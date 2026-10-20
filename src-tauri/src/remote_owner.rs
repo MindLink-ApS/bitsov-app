@@ -201,17 +201,32 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
         || (setup.attempt.is_none() && matches!(input, Input::Poll {}));
     if recover_lost {
         if !matches!(input, Input::Poll {}) {
-            return Err("Setup may already be committed. Check the box and continue recovery.".into());
+            return Err(
+                "Setup may already be committed. Check the box and continue recovery.".into(),
+            );
         }
-        let descriptor = state.remote_descriptor.lock().unwrap().clone().ok_or("Missing box descriptor.")?;
-        let ctx = state.pairing.lock().unwrap().clone().ok_or("Pairing is unavailable.")?;
+        let descriptor = state
+            .remote_descriptor
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("Missing box descriptor.")?;
+        let ctx = state
+            .pairing
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("Pairing is unavailable.")?;
         if Recovery::load(&ctx.store)?.is_none() {
             return Err("No confirmed setup is waiting for recovery.".into());
         }
         let recovered = recovery::recover(state, &descriptor).await?;
         setup.attempt = None;
         if recovered.bootstrap_box_key().is_some() {
-            return Err("The box is still in setup. Cancel this pending setup before starting again.".into());
+            return Err(
+                "The box is still in setup. Cancel this pending setup before starting again."
+                    .into(),
+            );
         }
         home_unlock::probe(state).await?;
         return Ok(View::Done);
@@ -299,7 +314,9 @@ async fn run_pending(state: &NodeState, setup: &mut Setup, input: Input) -> Resu
             let body = serde_json::to_vec(&serde_json::json!({"password_commitment":blake3::hash(password.as_bytes()).to_hex().to_string(),
                 "sas_version":1,"device":{"public_key":record.public_key,"name":NAME}})).unwrap();
             let (pending, nonce, escrow) = accept_pending(
-                connection.request("POST", "/api/v1/identity/create-pending", &body, &token).await,
+                connection
+                    .request("POST", "/api/v1/identity/create-pending", &body, &token)
+                    .await,
                 escrow,
             )?;
             let public: [u8; 65] = hex::decode(&record.public_key)
@@ -515,19 +532,34 @@ async fn submit(state: &NodeState, setup: &mut Setup) -> Result<View, String> {
         })
         .map_err(|_| "Could not encode setup confirmation.")?,
     );
-    let ctx = state.pairing.lock().unwrap().clone().ok_or("Pairing is unavailable.")?;
-    let descriptor = state.remote_descriptor.lock().unwrap().clone().ok_or("Missing box descriptor.")?;
+    let ctx = state
+        .pairing
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Pairing is unavailable.")?;
+    let descriptor = state
+        .remote_descriptor
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Missing box descriptor.")?;
     let public = hex::decode(&attempt.record.public_key).map_err(|_| "Invalid device key.")?;
     Recovery {
         node_id: attempt.pending.node_id.clone(),
         box_key: hex::encode(attempt.connection.binding.box_public_key),
         endpoint: descriptor.endpoint().into(),
         client_public_key: ctx.key.public_hex().into(),
-        binding: bootstrap_binding(&token, &attempt.connection.client_id, &attempt.pending.node_id)?,
+        binding: bootstrap_binding(
+            &token,
+            &attempt.connection.client_id,
+            &attempt.pending.node_id,
+        )?,
         device_public_key: attempt.record.public_key.clone(),
         device_key_id: device::key_id(&public),
         password_saved: false,
-    }.save(&ctx.store)?;
+    }
+    .save(&ctx.store)?;
     // Write-ahead context is durable before the node can commit. A lost reply
     // must never cause a passive poll to submit the password/finalize again.
     let (status, bytes) =
@@ -597,11 +629,21 @@ struct Receipt {
 }
 impl Receipt {
     fn verify(&self, attempt: &Attempt) -> Result<(), String> {
-        self.verify_context(&attempt.pending.node_id, &attempt.connection.client_id,
-            &attempt.record.public_key, &hex::encode(attempt.connection.binding.box_public_key))
+        self.verify_context(
+            &attempt.pending.node_id,
+            &attempt.connection.client_id,
+            &attempt.record.public_key,
+            &hex::encode(attempt.connection.binding.box_public_key),
+        )
     }
 
-    fn verify_context(&self, node: &str, client: &str, device_public: &str, box_key: &str) -> Result<(), String> {
+    fn verify_context(
+        &self,
+        node: &str,
+        client: &str,
+        device_public: &str,
+        box_key: &str,
+    ) -> Result<(), String> {
         let public = hex::decode(device_public).map_err(|_| "Invalid device key.")?;
         if self.node_id != node
             || self.client_id != client
@@ -620,8 +662,12 @@ impl Receipt {
             &self.box_transport_signature,
         )
         .map_err(|_| "The box's setup receipt had an invalid identity signature.".to_string())?;
-        remote_access::verify_transport_proof(&self.node_id, &self.transport_pubkey, &self.transport_signature)
-            .map_err(|_| "The setup receipt had an invalid live transport signature.".to_string())?;
+        remote_access::verify_transport_proof(
+            &self.node_id,
+            &self.transport_pubkey,
+            &self.transport_signature,
+        )
+        .map_err(|_| "The setup receipt had an invalid live transport signature.".to_string())?;
         Ok(())
     }
 
@@ -630,7 +676,11 @@ impl Receipt {
         if binding.epoch != self.epoch {
             return Err("The setup receipt changed the pairing epoch.".into());
         }
-        Ok(UnlockBinding { client_id: self.client_id.clone(), epoch: self.epoch, fingerprint: binding.fingerprint })
+        Ok(UnlockBinding {
+            client_id: self.client_id.clone(),
+            epoch: self.epoch,
+            fingerprint: binding.fingerprint,
+        })
     }
 }
 
@@ -699,7 +749,8 @@ async fn resume(state: &NodeState, completion: &mut Completion) -> Result<View, 
         })
         .await
         .map_err(|_| "Saving the node password stopped; continue setup to retry.")??;
-        let mut recovery = Recovery::load(&ctx.store)?.ok_or("Missing first-run recovery context.")?;
+        let mut recovery =
+            Recovery::load(&ctx.store)?.ok_or("Missing first-run recovery context.")?;
         recovery.verify_binding(&completion.receipt.node_id, &completion.binding)?;
         recovery.password_saved = true;
         recovery.save(&ctx.store)?;
@@ -874,7 +925,9 @@ fn bootstrap_binding(token: &str, client_id: &str, node: &str) -> Result<UnlockB
         cid: String,
         epc: u64,
     }
-    if token.split('.').count() != 3 { return Err("Invalid bootstrap pairing binding.".into()); }
+    if token.split('.').count() != 3 {
+        return Err("Invalid bootstrap pairing binding.".into());
+    }
     let claims: Claims = token
         .split('.')
         .nth(1)
@@ -895,6 +948,13 @@ fn bootstrap_binding(token: &str, client_id: &str, node: &str) -> Result<UnlockB
     })
 }
 
+/// True while a first-run recovery journal is unresolved for the saved node.
+/// Replacing the remote link then would make the next start check the new node
+/// against the old journal and refuse it, so callers must not replace.
+pub fn has_pending_recovery(store: &Path) -> Result<bool, String> {
+    Ok(Recovery::load(store)?.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -908,18 +968,31 @@ mod tests {
         *state.pairing.lock().unwrap() = Some(Arc::new(PairingCtx {
             client: PairingClient::new(state.http.clone(), state.api_base.clone()),
             key: Arc::new(ClientKey::load_or_create(&store).unwrap()),
-            store: store.clone(), data_dir: dir.path().to_path_buf(),
+            store: store.clone(),
+            data_dir: dir.path().to_path_buf(),
         }));
         let value = serde_json::json!({"v":1,"endpoint":"box.local:9737",
             "box_transport_pubkey":key,"code":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([3;32])});
-        let link = format!("bitsov://pair/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&value).unwrap()));
-        *state.remote_descriptor.lock().unwrap() = Some(remote_access::parse_pairing_link(&link).unwrap());
+        let link = format!(
+            "bitsov://pair/{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&value).unwrap())
+        );
+        *state.remote_descriptor.lock().unwrap() =
+            Some(remote_access::parse_pairing_link(&link).unwrap());
         let saved = Recovery {
-            node_id: "ab".repeat(32), box_key: key.clone(), endpoint: "box.local:9737".into(),
-            client_public_key: "33".repeat(32), device_public_key: "04".repeat(65),
-            device_key_id: "key".into(), password_saved: false,
-            binding: UnlockBinding { client_id: "client".into(), epoch: 7, fingerprint: "fp".into() },
+            node_id: "ab".repeat(32),
+            box_key: key.clone(),
+            endpoint: "box.local:9737".into(),
+            client_public_key: "33".repeat(32),
+            device_public_key: "04".repeat(65),
+            device_key_id: "key".into(),
+            password_saved: false,
+            binding: UnlockBinding {
+                client_id: "client".into(),
+                epoch: 7,
+                fingerprint: "fp".into(),
+            },
         };
         saved.save(&store).unwrap();
         let mut escrow = password_store::Escrow::save(key.clone(), b"password").unwrap();
@@ -935,6 +1008,32 @@ mod tests {
     }
 
     #[test]
+    fn pending_recovery_is_reported_until_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("pairing");
+        std::fs::create_dir_all(&store).unwrap();
+        assert!(!has_pending_recovery(&store).unwrap());
+        let saved = Recovery {
+            node_id: "ab".repeat(32),
+            box_key: "k".into(),
+            endpoint: "box.local:9737".into(),
+            client_public_key: "33".repeat(32),
+            device_public_key: "04".repeat(65),
+            device_key_id: "key".into(),
+            password_saved: false,
+            binding: UnlockBinding {
+                client_id: "client".into(),
+                epoch: 7,
+                fingerprint: "fp".into(),
+            },
+        };
+        saved.save(&store).unwrap();
+        assert!(has_pending_recovery(&store).unwrap());
+        Recovery::clear(&store).unwrap();
+        assert!(!has_pending_recovery(&store).unwrap());
+    }
+
+    #[test]
     fn create_failures_release_escrow_without_cancel() {
         let valid = serde_json::json!({"ceremony_id":"a".repeat(32), "node_id":"b".repeat(64),
             "mnemonic":"abandon ability able about above absent absorb abstract absurd abuse access accident",
@@ -943,7 +1042,10 @@ mod tests {
         invalid["box_nonce"] = "invalid".into();
         for response in [
             Err(remote_access::RemoteError::HandshakeUnavailable),
-            Ok((409, Zeroizing::new(br#"{"code":"ceremony_in_progress"}"#.to_vec()))),
+            Ok((
+                409,
+                Zeroizing::new(br#"{"code":"ceremony_in_progress"}"#.to_vec()),
+            )),
             Ok((500, Zeroizing::new(b"{}".to_vec()))),
             Ok((200, Zeroizing::new(b"not json".to_vec()))),
             Ok((200, Zeroizing::new(b"{}".to_vec()))),
@@ -956,7 +1058,11 @@ mod tests {
         }
         let key = password_store::test_store::key();
         let escrow = password_store::Escrow::save(key.clone(), b"password").unwrap();
-        let pending = accept_pending(Ok((200, Zeroizing::new(serde_json::to_vec(&valid).unwrap()))), escrow).unwrap();
+        let pending = accept_pending(
+            Ok((200, Zeroizing::new(serde_json::to_vec(&valid).unwrap()))),
+            escrow,
+        )
+        .unwrap();
         assert!(password_store::test_store::contains(&key));
         // An abort after validation (e.g. invalid local public key) still cleans up.
         drop(pending);
@@ -969,10 +1075,18 @@ mod tests {
             "device_key_id":"key","box_transport_pubkey":"22".repeat(32),
             "box_transport_signature":"box-proof","transport_pubkey":"33".repeat(32),
             "transport_signature":"live-proof","client_id":"a".repeat(32),"epoch":7});
-        for field in ["transport_pubkey", "transport_signature", "client_id", "epoch"] {
+        for field in [
+            "transport_pubkey",
+            "transport_signature",
+            "client_id",
+            "epoch",
+        ] {
             let mut missing = value.clone();
             missing.as_object_mut().unwrap().remove(field);
-            assert!(serde_json::from_value::<Receipt>(missing).is_err(), "accepted missing {field}");
+            assert!(
+                serde_json::from_value::<Receipt>(missing).is_err(),
+                "accepted missing {field}"
+            );
         }
         assert!(serde_json::from_value::<Receipt>(value).is_ok());
     }
@@ -980,32 +1094,58 @@ mod tests {
     #[test]
     fn pr287_receipt_verifies_both_domains_and_preserved_binding() {
         use base64::Engine;
-        let fixture: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/remote-first-run-pr287.json")).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/remote-first-run-pr287.json"
+        ))
+        .unwrap();
         let public = [4u8; 65];
         let mut value = fixture["finalize"].clone();
         value["device_key_id"] = hex::encode(&blake3::hash(&public).as_bytes()[..16]).into();
         let node = value["node_id"].as_str().unwrap();
         let client = value["client_id"].as_str().unwrap();
         let box_key = value["box_transport_pubkey"].as_str().unwrap();
-        let verify = |v: serde_json::Value| serde_json::from_value::<Receipt>(v).unwrap()
-            .verify_context(node, client, &hex::encode(public), box_key);
+        let verify = |v: serde_json::Value| {
+            serde_json::from_value::<Receipt>(v)
+                .unwrap()
+                .verify_context(node, client, &hex::encode(public), box_key)
+        };
         verify(value.clone()).unwrap();
-        for field in ["node_id", "client_id", "device_key_id", "box_transport_pubkey", "box_transport_signature",
-            "transport_pubkey", "transport_signature"] {
-            let mut bad = value.clone(); bad[field] = "invalid".into();
+        for field in [
+            "node_id",
+            "client_id",
+            "device_key_id",
+            "box_transport_pubkey",
+            "box_transport_signature",
+            "transport_pubkey",
+            "transport_signature",
+        ] {
+            let mut bad = value.clone();
+            bad[field] = "invalid".into();
             assert!(verify(bad).is_err(), "{field}");
         }
         let mut wrong_domain = value.clone();
         wrong_domain["transport_signature"] = value["box_transport_signature"].clone();
         assert!(verify(wrong_domain).is_err());
         let receipt: Receipt = serde_json::from_value(value.clone()).unwrap();
-        let token = |cid: &str, epoch: u64| format!("h.{}.s", base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&serde_json::json!({"cid":cid,"epc":epoch})).unwrap()));
+        let token = |cid: &str, epoch: u64| {
+            format!(
+                "h.{}.s",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                    serde_json::to_vec(&serde_json::json!({"cid":cid,"epc":epoch})).unwrap()
+                )
+            )
+        };
         assert_eq!(receipt.binding(&token(client, 7)).unwrap().epoch, 7);
         assert!(receipt.binding(&token(client, 8)).is_err());
         assert!(receipt.binding(&token("other", 7)).is_err());
-        for bad in [serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("7"), serde_json::Value::Null] {
-            let mut malformed = value.clone(); malformed["epoch"] = bad;
+        for bad in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("7"),
+            serde_json::Value::Null,
+        ] {
+            let mut malformed = value.clone();
+            malformed["epoch"] = bad;
             assert!(serde_json::from_value::<Receipt>(malformed).is_err());
         }
     }

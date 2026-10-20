@@ -12,8 +12,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    clean_question, endpoint_host, request_body, send, short, Remote, RemoteAnswer, TopicRead,
-    MAX_REMOTE_BYTES, Preset, ProviderKind, DEFAULT_PRESET,
+    clean_question, endpoint_host, request_body, send, short, Preset, ProviderKind, Remote,
+    RemoteAnswer, TopicRead, DEFAULT_PRESET, MAX_REMOTE_BYTES,
 };
 
 /// Ollama's default listen port.
@@ -69,12 +69,7 @@ pub struct LocalChoice {
 impl LocalChoice {
     /// OpenAI-compatible chat URL on loopback only.
     pub fn endpoint(&self) -> String {
-        format!(
-            "http://{}:{}{}",
-            LOOPBACK,
-            self.port,
-            self.kind.chat_path()
-        )
+        format!("http://{}:{}{}", LOOPBACK, self.port, self.kind.chat_path())
     }
 
     pub fn as_remote(&self) -> Remote {
@@ -127,21 +122,38 @@ fn http_client(timeout: Duration) -> Result<reqwest::Client, String> {
 
 /// A3 accepts only a host-resolved loopback choice, never a model/window URL.
 /// No process is launched here; host-launched models still belong to model_launch.
-pub async fn tool_completion(choice: &LocalChoice, mut body: serde_json::Value) -> Result<serde_json::Value, String> {
+pub async fn tool_completion(
+    choice: &LocalChoice,
+    mut body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
     body["model"] = serde_json::json!(choice.model);
     let client = http_client(super::REMOTE_TIMEOUT)?;
-    let mut response = client.post(choice.endpoint()).json(&body).send().await
+    let mut response = client
+        .post(choice.endpoint())
+        .json(&body)
+        .send()
+        .await
         .map_err(|_| "The local model did not answer.".to_string())?;
-    if !response.status().is_success() { return Err("The local model refused the request.".into()); }
+    if !response.status().is_success() {
+        return Err("The local model refused the request.".into());
+    }
     let bytes = read_bounded(&mut response).await?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|_| "The local model returned an invalid response.".to_string())?;
-    let choices = value["choices"].as_array().filter(|c| c.len() == 1)
+    let choices = value["choices"]
+        .as_array()
+        .filter(|c| c.len() == 1)
         .ok_or("The local model returned an invalid response.")?;
-    if !matches!(choices[0]["finish_reason"].as_str(), Some("stop" | "tool_calls")) {
+    if !matches!(
+        choices[0]["finish_reason"].as_str(),
+        Some("stop" | "tool_calls")
+    ) {
         return Err("The local model did not finish its answer.".into());
     }
-    choices[0].get("message").filter(|v| v.is_object()).cloned()
+    choices[0]
+        .get("message")
+        .filter(|v| v.is_object())
+        .cloned()
         .ok_or_else(|| "The local model returned an invalid response.".into())
 }
 
@@ -278,7 +290,8 @@ pub fn save_local_file(path: &Path, file: &LocalFile) -> Result<(), String> {
         kind: file.kind,
     };
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|_| "Could not save the model pick.".to_string())?;
+        std::fs::create_dir_all(parent)
+            .map_err(|_| "Could not save the model pick.".to_string())?;
     }
     let text = serde_json::to_string_pretty(&clean)
         .map_err(|_| "Could not save the model pick.".to_string())?;
@@ -424,10 +437,20 @@ mod tests {
             let message = json!({"role":"assistant","content":"{\"kind\":\"answer\",\"text\":\"Unknown\",\"topics\":[]}"});
             let reply = json!({"choices":[{"finish_reason":"stop","message":message}]}).to_string();
             let (port, seen) = serve(vec![("/v1/chat/completions".into(), reply)]);
-            let choice = LocalChoice { port, model: "tiny".into(), kind };
+            let choice = LocalChoice {
+                port,
+                model: "tiny".into(),
+                kind,
+            };
             assert!(choice.endpoint().starts_with("http://127.0.0.1:"));
-            assert_eq!(block_on(tool_completion(&choice, json!({"messages":[]}))).unwrap(), message);
-            assert_eq!(seen.recv_timeout(Duration::from_secs(2)).unwrap(), "/v1/chat/completions");
+            assert_eq!(
+                block_on(tool_completion(&choice, json!({"messages":[]}))).unwrap(),
+                message
+            );
+            assert_eq!(
+                seen.recv_timeout(Duration::from_secs(2)).unwrap(),
+                "/v1/chat/completions"
+            );
         }
         for reply in ["invalid".to_owned(), "{}".to_owned(),
             json!({"choices":[{"finish_reason":"length","message":{"content":"{}"}}]}).to_string(),
@@ -445,25 +468,41 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
-            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             let mut buf = [0u8; 8192];
             let _ = socket.read(&mut buf).unwrap();
             socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: https://example.invalid/model\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
         });
-        let choice = LocalChoice { port, model: "tiny".into(), kind: LocalKind::Ollama };
-        assert_eq!(block_on(tool_completion(&choice, json!({"messages":[]}))).unwrap_err(), "The local model refused the request.");
+        let choice = LocalChoice {
+            port,
+            model: "tiny".into(),
+            kind: LocalKind::Ollama,
+        };
+        assert_eq!(
+            block_on(tool_completion(&choice, json!({"messages":[]}))).unwrap_err(),
+            "The local model refused the request."
+        );
         server.join().unwrap();
     }
 
     #[test]
     fn probe_finds_ollama_tags_on_loopback() {
-        let tags = json!({"models": [{"name": "llama3.2:latest"}, {"name": "qwen2.5"}]}).to_string();
+        let tags =
+            json!({"models": [{"name": "llama3.2:latest"}, {"name": "qwen2.5"}]}).to_string();
         let (port, seen) = serve(vec![("/api/tags".into(), tags)]);
         let hit = block_on(probe_port(port)).expect("ollama");
         assert_eq!(hit.kind, LocalKind::Ollama);
         assert_eq!(hit.port, port);
-        assert_eq!(hit.models, vec!["llama3.2:latest".to_string(), "qwen2.5".to_string()]);
-        assert_eq!(seen.recv_timeout(Duration::from_secs(2)).unwrap(), "/api/tags");
+        assert_eq!(
+            hit.models,
+            vec!["llama3.2:latest".to_string(), "qwen2.5".to_string()]
+        );
+        assert_eq!(
+            seen.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "/api/tags"
+        );
     }
 
     #[test]
@@ -472,7 +511,10 @@ mod tests {
         let (port, seen) = serve(vec![("/v1/models".into(), models)]);
         let hit = block_on(probe_port(port)).expect("openai");
         assert_eq!(hit.kind, LocalKind::OpenAiCompat);
-        assert_eq!(hit.models, vec!["Qwen2.5-3B".to_string(), "tiny".to_string()]);
+        assert_eq!(
+            hit.models,
+            vec!["Qwen2.5-3B".to_string(), "tiny".to_string()]
+        );
         let mut paths = Vec::new();
         while let Ok(path) = seen.recv_timeout(Duration::from_millis(200)) {
             paths.push(path);
@@ -520,10 +562,7 @@ mod tests {
             model: "b".into(),
             kind: Some(LocalKind::Ollama),
         };
-        assert_eq!(
-            resolve_choice(&ok, &probe).unwrap().model,
-            "b"
-        );
+        assert_eq!(resolve_choice(&ok, &probe).unwrap().model, "b");
         let missing = LocalFile {
             port: 11434,
             model: "gone".into(),
@@ -560,7 +599,8 @@ mod tests {
     #[test]
     fn ask_posts_chat_completions_on_loopback_only() {
         use crate::ai::{Freshness, Topic, TopicRead};
-        let reply = json!({"choices": [{"message": {"content": "You have one channel."}}]}).to_string();
+        let reply =
+            json!({"choices": [{"message": {"content": "You have one channel."}}]}).to_string();
         let tags = json!({"models": [{"name": "tiny"}]}).to_string();
         let (port, seen) = serve(vec![
             ("/api/tags".into(), tags),

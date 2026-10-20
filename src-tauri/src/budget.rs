@@ -81,13 +81,32 @@ pub struct Preset {
 }
 
 pub const PRESETS: [Preset; 3] = [
-    Preset { id: PresetId::Careful, contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 },
-    Preset { id: PresetId::Everyday, contact_msat: 200_000, room_msat: 500_000, ceiling_msat: 2_000_000 },
-    Preset { id: PresetId::Generous, contact_msat: 1_000_000, room_msat: 2_500_000, ceiling_msat: 10_000_000 },
+    Preset {
+        id: PresetId::Careful,
+        contact_msat: 50_000,
+        room_msat: 100_000,
+        ceiling_msat: 500_000,
+    },
+    Preset {
+        id: PresetId::Everyday,
+        contact_msat: 200_000,
+        room_msat: 500_000,
+        ceiling_msat: 2_000_000,
+    },
+    Preset {
+        id: PresetId::Generous,
+        contact_msat: 1_000_000,
+        room_msat: 2_500_000,
+        ceiling_msat: 10_000_000,
+    },
 ];
 
 pub fn preset(id: PresetId) -> Preset {
-    PRESETS.iter().copied().find(|p| p.id == id).unwrap_or(PRESETS[0])
+    PRESETS
+        .iter()
+        .copied()
+        .find(|p| p.id == id)
+        .unwrap_or(PRESETS[0])
 }
 
 // ---- the book (persisted numbers) ---------------------------------------------
@@ -162,11 +181,19 @@ impl Book {
     }
 
     fn map(&self, room: bool) -> &BTreeMap<String, u64> {
-        if room { &self.rooms } else { &self.contacts }
+        if room {
+            &self.rooms
+        } else {
+            &self.contacts
+        }
     }
 
     fn map_mut(&mut self, room: bool) -> &mut BTreeMap<String, u64> {
-        if room { &mut self.rooms } else { &mut self.contacts }
+        if room {
+            &mut self.rooms
+        } else {
+            &mut self.contacts
+        }
     }
 
     pub fn limit(&self, target: &str, room: bool) -> Option<u64> {
@@ -175,7 +202,11 @@ impl Book {
 
     /// Conservative enforcement total. Renderer paid totals come from `view`.
     pub fn spent_total(&self, now_ms: u64) -> u64 {
-        self.ledger.iter().filter(|e| in_window(e, now_ms)).map(|e| e.msat).sum()
+        self.ledger
+            .iter()
+            .filter(|e| in_window(e, now_ms))
+            .map(|e| e.msat)
+            .sum()
     }
 
     pub fn spent(&self, target: &str, room: bool, now_ms: u64) -> u64 {
@@ -216,13 +247,20 @@ impl Book {
                 .entry((e.target.clone(), e.room))
                 .and_modify(|m| {
                     m.paid = Some(Paid {
-                        msat: m.paid.map_or(0, |p| p.msat).saturating_add(e.paid.map_or(0, |p| p.msat)),
-                        fee_unknown: m.paid.is_none_or(|p| p.fee_unknown) || e.paid.is_none_or(|p| p.fee_unknown),
+                        msat: m
+                            .paid
+                            .map_or(0, |p| p.msat)
+                            .saturating_add(e.paid.map_or(0, |p| p.msat)),
+                        fee_unknown: m.paid.is_none_or(|p| p.fee_unknown)
+                            || e.paid.is_none_or(|p| p.fee_unknown),
                     });
                     m.msat = m.msat.saturating_add(e.msat);
                     m.at_ms = m.at_ms.max(e.at_ms);
                 })
-                .or_insert_with(|| Entry { id: format!("compacted:{}", e.id), ..e });
+                .or_insert_with(|| Entry {
+                    id: format!("compacted:{}", e.id),
+                    ..e
+                });
         }
         self.ledger = merged.into_values().chain(open).collect();
         self.ledger.sort_by_key(|e| e.at_ms);
@@ -262,7 +300,15 @@ impl Book {
     pub fn reserve(&mut self, id: &str, target: &str, room: bool, msat: u64, now_ms: u64) {
         // The journal-aware writer prunes after the edit, retaining current
         // and rollback accounting. Pruning here would erase rows it still needs.
-        self.ledger.push(Entry { id: id.to_string(), at_ms: now_ms, target: target.to_string(), room, msat, settled: false, paid: None });
+        self.ledger.push(Entry {
+            id: id.to_string(),
+            at_ms: now_ms,
+            target: target.to_string(),
+            room,
+            msat,
+            settled: false,
+            paid: None,
+        });
     }
 
     /// The node reported what was paid. Over the reservation is recorded as is.
@@ -275,14 +321,19 @@ impl Book {
             }
             e.msat = msat;
             e.settled = true;
-            e.paid = Some(Paid { msat, fee_unknown: false });
+            e.paid = Some(Paid {
+                msat,
+                fee_unknown: false,
+            });
         }
     }
 
     /// Account a canonical direct payment once. Persist this book as one atomic
     /// snapshot so its identity and allowance cannot be committed separately.
     pub fn settle_payment(&mut self, id: &str, hash: &str, msat: u64, now_ms: u64) {
-        let Some(entry) = self.ledger.iter().rev().find(|e| e.id == id) else { return; };
+        let Some(entry) = self.ledger.iter().rev().find(|e| e.id == id) else {
+            return;
+        };
         let hash = hash.to_ascii_lowercase();
         if entry.settled {
             // Crash after book save but before journal clear: leave this row
@@ -292,7 +343,9 @@ impl Book {
             }
             return;
         }
-        let paid = if let std::collections::btree_map::Entry::Vacant(entry) = self.accounted_payments.entry(hash) {
+        let paid = if let std::collections::btree_map::Entry::Vacant(entry) =
+            self.accounted_payments.entry(hash)
+        {
             entry.insert(msat);
             msat
         } else {
@@ -341,14 +394,25 @@ impl Autopay {
     /// Open the approval, but never past `until_ms` (a G1 node grant's expiry).
     pub fn arm_until(&mut self, now_ms: u64, until_ms: u64, ceiling_msat: u64, basis: SpendBasis) {
         self.generation = self.generation.wrapping_add(1);
-        self.open = Some(((now_ms + BUDGET_WINDOW_MS).min(until_ms), ceiling_msat, basis));
+        self.open = Some((
+            (now_ms + BUDGET_WINDOW_MS).min(until_ms),
+            ceiling_msat,
+            basis,
+        ));
         self.armed_by_request = None;
         self.expired = false;
     }
 
     /// Complete the pending elevation after the caller has checked its poll fence.
     /// The request identity comes from that record, never from the grant cache.
-    pub fn arm_pending_until(&mut self, now_ms: u64, until_ms: u64, ceiling_msat: u64, basis: SpendBasis, pending: &crate::act::Elevation) {
+    pub fn arm_pending_until(
+        &mut self,
+        now_ms: u64,
+        until_ms: u64,
+        ceiling_msat: u64,
+        basis: SpendBasis,
+        pending: &crate::act::Elevation,
+    ) {
         self.arm_until(now_ms, until_ms, ceiling_msat, basis);
         self.armed_by_request = Some(pending.op_id.clone());
     }
@@ -404,7 +468,10 @@ impl Autopay {
     pub fn check_generation(&mut self, generation: u64, now_ms: u64) -> Result<(), ActionError> {
         self.settle(now_ms);
         if self.open.is_none() || self.generation != generation {
-            return Err(ActionError::new("budget_needed", "Your budget approval changed while sending. Nothing was sent; approve it again."));
+            return Err(ActionError::new(
+                "budget_needed",
+                "Your budget approval changed while sending. Nothing was sent; approve it again.",
+            ));
         }
         Ok(())
     }
@@ -470,7 +537,10 @@ pub struct Ask<'a> {
 /// Messages and files share this plan; invoice/keysend stay window-only.
 pub fn plan(book: &Book, ask: Ask<'_>) -> Result<Plan, ActionError> {
     if book.paused {
-        return Err(ActionError::new("budget_paused", "Payments are paused. Resume them to send."));
+        return Err(ActionError::new(
+            "budget_paused",
+            "Payments are paused. Resume them to send.",
+        ));
     }
     if book.full() {
         return Err(ActionError::new(
@@ -478,7 +548,11 @@ pub fn plan(book: &Book, ask: Ask<'_>) -> Result<Plan, ActionError> {
             "Too many unresolved sends to track another one. Check the pending results first.",
         ));
     }
-    let who = if ask.room { "this room" } else { "this contact" };
+    let who = if ask.room {
+        "this room"
+    } else {
+        "this contact"
+    };
     let known = book.limit(ask.target, ask.room);
     if let Some(limit) = known {
         let spent = book.spent(ask.target, ask.room, ask.now_ms);
@@ -492,7 +566,10 @@ pub fn plan(book: &Book, ask: Ask<'_>) -> Result<Plan, ActionError> {
             ));
         }
     }
-    let ceiling = ask.autopay.unwrap_or(book.ceiling_msat).min(book.ceiling_msat);
+    let ceiling = ask
+        .autopay
+        .unwrap_or(book.ceiling_msat)
+        .min(book.ceiling_msat);
     let spent = book.spent_total(ask.now_ms);
     if spent.saturating_add(ask.max_msat) > ceiling {
         return Err(ActionError::new(
@@ -504,44 +581,62 @@ pub fn plan(book: &Book, ask: Ask<'_>) -> Result<Plan, ActionError> {
         ));
     }
     if ask.autopay.is_some() {
-        let confirm = match (known, ask.first_contact_msat) {
-            (Some(_), _) => None,
-            (None, None) => {
-                return Err(ActionError::new(
+        let confirm =
+            match (known, ask.first_contact_msat) {
+                (Some(_), _) => None,
+                (None, None) => return Err(ActionError::new(
                     "first_contact",
-                    format!("Your first paid message to {who} needs your OK once. Nothing was sent."),
-                ))
-            }
-            (None, Some(msat)) => {
-                let msat = msat.min(book.ceiling_msat);
-                if msat < ask.max_msat {
-                    return Err(ActionError::invalid(format!(
-                        "A budget of {} does not cover this message ({}).",
-                        amount(msat), amount(ask.max_msat)
-                    )));
+                    format!(
+                        "Your first paid message to {who} needs your OK once. Nothing was sent."
+                    ),
+                )),
+                (None, Some(msat)) => {
+                    let msat = msat.min(book.ceiling_msat);
+                    if msat < ask.max_msat {
+                        return Err(ActionError::invalid(format!(
+                            "A budget of {} does not cover this message ({}).",
+                            amount(msat),
+                            amount(ask.max_msat)
+                        )));
+                    }
+                    Some(msat)
                 }
-                Some(msat)
-            }
-        };
-        return Ok(Plan { route: Route::Budget, confirm });
+            };
+        return Ok(Plan {
+            route: Route::Budget,
+            confirm,
+        });
     }
     ask.window?;
     let confirm = match (known, ask.first_contact_msat) {
         (None, Some(msat)) if msat <= book.ceiling_msat && msat >= ask.max_msat => Some(msat),
         _ => None,
     };
-    Ok(Plan { route: Route::Window, confirm })
+    Ok(Plan {
+        route: Route::Window,
+        confirm,
+    })
 }
 
 // ---- persistence --------------------------------------------------------------
 
 fn unreadable(detail: impl std::fmt::Display) -> ActionError {
-    ActionError::new("budget_unreadable", format!("Your budget file could not be read or written ({detail}). Automatic payments are off."))
+    ActionError::new(
+        "budget_unreadable",
+        format!(
+            "Your budget file could not be read or written ({detail}). Automatic payments are off."
+        ),
+    )
 }
 
 /// `app-spend/budget-<first 16 hex of node id>.json`: one book per identity.
 pub fn book_path(dir: &Path, node_id: &str) -> PathBuf {
-    let short: String = node_id.chars().filter(|c| c.is_ascii_hexdigit()).take(16).collect::<String>().to_ascii_lowercase();
+    let short: String = node_id
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(16)
+        .collect::<String>()
+        .to_ascii_lowercase();
     dir.join(format!("budget-{short}.json"))
 }
 
@@ -573,7 +668,8 @@ pub fn save(dir: &Path, book: &Book) -> Result<(), ActionError> {
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     let mut file = options.open(&tmp).map_err(unreadable)?;
-    file.write_all(&serde_json::to_vec(book).map_err(unreadable)?).map_err(unreadable)?;
+    file.write_all(&serde_json::to_vec(book).map_err(unreadable)?)
+        .map_err(unreadable)?;
     file.sync_all().map_err(unreadable)?;
     std::fs::rename(&tmp, &path).map_err(unreadable)?;
     Ok(())
@@ -581,7 +677,9 @@ pub fn save(dir: &Path, book: &Book) -> Result<(), ActionError> {
 
 #[cfg(not(unix))]
 pub fn save(_dir: &Path, _book: &Book) -> Result<(), ActionError> {
-    Err(unreadable("private budget storage is not supported on this platform"))
+    Err(unreadable(
+        "private budget storage is not supported on this platform",
+    ))
 }
 
 // ---- what the renderer sees ---------------------------------------------------
@@ -631,13 +729,25 @@ pub struct BudgetView {
 
 pub fn view(book: &Book, autopay: AutopayView, waiting_for_owner: bool, now_ms: u64) -> BudgetView {
     let row = |target: &str, room: bool, limit_msat| {
-        let entries: Vec<_> = book.ledger.iter().filter(|e| e.target == target && e.room == room && in_window(e, now_ms)).collect();
+        let entries: Vec<_> = book
+            .ledger
+            .iter()
+            .filter(|e| e.target == target && e.room == room && in_window(e, now_ms))
+            .collect();
         Row {
-            target: target.into(), room, limit_msat,
-            spent_msat: entries.iter().filter(|e| e.settled).map(|e| e.paid.map_or(0, |p| p.msat)).sum(),
+            target: target.into(),
+            room,
+            limit_msat,
+            spent_msat: entries
+                .iter()
+                .filter(|e| e.settled)
+                .map(|e| e.paid.map_or(0, |p| p.msat))
+                .sum(),
             unsettled_msat: entries.iter().filter(|e| !e.settled).map(|e| e.msat).sum(),
             accounted_msat: entries.iter().map(|e| e.msat).sum(),
-            fee_unknown: entries.iter().any(|e| e.settled && e.paid.is_none_or(|p| p.fee_unknown)),
+            fee_unknown: entries
+                .iter()
+                .any(|e| e.settled && e.paid.is_none_or(|p| p.fee_unknown)),
         }
     };
     let mut rows: Vec<Row> = Vec::new();
@@ -647,23 +757,36 @@ pub fn view(book: &Book, autopay: AutopayView, waiting_for_owner: bool, now_ms: 
         }
     }
     for e in book.ledger.iter().filter(|e| in_window(e, now_ms)) {
-        if !rows.iter().any(|r| r.target == e.target && r.room == e.room) {
+        if !rows
+            .iter()
+            .any(|r| r.target == e.target && r.room == e.room)
+        {
             rows.push(row(&e.target, e.room, None));
         }
     }
-    rows.sort_by(|a, b| b.spent_msat.cmp(&a.spent_msat).then(a.target.cmp(&b.target)));
+    rows.sort_by(|a, b| {
+        b.spent_msat
+            .cmp(&a.spent_msat)
+            .then(a.target.cmp(&b.target))
+    });
     BudgetView {
         request_id: None,
         granted_op: None,
         armed_by_request: None,
-        paused: book.paused, autopay, waiting_for_owner, preset: book.preset,
+        paused: book.paused,
+        autopay,
+        waiting_for_owner,
+        preset: book.preset,
         ceiling_msat: book.ceiling_msat,
         spent_msat: rows.iter().map(|r| r.spent_msat).sum(),
         unsettled_msat: rows.iter().map(|r| r.unsettled_msat).sum(),
         accounted_msat: book.spent_total(now_ms),
         fee_unknown: rows.iter().any(|r| r.fee_unknown),
-        rows, presets: PRESETS.to_vec(), window_ms: BUDGET_WINDOW_MS,
-        max_daily_msat: MAX_DAILY_MSAT, node_grant: None,
+        rows,
+        presets: PRESETS.to_vec(),
+        window_ms: BUDGET_WINDOW_MS,
+        max_daily_msat: MAX_DAILY_MSAT,
+        node_grant: None,
     }
 }
 
@@ -683,7 +806,11 @@ mod tests {
         assert_eq!(view["unsettled_msat"], 6000);
         assert_eq!(view["rows"][0]["spent_msat"], 1000);
         assert_eq!(view["rows"][0]["unsettled_msat"], 6000);
-        assert_eq!(book.spent_total(T), 7000, "enforcement still includes reservations");
+        assert_eq!(
+            book.spent_total(T),
+            7000,
+            "enforcement still includes reservations"
+        );
     }
 
     #[test]
@@ -700,7 +827,10 @@ mod tests {
         for i in 0..LEDGER_MAX {
             book.reserve(&format!("new-{i}"), MAYA, false, 6000, T);
             book.settle(&format!("new-{i}"), 6000, T);
-            book.ledger.last_mut().unwrap().paid = Some(Paid { msat: 1000, fee_unknown: true });
+            book.ledger.last_mut().unwrap().paid = Some(Paid {
+                msat: 1000,
+                fee_unknown: true,
+            });
         }
         book.prune(T);
         assert_eq!(book.ledger.len(), 1);
@@ -741,27 +871,54 @@ mod tests {
     fn fractional_budget_refusals_use_explicit_integer_msat() {
         let b = book_with_maya(2000);
         let error = plan(&b, ask(MAYA, 21187, Some(500_000))).unwrap_err();
-        assert!(error.message.contains("used 0 sats of 2 sats"), "{}", error.message);
-        assert!(error.message.contains("costs 21187 msat"), "{}", error.message);
+        assert!(
+            error.message.contains("used 0 sats of 2 sats"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("costs 21187 msat"),
+            "{}",
+            error.message
+        );
         assert!(!error.message.contains("21.187"));
         let mut b = Book::new(ME);
         b.set_ceiling(21187);
-        assert!(b.set_limit(MAYA, false, 22000).unwrap_err().message.contains("21187 msat"));
+        assert!(b
+            .set_limit(MAYA, false, 22000)
+            .unwrap_err()
+            .message
+            .contains("21187 msat"));
     }
 
     #[test]
     fn inside_the_budget_pays_automatically() {
         let b = book_with_maya(50_000);
-        assert_eq!(plan(&b, ask(MAYA, 2000, Some(500_000))).unwrap(), Plan { route: Route::Budget, confirm: None });
+        assert_eq!(
+            plan(&b, ask(MAYA, 2000, Some(500_000))).unwrap(),
+            Plan {
+                route: Route::Budget,
+                confirm: None
+            }
+        );
     }
 
     #[test]
     fn strangers_are_never_paid_automatically() {
         let b = Book::new(ME);
-        assert_eq!(plan(&b, ask(JOSH, 1000, Some(500_000))).unwrap_err().code, "first_contact");
+        assert_eq!(
+            plan(&b, ask(JOSH, 1000, Some(500_000))).unwrap_err().code,
+            "first_contact"
+        );
         let mut confirmed = ask(JOSH, 1000, Some(500_000));
         confirmed.first_contact_msat = Some(20_000);
-        assert_eq!(plan(&b, confirmed).unwrap(), Plan { route: Route::Budget, confirm: Some(20_000) });
+        assert_eq!(
+            plan(&b, confirmed).unwrap(),
+            Plan {
+                route: Route::Budget,
+                confirm: Some(20_000)
+            }
+        );
         // A confirmation cannot choose a budget smaller than the message.
         let mut tiny = ask(JOSH, 5000, Some(500_000));
         tiny.first_contact_msat = Some(1000);
@@ -799,14 +956,39 @@ mod tests {
         assert_eq!(e.code, "ceiling_exhausted");
         // The narrower of the approved total and the book's own number wins.
         assert!(plan(&b, ask(JOSH, 2000, Some(10_000))).is_ok());
-        assert_eq!(plan(&b, ask(JOSH, 2000, Some(9_000))).unwrap_err().code, "ceiling_exhausted");
+        assert_eq!(
+            plan(&b, ask(JOSH, 2000, Some(9_000))).unwrap_err().code,
+            "ceiling_exhausted"
+        );
     }
 
     #[test]
     fn a_rolling_day_forgets_old_spends_and_keeps_future_dated_ones() {
         let mut b = book_with_maya(5000);
-        b.ledger.push(Entry { id: "old".into(), at_ms: T - DAY_MS, target: MAYA.into(), room: false, msat: 5000, settled: true, paid: Some(Paid { msat: 5000, fee_unknown: false }) });
-        b.ledger.push(Entry { id: "skew".into(), at_ms: T + 60_000, target: MAYA.into(), room: false, msat: 3000, settled: true, paid: Some(Paid { msat: 3000, fee_unknown: false }) });
+        b.ledger.push(Entry {
+            id: "old".into(),
+            at_ms: T - DAY_MS,
+            target: MAYA.into(),
+            room: false,
+            msat: 5000,
+            settled: true,
+            paid: Some(Paid {
+                msat: 5000,
+                fee_unknown: false,
+            }),
+        });
+        b.ledger.push(Entry {
+            id: "skew".into(),
+            at_ms: T + 60_000,
+            target: MAYA.into(),
+            room: false,
+            msat: 3000,
+            settled: true,
+            paid: Some(Paid {
+                msat: 3000,
+                fee_unknown: false,
+            }),
+        });
         assert_eq!(b.spent(MAYA, false, T), 3000);
         b.prune(T);
         assert_eq!(b.ledger.len(), 1);
@@ -819,27 +1001,48 @@ mod tests {
         let mut windowed = ask(MAYA, 1000, None);
         windowed.window = Ok(());
         assert_eq!(plan(&b, windowed).unwrap_err().code, "budget_paused");
-        assert_eq!(plan(&b, ask(MAYA, 1000, Some(500_000))).unwrap_err().code, "budget_paused");
+        assert_eq!(
+            plan(&b, ask(MAYA, 1000, Some(500_000))).unwrap_err().code,
+            "budget_paused"
+        );
     }
 
     #[test]
     fn without_an_approval_the_window_decides_and_strangers_stay_unconfirmed() {
         let b = Book::new(ME);
-        assert_eq!(plan(&b, ask(JOSH, 1000, None)).unwrap_err().code, "spend_locked");
+        assert_eq!(
+            plan(&b, ask(JOSH, 1000, None)).unwrap_err().code,
+            "spend_locked"
+        );
         let mut windowed = ask(JOSH, 1000, None);
         windowed.window = Ok(());
-        assert_eq!(plan(&b, windowed).unwrap(), Plan { route: Route::Window, confirm: None });
+        assert_eq!(
+            plan(&b, windowed).unwrap(),
+            Plan {
+                route: Route::Window,
+                confirm: None
+            }
+        );
     }
 
     #[test]
     fn limits_only_narrow_below_the_approved_total() {
         let mut b = Book::new(ME);
-        assert_eq!(b.set_limit(MAYA, false, b.ceiling_msat + 1).unwrap_err().code, "invalid");
+        assert_eq!(
+            b.set_limit(MAYA, false, b.ceiling_msat + 1)
+                .unwrap_err()
+                .code,
+            "invalid"
+        );
         b.set_limit(MAYA, false, 400_000).unwrap();
         b.set_ceiling(100_000);
         assert_eq!(b.limit(MAYA, false), Some(100_000));
         b.set_limit(MAYA, false, 0).unwrap();
-        assert_eq!(b.limit(MAYA, false), None, "zero forgets: they are a stranger again");
+        assert_eq!(
+            b.limit(MAYA, false),
+            None,
+            "zero forgets: they are a stranger again"
+        );
     }
 
     #[test]
@@ -865,18 +1068,40 @@ mod tests {
 
         let again = load(dir.path(), ME).unwrap();
         assert_eq!(again, b);
-        assert_eq!(again.spent(MAYA, false, T), 5000, "unknown outcomes stay reserved at their ceiling");
+        assert_eq!(
+            again.spent(MAYA, false, T),
+            5000,
+            "unknown outcomes stay reserved at their ceiling"
+        );
 
-        let raw = std::fs::read_to_string(book_path(dir.path(), ME)).unwrap().to_ascii_lowercase();
-        for word in ["spend\"", "scope", "grant", "token", "approv", "until", "basis", "preimage", "plaintext"] {
-            assert!(!raw.contains(word), "{word} must never reach the budget file: {raw}");
+        let raw = std::fs::read_to_string(book_path(dir.path(), ME))
+            .unwrap()
+            .to_ascii_lowercase();
+        for word in [
+            "spend\"",
+            "scope",
+            "grant",
+            "token",
+            "approv",
+            "until",
+            "basis",
+            "preimage",
+            "plaintext",
+        ] {
+            assert!(
+                !raw.contains(word),
+                "{word} must never reach the budget file: {raw}"
+            );
         }
         // A new process starts with no approval, whatever the file says.
         assert_eq!(Autopay::default().view(T).state, AutopayState::Off);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(book_path(dir.path(), ME)).unwrap().permissions().mode();
+            let mode = std::fs::metadata(book_path(dir.path(), ME))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
     }
@@ -904,13 +1129,24 @@ mod tests {
         assert_eq!(load(dir.path(), ME).unwrap_err().code, "budget_unreadable");
         let mut other = Book::new(ME);
         other.node_id = MAYA.into();
-        std::fs::write(book_path(dir.path(), ME), serde_json::to_vec(&other).unwrap()).unwrap();
+        std::fs::write(
+            book_path(dir.path(), ME),
+            serde_json::to_vec(&other).unwrap(),
+        )
+        .unwrap();
         assert_eq!(load(dir.path(), ME).unwrap_err().code, "budget_unreadable");
         let mut planted = serde_json::to_value(Book::new(ME)).unwrap();
         planted["grant"] = serde_json::json!(true);
         std::fs::write(book_path(dir.path(), ME), planted.to_string()).unwrap();
-        assert_eq!(load(dir.path(), ME).unwrap_err().code, "budget_unreadable", "unknown fields are refused");
-        assert_eq!(load(tempfile::tempdir().unwrap().path(), ME).unwrap(), Book::new(ME));
+        assert_eq!(
+            load(dir.path(), ME).unwrap_err().code,
+            "budget_unreadable",
+            "unknown fields are refused"
+        );
+        assert_eq!(
+            load(tempfile::tempdir().unwrap().path(), ME).unwrap(),
+            Book::new(ME)
+        );
     }
 
     #[test]
@@ -923,7 +1159,12 @@ mod tests {
         assert_eq!(a.ceiling(T), Some(10_000), "narrow never raises");
         a.narrow(4_000);
         assert_eq!(a.ceiling(T), Some(4_000));
-        assert_eq!(a.check_generation(g, T + BUDGET_WINDOW_MS).unwrap_err().code, "budget_needed");
+        assert_eq!(
+            a.check_generation(g, T + BUDGET_WINDOW_MS)
+                .unwrap_err()
+                .code,
+            "budget_needed"
+        );
         assert_eq!(a.view(T + BUDGET_WINDOW_MS).state, AutopayState::Expired);
         a.arm(T, 10_000, SpendBasis::AppLock);
         let g = a.generation();
@@ -938,8 +1179,22 @@ mod tests {
         b.reserve("r1", JOSH, false, 1000, T);
         let v = view(&b, Autopay::default().view(T), false, T);
         assert_eq!(v.rows.len(), 2);
-        assert_eq!(v.rows.iter().find(|r| r.target == JOSH).unwrap(), &Row { target: JOSH.into(), room: false, limit_msat: None, spent_msat: 0, accounted_msat: 1000, unsettled_msat: 1000, fee_unknown: false });
-        assert_eq!(v.rows.iter().find(|r| r.target == MAYA).unwrap().limit_msat, Some(50_000));
+        assert_eq!(
+            v.rows.iter().find(|r| r.target == JOSH).unwrap(),
+            &Row {
+                target: JOSH.into(),
+                room: false,
+                limit_msat: None,
+                spent_msat: 0,
+                accounted_msat: 1000,
+                unsettled_msat: 1000,
+                fee_unknown: false
+            }
+        );
+        assert_eq!(
+            v.rows.iter().find(|r| r.target == MAYA).unwrap().limit_msat,
+            Some(50_000)
+        );
         assert_eq!(v.unsettled_msat, 1000);
     }
 }

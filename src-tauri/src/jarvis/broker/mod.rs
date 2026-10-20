@@ -28,12 +28,12 @@ pub use route::{PeerKey, ReadRoute, RequestTarget, ALLOWED_PATHS};
 #[allow(unused_imports)]
 pub use schema::{
     Amount, BalanceInput, BalanceReport, CategoryFeeTarget, CategoryPrice, ChainBackend,
-    ChannelSummary, ChannelsInput, ChannelsReport, CopiedId, HealthInput, HealthReport,
-    Direction, LightningBackend, Liveness, LocalPrices, LocalPricesInput, MessageCountsInput,
-    MessageMetadata, PaymentEntry, PaymentsInput, PaymentsReport, PriceCategory, PricingMode,
-    Report, SenderCount, SourceField, TargetFee, ToolCall, ToolOutput, TrustLevel,
-    UnavailableReason, Unit, WalletBalanceLabel, MAX_MESSAGE_LIMIT, MAX_PAYMENT_ENTRIES,
-    MAX_PAYMENT_PEERS, PAYMENT_THREAD_LIMIT,
+    ChannelSummary, ChannelsInput, ChannelsReport, CopiedId, Direction, HealthInput, HealthReport,
+    LightningBackend, Liveness, LocalPrices, LocalPricesInput, MessageCountsInput, MessageMetadata,
+    PaymentEntry, PaymentsInput, PaymentsReport, PriceCategory, PricingMode, Report, SenderCount,
+    SourceField, TargetFee, ToolCall, ToolOutput, TrustLevel, UnavailableReason, Unit,
+    WalletBalanceLabel, MAX_MESSAGE_LIMIT, MAX_PAYMENT_ENTRIES, MAX_PAYMENT_PEERS,
+    PAYMENT_THREAD_LIMIT,
 };
 
 use std::fmt;
@@ -218,8 +218,8 @@ pub fn default_limit() -> u32 {
 #[cfg(test)]
 mod mock_read;
 #[cfg(test)]
-pub(crate) mod test_server;
-#[cfg(test)]
 mod payments_tests;
+#[cfg(test)]
+pub(crate) mod test_server;
 #[cfg(test)]
 mod tests;

@@ -77,7 +77,12 @@ pub const PEER_ROOM_CAPABILITY: &str = r#"Custom("room_binding_v1")"#;
 /// is never offered one.
 pub fn with_meeting_support(mut peers: Vec<Peer>) -> Vec<Peer> {
     for p in &mut peers {
-        let lists = |cap: &str| p.connected && p.capabilities.as_ref().is_some_and(|c| c.iter().any(|x| x == cap));
+        let lists = |cap: &str| {
+            p.connected
+                && p.capabilities
+                    .as_ref()
+                    .is_some_and(|c| c.iter().any(|x| x == cap))
+        };
         (p.meetings, p.rooms) = (lists(PEER_MEETING_CAPABILITY), lists(PEER_ROOM_CAPABILITY));
     }
     peers
@@ -95,7 +100,10 @@ pub struct Session {
 /// list could not be read) marks nobody: a room then skips them all.
 pub fn with_sessions(mut peers: Vec<Peer>, sessions: Option<&[Session]>) -> Vec<Peer> {
     for p in &mut peers {
-        p.session = sessions.is_some_and(|s| s.iter().any(|x| x.active && x.peer_id.eq_ignore_ascii_case(&p.node_id)));
+        p.session = sessions.is_some_and(|s| {
+            s.iter()
+                .any(|x| x.active && x.peer_id.eq_ignore_ascii_case(&p.node_id))
+        });
     }
     peers
 }
@@ -106,7 +114,11 @@ pub fn with_sessions(mut peers: Vec<Peer>, sessions: Option<&[Session]>) -> Vec<
 pub fn with_porch_support(mut peers: Vec<Peer>) -> Vec<Peer> {
     for p in &mut peers {
         p.porch = p.connected
-            && p.capabilities.as_ref().is_some_and(|c| c.iter().any(|x| x == crate::porch::PEER_QUOTE_CAPABILITY || x == crate::porch::PEER_CAPABILITY));
+            && p.capabilities.as_ref().is_some_and(|c| {
+                c.iter().any(|x| {
+                    x == crate::porch::PEER_QUOTE_CAPABILITY || x == crate::porch::PEER_CAPABILITY
+                })
+            });
     }
     peers
 }
@@ -251,7 +263,17 @@ pub struct NodeStatusResponse {
 /// Capabilities the renderer may act on. Anything else the node lists is dropped.
 /// `owner_device_approval_v1`: the node approves spend windows and first contact
 /// from an enrolled owner device (node #303); the renderer only changes copy on it.
-pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1", "room_binding_v1", "porch_read_v1", "porch_quote_v1", "front_door_v1", "owner_device_approval_v1", "owner_device_approval_breaker_reset_v1"];
+pub const KNOWN_CAPABILITIES: &[&str] = &[
+    "energy_v1",
+    "membrane_v1",
+    "call_meeting_v1",
+    "room_binding_v1",
+    "porch_read_v1",
+    "porch_quote_v1",
+    "front_door_v1",
+    "owner_device_approval_v1",
+    "owner_device_approval_breaker_reset_v1",
+];
 
 pub fn known_capabilities(listed: &[String]) -> Vec<String> {
     KNOWN_CAPABILITIES
@@ -363,8 +385,19 @@ impl EnergyRead {
             .into_iter()
             .filter_map(|c| {
                 let id = counterparty_id(&c.counterparty)?;
-                let kind = if c.counterparty_kind.as_deref() == Some("room") || id.contains('-') { "room" } else { "peer" };
-                Some(CounterpartyEnergy { kind, id, in_msat: c.in_msat, out_msat: c.out_msat, in_count: c.in_count, out_count: c.out_count })
+                let kind = if c.counterparty_kind.as_deref() == Some("room") || id.contains('-') {
+                    "room"
+                } else {
+                    "peer"
+                };
+                Some(CounterpartyEnergy {
+                    kind,
+                    id,
+                    in_msat: c.in_msat,
+                    out_msat: c.out_msat,
+                    in_count: c.in_count,
+                    out_count: c.out_count,
+                })
             })
             .collect();
         let mut buckets = node.buckets;
@@ -409,7 +442,9 @@ pub struct MembraneEvent {
 impl MembraneEvent {
     /// Keep an event only if its enums are known and its counterparty is id-shaped.
     fn checked(mut self) -> Option<Self> {
-        let token = |s: &str| !s.is_empty() && s.len() <= 40 && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+        let token = |s: &str| {
+            !s.is_empty() && s.len() <= 40 && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        };
         if !matches!(self.direction.as_str(), "inbound" | "outbound")
             || !matches!(self.verdict.as_str(), "admitted" | "refused")
             || !token(&self.code)
@@ -468,8 +503,14 @@ impl MembraneRead {
         Self {
             capacity: node.capacity,
             totals: node.totals,
-            events: node.events.into_iter().filter_map(MembraneEvent::checked).collect(),
-            pre_payment_refusals: node.pre_payment_refusals.and_then(|counts| counts.project()),
+            events: node
+                .events
+                .into_iter()
+                .filter_map(MembraneEvent::checked)
+                .collect(),
+            pre_payment_refusals: node
+                .pre_payment_refusals
+                .and_then(|counts| counts.project()),
             read_at,
         }
     }
@@ -636,13 +677,17 @@ pub fn ldk_network_name(configured: &str) -> Option<&'static str> {
 /// TURN, credentials or query; IPv6 in brackets) on the port the node reported.
 pub fn own_stun_url(url: Option<&str>, port: Option<u16>) -> Option<String> {
     let (url, port) = (url?.trim(), port?);
-    let host = url.strip_prefix("stun:")?.strip_suffix(&format!(":{port}"))?;
+    let host = url
+        .strip_prefix("stun:")?
+        .strip_suffix(&format!(":{port}"))?;
     let ok = match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
         Some(v6) => v6.parse::<std::net::Ipv6Addr>().is_ok(),
         None => {
             !host.is_empty()
                 && host.len() <= 253
-                && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+                && host
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
                 && !host.starts_with(['.', '-'])
                 && !host.ends_with(['.', '-'])
         }
@@ -712,7 +757,11 @@ pub fn price_quote(own: KindPrice, tables: &[PeerPrice], peer: Option<&str>) -> 
     PriceQuote {
         send_unavailable: None,
         max_routing_fee_msat: crate::act::routing_fee(
-            peer_msat.filter(|_| table.is_some_and(|t| !t.stale)).unwrap_or(own.price_msat).max(crate::act::MIN_PAYMENT_MSAT)),
+            peer_msat
+                .filter(|_| table.is_some_and(|t| !t.stale))
+                .unwrap_or(own.price_msat)
+                .max(crate::act::MIN_PAYMENT_MSAT),
+        ),
         kind: own.kind,
         own_msat: own.price_msat,
         peer_msat,
@@ -723,16 +772,30 @@ pub fn price_quote(own: KindPrice, tables: &[PeerPrice], peer: Option<&str>) -> 
 
 /// Classify the evidence from an attempted all-in quote probe. A failed read
 /// is not evidence that the node lacks the contract.
-pub fn conversation_ceiling_evidence(proven: bool, probe: Result<(), String>) -> Result<(), crate::act::ActionError> {
+pub fn conversation_ceiling_evidence(
+    proven: bool,
+    probe: Result<(), String>,
+) -> Result<(), crate::act::ActionError> {
     probe.map_err(|reason| {
-        if matches!(reason.as_str(), "peer_not_ready:chain_unavailable" | "peer_not_ready:not_synced") {
+        if matches!(
+            reason.as_str(),
+            "peer_not_ready:chain_unavailable" | "peer_not_ready:not_synced"
+        ) {
             crate::act::ActionError::new("peer_not_ready", reason)
         } else {
-            crate::act::ActionError::new("price_quote_unavailable", format!("Quote unavailable: {reason}"))
+            crate::act::ActionError::new(
+                "price_quote_unavailable",
+                format!("Quote unavailable: {reason}"),
+            )
         }
     })?;
-    if proven { return Ok(()); }
-    Err(crate::act::ActionError::new("price_cap_unavailable", "Upgrade the node to enforce an all-in message ceiling."))
+    if proven {
+        return Ok(());
+    }
+    Err(crate::act::ActionError::new(
+        "price_cap_unavailable",
+        "Upgrade the node to enforce an all-in message ceiling.",
+    ))
 }
 
 /// `call_quote`: what calling this contact costs, before anything is paid.
@@ -803,7 +866,11 @@ pub fn room_id(value: &str) -> Result<String, String> {
 
 /// `/messages?peer=…&limit=…[&before=…]`. `peer` is a node id or a room UUID;
 /// both are validated, so nothing user-shaped is spliced into the path.
-pub fn messages_path(peer: &str, before: Option<u64>, limit: Option<u32>) -> Result<String, String> {
+pub fn messages_path(
+    peer: &str,
+    before: Option<u64>,
+    limit: Option<u32>,
+) -> Result<String, String> {
     let peer = if peer.contains('-') {
         room_id(peer)?
     } else {
@@ -821,7 +888,11 @@ pub fn messages_path(peer: &str, before: Option<u64>, limit: Option<u32>) -> Res
 /// both directions. The room id is 64 lowercase hex, never a peer: the two
 /// are the same shape, so this is its own path. `before`/`limit` count whole
 /// messages.
-pub fn room_thread_path(room: &str, before: Option<u64>, limit: Option<u32>) -> Result<String, String> {
+pub fn room_thread_path(
+    room: &str,
+    before: Option<u64>,
+    limit: Option<u32>,
+) -> Result<String, String> {
     let room = node_id(room).map_err(|_| "expected a 64-character hex room id".to_string())?;
     let limit = limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
     let mut path = format!("/messages?room={room}&limit={limit}");
@@ -961,7 +1032,9 @@ pub fn parse_ws_frame(text: &str) -> Option<LiveEvent> {
                 step: field("status")?,
             }),
             "membrane" => Some(LiveEvent::Membrane {
-                event: serde_json::from_value::<MembraneEvent>(value).ok()?.checked()?,
+                event: serde_json::from_value::<MembraneEvent>(value)
+                    .ok()?
+                    .checked()?,
             }),
             _ => None,
         };
@@ -999,10 +1072,17 @@ pub fn ws_url(api_base: &str, token: &str) -> Result<String, String> {
     if host != "127.0.0.1" && host != "localhost" {
         return Err("live events are loopback-only".into());
     }
-    if token.is_empty() || !token.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) {
+    if token.is_empty()
+        || !token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    {
         return Err("the node token is not URL-safe".into());
     }
-    Ok(format!("ws://{}/ws?token={token}", rest.trim_end_matches('/')))
+    Ok(format!(
+        "ws://{}/ws?token={token}",
+        rest.trim_end_matches('/')
+    ))
 }
 
 /// Exponential retry ceiling; equal jitter avoids synchronized reconnects.
@@ -1033,21 +1113,35 @@ pub async fn run_live_feed<F, Fut>(
                     continue;
                 }
                 Ok(Some((url, credential))) => {
-                    emit(LiveEvent::Link { state: LinkState::Connecting, detail: None });
+                    emit(LiveEvent::Link {
+                        state: LinkState::Connecting,
+                        detail: None,
+                    });
                     let opened = std::sync::atomic::AtomicBool::new(false);
                     let forward = |event| {
-                        if matches!(event, LiveEvent::Link { state: LinkState::Open, .. }) {
+                        if matches!(
+                            event,
+                            LiveEvent::Link {
+                                state: LinkState::Open,
+                                ..
+                            }
+                        ) {
                             opened.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                         emit(event);
                     };
                     let result = run_ws_session(&url, Some(&credential), &forward).await;
-                    if opened.load(std::sync::atomic::Ordering::Relaxed) { attempt = 0; }
+                    if opened.load(std::sync::atomic::Ordering::Relaxed) {
+                        attempt = 0;
+                    }
                     result.err()
                 }
                 Err(error) => Some(error),
             };
-            emit(LiveEvent::Link { state: LinkState::Closed, detail });
+            emit(LiveEvent::Link {
+                state: LinkState::Closed,
+                detail,
+            });
             tokio::time::sleep(backoff(attempt)).await;
             attempt = attempt.saturating_add(1);
         }
@@ -1068,11 +1162,13 @@ pub async fn run_ws_session(
     local_proxy_auth: Option<&str>,
     emit: &(dyn Fn(LiveEvent) + Send + Sync),
 ) -> Result<(), String> {
-    let mut request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
-        .map_err(|_| "the live-event request could not be built".to_string())?;
-    request
-        .headers_mut()
-        .insert("Sec-WebSocket-Protocol", "bitsov.v1".parse().expect("static header"));
+    let mut request =
+        tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
+            .map_err(|_| "the live-event request could not be built".to_string())?;
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        "bitsov.v1".parse().expect("static header"),
+    );
     if let Some(local_proxy_auth) = local_proxy_auth {
         request.headers_mut().insert(
             crate::remote_access::LOCAL_AUTH_HEADER,
@@ -1081,15 +1177,21 @@ pub async fn run_ws_session(
                 .map_err(|_| "the local proxy credential is invalid".to_string())?,
         );
     }
-    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(request))
-        .await
-        .map_err(|_| "the live-event handshake timed out".to_string())?
-        .map_err(|e| match e {
-            tokio_tungstenite::tungstenite::Error::Http(response) => {
-                format!("the node refused live events ({})", response.status().as_u16())
-            }
-            _ => "the node's live-event socket is not reachable".to_string(),
-        })?;
+    let (mut socket, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .map_err(|_| "the live-event handshake timed out".to_string())?
+    .map_err(|e| match e {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            format!(
+                "the node refused live events ({})",
+                response.status().as_u16()
+            )
+        }
+        _ => "the node's live-event socket is not reachable".to_string(),
+    })?;
     emit(LiveEvent::Link {
         state: LinkState::Open,
         detail: None,
@@ -1123,7 +1225,8 @@ pub async fn run_ws_session(
             }
             Ok(Frame::Ping(_)) => {
                 // Flush tungstenite's queued pong even on an otherwise idle feed.
-                tokio::time::timeout(Duration::from_secs(5), socket.flush()).await
+                tokio::time::timeout(Duration::from_secs(5), socket.flush())
+                    .await
                     .map_err(|_| "the live-event heartbeat timed out".to_string())?
                     .map_err(|_| "the live-event socket dropped".to_string())?;
             }
@@ -1142,7 +1245,9 @@ mod tests {
     fn peer_lightning_mapping_is_preserved_when_reported_and_optional_on_old_nodes() {
         let node_id = "ab".repeat(32);
         let ln = format!("02{}", "cd".repeat(32));
-        let peer: Peer = serde_json::from_value(serde_json::json!({"node_id": node_id, "ln_pubkey": ln})).unwrap();
+        let peer: Peer =
+            serde_json::from_value(serde_json::json!({"node_id": node_id, "ln_pubkey": ln}))
+                .unwrap();
         assert_eq!(serde_json::to_value(peer).unwrap()["ln_pubkey"], ln);
         let legacy: Peer = serde_json::from_value(serde_json::json!({"node_id": node_id})).unwrap();
         assert!(serde_json::to_value(legacy).unwrap()["ln_pubkey"].is_null());
@@ -1150,7 +1255,12 @@ mod tests {
 
     #[test]
     fn conversation_ceiling_evidence_distinguishes_missing_contract_from_failed_quote() {
-        for reason in ["No route or channel yet", "Peer offline", "Quote unavailable", "Owner approval required"] {
+        for reason in [
+            "No route or channel yet",
+            "Peer offline",
+            "Quote unavailable",
+            "Owner approval required",
+        ] {
             let err = conversation_ceiling_evidence(false, Err(reason.into())).unwrap_err();
             assert_eq!(err.code, "price_quote_unavailable");
             assert!(err.message.contains(reason));
@@ -1166,7 +1276,10 @@ mod tests {
     fn wallet_pending_fields_survive_host_projection() {
         for field in ["onchain_pending_sats", "onchain_unconfirmed_sats"] {
             for amount in [0, 188800] {
-                let balance: Balance = serde_json::from_value(serde_json::json!({"balance_msat": 2004000, field: amount})).unwrap();
+                let balance: Balance = serde_json::from_value(
+                    serde_json::json!({"balance_msat": 2004000, field: amount}),
+                )
+                .unwrap();
                 let out = serde_json::to_value(wallet_overview(balance, vec![])).unwrap();
                 assert_eq!(out["onchain_pending_sats"], amount);
                 assert_eq!(out["balance_msat"], 2004000);
@@ -1176,16 +1289,31 @@ mod tests {
 
     #[test]
     fn a_call_costs_the_callees_offer_price_then_realtime_signals() {
-        let live = PeerCallPrice { offer_msat: 10_000, signal_msat: 50 };
+        let live = PeerCallPrice {
+            offer_msat: 10_000,
+            signal_msat: 50,
+        };
         let q = call_quote(Some(&live), 50);
         assert_eq!(q.offer_msat, Some(10_000));
         assert_eq!(q.offer_max_routing_fee_msat, 5_000);
-        assert_eq!((q.signal_msat, q.signal_max_routing_fee_msat), (1_000, 5_000));
+        assert_eq!(
+            (q.signal_msat, q.signal_max_routing_fee_msat),
+            (1_000, 5_000)
+        );
         assert_eq!(q.call_total_msat, Some(21_000));
         // Their node did not answer: no offer, nothing to ring with.
         let none = call_quote(None, 2_000);
-        assert_eq!((none.offer_msat, none.call_total_msat, none.signal_msat), (None, None, 2_000));
-        let big = call_quote(Some(&PeerCallPrice { offer_msat: 2_000_000, signal_msat: 50 }), 50);
+        assert_eq!(
+            (none.offer_msat, none.call_total_msat, none.signal_msat),
+            (None, None, 2_000)
+        );
+        let big = call_quote(
+            Some(&PeerCallPrice {
+                offer_msat: 2_000_000,
+                signal_msat: 50,
+            }),
+            50,
+        );
         assert_eq!(big.offer_max_routing_fee_msat, 10_000);
     }
 
@@ -1193,7 +1321,10 @@ mod tests {
     const ROOM: &str = "0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b";
 
     fn link(state: LinkState, detail: Option<&str>) -> LiveEvent {
-        LiveEvent::Link { state, detail: detail.map(str::to_string) }
+        LiveEvent::Link {
+            state,
+            detail: detail.map(str::to_string),
+        }
     }
 
     #[test]
@@ -1206,11 +1337,21 @@ mod tests {
                     "retry_attempt":3,"retry_after_secs":10,
                     "events":[{"sequence":1,"timestamp":1725000000,"state":"offline","money_ready":false}]});
             }
-            let projected = serde_json::to_value(NodeOverview::from_status(serde_json::from_value(wire).unwrap(), 123)).unwrap();
-            assert_eq!(projected.get("money_ready").and_then(|v| v.as_bool()), ready);
+            let projected = serde_json::to_value(NodeOverview::from_status(
+                serde_json::from_value(wire).unwrap(),
+                123,
+            ))
+            .unwrap();
+            assert_eq!(
+                projected.get("money_ready").and_then(|v| v.as_bool()),
+                ready
+            );
             if ready.is_some() {
                 assert_eq!(projected["readiness"]["retry_attempt"], 3);
-                assert_eq!(projected["readiness"]["events"][0]["timestamp"], 1725000000u64);
+                assert_eq!(
+                    projected["readiness"]["events"][0]["timestamp"],
+                    1725000000u64
+                );
             }
         }
     }
@@ -1222,11 +1363,15 @@ mod tests {
             "api_capabilities": ["unknown_future_v1", "front_door_v1", "front_door_v1", "porch_quote_v1"]
         })).unwrap();
         let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
-        assert_eq!(projected["capabilities"], serde_json::json!(["porch_quote_v1", "front_door_v1"]));
+        assert_eq!(
+            projected["capabilities"],
+            serde_json::json!(["porch_quote_v1", "front_door_v1"])
+        );
 
         let status = serde_json::from_value(serde_json::json!({
             "status": "ok", "node_id": "x", "api_capabilities": ["unknown_future_v1"]
-        })).unwrap();
+        }))
+        .unwrap();
         let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
         assert_eq!(projected["capabilities"], serde_json::json!([]));
     }
@@ -1234,15 +1379,26 @@ mod tests {
     #[test]
     fn overview_only_offers_breaker_reset_for_the_exact_advertised_capability() {
         for (caps, expected) in [
-            (serde_json::json!(["owner_device_approval_breaker_reset_v1", "owner_device_approval_breaker_reset_v1"]),
-             serde_json::json!(["owner_device_approval_breaker_reset_v1"])),
-            (serde_json::json!(["owner_device_approval_v1", "owner_device_approval_breaker_reset_v2"]),
-             serde_json::json!(["owner_device_approval_v1"])),
+            (
+                serde_json::json!([
+                    "owner_device_approval_breaker_reset_v1",
+                    "owner_device_approval_breaker_reset_v1"
+                ]),
+                serde_json::json!(["owner_device_approval_breaker_reset_v1"]),
+            ),
+            (
+                serde_json::json!([
+                    "owner_device_approval_v1",
+                    "owner_device_approval_breaker_reset_v2"
+                ]),
+                serde_json::json!(["owner_device_approval_v1"]),
+            ),
             (serde_json::json!([]), serde_json::json!([])),
         ] {
             let status = serde_json::from_value(serde_json::json!({
                 "status": "ok", "node_id": "x", "api_capabilities": caps
-            })).unwrap();
+            }))
+            .unwrap();
             let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
             assert_eq!(projected["capabilities"], expected);
         }
@@ -1255,36 +1411,62 @@ mod tests {
             "api_capabilities": ["owner_device_approval_v2", "owner_device_approval_v1", "unknown_future_v1", "<script>", "owner_device_approval_v1"]
         })).unwrap();
         let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
-        assert_eq!(projected["capabilities"], serde_json::json!(["owner_device_approval_v1"]));
+        assert_eq!(
+            projected["capabilities"],
+            serde_json::json!(["owner_device_approval_v1"])
+        );
 
         let status = serde_json::from_value(serde_json::json!({
             "status": "ok", "node_id": "x", "api_capabilities": ["owner_device_approval"]
-        })).unwrap();
+        }))
+        .unwrap();
         let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
-        assert_eq!(projected["capabilities"], serde_json::json!([]), "only the exact string passes");
+        assert_eq!(
+            projected["capabilities"],
+            serde_json::json!([]),
+            "only the exact string passes"
+        );
     }
 
     #[test]
     fn live_link_replays_the_state_the_socket_last_reported() {
         let live = LiveLink::default();
         let mut sent = Vec::new();
-        assert_eq!(live.replay(|e| sent.push(e)), None, "nothing to replay before the bridge runs");
+        assert_eq!(
+            live.replay(|e| sent.push(e)),
+            None,
+            "nothing to replay before the bridge runs"
+        );
         assert!(sent.is_empty());
 
         live.publish(link(LinkState::Connecting, None), |e| sent.push(e));
         live.publish(link(LinkState::Open, None), |e| sent.push(e));
         // Traffic after the open does not change the link state.
-        live.publish(LiveEvent::Onboarding { step: "funding-seen".into() }, |e| sent.push(e));
+        live.publish(
+            LiveEvent::Onboarding {
+                step: "funding-seen".into(),
+            },
+            |e| sent.push(e),
+        );
         assert_eq!(sent.len(), 3);
 
         let mut replayed = Vec::new();
         assert_eq!(live.replay(|e| replayed.push(e)), Some(LinkState::Open));
         assert_eq!(replayed, [link(LinkState::Open, None)]);
 
-        live.publish(link(LinkState::Closed, Some("the live-event socket dropped")), |_| {});
+        live.publish(
+            link(LinkState::Closed, Some("the live-event socket dropped")),
+            |_| {},
+        );
         let mut replayed = Vec::new();
         assert_eq!(live.replay(|e| replayed.push(e)), Some(LinkState::Closed));
-        assert_eq!(replayed, [link(LinkState::Closed, Some("the live-event socket dropped"))]);
+        assert_eq!(
+            replayed,
+            [link(
+                LinkState::Closed,
+                Some("the live-event socket dropped")
+            )]
+        );
     }
 
     #[test]
@@ -1295,12 +1477,18 @@ mod tests {
         assert_eq!(room_id(ROOM).unwrap(), ROOM);
         assert!(room_id("0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b/../../x").is_err());
         assert!(room_members_path("x").is_err());
-        assert_eq!(room_members_path(ROOM).unwrap(), format!("/rooms/{ROOM}/members"));
+        assert_eq!(
+            room_members_path(ROOM).unwrap(),
+            format!("/rooms/{ROOM}/members")
+        );
     }
 
     #[test]
     fn messages_path_clamps_the_page_and_carries_the_cursor() {
-        assert_eq!(messages_path(A, None, None).unwrap(), format!("/messages?peer={A}&limit=50"));
+        assert_eq!(
+            messages_path(A, None, None).unwrap(),
+            format!("/messages?peer={A}&limit=50")
+        );
         assert_eq!(
             messages_path(ROOM, Some(1_725_000_000_000), Some(5000)).unwrap(),
             format!("/messages?peer={ROOM}&limit=200&before=1725000000000")
@@ -1312,9 +1500,18 @@ mod tests {
     #[test]
     fn a_room_thread_is_its_own_path_and_keeps_each_copy() {
         let room = "AB".repeat(32);
-        assert_eq!(room_thread_path(&room, None, None).unwrap(), format!("/messages?room={}&limit=50", "ab".repeat(32)));
-        assert_eq!(room_thread_path(&room, Some(7), Some(5000)).unwrap(), format!("/messages?room={}&limit=200&before=7", "ab".repeat(32)));
-        assert!(room_thread_path(ROOM, None, None).is_err(), "a UUID room is not a bound room");
+        assert_eq!(
+            room_thread_path(&room, None, None).unwrap(),
+            format!("/messages?room={}&limit=50", "ab".repeat(32))
+        );
+        assert_eq!(
+            room_thread_path(&room, Some(7), Some(5000)).unwrap(),
+            format!("/messages?room={}&limit=200&before=7", "ab".repeat(32))
+        );
+        assert!(
+            room_thread_path(ROOM, None, None).is_err(),
+            "a UUID room is not a bound room"
+        );
         assert!(room_thread_path(&format!("{}&peer=x", "ab".repeat(32)), None, None).is_err());
         let body = serde_json::json!([{
             "id": "c2", "kind": 0, "sender": A, "recipient": "ab".repeat(32), "timestamp": 9,
@@ -1324,10 +1521,19 @@ mod tests {
         }, {"id": "x", "kind": 0, "sender": A, "recipient": "bb", "timestamp": 1}]);
         let messages: Vec<Message> = serde_json::from_value(body).unwrap();
         let out = serde_json::to_value(&messages).unwrap();
-        assert_eq!(out[0]["copies"][1], serde_json::json!({"recipient": "cc", "id": "c2", "payment_amount_msat": 3000}));
-        assert!(out[1].get("copies").is_none(), "no copies outside a room thread");
+        assert_eq!(
+            out[0]["copies"][1],
+            serde_json::json!({"recipient": "cc", "id": "c2", "payment_amount_msat": 3000})
+        );
+        assert!(
+            out[1].get("copies").is_none(),
+            "no copies outside a room thread"
+        );
         let text = out.to_string();
-        assert!(!text.contains("deadbeef") && !text.contains("payment_hash"), "{text}");
+        assert!(
+            !text.contains("deadbeef") && !text.contains("payment_hash"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1348,7 +1554,9 @@ mod tests {
         }]))
         .unwrap();
         assert_eq!(peers[0].label, None);
-        assert!(!serde_json::to_string(&peers).unwrap().contains("safety_number"));
+        assert!(!serde_json::to_string(&peers)
+            .unwrap()
+            .contains("safety_number"));
 
         let rooms: Vec<Room> = serde_json::from_value(serde_json::json!([{
             "id": ROOM, "name": "Mexico", "created_by": A, "created_at": "2026-09-27T10:00:00Z",
@@ -1361,8 +1569,12 @@ mod tests {
     #[test]
     fn wallet_breakdown_preserves_present_absent_zero_and_partial_categories() {
         let fields = [
-            "onchain_spendable_sats", "onchain_total_sats", "anchor_reserve_sats",
-            "lightning_spendable_sats", "closing_sats", "contested_sats",
+            "onchain_spendable_sats",
+            "onchain_total_sats",
+            "anchor_reserve_sats",
+            "lightning_spendable_sats",
+            "closing_sats",
+            "contested_sats",
         ];
         for body in [
             serde_json::json!({"balance_msat": 480_000_000}),
@@ -1395,7 +1607,8 @@ mod tests {
             remote_balance_msat: 1,
             active,
         };
-        let balance = serde_json::from_value(serde_json::json!({"balance_msat": 52_500_000})).unwrap();
+        let balance =
+            serde_json::from_value(serde_json::json!({"balance_msat": 52_500_000})).unwrap();
         let w = wallet_overview(balance, vec![ch(500_000, true), ch(80_000, false)]);
         assert_eq!(w.balance_msat, 52_500_000);
         assert_eq!(w.lightning_outbound_msat, 500_000);
@@ -1404,7 +1617,10 @@ mod tests {
 
     #[test]
     fn price_quote_uses_the_peer_table_only_when_cached() {
-        let own = || KindPrice { kind: 0, price_msat: 1_000 };
+        let own = || KindPrice {
+            kind: 0,
+            price_msat: 1_000,
+        };
         let tables = vec![PeerPrice {
             peer_id: A.to_uppercase(),
             prices: HashMap::from([(CATEGORY_COMMUNICATION.to_string(), 2_000)]),
@@ -1412,9 +1628,15 @@ mod tests {
             stale: true,
         }];
         let q = price_quote(own(), &tables, Some(A));
-        assert_eq!((q.own_msat, q.peer_msat, q.peer_age_secs, q.peer_stale), (1_000, Some(2_000), Some(240), true));
+        assert_eq!(
+            (q.own_msat, q.peer_msat, q.peer_age_secs, q.peer_stale),
+            (1_000, Some(2_000), Some(240), true)
+        );
         let q = price_quote(own(), &tables, Some(&"b".repeat(64)));
-        assert_eq!((q.peer_msat, q.peer_age_secs, q.peer_stale), (None, None, false));
+        assert_eq!(
+            (q.peer_msat, q.peer_age_secs, q.peer_stale),
+            (None, None, false)
+        );
         assert_eq!(price_quote(own(), &[], None).peer_msat, None);
     }
 
@@ -1446,7 +1668,10 @@ mod tests {
             "id": "0b", "kind": 0, "sender": A, "recipient": {"Node": "11"}, "timestamp": 1
         });
         match parse_ws_frame(&direct.to_string()) {
-            Some(LiveEvent::Message { message, room_id: None }) => {
+            Some(LiveEvent::Message {
+                message,
+                room_id: None,
+            }) => {
                 assert_eq!(message.recipient, "11");
                 assert_eq!(message.payment_amount_msat, None);
             }
@@ -1457,7 +1682,9 @@ mod tests {
     #[test]
     fn ws_status_frames_are_tagged_and_noise_is_dropped() {
         assert_eq!(
-            parse_ws_frame(r#"{"type":"delivery_status","message_id":"0a","status":"rejected","reason":"price"}"#),
+            parse_ws_frame(
+                r#"{"type":"delivery_status","message_id":"0a","status":"rejected","reason":"price"}"#
+            ),
             Some(LiveEvent::Delivery {
                 message_id: "0a".into(),
                 status: "rejected".into(),
@@ -1465,11 +1692,18 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_ws_frame(r#"{"type":"onboarding_progress","message_id":"onboarding","status":"funding-seen"}"#),
-            Some(LiveEvent::Onboarding { step: "funding-seen".into() })
+            parse_ws_frame(
+                r#"{"type":"onboarding_progress","message_id":"onboarding","status":"funding-seen"}"#
+            ),
+            Some(LiveEvent::Onboarding {
+                step: "funding-seen".into()
+            })
         );
         assert_eq!(parse_ws_frame(r#"{"type":"pong"}"#), None);
-        assert_eq!(parse_ws_frame(r#"{"type":"operator_hosting_overdue","message_id":"x","status":"y"}"#), None);
+        assert_eq!(
+            parse_ws_frame(r#"{"type":"operator_hosting_overdue","message_id":"x","status":"y"}"#),
+            None
+        );
         assert_eq!(parse_ws_frame("not json"), None);
         assert_eq!(parse_ws_frame(r#"{"id":"x"}"#), None);
     }
@@ -1481,21 +1715,50 @@ mod tests {
             r#"{{"type":"membrane","seq":7,"at":1000,"direction":"inbound","verdict":"admitted","code":"settled","kind":0,"counterparty":"{}","first_contact":true,"paid_msat":20000,"payment_hash":"ff","preimage":"ee"}}"#,
             a.to_uppercase()
         );
-        let Some(LiveEvent::Membrane { event }) = parse_ws_frame(&frame) else { panic!("membrane frame dropped") };
-        assert_eq!(event.counterparty.as_deref(), Some(a.as_str()), "lowercased id");
+        let Some(LiveEvent::Membrane { event }) = parse_ws_frame(&frame) else {
+            panic!("membrane frame dropped")
+        };
+        assert_eq!(
+            event.counterparty.as_deref(),
+            Some(a.as_str()),
+            "lowercased id"
+        );
         assert!(event.first_contact);
         let json = serde_json::to_string(&LiveEvent::Membrane { event }).unwrap();
-        assert!(!json.contains("payment_hash") && !json.contains("preimage"), "{json}");
+        assert!(
+            !json.contains("payment_hash") && !json.contains("preimage"),
+            "{json}"
+        );
 
         // A counterparty that is not id-shaped, or an unknown verdict, drops the frame.
-        assert_eq!(parse_ws_frame(r#"{"type":"membrane","seq":1,"at":1,"direction":"inbound","verdict":"admitted","code":"settled","counterparty":"../x"}"#), None);
-        assert_eq!(parse_ws_frame(r#"{"type":"membrane","seq":1,"at":1,"direction":"inbound","verdict":"maybe","code":"settled"}"#), None);
-        assert_eq!(parse_ws_frame(r#"{"type":"membrane","seq":1,"at":1,"direction":"inbound","verdict":"refused","code":"<b>"}"#), None);
+        assert_eq!(
+            parse_ws_frame(
+                r#"{"type":"membrane","seq":1,"at":1,"direction":"inbound","verdict":"admitted","code":"settled","counterparty":"../x"}"#
+            ),
+            None
+        );
+        assert_eq!(
+            parse_ws_frame(
+                r#"{"type":"membrane","seq":1,"at":1,"direction":"inbound","verdict":"maybe","code":"settled"}"#
+            ),
+            None
+        );
+        assert_eq!(
+            parse_ws_frame(
+                r#"{"type":"membrane","seq":1,"at":1,"direction":"inbound","verdict":"refused","code":"<b>"}"#
+            ),
+            None
+        );
         // A refusal without a verified sender stays anonymous.
         let Some(LiveEvent::Membrane { event }) = parse_ws_frame(
             r#"{"type":"membrane","seq":2,"at":2,"direction":"inbound","verdict":"refused","code":"unpaid","required_msat":20000,"paid_msat":0}"#,
-        ) else { panic!() };
-        assert_eq!((event.counterparty, event.required_msat), (None, Some(20000)));
+        ) else {
+            panic!()
+        };
+        assert_eq!(
+            (event.counterparty, event.required_msat),
+            (None, Some(20000))
+        );
     }
 
     #[test]
@@ -1509,7 +1772,10 @@ mod tests {
             {"node_id":"f","connected":true,"meetings":true}
         ]"#).unwrap();
         let peers = with_meeting_support(peers);
-        assert_eq!(peers.iter().map(|p| p.meetings).collect::<Vec<_>>(), [true, false, false, false, false, false]);
+        assert_eq!(
+            peers.iter().map(|p| p.meetings).collect::<Vec<_>>(),
+            [true, false, false, false, false, false]
+        );
         // The renderer sees the derived flag, never the raw capability list.
         let out = serde_json::to_value(&peers[0]).unwrap();
         assert_eq!(out["meetings"], true);
@@ -1517,7 +1783,8 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_takes_rooms_only_when_connected_with_the_exact_advert_and_sessions_come_from_the_node() {
+    fn a_peer_takes_rooms_only_when_connected_with_the_exact_advert_and_sessions_come_from_the_node(
+    ) {
         let peers: Vec<Peer> = serde_json::from_str(r#"[
             {"node_id":"AA","connected":true,"capabilities":["Custom(\"room_binding_v1\")"]},
             {"node_id":"bb","connected":false,"capabilities":["Custom(\"room_binding_v1\")"]},
@@ -1525,11 +1792,26 @@ mod tests {
             {"node_id":"dd","connected":true,"rooms":true,"session":true}
         ]"#).unwrap();
         let peers = with_meeting_support(peers);
-        assert_eq!(peers.iter().map(|p| (p.rooms, p.meetings)).collect::<Vec<_>>(), [(true, false), (false, false), (false, true), (false, false)]);
-        let sessions: Vec<Session> = serde_json::from_str(r#"[{"peer_id":"aa","active":true},{"peer_id":"cc","active":false}]"#).unwrap();
+        assert_eq!(
+            peers
+                .iter()
+                .map(|p| (p.rooms, p.meetings))
+                .collect::<Vec<_>>(),
+            [(true, false), (false, false), (false, true), (false, false)]
+        );
+        let sessions: Vec<Session> = serde_json::from_str(
+            r#"[{"peer_id":"aa","active":true},{"peer_id":"cc","active":false}]"#,
+        )
+        .unwrap();
         let with = with_sessions(peers.clone(), Some(&sessions));
-        assert_eq!(with.iter().map(|p| p.session).collect::<Vec<_>>(), [true, false, false, false]);
-        assert!(with_sessions(peers, None).iter().all(|p| !p.session), "unreadable sessions: nobody");
+        assert_eq!(
+            with.iter().map(|p| p.session).collect::<Vec<_>>(),
+            [true, false, false, false]
+        );
+        assert!(
+            with_sessions(peers, None).iter().all(|p| !p.session),
+            "unreadable sessions: nobody"
+        );
         assert_eq!(serde_json::to_value(&with[0]).unwrap()["rooms"], true);
     }
 
@@ -1546,8 +1828,14 @@ mod tests {
             {"node_id":"h","connected":true,"capabilities":["porch_quote_v1","Custom(\"porch_quote_v1x\")"]}
         ]"#).unwrap();
         let peers = with_porch_support(with_meeting_support(peers));
-        assert_eq!(peers.iter().map(|p| p.porch).collect::<Vec<_>>(), [true, false, false, false, false, true, false, false]);
-        assert_eq!(peers.iter().map(|p| p.meetings).collect::<Vec<_>>(), [false, true, false, false, false, false, false, false]);
+        assert_eq!(
+            peers.iter().map(|p| p.porch).collect::<Vec<_>>(),
+            [true, false, false, false, false, true, false, false]
+        );
+        assert_eq!(
+            peers.iter().map(|p| p.meetings).collect::<Vec<_>>(),
+            [false, true, false, false, false, false, false, false]
+        );
         assert_eq!(serde_json::to_value(&peers[0]).unwrap()["porch"], true);
     }
 
@@ -1570,62 +1858,150 @@ mod tests {
         ))
         .unwrap();
         let read = EnergyRead::from_node(node);
-        assert_eq!(read.buckets.iter().map(|b| b.start_ms).collect::<Vec<_>>(), [0, 7_200_000], "oldest first");
-        assert_eq!(read.counterparties.len(), 2, "a non-id counterparty is dropped");
-        assert_eq!((read.counterparties[0].kind, read.counterparties[1].kind), ("peer", "room"));
+        assert_eq!(
+            read.buckets.iter().map(|b| b.start_ms).collect::<Vec<_>>(),
+            [0, 7_200_000],
+            "oldest first"
+        );
+        assert_eq!(
+            read.counterparties.len(),
+            2,
+            "a non-id counterparty is dropped"
+        );
+        assert_eq!(
+            (read.counterparties[0].kind, read.counterparties[1].kind),
+            ("peer", "room")
+        );
 
         let status: NodeStatusResponse = serde_json::from_str(
             r#"{"status":"ok","node_id":"x","api_capabilities":["paid_send_caps_v1","membrane_v1","energy_v1","<script>"]}"#,
         )
         .unwrap();
-        assert_eq!(NodeOverview::from_status(status, 1).capabilities, ["energy_v1", "membrane_v1"]);
-        let rc7: NodeStatusResponse = serde_json::from_str(r#"{"status":"ok","node_id":"x"}"#).unwrap();
-        assert!(NodeOverview::from_status(rc7, 1).capabilities.is_empty(), "rc7 advertises nothing: v1 sources");
+        assert_eq!(
+            NodeOverview::from_status(status, 1).capabilities,
+            ["energy_v1", "membrane_v1"]
+        );
+        let rc7: NodeStatusResponse =
+            serde_json::from_str(r#"{"status":"ok","node_id":"x"}"#).unwrap();
+        assert!(
+            NodeOverview::from_status(rc7, 1).capabilities.is_empty(),
+            "rc7 advertises nothing: v1 sources"
+        );
     }
 
     #[test]
     fn custody_mode_is_projected_and_only_ever_strengthened() {
         let read = |extra: &str| {
-            let s: NodeStatusResponse = serde_json::from_str(&format!(r#"{{"status":"ok","node_id":"x"{extra}}}"#)).unwrap();
+            let s: NodeStatusResponse =
+                serde_json::from_str(&format!(r#"{{"status":"ok","node_id":"x"{extra}}}"#))
+                    .unwrap();
             serde_json::to_value(NodeOverview::from_status(s, 1)).unwrap()
         };
-        assert!(read("").get("custody_mode").is_none(), "an older node reports nothing raw");
-        for mode in ["local_seed", "encrypted_seed", "hosted_custody", "money_signer", "remote_signer"] {
-            assert_eq!(read(&format!(r#","custody_mode":"{mode}""#))["custody_mode"], mode);
+        assert!(
+            read("").get("custody_mode").is_none(),
+            "an older node reports nothing raw"
+        );
+        for mode in [
+            "local_seed",
+            "encrypted_seed",
+            "hosted_custody",
+            "money_signer",
+            "remote_signer",
+        ] {
+            assert_eq!(
+                read(&format!(r#","custody_mode":"{mode}""#))["custody_mode"],
+                mode
+            );
         }
-        assert!(read(r#","custody_mode":"<b>trust me</b>""#).get("custody_mode").is_none(), "unknown values are dropped");
+        assert!(
+            read(r#","custody_mode":"<b>trust me</b>""#)
+                .get("custody_mode")
+                .is_none(),
+            "unknown values are dropped"
+        );
         // Verified local: report passes through; older nodes stay silent.
-        for mode in ["local_seed", "encrypted_seed", "hosted_custody", "money_signer", "remote_signer"] {
+        for mode in [
+            "local_seed",
+            "encrypted_seed",
+            "hosted_custody",
+            "money_signer",
+            "remote_signer",
+        ] {
             assert_eq!(custody_mode(Some(mode), true), Some(mode));
         }
         assert_eq!(custody_mode(None, true), None);
         // Unverified (SSH forward, proxy, external attach): local seed claims
         // become hosted; signer modes and explicit hosted pass through.
-        for reported in [None, Some("local_seed"), Some("encrypted_seed"), Some("hosted_custody"), Some("bogus")] {
-            assert_eq!(custody_mode(reported, false), Some("hosted_custody"), "{reported:?}");
+        for reported in [
+            None,
+            Some("local_seed"),
+            Some("encrypted_seed"),
+            Some("hosted_custody"),
+            Some("bogus"),
+        ] {
+            assert_eq!(
+                custody_mode(reported, false),
+                Some("hosted_custody"),
+                "{reported:?}"
+            );
         }
-        assert_eq!(custody_mode(Some("remote_signer"), false), Some("remote_signer"));
-        assert_eq!(custody_mode(Some("money_signer"), false), Some("money_signer"));
+        assert_eq!(
+            custody_mode(Some("remote_signer"), false),
+            Some("remote_signer")
+        );
+        assert_eq!(
+            custody_mode(Some("money_signer"), false),
+            Some("money_signer")
+        );
     }
 
     #[test]
     fn own_stun_is_projected_only_when_well_formed() {
         let read = |extra: &str| {
-            let s: NodeStatusResponse = serde_json::from_str(&format!(r#"{{"status":"ok","node_id":"x"{extra}}}"#)).unwrap();
+            let s: NodeStatusResponse =
+                serde_json::from_str(&format!(r#"{{"status":"ok","node_id":"x"{extra}}}"#))
+                    .unwrap();
             serde_json::to_value(NodeOverview::from_status(s, 1)).unwrap()
         };
         let off = read("");
-        assert!(off.get("stun_port").is_none() && off.get("stun_url").is_none(), "no responder, nothing offered");
+        assert!(
+            off.get("stun_port").is_none() && off.get("stun_url").is_none(),
+            "no responder, nothing offered"
+        );
         let port_only = read(r#","stun_port":3478"#);
         assert_eq!(port_only["stun_port"], 3478);
         assert!(port_only.get("stun_url").is_none());
-        assert_eq!(read(r#","stun_port":3478,"stun_url":"stun:node.example.org:3478""#)["stun_url"], "stun:node.example.org:3478");
-        assert_eq!(read(r#","stun_port":3478,"stun_url":"stun:[2001:db8::1]:3478""#)["stun_url"], "stun:[2001:db8::1]:3478");
-        for bad in ["turn:node.example.org:3478", "stun:node.example.org:9999", "stun:u:p@h:3478", "stun:h:3478?transport=tcp",
-            "stun:-h:3478", "stun::3478", "stun:[not-v6]:3478", "stun:node.example.org"] {
-            assert!(read(&format!(r#","stun_port":3478,"stun_url":"{bad}""#)).get("stun_url").is_none(), "{bad}");
+        assert_eq!(
+            read(r#","stun_port":3478,"stun_url":"stun:node.example.org:3478""#)["stun_url"],
+            "stun:node.example.org:3478"
+        );
+        assert_eq!(
+            read(r#","stun_port":3478,"stun_url":"stun:[2001:db8::1]:3478""#)["stun_url"],
+            "stun:[2001:db8::1]:3478"
+        );
+        for bad in [
+            "turn:node.example.org:3478",
+            "stun:node.example.org:9999",
+            "stun:u:p@h:3478",
+            "stun:h:3478?transport=tcp",
+            "stun:-h:3478",
+            "stun::3478",
+            "stun:[not-v6]:3478",
+            "stun:node.example.org",
+        ] {
+            assert!(
+                read(&format!(r#","stun_port":3478,"stun_url":"{bad}""#))
+                    .get("stun_url")
+                    .is_none(),
+                "{bad}"
+            );
         }
-        assert!(read(r#","stun_url":"stun:node.example.org:3478""#).get("stun_url").is_none(), "URL without a port is ignored");
+        assert!(
+            read(r#","stun_url":"stun:node.example.org:3478""#)
+                .get("stun_url")
+                .is_none(),
+            "URL without a port is ignored"
+        );
     }
 
     #[test]
@@ -1650,26 +2026,43 @@ mod tests {
     fn backoff_grows_and_caps() {
         for (attempt, low, high) in [(0, 500, 1000), (3, 4000, 8000), (40, 15_000, 30_000)] {
             for _ in 0..64 {
-                assert!((Duration::from_millis(low)..=Duration::from_millis(high)).contains(&backoff(attempt)));
+                assert!((Duration::from_millis(low)..=Duration::from_millis(high))
+                    .contains(&backoff(attempt)));
             }
         }
-        assert!((0..32).map(|_| backoff(3)).collect::<std::collections::HashSet<_>>().len() > 1);
+        assert!(
+            (0..32)
+                .map(|_| backoff(3))
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                > 1
+        );
     }
 
     #[tokio::test]
     async fn silent_handshake_is_bounded() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("ws://{}/api/v1/ws?token=SECRET", listener.local_addr().unwrap());
+        let url = format!(
+            "ws://{}/api/v1/ws?token=SECRET",
+            listener.local_addr().unwrap()
+        );
         let client = tokio::spawn(async move { run_ws_session(&url, None, &|_| {}).await });
         let (_held, _) = listener.accept().await.unwrap();
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(11)).await;
-        for _ in 0..20 { tokio::task::yield_now().await; }
-        assert!(client.is_finished(), "a silent handshake must release the retry loop");
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            client.is_finished(),
+            "a silent handshake must release the retry loop"
+        );
         assert!(!client.await.unwrap().unwrap_err().contains("SECRET"));
     }
 
-    async fn accept_feed(listener: &tokio::net::TcpListener) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+    async fn accept_feed(
+        listener: &tokio::net::TcpListener,
+    ) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
         let (stream, _) = listener.accept().await.unwrap();
         tokio_tungstenite::accept_hdr_async(stream, |_: &tokio_tungstenite::tungstenite::handshake::server::Request, mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
             response.headers_mut().insert("Sec-WebSocket-Protocol", "bitsov.v1".parse().unwrap());
@@ -1679,7 +2072,10 @@ mod tests {
 
     #[tokio::test]
     async fn feed_reconnects_after_node_restart_and_silent_network_drop() {
-        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
         for silent_drop in [false, true] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
@@ -1688,59 +2084,120 @@ mod tests {
             let stopping = stop.clone();
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let client = tokio::spawn(async move {
-                run_live_feed(|| std::future::ready(Ok(Some((url.clone(), "local-secret".into())))),
-                    &|e| { let _ = tx.send(e); }, &|| stopping.load(Ordering::SeqCst)).await;
+                run_live_feed(
+                    || std::future::ready(Ok(Some((url.clone(), "local-secret".into())))),
+                    &|e| {
+                        let _ = tx.send(e);
+                    },
+                    &|| stopping.load(Ordering::SeqCst),
+                )
+                .await;
             });
             let socket = accept_feed(&listener).await;
-            while !matches!(rx.recv().await.unwrap(), LiveEvent::Link { state: LinkState::Open, .. }) {}
-            let held = if silent_drop { Some(socket) } else { drop(socket); None };
+            while !matches!(
+                rx.recv().await.unwrap(),
+                LiveEvent::Link {
+                    state: LinkState::Open,
+                    ..
+                }
+            ) {}
+            let held = if silent_drop {
+                Some(socket)
+            } else {
+                drop(socket);
+                None
+            };
             drop(listener); // Same node endpoint will return after the gap.
             if silent_drop {
                 tokio::time::pause();
                 tokio::time::advance(Duration::from_secs(16)).await;
-                for _ in 0..50 { tokio::task::yield_now().await; }
+                for _ in 0..50 {
+                    tokio::task::yield_now().await;
+                }
                 tokio::time::advance(Duration::from_secs(16)).await;
-                for _ in 0..50 { tokio::task::yield_now().await; }
+                for _ in 0..50 {
+                    tokio::task::yield_now().await;
+                }
                 tokio::time::resume();
             }
             tokio::time::timeout(Duration::from_secs(2), async {
-                while !matches!(rx.recv().await.unwrap(), LiveEvent::Link { state: LinkState::Closed, .. }) {}
-            }).await.expect("drop must become visibly disconnected");
+                while !matches!(
+                    rx.recv().await.unwrap(),
+                    LiveEvent::Link {
+                        state: LinkState::Closed,
+                        ..
+                    }
+                ) {}
+            })
+            .await
+            .expect("drop must become visibly disconnected");
             drop(held);
             let listener = tokio::net::TcpListener::bind(address).await.unwrap();
-            let mut recovered = tokio::time::timeout(Duration::from_secs(3), accept_feed(&listener)).await.expect("feed must resubscribe");
+            let mut recovered =
+                tokio::time::timeout(Duration::from_secs(3), accept_feed(&listener))
+                    .await
+                    .expect("feed must resubscribe");
             recovered.send(Frame::text(r#"{"type":"delivery_status","message_id":"after-restart","status":"delivered"}"#)).await.unwrap();
             tokio::time::timeout(Duration::from_secs(2), async {
                 while !matches!(rx.recv().await.unwrap(), LiveEvent::Delivery { message_id, .. } if message_id == "after-restart") {}
             }).await.expect("reconnected feed must deliver events");
             stop.store(true, Ordering::SeqCst);
-            tokio::time::timeout(Duration::from_secs(1), client).await.unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(1), client)
+                .await
+                .unwrap()
+                .unwrap();
         }
     }
 
     #[tokio::test]
     async fn feed_keeps_retrying_beyond_four_failed_connections() {
-        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
         use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("ws://{}/api/v1/ws?token=tok", listener.local_addr().unwrap());
+        let url = format!(
+            "ws://{}/api/v1/ws?token=tok",
+            listener.local_addr().unwrap()
+        );
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let client = tokio::spawn(async move {
-            run_live_feed(|| std::future::ready(Ok(Some((url.clone(), "local-secret".into())))),
-                &|e| { let _ = tx.send(e); }, &|| stopping.load(Ordering::SeqCst)).await;
+            run_live_feed(
+                || std::future::ready(Ok(Some((url.clone(), "local-secret".into())))),
+                &|e| {
+                    let _ = tx.send(e);
+                },
+                &|| stopping.load(Ordering::SeqCst),
+            )
+            .await;
         });
         tokio::time::timeout(Duration::from_secs(40), async {
             for _ in 0..5 {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+                stream
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                    .await
+                    .unwrap();
             }
             let _socket = accept_feed(&listener).await;
-            while !matches!(rx.recv().await.unwrap(), LiveEvent::Link { state: LinkState::Open, .. }) {}
-        }).await.expect("retry budget must not be exhausted");
+            while !matches!(
+                rx.recv().await.unwrap(),
+                LiveEvent::Link {
+                    state: LinkState::Open,
+                    ..
+                }
+            ) {}
+        })
+        .await
+        .expect("retry budget must not be exhausted");
         stop.store(true, Ordering::SeqCst);
-        tokio::time::timeout(Duration::from_secs(1), client).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), client)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     /// A real socket on an ephemeral loopback port: the session presents the
@@ -1759,44 +2216,49 @@ mod tests {
         let seen_srv = seen.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let mut ws = tokio_tungstenite::accept_hdr_async(stream, |req: &Request, mut res: Response| {
-                let proto = req
-                    .headers()
-                    .get("Sec-WebSocket-Protocol")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
-                let local_auth = req
-                    .headers()
-                    .get(crate::remote_access::LOCAL_AUTH_HEADER)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
-                *seen_srv.lock().unwrap() = Some((req.uri().to_string(), proto, local_auth));
-                res.headers_mut()
-                    .insert("Sec-WebSocket-Protocol", "bitsov.v1".parse().unwrap());
-                Ok(res)
-            })
-            .await
-            .unwrap();
+            let mut ws =
+                tokio_tungstenite::accept_hdr_async(stream, |req: &Request, mut res: Response| {
+                    let proto = req
+                        .headers()
+                        .get("Sec-WebSocket-Protocol")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    let local_auth = req
+                        .headers()
+                        .get(crate::remote_access::LOCAL_AUTH_HEADER)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    *seen_srv.lock().unwrap() = Some((req.uri().to_string(), proto, local_auth));
+                    res.headers_mut()
+                        .insert("Sec-WebSocket-Protocol", "bitsov.v1".parse().unwrap());
+                    Ok(res)
+                })
+                .await
+                .unwrap();
             let msg = serde_json::json!({
                 "id": "0a", "kind": 0, "sender": A, "recipient": {"Node": "11"},
                 "timestamp": 7, "payment_proof": {"amount_msat": 1000}, "plaintext": "gm"
             });
             ws.send(Frame::text(r#"{"type":"pong"}"#)).await.unwrap();
             ws.send(Frame::text(msg.to_string())).await.unwrap();
-            ws.send(Frame::text(r#"{"type":"delivery_status","message_id":"0a","status":"delivered"}"#))
-                .await
-                .unwrap();
+            ws.send(Frame::text(
+                r#"{"type":"delivery_status","message_id":"0a","status":"delivered"}"#,
+            ))
+            .await
+            .unwrap();
             ws.close(None).await.unwrap();
         });
 
         let url = ws_url(&format!("http://127.0.0.1:{port}/api/v1"), "tok").unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();
-        run_ws_session(&url, Some("local-secret"), &move |e| sink.lock().unwrap().push(e))
-            .await
-            .unwrap();
+        run_ws_session(&url, Some("local-secret"), &move |e| {
+            sink.lock().unwrap().push(e)
+        })
+        .await
+        .unwrap();
         server.await.unwrap();
 
         let (uri, proto, local_auth) = seen.lock().unwrap().clone().unwrap();
@@ -1806,9 +2268,19 @@ mod tests {
         {
             let events = events.lock().unwrap();
             assert_eq!(events.len(), 3, "{events:?}");
-            assert!(matches!(events[0], LiveEvent::Link { state: LinkState::Open, .. }));
-            assert!(matches!(&events[1], LiveEvent::Message { message, .. } if message.plaintext.as_deref() == Some("gm")));
-            assert!(matches!(&events[2], LiveEvent::Delivery { status, .. } if status == "delivered"));
+            assert!(matches!(
+                events[0],
+                LiveEvent::Link {
+                    state: LinkState::Open,
+                    ..
+                }
+            ));
+            assert!(
+                matches!(&events[1], LiveEvent::Message { message, .. } if message.plaintext.as_deref() == Some("gm"))
+            );
+            assert!(
+                matches!(&events[2], LiveEvent::Delivery { status, .. } if status == "delivered")
+            );
         }
 
         // Nothing listening: the error names no URL, so the token cannot leak into it.
@@ -1830,7 +2302,9 @@ mod pre_payment_refusal_tests {
 
     fn project(field: Option<Value>) -> Value {
         let mut wire = json!({"capacity":500,"totals":{"refused":9},"events":[]});
-        if let Some(field) = field { wire["pre_payment_refusals"] = field; }
+        if let Some(field) = field {
+            wire["pre_payment_refusals"] = field;
+        }
         let node = serde_json::from_value(wire).unwrap();
         serde_json::to_value(MembraneRead::from_node(node, NOW)).unwrap()
     }
@@ -1848,7 +2322,10 @@ mod pre_payment_refusal_tests {
         ]))));
         let rows = read["pre_payment_refusals"]["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 8);
-        assert_eq!(rows[0], json!({"reason":"session_before_payment","hour":{"count":"2","at_least":false},"day":{"count":"10","at_least":false}}));
+        assert_eq!(
+            rows[0],
+            json!({"reason":"session_before_payment","hour":{"count":"2","at_least":false},"day":{"count":"10","at_least":false}})
+        );
         assert_eq!(rows[7]["day"]["count"], "1");
         assert_eq!(rows[1]["hour"]["count"], "0");
         assert!(!read.to_string().contains("arbitrary_sender"));
@@ -1861,7 +2338,9 @@ mod pre_payment_refusal_tests {
         assert!(project(None)["pre_payment_refusals"].is_null());
         let read = project(Some(counts(json!([]))));
         let rows = read["pre_payment_refusals"]["rows"].as_array().unwrap();
-        assert!(rows.iter().all(|r| r["hour"]["count"] == "0" && r["day"]["count"] == "0"));
+        assert!(rows
+            .iter()
+            .all(|r| r["hour"]["count"] == "0" && r["day"]["count"] == "0"));
     }
 
     #[test]
@@ -1871,9 +2350,18 @@ mod pre_payment_refusal_tests {
             {"start_ms":100*HOUR,"counts":{"session_before_payment":u64::MAX,"price_before_payment":1}}
         ]))));
         let rows = &read["pre_payment_refusals"]["rows"];
-        assert_eq!(rows[0]["hour"], json!({"count":"18446744073709551615","at_least":true}));
-        assert_eq!(rows[0]["day"], json!({"count":"36893488147419103230","at_least":true}));
-        assert_eq!(rows[2]["day"], json!({"count":"9007199254740994","at_least":false}));
+        assert_eq!(
+            rows[0]["hour"],
+            json!({"count":"18446744073709551615","at_least":true})
+        );
+        assert_eq!(
+            rows[0]["day"],
+            json!({"count":"36893488147419103230","at_least":true})
+        );
+        assert_eq!(
+            rows[2]["day"],
+            json!({"count":"9007199254740994","at_least":false})
+        );
     }
 
     #[test]
@@ -1881,10 +2369,13 @@ mod pre_payment_refusal_tests {
         let mut field = counts(json!([
             {"start_ms":101*HOUR,"counts":{"admission_required":4}}
         ]));
-        field["effective_hour_start_ms"] = json!(101*HOUR);
+        field["effective_hour_start_ms"] = json!(101 * HOUR);
         let read = project(Some(field));
-        assert_eq!(read["pre_payment_refusals"]["hour_start_ms"], 101*HOUR);
-        assert_eq!(read["pre_payment_refusals"]["rows"][7]["hour"]["count"], "4");
+        assert_eq!(read["pre_payment_refusals"]["hour_start_ms"], 101 * HOUR);
+        assert_eq!(
+            read["pre_payment_refusals"]["rows"][7]["hour"]["count"],
+            "4"
+        );
     }
 
     #[test]
@@ -1895,9 +2386,9 @@ mod pre_payment_refusal_tests {
             "buckets":[{"start_ms":100*HOUR,"counts":{"session_before_payment":1}}]
         }});
         let node = serde_json::from_value(wire).unwrap();
-        let read = serde_json::to_value(MembraneRead::from_node(node, 99*HOUR)).unwrap();
+        let read = serde_json::to_value(MembraneRead::from_node(node, 99 * HOUR)).unwrap();
         let counts = &read["pre_payment_refusals"];
-        assert_eq!(counts["hour_start_ms"], 101*HOUR);
+        assert_eq!(counts["hour_start_ms"], 101 * HOUR);
         assert_eq!(counts["rows"][0]["hour"]["count"], "0");
         assert_eq!(counts["rows"][0]["day"]["count"], "1");
     }
@@ -1909,12 +2400,21 @@ mod pre_payment_refusal_tests {
                 {"start_ms":100*HOUR,"counts":{"session_before_payment":1}},
                 {"start_ms":101*HOUR,"counts":{"admission_required":4}}
             ]));
-            field.as_object_mut().unwrap().remove("effective_hour_start_ms");
-            if let Some(anchor) = anchor { field["effective_hour_start_ms"] = anchor; }
+            field
+                .as_object_mut()
+                .unwrap()
+                .remove("effective_hour_start_ms");
+            if let Some(anchor) = anchor {
+                field["effective_hour_start_ms"] = anchor;
+            }
             let read = project(Some(field));
             let counts = &read["pre_payment_refusals"];
             assert!(counts["hour_start_ms"].is_null());
-            assert!(counts["rows"].as_array().unwrap().iter().all(|r| r["hour"].is_null()));
+            assert!(counts["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["hour"].is_null()));
             assert_eq!(counts["rows"][0]["day"]["count"], "1");
             assert_eq!(counts["rows"][7]["day"]["count"], "4");
         }
@@ -1929,7 +2429,7 @@ mod pre_payment_refusal_tests {
             counts(json!([{"start_ms":101*HOUR,"counts":{}}])),
             counts(json!([{"start_ms":NOW,"counts":{}}])),
             counts(json!([{"start_ms":100*HOUR,"counts":{}},{"start_ms":100*HOUR,"counts":{}}])),
-            counts(json!(vec![json!({"start_ms":0,"counts":{}});25])),
+            counts(json!(vec![json!({"start_ms":0,"counts":{}}); 25])),
         ] {
             assert!(project(Some(field))["pre_payment_refusals"].is_null());
         }

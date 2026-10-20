@@ -143,7 +143,12 @@ impl LocalNodeRead {
         audit: Arc<dyn AuditSink>,
     ) -> Result<Self, BaseUrlRejected> {
         match loopback_addr(base_url) {
-            Some(addr) => Ok(Self { addr, token, proxy_auth: None, audit }),
+            Some(addr) => Ok(Self {
+                addr,
+                token,
+                proxy_auth: None,
+                audit,
+            }),
             None => {
                 audit.record(&format!(
                     "{LOG_PREFIX} refused base url: not http on a loopback IP with /api/v1"
@@ -288,7 +293,10 @@ pub fn admit(
 
 /// The allowlisted constant equal to `path`. `admit` has already matched it.
 fn static_path(path: &str) -> Option<&'static str> {
-    route::ALLOWED_PATHS.iter().copied().find(|allowed| *allowed == path)
+    route::ALLOWED_PATHS
+        .iter()
+        .copied()
+        .find(|allowed| *allowed == path)
 }
 
 impl NodeRead for LocalNodeRead {
@@ -599,7 +607,10 @@ mod tests {
         });
         assert_eq!(admit("GET", "/api/v1/health", None, None), Ok(()));
         assert_eq!(admit("GET", "/api/v1/payments/balance", None, None), Ok(()));
-        assert_eq!(admit("GET", "/api/v1/payments/channels", None, None), Ok(()));
+        assert_eq!(
+            admit("GET", "/api/v1/payments/channels", None, None),
+            Ok(())
+        );
         assert_eq!(admit("GET", "/api/v1/messages", limit, None), Ok(()));
         assert_eq!(admit("GET", "/api/v1/pricing", None, None), Ok(()));
         assert_eq!(admit("GET", "/api/v1/peers", None, None), Ok(()));
@@ -638,11 +649,20 @@ mod tests {
             "health",
             "",
         ] {
-            assert_eq!(admit("GET", path, None, None), Err(DenyReason::Route), "{path}");
+            assert_eq!(
+                admit("GET", path, None, None),
+                Err(DenyReason::Route),
+                "{path}"
+            );
         }
         for key in ["peer", "before", "sent", "limit "] {
             assert_eq!(
-                admit("GET", "/api/v1/messages", Some(Query { key, value: 1 }), None),
+                admit(
+                    "GET",
+                    "/api/v1/messages",
+                    Some(Query { key, value: 1 }),
+                    None
+                ),
                 Err(DenyReason::Query),
                 "{key}"
             );
@@ -657,9 +677,21 @@ mod tests {
             admit("GET", "/api/v1/messages", None, peer),
             Err(DenyReason::Query)
         );
-        for path in ["/api/v1/peers", "/api/v1/health", "/api/v1/payments/balance"] {
-            assert_eq!(admit("GET", path, limit, peer), Err(DenyReason::Query), "{path}");
-            assert_eq!(admit("GET", path, None, peer), Err(DenyReason::Query), "{path}");
+        for path in [
+            "/api/v1/peers",
+            "/api/v1/health",
+            "/api/v1/payments/balance",
+        ] {
+            assert_eq!(
+                admit("GET", path, limit, peer),
+                Err(DenyReason::Query),
+                "{path}"
+            );
+            assert_eq!(
+                admit("GET", path, None, peer),
+                Err(DenyReason::Query),
+                "{path}"
+            );
         }
     }
 
@@ -669,11 +701,13 @@ mod tests {
         let (read, audit) = reader(&server.api_base());
 
         assert_eq!(
-            read.send("POST", "/api/v1/payments/pay", None, None).map(|_| ()),
+            read.send("POST", "/api/v1/payments/pay", None, None)
+                .map(|_| ()),
             Err(Refused::Denied(DenyReason::Method))
         );
         assert_eq!(
-            read.send("POST", "/api/v1/auth/local", None, None).map(|_| ()),
+            read.send("POST", "/api/v1/auth/local", None, None)
+                .map(|_| ()),
             Err(Refused::Denied(DenyReason::Method))
         );
         assert_eq!(

@@ -42,19 +42,27 @@ pub const MAX_CACHED_CARDS: usize = 512;
 
 /// A flat, visible `.md` or `.txt` page at the site root (genome `is_site_page`).
 pub fn is_site_page(path: &str) -> bool {
-    let Some(name) = path.strip_prefix('/') else { return false };
+    let Some(name) = path.strip_prefix('/') else {
+        return false;
+    };
     path.len() <= MAX_PATH_LEN
         && !name.starts_with('.')
         && (name.ends_with(".md") || name.ends_with(".txt"))
         && !name.contains("..")
-        && !name.chars().any(|c| matches!(c, '/' | '\\' | '%') || c.is_control())
+        && !name
+            .chars()
+            .any(|c| matches!(c, '/' | '\\' | '%') || c.is_control())
 }
 
 /// The canonical porch path for what the owner typed or a card names
 /// (`index.md` or `/index.md`), or why it is not one. Checked before any quote.
 pub fn porch_path(input: &str) -> Result<String, ActionError> {
     let trimmed = input.trim();
-    let path = if trimmed.starts_with('/') { trimmed.to_string() } else { format!("/{trimmed}") };
+    let path = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    };
     if path == CARD_PATH || is_site_page(&path) {
         Ok(path)
     } else {
@@ -91,7 +99,10 @@ pub fn quote(text: &str, peer: &str, path: &str) -> Result<PaymentQuote, ActionE
         return Err(invalid());
     }
     if reply.status != "Ok" {
-        if reply.amount_msat.is_some() || reply.max_total_msat != 0 || reply.max_routing_fee_msat != 0 {
+        if reply.amount_msat.is_some()
+            || reply.max_total_msat != 0
+            || reply.max_routing_fee_msat != 0
+        {
             return Err(invalid());
         }
         return Err(refused(match reply.status.as_str() {
@@ -100,16 +111,30 @@ pub fn quote(text: &str, peer: &str, path: &str) -> Result<PaymentQuote, ActionE
             _ => "porch_unavailable",
         }));
     }
-    let principal_msat = reply.amount_msat.filter(|n| *n >= MIN_READ_MSAT).ok_or_else(invalid)?;
+    let principal_msat = reply
+        .amount_msat
+        .filter(|n| *n >= MIN_READ_MSAT)
+        .ok_or_else(invalid)?;
     if principal_msat.checked_add(reply.max_routing_fee_msat) != Some(reply.max_total_msat)
-        || reply.max_total_msat > 9_007_199_254_740_991 { // renderer's exact integer range
+        || reply.max_total_msat > 9_007_199_254_740_991
+    {
+        // renderer's exact integer range
         return Err(invalid());
     }
-    Ok(PaymentQuote { principal_msat, max_routing_fee_msat: reply.max_routing_fee_msat, total_msat: reply.max_total_msat })
+    Ok(PaymentQuote {
+        principal_msat,
+        max_routing_fee_msat: reply.max_routing_fee_msat,
+        total_msat: reply.max_total_msat,
+    })
 }
 
 /// The `/browse/fetch` body (genome `FetchRequest`, `deny_unknown_fields`).
-pub fn fetch_body(node_id: &str, path: &str, max_total_msat: u64, max_routing_fee_msat: u64) -> serde_json::Value {
+pub fn fetch_body(
+    node_id: &str,
+    path: &str,
+    max_total_msat: u64,
+    max_routing_fee_msat: u64,
+) -> serde_json::Value {
     serde_json::json!({
         "node_id": node_id,
         "path": path,
@@ -127,8 +152,18 @@ pub fn amount(msat: u64) -> String {
     }
 }
 
-const REFUSALS: [&str; 5] = ["porch_path_invalid", "porch_own_node", "porch_unreachable", "porch_knock_first", "porch_busy"];
-const PAID_FAILURES: [&str; 3] = ["porch_timeout", "porch_reply_invalid", "porch_card_mismatch"];
+const REFUSALS: [&str; 5] = [
+    "porch_path_invalid",
+    "porch_own_node",
+    "porch_unreachable",
+    "porch_knock_first",
+    "porch_busy",
+];
+const PAID_FAILURES: [&str; 3] = [
+    "porch_timeout",
+    "porch_reply_invalid",
+    "porch_card_mismatch",
+];
 
 /// A refusal before any payment, as a plain sentence.
 pub fn refused(code: &'static str) -> ActionError {
@@ -191,7 +226,10 @@ pub fn answer(status: u16, body: &str) -> Option<Answer> {
     if status == 502 {
         let code = PAID_FAILURES.iter().find(|c| **c == reason)?;
         let paid_msat = paid_in(v.get("error")?.as_str()?)?;
-        return Some(Answer::Paid { paid_msat, error: paid_failure(code, paid_msat) });
+        return Some(Answer::Paid {
+            paid_msat,
+            error: paid_failure(code, paid_msat),
+        });
     }
     None
 }
@@ -209,7 +247,9 @@ fn paid_in(text: &str) -> Option<u64> {
 /// Principal the node reports for a successful read (genome `FetchResponse`).
 pub fn principal(text: &str) -> Option<u64> {
     let reply: FetchReply = serde_json::from_str(text).ok()?;
-    reply.amount_msat.checked_add(reply.readmission_msat.unwrap_or(0))
+    reply
+        .amount_msat
+        .checked_add(reply.readmission_msat.unwrap_or(0))
 }
 
 #[derive(Deserialize)]
@@ -270,7 +310,12 @@ pub struct PorchRead {
     pub message_id: String,
 }
 
-fn verified(view: CardView, peer: Option<&str>, now_unix: u64, cached: bool) -> Result<PorchCard, String> {
+fn verified(
+    view: CardView,
+    peer: Option<&str>,
+    now_unix: u64,
+    cached: bool,
+) -> Result<PorchCard, String> {
     let shown = view.card.view(now_unix)?;
     if peer.is_some_and(|p| !shown.node_id.eq_ignore_ascii_case(p)) {
         return Err("the card is signed by another node".into());
@@ -278,7 +323,11 @@ fn verified(view: CardView, peer: Option<&str>, now_unix: u64, cached: bool) -> 
     if shown.link != view.link {
         return Err("the card link does not match the card".into());
     }
-    Ok(PorchCard { view: shown, cached, stale: !cached && view.stale })
+    Ok(PorchCard {
+        view: shown,
+        cached,
+        stale: !cached && view.stale,
+    })
 }
 
 /// Drop C0/C1 controls (keeping newline and tab) and invisible formatting or
@@ -295,8 +344,15 @@ pub fn clean_text(text: &str) -> String {
 }
 
 /// Project a successful `/browse/fetch` reply for `peer` and `path`.
-pub fn project(text: &str, peer: &str, path: &str, total_msat: u64, now_unix: u64) -> Result<PorchRead, String> {
-    let reply: FetchReply = serde_json::from_str(text).map_err(|e| format!("the reply is not a porch read ({e})"))?;
+pub fn project(
+    text: &str,
+    peer: &str,
+    path: &str,
+    total_msat: u64,
+    now_unix: u64,
+) -> Result<PorchRead, String> {
+    let reply: FetchReply =
+        serde_json::from_str(text).map_err(|e| format!("the reply is not a porch read ({e})"))?;
     if !reply.node_id.eq_ignore_ascii_case(peer) || reply.path != path {
         return Err("the reply names another node or page".into());
     }
@@ -311,10 +367,18 @@ pub fn project(text: &str, peer: &str, path: &str, total_msat: u64, now_unix: u6
     let (kind, body, card) = match (status, path == CARD_PATH) {
         ("ok", true) => {
             let view = reply.card.ok_or("the node sent no verified card")?;
-            ("card", String::new(), Some(verified(view, Some(peer), now_unix, false)?))
+            (
+                "card",
+                String::new(),
+                Some(verified(view, Some(peer), now_unix, false)?),
+            )
         }
         ("ok", false) => {
-            let kind = if reply.content_type == "text/markdown" { "markdown" } else { "text" };
+            let kind = if reply.content_type == "text/markdown" {
+                "markdown"
+            } else {
+                "text"
+            };
             (kind, clean_text(&reply.body), None)
         }
         _ => ("none", String::new(), None),
@@ -335,7 +399,8 @@ pub fn project(text: &str, peer: &str, path: &str, total_msat: u64, now_unix: u6
 /// `GET /browse/cards`: every held card that verifies here, marked cached.
 /// A card that does not verify is dropped, never shown.
 pub fn cached_cards(text: &str, now_unix: u64) -> Result<Vec<PorchCard>, String> {
-    let reply: CardsReply = serde_json::from_str(text).map_err(|e| format!("{CARDS_ROUTE} decode failed: {e}"))?;
+    let reply: CardsReply =
+        serde_json::from_str(text).map_err(|e| format!("{CARDS_ROUTE} decode failed: {e}"))?;
     Ok(reply
         .cards
         .into_iter()
@@ -363,7 +428,12 @@ mod tests {
             seq,
             issued_at: NOW,
             expires_at: NOW + 7 * 24 * 3600,
-            prices: FrontDoorPrices { admission_msat: 100_000, message_msat: 10_000, page_msat: 1_000, price_epoch: 0 },
+            prices: FrontDoorPrices {
+                admission_msat: 100_000,
+                message_msat: 10_000,
+                page_msat: 1_000,
+                price_epoch: 0,
+            },
             profile: FrontDoorProfile {
                 kind: ProfileKind::Person,
                 display_name: "Maya".into(),
@@ -373,7 +443,11 @@ mod tests {
             },
             cv: None,
             media: vec![],
-            site: Some(FrontDoorSite { index_path: Some("index.md".into()), page_count: 1, ..Default::default() }),
+            site: Some(FrontDoorSite {
+                index_path: Some("index.md".into()),
+                page_count: 1,
+                ..Default::default()
+            }),
             links: vec![],
             sig: String::new(),
         };
@@ -381,8 +455,16 @@ mod tests {
         card
     }
 
-    fn reply(card: Option<&Card>, path: &str, status: &str, content_type: &str, body: &str, node: &str) -> String {
-        let card = card.map(|c| serde_json::json!({"card": c, "link": c.to_link().unwrap(), "fresh": true}));
+    fn reply(
+        card: Option<&Card>,
+        path: &str,
+        status: &str,
+        content_type: &str,
+        body: &str,
+        node: &str,
+    ) -> String {
+        let card = card
+            .map(|c| serde_json::json!({"card": c, "link": c.to_link().unwrap(), "fresh": true}));
         serde_json::json!({
             "node_id": node, "path": path, "status": status, "content_type": content_type,
             "body": body, "amount_msat": 1000, "message_id": "ab".repeat(32), "card": card,
@@ -397,16 +479,30 @@ mod tests {
             "max_routing_fee_msat": 1250, "max_total_msat": 2250,
         });
         let shown = quote(&valid.to_string(), "a", "/notes.txt").unwrap();
-        assert_eq!((shown.principal_msat, shown.max_routing_fee_msat, shown.total_msat), (1000, 1250, 2250));
+        assert_eq!(
+            (
+                shown.principal_msat,
+                shown.max_routing_fee_msat,
+                shown.total_msat
+            ),
+            (1000, 1250, 2250)
+        );
         for (field, value) in [
-            ("node_id", serde_json::json!("b")), ("path", serde_json::json!("/other.txt")),
-            ("amount_msat", serde_json::json!(null)), ("amount_msat", serde_json::json!(999)),
-            ("max_routing_fee_msat", serde_json::json!(-1)), ("max_total_msat", serde_json::json!(2251)),
+            ("node_id", serde_json::json!("b")),
+            ("path", serde_json::json!("/other.txt")),
+            ("amount_msat", serde_json::json!(null)),
+            ("amount_msat", serde_json::json!(999)),
+            ("max_routing_fee_msat", serde_json::json!(-1)),
+            ("max_total_msat", serde_json::json!(2251)),
             ("status", serde_json::json!("NotFound")),
         ] {
             let mut bad = valid.clone();
             bad[field] = value;
-            assert_eq!(quote(&bad.to_string(), "a", "/notes.txt").unwrap_err().code, "porch_quote_invalid", "{field}");
+            assert_eq!(
+                quote(&bad.to_string(), "a", "/notes.txt").unwrap_err().code,
+                "porch_quote_invalid",
+                "{field}"
+            );
         }
     }
 
@@ -415,8 +511,22 @@ mod tests {
         assert_eq!(porch_path("/front-door.json").unwrap(), CARD_PATH);
         assert_eq!(porch_path(" index.md ").unwrap(), "/index.md");
         assert_eq!(porch_path("/notes.txt").unwrap(), "/notes.txt");
-        for bad in ["/page.html", "/blog/post.md", "/../x.md", "/.draft.md", "/a%2fb.md", "/x\u{0}.md", "", "/", "/front-door.seq"] {
-            assert_eq!(porch_path(bad).unwrap_err().code, "porch_path_invalid", "{bad:?}");
+        for bad in [
+            "/page.html",
+            "/blog/post.md",
+            "/../x.md",
+            "/.draft.md",
+            "/a%2fb.md",
+            "/x\u{0}.md",
+            "",
+            "/",
+            "/front-door.seq",
+        ] {
+            assert_eq!(
+                porch_path(bad).unwrap_err().code,
+                "porch_path_invalid",
+                "{bad:?}"
+            );
         }
         assert!(porch_path(&format!("/{}.md", "a".repeat(MAX_PATH_LEN))).is_err());
     }
@@ -432,9 +542,16 @@ mod tests {
         assert_eq!(read_price(None, 50), MIN_READ_MSAT);
         assert_eq!(read_price(None, 2_000), 2_000);
         assert_eq!(read_price(Some(&table(3_000, false)), 1_000), 3_000);
-        assert_eq!(read_price(Some(&table(3_000, true)), 1_000), 1_000, "a stale table is not their price");
+        assert_eq!(
+            read_price(Some(&table(3_000, true)), 1_000),
+            1_000,
+            "a stale table is not their price"
+        );
         assert_eq!(read_price(Some(&table(0, false)), 1_000), MIN_READ_MSAT);
-        assert_eq!((amount(1_000), amount(6_000), amount(1_500)), ("1 sat".into(), "6 sats".into(), "1500 msat".into()));
+        assert_eq!(
+            (amount(1_000), amount(6_000), amount(1_500)),
+            ("1 sat".into(), "6 sats".into(), "1500 msat".into())
+        );
     }
 
     #[test]
@@ -447,14 +564,30 @@ mod tests {
             (400, "porch_path_invalid", ".md or .txt"),
         ] {
             let body = serde_json::json!({"error": format!("{reason}: detail"), "code": status, "reason": reason}).to_string();
-            let Some(Answer::Refused(e)) = answer(status, &body) else { panic!("{reason}") };
+            let Some(Answer::Refused(e)) = answer(status, &body) else {
+                panic!("{reason}")
+            };
             assert_eq!(e.code, reason);
-            assert!(e.message.contains(words) && e.message.ends_with("Nothing was paid."), "{}", e.message);
-            assert!(!e.message.contains('_'), "no codes in the sentence: {}", e.message);
+            assert!(
+                e.message.contains(words) && e.message.ends_with("Nothing was paid."),
+                "{}",
+                e.message
+            );
+            assert!(
+                !e.message.contains('_'),
+                "no codes in the sentence: {}",
+                e.message
+            );
         }
         // A reason the porch does not own, or none, is not classified here.
-        assert_eq!(answer(409, r#"{"error":"x","code":"price_cap_exceeded"}"#), None);
-        assert_eq!(answer(409, r#"{"error":"x","reason":"readmission_required"}"#), None);
+        assert_eq!(
+            answer(409, r#"{"error":"x","code":"price_cap_exceeded"}"#),
+            None
+        );
+        assert_eq!(
+            answer(409, r#"{"error":"x","reason":"readmission_required"}"#),
+            None
+        );
         assert_eq!(answer(500, r#"{"error":"x","reason":"porch_busy"}"#), None);
         assert_eq!(answer(409, "not json"), None);
     }
@@ -462,14 +595,39 @@ mod tests {
     #[test]
     fn paid_without_an_answer_names_the_amount_and_does_not_retry() {
         let body = r#"{"error":"porch_timeout: paid 1000 msat, no reply within 20 s; not retried, a retry pays again","code":502,"reason":"porch_timeout"}"#;
-        let Some(Answer::Paid { paid_msat, error }) = answer(502, body) else { panic!() };
+        let Some(Answer::Paid { paid_msat, error }) = answer(502, body) else {
+            panic!()
+        };
         assert_eq!((paid_msat, error.code), (1_000, "porch_timeout"));
-        assert!(error.message.starts_with("Paid 1 sat") && error.message.contains("reading again pays again"), "{}", error.message);
+        assert!(
+            error.message.starts_with("Paid 1 sat")
+                && error.message.contains("reading again pays again"),
+            "{}",
+            error.message
+        );
         let mismatch = r#"{"error":"porch_card_mismatch: paid 2000 msat, the node served a card for another node","reason":"porch_card_mismatch"}"#;
-        assert!(matches!(answer(502, mismatch), Some(Answer::Paid { paid_msat: 2_000, .. })));
+        assert!(matches!(
+            answer(502, mismatch),
+            Some(Answer::Paid {
+                paid_msat: 2_000,
+                ..
+            })
+        ));
         // No amount it can read: the caller keeps the outcome unknown.
-        assert_eq!(answer(502, r#"{"error":"porch_timeout: no reply","reason":"porch_timeout"}"#), None);
-        assert_eq!(answer(502, r#"{"error":"payment settled","code":"payment_settled_send_incomplete"}"#), None);
+        assert_eq!(
+            answer(
+                502,
+                r#"{"error":"porch_timeout: no reply","reason":"porch_timeout"}"#
+            ),
+            None
+        );
+        assert_eq!(
+            answer(
+                502,
+                r#"{"error":"payment settled","code":"payment_settled_send_incomplete"}"#
+            ),
+            None
+        );
     }
 
     #[test]
@@ -477,36 +635,137 @@ mod tests {
         let key = SigningKey::from_bytes(&[7u8; 32]);
         let maya = card(&key, 3);
         let peer = maya.node_id.clone();
-        let read = project(&reply(Some(&maya), CARD_PATH, "Ok", "application/json", "{…}", &peer), &peer, CARD_PATH, 6_000, NOW + 5).unwrap();
-        assert_eq!((read.status, read.kind, read.body.as_str(), read.total_msat), ("ok", "card", "", 6_000));
+        let read = project(
+            &reply(
+                Some(&maya),
+                CARD_PATH,
+                "Ok",
+                "application/json",
+                "{…}",
+                &peer,
+            ),
+            &peer,
+            CARD_PATH,
+            6_000,
+            NOW + 5,
+        )
+        .unwrap();
+        assert_eq!(
+            (read.status, read.kind, read.body.as_str(), read.total_msat),
+            ("ok", "card", "", 6_000)
+        );
         let shown = read.card.unwrap();
-        assert_eq!((shown.view.seq, shown.cached, shown.stale, shown.view.verified), (3, false, false, true));
+        assert_eq!(
+            (
+                shown.view.seq,
+                shown.cached,
+                shown.stale,
+                shown.view.verified
+            ),
+            (3, false, false, true)
+        );
 
         // Signed by another key than the node read.
         let other = SigningKey::from_bytes(&[9u8; 32]);
         let theirs = card(&other, 1);
-        assert!(project(&reply(Some(&theirs), CARD_PATH, "Ok", "application/json", "", &peer), &peer, CARD_PATH, 6_000, NOW).is_err());
+        assert!(project(
+            &reply(
+                Some(&theirs),
+                CARD_PATH,
+                "Ok",
+                "application/json",
+                "",
+                &peer
+            ),
+            &peer,
+            CARD_PATH,
+            6_000,
+            NOW
+        )
+        .is_err());
         // Tampered after signing.
         let mut forged = maya.clone();
         forged.profile.display_name = "Mallory".into();
-        assert!(project(&reply(Some(&forged), CARD_PATH, "Ok", "application/json", "", &peer), &peer, CARD_PATH, 6_000, NOW).is_err());
+        assert!(project(
+            &reply(
+                Some(&forged),
+                CARD_PATH,
+                "Ok",
+                "application/json",
+                "",
+                &peer
+            ),
+            &peer,
+            CARD_PATH,
+            6_000,
+            NOW
+        )
+        .is_err());
         // An answer for another page or node.
-        assert!(project(&reply(Some(&maya), CARD_PATH, "Ok", "", "", &peer), &peer, "/index.md", 6_000, NOW).is_err());
-        assert!(project(&reply(None, "/index.md", "Ok", "text/plain", "x", &"cd".repeat(32)), &peer, "/index.md", 6_000, NOW).is_err());
+        assert!(project(
+            &reply(Some(&maya), CARD_PATH, "Ok", "", "", &peer),
+            &peer,
+            "/index.md",
+            6_000,
+            NOW
+        )
+        .is_err());
+        assert!(project(
+            &reply(None, "/index.md", "Ok", "text/plain", "x", &"cd".repeat(32)),
+            &peer,
+            "/index.md",
+            6_000,
+            NOW
+        )
+        .is_err());
     }
 
     #[test]
     fn a_page_is_cleaned_text_and_a_missing_one_has_no_body() {
         let peer = "ab".repeat(32);
         let page = "# Maya\r\n\u{202E}evil\u{200B} <script>x</script>\u{7}\n\tok";
-        let read = project(&reply(None, "/index.md", "Ok", "text/markdown", page, &peer), &peer, "/index.md", 6_000, NOW).unwrap();
-        assert_eq!((read.kind, read.body.as_str()), ("markdown", "# Maya\nevil <script>x</script>\n\tok"));
-        let text = project(&reply(None, "/a.txt", "Ok", "text/html", "<b>", &peer), &peer, "/a.txt", 6_000, NOW).unwrap();
+        let read = project(
+            &reply(None, "/index.md", "Ok", "text/markdown", page, &peer),
+            &peer,
+            "/index.md",
+            6_000,
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            (read.kind, read.body.as_str()),
+            ("markdown", "# Maya\nevil <script>x</script>\n\tok")
+        );
+        let text = project(
+            &reply(None, "/a.txt", "Ok", "text/html", "<b>", &peer),
+            &peer,
+            "/a.txt",
+            6_000,
+            NOW,
+        )
+        .unwrap();
         assert_eq!(text.kind, "text", "never anything but text");
-        let missing = project(&reply(None, "/gone.md", "NotFound", "", "Not found", &peer), &peer, "/gone.md", 6_000, NOW).unwrap();
-        assert_eq!((missing.status, missing.kind, missing.body.as_str()), ("not_found", "none", ""));
+        let missing = project(
+            &reply(None, "/gone.md", "NotFound", "", "Not found", &peer),
+            &peer,
+            "/gone.md",
+            6_000,
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            (missing.status, missing.kind, missing.body.as_str()),
+            ("not_found", "none", "")
+        );
         let big = "x".repeat(MAX_BODY_BYTES + 1);
-        assert!(project(&reply(None, "/big.md", "Ok", "text/markdown", &big, &peer), &peer, "/big.md", 6_000, NOW).is_err());
+        assert!(project(
+            &reply(None, "/big.md", "Ok", "text/markdown", &big, &peer),
+            &peer,
+            "/big.md",
+            6_000,
+            NOW
+        )
+        .is_err());
     }
 
     #[test]
@@ -522,7 +781,15 @@ mod tests {
         let held = cached_cards(&cards, NOW + 1).unwrap();
         assert_eq!(held.len(), 1);
         assert!(held[0].cached && !held[0].stale && held[0].view.fresh);
-        assert_eq!(held[0].view.site.as_ref().unwrap().index_path.as_deref(), Some("index.md"));
-        assert!(!cached_cards(&cards, NOW + 8 * 24 * 3600).unwrap()[0].view.fresh, "expired stays shown, marked");
+        assert_eq!(
+            held[0].view.site.as_ref().unwrap().index_path.as_deref(),
+            Some("index.md")
+        );
+        assert!(
+            !cached_cards(&cards, NOW + 8 * 24 * 3600).unwrap()[0]
+                .view
+                .fresh,
+            "expired stays shown, marked"
+        );
     }
 }

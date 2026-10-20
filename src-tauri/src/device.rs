@@ -105,7 +105,11 @@ pub enum DeviceState {
 
 /// The node's reason codes for device approvals being off
 /// (`GET /pair/device-keys` → `device_approvals`, or a 403 `reason`).
-pub const NODE_OFF_REASONS: [&str; 3] = ["seed_not_encrypted", "seed_password_not_typed", "owner_key_unavailable"];
+pub const NODE_OFF_REASONS: [&str; 3] = [
+    "seed_not_encrypted",
+    "seed_password_not_typed",
+    "owner_key_unavailable",
+];
 
 /// What the owner is told for a reason code; `None` for a code this app does
 /// not know (shown as generic "off").
@@ -142,7 +146,11 @@ impl DeviceView {
             delegation_supported: false,
             owner_device_count: None,
             available,
-            state: if available { DeviceState::None } else { DeviceState::Unavailable },
+            state: if available {
+                DeviceState::None
+            } else {
+                DeviceState::Unavailable
+            },
             fingerprint: None,
             owner_action: None,
             expires_at_ms: None,
@@ -177,7 +185,13 @@ impl DeviceView {
                 self.state = DeviceState::Off;
                 self.owner_action = None;
                 self.expires_at_ms = None;
-                self.off_reason = Some(NODE_OFF_REASONS.into_iter().find(|r| *r == reason).unwrap_or("off").to_string());
+                self.off_reason = Some(
+                    NODE_OFF_REASONS
+                        .into_iter()
+                        .find(|r| *r == reason)
+                        .unwrap_or("off")
+                        .to_string(),
+                );
                 self.off_message = Some(node_off_message(reason).to_string());
             }
         }
@@ -200,14 +214,25 @@ pub struct Intent {
 
 impl Intent {
     /// A Contact envelope for `peer`, with a fresh 16-byte nonce.
-    pub fn contact(key_id: &str, peer: &str, budget_msat: u64, per_act_max_msat: u64, now_unix: i64) -> Result<Self, ActionError> {
-        let peer = bitsov_app::control::node_id(peer).map_err(ActionError::invalid)?.to_ascii_lowercase();
+    pub fn contact(
+        key_id: &str,
+        peer: &str,
+        budget_msat: u64,
+        per_act_max_msat: u64,
+        now_unix: i64,
+    ) -> Result<Self, ActionError> {
+        let peer = bitsov_app::control::node_id(peer)
+            .map_err(ActionError::invalid)?
+            .to_ascii_lowercase();
         if budget_msat == 0 || per_act_max_msat == 0 || per_act_max_msat > budget_msat {
-            return Err(ActionError::invalid("The per-message maximum must fit the daily budget."));
+            return Err(ActionError::invalid(
+                "The per-message maximum must fit the daily budget.",
+            ));
         }
         let mut nonce = [0u8; 16];
-        getrandom::getrandom(&mut nonce)
-            .map_err(|_| ActionError::new("device_key", "This Mac could not produce a random nonce."))?;
+        getrandom::getrandom(&mut nonce).map_err(|_| {
+            ActionError::new("device_key", "This Mac could not produce a random nonce.")
+        })?;
         Ok(Self {
             device_key_id: key_id.to_string(),
             peer,
@@ -224,7 +249,9 @@ impl Intent {
 /// Exact bytes the device signs at registration (the node's
 /// `registration_message`).
 pub fn registration_message(node: &str, client_id: &str, public_key_hex: &str) -> String {
-    format!("bitsov-device-register-v1\nnode:{node}\nclient:{client_id}\npublic_key:{public_key_hex}")
+    format!(
+        "bitsov-device-register-v1\nnode:{node}\nclient:{client_id}\npublic_key:{public_key_hex}"
+    )
 }
 
 /// Exact bytes the device signs for an envelope (the node's `intent_message`).
@@ -250,19 +277,29 @@ pub fn intent_reason(contact: &str, budget_msat: u64, per_act_max_msat: u64) -> 
 /// short as the app shows it (`shortId`: first 8 and last 8 hex). Never a name:
 /// a node-side label may be the peer's own claim, and petnames stay on this Mac.
 pub fn contact_key(peer: &str) -> String {
-    format!("node {}…{}", &peer[..8.min(peer.len())], &peer[peer.len().saturating_sub(8)..])
+    format!(
+        "node {}…{}",
+        &peer[..8.min(peer.len())],
+        &peer[peer.len().saturating_sub(8)..]
+    )
 }
 
 /// The dialog text for one signed intent, from the intent alone: the amounts
 /// and key the owner reads are exactly the ones signed.
 pub fn contact_intent_reason(intent: &Intent) -> String {
-    intent_reason(&contact_key(&intent.peer), intent.budget_msat, intent.per_act_max_msat)
+    intent_reason(
+        &contact_key(&intent.peer),
+        intent.budget_msat,
+        intent.per_act_max_msat,
+    )
 }
 
 /// The per-message maximum for a contact: its quoted price, at least 1 sat
 /// and never above the budget.
 pub fn default_per_act(quoted_msat: Option<u64>, budget_msat: u64) -> u64 {
-    quoted_msat.unwrap_or(10_000).clamp(1_000, budget_msat.max(1_000))
+    quoted_msat
+        .unwrap_or(10_000)
+        .clamp(1_000, budget_msat.max(1_000))
 }
 
 // ---- private files -----------------------------------------------------------
@@ -315,14 +352,18 @@ pub fn read_private(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
 // Unix file modes and no-follow semantics have no implemented equivalent here.
 #[cfg(not(unix))]
 pub fn write_private(_path: &Path, _bytes: &[u8]) -> std::io::Result<()> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
-        "private device storage is not supported on this platform"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "private device storage is not supported on this platform",
+    ))
 }
 
 #[cfg(not(unix))]
 pub fn read_private(_path: &Path) -> std::io::Result<Option<Vec<u8>>> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
-        "private device storage is not supported on this platform"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "private device storage is not supported on this platform",
+    ))
 }
 
 pub fn load_record(store: &Path) -> Option<Record> {
@@ -331,8 +372,16 @@ pub fn load_record(store: &Path) -> Option<Record> {
 }
 
 pub fn save_record(store: &Path, record: &Record) -> Result<(), ActionError> {
-    write_private(&store.join(RECORD_FILE), &serde_json::to_vec(record).expect("record serializes"))
-        .map_err(|e| ActionError::new("device_key", format!("Could not save the device key record: {e}")))
+    write_private(
+        &store.join(RECORD_FILE),
+        &serde_json::to_vec(record).expect("record serializes"),
+    )
+    .map_err(|e| {
+        ActionError::new(
+            "device_key",
+            format!("Could not save the device key record: {e}"),
+        )
+    })
 }
 
 pub fn load_blob(store: &Path) -> Option<Vec<u8>> {
@@ -354,7 +403,11 @@ pub fn forget(store: &Path) {
 
 /// The app's pending console approval, per node. Private file.
 pub fn approvals_path(dir: &Path, node_id: &str) -> PathBuf {
-    let safe: String = node_id.chars().filter(|c| c.is_ascii_hexdigit()).take(64).collect();
+    let safe: String = node_id
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(64)
+        .collect();
     dir.join(format!("approval-{safe}.json"))
 }
 
@@ -372,7 +425,9 @@ pub fn save_pending(path: &Path, pending: Option<&Elevation>) -> std::io::Result
 pub fn load_pending(path: &Path, now_ms: u64) -> Option<Elevation> {
     let bytes = read_private(path).ok()??;
     let e: Elevation = serde_json::from_slice(&bytes).ok()?;
-    let op_ok = !e.op_id.is_empty() && e.op_id.len() <= 64 && e.op_id.chars().all(|c| c.is_ascii_hexdigit());
+    let op_ok = !e.op_id.is_empty()
+        && e.op_id.len() <= 64
+        && e.op_id.chars().all(|c| c.is_ascii_hexdigit());
     (op_ok && e.expires_at_ms > now_ms).then_some(e)
 }
 
@@ -385,8 +440,14 @@ mod tests {
         let mut record: Record = serde_json::from_value(serde_json::json!({
             "public_key": "04",
             "pending": {"op_id": "ab", "owner_action": "approve", "expires_at_ms": 100}
-        })).unwrap();
-        assert!(record.pending.as_ref().unwrap().delegation_message.is_none());
+        }))
+        .unwrap();
+        assert!(record
+            .pending
+            .as_ref()
+            .unwrap()
+            .delegation_message
+            .is_none());
         record.pending.as_mut().unwrap().delegation_message = Some("delegation-message".into());
         let dir = tempfile::tempdir().unwrap();
         save_record(dir.path(), &record).unwrap();
@@ -398,17 +459,35 @@ mod tests {
     #[test]
     fn messages_match_the_nodes_bytes() {
         let i = Intent {
-            device_key_id: "k1".into(), peer: PEER.into(), level: 1, budget_msat: 200_000,
-            per_act_max_msat: 2_000, window_secs: 86_400, issued_at: 1_790_000_000, nonce: "0f".repeat(16),
+            device_key_id: "k1".into(),
+            peer: PEER.into(),
+            level: 1,
+            budget_msat: 200_000,
+            per_act_max_msat: 2_000,
+            window_secs: 86_400,
+            issued_at: 1_790_000_000,
+            nonce: "0f".repeat(16),
         };
         assert_eq!(
             intent_message("fp", "c1", &i),
             format!("bitsov-relation-intent-v1\nnode:fp\nclient:c1\ndevice:k1\npeer:{PEER}\nlevel:1\nbudget_msat:200000\nper_act_max_msat:2000\nwindow_secs:86400\nissued_at:1790000000\nnonce:{}", "0f".repeat(16))
         );
-        assert_eq!(registration_message("fp", "c1", "04ab"), "bitsov-device-register-v1\nnode:fp\nclient:c1\npublic_key:04ab");
+        assert_eq!(
+            registration_message("fp", "c1", "04ab"),
+            "bitsov-device-register-v1\nnode:fp\nclient:c1\npublic_key:04ab"
+        );
         // The node's JSON field names.
         let v = serde_json::to_value(&i).unwrap();
-        for f in ["device_key_id", "peer", "level", "budget_msat", "per_act_max_msat", "window_secs", "issued_at", "nonce"] {
+        for f in [
+            "device_key_id",
+            "peer",
+            "level",
+            "budget_msat",
+            "per_act_max_msat",
+            "window_secs",
+            "issued_at",
+            "nonce",
+        ] {
             assert!(v.get(f).is_some(), "{f}");
         }
     }
@@ -426,7 +505,10 @@ mod tests {
 
     #[test]
     fn the_dialog_names_the_contact_by_key_and_both_amounts() {
-        assert_eq!(intent_reason("Maya", 200_000, 21_187), "approve paying up to 200 sats per day, at most 21187 msat per message, to Maya");
+        assert_eq!(
+            intent_reason("Maya", 200_000, 21_187),
+            "approve paying up to 200 sats per day, at most 21187 msat per message, to Maya"
+        );
         assert_eq!(contact_key(PEER), "node aaaaaaaa…aaaaaaaa");
         assert_eq!(intent_reason(&contact_key(PEER), 200_000, 2_000), "approve paying up to 200 sats per day, at most 2 sats per message, to node aaaaaaaa…aaaaaaaa");
         // Built from the signed intent alone: no label, node-side or local, can reach it.
@@ -441,29 +523,61 @@ mod tests {
     #[test]
     fn the_view_never_shows_an_expired_command() {
         let r = Record {
-            public_key: "04".into(), fingerprint: Some("AAAA-BBBB".into()),
-            pending: Some(PendingRegistration { delegation_message: None, op_id: "ab".into(), owner_action: "konsensus device approve --op ab".into(), expires_at_ms: 100 }),
+            public_key: "04".into(),
+            fingerprint: Some("AAAA-BBBB".into()),
+            pending: Some(PendingRegistration {
+                delegation_message: None,
+                op_id: "ab".into(),
+                owner_action: "konsensus device approve --op ab".into(),
+                expires_at_ms: 100,
+            }),
             ..Default::default()
         };
-        assert_eq!(DeviceView::of(true, Some(&r), false, 50).state, DeviceState::Pending);
+        assert_eq!(
+            DeviceView::of(true, Some(&r), false, 50).state,
+            DeviceState::Pending
+        );
         let lapsed = DeviceView::of(true, Some(&r), false, 100);
-        assert_eq!((lapsed.state, lapsed.owner_action), (DeviceState::Lapsed, None));
-        assert_eq!(DeviceView::of(false, Some(&r), false, 0).state, DeviceState::Unavailable);
-        assert_eq!(DeviceView::of(true, None, false, 0).state, DeviceState::None);
+        assert_eq!(
+            (lapsed.state, lapsed.owner_action),
+            (DeviceState::Lapsed, None)
+        );
+        assert_eq!(
+            DeviceView::of(false, Some(&r), false, 0).state,
+            DeviceState::Unavailable
+        );
+        assert_eq!(
+            DeviceView::of(true, None, false, 0).state,
+            DeviceState::None
+        );
     }
 
     #[test]
     fn the_blob_and_the_record_never_share_a_temporary_file() {
         let dir = tempfile::tempdir().unwrap();
         save_blob(dir.path(), b"blob").unwrap();
-        save_record(dir.path(), &Record { public_key: "04".into(), ..Default::default() }).unwrap();
+        save_record(
+            dir.path(),
+            &Record {
+                public_key: "04".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(load_blob(dir.path()).unwrap(), b"blob");
         assert_eq!(load_record(dir.path()).unwrap().public_key, "04");
         // Leftover temporaries of both, as after a crash, do not collide either.
         std::fs::write(dir.path().join("device-key.blob.tmp"), b"x").unwrap();
         std::fs::write(dir.path().join("device-key.json.tmp"), b"y").unwrap();
         save_blob(dir.path(), b"blob2").unwrap();
-        save_record(dir.path(), &Record { public_key: "05".into(), ..Default::default() }).unwrap();
+        save_record(
+            dir.path(),
+            &Record {
+                public_key: "05".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(load_blob(dir.path()).unwrap(), b"blob2");
     }
 
@@ -475,7 +589,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
             assert!(read_private(&p).is_err());
             let link = dir.path().join("l.json");
@@ -489,7 +606,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = approvals_path(dir.path(), "../../ab");
         assert_eq!(p.file_name().unwrap(), "approval-ab.json");
-        let e = Elevation { op_id: "ab12".into(), expires_at_ms: 1_000, owner_action: "konsensus grant --op ab12".into(), owner_can_grant: true };
+        let e = Elevation {
+            op_id: "ab12".into(),
+            expires_at_ms: 1_000,
+            owner_action: "konsensus grant --op ab12".into(),
+            owner_can_grant: true,
+        };
         save_pending(&p, Some(&e)).unwrap();
         assert_eq!(load_pending(&p, 999), Some(e));
         assert_eq!(load_pending(&p, 1_000), None);
@@ -505,17 +627,28 @@ mod node_off_tests {
 
     #[test]
     fn node_off_reasons_map_to_the_owner_message() {
-        assert_eq!(node_off_reason(r#"{"error":"x","reason":"seed_not_encrypted"}"#), Some("seed_not_encrypted"));
-        assert_eq!(node_off_reason(r#"{"error":"x","reason":"budget_exceeded"}"#), None);
+        assert_eq!(
+            node_off_reason(r#"{"error":"x","reason":"seed_not_encrypted"}"#),
+            Some("seed_not_encrypted")
+        );
+        assert_eq!(
+            node_off_reason(r#"{"error":"x","reason":"budget_exceeded"}"#),
+            None
+        );
         assert_eq!(node_off_reason("not json"), None);
         let base = DeviceView::of(true, None, false, 0);
         assert_eq!(base.clone().with_node_approvals(Some("enabled")), base);
-        assert_eq!(base.clone().with_node_approvals(None), base, "older nodes: unchanged");
+        assert_eq!(
+            base.clone().with_node_approvals(None),
+            base,
+            "older nodes: unchanged"
+        );
         let off = base.with_node_approvals(Some("seed_not_encrypted"));
         assert_eq!(off.state, DeviceState::Off);
         assert!(off.off_message.unwrap().contains("konsensus seed encrypt"));
         // A Mac without an enclave stays "unavailable", whatever the node says.
-        let none = DeviceView::of(false, None, false, 0).with_node_approvals(Some("seed_not_encrypted"));
+        let none =
+            DeviceView::of(false, None, false, 0).with_node_approvals(Some("seed_not_encrypted"));
         assert_eq!(none.state, DeviceState::Unavailable);
     }
 }

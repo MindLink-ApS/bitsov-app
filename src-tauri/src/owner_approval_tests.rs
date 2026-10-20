@@ -213,7 +213,10 @@ async fn malformed_requests_are_refused_before_network_access() {
             forwarded.push((body, error.code));
         }
     }
-    assert!(forwarded.is_empty(), "malformed bodies were forwarded: {forwarded:?}");
+    assert!(
+        forwarded.is_empty(),
+        "malformed bodies were forwarded: {forwarded:?}"
+    );
 }
 
 #[test]
@@ -224,19 +227,33 @@ fn registered_key_id_matches_known_sec1_p256_key() {
             "04",
             "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296",
             "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
-        ).into(),
+        )
+        .into(),
         key_id: Some("fbbd51dc2db9576d035086edbf28a328".into()),
         registered: true,
         ..Default::default()
     };
-    assert_eq!(registered_key_id(&record).unwrap(), "fbbd51dc2db9576d035086edbf28a328");
-    for bad_id in [None, Some("00".repeat(16)), Some("FBBD51DC2DB9576D035086EDBF28A328".into())] {
+    assert_eq!(
+        registered_key_id(&record).unwrap(),
+        "fbbd51dc2db9576d035086edbf28a328"
+    );
+    for bad_id in [
+        None,
+        Some("00".repeat(16)),
+        Some("FBBD51DC2DB9576D035086EDBF28A328".into()),
+    ] {
         record.key_id = bad_id;
-        assert_eq!(registered_key_id(&record).unwrap_err().code, "approval_forbidden");
+        assert_eq!(
+            registered_key_id(&record).unwrap_err().code,
+            "approval_forbidden"
+        );
     }
     record.key_id = Some("fbbd51dc2db9576d035086edbf28a328".into());
     record.registered = false;
-    assert_eq!(registered_key_id(&record).unwrap_err().code, "approval_forbidden");
+    assert_eq!(
+        registered_key_id(&record).unwrap_err().code,
+        "approval_forbidden"
+    );
 }
 
 #[test]
@@ -249,10 +266,15 @@ fn breaker_expiry_formats_calendar_boundaries_and_refuses_out_of_range() {
         (1900000000, "2030-03-17 17:46:40 UTC"),
     ] {
         v["breaker_reset"]["grant_expires_at"] = json!(timestamp);
-        assert!(checked_approval(&v, "owner", &message).unwrap().contains(&format!("Grant ends: {expected} ·")));
+        assert!(checked_approval(&v, "owner", &message)
+            .unwrap()
+            .contains(&format!("Grant ends: {expected} ·")));
     }
     v["breaker_reset"]["grant_expires_at"] = json!(i64::MAX);
-    assert_eq!(checked_approval(&v, "owner", &message).unwrap_err().code, "node");
+    assert_eq!(
+        checked_approval(&v, "owner", &message).unwrap_err().code,
+        "node"
+    );
 }
 
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
@@ -275,16 +297,25 @@ fn registered_key_refuses_a_record_id_that_does_not_match_its_public_key() {
         ..Default::default()
     };
     device::save_record(dir.path(), &record).unwrap();
-    assert_eq!(registered_key(&state).unwrap(), (blob, record.key_id.clone().unwrap()));
+    assert_eq!(
+        registered_key(&state).unwrap(),
+        (blob, record.key_id.clone().unwrap())
+    );
     record.key_id = Some("00".repeat(16));
     device::save_record(dir.path(), &record).unwrap();
-    assert_eq!(registered_key(&state).unwrap_err().code, "approval_forbidden");
+    assert_eq!(
+        registered_key(&state).unwrap_err().code,
+        "approval_forbidden"
+    );
 }
 
 async fn check_requester_passthrough(expected_view: Value) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let state = NodeState::for_api(format!("http://127.0.0.1:{}/api/v1", listener.local_addr().unwrap().port()));
+    let state = NodeState::for_api(format!(
+        "http://127.0.0.1:{}/api/v1",
+        listener.local_addr().unwrap().port()
+    ));
     *state.token.lock().unwrap() = Some("test-pairing-token".into());
     let keys = json!({"device_approvals":"enabled","owner_device_count":1,
         "device_keys":[{"key_id":"ab".repeat(16),"fingerprint":"ABCD","name":null,"registered_at":1}]});
@@ -430,8 +461,14 @@ async fn breaker_approval_signs_exact_message_and_reads_top_level_snapshot() {
         std::future::ready(Ok("signature".into()))
     }).await.unwrap();
     assert_eq!(signature, "signature");
-    assert_eq!(checked_approval(&v, "owner", "changed").unwrap_err().code, "approval_changed");
-    assert_eq!(checked_approval(&v, "requester", message).unwrap_err().code, "approval_self");
+    assert_eq!(
+        checked_approval(&v, "owner", "changed").unwrap_err().code,
+        "approval_changed"
+    );
+    assert_eq!(
+        checked_approval(&v, "requester", message).unwrap_err().code,
+        "approval_self"
+    );
 
     let mut missing = v.clone();
     missing.as_object_mut().unwrap().remove("breaker_reset");

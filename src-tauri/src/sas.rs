@@ -129,7 +129,12 @@ mod claim_tests {
     use super::*;
     #[test]
     fn malformed_claim_code_refusal_names_the_owner_console_and_box_sticker() {
-        for input in ["", "AAAAAAAAAAAAAAAA00", "AAAAAAAAAAAAAAAA!!", "éAAAAAAAAAAAAAAAAAA"] {
+        for input in [
+            "",
+            "AAAAAAAAAAAAAAAA00",
+            "AAAAAAAAAAAAAAAA!!",
+            "éAAAAAAAAAAAAAAAAAA",
+        ] {
             let message = claim_commitment(input).unwrap_err();
             assert!(message.contains("18-character claim code"));
             assert!(message.contains("your node's owner console"));

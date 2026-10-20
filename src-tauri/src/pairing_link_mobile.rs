@@ -1,17 +1,24 @@
 //! Android-only intent inbox. No persistence, logging, parsing or auto-import.
 use serde::Deserialize;
 use std::{io, sync::OnceLock};
-use tauri::{plugin::{Builder, PluginHandle, TauriPlugin}, Wry};
+use tauri::{
+    plugin::{Builder, PluginHandle, TauriPlugin},
+    Wry,
+};
 
 static HANDLE: OnceLock<PluginHandle<Wry>> = OnceLock::new();
 
 pub fn init() -> TauriPlugin<Wry> {
     Builder::new("pairing-link")
         .setup(|_app, api| {
-            let handle = api.register_android_plugin("tech.mindlink.bitsov", "PairingLinkPlugin")?;
-            HANDLE.set(handle).map_err(|_| io::Error::new(
-                io::ErrorKind::AlreadyExists, "pairing link inbox already registered",
-            ))?;
+            let handle =
+                api.register_android_plugin("tech.mindlink.bitsov", "PairingLinkPlugin")?;
+            HANDLE.set(handle).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "pairing link inbox already registered",
+                )
+            })?;
             Ok(())
         })
         .build()

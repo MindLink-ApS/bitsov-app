@@ -1273,8 +1273,9 @@ fn assert_no_json_number(value: &Value, forbidden: u64) {
 fn assert_reasons_carry_no_payload(value: &Value) {
     match value {
         Value::Object(map) => {
-            if let Some("timeout" | "upstream_error" | "malformed" | "absent" | "stale" | "overflow") =
-                map.get("kind").and_then(Value::as_str)
+            if let Some(
+                "timeout" | "upstream_error" | "malformed" | "absent" | "stale" | "overflow",
+            ) = map.get("kind").and_then(Value::as_str)
             {
                 assert_eq!(map.len(), 1, "reason carries a payload: {map:?}");
             }
