@@ -2454,15 +2454,13 @@ fn remote_access_replace(
         .app_data_dir()
         .map_err(|error| format!("no app data dir: {error}"))?;
     // An unresolved first-run recovery journal is bound to the current node; the
-    // next start would check the new node against it and refuse. Hold the locks
-    // first run and unlock hold while they save or clear that journal, so the
-    // check and the replace cannot race them. Busy fails closed.
+    // next start would check the new node against it and refuse. Take the same
+    // locks that first run and unlock hold while they save or clear that journal,
+    // so the check and the replace cannot race them. Busy fails closed.
     #[cfg(all(desktop, not(feature = "mobile")))]
     {
-        let busy = "BitSov is busy with your current node. Try again in a moment.";
-        let _recovery = state.remote_recovery.try_lock().map_err(|_| busy)?;
-        let _setup = state.remote_owner.try_lock().map_err(|_| busy)?;
-        return remote_owner::replace_link_unless_pending(
+        return remote_owner::replace_link_when_idle(
+            &state,
             &app_data_dir.join(PAIRING_STORE_DIR),
             &app_data_dir,
             &link,
