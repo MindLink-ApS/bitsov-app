@@ -22,8 +22,15 @@ private func checkStoragePolicy() {
     }
     let node = String(repeating: "ab", count: 32)
     assert(passwordNode("bitsov.node.\(node).seed-password") == node)
+    let scoped = "tech.mindlink.bitsov.remotetest.bitsov.node.\(node).seed-password"
+    assert(passwordNode(scoped) == node)
+    assert(wrappedService(scoped) == scoped + ".wrapped-v1")
     for name in ["bitsov.node.X.seed-password", "bitsov.node.\(node).box-transport",
-                 "bitsov.node.\(node).seed-password.extra"] {
+                 "bitsov.node.\(node).seed-password.extra",
+                 "tech.mindlink.bitsov.remotetest.bitsov.node.X.seed-password",
+                 "tech.mindlink.bitsov.remotetest.bitsov.node.\(node).seed-password.wrapped-v1",
+                 "tech.mindlink.bitsov.other.bitsov.node.\(node).seed-password",
+                 "tech.mindlink.bitsov.remotetest.\(scoped)"] {
         assert(passwordNode(name) == nil)
     }
 }

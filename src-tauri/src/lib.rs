@@ -21,6 +21,7 @@ pub mod jarvis;
 pub mod at_rest;
 pub mod pairing;
 mod trust;
+mod profile;
 pub mod remote_access;
 pub mod sas;
 pub mod delegation;

@@ -236,7 +236,7 @@ mod macos {
     }
     impl LegacySealer for LegacyMacSealer {
         fn delete_key(&self, purpose: &str) -> Result<(), String> {
-            let status = bitsov_ffi::home_keychain::delete_items(Self::SERVICE, purpose)
+            let status = bitsov_ffi::home_keychain::delete_items(&Self::service()?, purpose)
                 .map_err(|_| "Invalid thread key name.")?;
             if status != 0 && status != -25300 {
                 return Err(format!(

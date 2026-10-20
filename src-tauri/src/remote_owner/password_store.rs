@@ -26,7 +26,7 @@ pub fn password(box_key: &str, blob: &[u8]) -> Result<zeroize::Zeroizing<String>
 
 #[cfg(all(target_os = "macos", not(test)))]
 pub fn forget(box_key: &str) -> Result<(), String> {
-    forget_with(box_key, |name, account| {
+    forget_with(crate::profile::current()?, box_key, |name, account| {
         bitsov_ffi::home_keychain::delete_items(name, account)
             .map_err(|_| "Invalid setup envelope.".into())
     })
@@ -34,13 +34,14 @@ pub fn forget(box_key: &str) -> Result<(), String> {
 
 #[cfg(any(target_os = "macos", test))]
 fn forget_with(
+    profile: crate::profile::AppProfile,
     box_key: &str,
     delete: impl FnOnce(&str, &str) -> Result<i32, String>,
 ) -> Result<(), String> {
-    let name = format!(
+    let name = profile.keychain_service(&format!(
         "bitsov.node.{}.seed-password.wrapped-v1",
         escrow_id(box_key)?
-    );
+    ));
     let status = delete(&name, "BitSov")?;
     if status != 0 {
         return Err("Could not remove the provisional setup envelope.".into());
@@ -112,7 +113,7 @@ fn save(box_key: &str, password: &[u8]) -> Result<(), String> {
 }
 #[cfg(test)]
 pub fn forget(box_key: &str) -> Result<(), String> {
-    forget_with(box_key, |name, account| {
+    forget_with(crate::profile::AppProfile::for_identifier("tech.mindlink.bitsov"), box_key, |name, account| {
         test_store::items()
             .lock()
             .unwrap()
@@ -149,6 +150,32 @@ pub(super) mod test_store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_escrow_forget_cannot_delete_the_same_boxs_production_item() {
+        use crate::profile::AppProfile;
+        let key = "ab".repeat(32);
+        let production = format!("bitsov.node.{}.seed-password.wrapped-v1", escrow_id(&key).unwrap());
+        let remote = format!("tech.mindlink.bitsov.remotetest.{production}");
+        let mut items = std::collections::HashSet::from([
+            (production.clone(), "BitSov".to_string()),
+            (remote.clone(), "BitSov".to_string()),
+        ]);
+        forget_with(AppProfile::for_identifier("tech.mindlink.bitsov.remotetest"), &key, |name, account| {
+            assert_eq!(name, remote);
+            assert_eq!(account, "BitSov");
+            assert!(items.remove(&(name.into(), account.into())));
+            Ok(0)
+        }).unwrap();
+        assert_eq!(items, std::collections::HashSet::from([(production.clone(), "BitSov".into())]));
+        forget_with(AppProfile::for_identifier("tech.mindlink.bitsov"), &key, |name, account| {
+            assert_eq!(name, production);
+            assert!(items.remove(&(name.into(), account.into())));
+            Ok(0)
+        }).unwrap();
+        assert!(items.is_empty());
+    }
+
     #[test]
     fn dropping_provisional_escrow_removes_only_its_wrapped_item() {
         let key = test_store::key();

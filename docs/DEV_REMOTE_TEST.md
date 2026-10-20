@@ -28,6 +28,34 @@ feature are needed.
   `~/Library/Application Support/tech.mindlink.bitsov.remotetest/`, separate from
   the production app and other dev profiles. Pairing records, client keys and
   app state use this profile's directory.
+- On macOS, the same bundled-identifier check also prefixes AI-thread and
+  home-node Keychain services with `tech.mindlink.bitsov.remotetest.`:
+  - `tech.mindlink.bitsov.ai-threads.v1` becomes
+    `tech.mindlink.bitsov.remotetest.tech.mindlink.bitsov.ai-threads.v1`.
+  - `bitsov.node.<id>.seed-password` and its `.wrapped-v1` envelope become
+    `tech.mindlink.bitsov.remotetest.bitsov.node.<id>.seed-password` and
+    `tech.mindlink.bitsov.remotetest.bitsov.node.<id>.seed-password.wrapped-v1`.
+    This includes provisional setup escrow, whose `<id>` is derived from the
+    setup box key. The same prefix also separates `box-transport` pins and
+    `unlock-binding` items.
+  Reads, writes, replacement, escrow deletion and AI legacy-key retirement use
+  these scoped names. Keychain-store and old-password fallbacks retain the
+  prefix; the test app never looks up or migrates these production items, even
+  when both apps pair to the same node. Production and other profile service
+  names remain unchanged. Existing unprefixed items from older remote-test
+  builds are deliberately not imported or deleted, since they may belong to
+  production; enroll the test app's remembered password again if needed.
+- This is separate local storage, not a separate macOS account, Keychain,
+  Secure Enclave or remote node. Both apps use the same OS storage facilities;
+  normal access/biometric prompts for the test app's own items can still occur.
+  Device-bound key blobs and assistant ciphertext live in each app's data
+  directory. The legacy local-owner launcher service remains unchanged (its
+  account is derived from the data-directory path); remote-only mode cannot
+  enter the local-node launcher/setup flow. Other dev profiles do not receive
+  this Keychain prefix.
+- Pairing both apps to one remote node shares that node's identity, funds and
+  server-side state. Actions authorized on that node have real effects visible
+  to its other clients; use a separate test node for server-side isolation.
 - The window title is **BitSov Remote Test — DEV, REMOTE ONLY**.
 - The bundled identifier selects a permanent remote-only policy in the host.
   Startup checks saved remote pairing first. Without it, the app asks you to
@@ -70,6 +98,7 @@ TAURI_CONFIG="$(cat src-tauri/tauri.remote-only.conf.json)" \
   cargo check --manifest-path src-tauri/Cargo.toml --locked --tests
 ```
 
-`cargo check --tests` also type-checks the Rust profile-policy regression tests;
+`cargo check --tests` also type-checks the Rust profile-policy, exact Keychain
+service-name and escrow-deletion isolation regression tests;
 it does not run them. The overlay is supplied so Tauri's build script does not
 require a sidecar merely to compile this profile.

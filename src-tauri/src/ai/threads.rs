@@ -312,16 +312,19 @@ pub fn watch_settings(
 struct LegacyMacSealer;
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
 impl LegacyMacSealer {
-    const SERVICE: &'static str = "tech.mindlink.bitsov.ai-threads.v1";
+    fn service() -> Result<String, String> {
+        Ok(crate::profile::current()?.keychain_service("tech.mindlink.bitsov.ai-threads.v1"))
+    }
     fn key(purpose: &str, create: bool) -> Result<Zeroizing<Vec<u8>>, String> {
         use bitsov_ffi::home_keychain::{add_item, read_item};
+        let service = Self::service()?;
         let read =
-            || read_item(Self::SERVICE, purpose, 32).map_err(|_| "Invalid thread key name.".to_string());
+            || read_item(&service, purpose, 32).map_err(|_| "Invalid thread key name.".to_string());
         let (mut status, mut length, mut bytes) = read()?;
         if status == -25300 && create {
             let mut key = Zeroizing::new(vec![0; 32]);
             getrandom::getrandom(&mut key).map_err(|_| "Could not create the thread key.")?;
-            let added = add_item(Self::SERVICE, purpose, &key).map_err(|_| "Invalid thread key name.")?;
+            let added = add_item(&service, purpose, &key).map_err(|_| "Invalid thread key name.")?;
             if added != 0 && added != -25299 {
                 return Err(format!("Keychain could not save the thread key ({added})."));
             }

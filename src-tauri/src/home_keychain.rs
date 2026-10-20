@@ -1,4 +1,4 @@
-//! Exact, node-scoped Keychain items. Typed secrets are saved only after acceptance and opt-in.
+//! Exact, profile- and node-scoped Keychain items. Secrets require acceptance and opt-in.
 use bitsov_app::home_node::{BoxPin, BoxPinStore, UnlockBinding};
 use bitsov_app::remote_access::RemoteError;
 use zeroize::Zeroizing;
@@ -25,6 +25,7 @@ fn store(
     #[cfg(all(target_os = "macos", desktop, not(feature = "mobile")))]
     {
         let _ = device_blob;
+        let name = crate::profile::current()?.keychain_service(&name);
         let status = bitsov_ffi::home_keychain::store(&name, bytes, secret)
             .map_err(|_| "Invalid Keychain item.")?;
         if status == 0 {
@@ -71,6 +72,7 @@ fn read(
     #[cfg(all(target_os = "macos", desktop, not(feature = "mobile")))]
     {
         let _ = (secret, device_blob);
+        let name = crate::profile::current()?.keychain_service(&name);
         let (status, length, mut bytes) =
             bitsov_ffi::home_keychain::read(&name, 16384).map_err(|_| "Invalid Keychain item.")?;
         if status == -25300 {

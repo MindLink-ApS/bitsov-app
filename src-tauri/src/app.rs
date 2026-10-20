@@ -328,7 +328,7 @@ impl Default for NodeState {
 impl NodeState {
     fn for_identifier(identifier: &str) -> Self {
         let mut state = Self::default();
-        state.remote_only = identifier == "tech.mindlink.bitsov.remotetest";
+        state.remote_only = crate::profile::AppProfile::for_identifier(identifier).remote_only();
         state.remote_mode.store(state.remote_only, Ordering::SeqCst);
         state
     }
@@ -8237,6 +8237,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
         ])
         .setup(|app| {
             // Install the immutable profile policy before any commands or tasks run.
+            crate::profile::install(&app.config().identifier)?;
             app.manage(NodeState::for_identifier(&app.config().identifier));
             #[cfg(all(desktop, not(feature = "mobile")))]
             if assistant_dev_enabled() || assistant_node_enabled() {
