@@ -27,13 +27,15 @@
 - **macOS:** `src-tauri/Entitlements.plist`, referenced by
   `bundle.macOS.entitlements`, enables microphone and camera access under the
   hardened runtime. Usage descriptions remain in `src-tauri/Info.plist`.
-- **iOS:** There is no committed `gen/apple` project or custom Xcode template.
-  The committed source is `src-tauri/Info.plist`, explicitly referenced by
-  `bundle.iOS.infoPlist` in `tauri.ios.conf.json`. Tauri merges it into the iOS
-  Info.plist ([configuration reference](https://v2.tauri.app/reference/config/#iosconfig)),
-  reusing the macOS wording for `NSMicrophoneUsageDescription` and
-  `NSCameraUsageDescription`. When creating the Xcode project, verify both keys
-  appear in the app target's Info settings and resulting Info.plist.
+- **iOS:** `src-tauri/gen/apple` is the committed Xcode project (see
+  `.gitignore`). The usage descriptions live in `src-tauri/Info.ios.plist`,
+  referenced by `bundle.iOS.infoPlist` in `tauri.ios.conf.json`; Tauri merges
+  it into `gen/apple/bitsov-app_iOS/Info.plist` on each iOS build
+  ([configuration reference](https://v2.tauri.app/reference/config/#iosconfig)).
+  It repeats the macOS wording for `NSMicrophoneUsageDescription` and
+  `NSCameraUsageDescription` (keep both files in step) and adds
+  `NSLocalNetworkUsageDescription`, because node endpoints and host-only call
+  candidates can be LAN addresses. The desktop `Info.plist` is unchanged.
 
 Headless checks validate configuration and compilation, not OS permission prompts
 or real-device capture. Native media acceptance still requires separate device

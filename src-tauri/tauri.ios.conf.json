@@ -5,7 +5,7 @@
   "bundle": {
     "externalBin": [],
     "iOS": {
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.ios.plist"
     }
   }
 }
