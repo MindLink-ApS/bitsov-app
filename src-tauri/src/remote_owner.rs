@@ -902,6 +902,23 @@ pub fn has_pending_recovery(store: &Path) -> Result<bool, String> {
     Ok(Recovery::load(store)?.is_some())
 }
 
+pub const PENDING_REPLACE_REFUSAL: &str = "BitSov is still finishing setup with your current node. \
+    Unlock it with Touch ID once, or restart BitSov, then pair another node.";
+
+/// Replace the saved remote link unless a first-run recovery journal for the
+/// current node is unresolved. The caller holds the first-run and recovery
+/// locks. Fails closed: any error keeps the old link.
+pub fn replace_link_unless_pending(
+    store: &Path,
+    app_data_dir: &Path,
+    link: &str,
+) -> Result<remote_access::RemoteImportView, String> {
+    if has_pending_recovery(store)? {
+        return Err(PENDING_REPLACE_REFUSAL.into());
+    }
+    remote_access::replace_pairing_link(app_data_dir, link.trim()).map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -957,6 +974,38 @@ mod tests {
         assert!(has_pending_recovery(&store).unwrap());
         Recovery::clear(&store).unwrap();
         assert!(!has_pending_recovery(&store).unwrap());
+    }
+
+    #[test]
+    fn replace_is_refused_while_a_recovery_journal_is_pending() {
+        use base64::Engine;
+        let link_for = |key: &str| {
+            let value = serde_json::json!({"v":1,"endpoint":"box.local:9737",
+                "box_transport_pubkey":key,"code":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([3;32])});
+            format!("bitsov://pair/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&value).unwrap()))
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("pairing");
+        std::fs::create_dir_all(&store).unwrap();
+        let current = password_store::test_store::key();
+        remote_access::import_pairing_link(dir.path(), &link_for(&current)).unwrap();
+        let descriptor = dir.path().join(remote_access::REMOTE_CONFIG_DIR).join(remote_access::REMOTE_CONFIG_FILE);
+        let before = std::fs::read(&descriptor).unwrap();
+        Recovery {
+            node_id: "ab".repeat(32), box_key: current.clone(), endpoint: "box.local:9737".into(),
+            client_public_key: "33".repeat(32), device_public_key: "04".repeat(65),
+            device_key_id: "key".into(), password_saved: false,
+            binding: UnlockBinding { client_id: "client".into(), epoch: 7, fingerprint: "fp".into() },
+        }.save(&store).unwrap();
+        let other = link_for(&password_store::test_store::key());
+        let error = replace_link_unless_pending(&store, dir.path(), &other).unwrap_err();
+        assert_eq!(error, PENDING_REPLACE_REFUSAL);
+        assert_eq!(std::fs::read(&descriptor).unwrap(), before);
+        // Once the journal is resolved the same ticket replaces the link.
+        Recovery::clear(&store).unwrap();
+        assert!(replace_link_unless_pending(&store, dir.path(), &other).unwrap().restart_required);
+        assert_ne!(std::fs::read(&descriptor).unwrap(), before);
     }
 
     #[test]
