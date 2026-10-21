@@ -84,6 +84,35 @@ it('a tap on Call or Video call only asks; nothing rings or pays until Ring', as
   expect(signal).not.toHaveBeenCalled();
 });
 
+it('the paid-call confirm closes when another sheet opens, and sits below every modal layer', async () => {
+  const source = sampleSource({ firstLiveMs: 1e9 });
+  const signal = vi.spyOn(source, 'callSignal');
+  await shell(source);
+  // Call, then tap the contact name: the confirm must not stay up (Ring enabled) over the sheet.
+  $<HTMLButtonElement>('[data-call="audio"]')!.click();
+  expect($('[data-call-confirm="audio"]')).not.toBeNull();
+  const name = $<HTMLButtonElement>('[data-contact-open]')!;
+  name.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+  name.click();
+  expect($('[data-call-confirm-box]')).toBeNull();
+  await vi.waitFor(() => expect($('[data-contact-panel]')?.getAttribute('data-contact-panel')).toBe('open'));
+  $<HTMLButtonElement>('[data-contact-close]')!.click();
+  // Keyboard path: focus moving anywhere else (e.g. to the settings gear) dismisses it too.
+  $<HTMLButtonElement>('[data-call="video"]')!.click();
+  expect($('[data-call-confirm="video"]')).not.toBeNull();
+  $<HTMLButtonElement>('.track-head .context-toggle')!.focus();
+  expect($('[data-call-confirm-box]')).toBeNull();
+  // A press inside the confirm does not dismiss it.
+  $<HTMLButtonElement>('[data-call="video"]')!.click();
+  $('[data-call-confirm-box]')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+  expect($('[data-call-confirm-box]')).not.toBeNull();
+  expect(signal).not.toHaveBeenCalled();
+  // Stacking: below the avatar menu (6), wallet (18), settings scrim/modal (20/21) and the contact sheet.
+  const z = Number(css().match(/\.call-confirm \{[^}]*z-index: (\d+);/)![1]);
+  expect(z).toBeGreaterThan(2);
+  expect(z).toBeLessThan(6);
+});
+
 it('a long contact name ellipsizes instead of running under the call buttons', () => {
   const s = css();
   expect(s).toMatch(/\.track-head h1 \{[^}]*flex: 0 1 auto;[^}]*min-width: 0;[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/);

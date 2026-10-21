@@ -673,6 +673,28 @@ describe('meetings in the shell', () => {
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
 
+  it('toggling a participant keeps keyboard focus on that checkbox (autofocus runs only when the planner opens)', async () => {
+    stubHost();
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="meeting"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="meeting"]')!.click();
+    await vi.waitFor(() => expect($<HTMLInputElement>(`[data-meeting-pick="${B}"]`)?.disabled).toBe(false));
+    await new Promise((r) => setTimeout(r, 0));
+    // Opening moved focus into the planner once.
+    expect(mount.querySelector('[data-meeting-panel="planning"]')!.contains(document.activeElement)).toBe(true);
+    const pick = $<HTMLInputElement>(`[data-meeting-pick="${B}"]`)!;
+    pick.focus();
+    pick.click();
+    await vi.waitFor(() => expect(text('[data-meeting-invite]')).toBe('Invite · 42 sats'));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(document.activeElement).toBe(pick);
+    pick.click();
+    await vi.waitFor(() => expect(text('[data-meeting-invite]')).toBe('Invite · 21 sats'));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(document.activeElement).toBe(pick);
+    expect(document.activeElement).not.toBe($('[data-meeting-cancel]'));
+  });
+
   it('plans a meeting with the price for everyone picked, then rings each invitee once with the roster', async () => {
     const host = stubHost();
     await openShell();

@@ -3078,8 +3078,20 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   createEffect(() => {
     if (!armed()) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') disarm(); };
+    // Anything else pressed or focused (the contact name, settings, You, the
+    // composer) dismisses the confirm: it must never sit, Ring enabled, over
+    // another sheet or modal.
+    const onOutside = (e: Event) => {
+      const t = e.target as Node | null;
+      if (t && wrap?.contains(t)) return;
+      disarm(false);
+    };
     window.addEventListener('keydown', onKey);
-    onCleanup(() => window.removeEventListener('keydown', onKey));
+    for (const type of ['pointerdown', 'click', 'focusin']) document.addEventListener(type, onOutside, true);
+    onCleanup(() => {
+      window.removeEventListener('keydown', onKey);
+      for (const type of ['pointerdown', 'click', 'focusin']) document.removeEventListener(type, onOutside, true);
+    });
   });
   const callWord = (media: CallMedia) => (media === 'video' ? 'Video call' : 'Call');
   return (
@@ -3314,13 +3326,16 @@ function MeetingPanel(props: {
   const planning = () => props.plan !== null && (props.view.phase === 'idle' || props.view.phase === 'ended');
   createEffect(on(planning, (open) => { if (open) refresh(props.contacts.map((c) => c.id)); }));
   // The planner is a dialog: focus moves in when it opens, and Escape cancels it (nobody is rung).
-  createEffect(() => {
-    if (!planning()) return;
+  // Keyed on the open/closed boolean only: toggling a participant changes the plan
+  // but must not re-run this and pull focus away from the checkbox just pressed.
+  const planOpen = createMemo(planning);
+  createEffect(on(planOpen, (open) => {
+    if (!open) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') props.setPlan(null); };
     queueMicrotask(() => document.querySelector<HTMLElement>('[data-meeting-panel="planning"] input:not(:disabled), [data-meeting-panel="planning"] [data-meeting-cancel]')?.focus());
     window.addEventListener('keydown', onKey);
     onCleanup(() => window.removeEventListener('keydown', onKey));
-  });
+  }));
   createEffect(on(() => (props.view.phase === 'invited' ? props.view.id : null), (id) => {
     if (id) refresh(untrack(() => props.view.roster).filter((x) => x !== props.ownId.toLowerCase()));
   }));

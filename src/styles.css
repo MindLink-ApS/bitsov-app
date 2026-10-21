@@ -952,7 +952,8 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 .call-buttons { display: flex; gap: var(--s-2); flex: none; }
 .track-head:has(.call-confirm) { position: relative; }
 /* Call / Video call ask first: a small confirm under the header buttons, with the price. */
-.call-confirm { position: absolute; top: calc(100% - 4px); right: var(--s-4); z-index: 30; width: max-content; max-width: min(320px, calc(100vw - 2 * var(--s-4))); display: grid; gap: var(--s-2); padding: var(--s-3); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-panel); box-shadow: 0 8px 24px rgb(0 0 0 / 0.18); }
+/* Above the stream and composer (2), below every menu, sheet and modal (avatar 6+, settings 20/21, wallet 18). */
+.call-confirm { position: absolute; top: calc(100% - 4px); right: var(--s-4); z-index: 4; width: max-content; max-width: min(320px, calc(100vw - 2 * var(--s-4))); display: grid; gap: var(--s-2); padding: var(--s-3); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-panel); box-shadow: 0 8px 24px rgb(0 0 0 / 0.18); }
 .call-confirm-text { margin: 0; font-size: var(--t-sm); }
 .call-confirm-text .hint { display: block; margin-top: 2px; }
 .call-confirm-actions { display: flex; gap: var(--s-2); justify-content: flex-end; }
