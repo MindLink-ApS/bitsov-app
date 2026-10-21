@@ -71,7 +71,7 @@ export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobil
           <Show when={ticket()!.uri && ticket()!.expires_at > now()} fallback={<p role="status">{ticket()!.expires_at <= now()
             ? 'This ticket expired. If it was already scanned, finish enrollment on the new device. Otherwise close this ticket and create a new one.'
             : 'This ticket was used. Check whether the new device was added or its request ended. Close this ticket before starting again.'}</p>}>
-            <p data-ticket-where>On the new device, open BitSov and choose to connect to your node (on a computer: “Use a node you already run at home”), then scan or paste this ticket. It works once and expires in five minutes.</p>
+            <p data-ticket-where>On the new device, open BitSov and choose to connect to your node (on a computer: open “Advanced: use a node you already run at home”), then scan or paste this ticket. It works once and expires in five minutes.</p>
             <p class="hint" data-ticket-claim-warning>The new device then asks for your node’s 18-character claim code. Have it ready: it is shown at your node’s owner console with <code>konsensus claim-code --show</code>, and a BitSov box also has it on its sticker.</p>
             <Show when={qr()} fallback={<p class="hint">This ticket is too large for a QR code. Copy and paste the pairing ticket below on the new device.</p>}>{q => <svg class="qr" viewBox={`0 0 ${q().extent} ${q().extent}`} shape-rendering="crispEdges" role="img" aria-label="Add a device pairing ticket">
               <rect width={q().extent} height={q().extent} fill="#fff" /><path d={q().path} fill="#000" />

@@ -534,7 +534,7 @@ export function AiTrack(props: {
                     </button>
                   </Show>
                 </div>
-                <div class="ai-own-models" role="listbox" aria-label="Local models" data-ai-own-models>
+                <div class="ai-own-models" role={(localStatus()?.models.length ?? 0) > 0 ? 'listbox' : 'group'} aria-label="Local models" data-ai-own-models>
                   <For each={localStatus()?.models ?? []}>
                     {(name) => (
                       <button

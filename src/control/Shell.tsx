@@ -2284,7 +2284,7 @@ function SettingsDisplay(props: { own: OwnStun | null }) {
           )}
         </For>
       </div>
-      <p class="hint">Balances and costs use this unit everywhere. Payment amounts to the node stay in millisatoshis.</p>
+      <p class="hint">Balances and costs use this unit everywhere. Your node still counts each payment in millisatoshis (1 sat = 1,000).</p>
       <CallSettings own={props.own} />
     </div>
   );
@@ -5809,7 +5809,7 @@ function Composer(props: {
       </details>
       </div>
       <Show when={emojiOpen()}>
-        <div class="emoji-picker" data-emoji-picker role="listbox" aria-label="Emoji">
+        <div class="emoji-picker" data-emoji-picker role="group" aria-label="Emoji">
           <For each={[...EMOJIS]}>
             {(e) => (
               <button
