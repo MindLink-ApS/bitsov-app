@@ -8512,8 +8512,13 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             bitsov_app::at_rest::install_macos();
             #[cfg(target_os = "ios")]
             {
-                bitsov_ffi::client_keychain::exclude_from_backup(&app.path().app_data_dir()?)?;
+                let data_dir = app.path().app_data_dir()?;
+                bitsov_ffi::client_keychain::exclude_from_backup(&data_dir)?;
+                crate::ios_install::prepare(&data_dir, || {
+                    bitsov_ffi::client_keychain::delete(&data_dir.join(PAIRING_STORE_DIR))
+                })?;
                 bitsov_app::at_rest::install_ios()?;
+                crate::ios_install::complete(&data_dir)?;
             }
             #[cfg(target_os = "android")]
             bitsov_app::at_rest::install(Arc::new(device_key::KeystoreSealer))?;

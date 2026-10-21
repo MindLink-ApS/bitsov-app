@@ -37,6 +37,32 @@ refused. Overwriting cannot promise erasure of historic APFS/flash blocks or old
 backups; migration removes the live plaintext file and prevents new plaintext
 writes. It does not manipulate existing backups.
 
+On iOS, deletion of the app removes its container but can leave the client
+Keychain item behind. Before any pairing task or command runs, startup checks
+the app data directory. A `.ios-setup-complete` marker, or any other surviving
+app/pairing data, protects the existing identity, including on upgrades from
+versions without this marker. Unknown, corrupt or incomplete state also counts;
+an inspection error aborts setup without deleting anything. Only an absent/empty
+directory, or an `app-client` directory containing nothing except the legacy
+client key, qualifies for fresh-install cleanup.
+
+Fresh-install cleanup deletes the exact profile-scoped client Keychain item
+without reading its seed or allowing authentication UI, then unlinks the legacy
+file without parsing it and syncs the directory. This also recovers the stale
+Keychain seed plus conflicting/corrupt legacy-file case when no app/pairing state
+survives. Keychain errors stop setup and retain the legacy file; an already
+absent item/file is success. Cleanup can repeat after interruption at any step.
+The empty, owner-only setup marker is synced only after cleanup and synchronous
+app setup succeed, before background tasks or commands can create pairing state.
+An existing install's conflicting identities still fail closed; they are never
+silently reset. Unlinking does not guarantee erasure of historical flash blocks.
+
+Approval keys use CryptoKit `SecureEnclave.P256.Signing.PrivateKey` with their
+wrapped `dataRepresentation` in app files. The bridge creates no persistent
+Keychain key and assigns no application tag. There are therefore no app-tagged
+approval keys to enumerate/delete on reinstall; their stored wrappers disappear
+with the container. Cleanup does not search unrelated Keychain or enclave keys.
+
 At iOS startup, before descriptor access, the app data directory is excluded from
 backups. Source inspection of `remote-access/descriptor.json` found that only its
 optional one-time pairing code is secret. iOS now uses the existing enclave
@@ -54,17 +80,22 @@ are unchanged.
 - `npx tsc --noEmit`, `npm test`, `npm run build`, `npm run authority`
 - `TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-apple-ios`
 
+Install-lifecycle tests cover fresh cleanup, existing-state preservation,
+interrupted cleanup retries, and recovery from conflicting orphaned identities.
 Device testing still needs to exercise Face ID approval/cancellation, locked
-state, biometric enrollment changes, and an actual upgrade migration on a
-signed iPhone build. Host mocks and cross-compilation do not establish those
-hardware/entitlement outcomes.
+state, biometric enrollment changes, an actual upgrade migration, and deletion
+followed by reinstall on a signed iPhone build. Host mocks and cross-compilation
+do not establish those hardware/entitlement outcomes.
 
 ## Security
 
 Threats addressed: extraction from app-container files/backups, migration onto a
 different device, biometric enrollment changes, and accidental identity rotation
-on Keychain errors. Accessibility is WhenUnlockedThisDeviceOnly; synchronization
-is disabled. Approval private keys are never exported. Seeds, private blobs,
+on Keychain errors. Fresh-install cleanup also prevents silent reuse of a prior
+installation's client identity when its app/pairing data is gone, without
+rotating identities on upgrades or ordinary restarts. Accessibility is
+WhenUnlockedThisDeviceOnly; synchronization is disabled. Approval private keys
+are never exported. Seeds, private blobs,
 pairing codes and biometric data are never logged or exposed to the renderer.
 A compromised unlocked app process or device OS remains outside this protection.
 

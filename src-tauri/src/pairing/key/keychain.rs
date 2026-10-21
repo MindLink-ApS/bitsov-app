@@ -220,6 +220,26 @@ mod tests {
         assert_eq!(ClientKey::load(&dir.path().join(KEY_FILE)).unwrap().public_hex(), original.public_hex());
     }
     #[test]
+    fn fresh_install_recovers_from_orphaned_keychain_and_conflicting_legacy_file() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("app-client");
+        let legacy_key = ClientKey::load_or_create_plain(&dir).unwrap();
+        let store = MemoryStore::default();
+        store.add(&[9; 32]).unwrap();
+        let orphan_public = ClientKey::from_seed([9; 32]).public_hex().to_owned();
+        crate::ios_install::prepare(root.path(), || {
+            *store.seed.borrow_mut() = None;
+            Ok(())
+        }).unwrap();
+        crate::ios_install::complete(root.path()).unwrap();
+        let fresh = load_or_create(&dir, &store).unwrap();
+        assert_ne!(fresh.public_hex(), legacy_key.public_hex());
+        assert_ne!(fresh.public_hex(), orphan_public);
+        assert!(!dir.join(KEY_FILE).exists());
+        crate::ios_install::prepare(root.path(), || panic!("must keep new identity")).unwrap();
+        assert_eq!(load_or_create(&dir, &store).unwrap().public_hex(), fresh.public_hex());
+    }
+    #[test]
     fn resumes_cleanup_after_wipe_before_unlink() {
         for wiped_bytes in [17, 64] {
             let dir = tempfile::tempdir().unwrap();
