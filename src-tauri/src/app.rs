@@ -7049,6 +7049,14 @@ fn device_error(e: device_key::DeviceKeyError) -> ActionError {
     }
 }
 
+/// Only explicit key invalidation permits deleting the stored approval key.
+/// Bridge/transport failures leave the key and its enrollment available to retry.
+fn forget_invalid_signing_key(store: &std::path::Path, error: &ActionError) -> bool {
+    if error.code != "device_invalid" { return false; }
+    device::forget(store);
+    true
+}
+
 /// Sign with the enclave off the async runtime: a Touch ID prompt blocks.
 async fn device_sign(blob: Vec<u8>, message: String, reason: String) -> Result<String, ActionError> {
     tokio::task::spawn_blocking(move || device_key::sign(&blob, message.as_bytes(), &reason))
@@ -7373,10 +7381,7 @@ async fn do_relation_approve(
     let signature = match device_sign(blob, message, reason).await {
         Ok(signature) => signature,
         Err(e) => {
-            // A key the enclave no longer accepts is gone for good: set up again.
-            if e.code == "device_invalid" {
-                device::forget(&store);
-            }
+            forget_invalid_signing_key(&store, &e);
             return Err(e);
         }
     };
@@ -8996,6 +9001,37 @@ mod remote_test_profile_tests {
 #[allow(dead_code)]
 #[path = "../tests/support/mod.rs"]
 mod test_support;
+
+#[cfg(test)]
+mod device_sign_error_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_signature_transport_error_does_not_forget_key_or_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = b"synthetic wrapped enclave key";
+        let record = device::Record {
+            public_key: "04".into(), key_id: Some("registered-key".into()),
+            registered: true, ..Default::default()
+        };
+        device::save_blob(dir.path(), blob).unwrap();
+        device::save_record(dir.path(), &record).unwrap();
+        // The ABI contract tests pin malformed signature output to Other(-6).
+        // Exercise the real app mapping and deletion handler shared by relation
+        // approval and home unlock, with on-disk key and enrollment state.
+        let error = device_error(device_key::DeviceKeyError::Other(-6));
+        assert_eq!(error.code, "device_key");
+        assert!(!forget_invalid_signing_key(dir.path(), &error));
+        assert_eq!(device::load_blob(dir.path()).as_deref(), Some(blob.as_slice()));
+        assert_eq!(device::load_record(dir.path()), Some(record));
+
+        // A genuine native invalidation must still require re-enrollment.
+        let error = device_error(device_key::DeviceKeyError::Invalid);
+        assert!(forget_invalid_signing_key(dir.path(), &error));
+        assert!(device::load_blob(dir.path()).is_none());
+        assert!(device::load_record(dir.path()).is_none());
+    }
+}
 
 #[cfg(test)]
 mod trust_tests {

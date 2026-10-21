@@ -54,5 +54,5 @@ fn authenticated_recovery_resets_locked_view_and_invalid_signing_keys_require_se
     let auth = app.split("async fn finish_auth(").nth(1).unwrap().split("\nasync fn ").next().unwrap();
     ordered(auth, &["home_unlock::remember_binding", "home_unlock_state.lock().unwrap() = \"ready\"", "home_locked.store(false"]);
     let unlock = read("src/home_unlock.rs");
-    ordered(&unlock, &["let signature =", "device_invalid", "device::forget(&ctx.store)", "home_unlock_state.lock().unwrap() = \"not-enrolled\""]);
+    ordered(&unlock, &["let signature =", "forget_invalid_signing_key(&ctx.store, &e)", "home_unlock_state.lock().unwrap() = \"not-enrolled\""]);
 }
