@@ -19,7 +19,7 @@ export function AssistantSurface(props: { text: string }): JSX.Element {
         type="button"
         class="assistant-copy"
         onClick={() => {
-          void copyPlainText(props.text);
+          void copyPlainText(props.text).catch(() => {});
         }}
       >
         Copy

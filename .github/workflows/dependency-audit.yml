@@ -1,0 +1,67 @@
+name: Dependency Audit
+
+# cargo audit + npm audit for the Tauri lockfile and the npm lockfile.
+# Not a merge gate. Do not add `Dependency audit` to branch protection: this
+# workflow does not run on a pull request that leaves both lockfiles alone, and
+# a required check that never starts stays pending.
+#
+# New advisories against an unchanged lockfile are the daily run (06:00 UTC).
+# Lockfile edits, `v*` tags, and manual dispatch run it too. The macOS bundle
+# and the Windows compile are not part of this workflow.
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+    branches: [main]
+    # Path filters are not applied to tag pushes.
+    paths:
+      - 'src-tauri/Cargo.lock'
+      - 'src-tauri/**/Cargo.lock'
+      - 'package-lock.json'
+      - 'package.json'
+      - '.github/workflows/dependency-audit.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src-tauri/Cargo.lock'
+      - 'src-tauri/**/Cargo.lock'
+      - 'package-lock.json'
+      - 'package.json'
+      - '.github/workflows/dependency-audit.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # 0.22 reads the CVSS 4.0 advisories in the RustSec database. 0.21 fails
+      # closed on the database parse before it reports crate vulnerabilities.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+
+      - name: cargo audit
+        working-directory: src-tauri
+        run: cargo audit
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: npm audit (production dependencies)
+        run: npm audit --package-lock-only --omit=dev --audit-level=high

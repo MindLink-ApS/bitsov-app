@@ -34,6 +34,11 @@ import {
   type Proposal,
 } from './ai';
 import { amount, clock, day, satsWhole, uptime } from './format';
+import { deviceWord } from '../platform';
+
+/** The host names its local provider "On this computer"; a phone build says "On this phone". */
+const providerLabel = (p: { kind: string; label: string }) =>
+  p.kind === 'local' && p.label === 'On this computer' ? `On this ${deviceWord()}` : p.label;
 import type { Source } from './source';
 import { asActionError, peerName } from './state';
 import type {
@@ -399,7 +404,8 @@ export function AiTrack(props: {
       {props.head(assistant ? `${assistant.name} assistant` : 'Ask your node', sub())}
       <Show when={assistant}>
         <div class="ai-providers-bar" data-assistant-ready={threadReady() ? '' : undefined}>
-          <p data-assistant-role>{assistant!.role} Questions and answers stay sealed on this Mac. Keeps the latest 100 turns.</p>
+          {/* Threads are sealed by the Mac host only (ai/threads/storage.rs); a phone does not claim it. */}
+          <p data-assistant-role>{assistant!.role}{deviceWord() === 'computer' ? ' Questions and answers stay sealed on this Mac. Keeps the latest 100 turns.' : ''}</p>
           <button type="button" class="soft" data-assistant-forget
             disabled={threadBusy() || session.turns.some(t => t.state === 'reading' || t.state === 'sending')}
             onClick={() => void forget()}>Forget</button>
@@ -444,13 +450,13 @@ export function AiTrack(props: {
                     ? 'Send or don’t send the preview first'
                     : p.host
                       ? `${p.model ?? ''} at ${p.host}`
-                      : 'Nothing leaves this computer')
+                      : `Nothing leaves this ${deviceWord()}`)
                 }
                 data-provider={p.kind}
                 data-tier={endpointBadge(p).tier}
                 onClick={() => setSession('provider', p.kind)}
               >
-                <span class="name">{p.label}</span>
+                <span class="name">{providerLabel(p)}</span>
                 <span class="meta">
                   {p.kind === 'local'
                     ? p.model
@@ -484,14 +490,14 @@ export function AiTrack(props: {
                 fallback={
                   <p class="hint" data-ai-own-howto>
                     {localStatus()?.howto ??
-                      'Looking for a local model server on this computer…'}
+                      `Looking for a local model server on this ${deviceWord()}…`}
                   </p>
                 }
               >
                 <p class="hint" data-ai-own-found>
                   Found{' '}
                   {localStatus()!.kind === 'ollama' ? 'Ollama' : 'a local model server'} on 127.0.0.1:
-                  {localStatus()!.port}. Nobody is paid; nothing leaves this computer.
+                  {localStatus()!.port}. Nobody is paid; nothing leaves this {deviceWord()}.
                 </p>
                 <div class="ai-own-row">
                   <label class="ai-own-port">
@@ -571,7 +577,7 @@ export function AiTrack(props: {
               </div>
               <h2>Ask about your own node</h2>
               <p class="hint">
-                {assistant ? 'Ask about the topics in this assistant’s role. Rules answer here. With a local model selected, Ask lets it read up to three topics on this computer and return an answer or a display-only draft.' : 'This app reads your node through a closed list of read-only routes and answers here. Your node never talks to a model. If you turn on a remote model, each question shows exactly what would leave this computer, and nothing is sent until you press Send.'}
+                {assistant ? `Ask about the topics in this assistant’s role. Rules answer here. With a local model selected, Ask lets it read up to three topics on this ${deviceWord()} and return an answer or a display-only draft.` : `This app reads your node through a closed list of read-only routes and answers here. Your node never talks to a model. If you turn on a remote model, each question shows exactly what would leave this ${deviceWord()}, and nothing is sent until you press Send.`}
               </p>
               <div class="ai-hero-suggestions" aria-label="Suggestions">
                 <For each={suggestions}>
@@ -727,13 +733,13 @@ export function AiTrack(props: {
           <span>
             {assistant
               ? ownModel()
-                ? 'Read-only assistant. Up to three reads per question; drafts are display-only. Nothing is sent or spent. The model stays on this computer.'
-                : 'Read-only assistant. No payments, messages or drafts. Rules stay on this computer.'
+                ? `Read-only assistant. Up to three reads per question; drafts are display-only. Nothing is sent or spent. The model stays on this ${deviceWord()}.`
+                : `Read-only assistant. No payments, messages or drafts. Rules stay on this ${deviceWord()}.`
               : remote()
               ? `Each question shows the exact request for ${provider()?.label ?? 'the remote model'} first. Nothing is approved ahead of time.`
               : ownModel()
-                ? `Each question shows the exact request for ${provider()?.model} on this computer first. Nobody is paid; the preview never leaves this machine.`
-                : 'Nothing leaves this computer. The AI never spends: it can only prepare a draft for you to send.'}
+                ? `Each question shows the exact request for ${provider()?.model} on this ${deviceWord()} first. Nobody is paid; the preview never leaves this ${deviceWord()}.`
+                : `Nothing leaves this ${deviceWord()}. The AI never spends: it can only prepare a draft for you to send.`}
           </span>
         </p>
       </form>
@@ -824,7 +830,7 @@ function TurnView(props: {
               }
             >
               <p class="ai-source" data-ai-source="own">
-                <span class="ai-from">Own</span> · On this computer · {r().model} · Nobody is paid · from what you shared
+                <span class="ai-from">Own</span> · On this {deviceWord()} · {r().model} · Nobody is paid · from what you shared
                 ({PRESETS.find((p) => p.id === t().disclosure?.preset)?.label.toLowerCase()},{' '}
                 {r().sent_bytes > 0 ? `${satsWhole(r().sent_bytes)} bytes` : 'sample'}). Your node did not check this
                 answer.
@@ -854,20 +860,20 @@ function SourceStamp(props: { routes: string[]; line: ReturnType<typeof sourceLi
 }
 
 function CopyButton(props: { text: () => string }) {
-  const [done, setDone] = createSignal(false);
+  const [done, setDone] = createSignal<false | 'copied' | 'failed'>(false);
   return (
     <button
       type="button"
       class="link copy"
       data-copy
       onClick={() => {
-        void copyPlainText(props.text()).then(() => {
-          setDone(true);
-          setTimeout(() => setDone(false), 1600);
+        void copyPlainText(props.text()).then(() => 'copied' as const, () => 'failed' as const).then((r) => {
+          setDone(r);
+          setTimeout(() => setDone(false), r === 'failed' ? 4000 : 1600);
         });
       }}
     >
-      {done() ? 'Copied' : 'Copy'}
+      {done() === 'copied' ? 'Copied' : done() === 'failed' ? 'Copy failed' : 'Copy'}
     </button>
   );
 }
@@ -1065,16 +1071,16 @@ function DisclosureCard(props: {
   return (
     <div class="artifact ai-card disclosure" data-ai-card="disclosure" data-state={props.state} data-preset={props.d.preset}>
       <div class="row card-head">
-        <span class="kind">{props.state === 'not-sent' ? 'Not sent' : 'Nothing has left this computer yet'}</span>
+        <span class="kind">{props.state === 'not-sent' ? 'Not sent' : `Nothing has left this ${deviceWord()} yet`}</span>
       </div>
       <Show
         when={props.state !== 'not-sent'}
-        fallback={<p class="hint">This preview was canceled. Nothing left this computer.</p>}
+        fallback={<p class="hint">This preview was canceled. Nothing left this {deviceWord()}.</p>}
       >
         <p>
           This is exactly what would go to <strong>{props.d.label}</strong> ({props.d.model}) at{' '}
           <span class="id">{props.d.host}</span>: {satsWhole(props.d.bytes)} bytes, once.
-          <Show when={props.d.key_env}> Its key is added from {props.d.key_env} on this computer and is not shown.</Show>
+          <Show when={props.d.key_env}> Its key is added from {props.d.key_env} on this {deviceWord()} and is not shown.</Show>
         </p>
         <div class="modes small" role="radiogroup" aria-label="What to share" data-ai-presets>
           <For each={PRESETS}>

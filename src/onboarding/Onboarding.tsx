@@ -4,6 +4,7 @@ import { LocalNodeSwitch } from './LocalNodeSwitch';
 import { DeviceApprovals } from './DeviceApprovals';
 import { SoftError } from '../control/SoftError';
 import { createEffect, createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
+import { Dynamic } from 'solid-js/web';
 import { normalizePairingLink, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
@@ -286,8 +287,11 @@ export function Onboarding(props: {
             </p>
           </Show>
           {/* Once the node is up the choice is compact: both locations show as pills, no fold. */}
-          <details class="node-target-advanced" open={phone() || target() !== 'local' || stage() !== 'node'}>
-            <summary>{phone() ? 'Connect to your node' : 'Advanced: use a node you already run at home'}</summary>
+          {/* On a phone there is nothing to fold: a plain block. A <details> with no
+              <summary> makes WebKit add its own OS-language label ("Flere oplysninger"
+              on a Danish phone) and lets the only choice be collapsed. */}
+          <Dynamic component={phone() ? 'div' : 'details'} class="node-target-advanced" open={phone() ? undefined : target() !== 'local' || stage() !== 'node'}>
+            <Show when={!phone()}><summary>Advanced: use a node you already run at home</summary></Show>
           {/* A home node uses a remote pairing link. */}
           <button
             type="button"
@@ -321,12 +325,12 @@ export function Onboarding(props: {
                 </div>
               </div>
               <p>{phone()
-                ? 'A computer or server that stays on runs your node; its keys live there. Scan or paste its pairing link to connect this phone.'
+                ? `A computer or server that stays on runs your node; its keys live there. ${props.onScanRemote ? 'Scan or paste' : 'Paste'} its pairing link to connect this phone.`
                 : 'A computer you keep running at home can receive while this Mac is off. Its keys live on that computer. Paste its pairing link; it is saved for the next start.'}</p>
             </div>
           </button>
 
-          </details>
+          </Dynamic>
 
           <Show when={testNodes}>
           {/* Internal testing only; not a product path. */}

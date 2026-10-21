@@ -19,6 +19,12 @@ export function appPlatform(
   return 'desktop';
 }
 
+/**
+ * "computer" on a desktop, "phone" on a phone or tablet: the word for the
+ * device this app runs on, for copy like "Nothing leaves this computer".
+ */
+export const deviceWord = (platform: AppPlatform = appPlatform()) => (platform === 'desktop' ? 'computer' : 'phone');
+
 /** A phone or tablet build (Android or iOS): there is no "This Mac" to run a node on. */
 export const isMobilePlatform = (platform: AppPlatform = appPlatform()) => platform !== 'desktop';
 

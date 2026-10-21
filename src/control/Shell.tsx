@@ -31,6 +31,7 @@ import { SoftError } from './SoftError';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { PorchPanel } from './Porch';
 import { ContactPanel } from './ContactPanel';
+import { onEscape } from './escapeStack';
 import { custodyBadge, CustodyBadgeView } from './custody';
 import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
@@ -478,14 +479,7 @@ export function ControlCenter(props: Props) {
   const [walletTab, setWalletTab] = createSignal<WalletTab | null>(null);
   createEffect(() => {
     if (!walletTab()) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !contextOpen()) {
-        e.preventDefault();
-        setWalletTab(null);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    onCleanup(() => window.removeEventListener('keydown', onKey));
+    onCleanup(onEscape(() => { if (!contextOpen()) setWalletTab(null); }));
   });
   const [settingsEl, setSettingsEl] = createSignal<HTMLElement | null>(null);
   let settingsReturnFocus: HTMLElement | null = null;
@@ -496,14 +490,7 @@ export function ControlCenter(props: Props) {
     if (open && panel) {
       settingsReturnFocus = document.activeElement as HTMLElement | null;
       queueMicrotask(() => panel.querySelector<HTMLElement>('[data-settings-close]')?.focus());
-      const onKey = (e: KeyboardEvent) => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          setContextOpen(false);
-        }
-      };
-      window.addEventListener('keydown', onKey);
-      onCleanup(() => window.removeEventListener('keydown', onKey));
+      onCleanup(onEscape(() => setContextOpen(false)));
     } else if (!open && settingsReturnFocus) {
       const back = settingsReturnFocus;
       settingsReturnFocus = null;
@@ -1758,11 +1745,11 @@ export function ControlCenter(props: Props) {
         balanceMsat={wallet()?.balance_msat ?? null}
         approvalsWaiting={approvalsWaiting()}
         onApprovals={() => { setTab('node'); setContextOpen(true); }}
-        behind={walletTab() !== null}
+        behind={walletTab() !== null || contextOpen()}
       />
 
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
-        <section class="track" aria-label="Track" inert={walletTab() !== null}>
+        <section class="track" aria-label="Track" inert={walletTab() !== null || contextOpen()}>
           {props.offline}
           <Show when={moneyBlocked()}>
             <p class="hint money-notice" data-money-notice role="status">{!live() ? 'Waiting for the connection. Your node will retry automatically.' : MONEY_NOT_READY} Sending, paying, calls, first contact, files, rooms, channels and gifts will be available when it is ready.</p>
@@ -2336,9 +2323,9 @@ function Rail(props: {
   };
   createEffect(() => {
     if (!menuOpen()) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenuOpen(false); };
-    window.addEventListener('keydown', onKey);
-    onCleanup(() => window.removeEventListener('keydown', onKey));
+    // Escape closes and puts focus back on You; opening moves focus to the first item.
+    queueMicrotask(() => document.querySelector<HTMLElement>('[data-avatar-menu] [role="menuitem"]')?.focus());
+    onCleanup(onEscape(() => { setMenuOpen(false); avatar?.focus(); }));
   });
   const item = (t: TrackRef, name: string, meta?: JSX.Element) => {
     const key = trackKey(t);
@@ -3057,17 +3044,66 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
       ? `Up to ${fmtAmount(cost()!)}: ${fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat)} to ring (their call price plus ${feeCeiling(quote()!.offer_max_routing_fee_msat)}), then ${fmtAmount(signalCost(quote()!))} to hang up. Includes up to ${fmtAmount(callCost(quote()!)!)} more for one automatic recovery (another admission and hangup). Media goes directly between you; it is not billed. ${effectiveStun() ? `Uses the STUN server ${effectiveStun()} to find a route.` : stunOff() ? 'STUN is turned off, so calls connect only on the same network (Settings).' : 'No STUN server is set, so calls connect only on the same network (Settings).'}`
       : 'Reading their call price…');
   const place = (media: CallMedia) => { const q = quote(); if (q && !off()) props.actions.placeCall(props.peer, media, q); };
+  // A call pays and rings someone, so one tap only asks: the call/video button
+  // opens a small confirm with the price, and Ring places it. A mis-tap on the
+  // header costs nothing.
+  const [armed, setArmed] = createSignal<CallMedia | null>(null);
+  let ringBtn: HTMLButtonElement | undefined;
+  let wrap: HTMLDivElement | undefined;
+  createEffect(on(() => props.peer, () => setArmed(null), { defer: true }));
+  createEffect(() => { if (off()) setArmed(null); });
+  const arm = (media: CallMedia) => {
+    if (off()) return;
+    setArmed((m) => (m === media ? null : media));
+    if (armed()) queueMicrotask(() => ringBtn?.focus());
+  };
+  const disarm = (refocus = true) => {
+    const media = armed();
+    setArmed(null);
+    if (refocus && media) wrap?.querySelector<HTMLButtonElement>(`[data-call="${media}"]`)?.focus();
+  };
+  createEffect(() => {
+    if (!armed()) return;
+    // Anything else pressed or focused (the contact name, settings, You, the
+    // composer) dismisses the confirm: it must never sit, Ring enabled, over
+    // another sheet or modal.
+    const onOutside = (e: Event) => {
+      const t = e.target as Node | null;
+      if (t && wrap?.contains(t)) return;
+      disarm(false);
+    };
+    for (const type of ['pointerdown', 'click', 'focusin']) document.addEventListener(type, onOutside, true);
+    onCleanup(onEscape(() => disarm()));
+    onCleanup(() => {
+      for (const type of ['pointerdown', 'click', 'focusin']) document.removeEventListener(type, onOutside, true);
+    });
+  });
+  const callWord = (media: CallMedia) => (media === 'video' ? 'Video call' : 'Call');
   return (
-    <div class="call-buttons" data-call-buttons>
-      <button type="button" class="soft call-button icon-btn" data-call="audio" disabled={off()} title={title()} aria-label={`Call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`} onClick={() => place('audio')}>
+    <div class="call-buttons" data-call-buttons ref={wrap}>
+      <button type="button" class="soft call-button icon-btn" data-call="audio" disabled={off()} title={title()} aria-label={`Call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`} aria-haspopup="dialog" aria-expanded={armed() === 'audio'} onClick={() => arm('audio')}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z" /></svg>
       </button>
-      <button type="button" class="soft call-button icon-btn" data-call="video" disabled={off()} title={title()} onClick={() => place('video')} aria-label={`Video call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`}>
+      <button type="button" class="soft call-button icon-btn" data-call="video" disabled={off()} title={title()} aria-haspopup="dialog" aria-expanded={armed() === 'video'} onClick={() => arm('video')} aria-label={`Video call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="12" height="12" rx="2" /><path d="m15 10 6-3v10l-6-3z" /></svg>
       </button>
       <button type="button" class="soft call-button icon-btn quiet" data-call="meeting" disabled={off()} title={`Start a meeting with ${props.name} and up to ${MAX_PARTICIPANTS - 2} more contacts. The price shows before anyone is rung.`} aria-label={`Start a meeting with ${props.name}`} onClick={() => props.actions.planMeeting(props.peer)}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3" /><path d="M3 20a6 6 0 0 1 12 0" /><circle cx="17" cy="9" r="2.5" /><path d="M17 14a5 5 0 0 1 4 5" /></svg>
       </button>
+      <Show when={armed()}>
+        {(media) => (
+          <div class="call-confirm" role="dialog" aria-label={`${callWord(media())} ${props.name}?`} data-call-confirm-box={media()}>
+            <p class="call-confirm-text">
+              <strong>{callWord(media())} {props.name}?</strong>
+              <Show when={cost() !== null}>{' '}<span class="hint">Up to {fmtAmount(cost()!)}. Nothing is paid until you press Ring.</span></Show>
+            </p>
+            <div class="call-confirm-actions">
+              <button type="button" class="soft" data-call-confirm-cancel onClick={() => disarm()}>Cancel</button>
+              <button ref={ringBtn} type="button" class="primary soft money" data-call-confirm={media()} disabled={off()} onClick={() => { const m = media(); setArmed(null); place(m); }}>Ring</button>
+            </div>
+          </div>
+        )}
+      </Show>
     </div>
   );
 }
@@ -3274,6 +3310,16 @@ function MeetingPanel(props: {
   };
   const planning = () => props.plan !== null && (props.view.phase === 'idle' || props.view.phase === 'ended');
   createEffect(on(planning, (open) => { if (open) refresh(props.contacts.map((c) => c.id)); }));
+  // The planner is a dialog: focus moves in when it opens, and Escape cancels it (nobody is rung).
+  // Keyed on the open/closed boolean only: toggling a participant changes the plan
+  // but must not re-run this and pull focus away from the checkbox just pressed.
+  const planOpen = createMemo(planning);
+  createEffect(on(planOpen, (open) => {
+    if (!open) return;
+    queueMicrotask(() => document.querySelector<HTMLElement>('[data-meeting-panel="planning"] input:not(:disabled), [data-meeting-panel="planning"] [data-meeting-cancel]')?.focus());
+    // Only while it is the top layer: Escape in Settings opened over it closes Settings, not the plan.
+    onCleanup(onEscape(() => props.setPlan(null)));
+  }));
   createEffect(on(() => (props.view.phase === 'invited' ? props.view.id : null), (id) => {
     if (id) refresh(untrack(() => props.view.roster).filter((x) => x !== props.ownId.toLowerCase()));
   }));
@@ -4067,6 +4113,14 @@ function Composer(props: {
   let fileInput: HTMLInputElement | undefined;
   let draftInput: HTMLTextAreaElement | undefined;
   const [emojiOpen, setEmojiOpen] = createSignal(false);
+  let plusBtn: HTMLButtonElement | undefined;
+  let emojiBtn: HTMLButtonElement | undefined;
+  createEffect(() => {
+    if (!emojiOpen()) return;
+    // Escape closes the picker and returns focus to the emoji button; opening moves focus into it.
+    queueMicrotask(() => document.querySelector<HTMLElement>('[data-emoji-picker] [data-emoji-pick]')?.focus());
+    onCleanup(onEscape(() => { setEmojiOpen(false); emojiBtn?.focus(); }));
+  });
   // voice note: recorded here, then sent exactly like a chosen file
   const [recording, setRecording] = createSignal<{ rec: Recording; startedAt: number } | null>(null);
   const [recordedMs, setRecordedMs] = createSignal(0);
@@ -4684,7 +4738,10 @@ function Composer(props: {
     const onDoc = (e: Event) => {
       if (!(e.target as Element | null)?.closest?.('.composer-plus-wrap')) setMenuOpen(false);
     };
+    // Escape closes the Pay / Request / Attach menu and returns focus to +.
+    queueMicrotask(() => plusBtn?.parentElement?.querySelector<HTMLElement>('[role="menuitem"]')?.focus());
     document.addEventListener('click', onDoc);
+    onCleanup(onEscape(() => { setMenuOpen(false); plusBtn?.focus(); }));
     onCleanup(() => document.removeEventListener('click', onDoc));
   });
 
@@ -5661,6 +5718,7 @@ function Composer(props: {
       </Show>
       <div class="composer-main signal-bar" data-composer-bar>
         <button
+          ref={emojiBtn}
           type="button"
           class="attach soft icon-btn"
           data-emoji
@@ -5703,6 +5761,7 @@ function Composer(props: {
           </button>
           <div class="composer-plus-wrap">
             <button
+              ref={plusBtn}
               type="button"
               class="attach soft icon-btn"
               data-composer-plus
@@ -5811,7 +5870,7 @@ function Composer(props: {
       </details>
       </div>
       <Show when={emojiOpen()}>
-        <div class="emoji-picker" data-emoji-picker role="listbox" aria-label="Emoji">
+        <div class="emoji-picker" data-emoji-picker role="group" aria-label="Emoji">
           <For each={[...EMOJIS]}>
             {(e) => (
               <button
@@ -5861,7 +5920,7 @@ function Composer(props: {
         <p class="err-note" data-room-blocked>{blocked()}</p>
       </Show>
       <Show when={note() && note() !== MONEY_NOT_READY}>
-        <p class="err-note" data-composer-note>{note()}</p>
+        <p class="err-note" data-composer-note role="status">{note()}</p>
       </Show>
       <Show when={ownerExpired()}>
         <button type="button" class="link" data-contact-requote onClick={() => {
@@ -6445,7 +6504,7 @@ function BudgetBar(props: {
       </Switch>
       <Reconcile actions={props.actions} hasPending={props.hasPending} />
       <Show when={props.error}>
-        <p class="err-note" data-budget-error>{props.error}</p>
+        <p class="err-note" data-budget-error role="alert">{props.error}</p>
       </Show>
     </div>
   );
@@ -6581,8 +6640,8 @@ function BudgetPanel(props: {
                 );
               }}
             </For>
-            <Show when={note() && note() !== MONEY_NOT_READY}><p class="err-note">{note()}</p></Show>
-            <Show when={props.error}><p class="err-note">{props.error}</p></Show>
+            <Show when={note() && note() !== MONEY_NOT_READY}><p class="err-note" role="alert">{note()}</p></Show>
+            <Show when={props.error}><p class="err-note" role="alert">{props.error}</p></Show>
             <p class="hint">
               A budget can go up to the app all-in limit you approved; raising the total is a new approval. Budgets and this tally are
               saved on this device. Your approval is not: after a restart, approve once more. 0 forgets a contact, so they are asked
