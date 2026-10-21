@@ -42,6 +42,8 @@ class PairingLinkPlugin(private val activity: Activity) : Plugin(activity) {
         val link = intent.dataString ?: return
         // Do not retain the ticket in the Activity's launch Intent.
         intent.data = null
+        // Explicit intents bypass the manifest filter; match the iOS inbox.
+        if (!link.startsWith(PAIRING_PREFIX)) return
         val hash = MessageDigest.getInstance("SHA-256")
             .digest(link.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
         if (hash in takenHashes) return
