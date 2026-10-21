@@ -12,16 +12,22 @@ async function serious(page: Page, include?: string) {
   return result.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical');
 }
 
-test('onboarding, inbox, and welcome stay free of serious axe violations', async ({ page }) => {
-  const pageErrors: string[] = [];
-  page.on('pageerror', (error) => pageErrors.push(String(error)));
-  for (const theme of ['dark', 'light'] as const) {
-    await page.addInitScript((t) => {
-      try { localStorage.setItem('bitsov.theme', t); } catch { /* private mode */ }
-    }, theme);
+// One test per theme: init scripts accumulate on a page, so each theme gets its own fresh page.
+async function setTheme(page: Page, theme: 'dark' | 'light') {
+  await page.addInitScript((t) => {
+    try { localStorage.setItem('bitsov.theme', t); } catch { /* private mode */ }
+  }, theme);
+}
+
+for (const theme of ['dark', 'light'] as const) {
+  test(`onboarding, inbox, and welcome stay free of serious axe violations (${theme})`, async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on('pageerror', (error) => pageErrors.push(String(error)));
+    await setTheme(page, theme);
     for (const url of ['/?sample=first-run', '/?sample', '/?sample&peers=0']) {
       await page.goto(url, { waitUntil: 'networkidle' });
       await page.evaluate(() => document.fonts.ready);
+      await expect(page.locator('html'), `${theme} ${url}`).toHaveAttribute('data-theme', theme);
       const bad = await serious(page);
       expect(bad.map((v) => ({
         id: v.id,
@@ -30,9 +36,9 @@ test('onboarding, inbox, and welcome stay free of serious axe violations', async
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
       expect(overflow, `${theme} ${url}`).toBe(false);
     }
-  }
-  expect(pageErrors).toEqual([]);
-});
+    expect(pageErrors).toEqual([]);
+  });
+}
 
 test('emoji picker and the body energy table are valid aria', async ({ page }) => {
   await page.goto('/?sample');
@@ -47,14 +53,21 @@ test('emoji picker and the body energy table are valid aria', async ({ page }) =
   await expect(energy).toBeVisible();
   await page.waitForFunction(() => getComputedStyle(document.querySelector('.settings-modal.open')!).opacity === '1');
   const energyViolations = await serious(page, '.settings-modal.open .energy');
+  // The table cells reset `font`; the figures keep their body size and tabular numerals.
+  const fig = await page.locator('.settings-modal.open .energy .energy-fig').first().evaluate((el) => {
+    const cs = getComputedStyle(el);
+    const md = getComputedStyle(document.documentElement).getPropertyValue('--t-md').trim();
+    return { size: cs.fontSize, md, numeric: cs.fontVariantNumeric };
+  });
+  expect(fig.size).toBe(fig.md);
+  expect(fig.numeric).toContain('tabular-nums');
   expect(energyViolations.map((v) => v.nodes.map((n) => n.failureSummary).join('\n'))).toEqual([]);
 });
 
 test('light wallet custody pill meets contrast', async ({ page }) => {
-  await page.addInitScript(() => {
-    try { localStorage.setItem('bitsov.theme', 'light'); } catch { /* private mode */ }
-  });
+  await setTheme(page, 'light');
   await page.goto('/?sample');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await page.getByRole('button', { name: 'You: wallet, profile and settings' }).click();
   await page.getByRole('menuitem').first().click();
   const pill = page.locator('.wallet-page [data-custody]');

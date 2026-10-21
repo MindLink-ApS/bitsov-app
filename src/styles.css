@@ -841,6 +841,9 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 .energy .col { font-size: var(--t-xs); color: var(--muted); text-align: right; }
 .energy .dir { font-size: var(--t-xs); color: var(--muted); }
 .energy-fig { text-align: right; color: var(--accent); font-size: var(--t-md); }
+/* .energy td resets font (table cells); restore the figures' size and tabular numerals from .energy-fig and .sats. */
+.energy .sats { font-family: var(--font-sans); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.energy .energy-fig { font-size: var(--t-md); font-variant-numeric: tabular-nums; }
 .organ-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 var(--s-2); align-items: baseline; padding: 2px var(--s-1); margin: 0 calc(-1 * var(--s-1)); border-radius: 4px; transition: background-color var(--d-slow) var(--ease), font-weight var(--d-slow); }
 .organ-row .who { font-family: var(--font-sans); display: inline-flex; align-items: center; gap: var(--s-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .organ-row .sats { text-align: right; }

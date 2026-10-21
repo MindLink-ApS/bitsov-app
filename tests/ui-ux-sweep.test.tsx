@@ -51,3 +51,18 @@ it('keeps the sweep contrast, token, and focus fixes', () => {
   expect(readFileSync('index.html', 'utf8')).toContain('rel="icon"');
   expect(readFileSync('src/control/Shell.tsx', 'utf8')).toContain('1 sat = 1,000');
 });
+
+it('keeps the energy figures at the body size with tabular numerals inside the table', () => {
+  const source = css();
+  // `.energy td { font: inherit }` would otherwise reset .energy-fig and .sats.
+  const td = source.indexOf('.energy th, .energy td');
+  const fig = source.indexOf('.energy .energy-fig {');
+  const sats = source.indexOf('.energy .sats {');
+  expect(td).toBeGreaterThan(-1);
+  expect(fig).toBeGreaterThan(td);
+  expect(sats).toBeGreaterThan(td);
+  expect(line(source, '.energy .energy-fig {')).toContain('font-size: var(--t-md)');
+  expect(line(source, '.energy .energy-fig {')).toContain('font-variant-numeric: tabular-nums');
+  expect(line(source, '.energy .sats {')).toContain('font-family: var(--font-sans)');
+  expect(line(source, '.energy .sats {')).toContain('font-variant-numeric: tabular-nums');
+});
