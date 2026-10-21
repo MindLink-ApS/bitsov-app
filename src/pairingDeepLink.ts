@@ -1,4 +1,15 @@
 import { invoke } from '@tauri-apps/api/core';
+import { appPlatform } from './platform';
+
+/** The native take-once inbox exists on Android (intent) and iOS (opened URL).
+ * Desktop has none, so it never polls. */
+export function pairingLinkInboxAvailable(
+  userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
+  maxTouchPoints = typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints ?? 0,
+): boolean {
+  const platform = appPlatform(userAgent, maxTouchPoints);
+  return platform === 'android' || platform === 'ios';
+}
 
 /** Poll a private, take-once native inbox; never put tickets on the event bus,
  * in browser history, persistent storage, or diagnostic output. */

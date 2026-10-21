@@ -46,5 +46,16 @@
 	<string>BitSov uses the camera only during a video call you place or accept, or while you scan a pairing QR code.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>BitSov connects to your own node and to call peers on your local network.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>tech.mindlink.bitsov.pair</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>bitsov</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

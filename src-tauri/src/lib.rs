@@ -35,6 +35,9 @@ mod app;
 #[cfg(target_os = "android")]
 mod pairing_link_mobile;
 
+#[cfg(any(target_os = "ios", test))]
+mod pairing_link_ios;
+
 /// Start the desktop shell or mobile client.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

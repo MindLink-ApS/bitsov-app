@@ -32,7 +32,9 @@ const STEP_LABEL = { node: 'Your node', pair: 'Pair this app', identity: 'Your i
 export function onboardingStage(steps: { id: string; status: string }[]): Stage {
   const by = (id: string) => steps.find((s) => s.id === id)?.status;
   const settled = (st?: string) => st === 'done' || st === 'skipped';
-  if (!settled(by('node')) || !settled(by('pair'))) return 'node';
+  // A phone has no node step: only pairing gates the first stage there.
+  const node = by('node');
+  if ((node !== undefined && !settled(node)) || !settled(by('pair'))) return 'node';
   return by('identity') === 'done' ? 'fund' : 'identity';
 }
 
@@ -68,7 +70,7 @@ export function Onboarding(props: {
   const testNodes = (() => {
     try { return localStorage.getItem('bitsov.test-nodes') === '1'; } catch { return false; }
   })();
-  const steps = () => onboardingSteps(props.status(), props.pairing(), props.trustAck());
+  const steps = () => onboardingSteps(props.status(), props.pairing(), props.trustAck(), phone());
   const stage = () => onboardingStage(steps());
   // On a phone the only target is your node (there is no "This Mac").
   const [internalTarget, setInternalTarget] = createSignal<NodeTarget>((props.phone ?? props.mobile === true) ? 'network' : 'local');
@@ -200,7 +202,7 @@ export function Onboarding(props: {
       <ol class="steps stepper" aria-label="Setup progress">
         <For each={steps()}>
           {(step) => (
-            <li class={`step ${step.status}`} classList={{ joined: step.id === 'pair' }} data-step={step.id} data-status={step.status}>
+            <li class={`step ${step.status}`} classList={{ joined: step.id === 'pair' && !phone() }} data-step={step.id} data-status={step.status}>
               <span class="pip" aria-hidden="true" />
               {/* Node and pair read as one stage: two pips, one label after both. */}
               <span class="step-label" classList={{ 'sr-only': step.id === 'node' }}>

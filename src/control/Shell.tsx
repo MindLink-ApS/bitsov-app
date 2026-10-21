@@ -154,6 +154,8 @@ type Props = {
   watchUpdates?: WatchUpdates;
   watchError?: string | null;
   remote?: boolean;
+  /** An Android or iOS build: no node of its own, so no local-node state in the pill. */
+  phone?: boolean;
   /** The remote node's display label from its pairing link, if any. */
   hostedBy?: string | null;
   retryAfterSecs?: number | null;
@@ -1653,7 +1655,7 @@ export function ControlCenter(props: Props) {
   };
 
   const pill = () =>
-    nodePill({ remote: props.remote, retryAfterSecs: props.retryAfterSecs, ready: props.ready, error: props.error, overview: overview(), link: link(), nowMs: now() });
+    nodePill({ remote: props.remote, phone: props.phone, retryAfterSecs: props.retryAfterSecs, ready: props.ready, error: props.error, overview: overview(), link: link(), nowMs: now() });
 
   const trackName = (t: TrackRef): string => {
     if (t.kind === 'peer') return peerName(peerById().get(t.id), t.id);
