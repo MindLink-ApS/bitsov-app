@@ -262,20 +262,23 @@ signed assets; the historical rc7 inspection is not rc14 binary evidence. No mac
 
 ## CI artifact
 
-`.github/workflows/mac-package.yml` ("Mac Package") runs once per change: on
-pushes to `main` and on `workflow_dispatch` (app #131). On a PR it runs only
-when the `full-ci` label is added; the label triggers a run only on the
-`labeled` event itself, so remove and re-add it to request another run. It no
-longer runs when a PR is opened or marked ready for review. Windows Compile
-runs on pushes to `main`, `workflow_dispatch`, or the `full-ci` label to catch
-platform-gating regressions (app #132); Windows remains compile-only and is
-not a supported runtime or merge gate. macOS minutes cost 10x Linux:
+`.github/workflows/mac-package.yml` ("Mac Package") does not run on every
+push to `main`. macos-14 is billed at 10× Linux, so the ad-hoc signed Tauri
+bundle runs nightly (05:00 UTC, default branch), on `v*` tags, on
+`workflow_dispatch`, and on a pull request when `full-ci` is added. The
+label sticks: later pushes to that PR build again. Adding or removing any
+other label (for example `merge-ready`) does not start a build. There is no iOS simulator
+job; an iOS bundle would use these same triggers. Windows Compile uses the
+same schedule (2× Linux) to catch platform-gating regressions (app #132).
+Windows remains compile-only and is not a supported runtime or merge gate.
+Neither job is a required check.
 
 - Runner: `macos-14` (arm64). Toolchain: Node 22 and stable Rust. Permissions:
-  `contents: read`. It uses `github.token` read-only for `gh release download`.
-- Runs the offline checker and verifier tests, fetches the pinned sidecar, and
-  explicitly re-verifies all sidecars before `scripts/package-mac.sh --dmg
-  --use-existing-sidecar`. The package script and Tauri hook re-check them too.
+  `contents: read` only. It uses `github.token` read-only for `gh release download`.
+- Fetches the pinned sidecar and explicitly re-verifies all sidecars before
+  `scripts/package-mac.sh --dmg --use-existing-sidecar`. The offline checker
+  unit tests run on Linux in Authority Check, not on this 10× runner. The
+  package script and Tauri hook re-check the sidecars too.
   The package script compares the bundled node to the source before signing.
   Before zipping, CI requires the resource seal and repeats strict signature
   verification on the finished app.
@@ -285,12 +288,12 @@ not a supported runtime or merge gate. macOS minutes cost 10x Linux:
 - Download it from the run's **Summary → Artifacts** page, or with
   `gh run download <run-id> -n bitsov-unsigned-macos-arm64-<sha>`.
 
-The artifact names retain `unsigned` for compatibility; their contents are now
-ad-hoc signed. No Developer ID secrets, notarization, release publication or
-tags are used by the default workflow.
-Mac Package is **not a merge gate**. Like the `sidecar` job, it depends on
-network access and on the genome's published release. Keep it out of branch
-protection.
+The artifact names retain `unsigned` for compatibility; their contents are
+ad-hoc signed. No Developer ID secrets, notarization, or `gh release` are
+used. A `v*` tag runs the workflow; it still does not publish a GitHub
+Release. Mac Package is **not a merge gate**. Like the `sidecar` job, it
+depends on network access and on the genome's published release. Keep it out
+of branch protection.
 
 Follow [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) for G1 verification evidence
 and the remaining release requirements.
