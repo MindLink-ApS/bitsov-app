@@ -26,14 +26,9 @@ on:
   push:
     branches: [main]
     tags: ['v*']
-    # Path filters are not applied to tag pushes. Docs-only pushes skip this
-    # workflow; the pull_request path above cannot, or required checks pend.
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'pm/**'
-      - 'LICENSE'
-      - '.gitignore'
+    # No push paths filter (Atlas ruling 20 Oct): every push to main builds, so
+    # main's status always reflects a compiled tree. PRs still skip heavy jobs
+    # for docs-only changes at the job level.
   merge_group:
 
 # contents: read only. Do not grant actions: write or issues: write here:
