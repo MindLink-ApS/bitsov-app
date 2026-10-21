@@ -1399,6 +1399,9 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .spend-line > .dot { display: inline-block; vertical-align: middle; margin-right: var(--s-1); }
 .spend-line:not(:has(> .line-text)) { display: block; }
 .spend-line:not(:has(> .line-text)) > .link { margin-left: var(--s-1); }
+/* The meeting planner grows with the contact list; it scrolls inside the screen instead of
+   running off the top (12 contacts at 375 x 667 put its top at -174 px). */
+.meeting-panel[data-meeting-panel='planning'] { max-height: calc(100dvh - 48px); overflow-y: auto; }
 /* Phone: checkboxes in assistant watches and the meeting planner get a thumb-sized row. */
 @media (max-width: 480px) {
   .ai-watches label, .meeting-panel .meeting-legs label { min-height: 44px; display: flex !important; align-items: center; gap: var(--s-2); }

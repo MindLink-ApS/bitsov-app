@@ -589,7 +589,16 @@ const SAMPLE_PAYEE = `02${'5a'.repeat(32)}`;
 const sampleBolt11 = (msat: number) =>
   msat % 100 === 0 ? `lntbs${msat / 100}n1samplenotpayable0donotpay` : `lntbs${msat * 10}p1samplenotpayable0donotpay`;
 
-export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number; organism?: 'v1' | 'v2'; noPeers?: boolean } = {}): Source {
+/** `?sample&peers=12`: the sample contacts plus generated ones, for layout checks with a long list. */
+export function samplePeers(count: number): Peer[] {
+  const extra = Array.from({ length: Math.max(0, Math.min(64, count) - SAMPLE_PEERS.length) }, (_, i): Peer => {
+    const n = (16 + i).toString(16).padStart(2, '0');
+    return { node_id: n.repeat(32), addr: `34.90.40.${10 + i}:9735`, label: `Contact ${SAMPLE_PEERS.length + i + 1}`, connected: true, fingerprint: n.repeat(4) };
+  });
+  return [...SAMPLE_PEERS, ...extra];
+}
+
+export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number; organism?: 'v1' | 'v2'; noPeers?: boolean; peerCount?: number } = {}): Source {
   const assistantThreads: Partial<Record<AssistantId, AssistantThread>> = {};
   // Demo convenience: sample peers carry remote labels; mirror them into local
   // petnames once so the rail shows owner names without treating labels as truth.
@@ -842,7 +851,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
           } satisfies MembraneRead)
         : Promise.reject('not found: this node has no membrane read (N2)'),
     // `?sample&peers=0`: a node with no contacts yet (shows Welcome home).
-    peers: () => ok(opts.noPeers ? [] : SAMPLE_PEERS),
+    peers: () => ok(opts.noPeers ? [] : opts.peerCount ? samplePeers(opts.peerCount) : SAMPLE_PEERS),
     rooms: () => ok(SAMPLE_ROOMS),
     roomMembers: (id) => ok(ROOM_MEMBERS[id.toLowerCase()] ?? []),
     roomThread: () => ok([]),
