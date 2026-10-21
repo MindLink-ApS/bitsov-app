@@ -145,7 +145,7 @@ fn remote_client(state: &NodeState) -> Result<String, ActionError> {
 }
 
 fn registered_key(state: &NodeState) -> Result<(Vec<u8>, String), ActionError> {
-    let (blob, record) = local_key(&device_store(state)?)
+    let (blob, record) = local_key(&device_store(state)?)?
         .ok_or_else(|| device_error(device_key::DeviceKeyError::Invalid))?;
     Ok((blob, registered_key_id(&record)?))
 }

@@ -261,7 +261,7 @@ async fn run_pending(state: &NodeState, setup: &mut Setup, input: Input) -> Resu
                 .map_err(|_| {
                     "The box restarted or setup is closed. Open a new link from the box page."
                 })?;
-            let (blob, record) = match local_key(&ctx.store) {
+            let (blob, record) = match local_key(&ctx.store).map_err(|e| e.message)? {
                 Some((_, record)) if record.registered => {
                     return Err(
                         "This pairing already has an enrolled device. Open a new setup link."

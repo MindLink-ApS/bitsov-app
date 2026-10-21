@@ -121,6 +121,43 @@ describe.each([['iPhone', IPHONE], ['Android', ANDROID]])('%s pairing links', (_
     expect(mount!.querySelector('[data-pairing-link-banner]')).toBeNull();
   });
 
+  it('retries a failed connect from Review after the native inbox has consumed the link', async () => {
+    vi.useFakeTimers();
+    const link = 'bitsov://pair/retry-ticket';
+    const inbox = { pending: link as string | null };
+    const calls: string[] = [];
+    start(userAgent, inbox, calls);
+    const invoke = (globalThis as any).__TAURI_INTERNALS__.invoke;
+    const attempts: string[] = [];
+    (globalThis as any).__TAURI_INTERNALS__.invoke = (cmd: string, args?: { link: string }) => {
+      if (cmd === 'remote_access_connect') {
+        attempts.push(args!.link);
+        return attempts.length === 1
+          ? Promise.reject({ kind: 'busy', detail: 'Try again shortly.' })
+          : Promise.resolve({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', restart_required: false });
+      }
+      return invoke(cmd, args);
+    };
+    await vi.advanceTimersByTimeAsync(100);
+    mount!.querySelector<HTMLButtonElement>('[data-review-pairing]')!.click();
+    await vi.advanceTimersByTimeAsync(1);
+    const form = mount!.querySelector<HTMLFormElement>('[data-pairing-link-screen] form')!;
+    form.requestSubmit();
+    await vi.advanceTimersByTimeAsync(1);
+    form.requestSubmit();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(inbox.pending).toBeNull();
+    expect(mount!.textContent).toContain('Try again shortly.');
+    expect(mount!.querySelector('[data-pairing-preview]')).not.toBeNull();
+    expect(mount!.querySelector<HTMLInputElement>('[data-pairing-link-screen] input')!.value).toBe(link);
+    expect(attempts).toEqual([link]);
+    form.requestSubmit();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(attempts).toEqual([link, link]);
+    expect(mount!.querySelector('[data-import-result]')).not.toBeNull();
+    expect(mount!.querySelector<HTMLInputElement>('[data-pairing-link-screen] input')!.value).toBe('');
+  });
+
   it('a dismissed link is gone; the desktop app never polls the inbox', async () => {
     vi.useFakeTimers();
     const inbox = { pending: 'bitsov://pair/unwanted' as string | null };

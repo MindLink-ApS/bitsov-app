@@ -1627,7 +1627,7 @@ async fn connect_remote_at(state: &NodeState, app_data_dir: &Path, wait: bool) -
                         }
                     }
                 }
-            } else if !wait {
+            } else {
                 finish_remote_auth(state, app_data_dir).await;
             }
             Ok(())
@@ -2534,9 +2534,9 @@ async fn remote_access_connect(
     state: State<'_, NodeState>,
     link: String,
 ) -> Result<RemoteImportView, remote_access::ConnectionError> {
-    reject_sealed_window(&window)?;
+    reject_sealed_window(&window).map_err(|_| remote_access::ConnectionError::main_window_only())?;
     drop(window);
-    let dir = app.path().app_data_dir().map_err(|_| remote_access::ConnectionError::other())?;
+    let dir = app.path().app_data_dir().map_err(|_| remote_access::ConnectionError::app_data_unavailable())?;
     remote_access_connect_at(&app, &state, &dir, &link).await
 }
 
@@ -2576,6 +2576,11 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     let result = match remote_access::import_pairing_link(dir, link.trim()) {
         Ok(result) => result,
         Err(error) => {
+            // Join teardown under remote_change/recovery, outside the spawned
+            // task's cancellation select. A second Connect/Forget must wait for
+            // the surviving listener and its sockets to close before rebinding.
+            let previous = state.remote_proxy.lock().unwrap().take();
+            if let Some(proxy) = previous { proxy.stop_and_wait().await; }
             spawn_remote_connect(app, dir, true);
             return Err((&error).into());
         }
@@ -2599,6 +2604,11 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     *state.readmission_ask.lock().unwrap() = None;
     *state.owner_contact.lock().unwrap() = None;
     *state.front_door_ask.lock().unwrap() = None;
+    // Config fallbacks describe the old node; the remint cooldown also gates
+    // paired auth. Neither its policy/network nor its cooldown transfers.
+    *state.room_routing_policy.lock().unwrap() = None;
+    *state.configured_network.lock().unwrap() = None;
+    *state.last_remint.lock().unwrap() = None;
     *devices = add_device::Setup::default();
     let previous = state.remote_proxy.lock().unwrap().take();
     if let Some(proxy) = previous { proxy.stop_and_wait().await; }
@@ -2698,43 +2708,6 @@ fn spawn_remote_connect<R: tauri::Runtime>(app: &AppHandle<R>, app_data_dir: &Pa
             }
         }
     });
-}
-
-/// Replace the saved remote link with a reviewed ticket for another node, after
-/// the owner confirmed it. Only for an app already using a remote node; it
-/// changes the next start and never the live connection. Fails
-/// closed and keeps the old link on any error.
-#[tauri::command(rename_all = "snake_case")]
-fn remote_access_replace(
-    window: WebviewWindow<impl tauri::Runtime>,
-    app: AppHandle<impl tauri::Runtime>,
-    state: State<'_, NodeState>,
-    link: String,
-) -> Result<RemoteImportView, String> {
-    reject_sealed_window(&window)?;
-    if !state.remote_mode.load(Ordering::SeqCst) {
-        return Err("this app is not using a remote node; pair one from the setup screen".into());
-    }
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("no app data dir: {error}"))?;
-    // An unresolved first-run recovery journal is bound to the current node; the
-    // next start would check the new node against it and refuse. Take the same
-    // locks that first run and unlock hold while they save or clear that journal,
-    // so the check and the replace cannot race them. Busy fails closed.
-    #[cfg(all(desktop, not(feature = "mobile")))]
-    {
-        return remote_owner::replace_link_when_idle(
-            &state,
-            &app_data_dir.join(PAIRING_STORE_DIR),
-            &app_data_dir,
-            &link,
-        );
-    }
-    #[cfg(not(all(desktop, not(feature = "mobile"))))]
-    remote_access::replace_pairing_link(&app_data_dir, link.trim())
-        .map_err(|error| error.to_string())
 }
 
 /// Forget the saved remote link for the next startup. Do not switch a live
@@ -7245,25 +7218,27 @@ struct DeviceKeyReply {
     owner_action: String,
 }
 
-/// Where this Mac's registration stands; asks the node while one is pending,
-/// and notices a key the owner revoked.
-/// The local key, only when the record and the enclave blob agree. A record
-/// whose blob is missing, unreadable or holds another key is dropped, so setup
-/// is offered again rather than "registered" forever.
-fn local_key(store: &Path) -> Option<(Vec<u8>, device::Record)> {
-    let record = device::load_record(store)?;
-    let consistent = device::load_blob(store).filter(|blob| {
-        device_key::public_key(blob).is_ok_and(|public| hex::encode(public) == record.public_key)
-    });
-    match consistent {
-        Some(blob) => Some((blob, record)),
-        None => {
-            // Not on a Mac without an enclave, where nothing can be read back.
-            if device_key::enclave_available() {
-                device::forget(store);
-            }
-            None
+/// Read the local key only when its public key agrees with the registration.
+/// A bridge/transport failure is retryable, not evidence of invalidation.
+fn local_key(store: &Path) -> Result<Option<(Vec<u8>, device::Record)>, ActionError> {
+    local_key_with(store, device_key::public_key)
+}
+
+fn local_key_with(
+    store: &Path,
+    public_key: impl FnOnce(&[u8]) -> Result<[u8; device_key::PUBLIC_KEY_LEN], device_key::DeviceKeyError>,
+) -> Result<Option<(Vec<u8>, device::Record)>, ActionError> {
+    let Some(record) = device::load_record(store) else { return Ok(None); };
+    let Some(blob) = device::load_blob(store) else { return Ok(None); };
+    match public_key(&blob) {
+        Ok(public) if hex::encode(public) == record.public_key => Ok(Some((blob, record))),
+        Ok(_) | Err(device_key::DeviceKeyError::Invalid) => {
+            device::forget(store);
+            Ok(None)
         }
+        // Propagate transient failures so registration cannot overwrite the key
+        // by treating a failed read as a missing enrollment.
+        Err(error) => Err(device_error(error)),
     }
 }
 
@@ -7279,7 +7254,7 @@ async fn do_device_key_status(state: &NodeState) -> Result<device::DeviceView, A
 
 async fn do_device_key_status_local(state: &NodeState) -> Result<device::DeviceView, ActionError> {
     let store = device_store(state)?;
-    let Some((_, record)) = local_key(&store) else { return Ok(device_view(state, None)) };
+    let Some((_, record)) = local_key(&store)? else { return Ok(device_view(state, None)) };
     // What this poll found, applied only if the record is still the one polled.
     let before = record.clone();
     let mut updated = record;
@@ -7378,7 +7353,7 @@ async fn do_device_key_register(state: &NodeState) -> Result<device::DeviceView,
         return Err(device_error(device_key::DeviceKeyError::BiometryUnavailable));
     }
     let store = device_store(state)?;
-    let existing = local_key(&store);
+    let existing = local_key(&store)?;
     if let Some((_, r)) = existing.as_ref().filter(|(_, r)| r.registered) {
         return Ok(device_view(state, Some(r)));
     }
@@ -7480,7 +7455,7 @@ async fn do_relation_approve(
     // at the dialog, or while the node answers, opens nothing.
     let fence = approval_fence(state);
     let store = device_store(state)?;
-    let Some((blob, record)) = local_key(&store).filter(|(_, r)| r.registered) else {
+    let Some((blob, record)) = local_key(&store)?.filter(|(_, r)| r.registered) else {
         return Err(ActionError::new("device_not_registered", if cfg!(target_os = "android") {
             "Set up biometric approvals first."
         } else {
@@ -8954,7 +8929,6 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             remote_access_connect,
             pairing_link_take,
             remote_access_forget,
-            remote_access_replace,
             node_overview,
             live_link,
             peers_list,
@@ -9148,6 +9122,33 @@ mod test_support;
 #[cfg(test)]
 mod device_sign_error_tests {
     use super::*;
+
+    #[test]
+    fn local_key_preserves_transport_failures_but_forgets_invalid_or_mismatched_keys() {
+        use device_key::DeviceKeyError::*;
+        for public in [Err(Other(-6)), Err(Unavailable), Err(Cancelled), Err(BiometryUnavailable),
+            Err(Invalid), Ok([5; 65]), Ok([4; 65])] {
+            let dir = tempfile::tempdir().unwrap();
+            let blob = b"synthetic wrapped key";
+            let record = device::Record { public_key: hex::encode([4; 65]), registered: true, ..Default::default() };
+            device::save_blob(dir.path(), blob).unwrap();
+            device::save_record(dir.path(), &record).unwrap();
+            let result = local_key_with(dir.path(), |_| public);
+            match public {
+                value if value == Err(Invalid) || value == Ok([5; 65]) => {
+                    assert!(result.unwrap().is_none());
+                    assert!(device::load_blob(dir.path()).is_none());
+                    assert!(device::load_record(dir.path()).is_none());
+                }
+                _ => {
+                    assert_eq!(device::load_blob(dir.path()).as_deref(), Some(blob.as_slice()));
+                    assert_eq!(device::load_record(dir.path()), Some(record));
+                    if public.is_err() { assert!(result.is_err(), "transient failure must not offer key creation"); }
+                    else { assert!(result.unwrap().is_some()); }
+                }
+            }
+        }
+    }
 
     #[test]
     fn malformed_signature_transport_error_does_not_forget_key_or_registration() {
@@ -19328,7 +19329,6 @@ mod assistant_acl_tests {
                 "remote_access_connect",
                 "pairing_link_take",
                 "remote_access_forget",
-                "remote_access_replace",
                 // Control center reads (main window only, ACL + reject_sealed_window).
                 "node_overview",
                 "live_link",
@@ -19780,8 +19780,11 @@ mod assistant_acl_tests {
                 .map(str::trim)
                 .find(|line| !line.is_empty() && !line.starts_with("//"))
                 .unwrap_or("");
+            let expected = if name == "remote_access_connect" {
+                "reject_sealed_window(&window).map_err(|_| remote_access::ConnectionError::main_window_only())?;"
+            } else { "reject_sealed_window(&window)?;" };
             assert_eq!(
-                first, "reject_sealed_window(&window)?;",
+                first, expected,
                 "{name} must reject the assistant window before doing anything else"
             );
             assert!(!body.contains("window_label"));
@@ -20088,7 +20091,6 @@ mod assistant_acl_tests {
                 super::remote_access_import,
                 super::remote_access_connect,
                 super::remote_access_forget,
-                super::remote_access_replace,
             ])
             // `test = true` skips the macOS Info.plist embed. A second plain
             // generate_context!() defines `_EMBED_INFO_PLIST` again and cargo
@@ -20209,7 +20211,7 @@ mod assistant_acl_tests {
         // Do not invoke forget against the user's real app-data directory in
         // this mock app. The persistence tests use isolated temporary folders.
         assert_handler_ran(invoke(&main, "node_unlock", serde_json::json!({})), "not locked");
-        for cmd in ["node_unlock", "pairing_status", "trust_acknowledge", "pairing_retry", "remote_access_preview", "remote_access_import", "remote_access_connect", "remote_access_forget", "remote_access_replace"] {
+        for cmd in ["node_unlock", "pairing_status", "trust_acknowledge", "pairing_retry", "remote_access_preview", "remote_access_import", "remote_access_connect", "remote_access_forget"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
     }
