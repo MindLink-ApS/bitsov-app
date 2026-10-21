@@ -82,10 +82,10 @@ mod model_launch;
 #[path = "dev_node.rs"]
 mod dev_node;
 // Safe desktop native wrappers. Their unsafe implementations live in bitsov-ffi.
-#[cfg(all(desktop, not(feature = "mobile")))]
+#[cfg(any(target_os = "ios", all(desktop, not(feature = "mobile"))))]
 #[path = "device_key.rs"]
 mod device_key;
-#[cfg(any(mobile, feature = "mobile"))]
+#[cfg(all(not(target_os = "ios"), any(mobile, feature = "mobile")))]
 #[path = "device_key_mobile.rs"]
 mod device_key;
 #[cfg(all(desktop, not(feature = "mobile")))]
@@ -8199,8 +8199,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
         .plugin(device_key::init())
         .plugin(crate::pairing_link_mobile::init())
         .plugin(tauri_plugin_barcode_scanner::init());
-    // iOS: no Keystore plugin yet (device keys fail closed, see
-    // device_key_mobile.rs); the QR scanner is the only native plugin. Pairing
+    // iOS device keys use the statically linked Apple enclave bridge;
+    // the QR scanner is the only mobile plugin. Pairing
     // links arrive as `RunEvent::Opened` (see `run`), not through a plugin.
     #[cfg(target_os = "ios")]
     let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
@@ -8325,6 +8325,11 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             // Install before bootstrap_node reads any pairing secrets.
             #[cfg(all(target_os = "macos", not(feature = "mobile")))]
             bitsov_app::at_rest::install_macos();
+            #[cfg(target_os = "ios")]
+            {
+                bitsov_ffi::client_keychain::exclude_from_backup(&app.path().app_data_dir()?)?;
+                bitsov_app::at_rest::install_ios()?;
+            }
             #[cfg(target_os = "android")]
             bitsov_app::at_rest::install(Arc::new(device_key::KeystoreSealer))?;
             let handle = app.handle().clone();

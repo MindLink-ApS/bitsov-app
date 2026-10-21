@@ -7,6 +7,8 @@
 //! written only as ciphertext under a non-exportable key. Public pins (node
 //! id, transport keys and their signatures) stay readable: their integrity
 //! comes from the node's signature, not from secrecy.
+//! iOS installs the same enclave-wrapping primitive without plaintext fallback
+//! for descriptor codes; its Ed25519 client seed lives directly in Keychain.
 
 use std::sync::{Arc, OnceLock};
 
@@ -75,4 +77,18 @@ pub(crate) mod test_sealer {
             ))
         }
     }
+}
+
+#[cfg(target_os = "ios")]
+pub fn install_ios() -> Result<(), String> {
+    struct IosSealer;
+    impl Sealer for IosSealer {
+        fn seal(&self, purpose: &str, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+            bitsov_ffi::pairing_sealer::seal(purpose, plaintext)
+        }
+        fn open(&self, purpose: &str, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+            bitsov_ffi::pairing_sealer::open(purpose, sealed)
+        }
+    }
+    install(Arc::new(IosSealer))
 }

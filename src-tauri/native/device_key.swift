@@ -1,4 +1,4 @@
-// Secure Enclave device key bridge for the BitSov desktop app (macOS only).
+// Secure Enclave device key bridge for the BitSov Apple apps.
 //
 // ffi/build.rs compiles this file into a static library (module BitsovDeviceKey)
 // and links it into the app binary. Safe Rust wrappers live in ffi/src; the ABI
@@ -85,15 +85,18 @@ private func createKey(
         return errBadArgument
     }
     outBlobLen.pointee = 0
-    guard SecureEnclave.isAvailable else { return errUnavailable }
-
     let flags: SecAccessControlCreateFlags
     switch policy {
     case 1: flags = [.privateKeyUsage, .biometryCurrentSet]
+    #if os(iOS) || BITSOV_IOS_TEST_POLICY
+    case 0: return errBadArgument
+    #else
     case 0: flags = [.privateKeyUsage]
+    #endif
     default: return errBadArgument
     }
 
+    guard SecureEnclave.isAvailable else { return errUnavailable }
     var cfError: Unmanaged<CFError>?
     guard let access = SecAccessControlCreateWithFlags(
         nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, &cfError
@@ -232,6 +235,7 @@ private func statusForSigningError(_ error: Error) -> Int32 {
     return errOther
 }
 
+#if os(macOS)
 // Shared storage policy for home records and the bootstrap launcher password.
 // An authentication refusal must never select a weaker store.
 private func missingEntitlement(_ status: OSStatus) -> Bool {
@@ -317,6 +321,8 @@ private func deleteItems(_ service: String, _ account: String) -> OSStatus {
     }
     return errSecSuccess
 }
+
+#endif
 
 private let passwordPurpose = Data("bitsov.home-seed-password.wrap.v1".utf8)
 private struct WrappedPassword: Codable {
@@ -411,6 +417,7 @@ private func statusForPairingError(_ error: Error, sealing: Bool) -> Int32 {
     return errOther
 }
 
+#if os(macOS)
 private func passwordNode(_ service: String) -> String? {
     // Strip only for node validation/AAD. Every Keychain query keeps the full
     // service, including wrapped-envelope and old biometric-item fallbacks.
@@ -532,6 +539,8 @@ public func bitsov_home_read(_ service: UnsafePointer<CChar>?, _ output: UnsafeM
     }
 }
 
+#endif
+
 private func copyOutput(_ data: Data, _ output: UnsafeMutablePointer<UInt8>,
                         _ capacity: Int, _ length: UnsafeMutablePointer<Int>) -> Int32 {
     guard data.count <= capacity else { return errBufferTooSmall }
@@ -540,6 +549,7 @@ private func copyOutput(_ data: Data, _ output: UnsafeMutablePointer<UInt8>,
     return errSecSuccess
 }
 
+#if os(macOS)
 // Bootstrap launcher item uses the same exact service/account in both stores.
 @_cdecl("bitsov_item_add")
 public func bitsov_item_add(_ service: UnsafePointer<CChar>?, _ account: UnsafePointer<CChar>?,
@@ -576,6 +586,8 @@ public func bitsov_item_delete(_ service: UnsafePointer<CChar>?, _ account: Unsa
     guard let service = service, let account = account else { return errBadArgument }
     return autoreleasepool { deleteItems(String(cString: service), String(cString: account)) }
 }
+
+#endif
 
 // Onboarding only: registration authorization may sign one first-unlock
 // challenge for the same key/node/client. General device signing never uses it.

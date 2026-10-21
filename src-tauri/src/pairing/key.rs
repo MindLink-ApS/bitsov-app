@@ -1,5 +1,8 @@
 //! The app-held Ed25519 client key.
 //!
+//! iOS stores the seed directly in the non-synchronizing, ThisDeviceOnly
+//! Keychain. Only a public identity marker remains in the pairing directory.
+//!
 //! macOS (Secure Enclave) and Android (Keystore) install an [`at_rest::Sealer`].
 //! A legacy [`KEY_FILE`] is sealed, read back and verified, then wiped and
 //! deleted. Once [`SEALED_KEY_FILE`] exists it is authoritative, even when
@@ -43,6 +46,9 @@ impl ClientKey {
     /// Refuses a key file readable or writable by group or others rather than
     /// silently tightening it: a loosened mode means something else touched it.
     pub fn load_or_create(dir: &Path) -> Result<Self, PairError> {
+        #[cfg(target_os = "ios")]
+        { return keychain::load_native(dir); }
+        #[cfg(not(target_os = "ios"))]
         match at_rest::installed() {
             Some(sealer) => Self::load_or_create_sealed(dir, sealer),
             None => Self::load_or_create_plain(dir),
@@ -575,3 +581,7 @@ mod tests {
         assert!(!dir.path().join(KEY_FILE).exists());
     }
 }
+
+#[cfg(any(target_os = "ios", all(test, unix)))]
+#[path = "key/keychain.rs"]
+mod keychain;
