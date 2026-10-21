@@ -81,7 +81,7 @@ it('lets an Android owner type the node password, then clears the field', async 
   buttonNamed(mount, 'Type your node password instead')!.click();
   const input = typePassword(mount, 'correct horse');
   expect(input.type).toBe('password');
-  expect(mount.textContent).toContain('Your node checks it. This phone keeps it only in memory, unless you then choose to remember it here behind your fingerprint.');
+  expect(mount.textContent).toContain('Your node checks it. This phone keeps it only in memory, unless you then choose to remember it here behind biometrics.');
   buttonNamed(mount, 'Unlock with password')!.click();
   await vi.waitFor(() => expect(typed).toEqual(['correct horse']));
   expect(input.value).toBe('');
@@ -106,24 +106,24 @@ it('opens the typed password form after a failed biometric unlock on Android', a
   expect(mount.querySelector('[role="alert"]')?.textContent).toContain('device key is not valid');
 });
 
-it('offers to remember the accepted password behind a fingerprint, once', async () => {
+it('offers to remember the accepted password behind biometrics, once', async () => {
   const choices: boolean[] = [];
   const onDone = vi.fn();
   const mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <RememberUnlock mobile onChoose={async (remember) => { choices.push(remember); }} onDone={onDone} />, mount);
   expect(mount.textContent).toContain('Unlocked. Remember the password on this phone?');
-  expect(mount.textContent).toContain('only opens with your fingerprint');
-  expect(mount.textContent).toContain('If the fingerprints on this phone change, the saved copy stops opening. Type the password once more and choose Remember to replace it.');
+  expect(mount.textContent).toContain('only opens with biometrics');
+  expect(mount.textContent).toContain('If the enrolled biometrics on this phone change, the saved copy stops opening. Type the password once more and choose Remember to replace it.');
   expect(mount.querySelector('input')).toBeNull();
-  buttonNamed(mount, 'Remember on this phone (fingerprint)')!.click();
-  await vi.waitFor(() => expect(mount.querySelector('[data-remember-saved]')?.textContent).toBe('Saved on this phone. Next time, unlock with your fingerprint.'));
+  buttonNamed(mount, 'Remember on this phone (biometrics)')!.click();
+  await vi.waitFor(() => expect(mount.querySelector('[data-remember-saved]')?.textContent).toBe('Saved on this phone. Next time, unlock with biometrics.'));
   expect(choices).toEqual([true]);
   expect(onDone).not.toHaveBeenCalled();
   buttonNamed(mount, 'Close')!.click();
   expect(onDone).toHaveBeenCalledOnce();
 });
 
-it('keeps the offer after a cancelled fingerprint and closes on Not now', async () => {
+it('keeps the offer after a cancelled biometric check and closes on Not now', async () => {
   const choices: boolean[] = [];
   const onDone = vi.fn();
   const mount = document.createElement('div'); document.body.appendChild(mount);
@@ -131,9 +131,9 @@ it('keeps the offer after a cancelled fingerprint and closes on Not now', async 
     choices.push(remember);
     if (remember) throw 'Android encrypted storage refused the home-node item: device key approval was cancelled';
   }} onDone={onDone} />, mount);
-  buttonNamed(mount, 'Remember on this phone (fingerprint)')!.click();
+  buttonNamed(mount, 'Remember on this phone (biometrics)')!.click();
   await vi.waitFor(() => expect(mount.querySelector('[role="alert"]')?.textContent).toContain('cancelled'));
-  expect(buttonNamed(mount, 'Remember on this phone (fingerprint)')).toBeDefined();
+  expect(buttonNamed(mount, 'Remember on this phone (biometrics)')).toBeDefined();
   buttonNamed(mount, 'Not now')!.click();
   await vi.waitFor(() => expect(onDone).toHaveBeenCalledOnce());
   expect(choices).toEqual([true, false]);
@@ -163,7 +163,7 @@ it.each(['Android', 'Mac'])('on %s, unlocks with a typed password and asks to re
   expect(calls.filter(([cmd]) => cmd === 'node_unlock_password').map(([, args]) => args)).toEqual([{ password: 'correct horse' }]);
   expect(calls.map(([cmd]) => cmd)).not.toContain('node_unlock');
   expect(calls.map(([cmd]) => cmd)).not.toContain('node_unlock_remember');
-  buttonNamed(mount, mobile ? 'Remember on this phone (fingerprint)' : 'Remember on this Mac (Touch ID)')!.click();
+  buttonNamed(mount, mobile ? 'Remember on this phone (biometrics)' : 'Remember on this Mac (Touch ID)')!.click();
   await vi.waitFor(() => expect(mount.querySelector('[data-remember-saved]')).not.toBeNull());
   const remembered = calls.filter(([cmd]) => cmd === 'node_unlock_remember').map(([, args]) => args);
   expect(remembered).toEqual([{ remember: true }]);

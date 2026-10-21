@@ -12,7 +12,7 @@ describe('platform-aware device words', () => {
   it('a Mac keeps Touch ID and "this Mac"; an iPhone says biometrics; Android says "this phone"', () => {
     expect(deviceWords('desktop')).toMatchObject({ device: 'Mac', biometric: 'Touch ID', unlockButton: 'Unlock with Touch ID' });
     expect(deviceWords('ios')).toMatchObject({ device: 'iPhone', biometric: 'biometrics', unlockButton: 'Unlock with biometrics' });
-    expect(deviceWords('android')).toMatchObject({ device: 'phone', biometric: 'your fingerprint', unlockButton: 'Unlock with biometrics' });
+    expect(deviceWords('android')).toMatchObject({ device: 'phone', biometric: 'biometrics', unlockButton: 'Unlock with biometrics' });
   });
 
   it('a cancelled approval names the platform\'s biometric', () => {

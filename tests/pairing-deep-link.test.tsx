@@ -62,7 +62,7 @@ describe('watchPairingLinks', () => {
   });
 });
 
-describe('iPhone pairing links', () => {
+describe.each([['iPhone', IPHONE], ['Android', ANDROID]])('%s pairing links', (_label, userAgent) => {
   let dispose: (() => void) | undefined;
   let mount: HTMLElement | undefined;
   afterEach(() => {
@@ -88,7 +88,7 @@ describe('iPhone pairing links', () => {
     vi.useFakeTimers();
     const inbox = { pending: 'bitsov://pair/first-ticket' as string | null };
     const calls: string[] = [];
-    start(IPHONE, inbox, calls);
+    start(userAgent, inbox, calls);
     await vi.advanceTimersByTimeAsync(100);
     expect(mount!.querySelector('[data-pairing-link-banner]')).not.toBeNull();
     // Opening a link only queues it: no review screen until the owner asks.
@@ -111,7 +111,7 @@ describe('iPhone pairing links', () => {
     vi.useFakeTimers();
     const inbox = { pending: 'bitsov://pair/unwanted' as string | null };
     const calls: string[] = [];
-    start(IPHONE, inbox, calls);
+    start(userAgent, inbox, calls);
     await vi.advanceTimersByTimeAsync(100);
     const dismiss = [...mount!.querySelectorAll<HTMLButtonElement>('[data-pairing-link-banner] button')].find(b => b.textContent === 'Dismiss link')!;
     dismiss.click();

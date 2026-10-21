@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Release the pending spend slot and budget reservation for proven unpaid call-rules refusals, retain the operation receipt, and allow later payments after an expired hangup.
+- Align Android unlock and Remember copy with supported biometrics, remove Touch ID wording from missing-contact approval errors, ignore unrelated Android pairing intents, and cover phone flows with rendered Android Tauri tests.
 
 - Restore focus after Wallet and info/hub dialogs close, stack dialog Escape handling, focus incoming calls, expose AI composer expansion, and show pending-result checks only for pending work (UI/UX audit 2-8–2-11, 2-21).
 

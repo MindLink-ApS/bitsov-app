@@ -12,6 +12,7 @@ import { cameraQrScannerAvailable } from '../src/cameraQrScanner';
 import { Onboarding } from '../src/onboarding/Onboarding';
 import { androidQrScannerAvailable } from '../src/pairingScanner';
 
+const ANDROID = 'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/130.0 Mobile Safari/537.36';
 const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148';
 const IPAD = 'Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148';
 const MACINTOSH = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15';
@@ -27,23 +28,24 @@ afterEach(() => { dispose?.(); mount?.remove(); vi.restoreAllMocks(); vi.unstubA
 
 // Exercise the actual Tauri + navigator detection, including iPadOS's desktop UA.
 describe.each([
-  ['iPhone', IPHONE, 'phone'],
-  ['iPad', IPAD, 'iPad'],
-  ['iPad (desktop UA)', MACINTOSH, 'iPad'],
-])('%s mobile copy', (label, userAgent, device) => {
-  const namedDevice = label.startsWith('iPad') ? 'iPad' : 'iPhone';
+  ['Android', ANDROID, 'phone', 'android'],
+  ['iPhone', IPHONE, 'phone', 'ios'],
+  ['iPad', IPAD, 'iPad', 'ios'],
+  ['iPad (desktop UA)', MACINTOSH, 'iPad', 'ios'],
+] as const)('%s mobile copy', (label, userAgent, device, platform) => {
+  const namedDevice = platform === 'android' ? 'phone' : label.startsWith('iPad') ? 'iPad' : 'iPhone';
   beforeEach(() => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(userAgent);
     vi.spyOn(navigator, 'maxTouchPoints', 'get').mockReturnValue(5);
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: () => Promise.reject('unused host command') });
   });
 
-  it('detects mobile and its device name without enabling the Android scanner', () => {
-    expect(appPlatform()).toBe('ios');
+  it('detects mobile and enables the native scanner only on Android', () => {
+    expect(appPlatform()).toBe(platform);
     expect(isMobilePlatform()).toBe(true);
     expect(deviceWord()).toBe(device);
     expect(deviceWords().device).toBe(namedDevice);
-    expect(androidQrScannerAvailable()).toBe(false);
+    expect(androidQrScannerAvailable()).toBe(platform === 'android');
     expect(cameraQrScannerAvailable(userAgent, { getUserMedia: vi.fn() })).toBe(false);
   });
 
@@ -72,9 +74,10 @@ describe.each([
   });
 
   it('Remember uses biometric wording even when only the platform prop is supplied', async () => {
-    show(() => <RememberUnlock platform="ios" onChoose={async () => {}} onDone={() => {}} />);
+    show(() => <RememberUnlock platform={platform} onChoose={async () => {}} onDone={() => {}} />);
     expect(mount.textContent).toContain(`Remember the password on this ${namedDevice}`);
     expect(mount.textContent).toContain('Then set up biometric approvals again');
+    expect($('[data-remember-yes]').textContent).toContain('(biometrics)');
     cleanCopy();
     $<HTMLButtonElement>('[data-remember-yes]').click();
     await vi.waitFor(() => expect($('[data-remember-saved]')?.textContent).toContain(`Saved on this ${namedDevice}`));
@@ -82,7 +85,7 @@ describe.each([
   });
 
   it('locked enrollment instructions use the platform even without a mobile prop', () => {
-    show(() => <LockedNode platform="ios" state="not-enrolled" onUnlock={async () => {}} />);
+    show(() => <LockedNode platform={platform} state="not-enrolled" onUnlock={async () => {}} />);
     expect(mount.textContent).toContain(`This ${namedDevice} is not an approved owner device yet`);
     expect(mount.textContent).toContain('Set up biometric approvals');
     cleanCopy();
@@ -107,7 +110,7 @@ describe.each([
     expect($('[data-remember-unlock]').textContent).toContain(`this ${namedDevice}`);
   });
 
-  it('App pairing names the device in first run and the incoming-link dialog, with no Android scanner', async () => {
+  it('App pairing names the device in first run and the incoming-link dialog, with a native scanner only on Android', async () => {
     let link: string | null = 'bitsov://pair/test-ticket';
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
       if (cmd === 'pairing_link_take') { const pending = link; link = null; return Promise.resolve(pending); }
@@ -118,12 +121,15 @@ describe.each([
     show(() => <App />);
     await vi.waitFor(() => expect($('[data-review-pairing]')).not.toBeNull());
     expect(mount.textContent).toContain(`Connect this ${device} to your node`);
+    expect($('[data-target="local"]')).toBeNull();
+    expect($('[data-step="node"]')).toBeNull();
+    expect(mount.textContent).not.toMatch(/This Mac|Use this Mac instead|Start local node/);
     $<HTMLButtonElement>('[data-review-pairing]').click();
     const dialog = $('[data-pairing-link-screen]');
     expect(dialog.getAttribute('aria-label')).toBe(`Pair this ${device} with your node`);
     expect(dialog.querySelector('h1')?.textContent).toBe(`Pair this ${device} with your node`);
     expect(dialog.textContent).toContain(`does not pair this ${device}`);
-    expect(dialog.querySelector('[data-scan-pairing-qr]')).toBeNull();
+    expect(!!dialog.querySelector('[data-scan-pairing-qr]')).toBe(platform === 'android');
     cleanCopy(dialog);
     if (device === 'iPad') expect(dialog.textContent).not.toMatch(/this phone|iPhone/);
   });
