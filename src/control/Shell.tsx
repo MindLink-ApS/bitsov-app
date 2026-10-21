@@ -1,3 +1,4 @@
+import { provenUnpaid } from './paymentOutcome';
 import { AddDevice } from '../onboarding/AddDevice';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
 import { ConnectionCard, nextLastCall, type NodeAnswer, type StunSource, type TrackedCall } from './ConnectionCard';
@@ -1228,6 +1229,7 @@ export function ControlCenter(props: Props) {
   const [callApproval, setCallApproval] = createSignal(false);
   const [callApproving, setCallApproving] = createSignal(false);
   const calls = createCallEngine({
+    closeAdmission: (operationId, peer, callId) => source.closeCallAdmission(operationId, peer, callId),
     authorize: async () => {
       const pairing = await act(() => source.pairingStatus());
       if (!pairing.ok) {
@@ -1259,6 +1261,19 @@ export function ControlCenter(props: Props) {
     // No STUN unless the owner set one: host candidates only.
     iceServers: () => stunServer(effectiveStun()),
     busy: () => meetingOn(),
+    // H2: the host ends our admission (one paid hangup, or none if the offer was never paid).
+    endCall: async (callId) => {
+      const r = await act(() => source.opEndCall(callId));
+      void loadBudget();
+      void loadWallet();
+      return r;
+    },
+    stuckCall: async (peer, opId) => {
+      const list = await act(() => source.opList(peer));
+      if (!list.ok) return null;
+      const open = list.value.operations.filter((o) => (o.kind === 'call_offer' || o.kind === 'call_recovery') && o.call_id);
+      return (opId ? open.find((o) => o.op_id === opId) : open[0])?.call_id ?? null;
+    },
     provenUnpaid: (code) => provenUnpaid(code),
   });
   // The latest call and its route (candidate types only), kept after the call for the connection card.
@@ -2099,6 +2114,8 @@ export function ControlCenter(props: Props) {
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
         dismiss={() => { setCallApproval(false); calls.dismiss(); }}
+        closeAgain={() => void calls.closeAgain()}
+        endStuck={() => void calls.endStuck()}
       />
       <MeetingPanel
         view={meetingView()}
@@ -3144,6 +3161,10 @@ function CallPanel(props: {
   mute: () => void;
   camera: () => void;
   dismiss: () => void;
+  /** H2: ask the host again to end this call's admission. */
+  closeAgain: () => void;
+  /** H2: end the earlier call the host still holds open to this contact. */
+  endStuck: () => void;
   /** Opens Settings → General, where the STUN server is chosen. */
   openCallSettings?: () => void;
 }) {
@@ -3239,11 +3260,20 @@ function CallPanel(props: {
           {(connection) => <p class="hint" data-call-connection>Connection: {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} (local) / {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} (remote)</p>}
         </Show>
         <Show when={v().phase === 'ended'}>
-          <p class="hint" data-call-ended>{v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
+          <p class="hint" data-call-ended>{v().stuck
+            ? `A call to ${who()} is still closing at your node. Nothing was paid for this one. End it to call again.`
+            : v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
           <Show when={v().reason === 'failed'}>
             {/* A connectivity failure only ('failed': the connection closed, was lost, or never connected); no relay exists yet. No money claim here. */}
             <p class="hint" data-call-no-relay>Some networks need a relay to connect a call, and your node does not offer one yet.</p>
           </Show>
+        </Show>
+        <Show when={v().phase === 'ended' && v().close && (v().close!.status !== 'closed' || !!v().close!.message) ? v().close : null}>
+          {(close) => (
+            <p class={close().status === 'refused' || close().status === 'unknown' ? 'err-note' : 'hint'} role={close().status === 'closing' ? 'status' : 'alert'} data-call-close={close().status}>
+              {close().status === 'closing' ? 'Ending the call at your node…' : close().message}
+            </p>
+          )}
         </Show>
         {/* Display only: the browser reports no network. Recovery itself stays ICE-driven. */}
         <Show when={v().offline && v().phase !== 'ended' && v().phase !== 'idle'}>
@@ -3260,6 +3290,12 @@ function CallPanel(props: {
               <button type="button" class="soft" data-call-decline disabled={props.blocked} onClick={() => props.decline()}>Decline{price(answer())}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
+              <Show when={v().stuck}>
+                <button type="button" class="soft money" data-call-end-stuck onClick={() => props.endStuck()}>End that call</button>
+              </Show>
+              <Show when={v().close?.status === 'refused' && !v().stuck}>
+                <button type="button" class="soft money" data-call-close-retry onClick={() => props.closeAgain()}>Try ending it again</button>
+              </Show>
               <button type="button" class="soft" data-call-dismiss disabled={v().pendingCount > 0} title={v().pendingCount > 0 ? 'Closes once the payment has settled' : undefined} onClick={() => props.dismiss()}>Close</button>
             </Match>
             <Match when={v().phase !== 'idle'}>
@@ -3980,39 +4016,6 @@ export function opStateText(op: OpView, subject = 'This app’s record'): string
     default: return `${subject} could not be read.`;
   }
 }
-/**
- * Codes the host returns only when nothing was paid for this send (audited
- * against src-tauri/src/app.rs on this branch; `message_send`,
- * `message_retry`, `file_send`, all through money_post_with, POST at 4266).
- * Before the POST only: owner_*, price_changed, price_cap_unavailable,
- * price_quote_unavailable, peer_not_ready, room_unreachable, invalid,
- * retry_unavailable (confirm_first_contact 3735-3745, ceiling 3875,
- * require_price_caps 5216-5222, room_sendable, compose_body validation,
- * do_message_retry 5508-5522). After the POST but proven unpaid by the host
- * (it releases the reservation and abandons the journal): spend_refused
- * 4272-4277, not_ready 4279-4282, not_dispatched 4285-4289, grant_* node
- * refusals 4291-4297 ("before reserving or paying anything"),
- * price_cap_exceeded / readmission_capped 4300-4321, operation_mismatch
- * 4323-4329, readmission_quoted 5456 and retry_needs_admission 5536-5544
- * (after a refused POST, no second compose), and the local budget/approval
- * codes, which are before the POST except in readmit_under_quote 5451-5454,
- * which itself only runs after a refused POST. Everything else is unresolved:
- * spend_unknown, payment_unknown, budget_unreadable (raw after a paid retry,
- * refine_retry_fee 4413), app_not_ready (close_charge 4040 after payment),
- * node (transport loss can follow dispatch), and any code not listed.
- * Call-rules reasons below are mapped only for HTTP 400 on a 1:1 call compose;
- * the node's reserve_outgoing refuses before operation creation or payment.
- */
-const PROVEN_UNPAID = new Set([
-  'owner_only', 'owner_contact_unavailable', 'owner_contact_expired', 'sponsor_owner_approval_required',
-  'price_changed', 'price_cap_unavailable', 'price_quote_unavailable', 'peer_not_ready', 'room_unreachable', 'invalid', 'retry_unavailable',
-  'spend_refused', 'not_ready', 'not_dispatched', 'price_cap_exceeded', 'readmission_capped', 'readmission_quoted', 'operation_mismatch', 'retry_needs_admission',
-  'call_id_used', 'call_busy', 'call_signal_in_flight', 'call_signal_invalid', 'call_not_live',
-  'grant_ended', 'grant_per_call', 'grant_exhausted', 'grant_recipient', 'grant_unpriced', 'grant_paused', 'grant_failures_pending', 'grant_rate_limited',
-  'grant_velocity', 'grant_ledger', 'grant_refused', 'grant_first_contact', 'grant_readmission', 'grant_no_envelope', 'grant_unknown',
-  'spend_locked', 'spend_expired', 'budget_needed', 'budget_paused', 'budget_exhausted', 'ceiling_exhausted', 'budget_ledger_full', 'first_contact',
-]);
-const provenUnpaid = (code: string) => PROVEN_UNPAID.has(code);
 
 const kb = (bytes: number) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(bytes < 10_240 ? 1 : 0)} KB`);
 

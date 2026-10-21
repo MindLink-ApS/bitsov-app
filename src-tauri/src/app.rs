@@ -4127,6 +4127,45 @@ fn spend_journal(state: &NodeState) -> Result<Journal, ActionError> {
     Journal::open(&dir.join("app-spend"))
 }
 
+/// Requires the money lock. Preflight readers must not normalize a snapshot
+/// belonging to another money action that is awaiting its node response.
+fn locked_spend_journal(state: &NodeState) -> Result<Journal, ActionError> {
+    let journal = spend_journal(state)?;
+    if let Some(mut pending) = journal.pending()? {
+        if let Some(id) = pending.operation_id.clone() {
+            let record = journal.operation_record(&id)?;
+            let may_be_call = record.as_ref().is_none_or(|r| r.kind == "legacy" || r.kind.starts_with("call_"));
+            if may_be_call {
+                // Pre-A2 grace releases retained their operation id. They have
+                // no durable proof that the original call cannot still pay.
+                // Confirmed abandonment clears that id and never enters here.
+                if pending.resumable || record.as_ref().is_some_and(|r| r.state == spend_journal::OperationState::Unpaid) {
+                    pending.resumable = false;
+                    journal.save(&pending)?;
+                    journal.record_outcome(&pending, spend_journal::OperationState::Unknown, None)?;
+                }
+                if !pending.budgeted && pending.accounting_msat.is_none() {
+                    if state.node_id.lock().unwrap().as_deref() != Some(&pending.node_id) {
+                        return Err(spend_journal::unknown("The pending call belongs to another node identity."));
+                    }
+                    let peer = pending.peer.as_deref().ok_or_else(|| spend_journal::unknown("The pending call has no accounting target."))?;
+                    // Restore only the existing liability, never permission to
+                    // dispatch. Idempotent across a crash before the slot save.
+                    with_book(state, true, |book| {
+                        if !book.ledger.iter().any(|entry| entry.id == pending.charge_id()) {
+                            book.reserve(pending.charge_id(), peer, false, pending.max_msat, now_ms());
+                        }
+                        Ok(())
+                    })?;
+                    pending.budgeted = true;
+                    journal.save(&pending)?;
+                }
+            }
+        }
+    }
+    Ok(journal)
+}
+
 fn ceiling(price: u64, max_msat: u64) -> Result<(), ActionError> {
     if max_msat == 0 || price > max_msat {
         return Err(ActionError::new("price_changed", format!("The current price is {price} msat, above the confirmed ceiling of {max_msat} msat. Nothing was dispatched; refresh the quote.")));
@@ -4394,12 +4433,57 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // A failed refresh cannot erase an ID already observed before the wait.
     existing_operation = pending_operation_id(state).unwrap_or_else(|_| existing_operation.clone());
     refuse_if_connection_waiting(state)?;
-    let journal = spend_journal(state)?;
+    let journal = locked_spend_journal(state)?;
     let prior = journal.pending()?;
     existing_operation = prior.as_ref().and_then(|p| p.operation_id.clone());
     ensure_fresh_token(state).await;
     let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
+    if body["host_expected_node_id"].as_str().is_some_and(|expected| expected != node_id) {
+        return act::with_op(Active(body["host_admission_op"].as_str()), Err(ActionError::new(
+            "call_identity_changed", "This call belongs to another node identity. Nothing was paid.")));
+    }
+    // Call admission guards precede the generic pending fence, under the same
+    // money lock as dispatch. Concurrent calls wait for the first receipt.
+    if path == "/messages/compose" && body["is_room"].as_bool() != Some(true) {
+        let kind = body["kind"].as_u64().unwrap_or(0);
+        if matches!(kind, 400 | 403) {
+            let peer = body["recipient"].as_str().unwrap_or_default();
+            let calls = journal.call_operations(&node_id, Some(peer))?;
+            let payload = body["plaintext"].as_str().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+            let call_id = payload.as_ref().and_then(|v| v["call_id"].as_str());
+            let blocked = if kind == 400 {
+                calls.iter().find(|r| spend_journal::admission_open(r, &calls))
+                    .map(|r| (r, "call_admission_open", "End the existing call before starting another admission. Nothing was paid."))
+            } else {
+                let offer = calls.iter().filter(|r| r.call_id.as_deref() == call_id
+                    && matches!(r.kind.as_str(), "call_offer" | "call_recovery"))
+                    .max_by_key(|r| (r.created_ms, &r.op_id));
+                let expected = body["host_admission_op"].as_str();
+                // Preflight may have waited on quotes while the peer ended the
+                // call or another admission reused its wire id. Recheck here.
+                if body["host_call_snapshot"].as_bool() == Some(true)
+                    && offer.map(|r| r.op_id.as_str()) != expected {
+                    return act::with_op(Active(expected), Err(ActionError::new(
+                        "call_not_live", "This admission has ended. Nothing was dispatched.")));
+                }
+                let hangup = calls.iter().find(|r| spend_journal::hangup_blocks(r)
+                    && match offer {
+                        Some(offer) => spend_journal::hangup_for(r, offer),
+                        None => r.call_id.as_deref() == call_id && r.parent_op.is_none(),
+                    });
+                if let Some(hangup) = hangup {
+                    Some((hangup, "hangup_in_flight", "This call already has a hangup operation. Nothing was dispatched again."))
+                } else {
+                    offer.filter(|r| !spend_journal::admission_open(r, &calls))
+                        .map(|r| (r, "call_not_live", "This admission has ended. Nothing was dispatched."))
+                }
+            };
+            if let Some((record, code, message)) = blocked {
+                return act::with_op(Active(Some(&record.op_id)), Err(ActionError::new(code, message)));
+            }
+        }
+    }
     match (&prior, retry) {
         (None, None) => {}
         // Holds no payment: this action replaces it, or resumes it below.
@@ -4496,6 +4580,12 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     let result = async {
     // Durable above; only now may the id leave the app.
     if let Some(id) = &operation_id { body["operation_id"] = serde_json::json!(id); }
+    if let Some(body) = body.as_object_mut() {
+        body.remove("host_hangup_cap_msat");
+        body.remove("host_expected_node_id");
+        body.remove("host_admission_op");
+        body.remove("host_call_snapshot");
+    }
     pending.all_in = true;
     let charged = match &charge {
         Some(c) => match reserve(state, auth, c, pending.charge_id(), reserve_msat) {
@@ -4570,7 +4660,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
                 _ => None,
             }) {
             release(state)?;
-            // abandon records Unpaid before restoring/clearing the slot.
+            // Persist node closure evidence before restoring/clearing the slot.
+            journal.record_outcome(&begun, OpState::Unpaid, Some(&serde_json::json!({"reason": reason})))?;
             abandon(&journal)?;
             return Err(ActionError::new(reason, "The node refused this call signal before payment. Nothing was paid."));
         }
@@ -4812,7 +4903,7 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
     let _money = state.money.lock().await;
     // A failed refresh cannot erase an ID already observed before the wait.
     existing_operation = pending_operation_id(state).unwrap_or_else(|_| existing_operation.clone());
-    let journal = spend_journal(state)?;
+    let journal = locked_spend_journal(state)?;
     let Some(mut pending) = journal.pending()? else { return Ok("No pending spend.".into()); };
     let operation_id = pending.operation_id.clone();
     let result = async {
@@ -5016,7 +5107,13 @@ async fn reconcile_operation_with_reply(state: &NodeState, journal: &Journal, mu
         journal.save(&pending)?;
         // A lookup begun before the deadline may already be stale by the time
         // /status or the unsupported abandon request finishes.
-        if !unpaid_grace_elapsed(dispatched_at, lookup_started_at, state.spend_timeout) {
+        // Calls cannot use the legacy elapsed-time fallback: even an old
+        // 404/prepared/released snapshot can race the original POST. Only a
+        // node tombstone/confirmed abandon excludes future dispatch.
+        // Metadata-less legacy journals may also be calls. Their hash alone
+        // cannot establish otherwise, so require node abandonment for them too.
+        let call_operation = journal.operation_record(id)?.is_none_or(|r| r.kind == "legacy" || r.kind.starts_with("call_"));
+        if call_operation || !unpaid_grace_elapsed(dispatched_at, lookup_started_at, state.spend_timeout) {
             journal.record_outcome(&pending, OpState::Unknown, None)?;
             return Err(ActionError::new("payment_unknown", RECONCILE_WAIT).for_pending(&pending.id));
         }
@@ -5157,7 +5254,7 @@ fn do_spend_dismiss_undelivered(state: &NodeState, pending_id: &str) -> Result<S
         return Err(ActionError::new("money_busy", "Another payment action is still running. Nothing was changed; try again in a moment."));
     };
     existing_operation = pending_operation_id(state).unwrap_or_else(|_| existing_operation.clone());
-    let journal = spend_journal(state)?;
+    let journal = locked_spend_journal(state)?;
     // Only the record the owner chose: a stale card never releases another message.
     let pending = journal.pending()?.filter(|p| p.id == pending_id)
         .ok_or_else(|| ActionError::new("retry_unavailable", "That message is no longer waiting for delivery. Nothing was changed."))?;
@@ -5765,7 +5862,7 @@ async fn do_message_send_with(
 /// changes the request, raises a cap, or enters the delivery-retry path.
 async fn resume_admission_send(state: &NodeState, pending_id: &str, peer: &str, is_room: bool, plaintext: &str, max_msat: u64) -> Result<MoneyReply, ActionError> {
     let _money = state.money.lock().await;
-    let journal = spend_journal(state)?;
+    let journal = locked_spend_journal(state)?;
     let mut pending = journal.pending()?.filter(|p| p.id == pending_id && p.admission_resume
         && !p.over_budget && p.evidence_reservation_msat.is_some() && p.undelivered.is_none()
         && p.max_msat == max_msat && p.peer.as_deref() == Some(peer) && !is_room
@@ -6340,18 +6437,47 @@ async fn do_call_signal(
     plaintext: &str,
     max_msat: u64,
 ) -> Result<act::CallReceipt, ActionError> {
-    let existing_operation = pending_operation_id(state).unwrap_or_default();
+    do_call_signal_for_admission(state, peer, kind, plaintext, max_msat, None).await
+}
+
+async fn do_call_signal_for_admission(
+    state: &NodeState, peer: &str, kind: u16, plaintext: &str, max_msat: u64,
+    admission: Option<&spend_journal::OperationRecord>,
+) -> Result<act::CallReceipt, ActionError> {
+    let mut existing_operation = admission.map(|r| r.op_id.clone()).or_else(|| pending_operation_id(state).unwrap_or_default());
     let result = async {
     let target = control::node_id(peer).map_err(ActionError::invalid)?;
+    let signal_node_id = state.node_id.lock().unwrap().clone().unwrap_or_default();
+    // Bind ordinary renderer hangups too, before any quote/auth await.
+    let captured = if kind == act::KIND_CALL_HANGUP && admission.is_none() {
+        let payload: serde_json::Value = serde_json::from_str(plaintext).map_err(|_| ActionError::invalid("invalid call signal"))?;
+        let dir = app_files_dir(state).ok_or_else(|| spend_journal::unknown("The app data directory is not ready."))?;
+        spend_journal::read_call_admission(&dir.join("app-spend"), &signal_node_id, &target,
+            payload["call_id"].as_str().unwrap_or_default())?
+    } else { None };
+    let admission = admission.or(captured.as_ref());
+    if let Some(admission) = admission { existing_operation = Some(admission.op_id.clone()); }
     let mut body = act::call_body(&target, kind, plaintext)?;
+    if kind == act::KIND_CALL_HANGUP {
+        body["host_call_snapshot"] = serde_json::json!(true);
+        body["host_expected_node_id"] = serde_json::json!(signal_node_id);
+    }
+    if let Some(admission) = admission {
+        body["host_expected_node_id"] = serde_json::json!(admission.node_id);
+        body["host_admission_op"] = serde_json::json!(admission.op_id);
+    }
     let needs_contact = || ActionError::new("call_needs_contact", "Calls go to contacts you have already paid. Send them a message first. Nothing was paid.");
     let (auth, plan) = plan_message(state, &target, false, max_msat, None)
         .map_err(|e| if e.code == "first_contact" { needs_contact() } else { e })?;
     if plan.confirm.is_some() {
         return Err(needs_contact());
     }
-    no_pending_spend(state)?;
+    // The locked money path owns call fencing, including a pending receipt.
     let caps = require_price_caps(state, false).await?;
+    if (kind == act::KIND_CALL_OFFER || admission.is_some()) && !caps.operations {
+        return Err(ActionError::new("call_needs_node_upgrade",
+            "Upgrade your node before making calls: it cannot track call payments and admission safely. Nothing was paid."));
+    }
     let quote = read_call_quote(state, &target).await.map_err(ActionError::node)?;
     let (principal, fee) = if kind == act::KIND_CALL_OFFER {
         let offer = quote.offer_msat.ok_or_else(|| ActionError::new(
@@ -6374,6 +6500,9 @@ async fn do_call_signal(
             }
             error
         })?;
+    }
+    if kind == act::KIND_CALL_OFFER {
+        body["host_hangup_cap_msat"] = serde_json::json!(quote.signal_msat + quote.signal_max_routing_fee_msat);
     }
     body["max_total_msat"] = serde_json::json!(max_msat);
     body["max_routing_fee_msat"] = serde_json::json!(fee);
@@ -6401,6 +6530,107 @@ async fn do_call_signal(
     })
     }.await;
     act::with_op(Fallback(existing_operation.as_deref()), result)
+}
+
+/// Local teardown is not evidence that the node has closed its admission.
+/// The renderer must name the exact admission, not a reusable wire call id.
+async fn do_op_close_call(state: &NodeState, operation_id: &str, peer: &str, call_id: &str) -> Result<(), ActionError> {
+    let _money = state.money.lock().await;
+    let journal = locked_spend_journal(state)?;
+    let offer = journal.operation_record(operation_id)?
+        .ok_or_else(|| ActionError::new("call_not_found", "No outgoing admission is recorded."))?;
+    if state.node_id.lock().unwrap().as_deref() != Some(&offer.node_id)
+        || offer.peer != peer || offer.call_id.as_deref() != Some(call_id)
+        || !matches!(offer.kind.as_str(), "call_offer" | "call_recovery") {
+        return Err(ActionError::new("call_not_found", "No outgoing admission is recorded for this identity."));
+    }
+    // Keep admission and payment fenced until node-confirmed cleanup.
+    Ok(())
+}
+
+/// End an outgoing admission using host-owned identity and cap. Waiting for the
+/// money lock joins any offer/hangup receipt already in flight. Only a matching
+/// unknown offer is reconciled; unrelated sends retain their existing fence.
+async fn do_op_end_call(state: &NodeState, call_id: &str) -> Result<spend_journal::OpView, ActionError> {
+    let mut operation_id = pending_operation_id(state).unwrap_or_default();
+    let result = async {
+        if call_id.len() != 32 || !call_id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+            return Err(ActionError::invalid("invalid call id"));
+        }
+        let offer = {
+            let _money = state.money.lock().await;
+            let journal = locked_spend_journal(state)?;
+            let pending = journal.pending()?;
+            let node_id = state.node_id.lock().unwrap().clone()
+                .ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
+            let records = journal.call_operations_for(&node_id, None, Some(call_id))?;
+            let calls: Vec<_> = records.iter().filter(|r| r.call_id.as_deref() == Some(call_id)).collect();
+            let offer = calls.iter().filter(|r| matches!(r.kind.as_str(), "call_offer" | "call_recovery"))
+                .max_by_key(|r| (r.created_ms, &r.op_id)).copied()
+                .ok_or_else(|| ActionError::new("call_not_found", "No outgoing admission is recorded for this call."))?;
+            operation_id = Some(offer.op_id.clone());
+            if calls.iter().any(|r| r.peer != offer.peer) {
+                return Err(spend_journal::unknown("This call id names more than one peer."));
+            }
+            if let Some(hangup) = calls.iter().find(|r| spend_journal::hangup_for(r, offer) && spend_journal::hangup_blocks(r)) {
+                return Ok((**hangup).clone().into());
+            }
+            if !spend_journal::admission_open(offer, &records) { return Ok(offer.clone().into()); }
+            if let Some(p) = pending.filter(|p| p.operation_id.as_deref() == Some(&offer.op_id) && !p.resumable) {
+                // A lost offer receipt is checked by exact operation id, never
+                // replaced or guessed unpaid just because the renderer timed out.
+                match reconcile_operation(state, &journal, p, &offer.op_id).await {
+                    Ok(_) => {}
+                    Err(error) if error.code == "failed_paid" => {
+                        // Reconciliation accounted this terminal payment and
+                        // cleared its slot; the admission still needs cleanup.
+                        if journal.pending()?.is_some() || journal.operation_record(&offer.op_id)?
+                            .is_none_or(|r| r.state != spend_journal::OperationState::FailedPaid) {
+                            return Err(error);
+                        }
+                    }
+                    Err(error) if error.code == "undelivered_pending" => {
+                        let p = journal.pending()?.ok_or_else(|| spend_journal::unknown("Missing paid call operation."))?;
+                        if p.operation_id.as_deref() != Some(&offer.op_id) || p.over_budget
+                            || p.evidence_reservation_msat.is_some() || p.accounting_msat.is_none()
+                            || p.undelivered.as_ref().is_none_or(|u| u.in_flight) {
+                            return Err(error);
+                        }
+                        // End cancels further app delivery retries of this
+                        // offer. Preserve its paid evidence and admission fence;
+                        // only retire the fully accounted dispatch slot so the
+                        // single, parent-bound hangup can be sent.
+                        close_charge(state, p.charge_id(), p.accounting_msat, p.target.as_ref())?;
+                        journal.record_outcome(&p, spend_journal::OperationState::PaidUndelivered, None)?;
+                        journal.clear()?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            let offer = journal.operation_record(&offer.op_id)?.ok_or_else(|| spend_journal::unknown("Missing call offer."))?;
+            if !spend_journal::admission_open(&offer, &records) { return Ok(offer.into()); }
+            offer
+        };
+        let cap = match offer.hangup_cap_msat {
+            Some(cap) => cap,
+            // H1 predates the saved signal cap. Its explicit offer cap remains
+            // an upper bound; the normal call path checks today's signal quote.
+            None => offer.cap_msat,
+        };
+        let payload = serde_json::json!({"v": 1, "call_id": call_id, "reason": "hangup"}).to_string();
+        let id = match do_call_signal_for_admission(state, &offer.peer, act::KIND_CALL_HANGUP, &payload, cap, Some(&offer)).await {
+            Ok(receipt) => receipt.operation_id.ok_or_else(|| spend_journal::unknown("The node did not identify the hangup operation."))?,
+            Err(error) if matches!(error.code, "hangup_in_flight" | "call_not_live" | "call_not_found") => {
+                error.operation_id.ok_or_else(|| spend_journal::unknown("The hangup operation has no identity."))?
+            }
+            Err(error) => return Err(error),
+        };
+        operation_id = Some(id.clone());
+        let _money = state.money.lock().await;
+        locked_spend_journal(state)?.operation_record(&id)?.map(Into::into)
+            .ok_or_else(|| spend_journal::unknown("Missing hangup operation."))
+    }.await;
+    act::with_op(Fallback(operation_id.as_deref()), result)
 }
 
 // ---- porch reads (genome BROWSE.md, `porch_read_v1`) ------------------------------
@@ -6498,7 +6728,7 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     // The quote and lock wait may have let another command publish a pending ID.
     existing_operation = pending_operation_id(state).unwrap_or_else(|_| existing_operation.clone());
     refuse_if_connection_waiting(state)?;
-    let journal = spend_journal(state)?;
+    let journal = locked_spend_journal(state)?;
     let prior = journal.pending()?;
     existing_operation = prior.as_ref().and_then(|p| p.operation_id.clone());
     ensure_fresh_token(state).await;
@@ -7298,6 +7528,30 @@ async fn relation_approve(
     reject_sealed_window(&window)?;
     drop(window);
     do_relation_approve(state.inner(), &peer, budget_msat, per_act_max_msat).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn op_end_call(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    call_id: String,
+) -> Result<spend_journal::OpView, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_op_end_call(state.inner(), &call_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn op_close_call(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    operation_id: String,
+    peer: String,
+    call_id: String,
+) -> Result<(), ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_op_close_call(state.inner(), &operation_id, &peer, &call_id).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -8112,6 +8366,49 @@ async fn ai_local_clear(
     Ok(ai_provider_views(window.app_handle()).await)
 }
 
+struct CallObservation {
+    offer: spend_journal::OperationRecord,
+    ended: bool,
+}
+
+fn capture_call_observation(state: &NodeState, event: &control::LiveEvent) -> Result<Option<CallObservation>, ActionError> {
+    let control::LiveEvent::Message { message, room_id: None } = event else { return Ok(None) };
+    if !matches!(message.kind, 401 | 403) { return Ok(None); }
+    let Some(node_id) = state.node_id.lock().unwrap().clone() else { return Ok(None) };
+    if message.recipient != node_id || message.sender == node_id { return Ok(None); }
+    let Some(payload) = message.plaintext.as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()) else { return Ok(None) };
+    if payload["v"] != 1 { return Ok(None); }
+    let Some(call_id) = payload["call_id"].as_str() else { return Ok(None) };
+    if call_id.len() != 32 || !call_id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+        return Ok(None);
+    }
+    if message.kind == 401 && payload["sdp"].as_str().is_none_or(str::is_empty) { return Ok(None); }
+    let Some(dir) = app_files_dir(state) else { return Ok(None) };
+    let Some(offer) = spend_journal::read_completed_call_admission(&dir.join("app-spend"), &node_id, &message.sender, call_id)?
+        else { return Ok(None) };
+    Ok(Some(CallObservation { offer, ended: message.kind == 403 }))
+}
+
+async fn persist_call_observation(state: &NodeState, observation: &CallObservation) -> Result<bool, ActionError> {
+    let _money = state.money.lock().await;
+    if state.node_id.lock().unwrap().as_deref() != Some(&observation.offer.node_id) { return Ok(false); }
+    let journal = locked_spend_journal(state)?;
+    let current = journal.operation_record(&observation.offer.op_id)?;
+    if current.is_none_or(|r| r.created_ms != observation.offer.created_ms) { return Ok(false); }
+    journal.observe_call(&observation.offer, observation.ended)?;
+    Ok(true)
+}
+
+/// Carry the receive-time binding to the renderer; it never resolves a wire
+/// call id into payment authority. Missing/stale observations serialize as null.
+fn bind_call_event(event: &mut control::LiveEvent, observation: Option<&CallObservation>) {
+    if let control::LiveEvent::Message { message, .. } = event {
+        message.admission_operation_id = observation.filter(|o| !o.offer.call_closed)
+            .map(|o| o.offer.op_id.clone());
+    }
+}
+
 /// Tauri event the main window listens on for `/ws` traffic.
 const LIVE_EVENT: &str = "node-live";
 
@@ -8149,7 +8446,16 @@ fn live_link(
 /// with backoff, and stops once the app is quitting.
 async fn live_bridge(app: AppHandle) {
     let state = app.state::<NodeState>();
-    control::run_live_feed(
+    let session_identity = Mutex::new(None::<String>);
+    let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let forward = |event| {
+        // Old socket traffic must not acquire a replacement node's authority.
+        let same_identity = *session_identity.lock().unwrap() == *state.node_id.lock().unwrap();
+        let observation = if same_identity { capture_call_observation(&state, &event) } else { Ok(None) };
+        let _ = events.send((event, observation));
+    };
+    let stopping = || state.quitting.load(Ordering::SeqCst);
+    let feed = control::run_live_feed(
         || async {
             if state.remote_mode.load(Ordering::SeqCst) && state.remote_retry.is_retrying() {
                 let _ = reconnect_remote(&state).await;
@@ -8158,11 +8464,35 @@ async fn live_bridge(app: AppHandle) {
             ensure_fresh_token(&state).await;
             let Some(token) = state.token.lock().unwrap().clone() else { return Ok(None); };
             let url = control::ws_url(&state.api_base, &token)?;
+            *session_identity.lock().unwrap() = state.node_id.lock().unwrap().clone();
             Ok(Some((url, state.remote_proxy_auth.to_string())))
         },
-        &|event| emit_live(&app, event),
-        &|| state.quitting.load(Ordering::SeqCst),
-    ).await;
+        &forward,
+        &stopping,
+    );
+    let process = forward_live_events(&state, &mut received, |event| emit_live(&app, event));
+    tokio::select! { _ = feed => {}, _ = process => {} }
+}
+
+/// Drain receive-time observations in order. Idle time and link outages carry
+/// no closure authority; only an observed node event can update admission.
+async fn forward_live_events(
+    state: &NodeState,
+    received: &mut tokio::sync::mpsc::UnboundedReceiver<(control::LiveEvent, Result<Option<CallObservation>, ActionError>)>,
+    mut emit: impl FnMut(control::LiveEvent),
+) {
+    while let Some((mut event, observation)) = received.recv().await {
+        let result = match &observation {
+            Ok(Some(observation)) => persist_call_observation(state, observation).await,
+            Ok(None) => Ok(false),
+            Err(error) => Err(error.clone()),
+        };
+        if result.is_err() { eprintln!("call ledger: could not persist live call observation"); }
+        bind_call_event(&mut event, if matches!(result, Ok(true)) {
+            observation.as_ref().ok().and_then(Option::as_ref)
+        } else { None });
+        emit(event);
+    }
 }
 
 /// What a stop attempt actually did. Returned so the REAL adapter can be asserted
@@ -8525,6 +8855,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             relation_approve,
             spend_reconcile,
             op_list,
+            op_end_call,
+            op_close_call,
             budget_status,
             budget_approve,
             budget_set,
@@ -10663,16 +10995,18 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn call_rules_refusals_existing_attempts_stay_unknown() {
+        // An answer exercises the #278 guard independently of the offer admission fence.
         // A resumable resend reuses an id whose earlier payment may still be
         // unresolved. A delivery retry retains its earlier payment, even on
         // legacy nodes without operation ids. Neither refusal proves unpaid.
+        for kind in [400, 401] {
         for (delivery_retry, has_operation_id) in [(false, true), (true, true), (true, false)] {
             let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
                 if p == "/messages/compose" { (400, r#"{"reason":"call_id_used"}"#.into()) }
                 else { happy()(m, p, b) }
             }));
             spend_advance(&node.state, true).await.unwrap();
-            let body = serde_json::json!({"recipient": A, "is_room": false, "kind": 400, "plaintext": OFFER});
+            let body = serde_json::json!({"recipient": A, "is_room": false, "kind": kind, "plaintext": OFFER});
             let op = spend_journal::operation(&body);
             let id = has_operation_id.then(|| spend_journal::new_operation_id().unwrap());
             let journal = spend_journal(&node.state).unwrap();
@@ -10697,6 +11031,12 @@ mod control_act_tests {
                 confirmed: false, operation: has_operation_id, envelope_ids: Some(true) };
             let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()),
                 "/messages/compose", body, 15000, Some(charge), prior.undelivered.as_ref()).await.unwrap_err();
+            if has_operation_id && (kind == 400 || !delivery_retry) {
+                assert_eq!(err.code, if kind == 400 { "call_admission_open" } else { "spend_unknown" });
+                assert!(op_ids(&node).is_empty(), "the call fence rejects before retry dispatch");
+                assert_eq!(pending(&node).unwrap().operation_id, id);
+                continue;
+            }
             assert_eq!(op_ids(&node), [id.clone()], "the existing operation id is reused");
             assert_eq!(err.code, "spend_unknown", "retry={delivery_retry}, operation_id={has_operation_id}");
             assert!(!err.message.contains("Nothing was paid"));
@@ -10715,6 +11055,7 @@ mod control_act_tests {
             }
             assert!(budget_now(&node.state).unsettled_msat > 0);
             assert_eq!(no_pending_spend(&node.state).unwrap_err().code, "spend_unknown");
+        }
         }
     }
 
@@ -10814,10 +11155,10 @@ mod control_act_tests {
         }
     }
 
-    // These use the same host call path and node receipts as the baseline test
-    // above: history must not affect dispatch, caps, paid totals, or the fence.
+    // Unrelated history stays local. H2 recovery offers obey the same open
+    // admission fence; hangups retain their H1 parent and accounting.
     #[tokio::test]
-    async fn ledger_call_history_does_not_change_hangup_or_recovery() {
+    async fn ledger_call_history_keeps_damage_local_and_guards_recovery() {
         for history in ["large", "corrupt", "unreadable", "corrupt_parent", "missing_parent"] {
             for kind in [403, 400] {
                 let (ops, paid) = ops_node();
@@ -10858,6 +11199,12 @@ mod control_act_tests {
                     assert!(pending(&node).is_none());
                     do_message_send(&node.state, A, false, "unrelated message", 14000, None).await.unwrap();
                     assert_eq!(paid.lock().unwrap().pays, 2, "damage stays local to that call");
+                } else if kind == 400 {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.code, "call_admission_open");
+                    assert_eq!(error.operation_id.as_deref(), Some(parent.as_str()));
+                    assert_eq!(paid.lock().unwrap().pays, 1);
+                    assert_eq!(op_ids(&node).len(), 1);
                 } else {
                     let receipt = result.unwrap();
                     let record = ledger_record(&node, receipt.operation_id.as_ref().unwrap());
@@ -12968,17 +13315,776 @@ mod control_act_tests {
                     None => (400, r#"{"error":"their node did not answer with a call price; nothing was paid","code":400,"reason":"call_price_unknown"}"#.into()),
                 },
                 "/payments/price/401" => (200, serde_json::json!({"kind": 401, "price_msat": 50}).to_string()),
-                "/messages/compose" => (200, serde_json::json!({"max_routing_fee_msat": 5000, "message_id": "c1", "delivered": true, "amount_msat": 10000, "accepted": true, "state": "acked"}).to_string()),
+                "/messages/compose" => (200, serde_json::json!({"operation_id": serde_json::from_str::<serde_json::Value>(b).unwrap()["operation_id"], "max_routing_fee_msat": 5000, "message_id": "c1", "delivered": true, "amount_msat": 10000, "accepted": true, "state": "acked"}).to_string()),
                 _ => inner(m, p, b),
             }
         })
     }
     const OFFER: &str = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","media":"audio","sdp":"v=0"}"#;
 
+    fn ledger_call_routes() -> (Routes, Arc<Mutex<OpsNode>>) {
+        let (ops, paid) = ops_node();
+        let calls = call_routes(Some(10000));
+        (Arc::new(move |m, p, b| {
+            if p == "/status" || p == "/messages/compose" || p.starts_with("/messages/operations/") {
+                ops(m, p, b)
+            } else { calls(m, p, b) }
+        }), paid)
+    }
+
+    async fn approve_calls(node: &Fake) {
+        do_budget_approve(&node.state, 500000, budget::PresetId::Careful).await.unwrap();
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50000)).unwrap();
+    }
+
+    async fn during_call<T>(hold: &Hold, action: impl std::future::Future<Output = T>) -> T {
+        while !hold.arrived.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let (result, ()) = tokio::join!(action, async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            hold.release.send(()).unwrap();
+        });
+        result
+    }
+
+    // #220: the original POST is still held before payment after its host
+    // timeout. A concurrent lookup is only a snapshot, even beyond #228's grace.
+    #[tokio::test]
+    async fn a2_late_offer_cannot_be_released_by_empty_lookup_or_elapsed_grace() {
+        for restored_unpaid in [false, true] {
+        for legacy in [false, true] {
+        for lookup in ["404", "prepared", "released"] {
+            let (routes, paid) = ledger_call_routes();
+            let (routes, hold) = hold_compose(routes, 0, None, false);
+            let checking = Arc::new(AtomicBool::new(true));
+            let check = checking.clone();
+            let mut node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                if check.load(Ordering::SeqCst) && m == "GET" {
+                    if let Some(id) = p.strip_prefix("/messages/operations/") {
+                        return if lookup == "404" { (404, "{}".into()) } else { (200, op_reply(id, lookup)) };
+                    }
+                }
+                routes(m, p, b)
+            }));
+            node.state.spend_timeout = Duration::from_millis(60);
+            approve_calls(&node).await;
+            let first = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err();
+            let id = first.operation_id.unwrap();
+            let journal = spend_journal(&node.state).unwrap();
+            let mut p = journal.pending().unwrap().unwrap();
+            p.dispatched_at = Some(spend_journal::timestamp_ms().saturating_sub(600_000));
+            if restored_unpaid {
+                // A pre-A2 #228 grace release can already be on disk at upgrade.
+                p.resumable = true;
+                p.budgeted = false;
+                with_book(&node.state, true, |book| { book.release(p.charge_id()); Ok(()) }).unwrap();
+                journal.record_outcome(&p, spend_journal::OperationState::Unpaid, None).unwrap();
+            }
+            if legacy {
+                p.operation_record = None;
+                for index in ["call-index", "call-ops"] {
+                    let _ = std::fs::remove_dir_all(node._dir.path().join("app-spend").join(index));
+                }
+                std::fs::remove_file(node._dir.path().join("app-spend/ops").join(format!("{id}.json"))).unwrap();
+            }
+            journal.save(&p).unwrap();
+            drop(journal);
+            // Preflight may run while a money operation is awaiting the node.
+            // Reading its slot must not rewrite that operation's snapshot.
+            let preflight_unchanged = {
+                let _money = node.state.money.lock().await;
+                let observed = spend_journal(&node.state).unwrap().pending().unwrap().unwrap();
+                observed.resumable == p.resumable && observed.budgeted == p.budgeted
+            };
+            let ended = if legacy { do_spend_reconcile(&node.state).await.map(|_| ()) }
+                else { do_op_end_call(&node.state, CALL_ID).await.map(|_| ()) };
+            let held = pending(&node).unwrap();
+            let state = ledger_record(&node, &id)["state"].clone();
+            let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+            let second = do_call_signal(&node.state, A, 400, &redial, 15000).await;
+            // Always release the mock worker before asserting the safety results.
+            checking.store(false, Ordering::SeqCst);
+            hold.release.send(()).unwrap();
+            assert!(preflight_unchanged, "preflight must not repair a slot outside the money lock");
+            assert_eq!(ended.unwrap_err().code, "payment_unknown", "{lookup}");
+            assert!(!held.resumable, "{lookup}");
+            assert_eq!(state, "unknown", "{lookup}");
+            assert_eq!(second.unwrap_err().code, if legacy { "spend_unknown" } else { "call_admission_open" }, "{lookup}");
+            for _ in 0..100 {
+                if paid.lock().unwrap().pays == 1 { break; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            if legacy {
+                do_spend_reconcile(&node.state).await.unwrap();
+                assert_eq!(paid.lock().unwrap().pays, 1);
+                assert_eq!(budget_now(&node.state).spent_msat, 2000, "late payment restored to accounting");
+                continue;
+            }
+            let end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+            assert_eq!(end.kind, "call_hangup");
+            assert_eq!(paid.lock().unwrap().pays, 2, "only the original offer and its one hangup");
+            assert_eq!(budget_now(&node.state).spent_msat, 4000, "both payments accounted after upgrade");
+            assert_eq!(node.posts().iter().filter(|(_, b)| b["kind"] == 400).count(), 1);
+        }
+        }
+        }
+    }
+
+    #[tokio::test]
+    async fn a2_only_confirmed_node_abandon_releases_a_call_offer() {
+        for abandon in ["confirmed", "paying", "prepared", "unsupported"] {
+            let (routes, paid) = ledger_call_routes();
+            let tombstone = Arc::new(Mutex::new(None::<String>));
+            let tomb = tombstone.clone();
+            let inner: Routes = Arc::new(move |m, p, b| {
+                if p == "/messages/compose" {
+                    let body: serde_json::Value = serde_json::from_str(b).unwrap();
+                    if tomb.lock().unwrap().as_deref() == body["operation_id"].as_str() {
+                        return (409, op_reply(body["operation_id"].as_str().unwrap(), "abandoned"));
+                    }
+                }
+                routes(m, p, b)
+            });
+            let (routes, hold) = hold_compose(inner, 0, None, false);
+            let tomb = tombstone.clone();
+            let mut node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                if p == "/status" {
+                    return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+                        "message_operations_v1", "message_operation_abandon_v1"]}).to_string());
+                }
+                if let Some(id) = p.strip_prefix("/messages/operations/") {
+                    if let Some(id) = id.strip_suffix("/abandon") {
+                        return match abandon {
+                            "confirmed" => { *tomb.lock().unwrap() = Some(id.into()); (200, op_reply(id, "abandoned")) }
+                            "unsupported" => (404, "{}".into()),
+                            state => (409, op_reply(id, state)),
+                        };
+                    }
+                    return (200, op_reply(id, if tomb.lock().unwrap().as_deref() == Some(id) { "abandoned" } else { "prepared" }));
+                }
+                routes(m, p, b)
+            }));
+            node.state.spend_timeout = Duration::from_millis(60);
+            approve_calls(&node).await;
+            let id = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err().operation_id.unwrap();
+            let result = do_op_end_call(&node.state, CALL_ID).await;
+            hold.release.send(()).unwrap();
+            if abandon == "confirmed" {
+                assert_eq!(result.unwrap().state, spend_journal::OperationState::Unpaid);
+                assert!(pending(&node).unwrap().operation_id.is_none(), "tombstoned id cannot be reused");
+                let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+                let next = do_call_signal(&node.state, A, 400, &redial, 15000).await.unwrap();
+                assert_ne!(next.operation_id.as_deref(), Some(id.as_str()));
+                assert_eq!(paid.lock().unwrap().pays, 1, "only the fresh offer can pay");
+            } else {
+                assert_eq!(result.unwrap_err().code, "payment_unknown", "{abandon}");
+                assert!(!pending(&node).unwrap().resumable);
+                assert_eq!(ledger_record(&node, &id)["state"], "unknown");
+                assert_eq!(do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err().code, "call_admission_open");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a2_end_call_cleans_paid_errors_without_reclassifying_them_unpaid() {
+        for outcome in ["paid", "failed_paid"] {
+            let (routes, paid) = ledger_call_routes();
+            paid.lock().unwrap().script = vec![(outcome, true)];
+            let mut node = fake(AuthMode::Local, routes);
+            node.state.spend_timeout = Duration::from_millis(60);
+            approve_calls(&node).await;
+            let id = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err().operation_id.unwrap();
+            let end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+            assert_eq!(end.kind, "call_hangup", "{outcome}");
+            assert_eq!(ledger_record(&node, &id)["state"], if outcome == "paid" { "paid_undelivered" } else { "failed_paid" });
+            assert_eq!(paid.lock().unwrap().pays, 2);
+            assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap().op_id, end.op_id);
+            assert_eq!(paid.lock().unwrap().pays, 2);
+            assert!(pending(&node).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a2_cleanup_requires_operation_support_after_capability_downgrade() {
+        let (routes, paid) = ledger_call_routes();
+        let downgraded = Arc::new(AtomicBool::new(false));
+        let flag = downgraded.clone();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/status" && flag.load(Ordering::SeqCst) {
+                return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1"]}).to_string());
+            }
+            routes(m, p, b)
+        }));
+        approve_calls(&node).await;
+        do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        downgraded.store(true, Ordering::SeqCst);
+        assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap_err().code, "call_needs_node_upgrade");
+        assert_eq!(node.posts().iter().filter(|(_, b)| b["kind"] == 403).count(), 0);
+        assert_eq!(paid.lock().unwrap().pays, 1);
+        downgraded.store(false, Ordering::SeqCst);
+        let end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap().op_id, end.op_id);
+        assert_eq!(paid.lock().unwrap().pays, 2);
+    }
+
+    #[tokio::test]
+    async fn h2_pending_offer_refuses_second_admission() {
+        for recovery in [false, true] {
+            let (routes, paid) = ledger_call_routes();
+            let (routes, hold) = hold_compose(routes, 0, None, false);
+            let node = fake(AuthMode::Local, routes);
+            approve_calls(&node).await;
+            let second = if recovery {
+                r#"{"v":1,"call_id":"1123456789abcdef0123456789abcdef","sdp":"v=0\na=x-bitsov-restart-of:0123456789abcdef0123456789abcdef"}"#
+            } else { r#"{"v":1,"call_id":"1123456789abcdef0123456789abcdef","sdp":"v=0"}"# };
+            let (first, second) = tokio::join!(
+                do_call_signal(&node.state, A, 400, OFFER, 15000),
+                during_call(&hold, do_call_signal(&node.state, A, 400, second, 15000)),
+            );
+            let first = first.unwrap();
+            let error = second.unwrap_err();
+            assert_eq!(error.code, "call_admission_open");
+            assert_eq!(error.operation_id, first.operation_id);
+            assert_eq!(composes(&node), 1);
+            assert_eq!(paid.lock().unwrap().pays, 1);
+            assert_eq!(node.posts().iter().filter(|(_, b)| b["kind"] == 400).count(), 1);
+        }
+    }
+
+    const CALL_ID: &str = "0123456789abcdef0123456789abcdef";
+
+    fn inbound_call_event(kind: u16, reason: &str) -> control::LiveEvent {
+        control::parse_ws_frame(&serde_json::json!({
+            "id": "remote-call-signal", "kind": kind, "sender": A,
+            "recipient": {"Node": OWN}, "timestamp": now_ms(),
+            "plaintext": serde_json::json!({"v": 1, "call_id": CALL_ID,
+                "reason": reason, "sdp": "v=0 answer"}).to_string()
+        }).to_string()).unwrap()
+    }
+
+    async fn observe_call_event(state: &NodeState, event: &control::LiveEvent) {
+        let observation = capture_call_observation(state, event).unwrap().unwrap();
+        persist_call_observation(state, &observation).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn h2_stale_hangup_received_during_reused_call_dispatch_binds_old_offer() {
+        let (routes, _) = ledger_call_routes();
+        let (routes, hold) = hold_compose(routes, 2, None, false);
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let first = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        let (second, captured) = tokio::join!(
+            do_call_signal(&node.state, A, 400, OFFER, 15000),
+            during_call(&hold, async {
+                // Peer clock is ahead: only local receive order has authority.
+                let mut event = inbound_call_event(403, "hangup");
+                if let control::LiveEvent::Message { message, .. } = &mut event { message.timestamp = u64::MAX; }
+                capture_call_observation(&node.state, &event).unwrap().unwrap()
+            }),
+        );
+        let second = second.unwrap();
+        assert_eq!(captured.offer.op_id, first.operation_id.unwrap());
+        persist_call_observation(&node.state, &captured).await.unwrap();
+        assert_eq!(ledger_record(&node, second.operation_id.as_ref().unwrap())["call_closed"], false);
+        assert_eq!(do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err().code, "call_admission_open");
+        assert_ne!(do_op_end_call(&node.state, CALL_ID).await.unwrap().op_id, second.operation_id.unwrap());
+    }
+
+    #[tokio::test]
+    async fn h2_local_failure_keeps_live_node_admission_until_paid_cleanup() {
+        let (routes, paid) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let id = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap().operation_id.unwrap();
+        do_op_close_call(&node.state, &id, A, CALL_ID).await.unwrap();
+        let restarted = reopen(&node);
+        do_budget_approve(&restarted, 500000, budget::PresetId::Careful).await.unwrap();
+        assert_eq!(do_call_signal(&restarted, A, 400, OFFER, 15000).await.unwrap_err().code, "call_admission_open");
+        let end = do_op_end_call(&restarted, CALL_ID).await.unwrap();
+        assert_ne!(end.op_id, id);
+        assert_eq!(paid.lock().unwrap().pays, 2);
+        assert_eq!(node.posts().iter().filter(|(_, b)| b["kind"] == 403).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn h2_forwarded_hangup_carries_only_the_hosts_receive_time_binding() {
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let id = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap().operation_id.unwrap();
+        let mut event = inbound_call_event(403, "hangup");
+        if let control::LiveEvent::Message { message, .. } = &mut event {
+            message.admission_operation_id = Some("untrusted".into());
+        }
+        let observation = capture_call_observation(&node.state, &event);
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        events.send((event.clone(), observation)).unwrap();
+        events.send((event, Ok(None))).unwrap();
+        drop(events);
+        let mut forwarded = Vec::new();
+        forward_live_events(&node.state, &mut received, |e| forwarded.push(serde_json::to_value(e).unwrap())).await;
+        assert_eq!(forwarded[0]["message"]["admission_operation_id"], id);
+        assert!(forwarded[1]["message"]["admission_operation_id"].is_null());
+        assert_eq!(ledger_record(&node, &id)["call_closed"], true);
+    }
+
+    #[tokio::test]
+    async fn h2_clock_behind_peer_answer_and_hangup_bind_locally() {
+        let (routes, paid) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let id = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap().operation_id.unwrap();
+        for kind in [401, 403] {
+            let mut event = inbound_call_event(kind, "hangup");
+            if let control::LiveEvent::Message { message, .. } = &mut event { message.timestamp = 1; }
+            observe_call_event(&node.state, &event).await;
+        }
+        let record = ledger_record(&node, &id);
+        assert_eq!(record["call_answered"], true);
+        assert_eq!(record["call_closed"], true);
+        assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap().op_id, id);
+        assert_eq!(paid.lock().unwrap().pays, 1);
+    }
+
+    #[tokio::test]
+    async fn h2_abandoned_resend_has_fresh_identity_and_call_lifecycle() {
+        let (routes, paid) = ledger_call_routes();
+        paid.lock().unwrap().script = vec![("prepared", true)];
+        let mut node = fake(AuthMode::Local, routes);
+        node.state.spend_timeout = Duration::from_millis(60);
+        approve_calls(&node).await;
+        let id = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err().operation_id.unwrap();
+        observe_call_event(&node.state, &inbound_call_event(401, "")).await;
+        let captured = capture_call_observation(&node.state, &inbound_call_event(403, "hangup")).unwrap().unwrap();
+        persist_call_observation(&node.state, &captured).await.unwrap();
+        paid.lock().unwrap().ops.get_mut(&id).unwrap().1 = "abandoned";
+        do_spend_reconcile(&node.state).await.unwrap();
+        assert!(pending(&node).unwrap().resumable);
+        let resent = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        assert_ne!(resent.operation_id.as_deref(), Some(id.as_str()));
+        let new_id = resent.operation_id.unwrap();
+        // An event queued for the previous attempt cannot close the resend.
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        events.send((inbound_call_event(403, "hangup"), Ok(Some(captured)))).unwrap();
+        drop(events);
+        let mut forwarded = Vec::new();
+        forward_live_events(&node.state, &mut received, |e| forwarded.push(serde_json::to_value(e).unwrap())).await;
+        assert_ne!(forwarded[0]["message"]["admission_operation_id"], new_id);
+        let record = ledger_record(&node, &new_id);
+        assert_eq!(record["call_closed"], false);
+        assert_eq!(record["call_answered"], false);
+        assert_eq!(do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err().code, "call_admission_open");
+        assert_ne!(do_op_end_call(&node.state, CALL_ID).await.unwrap().op_id, new_id);
+        assert_eq!(paid.lock().unwrap().pays, 2);
+    }
+
+    #[tokio::test]
+    async fn h2_inbound_closure_requires_matching_peer_recipient_and_call() {
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let receipt = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        for field in ["sender", "recipient", "call", "version", "room", "kind"] {
+            let mut event = inbound_call_event(403, "hangup");
+            if let control::LiveEvent::Message { message, room_id } = &mut event {
+                match field {
+                    "sender" => message.sender = C.into(),
+                    "recipient" => message.recipient = C.into(),
+                    "call" => message.plaintext = Some(OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef")),
+                    "version" => message.plaintext = Some(OFFER.replace("\"v\":1", "\"v\":2")),
+                    "room" => *room_id = Some(ROOM.into()),
+                    "kind" => message.kind = 1,
+                    _ => unreachable!(),
+                }
+            }
+            assert!(capture_call_observation(&node.state, &event).unwrap().is_none(), "{field}");
+        }
+        // Normalization precedes the snapshot just as it precedes dispatch.
+        let hangup = do_call_signal(&node.state, &A.to_uppercase(), 403, OFFER, 15000).await.unwrap();
+        assert_eq!(ledger_record(&node, hangup.operation_id.as_ref().unwrap())["parent_op"], receipt.operation_id.unwrap());
+    }
+
+    #[tokio::test]
+    async fn h2_inbound_closure_survives_restart_without_paying_cleanup() {
+        for reason in ["hangup", "declined", "decline", "end", "timeout", "failed", "busy"] {
+            let (routes, paid) = ledger_call_routes();
+            let node = fake(AuthMode::Local, routes);
+            approve_calls(&node).await;
+            let receipt = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+            let id = receipt.operation_id.unwrap();
+            let before = ledger_record(&node, &id);
+            observe_call_event(&node.state, &inbound_call_event(403, reason)).await;
+            let after = ledger_record(&node, &id);
+            assert_eq!(after["call_closed"], true);
+            assert_eq!(after["paid_msat"], before["paid_msat"]);
+            assert_eq!(after["state"], before["state"], "closure is not payment evidence");
+            let restarted = reopen(&node);
+            assert_eq!(do_op_end_call(&restarted, CALL_ID).await.unwrap().op_id, id);
+            let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+            do_budget_approve(&restarted, 500000, budget::PresetId::Careful).await.unwrap();
+            do_call_signal(&restarted, A, 400, &redial, 15000).await.unwrap();
+            assert_eq!(paid.lock().unwrap().pays, 2);
+            assert_eq!(node.posts().iter().filter(|(_, b)| b["kind"] == 403).count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn h2_inbound_closure_races_offer_receipt_and_local_hangup() {
+        for held in [0, 1] {
+            let (routes, paid) = ledger_call_routes();
+            let (routes, hold) = hold_compose(routes, held, None, false);
+            let node = fake(AuthMode::Local, routes);
+            approve_calls(&node).await;
+            if held == 0 {
+                let (offer, ()) = tokio::join!(
+                    do_call_signal(&node.state, A, 400, OFFER, 15000),
+                    during_call(&hold, async {
+                        assert!(capture_call_observation(&node.state, &inbound_call_event(403, "hangup")).unwrap().is_none());
+                    }),
+                );
+                offer.unwrap();
+            } else {
+                do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+                let (end, ()) = tokio::join!(
+                    do_op_end_call(&node.state, CALL_ID),
+                    during_call(&hold, async { observe_call_event(&node.state, &inbound_call_event(403, "hangup")).await }),
+                );
+                end.unwrap();
+            }
+            let restarted = reopen(&node);
+            do_budget_approve(&restarted, 500000, budget::PresetId::Careful).await.unwrap();
+            do_op_end_call(&restarted, CALL_ID).await.unwrap();
+            assert_eq!(paid.lock().unwrap().pays, 2);
+            let records = spend_journal(&restarted).unwrap().call_operations(OWN, Some(A)).unwrap();
+            assert!(records.iter().all(|r| !spend_journal::admission_open(r, &records)));
+        }
+    }
+
+    #[tokio::test]
+    async fn h2_captured_closure_and_stale_cleanup_cannot_close_reused_call_id() {
+        let (routes, paid) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let first = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        let old = spend_journal(&node.state).unwrap().operation_record(first.operation_id.as_ref().unwrap()).unwrap().unwrap();
+        let event = inbound_call_event(403, "hangup");
+        let captured = capture_call_observation(&node.state, &event).unwrap().unwrap();
+        persist_call_observation(&node.state, &captured).await.unwrap();
+        // Models op_end_call's gap between selecting the offer and taking the
+        // dispatch lock: an inbound end already won, so no paid hangup follows.
+        let error = do_call_signal_for_admission(&node.state, A, 403, OFFER, 15000, Some(&old)).await.unwrap_err();
+        assert_eq!(error.code, "call_not_live");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let second = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        persist_call_observation(&node.state, &captured).await.unwrap();
+        // A queued event keeps its captured generation. Peer timestamps are
+        // deliberately not used to reclassify events received later.
+        let error = do_call_signal_for_admission(&node.state, A, 403, OFFER, 15000, Some(&old)).await.unwrap_err();
+        assert_eq!(error.code, "call_not_live");
+        assert_eq!(ledger_record(&node, second.operation_id.as_ref().unwrap())["call_closed"], false);
+        assert_eq!(paid.lock().unwrap().pays, 2);
+        let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+        assert_eq!(do_call_signal(&node.state, A, 400, &redial, 15000).await.unwrap_err().code, "call_admission_open");
+    }
+
+    #[tokio::test]
+    async fn h2_local_failure_preserves_exact_admission_and_unknown_payment() {
+        let (routes, paid) = ledger_call_routes();
+        paid.lock().unwrap().script = vec![("paying", true)];
+        let mut node = fake(AuthMode::Local, routes);
+        node.state.spend_timeout = Duration::from_millis(60);
+        approve_calls(&node).await;
+        let error = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err();
+        let id = error.operation_id.unwrap();
+        let before = pending(&node).unwrap();
+        assert!(do_op_close_call(&node.state, &id, C, CALL_ID).await.is_err());
+        assert!(do_op_close_call(&node.state, &id, A, "1123456789abcdef0123456789abcdef").await.is_err());
+        observe_call_event(&node.state, &inbound_call_event(401, "")).await;
+        do_op_close_call(&node.state, &id, A, CALL_ID).await.unwrap();
+        assert_eq!(pending(&node).unwrap().operation_id, before.operation_id);
+        assert_eq!(ledger_record(&node, &id)["state"], "unknown");
+        assert_eq!(ledger_record(&node, &id)["call_closed"], false);
+        assert_eq!(do_op_end_call(&reopen(&node), CALL_ID).await.unwrap_err().code, "payment_unknown");
+        let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+        assert_eq!(do_call_signal(&node.state, A, 400, &redial, 15000).await.unwrap_err().code, "call_admission_open");
+        assert_eq!(composes(&node), 1);
+        paid.lock().unwrap().ops.get_mut(&id).unwrap().1 = "acked";
+        do_spend_reconcile(&node.state).await.unwrap();
+        assert_eq!(ledger_record(&node, &id)["state"], "settled");
+        assert_eq!(ledger_record(&node, &id)["call_closed"], false);
+        assert!(pending(&node).is_none());
+        assert_ne!(do_op_end_call(&node.state, CALL_ID).await.unwrap().op_id, id);
+        assert_eq!(paid.lock().unwrap().pays, 2);
+    }
+
+    #[tokio::test]
+    async fn h2_missed_answer_during_ws_outage_keeps_aged_admission_open() {
+        let (routes, paid) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let id = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap().operation_id.unwrap();
+        // Node answered during a ws outage; no answer reached the host. Restore
+        // an offer older than the former ring timeout, then request cleanup.
+        let path = app_files_dir(&node.state).unwrap().join("app-spend/ops").join(format!("{id}.json"));
+        let mut record = ledger_record(&node, &id);
+        record["settled_ms"] = serde_json::json!(now_ms() - 120_000);
+        std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let restarted = reopen(&node);
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        tokio::time::pause();
+        tokio::join!(
+            forward_live_events(&restarted, &mut received, |_| panic!("no ws events during outage")),
+            async {
+                tokio::time::advance(Duration::from_secs(120)).await;
+                drop(events);
+            },
+        );
+        tokio::time::resume();
+        do_budget_approve(&restarted, 500000, budget::PresetId::Careful).await.unwrap();
+        assert_eq!(do_call_signal(&restarted, A, 400, OFFER, 15000).await.unwrap_err().code, "call_admission_open");
+        assert_ne!(do_op_end_call(&restarted, CALL_ID).await.unwrap().op_id, id);
+        assert_eq!(paid.lock().unwrap().pays, 2);
+        assert_eq!(node.posts().iter().filter(|(_, b)| b["kind"] == 403).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn h2_reused_call_id_does_not_reuse_old_closure_or_cleanup() {
+        let (routes, paid) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let first = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        let old_end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let second = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        assert_ne!(first.operation_id, second.operation_id);
+        let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+        let error = do_call_signal(&node.state, A, 400, &redial, 15000).await.unwrap_err();
+        assert_eq!(error.code, "call_admission_open");
+        assert_eq!(error.operation_id, second.operation_id);
+        let end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_ne!(end.op_id, old_end.op_id);
+        assert_eq!(ledger_record(&node, &end.op_id)["parent_op"], second.operation_id.unwrap());
+        assert_eq!(paid.lock().unwrap().pays, 4);
+    }
+
+    #[tokio::test]
+    async fn h2_unknown_hangup_is_reused_without_another_payment() {
+        let (routes, paid) = ledger_call_routes();
+        paid.lock().unwrap().script = vec![("acked", false), ("acked", true)];
+        let mut node = fake(AuthMode::Local, routes);
+        node.state.spend_timeout = Duration::from_millis(60);
+        approve_calls(&node).await;
+        do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        let error = do_call_signal(&node.state, A, 403, OFFER, 15000).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        let end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_eq!(Some(end.op_id), error.operation_id);
+        assert_eq!(end.state, spend_journal::OperationState::Unknown);
+        assert_eq!(composes(&node), 2);
+        assert_eq!(paid.lock().unwrap().pays, 2);
+    }
+
+    #[tokio::test]
+    async fn h2_cleanup_retains_the_original_signal_ceiling_and_error_identity() {
+        let (routes, _) = ledger_call_routes();
+        let high = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let changed = high.clone();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p.starts_with(&format!("/pricing/peers/{A}/call")) && changed.load(std::sync::atomic::Ordering::SeqCst) {
+                (200, serde_json::json!({"peer_id":A,"offer_msat":10000,"signal_msat":9000}).to_string())
+            } else { routes(m, p, b) }
+        }));
+        approve_calls(&node).await;
+        let offer = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        high.store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = do_op_end_call(&node.state, CALL_ID).await.unwrap_err();
+        assert_eq!(error.code, "price_changed");
+        assert_eq!(error.operation_id, offer.operation_id);
+        assert_eq!(composes(&node), 1);
+    }
+
+    #[tokio::test]
+    async fn h2_cleanup_cannot_pay_from_a_different_node_identity() {
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let receipt = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        let offer = spend_journal(&node.state).unwrap().operation_record(receipt.operation_id.as_ref().unwrap()).unwrap().unwrap();
+        *node.state.node_id.lock().unwrap() = Some(C.into());
+        approve_calls(&node).await;
+        let error = do_call_signal_for_admission(&node.state, A, 403, OFFER, 15000, Some(&offer)).await.unwrap_err();
+        assert_eq!(error.code, "call_identity_changed");
+        assert_eq!(error.operation_id, receipt.operation_id);
+        assert_eq!(composes(&node), 1);
+    }
+
+    #[tokio::test]
+    async fn h2_end_call_waits_for_offer_and_concurrent_cleanup_pays_once() {
+        let (routes, paid) = ledger_call_routes();
+        let (routes, hold) = hold_compose(routes, 0, None, false);
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let (offer, (end, duplicate)) = tokio::join!(
+            do_call_signal(&node.state, A, 400, OFFER, 15000),
+            during_call(&hold, async { tokio::join!(
+                do_op_end_call(&node.state, CALL_ID), do_op_end_call(&node.state, CALL_ID)) }),
+        );
+        offer.unwrap();
+        assert_eq!(end.unwrap().op_id, duplicate.unwrap().op_id);
+        assert_eq!(node.posts().iter().filter(|(_, b)| b["kind"] == 403).count(), 1);
+        assert_eq!(paid.lock().unwrap().pays, 2);
+    }
+
+    #[tokio::test]
+    async fn h2_pending_hangup_and_end_call_pay_once() {
+        let (routes, paid) = ledger_call_routes();
+        let (routes, hold) = hold_compose(routes, 1, None, false);
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        let (hangup, end) = tokio::join!(
+            do_call_signal(&node.state, A, 403, OFFER, 15000),
+            during_call(&hold, do_op_end_call(&node.state, CALL_ID)),
+        );
+        let hangup = hangup.unwrap();
+        let end = end.unwrap();
+        assert_eq!(Some(end.op_id.clone()), hangup.operation_id);
+        assert_eq!(end.kind, "call_hangup");
+        assert_eq!(end.state, spend_journal::OperationState::Settled);
+        assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap().op_id, end.op_id);
+        let error = do_call_signal(&node.state, A, 403, OFFER, 15000).await.unwrap_err();
+        assert_eq!(error.code, "hangup_in_flight");
+        assert_eq!(error.operation_id.as_deref(), Some(end.op_id.as_str()));
+        assert_eq!(node.posts().iter().filter(|(_, b)| b["kind"] == 403).count(), 1);
+        assert_eq!(paid.lock().unwrap().pays, 2);
+    }
+
+    #[tokio::test]
+    async fn h2_failed_paid_offer_keeps_admission_until_confirmed_closure() {
+        for closure in ["paid_hangup", "call_not_live", "peer_end"] {
+            let (routes, paid) = ledger_call_routes();
+            paid.lock().unwrap().script = vec![("failed_paid", true)];
+            let mut node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+                if p == "/messages/compose" && body["kind"] == 403
+                    && matches!(closure, "call_not_live" | "call_not_found") {
+                    (400, serde_json::json!({"reason": closure, "error": "call expired"}).to_string())
+                } else { routes(m, p, b) }
+            }));
+            node.state.spend_timeout = Duration::from_millis(60);
+            approve_calls(&node).await;
+            let lost = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err();
+            assert_eq!(lost.code, "spend_unknown");
+            let id = lost.operation_id.unwrap();
+            assert_eq!(do_spend_reconcile(&node.state).await.unwrap_err().code, "failed_paid");
+            assert!(pending(&node).is_none());
+            assert_eq!(ledger_record(&node, &id)["state"], "failed_paid");
+            assert_eq!(budget_now(&node.state).spent_msat, 2000);
+
+            let restarted = reopen(&node);
+            do_budget_approve(&restarted, 500000, budget::PresetId::Careful).await.unwrap();
+            let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+            let blocked = do_call_signal(&restarted, A, 400, &redial, 15000).await.unwrap_err();
+            assert_eq!(blocked.code, "call_admission_open", "{closure}");
+            assert_eq!(blocked.operation_id.as_deref(), Some(id.as_str()));
+            assert_eq!(composes(&node), 1);
+            assert_eq!(paid.lock().unwrap().pays, 1);
+
+            if closure == "peer_end" {
+                observe_call_event(&restarted, &inbound_call_event(403, "hangup")).await;
+            }
+            let end = do_op_end_call(&restarted, CALL_ID).await.unwrap();
+            if closure == "peer_end" {
+                assert_eq!(end.op_id, id);
+            } else {
+                assert_ne!(end.op_id, id);
+                assert_eq!(ledger_record(&node, &end.op_id)["parent_op"], id);
+                assert_eq!(end.state, if closure == "paid_hangup" {
+                    spend_journal::OperationState::Settled
+                } else { spend_journal::OperationState::Unpaid });
+            }
+            assert_eq!(node.posts().iter().filter(|(_, b)| b["kind"] == 403).count(),
+                usize::from(closure != "peer_end"));
+            // Closure and duplicate cleanup remain effective after another restart.
+            let closed = reopen(&node);
+            do_budget_approve(&closed, 500000, budget::PresetId::Careful).await.unwrap();
+            assert_eq!(do_op_end_call(&closed, CALL_ID).await.unwrap().op_id, end.op_id);
+            do_call_signal(&closed, A, 400, &redial, 15000).await.unwrap();
+            assert_eq!(paid.lock().unwrap().pays, if closure == "paid_hangup" { 3 } else { 2 });
+        }
+    }
+
+    #[tokio::test]
+    async fn h2_timeout_then_expired_hangup_closes_admission_and_allows_redial() {
+        for reason in ["call_not_live"] {
+            let (routes, paid) = ledger_call_routes();
+            paid.lock().unwrap().script = vec![("acked", true)];
+            let mut node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+                if p == "/messages/compose" && body["kind"] == 403 {
+                    (400, serde_json::json!({"reason": reason, "error":"call expired"}).to_string())
+                } else { routes(m, p, b) }
+            }));
+            node.state.spend_timeout = Duration::from_millis(60);
+            approve_calls(&node).await;
+            let offer = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err();
+            assert_eq!(offer.code, "spend_unknown");
+            assert!(offer.operation_id.is_some());
+            let end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+            assert_eq!(end.state, spend_journal::OperationState::Unpaid);
+            assert_eq!(end.paid_msat, Some(0));
+            assert_eq!(ledger_record(&node, &end.op_id)["reason"], reason);
+            assert!(pending(&node).is_none());
+            let spent = budget_now(&node.state).spent_msat;
+            assert_eq!(spent, 2000, "only the offer was paid; cleanup paid nothing");
+            // Closure and duplicate cleanup survive restart.
+            let restarted = reopen(&node);
+            assert_eq!(do_op_end_call(&restarted, CALL_ID).await.unwrap().op_id, end.op_id);
+            approve_calls(&node).await;
+            let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+            do_call_signal(&node.state, A, 400, &redial, 15000).await.unwrap();
+            assert_eq!(node.posts().iter().filter(|(_, b)| b["kind"] == 403).count(), 1);
+            assert_eq!(paid.lock().unwrap().pays, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn h2_call_refusals_are_unpaid_but_message_errors_stay_unknown() {
+        for reason in ["call_not_live", "call_id_used", "call_signal_in_flight"] {
+            for kind in [1, 400, 403] {
+                let (routes, _) = ledger_call_routes();
+                let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                    if p == "/messages/compose" {
+                        (400, serde_json::json!({"reason":reason}).to_string())
+                    } else { routes(m, p, b) }
+                }));
+                approve_calls(&node).await;
+                let error = if kind == 1 {
+                    do_message_send(&node.state, A, false, "hello", 15000, None).await.unwrap_err()
+                } else { do_call_signal(&node.state, A, kind, OFFER, 15000).await.unwrap_err() };
+                let id = error.operation_id.as_ref().unwrap();
+                assert_eq!(error.code, if kind == 1 { "spend_unknown" } else { reason });
+                assert_eq!(ledger_record(&node, id)["state"], if kind == 1 { "unknown" } else { "unpaid" });
+                if kind != 1 {
+                    assert!(pending(&node).is_none());
+                    assert_eq!(budget_now(&node.state).accounted_msat, 0);
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn call_grant_checks_the_full_ceiling_before_posting() {
         let routes = call_routes(Some(10_000));
         let first: Routes = Arc::new(move |m, p, b| {
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": [
+                    "paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1",
+                    "message_operations_v1"]}).to_string());
+            }
             if p.contains("/call") || p == "/payments/price/401" || p == "/messages/compose" {
                 routes(m, p, b)
             } else { (0, String::new()) }
@@ -13009,7 +14115,7 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn call_node_error_surfaces_and_keeps_an_uncertain_payment_pending() {
-        let inner = call_routes(Some(10_000));
+        let (inner, _) = ledger_call_routes();
         let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
             if p == "/messages/compose" { (500, r#"{"error":"call routing unavailable"}"#.into()) }
             else { inner(m, p, b) }
@@ -13025,7 +14131,7 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn call_node_timeout_is_bounded_and_keeps_the_payment_pending() {
-        let inner = call_routes(Some(10_000));
+        let (inner, _) = ledger_call_routes();
         let mut node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
             if p == "/messages/compose" { std::thread::sleep(Duration::from_millis(500)); }
             inner(m, p, b)
@@ -13044,7 +14150,7 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn a_refused_call_returns_without_payment_and_releases_its_reservation() {
-        let inner = call_routes(Some(10_000));
+        let (inner, _) = ledger_call_routes();
         let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
             if p == "/messages/compose" { (403, "token lacks required scope: spend".into()) }
             else { inner(m, p, b) }
@@ -13063,33 +14169,38 @@ mod control_act_tests {
     }
 
     #[tokio::test]
-    async fn a_call_offer_pays_the_callees_call_price_inside_the_contact_budget() {
+    async fn legacy_call_offers_require_node_upgrade_before_dispatch() {
         let node = fake(AuthMode::Local, call_routes(Some(10_000)));
-        let s = &node.state;
-        do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap();
-        with_book(s, true, |b| b.set_limit(A, false, 50_000)).unwrap();
-        let quote = read_call_quote(s, A).await.unwrap();
+        approve_calls(&node).await;
+        let quote = read_call_quote(&node.state, A).await.unwrap();
         assert_eq!((quote.offer_msat, quote.call_total_msat), (Some(10_000), Some(21_000)));
-        let receipt = do_call_signal(s, A, 400, OFFER, 15_000).await.unwrap();
-        assert_eq!((receipt.kind, receipt.amount_msat, receipt.total_msat), (400, 10_000, 15_000));
-        let (path, body) = node.posts().into_iter().find(|(p, _)| p == "/messages/compose").unwrap();
-        assert_eq!(path, "/messages/compose");
-        assert_eq!((body["kind"].as_u64(), body["is_room"].as_bool()), (Some(400), Some(false)));
-        assert_eq!((body["max_total_msat"].as_u64(), body["max_routing_fee_msat"].as_u64()), (Some(15_000), Some(5_000)));
-        assert_eq!(body["plaintext"], OFFER);
-        assert_eq!(budget_now(s).accounted_msat, 15_000);
-        assert_eq!(budget_now(s).spent_msat, 10_000);
+        let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+        for offer in [OFFER, redial.as_str()] {
+            let error = do_call_signal(&node.state, A, 400, offer, 15_000).await.unwrap_err();
+            assert_eq!(error.code, "call_needs_node_upgrade");
+            assert!(error.message.contains("Upgrade") && error.message.contains("Nothing was paid"));
+            assert!(error.operation_id.is_none());
+            assert_eq!(composes(&node), 0);
+            assert!(pending(&node).is_none());
+            assert!(do_op_list(&node.state, None).await.unwrap().operations.is_empty());
+            let budget = budget_now(&node.state);
+            assert_eq!((budget.accounted_msat, budget.spent_msat, budget.unsettled_msat), (0, 0, 0));
+        }
     }
 
     #[tokio::test]
     async fn a_call_is_refused_before_paying_when_it_cannot_be_priced_or_authorised() {
         // Their node advertises no call price: nothing is posted.
-        let node = fake(AuthMode::Local, call_routes(None));
+        let calls = call_routes(None);
+        let (ops, _) = ops_node();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/status" { ops(m, p, b) } else { calls(m, p, b) }
+        }));
         do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
         with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
         assert_eq!(do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap_err().code, "call_unsupported");
         // The ceiling the owner saw is below the price.
-        let node2 = fake(AuthMode::Local, call_routes(Some(10_000)));
+        let node2 = fake(AuthMode::Local, ledger_call_routes().0);
         do_budget_approve(&node2.state, 500_000, budget::PresetId::Careful).await.unwrap();
         with_book(&node2.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
         assert_eq!(do_call_signal(&node2.state, A, 400, OFFER, 14_999).await.unwrap_err().code, "price_changed");
@@ -15685,6 +16796,10 @@ mod control_act_tests {
     // loopback HTTP, including the first send's all-in quote probe.
     async fn send_preflight_node(call: bool, raised: Arc<AtomicBool>) -> (Fake, tempfile::TempDir, G1) {
         let routes: Routes = Arc::new(move |m, p, b| {
+            if call && p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+                    "spend_budget_grant_v1", "first_contact_grant_v1", "relation_envelope_id_v1", "message_operations_v1"]}).to_string());
+            }
             let high = raised.load(Ordering::SeqCst);
             let value = match p {
                 "/status" => serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
@@ -15744,6 +16859,9 @@ mod control_act_tests {
                 assert!(own < peer && peer < grant, "{targets:?}");
                 assert_eq!(targets[compose - 1], "GET /pair/grant", "{targets:?}");
                 assert_eq!(targets.iter().filter(|p| *p == "POST /messages/compose").count(), 1);
+                if call {
+                    observe_call_event(&node.state, &inbound_call_event(403, "hangup")).await;
+                }
             }
         }
     }
@@ -15807,6 +16925,11 @@ mod control_act_tests {
             let routes: Routes = Arc::new(move |m, p, b| {
                 if p == "/status" && changed.load(Ordering::SeqCst) {
                     return (200, serde_json::json!({"api_capabilities": []}).to_string());
+                }
+                if call && p == "/status" {
+                    return (200, serde_json::json!({"api_capabilities": [
+                        "paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1",
+                        "message_operations_v1"]}).to_string());
                 }
                 if p.contains("/call") || p == "/payments/price/401" || (call && p == "/messages/compose") {
                     return call_routes(Some(10000))(m, p, b);
@@ -17935,6 +19058,8 @@ mod assistant_acl_tests {
                 "relation_approve",
                 "spend_reconcile",
                 "op_list",
+                "op_end_call",
+                "op_close_call",
                 "budget_status",
                 "budget_approve",
                 "budget_set",
