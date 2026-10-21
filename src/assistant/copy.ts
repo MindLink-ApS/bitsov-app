@@ -1,4 +1,8 @@
-/** Copy plain text. No network and no Tauri command. */
+/**
+ * Copy plain text. No network and no Tauri command. Rejects when neither the
+ * clipboard API nor the fallback copied anything, so a caller never says
+ * "Copied" over a clipboard that still holds something else (an old address).
+ */
 export async function copyPlainText(text: string): Promise<void> {
   const clipboard = navigator.clipboard;
   if (clipboard && typeof clipboard.writeText === 'function') {
@@ -17,6 +21,8 @@ export async function copyPlainText(text: string): Promise<void> {
   area.setAttribute('aria-hidden', 'true');
   document.body.appendChild(area);
   area.select();
-  document.execCommand('copy');
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { ok = false; }
   area.remove();
+  if (!ok) throw new Error('Copy did not work here. Select the text and copy it by hand.');
 }

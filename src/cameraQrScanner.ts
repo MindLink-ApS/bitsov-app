@@ -5,6 +5,7 @@
  * anywhere, and every camera track stops on success, Cancel, error or timeout.
  * Android keeps its native scanner (pairingScanner.ts).
  */
+import { onEscape } from './control/escapeStack';
 
 /** jsQR's decode, as this module uses it. */
 export type QrDecode = (data: Uint8ClampedArray, width: number, height: number, options?: { inversionAttempts?: 'dontInvert' | 'onlyInvert' | 'attemptBoth' | 'invertFirst' }) => { data: string } | null;
@@ -155,8 +156,8 @@ export function scanPairingLinkWithCamera(): Promise<string> {
       close.dataset.qrScanCancel = '';
       close.textContent = 'Cancel';
       close.onclick = cancel;
-      const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') cancel(); };
-      document.addEventListener('keydown', onKey);
+      // The scan overlay is the top layer while it is open: Escape cancels it, not Settings below.
+      const offEscape = onEscape(cancel);
       box.append(title, video, hint, close);
       overlay.append(box);
       document.body.append(overlay);
@@ -165,7 +166,7 @@ export function scanPairingLinkWithCamera(): Promise<string> {
       if (playing && typeof playing.catch === 'function') playing.catch(() => fail());
       close.focus();
       return () => {
-        document.removeEventListener('keydown', onKey);
+        offEscape();
         if (video) { video.pause?.(); video.srcObject = null; }
         video = null;
         // The last frame is not kept: the canvas is emptied and dropped.

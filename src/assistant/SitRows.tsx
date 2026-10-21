@@ -29,7 +29,7 @@ export function SitRows(props: { rows: SitRow[] }): JSX.Element {
         type="button"
         class="assistant-copy"
         onClick={() => {
-          void copyPlainText(rowsText(props.rows));
+          void copyPlainText(rowsText(props.rows)).catch(() => {});
         }}
       >
         Copy

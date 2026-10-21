@@ -10,6 +10,7 @@
     "a11y": "playwright test -c playwright.a11y.config.ts",
     "preview": "vite preview",
     "authority": "scripts/authority-check.sh",
+    "check:layout": "node scripts/ui-layout/meeting-planner-check.mjs",
     "smoke:cs1": "scripts/cs1-local-smoke.sh",
     "smoke:cs2": "scripts/cs2-local-smoke.sh",
     "tauri": "tauri",

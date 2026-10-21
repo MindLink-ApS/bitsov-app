@@ -40,7 +40,7 @@ it('keeps the sweep contrast, token, and focus fixes', () => {
   expect(line(source, '.attach.soft:hover')).toContain('color: var(--ink)');
   expect(line(source, '.attach.soft:hover')).not.toContain('accent-ink');
   expect(line(source, '.touchid-check')).toContain('color: var(--bg)');
-  expect(line(source, '.amount-field .amount-input:focus-visible')).toContain('outline: 2px solid var(--accent)');
+  expect(line(source, '.amount-field:has(.amount-input:focus-visible)')).toContain('outline: 2px solid var(--accent)');
   expect(line(source, '.node-target-card.selected {')).toContain('border-color: var(--ink)');
   expect(line(source, '.connection-card')).toContain('border-radius: var(--r-control)');
   expect(source).toContain('.rail .track-link { width: max-content; }');
