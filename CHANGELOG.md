@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Expose structured phone connection errors for unclaimed boxes and unavailable iOS Local Network access; reconnect from the saved descriptor when the phone returns to the foreground, without replaying a consumed ticket. Claim-free second-device enrollment remains blocked on the node contract (see `docs/PHONE_ONBOARDING_PR1.md`).
+
+- Connect phones immediately after importing a remote ticket, allow reconnect from saved tickets before remote mode starts, and direct first-run box tickets to Mac setup; add mobile pairing and Noise framing regression coverage.
+
 - Replace the default Tauri iOS and Android launcher icons with the BitSov mark, with opaque iOS assets on the mark's dark background.
 - Fall back to uncached Rust compilation when sccache setup or its cache backend fails, so cache outages do not fail CI (app #280).
 
