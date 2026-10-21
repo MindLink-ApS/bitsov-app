@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Replace the default Tauri iOS and Android launcher icons with the BitSov mark, with opaque iOS assets on the mark's dark background.
 - Fall back to uncached Rust compilation when sccache setup or its cache backend fails, so cache outages do not fail CI (app #280).
 
 - Release the pending spend slot and budget reservation for proven unpaid call-rules refusals, retain the operation receipt, and allow later payments after an expired hangup.
