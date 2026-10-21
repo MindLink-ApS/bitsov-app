@@ -297,7 +297,7 @@ impl Refusal {
 pub fn no_envelope() -> ActionError {
     ActionError::new(
         "grant_no_envelope",
-        "You have not approved spending for this contact yet. Nothing was sent. Approve it with Touch ID first.",
+        "You have not approved spending for this contact yet. Nothing was sent. Approve this contact first.",
     )
 }
 

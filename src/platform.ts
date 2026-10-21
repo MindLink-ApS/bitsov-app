@@ -37,8 +37,7 @@ export const isMobilePlatform = (platform: AppPlatform = appPlatform()) => platf
 
 /**
  * The words for this device and its biometric, per platform: a Mac keeps
- * Touch ID and "this Mac"; iOS uses biometrics (the available sensor varies); Android says
- * "this phone" and its fingerprint.
+ * Touch ID and "this Mac"; phones use biometrics (the available sensor varies).
  */
 export type DeviceWords = {
   /** "this {device}". */
@@ -54,7 +53,7 @@ export type DeviceWords = {
 export function deviceWords(platform: AppPlatform = appPlatform()): DeviceWords {
   switch (platform) {
     case 'ios': return { device: isIpad(platform) ? 'iPad' : 'iPhone', biometric: 'biometrics', available: 'biometrics are', unlockButton: 'Unlock with biometrics' };
-    case 'android': return { device: 'phone', biometric: 'your fingerprint', available: 'biometrics are', unlockButton: 'Unlock with biometrics' };
+    case 'android': return { device: 'phone', biometric: 'biometrics', available: 'biometrics are', unlockButton: 'Unlock with biometrics' };
     default: return { device: 'Mac', biometric: 'Touch ID', available: 'Touch ID is', unlockButton: 'Unlock with Touch ID' };
   }
 }

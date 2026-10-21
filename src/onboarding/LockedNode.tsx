@@ -134,13 +134,13 @@ export function LockedNode(props: {
 }
 
 const REMEMBER_TEXT = {
-  phone: 'BitSov encrypts it with a key in this phone’s secure hardware that only opens with your fingerprint. Next time, unlock with your fingerprint instead of typing it.',
+  phone: 'BitSov encrypts it with a key in this phone’s secure hardware that only opens with biometrics. Next time, unlock with biometrics instead of typing it.',
   iPhone: 'BitSov saves it on this iPhone, protected by biometrics. Next time, unlock with biometrics instead of typing it.',
   iPad: 'BitSov saves it on this iPad, protected by biometrics. Next time, unlock with biometrics instead of typing it.',
   Mac: 'BitSov saves it in this Mac’s Keychain, protected by Touch ID. Next time, unlock with Touch ID instead of typing it.',
 } as const;
 const REMEMBER_BUTTON = {
-  phone: 'Remember on this phone (fingerprint)',
+  phone: 'Remember on this phone (biometrics)',
   iPhone: 'Remember on this iPhone (biometrics)',
   iPad: 'Remember on this iPad (biometrics)',
   Mac: 'Remember on this Mac (Touch ID)',
@@ -182,7 +182,7 @@ export function RememberUnlock(props: {
     >
       <h2>Unlocked. Remember the password on this {wordsFor(props).device}?</h2>
       <p>{REMEMBER_TEXT[wordsFor(props).device]}</p>
-      <p class="hint">If the {platformFor(props) === 'ios' ? 'faces or fingerprints' : 'fingerprints'} on this {wordsFor(props).device} change, the saved copy stops opening. Type the password once more and choose Remember to replace it.</p>
+      <p class="hint">If the {platformFor(props) === 'android' ? 'enrolled biometrics' : platformFor(props) === 'ios' ? 'faces or fingerprints' : 'fingerprints'} on this {wordsFor(props).device} change, the saved copy stops opening. Type the password once more and choose Remember to replace it.</p>
       <p class="hint">If your device’s approval key also stops working, another approved owner device or the box must unlock the node first. Then set up {isMobilePlatform(platformFor(props)) ? 'biometric' : 'Touch ID'} approvals again before unlocking from this device.</p>
       <div class="row">
         <button class="primary" data-remember-yes disabled={busy()} onClick={() => void choose(true)}>{busy() ? 'Saving…' : REMEMBER_BUTTON[wordsFor(props).device]}</button>

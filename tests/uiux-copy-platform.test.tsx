@@ -24,11 +24,12 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+const ANDROID = 'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/130.0 Mobile Safari/537.36';
 const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148';
-/** An iPhone build: a Tauri webview that reports an iPhone. */
-function asIphone() {
+/** A phone build: use its Tauri runtime and reported user agent. */
+function asPhone(userAgent = IPHONE) {
   vi.stubGlobal('__TAURI_INTERNALS__', { invoke: () => Promise.reject(new Error('no host in this test')), transformCallback: () => 0 });
-  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(IPHONE);
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(userAgent);
 }
 function mountIt(ui: () => any) {
   mount = document.createElement('div');
@@ -66,7 +67,7 @@ it('says "computer" on a desktop and "phone" on a phone', () => {
   expect(deviceWord('android')).toBe('phone');
   expect(endpointBadge(OWN_RULES).where).toBe('On this computer · rules');
   expect(OWN_RULES.label).toBe('On this computer');
-  asIphone();
+  asPhone();
   expect(deviceWord()).toBe('phone');
   expect(endpointBadge(OWN_RULES).where).toBe('On this phone · rules');
   expect(OWN_RULES.label).toBe('On this phone');
@@ -111,8 +112,8 @@ it('Profile: the image pickers use the app’s own words, not the native "Choose
   expect(mount.textContent).toContain('No image chosen');
 });
 
-it('assistant and Browse copy on an iPhone says nothing about a Mac or a desktop app', async () => {
-  asIphone();
+it.each([['iPhone', IPHONE], ['Android', ANDROID]])('assistant, Browse and Wallet copy on %s uses phone wording', async (_label, userAgent) => {
+  asPhone(userAgent);
   mountIt(() => <ControlCenter source={sampleSource({ firstLiveMs: 1e9 })} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />);
   await vi.waitFor(() => expect($('[data-track="assistant:node"]')).not.toBeNull());
   $<HTMLButtonElement>('[data-track="assistant:node"]')!.click();
@@ -124,4 +125,10 @@ it('assistant and Browse copy on an iPhone says nothing about a Mac or a desktop
   $<HTMLButtonElement>('[data-track="discover"]')!.click();
   await vi.waitFor(() => expect($('[data-panel="discover"]')).not.toBeNull());
   expect($('[data-panel="discover"]')!.textContent).not.toMatch(/desktop app/);
+  $<HTMLButtonElement>('[data-profile]')!.click();
+  $<HTMLButtonElement>('[data-open-wallet]')!.click();
+  await vi.waitFor(() => expect($('[data-wallet-tab="activity"]')).not.toBeNull());
+  $<HTMLButtonElement>('[data-wallet-tab="activity"]')!.click();
+  expect(mount.textContent).toContain('made in this app on this phone');
+  expect(mount.textContent).not.toMatch(/on this Mac|Touch ID|desktop app/);
 });
