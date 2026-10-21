@@ -116,6 +116,8 @@ pub fn payment_quote(principal_msat: u64) -> Result<PaymentQuote, ActionError> {
 /// approval, name the unreachable members); `message` is shown as written.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct ActionError {
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub connection_error: Option<crate::remote_access::ConnectionError>,
     pub code: &'static str,
     pub message: String,
     /// `payment_settled_undelivered` only: what was paid, and whether a retry is offered.
@@ -297,6 +299,7 @@ pub fn with_op<T>(context: OperationContext<'_>, result: Result<T, ActionError>)
 impl ActionError {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
+            connection_error: None,
             code,
             message: message.into(),
             undelivered: None,

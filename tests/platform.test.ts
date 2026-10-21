@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { appPlatform, deviceWords, isMobilePlatform } from '../src/platform';
 import { refusalText } from '../src/control/ownerApproval';
-import { androidQrScannerAvailable } from '../src/pairingScanner';
+import { mobileQrScannerAvailable } from '../src/pairingScanner';
 
 const ANDROID = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36';
 const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148';
@@ -37,14 +37,14 @@ describe('the app platform, from its own Tauri runtime', () => {
     expect(appPlatform(ANDROID, 5, false)).toBe('desktop');
   });
 
-  it('a phone is Android or iOS; the Android scanner stays Android only', () => {
+  it('a phone is Android or iOS; the native scanner supports both', () => {
     expect(isMobilePlatform('android')).toBe(true);
     expect(isMobilePlatform('ios')).toBe(true);
     expect(isMobilePlatform('desktop')).toBe(false);
     (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     try {
-      expect(androidQrScannerAvailable(ANDROID)).toBe(true);
-      expect(androidQrScannerAvailable(IPHONE)).toBe(false);
+      expect(mobileQrScannerAvailable(ANDROID)).toBe(true);
+      expect(mobileQrScannerAvailable(IPHONE)).toBe(true);
     } finally { delete (globalThis as Record<string, unknown>).__TAURI_INTERNALS__; }
   });
 });

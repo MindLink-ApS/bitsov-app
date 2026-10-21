@@ -5,6 +5,8 @@
 pub mod device_key;
 #[cfg(target_os = "ios")]
 pub mod client_keychain;
+#[cfg(target_os = "ios")]
+pub mod pairing_link;
 #[cfg(target_os = "macos")]
 pub mod home_keychain;
 #[cfg(target_os = "macos")]

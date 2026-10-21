@@ -37,6 +37,20 @@ describe('pairing link inbox availability', () => {
 });
 
 describe('watchPairingLinks', () => {
+  it('takes a cold-launch link immediately, before the first polling interval', async () => {
+    vi.useFakeTimers();
+    let reads = 0;
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: async () => { reads++; return reads === 1 ? 'bitsov://pair/synthetic' : null; } });
+    const seen: string[] = [];
+    const stop = watchPairingLinks(link => seen.push(link));
+    expect(reads).toBe(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(750);
+    expect(reads).toBe(2);
+    expect(seen).toHaveLength(1);
+    stop();
+  });
   it('delivers each taken link once, skips empty reads and survives native errors', async () => {
     vi.useFakeTimers();
     const replies: (string | null | Error)[] = [new Error('inbox unavailable'), null, 'bitsov://pair/one', null, 'bitsov://pair/two'];
