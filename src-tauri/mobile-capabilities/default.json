@@ -82,6 +82,7 @@
     "allow-spend-reconcile",
     "allow-op-list",
     "allow-op-end-call",
+    "allow-op-repair-call-index",
     "allow-op-close-call",
     "allow-budget-status",
     "allow-budget-approve",

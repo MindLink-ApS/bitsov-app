@@ -88,6 +88,7 @@ fn main() {
             "spend_reconcile",
             "op_list",
             "op_end_call",
+            "op_repair_call_index",
             "op_close_call",
             "budget_status",
             "budget_approve",

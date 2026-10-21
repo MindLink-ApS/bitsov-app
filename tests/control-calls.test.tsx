@@ -1593,6 +1593,41 @@ describe('H2: what the host says about ending, said honestly', () => {
     expect(endCall).toHaveBeenCalledTimes(1);
   });
 
+  it('recovery refusal explains closure and End call closes the original admission', async () => {
+    vi.useFakeTimers();
+    let offers = 0;
+    const endCall = vi.fn(async () => ({ ok: true as const, value: view('settled') }));
+    const { e, last } = engine({ endCall, signal: async () => ++offers === 1
+      ? { ok: true, value: { operation_id: 'original', message_id: 'm', kind: 400, amount_msat: 10000, total_msat: 15000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: 0 } }
+      : { ok: false, error: { code: 'call_admission_open', message: 'generic', operation_id: 'original' } } });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'answer' }), OWN);
+    const pc = FakePc.made[FakePc.made.length - 1];
+    pc.connect(); pc.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(last().recoveryError).toBe('Your last call is still closing. End it, then call again.');
+    await e.hangup();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(endCall.mock.calls).toHaveLength(1);
+    expect(endCall).toHaveBeenCalledWith(ID);
+    expect(last().close?.status).toBe('closed');
+    vi.useRealTimers();
+  });
+
+  it.each(['hangup', 'busy'])('host-bound early %s waits for the exact offer receipt', async (reason) => {
+    let resolve!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
+    const endCall = vi.fn();
+    const { e, last } = engine({ endCall, signal: () => new Promise(r => { resolve = r; }) });
+    const placing = e.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(resolve).toBeDefined());
+    await e.receive({ ...msg(403, { reason }), admission_operation_id: 'fresh' }, OWN);
+    expect(last().phase).toBe('calling');
+    resolve({ ok: true, value: { operation_id: 'fresh', message_id: 'm', kind: 400, amount_msat: 10000, total_msat: 15000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: 0 } });
+    await placing;
+    expect(last()).toMatchObject({ phase: 'ended', reason });
+    expect(endCall).not.toHaveBeenCalled();
+  });
+
   it('call_admission_open: said, never a silent block; the owner ends the earlier call, found by its op', async () => {
     const earlier = 'c'.repeat(32);
     const endCall = vi.fn(async (id: string) => ({ ok: true as const, value: { ...view('settled'), call_id: id } }));
@@ -2677,6 +2712,81 @@ describe('calls in the shell', () => {
     expect(host.used('op_end_call')).toHaveLength(1);
   });
 
+  it.each([null, ID])('unresolved call index is visible and owner repair uses only the host binding: %s', async (repaired) => {
+    const index = 'a'.repeat(64);
+    let reviewed = false;
+    const host = stubHost({
+      op_list: () => ({ operations: [], skipped: 1, has_more: false,
+        unresolved_calls: reviewed && repaired ? [] : [{ index_id: index, acknowledged: reviewed }] }),
+      op_repair_call_index: () => { reviewed = true; return repaired; },
+    });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-call-repair]')).not.toBeNull());
+    expect(text('[data-call-repairs]')).toContain('Unresolved call record');
+    expect(host.used('op_end_call')).toHaveLength(0);
+    $<HTMLButtonElement>('[data-call-repair]')!.click();
+    await vi.waitFor(() => expect(host.used('op_repair_call_index').length).toBeGreaterThanOrEqual(1));
+    expect(host.used('op_repair_call_index')[0].args).toEqual({ index_id: index });
+    if (repaired) {
+      await vi.waitFor(() => expect(host.used('op_end_call')).toHaveLength(1));
+      expect(host.used('op_end_call')[0].args).toEqual({ call_id: ID });
+      await vi.waitFor(() => expect(text('[data-call-repair-result]')).toContain('ended'));
+    } else {
+      await vi.waitFor(() => expect(text('[data-call-repair-result]')).toContain('still blocked'));
+      expect(host.used('op_end_call')).toHaveLength(0);
+      expect($('[data-call-repair]')).not.toBeNull();
+    }
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it('repair keeps its owner action when ending the repaired admission is refused', async () => {
+    const index = 'b'.repeat(64);
+    const host = stubHost({
+      op_list: () => ({ operations: [], skipped: 0, has_more: false, unresolved_calls: [{ index_id: index, acknowledged: false }] }),
+      op_repair_call_index: () => ID,
+      op_end_call: () => { throw { code: 'price_changed', message: 'Price changed.' }; },
+    });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-call-repair]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-repair]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-repair-result]')).toContain('Couldn’t end the call'));
+    expect($<HTMLButtonElement>('[data-call-repair]')!.disabled).toBe(false);
+    $<HTMLButtonElement>('[data-call-repair]')!.click();
+    await vi.waitFor(() => expect(host.used('op_end_call')).toHaveLength(2));
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it('recovery End call offers a priced Call again only after host closure', async () => {
+    let offers = 0;
+    let close!: (r: unknown) => void;
+    const host = stubHost({
+      call_signal: (args) => {
+        if (++offers > 1) throw { code: 'call_admission_open', message: 'generic', operation_id: 'original' };
+        return { operation_id: 'original', message_id: 'sig', kind: args!.kind, amount_msat: 10000, total_msat: 15000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+      },
+      op_end_call: () => new Promise(r => { close = r; }),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    const id = JSON.parse(host.used('call_signal')[0].args!.plaintext as string).call_id;
+    host.emitLive({ type: 'message', room_id: null, message: msg(401, { call_id: id, sdp: 'answer' }) });
+    await vi.waitFor(() => expect(FakePc.made[0].remote).not.toBeNull());
+    FakePc.made[0].connect(); FakePc.made[0].state('failed');
+    await vi.waitFor(() => expect(text('[data-call-error]')).toBe('Your last call is still closing. End it, then call again.'));
+    expect(text('[data-call-hangup]')).toBe('End call');
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect(host.used('op_end_call')).toHaveLength(1));
+    expect(host.used('op_end_call')[0].args).toEqual({ call_id: id });
+    expect($('[data-call-again]')).toBeNull();
+    close({ op_id: 'end', kind: 'call_hangup', peer: A, call_id: id, state: 'settled', cap_msat: 6000, paid_msat: 1000, message_id: 'end' });
+    await vi.waitFor(() => expect($('[data-call-again]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-again]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-again-confirm]')).toContain('Ring'));
+    expect(host.used('call_signal')).toHaveLength(2); // merely offering another call never pays
+  });
+
   it('H2: "a call to Maya is still closing", never a silent block; End that call ends the one the host holds', async () => {
     const earlier = 'c'.repeat(32);
     const host = stubHost({
@@ -2693,7 +2803,7 @@ describe('calls in the shell', () => {
     expect(host.used('op_end_call')).toHaveLength(0);
     $<HTMLButtonElement>('[data-call-end-stuck]')!.click();
     await vi.waitFor(() => expect(text('[data-call-close]')).toBe('The earlier call is ended. You can call them again.'));
-    expect(host.used('op_list').slice(-1)[0].args).toEqual({ peer: A });
+    expect(host.used('op_list').some(c => c.args?.peer === A)).toBe(true);
     expect(host.used('op_end_call').map((c) => c.args)).toEqual([{ call_id: earlier }]);
     expect($('[data-call-end-stuck]')).toBeNull();
   });
