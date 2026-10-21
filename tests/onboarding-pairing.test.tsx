@@ -169,6 +169,45 @@ describe('pairing panel', () => {
   let dispose: (() => void) | undefined;
   let mount: HTMLElement | undefined;
 
+  it.each([true, false])('first-run box preview on phone=%s gates import', async phone => {
+    const save = vi.fn();
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <Onboarding status={() => booting} pairing={() => starting}
+      trustAck={() => false} onRetry={() => {}} selectedTarget="network" phone={phone}
+      onPreviewRemote={async () => ({ endpoint: 'box:9737', node_id_fingerprint: '22…22', first_run: true })}
+      onImportRemote={save} initialPairingLink="bitsov://pair/test" />, mount);
+    const form = mount.querySelector<HTMLFormElement>('form')!;
+    form.requestSubmit();
+    await vi.waitFor(() => expect(mount!.querySelector('[data-pairing-preview]')).not.toBeNull());
+    const message = "This node isn't set up yet. Finish setup on a Mac, then add this phone.";
+    if (phone) {
+      expect(mount.textContent).toContain(message);
+      expect(Array.from(form.querySelectorAll('button')).some(b => b.textContent === 'Use remote node')).toBe(false);
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+      expect(save).not.toHaveBeenCalled();
+    } else {
+      expect(mount.textContent).not.toContain(message);
+      expect(form.querySelector('button[type="submit"]')?.textContent).toBe('Use remote node');
+    }
+  });
+
+  it('shows connecting without restart instructions after a mobile import', async () => {
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <Onboarding status={() => booting} pairing={() => starting}
+      trustAck={() => false} onRetry={() => {}} phone
+      onPreviewRemote={async () => ({ endpoint: 'home:9737', node_id_fingerprint: 'ab…cd', first_run: false })}
+      onImportRemote={async () => ({ endpoint: 'home:9737', node_id_fingerprint: 'ab…cd', restart_required: false })}
+      initialPairingLink="bitsov://pair/test" />, mount);
+    const form = mount.querySelector<HTMLFormElement>('form')!;
+    form.requestSubmit();
+    await vi.waitFor(() => expect(mount!.querySelector('[data-pairing-preview]')).not.toBeNull());
+    form.requestSubmit();
+    await vi.waitFor(() => expect(mount!.querySelector('[data-import-result]')).not.toBeNull());
+    expect(mount.textContent).toContain('Connecting to your node…');
+    expect(mount.textContent).not.toMatch(/Restart BitSov|next app start/);
+  });
+
   it('previews the exact ticket before confirmation and invalidates the preview after editing', async () => {
     const preview = vi.fn().mockResolvedValue({ endpoint: 'review.example:4242', node_id_fingerprint: '12345678…abcdef12' });
     const save = vi.fn().mockResolvedValue({ endpoint: 'review.example:4242', node_id_fingerprint: '12345678…abcdef12', restart_required: true });

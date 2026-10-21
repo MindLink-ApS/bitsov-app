@@ -261,6 +261,7 @@ pub enum RemoteAuthResponse {
 /// Public ticket identity only; contains no pairing code or other authority.
 #[derive(Debug, Clone, Serialize)]
 pub struct RemotePreviewView {
+    pub first_run: bool,
     pub endpoint: String,
     pub node_id_fingerprint: String,
     pub hosted_by: Option<String>,
@@ -281,6 +282,8 @@ pub enum RemoteError {
     Transport(String),
     Refused(String),
     HandshakeUnavailable,
+    Unclaimed,
+    LocalNetwork,
     RateLimited(u64),
     Waiting(u64),
     /// Seconds since the pairing ticket expired.
@@ -308,6 +311,8 @@ impl fmt::Display for RemoteError {
             Self::Local(message) => f.write_str(message),
             Self::Transport(message) => write!(f, "remote transport failed: {message}"),
             Self::Refused(message) => write!(f, "remote node refused pairing: {message}"),
+            Self::Unclaimed => f.write_str("This node isn't set up yet. Finish setup on a Mac, then add this phone."),
+            Self::LocalNetwork => f.write_str("Local network access is denied or unavailable. Check BitSov's Local Network permission in Settings and your network connection."),
             Self::HandshakeUnavailable => f.write_str(HANDSHAKE_UNAVAILABLE),
             Self::RateLimited(seconds) => write!(f, "Remote connection limited; waiting {seconds} s"),
             Self::Waiting(seconds) => write!(f, "Remote connection unavailable; waiting {seconds} s"),
@@ -316,6 +321,65 @@ impl fmt::Display for RemoteError {
 }
 
 impl std::error::Error for RemoteError {}
+
+/// Stable renderer contract. Detail is diagnostic copy, never a ticket or key.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectionError {
+    pub kind: ConnectionErrorKind,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionErrorKind {
+    Unclaimed,
+    LocalNetwork,
+    Unreachable,
+    Busy,
+    Expired,
+    Other,
+}
+
+impl From<&RemoteError> for ConnectionError {
+    fn from(error: &RemoteError) -> Self {
+        let kind = match error {
+            RemoteError::Unclaimed => ConnectionErrorKind::Unclaimed,
+            RemoteError::LocalNetwork => ConnectionErrorKind::LocalNetwork,
+            RemoteError::HandshakeUnavailable | RemoteError::Waiting(_) => ConnectionErrorKind::Unreachable,
+            RemoteError::RateLimited(_) => ConnectionErrorKind::Busy,
+            RemoteError::Expired(_) => ConnectionErrorKind::Expired,
+            _ => ConnectionErrorKind::Other,
+        };
+        // Never forward arbitrary peer messages, paths, or parser input through
+        // this UI contract: a peer can echo the authentication code it received.
+        let detail = if kind == ConnectionErrorKind::Other {
+            "The remote connection could not be established.".to_string()
+        } else {
+            error.to_string()
+        };
+        Self { kind, detail }
+    }
+}
+
+// BSD sockets cannot definitively distinguish an iOS privacy denial from an
+// unavailable route. Preserve these classes without asserting permission was
+// denied; a timeout/refusal alone is not evidence of a privacy restriction.
+fn classify_connect_error(error: std::io::Error, ios: bool, endpoint: &str) -> RemoteError {
+    use std::io::ErrorKind;
+    let local = endpoint_parts(endpoint).is_ok_and(|(host, _)| {
+        match host.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(ip)) => ip.is_private() || ip.is_link_local(),
+            Ok(std::net::IpAddr::V6(ip)) => ip.is_unique_local() || ip.is_unicast_link_local(),
+            Err(_) => host.trim_end_matches('.').to_ascii_lowercase().ends_with(".local"),
+        }
+    });
+    if ios && local && matches!(error.kind(), ErrorKind::PermissionDenied | ErrorKind::NetworkDown
+        | ErrorKind::NetworkUnreachable | ErrorKind::HostUnreachable) {
+        RemoteError::LocalNetwork
+    } else {
+        RemoteError::HandshakeUnavailable
+    }
+}
 
 /// Exact UTF-8 string signed by the node for the pairing link.
 pub fn descriptor_signature_message(node_id_hex: &str, transport_pubkey_hex: &str) -> String {
@@ -820,6 +884,7 @@ fn persist_with(
 pub fn preview_pairing_link(link: &str) -> Result<RemotePreviewView, RemoteError> {
     let descriptor = parse_pairing_link(link)?;
     Ok(RemotePreviewView {
+        first_run: descriptor.bootstrap_box_key().is_some() && descriptor.node_id().is_empty(),
         endpoint: descriptor.endpoint.clone(),
         node_id_fingerprint: node_id_fingerprint(descriptor.bootstrap_box_key().unwrap_or(&descriptor.node_id)),
         hosted_by: descriptor.hosted_by.clone(),
@@ -1793,7 +1858,7 @@ async fn connect_bound(
         let attempt = async {
             let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(endpoint))
                 .await.map_err(|_| RemoteError::HandshakeUnavailable)?
-                .map_err(|_| RemoteError::HandshakeUnavailable)?;
+                .map_err(|error| classify_connect_error(error, cfg!(target_os = "ios"), endpoint))?;
             let (noise, hash) = pinned_handshake_bound(&mut stream, descriptor, key).await?;
             Ok::<_, RemoteError>((stream, noise, hash))
         }.await;
@@ -1803,7 +1868,14 @@ async fn connect_bound(
                 return Ok((remote, noise, hash, client, scopes, proofs));
             }
             Err(error @ RemoteError::RateLimited(_)) => return Err(error),
-            Err(error) => last = map_pre_auth_failure(error),
+            // Keep the actionable OS error if a later fallback is unreachable.
+            Err(RemoteError::LocalNetwork) => last = RemoteError::LocalNetwork,
+            Err(error) => {
+                let error = map_pre_auth_failure(error);
+                if !matches!(last, RemoteError::LocalNetwork) || !matches!(error, RemoteError::HandshakeUnavailable) {
+                    last = error;
+                }
+            }
         }
     }
     Err(last)
@@ -3468,6 +3540,26 @@ mod tests {
         assert_eq!(error.to_string(), HANDSHAKE_UNAVAILABLE);
     }
 
+    #[tokio::test]
+    async fn remote_dial_opens_with_a_noise_frame_not_tls() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let node = SigningKey::from_bytes(&[42; 32]);
+        let descriptor = parse_pairing_link(&signed_link(
+            listener.local_addr().unwrap().to_string(), &node, [43; 32], &test_code(44),
+        )).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(dir.path()).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut head = [0; 4];
+            stream.read_exact(&mut head).await.unwrap();
+            assert_ne!(head[0], 0x16);
+            assert_eq!(u32::from_be_bytes(head), 32);
+        });
+        assert!(connect_authenticated(&descriptor, &key, "test phone").await.is_err());
+        tokio::time::timeout(Duration::from_secs(2), server).await.unwrap().unwrap();
+    }
+
     async fn responder(listener: TcpListener, secret: [u8; 32]) -> Result<(), RemoteError> {
         let (mut stream, _) = listener.accept().await.unwrap();
         let params = NOISE_PROTOCOL.parse().unwrap();
@@ -3991,3 +4083,47 @@ mod tests {
 #[cfg(test)]
 #[path = "remote_access/home_tests.rs"]
 mod home_tests;
+
+#[cfg(test)]
+mod onboarding_error_tests {
+    use super::*;
+
+    #[test]
+    fn structured_errors_never_echo_remote_or_local_secrets() {
+        for error in [RemoteError::Refused("SECRET_TICKET_SENTINEL".into()),
+            RemoteError::Transport("SECRET_TICKET_SENTINEL".into()),
+            RemoteError::Local("SECRET_TICKET_SENTINEL".into()),
+            RemoteError::Invalid("SECRET_TICKET_SENTINEL".into())] {
+            let wire = serde_json::to_string(&ConnectionError::from(&error)).unwrap();
+            assert!(!wire.contains("SECRET_TICKET_SENTINEL"));
+        }
+    }
+
+    #[test]
+    fn ios_connect_permission_and_unavailable_classes_survive_mapping() {
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::NetworkDown, std::io::ErrorKind::NetworkUnreachable, std::io::ErrorKind::HostUnreachable] {
+            let error = classify_connect_error(std::io::Error::from(kind), true, "192.168.1.2:3141");
+            assert!(matches!(error, RemoteError::LocalNetwork));
+            assert!(matches!(map_pre_auth_failure(error), RemoteError::LocalNetwork));
+        }
+        for kind in [std::io::ErrorKind::ConnectionRefused, std::io::ErrorKind::TimedOut, std::io::ErrorKind::NotFound] {
+            assert!(matches!(classify_connect_error(std::io::Error::from(kind), true, "192.168.1.2:3141"), RemoteError::HandshakeUnavailable));
+        }
+        assert!(matches!(classify_connect_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied), false, "192.168.1.2:3141"), RemoteError::HandshakeUnavailable));
+        for endpoint in ["100.64.0.1:3141", "box.tailnet.ts.net:3141", "example.com:3141"] {
+            assert!(matches!(classify_connect_error(std::io::Error::from(std::io::ErrorKind::NetworkUnreachable), true, endpoint), RemoteError::HandshakeUnavailable));
+        }
+        for endpoint in ["box.local:3141", "[fe80::123]:3141", "[fd00::123]:3141", "10.0.0.2:3141"] {
+            assert!(matches!(classify_connect_error(std::io::Error::from(std::io::ErrorKind::NetworkDown), true, endpoint), RemoteError::LocalNetwork));
+        }
+    }
+
+    #[test]
+    fn ios_local_network_usage_copy_explains_box_connection_and_recovery() {
+        let plist = include_str!("../Info.ios.plist");
+        let copy = plist.split("<key>NSLocalNetworkUsageDescription</key>").nth(1).unwrap().split("</string>").next().unwrap();
+        assert!(copy.contains("connect to your box"));
+        assert!(copy.contains("local network"));
+        assert!(!copy.contains("claim code"));
+    }
+}

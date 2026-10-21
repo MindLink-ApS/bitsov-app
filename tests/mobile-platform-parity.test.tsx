@@ -110,6 +110,19 @@ describe.each([
     expect($('[data-remember-unlock]').textContent).toContain(`this ${namedDevice}`);
   });
 
+  it('App renders saved first-run ticket guidance without an unavailable error or reconnect button', async () => {
+    const message = "This node isn't set up yet. Finish setup on a Mac, then add this phone.";
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      if (cmd === 'node_status') return Promise.resolve({ ready: false, node_id: null, error: message });
+      if (cmd === 'pairing_status') return Promise.resolve({ state: 'starting', remote: false, scopes: [], bootstrap: null });
+      return Promise.reject('unavailable');
+    } });
+    show(() => <App />);
+    await vi.waitFor(() => expect(mount.textContent).toContain(message));
+    expect(mount.textContent).not.toContain('Your node is unavailable');
+    expect(Array.from(mount.querySelectorAll('button')).some(b => b.textContent === 'Reconnect')).toBe(false);
+  });
+
   it('App pairing names the device in first run and the incoming-link dialog, with a native scanner only on Android', async () => {
     let link: string | null = 'bitsov://pair/test-ticket';
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {

@@ -67,6 +67,7 @@ import type {
 } from './types';
 
 export type RemotePreviewView = {
+  first_run?: boolean;
   endpoint: string;
   node_id_fingerprint: string;
   hosted_by?: string | null;

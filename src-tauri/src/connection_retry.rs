@@ -36,6 +36,13 @@ pub struct RemoteRetry {
     attempt: tokio::sync::Mutex<()>,
     state: std::sync::Mutex<RemoteRetryState>,
     failure_revision: std::sync::atomic::AtomicU64,
+    last_error: std::sync::Mutex<ConnectionFailure>,
+}
+
+#[derive(Default)]
+struct ConnectionFailure {
+    revision: u64,
+    error: Option<crate::remote_access::ConnectionError>,
 }
 
 #[derive(Default)]
@@ -46,6 +53,29 @@ struct RemoteRetryState {
 }
 
 impl RemoteRetry {
+    pub fn connection_error(&self) -> Option<crate::remote_access::ConnectionError> {
+        self.last_error.lock().unwrap().error.clone()
+    }
+
+    pub fn clear_connection_error(&self) {
+        let mut last = self.last_error.lock().unwrap();
+        last.revision = last.revision.wrapping_add(1);
+        last.error = None;
+    }
+
+    pub fn connection_error_revision(&self) -> u64 {
+        self.last_error.lock().unwrap().revision
+    }
+
+    /// A successful retained tunnel must not erase a newer proxy failure.
+    pub fn clear_connection_error_if_unchanged(&self, revision: u64) {
+        let mut last = self.last_error.lock().unwrap();
+        if last.revision == revision {
+            last.revision = last.revision.wrapping_add(1);
+            last.error = None;
+        }
+    }
+
     /// Rounded up for UI and scheduling, using a monotonic clock.
     pub fn remaining(&self) -> Option<u64> {
         self.state.lock().unwrap().next.and_then(|next| {
@@ -77,6 +107,11 @@ impl RemoteRetry {
 
     pub fn failed(&self, error: &crate::remote_access::RemoteError) {
         use crate::remote_access::RemoteError;
+        {
+            let mut last = self.last_error.lock().unwrap();
+            last.revision = last.revision.wrapping_add(1);
+            last.error = Some(error.into());
+        }
         let mut state = self.state.lock().unwrap();
         let hint = match error {
             RemoteError::RateLimited(seconds) => *seconds,
@@ -115,11 +150,17 @@ impl RemoteRetry {
             Some(tokio::time::Instant::now() + Duration::from_secs(1));
         let result = operation().await;
         match &result {
-            Ok(_) => *self.state.lock().unwrap() = RemoteRetryState::default(),
+            Ok(_) => {
+                *self.state.lock().unwrap() = RemoteRetryState::default();
+                self.clear_connection_error();
+            },
             Err(RemoteError::HandshakeUnavailable | RemoteError::RateLimited(_)) => {
                 self.failed(result.as_ref().err().unwrap());
             }
-            Err(_) => *self.state.lock().unwrap() = RemoteRetryState::default(),
+            Err(error) => {
+                *self.state.lock().unwrap() = RemoteRetryState::default();
+                self.failed(error);
+            },
         }
         result
     }
@@ -323,5 +364,36 @@ mod remote_tests {
             assert!(!retry.is_retrying());
             assert_eq!(retry.remaining(), None);
         }
+    }
+}
+
+#[cfg(test)]
+mod onboarding_tests {
+    use super::*;
+    use crate::remote_access::{ConnectionErrorKind, RemoteError};
+
+    #[test]
+    fn older_recovery_cannot_clear_a_newer_connection_failure() {
+        let retry = RemoteRetry::default();
+        retry.failed(&RemoteError::Unclaimed);
+        let before = retry.connection_error_revision();
+        retry.failed(&RemoteError::LocalNetwork);
+        retry.clear_connection_error_if_unchanged(before);
+        assert_eq!(retry.connection_error().unwrap().kind, ConnectionErrorKind::LocalNetwork);
+        let current = retry.connection_error_revision();
+        retry.clear_connection_error_if_unchanged(current);
+        assert!(retry.connection_error().is_none());
+    }
+
+    #[tokio::test]
+    async fn permission_failure_is_actionable_until_a_successful_retry() {
+        let retry = RemoteRetry::default();
+        let _ = retry.run(|| async { Err::<(), _>(RemoteError::LocalNetwork) }).await;
+        assert_eq!(retry.connection_error().unwrap().kind, ConnectionErrorKind::LocalNetwork);
+        assert!(retry.remaining().is_none());
+        retry.clear_expired();
+        assert!(retry.connection_error().is_some());
+        retry.run(|| async { Ok(()) }).await.unwrap();
+        assert!(retry.connection_error().is_none());
     }
 }
