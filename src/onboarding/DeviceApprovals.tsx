@@ -1,3 +1,4 @@
+import { deviceWord, isMobilePlatform } from '../platform';
 import { JoinDevice, type JoinInput, type JoinView } from './AddDevice';
 import { createSignal, Match, Show, Switch } from 'solid-js';
 import type { DeviceView } from '../control/types';
@@ -25,10 +26,12 @@ export function DeviceApprovals(props: {
   /** Registration exists only for a remote node. */
   remote: boolean;
 }) {
+  const mobile = () => props.mobile ?? isMobilePlatform();
+  const device = () => mobile() ? (deviceWord() === 'iPad' ? 'iPad' : 'phone') : 'Mac';
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   usePairingActivity(busy);
-  const what = () => (props.mobile ? 'biometric approvals' : 'Touch ID approvals');
+  const what = () => (mobile() ? 'biometric approvals' : 'Touch ID approvals');
   const run = async (action: () => Promise<unknown>) => {
     if (busy()) return;
     setBusy(true);
@@ -44,14 +47,14 @@ export function DeviceApprovals(props: {
   };
   const joining = () => props.remote && props.device?.delegation_supported && props.joinDevice && ['none','pending','lapsed'].includes(state() ?? '');
   return (
-    <Show when={!joining()} fallback={<JoinDevice api={input => props.joinDevice!(input)} mobile={props.mobile} />}>
+    <Show when={!joining()} fallback={<JoinDevice api={input => props.joinDevice!(input)} mobile={mobile()} />}>
     <Show when={state() && state() !== 'unavailable' && (state() !== 'registered' || props.showRegistered)}>
       <section class="panel device-approvals" data-device-approvals={state()!}>
-        <h2>{props.mobile ? 'Approve payments with your fingerprint' : 'Approve payments with Touch ID'}</h2>
+        <h2>{mobile() ? 'Approve payments with biometrics' : 'Approve payments with Touch ID'}</h2>
         <Switch>
           <Match when={state() === 'registered'}>
             <p class="ok-note" data-device-approvals-on>
-              {props.mobile ? 'Biometric approvals are on for this phone.' : 'Touch ID approvals are on for this Mac.'}
+              {mobile() ? `Biometric approvals are on for this ${device()}.` : 'Touch ID approvals are on for this Mac.'}
             </p>
             <Show when={props.device?.owner_device_count === 1}>
               <p class="hint" role="status">This is your only owner device. Add and keep a second one so you can approve devices if this one is lost. A phone should not be your only owner device.</p>
@@ -59,21 +62,21 @@ export function DeviceApprovals(props: {
           </Match>
           <Match when={state() === 'off'}>
             <p class="hint" data-device-off={props.device?.off_reason ?? 'off'}>
-              <strong>{props.mobile ? 'Biometric approvals are off.' : 'Touch ID approvals are off.'}</strong> {props.device?.off_message}
+              <strong>{mobile() ? 'Biometric approvals are off.' : 'Touch ID approvals are off.'}</strong> {props.device?.off_message}
             </p>
           </Match>
           <Match when={state() === 'pending' && props.device}>
-            {(d) => <PendingApproval pending={d()} mobile={props.mobile} onCancel={() => run(props.onCancel).then(() => undefined)} />}
+            {(d) => <PendingApproval pending={d()} mobile={mobile()} onCancel={() => run(props.onCancel).then(() => undefined)} />}
           </Match>
           <Match when={state() === 'none' || state() === 'lapsed'}>
             <p class="hint">
-              {state() === 'lapsed' ? `Your last ${props.mobile ? 'biometric' : 'Touch ID'} setup request lapsed. ` : ''}
-              One {props.mobile ? 'fingerprint' : 'Touch ID'} tap approves a contact’s payments on this {props.mobile ? 'phone' : 'Mac'},
-              instead of approving each one at your node. Setup asks your node’s owner to approve this {props.mobile ? 'phone' : 'Mac'} once.
+              {state() === 'lapsed' ? `Your last ${mobile() ? 'biometric' : 'Touch ID'} setup request lapsed. ` : ''}
+              One {mobile() ? 'biometric' : 'Touch ID'} tap approves a contact’s payments on this {device()},
+              instead of approving each one at your node. Setup asks your node’s owner to approve this {device()} once.
             </p>
             <div class="form-actions">
               <button type="button" class="primary" data-device-register disabled={busy()} onClick={() => void run(props.onRegister)}>
-                {busy() ? 'Starting…' : props.mobile ? 'Set up biometric approvals' : 'Set up Touch ID approvals'}
+                {busy() ? 'Starting…' : mobile() ? 'Set up biometric approvals' : 'Set up Touch ID approvals'}
               </button>
               <Show when={props.onSkip}>
                 <button type="button" class="quiet" data-device-approvals-skip disabled={busy()} onClick={() => props.onSkip!()}>Not now</button>

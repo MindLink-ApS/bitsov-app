@@ -1,3 +1,4 @@
+import { deviceWord, isMobilePlatform } from '../platform';
 import { createEffect, createSignal, For, onCleanup, Show } from 'solid-js';
 import type { ActionError } from './types';
 import { refusalText, secondsLeft, shortKey, termLines, type ApprovalView } from './ownerApproval';
@@ -56,7 +57,9 @@ export function OwnerApprovals(props: {
   const { hidden, setHidden, kept, setKept, said, setSaid, busy, setBusy } = memory;
   /** An "Approved" is final: nothing later (a stale reply, a second press) overwrites it. */
   const settle = (opId: string, outcome: { ok: boolean; text: string }) => setSaid((s) => settleOutcome(s, opId, outcome));
-  const tap = () => (props.mobile ? 'your fingerprint' : 'Touch ID');
+  const mobile = () => props.mobile ?? isMobilePlatform();
+  const device = () => mobile() ? (deviceWord() === 'iPad' ? 'iPad' : 'phone') : 'Mac';
+  const tap = () => (mobile() ? 'biometrics' : 'Touch ID');
   const live = (v: ApprovalView) => v.status === 'pending' && secondsLeft(v, props.now) > 0;
   /** Approve is offered only while the node still lists it as waiting. */
   const waiting = (opId: string) => props.approvals.some((v) => v.op_id === opId && live(v));
@@ -123,7 +126,7 @@ export function OwnerApprovals(props: {
                   </p>
                 </Show>
                 <details class="quiet-detail" data-approval-message>
-                  <summary>Exact message your {props.mobile ? 'phone' : 'Mac'} signs</summary>
+                  <summary>Exact message your {device()} signs</summary>
                   <pre class="approval-message">{v.approval_message}</pre>
                 </details>
                 <Show when={busy() === v.op_id}>

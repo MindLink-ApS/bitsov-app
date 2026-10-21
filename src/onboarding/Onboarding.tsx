@@ -1,3 +1,4 @@
+import { deviceWord, isMobilePlatform } from '../platform';
 import type { JoinInput, JoinView } from './AddDevice';
 import { BoxIllustration } from './BoxIllustration';
 import { LocalNodeSwitch } from './LocalNodeSwitch';
@@ -52,9 +53,9 @@ export function Onboarding(props: {
   onBusyChange?: (busy: boolean) => void;
   onImportRemote?: (link: string) => Promise<RemoteImportView>;
   onScanRemote?: () => Promise<string>;
-  /** A phone (biometric approvals). Defaults to “has a scanner” for older callers. */
+  /** Mobile wording (Android or iOS), independent of scanner capability. */
   mobile?: boolean;
-  /** A phone or tablet build (Android or iOS). Defaults to `mobile` (Android). */
+  /** A phone or tablet build (Android or iOS). Defaults to the runtime platform. */
   phone?: boolean;
   /** Touch ID approvals setup, offered once the app is paired (Settings → Node has the same). */
   onRegisterDevice?: () => Promise<unknown>;
@@ -73,16 +74,16 @@ export function Onboarding(props: {
   const steps = () => onboardingSteps(props.status(), props.pairing(), props.trustAck(), phone());
   const stage = () => onboardingStage(steps());
   // On a phone the only target is your node (there is no "This Mac").
-  const [internalTarget, setInternalTarget] = createSignal<NodeTarget>((props.phone ?? props.mobile === true) ? 'network' : 'local');
+  const phone = () => props.phone ?? props.mobile ?? isMobilePlatform();
+  const mobileBiometrics = () => props.mobile ?? isMobilePlatform();
+  const device = () => deviceWord() === 'iPad' ? 'iPad' : 'phone';
+  const [internalTarget, setInternalTarget] = createSignal<NodeTarget>(phone() ? 'network' : 'local');
   const target = () => props.selectedTarget ?? internalTarget();
   const setTarget = (t: NodeTarget) => {
     setInternalTarget(t);
     props.onTargetChange?.(t);
   };
   const isEnrolled = () => props.device?.()?.state === 'registered';
-  const mobileBiometrics = () => props.mobile ?? props.onScanRemote !== undefined;
-  /** Running on a phone or tablet (Android or iOS, from isMobilePlatform): there is no "This Mac" to choose. */
-  const phone = () => props.phone ?? props.mobile === true;
   const [approvalsSkipped, setApprovalsSkipped] = createSignal(false);
   const [remoteLink, setRemoteLink] = createSignal('');
   const [previewing, setPreviewing] = createSignal(false);
@@ -236,9 +237,9 @@ export function Onboarding(props: {
       >
         <header class="ob-head" data-ob-head="node">
           <Show when={target() !== 'local'}><BoxIllustration /></Show>
-          <h1>{phone() ? 'Connect this phone to your node' : 'Where should your node run?'}</h1>
+          <h1>{phone() ? `Connect this ${device()} to your node` : 'Where should your node run?'}</h1>
           <p class="lede">{phone()
-            ? 'Every message you send is a small bitcoin payment to the person you are writing to. Your node makes those payments; this phone connects to it.'
+            ? `Every message you send is a small bitcoin payment to the person you are writing to. Your node makes those payments; this ${device()} connects to it.`
             : 'Every message you send is a small bitcoin payment to the person you are writing to. Your node makes those payments, so it needs a home first.'}</p>
         </header>
       </Show>
@@ -325,7 +326,7 @@ export function Onboarding(props: {
                 </div>
               </div>
               <p>{phone()
-                ? `A computer or server that stays on runs your node; its keys live there. ${props.onScanRemote ? 'Scan or paste' : 'Paste'} its pairing link to connect this phone.`
+                ? `A computer or server that stays on runs your node; its keys live there. ${props.onScanRemote ? 'Scan or paste' : 'Paste'} its pairing link to connect this ${device()}.`
                 : 'A computer you keep running at home can receive while this Mac is off. Its keys live on that computer. Paste its pairing link; it is saved for the next start.'}</p>
             </div>
           </button>
@@ -362,11 +363,11 @@ export function Onboarding(props: {
           </Show>
         </div>
         <p class="hint connect-line">
-          {props.pairing().remote ? 'This app connects to your remote node.' : phone() ? 'This phone is not connected to a node yet.' : 'This app connects to the node on this Mac.'}
+          {props.pairing().remote ? 'This app connects to your remote node.' : phone() ? `This ${device()} is not connected to a node yet.` : 'This app connects to the node on this Mac.'}
           <Show when={!props.pairing().remote && target() !== 'local'}> A saved pairing link takes effect at the next start.</Show>
           <Show when={isEnrolled()}>
             {mobileBiometrics()
-              ? ' Biometrics on this phone can approve a contact or budget.'
+              ? ` Biometrics on this ${device()} can approve a contact or budget.`
               : ' Touch ID on this Mac can approve a contact or budget.'}
           </Show>
         </p>
@@ -396,7 +397,7 @@ export function Onboarding(props: {
                 <Show when={isEnrolled()}>
                   <p class="hint">
                     {mobileBiometrics()
-                      ? 'Biometric approvals are already set up on this phone; pairing does not create that key.'
+                      ? `Biometric approvals are already set up on this ${device()}; pairing does not create that key.`
                       : 'Touch ID approvals are already set up on this Mac; pairing does not create that key.'}
                   </p>
                 </Show>
@@ -434,7 +435,7 @@ export function Onboarding(props: {
                 >
                   <span class="touchid-status-pill" data-device-badge="registered">
                     {mobileBiometrics()
-                      ? 'Biometrics Enrolled · Android Keystore'
+                      ? 'Biometric approvals enabled'
                       : 'Touch ID Enrolled · Secure Enclave'}
                   </span>
                 </Show>

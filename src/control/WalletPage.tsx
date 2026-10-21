@@ -407,7 +407,7 @@ function ActivityView(props: {
         </ul>
       </Show>
       <p class="hint" data-activity-scope>
-        Messages and calls are the latest your node keeps with each contact. Lightning payments and invoices are the ones made in this app on this {deviceWord() === 'phone' ? 'phone' : 'Mac'}; your node does not list the others yet, and on-chain deposits are not listed here.
+        Messages and calls are the latest your node keeps with each contact. Lightning payments and invoices are the ones made in this app on this {deviceWord() === 'computer' ? 'Mac' : deviceWord()}; your node does not list the others yet, and on-chain deposits are not listed here.
       </p>
     </section>
   );

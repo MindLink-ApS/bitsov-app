@@ -1,3 +1,4 @@
+import { deviceWord } from '../platform';
 import { BoxIllustration } from './BoxIllustration';
 import { PairWords } from './PairWords';
 import { createSignal, For, onCleanup, Show } from 'solid-js';
@@ -101,7 +102,7 @@ export function RemoteOwnerCeremony(props: {
     <h2>Set up your BitSov box</h2>
     <Show when={props.phone && step() === 'start'}>
       {/* No password form here: the phone host cannot set up a box, and it has no Touch ID. */}
-      <p data-remote-owner-phone>Setting up a new box needs BitSov on your Mac for now. Finish setup there, then add this phone from the Mac: Settings → Devices → Add a device.</p>
+      <p data-remote-owner-phone>Setting up a new box needs BitSov on your Mac for now. Finish setup there, then add this {deviceWord() === 'iPad' ? 'iPad' : 'phone'} from the Mac: Settings → Devices → Add a device.</p>
     </Show>
     <Show when={!props.phone && step() === 'start'}>
       <p>Choose a password once. This Mac will keep it protected by Touch ID so you can unlock your box after a restart.</p>

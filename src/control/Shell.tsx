@@ -9,7 +9,7 @@ import { createMessageEntrance } from './messageEntrance';
 import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
 import { PairAnotherNode } from '../onboarding/PairAnotherNode';
 import { cameraQrScannerAvailable, scanPairingLinkWithCamera } from '../cameraQrScanner';
-import { isMobilePlatform } from '../platform';
+import { deviceWord, isMobilePlatform } from '../platform';
 import { DeviceApprovals } from '../onboarding/DeviceApprovals';
 import { approvalMemory, BreakerCard, breakerReason, OwnerApprovals, OwnerApprovalWait, type BreakerReason } from './OwnerApprovals';
 import { OWNER_DEVICE_APPROVAL, OWNER_DEVICE_BREAKER_RESET, refusalText, type ApprovalRequest, type ApprovalView, type DeviceKeysView } from './ownerApproval';
@@ -2010,7 +2010,7 @@ export function ControlCenter(props: Props) {
                   recheck={recheckApproval}
                   memory={approvalsMemory}
                   now={now()}
-                  mobile={androidQrScannerAvailable()}
+                  mobile={isMobilePlatform()}
                   nameOf={(id) => { const p = peerById().get(id.toLowerCase()); return p ? peerName(p, p.node_id) : null; }}
                   approve={async (opId, message) => {
                     const r = await act(() => source.approvalApprove(opId, message));
@@ -2023,7 +2023,7 @@ export function ControlCenter(props: Props) {
                 device={actions.device()}
                 joinDevice={input => source.joinDevice(input)}
                 remote={props.remote === true}
-                mobile={androidQrScannerAvailable()}
+                mobile={isMobilePlatform()}
                 showRegistered
                 onRegister={async () => { const r = await act(() => source.deviceKeyRegister()); if (r.ok) setDevice(r.value); else throw r.error.message; }}
                 onCancel={async () => { const r = await act(() => source.deviceKeyCancel()); if (r.ok) setDevice(r.value); else throw r.error.message; }}
@@ -2034,14 +2034,14 @@ export function ControlCenter(props: Props) {
               onPreview={link => source.remoteAccessPreview(link)}
               onReplace={link => source.remoteAccessReplace(link)}
               onScan={androidQrScannerAvailable() ? scanPairingLink : cameraQrScannerAvailable() ? scanPairingLinkWithCamera : undefined}
-              mobile={androidQrScannerAvailable()}
+              mobile={isMobilePlatform()}
               phone={isMobilePlatform()}
             /> : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
           </Match>
           <Match when={tab() === 'devices'}>
             {/* The host offers Add a device only to a remote node (add_device::supported checks remote mode). */}
-            <AddDevice api={input => source.addDevice(input)} mobile={androidQrScannerAvailable()} local={props.remote !== true} />
-            <DeviceApprovals device={actions.device()} remote={props.remote === true} mobile={androidQrScannerAvailable()} showRegistered
+            <AddDevice api={input => source.addDevice(input)} mobile={isMobilePlatform()} local={props.remote !== true} />
+            <DeviceApprovals device={actions.device()} remote={props.remote === true} mobile={isMobilePlatform()} showRegistered
               joinDevice={input => source.joinDevice(input)}
               onRegister={async () => setDevice(await source.deviceKeyRegister())}
               onCancel={async () => setDevice(await source.deviceKeyCancel())} />
@@ -4681,7 +4681,7 @@ function Composer(props: {
     if (deviceWait()) return 'Waiting for your other device';
     if (ownerWait()) return 'Waiting for contact approval';
     if (needsTouch()) {
-      return androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID';
+      return isMobilePlatform() ? 'Approve with biometrics' : 'Approve with Touch ID';
     }
     if (viaBudget()) {
       const s = shown();
@@ -4713,7 +4713,7 @@ function Composer(props: {
     if (!needsTouch() && !viaBudget() && spends() && !line().open && props.spend?.state !== 'pending' && props.spend?.state !== 'unavailable' && canContinue('grant')) {
       return 'Approve & send';
     }
-    if (needsTouch()) return androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID';
+    if (needsTouch()) return isMobilePlatform() ? 'Approve with biometrics' : 'Approve with Touch ID';
     // A budget press only approves or resumes; it sends nothing.
     if (viaBudget() && (mode() === 'message' || mode() === 'file')) {
       const k = stand().kind;
@@ -4874,7 +4874,7 @@ function Composer(props: {
     setConsent({ ...c, approved: true, envelope: r.envelopeId, readsFrom: r.readsFrom });
   };
   const LAPSED = 'The approval was cancelled or lapsed before it went through.';
-  const TOUCH_AGAIN = 'It needs Touch ID again. Press Send to ask.';
+  const TOUCH_AGAIN = `It needs ${isMobilePlatform() ? 'biometric approval' : 'Touch ID'} again. Press Send to ask.`;
   const BUDGET_AGAIN = 'Payments need approving again. Press Send to ask.';
   const BUDGET_SHORT = 'Allowed, but your budget does not cover this message. Nothing was sent.';
   const PRICE_MOVED = 'The message price changed before it was sent. Nothing was sent; check the price and press Send.';
@@ -4918,7 +4918,7 @@ function Composer(props: {
     const c = consent();
     if (!c || c.kind !== 'touch') return;
     // Before the approval answers too: once this Mac's approvals stop, the wait ends for good.
-    if (props.actions.device()?.state !== 'registered') { dropConsent('Touch ID approvals on this Mac stopped before it went through.'); return; }
+    if (props.actions.device()?.state !== 'registered') { dropConsent(`${isMobilePlatform() ? `Biometric approvals on this ${deviceWord()}` : 'Touch ID approvals on this Mac'} stopped before it went through.`); return; }
     if (!c.approved) return;
     if (props.actions.budgetReadApplied() < c.readsFrom) return;
     const g = budget()?.node_grant ?? null;
@@ -5105,7 +5105,7 @@ function Composer(props: {
       // The price it was approved at is not this contact's price any more: never sent at the old one.
       if (here === trackKey(p.track) && price !== null && price !== p.msat) { cancel(p, PRICE_MOVED); return true; }
       if (p.kind === 'touch') {
-        if (!deviceOn) { cancel(p, 'Touch ID approvals on this Mac stopped before it went through.'); return true; }
+        if (!deviceOn) { cancel(p, `${isMobilePlatform() ? `Biometric approvals on this ${deviceWord()}` : 'Touch ID approvals on this Mac'} stopped before it went through.`); return true; }
         if (!fresh || props.actions.budgetReadApplied() < p.readsFrom) return false;
         const peer = (p.track as { id: string }).id.toLowerCase();
         const until = g?.envelopes?.[peer];
@@ -6032,9 +6032,9 @@ const [touchIdOffersShown, setTouchIdOffersShown] = createSignal(0);
  * view. What gets approved and its limits are unchanged.
  */
 function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: JSX.Element }) {
-  const mobile = androidQrScannerAvailable();
-  const device = mobile ? 'phone' : 'Mac';
-  const tap = mobile ? 'fingerprint' : 'Touch ID';
+  const mobile = isMobilePlatform();
+  const device = mobile ? deviceWord() : 'Mac';
+  const tap = mobile ? 'biometric' : 'Touch ID';
   const Offer = () => {
     setTouchIdOffersShown((n) => n + 1);
     onCleanup(() => setTouchIdOffersShown((n) => n - 1));
@@ -6042,14 +6042,14 @@ function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: J
     return (
       <div class="approval touch-id-first" data-touch-id-first>
         <p>
-          <strong>Approve on this {device} with {mobile ? 'your fingerprint' : 'Touch ID'}.</strong>{' '}
+          <strong>Approve on this {device} with {mobile ? 'biometrics' : 'Touch ID'}.</strong>{' '}
           {lapsed()
             ? `Your last setup request lapsed. Set it up again: your node’s owner approves this ${device} once more.`
             : `Set it up once: your node’s owner approves this ${device} one time.`}{' '}
           {/* Only promised where the node says it does it; otherwise, said as it is today. */}
           {props.actions.ownerDeviceApproval?.()
             ? `After that, one ${tap} tap approves a contact here, without a command at the node.`
-            : `Your node does not yet accept ${mobile ? 'fingerprint' : 'Touch ID'} approvals in place of its command, so for now approve as shown under Other ways; once it does, one ${tap} tap will approve a contact here.`}
+            : `Your node does not yet accept ${mobile ? 'biometric' : 'Touch ID'} approvals in place of its command, so for now approve as shown under Other ways; once it does, one ${tap} tap will approve a contact here.`}
         </p>
         <div class="form-actions">
           <button type="button" class="primary soft" data-touch-id-setup onClick={() => props.actions.openNodeSettings?.()}>
@@ -6183,8 +6183,8 @@ export const envelopePerAct = (priceMsat: number | null) =>
 function DeviceSetup(props: { device: DeviceView | null; now: number; actions: Actions }) {
   // One home for Touch ID approvals (Settings → Node, and onboarding after
   // pairing); the spend bar only points there instead of repeating it.
-  const android = androidQrScannerAvailable();
-  const what = () => (android ? 'Biometric approvals' : 'Touch ID approvals');
+  const mobile = isMobilePlatform();
+  const what = () => (mobile ? 'Biometric approvals' : 'Touch ID approvals');
   const note = () => {
     switch (props.device?.state) {
       case 'off': return `${what()} are off.`;
@@ -6212,7 +6212,7 @@ function DeviceSetup(props: { device: DeviceView | null; now: number; actions: A
  */
 export function TouchApproval(props: { peer: string; name: string; priceMsat: number | null; actions: Actions }) {
   const perAct = () => envelopePerAct(props.priceMsat);
-  const android = androidQrScannerAvailable();
+  const mobile = isMobilePlatform();
   return (
     <div class="spend touch-line" data-touch-approval>
       <p class="spend-line">
@@ -6220,7 +6220,7 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
         <span class="line-text">
           {/* The petname is local; Touch ID names the same key, never a name. */}
           <strong>
-            Approve {props.name} (node <code data-touch-peer>{shortId(props.peer)}</code>) with {android ? 'biometrics' : 'Touch ID'}.
+            Approve {props.name} (node <code data-touch-peer>{shortId(props.peer)}</code>) with {mobile ? 'biometrics' : 'Touch ID'}.
           </strong> Up
           to <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT)}</span> a day, at most{' '}
           <span data-touch-per-act>{fmtAmount(perAct())}</span> per message, for 24 hours.
@@ -6229,7 +6229,7 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
       <details class="quiet-detail" data-touch-detail>
         <summary>Details</summary>
         <p>
-          {android ? 'The biometric prompt' : 'Touch ID'} shows the same amounts for node {shortId(props.peer)}. Your node checks every payment against them;
+          {mobile ? 'The biometric prompt' : 'Touch ID'} shows the same amounts for node {shortId(props.peer)}. Your node checks every payment against them;
           nothing else can be paid under this approval.
         </p>
       </details>
