@@ -573,3 +573,43 @@ async fn second_device_foreign_ticket_cannot_be_approved_but_can_be_rejected() {
     assert!(d.node.posts().is_empty());
     assert!(matches!(add_device::run(&d.node.state, add_device::Input::Reject {op_id:"aa".repeat(12)}).await.unwrap(), add_device::View::Rejected));
 }
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[tokio::test]
+async fn phone_first_join_accepts_zero_owner_devices_and_requires_console_claim() {
+    for (platform, name) in [("android", "BitSov app on this Android phone"), ("ios", "BitSov app on this iPhone")] {
+        let (uri, server) = remote_access::second_tests::first_node(name).await;
+        let descriptor = remote_access::parse_pairing_link(&uri).unwrap();
+        let node_id = descriptor.node_id().to_string();
+        let fingerprint = bitsov_app::home_node::identity_fingerprint(&node_id);
+        let (node, dir) = paired_fake(Arc::new(move |method, path, _| {
+            assert_eq!(method, "GET");
+            if path == "/pair/device-keys" {
+                (200, serde_json::json!({"node":fingerprint,"client_id":"c".repeat(32),"owner_device_count":0,"device_keys":[],"device_approvals":"enabled"}).to_string())
+            } else {
+                assert!(path.starts_with("/pair/device-key/"));
+                (200, r#"{"status":"pending"}"#.into())
+            }
+        }));
+        let state = &node.state;
+        state.remote_mode.store(true, Ordering::SeqCst);
+        *state.device_policy.lock().unwrap() = device_key::Policy::NoPromptForTests;
+        remote_access::import_pairing_link(dir.path(), &uri).unwrap();
+        let ctx = state.pairing.lock().unwrap().clone().unwrap();
+        let descriptor = remote_access::authenticate_pinned_transport_and_save_record(dir.path(), descriptor, &ctx.key, name, &ctx.store, &state.remote_retry).await.unwrap();
+        *state.remote_descriptor.lock().unwrap() = Some(descriptor);
+        *state.node_id.lock().unwrap() = Some(node_id);
+        if let AuthMode::Paired(ref mut session) = *state.auth.lock().unwrap() { session.client_id = "c".repeat(32); }
+        assert!(add_device::join_on_platform(state, add_device::JoinInput::StartSecond {}, platform).await.is_err());
+        let invalid = add_device::join_on_platform(state, add_device::JoinInput::Start { claim_code: String::new().into() }, platform).await.err().unwrap();
+        assert!(invalid.message.contains("claim code"));
+        assert!(device::load_record(&device_store(state).unwrap()).is_none());
+        let result = add_device::join_on_platform(state, add_device::JoinInput::Start { claim_code: remote_access::second_tests::claim_code().into() }, platform).await;
+        let view = serde_json::to_value(result.unwrap()).unwrap();
+        assert_eq!(view["state"], "waiting");
+        assert_eq!(view["second_device"], false);
+        assert_eq!(view["words"].as_array().unwrap().len(), 4);
+        assert!(!device::load_record(&device_store(state).unwrap()).unwrap().registered);
+        server.await.unwrap();
+    }
+}

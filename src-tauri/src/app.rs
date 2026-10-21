@@ -7405,10 +7405,11 @@ async fn do_device_key_register(state: &NodeState) -> Result<device::DeviceView,
         return Err(device::node_off_error(reason));
     }
     let message = device::registration_message(&binding.node, &binding.client_id, &record.public_key);
-    let (reason, name) = if cfg!(target_os = "android") {
-        ("register this phone with your BitSov node, so it can approve payments with biometrics", "BitSov app on Android")
+    let name = device::registration_name(std::env::consts::OS);
+    let reason = if cfg!(target_os = "macos") {
+        "register this Mac with your BitSov node, so it can approve payments with Touch ID"
     } else {
-        ("register this Mac with your BitSov node, so it can approve payments with Touch ID", "BitSov app on this Mac")
+        "register this device with your BitSov node, so it can approve payments with biometrics"
     };
     let proof = device_sign(blob, message, reason.into()).await?;
     let body = serde_json::json!({"public_key": record.public_key, "name": name, "proof": proof});

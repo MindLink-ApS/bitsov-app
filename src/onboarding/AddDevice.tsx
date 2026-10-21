@@ -131,7 +131,7 @@ export function JoinDevice(props:{api:(input:JoinInput)=>Promise<JoinView>; mobi
         <Show when={(view() as {second_device?:boolean}).second_device} fallback={<>
         {/* New device: the ticket was scanned or pasted to get here; next the claim code. */}
         <PairSteps secondDevice={secondDevice()} current={1} />
-        <p>After scanning or pasting the ticket, enter your node’s 18-character claim code: it is shown at your node’s owner console with <code>konsensus claim-code --show</code>, and a BitSov box also has it on its sticker. Keep an enrolled owner device nearby. Keep a computer or another non-phone owner device enrolled as well.</p>
+        <p>After scanning or pasting the ticket, enter your node’s 18-character claim code: it is shown at your node’s owner console with <code>konsensus claim-code --show</code>, and a BitSov box also has it on its sticker. A phone can be your first owner device. For later devices, compare the words and approve from an enrolled owner device.</p>
         <form onSubmit={event => { event.preventDefault(); const value = claim.value; claim.value = ''; void run({action:'start',claim_code:value}); }}>
           <label>Claim code<input ref={claim} name="claim_code" type="password" autocomplete="off" spellcheck={false} required disabled={busy()} /></label>
           <button class="primary" disabled={busy()}>{busy() ? 'Preparing comparison…' : 'Show comparison words'}</button>
@@ -144,10 +144,10 @@ export function JoinDevice(props:{api:(input:JoinInput)=>Promise<JoinView>; mobi
       <Match when={waiting()}>{v => <>
         <PairSteps secondDevice={secondDevice()} current={2} />
         <PairWords words={v().words} />
-        <p role="status">Compare these words with your owner device, then approve there with {(props.mobile ?? isMobilePlatform()) ? 'biometrics' : 'Touch ID'}.</p>
+        <p role="status">Compare these words with your node’s owner console and approve there, or compare with an enrolled owner device and approve there with {(props.mobile ?? isMobilePlatform()) ? 'biometrics' : 'Touch ID'}.</p>
         <button class="quiet" disabled={busy()} onClick={() => void run({action:'cancel'})}>Words differ · Cancel</button>
       </>}</Match>
-      <Match when={view()?.state === 'done'}><PairSteps secondDevice={secondDevice()} current={3} /><p class="ok-note" role="status">Device added. Your node’s unlock password was not transferred. Keep your other owner device.</p></Match>
+      <Match when={view()?.state === 'done'}><PairSteps secondDevice={secondDevice()} current={3} /><p class="ok-note" role="status">Device added. Your node’s unlock password was not transferred. Keep access to your node’s owner console.</p></Match>
     </Switch>
     <Show when={error()}><p class="err-note" role="alert">{error()}</p><button disabled={busy()} onClick={() => void run({action:'status'})}>Check again</button><Show when={!waiting()}><button disabled={busy()} onClick={() => void run({action:'cancel'})}>Cancel pending setup</button></Show></Show>
   </section>;

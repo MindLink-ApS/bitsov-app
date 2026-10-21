@@ -601,6 +601,10 @@ pub async fn complete_second_join(state: &NodeState) -> Result<(), ActionError> 
 }
 
 pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, ActionError> {
+    join_on_platform(state, input, std::env::consts::OS).await
+}
+
+pub(super) async fn join_on_platform(state: &NodeState, input: JoinInput, platform: &str) -> Result<JoinView, ActionError> {
     let _connection = state.remote_recovery.lock().await;
     let mut setup = state.add_device.lock().await;
     if !state.remote_mode.load(Ordering::SeqCst) {
@@ -665,11 +669,6 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
     {
         return Err(refusal(403));
     }
-    if !second_device && cfg!(target_os = "android") && binding.owner_device_count.unwrap_or(0) == 0 {
-        return Err(invalid(
-            "Keep an enrolled Mac or another non-phone owner device before enrolling this phone.",
-        ));
-    }
     let (blob, mut record) = match local_key(&store) {
         Some(key) => key,
         None => {
@@ -688,11 +687,7 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
             (blob, record)
         }
     };
-    let name = if cfg!(target_os = "android") {
-        "BitSov app on Android"
-    } else {
-        "BitSov app on this Mac"
-    };
+    let name = device::registration_name(platform);
     let proof = device_sign(
         blob.clone(),
         device::registration_message(&binding.node, &binding.client_id, &record.public_key),

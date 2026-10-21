@@ -16,6 +16,12 @@ app (`owner_` plus 32-byte lowercase hex). The existing device-join command adds
 field. `start` with a claim code retains the original SAS v1 behavior and cannot
 be used for a provisional second-device pairing.
 
+A phone (iPhone or Android) can be the first owner device. First claims use the
+owner-entered console claim code; no enrolled computer or other non-phone device
+is required. Later devices still require the word comparison and owner approval.
+Both registration paths label devices by their actual platform: iPhone, Android
+phone, Mac, or Windows.
+
 `status` returns `{ "state": "idle", "second_device": true }` for a consumed
 second-device ticket. Start returns `waiting` with four words and the node's
 five-minute deadline; `poll` waits for registration. Waiting and done responses
@@ -113,3 +119,15 @@ Verified 2026-10-21 on the final implementation:
 The production build retains its existing large-chunk warning; native checks
 retain unused-code warnings. These are compile/contract checks, not physical-device
 or release-package acceptance evidence.
+
+Phone-first/platform-name follow-up (2026-10-21): no-sidecar library tests passed
+1,053 app tests and 12 FFI tests, with the existing hardware test ignored. The
+phone-first fixture exercises zero enrolled owners, required console claim input,
+phone registration names and independently checked SAS v1 bytes on the host;
+existing SAS v2 tests still cover waiting for owner approval. Four platform-name
+unit tests cover iPhone, Android phone, Mac and Windows. TypeScript, all 1,795
+Vitest tests, build, authority, mobile-feature and iOS/Android `cargo check --tests`
+passed. After the copy adjustment, the 77 add-device/mobile-parity UI tests passed.
+The phone cases use the host's non-prompting test key policy; native checks compile
+the target paths and do not replace physical-device acceptance. No `cargo fmt`
+or window-opening binary was run.

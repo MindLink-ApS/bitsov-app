@@ -4,6 +4,24 @@ use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{json, Value};
 
 pub(crate) async fn node(finalize_status: u16) -> (String, tokio::task::JoinHandle<()>) {
+    enrollment_node(finalize_status, None).await
+}
+
+pub(crate) async fn first_node(name: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+    enrollment_node(204, Some(name)).await
+}
+
+pub(crate) fn claim_code() -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut code = [b'A'; 18];
+    let hash = blake3::hash(&code[..16]);
+    code[16] = ALPHABET[(hash.as_bytes()[0] >> 3) as usize];
+    code[17] = ALPHABET[(((hash.as_bytes()[0] & 7) << 2) | (hash.as_bytes()[1] >> 6)) as usize];
+    String::from_utf8(code.to_vec()).unwrap()
+}
+
+async fn enrollment_node(finalize_status: u16, first_name: Option<&'static str>) -> (String, tokio::task::JoinHandle<()>) {
+    let version = if first_name.is_some() { 1 } else { 2 };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = listener.local_addr().unwrap().to_string();
     let identity = SigningKey::from_bytes(&[7;32]);
@@ -12,7 +30,7 @@ pub(crate) async fn node(finalize_status: u16) -> (String, tokio::task::JoinHand
     let live = hex::encode(X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes());
     let box_key = hex::encode(X25519PublicKey::from(&StaticSecret::from([9;32])).to_bytes());
     let sign = |m: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(identity.sign(m.as_bytes()).to_bytes());
-    let code = format!("second_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([77;32]));
+    let code = format!("{}{}", if version == 2 { "second_" } else { "" }, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([77;32]));
     let link = json!({"v":1,"endpoint":endpoint,"node_id":node,"transport_pubkey":live,
         "transport_signature":sign(&format!("bitsov-remote-transport-v1:{node}:{live}")),
         "box_transport_pubkey":box_key,"box_transport_signature":sign(&format!("bitsov-box-transport-v1:{node}:{box_key}")),
@@ -36,12 +54,13 @@ pub(crate) async fn node(finalize_status: u16) -> (String, tokio::task::JoinHand
             let auth: Value = serde_json::from_slice(&decode_transport(&mut noise, &encrypted, MAX_AUTH_PLAINTEXT).unwrap()).unwrap();
             if first { assert!(auth["code"].as_str() == Some(code.as_str())); }
             else { assert!(auth.get("code").is_none(), "consumed ticket must not be replayed"); }
-            let response = encode_transport(&mut noise, br#"{"status":"ok","v":1,"client_id":"cccccccccccccccccccccccccccccccc","scopes":[]}"#).unwrap();
+            let response = encode_transport(&mut noise, &serde_json::to_vec(&json!({"status":"ok","v":1,"client_id":"cccccccccccccccccccccccccccccccc","scopes":if version == 2 { vec![] } else { vec!["read", "receive"] }})).unwrap()).unwrap();
             write_frame(&mut stream, &response).await.unwrap();
             if first { continue; }
             let request = http(&mut stream, &mut noise).await;
             assert!(request.0.starts_with("POST /api/v1/pair/device-key HTTP/"));
-            assert_eq!(request.1["sas_version"], 2);
+            assert_eq!(request.1["sas_version"], version);
+            if let Some(name) = first_name { assert_eq!(request.1["name"], name); }
             assert!(request.1.get("claim_code").is_none());
             let public = hex::decode(request.1["public_key"].as_str().unwrap()).unwrap();
             let public_hex = hex::encode(&public);
@@ -49,16 +68,20 @@ pub(crate) async fn node(finalize_status: u16) -> (String, tokio::task::JoinHand
             verify(&public, &format!("bitsov-device-register-v1\nnode:{fingerprint}\nclient:cccccccccccccccccccccccccccccccc\npublic_key:{public_hex}"), &request.1);
             let op = "aa".repeat(12);
             let nonce = [0x55;16];
-            let reply = json!({"op_id":op,"key_id":hex::encode(&blake3::hash(&public).as_bytes()[..16]),"fingerprint":"fixture","expires_at":unix_now()+300,"sas_version":2,"box_nonce":hex::encode(nonce)});
+            let reply = json!({"op_id":op,"key_id":hex::encode(&blake3::hash(&public).as_bytes()[..16]),"fingerprint":"fixture","expires_at":unix_now()+300,"sas_version":version,"box_nonce":hex::encode(nonce)});
             respond(&mut stream,&mut noise,200,&reply.to_string()).await;
             let finalized = http(&mut stream, &mut noise).await;
             assert!(finalized.0.starts_with(&format!("POST /api/v1/pair/device-key/{op}/finalize HTTP/")));
-            assert_eq!(finalized.1["sas_version"], 2);
+            assert_eq!(finalized.1["sas_version"], version);
             // Copied concatenation from node sas.rs and second_device.rs, not app helpers.
             let mut ticket = blake3::Hasher::new();
-            ticket.update(b"bitsov-second-device-ticket-v1"); ticket.update(code.as_bytes());
+            if version == 2 {
+                ticket.update(b"bitsov-second-device-ticket-v1"); ticket.update(code.as_bytes());
+            } else {
+                ticket.update(b"bitsov-claim-code-v1"); ticket.update(claim_code().as_bytes());
+            }
             let mut h = blake3::Hasher::new();
-            for bytes in [b"bitsov-sas-v2".as_slice(),&handshake,&hex::decode(&box_key).unwrap(),&client_static,&public,&nonce,ticket.finalize().as_bytes()] { h.update(bytes); }
+            for bytes in [if version == 2 { b"bitsov-sas-v2".as_slice() } else { b"bitsov-sas-v1".as_slice() },&handshake,&hex::decode(&box_key).unwrap(),&client_static,&public,&nonce,ticket.finalize().as_bytes()] { h.update(bytes); }
             let digest = h.finalize().to_hex().to_string();
             assert!(finalized.1["sas_digest"].as_str() == Some(digest.as_str()), "SAS bytes differ from node");
             verify(&public,&format!("bitsov-device-register-v2\nnode:{fingerprint}\nclient:cccccccccccccccccccccccccccccccc\npublic_key:{public_hex}\nsas_digest:{digest}"),&finalized.1);
