@@ -348,11 +348,13 @@ pub enum ConnectionErrorKind {
 
 pub const USED_TICKET_MESSAGE: &str = "This ticket expired, was already used, or its owner was revoked. Ask an enrolled owner device for a new ticket.";
 
-impl From<String> for ConnectionError {
-    fn from(_: String) -> Self { Self::other() }
-}
-
 impl ConnectionError {
+    pub fn main_window_only() -> Self {
+        Self { kind: ConnectionErrorKind::Other, detail: "this command is only available to the main window".into() }
+    }
+    pub fn app_data_unavailable() -> Self {
+        Self { kind: ConnectionErrorKind::Other, detail: "The app data directory is unavailable. Remote pairing could not be saved.".into() }
+    }
     pub fn other() -> Self { Self::from(&RemoteError::Local(String::new())) }
     pub fn busy() -> Self { Self::from(&RemoteError::RateLimited(0)) }
     pub fn for_endpoint(error: &RemoteError, endpoint: Option<&str>) -> Self {

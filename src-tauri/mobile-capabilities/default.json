@@ -32,7 +32,6 @@
     "allow-remote-access-connect",
     "allow-pairing-link-take",
     "allow-remote-access-forget",
-    "allow-remote-access-replace",
     "allow-node-overview",
     "allow-live-link",
     "allow-peers-list",
