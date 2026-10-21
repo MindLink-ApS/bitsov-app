@@ -64,7 +64,8 @@ async fn noise_auth_reply(listener: tokio::net::TcpListener, accept: bool) -> re
 }
 
 fn app() -> tauri::App<tauri::test::MockRuntime> {
-    tauri::test::mock_builder().manage(NodeState::for_api("http://127.0.0.1:1/api/v1"))
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    tauri::test::mock_builder().manage(NodeState::for_api(format!("http://127.0.0.1:{port}/api/v1")))
         .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap()
 }
 
@@ -78,7 +79,7 @@ async fn import_clears_unpaired_error_and_attaches_without_restart() {
     assert!(!remote_access::preview_pairing_link(&link).unwrap().first_run);
     let server = tokio::spawn(noise_responder(listener));
     set_error(&state, "Pair this phone with your home node to continue.");
-    let result = remote_access_import_at(app.handle(), &state, dir.path(), &link).unwrap();
+    let result = remote_access_import_at(app.handle(), &state, dir.path(), &link).await.unwrap();
     assert!(state.status_snapshot().error.is_none());
     assert!(!result.restart_required);
     tokio::time::timeout(Duration::from_secs(3), server).await.unwrap().unwrap();
@@ -124,7 +125,7 @@ async fn invalid_import_preserves_error_and_does_not_start_remote_mode() {
     let state = app.state::<NodeState>();
     let dir = tempfile::tempdir().unwrap();
     set_error(&state, "Pair this phone with your home node to continue.");
-    assert!(remote_access_import_at(app.handle(), &state, dir.path(), "invalid").is_err());
+    assert!(remote_access_import_at(app.handle(), &state, dir.path(), "invalid").await.is_err());
     assert_eq!(state.status_snapshot().error.as_deref(), Some("Pair this phone with your home node to continue."));
     assert!(!state.remote_mode.load(Ordering::SeqCst));
     assert!(remote_access::load_persisted(dir.path()).unwrap().is_none());
@@ -138,7 +139,7 @@ async fn first_run_import_reports_setup_guidance_without_dialing() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let link = ticket(listener.local_addr().unwrap().to_string(), true);
     assert!(remote_access::preview_pairing_link(&link).unwrap().first_run);
-    remote_access_import_at(app.handle(), &state, dir.path(), &link).unwrap();
+    remote_access_import_at(app.handle(), &state, dir.path(), &link).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         while state.status_snapshot().error.is_none() { tokio::task::yield_now().await; }
     }).await.unwrap();
@@ -147,16 +148,41 @@ async fn first_run_import_reports_setup_guidance_without_dialing() {
 }
 
 #[tokio::test]
-async fn import_during_recovery_preserves_the_saved_ticket() {
+async fn replacement_ticket_interrupts_a_stalled_handshake_and_attaches() {
     let app = app();
     let state = app.state::<NodeState>();
     let dir = tempfile::tempdir().unwrap();
-    remote_access::import_pairing_link(dir.path(), &ticket("127.0.0.1:1234".into(), false)).unwrap();
-    let recovery = state.remote_recovery.lock().await;
-    let error = remote_access_import_at(app.handle(), &state, dir.path(), &ticket("127.0.0.1:5678".into(), false)).unwrap_err();
-    assert!(error.contains("already in progress"));
-    assert_eq!(remote_access::load_persisted(dir.path()).unwrap().unwrap().endpoint(), "127.0.0.1:1234");
-    drop(recovery);
+    let old = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    remote_access::import_pairing_link(dir.path(), &ticket(old.local_addr().unwrap().to_string(), false)).unwrap();
+    let attempt = pairing_retry_at(&state, dir.path());
+    tokio::pin!(attempt);
+    let (mut stalled, _) = tokio::select! {
+        accepted = old.accept() => accepted.unwrap(),
+        _ = &mut attempt => panic!("old attempt ended before handshake"),
+    };
+    let next = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = next.local_addr().unwrap().to_string();
+    let server = tokio::spawn(noise_auth_reply(next, true));
+    let replacement = ticket(endpoint.clone(), false);
+    let (old_result, result) = tokio::time::timeout(Duration::from_millis(200), async {
+        tokio::join!(&mut attempt, remote_access_import_at(app.handle(), &state, dir.path(), &replacement))
+    }).await.expect("replacement must release the attach lock promptly");
+    old_result.unwrap();
+    assert!(result.is_ok(), "replacement must cancel the stalled attempt: {result:?}");
+    let authenticated = tokio::time::timeout(Duration::from_secs(4), server).await.unwrap().unwrap();
+    assert!(authenticated.code.is_some());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.remote_proxy.lock().unwrap().is_none() { tokio::task::yield_now().await; }
+    }).await.expect("the replacement must install its authenticated proxy");
+    let saved = remote_access::load_persisted(dir.path()).unwrap().unwrap();
+    assert_eq!(saved.endpoint(), endpoint);
+    assert!(!saved.has_code(), "successful replacement must persist code consumption");
+    // The fake only serves enrollment, not HTTP. Stop its subsequent auth retry.
+    tokio::time::timeout(Duration::from_millis(200), remote_access_forget_at(&state, dir.path())).await.unwrap().unwrap();
+    let _recovery = state.remote_recovery.lock().await;
+    assert!(state.remote_proxy.lock().unwrap().is_some());
+    let mut discarded = Vec::new();
+    tokio::time::timeout(Duration::from_millis(200), stalled.read_to_end(&mut discarded)).await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -247,4 +273,130 @@ async fn foreground_after_ticket_expiry_uses_existing_auth_without_replaying_tic
     assert!(resumed.code.is_none());
     assert!(resumed.signature.is_none());
     assert!(state.pairing.lock().unwrap().is_some());
+}
+
+#[tokio::test]
+async fn forget_interrupts_stalled_dial_and_foreground_cannot_resurrect_it() {
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    remote_access::import_pairing_link(dir.path(), &ticket(listener.local_addr().unwrap().to_string(), false)).unwrap();
+    let attempt = pairing_retry_at(&state, dir.path());
+    tokio::pin!(attempt);
+    let (mut stalled, _) = tokio::select! {
+        accepted = listener.accept() => accepted.unwrap(),
+        _ = &mut attempt => panic!("dial ended unexpectedly"),
+    };
+    let (old, forgotten) = tokio::time::timeout(Duration::from_millis(200), async {
+        tokio::join!(&mut attempt, remote_access_forget_at(&state, dir.path()))
+    }).await.expect("Forget must interrupt the in-flight handshake");
+    old.unwrap();
+    forgotten.unwrap();
+    assert!(state.remote_recovery.try_lock().is_ok());
+    assert!(state.pairing.lock().unwrap().is_none());
+    assert!(state.remote_proxy.lock().unwrap().is_none());
+    assert!(remote_access::load_persisted(dir.path()).unwrap().is_none());
+    resume_remote_at(&state, dir.path()).await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
+    let mut discarded = Vec::new();
+    tokio::time::timeout(Duration::from_millis(200), stalled.read_to_end(&mut discarded)).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn forget_interrupts_backoff_without_clearing_the_retry_budget() {
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    remote_access::import_pairing_link(dir.path(), &ticket(listener.local_addr().unwrap().to_string(), false)).unwrap();
+    state.remote_retry.failed(&remote_access::RemoteError::RateLimited(60));
+    let attempt = pairing_retry_at(&state, dir.path());
+    tokio::pin!(attempt);
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(20)) => {},
+        _ = &mut attempt => panic!("backoff must retain the attempt"),
+    }
+    assert!(state.remote_recovery.try_lock().is_err());
+    assert!(remote_access_import_at(app().handle(), &state, dir.path(), "invalid").await.is_err());
+    assert!(state.remote_recovery.try_lock().is_err(), "invalid import must not cancel");
+    let (old, forgotten) = tokio::time::timeout(Duration::from_millis(200), async {
+        tokio::join!(&mut attempt, remote_access_forget_at(&state, dir.path()))
+    }).await.expect("Forget must wake the retry sleep");
+    old.unwrap();
+    forgotten.unwrap();
+    assert!(state.remote_recovery.try_lock().is_ok());
+    assert!(state.remote_retry.remaining().unwrap() >= 59);
+    assert!(remote_access::load_persisted(dir.path()).unwrap().is_none());
+    assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
+}
+
+#[tokio::test]
+async fn rejected_import_does_not_cancel_an_established_proxy_recovery() {
+    let app = app();
+    let state = app.state::<NodeState>();
+    let dir = tempfile::tempdir().unwrap();
+    let link = ticket("127.0.0.1:1234".into(), false);
+    remote_access::import_pairing_link(dir.path(), &link).unwrap();
+    let descriptor = remote_access::load_persisted(dir.path()).unwrap().unwrap();
+    let store = dir.path().join(PAIRING_STORE_DIR);
+    let key = Arc::new(ClientKey::load_or_create(&store).unwrap());
+    let proxy = remote_access::start_proxy(&state.api_base, dir.path(), descriptor,
+        key, PAIRING_CLIENT_NAME, store, state.remote_proxy_auth.clone(), state.remote_retry.clone()).await.unwrap();
+    *state.remote_proxy.lock().unwrap() = Some(proxy);
+    state.remote_mode.store(true, Ordering::SeqCst);
+    state.remote_retry.failed(&remote_access::RemoteError::RateLimited(60));
+    let recovery = reconnect_remote_at(&state, dir.path());
+    tokio::pin!(recovery);
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(20)) => {},
+        _ = &mut recovery => panic!("recovery must wait through backoff"),
+    }
+    let replacement = ticket("127.0.0.1:5678".into(), false);
+    let result = tokio::select! {
+        result = remote_access_import_at(app.handle(), &state, dir.path(), &replacement) => result,
+        _ = &mut recovery => panic!("a rejected import must not cancel recovery"),
+    };
+    assert!(result.unwrap_err().contains("already active"));
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut recovery).await.is_err());
+    let (old, forgotten) = tokio::join!(&mut recovery, remote_access_forget_at(&state, dir.path()));
+    old.unwrap();
+    forgotten.unwrap();
+    assert!(state.remote_proxy.lock().unwrap().is_some(), "Forget preserves the established transport");
+    assert!(state.remote_retry.remaining().unwrap() >= 59);
+    // A bootstrap/import task queued behind a successful attach does not redo auth.
+    tokio::time::timeout(Duration::from_millis(200), connect_remote_at(&state, dir.path(), true))
+        .await.expect("duplicate bootstrap must not start another auth recovery").unwrap();
+}
+
+#[tokio::test]
+async fn proxy_published_during_import_cancellation_keeps_recovering() {
+    let app = app();
+    let state = app.state::<NodeState>();
+    let dir = tempfile::tempdir().unwrap();
+    let link = ticket("127.0.0.1:1234".into(), false);
+    remote_access::import_pairing_link(dir.path(), &link).unwrap();
+    let descriptor = remote_access::load_persisted(dir.path()).unwrap().unwrap();
+    let store = dir.path().join(PAIRING_STORE_DIR);
+    let key = Arc::new(ClientKey::load_or_create(&store).unwrap());
+    let proxy = remote_access::start_proxy(&state.api_base, dir.path(), descriptor,
+        key, PAIRING_CLIENT_NAME, store, state.remote_proxy_auth.clone(), state.remote_retry.clone()).await.unwrap();
+    state.remote_mode.store(true, Ordering::SeqCst);
+    state.remote_retry.failed(&remote_access::RemoteError::RateLimited(60));
+    // Model an attach that publishes its proxy while import is waiting for the
+    // cancelled operation to release recovery (after import's first proxy check).
+    let guard = state.remote_recovery.lock().await;
+    let replacement = ticket("127.0.0.1:5678".into(), false);
+    let import = remote_access_import_at(app.handle(), &state, dir.path(), &replacement);
+    tokio::pin!(import);
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(20)) => {},
+        _ = &mut import => panic!("import must wait for the cancelled attach"),
+    }
+    *state.remote_proxy.lock().unwrap() = Some(proxy);
+    drop(guard);
+    assert!(import.await.unwrap_err().contains("already active"));
+    tokio::time::timeout(Duration::from_millis(200), async {
+        while state.remote_recovery.try_lock().is_ok() { tokio::task::yield_now().await; }
+    }).await.expect("the raced proxy must continue auth recovery after rejection");
+    assert_eq!(remote_access::load_persisted(dir.path()).unwrap().unwrap().endpoint(), "127.0.0.1:1234");
+    tokio::time::timeout(Duration::from_millis(200), remote_access_forget_at(&state, dir.path())).await.unwrap().unwrap();
 }

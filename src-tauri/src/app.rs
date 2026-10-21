@@ -236,6 +236,14 @@ struct NodeState {
     remote_descriptor: Mutex<Option<remote_access::RemoteDescriptor>>,
     remote_retry: Arc<bitsov_app::connection_retry::RemoteRetry>,
     remote_recovery: tokio::sync::Mutex<()>,
+    /// Serialize link edits and registering a new connect generation. Never held
+    /// by network work, so Forget/import can always invalidate that work.
+    remote_change: tokio::sync::Mutex<()>,
+    remote_connect_generation: tokio::sync::watch::Sender<u64>,
+    /// Set before scheduling desktop bootstrap, cleared on every bootstrap exit.
+    /// Config/external_node are still empty while first-run init is awaiting.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    local_startup: AtomicBool,
     add_device: tokio::sync::Mutex<add_device::Setup>,
     #[cfg(all(desktop, not(feature = "mobile")))]
     remote_owner: Arc<tokio::sync::Mutex<remote_owner::Setup>>,
@@ -330,6 +338,8 @@ impl NodeState {
         let mut state = Self::default();
         state.remote_only = crate::profile::AppProfile::for_identifier(identifier).remote_only();
         state.remote_mode.store(state.remote_only, Ordering::SeqCst);
+        #[cfg(all(desktop, not(feature = "mobile")))]
+        state.local_startup.store(!state.remote_only, Ordering::SeqCst);
         state
     }
 
@@ -439,6 +449,10 @@ impl NodeState {
             remote_descriptor: Mutex::new(None),
             remote_retry: Arc::new(bitsov_app::connection_retry::RemoteRetry::default()),
             remote_recovery: tokio::sync::Mutex::new(()),
+            remote_change: tokio::sync::Mutex::new(()),
+            remote_connect_generation: tokio::sync::watch::channel(0).0,
+            #[cfg(all(desktop, not(feature = "mobile")))]
+            local_startup: AtomicBool::new(false),
             add_device: tokio::sync::Mutex::new(add_device::Setup::default()),
             #[cfg(all(desktop, not(feature = "mobile")))]
             remote_owner: Arc::new(tokio::sync::Mutex::new(remote_owner::Setup::default())),
@@ -1373,14 +1387,21 @@ async fn bootstrap_node(app: AppHandle) {
 #[cfg(all(desktop, not(feature = "mobile"), unix))]
 async fn bootstrap_node(app: AppHandle) {
     let state = app.state::<NodeState>();
+    struct StartupFinished<'a>(&'a AtomicBool);
+    impl Drop for StartupFinished<'_> {
+        fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
+    }
+    let _startup = StartupFinished(&state.local_startup);
     let app_data_dir: PathBuf = match app.path().app_data_dir() {
         Ok(d) => d,
         Err(e) => return set_error(&state, format!("no app data dir: {e}")),
     };
     match remote_access::load_persisted(&app_data_dir) {
-        Ok(Some(descriptor)) => {
-            let _recovery = state.remote_recovery.lock().await;
-            return attach_remote(&state, &app_data_dir, descriptor).await;
+        Ok(Some(_)) => {
+            if let Err(error) = connect_remote_at(&state, &app_data_dir, true).await {
+                set_error(&state, error);
+            }
+            return;
         }
         Ok(None) => {}
         Err(error) => return set_error(&state, error.to_string()),
@@ -1452,17 +1473,8 @@ async fn bootstrap_node(app: AppHandle) {
         Ok(directory) => directory,
         Err(error) => return set_error(&state, format!("no app data dir: {error}")),
     };
-    let _recovery = state.remote_recovery.lock().await;
-    if state.remote_proxy.lock().unwrap().is_some() { return; }
-    match remote_access::load_persisted(&app_data_dir) {
-        Ok(Some(descriptor)) => {
-            attach_remote(&state, &app_data_dir, descriptor).await;
-        }
-        Ok(None) => {
-            *state.pairing_view.lock().unwrap() = PairingView::starting();
-            set_error(&state, "Pair this phone with your home node to continue.");
-        }
-        Err(error) => set_error(&state, error.to_string()),
+    if let Err(error) = connect_remote_at(&state, &app_data_dir, true).await {
+        set_error(&state, error);
     }
 }
 
@@ -1581,20 +1593,43 @@ async fn reconnect_remote(state: &NodeState) -> Result<(), String> {
 }
 
 async fn reconnect_remote_at(state: &NodeState, app_data_dir: &Path) -> Result<(), String> {
-    // A click while recovery is in flight joins that attempt; it never cancels
-    // the cooldown or starts another bootstrap/proxy.
-    let Ok(_recovery) = state.remote_recovery.try_lock() else {
-        return Ok(());
+    connect_remote_at(state, app_data_dir, false).await
+}
+
+async fn connect_remote_at(state: &NodeState, app_data_dir: &Path, wait: bool) -> Result<(), String> {
+    let mut cancelled = {
+        let _change = state.remote_change.lock().await;
+        state.remote_connect_generation.subscribe()
     };
-    if state.remote_proxy.lock().unwrap().is_none() {
-        let descriptor = remote_access::load_persisted(app_data_dir)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "remote pairing descriptor is missing".to_string())?;
-        attach_remote(state, app_data_dir, descriptor).await;
-    } else {
-        finish_remote_auth(state, app_data_dir).await;
+    tokio::select! {
+        biased;
+        _ = cancelled.changed() => Ok(()),
+        result = async {
+            // Reconnect/focus joins an existing attempt without changing its backoff.
+            // Bootstrap/import can wait, but cancellation also retires queued work.
+            let _recovery = if wait {
+                state.remote_recovery.lock().await
+            } else {
+                let Ok(guard) = state.remote_recovery.try_lock() else { return Ok(()); };
+                guard
+            };
+            if state.remote_proxy.lock().unwrap().is_none() {
+                match remote_access::load_persisted(app_data_dir).map_err(|error| error.to_string())? {
+                    Some(descriptor) => attach_remote(state, app_data_dir, descriptor).await,
+                    None => {
+                        #[cfg(any(mobile, feature = "mobile"))]
+                        {
+                            *state.pairing_view.lock().unwrap() = PairingView::starting();
+                            set_error(state, "Pair this phone with your home node to continue.");
+                        }
+                    }
+                }
+            } else if !wait {
+                finish_remote_auth(state, app_data_dir).await;
+            }
+            Ok(())
+        } => result,
     }
-    Ok(())
 }
 
 /// Foreground recovery never re-imports a ticket or rechecks its QR expiry.
@@ -2485,29 +2520,42 @@ fn remote_access_preview(
 /// Validate and persist a confirmed ticket. Phones attach immediately; desktop
 /// bootstrap selects the saved remote node on the next app start.
 #[tauri::command(rename_all = "snake_case")]
-fn remote_access_import(
+async fn remote_access_import(
     window: WebviewWindow<impl tauri::Runtime>,
     app: AppHandle<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     link: String,
 ) -> Result<RemoteImportView, String> {
     reject_sealed_window(&window)?;
+    drop(window);
     let app_data_dir = app.path().app_data_dir()
         .map_err(|error| format!("no app data dir: {error}"))?;
-    remote_access_import_at(&app, &state, &app_data_dir, &link)
+    remote_access_import_at(&app, &state, &app_data_dir, &link).await
 }
 
-fn remote_access_import_at<R: tauri::Runtime>(
+async fn remote_access_import_at<R: tauri::Runtime>(
     _app: &AppHandle<R>,
     state: &NodeState,
     app_data_dir: &Path,
     link: &str,
 ) -> Result<RemoteImportView, String> {
-    // Do not replace a ticket while startup/import/retry is authenticating it.
+    // Validate before cancelling: a malformed ticket must not interrupt recovery.
+    remote_access::preview_pairing_link(link.trim()).map_err(|error| error.to_string())?;
     #[cfg(any(mobile, feature = "mobile"))]
-    let _recovery = state.remote_recovery.try_lock()
-        .map_err(|_| "remote connection is already in progress; try again when it finishes".to_string())?;
+    let _change = state.remote_change.lock().await;
+    // Reject a live trust-boundary switch without cancelling its recovery.
     if state.remote_proxy.lock().unwrap().is_some() {
+        return Err("remote access is already active; quit BitSov before replacing its pairing link".into());
+    }
+    #[cfg(any(mobile, feature = "mobile"))]
+    state.remote_connect_generation.send_modify(|generation| *generation = generation.wrapping_add(1));
+    #[cfg(any(mobile, feature = "mobile"))]
+    let _recovery = state.remote_recovery.lock().await;
+    if state.remote_proxy.lock().unwrap().is_some() {
+        // The old attach can publish a proxy between our first check and its
+        // cancellation. Keep that trust boundary and resume the auth we stopped.
+        #[cfg(any(mobile, feature = "mobile"))]
+        spawn_remote_connect(_app, app_data_dir, false);
         return Err("remote access is already active; quit BitSov before replacing its pairing link".into());
     }
     let result = remote_access::import_pairing_link(app_data_dir, link.trim())
@@ -2515,23 +2563,23 @@ fn remote_access_import_at<R: tauri::Runtime>(
     #[cfg(any(mobile, feature = "mobile"))]
     {
         *state.error.lock().unwrap() = None;
-        let app = _app.clone();
-        let app_data_dir = app_data_dir.to_path_buf();
-        tauri::async_runtime::spawn(async move {
-            let state = app.state::<NodeState>();
-            let _recovery = state.remote_recovery.lock().await;
-            // Startup or another import may have attached while this task waited.
-            if state.remote_proxy.lock().unwrap().is_some() { return; }
-            match remote_access::load_persisted(&app_data_dir) {
-                Ok(Some(descriptor)) => attach_remote(&state, &app_data_dir, descriptor).await,
-                Ok(None) => {},
-                Err(error) => set_error(&state, error.to_string()),
-            }
-        });
+        spawn_remote_connect(_app, app_data_dir, true);
         return Ok(RemoteImportView { restart_required: false, ..result });
     }
     #[cfg(not(any(mobile, feature = "mobile")))]
     Ok(result)
+}
+
+#[cfg(any(mobile, feature = "mobile"))]
+fn spawn_remote_connect<R: tauri::Runtime>(app: &AppHandle<R>, app_data_dir: &Path, wait: bool) {
+    let app = app.clone();
+    let app_data_dir = app_data_dir.to_path_buf();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<NodeState>();
+        if let Err(error) = connect_remote_at(&state, &app_data_dir, wait).await {
+            set_error(&state, error);
+        }
+    });
 }
 
 /// Replace the saved remote link with a reviewed ticket for another node, after
@@ -2574,16 +2622,36 @@ fn remote_access_replace(
 /// Forget the saved remote link for the next startup. Do not switch a live
 /// connection (or its trust boundary) in place.
 #[tauri::command]
-fn remote_access_forget(
+async fn remote_access_forget(
     window: WebviewWindow<impl tauri::Runtime>,
     app: AppHandle<impl tauri::Runtime>,
 ) -> Result<(), String> {
     reject_sealed_window(&window)?;
+    drop(window);
     let app_data_dir = app
         .path()
         .app_data_dir()
         .map_err(|error| format!("no app data dir: {error}"))?;
-    remote_access::forget_persisted(&app_data_dir).map_err(|error| error.to_string())
+    remote_access_forget_at(&app.state::<NodeState>(), &app_data_dir).await
+}
+
+async fn remote_access_forget_at(state: &NodeState, app_data_dir: &Path) -> Result<(), String> {
+    let _change = state.remote_change.lock().await;
+    state.remote_connect_generation.send_modify(|generation| *generation = generation.wrapping_add(1));
+    let _recovery = state.remote_recovery.lock().await;
+    remote_access::forget_persisted(app_data_dir).map_err(|error| error.to_string())?;
+    // Preserve established connections (Forget still selects the next startup).
+    // An unfinished attach, however, must leave no stale remote onboarding state.
+    if state.remote_mode.load(Ordering::SeqCst) && state.remote_proxy.lock().unwrap().is_none() {
+        *state.remote_descriptor.lock().unwrap() = None;
+        *state.expected_remote_node_id.lock().unwrap() = None;
+        *state.pairing.lock().unwrap() = None;
+        *state.pairing_view.lock().unwrap() = PairingView::starting();
+        *state.error.lock().unwrap() = None;
+        state.remote_mode.store(state.remote_only, Ordering::SeqCst);
+        state.remote_retry.clear_connection_error();
+    }
+    Ok(())
 }
 
 /// Reconnect the remote transport even if pairing already succeeded. Local
@@ -2610,7 +2678,8 @@ async fn pairing_retry_at(state: &NodeState, app_data_dir: &Path) -> Result<Pair
         // selected. Its API listener and authenticated state cannot switch live.
         #[cfg(all(desktop, not(feature = "mobile")))]
         if !state.remote_mode.load(Ordering::SeqCst)
-            && (state.config.lock().unwrap().is_some() || state.external_node.lock().unwrap().is_some())
+            && (state.local_startup.load(Ordering::SeqCst)
+                || state.config.lock().unwrap().is_some() || state.external_node.lock().unwrap().is_some())
         {
             return Err("Restart BitSov to connect to the saved remote node.".into());
         }
@@ -8746,6 +8815,29 @@ time.sleep(60)
 #[cfg(all(test, desktop, not(feature = "mobile")))]
 mod remote_onboarding_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn reconnect_during_first_local_startup_never_attaches_remote() {
+        use base64::Engine;
+        let state = NodeState::for_identifier("app.bitsov.desktop");
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let value = serde_json::json!({"v": 2, "endpoint": endpoint,
+            "endpoints": [endpoint], "box_transport_pubkey": "22".repeat(32),
+            "code": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([44; 32])});
+        let link = format!("bitsov://pair/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).unwrap()));
+        remote_access::import_pairing_link(dir.path(), &link).unwrap();
+        // Before init_node completes, neither local selector has been published.
+        assert!(state.config.lock().unwrap().is_none());
+        assert!(state.external_node.lock().unwrap().is_none());
+        let result = tokio::time::timeout(Duration::from_millis(200), pairing_retry_at(&state, dir.path())).await;
+        assert!(result.is_ok(), "Reconnect must refuse promptly during local startup");
+        assert!(result.unwrap().unwrap_err().contains("Restart BitSov"));
+        assert!(!state.remote_mode.load(Ordering::SeqCst));
+        assert!(state.pairing.lock().unwrap().is_none());
+        assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
+    }
 
     #[tokio::test]
     async fn saved_remote_ticket_retry_does_not_switch_a_selected_local_node() {
