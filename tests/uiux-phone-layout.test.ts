@@ -48,8 +48,10 @@ describe('phone layout (375 px)', () => {
     expect(block).toMatch(/input\[type='checkbox'\] \{ width: 22px; height: 22px;/);
   });
 
-  it('the meeting planner is held inside the screen and scrolls (rendered check: npm run check:layout)', () => {
-    expect(css).toMatch(/\.meeting-panel\[data-meeting-panel='planning'\] \{ max-height: calc\(100dvh - 48px\); overflow-y: auto; \}/);
+  it('the meeting planner and New room (shared .meeting-panel) are held inside the screen and scroll (rendered: npm run check:layout)', () => {
+    expect(css).toMatch(/\n\.meeting-panel \{ max-height: calc\(100dvh - 48px\); overflow-y: auto; \}/);
+    expect(readFileSync(join(__dirname, '../src/control/RoomPanel.tsx'), 'utf8')).toMatch(/class="call-panel meeting-panel room-panel" data-room-panel="new"/);
+    expect(readFileSync(join(__dirname, '../scripts/ui-layout/meeting-planner-check.mjs'), 'utf8')).toContain('[data-room-panel="new"]');
     expect(readFileSync(join(__dirname, '../scripts/ui-layout/meeting-planner-check.mjs'), 'utf8')).toContain('width: 375, height: 667');
     // `?sample&peers=12`, the list the rendered check uses: 12 distinct contacts.
     const peers = samplePeers(12);

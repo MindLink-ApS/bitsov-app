@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
  * Rendered layout regression check (UI/UX audit 21 Oct, #271 review):
- * the meeting planner stays inside a 375 x 667 phone screen with 12 contacts,
- * and every participant checkbox can be reached (the top was at -174 px).
+ * the meeting planner and New room (both .meeting-panel) stay inside a 375 x 667
+ * phone screen with 12 contacts, and every checkbox can be reached (the planner's
+ * top was at -174 px; New room's header went off screen).
  *
  * Runs the Vite dev server with sample data (no node, no Tauri window) and a
  * headless Chromium through Playwright. Playwright is not a dependency of this
@@ -81,39 +82,50 @@ async function launch() {
 }
 const browser = await launch();
 try {
+  // Both contact pickers share .meeting-panel and its 44 px rows on a phone.
+  const PANELS = [
+    { name: 'meeting planner', open: '[data-call="meeting"]', panel: '[data-meeting-panel="planning"]', pick: 'data-meeting-pick', cancel: '[data-meeting-cancel]' },
+    { name: 'New room', open: '[data-room-new]', panel: '[data-room-panel="new"]', pick: 'data-room-pick', cancel: '[data-room-cancel]' },
+  ];
   for (const scheme of ['light', 'dark']) {
-    const page = await browser.newPage({ viewport: { width: 375, height: 667 }, colorScheme: scheme, hasTouch: true });
-    await page.goto(`${base}/?sample&peers=12`);
-    await page.waitForSelector('[data-call="meeting"]:not([disabled])', { timeout: 15_000 });
-    await page.click('[data-call="meeting"]');
-    const panel = page.locator('[data-meeting-panel="planning"]');
-    await panel.waitFor({ timeout: 5_000 });
-    await page.waitForTimeout(400); // pop-in animation
-    const box = await panel.boundingBox();
-    const picks = await page.locator('[data-meeting-panel="planning"] [data-meeting-pick]').count();
-    const where = `${scheme}: panel top ${Math.round(box.y)}, bottom ${Math.round(box.y + box.height)}, ${picks} picks`;
-    console.log(where);
-    if (picks < 12) failures.push(`${scheme}: expected 12 contacts in the planner, saw ${picks}`);
-    if (box.y < 0) failures.push(`${scheme}: planner top is off screen (${Math.round(box.y)} px)`);
-    if (box.y + box.height > 667 + 0.5) failures.push(`${scheme}: planner bottom is off screen (${Math.round(box.y + box.height)} px)`);
-    // Every checkbox: scrolled into view inside the panel, it is the element under its own centre.
-    for (let i = 0; i < picks; i++) {
-      const pick = page.locator('[data-meeting-panel="planning"] [data-meeting-pick]').nth(i);
-      await pick.scrollIntoViewIfNeeded();
-      const b = await pick.boundingBox();
-      const hit = await page.evaluate(([x, y]) => {
-        const el = document.elementFromPoint(x, y);
-        return el?.closest('label')?.querySelector('[data-meeting-pick]')?.getAttribute('data-meeting-pick') ?? el?.getAttribute('data-meeting-pick') ?? null;
-      }, [b.x + b.width / 2, b.y + b.height / 2]);
-      const want = await pick.getAttribute('data-meeting-pick');
-      if (b.y < 0 || b.y + b.height > 667 || hit !== want) failures.push(`${scheme}: contact ${i + 1} is not reachable (y ${Math.round(b.y)}, hit ${hit})`);
+    for (const p of PANELS) {
+      const page = await browser.newPage({ viewport: { width: 375, height: 667 }, colorScheme: scheme, hasTouch: true });
+      await page.goto(`${base}/?sample&peers=12&rooms=1`);
+      // + New room sits in the scrolling top strip on a phone: click it in place.
+      await page.waitForSelector(`${p.open}:not([disabled])`, { timeout: 15_000, state: 'attached' });
+      await page.locator(p.open).first().evaluate((el) => el.click());
+      const panel = page.locator(p.panel);
+      await panel.waitFor({ timeout: 5_000 });
+      await page.waitForTimeout(400); // pop-in animation
+      const tag = `${scheme} ${p.name}`;
+      const box = await panel.boundingBox();
+      const picks = await page.locator(`${p.panel} [${p.pick}]`).count();
+      console.log(`${tag}: panel top ${Math.round(box.y)}, bottom ${Math.round(box.y + box.height)}, ${picks} picks`);
+      if (picks < 12) failures.push(`${tag}: expected 12 contacts, saw ${picks}`);
+      if (box.y < 0) failures.push(`${tag}: top is off screen (${Math.round(box.y)} px)`);
+      if (box.y + box.height > 667 + 0.5) failures.push(`${tag}: bottom is off screen (${Math.round(box.y + box.height)} px)`);
+      // The header (what this dialog is) is visible when it opens.
+      const head = await page.locator(`${p.panel} header`).boundingBox();
+      if (!head || head.y < 0 || head.y + head.height > 667) failures.push(`${tag}: header is off screen`);
+      // Every checkbox: scrolled into view inside the panel, it is the element under its own centre.
+      for (let i = 0; i < picks; i++) {
+        const pick = page.locator(`${p.panel} [${p.pick}]`).nth(i);
+        await pick.scrollIntoViewIfNeeded();
+        const b = await pick.boundingBox();
+        const hit = await page.evaluate(([x, y, attr]) => {
+          const el = document.elementFromPoint(x, y);
+          return el?.closest('label')?.querySelector(`[${attr}]`)?.getAttribute(attr) ?? el?.getAttribute(attr) ?? null;
+        }, [b.x + b.width / 2, b.y + b.height / 2, p.pick]);
+        const want = await pick.getAttribute(p.pick);
+        if (b.y < 0 || b.y + b.height > 667 || hit !== want) failures.push(`${tag}: contact ${i + 1} is not reachable (y ${Math.round(b.y)}, hit ${hit})`);
+      }
+      // Cancel stays reachable too.
+      const cancel = page.locator(p.cancel);
+      await cancel.scrollIntoViewIfNeeded();
+      const c = await cancel.boundingBox();
+      if (c.y < 0 || c.y + c.height > 667) failures.push(`${tag}: Cancel is off screen`);
+      await page.close();
     }
-    // Cancel stays reachable too.
-    const cancel = page.locator('[data-meeting-cancel]');
-    await cancel.scrollIntoViewIfNeeded();
-    const c = await cancel.boundingBox();
-    if (c.y < 0 || c.y + c.height > 667) failures.push(`${scheme}: Cancel is off screen`);
-    await page.close();
   }
 } finally {
   await browser.close();
@@ -124,4 +136,4 @@ if (failures.length) {
   console.error('FAIL\n' + failures.join('\n'));
   process.exit(1);
 }
-console.log('PASS: meeting planner fits 375 x 667 with 12 contacts; every checkbox and Cancel reachable');
+console.log('PASS: meeting planner and New room fit 375 x 667 with 12 contacts; header, every checkbox and Cancel reachable');

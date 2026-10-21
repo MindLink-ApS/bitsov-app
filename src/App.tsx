@@ -75,7 +75,8 @@ function AppScreen() {
   const noPeers = new URLSearchParams(window.location.search).get('peers') === '0';
   // `?sample&peers=12`: a long contact list (scripts/ui-layout checks the meeting planner with it).
   const peerCount = Number(new URLSearchParams(window.location.search).get('peers')) || undefined;
-  const [source, setSource] = createSignal<Source>(sample ? sampleSource({ organism, noPeers, peerCount }) : hostSource);
+  const rooms = new URLSearchParams(window.location.search).get('rooms') === '1';
+  const [source, setSource] = createSignal<Source>(sample ? sampleSource({ organism, noPeers, peerCount, rooms }) : hostSource);
   const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
   // Gate G6: the funds UI stays behind an explicit trust disclosure.
   const [sessionTrust, setSessionTrust] = createSignal<string | null>(null);
@@ -251,7 +252,7 @@ function AppScreen() {
     }
   };
   const useSample = (start: SampleStart) => {
-    setSource(sampleSource({ organism, noPeers, peerCount }));
+    setSource(sampleSource({ organism, noPeers, peerCount, rooms }));
     setSessionTrust(start === 'shell' ? 'sample' : null);
     void poll();
   };
