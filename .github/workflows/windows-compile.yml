@@ -9,18 +9,17 @@ name: Windows Compile
 #
 # CI cost: windows-latest is billed at 2× Linux. This does not run on every
 # pull request or every push to main. It runs on the nightly schedule (default
-# branch), on `v*` tags, in the merge queue, on workflow_dispatch, and on a PR
-# that carries `full-ci`. Required gates (Authority Check, Build) are unaffected.
+# branch), on `v*` tags, on workflow_dispatch, and on a PR when `full-ci` is
+# added or a full-ci PR gets a new commit (other labels do not rebuild). Required gates (Authority Check, Build) are unaffected.
 on:
   schedule:
     - cron: '0 5 * * *'
   workflow_dispatch:
-  merge_group:
   push:
     tags: ['v*']
   pull_request:
     branches: [main]
-    types: [labeled, unlabeled, synchronize, reopened]
+    types: [labeled, synchronize, reopened]
 
 # contents: read only. A full-ci pull request runs this job; do not grant
 # actions: write to that token.
@@ -47,9 +46,9 @@ jobs:
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'merge_group' ||
       startsWith(github.ref, 'refs/tags/v') ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'full-ci'))
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

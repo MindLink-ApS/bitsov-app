@@ -13,7 +13,7 @@ name: Build
 #   pull_request paths-ignore: a skipped workflow never reports, and a required
 #   `Build (tsc + vite + cargo check)` would stay pending.
 # - macOS / Windows bundles are not in this file. They run nightly, on `v*` tags,
-#   in the merge queue, or with the `full-ci` label (mac-package.yml,
+#   or when the `full-ci` label is added (mac-package.yml,
 #   windows-compile.yml). There is no iOS simulator job; `cargo check --features
 #   mobile` below is the Linux mobile compile and stays on every code PR.
 # - The sidecar job is not a merge gate. It waits for this job and reuses the same

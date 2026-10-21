@@ -194,9 +194,10 @@ signed assets; the historical rc7 inspection is not rc14 binary evidence. No mac
 
 `.github/workflows/mac-package.yml` ("Mac Package") does not run on every
 push to `main`. macos-14 is billed at 10× Linux, so the unsigned Tauri bundle
-runs nightly (05:00 UTC, default branch), on `v*` tags, in the merge queue,
-on `workflow_dispatch`, and on a pull request that carries `full-ci`. The
-label sticks: later pushes to that PR build again. There is no iOS simulator
+runs nightly (05:00 UTC, default branch), on `v*` tags, on
+`workflow_dispatch`, and on a pull request when `full-ci` is added. The
+label sticks: later pushes to that PR build again. Adding or removing any
+other label (for example `merge-ready`) does not start a build. There is no iOS simulator
 job; an iOS bundle would use these same triggers. Windows Compile uses the
 same schedule (2× Linux) to catch platform-gating regressions (app #132).
 Windows remains compile-only and is not a supported runtime or merge gate.

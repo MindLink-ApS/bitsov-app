@@ -10,8 +10,9 @@ name: Mac Package
 #
 # CI cost (app #131, private-repo minutes): macos-14 is billed at 10× Linux.
 # This Tauri bundle does not run on pull-request pushes or on every push to
-# main. It runs on the nightly schedule (default branch), on `v*` tags, in the
-# merge queue, on workflow_dispatch, and on a PR that carries `full-ci`.
+# main. It runs on the nightly schedule (default branch), on `v*` tags, on
+# workflow_dispatch, and on a PR when `full-ci` is added or a full-ci PR gets a
+# new commit. Adding any other label (e.g. merge-ready) does not rebuild.
 # There is no iOS simulator / `tauri ios build` workflow on this repo. The
 # Linux Build job still runs `cargo check --features mobile` on every code PR.
 # Do not add an xcodebuild on macos-14 to the per-PR path; an iOS bundle
@@ -21,14 +22,13 @@ on:
     # Once a day on the default branch. 05:00 UTC, clear of the 06:00 audit.
     - cron: '0 5 * * *'
   workflow_dispatch:
-  merge_group:
   push:
     tags: ['v*']
   pull_request:
     branches: [main]
     # `synchronize` makes `full-ci` stick for later pushes. Other PRs hit the
     # job `if` and do not start a runner.
-    types: [labeled, unlabeled, synchronize, reopened]
+    types: [labeled, synchronize, reopened]
 
 # contents: read only. A full-ci pull request runs this job; do not grant
 # actions: write to that token.
@@ -39,8 +39,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   # A new commit on a full-ci PR cancels the previous bundle. Adding another
   # label must not cancel an in-flight 10× run (cancel-in-progress stays false
-  # for `labeled`). Pushes, tags, the nightly, and the merge queue are not
-  # cancelled.
+  # for `labeled`). Pushes, tags and the nightly are not cancelled.
   cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
 
 jobs:
@@ -50,9 +49,9 @@ jobs:
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'merge_group' ||
       startsWith(github.ref, 'refs/tags/v') ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'full-ci'))
     timeout-minutes: 45
     env:
       # scripts/fetch-node-sidecar.sh reads the pinned public release with gh.
