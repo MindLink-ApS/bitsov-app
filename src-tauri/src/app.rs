@@ -4135,7 +4135,11 @@ fn locked_spend_journal(state: &NodeState) -> Result<Journal, ActionError> {
         if let Some(id) = pending.operation_id.clone() {
             let record = journal.operation_record(&id)?;
             let may_be_call = record.as_ref().is_none_or(|r| r.kind == "legacy" || r.kind.starts_with("call_"));
-            if may_be_call {
+            let proven_unsent = pending.non_dispatch_proven && pending.resumable
+                && pending.accounting_msat.is_none() && pending.paid.is_none()
+                && pending.undelivered.is_none() && pending.evidence_reservation_msat.is_none()
+                && record.as_ref().is_some_and(|r| r.state == spend_journal::OperationState::Unpaid);
+            if may_be_call && !proven_unsent {
                 // Pre-A2 grace releases retained their operation id. They have
                 // no durable proof that the original call cannot still pay.
                 // Confirmed abandonment clears that id and never enters here.
@@ -4454,7 +4458,10 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
             let call_id = payload.as_ref().and_then(|v| v["call_id"].as_str());
             let blocked = if kind == 400 {
                 calls.iter().find(|r| spend_journal::admission_open(r, &calls))
-                    .map(|r| (r, "call_admission_open", "End the existing call before starting another admission. Nothing was paid."))
+                    .map(|r| (r, "call_admission_open", if payload.as_ref().and_then(|v| v["sdp"].as_str())
+                        .is_some_and(|sdp| sdp.lines().any(|line| line.starts_with("a=x-bitsov-restart-of:"))) {
+                            "Your last call is still closing. End it, then call again."
+                        } else { "End the existing call before starting another admission. Nothing was paid." }))
             } else {
                 let offer = calls.iter().filter(|r| r.call_id.as_deref() == call_id
                     && matches!(r.kind.as_str(), "call_offer" | "call_recovery"))
@@ -4605,6 +4612,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         Some(id) => close_charge(state, id, None, None),
         None => Ok(()),
     };
+    pending.non_dispatch_proven = false;
     pending.dispatched_at = Some(spend_journal::timestamp_ms());
     journal.save(&pending)?;
     // Journal I/O can take time. Recheck immediately before issuing the request.
@@ -4684,6 +4692,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
                 // this very message again (under the contact's re-admission
                 // quote) reuses its id, so it can never be paid twice.
                 pending.resumable = true;
+                pending.non_dispatch_proven = fresh_operation || prior.as_ref().is_some_and(|p| p.non_dispatch_proven);
                 pending.budgeted = false;
                 pending.accounting_msat = None;
                 pending.paid = None;
@@ -4894,6 +4903,14 @@ async fn do_op_list(state: &NodeState, peer: Option<&str>) -> Result<spend_journ
         .await.map_err(spend_journal::unknown)?
     }.await;
     act::with_op(Fallback(existing_operation.as_deref()), result)
+}
+
+/// Repair metadata only. Money and admission closure still belong to op_end_call.
+async fn do_op_repair_call_index(state: &NodeState, index_id: &str) -> Result<Option<String>, ActionError> {
+    let _money = state.money.lock().await;
+    let node_id = state.node_id.lock().unwrap().clone()
+        .ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
+    spend_journal(state)?.repair_call_index(&node_id, index_id)
 }
 
 /// Waits for any money POST in flight (`NodeState::money`), then reads its record.
@@ -5915,6 +5932,7 @@ async fn resume_admission_send(state: &NodeState, pending_id: &str, peer: &str, 
     // Consume permission durably before exactly one POST. A lost answer must
     // be checked again; saved accounting is never authority to resume.
     pending.admission_resume = false;
+    pending.non_dispatch_proven = false;
     pending.dispatched_at = Some(spend_journal::timestamp_ms());
     journal.save(&pending)?;
     journal.record_outcome(&pending, spend_journal::OperationState::Dispatching, None)?;
@@ -7531,6 +7549,17 @@ async fn relation_approve(
 }
 
 #[tauri::command(rename_all = "snake_case")]
+async fn op_repair_call_index(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    index_id: String,
+) -> Result<Option<String>, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_op_repair_call_index(state.inner(), &index_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
 async fn op_end_call(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -8856,6 +8885,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             spend_reconcile,
             op_list,
             op_end_call,
+            op_repair_call_index,
             op_close_call,
             budget_status,
             budget_approve,
@@ -13348,6 +13378,68 @@ mod control_act_tests {
         result
     }
 
+    #[tokio::test]
+    async fn recovery_fast_peer_end_binds_fresh_dispatch_without_paying_cleanup() {
+        for reason in ["hangup", "busy"] {
+            let (routes, paid) = ledger_call_routes();
+            let (routes, hold) = hold_compose(routes, 0, None, false);
+            let node = fake(AuthMode::Local, routes);
+            approve_calls(&node).await;
+            let (offer, captured) = tokio::join!(
+                do_call_signal(&node.state, A, 400, OFFER, 15000),
+                during_call(&hold, async {
+                    capture_call_observation(&node.state, &inbound_call_event(403, reason)).unwrap()
+                }),
+            );
+            let captured = captured.expect("fresh dispatch must retain the early peer end");
+            assert_eq!(Some(captured.offer.op_id.clone()), offer.unwrap().operation_id);
+            assert!(persist_call_observation(&node.state, &captured).await.unwrap());
+            do_op_end_call(&node.state, CALL_ID).await.unwrap();
+            assert_eq!(paid.lock().unwrap().pays, 1);
+            assert_eq!(composes(&node), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_proven_capped_call_stays_released_without_abandon() {
+        let (routes, _) = ledger_call_routes();
+        let refuse = Arc::new(AtomicBool::new(true));
+        let flag = refuse.clone();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if m == "POST" && p == "/messages/compose" && flag.load(Ordering::SeqCst) {
+                return readmission_coded_reply();
+            }
+            routes(m, p, b)
+        }));
+        approve_calls(&node).await;
+        assert_eq!(do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err().code, "readmission_capped");
+        let restarted = reopen(&node);
+        {
+            let journal = locked_spend_journal(&restarted).unwrap();
+            let p = journal.pending().unwrap().unwrap();
+            assert!(p.resumable && !p.budgeted, "node-proven unsent slot must stay released");
+        }
+        refuse.store(false, Ordering::SeqCst);
+        approve_calls(&node).await;
+        let next = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+        do_call_signal(&node.state, A, 400, &next, 15000).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_host_call_fields_never_reach_compose() {
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        let bodies = compose_bodies(&node);
+        assert_eq!(bodies.len(), 2);
+        for body in bodies {
+            assert!(body.as_object().unwrap().keys().all(|k| !k.starts_with("host_")));
+            assert!(body["operation_id"].is_string());
+        }
+    }
+
     // #220: the original POST is still held before payment after its host
     // timeout. A concurrent lookup is only a snapshot, even beyond #228's grace.
     #[tokio::test]
@@ -13545,6 +13637,7 @@ mod control_act_tests {
             let first = first.unwrap();
             let error = second.unwrap_err();
             assert_eq!(error.code, "call_admission_open");
+            if recovery { assert_eq!(error.message, "Your last call is still closing. End it, then call again."); }
             assert_eq!(error.operation_id, first.operation_id);
             assert_eq!(composes(&node), 1);
             assert_eq!(paid.lock().unwrap().pays, 1);
@@ -13742,7 +13835,8 @@ mod control_act_tests {
                 let (offer, ()) = tokio::join!(
                     do_call_signal(&node.state, A, 400, OFFER, 15000),
                     during_call(&hold, async {
-                        assert!(capture_call_observation(&node.state, &inbound_call_event(403, "hangup")).unwrap().is_none());
+                        // A fresh dispatch now retains and persists the early end.
+                        observe_call_event(&node.state, &inbound_call_event(403, "hangup")).await;
                     }),
                 );
                 offer.unwrap();
@@ -13757,7 +13851,7 @@ mod control_act_tests {
             let restarted = reopen(&node);
             do_budget_approve(&restarted, 500000, budget::PresetId::Careful).await.unwrap();
             do_op_end_call(&restarted, CALL_ID).await.unwrap();
-            assert_eq!(paid.lock().unwrap().pays, 2);
+            assert_eq!(paid.lock().unwrap().pays, if held == 0 { 1 } else { 2 });
             let records = spend_journal(&restarted).unwrap().call_operations(OWN, Some(A)).unwrap();
             assert!(records.iter().all(|r| !spend_journal::admission_open(r, &records)));
         }
@@ -19059,6 +19153,7 @@ mod assistant_acl_tests {
                 "spend_reconcile",
                 "op_list",
                 "op_end_call",
+                "op_repair_call_index",
                 "op_close_call",
                 "budget_status",
                 "budget_approve",

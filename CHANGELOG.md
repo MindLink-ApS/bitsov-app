@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep caller recovery refused while the original admission is open, with clear End call and priced Call again controls. Expose unresolved call records for host repair or acknowledgement without releasing unproven liabilities. Bind early peer hangup/busy events to fresh dispatches, preserve stale-event protection for reused call IDs, and retain durable proof for node-refused unsent call slots.
+
 - Show restart guidance after Forget cancels desktop startup, resume the previous phone connection after a ticket-save failure, and retry locked-Keychain fresh-install cleanup once on foreground while keeping identity use blocked. Make remote cancellation tests tolerant of loaded CI.
 
 - Let Forget and replacement phone tickets cancel a stalled remote connection without restarting; preserve retry backoff and consumed-ticket handling, prevent desktop Reconnect during local startup, and align the generated iOS Local Network description.

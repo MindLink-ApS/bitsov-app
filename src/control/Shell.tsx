@@ -1,3 +1,4 @@
+import { CallRepairs } from './CallRepairs';
 import { provenUnpaid } from './paymentOutcome';
 import { AddDevice } from '../onboarding/AddDevice';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
@@ -37,7 +38,7 @@ import { custodyBadge, CustodyBadgeView } from './custody';
 import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { androidQrScannerAvailable, scanPairingLink } from '../pairingScanner';
-import { callCost, createCallEngine, NO_MEDIA_DEVICES, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { callCost, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
 import { NewRoomPanel, RoomThread, type RoomSend, type ThreadRead } from './RoomPanel';
@@ -1771,6 +1772,8 @@ export function ControlCenter(props: Props) {
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
         <section class="track" aria-label="Track" inert={walletTab() !== null || contextOpen()}>
           {props.offline}
+          <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
+            onEnded={() => { void loadBudget(); void loadWallet(); }} />
           <Show when={moneyBlocked()}>
             <p class="hint money-notice" data-money-notice role="status">{!live() ? 'Waiting for the connection. Your node will retry automatically.' : MONEY_NOT_READY} Sending, paying, calls, first contact, files, rooms, channels and gifts will be available when it is ready.</p>
           </Show>
@@ -2116,6 +2119,7 @@ export function ControlCenter(props: Props) {
         dismiss={() => { setCallApproval(false); calls.dismiss(); }}
         closeAgain={() => void calls.closeAgain()}
         endStuck={() => void calls.endStuck()}
+        callAgain={(peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); }}
       />
       <MeetingPanel
         view={meetingView()}
@@ -3064,7 +3068,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   const off = () => props.blocked || cost() === null || props.actions.callActive();
   const title = () =>
     why() ?? (quote() && cost() === null ? `${props.name}’s node does not take calls yet` : cost() !== null
-      ? `Up to ${fmtAmount(cost()!)}: ${fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat)} to ring (their call price plus ${feeCeiling(quote()!.offer_max_routing_fee_msat)}), then ${fmtAmount(signalCost(quote()!))} to hang up. Includes up to ${fmtAmount(callCost(quote()!)!)} more for one automatic recovery (another admission and hangup). Media goes directly between you; it is not billed. ${effectiveStun() ? `Uses the STUN server ${effectiveStun()} to find a route.` : stunOff() ? 'STUN is turned off, so calls connect only on the same network (Settings).' : 'No STUN server is set, so calls connect only on the same network (Settings).'}`
+      ? `Up to ${fmtAmount(cost()!)}: ${fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat)} to ring (their call price plus ${feeCeiling(quote()!.offer_max_routing_fee_msat)}), then ${fmtAmount(signalCost(quote()!))} to hang up. Includes up to ${fmtAmount(callCost(quote()!)!)} more for recovery after the original admission is confirmed closed. Media goes directly between you; it is not billed. ${effectiveStun() ? `Uses the STUN server ${effectiveStun()} to find a route.` : stunOff() ? 'STUN is turned off, so calls connect only on the same network (Settings).' : 'No STUN server is set, so calls connect only on the same network (Settings).'}`
       : 'Reading their call price…');
   const place = (media: CallMedia) => { const q = quote(); if (q && !off()) props.actions.placeCall(props.peer, media, q); };
   // A call pays and rings someone, so one tap only asks: the call/video button
@@ -3165,11 +3169,24 @@ function CallPanel(props: {
   closeAgain: () => void;
   /** H2: end the earlier call the host still holds open to this contact. */
   endStuck: () => void;
+  callAgain: (peer: string, media: CallMedia, quote: CallQuote) => void;
   /** Opens Settings → General, where the STUN server is chosen. */
   openCallSettings?: () => void;
 }) {
   const [tick, setTick] = createSignal(Date.now());
   const [answer, setAnswer] = createSignal<number | null>(null);
+  const [again, setAgain] = createSignal<CallQuote | null>(null);
+  const [againError, setAgainError] = createSignal<string | null>(null);
+  createEffect(on(() => props.view.callId, () => { setAgain(null); setAgainError(null); }));
+  const offerAgain = async () => {
+    const call = props.view.callId;
+    const peer = props.view.peer;
+    if (!peer) return;
+    const q = await props.quote(peer);
+    if (props.view.callId !== call || props.view.phase !== 'ended') return;
+    if (q.ok && callCost(q.value) !== null) setAgain(q.value);
+    else setAgainError(q.ok ? 'Their node does not take calls yet.' : q.error.message);
+  };
   let panel: HTMLElement | undefined;
   createEffect(on(() => props.view.phase === 'incoming' ? props.view.callId : null, (callId) => {
     if (!callId) return;
@@ -3207,7 +3224,7 @@ function CallPanel(props: {
         </Show>
         {/* Not on the ended card: it promises a recovery that can no longer happen. */}
         <Show when={v().phase !== 'ended'}>
-          <p class="hint" data-call-recovery-note>A network interruption may trigger one paid recovery attempt within your budget. Recovery uses another call admission and signalling fees.</p>
+          <p class="hint" data-call-recovery-note>The connection may recover on its own. A new paid recovery admission waits until the original call is confirmed closed.</p>
         </Show>
         {/* While reconnecting: what is happening, and when the call ends if it does not come back (display only). */}
         <Show when={v().phase === 'reconnecting'}>
@@ -3281,7 +3298,7 @@ function CallPanel(props: {
         </Show>
         <Show when={v().phase !== 'ended' && v().error}>
           {/* Only a recovery that could not start is framed as one (the call still waits); any other error (a camera, say) as it is. */}
-          <p class="hint" data-call-error>{v().phase === 'reconnecting' && v().recoveryError !== null ? `Recovery could not start: ${v().recoveryError} Still waiting for the connection to come back on its own.` : v().error}</p>
+          <p class="hint" data-call-error>{v().recoveryError === RECOVERY_CLOSING ? RECOVERY_CLOSING : v().phase === 'reconnecting' && v().recoveryError !== null ? `Recovery could not start: ${v().recoveryError} Still waiting for the connection to come back on its own.` : v().error}</p>
         </Show>
         <div class="call-actions">
           <Switch>
@@ -3296,6 +3313,12 @@ function CallPanel(props: {
               <Show when={v().close?.status === 'refused' && !v().stuck}>
                 <button type="button" class="soft money" data-call-close-retry onClick={() => props.closeAgain()}>Try ending it again</button>
               </Show>
+              <Show when={v().outgoing && v().close?.status === 'closed' && !v().stuck && v().pendingCount === 0 && v().unknownCount === 0}>
+                <Show when={again()} fallback={<button type="button" class="soft" data-call-again disabled={props.blocked} onClick={() => void offerAgain()}>Call again</button>}>
+                  {(q) => <button type="button" class="primary money" data-call-again-confirm disabled={props.blocked} onClick={() => props.callAgain(v().peer!, v().media, q())}>Ring · up to {fmtAmount(2 * callCost(q())!)}</button>}
+                </Show>
+                <Show when={againError()}><p class="hint" role="status">{againError()}</p></Show>
+              </Show>
               <button type="button" class="soft" data-call-dismiss disabled={v().pendingCount > 0} title={v().pendingCount > 0 ? 'Closes once the payment has settled' : undefined} onClick={() => props.dismiss()}>Close</button>
             </Match>
             <Match when={v().phase !== 'idle'}>
@@ -3306,7 +3329,7 @@ function CallPanel(props: {
                 </Show>
               </Show>
               <button type="button" class="danger soft" data-call-hangup onClick={() => props.hangup()}>
-                {v().phase === 'calling' ? 'Cancel' : 'Hang up'}
+                {v().recoveryError === RECOVERY_CLOSING ? 'End call' : v().phase === 'calling' ? 'Cancel' : 'Hang up'}
               </button>
             </Match>
           </Switch>
