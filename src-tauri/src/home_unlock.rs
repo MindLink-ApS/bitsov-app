@@ -289,8 +289,7 @@ async fn unlock_with(
     let signature = device_sign(blob.clone(), message, "Unlock your BitSov home node".into())
         .await
         .map_err(|e| {
-            if e.code == "device_invalid" {
-                device::forget(&ctx.store);
+            if forget_invalid_signing_key(&ctx.store, &e) {
                 *state.home_unlock_state.lock().unwrap() = "not-enrolled";
             }
             e.message

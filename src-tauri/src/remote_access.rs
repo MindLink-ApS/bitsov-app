@@ -325,7 +325,7 @@ impl fmt::Display for RemoteError {
 impl std::error::Error for RemoteError {}
 
 /// Stable renderer contract. Detail is diagnostic copy, never a ticket or key.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ConnectionError {
     pub kind: ConnectionErrorKind,
     pub detail: String,
@@ -337,28 +337,61 @@ pub enum ConnectionErrorKind {
     Unclaimed,
     LocalNetwork,
     Unreachable,
+    Tailscale,
     Busy,
     Expired,
+    Clock,
+    Used,
+    ClaimMismatch,
     Other,
+}
+
+pub const USED_TICKET_MESSAGE: &str = "This ticket expired, was already used, or its owner was revoked. Ask an enrolled owner device for a new ticket.";
+
+impl From<String> for ConnectionError {
+    fn from(_: String) -> Self { Self::other() }
+}
+
+impl ConnectionError {
+    pub fn other() -> Self { Self::from(&RemoteError::Local(String::new())) }
+    pub fn busy() -> Self { Self::from(&RemoteError::RateLimited(0)) }
+    pub fn for_endpoint(error: &RemoteError, endpoint: Option<&str>) -> Self {
+        let mut result = Self::from(error);
+        if result.kind == ConnectionErrorKind::Unreachable && endpoint.is_some_and(is_tailscale_endpoint) {
+            result.kind = ConnectionErrorKind::Tailscale;
+            result.detail = "Check that Tailscale is connected on this device and your node.".into();
+        }
+        result
+    }
+}
+
+fn is_tailscale_endpoint(endpoint: &str) -> bool {
+    endpoint_parts(endpoint).is_ok_and(|(host, _)| {
+        if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+            let bytes = ip.octets();
+            bytes[0] == 100 && (64..=127).contains(&bytes[1])
+        } else { host.trim_end_matches('.').to_ascii_lowercase().ends_with(".ts.net") }
+    })
 }
 
 impl From<&RemoteError> for ConnectionError {
     fn from(error: &RemoteError) -> Self {
-        let kind = match error {
-            RemoteError::Unclaimed => ConnectionErrorKind::Unclaimed,
-            RemoteError::LocalNetwork | RemoteError::AndroidLocalNetwork => ConnectionErrorKind::LocalNetwork,
-            RemoteError::HandshakeUnavailable | RemoteError::Waiting(_) => ConnectionErrorKind::Unreachable,
-            RemoteError::RateLimited(_) => ConnectionErrorKind::Busy,
-            RemoteError::Expired(_) => ConnectionErrorKind::Expired,
-            _ => ConnectionErrorKind::Other,
+        use ConnectionErrorKind::*;
+        let (kind, detail) = match error {
+            RemoteError::Unclaimed => (Unclaimed, error.to_string()),
+            RemoteError::LocalNetwork | RemoteError::AndroidLocalNetwork => (LocalNetwork, error.to_string()),
+            RemoteError::HandshakeUnavailable | RemoteError::Waiting(_) | RemoteError::Transport(_) =>
+                (Unreachable, "The remote node could not be reached.".into()),
+            RemoteError::RateLimited(_) => (Busy, "The remote connection is busy. Try again shortly.".into()),
+            // A very old expiry can also mean the device clock is wrong. This
+            // is a recovery hint, never proof of clock skew or an expiry bypass.
+            RemoteError::Expired(seconds) if *seconds > 86_400 =>
+                (Clock, "Check this device's date and time, or request a fresh pairing link.".into()),
+            RemoteError::Expired(_) => (Expired, error.to_string()),
+            RemoteError::Refused(message) if message == USED_TICKET_MESSAGE => (Used, USED_TICKET_MESSAGE.into()),
+            _ => (Other, "The remote connection could not be established.".into()),
         };
-        // Never forward arbitrary peer messages, paths, or parser input through
-        // this UI contract: a peer can echo the authentication code it received.
-        let detail = if kind == ConnectionErrorKind::Other {
-            "The remote connection could not be established.".to_string()
-        } else {
-            error.to_string()
-        };
+        // Peer text may echo authentication codes. Only fixed local copy crosses.
         Self { kind, detail }
     }
 }
@@ -1369,7 +1402,7 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
                 }
                 let reason: String = if code == "authentication_failed"
                     && descriptor.code.as_deref().is_some_and(|c| c.starts_with("owner_")) {
-                    "This ticket expired, was already used, or its owner was revoked. Ask an enrolled owner device for a new ticket.".into()
+                    USED_TICKET_MESSAGE.into()
                 } else { format!("{code}: {message}").chars().take(160).collect() };
                 Err(RemoteError::Refused(reason))
             }
@@ -2191,6 +2224,7 @@ pub struct RemoteProxy {
     descriptor: Arc<Mutex<RemoteDescriptor>>,
     local_addr: SocketAddr,
     shutdown: watch::Sender<bool>,
+    stopped: Option<tokio::sync::oneshot::Receiver<()>>,
     last_error: Arc<Mutex<Option<String>>>,
 }
 
@@ -2214,6 +2248,12 @@ impl RemoteProxy {
 
     pub fn stop(&self) {
         let _ = self.shutdown.send(true);
+    }
+
+    /// Release the listener and every accepted socket before another proxy binds.
+    pub async fn stop_and_wait(mut self) {
+        self.stop();
+        if let Some(stopped) = self.stopped.take() { let _ = stopped.await; }
     }
 
     pub fn last_error(&self) -> Option<String> {
@@ -2282,6 +2322,7 @@ pub async fn start_proxy(
     let config_path = config_path(app_data_dir);
     let client_name: Arc<str> = Arc::from(client_name);
     let (shutdown, mut stopped) = watch::channel(false);
+    let (closed, closed_rx) = tokio::sync::oneshot::channel();
     // HTTP keep-alive and WebSocket connections each retain one remote
     // TCP/Noise tunnel. Independent byte streams are never interleaved; this
     // bounded set is the safe reusable pool without adding a mux wire protocol.
@@ -2294,9 +2335,12 @@ pub async fn start_proxy(
         let key = key.clone();
         let last_error = last_error.clone();
         async move {
+            let mut connections = tokio::task::JoinSet::new();
             let mut accept_backoff = Duration::from_millis(10);
             loop {
                 tokio::select! {
+                    biased;
+                    _ = connections.join_next(), if !connections.is_empty() => {}
                     changed = stopped.changed() => {
                         if changed.is_err() || *stopped.borrow() {
                             break;
@@ -2340,7 +2384,7 @@ pub async fn start_proxy(
                         let tunnel_permits = tunnel_permits.clone();
                         let retry = retry.clone();
                         let mut connection_stopped = stopped.clone();
-                        tokio::spawn(async move {
+                        connections.spawn(async move {
                             let (local_http, initial_local) =
                                 match authenticated_prefix(&mut stream, &local_auth).await {
                                     Ok(prefix) => prefix,
@@ -2403,6 +2447,10 @@ pub async fn start_proxy(
                     }
                 }
             }
+            drop(listener);
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
+            let _ = closed.send(());
         }
     });
 
@@ -2410,6 +2458,7 @@ pub async fn start_proxy(
         descriptor,
         local_addr: actual_addr,
         shutdown,
+        stopped: Some(closed_rx),
         last_error,
     })
 }

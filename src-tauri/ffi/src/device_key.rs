@@ -5,7 +5,7 @@ use std::fmt;
 /// Upper bound for a key blob. Observed size is about 570 bytes.
 const BLOB_CAP: usize = 4096;
 /// Upper bound for a DER ECDSA P-256 signature (at most 72 bytes).
-const SIG_CAP: usize = 128;
+const SIG_CAP: usize = 72;
 /// X9.63 uncompressed P-256 public key: 0x04 || X || Y.
 pub const PUBLIC_KEY_LEN: usize = 65;
 
@@ -56,6 +56,8 @@ const OK: i32 = 0;
 const ERR_UNAVAILABLE: i32 = -1;
 const ERR_CANCELLED: i32 = -2;
 const ERR_INVALID_BLOB: i32 = -3;
+// A malformed bridge response does not mean the stored enclave key is invalid.
+const ERR_TRANSPORT: i32 = -6;
 const ERR_BIOMETRY_UNAVAILABLE: i32 = -7;
 
 fn status_error(code: i32) -> DeviceKeyError {
@@ -141,7 +143,7 @@ pub fn create(policy: Policy) -> Result<(Vec<u8>, [u8; PUBLIC_KEY_LEN]), DeviceK
         return Err(status_error(status));
     }
     if blob_len == 0 || blob_len > BLOB_CAP || public[0] != 0x04 {
-        return Err(DeviceKeyError::Other(status));
+        return Err(DeviceKeyError::Other(ERR_TRANSPORT));
     }
     blob.truncate(blob_len);
     Ok((blob, public))
@@ -172,8 +174,9 @@ pub fn sign(blob: &[u8], message: &[u8], reason: &str) -> Result<Vec<u8>, Device
     if status != OK {
         return Err(status_error(status));
     }
-    if signature_len == 0 || signature_len > SIG_CAP {
-        return Err(DeviceKeyError::Other(status));
+    if signature_len < 2 || signature_len > SIG_CAP || signature[0] != 0x30
+        || usize::from(signature[1]) != signature_len - 2 {
+        return Err(DeviceKeyError::Other(ERR_TRANSPORT));
     }
     signature.truncate(signature_len);
     Ok(signature)
@@ -206,8 +209,9 @@ pub fn sign_setup(blob: &[u8], message: &[u8], reason: &str, finish: bool) -> Re
     if status != OK {
         return Err(status_error(status));
     }
-    if signature_len == 0 || signature_len > SIG_CAP {
-        return Err(DeviceKeyError::Other(status));
+    if signature_len < 2 || signature_len > SIG_CAP || signature[0] != 0x30
+        || usize::from(signature[1]) != signature_len - 2 {
+        return Err(DeviceKeyError::Other(ERR_TRANSPORT));
     }
     signature.truncate(signature_len);
     Ok(signature)
@@ -228,6 +232,9 @@ pub fn public_key(blob: &[u8]) -> Result<[u8; PUBLIC_KEY_LEN], DeviceKeyError> {
     let status = unsafe { ffi::bitsov_dk_public(blob.as_ptr(), blob.len(), public.as_mut_ptr()) };
     if status != OK {
         return Err(status_error(status));
+    }
+    if public[0] != 0x04 {
+        return Err(DeviceKeyError::Other(ERR_TRANSPORT));
     }
     Ok(public)
 }

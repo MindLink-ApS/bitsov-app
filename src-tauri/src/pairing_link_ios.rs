@@ -1,8 +1,9 @@
 //! iOS-only URL inbox, the counterpart of the Android `PairingLinkPlugin`. No
 //! persistence, logging, parsing or auto-import.
 //!
-//! iOS hands a `bitsov://` URL to the app as `RunEvent::Opened` (tao's scene
-//! delegate). The run loop drops it here; the renderer takes it once through
+//! The native scene bridge captures cold connectionOptions.URLContexts and
+//! warm openURLContexts before forwarding to tao. RunEvent::Opened is retained
+//! as a deduplicated fallback. The renderer takes each link once through
 //! `pairing_link_take`, and import and validation belong to the existing
 //! pairing command, called only after the owner confirms in the webview.
 //!
@@ -87,6 +88,19 @@ pub(crate) fn take() -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cold_scene_link_survives_until_mount_and_warm_delivery_is_deduplicated() {
+        let mut inbox = Inbox::new();
+        // The native willConnect hook runs before Tao creates the webview.
+        inbox.receive("bitsov://pair/cold-launch-fixture");
+        // A duplicate Opened callback before the first take is harmless.
+        inbox.receive("bitsov://pair/cold-launch-fixture");
+        assert!(inbox.pending.is_some());
+        assert!(inbox.take().is_some());
+        inbox.receive("bitsov://pair/cold-launch-fixture");
+        assert!(inbox.take().is_none());
+    }
 
     #[test]
     fn take_is_once_and_empty_by_default() {

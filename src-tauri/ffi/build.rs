@@ -25,6 +25,7 @@ fn build_device_key_swift() {
     let platform = if ios { if simulator { "iphonesimulator" } else { "iphoneos" } } else { "macosx" };
     println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
     println!("cargo:rerun-if-changed=../native/client_keychain.swift");
+    println!("cargo:rerun-if-changed=../native/pairing_link.swift");
     let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("aarch64") => "arm64",
         Ok("x86_64") => "x86_64",
@@ -62,7 +63,7 @@ fn build_device_key_swift() {
 
     let lib = out_dir.join("libbitsov_device_key.a");
     let mut compiler = Command::new(&swiftc);
-    if ios { compiler.arg("../native/client_keychain.swift"); }
+    if ios { compiler.args(["../native/client_keychain.swift", "../native/pairing_link.swift"]); }
     let status = compiler
         .args([
             "-emit-library",

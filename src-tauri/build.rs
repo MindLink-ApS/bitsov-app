@@ -35,6 +35,7 @@ fn main() {
             "pairing_retry",
             "remote_access_preview",
             "remote_access_import",
+            "remote_access_connect",
             "pairing_link_take",
             "remote_access_forget",
             "remote_access_replace",

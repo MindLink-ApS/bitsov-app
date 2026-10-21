@@ -10,7 +10,7 @@ import { AddDevice, JoinDevice } from '../src/onboarding/AddDevice';
 import { appPlatform, deviceWord, deviceWords, isMobilePlatform } from '../src/platform';
 import { cameraQrScannerAvailable } from '../src/cameraQrScanner';
 import { Onboarding } from '../src/onboarding/Onboarding';
-import { androidQrScannerAvailable } from '../src/pairingScanner';
+import { mobileQrScannerAvailable } from '../src/pairingScanner';
 
 const ANDROID = 'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/130.0 Mobile Safari/537.36';
 const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148';
@@ -40,12 +40,12 @@ describe.each([
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: () => Promise.reject('unused host command') });
   });
 
-  it('detects mobile and enables the native scanner only on Android', () => {
+  it('detects mobile and enables the native scanner on both mobile platforms', () => {
     expect(appPlatform()).toBe(platform);
     expect(isMobilePlatform()).toBe(true);
     expect(deviceWord()).toBe(device);
     expect(deviceWords().device).toBe(namedDevice);
-    expect(androidQrScannerAvailable()).toBe(platform === 'android');
+    expect(mobileQrScannerAvailable()).toBe(true);
     expect(cameraQrScannerAvailable(userAgent, { getUserMedia: vi.fn() })).toBe(false);
   });
 
@@ -123,7 +123,7 @@ describe.each([
     expect(Array.from(mount.querySelectorAll('button')).some(b => b.textContent === 'Reconnect')).toBe(false);
   });
 
-  it('App pairing names the device in first run and the incoming-link dialog, with a native scanner only on Android', async () => {
+  it('App pairing names the device in first run and the incoming-link dialog, with a native scanner on both mobile platforms', async () => {
     let link: string | null = 'bitsov://pair/test-ticket';
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
       if (cmd === 'pairing_link_take') { const pending = link; link = null; return Promise.resolve(pending); }
@@ -142,7 +142,7 @@ describe.each([
     expect(dialog.getAttribute('aria-label')).toBe(`Pair this ${device} with your node`);
     expect(dialog.querySelector('h1')?.textContent).toBe(`Pair this ${device} with your node`);
     expect(dialog.textContent).toContain(`does not pair this ${device}`);
-    expect(!!dialog.querySelector('[data-scan-pairing-qr]')).toBe(platform === 'android');
+    expect(!!dialog.querySelector('[data-scan-pairing-qr]')).toBe(true);
     cleanCopy(dialog);
     if (device === 'iPad') expect(dialog.textContent).not.toMatch(/this phone|iPhone/);
   });

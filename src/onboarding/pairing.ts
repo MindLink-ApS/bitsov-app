@@ -18,7 +18,7 @@ export function normalizePairingLink(input: string): string {
 
 /** Structured host failures; detail belongs in connection diagnostics. */
 export type ConnectionError = {
-  kind: 'unclaimed' | 'local_network' | 'unreachable' | 'busy' | 'expired' | 'other';
+  kind: 'unclaimed' | 'local_network' | 'unreachable' | 'busy' | 'expired' | 'clock' | 'used' | 'tailscale' | 'claim_mismatch' | 'other';
   detail: string;
 };
 
@@ -113,3 +113,9 @@ export function onboardingSteps(status: NodeStatus, pairing: PairingView, trustA
 }
 
 export const scopeList = (scopes: string[]) => scopes.join(' + ');
+
+/** Host connection errors carry sanitized diagnostic copy. */
+export function connectionErrorDetail(error: unknown): string {
+  if (error && typeof error === 'object' && 'detail' in error && typeof error.detail === 'string') return error.detail;
+  return String(error);
+}

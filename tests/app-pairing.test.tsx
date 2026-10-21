@@ -74,7 +74,7 @@ describe('app shell pairing wiring', () => {
       if (cmd === 'node_status') return Promise.resolve({ ready: !locked, locked, node_id: 'fa'.repeat(32), error: null });
       if (cmd === 'pairing_status') return Promise.resolve({ ...paired, remote: true });
       if (cmd === 'remote_access_preview') return Promise.resolve({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd' });
-      if (cmd === 'remote_access_import') {
+      if (cmd === 'remote_access_connect') {
         imports.push(args!.link);
         return new Promise(resolve => { finishImport = resolve; });
       }

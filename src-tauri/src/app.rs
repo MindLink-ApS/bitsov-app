@@ -234,6 +234,7 @@ struct NodeState {
     #[cfg(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile"))))]
     home_remember: Arc<Mutex<Option<home_unlock::RememberOffer>>>,
     remote_descriptor: Mutex<Option<remote_access::RemoteDescriptor>>,
+    remote_pins: Arc<dyn bitsov_app::home_node::BoxPinStore>,
     remote_retry: Arc<bitsov_app::connection_retry::RemoteRetry>,
     remote_recovery: tokio::sync::Mutex<()>,
     /// Serialize link edits and registering a new connect generation. Never held
@@ -447,6 +448,7 @@ impl NodeState {
             #[cfg(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile"))))]
             home_remember: Arc::new(Mutex::new(None)),
             remote_descriptor: Mutex::new(None),
+            remote_pins: Arc::new(home_keychain::MacBoxPins),
             remote_retry: Arc::new(bitsov_app::connection_retry::RemoteRetry::default()),
             remote_recovery: tokio::sync::Mutex::new(()),
             remote_change: tokio::sync::Mutex::new(()),
@@ -1300,7 +1302,8 @@ async fn attach_remote(
         state.remote_retry.failed(&error);
         return set_error(state, error.to_string());
     }
-    let descriptor = descriptor.with_pin_store(Arc::new(home_keychain::MacBoxPins));
+    state.remote_retry.set_endpoint(descriptor.endpoint());
+    let descriptor = descriptor.with_pin_store(state.remote_pins.clone());
     let store = app_data_dir.join(PAIRING_STORE_DIR);
     let key = match ClientKey::load_or_create(&store) {
         Ok(key) => Arc::new(key),
@@ -1805,20 +1808,25 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
 
 /// Mint a fresh paired token and install it. No fallback on failure.
 async fn refresh_paired(state: &NodeState) -> Result<(), String> {
-    let session = match &*state.auth.lock().unwrap() {
-        AuthMode::Paired(session) => session.clone(),
-        _ => return Err("not paired".into()),
+    let (generation, session, ctx) = {
+        // The watch read guard also fences the snapshot against a switch's
+        // synchronous invalidation; it is never held across network work.
+        let generation = state.remote_connect_generation.borrow();
+        let session = match &*state.auth.lock().unwrap() {
+            AuthMode::Paired(session) => session.clone(),
+            _ => return Err("not paired".into()),
+        };
+        let ctx = state.pairing.lock().unwrap().clone()
+            .ok_or_else(|| "pairing is not set up".to_string())?;
+        (*generation, session, ctx)
     };
-    let ctx = state
-        .pairing
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| "pairing is not set up".to_string())?;
     let mut session = session;
     pairing::refresh(&mut session, &ctx.client, &ctx.key)
-        .await
-        .map_err(|e| e.to_string())?;
+        .await.map_err(|e| e.to_string())?;
+    // A buffered old-node reply cannot restore credentials after replacement
+    // or Forget. Keep this guard through publication so invalidation is atomic.
+    let current = state.remote_connect_generation.borrow();
+    if *current != generation { return Err("the remote connection changed".into()); }
     check_first_run_session(state, &session)?;
     *state.token.lock().unwrap() = Some(session.token.clone());
     *state.auth.lock().unwrap() = AuthMode::Paired(session);
@@ -2517,6 +2525,104 @@ fn remote_access_preview(
     remote_access::preview_pairing_link(link.trim()).map_err(|error| error.to_string())
 }
 
+/// Confirm a reviewed link and attach without restarting the app. Validation
+/// happens before cancellation; persistence still owns REMOTE_CONFIG_LOCK.
+#[tauri::command(rename_all = "snake_case")]
+async fn remote_access_connect(
+    window: WebviewWindow<impl tauri::Runtime>,
+    app: AppHandle<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    link: String,
+) -> Result<RemoteImportView, remote_access::ConnectionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let dir = app.path().app_data_dir().map_err(|_| remote_access::ConnectionError::other())?;
+    remote_access_connect_at(&app, &state, &dir, &link).await
+}
+
+async fn remote_access_connect_at<R: tauri::Runtime>(
+    app: &AppHandle<R>, state: &NodeState, dir: &Path, link: &str,
+) -> Result<RemoteImportView, remote_access::ConnectionError> {
+    use remote_access::{ConnectionError, RemoteError};
+    let preview = remote_access::preview_pairing_link(link.trim()).map_err(|e| ConnectionError::from(&e))?;
+    // This command is the join path. Desktop first-owner setup retains its
+    // separate import/ceremony path; an unclaimed box must never be dialed here.
+    if preview.first_run { return Err((&RemoteError::Unclaimed).into()); }
+    let _change = state.remote_change.lock().await;
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    if !state.remote_mode.load(Ordering::SeqCst)
+        && (state.local_startup.load(Ordering::SeqCst)
+            || state.config.lock().unwrap().is_some() || state.external_node.lock().unwrap().is_some())
+    {
+        return Err(ConnectionError::busy());
+    }
+    // Never switch a node underneath a money action or an enrollment ceremony.
+    let _money = state.money.try_lock().map_err(|_| ConnectionError::busy())?;
+    let mut devices = state.add_device.try_lock().map_err(|_| ConnectionError::busy())?;
+    if devices.is_active() { return Err(ConnectionError::busy()); }
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    let _owner = state.remote_owner.try_lock().map_err(|_| ConnectionError::busy())?;
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    if _owner.is_active() || remote_owner::has_pending_recovery(&dir.join(PAIRING_STORE_DIR))
+        .map_err(|_| ConnectionError::other())? { return Err(ConnectionError::busy()); }
+
+    let next = remote_access::parse_pairing_link(link.trim()).map_err(|e| ConnectionError::from(&e))?;
+    let previous_descriptor = state.remote_descriptor.lock().unwrap().clone()
+        .or(remote_access::load_persisted(dir).map_err(|e| ConnectionError::from(&e))?);
+    let changed_node = previous_descriptor.as_ref()
+        .is_none_or(|old| remote_access::replaces_another_node(old, &next));
+    state.remote_connect_generation.send_modify(|generation| *generation = generation.wrapping_add(1));
+    let _recovery = state.remote_recovery.lock().await;
+    let result = match remote_access::import_pairing_link(dir, link.trim()) {
+        Ok(result) => result,
+        Err(error) => {
+            spawn_remote_connect(app, dir, true);
+            return Err((&error).into());
+        }
+    };
+    // Hide the old trust boundary before closing its sockets. No old approval,
+    // bearer, readiness or identity may authorize work on the replacement.
+    state.remote_connect_generation.send_modify(|generation| {
+        *generation = generation.wrapping_add(1);
+        *state.ready.lock().unwrap() = false;
+        *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
+        *state.token.lock().unwrap() = None;
+        *state.node_id.lock().unwrap() = None;
+    });
+    state.spend.lock().unwrap().lock();
+    state.autopay.lock().unwrap().lock();
+    *state.wants.lock().unwrap() = Wants::default();
+    state.approvals_restored.store(false, Ordering::SeqCst);
+    state.device_lapsed.store(false, Ordering::SeqCst);
+    *state.node_grant.lock().unwrap() = None;
+    *state.all_in_caps_node.lock().unwrap() = None;
+    *state.readmission_ask.lock().unwrap() = None;
+    *state.owner_contact.lock().unwrap() = None;
+    *state.front_door_ask.lock().unwrap() = None;
+    *devices = add_device::Setup::default();
+    let previous = state.remote_proxy.lock().unwrap().take();
+    if let Some(proxy) = previous { proxy.stop_and_wait().await; }
+    if changed_node { state.remote_retry.reset_for_replacement(); }
+    *state.remote_descriptor.lock().unwrap() = None;
+    *state.expected_remote_node_id.lock().unwrap() = None;
+    *state.pairing.lock().unwrap() = None;
+    *state.pairing_view.lock().unwrap() = PairingView::pending();
+    *state.home_last_probe.lock().unwrap() = None;
+    *state.home_attempts_left.lock().unwrap() = None;
+    *state.home_unlock_state.lock().unwrap() = "ready";
+    state.home_locked.store(false, Ordering::SeqCst);
+    #[cfg(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile"))))]
+    { *state.home_remember.lock().unwrap() = None; }
+    state.stale_pairing.store(false, Ordering::SeqCst);
+    state.remote_mode.store(true, Ordering::SeqCst);
+    *state.error.lock().unwrap() = None;
+    state.remote_retry.clear_connection_error();
+    // Subscribe while holding remote_change: Forget must invalidate even a
+    // spawned task that has not been polled yet.
+    spawn_remote_connect(app, dir, true);
+    Ok(RemoteImportView { restart_required: false, ..result })
+}
+
 /// Validate and persist a confirmed ticket. Phones attach immediately; desktop
 /// bootstrap selects the saved remote node on the next app start.
 #[tauri::command(rename_all = "snake_case")]
@@ -2578,14 +2684,18 @@ async fn remote_access_import_at<R: tauri::Runtime>(
     Ok(result)
 }
 
-#[cfg(any(mobile, feature = "mobile"))]
 fn spawn_remote_connect<R: tauri::Runtime>(app: &AppHandle<R>, app_data_dir: &Path, wait: bool) {
+    let mut cancelled = app.state::<NodeState>().remote_connect_generation.subscribe();
     let app = app.clone();
     let app_data_dir = app_data_dir.to_path_buf();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<NodeState>();
-        if let Err(error) = connect_remote_at(&state, &app_data_dir, wait).await {
-            set_error(&state, error);
+        tokio::select! {
+            biased;
+            _ = cancelled.changed() => {},
+            result = connect_remote_at(&state, &app_data_dir, wait) => {
+                if let Err(error) = result { set_error(&state, error); }
+            }
         }
     });
 }
@@ -7067,6 +7177,14 @@ fn device_error(e: device_key::DeviceKeyError) -> ActionError {
     }
 }
 
+/// Only explicit key invalidation permits deleting the stored approval key.
+/// Bridge/transport failures leave the key and its enrollment available to retry.
+fn forget_invalid_signing_key(store: &std::path::Path, error: &ActionError) -> bool {
+    if error.code != "device_invalid" { return false; }
+    device::forget(store);
+    true
+}
+
 /// Sign with the enclave off the async runtime: a Touch ID prompt blocks.
 async fn device_sign(blob: Vec<u8>, message: String, reason: String) -> Result<String, ActionError> {
     tokio::task::spawn_blocking(move || device_key::sign(&blob, message.as_bytes(), &reason))
@@ -7391,10 +7509,7 @@ async fn do_relation_approve(
     let signature = match device_sign(blob, message, reason).await {
         Ok(signature) => signature,
         Err(e) => {
-            // A key the enclave no longer accepts is gone for good: set up again.
-            if e.code == "device_invalid" {
-                device::forget(&store);
-            }
+            forget_invalid_signing_key(&store, &e);
             return Err(e);
         }
     };
@@ -8665,6 +8780,8 @@ impl NodeState {
 }
 
 pub(super) fn entry() {
+    #[cfg(target_os = "ios")]
+    bitsov_ffi::pairing_link::install(|url| crate::pairing_link_ios::receive([url]));
     run();
 }
 
@@ -8834,6 +8951,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             pairing_retry,
             remote_access_preview,
             remote_access_import,
+            remote_access_connect,
             pairing_link_take,
             remote_access_forget,
             remote_access_replace,
@@ -9026,6 +9144,37 @@ mod remote_test_profile_tests {
 #[allow(dead_code)]
 #[path = "../tests/support/mod.rs"]
 mod test_support;
+
+#[cfg(test)]
+mod device_sign_error_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_signature_transport_error_does_not_forget_key_or_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = b"synthetic wrapped enclave key";
+        let record = device::Record {
+            public_key: "04".into(), key_id: Some("registered-key".into()),
+            registered: true, ..Default::default()
+        };
+        device::save_blob(dir.path(), blob).unwrap();
+        device::save_record(dir.path(), &record).unwrap();
+        // The ABI contract tests pin malformed signature output to Other(-6).
+        // Exercise the real app mapping and deletion handler shared by relation
+        // approval and home unlock, with on-disk key and enrollment state.
+        let error = device_error(device_key::DeviceKeyError::Other(-6));
+        assert_eq!(error.code, "device_key");
+        assert!(!forget_invalid_signing_key(dir.path(), &error));
+        assert_eq!(device::load_blob(dir.path()).as_deref(), Some(blob.as_slice()));
+        assert_eq!(device::load_record(dir.path()), Some(record));
+
+        // A genuine native invalidation must still require re-enrollment.
+        let error = device_error(device_key::DeviceKeyError::Invalid);
+        assert!(forget_invalid_signing_key(dir.path(), &error));
+        assert!(device::load_blob(dir.path()).is_none());
+        assert!(device::load_record(dir.path()).is_none());
+    }
+}
 
 #[cfg(test)]
 mod trust_tests {
@@ -19176,6 +19325,7 @@ mod assistant_acl_tests {
                 "pairing_retry",
                 "remote_access_preview",
                 "remote_access_import",
+                "remote_access_connect",
                 "pairing_link_take",
                 "remote_access_forget",
                 "remote_access_replace",
@@ -19899,7 +20049,7 @@ mod assistant_acl_tests {
         let tauri::ipc::InvokeResponseBody::Json(status) = status else { panic!("expected JSON status"); };
         assert!(status.contains("Unlock this device"));
         assert!(invoke(&main, "pairing_status", serde_json::json!({})).is_ok());
-        for command in ["remote_access_import", "remote_access_forget", "pairing_retry", "node_unlock", "remote_access_preview"] {
+        for command in ["remote_access_import", "remote_access_connect", "remote_access_forget", "pairing_retry", "node_unlock", "remote_access_preview"] {
             let error = invoke(&main, command, serde_json::json!({"link": "invalid"})).unwrap_err();
             assert!(error_text(&error).contains("finish secure setup"), "{command}: {error}");
         }
@@ -19936,6 +20086,7 @@ mod assistant_acl_tests {
                 super::pairing_retry,
                 super::remote_access_preview,
                 super::remote_access_import,
+                super::remote_access_connect,
                 super::remote_access_forget,
                 super::remote_access_replace,
             ])
@@ -20058,7 +20209,7 @@ mod assistant_acl_tests {
         // Do not invoke forget against the user's real app-data directory in
         // this mock app. The persistence tests use isolated temporary folders.
         assert_handler_ran(invoke(&main, "node_unlock", serde_json::json!({})), "not locked");
-        for cmd in ["node_unlock", "pairing_status", "trust_acknowledge", "pairing_retry", "remote_access_preview", "remote_access_import", "remote_access_forget", "remote_access_replace"] {
+        for cmd in ["node_unlock", "pairing_status", "trust_acknowledge", "pairing_retry", "remote_access_preview", "remote_access_import", "remote_access_connect", "remote_access_forget", "remote_access_replace"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
     }
@@ -20141,3 +20292,7 @@ mod post_rc7_tests;
 #[cfg(all(test, any(mobile, feature = "mobile")))]
 #[path = "mobile_import_tests.rs"]
 mod mobile_import_tests;
+
+#[cfg(test)]
+#[path = "remote_connect_tests.rs"]
+mod remote_connect_tests;

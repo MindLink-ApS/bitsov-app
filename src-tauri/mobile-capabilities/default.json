@@ -29,6 +29,7 @@
     "allow-pairing-retry",
     "allow-remote-access-preview",
     "allow-remote-access-import",
+    "allow-remote-access-connect",
     "allow-pairing-link-take",
     "allow-remote-access-forget",
     "allow-remote-access-replace",
