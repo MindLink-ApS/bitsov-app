@@ -4361,8 +4361,13 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     }
     // Node main b21e9a94 / rc18 20c6449e: calls::refused is used only by
     // reserve_outgoing, before compose_locked creates/executes the operation.
-    // This proof applies only to HTTP 400 for a 1:1 call compose (kinds 400-403).
-    if one_to_one && body["kind"].as_u64().is_some_and(|kind| (400..=403).contains(&kind))
+    // This proves unpaid only for a fresh attempt (new operation id or none).
+    // An existing kind-400 operation can return call_id_used after ring expiry
+    // while its earlier payment is unresolved; delivery retries also stay held.
+    let fresh_operation = operation_id.is_none()
+        || prior.as_ref().and_then(|p| p.operation_id.as_ref()) != operation_id.as_ref();
+    if retry.is_none() && fresh_operation && one_to_one
+        && body["kind"].as_u64().is_some_and(|kind| (400..=403).contains(&kind))
         && status == reqwest::StatusCode::BAD_REQUEST {
         if let Some(reason) = serde_json::from_str::<serde_json::Value>(&text).ok()
             .and_then(|v| match v["reason"].as_str()? {
@@ -4374,8 +4379,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
                 _ => None,
             }) {
             release(state)?;
-            // Persist the unpaid outcome before abandon can clear the slot.
-            journal.record_outcome(&pending, OpState::Unpaid, Some(&serde_json::json!({"reason": reason})))?;
+            // abandon records Unpaid before restoring/clearing the slot.
             abandon(&journal)?;
             return Err(ActionError::new(reason, "The node refused this call signal before payment. Nothing was paid."));
         }
@@ -10284,6 +10288,63 @@ mod control_act_tests {
             if let Some(id) = held.operation_id.as_ref() {
                 assert_eq!(ledger_record(&node, id)["state"], "unknown");
                 assert_eq!(err.operation_id.as_ref(), Some(id));
+            }
+            assert!(budget_now(&node.state).unsettled_msat > 0);
+            assert_eq!(no_pending_spend(&node.state).unwrap_err().code, "spend_unknown");
+        }
+    }
+
+    #[tokio::test]
+    async fn call_rules_refusals_existing_attempts_stay_unknown() {
+        // A resumable resend reuses an id whose earlier payment may still be
+        // unresolved. A delivery retry retains its earlier payment, even on
+        // legacy nodes without operation ids. Neither refusal proves unpaid.
+        for (delivery_retry, has_operation_id) in [(false, true), (true, true), (true, false)] {
+            let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                if p == "/messages/compose" { (400, r#"{"reason":"call_id_used"}"#.into()) }
+                else { happy()(m, p, b) }
+            }));
+            spend_advance(&node.state, true).await.unwrap();
+            let body = serde_json::json!({"recipient": A, "is_room": false, "kind": 400, "plaintext": OFFER});
+            let op = spend_journal::operation(&body);
+            let id = has_operation_id.then(|| spend_journal::new_operation_id().unwrap());
+            let journal = spend_journal(&node.state).unwrap();
+            let mut prior = journal.begin_operation(OWN, "/messages/compose", &body, 15000,
+                id.clone().map(|id| (id, op.clone()))).unwrap();
+            prior.resumable = !delivery_retry;
+            if delivery_retry {
+                prior.accounting_msat = Some(2000);
+                prior.undelivered = Some(spend_journal::Undelivered {
+                    peer: A.into(), paid_msat: 2000, retry: true, op,
+                    admission_msat: 2000, in_flight: false, attempts: 0, payment_hash: None,
+                });
+                with_book(&node.state, true, |b| {
+                    b.reserve(&prior.request_hash, A, false, 15000, now_ms());
+                    b.settle(&prior.request_hash, 2000, now_ms());
+                    Ok(())
+                }).unwrap();
+            }
+            journal.save(&prior).unwrap();
+            drop(journal);
+            let charge = Charge { target: A.into(), room: false, confirm: None, readmission_possible: false,
+                confirmed: false, operation: has_operation_id, envelope_ids: Some(true) };
+            let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()),
+                "/messages/compose", body, 15000, Some(charge), prior.undelivered.as_ref()).await.unwrap_err();
+            assert_eq!(op_ids(&node), [id.clone()], "the existing operation id is reused");
+            assert_eq!(err.code, "spend_unknown", "retry={delivery_retry}, operation_id={has_operation_id}");
+            assert!(!err.message.contains("Nothing was paid"));
+            assert_eq!(err.operation_id, id);
+            let held = pending(&node).expect("single slot remains held");
+            assert_eq!(held.operation_id, id);
+            assert!(!held.resumable);
+            if let Some(id) = id.as_ref() {
+                assert_eq!(ledger_record(&node, id)["state"], "unknown");
+            }
+            if delivery_retry {
+                let undelivered = held.undelivered.unwrap();
+                assert!(undelivered.in_flight);
+                assert_eq!(undelivered.paid_msat, 2000);
+                assert!(book(&node).contains(&(prior.request_hash.clone(), 2000, true)), "original payment retained");
             }
             assert!(budget_now(&node.state).unsettled_msat > 0);
             assert_eq!(no_pending_spend(&node.state).unwrap_err().code, "spend_unknown");
