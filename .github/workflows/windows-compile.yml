@@ -22,9 +22,10 @@ on:
     branches: [main]
     types: [labeled, unlabeled, synchronize, reopened]
 
+# contents: read only. A full-ci pull request runs this job; do not grant
+# actions: write to that token.
 permissions:
   contents: read
-  actions: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

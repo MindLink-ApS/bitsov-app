@@ -203,8 +203,7 @@ Windows remains compile-only and is not a supported runtime or merge gate.
 Neither job is a required check.
 
 - Runner: `macos-14` (arm64). Toolchain: Node 22 and stable Rust. Permissions:
-  `contents: read` and `actions: write` (the Rust cache). It uses `github.token`
-  read-only for `gh release download`.
+  `contents: read` only. It uses `github.token` read-only for `gh release download`.
 - Fetches the pinned sidecar and explicitly re-verifies all sidecars before
   `scripts/package-mac.sh --dmg --use-existing-sidecar`. The offline checker
   unit tests run on Linux in Authority Check, not on this 10× runner. The

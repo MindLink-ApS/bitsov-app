@@ -30,10 +30,10 @@ on:
     # job `if` and do not start a runner.
     types: [labeled, unlabeled, synchronize, reopened]
 
+# contents: read only. A full-ci pull request runs this job; do not grant
+# actions: write to that token.
 permissions:
   contents: read
-  # rust-cache and sccache save to the Actions cache.
-  actions: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
