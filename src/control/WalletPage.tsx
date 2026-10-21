@@ -13,6 +13,7 @@ import { DelayedSpinner } from './DelayedSpinner';
 import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch, type JSX } from 'solid-js';
 import { qrSvg } from '../qr';
 import { copyPlainText } from '../assistant/copy';
+import { deviceWord } from '../platform';
 import { amount as fmtAmount, allIn, clock, day, routingFee, sats, satUnit, shortId } from './format';
 import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { denom } from './prefs';
@@ -68,7 +69,8 @@ const QR = (props: { value: string; label: string }) => {
 };
 
 function CopyButton(props: { text: string; label: string }) {
-  const [done, setDone] = createSignal(false);
+  // 'copied' only after the copy really worked; 'failed' says so instead.
+  const [done, setDone] = createSignal<false | 'copied' | 'failed'>(false);
   let timer: number | undefined;
   onCleanup(() => window.clearTimeout(timer));
   return (
@@ -76,13 +78,13 @@ function CopyButton(props: { text: string; label: string }) {
       type="button"
       class="soft wallet-copy"
       data-wallet-copy
-      onClick={() => void copyPlainText(props.text).then(() => {
-        setDone(true);
+      onClick={() => void copyPlainText(props.text).then(() => 'copied' as const, () => 'failed' as const).then((r) => {
+        setDone(r);
         window.clearTimeout(timer);
-        timer = window.setTimeout(() => setDone(false), 1500);
+        timer = window.setTimeout(() => setDone(false), r === 'failed' ? 4000 : 1500);
       })}
     >
-      {done() ? 'Copied' : props.label}
+      {done() === 'copied' ? 'Copied' : done() === 'failed' ? 'Copy failed — select it by hand' : props.label}
     </button>
   );
 }
@@ -405,7 +407,7 @@ function ActivityView(props: {
         </ul>
       </Show>
       <p class="hint" data-activity-scope>
-        Messages and calls are the latest your node keeps with each contact. Lightning payments and invoices are the ones made in this app on this Mac; your node does not list the others yet, and on-chain deposits are not listed here.
+        Messages and calls are the latest your node keeps with each contact. Lightning payments and invoices are the ones made in this app on this {deviceWord() === 'phone' ? 'phone' : 'Mac'}; your node does not list the others yet, and on-chain deposits are not listed here.
       </p>
     </section>
   );
@@ -579,7 +581,7 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
           )}
         </Show>
       </Show>
-      <Show when={error()}>{(e) => <p class="err-note" data-receive-error>{e()}</p>}</Show>
+      <Show when={error()}>{(e) => <p class="err-note" data-receive-error role="alert">{e()}</p>}</Show>
     </section>
   );
 }
@@ -704,7 +706,7 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
               <input data-send-memo placeholder="Note (optional)" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="Note" />
             </Show>
             <Show when={hint()}>{(h) => <p class="hint" data-send-hint>{h()}</p>}</Show>
-            <Show when={readError()}>{(e) => <p class="err-note" data-send-error>{e()}</p>}</Show>
+            <Show when={readError()}>{(e) => <p class="err-note" data-send-error role="alert">{e()}</p>}</Show>
             <Show when={read()}>
               {(inv) => (
                 <p class="hint" data-send-invoice={inv().amount_msat}>

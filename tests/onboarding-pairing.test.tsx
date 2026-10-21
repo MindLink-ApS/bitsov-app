@@ -298,8 +298,10 @@ describe('pairing panel', () => {
     const node = mount.querySelector<HTMLButtonElement>('[data-target="network"]')!;
     expect(node.textContent).toContain('Your node');
     expect(node.textContent).toContain('connect this phone');
-    expect(mount.querySelector('details.node-target-advanced summary')).toBeNull();
-    expect(mount.querySelector<HTMLDetailsElement>('details.node-target-advanced')!.open).toBe(true);
+    // No <details> on a phone: WebKit would add its own OS-language summary ("Flere oplysninger").
+    expect(mount.querySelector('details.node-target-advanced')).toBeNull();
+    expect(mount.querySelector('.node-target-advanced summary')).toBeNull();
+    expect(mount.querySelector('div.node-target-advanced [data-target="network"]')).not.toBeNull();
     expect(mount.querySelector('[data-remote-access]')).not.toBeNull();
     expect(mount.textContent).not.toMatch(/Use this Mac instead|separate wallet|Keys on this Mac|this Mac must stay awake/);
   });

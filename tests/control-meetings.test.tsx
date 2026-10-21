@@ -673,6 +673,49 @@ describe('meetings in the shell', () => {
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
 
+  it('toggling a participant keeps keyboard focus on that checkbox (autofocus runs only when the planner opens)', async () => {
+    stubHost();
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="meeting"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="meeting"]')!.click();
+    await vi.waitFor(() => expect($<HTMLInputElement>(`[data-meeting-pick="${B}"]`)?.disabled).toBe(false));
+    await new Promise((r) => setTimeout(r, 0));
+    // Opening moved focus into the planner once.
+    expect(mount.querySelector('[data-meeting-panel="planning"]')!.contains(document.activeElement)).toBe(true);
+    const pick = $<HTMLInputElement>(`[data-meeting-pick="${B}"]`)!;
+    pick.focus();
+    pick.click();
+    await vi.waitFor(() => expect(text('[data-meeting-invite]')).toBe('Invite · 42 sats'));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(document.activeElement).toBe(pick);
+    pick.click();
+    await vi.waitFor(() => expect(text('[data-meeting-invite]')).toBe('Invite · 21 sats'));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(document.activeElement).toBe(pick);
+    expect(document.activeElement).not.toBe($('[data-meeting-cancel]'));
+  });
+
+  it('Escape in Settings opened over the meeting planner closes Settings only; the plan and its picks stay', async () => {
+    stubHost();
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="meeting"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="meeting"]')!.click();
+    await vi.waitFor(() => expect($<HTMLInputElement>(`[data-meeting-pick="${B}"]`)?.disabled).toBe(false));
+    $<HTMLInputElement>(`[data-meeting-pick="${B}"]`)!.click();
+    await vi.waitFor(() => expect(text('[data-meeting-invite]')).toBe('Invite · 42 sats'));
+    // Settings on top of the planner.
+    $<HTMLButtonElement>('.node-pill')!.click();
+    await vi.waitFor(() => expect($('[data-settings-open]')?.getAttribute('data-settings-open')).toBe('true'));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true }));
+    await vi.waitFor(() => expect($('[data-settings-open]')?.getAttribute('data-settings-open')).toBe('false'));
+    expect($('[data-meeting-panel="planning"]')).not.toBeNull();
+    expect($<HTMLInputElement>(`[data-meeting-pick="${B}"]`)!.checked).toBe(true);
+    expect(text('[data-meeting-invite]')).toBe('Invite · 42 sats');
+    // Now the planner is on top: Escape cancels it.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true }));
+    await vi.waitFor(() => expect($('[data-meeting-panel="planning"]')).toBeNull());
+  });
+
   it('plans a meeting with the price for everyone picked, then rings each invitee once with the roster', async () => {
     const host = stubHost();
     await openShell();
