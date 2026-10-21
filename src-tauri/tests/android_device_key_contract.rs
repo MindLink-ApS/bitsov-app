@@ -806,7 +806,7 @@ fn macos_keychain_home_path_keeps_its_keychain_calls() {
 }
 
 #[test]
-fn android_manifest_adds_only_camera_audio_and_biometric_permissions() {
+fn android_manifest_adds_only_camera_audio_biometric_and_local_network_permissions() {
     let manifest = project_file("gen/android/app/src/main/AndroidManifest.xml");
     assert!(
         manifest.contains("android:allowBackup=\"false\""),
@@ -822,6 +822,7 @@ fn android_manifest_adds_only_camera_audio_and_biometric_permissions() {
     assert_eq!(
         declared,
         BTreeSet::from([
+            "android.permission.ACCESS_LOCAL_NETWORK",
             "android.permission.ACCESS_NETWORK_STATE",
             "android.permission.CAMERA",
             "android.permission.INTERNET",
