@@ -2558,8 +2558,16 @@ async fn remote_access_import_at<R: tauri::Runtime>(
         spawn_remote_connect(_app, app_data_dir, false);
         return Err("remote access is already active; quit BitSov before replacing its pairing link".into());
     }
-    let result = remote_access::import_pairing_link(app_data_dir, link.trim())
-        .map_err(|error| error.to_string())?;
+    let result = match remote_access::import_pairing_link(app_data_dir, link.trim()) {
+        Ok(result) => result,
+        Err(error) => {
+            // Persistence is atomic: the previous saved ticket still owns this
+            // connection. Cancellation must not leave its recovery stopped.
+            #[cfg(any(mobile, feature = "mobile"))]
+            spawn_remote_connect(_app, app_data_dir, true);
+            return Err(error.to_string());
+        }
+    };
     #[cfg(any(mobile, feature = "mobile"))]
     {
         *state.error.lock().unwrap() = None;
@@ -2650,6 +2658,8 @@ async fn remote_access_forget_at(state: &NodeState, app_data_dir: &Path) -> Resu
         *state.error.lock().unwrap() = None;
         state.remote_mode.store(state.remote_only, Ordering::SeqCst);
         state.remote_retry.clear_connection_error();
+        #[cfg(all(desktop, not(feature = "mobile")))]
+        set_error(state, "Restart BitSov to continue after forgetting the remote node.");
     }
     Ok(())
 }
@@ -8331,8 +8341,16 @@ fn run() {
     }
 
     app.run(|app, event| {
+        #[cfg(target_os = "ios")]
+        if let RunEvent::WindowEvent { label, event: tauri::WindowEvent::Focused(false) | tauri::WindowEvent::Suspended, .. } = &event {
+            if label == MAIN_WINDOW_LABEL {
+                app.state::<Mutex<crate::ios_install::Startup>>().lock().unwrap().suspended();
+            }
+        }
         #[cfg(any(mobile, feature = "mobile"))]
         if is_remote_resume_event(&event) {
+            #[cfg(target_os = "ios")]
+            if !resume_ios_startup(app) { return; }
             resume_remote(app);
         }
         // iOS: queue an opened `bitsov://pair/…` URL for owner review. Never
@@ -8365,6 +8383,48 @@ fn run() {
     });
 }
 
+/// During deferred iOS cleanup only status reads may enter the app. In
+/// particular import/Forget must not write app data that could make the next
+/// fresh-install inspection preserve an orphaned identity.
+#[cfg(any(target_os = "ios", all(test, unix)))]
+fn guard_ios_startup<R: tauri::Runtime>(
+    handler: impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
+    move |invoke| {
+        let webview = invoke.message.webview();
+        let startup = webview.state::<Mutex<crate::ios_install::Startup>>();
+        let ready = startup.lock().unwrap().ready();
+        if !ready && !matches!(invoke.message.command(), "node_status" | "pairing_status") {
+            invoke.resolver.reject("Unlock this device and return to BitSov to finish secure setup. If it still fails, restart BitSov.");
+            return true;
+        }
+        handler(invoke)
+    }
+}
+
+/// Runs synchronously on the event-loop thread, before admitting commands or
+/// starting any tasks. Returning false also prevents a duplicate resume task
+/// when this foreground event has just started the deferred bootstrap.
+#[cfg(target_os = "ios")]
+fn resume_ios_startup(app: &AppHandle) -> bool {
+    let startup = app.state::<Mutex<crate::ios_install::Startup>>();
+    let mut startup = startup.lock().unwrap();
+    if startup.ready() { return true; }
+    let result = app.path().app_data_dir().map_err(|error| error.to_string()).and_then(|dir| {
+        startup.foreground(&dir, bitsov_ffi::client_keychain::app_is_backgrounded(), || bitsov_ffi::client_keychain::delete(&dir.join(PAIRING_STORE_DIR)))
+    });
+    match result {
+        Ok(true) => {
+            *app.state::<NodeState>().error.lock().unwrap() = None;
+            tauri::async_runtime::spawn(bootstrap_node(app.clone()));
+            tauri::async_runtime::spawn(live_bridge(app.clone()));
+        }
+        Ok(false) => {},
+        Err(_) => set_error(&app.state::<NodeState>(), "Secure setup could not finish. Unlock this device and restart BitSov."),
+    }
+    false
+}
+
 /// Normal CS-1 / CS-2 desktop shell: NodeState, wallet commands, bootstrap.
 fn app_builder() -> tauri::Builder<tauri::Wry> {
     let builder = tauri::Builder::default();
@@ -8391,7 +8451,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
     let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
     builder
         .manage(AiState::default())
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler({
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             node_status,
             node_unlock,
             node_unlock_password,
@@ -8498,7 +8559,11 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             ai_local_status,
             ai_local_select,
             ai_local_clear
-        ])
+            ];
+            #[cfg(target_os = "ios")]
+            let handler = guard_ios_startup(handler);
+            handler
+        })
         .setup(|app| {
             // Install the immutable profile policy before any commands or tasks run.
             crate::profile::install(&app.config().identifier)?;
@@ -8514,11 +8579,24 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             {
                 let data_dir = app.path().app_data_dir()?;
                 bitsov_ffi::client_keychain::exclude_from_backup(&data_dir)?;
-                crate::ios_install::prepare(&data_dir, || {
-                    bitsov_ffi::client_keychain::delete(&data_dir.join(PAIRING_STORE_DIR))
-                })?;
+                // Installing the sealer reads no identity. Do it only once,
+                // before cleanup/marker publication and any deferred bootstrap.
                 bitsov_app::at_rest::install_ios()?;
-                crate::ios_install::complete(&data_dir)?;
+                let mut startup = crate::ios_install::Startup::default();
+                // A locked/background launch may have no later suspension event
+                // before its first real foreground. Initial active-launch focus
+                // events, however, must not consume the retry.
+                if bitsov_ffi::client_keychain::app_is_backgrounded() { startup.suspended(); }
+                let result = startup.launch(&data_dir, || {
+                    bitsov_ffi::client_keychain::delete(&data_dir.join(PAIRING_STORE_DIR))
+                });
+                let retry_pending = startup.retry_pending();
+                app.manage(Mutex::new(startup));
+                if let Err(error) = result {
+                    if !retry_pending { return Err(error.into()); }
+                    set_error(&app.state::<NodeState>(), "Unlock this device and return to BitSov to finish secure setup.");
+                    return Ok(());
+                }
             }
             #[cfg(target_os = "android")]
             bitsov_app::at_rest::install(Arc::new(device_key::KeystoreSealer))?;
@@ -8836,12 +8914,44 @@ mod remote_onboarding_tests {
         // Before init_node completes, neither local selector has been published.
         assert!(state.config.lock().unwrap().is_none());
         assert!(state.external_node.lock().unwrap().is_none());
-        let result = tokio::time::timeout(Duration::from_millis(200), pairing_retry_at(&state, dir.path())).await;
+        let result = tokio::time::timeout(Duration::from_secs(5), pairing_retry_at(&state, dir.path())).await;
         assert!(result.is_ok(), "Reconnect must refuse promptly during local startup");
         assert!(result.unwrap().unwrap_err().contains("Restart BitSov"));
         assert!(!state.remote_mode.load(Ordering::SeqCst));
         assert!(state.pairing.lock().unwrap().is_none());
         assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn forget_during_stalled_desktop_startup_shows_restart_guidance() {
+        use base64::Engine;
+        let state = NodeState::for_identifier("app.bitsov.desktop");
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let value = serde_json::json!({"v": 2, "endpoint": endpoint,
+            "endpoints": [endpoint], "box_transport_pubkey": "22".repeat(32),
+            "code": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([44; 32])});
+        let link = format!("bitsov://pair/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).unwrap()));
+        remote_access::import_pairing_link(dir.path(), &link).unwrap();
+        let startup = connect_remote_at(&state, dir.path(), true);
+        tokio::pin!(startup);
+        let (_stalled, _) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                accepted = listener.accept() => accepted.unwrap(),
+                _ = &mut startup => panic!("startup ended before handshake"),
+            }
+        }).await.unwrap();
+        let (connected, forgotten) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(&mut startup, remote_access_forget_at(&state, dir.path()))
+        }).await.expect("Forget must cancel startup");
+        connected.unwrap();
+        forgotten.unwrap();
+        assert!(state.status_snapshot().error.as_deref().unwrap_or_default().contains("Restart BitSov"));
+        assert!(!state.status_snapshot().ready);
+        assert!(state.pairing.lock().unwrap().is_none());
+        assert!(!state.remote_mode.load(Ordering::SeqCst));
+        assert!(remote_access::load_persisted(dir.path()).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -18465,6 +18575,43 @@ mod assistant_acl_tests {
         for cmd in ["ai_send", "ai_cancel", "payment_pay", "payment_keysend", "spend_request", "channel_open", "message_compose"] {
             assert_acl_denied(invoke(&sealed, cmd, serde_json::json!({"disclosure_id": "invalid"})), cmd);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deferred_ios_setup_blocks_commands_until_cleanup_succeeds() {
+        use super::{guard_ios_startup, set_error, NodeState};
+        use std::sync::Mutex;
+        use tauri::Manager;
+        use crate::ios_install::Startup;
+        let dir = tempfile::tempdir().unwrap();
+        let mut startup = Startup::default();
+        assert!(startup.launch(dir.path(), || Err("locked".into())).is_err());
+        let state = NodeState::default();
+        set_error(&state, "Unlock this device and return to BitSov to finish secure setup.");
+        let app = tauri::test::mock_builder()
+            .manage(state)
+            .manage(Mutex::new(startup))
+            .invoke_handler(guard_ios_startup(tauri::generate_handler![
+                super::node_status, super::pairing_status, super::remote_access_preview,
+            ]))
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+        let status = invoke(&main, "node_status", serde_json::json!({})).unwrap();
+        let tauri::ipc::InvokeResponseBody::Json(status) = status else { panic!("expected JSON status"); };
+        assert!(status.contains("Unlock this device"));
+        assert!(invoke(&main, "pairing_status", serde_json::json!({})).is_ok());
+        for command in ["remote_access_import", "remote_access_forget", "pairing_retry", "node_unlock", "remote_access_preview"] {
+            let error = invoke(&main, command, serde_json::json!({"link": "invalid"})).unwrap_err();
+            assert!(error_text(&error).contains("finish secure setup"), "{command}: {error}");
+        }
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+        let startup = app.state::<Mutex<Startup>>();
+        startup.lock().unwrap().suspended();
+        startup.lock().unwrap().foreground(dir.path(), false, || Ok(())).unwrap();
+        // The real preview parser is reachable only after cleanup publishes readiness.
+        let error = invoke(&main, "remote_access_preview", serde_json::json!({"link": "invalid"})).unwrap_err();
+        assert!(!error_text(&error).contains("finish secure setup"));
     }
 
     #[test]

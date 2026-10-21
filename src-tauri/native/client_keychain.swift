@@ -119,3 +119,15 @@ public func bitsov_exclude_app_backup(_ path: UnsafePointer<CChar>?) -> Int32 {
         } catch { return errSecParam }
     }
 }
+
+#if os(iOS)
+import UIKit
+
+// Setup runs on the main thread. Initial activation is not a return from the
+// background, but a background launch must retry on its first foreground.
+@_cdecl("bitsov_app_is_backgrounded")
+public func bitsov_app_is_backgrounded() -> Int32 {
+    guard Thread.isMainThread else { return 0 }
+    return UIApplication.shared.applicationState == .background ? 1 : 0
+}
+#endif
