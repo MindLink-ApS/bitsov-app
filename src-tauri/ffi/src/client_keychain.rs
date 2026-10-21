@@ -6,6 +6,7 @@ unsafe extern "C" {
     fn bitsov_exclude_app_backup(path: *const std::ffi::c_char) -> i32;
     fn bitsov_client_key_read(path: *const std::ffi::c_char, output: *mut u8) -> i32;
     fn bitsov_client_key_add(path: *const std::ffi::c_char, seed: *const u8) -> i32;
+    fn bitsov_client_key_delete(path: *const std::ffi::c_char) -> i32;
 }
 
 fn path_string(path: &Path) -> Result<CString, String> {
@@ -44,5 +45,17 @@ pub fn exclude_from_backup(path: &Path) -> Result<(), String> {
     match unsafe { bitsov_exclude_app_backup(path.as_ptr()) } {
         0 => Ok(()),
         status => Err(format!("cannot exclude device-specific app storage from backups ({status})")),
+    }
+}
+
+/// Remove only this profile's client identity, without reading it or prompting.
+/// Call only after establishing that no app data or pairing state survives.
+pub fn delete(path: &Path) -> Result<(), String> {
+    let path = path_string(path)?;
+    // SAFETY: the path outlives the synchronous call; Swift retains no pointer.
+    // The bridge treats an already absent item as success for crash recovery.
+    match unsafe { bitsov_client_key_delete(path.as_ptr()) } {
+        0 => Ok(()),
+        status => Err(error(status)),
     }
 }

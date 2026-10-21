@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Security: Give fresh iOS installs a new client identity by removing orphaned Keychain and legacy client keys before setup; preserve existing app/pairing data and safely retry interrupted cleanup.
+
 - Replace the default Tauri iOS and Android launcher icons with the BitSov mark, with opaque iOS assets on the mark's dark background.
 - Fall back to uncached Rust compilation when sccache setup or its cache backend fails, so cache outages do not fail CI (app #280).
 

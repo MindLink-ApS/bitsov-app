@@ -57,3 +57,31 @@ precondition(temporary.path.withCString { bitsov_exclude_app_backup($0) } == err
 let resources = try temporary.resourceValues(forKeys: [.isExcludedFromBackupKey])
 precondition(resources.isExcludedFromBackup == true)
 print("PASS: app storage is excluded from backups before any credentials are written")
+
+// Deletion must be an exact, prompt-free query with no request for key data.
+database = Data(fixture)
+store.copy = { _, _ in fatalError("cleanup must not read key material") }
+store.delete = { query in
+    let q = query as! [CFString: Any]
+    precondition(q[kSecClass] as? String == kSecClassGenericPassword as String)
+    precondition(q[kSecAttrService] as? String == "tech.mindlink.bitsov.client-ed25519.v1")
+    precondition(q[kSecAttrAccount] as? String == "profile/app-client")
+    precondition(q[kSecAttrSynchronizable] as? Bool == false)
+    precondition(q[kSecUseDataProtectionKeychain] as? Bool == true)
+    precondition((q[kSecUseAuthenticationContext] as? LAContext)?.interactionNotAllowed == true)
+    precondition(q[kSecReturnData] == nil && q[kSecValueData] == nil)
+    // Accessibility is not part of item identity: also remove an old item
+    // whose accessibility policy differs, without broadening service/account.
+    precondition(q[kSecAttrAccessible] == nil)
+    guard database != nil else { return errSecItemNotFound }
+    database = nil
+    return errSecSuccess
+}
+precondition(store.remove("profile/app-client") == errSecSuccess)
+precondition(database == nil)
+precondition(store.remove("profile/app-client") == errSecSuccess)
+for status in [errSecInteractionNotAllowed, errSecAuthFailed, errSecMissingEntitlement] {
+    store.delete = { _ in status }
+    precondition(store.remove("profile/app-client") == status)
+}
+print("PASS: exact prompt-free deletion, repeat cleanup, and refusal propagation")
