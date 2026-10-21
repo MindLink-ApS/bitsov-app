@@ -58,6 +58,10 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         CFBundleShortVersionString: 0.0.1
         CFBundleVersion: "0.0.1"
+        # Mirrors Info.ios.plist so an xcodegen regeneration keeps the scheme.
+        CFBundleURLTypes:
+          - CFBundleURLName: tech.mindlink.bitsov.pair
+            CFBundleURLSchemes: [bitsov]
     entitlements:
       path: bitsov-app_iOS/bitsov-app_iOS.entitlements
     scheme:

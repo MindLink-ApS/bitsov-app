@@ -2385,7 +2385,8 @@ fn trust_acknowledge(
     state.acknowledge_trust(&node_id, remote, legacy)
 }
 
-/// Read the Android launch/warm intent once. This never imports a ticket.
+/// Read the Android launch/warm intent, or the iOS opened URL, once. This
+/// never imports a ticket.
 #[tauri::command]
 async fn pairing_link_take(
     window: WebviewWindow<impl tauri::Runtime>,
@@ -2397,7 +2398,11 @@ async fn pairing_link_take(
             .await
             .map_err(|_| "could not read pairing link inbox".to_string())?
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
+    {
+        crate::pairing_link_ios::take()
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     Ok(None)
 }
 
@@ -8120,6 +8125,12 @@ fn run() {
     }
 
     app.run(|app, event| {
+        // iOS: queue an opened `bitsov://pair/…` URL for owner review. Never
+        // emitted, logged or imported here (pairing_link_ios.rs).
+        #[cfg(target_os = "ios")]
+        if let RunEvent::Opened { urls } = &event {
+            crate::pairing_link_ios::receive(urls.iter().map(|url| url.as_str()));
+        }
         // Stop the supervised node on exit — no orphan node with the user's keys.
         //
         // BOTH events are required (app #16). `ExitRequested` fires when the last
@@ -8163,8 +8174,9 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
         .plugin(device_key::init())
         .plugin(crate::pairing_link_mobile::init())
         .plugin(tauri_plugin_barcode_scanner::init());
-    // iOS: no Keystore or intent-inbox plugin yet (device keys fail closed, see
-    // device_key_mobile.rs); the QR scanner is the only native plugin.
+    // iOS: no Keystore plugin yet (device keys fail closed, see
+    // device_key_mobile.rs); the QR scanner is the only native plugin. Pairing
+    // links arrive as `RunEvent::Opened` (see `run`), not through a plugin.
     #[cfg(target_os = "ios")]
     let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
     builder
