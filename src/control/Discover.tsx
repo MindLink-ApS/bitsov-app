@@ -138,7 +138,7 @@ export function DiscoverPanel(props: Props) {
       <h2>Browse</h2>
       <p class="hint">
         Paste a profile link (or hold up its QR for someone else to paste). Reading is free and local.
-        This desktop app does not scan a camera. Knocking uses first contact — you pay their admission
+        This app does not scan profile QR codes with the camera. Knocking uses first contact — you pay their admission
         price once.
       </p>
       <p class="hint" data-browse-porch-hint>
@@ -590,24 +590,36 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
           maxlength={512}
         />
       </label>
-      <label class="field">
+      {/* The native file control is hidden: WebKit draws "Choose File / No file chosen"
+          in the OS language (Danish on a Danish Mac), next to English copy. */}
+      <label class="field file-pick">
         <span>Avatar</span>
         <input
+          class="sr-only"
           data-fd-edit-avatar
           type="file"
           accept="image/*"
           onChange={(e) => void onAvatar(e.currentTarget.files?.[0] ?? null)}
         />
+        <span class="file-pick-row" aria-hidden="true">
+          <span class="file-pick-btn">Choose image</span>
+          <span class="hint" data-fd-avatar-state>{avatar() ? 'Image chosen' : 'No image chosen'}</span>
+        </span>
       </label>
-      <label class="field">
+      <label class="field file-pick">
         <span>Media (up to {MAX_MEDIA_ITEMS}, by hash)</span>
         <input
+          class="sr-only"
           data-fd-edit-media
           type="file"
           accept="image/*"
           multiple
           onChange={(e) => void onMedia(e.currentTarget.files)}
         />
+        <span class="file-pick-row" aria-hidden="true">
+          <span class="file-pick-btn">Choose images</span>
+          <Show when={media().length === 0}><span class="hint">No images chosen</span></Show>
+        </span>
         <Show when={media().length > 0}>
           <p class="hint" data-fd-media-count>
             {media().length} item{media().length === 1 ? '' : 's'} ready

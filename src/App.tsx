@@ -344,7 +344,7 @@ function AppScreen() {
                   <LocalOwnerCeremony onComplete={() => void poll()} />
                 </Show>
               }>
-                <RemoteOwnerCeremony onComplete={() => void poll()} />
+                <RemoteOwnerCeremony phone={onPhone} onComplete={() => void poll()} />
               </Show>
             </Show>
           </Show>
