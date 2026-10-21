@@ -5,7 +5,7 @@ use std::fmt;
 /// Upper bound for a key blob. Observed size is about 570 bytes.
 const BLOB_CAP: usize = 4096;
 /// Upper bound for a DER ECDSA P-256 signature (at most 72 bytes).
-const SIG_CAP: usize = 128;
+const SIG_CAP: usize = 72;
 /// X9.63 uncompressed P-256 public key: 0x04 || X || Y.
 pub const PUBLIC_KEY_LEN: usize = 65;
 
@@ -172,8 +172,8 @@ pub fn sign(blob: &[u8], message: &[u8], reason: &str) -> Result<Vec<u8>, Device
     if status != OK {
         return Err(status_error(status));
     }
-    if signature_len == 0 || signature_len > SIG_CAP {
-        return Err(DeviceKeyError::Other(status));
+    if signature_len == 0 || signature_len > SIG_CAP || signature[0] != 0x30 {
+        return Err(DeviceKeyError::Invalid);
     }
     signature.truncate(signature_len);
     Ok(signature)
@@ -206,8 +206,8 @@ pub fn sign_setup(blob: &[u8], message: &[u8], reason: &str, finish: bool) -> Re
     if status != OK {
         return Err(status_error(status));
     }
-    if signature_len == 0 || signature_len > SIG_CAP {
-        return Err(DeviceKeyError::Other(status));
+    if signature_len == 0 || signature_len > SIG_CAP || signature[0] != 0x30 {
+        return Err(DeviceKeyError::Invalid);
     }
     signature.truncate(signature_len);
     Ok(signature)
@@ -228,6 +228,9 @@ pub fn public_key(blob: &[u8]) -> Result<[u8; PUBLIC_KEY_LEN], DeviceKeyError> {
     let status = unsafe { ffi::bitsov_dk_public(blob.as_ptr(), blob.len(), public.as_mut_ptr()) };
     if status != OK {
         return Err(status_error(status));
+    }
+    if public[0] != 0x04 {
+        return Err(DeviceKeyError::Invalid);
     }
     Ok(public)
 }
