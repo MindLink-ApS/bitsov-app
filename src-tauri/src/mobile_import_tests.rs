@@ -1,4 +1,4 @@
-//! Host-only mobile tests: MockRuntime, temporary tickets, and loopback fakes.
+//! Mobile-path tests: MockRuntime, temporary tickets, and loopback fakes.
 use super::*;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
@@ -380,15 +380,20 @@ async fn proxy_published_during_import_cancellation_keeps_recovering() {
     let app = app();
     let state = app.state::<NodeState>();
     let dir = tempfile::tempdir().unwrap();
-    let link = ticket("127.0.0.1:1234".into(), false);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    let link = ticket(endpoint.clone(), false);
     remote_access::import_pairing_link(dir.path(), &link).unwrap();
     let descriptor = remote_access::load_persisted(dir.path()).unwrap().unwrap();
     let store = dir.path().join(PAIRING_STORE_DIR);
     let key = Arc::new(ClientKey::load_or_create(&store).unwrap());
+    // A real attach saves the authenticated client before publishing a proxy.
+    pairing::save_remote_record(&store, &key,
+        "0123456789abcdef0123456789abcdef".into(), vec!["read".into()]).unwrap();
     let proxy = remote_access::start_proxy(&state.api_base, dir.path(), descriptor,
         key, PAIRING_CLIENT_NAME, store, state.remote_proxy_auth.clone(), state.remote_retry.clone()).await.unwrap();
     state.remote_mode.store(true, Ordering::SeqCst);
-    state.remote_retry.failed(&remote_access::RemoteError::RateLimited(60));
+    state.remote_retry.failed(&remote_access::RemoteError::RateLimited(1));
     // Model an attach that publishes its proxy while import is waiting for the
     // cancelled operation to release recovery (after import's first proxy check).
     let guard = state.remote_recovery.lock().await;
@@ -405,10 +410,11 @@ async fn proxy_published_during_import_cancellation_keeps_recovering() {
     *state.remote_proxy.lock().unwrap() = Some(proxy);
     drop(guard);
     assert!(import.await.unwrap_err().contains("already active"));
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while state.remote_recovery.try_lock().is_ok() { tokio::task::yield_now().await; }
-    }).await.expect("the raced proxy must continue auth recovery after rejection");
-    assert_eq!(remote_access::load_persisted(dir.path()).unwrap().unwrap().endpoint(), "127.0.0.1:1234");
+    // Observe the recovered dial. Polling try_lock can itself take the lock
+    // while the recovery task calls try_lock, making that task skip its work.
+    let (_retried, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await.expect("the raced proxy must continue auth recovery after rejection").unwrap();
+    assert_eq!(remote_access::load_persisted(dir.path()).unwrap().unwrap().endpoint(), endpoint);
     tokio::time::timeout(Duration::from_secs(5), remote_access_forget_at(&state, dir.path())).await.unwrap().unwrap();
 }
 
