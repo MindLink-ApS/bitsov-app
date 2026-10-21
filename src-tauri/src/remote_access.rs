@@ -4125,5 +4125,9 @@ mod onboarding_error_tests {
         assert!(copy.contains("connect to your box"));
         assert!(copy.contains("local network"));
         assert!(!copy.contains("claim code"));
+        let generated = include_str!("../gen/apple/bitsov-app_iOS/Info.plist");
+        let generated_copy = generated.split("<key>NSLocalNetworkUsageDescription</key>").nth(1).unwrap()
+            .split("</string>").next().unwrap().split("<string>").nth(1).unwrap();
+        assert_eq!(generated_copy, copy.split("<string>").nth(1).unwrap());
     }
 }

@@ -31,6 +31,14 @@ owns the existing recovery mutex; concurrent foreground events do not start
 another connection. No descriptor, a forgotten descriptor, or shutdown means
 no automatic connection. Backoff and server rate limits remain intact.
 
+Forget and a valid replacement import cancel the current connect generation,
+including a pending dial or retry sleep, and wait for the recovery lock before
+changing the saved descriptor. Invalid imports leave recovery running. A live
+proxy still refuses in-place import; Forget preserves its established transport.
+New attempts retain the process-wide retry budget. Desktop Reconnect also refuses
+a remote switch while the first local startup is still initializing its config.
+The generated Xcode plist and source iOS plist carry the same Local Network text.
+
 Foreground recovery loads the persisted descriptor. It never parses or imports
 the original QR again. After successful ticket consumption, the descriptor has
 no ticket code and reconnect uses existing-client authentication. A ticket that
@@ -72,3 +80,13 @@ Validation on 21 October 2026:
 - Read-only review approved (a)–(c) after lifecycle-event, diagnostic privacy, and concurrent error-clearing fixes. This is not approval of (d) or device acceptance.
 
 No `cargo fmt` or app/window-opening executable was run.
+
+Connect-cancellation follow-up validation (21 October 2026): the no-sidecar
+`cargo test --lib -- --test-threads=1` gate passed 970 app and 12 FFI tests
+(one existing Touch ID test ignored); `-p bitsov-app --features mobile --lib`
+passed 539 tests. `cargo check --target aarch64-apple-ios`, TypeScript, Vitest
+(98 files / 1,705 tests), frontend build, and authority passed. Regression tests
+cover stalled handshakes, retry sleeps, successful replacement and code removal,
+rejected imports, proxy publication during cancellation, first local startup,
+and parity between both iOS Local Network descriptions. Read-only review found
+no remaining blockers. Physical-device acceptance was not performed.
