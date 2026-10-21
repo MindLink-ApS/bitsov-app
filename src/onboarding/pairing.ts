@@ -16,7 +16,14 @@ export function normalizePairingLink(input: string): string {
   return link;
 }
 
+/** Structured host failures; detail belongs in connection diagnostics. */
+export type ConnectionError = {
+  kind: 'unclaimed' | 'local_network' | 'unreachable' | 'busy' | 'expired' | 'other';
+  detail: string;
+};
+
 export type NodeStatus = {
+  connection_error?: ConnectionError | null;
   locked?: boolean;
   typed_unlock_supported?: boolean;
   unlock_state?: 'ready' | 'no-password' | 'not-enrolled' | 'pending-approval';

@@ -407,6 +407,7 @@ impl NodeState {
             ready: *self.ready.lock().unwrap(),
             node_id: self.node_id.lock().unwrap().clone(),
             error: self.error.lock().unwrap().clone(),
+            connection_error: self.remote_retry.connection_error(),
         }
     }
 
@@ -510,6 +511,7 @@ struct Status {
     ready: bool,
     node_id: Option<String>,
     error: Option<String>,
+    connection_error: Option<remote_access::ConnectionError>,
 }
 
 /// `GET /onboarding/state` / `POST /onboarding/start` (OnboardingStateResponse).
@@ -1280,7 +1282,9 @@ async fn attach_remote(
     #[cfg(any(mobile, feature = "mobile"))]
     if descriptor.bootstrap_box_key().is_some() && descriptor.node_id().is_empty() {
         *state.pairing_view.lock().unwrap() = PairingView::starting();
-        return set_error(state, "This node isn't set up yet. Finish setup on a Mac, then add this phone.");
+        let error = remote_access::RemoteError::Unclaimed;
+        state.remote_retry.failed(&error);
+        return set_error(state, error.to_string());
     }
     let descriptor = descriptor.with_pin_store(Arc::new(home_keychain::MacBoxPins));
     let store = app_data_dir.join(PAIRING_STORE_DIR);
@@ -1300,8 +1304,10 @@ async fn attach_remote(
     state.remote_mode.store(true, Ordering::SeqCst);
 
     *state.error.lock().unwrap() = None;
+    state.remote_retry.clear_connection_error();
     *state.pairing_view.lock().unwrap() = PairingView::pending();
     let failed = |error: remote_access::RemoteError| {
+        state.remote_retry.failed(&error);
         *state.pairing_view.lock().unwrap() =
             PairingView::from_outcome(&Err(PairError::Local(error.to_string())));
     };
@@ -1540,9 +1546,19 @@ async fn finish_remote_auth(state: &NodeState, data_dir: &Path) {
             continue;
         }
         let revision = state.remote_retry.failure_revision();
+        let error_revision = state.remote_retry.connection_error_revision();
         match home_unlock::probe(state).await {
-            Ok(true) => return,
-            Ok(false) => finish_auth(state, data_dir).await,
+            Ok(true) => {
+                state.remote_retry.clear_connection_error_if_unchanged(error_revision);
+                return;
+            }
+            Ok(false) => {
+                finish_auth(state, data_dir).await;
+                // A retained tunnel may recover without another Noise handshake.
+                if *state.ready.lock().unwrap() && state.error.lock().unwrap().is_none() {
+                    state.remote_retry.clear_connection_error_if_unchanged(error_revision);
+                }
+            }
             Err(error) => { *state.ready.lock().unwrap() = false; set_error(state, error); }
         }
         // A retained HTTP tunnel can finish auth without opening a handshake.
@@ -1579,6 +1595,49 @@ async fn reconnect_remote_at(state: &NodeState, app_data_dir: &Path) -> Result<(
         finish_remote_auth(state, app_data_dir).await;
     }
     Ok(())
+}
+
+/// Foreground recovery never re-imports a ticket or rechecks its QR expiry.
+/// No saved descriptor (including after Forget) means no automatic connection.
+#[cfg(any(mobile, feature = "mobile"))]
+async fn resume_remote_at(state: &NodeState, app_data_dir: &Path) -> Result<(), String> {
+    if state.quitting.load(Ordering::SeqCst)
+        || remote_access::load_persisted(app_data_dir).map_err(|error| error.to_string())?.is_none()
+    {
+        return Ok(());
+    }
+    pairing_retry_at(state, app_data_dir).await.map(|_| ())
+}
+
+#[cfg(any(mobile, feature = "mobile"))]
+fn is_remote_resume_window(label: &str, event: &tauri::WindowEvent) -> bool {
+    if label != MAIN_WINDOW_LABEL { return false; }
+    match event {
+        // Native foreground event, absent from the desktop API even when the
+        // host-only `mobile` Cargo feature is enabled for tests.
+        #[cfg(mobile)]
+        tauri::WindowEvent::Resumed => true,
+        tauri::WindowEvent::Focused(true) => true,
+        _ => false,
+    }
+}
+
+#[cfg(any(mobile, feature = "mobile"))]
+fn is_remote_resume_event(event: &RunEvent) -> bool {
+    // Top-level RunEvent::Resumed may be an event-loop Poll, not foreground.
+    matches!(event, RunEvent::WindowEvent { label, event, .. } if is_remote_resume_window(label, event))
+}
+
+#[cfg(any(mobile, feature = "mobile"))]
+fn resume_remote<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Ok(dir) = app.path().app_data_dir() else { return; };
+        let state = app.state::<NodeState>();
+        if let Err(error) = resume_remote_at(&state, &dir).await {
+            set_error(&state, error);
+        }
+    });
 }
 
 // ---- pairing ----------------------------------------------------------------
@@ -8178,6 +8237,10 @@ fn run() {
     }
 
     app.run(|app, event| {
+        #[cfg(any(mobile, feature = "mobile"))]
+        if is_remote_resume_event(&event) {
+            resume_remote(app);
+        }
         // iOS: queue an opened `bitsov://pair/…` URL for owner review. Never
         // emitted, logged or imported here (pairing_link_ios.rs).
         #[cfg(target_os = "ios")]
@@ -8976,6 +9039,22 @@ mod pairing_wiring_tests {
             std::fs::read(ctx.store.join(pairing::RECORD_FILE)).unwrap(),
             record_before
         );
+        assert_eq!(f.node.calls("/api/v1/auth/local"), 0);
+    }
+
+    #[tokio::test]
+    async fn successful_remote_reauthentication_clears_structured_connection_failure() {
+        let f = fixture(PairRoutes::Live);
+        finish_auth(&f.state, f.data_dir.path()).await;
+        f.state.remote_mode.store(true, Ordering::SeqCst);
+        f.state.remote_retry.failed(&remote_access::RemoteError::LocalNetwork);
+        set_error(&f.state, "previous network unavailable");
+        finish_remote_auth(&f.state, f.data_dir.path()).await;
+        let status = f.state.status_snapshot();
+        assert!(status.ready);
+        assert!(status.error.is_none());
+        assert!(status.connection_error.is_none());
+        assert_eq!(status.node_id.as_deref(), Some(mock_node::NODE_ID));
         assert_eq!(f.node.calls("/api/v1/auth/local"), 0);
     }
 

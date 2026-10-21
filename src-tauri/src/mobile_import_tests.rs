@@ -22,6 +22,10 @@ fn ticket(endpoint: String, first_run: bool) -> String {
 }
 
 async fn noise_responder(listener: tokio::net::TcpListener) {
+    noise_auth_reply(listener, false).await;
+}
+
+async fn noise_auth_reply(listener: tokio::net::TcpListener, accept: bool) -> remote_access::RemoteAuthRequest {
     let (mut stream, _) = listener.accept().await.unwrap();
     let secret = [43; 32];
     let mut noise = snow::Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse().unwrap())
@@ -45,11 +49,18 @@ async fn noise_responder(listener: tokio::net::TcpListener) {
     let mut message = vec![0; length as usize];
     stream.read_exact(&mut message).await.unwrap();
     assert_eq!(u16::from_be_bytes([message[0], message[1]]) as usize, message.len() - 2);
-    noise.read_message(&message[2..], &mut output).unwrap();
-    let length = noise.write_message(br#"{"v":1,"status":"error","code":"test_refusal","message":"test complete"}"#, &mut output).unwrap();
+    let length = noise.read_message(&message[2..], &mut output).unwrap();
+    let request = serde_json::from_slice(&output[..length]).unwrap();
+    let reply = if accept {
+        br#"{"v":1,"status":"ok","client_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","scopes":["read"]}"#.as_slice()
+    } else {
+        br#"{"v":1,"status":"error","code":"test_refusal","message":"test complete"}"#.as_slice()
+    };
+    let length = noise.write_message(reply, &mut output).unwrap();
     stream.write_u32((length + 2) as u32).await.unwrap();
     stream.write_u16(length as u16).await.unwrap();
     stream.write_all(&output[..length]).await.unwrap();
+    request
 }
 
 fn app() -> tauri::App<tauri::test::MockRuntime> {
@@ -146,4 +157,94 @@ async fn import_during_recovery_preserves_the_saved_ticket() {
     assert!(error.contains("already in progress"));
     assert_eq!(remote_access::load_persisted(dir.path()).unwrap().unwrap().endpoint(), "127.0.0.1:1234");
     drop(recovery);
+}
+
+#[tokio::test]
+async fn unclaimed_box_exports_a_structured_error_before_any_dial() {
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let descriptor = remote_access::parse_pairing_link(&ticket(listener.local_addr().unwrap().to_string(), true)).unwrap();
+    attach_remote(&state, dir.path(), descriptor).await;
+    let status = serde_json::to_value(state.status_snapshot()).unwrap();
+    assert_eq!(status["connection_error"]["kind"], "unclaimed");
+    assert!(status["connection_error"]["detail"].as_str().unwrap().contains("Finish setup"));
+    assert!(state.pairing.lock().unwrap().is_none());
+    assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
+}
+
+#[tokio::test]
+async fn foreground_reconnects_saved_link_without_import_and_ignores_duplicates() {
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    let dir = tempfile::tempdir().unwrap();
+    // No saved link is an ordinary first launch, not an error.
+    resume_remote_at(&state, dir.path()).await.unwrap();
+    assert!(state.pairing.lock().unwrap().is_none());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    remote_access::import_pairing_link(dir.path(), &ticket(listener.local_addr().unwrap().to_string(), false)).unwrap();
+    let server = tokio::spawn(noise_responder(listener));
+    let guard = state.remote_recovery.lock().await;
+    tokio::time::timeout(Duration::from_millis(100), resume_remote_at(&state, dir.path())).await.unwrap().unwrap();
+    assert!(state.pairing.lock().unwrap().is_none());
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(3), resume_remote_at(&state, dir.path())).await.unwrap().unwrap();
+    server.await.unwrap();
+    assert!(state.remote_mode.load(Ordering::SeqCst));
+    remote_access::forget_persisted(dir.path()).unwrap();
+    resume_remote_at(&state, dir.path()).await.unwrap();
+}
+
+#[test]
+fn local_network_error_is_available_to_the_renderer_without_string_matching() {
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    state.remote_retry.failed(&remote_access::RemoteError::LocalNetwork);
+    let status = serde_json::to_value(state.status_snapshot()).unwrap();
+    assert_eq!(status["connection_error"]["kind"], "local_network");
+    assert!(status["connection_error"]["detail"].as_str().unwrap().contains("Settings"));
+}
+
+#[test]
+fn native_foreground_events_only_resume_the_main_client() {
+    // Tauri's top-level Resumed also represents event-loop Poll, not app foreground.
+    assert!(!is_remote_resume_event(&RunEvent::Resumed));
+    #[cfg(mobile)]
+    assert!(is_remote_resume_window(MAIN_WINDOW_LABEL, &tauri::WindowEvent::Resumed));
+    assert!(is_remote_resume_window(MAIN_WINDOW_LABEL, &tauri::WindowEvent::Focused(true)));
+    for (label, focused) in [(MAIN_WINDOW_LABEL, false), ("sealed", true)] {
+        assert!(!is_remote_resume_window(label, &tauri::WindowEvent::Focused(focused)));
+    }
+    assert!(!is_remote_resume_event(&RunEvent::Ready));
+}
+
+#[tokio::test]
+async fn foreground_after_ticket_expiry_uses_existing_auth_without_replaying_ticket() {
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let original = ticket(endpoint.to_string(), false);
+    let mut wire: serde_json::Value = serde_json::from_slice(&engine.decode(original.strip_prefix("bitsov://pair/").unwrap()).unwrap()).unwrap();
+    let expiry = now_unix() + 2;
+    wire["expires_at"] = expiry.into();
+    let link = format!("bitsov://pair/{}", engine.encode(serde_json::to_vec(&wire).unwrap()));
+    remote_access::import_pairing_link(dir.path(), &link).unwrap();
+    let key = ClientKey::load_or_create(&dir.path().join(PAIRING_STORE_DIR)).unwrap();
+    let server = tokio::spawn(noise_auth_reply(listener, true));
+    let descriptor = remote_access::load_persisted(dir.path()).unwrap().unwrap();
+    remote_access::authenticate_pinned_transport_and_save_record(
+        dir.path(), descriptor, &key, PAIRING_CLIENT_NAME,
+        &dir.path().join(PAIRING_STORE_DIR), &state.remote_retry,
+    ).await.unwrap();
+    assert!(server.await.unwrap().code.is_some());
+    assert!(!remote_access::load_persisted(dir.path()).unwrap().unwrap().has_code());
+    while now_unix() < expiry { tokio::time::sleep(Duration::from_millis(50)).await; }
+    assert!(matches!(remote_access::parse_pairing_link(&link), Err(remote_access::RemoteError::Expired(_))));
+    let listener = tokio::net::TcpListener::bind(endpoint).await.unwrap();
+    let server = tokio::spawn(noise_auth_reply(listener, false));
+    tokio::time::timeout(Duration::from_secs(3), resume_remote_at(&state, dir.path())).await.unwrap().unwrap();
+    let resumed = server.await.unwrap();
+    assert!(resumed.code.is_none());
+    assert!(resumed.signature.is_none());
+    assert!(state.pairing.lock().unwrap().is_some());
 }
