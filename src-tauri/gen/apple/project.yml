@@ -44,6 +44,7 @@ targets:
     info:
       path: bitsov-app_iOS/Info.plist
       properties:
+        NSFaceIDUsageDescription: BitSov uses Face ID to approve actions with your device key.
         LSRequiresIPhoneOS: true
         UILaunchStoryboardName: LaunchScreen
         UIRequiredDeviceCapabilities: [arm64, metal]

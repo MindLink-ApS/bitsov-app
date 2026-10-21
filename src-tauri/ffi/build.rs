@@ -1,7 +1,7 @@
 fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let mobile_feature = std::env::var_os("CARGO_FEATURE_MOBILE").is_some();
-    if target_os == "macos" && !mobile_feature {
+    if target_os == "ios" || (target_os == "macos" && !mobile_feature) {
         build_device_key_swift();
     }
 }
@@ -19,6 +19,12 @@ fn build_device_key_swift() {
     println!("cargo:rerun-if-env-changed=SDKROOT");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let ios = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios");
+    let simulator = std::env::var("TARGET").unwrap_or_default().ends_with("-sim")
+        || (ios && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64"));
+    let platform = if ios { if simulator { "iphonesimulator" } else { "iphoneos" } } else { "macosx" };
+    println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
+    println!("cargo:rerun-if-changed=../native/client_keychain.swift");
     let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("aarch64") => "arm64",
         Ok("x86_64") => "x86_64",
@@ -26,7 +32,10 @@ fn build_device_key_swift() {
     };
     // Matches the parent app's tauri.conf.json `bundle.macOS.minimumSystemVersion`.
     let min_os = std::env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".into());
-    let target = format!("{arch}-apple-macosx{min_os}");
+    let target = if ios {
+        let min_ios = std::env::var("IPHONEOS_DEPLOYMENT_TARGET").unwrap_or_else(|_| "15.0".into());
+        format!("{arch}-apple-ios{min_ios}{}", if simulator { "-simulator" } else { "" })
+    } else { format!("{arch}-apple-macosx{min_os}") };
 
     let xcrun = |args: &[&str]| -> String {
         let out = Command::new("xcrun")
@@ -43,16 +52,18 @@ fn build_device_key_swift() {
             .trim()
             .to_string()
     };
-    let sdk = xcrun(&["--sdk", "macosx", "--show-sdk-path"]);
-    let swiftc = PathBuf::from(xcrun(&["--sdk", "macosx", "-f", "swiftc"]));
+    let sdk = xcrun(&["--sdk", platform, "--show-sdk-path"]);
+    let swiftc = PathBuf::from(xcrun(&["--sdk", platform, "-f", "swiftc"]));
     let toolchain_lib = swiftc
         .parent()
         .and_then(|bin| bin.parent())
         .expect("swiftc path has a toolchain root")
-        .join("lib/swift/macosx");
+        .join(format!("lib/swift/{platform}"));
 
     let lib = out_dir.join("libbitsov_device_key.a");
-    let status = Command::new(&swiftc)
+    let mut compiler = Command::new(&swiftc);
+    if ios { compiler.arg("../native/client_keychain.swift"); }
+    let status = compiler
         .args([
             "-emit-library",
             "-static",
