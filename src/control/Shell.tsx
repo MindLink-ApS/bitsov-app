@@ -477,10 +477,13 @@ export function ControlCenter(props: Props) {
   const [contextOpen, setContextOpen] = createSignal(false);
   /** The full-screen Wallet page, on this tab; null when closed. */
   const [walletTab, setWalletTab] = createSignal<WalletTab | null>(null);
-  createEffect(() => {
-    if (!walletTab()) return;
+  let walletReturnFocus: HTMLElement | null = null;
+  createEffect(on(() => walletTab() !== null, (open) => {
+    if (!open) return;
+    const opener = walletReturnFocus;
     onCleanup(onEscape(() => { if (!contextOpen()) setWalletTab(null); }));
-  });
+    onCleanup(() => queueMicrotask(() => { if (opener?.isConnected) opener.focus(); }));
+  }));
   const [settingsEl, setSettingsEl] = createSignal<HTMLElement | null>(null);
   let settingsReturnFocus: HTMLElement | null = null;
   createEffect(() => {
@@ -1697,6 +1700,8 @@ export function ControlCenter(props: Props) {
     approve: async () => { await actions.approve(); },
   };
   const openWallet = (tab: WalletTab = 'activity') => {
+    // Settings is replaced by Wallet; its hidden controls cannot receive focus on return.
+    walletReturnFocus = contextOpen() ? settingsReturnFocus : document.activeElement as HTMLElement | null;
     setContextOpen(false);
     setWalletTab(tab);
     void loadWallet();
@@ -2821,6 +2826,7 @@ function Conversation(props: {
           props.artifacts.some(
             (a) =>
               a.type === 'undelivered' ||
+              (a.type === 'restored' && ['dispatching', 'unknown', 'paid', 'paid_undelivered'].includes(a.op.state)) ||
               (a.type === 'failed' &&
                 ['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered'].includes(a.error.code))
           ) ||
@@ -3143,6 +3149,13 @@ function CallPanel(props: {
 }) {
   const [tick, setTick] = createSignal(Date.now());
   const [answer, setAnswer] = createSignal<number | null>(null);
+  let panel: HTMLElement | undefined;
+  createEffect(on(() => props.view.phase === 'incoming' ? props.view.callId : null, (callId) => {
+    if (!callId) return;
+    queueMicrotask(() => {
+      if (props.view.phase === 'incoming' && props.view.callId === callId && panel?.isConnected) panel.focus();
+    });
+  }));
   createEffect(() => {
     if (!['live', 'reconnecting'].includes(props.view.phase)) return;
     setTick(Date.now());
@@ -3158,7 +3171,7 @@ function CallPanel(props: {
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
-      <aside ref={props.panelRef} tabindex="-1" class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? 'Call spending approval' : `${CALL_TITLE[v().phase]} ${who()}`}>
+      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? 'Call spending approval' : `${CALL_TITLE[v().phase]} ${who()}`}>
         <header>
           <strong data-call-title aria-live="polite">{CALL_TITLE[v().phase]}{v().media === 'video' ? ' (video)' : ''}</strong>
           <span class="who">{who()}</span>
@@ -6163,7 +6176,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
       <Show when={(props.actions.remote?.() || props.actions.device()?.state === 'off') && touchIdOffersShown() === 0}>
         <DeviceSetup device={props.actions.device()} now={props.now} actions={props.actions} />
       </Show>
-      <Reconcile actions={props.actions} hasPending={props.hasPending} />
+      <Reconcile actions={props.actions} hasPending={props.hasPending || Boolean(props.spend?.pending)} />
       <Show when={props.error}>
         <p class="err-note">{props.error}</p>
       </Show>
@@ -6268,9 +6281,11 @@ function Reconcile(props: { actions: Actions; hasPending?: boolean }) {
   };
   return (
     <>
-      <button type="button" class="link" data-spend-reconcile disabled={checking()} onClick={() => void reconcile()}>
-        Check pending result
-      </button>
+      <Show when={props.hasPending}>
+        <button type="button" class="link" data-spend-reconcile disabled={checking()} onClick={() => void reconcile()}>
+          Check pending result
+        </button>
+      </Show>
       <Show when={undelivered()}>
         <button type="button" class="link" data-stop-retrying disabled={checking()} onClick={() => void stop()}>
           Stop retrying
