@@ -4,10 +4,13 @@ use std::ffi::{CString, NulError};
 use zeroize::Zeroizing;
 
 unsafe extern "C" {
+    #[cfg(target_os = "macos")]
     fn bitsov_item_add(service: *const std::ffi::c_char, account: *const std::ffi::c_char,
         bytes: *const u8, count: usize) -> i32;
+    #[cfg(target_os = "macos")]
     fn bitsov_item_read(service: *const std::ffi::c_char, account: *const std::ffi::c_char,
         output: *mut u8, capacity: usize, length: *mut usize) -> i32;
+    #[cfg(target_os = "macos")]
     fn bitsov_item_delete(service: *const std::ffi::c_char, account: *const std::ffi::c_char) -> i32;
     fn bitsov_home_store(
         service: *const std::ffi::c_char,
@@ -57,6 +60,7 @@ pub fn read(service: &str, capacity: usize) -> Result<(i32, usize, Zeroizing<Vec
 }
 
 /// Add-only: an existing launcher password must never be overwritten.
+#[cfg(target_os = "macos")]
 pub fn add_item(service: &str, account: &str, bytes: &[u8]) -> Result<i32, NulError> {
     let service = CString::new(service)?;
     let account = CString::new(account)?;
@@ -64,6 +68,7 @@ pub fn add_item(service: &str, account: &str, bytes: &[u8]) -> Result<i32, NulEr
     Ok(unsafe { bitsov_item_add(service.as_ptr(), account.as_ptr(), bytes.as_ptr(), bytes.len()) })
 }
 
+#[cfg(target_os = "macos")]
 pub fn read_item(service: &str, account: &str, capacity: usize)
     -> Result<(i32, usize, Zeroizing<Vec<u8>>), NulError>
 {
@@ -77,6 +82,7 @@ pub fn read_item(service: &str, account: &str, capacity: usize)
     Ok((status, length, bytes))
 }
 
+#[cfg(target_os = "macos")]
 pub fn delete_items(service: &str, account: &str) -> Result<i32, NulError> {
     let service = CString::new(service)?;
     let account = CString::new(account)?;
@@ -84,7 +90,7 @@ pub fn delete_items(service: &str, account: &str) -> Result<i32, NulError> {
     Ok(unsafe { bitsov_item_delete(service.as_ptr(), account.as_ptr()) })
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

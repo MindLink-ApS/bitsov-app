@@ -72,6 +72,7 @@ pub struct PendingRegistration {
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct DeviceView {
     pub delegation_supported: bool,
+    pub second_device: bool,
     pub owner_device_count: Option<u64>,
     /// This Mac has a Secure Enclave the app can use.
     pub available: bool,
@@ -140,6 +141,7 @@ impl DeviceView {
     pub fn of(available: bool, record: Option<&Record>, lapsed: bool, now_ms: u64) -> Self {
         let mut view = Self {
             delegation_supported: false,
+            second_device: false,
             owner_device_count: None,
             available,
             state: if available { DeviceState::None } else { DeviceState::Unavailable },

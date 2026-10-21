@@ -246,6 +246,8 @@ struct NodeState {
     #[cfg(all(desktop, not(feature = "mobile")))]
     local_startup: AtomicBool,
     add_device: tokio::sync::Mutex<add_device::Setup>,
+    /// Enrollment is complete only after token refresh and identity validation.
+    second_join_complete: AtomicBool,
     #[cfg(all(desktop, not(feature = "mobile")))]
     remote_owner: Arc<tokio::sync::Mutex<remote_owner::Setup>>,
     expected_remote_node_id: Mutex<Option<String>>,
@@ -456,6 +458,7 @@ impl NodeState {
             #[cfg(all(desktop, not(feature = "mobile")))]
             local_startup: AtomicBool::new(false),
             add_device: tokio::sync::Mutex::new(add_device::Setup::default()),
+            second_join_complete: AtomicBool::new(false),
             #[cfg(all(desktop, not(feature = "mobile")))]
             remote_owner: Arc::new(tokio::sync::Mutex::new(remote_owner::Setup::default())),
             expected_remote_node_id: Mutex::new(None),
@@ -1302,6 +1305,7 @@ async fn attach_remote(
         state.remote_retry.failed(&error);
         return set_error(state, error.to_string());
     }
+    state.second_join_complete.store(false, Ordering::SeqCst);
     state.remote_retry.set_endpoint(descriptor.endpoint());
     let descriptor = descriptor.with_pin_store(state.remote_pins.clone());
     let store = app_data_dir.join(PAIRING_STORE_DIR);
@@ -1494,6 +1498,14 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
         return set_error(state, error.message);
     }
     if authenticate(state, data_dir).await.is_err() {
+        return;
+    }
+    // The signed descriptor pins identity; provisional tokens can only enroll.
+    // No identity/status probe or normal authority is granted before approval.
+    if add_device::is_second_join(state) {
+        *state.node_id.lock().unwrap() = state.expected_remote_node_id.lock().unwrap().clone();
+        *state.ready.lock().unwrap() = true;
+        *state.error.lock().unwrap() = None;
         return;
     }
     // An identity-free node has no live /identity route. Keep it paired so
@@ -2600,6 +2612,7 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     *state.owner_contact.lock().unwrap() = None;
     *state.front_door_ask.lock().unwrap() = None;
     *devices = add_device::Setup::default();
+    state.second_join_complete.store(false, Ordering::SeqCst);
     let previous = state.remote_proxy.lock().unwrap().take();
     if let Some(proxy) = previous { proxy.stop_and_wait().await; }
     if changed_node { state.remote_retry.reset_for_replacement(); }
@@ -7251,10 +7264,15 @@ fn local_key(store: &Path) -> Option<(Vec<u8>, device::Record)> {
 
 async fn do_device_key_status(state: &NodeState) -> Result<device::DeviceView, ActionError> {
     let mut view = do_device_key_status_local(state).await?;
-    view.delegation_supported = add_device::supported(state).await.unwrap_or(false);
+    if view.state == device::DeviceState::Registered && add_device::second_completion_pending(state) {
+        let _connection = state.remote_recovery.lock().await;
+        add_device::complete_second_join(state).await?;
+    }
+    view.second_device = view.state != device::DeviceState::Registered && add_device::has_second_ticket(state);
+    view.delegation_supported = view.second_device || add_device::supported(state).await.unwrap_or(false);
     // Whether the node takes device approvals at all (e.g. not while its
     // recovery phrase is unencrypted). Unreadable → leave the view as is.
-    let binding = device_binding(state).await.ok();
+    let binding = if view.second_device { None } else { device_binding(state).await.ok() };
     view.owner_device_count = binding.as_ref().and_then(|b| b.owner_device_count);
     Ok(view.with_node_approvals(binding.as_ref().and_then(|b| b.device_approvals.as_deref())))
 }

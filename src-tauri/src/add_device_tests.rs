@@ -37,7 +37,9 @@ struct DelegationNode {
     challenge_valid: Arc<AtomicBool>,
 }
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
-fn delegation_node() -> DelegationNode {
+fn delegation_node() -> DelegationNode { delegation_fixture(false) }
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+fn delegation_fixture(second: bool) -> DelegationNode {
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
     use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_ASN1};
@@ -73,13 +75,25 @@ fn delegation_node() -> DelegationNode {
         .unwrap()
         .replace(&format!("node:{}", "11".repeat(16)), &format!("node:{fp}"))
         .into();
+    if second {
+        let raw = include_str!("../tests/fixtures/node356-pending.json")
+            .replace(&"11".repeat(16), &fp)
+            .replace("owner", "c1")
+            .replace(&"22".repeat(16), &key_id)
+            .replace("1300", &(now_unix() + 300).to_string());
+        fixture = serde_json::from_str(&raw).unwrap();
+    }
     let pending = Arc::new(Mutex::new(fixture));
     let enrolled = Arc::new(AtomicBool::new(true));
     let challenge_valid = Arc::new(AtomicBool::new(true));
     let (p, en, cv) = (pending.clone(), enrolled.clone(), challenge_valid.clone());
     let k = key_id.clone();
+    let token_fp = fp.clone();
     let routes: Routes = Arc::new(move |method, path, body| {
         let body: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+        if path == "/status" && second {
+            return (200, serde_json::json!({"api_capabilities":if cv.load(Ordering::SeqCst) {vec!["second_device_enrollment_v1"]} else {vec![]}}).to_string());
+        }
         if path == "/pair/device-keys" {
             return (200,serde_json::json!({"node":fp,"client_id":"c1","device_approvals":"enabled","device_keys":if en.load(Ordering::SeqCst) {vec![serde_json::json!({"key_id":k})]} else {vec![]}}).to_string());
         }
@@ -89,7 +103,10 @@ fn delegation_node() -> DelegationNode {
         if path == "/pair/ticket" && method == "POST" {
             assert_eq!(body["approver_key_id"], k);
             assert_eq!(body["nonce"], "22".repeat(32));
-            let expected = format!("bitsov-ticket-v1\nnode:{fp}\nnonce:{}", "22".repeat(32));
+            let expected = if second {
+                assert_eq!(body["purpose"], "second_device");
+                format!("bitsov-ticket-v2\nnode:{fp}\nnonce:{}\npurpose:second_device", "22".repeat(32))
+            } else { format!("bitsov-ticket-v1\nnode:{fp}\nnonce:{}", "22".repeat(32)) };
             UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, public)
                 .verify(
                     expected.as_bytes(),
@@ -110,6 +127,17 @@ fn delegation_node() -> DelegationNode {
         if path.contains("/delegation?") {
             return (200, p.lock().unwrap().to_string());
         }
+        if second && (path.ends_with("/second-device/approve") || path.ends_with("/second-device/reject")) {
+            assert_eq!(body["approver_key_id"], k);
+            let p = p.lock().unwrap();
+            let reject = path.ends_with("/reject");
+            UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, public).verify(
+                p[if reject {"reject_message"} else {"approval_message"}].as_str().unwrap().as_bytes(),
+                &hex::decode(body["signature"].as_str().unwrap()).unwrap(),
+            ).unwrap();
+            if reject { return (204, String::new()); }
+            return (200,serde_json::json!({"status":"registered","op_id":p["op_id"],"key_id":hex::encode(&blake3::hash(&hex::decode(p["public_key"].as_str().unwrap()).unwrap()).as_bytes()[..16])}).to_string());
+        }
         if path.ends_with("/delegate") {
             assert_eq!(body["approver_key_id"], k);
             let p = p.lock().unwrap();
@@ -125,6 +153,11 @@ fn delegation_node() -> DelegationNode {
     });
     let (node, dir) = paired_fake(routes);
     node.state.remote_mode.store(true, Ordering::SeqCst);
+    if second {
+        let token = format!("e30.{}.sig", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({"cid":"c1","epc":7,"idf":token_fp})).unwrap()));
+        *node.state.token.lock().unwrap() = Some(token.clone());
+        if let AuthMode::Paired(ref mut session) = *node.state.auth.lock().unwrap() { session.token = token; }
+    }
     *node.state.node_id.lock().unwrap() = Some(node_id);
     *node.state.device_policy.lock().unwrap() = device_key::Policy::NoPromptForTests;
     let store = device_store(&node.state).unwrap();
@@ -347,4 +380,196 @@ fn add_device_enrollment_accepts_node_shape_and_bounded_clock_skew() {
             "{expiry}"
         );
     }
+}
+
+#[test]
+fn second_device_start_has_no_claim_code_contract() {
+    assert!(serde_json::from_value::<add_device::JoinInput>(serde_json::json!({"action":"start_second"})).is_ok());
+    assert!(serde_json::from_value::<add_device::JoinInput>(serde_json::json!({"action":"start_second","claim_code":""})).is_err());
+}
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[tokio::test]
+async fn second_device_owner_approves_or_rejects_signed_console_comparison_and_refuses_replay() {
+    for reject in [false, true] {
+        let d = delegation_fixture(true);
+        let state = &d.node.state;
+        assert!(add_device::run(state, add_device::Input::Approve { op_id:"aa".repeat(12) }).await.is_err());
+        let view = serde_json::to_value(add_device::run(state, add_device::Input::Status).await.unwrap()).unwrap();
+        assert_eq!(view["second_device"], true);
+        assert_eq!(view["pending"][0]["can_approve"], true);
+        let result = add_device::run(state, if reject {add_device::Input::Reject {op_id:"aa".repeat(12)}} else {add_device::Input::Approve {op_id:"aa".repeat(12)}}).await.unwrap();
+        assert_eq!(serde_json::to_value(result).unwrap()["state"], if reject {"rejected"} else {"done"});
+        assert!(add_device::run(state, add_device::Input::Approve {op_id:"aa".repeat(12)}).await.is_err());
+    }
+}
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[tokio::test]
+async fn second_device_owner_refuses_wrong_words_expiry_changed_op_and_revoked_owner() {
+    for change in ["words", "expiry", "changed", "revoked"] {
+        let d = delegation_fixture(true);
+        let state = &d.node.state;
+        add_device::run(state, add_device::Input::Status).await.unwrap();
+        if change == "revoked" { d.enrolled.store(false, Ordering::SeqCst); }
+        else {
+            let mut p = d.pending.lock().unwrap();
+            match change {
+                "words" => p["sas_words"][0] = "abandon".into(),
+                "expiry" => p["expires_at"] = (now_unix()-1).into(),
+                _ => p["nonce"] = "99".repeat(16).into(),
+            }
+        }
+        assert!(add_device::run(state, add_device::Input::Approve {op_id:"aa".repeat(12)}).await.is_err());
+        assert!(d.node.posts().is_empty());
+    }
+}
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[tokio::test]
+async fn second_device_mint_signs_purpose_and_binds_current_ticket() {
+    let d = delegation_fixture(true);
+    let view = serde_json::to_value(add_device::run(&d.node.state, add_device::Input::Mint).await.unwrap()).unwrap();
+    assert_eq!(view["second_device"], true);
+    assert!(view["uri"].as_str().unwrap().starts_with("bitsov://pair/"));
+}
+#[tokio::test]
+async fn second_device_cannot_start_on_normal_pairing_or_flag_off() {
+    let (node, _dir) = paired_fake(happy());
+    node.state.remote_mode.store(true, Ordering::SeqCst);
+    assert!(add_device::join(&node.state, add_device::JoinInput::StartSecond {}).await.is_err());
+    assert!(node.posts().is_empty());
+}
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[tokio::test]
+async fn second_device_join_uses_pinned_noise_node_digest_and_never_claims_on_refusal() {
+    for status in [204, 403, 409, 410] {
+        let (uri, server) = remote_access::second_tests::node(status).await;
+        let (node, dir) = paired_fake(Arc::new(|method,path,_| {
+            assert!(path.starts_with("/pair/device-key/"));
+            match method {
+                "DELETE" => (204,String::new()),
+                "GET" => (200,r#"{"status":"pending"}"#.into()),
+                _ => panic!("unexpected request"),
+            }
+        }));
+        let state = &node.state;
+        state.remote_mode.store(true,Ordering::SeqCst);
+        *state.device_policy.lock().unwrap() = device_key::Policy::NoPromptForTests;
+        remote_access::import_pairing_link(dir.path(),&uri).unwrap();
+        let descriptor = remote_access::load_persisted(dir.path()).unwrap().unwrap();
+        *state.node_id.lock().unwrap() = Some(descriptor.node_id().into());
+        let ctx = state.pairing.lock().unwrap().clone().unwrap();
+        let descriptor = remote_access::authenticate_pinned_transport_and_save_record(dir.path(),descriptor,&ctx.key,"Phone",&ctx.store,&state.remote_retry).await.unwrap();
+        assert!(!descriptor.has_code());
+        assert!(descriptor.enrollment_commitment().is_some());
+        let restored = remote_access::load_persisted(dir.path()).unwrap().unwrap();
+        assert!(!restored.has_code());
+        assert!(restored.enrollment_commitment() == descriptor.enrollment_commitment());
+        *state.remote_descriptor.lock().unwrap() = Some(descriptor);
+        if let AuthMode::Paired(ref mut session) = *state.auth.lock().unwrap() { session.scopes.clear(); session.client_id = "c".repeat(32); }
+        let result = add_device::join(state,add_device::JoinInput::StartSecond {}).await;
+        if status == 204 {
+            let view = serde_json::to_value(result.unwrap()).unwrap();
+            assert_eq!(view["state"],"waiting");
+            assert_eq!(view["second_device"],true);
+            assert_eq!(view["words"].as_array().unwrap().len(),4);
+            let poll = serde_json::to_value(add_device::join(state,add_device::JoinInput::Poll).await.unwrap()).unwrap();
+            assert_eq!(poll["state"],"waiting");
+            assert_eq!(poll["second_device"],true);
+            assert!(add_device::join(state,add_device::JoinInput::StartSecond {}).await.is_err());
+        } else {
+            let error = result.err().unwrap();
+            assert!(!error.message.contains("claim code"));
+            assert!(device::load_record(&device_store(state).unwrap()).unwrap().pending.is_some());
+        }
+        server.await.unwrap();
+        add_device::join(state,add_device::JoinInput::Cancel).await.unwrap();
+        assert!(device::load_record(&device_store(state).unwrap()).unwrap().pending.is_none());
+    }
+}
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[tokio::test]
+async fn second_device_background_poll_promotes_access_before_registered_view() {
+    crate::profile::install("tech.mindlink.bitsov.remotetest").unwrap();
+    use base64::Engine;
+    let (uri, server) = remote_access::second_tests::node(204).await;
+    let descriptor = remote_access::parse_pairing_link(&uri).unwrap();
+    let node_id = descriptor.node_id().to_string();
+    let fingerprint = bitsov_app::home_node::identity_fingerprint(&node_id);
+    let client = "c".repeat(32);
+    let token = format!("e30.{}.sig", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({"cid":client,"epc":7,"idf":fingerprint})).unwrap()));
+    let registered = Arc::new(AtomicBool::new(false));
+    let key = Arc::new(Mutex::new(String::new()));
+    let (r,k) = (registered.clone(),key.clone());
+    let identity = node_id.clone();
+    let fail_identity = AtomicBool::new(true);
+    let (node, dir) = paired_fake(Arc::new(move |_,path,_| {
+        let value = if path.starts_with("/pair/challenge?") {
+            serde_json::json!({"challenge":"bitsov-pair-token-v1:fixture"})
+        } else if path == "/pair/token" {
+            serde_json::json!({"token":token,"expires_at":now_unix()+86400,"scopes":["read","receive"]})
+        } else if path == "/identity" {
+            if fail_identity.swap(false,Ordering::SeqCst) { return (503,"{}".into()); }
+            serde_json::json!({"node_id":identity})
+        }
+        else if path == "/pair/device-keys" { serde_json::json!({"node":fingerprint,"client_id":client,"device_keys":[{"key_id":*k.lock().unwrap()}]}) }
+        else if path.starts_with("/pair/device-key/pending?") { serde_json::json!({"pending":[]}) }
+        else if path.starts_with("/pair/device-key/") { serde_json::json!({"status":if r.load(Ordering::SeqCst) {"registered"} else {"pending"}}) }
+        else { return (404,"{}".into()); };
+        (200,value.to_string())
+    }));
+    let state = &node.state;
+    state.remote_mode.store(true,Ordering::SeqCst);
+    *state.device_policy.lock().unwrap() = device_key::Policy::NoPromptForTests;
+    remote_access::import_pairing_link(dir.path(),&uri).unwrap();
+    let ctx = state.pairing.lock().unwrap().clone().unwrap();
+    let descriptor = remote_access::authenticate_pinned_transport_and_save_record(dir.path(),descriptor,&ctx.key,"Phone",&ctx.store,&state.remote_retry).await.unwrap();
+    *state.remote_descriptor.lock().unwrap() = Some(descriptor);
+    *state.node_id.lock().unwrap() = Some(node_id.clone());
+    *state.expected_remote_node_id.lock().unwrap() = Some(node_id);
+    if let AuthMode::Paired(ref mut session) = *state.auth.lock().unwrap() { session.scopes.clear(); session.client_id = "c".repeat(32); }
+    add_device::join(state,add_device::JoinInput::StartSecond {}).await.unwrap();
+    server.await.unwrap();
+    *key.lock().unwrap() = device::load_record(&device_store(state).unwrap()).unwrap().key_id.unwrap();
+    registered.store(true,Ordering::SeqCst);
+    // Simulate the App poll winning, with token issuance succeeding but the
+    // identity request failing once. Never expose completion before retry.
+    assert!(do_device_key_status(state).await.is_err());
+    assert!(matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(s) if s.scopes == ["read","receive"]));
+    let view = do_device_key_status(state).await.unwrap();
+    assert_eq!(view.state,device::DeviceState::Registered);
+    assert!(!view.second_device);
+    assert!(matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(s) if s.scopes == ["read","receive"]));
+    assert!(*state.ready.lock().unwrap());
+    assert!(state.error.lock().unwrap().is_none());
+    assert_eq!(serde_json::to_value(add_device::join(state,add_device::JoinInput::Poll).await.unwrap()).unwrap()["state"],"done");
+}
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[tokio::test]
+async fn second_device_flag_off_stops_a_reviewed_approval_without_signing() {
+    let d = delegation_fixture(true);
+    add_device::run(&d.node.state, add_device::Input::Status).await.unwrap();
+    d.challenge_valid.store(false, Ordering::SeqCst);
+    let view = add_device::run(&d.node.state, add_device::Input::Approve {op_id:"aa".repeat(12)}).await.unwrap();
+    assert!(matches!(view, add_device::View::Unsupported));
+    assert!(d.node.posts().is_empty());
+}
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[tokio::test]
+async fn second_device_foreign_ticket_cannot_be_approved_but_can_be_rejected() {
+    let d = delegation_fixture(true);
+    {
+        let mut p = d.pending.lock().unwrap();
+        p["issuer"] = "88".repeat(16).into();
+        for field in ["approval_message", "reject_message"] {
+            p[field] = p[field].as_str().unwrap().replace("issuer:console", &format!("issuer:{}", "88".repeat(16))).into();
+        }
+    }
+    let view = serde_json::to_value(add_device::run(&d.node.state, add_device::Input::Status).await.unwrap()).unwrap();
+    assert_eq!(view["pending"][0]["can_approve"], false);
+    assert!(add_device::run(&d.node.state, add_device::Input::Approve {op_id:"aa".repeat(12)}).await.is_err());
+    assert!(d.node.posts().is_empty());
+    assert!(matches!(add_device::run(&d.node.state, add_device::Input::Reject {op_id:"aa".repeat(12)}).await.unwrap(), add_device::View::Rejected));
 }

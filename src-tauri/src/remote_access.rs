@@ -112,6 +112,8 @@ impl fmt::Debug for PairingLinkV1 {
 /// proof construction; its `Debug` implementation never includes the code.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RemoteDescriptor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enrollment_commitment: Option<[u8; 32]>,
     v: u8,
     endpoint: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -181,6 +183,11 @@ impl RemoteDescriptor {
     }
     pub fn has_live_pin(&self) -> bool { !self.transport_pubkey.is_empty() }
 
+    pub fn enrollment_commitment(&self) -> Option<[u8; 32]> { self.enrollment_commitment }
+    pub fn ticket_id(&self) -> Option<String> {
+        self.code.as_deref().map(crate::second_device::ticket_id)
+    }
+
     pub fn has_code(&self) -> bool {
         self.code.is_some()
     }
@@ -194,6 +201,8 @@ impl RemoteDescriptor {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredDescriptor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enrollment_commitment: Option<[u8; 32]>,
     v: u8,
     endpoint: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -471,6 +480,7 @@ fn validate_code(code: Option<&str>) -> Result<(), RemoteError> {
             return if crate::delegation::canonical_hex(secret, 32) { Ok(()) }
                 else { Err(RemoteError::Invalid("owner ticket code must contain 32 lowercase hex bytes".into())) };
         }
+        let code = code.strip_prefix("second_").unwrap_or(code);
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(code)
             .map_err(|_| {
@@ -618,6 +628,7 @@ pub fn verify_transport_proof(node_id: &str, transport_pubkey: &str, transport_s
 
 fn descriptor_from_stored(stored: StoredDescriptor, transport_pubkey_bytes: [u8; 32]) -> RemoteDescriptor {
     RemoteDescriptor {
+        enrollment_commitment: stored.enrollment_commitment,
         v: stored.v, endpoint: stored.endpoint, endpoints: stored.endpoints,
         endpoints_signature: stored.endpoints_signature, bootstrap_routes: stored.bootstrap_routes,
         box_transport_pubkey: stored.box_transport_pubkey,
@@ -721,6 +732,7 @@ fn validate_link(link: PairingLinkV1, now: i64) -> Result<RemoteDescriptor, Remo
         return Err(RemoteError::Expired((now - link.expires_at) as u64));
     }
     let descriptor = validate_descriptor(StoredDescriptor {
+        enrollment_commitment: None,
         bootstrap_routes: vec![],
         endpoints: link.endpoints,
         endpoints_signature: link.endpoints_signature,
@@ -811,6 +823,7 @@ fn stored_bytes(
         })
         .transpose()?;
     serde_json::to_vec(&StoredDescriptor {
+        enrollment_commitment: descriptor.enrollment_commitment,
         bootstrap_routes: descriptor.bootstrap_routes.clone(),
         endpoints: descriptor.endpoints.clone(),
         endpoints_signature: descriptor.endpoints_signature.clone(),
@@ -1320,6 +1333,7 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
     key: &ClientKey,
     client_name: &str,
     recovery_node: Option<&str>,
+    before_auth: Option<&(dyn Fn() -> Result<(), RemoteError> + Sync)>,
 ) -> Result<(String, Vec<String>, Option<TransportProofs>), RemoteError> {
     tokio::time::timeout(CONNECT_TIMEOUT, async {
         let request = serde_json::to_vec(&auth_request(descriptor, key, client_name))
@@ -1330,6 +1344,7 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
             ));
         }
         let encrypted = encode_transport(noise, &request)?;
+        if let Some(retire) = before_auth { retire()?; }
         write_frame(stream, &encrypted).await?;
 
         let encrypted = read_frame(stream, MAX_TRANSPORT_FRAME).await?;
@@ -1400,8 +1415,10 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
                         "authentication reply has an unsupported version".into(),
                     ));
                 }
-                let reason: String = if code == "authentication_failed"
-                    && descriptor.code.as_deref().is_some_and(|c| c.starts_with("owner_")) {
+                let reason: String = if code == "already_paired" {
+                    "This device already has a pairing. Reconnect with its saved pairing; a second-device ticket is for a new device.".into()
+                } else if code == "authentication_failed"
+                    && descriptor.code.as_deref().is_some_and(|c| c.starts_with("owner_") || c.starts_with("second_")) {
                     USED_TICKET_MESSAGE.into()
                 } else { format!("{code}: {message}").chars().take(160).collect() };
                 Err(RemoteError::Refused(reason))
@@ -1856,6 +1873,13 @@ fn finalize_authenticated_pairing(
         {
             return Err(RemoteError::Local("remote pairing link was forgotten or replaced; restart BitSov".into()));
         }
+        if scopes.is_empty() {
+            let code = current.code.as_deref().unwrap();
+            if current.node_id.is_empty() || !(code.starts_with("owner_") || code.starts_with("second_")) {
+                return Err(RemoteError::Invalid("unexpected provisional pairing".into()));
+            }
+            current.enrollment_commitment = Some(crate::second_device::ticket_commitment(code));
+        }
         current.code = None;
         if let Err(error) = persist_at(config_path, &current) {
             // Fail closed: never leave a confirmed one-time code available
@@ -1878,12 +1902,13 @@ async fn connect_authenticated(
     key: &ClientKey,
     client_name: &str,
 ) -> Result<(TcpStream, TransportState, String, Vec<String>), RemoteError> {
-    let (remote, noise, _, client_id, scopes, _) = connect_bound(descriptor, key, client_name, None).await?;
+    let (remote, noise, _, client_id, scopes, _) = connect_bound(descriptor, key, client_name, None, None).await?;
     Ok((remote, noise, client_id, scopes))
 }
 
 async fn connect_bound(
     descriptor: &RemoteDescriptor, key: &ClientKey, name: &str, recovery_node: Option<&str>,
+    before_auth: Option<&(dyn Fn() -> Result<(), RemoteError> + Sync)>,
 ) -> Result<(TcpStream, TransportState, [u8; 32], String, Vec<String>, Option<TransportProofs>), RemoteError> {
     let routes = if descriptor.endpoints.is_empty() { &descriptor.bootstrap_routes } else { &descriptor.endpoints };
     let endpoints = if routes.is_empty() { vec![descriptor.endpoint.as_str()] }
@@ -1905,7 +1930,7 @@ async fn connect_bound(
         }.await;
         match attempt {
             Ok((mut remote, mut noise, hash)) => {
-                let (client, scopes, proofs) = encrypted_auth(&mut remote, &mut noise, descriptor, key, name, recovery_node).await?;
+                let (client, scopes, proofs) = encrypted_auth(&mut remote, &mut noise, descriptor, key, name, recovery_node, before_auth).await?;
                 return Ok((remote, noise, hash, client, scopes, proofs));
             }
             Err(error @ RemoteError::RateLimited(_)) => return Err(error),
@@ -1939,6 +1964,7 @@ pub fn commit_bootstrap(app_dir: &Path, previous: &RemoteDescriptor,
         return Err(RemoteError::Invalid("finalize changed the bootstrap box pin".into()));
     }
     let descriptor = validate_descriptor(StoredDescriptor {
+        enrollment_commitment: None,
         v: 1, endpoint: previous.endpoint.clone(), endpoints: vec![], endpoints_signature: None,
         bootstrap_routes: if previous.endpoints.is_empty() { previous.bootstrap_routes.clone() } else { previous.endpoints.clone() },
         node_id: node.into(), transport_pubkey: live_key.into(), transport_signature: live_signature.into(),
@@ -1964,7 +1990,7 @@ pub async fn recover_bootstrap(
         return Err(RemoteError::Invalid("recovery requires the already paired bootstrap box".into()));
     }
     let (mut remote, mut noise, _, client_id, scopes, proofs) =
-        connect_bound(descriptor, key, name, Some(trusted_node)).await?;
+        connect_bound(descriptor, key, name, Some(trusted_node), None).await?;
     if client_id != expected_client {
         return Err(RemoteError::Invalid("recovery client binding changed".into()));
     }
@@ -2090,12 +2116,21 @@ impl BootstrapConnection {
     /// A fresh, already-paired device's enrollment uses one authenticated Noise
     /// transcript through both requests, without replaying its consumed ticket.
     pub async fn connect_device(descriptor: &RemoteDescriptor, key: &ClientKey, name: &str) -> Result<Self, RemoteError> {
+        Self::connect_enrollment(descriptor, key, name, false).await
+    }
+    pub async fn connect_second_device(descriptor: &RemoteDescriptor, key: &ClientKey, name: &str) -> Result<Self, RemoteError> {
+        if descriptor.enrollment_commitment.is_none() {
+            return Err(RemoteError::Invalid("scan a second-device ticket first".into()));
+        }
+        Self::connect_enrollment(descriptor, key, name, true).await
+    }
+    async fn connect_enrollment(descriptor: &RemoteDescriptor, key: &ClientKey, name: &str, second: bool) -> Result<Self, RemoteError> {
         if descriptor.node_id.is_empty() || descriptor.has_code() {
             return Err(RemoteError::Invalid("an initialized, paired home node is required".into()));
         }
         let pin = descriptor.box_pin()?.ok_or_else(|| RemoteError::Invalid("missing box pin".into()))?;
-        let (remote, noise, handshake_hash, client_id, scopes, _) = connect_bound(descriptor, key, name, None).await?;
-        if !scopes.iter().any(|s| s == "read") { return Err(RemoteError::Refused("device enrollment requires read scope".into())); }
+        let (remote, noise, handshake_hash, client_id, scopes, _) = connect_bound(descriptor, key, name, None, None).await?;
+        if (second && !scopes.is_empty()) || (!second && !scopes.iter().any(|s| s == "read")) { return Err(RemoteError::Refused("pairing does not authorize this enrollment".into())); }
         Ok(Self {remote, noise, client_id, binding:crate::sas::NoiseBinding {
             handshake_hash, box_public_key:decode_hex(&pin.public_key, "box pin")?, client_static:client_transport_public_key(key),
         }})
@@ -2105,7 +2140,7 @@ impl BootstrapConnection {
         if !descriptor.node_id.is_empty() || descriptor.has_code() {
             return Err(RemoteError::Invalid("a paired empty box is required".into()));
         }
-        let (remote, noise, handshake_hash, client_id, scopes, _) = connect_bound(descriptor, key, name, None).await?;
+        let (remote, noise, handshake_hash, client_id, scopes, _) = connect_bound(descriptor, key, name, None, None).await?;
         if !scopes.iter().any(|s| s == "identity") {
             return Err(RemoteError::Refused("box setup is closed".into()));
         }
@@ -2145,22 +2180,66 @@ pub async fn authenticate_pinned_transport_and_save_record(
     pairing_store: &Path,
     retry: &RemoteRetry,
 ) -> Result<RemoteDescriptor, RemoteError> {
-    let (_remote, _noise, client_id, scopes) = retry
-        .run(|| connect_authenticated(&descriptor, key, client_name))
-        .await?;
-
+    let path = config_path(app_data_dir);
+    let one_use = |d: &RemoteDescriptor| d.code.as_deref().is_some_and(|c| c.starts_with("second_") || c.starts_with("owner_"));
+    // A previous interrupted send may already have retired the ticket on disk.
+    let descriptor = if one_use(&descriptor) {
+        let saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
+        match saved {
+            Some(mut saved) if saved.code.is_none() && saved.node_id == descriptor.node_id
+                && saved.endpoint == descriptor.endpoint && saved.transport_pubkey == descriptor.transport_pubkey
+                && saved.enrollment_commitment == descriptor.code.as_deref().map(crate::second_device::ticket_commitment) => {
+                    saved.pin_store = descriptor.pin_store.clone(); saved
+                }
+            _ => descriptor,
+        }
+    } else { descriptor };
+    let current = Mutex::new(descriptor);
+    let retire = || -> Result<(), RemoteError> {
+        let mut current = current.lock().unwrap();
+        if !one_use(&current) { return Ok(()); }
+        let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+        let saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
+        if !saved.is_some_and(|d| d.node_id == current.node_id && d.endpoint == current.endpoint
+            && d.transport_pubkey == current.transport_pubkey && d.code == current.code) {
+            return Err(RemoteError::Local("pairing ticket was forgotten or replaced".into()));
+        }
+        let mut consumed = current.clone();
+        consumed.enrollment_commitment = consumed.code.as_deref().map(crate::second_device::ticket_commitment);
+        consumed.code = None;
+        // Retire BEFORE writing a proof: crashes or lost replies can only
+        // reconnect with these same keys, never replay this one-use ticket.
+        persist_at(&path, &consumed)?;
+        *current = consumed;
+        Ok(())
+    };
+    let (_, _, _, client_id, scopes, _) = retry.run(|| async {
+        let snapshot = current.lock().unwrap().clone();
+        let result = connect_bound(&snapshot, key, client_name, None, Some(&retire)).await;
+        if matches!(&result, Err(RemoteError::Transport(_) | RemoteError::HandshakeUnavailable))
+            && one_use(&snapshot) && !current.lock().unwrap().has_code() {
+            let consumed = current.lock().unwrap().clone();
+            return connect_bound(&consumed, key, client_name, None, None).await;
+        }
+        result
+    }).await?;
+    let mut descriptor = current.into_inner().unwrap();
+    if descriptor.enrollment_commitment.is_some() {
+        let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+        let saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
+        if !saved.is_some_and(|d| d.node_id == descriptor.node_id && d.endpoint == descriptor.endpoint
+            && d.code.is_none() && d.enrollment_commitment == descriptor.enrollment_commitment) {
+            return Err(RemoteError::Local("pairing ticket was forgotten or replaced".into()));
+        }
+        // An owner_ ticket may be the legacy read-scoped ceremony. Only an
+        // authenticated provisional response selects SAS v2.
+        if !scopes.is_empty() { descriptor.enrollment_commitment = None; persist_at(&path, &descriptor)?; }
+        pairing::save_remote_record(pairing_store, key, client_id, scopes).map_err(|e| RemoteError::Local(e.to_string()))?;
+        return Ok(descriptor);
+    }
     let descriptor = Mutex::new(descriptor);
-    finalize_authenticated_pairing(
-        &descriptor,
-        &config_path(app_data_dir),
-        pairing_store,
-        key,
-        client_id,
-        scopes,
-    )?;
-    descriptor
-        .into_inner()
-        .map_err(|_| RemoteError::Local("remote descriptor lock is poisoned".into()))
+    finalize_authenticated_pairing(&descriptor, &path, pairing_store, key, client_id, scopes)?;
+    descriptor.into_inner().map_err(|_| RemoteError::Local("remote descriptor lock is poisoned".into()))
 }
 
 struct AuthenticatedLocal {
@@ -3309,7 +3388,7 @@ mod tests {
         assert!(matches!(result, Ok(Err(_))), "a silent handshake must release its connection slot");
         let (mut app, _silent_node) = tokio::io::duplex(65536);
         let (mut noise, _) = transport_pair();
-        let result = tokio::time::timeout(Duration::from_secs(6), encrypted_auth(&mut app, &mut noise, &descriptor, &key, "test", None)).await;
+        let result = tokio::time::timeout(Duration::from_secs(6), encrypted_auth(&mut app, &mut noise, &descriptor, &key, "test", None, None)).await;
         assert!(matches!(result, Ok(Err(_))), "silent encrypted auth must also be bounded");
     }
 
@@ -4188,3 +4267,7 @@ mod onboarding_error_tests {
         assert_eq!(generated_copy, copy.split("<string>").nth(1).unwrap());
     }
 }
+
+#[cfg(test)]
+#[path = "remote_access/second_tests.rs"]
+pub(crate) mod second_tests;
