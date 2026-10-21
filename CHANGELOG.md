@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Security: Give fresh iOS installs a new client identity by removing orphaned Keychain and legacy client keys before setup; preserve existing app/pairing data and safely retry interrupted cleanup.
 - Expose structured phone connection errors for unclaimed boxes and unavailable iOS Local Network access; reconnect from the saved descriptor when the phone returns to the foreground, without replaying a consumed ticket. Claim-free second-device enrollment remains blocked on the node contract (see `docs/PHONE_ONBOARDING_PR1.md`).
 
 - Connect phones immediately after importing a remote ticket, allow reconnect from saved tickets before remote mode starts, and direct first-run box tickets to Mac setup; add mobile pairing and Noise framing regression coverage.

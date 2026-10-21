@@ -7,6 +7,18 @@ import LocalAuthentication
 struct ClientKeychain {
     var copy: (CFDictionary, UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus = SecItemCopyMatching
     var add: (CFDictionary, UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus = SecItemAdd
+    var delete: (CFDictionary) -> OSStatus = SecItemDelete
+
+    func remove(_ account: String) -> OSStatus {
+        var attributes = query(account)
+        attributes.removeValue(forKey: kSecAttrAccessible)
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        defer { context.invalidate() }
+        attributes[kSecUseAuthenticationContext] = context
+        let status = delete(attributes as CFDictionary)
+        return status == errSecItemNotFound ? errSecSuccess : status
+    }
 
     func query(_ account: String) -> [CFString: Any] {
         [kSecClass: kSecClassGenericPassword,
@@ -77,6 +89,17 @@ public func bitsov_client_key_add(_ path: UnsafePointer<CChar>?, _ seed: UnsafeP
     guard let path = path, let seed = seed else { return errSecParam }
     return autoreleasepool {
         do { return ClientKeychain().insert(try clientAccount(path), seed) }
+        catch { return errSecParam }
+    }
+}
+
+// Only the Rust fresh-install guard calls this, before pairing can start.
+// Exact service/account deletion; no seed lookup and no authentication UI.
+@_cdecl("bitsov_client_key_delete")
+public func bitsov_client_key_delete(_ path: UnsafePointer<CChar>?) -> Int32 {
+    guard let path = path else { return errSecParam }
+    return autoreleasepool {
+        do { return ClientKeychain().remove(try clientAccount(path)) }
         catch { return errSecParam }
     }
 }
