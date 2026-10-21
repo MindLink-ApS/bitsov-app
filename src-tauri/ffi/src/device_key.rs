@@ -1,4 +1,4 @@
-//! Safe wrapper for the macOS Secure Enclave Swift bridge.
+//! Safe wrapper for the Apple Secure Enclave Swift bridge.
 
 use std::fmt;
 
@@ -68,7 +68,7 @@ fn status_error(code: i32) -> DeviceKeyError {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod ffi {
     unsafe extern "C" {
         pub fn bitsov_dk_available() -> i32;
@@ -105,21 +105,24 @@ mod ffi {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub fn enclave_available() -> bool {
     // SAFETY: no arguments; the Swift function only reads enclave availability.
     unsafe { ffi::bitsov_dk_available() == 1 }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub fn available() -> bool {
     // SAFETY: no arguments; the Swift function only checks whether biometric
     // authentication can be evaluated and never prompts.
     enclave_available() && unsafe { ffi::bitsov_dk_biometry() == OK }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub fn create(policy: Policy) -> Result<(Vec<u8>, [u8; PUBLIC_KEY_LEN]), DeviceKeyError> {
+    // iPhone production builds never accept a non-biometric signing key.
+    #[cfg(target_os = "ios")]
+    if policy != Policy::Biometry { return Err(DeviceKeyError::Unavailable); }
     let mut blob = vec![0u8; BLOB_CAP];
     let mut blob_len = 0;
     let mut public = [0u8; PUBLIC_KEY_LEN];
@@ -144,7 +147,7 @@ pub fn create(policy: Policy) -> Result<(Vec<u8>, [u8; PUBLIC_KEY_LEN]), DeviceK
     Ok((blob, public))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub fn sign(blob: &[u8], message: &[u8], reason: &str) -> Result<Vec<u8>, DeviceKeyError> {
     if blob.is_empty() || blob.len() > BLOB_CAP {
         return Err(DeviceKeyError::Invalid);
@@ -177,7 +180,7 @@ pub fn sign(blob: &[u8], message: &[u8], reason: &str) -> Result<Vec<u8>, Device
 }
 
 /// One SAS approval followed by one matching first-unlock signature.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub fn sign_setup(blob: &[u8], message: &[u8], reason: &str, finish: bool) -> Result<Vec<u8>, DeviceKeyError> {
     if blob.is_empty() || blob.len() > BLOB_CAP {
         return Err(DeviceKeyError::Invalid);
@@ -210,12 +213,12 @@ pub fn sign_setup(blob: &[u8], message: &[u8], reason: &str, finish: bool) -> Re
     Ok(signature)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub fn sign_setup(_: &[u8], _: &[u8], _: &str, _: bool) -> Result<Vec<u8>, DeviceKeyError> {
     Err(DeviceKeyError::Unavailable)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub fn public_key(blob: &[u8]) -> Result<[u8; PUBLIC_KEY_LEN], DeviceKeyError> {
     if blob.is_empty() || blob.len() > BLOB_CAP {
         return Err(DeviceKeyError::Invalid);
@@ -229,27 +232,27 @@ pub fn public_key(blob: &[u8]) -> Result<[u8; PUBLIC_KEY_LEN], DeviceKeyError> {
     Ok(public)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub fn public_key(_blob: &[u8]) -> Result<[u8; PUBLIC_KEY_LEN], DeviceKeyError> {
     Err(DeviceKeyError::Unavailable)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub fn available() -> bool {
     false
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub fn enclave_available() -> bool {
     false
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub fn create(_policy: Policy) -> Result<(Vec<u8>, [u8; PUBLIC_KEY_LEN]), DeviceKeyError> {
     Err(DeviceKeyError::Unavailable)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub fn sign(_blob: &[u8], _message: &[u8], _reason: &str) -> Result<Vec<u8>, DeviceKeyError> {
     Err(DeviceKeyError::Unavailable)
 }
