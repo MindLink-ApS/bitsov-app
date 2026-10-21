@@ -34,6 +34,9 @@ pub mod home_node;
 
 mod app;
 
+#[cfg(any(target_os = "android", test))]
+mod android_network;
+
 #[cfg(target_os = "android")]
 mod pairing_link_mobile;
 

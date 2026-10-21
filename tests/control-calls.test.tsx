@@ -1931,6 +1931,174 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
 
+  const LN = '02' + 'b'.repeat(64);
+  const spending = (): SpendView => ({ state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 });
+  const payHost = (over: Record<string, Reply> = {}) => stubHost({
+    peers_list: () => [{ node_id: A, ln_pubkey: LN, addr: null, label: 'Maya', connected: true, fingerprint: null }],
+    spend_status: spending,
+    payment_keysend: () => ({ method: 'keysend', amount_msat: 5000, max_routing_fee_msat: 5000, status: 'settled', paid_at_ms: Date.now() }),
+    ...over,
+  });
+  async function liveCall() {
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect($('[data-call-pay]')).toBeNull();
+    FakePc.made[0].connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+  }
+  function enterCallAmount(value = '5') {
+    $<HTMLButtonElement>('[data-call-pay]')!.click();
+    const input = $<HTMLInputElement>('[data-in-call-pay] [data-pay-amount]')!;
+    input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  it('in-call Pay binds the contact, shows the fee cap, and consumes one confirm without touching the call', async () => {
+    let finish!: (value: unknown) => void;
+    const host = payHost({ payment_keysend: () => new Promise(resolve => { finish = resolve; }) });
+    await liveCall();
+    const pc = FakePc.made[0];
+    const media = $('[data-call-media="remote"]');
+    enterCallAmount();
+    expect(text('[data-in-call-pay]')).toContain('Maya');
+    expect(text('[data-call-pay-total]')).toContain('10');
+    expect(text('[data-call-pay-fee]')).toContain('5');
+    expect(host.used('payment_keysend')).toHaveLength(0);
+    const confirm = $<HTMLButtonElement>('[data-call-pay-confirm]')!;
+    confirm.click(); confirm.click();
+    await vi.waitFor(() => expect(host.used('payment_keysend')).toHaveLength(1));
+    expect(host.used('payment_keysend')[0].args).toEqual({ dest_pubkey: LN, amount_msat: 5000, memo: null, max_msat: 10000 });
+    expect(text('[data-call-pay-status]')).toMatch(/sending/i);
+    expect(pc.closed).toBe(false);
+    expect($('[data-call-media="remote"]')).toBe(media);
+    expect(host.used('op_end_call')).toHaveLength(0);
+    expect(host.used('op_close_call')).toHaveLength(0);
+    expect(host.used('call_signal')).toHaveLength(1);
+    finish({ method: 'keysend', amount_msat: 5000, max_routing_fee_msat: 5000, status: 'settled', paid_at_ms: Date.now() });
+    await vi.waitFor(() => expect(text('[data-call-pay-status]')).toMatch(/sent/i));
+    expect($('[data-call-panel="live"]')).not.toBeNull();
+    expect(text('[data-call-paid]')).toContain('15');
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect(host.used('op_end_call')).toHaveLength(1));
+    expect(text('[data-call-pay-status]')).toMatch(/sent/i);
+  });
+
+  it('in-call Pay keeps the amount through approval and requires a separate explicit payment tap', async () => {
+    let approved = false;
+    const host = payHost({
+      spend_status: () => approved ? spending() : { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 },
+      spend_request: () => { approved = true; return spending(); },
+    });
+    await liveCall();
+    enterCallAmount();
+    expect($<HTMLButtonElement>('[data-call-pay-confirm]')!.disabled).toBe(true);
+    $<HTMLButtonElement>('[data-call-pay-approve]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-pay-confirm]')!.disabled).toBe(false));
+    expect(host.used('payment_keysend')).toHaveLength(0);
+    expect($<HTMLInputElement>('[data-in-call-pay] [data-pay-amount]')!.value).toBe('5');
+    $<HTMLButtonElement>('[data-call-pay-confirm]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-pay-status]')).toMatch(/sent/i));
+  });
+
+  it.each([null, A, '04' + 'b'.repeat(64)])('in-call Pay refuses an absent or invalid Lightning mapping: %s', async (ln) => {
+    const host = payHost({ peers_list: () => [{ node_id: A, ln_pubkey: ln, label: 'Maya', connected: true }] });
+    await liveCall();
+    expect($<HTMLButtonElement>('[data-call-pay]')!.disabled).toBe(true);
+    expect(text('[data-in-call-pay]')).toMatch(/Lightning.*unavailable/i);
+    expect(host.used('payment_keysend')).toHaveLength(0);
+  });
+
+  it.each(['0', '0.0001', '100000001', 'abc'])('in-call Pay rejects invalid amount %s', async (amount) => {
+    const host = payHost();
+    await liveCall(); enterCallAmount(amount);
+    expect($<HTMLButtonElement>('[data-call-pay-confirm]')!.disabled).toBe(true);
+    expect(host.used('payment_keysend')).toHaveLength(0);
+  });
+
+  it.each([
+    ['failed', /failed/i], ['inflight', /not confirmed|unknown/i],
+    ['spend_unknown', /unknown/i], ['not_dispatched', /not sent|failed/i],
+  ])('in-call Pay reports %s honestly and leaves the call live', async (status, words) => {
+    const host = payHost({ payment_keysend: () => {
+      if (status.includes('_')) throw { code: status, message: 'Check the payment result.' };
+      return { method: 'keysend', amount_msat: 5000, max_routing_fee_msat: 5000, status, paid_at_ms: Date.now() };
+    } });
+    await liveCall(); enterCallAmount();
+    $<HTMLButtonElement>('[data-call-pay-confirm]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-pay-status]')).toMatch(words));
+    expect($('[data-call-panel="live"]')).not.toBeNull();
+    expect(host.used('call_signal')).toHaveLength(1);
+    expect(host.used('op_end_call')).toHaveLength(0);
+    expect(FakePc.made[0].closed).toBe(false);
+  });
+
+  it('in-call Pay cannot dispatch after hangup or while another spend is pending', async () => {
+    const host = payHost({ budget_status: () => ({ ...openBudget(), unsettled_msat: 1000 }) });
+    await liveCall();
+    expect($<HTMLButtonElement>('[data-call-pay]')!.disabled).toBe(true);
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-pay]')).toBeNull();
+    expect(host.used('payment_keysend')).toHaveLength(0);
+  });
+
+  it('in-call Pay drops a draft on hangup and retains a late receipt on the ended card', async () => {
+    let finish!: (v: unknown) => void;
+    const host = payHost({ payment_keysend: () => new Promise(resolve => { finish = resolve; }) });
+    await liveCall(); enterCallAmount();
+    $<HTMLButtonElement>('[data-call-pay-confirm]')!.click();
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-pay-confirm]')).toBeNull();
+    finish({ method: 'keysend', amount_msat: 5000, max_routing_fee_msat: 5000, status: 'settled', paid_at_ms: Date.now() });
+    await vi.waitFor(() => expect(text('[data-call-pay-status]')).toMatch(/sent/i));
+    expect($('[data-call-panel="live"]')).toBeNull();
+    expect(host.used('payment_keysend')).toHaveLength(1);
+  });
+
+  it('in-call Pay clears the typed amount when the denomination changes', async () => {
+    const host = payHost();
+    await liveCall(); enterCallAmount();
+    setDenom('btc');
+    await vi.waitFor(() => expect($<HTMLInputElement>('[data-in-call-pay] [data-pay-amount]')!.value).toBe(''));
+    expect($<HTMLButtonElement>('[data-call-pay-confirm]')!.disabled).toBe(true);
+    expect(host.used('payment_keysend')).toHaveLength(0);
+  });
+
+  it('in-call Pay stays fenced on an unresolved check and permits a new explicit payment after reconciliation', async () => {
+    let resolved = false;
+    const host = payHost({
+      payment_keysend: () => ({ method: 'keysend', amount_msat: 5000, max_routing_fee_msat: 5000, status: 'inflight', paid_at_ms: Date.now() }),
+      spend_reconcile: () => { if (!resolved) throw { code: 'spend_unknown', message: 'Still pending.' }; return 'Payment settled; the pending slot is clear.'; },
+    });
+    await liveCall(); enterCallAmount();
+    $<HTMLButtonElement>('[data-call-pay-confirm]')!.click();
+    await vi.waitFor(() => expect($('[data-call-pay-status="unknown"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-in-call-pay] [data-spend-reconcile]')!.click();
+    await vi.waitFor(() => expect(text('[data-in-call-pay] [data-reconciliation]')).toContain('Still pending'));
+    expect($<HTMLButtonElement>('[data-call-pay]')!.disabled).toBe(true);
+    resolved = true;
+    $<HTMLButtonElement>('[data-in-call-pay] [data-spend-reconcile]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-pay]')!.disabled).toBe(false));
+    expect(text('[data-call-pay-status]')).toContain('Payment settled');
+    expect(host.used('payment_keysend')).toHaveLength(1);
+    expect(host.used('op_end_call')).toHaveLength(0);
+    enterCallAmount('7');
+    expect(host.used('payment_keysend')).toHaveLength(1);
+  });
+
+  it('in-call Pay preserves the amount when muting the same live call', async () => {
+    payHost();
+    await liveCall(); enterCallAmount('7');
+    $<HTMLButtonElement>('[data-call-mute]')!.click();
+    expect($<HTMLButtonElement>('[data-call-mute]')!.getAttribute('aria-pressed')).toBe('true');
+    expect($<HTMLInputElement>('[data-in-call-pay] [data-pay-amount]')!.value).toBe('7');
+    expect($<HTMLButtonElement>('[data-call-pay-confirm]')!.disabled).toBe(false);
+  });
+
   it('shows approval before dialling when the paired token lacks spend, and permits an explicit retry after approval', async () => {
     const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
     let approved = false;
