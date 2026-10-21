@@ -261,6 +261,7 @@ pub enum RemoteAuthResponse {
 /// Public ticket identity only; contains no pairing code or other authority.
 #[derive(Debug, Clone, Serialize)]
 pub struct RemotePreviewView {
+    pub first_run: bool,
     pub endpoint: String,
     pub node_id_fingerprint: String,
     pub hosted_by: Option<String>,
@@ -820,6 +821,7 @@ fn persist_with(
 pub fn preview_pairing_link(link: &str) -> Result<RemotePreviewView, RemoteError> {
     let descriptor = parse_pairing_link(link)?;
     Ok(RemotePreviewView {
+        first_run: descriptor.bootstrap_box_key().is_some() && descriptor.node_id().is_empty(),
         endpoint: descriptor.endpoint.clone(),
         node_id_fingerprint: node_id_fingerprint(descriptor.bootstrap_box_key().unwrap_or(&descriptor.node_id)),
         hosted_by: descriptor.hosted_by.clone(),
@@ -3466,6 +3468,26 @@ mod tests {
         ));
         assert!(matches!(error, RemoteError::HandshakeUnavailable));
         assert_eq!(error.to_string(), HANDSHAKE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn remote_dial_opens_with_a_noise_frame_not_tls() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let node = SigningKey::from_bytes(&[42; 32]);
+        let descriptor = parse_pairing_link(&signed_link(
+            listener.local_addr().unwrap().to_string(), &node, [43; 32], &test_code(44),
+        )).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(dir.path()).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut head = [0; 4];
+            stream.read_exact(&mut head).await.unwrap();
+            assert_ne!(head[0], 0x16);
+            assert_eq!(u32::from_be_bytes(head), 32);
+        });
+        assert!(connect_authenticated(&descriptor, &key, "test phone").await.is_err());
+        tokio::time::timeout(Duration::from_secs(2), server).await.unwrap().unwrap();
     }
 
     async fn responder(listener: TcpListener, secret: [u8; 32]) -> Result<(), RemoteError> {

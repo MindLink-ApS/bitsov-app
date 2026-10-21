@@ -1277,6 +1277,11 @@ async fn attach_remote(
     app_data_dir: &Path,
     descriptor: remote_access::RemoteDescriptor,
 ) {
+    #[cfg(any(mobile, feature = "mobile"))]
+    if descriptor.bootstrap_box_key().is_some() && descriptor.node_id().is_empty() {
+        *state.pairing_view.lock().unwrap() = PairingView::starting();
+        return set_error(state, "This node isn't set up yet. Finish setup on a Mac, then add this phone.");
+    }
     let descriptor = descriptor.with_pin_store(Arc::new(home_keychain::MacBoxPins));
     let store = app_data_dir.join(PAIRING_STORE_DIR);
     let key = match ClientKey::load_or_create(&store) {
@@ -1441,9 +1446,10 @@ async fn bootstrap_node(app: AppHandle) {
         Ok(directory) => directory,
         Err(error) => return set_error(&state, format!("no app data dir: {error}")),
     };
+    let _recovery = state.remote_recovery.lock().await;
+    if state.remote_proxy.lock().unwrap().is_some() { return; }
     match remote_access::load_persisted(&app_data_dir) {
         Ok(Some(descriptor)) => {
-            let _recovery = state.remote_recovery.lock().await;
             attach_remote(&state, &app_data_dir, descriptor).await;
         }
         Ok(None) => {
@@ -1552,24 +1558,25 @@ async fn finish_remote_auth(state: &NodeState, data_dir: &Path) {
 }
 
 async fn reconnect_remote(state: &NodeState) -> Result<(), String> {
+    let data_dir = state.pairing.lock().unwrap().as_ref().map(|ctx| ctx.data_dir.clone())
+        .or_else(|| app_files_dir(state))
+        .ok_or_else(|| "pairing is not available yet: the node has not started".to_string())?;
+    reconnect_remote_at(state, &data_dir).await
+}
+
+async fn reconnect_remote_at(state: &NodeState, app_data_dir: &Path) -> Result<(), String> {
     // A click while recovery is in flight joins that attempt; it never cancels
     // the cooldown or starts another bootstrap/proxy.
     let Ok(_recovery) = state.remote_recovery.try_lock() else {
         return Ok(());
     };
-    let ctx = state
-        .pairing
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| "pairing is not available yet: the node has not started".to_string())?;
     if state.remote_proxy.lock().unwrap().is_none() {
-        let descriptor = remote_access::load_persisted(&ctx.data_dir)
+        let descriptor = remote_access::load_persisted(app_data_dir)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "remote pairing descriptor is missing".to_string())?;
-        attach_remote(state, &ctx.data_dir, descriptor).await;
+        attach_remote(state, app_data_dir, descriptor).await;
     } else {
-        finish_remote_auth(state, &ctx.data_dir).await;
+        finish_remote_auth(state, app_data_dir).await;
     }
     Ok(())
 }
@@ -2416,8 +2423,8 @@ fn remote_access_preview(
     remote_access::preview_pairing_link(link.trim()).map_err(|error| error.to_string())
 }
 
-/// Validate and persist a pasted, scanned or deep-linked ticket after confirmation. The running mode is
-/// never changed in place; bootstrap selects it on the next app start.
+/// Validate and persist a confirmed ticket. Phones attach immediately; desktop
+/// bootstrap selects the saved remote node on the next app start.
 #[tauri::command(rename_all = "snake_case")]
 fn remote_access_import(
     window: WebviewWindow<impl tauri::Runtime>,
@@ -2426,22 +2433,51 @@ fn remote_access_import(
     link: String,
 ) -> Result<RemoteImportView, String> {
     reject_sealed_window(&window)?;
-    if state.remote_proxy.lock().unwrap().is_some() {
-        return Err(
-            "remote access is already active; quit BitSov before replacing its pairing link".into(),
-        );
-    }
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
+    let app_data_dir = app.path().app_data_dir()
         .map_err(|error| format!("no app data dir: {error}"))?;
-    remote_access::import_pairing_link(&app_data_dir, link.trim())
-        .map_err(|error| error.to_string())
+    remote_access_import_at(&app, &state, &app_data_dir, &link)
+}
+
+fn remote_access_import_at<R: tauri::Runtime>(
+    _app: &AppHandle<R>,
+    state: &NodeState,
+    app_data_dir: &Path,
+    link: &str,
+) -> Result<RemoteImportView, String> {
+    // Do not replace a ticket while startup/import/retry is authenticating it.
+    #[cfg(any(mobile, feature = "mobile"))]
+    let _recovery = state.remote_recovery.try_lock()
+        .map_err(|_| "remote connection is already in progress; try again when it finishes".to_string())?;
+    if state.remote_proxy.lock().unwrap().is_some() {
+        return Err("remote access is already active; quit BitSov before replacing its pairing link".into());
+    }
+    let result = remote_access::import_pairing_link(app_data_dir, link.trim())
+        .map_err(|error| error.to_string())?;
+    #[cfg(any(mobile, feature = "mobile"))]
+    {
+        *state.error.lock().unwrap() = None;
+        let app = _app.clone();
+        let app_data_dir = app_data_dir.to_path_buf();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<NodeState>();
+            let _recovery = state.remote_recovery.lock().await;
+            // Startup or another import may have attached while this task waited.
+            if state.remote_proxy.lock().unwrap().is_some() { return; }
+            match remote_access::load_persisted(&app_data_dir) {
+                Ok(Some(descriptor)) => attach_remote(&state, &app_data_dir, descriptor).await,
+                Ok(None) => {},
+                Err(error) => set_error(&state, error.to_string()),
+            }
+        });
+        return Ok(RemoteImportView { restart_required: false, ..result });
+    }
+    #[cfg(not(any(mobile, feature = "mobile")))]
+    Ok(result)
 }
 
 /// Replace the saved remote link with a reviewed ticket for another node, after
-/// the owner confirmed it. Only for an app already using a remote node; like
-/// import, it changes the next start and never the live connection. Fails
+/// the owner confirmed it. Only for an app already using a remote node; it
+/// changes the next start and never the live connection. Fails
 /// closed and keeps the old link on any error.
 #[tauri::command(rename_all = "snake_case")]
 fn remote_access_replace(
@@ -2496,13 +2532,30 @@ fn remote_access_forget(
 /// client can discard its stored pairing. Never downgrades remote auth.
 #[tauri::command(rename_all = "snake_case")]
 async fn pairing_retry(
+    app: AppHandle<impl tauri::Runtime>,
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
 ) -> Result<PairingView, String> {
     reject_sealed_window(&window)?;
     drop(window);
-    if state.remote_mode.load(Ordering::SeqCst) {
-        reconnect_remote(state.inner()).await?;
+    let app_data_dir = app.path().app_data_dir()
+        .map_err(|error| format!("no app data dir: {error}"))?;
+    pairing_retry_at(state.inner(), &app_data_dir).await
+}
+
+async fn pairing_retry_at(state: &NodeState, app_data_dir: &Path) -> Result<PairingView, String> {
+    if state.remote_mode.load(Ordering::SeqCst)
+        || remote_access::load_persisted(app_data_dir).map_err(|error| error.to_string())?.is_some()
+    {
+        // Desktop imports select the next startup when a local node is already
+        // selected. Its API listener and authenticated state cannot switch live.
+        #[cfg(all(desktop, not(feature = "mobile")))]
+        if !state.remote_mode.load(Ordering::SeqCst)
+            && (state.config.lock().unwrap().is_some() || state.external_node.lock().unwrap().is_some())
+        {
+            return Err("Restart BitSov to connect to the saved remote node.".into());
+        }
+        reconnect_remote_at(state, app_data_dir).await?;
         return Ok(state.pairing_snapshot());
     }
     let ctx = state
@@ -2517,7 +2570,7 @@ async fn pairing_retry(
     if state.stale_pairing.swap(false, Ordering::SeqCst) {
         pairing::forget_pairing(&ctx.store);
     }
-    finish_auth(state.inner(), &ctx.data_dir).await;
+    finish_auth(state, &ctx.data_dir).await;
     Ok(state.pairing_snapshot())
 }
 
@@ -8600,6 +8653,29 @@ time.sleep(60)
 #[cfg(all(test, desktop, not(feature = "mobile")))]
 mod remote_onboarding_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn saved_remote_ticket_retry_does_not_switch_a_selected_local_node() {
+        use base64::Engine;
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        let dir = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({"v": 2, "endpoint": "127.0.0.1:1234",
+            "endpoints": ["127.0.0.1:1234"], "box_transport_pubkey": "22".repeat(32),
+            "code": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([44; 32])});
+        let link = format!("bitsov://pair/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).unwrap()));
+        remote_access::import_pairing_link(dir.path(), &link).unwrap();
+        for external in [false, true] {
+            *state.config.lock().unwrap() = (!external).then(|| dir.path().join("konsensus.toml"));
+            *state.external_node.lock().unwrap() = external.then(|| dir.path().to_path_buf());
+            *state.ready.lock().unwrap() = true;
+            let error = pairing_retry_at(&state, dir.path()).await.unwrap_err();
+            assert_eq!(error, "Restart BitSov to connect to the saved remote node.");
+            assert!(!state.remote_mode.load(Ordering::SeqCst));
+            assert!(state.status_snapshot().ready);
+            assert!(state.pairing.lock().unwrap().is_none());
+            assert!(state.remote_proxy.lock().unwrap().is_none());
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn established_pairing_stays_ready_during_rate_limited_cooldown() {
@@ -18028,6 +18104,11 @@ mod assistant_acl_tests {
 
     #[test]
     fn real_acl_allows_main_and_denies_assistant() {
+        // Retry now checks persisted tickets: this ACL test must have its own
+        // empty app directory rather than reading an installed app's profile.
+        let data = tempfile::tempdir().unwrap();
+        let mut context = tauri::generate_context!(test = true);
+        context.config_mut().identifier = data.path().to_string_lossy().into_owned();
         let app = tauri::test::mock_builder()
             .manage(super::NodeState::default())
             .invoke_handler(tauri::generate_handler![
@@ -18051,7 +18132,7 @@ mod assistant_acl_tests {
             // `test = true` skips the macOS Info.plist embed. A second plain
             // generate_context!() defines `_EMBED_INFO_PLIST` again and cargo
             // test fails to link on macOS.
-            .build(tauri::generate_context!(test = true))
+            .build(context)
             .expect("test app");
 
         let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -18246,3 +18327,7 @@ mod peer_readiness_tests {
 #[cfg(all(test, desktop, not(feature = "mobile")))]
 #[path = "post_rc7_tests.rs"]
 mod post_rc7_tests;
+
+#[cfg(all(test, feature = "mobile"))]
+#[path = "mobile_import_tests.rs"]
+mod mobile_import_tests;

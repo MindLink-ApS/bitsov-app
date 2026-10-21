@@ -1,3 +1,5 @@
+export const FIRST_RUN_PHONE_MESSAGE = "This node isn't set up yet. Finish setup on a Mac, then add this phone.";
+
 // First-run onboarding model: Start node → Pair this app → Create/restore identity → Fund.
 // Pure functions over what the host reports (`node_status`, `pairing_status`), so the
 // step logic is testable without a window. The host never sends a token or key here.

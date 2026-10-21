@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Connect phones immediately after importing a remote ticket, allow reconnect from saved tickets before remote mode starts, and direct first-run box tickets to Mac setup; add mobile pairing and Noise framing regression coverage.
+
 - Align Android unlock and Remember copy with supported biometrics, remove Touch ID wording from missing-contact approval errors, ignore unrelated Android pairing intents, and cover phone flows with rendered Android Tauri tests.
 
 - Restore focus after Wallet and info/hub dialogs close, stack dialog Escape handling, focus incoming calls, expose AI composer expansion, and show pending-result checks only for pending work (UI/UX audit 2-8–2-11, 2-21).

@@ -6,7 +6,7 @@ import { DeviceApprovals } from './DeviceApprovals';
 import { SoftError } from '../control/SoftError';
 import { createEffect, createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
 import { Dynamic } from 'solid-js/web';
-import { normalizePairingLink, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
+import { FIRST_RUN_PHONE_MESSAGE, normalizePairingLink, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
 import { usePairingActivity } from '../pairingActivity';
@@ -145,6 +145,7 @@ export function Onboarding(props: {
       } finally { setPreviewing(false); }
       return;
     }
+    if (phone() && reviewed.view.first_run) return;
     if (props.confirmImport) {
       setConfirming(true);
       let confirmed = false;
@@ -364,7 +365,7 @@ export function Onboarding(props: {
         </div>
         <p class="hint connect-line">
           {props.pairing().remote ? 'This app connects to your remote node.' : phone() ? `This ${device()} is not connected to a node yet.` : 'This app connects to the node on this Mac.'}
-          <Show when={!props.pairing().remote && target() !== 'local'}> A saved pairing link takes effect at the next start.</Show>
+          <Show when={!props.pairing().remote && target() !== 'local'}> {phone() ? `This ${device()} connects as soon as you save a pairing link.` : 'A saved pairing link takes effect at the next start.'}</Show>
           <Show when={isEnrolled()}>
             {mobileBiometrics()
               ? ` Biometrics on this ${device()} can approve a contact or budget.`
@@ -568,21 +569,27 @@ export function Onboarding(props: {
         />
         <Show when={preview()}>{review => (
           <div class="panel" data-pairing-preview role="status">
+            <Show when={phone() && review().view.first_run} fallback={<>
             <p>Pair with endpoint: <bdi>{review().view.endpoint}</bdi></p>
             <p>Node ID fingerprint: <bdi>{review().view.node_id_fingerprint}</bdi></p>
             <Show when={review().view.hosted_by}>{label => <p>Hosted by <bdi>{label()}</bdi></p>}</Show>
             <p>Compare these details with your node before confirming.</p>
+            </>}>
+              <p>{FIRST_RUN_PHONE_MESSAGE}</p>
+            </Show>
           </div>
         )}</Show>
         <div class="form-actions">
+          <Show when={!(phone() && preview()?.view.first_run)}>
           <button type="submit" class="primary" disabled={busy()}>
             {importing() ? 'Saving…' : previewing() ? 'Checking ticket…' : preview() ? 'Use remote node' : 'Review pairing ticket'}
           </button>
+          </Show>
           <Show when={remoteLink() || preview() || importResult()}>
             <button type="button" class="quiet" data-cancel-pairing-review disabled={busy()} onClick={() => editLink('')}>Close ticket review</button>
           </Show>
         </div>
-        <p class="hint">The link is verified and stored for the next app start.</p>
+        <p class="hint">{phone() ? `The link is verified and saved, then this ${device()} connects to your node.` : 'The link is verified and stored for the next app start.'}</p>
         <Show when={importResult()}>
           {(result) => (
             <p class="ok-note" data-import-result>
@@ -590,7 +597,7 @@ export function Onboarding(props: {
               <Show when={result().hosted_by}>
                 {(label) => <> (hosted by <bdi data-hosted-by>{label()}</bdi>)</>}
               </Show>
-              {' '}saved. Node ID fingerprint: {result().node_id_fingerprint}. Restart BitSov to connect.
+              {' '}saved. Node ID fingerprint: {result().node_id_fingerprint}. {result().restart_required ? 'Restart BitSov to connect.' : 'Connecting to your node…'}
             </p>
           )}
         </Show>
