@@ -251,17 +251,27 @@ function MetabolismOrgan(props: OrganismProps & { fresh: { label: string; stale:
         )
       }
     >
-      <div class="energy" role="table" aria-label="Sats in and out">
-        <span role="columnheader" />
-        <span role="columnheader" class="col">1 h</span>
-        <span role="columnheader" class="col">24 h</span>
-        <span role="rowheader" class="dir">in</span>
-        <span class="sats energy-fig" data-energy="in-1h">{plus(m().hour.in_msat)}</span>
-        <span class="sats energy-fig" data-energy="in-24h">{plus(m().day.in_msat)}</span>
-        <span role="rowheader" class="dir">out</span>
-        <span class="sats energy-fig" data-energy="out-1h">{minus(m().hour.out_msat)}</span>
-        <span class="sats energy-fig" data-energy="out-24h">{minus(m().day.out_msat)}</span>
-      </div>
+      <table class="energy" aria-label="Sats in and out">
+        <thead>
+          <tr>
+            <th scope="col"><span class="sr-only">Direction</span></th>
+            <th scope="col" class="col">1 h</th>
+            <th scope="col" class="col">24 h</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row" class="dir">in</th>
+            <td class="sats energy-fig" data-energy="in-1h">{plus(m().hour.in_msat)}</td>
+            <td class="sats energy-fig" data-energy="in-24h">{plus(m().day.in_msat)}</td>
+          </tr>
+          <tr>
+            <th scope="row" class="dir">out</th>
+            <td class="sats energy-fig" data-energy="out-1h">{minus(m().hour.out_msat)}</td>
+            <td class="sats energy-fig" data-energy="out-24h">{minus(m().day.out_msat)}</td>
+          </tr>
+        </tbody>
+      </table>
       <Show when={m().bars}>{(b) => <Bars bars={b()} now={props.now} />}</Show>
       <Show when={idle(m().hour)}>
         <p class="organ-line" data-energy-idle>No energy crossed in the last hour.</p>

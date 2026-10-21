@@ -2273,7 +2273,7 @@ function SettingsDisplay(props: { own: OwnStun | null }) {
           )}
         </For>
       </div>
-      <p class="hint">Balances and costs use this unit everywhere. Payment amounts to the node stay in millisatoshis.</p>
+      <p class="hint">Balances and costs use this unit everywhere. Your node still counts each payment in millisatoshis (1 sat = 1,000).</p>
       <CallSettings own={props.own} />
     </div>
   );

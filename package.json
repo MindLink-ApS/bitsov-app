@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build --configLoader runner",
     "test": "vitest run --configLoader runner",
+    "a11y": "playwright test -c playwright.a11y.config.ts",
     "preview": "vite preview",
     "authority": "scripts/authority-check.sh",
     "check:layout": "node scripts/ui-layout/meeting-planner-check.mjs",
@@ -25,6 +26,8 @@
     "solid-js": "^1.9.16"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.10.2",
+    "@playwright/test": "^1.56.1",
     "@tauri-apps/cli": "^2",
     "happy-dom": "^20.14.5",
     "typescript": "^5.6.0",
