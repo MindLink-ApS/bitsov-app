@@ -1,4 +1,4 @@
-import { isMobilePlatform } from './platform';
+import { appPlatform, isMobilePlatform } from './platform';
 import { pollWatchBatch, statusWatchSamples, watchPoller, type WatchSamples, type WatchUpdates } from './control/watches';
 import type { AssistantId } from './control/assistants';
 import { LockedNode, RememberUnlock } from './onboarding/LockedNode';
@@ -49,7 +49,8 @@ function AppScreen() {
   const sample = sampleRequest(window.location.search, inHost(), import.meta.env.DEV);
   const canScanPairingQr = androidQrScannerAvailable();
   // Android or iOS: the first run has no "This Mac" (the scanner gate above stays Android-only).
-  const onPhone = isMobilePlatform();
+  const platform = appPlatform();
+  const onPhone = isMobilePlatform(platform);
   // A desktop (macOS) webview scans with the camera; jsQR loads only on Scan.
   const desktopScan = !canScanPairingQr && cameraQrScannerAvailable();
   const [pairingRequest, setPairingRequest] = createSignal<{ link: string } | null>(null);
@@ -404,7 +405,7 @@ function AppScreen() {
       <aside role="alert" class="panel" data-owner-warning>{status().owner_warning}</aside>
     </Show>
     <Show when={showRemember()}>
-      <RememberUnlock mobile={canScanPairingQr} onChoose={async (remember) => {
+      <RememberUnlock mobile={canScanPairingQr} platform={platform} onChoose={async (remember) => {
         // The host consumes the offer during storage. Keep this dialog mounted
         // across polls so a slow save retains its busy state and any refusal.
         setRememberChoosing(true);
@@ -419,6 +420,7 @@ function AppScreen() {
     </Show>
     <Show when={!status().locked} fallback={<LockedNode
       mobile={canScanPairingQr}
+      platform={platform}
       typedUnlockSupported={status().typed_unlock_supported}
       state={status().unlock_state}
       pending={status().pending_device}
@@ -433,11 +435,12 @@ function AppScreen() {
     <Show
       when={trustAck()}
       fallback={
-        <ControlCenter remote={pairing().remote} retryAfterSecs={status().retry_after_secs} onReconnect={retryPairing} source={source()} active={false} ready={status().ready} error={status().error} ownId={status().node_id} firstRun={firstRun} />
+        <ControlCenter remote={pairing().remote} phone={onPhone} retryAfterSecs={status().retry_after_secs} onReconnect={retryPairing} source={source()} active={false} ready={status().ready} error={status().error} ownId={status().node_id} firstRun={firstRun} />
       }
     >
       <ControlCenter
         remote={pairing().remote}
+        phone={onPhone}
         hostedBy={pairing().hosted_by ?? null}
         offline={offlineScreen()}
         retryAfterSecs={status().retry_after_secs}
