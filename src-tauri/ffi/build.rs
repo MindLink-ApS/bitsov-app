@@ -92,6 +92,7 @@ fn build_device_key_swift() {
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=bitsov_device_key");
+    if ios { println!("cargo:rustc-link-lib=framework=UIKit"); }
     for framework in ["CryptoKit", "LocalAuthentication", "Security", "Foundation"] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }

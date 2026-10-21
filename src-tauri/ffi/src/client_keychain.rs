@@ -3,6 +3,7 @@ use std::{ffi::CString, path::Path};
 use zeroize::Zeroizing;
 
 unsafe extern "C" {
+    fn bitsov_app_is_backgrounded() -> i32;
     fn bitsov_exclude_app_backup(path: *const std::ffi::c_char) -> i32;
     fn bitsov_client_key_read(path: *const std::ffi::c_char, output: *mut u8) -> i32;
     fn bitsov_client_key_add(path: *const std::ffi::c_char, seed: *const u8) -> i32;
@@ -58,4 +59,12 @@ pub fn delete(path: &Path) -> Result<(), String> {
         0 => Ok(()),
         status => Err(error(status)),
     }
+}
+
+/// Capture launch lifecycle state without reading identity or Keychain data.
+/// Used on the setup thread to distinguish background launch from initial focus.
+pub fn app_is_backgrounded() -> bool {
+    // SAFETY: no pointers cross the boundary. Swift checks main-thread access
+    // before querying UIKit and otherwise conservatively returns false.
+    unsafe { bitsov_app_is_backgrounded() == 1 }
 }

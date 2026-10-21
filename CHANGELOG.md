@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Show restart guidance after Forget cancels desktop startup, resume the previous phone connection after a ticket-save failure, and retry locked-Keychain fresh-install cleanup once on foreground while keeping identity use blocked. Make remote cancellation tests tolerant of loaded CI.
+
 - Let Forget and replacement phone tickets cancel a stalled remote connection without restarting; preserve retry backoff and consumed-ticket handling, prevent desktop Reconnect during local startup, and align the generated iOS Local Network description.
 
 - Security: Give fresh iOS installs a new client identity by removing orphaned Keychain and legacy client keys before setup; preserve existing app/pairing data and safely retry interrupted cleanup.
