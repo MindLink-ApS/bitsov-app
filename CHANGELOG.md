@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fall back to uncached Rust compilation when sccache setup or its cache backend fails, so cache outages do not fail CI (app #280).
+
 - Align Android unlock and Remember copy with supported biometrics, remove Touch ID wording from missing-contact approval errors, ignore unrelated Android pairing intents, and cover phone flows with rendered Android Tauri tests.
 
 - Restore focus after Wallet and info/hub dialogs close, stack dialog Escape handling, focus incoming calls, expose AI composer expansion, and show pending-result checks only for pending work (UI/UX audit 2-8–2-11, 2-21).
