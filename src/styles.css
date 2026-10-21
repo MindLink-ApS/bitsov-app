@@ -44,6 +44,8 @@
   --ok: #5bc98a;
   --warn: #e0b04a;
   --err: #ec7356;
+  /* Text on an --err fill (Hang up, Cancel call): dark ink in dark mode for 4.5:1. */
+  --err-ink: #1a0905;
 
   /* semantic aliases: say what a colour means, not what it looks like */
   --money: var(--accent);
@@ -121,6 +123,7 @@ html[data-theme='light'] {
   --ok: #217346;
   --warn: #8a6500;
   --err: #c0391f;
+  --err-ink: #ffffff;
 
   --bubble-in-bg: #f0eee9;
   --bubble-in-ink: #21201c;
@@ -242,7 +245,10 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 /* track */
 .track { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--bg); }
 .track-head { display: flex; align-items: center; gap: var(--s-3); padding: var(--s-4) var(--s-6); border-bottom: 1px solid var(--line); min-height: 56px; }
-.track-head h1 { font-size: var(--t-lg); flex: none; font-weight: 600; }
+.track-head h1 { font-size: var(--t-lg); flex: 0 1 auto; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A long name shrinks and ellipsizes; it never runs under the call buttons (a tap on it must not ring anyone). */
+.track-head > .track-title-btn { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.track-head > .call-buttons, .track-head > .context-toggle { flex: none; }
 .track-head .sub { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track-head .price { font-size: var(--t-sm); color: var(--muted); }
 .track-head .price .sats { color: var(--accent); }
@@ -383,6 +389,8 @@ select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: 
 .amount-field { display: flex; align-items: baseline; justify-content: center; gap: var(--s-2); padding: var(--s-2) 0; }
 .amount-field .amount-input { width: 9ch; min-width: 0; flex: 0 1 auto; text-align: right; font-size: var(--t-3xl); font-weight: 600; letter-spacing: -0.02em; background: transparent; border: none; padding: 0; font-variant-numeric: tabular-nums; }
 .amount-field .amount-input:focus { background: transparent; border: none; outline: none; }
+/* The amount input draws no ring of its own: the field shows where the keyboard is. */
+.amount-field:has(.amount-input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-control); }
 .amount-field .amount-value { font-size: var(--t-3xl); font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .amount-field .amount-unit { font-size: var(--t-lg); color: var(--muted); }
 .amount-field.invalid .amount-input { color: var(--err); }
@@ -942,6 +950,16 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 /* ---- calls (regtest prototype) ---- */
 .track > .call-network-note { margin: 0; max-width: none; flex: none; padding: var(--s-2) var(--s-6); font-size: var(--t-xs); color: var(--faint); border-bottom: 1px solid var(--line); }
 .call-buttons { display: flex; gap: var(--s-2); flex: none; }
+.track-head:has(.call-confirm) { position: relative; }
+/* Call / Video call ask first: a small confirm under the header buttons, with the price. */
+/* Above the stream and composer (2), below every menu, sheet and modal (avatar 6+, settings 20/21, wallet 18). */
+.call-confirm { position: absolute; top: calc(100% - 4px); right: var(--s-4); z-index: 4; width: max-content; max-width: min(320px, calc(100vw - 2 * var(--s-4))); display: grid; gap: var(--s-2); padding: var(--s-3); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-panel); box-shadow: 0 8px 24px rgb(0 0 0 / 0.18); }
+/* One column that may shrink: a 64-character petname wraps instead of pushing Cancel and Ring off screen. */
+.call-confirm { grid-template-columns: minmax(0, 1fr); }
+.call-confirm-text { margin: 0; font-size: var(--t-sm); min-width: 0; overflow-wrap: anywhere; }
+.call-confirm-actions { min-width: 0; flex-wrap: wrap; }
+.call-confirm-text .hint { display: block; margin-top: 2px; }
+.call-confirm-actions { display: flex; gap: var(--s-2); justify-content: flex-end; }
 .call-button { font-size: var(--t-sm); padding: 4px 10px; }
 .call-button.icon-btn { width: 34px; height: 34px; padding: 0; border: none; border-radius: 50%; background: transparent; color: var(--muted); }
 .call-button.icon-btn:hover:not(:disabled) { background: var(--surface); color: var(--ink); }
@@ -981,7 +999,7 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 .call-panel .duration { font-variant-numeric: tabular-nums; color: var(--accent); }
 .call-actions { display: flex; flex-wrap: wrap; gap: var(--s-2); }
 .call-actions button { flex: 1; }
-button.danger { background: var(--err); color: #fff; border: none; }
+button.danger { background: var(--err); color: var(--err-ink); border: none; }
 .call-videos { position: relative; border-radius: 10px; overflow: hidden; background: #000; aspect-ratio: 4 / 3; }
 .call-video.remote { width: 100%; height: 100%; object-fit: cover; }
 .call-video.local { position: absolute; right: 8px; bottom: 8px; width: 30%; border-radius: 6px; border: 1px solid var(--line-strong); }
