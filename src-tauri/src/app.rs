@@ -2579,6 +2579,7 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
             // Join teardown under remote_change/recovery, outside the spawned
             // task's cancellation select. A second Connect/Forget must wait for
             // the surviving listener and its sockets to close before rebinding.
+            *state.ready.lock().unwrap() = false;
             let previous = state.remote_proxy.lock().unwrap().take();
             if let Some(proxy) = previous { proxy.stop_and_wait().await; }
             spawn_remote_connect(app, dir, true);
@@ -7220,16 +7221,29 @@ struct DeviceKeyReply {
 
 /// Read the local key only when its public key agrees with the registration.
 /// A bridge/transport failure is retryable, not evidence of invalidation.
-fn local_key(store: &Path) -> Result<Option<(Vec<u8>, device::Record)>, ActionError> {
-    local_key_with(store, device_key::public_key)
+fn local_key(state: &NodeState, store: &Path) -> Result<Option<(Vec<u8>, device::Record)>, ActionError> {
+    local_key_with(state, store, device_key::public_key)
 }
 
 fn local_key_with(
+    state: &NodeState,
     store: &Path,
     public_key: impl FnOnce(&[u8]) -> Result<[u8; device_key::PUBLIC_KEY_LEN], device_key::DeviceKeyError>,
 ) -> Result<Option<(Vec<u8>, device::Record)>, ActionError> {
+    // Keep cleanup in the same critical section as the read, so registration
+    // cannot publish a new record between observing absence and removing it.
+    let _guard = state.device_lifecycle.lock().unwrap();
     let Some(record) = device::load_record(store) else { return Ok(None); };
-    let Some(blob) = device::load_blob(store) else { return Ok(None); };
+    let blob = match device::read_private(&store.join(device::BLOB_FILE)) {
+        Ok(Some(blob)) => blob,
+        Ok(None) => {
+            // Only a confirmed missing blob makes the record stale. Never
+            // remove a blob here, including one created after the read.
+            let _ = std::fs::remove_file(store.join(device::RECORD_FILE));
+            return Ok(None);
+        }
+        Err(_) => return Ok(None),
+    };
     match public_key(&blob) {
         Ok(public) if hex::encode(public) == record.public_key => Ok(Some((blob, record))),
         Ok(_) | Err(device_key::DeviceKeyError::Invalid) => {
@@ -7254,7 +7268,7 @@ async fn do_device_key_status(state: &NodeState) -> Result<device::DeviceView, A
 
 async fn do_device_key_status_local(state: &NodeState) -> Result<device::DeviceView, ActionError> {
     let store = device_store(state)?;
-    let Some((_, record)) = local_key(&store)? else { return Ok(device_view(state, None)) };
+    let Some((_, record)) = local_key(state, &store)? else { return Ok(device_view(state, None)) };
     // What this poll found, applied only if the record is still the one polled.
     let before = record.clone();
     let mut updated = record;
@@ -7353,7 +7367,7 @@ async fn do_device_key_register(state: &NodeState) -> Result<device::DeviceView,
         return Err(device_error(device_key::DeviceKeyError::BiometryUnavailable));
     }
     let store = device_store(state)?;
-    let existing = local_key(&store)?;
+    let existing = local_key(state, &store)?;
     if let Some((_, r)) = existing.as_ref().filter(|(_, r)| r.registered) {
         return Ok(device_view(state, Some(r)));
     }
@@ -7455,7 +7469,7 @@ async fn do_relation_approve(
     // at the dialog, or while the node answers, opens nothing.
     let fence = approval_fence(state);
     let store = device_store(state)?;
-    let Some((blob, record)) = local_key(&store)?.filter(|(_, r)| r.registered) else {
+    let Some((blob, record)) = local_key(state, &store)?.filter(|(_, r)| r.registered) else {
         return Err(ActionError::new("device_not_registered", if cfg!(target_os = "android") {
             "Set up biometric approvals first."
         } else {
@@ -9124,6 +9138,66 @@ mod device_sign_error_tests {
     use super::*;
 
     #[test]
+    fn local_key_waits_for_registration_before_cleaning_a_missing_blob() {
+        let state = Arc::new(NodeState::for_api("http://127.0.0.1:1/api/v1"));
+        let dir = tempfile::tempdir().unwrap();
+        device::save_record(dir.path(), &device::Record::default()).unwrap();
+        let guard = state.device_lifecycle.lock().unwrap();
+        let reader_state = Arc::clone(&state);
+        let store = dir.path().to_path_buf();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = local_key_with(&reader_state, &store, |_| Ok([4; 65]));
+            done_tx.send(()).unwrap();
+            result
+        });
+        started_rx.recv().unwrap();
+        let early = done_rx.recv_timeout(Duration::from_millis(100));
+        let blob = b"new wrapped key";
+        let record = device::Record { public_key: hex::encode([4; 65]), registered: true, ..Default::default() };
+        device::save_blob(dir.path(), blob).unwrap();
+        device::save_record(dir.path(), &record).unwrap();
+        drop(guard);
+        let result = reader.join().unwrap().unwrap();
+        assert!(matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "key reads must wait for registration to finish publishing");
+        assert_eq!(result, Some((blob.to_vec(), record.clone())));
+        assert_eq!(device::load_blob(dir.path()).as_deref(), Some(blob.as_slice()));
+        assert_eq!(device::load_record(dir.path()), Some(record));
+    }
+
+    #[test]
+    fn local_key_removes_the_stale_record_when_the_blob_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = device::Record { registered: true, ..Default::default() };
+        device::save_record(dir.path(), &record).unwrap();
+        assert!(local_key_with(&NodeState::for_api("http://127.0.0.1:1/api/v1"), dir.path(), |_| panic!("missing blob must not reach the bridge"))
+            .unwrap().is_none());
+        assert!(!dir.path().join(device::RECORD_FILE).exists());
+        assert!(!dir.path().join(device::BLOB_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_key_preserves_the_record_and_blob_on_a_private_file_read_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let record = device::Record { registered: true, ..Default::default() };
+        let blob = b"synthetic wrapped key";
+        device::save_record(dir.path(), &record).unwrap();
+        device::save_blob(dir.path(), blob).unwrap();
+        let path = dir.path().join(device::BLOB_FILE);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(device::read_private(&path).is_err());
+        assert!(local_key_with(&NodeState::for_api("http://127.0.0.1:1/api/v1"), dir.path(), |_| panic!("unreadable blob must not reach the bridge"))
+            .unwrap().is_none());
+        assert_eq!(device::load_record(dir.path()), Some(record));
+        assert_eq!(std::fs::read(path).unwrap(), blob);
+    }
+
+    #[test]
     fn local_key_preserves_transport_failures_but_forgets_invalid_or_mismatched_keys() {
         use device_key::DeviceKeyError::*;
         for public in [Err(Other(-6)), Err(Unavailable), Err(Cancelled), Err(BiometryUnavailable),
@@ -9133,7 +9207,7 @@ mod device_sign_error_tests {
             let record = device::Record { public_key: hex::encode([4; 65]), registered: true, ..Default::default() };
             device::save_blob(dir.path(), blob).unwrap();
             device::save_record(dir.path(), &record).unwrap();
-            let result = local_key_with(dir.path(), |_| public);
+            let result = local_key_with(&NodeState::for_api("http://127.0.0.1:1/api/v1"), dir.path(), |_| public);
             match public {
                 value if value == Err(Invalid) || value == Ok([5; 65]) => {
                     assert!(result.unwrap().is_none());

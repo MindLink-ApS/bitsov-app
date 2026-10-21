@@ -103,7 +103,7 @@ pub async fn recover(
     let Some(saved) = Recovery::load(&ctx.store)? else {
         return Ok(descriptor.clone());
     };
-    let (_, mut record) = local_key(&ctx.store).map_err(|e| e.message)?.ok_or("Missing setup device key.")?;
+    let (_, mut record) = local_key(state, &ctx.store).map_err(|e| e.message)?.ok_or("Missing setup device key.")?;
     saved.validate(&ctx, descriptor, &record)?;
     let descriptor = if descriptor.bootstrap_box_key().is_some() {
         let proofs = state

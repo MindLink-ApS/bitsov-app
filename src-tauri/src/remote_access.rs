@@ -954,34 +954,6 @@ pub fn replaces_another_node(current: &RemoteDescriptor, next: &RemoteDescriptor
     !pinned_identity(current).eq_ignore_ascii_case(pinned_identity(next))
 }
 
-/// Replace the saved remote link with a ticket for another node, for the next
-/// start. Fails closed: the ticket is parsed first, a saved link must still
-/// exist, and the new file is written beside it and renamed over it, so any
-/// failure keeps the old link. Node-scoped keychain items and the pairing
-/// record are untouched here; the new node's first pairing replaces the record.
-pub fn replace_pairing_link(
-    app_data_dir: &Path,
-    link: &str,
-) -> Result<RemoteImportView, RemoteError> {
-    let next = parse_pairing_link(link)?;
-    let sealer = at_rest::installed();
-    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
-    let path = config_path(app_data_dir);
-    let current = load_with(&path, sealer)?.ok_or_else(|| {
-        RemoteError::Local("no saved remote node to replace; restart BitSov and try again".into())
-    })?;
-    if !replaces_another_node(&current, &next) {
-        return Err(RemoteError::Invalid("this ticket is for the node you already use".into()));
-    }
-    persist_with(&path, &next, sealer)?;
-    Ok(RemoteImportView {
-        endpoint: next.endpoint.clone(),
-        node_id_fingerprint: node_id_fingerprint(pinned_identity(&next)),
-        hosted_by: next.hosted_by.clone(),
-        restart_required: true,
-    })
-}
-
 /// Forget only the startup link. Local keys, identity and live transport are untouched.
 pub fn forget_persisted(app_data_dir: &Path) -> Result<(), RemoteError> {
     let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
@@ -2799,46 +2771,6 @@ mod tests {
         let node = SigningKey::from_bytes(&[seed; 32]);
         let transport = X25519PublicKey::from(&StaticSecret::from([seed.wrapping_add(1); 32])).to_bytes();
         signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(seed))
-    }
-
-    #[test]
-    fn replacing_needs_a_saved_link_and_another_node() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(replace_pairing_link(dir.path(), &link_for(21)), Err(RemoteError::Local(_))));
-        assert!(load_persisted(dir.path()).unwrap().is_none());
-
-        import_pairing_link(dir.path(), &link_for(21)).unwrap();
-        let before = std::fs::read(config_path(dir.path())).unwrap();
-        assert!(matches!(replace_pairing_link(dir.path(), &link_for(21)), Err(RemoteError::Invalid(_))));
-        assert!(matches!(replace_pairing_link(dir.path(), "bitsov://pair/not-a-ticket"), Err(RemoteError::Invalid(_))));
-        assert_eq!(std::fs::read(config_path(dir.path())).unwrap(), before);
-    }
-
-    #[test]
-    fn replacing_swaps_the_saved_link_for_the_new_node() {
-        let dir = tempfile::tempdir().unwrap();
-        import_pairing_link(dir.path(), &link_for(21)).unwrap();
-        let view = replace_pairing_link(dir.path(), &link_for(31)).unwrap();
-        assert!(view.restart_required);
-        let saved = load_persisted(dir.path()).unwrap().unwrap();
-        let expected = parse_pairing_link(&link_for(31)).unwrap();
-        assert_eq!(saved.node_id(), expected.node_id());
-        assert!(saved.has_code());
-        assert_eq!(view.node_id_fingerprint, node_id_fingerprint(expected.node_id()));
-    }
-
-    #[test]
-    fn a_failed_replacement_keeps_the_old_link() {
-        let dir = tempfile::tempdir().unwrap();
-        import_pairing_link(dir.path(), &link_for(21)).unwrap();
-        let before = std::fs::read(config_path(dir.path())).unwrap();
-        // A directory where the temporary file goes makes the write fail.
-        let tmp = config_path(dir.path()).with_file_name(format!("{REMOTE_CONFIG_FILE}.tmp"));
-        std::fs::create_dir_all(&tmp).unwrap();
-        assert!(replace_pairing_link(dir.path(), &link_for(31)).is_err());
-        assert_eq!(std::fs::read(config_path(dir.path())).unwrap(), before);
-        let kept = load_persisted(dir.path()).unwrap().unwrap();
-        assert_eq!(kept.node_id(), parse_pairing_link(&link_for(21)).unwrap().node_id());
     }
 
     #[test]

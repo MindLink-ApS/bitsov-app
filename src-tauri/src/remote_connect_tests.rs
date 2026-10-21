@@ -394,13 +394,15 @@ async fn failed_import_replaces_surviving_proxy_and_finishes_auth() {
     let mut idle = tokio::net::TcpStream::connect(addr).await.unwrap();
     *state.remote_proxy.lock().unwrap() = Some(proxy);
     state.remote_mode.store(true, Ordering::SeqCst);
-    // Simulate cancellation after publishing the proxy but before auth finishes.
+    // A previously ready connection must be hidden during failed-import teardown.
+    *state.ready.lock().unwrap() = true;
     // A directory at the atomic-write staging path makes import fail without
     // damaging the previous persisted descriptor.
     let staging = dir.path().join(remote_access::REMOTE_CONFIG_DIR).join(format!("{}.tmp", remote_access::REMOTE_CONFIG_FILE));
     std::fs::create_dir(&staging).unwrap();
     let next = ticket_for("127.0.0.1:1".into(), false, 41);
     let result = remote_access_connect_at(app.handle(), &state, dir.path(), &next).await;
+    assert!(!state.status_snapshot().ready, "failed import must hide readiness before reconnecting");
     std::fs::remove_dir(staging).unwrap();
     assert!(result.is_err());
     assert_eq!(remote_access::load_persisted(dir.path()).unwrap().unwrap().node_id(), old_id);
