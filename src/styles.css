@@ -1427,3 +1427,10 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .connection-card { margin: var(--s-3) 0; padding: var(--s-3); border: 1px solid var(--line); border-radius: var(--r-md, 10px); }
 .connection-card h3 { margin: 0 0 var(--s-2); font-size: var(--t-sm); }
 .connection-card .facts-list { list-style: none; padding: 0; margin: 0 0 var(--s-2); display: grid; gap: 4px; font-size: var(--t-sm); color: var(--muted); }
+
+/* Profile: a file picker in the app's own words (the native control is visually hidden). */
+.file-pick { position: relative; }
+.file-pick-row { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
+.file-pick-btn { display: inline-flex; align-items: center; min-height: 36px; padding: 6px 14px; border-radius: 999px; background: var(--raised); border: 1px solid var(--line-strong); color: var(--ink); font-size: var(--t-sm); cursor: pointer; }
+.file-pick:focus-within .file-pick-btn { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 480px) { .file-pick-btn { min-height: 44px; } }

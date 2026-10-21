@@ -3,6 +3,7 @@
 // `ProviderView`; nothing here reads the node or asks the host.
 
 import type { Preset, ProviderKind, ProviderView } from '../control/types';
+import { deviceWord } from '../platform';
 
 /** Own (green), Shared open (amber), Frontier (red). */
 export type Tier = 'own' | 'shared' | 'frontier';
@@ -12,7 +13,8 @@ export type BadgeInput = Pick<ProviderView, 'kind' | 'host' | 'model' | 'pays' |
 /** The rules on this computer: no model, nobody paid, nothing leaves. */
 export const OWN_RULES: ProviderView = {
   kind: 'local',
-  label: 'On this computer',
+  // A getter: "On this phone" on a phone build.
+  get label() { return `On this ${deviceWord()}`; },
   enabled: true,
   host: null,
   model: null,
@@ -54,7 +56,7 @@ export function endpointBadge(p: BadgeInput, previewed: Preset | null = null): B
   const name = TIER_NAME[tier];
   // Own, or a remote that is off: nothing can leave and nobody is paid.
   if (tier === 'own' || p.data_leaves === null) {
-    const where = tier === 'own' ? `On this computer · ${p.model ?? 'rules'}` : 'Off on this computer';
+    const where = tier === 'own' ? `On this ${deviceWord()} · ${p.model ?? 'rules'}` : `Off on this ${deviceWord()}`;
     const quiet = { tier, name, where, paid: 'Nobody is paid', leaves: 'Nothing leaves' };
     return { ...quiet, text: join(quiet) };
   }
