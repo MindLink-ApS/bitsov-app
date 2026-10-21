@@ -3,7 +3,7 @@
  * Petnames never leave the device. Peer labels / profile names are suggestions.
  */
 
-import { createEffect, createMemo, createSignal, on, Show, untrack, type JSX } from 'solid-js';
+import { createEffect, createMemo, createSignal, on, onCleanup, Show, untrack, type JSX } from 'solid-js';
 import { qrSvg } from '../qr';
 import { shortId } from './format';
 import {
@@ -91,6 +91,20 @@ export function ContactPanel(props: {
     setDraft(untrack(() => petnameOf(contactKey())) ?? draft());
   };
 
+  // Open: focus moves to Close and Escape closes; closing returns focus to
+  // whatever opened the panel (the contact name in the chat header).
+  let panel: HTMLElement | undefined;
+  createEffect(() => {
+    if (!props.open) return;
+    const opener = document.activeElement as HTMLElement | null;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') props.onClose(); };
+    queueMicrotask(() => panel?.querySelector<HTMLElement>('[data-contact-close]')?.focus());
+    window.addEventListener('keydown', onKey);
+    onCleanup(() => {
+      window.removeEventListener('keydown', onKey);
+      if (opener && opener.isConnected && panel?.contains(document.activeElement)) opener.focus();
+    });
+  });
   return (
     <>
       <div
@@ -100,6 +114,7 @@ export function ContactPanel(props: {
         onClick={() => props.onClose()}
       />
       <aside
+        ref={panel}
         class="context settings-modal contact-panel"
         classList={{ open: props.open }}
         aria-label="Contact"
