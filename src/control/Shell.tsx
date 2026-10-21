@@ -4000,11 +4000,14 @@ export function opStateText(op: OpView, subject = 'This app’s record'): string
  * spend_unknown, payment_unknown, budget_unreadable (raw after a paid retry,
  * refine_retry_fee 4413), app_not_ready (close_charge 4040 after payment),
  * node (transport loss can follow dispatch), and any code not listed.
+ * Call-rules reasons below are mapped only for HTTP 400 on a 1:1 call compose;
+ * the node's reserve_outgoing refuses before operation creation or payment.
  */
 const PROVEN_UNPAID = new Set([
   'owner_only', 'owner_contact_unavailable', 'owner_contact_expired', 'sponsor_owner_approval_required',
   'price_changed', 'price_cap_unavailable', 'price_quote_unavailable', 'peer_not_ready', 'room_unreachable', 'invalid', 'retry_unavailable',
   'spend_refused', 'not_ready', 'not_dispatched', 'price_cap_exceeded', 'readmission_capped', 'readmission_quoted', 'operation_mismatch', 'retry_needs_admission',
+  'call_id_used', 'call_busy', 'call_signal_in_flight', 'call_signal_invalid', 'call_not_live',
   'grant_ended', 'grant_per_call', 'grant_exhausted', 'grant_recipient', 'grant_unpriced', 'grant_paused', 'grant_failures_pending', 'grant_rate_limited',
   'grant_velocity', 'grant_ledger', 'grant_refused', 'grant_first_contact', 'grant_readmission', 'grant_no_envelope', 'grant_unknown',
   'spend_locked', 'spend_expired', 'budget_needed', 'budget_paused', 'budget_exhausted', 'ceiling_exhausted', 'budget_ledger_full', 'first_contact',

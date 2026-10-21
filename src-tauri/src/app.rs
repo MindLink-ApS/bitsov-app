@@ -4359,6 +4359,31 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         abandon(&journal)?;
         return Err(ActionError::new("not_dispatched", act::not_dispatched_message(&text)));
     }
+    // Node main b21e9a94 / rc18 20c6449e: calls::refused is used only by
+    // reserve_outgoing, before compose_locked creates/executes the operation.
+    // This proves unpaid only for a fresh attempt (new operation id or none).
+    // An existing kind-400 operation can return call_id_used after ring expiry
+    // while its earlier payment is unresolved; delivery retries also stay held.
+    let fresh_operation = operation_id.is_none()
+        || prior.as_ref().and_then(|p| p.operation_id.as_ref()) != operation_id.as_ref();
+    if retry.is_none() && fresh_operation && one_to_one
+        && body["kind"].as_u64().is_some_and(|kind| (400..=403).contains(&kind))
+        && status == reqwest::StatusCode::BAD_REQUEST {
+        if let Some(reason) = serde_json::from_str::<serde_json::Value>(&text).ok()
+            .and_then(|v| match v["reason"].as_str()? {
+                "call_id_used" => Some("call_id_used"),
+                "call_busy" => Some("call_busy"),
+                "call_signal_in_flight" => Some("call_signal_in_flight"),
+                "call_signal_invalid" => Some("call_signal_invalid"),
+                "call_not_live" => Some("call_not_live"),
+                _ => None,
+            }) {
+            release(state)?;
+            // abandon records Unpaid before restoring/clearing the slot.
+            abandon(&journal)?;
+            return Err(ActionError::new(reason, "The node refused this call signal before payment. Nothing was paid."));
+        }
+    }
     // G1: the node refused under its grant before reserving or paying anything.
     if let Some(refusal) = grant::refusal(status.as_u16(), &text) {
         release(state)?;
@@ -10179,15 +10204,22 @@ mod control_act_tests {
             (409, r#"{"code":"payment_unresolved"}"#, "payment_unknown", "unknown", true),
             (500, "{}", "spend_unknown", "unknown", true),
             (200, "broken", "spend_unknown", "unknown", true),
-            // H2 alone changes these call refusals into proven non-dispatch.
-            (400, r#"{"reason":"call_not_live"}"#, "spend_unknown", "unknown", true),
+            // A call-rules refusal is proven unpaid only for a call signal.
+            (400, r#"{"reason":"call_not_live"}"#, "call_not_live", "unpaid", false),
         ] {
             let (inner, _) = ops_node();
+            let calls = call_routes(Some(10000));
             let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
-                if p == "/messages/compose" { (status, body.into()) } else { inner(m, p, b) }
+                if p == "/messages/compose" { (status, body.into()) }
+                else if p == "/status" { inner(m, p, b) }
+                else { calls(m, p, b) }
             }));
             spend_advance(&node.state, true).await.unwrap();
-            let err = do_message_send(&node.state, A, false, "PRIVATE", 14000, None).await.unwrap_err();
+            let err = if code == "call_not_live" {
+                do_call_signal(&node.state, A, 403, OFFER, 14000).await.unwrap_err()
+            } else {
+                do_message_send(&node.state, A, false, "PRIVATE", 14000, None).await.unwrap_err()
+            };
             if !matches!(status, 401 | 403) { assert_eq!(err.code, code, "{body}"); }
             let id = op_ids(&node)[0].clone().unwrap();
             assert_eq!(serde_json::to_value(&err).unwrap()["operation_id"], id);
@@ -10197,6 +10229,158 @@ mod control_act_tests {
             assert_eq!(pending(&node).is_some(), held, "existing single-slot fence: {body}");
             assert_eq!(ledger_record(&node, &id), record, "record is retained");
         }
+    }
+
+    #[tokio::test]
+    async fn call_rules_refusals_release_budget_and_record_unpaid() {
+        for reason in ["call_id_used", "call_busy", "call_signal_in_flight", "call_signal_invalid", "call_not_live"] {
+            for kind in 400..=403 {
+                let (ops, _) = ops_node();
+                let calls = call_routes(Some(10000));
+                let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                    if p == "/messages/compose" { (400, serde_json::json!({"reason": reason}).to_string()) }
+                    else if p == "/status" { ops(m, p, b) }
+                    else { calls(m, p, b) }
+                }));
+                do_budget_approve(&node.state, 500000, budget::PresetId::Careful).await.unwrap();
+                with_book(&node.state, true, |b| b.set_limit(A, false, 50000)).unwrap();
+                let err = do_call_signal(&node.state, A, kind, OFFER, 15000).await.unwrap_err();
+                assert_eq!(err.code, reason, "kind {kind}");
+                assert_eq!(err.message, "The node refused this call signal before payment. Nothing was paid.");
+                let id = op_ids(&node)[0].clone().unwrap();
+                assert_eq!(err.operation_id.as_deref(), Some(id.as_str()));
+                let record = ledger_record(&node, &id);
+                assert_eq!(record["state"], "unpaid");
+                assert_eq!(record["paid_msat"], 0);
+                assert!(record["settled_ms"].as_u64().is_some());
+                assert!(pending(&node).is_none());
+                assert!(book(&node).is_empty(), "reservation released");
+                assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+                assert_eq!(budget_now(&node.state).spent_msat, 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn call_rules_refusals_outside_proven_scope_stay_unknown() {
+        for (path, room, kind, status, reply) in [
+            ("/messages/compose", false, 200, 400, r#"{"reason":"call_not_live"}"#),
+            ("/messages/compose", true, 403, 400, r#"{"reason":"call_not_live"}"#),
+            ("/messages/compose", false, 403, 409, r#"{"reason":"call_not_live"}"#),
+            ("/messages/compose", false, 403, 400, r#"{"reason":"call_price_unknown"}"#),
+            ("/messages/compose", false, 399, 400, r#"{"reason":"call_not_live"}"#),
+            ("/messages/compose", false, 404, 400, r#"{"reason":"call_not_live"}"#),
+            ("/payments/keysend", false, 403, 400, r#"{"reason":"call_not_live"}"#),
+            ("/messages/compose", false, 403, 400, r#"{"code":"call_not_live"}"#),
+            ("/messages/compose", false, 403, 400, "broken"),
+        ] {
+            let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                if p == path { (status, reply.into()) } else { happy()(m, p, b) }
+            }));
+            spend_advance(&node.state, true).await.unwrap();
+            let charge = Charge { target: A.into(), room, confirm: None, readmission_possible: false,
+                confirmed: false, operation: true, envelope_ids: Some(true) };
+            let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()), path,
+                serde_json::json!({"recipient": A, "is_room": room, "kind": kind, "plaintext": OFFER}),
+                15000, Some(charge), None).await.unwrap_err();
+            assert_eq!(err.code, "spend_unknown", "{path} {room} {kind} {status} {reply}");
+            let held = pending(&node).expect("single slot remains held");
+            if let Some(id) = held.operation_id.as_ref() {
+                assert_eq!(ledger_record(&node, id)["state"], "unknown");
+                assert_eq!(err.operation_id.as_ref(), Some(id));
+            }
+            assert!(budget_now(&node.state).unsettled_msat > 0);
+            assert_eq!(no_pending_spend(&node.state).unwrap_err().code, "spend_unknown");
+        }
+    }
+
+    #[tokio::test]
+    async fn call_rules_refusals_existing_attempts_stay_unknown() {
+        // A resumable resend reuses an id whose earlier payment may still be
+        // unresolved. A delivery retry retains its earlier payment, even on
+        // legacy nodes without operation ids. Neither refusal proves unpaid.
+        for (delivery_retry, has_operation_id) in [(false, true), (true, true), (true, false)] {
+            let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                if p == "/messages/compose" { (400, r#"{"reason":"call_id_used"}"#.into()) }
+                else { happy()(m, p, b) }
+            }));
+            spend_advance(&node.state, true).await.unwrap();
+            let body = serde_json::json!({"recipient": A, "is_room": false, "kind": 400, "plaintext": OFFER});
+            let op = spend_journal::operation(&body);
+            let id = has_operation_id.then(|| spend_journal::new_operation_id().unwrap());
+            let journal = spend_journal(&node.state).unwrap();
+            let mut prior = journal.begin_operation(OWN, "/messages/compose", &body, 15000,
+                id.clone().map(|id| (id, op.clone()))).unwrap();
+            prior.resumable = !delivery_retry;
+            if delivery_retry {
+                prior.accounting_msat = Some(2000);
+                prior.undelivered = Some(spend_journal::Undelivered {
+                    peer: A.into(), paid_msat: 2000, retry: true, op,
+                    admission_msat: 2000, in_flight: false, attempts: 0, payment_hash: None,
+                });
+                with_book(&node.state, true, |b| {
+                    b.reserve(&prior.request_hash, A, false, 15000, now_ms());
+                    b.settle(&prior.request_hash, 2000, now_ms());
+                    Ok(())
+                }).unwrap();
+            }
+            journal.save(&prior).unwrap();
+            drop(journal);
+            let charge = Charge { target: A.into(), room: false, confirm: None, readmission_possible: false,
+                confirmed: false, operation: has_operation_id, envelope_ids: Some(true) };
+            let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()),
+                "/messages/compose", body, 15000, Some(charge), prior.undelivered.as_ref()).await.unwrap_err();
+            assert_eq!(op_ids(&node), [id.clone()], "the existing operation id is reused");
+            assert_eq!(err.code, "spend_unknown", "retry={delivery_retry}, operation_id={has_operation_id}");
+            assert!(!err.message.contains("Nothing was paid"));
+            assert_eq!(err.operation_id, id);
+            let held = pending(&node).expect("single slot remains held");
+            assert_eq!(held.operation_id, id);
+            assert!(!held.resumable);
+            if let Some(id) = id.as_ref() {
+                assert_eq!(ledger_record(&node, id)["state"], "unknown");
+            }
+            if delivery_retry {
+                let undelivered = held.undelivered.unwrap();
+                assert!(undelivered.in_flight);
+                assert_eq!(undelivered.paid_msat, 2000);
+                assert!(book(&node).contains(&(prior.request_hash.clone(), 2000, true)), "original payment retained");
+            }
+            assert!(budget_now(&node.state).unsettled_msat > 0);
+            assert_eq!(no_pending_spend(&node.state).unwrap_err().code, "spend_unknown");
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_hangup_refusal_allows_next_keysend() {
+        let (ops, _) = ops_node();
+        let calls = call_routes(Some(10000));
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" && serde_json::from_str::<serde_json::Value>(b).unwrap()["kind"] == 403 {
+                // The node has expired the call: hangup is refused before payment.
+                (400, r#"{"reason":"call_not_live"}"#.into())
+            } else if p == "/status" || p == "/messages/compose" { ops(m, p, b) }
+            else { calls(m, p, b) }
+        }));
+        do_budget_approve(&node.state, 500000, budget::PresetId::Careful).await.unwrap();
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50000)).unwrap();
+        let offer = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        let spent = budget_now(&node.state).spent_msat;
+        let err = do_call_signal(&node.state, A, 403,
+            r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","reason":"ended"}"#, 6000).await.unwrap_err();
+        assert_eq!(err.code, "call_not_live");
+        let id = err.operation_id.unwrap();
+        assert_eq!(ledger_record(&node, &id)["state"], "unpaid");
+        assert_eq!(ledger_record(&node, &offer.operation_id.unwrap())["state"], "settled");
+        assert!(pending(&node).is_none());
+        assert_eq!(budget_now(&node.state).spent_msat, spent);
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        spend_advance(&node.state, true).await.unwrap();
+        let receipt = do_payment_keysend(&node.state, &format!("03{}", "cd".repeat(32)), 5000, None, 10000).await.unwrap();
+        assert_eq!(receipt.status, "settled");
+        assert!(pending(&node).is_none());
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/payments/keysend").count(), 1);
+        assert_eq!(ledger_record(&node, &id)["state"], "unpaid");
     }
 
     #[tokio::test]
