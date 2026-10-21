@@ -9,7 +9,7 @@ import { createMessageEntrance } from './messageEntrance';
 import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
 import { PairAnotherNode } from '../onboarding/PairAnotherNode';
 import { cameraQrScannerAvailable, scanPairingLinkWithCamera } from '../cameraQrScanner';
-import { isMobilePlatform } from '../platform';
+import { deviceWord, isMobilePlatform } from '../platform';
 import { DeviceApprovals } from '../onboarding/DeviceApprovals';
 import { approvalMemory, BreakerCard, breakerReason, OwnerApprovals, OwnerApprovalWait, type BreakerReason } from './OwnerApprovals';
 import { OWNER_DEVICE_APPROVAL, OWNER_DEVICE_BREAKER_RESET, refusalText, type ApprovalRequest, type ApprovalView, type DeviceKeysView } from './ownerApproval';
@@ -31,6 +31,7 @@ import { SoftError } from './SoftError';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { PorchPanel } from './Porch';
 import { ContactPanel } from './ContactPanel';
+import { onEscape } from './escapeStack';
 import { custodyBadge, CustodyBadgeView } from './custody';
 import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
@@ -153,6 +154,8 @@ type Props = {
   watchUpdates?: WatchUpdates;
   watchError?: string | null;
   remote?: boolean;
+  /** An Android or iOS build: no node of its own, so no local-node state in the pill. */
+  phone?: boolean;
   /** The remote node's display label from its pairing link, if any. */
   hostedBy?: string | null;
   retryAfterSecs?: number | null;
@@ -474,17 +477,13 @@ export function ControlCenter(props: Props) {
   const [contextOpen, setContextOpen] = createSignal(false);
   /** The full-screen Wallet page, on this tab; null when closed. */
   const [walletTab, setWalletTab] = createSignal<WalletTab | null>(null);
-  createEffect(() => {
-    if (!walletTab()) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !contextOpen()) {
-        e.preventDefault();
-        setWalletTab(null);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    onCleanup(() => window.removeEventListener('keydown', onKey));
-  });
+  let walletReturnFocus: HTMLElement | null = null;
+  createEffect(on(() => walletTab() !== null, (open) => {
+    if (!open) return;
+    const opener = walletReturnFocus;
+    onCleanup(onEscape(() => { if (!contextOpen()) setWalletTab(null); }));
+    onCleanup(() => queueMicrotask(() => { if (opener?.isConnected) opener.focus(); }));
+  }));
   const [settingsEl, setSettingsEl] = createSignal<HTMLElement | null>(null);
   let settingsReturnFocus: HTMLElement | null = null;
   createEffect(() => {
@@ -494,14 +493,7 @@ export function ControlCenter(props: Props) {
     if (open && panel) {
       settingsReturnFocus = document.activeElement as HTMLElement | null;
       queueMicrotask(() => panel.querySelector<HTMLElement>('[data-settings-close]')?.focus());
-      const onKey = (e: KeyboardEvent) => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          setContextOpen(false);
-        }
-      };
-      window.addEventListener('keydown', onKey);
-      onCleanup(() => window.removeEventListener('keydown', onKey));
+      onCleanup(onEscape(() => setContextOpen(false)));
     } else if (!open && settingsReturnFocus) {
       const back = settingsReturnFocus;
       settingsReturnFocus = null;
@@ -1666,7 +1658,7 @@ export function ControlCenter(props: Props) {
   };
 
   const pill = () =>
-    nodePill({ remote: props.remote, retryAfterSecs: props.retryAfterSecs, ready: props.ready, error: props.error, overview: overview(), link: link(), nowMs: now() });
+    nodePill({ remote: props.remote, phone: props.phone, retryAfterSecs: props.retryAfterSecs, ready: props.ready, error: props.error, overview: overview(), link: link(), nowMs: now() });
 
   const trackName = (t: TrackRef): string => {
     if (t.kind === 'peer') return peerName(peerById().get(t.id), t.id);
@@ -1708,6 +1700,8 @@ export function ControlCenter(props: Props) {
     approve: async () => { await actions.approve(); },
   };
   const openWallet = (tab: WalletTab = 'activity') => {
+    // Settings is replaced by Wallet; its hidden controls cannot receive focus on return.
+    walletReturnFocus = contextOpen() ? settingsReturnFocus : document.activeElement as HTMLElement | null;
     setContextOpen(false);
     setWalletTab(tab);
     void loadWallet();
@@ -1756,11 +1750,11 @@ export function ControlCenter(props: Props) {
         balanceMsat={wallet()?.balance_msat ?? null}
         approvalsWaiting={approvalsWaiting()}
         onApprovals={() => { setTab('node'); setContextOpen(true); }}
-        behind={walletTab() !== null}
+        behind={walletTab() !== null || contextOpen()}
       />
 
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
-        <section class="track" aria-label="Track" inert={walletTab() !== null}>
+        <section class="track" aria-label="Track" inert={walletTab() !== null || contextOpen()}>
           {props.offline}
           <Show when={moneyBlocked()}>
             <p class="hint money-notice" data-money-notice role="status">{!live() ? 'Waiting for the connection. Your node will retry automatically.' : MONEY_NOT_READY} Sending, paying, calls, first contact, files, rooms, channels and gifts will be available when it is ready.</p>
@@ -2021,7 +2015,7 @@ export function ControlCenter(props: Props) {
                   recheck={recheckApproval}
                   memory={approvalsMemory}
                   now={now()}
-                  mobile={androidQrScannerAvailable()}
+                  mobile={isMobilePlatform()}
                   nameOf={(id) => { const p = peerById().get(id.toLowerCase()); return p ? peerName(p, p.node_id) : null; }}
                   approve={async (opId, message) => {
                     const r = await act(() => source.approvalApprove(opId, message));
@@ -2034,7 +2028,7 @@ export function ControlCenter(props: Props) {
                 device={actions.device()}
                 joinDevice={input => source.joinDevice(input)}
                 remote={props.remote === true}
-                mobile={androidQrScannerAvailable()}
+                mobile={isMobilePlatform()}
                 showRegistered
                 onRegister={async () => { const r = await act(() => source.deviceKeyRegister()); if (r.ok) setDevice(r.value); else throw r.error.message; }}
                 onCancel={async () => { const r = await act(() => source.deviceKeyCancel()); if (r.ok) setDevice(r.value); else throw r.error.message; }}
@@ -2045,14 +2039,14 @@ export function ControlCenter(props: Props) {
               onPreview={link => source.remoteAccessPreview(link)}
               onReplace={link => source.remoteAccessReplace(link)}
               onScan={androidQrScannerAvailable() ? scanPairingLink : cameraQrScannerAvailable() ? scanPairingLinkWithCamera : undefined}
-              mobile={androidQrScannerAvailable()}
+              mobile={isMobilePlatform()}
               phone={isMobilePlatform()}
             /> : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
           </Match>
           <Match when={tab() === 'devices'}>
             {/* The host offers Add a device only to a remote node (add_device::supported checks remote mode). */}
-            <AddDevice api={input => source.addDevice(input)} mobile={androidQrScannerAvailable()} local={props.remote !== true} />
-            <DeviceApprovals device={actions.device()} remote={props.remote === true} mobile={androidQrScannerAvailable()} showRegistered
+            <AddDevice api={input => source.addDevice(input)} mobile={isMobilePlatform()} local={props.remote !== true} />
+            <DeviceApprovals device={actions.device()} remote={props.remote === true} mobile={isMobilePlatform()} showRegistered
               joinDevice={input => source.joinDevice(input)}
               onRegister={async () => setDevice(await source.deviceKeyRegister())}
               onCancel={async () => setDevice(await source.deviceKeyCancel())} />
@@ -2284,7 +2278,7 @@ function SettingsDisplay(props: { own: OwnStun | null }) {
           )}
         </For>
       </div>
-      <p class="hint">Balances and costs use this unit everywhere. Payment amounts to the node stay in millisatoshis.</p>
+      <p class="hint">Balances and costs use this unit everywhere. Your node still counts each payment in millisatoshis (1 sat = 1,000).</p>
       <CallSettings own={props.own} />
     </div>
   );
@@ -2334,9 +2328,9 @@ function Rail(props: {
   };
   createEffect(() => {
     if (!menuOpen()) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenuOpen(false); };
-    window.addEventListener('keydown', onKey);
-    onCleanup(() => window.removeEventListener('keydown', onKey));
+    // Escape closes and puts focus back on You; opening moves focus to the first item.
+    queueMicrotask(() => document.querySelector<HTMLElement>('[data-avatar-menu] [role="menuitem"]')?.focus());
+    onCleanup(onEscape(() => { setMenuOpen(false); avatar?.focus(); }));
   });
   const item = (t: TrackRef, name: string, meta?: JSX.Element) => {
     const key = trackKey(t);
@@ -2832,6 +2826,7 @@ function Conversation(props: {
           props.artifacts.some(
             (a) =>
               a.type === 'undelivered' ||
+              (a.type === 'restored' && ['dispatching', 'unknown', 'paid', 'paid_undelivered'].includes(a.op.state)) ||
               (a.type === 'failed' &&
                 ['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered'].includes(a.error.code))
           ) ||
@@ -3055,17 +3050,66 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
       ? `Up to ${fmtAmount(cost()!)}: ${fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat)} to ring (their call price plus ${feeCeiling(quote()!.offer_max_routing_fee_msat)}), then ${fmtAmount(signalCost(quote()!))} to hang up. Includes up to ${fmtAmount(callCost(quote()!)!)} more for one automatic recovery (another admission and hangup). Media goes directly between you; it is not billed. ${effectiveStun() ? `Uses the STUN server ${effectiveStun()} to find a route.` : stunOff() ? 'STUN is turned off, so calls connect only on the same network (Settings).' : 'No STUN server is set, so calls connect only on the same network (Settings).'}`
       : 'Reading their call price…');
   const place = (media: CallMedia) => { const q = quote(); if (q && !off()) props.actions.placeCall(props.peer, media, q); };
+  // A call pays and rings someone, so one tap only asks: the call/video button
+  // opens a small confirm with the price, and Ring places it. A mis-tap on the
+  // header costs nothing.
+  const [armed, setArmed] = createSignal<CallMedia | null>(null);
+  let ringBtn: HTMLButtonElement | undefined;
+  let wrap: HTMLDivElement | undefined;
+  createEffect(on(() => props.peer, () => setArmed(null), { defer: true }));
+  createEffect(() => { if (off()) setArmed(null); });
+  const arm = (media: CallMedia) => {
+    if (off()) return;
+    setArmed((m) => (m === media ? null : media));
+    if (armed()) queueMicrotask(() => ringBtn?.focus());
+  };
+  const disarm = (refocus = true) => {
+    const media = armed();
+    setArmed(null);
+    if (refocus && media) wrap?.querySelector<HTMLButtonElement>(`[data-call="${media}"]`)?.focus();
+  };
+  createEffect(() => {
+    if (!armed()) return;
+    // Anything else pressed or focused (the contact name, settings, You, the
+    // composer) dismisses the confirm: it must never sit, Ring enabled, over
+    // another sheet or modal.
+    const onOutside = (e: Event) => {
+      const t = e.target as Node | null;
+      if (t && wrap?.contains(t)) return;
+      disarm(false);
+    };
+    for (const type of ['pointerdown', 'click', 'focusin']) document.addEventListener(type, onOutside, true);
+    onCleanup(onEscape(() => disarm()));
+    onCleanup(() => {
+      for (const type of ['pointerdown', 'click', 'focusin']) document.removeEventListener(type, onOutside, true);
+    });
+  });
+  const callWord = (media: CallMedia) => (media === 'video' ? 'Video call' : 'Call');
   return (
-    <div class="call-buttons" data-call-buttons>
-      <button type="button" class="soft call-button icon-btn" data-call="audio" disabled={off()} title={title()} aria-label={`Call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`} onClick={() => place('audio')}>
+    <div class="call-buttons" data-call-buttons ref={wrap}>
+      <button type="button" class="soft call-button icon-btn" data-call="audio" disabled={off()} title={title()} aria-label={`Call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`} aria-haspopup="dialog" aria-expanded={armed() === 'audio'} onClick={() => arm('audio')}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z" /></svg>
       </button>
-      <button type="button" class="soft call-button icon-btn" data-call="video" disabled={off()} title={title()} onClick={() => place('video')} aria-label={`Video call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`}>
+      <button type="button" class="soft call-button icon-btn" data-call="video" disabled={off()} title={title()} aria-haspopup="dialog" aria-expanded={armed() === 'video'} onClick={() => arm('video')} aria-label={`Video call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="12" height="12" rx="2" /><path d="m15 10 6-3v10l-6-3z" /></svg>
       </button>
       <button type="button" class="soft call-button icon-btn quiet" data-call="meeting" disabled={off()} title={`Start a meeting with ${props.name} and up to ${MAX_PARTICIPANTS - 2} more contacts. The price shows before anyone is rung.`} aria-label={`Start a meeting with ${props.name}`} onClick={() => props.actions.planMeeting(props.peer)}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3" /><path d="M3 20a6 6 0 0 1 12 0" /><circle cx="17" cy="9" r="2.5" /><path d="M17 14a5 5 0 0 1 4 5" /></svg>
       </button>
+      <Show when={armed()}>
+        {(media) => (
+          <div class="call-confirm" role="dialog" aria-label={`${callWord(media())} ${props.name}?`} data-call-confirm-box={media()}>
+            <p class="call-confirm-text">
+              <strong>{callWord(media())} {props.name}?</strong>
+              <Show when={cost() !== null}>{' '}<span class="hint">Up to {fmtAmount(cost()!)}. Nothing is paid until you press Ring.</span></Show>
+            </p>
+            <div class="call-confirm-actions">
+              <button type="button" class="soft" data-call-confirm-cancel onClick={() => disarm()}>Cancel</button>
+              <button ref={ringBtn} type="button" class="primary soft money" data-call-confirm={media()} disabled={off()} onClick={() => { const m = media(); setArmed(null); place(m); }}>Ring</button>
+            </div>
+          </div>
+        )}
+      </Show>
     </div>
   );
 }
@@ -3105,6 +3149,13 @@ function CallPanel(props: {
 }) {
   const [tick, setTick] = createSignal(Date.now());
   const [answer, setAnswer] = createSignal<number | null>(null);
+  let panel: HTMLElement | undefined;
+  createEffect(on(() => props.view.phase === 'incoming' ? props.view.callId : null, (callId) => {
+    if (!callId) return;
+    queueMicrotask(() => {
+      if (props.view.phase === 'incoming' && props.view.callId === callId && panel?.isConnected) panel.focus();
+    });
+  }));
   createEffect(() => {
     if (!['live', 'reconnecting'].includes(props.view.phase)) return;
     setTick(Date.now());
@@ -3120,7 +3171,7 @@ function CallPanel(props: {
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
-      <aside ref={props.panelRef} tabindex="-1" class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? 'Call spending approval' : `${CALL_TITLE[v().phase]} ${who()}`}>
+      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? 'Call spending approval' : `${CALL_TITLE[v().phase]} ${who()}`}>
         <header>
           <strong data-call-title aria-live="polite">{CALL_TITLE[v().phase]}{v().media === 'video' ? ' (video)' : ''}</strong>
           <span class="who">{who()}</span>
@@ -3272,6 +3323,16 @@ function MeetingPanel(props: {
   };
   const planning = () => props.plan !== null && (props.view.phase === 'idle' || props.view.phase === 'ended');
   createEffect(on(planning, (open) => { if (open) refresh(props.contacts.map((c) => c.id)); }));
+  // The planner is a dialog: focus moves in when it opens, and Escape cancels it (nobody is rung).
+  // Keyed on the open/closed boolean only: toggling a participant changes the plan
+  // but must not re-run this and pull focus away from the checkbox just pressed.
+  const planOpen = createMemo(planning);
+  createEffect(on(planOpen, (open) => {
+    if (!open) return;
+    queueMicrotask(() => document.querySelector<HTMLElement>('[data-meeting-panel="planning"] input:not(:disabled), [data-meeting-panel="planning"] [data-meeting-cancel]')?.focus());
+    // Only while it is the top layer: Escape in Settings opened over it closes Settings, not the plan.
+    onCleanup(onEscape(() => props.setPlan(null)));
+  }));
   createEffect(on(() => (props.view.phase === 'invited' ? props.view.id : null), (id) => {
     if (id) refresh(untrack(() => props.view.roster).filter((x) => x !== props.ownId.toLowerCase()));
   }));
@@ -3939,11 +4000,14 @@ export function opStateText(op: OpView, subject = 'This app’s record'): string
  * spend_unknown, payment_unknown, budget_unreadable (raw after a paid retry,
  * refine_retry_fee 4413), app_not_ready (close_charge 4040 after payment),
  * node (transport loss can follow dispatch), and any code not listed.
+ * Call-rules reasons below are mapped only for HTTP 400 on a 1:1 call compose;
+ * the node's reserve_outgoing refuses before operation creation or payment.
  */
 const PROVEN_UNPAID = new Set([
   'owner_only', 'owner_contact_unavailable', 'owner_contact_expired', 'sponsor_owner_approval_required',
   'price_changed', 'price_cap_unavailable', 'price_quote_unavailable', 'peer_not_ready', 'room_unreachable', 'invalid', 'retry_unavailable',
   'spend_refused', 'not_ready', 'not_dispatched', 'price_cap_exceeded', 'readmission_capped', 'readmission_quoted', 'operation_mismatch', 'retry_needs_admission',
+  'call_id_used', 'call_busy', 'call_signal_in_flight', 'call_signal_invalid', 'call_not_live',
   'grant_ended', 'grant_per_call', 'grant_exhausted', 'grant_recipient', 'grant_unpriced', 'grant_paused', 'grant_failures_pending', 'grant_rate_limited',
   'grant_velocity', 'grant_ledger', 'grant_refused', 'grant_first_contact', 'grant_readmission', 'grant_no_envelope', 'grant_unknown',
   'spend_locked', 'spend_expired', 'budget_needed', 'budget_paused', 'budget_exhausted', 'ceiling_exhausted', 'budget_ledger_full', 'first_contact',
@@ -4065,6 +4129,14 @@ function Composer(props: {
   let fileInput: HTMLInputElement | undefined;
   let draftInput: HTMLTextAreaElement | undefined;
   const [emojiOpen, setEmojiOpen] = createSignal(false);
+  let plusBtn: HTMLButtonElement | undefined;
+  let emojiBtn: HTMLButtonElement | undefined;
+  createEffect(() => {
+    if (!emojiOpen()) return;
+    // Escape closes the picker and returns focus to the emoji button; opening moves focus into it.
+    queueMicrotask(() => document.querySelector<HTMLElement>('[data-emoji-picker] [data-emoji-pick]')?.focus());
+    onCleanup(onEscape(() => { setEmojiOpen(false); emojiBtn?.focus(); }));
+  });
   // voice note: recorded here, then sent exactly like a chosen file
   const [recording, setRecording] = createSignal<{ rec: Recording; startedAt: number } | null>(null);
   const [recordedMs, setRecordedMs] = createSignal(0);
@@ -4625,7 +4697,7 @@ function Composer(props: {
     if (deviceWait()) return 'Waiting for your other device';
     if (ownerWait()) return 'Waiting for contact approval';
     if (needsTouch()) {
-      return androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID';
+      return isMobilePlatform() ? 'Approve with biometrics' : 'Approve with Touch ID';
     }
     if (viaBudget()) {
       const s = shown();
@@ -4657,7 +4729,7 @@ function Composer(props: {
     if (!needsTouch() && !viaBudget() && spends() && !line().open && props.spend?.state !== 'pending' && props.spend?.state !== 'unavailable' && canContinue('grant')) {
       return 'Approve & send';
     }
-    if (needsTouch()) return androidQrScannerAvailable() ? 'Approve with biometrics' : 'Approve with Touch ID';
+    if (needsTouch()) return isMobilePlatform() ? 'Approve with biometrics' : 'Approve with Touch ID';
     // A budget press only approves or resumes; it sends nothing.
     if (viaBudget() && (mode() === 'message' || mode() === 'file')) {
       const k = stand().kind;
@@ -4682,7 +4754,10 @@ function Composer(props: {
     const onDoc = (e: Event) => {
       if (!(e.target as Element | null)?.closest?.('.composer-plus-wrap')) setMenuOpen(false);
     };
+    // Escape closes the Pay / Request / Attach menu and returns focus to +.
+    queueMicrotask(() => plusBtn?.parentElement?.querySelector<HTMLElement>('[role="menuitem"]')?.focus());
     document.addEventListener('click', onDoc);
+    onCleanup(onEscape(() => { setMenuOpen(false); plusBtn?.focus(); }));
     onCleanup(() => document.removeEventListener('click', onDoc));
   });
 
@@ -4815,7 +4890,7 @@ function Composer(props: {
     setConsent({ ...c, approved: true, envelope: r.envelopeId, readsFrom: r.readsFrom });
   };
   const LAPSED = 'The approval was cancelled or lapsed before it went through.';
-  const TOUCH_AGAIN = 'It needs Touch ID again. Press Send to ask.';
+  const TOUCH_AGAIN = `It needs ${isMobilePlatform() ? 'biometric approval' : 'Touch ID'} again. Press Send to ask.`;
   const BUDGET_AGAIN = 'Payments need approving again. Press Send to ask.';
   const BUDGET_SHORT = 'Allowed, but your budget does not cover this message. Nothing was sent.';
   const PRICE_MOVED = 'The message price changed before it was sent. Nothing was sent; check the price and press Send.';
@@ -4859,7 +4934,7 @@ function Composer(props: {
     const c = consent();
     if (!c || c.kind !== 'touch') return;
     // Before the approval answers too: once this Mac's approvals stop, the wait ends for good.
-    if (props.actions.device()?.state !== 'registered') { dropConsent('Touch ID approvals on this Mac stopped before it went through.'); return; }
+    if (props.actions.device()?.state !== 'registered') { dropConsent(`${isMobilePlatform() ? `Biometric approvals on this ${deviceWord()}` : 'Touch ID approvals on this Mac'} stopped before it went through.`); return; }
     if (!c.approved) return;
     if (props.actions.budgetReadApplied() < c.readsFrom) return;
     const g = budget()?.node_grant ?? null;
@@ -5046,7 +5121,7 @@ function Composer(props: {
       // The price it was approved at is not this contact's price any more: never sent at the old one.
       if (here === trackKey(p.track) && price !== null && price !== p.msat) { cancel(p, PRICE_MOVED); return true; }
       if (p.kind === 'touch') {
-        if (!deviceOn) { cancel(p, 'Touch ID approvals on this Mac stopped before it went through.'); return true; }
+        if (!deviceOn) { cancel(p, `${isMobilePlatform() ? `Biometric approvals on this ${deviceWord()}` : 'Touch ID approvals on this Mac'} stopped before it went through.`); return true; }
         if (!fresh || props.actions.budgetReadApplied() < p.readsFrom) return false;
         const peer = (p.track as { id: string }).id.toLowerCase();
         const until = g?.envelopes?.[peer];
@@ -5659,6 +5734,7 @@ function Composer(props: {
       </Show>
       <div class="composer-main signal-bar" data-composer-bar>
         <button
+          ref={emojiBtn}
           type="button"
           class="attach soft icon-btn"
           data-emoji
@@ -5701,6 +5777,7 @@ function Composer(props: {
           </button>
           <div class="composer-plus-wrap">
             <button
+              ref={plusBtn}
               type="button"
               class="attach soft icon-btn"
               data-composer-plus
@@ -5809,7 +5886,7 @@ function Composer(props: {
       </details>
       </div>
       <Show when={emojiOpen()}>
-        <div class="emoji-picker" data-emoji-picker role="listbox" aria-label="Emoji">
+        <div class="emoji-picker" data-emoji-picker role="group" aria-label="Emoji">
           <For each={[...EMOJIS]}>
             {(e) => (
               <button
@@ -5859,7 +5936,7 @@ function Composer(props: {
         <p class="err-note" data-room-blocked>{blocked()}</p>
       </Show>
       <Show when={note() && note() !== MONEY_NOT_READY}>
-        <p class="err-note" data-composer-note>{note()}</p>
+        <p class="err-note" data-composer-note role="status">{note()}</p>
       </Show>
       <Show when={ownerExpired()}>
         <button type="button" class="link" data-contact-requote onClick={() => {
@@ -5971,9 +6048,9 @@ const [touchIdOffersShown, setTouchIdOffersShown] = createSignal(0);
  * view. What gets approved and its limits are unchanged.
  */
 function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: JSX.Element }) {
-  const mobile = androidQrScannerAvailable();
-  const device = mobile ? 'phone' : 'Mac';
-  const tap = mobile ? 'fingerprint' : 'Touch ID';
+  const mobile = isMobilePlatform();
+  const device = mobile ? deviceWord() : 'Mac';
+  const tap = mobile ? 'biometric' : 'Touch ID';
   const Offer = () => {
     setTouchIdOffersShown((n) => n + 1);
     onCleanup(() => setTouchIdOffersShown((n) => n - 1));
@@ -5981,14 +6058,14 @@ function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: J
     return (
       <div class="approval touch-id-first" data-touch-id-first>
         <p>
-          <strong>Approve on this {device} with {mobile ? 'your fingerprint' : 'Touch ID'}.</strong>{' '}
+          <strong>Approve on this {device} with {mobile ? 'biometrics' : 'Touch ID'}.</strong>{' '}
           {lapsed()
             ? `Your last setup request lapsed. Set it up again: your node’s owner approves this ${device} once more.`
             : `Set it up once: your node’s owner approves this ${device} one time.`}{' '}
           {/* Only promised where the node says it does it; otherwise, said as it is today. */}
           {props.actions.ownerDeviceApproval?.()
             ? `After that, one ${tap} tap approves a contact here, without a command at the node.`
-            : `Your node does not yet accept ${mobile ? 'fingerprint' : 'Touch ID'} approvals in place of its command, so for now approve as shown under Other ways; once it does, one ${tap} tap will approve a contact here.`}
+            : `Your node does not yet accept ${mobile ? 'biometric' : 'Touch ID'} approvals in place of its command, so for now approve as shown under Other ways; once it does, one ${tap} tap will approve a contact here.`}
         </p>
         <div class="form-actions">
           <button type="button" class="primary soft" data-touch-id-setup onClick={() => props.actions.openNodeSettings?.()}>
@@ -6102,7 +6179,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
       <Show when={(props.actions.remote?.() || props.actions.device()?.state === 'off') && touchIdOffersShown() === 0}>
         <DeviceSetup device={props.actions.device()} now={props.now} actions={props.actions} />
       </Show>
-      <Reconcile actions={props.actions} hasPending={props.hasPending} />
+      <Reconcile actions={props.actions} hasPending={props.hasPending || Boolean(props.spend?.pending)} />
       <Show when={props.error}>
         <p class="err-note">{props.error}</p>
       </Show>
@@ -6122,8 +6199,8 @@ export const envelopePerAct = (priceMsat: number | null) =>
 function DeviceSetup(props: { device: DeviceView | null; now: number; actions: Actions }) {
   // One home for Touch ID approvals (Settings → Node, and onboarding after
   // pairing); the spend bar only points there instead of repeating it.
-  const android = androidQrScannerAvailable();
-  const what = () => (android ? 'Biometric approvals' : 'Touch ID approvals');
+  const mobile = isMobilePlatform();
+  const what = () => (mobile ? 'Biometric approvals' : 'Touch ID approvals');
   const note = () => {
     switch (props.device?.state) {
       case 'off': return `${what()} are off.`;
@@ -6151,7 +6228,7 @@ function DeviceSetup(props: { device: DeviceView | null; now: number; actions: A
  */
 export function TouchApproval(props: { peer: string; name: string; priceMsat: number | null; actions: Actions }) {
   const perAct = () => envelopePerAct(props.priceMsat);
-  const android = androidQrScannerAvailable();
+  const mobile = isMobilePlatform();
   return (
     <div class="spend touch-line" data-touch-approval>
       <p class="spend-line">
@@ -6159,7 +6236,7 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
         <span class="line-text">
           {/* The petname is local; Touch ID names the same key, never a name. */}
           <strong>
-            Approve {props.name} (node <code data-touch-peer>{shortId(props.peer)}</code>) with {android ? 'biometrics' : 'Touch ID'}.
+            Approve {props.name} (node <code data-touch-peer>{shortId(props.peer)}</code>) with {mobile ? 'biometrics' : 'Touch ID'}.
           </strong> Up
           to <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT)}</span> a day, at most{' '}
           <span data-touch-per-act>{fmtAmount(perAct())}</span> per message, for 24 hours.
@@ -6168,7 +6245,7 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
       <details class="quiet-detail" data-touch-detail>
         <summary>Details</summary>
         <p>
-          {android ? 'The biometric prompt' : 'Touch ID'} shows the same amounts for node {shortId(props.peer)}. Your node checks every payment against them;
+          {mobile ? 'The biometric prompt' : 'Touch ID'} shows the same amounts for node {shortId(props.peer)}. Your node checks every payment against them;
           nothing else can be paid under this approval.
         </p>
       </details>
@@ -6207,9 +6284,11 @@ function Reconcile(props: { actions: Actions; hasPending?: boolean }) {
   };
   return (
     <>
-      <button type="button" class="link" data-spend-reconcile disabled={checking()} onClick={() => void reconcile()}>
-        Check pending result
-      </button>
+      <Show when={props.hasPending}>
+        <button type="button" class="link" data-spend-reconcile disabled={checking()} onClick={() => void reconcile()}>
+          Check pending result
+        </button>
+      </Show>
       <Show when={undelivered()}>
         <button type="button" class="link" data-stop-retrying disabled={checking()} onClick={() => void stop()}>
           Stop retrying
@@ -6443,7 +6522,7 @@ function BudgetBar(props: {
       </Switch>
       <Reconcile actions={props.actions} hasPending={props.hasPending} />
       <Show when={props.error}>
-        <p class="err-note" data-budget-error>{props.error}</p>
+        <p class="err-note" data-budget-error role="alert">{props.error}</p>
       </Show>
     </div>
   );
@@ -6579,8 +6658,8 @@ function BudgetPanel(props: {
                 );
               }}
             </For>
-            <Show when={note() && note() !== MONEY_NOT_READY}><p class="err-note">{note()}</p></Show>
-            <Show when={props.error}><p class="err-note">{props.error}</p></Show>
+            <Show when={note() && note() !== MONEY_NOT_READY}><p class="err-note" role="alert">{note()}</p></Show>
+            <Show when={props.error}><p class="err-note" role="alert">{props.error}</p></Show>
             <p class="hint">
               A budget can go up to the app all-in limit you approved; raising the total is a new approval. Budgets and this tally are
               saved on this device. Your approval is not: after a restart, approve once more. 0 forgets a contact, so they are asked

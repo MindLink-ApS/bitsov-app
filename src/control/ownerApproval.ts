@@ -35,6 +35,8 @@
  *   Touch ID / key: the existing device_* codes. Transport: `node`.
  */
 
+import { appPlatform, type AppPlatform } from '../platform';
+
 export const OWNER_DEVICE_APPROVAL = 'owner_device_approval_v1';
 /** Sub-flag (node #304): device-approved resets of this pairing's tripped spend breaker. Offer resets only with it. */
 export const OWNER_DEVICE_BREAKER_RESET = 'owner_device_approval_breaker_reset_v1';
@@ -210,7 +212,10 @@ export const needsReset = (tripped: string[]) => tripped.includes('grant_paused'
 export const secondsLeft = (view: ApprovalView, nowMs: number) => Math.max(0, Math.floor(view.expires_at - nowMs / 1000));
 
 /** Owner-facing words for each refusal; `node` is the node's own (sanitized) text, kept for detail. */
-export function refusalText(code: string, extra: { reason?: string; remaining_msat?: number } = {}): string {
+/** The biometric this platform's approvals use: Touch ID on a Mac, biometrics on iOS and Android. */
+const APPROVAL_BIOMETRIC: Record<AppPlatform, string> = { desktop: 'Touch ID', ios: 'The biometric check', android: 'The biometric check' };
+
+export function refusalText(code: string, extra: { reason?: string; remaining_msat?: number } = {}, platform: AppPlatform = appPlatform()): string {
   switch (code) {
     case 'approval_off':
       return extra.reason === 'seed_password_not_typed'
@@ -228,7 +233,7 @@ export function refusalText(code: string, extra: { reason?: string; remaining_ms
     case 'approval_rate_limited': return 'Too many approval requests just now. Wait a little and try again.';
     case 'approval_invalid': return 'Your node could not read this request. Nothing was approved.';
     case 'approval_unsaved': return 'Your node could not save the approval; the request is still waiting. Try again.';
-    case 'device_cancelled': return 'Touch ID was cancelled. Nothing was approved.';
+    case 'device_cancelled': return `${APPROVAL_BIOMETRIC[platform]} was cancelled. Nothing was approved.`;
     default: return 'This did not complete. Nothing was approved.';
   }
 }

@@ -1369,6 +1369,11 @@ describe('calls in the shell', () => {
     vi.unstubAllGlobals();
   });
   const $ = <T extends Element = HTMLElement>(sel: string) => mount.querySelector<T>(sel);
+  // Call and Video call ask first; Ring places the call.
+  const ring = (media: 'audio' | 'video') => {
+    $<HTMLButtonElement>(`[data-call="${media}"]`)!.click();
+    $<HTMLButtonElement>(`[data-call-confirm="${media}"]`)?.click();
+  };
   const text = (sel: string) => $(sel)?.textContent ?? '';
   async function openShell() {
     mount = document.createElement('div');
@@ -1391,7 +1396,7 @@ describe('calls in the shell', () => {
     });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-approval]')).not.toBeNull());
     expect($('[data-call-panel="calling"]')).toBeNull();
     expect(capture).not.toHaveBeenCalled();
@@ -1399,7 +1404,7 @@ describe('calls in the shell', () => {
     $<HTMLButtonElement>('[data-call-approve]')!.click();
     await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
     expect(host.used('call_signal')).toHaveLength(0);
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     expect(host.used('call_signal')).toHaveLength(1);
   });
@@ -1413,7 +1418,7 @@ describe('calls in the shell', () => {
     });
     await openShell();
     await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toMatch(/^Call Maya/));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-approval] [data-touch-id-first]')).not.toBeNull());
     const stays = $('[data-call-approval] [data-touch-id-stays-text="spend"]')!;
     expect(stays.textContent).toContain('Nothing is paid until you press Call or Accept again after approval.');
@@ -1428,7 +1433,7 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="video"]')!.disabled).toBe(false));
     vi.useFakeTimers();
     try {
-      $<HTMLButtonElement>('[data-call="video"]')!.click();
+      ring('video');
       await vi.advanceTimersByTimeAsync(15_000);
       expect(text('[data-call-ended]')).toContain('Camera/microphone not available — check System Settings → Privacy');
       expect(host.used('call_signal')).toEqual([]);
@@ -1443,7 +1448,7 @@ describe('calls in the shell', () => {
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     refuse = true;
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-approval]')).not.toBeNull());
     expect(text('[data-call-approval]')).toContain(typeof error === 'string' ? error : error.message);
     expect(capture).not.toHaveBeenCalled();
@@ -1472,7 +1477,7 @@ describe('calls in the shell', () => {
     await openShell();
     expect(await lastCallLine()).toBe('Last call: no call yet');
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     const pc = FakePc.made[0];
     pc.stats = new Map([
@@ -1491,7 +1496,7 @@ describe('calls in the shell', () => {
     // A later call is refused before it connects: the card says so, not the earlier route.
     refuse = true;
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     $<HTMLButtonElement>('[data-call-dismiss]')!.click();
     expect(await lastCallLine()).toBe('Last call: no route (it didn’t connect)');
@@ -1506,7 +1511,7 @@ describe('calls in the shell', () => {
     });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     // No stats ever name a pair (an empty report), but the call goes live.
     FakePc.made[0].stats = new Map();
@@ -1519,7 +1524,7 @@ describe('calls in the shell', () => {
     expect(await lastCallLine()).toBe('Last call: connected, route unavailable');
     small = true;
     await new Promise((r) => setTimeout(r, 3500));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(/This call needs up to/));
     expect(FakePc.made).toHaveLength(1);
     $<HTMLButtonElement>('[data-call-dismiss]')!.click();
@@ -1530,7 +1535,7 @@ describe('calls in the shell', () => {
     stubHost({ call_signal: () => { throw { code: 'spend_refused', message: 'Owner grant required.' }; } });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     $<HTMLButtonElement>('[data-call-dismiss]')!.click();
     expect(await lastCallLine()).toBe('Last call: no route (it didn’t connect)');
@@ -1540,7 +1545,7 @@ describe('calls in the shell', () => {
     stubHost({ call_signal: (args) => ({ message_id: 'sig', kind: args!.kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }) });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     const pc = FakePc.made[0];
     pc.stats = new Map([
@@ -1574,7 +1579,7 @@ describe('calls in the shell', () => {
     });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(/owner.*approve/i));
     expect(text('[data-call-ended]')).toContain('21,205 sats');
     expect(text('[data-call-ended]')).toContain('500 sats');
@@ -1591,7 +1596,7 @@ describe('calls in the shell', () => {
     } }) });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     expect(host.used('call_signal')).toHaveLength(1);
     expect(host.used('call_signal')[0].args).toMatchObject({ kind: 400, max_msat: 15_000 });
@@ -1603,7 +1608,7 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     vi.useFakeTimers();
     try {
-      $<HTMLButtonElement>('[data-call="audio"]')!.click();
+      ring('audio');
       await vi.advanceTimersByTimeAsync(30_001);
       expect(text('[data-call-ended]')).toMatch(/node did not answer.*outcome is unknown/i);
       expect($('[data-call-panel="calling"]')).toBeNull();
@@ -1616,7 +1621,7 @@ describe('calls in the shell', () => {
     stubHost({ call_signal: () => { throw { code: 'spend_refused', message: 'token lacks required scope: spend' }; } });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('token lacks required scope: spend'));
     expect($('[data-call-panel="calling"]')).toBeNull();
     expect(FakePc.made[0].closed).toBe(true);
@@ -1630,7 +1635,7 @@ describe('calls in the shell', () => {
     stubHost({ call_signal: () => new Promise((resolve) => { land = resolve; }) });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect(land).toBeDefined());
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
@@ -1668,6 +1673,25 @@ describe('calls in the shell', () => {
     expect(seen).not.toContain('nothing');
   });
 
+  it.each(['call_id_used', 'call_busy', 'call_signal_in_flight', 'call_signal_invalid', 'call_not_live'])(
+    'a hangup refused with %s keeps the paid offer total without an unknown payment', async (code) => {
+      stubHost({ call_signal: (args) => {
+        if (args!.kind === 403) throw { code, message: 'The node refused this call signal before payment. Nothing was paid.' };
+        return { message_id: 'sig', kind: args!.kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+      } });
+      await openShell();
+      await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+      ring('audio');
+      await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+      $<HTMLButtonElement>('[data-call-hangup]')!.click();
+      await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+      await vi.waitFor(() => expect($('[data-call-paid]')?.getAttribute('data-call-paid')).toBe('settled'));
+      expect(text('[data-call-paid]')).toMatch(/^This call paid up to 15 sats:/);
+      expect(text('[data-call-paid]')).not.toMatch(/not known|check pending result/);
+      expect($<HTMLButtonElement>('[data-call-dismiss]')!.disabled).toBe(false);
+    },
+  );
+
   it('a hangup lost in transport (not proven unpaid) is said as not known, not as paid nothing', async () => {
     stubHost({ call_signal: (args) => {
       if (args!.kind === 403) throw 'connection lost';
@@ -1675,7 +1699,7 @@ describe('calls in the shell', () => {
     } });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect($('[data-call-paid]')?.getAttribute('data-call-paid')).toBe('unknown'));
@@ -1689,7 +1713,7 @@ describe('calls in the shell', () => {
     } });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect($('[data-call-paid]')?.getAttribute('data-call-paid')).toBe('unknown'));
@@ -1716,7 +1740,7 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($('[data-message="chat-1"]')).not.toBeNull());
     expect($('[data-message="call-1"]')).toBeNull();
     expect(host.used('call_signal')).toHaveLength(0);
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     expect(host.used('call_signal')).toHaveLength(1);
     const args = host.used('call_signal')[0].args!;
@@ -1732,7 +1756,7 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     // Not on every chat: the chat itself carries no network note.
     expect($('[data-call-network-note]')).toBeNull();
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="calling"]')).not.toBeNull());
     const note = $('[data-call-panel] [data-call-network-note]');
     if (stun) expect(note).toBeNull();
@@ -1870,7 +1894,7 @@ describe('calls in the shell', () => {
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => { throw new DOMException('capture failed', name as string); } } });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(message as RegExp));
     expect(host.used('call_signal')).toHaveLength(0);
     expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false);
@@ -1891,7 +1915,7 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('aria-label')).toBe('Call Maya, up to 42 sats'));
     expect($('[data-call="video"]')!.getAttribute('aria-label')).toBe('Video call Maya, up to 42 sats');
     expect($('[data-call="audio"]')!.getAttribute('title')).toMatch(/No STUN server is set/);
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="calling"]')).not.toBeNull());
     const cancel = $<HTMLButtonElement>('[data-call-hangup]')!;
     expect(cancel.disabled).toBe(false);
@@ -1921,7 +1945,7 @@ describe('calls in the shell', () => {
     stubHost();
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect($('[data-call-network-note]')).not.toBeNull());
     expect(text('[data-call-network-note]')).toContain('Settings → General → Calls');
     $<HTMLButtonElement>('[data-call-settings-link]')!.click();
@@ -1952,7 +1976,7 @@ describe('calls in the shell', () => {
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: undefined });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('This build cannot use the microphone yet. Nothing was paid.'));
     expect(host.used('call_signal')).toHaveLength(0);
   });
@@ -1978,7 +2002,7 @@ describe('calls in the shell', () => {
     $<HTMLButtonElement>('[data-stun-save]')!.click();
     await vi.waitFor(() => expect(text('[data-stun-note]')).toMatch(/own-node\.example:3478 .*sees your IP address/));
     // The next call uses it.
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
     expect(FakePc.made[0].config.iceServers).toEqual([{ urls: 'stun:own-node.example:3478' }]);
     $<HTMLButtonElement>('[data-stun-clear]')!.click();
@@ -2003,7 +2027,7 @@ describe('calls in the shell', () => {
     expect($('[data-call="audio"]')!.getAttribute('title')).toContain(`Uses the STUN server ${own} to find a route.`);
     expect($('[data-call="audio"]')!.getAttribute('title')).not.toContain('No STUN server');
     // A call uses it with no setting saved.
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
     expect(FakePc.made[0].config.iceServers).toEqual([{ urls: own }]);
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
@@ -2013,7 +2037,7 @@ describe('calls in the shell', () => {
     expect(localStorage.getItem('bitsov.stun')).toBe('off');
     expect($('[data-call="audio"]')!.getAttribute('title')).toContain('STUN is turned off');
     $<HTMLButtonElement>('[data-call-dismiss]')?.click();
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect(FakePc.made).toHaveLength(2));
     expect(FakePc.made[1].config.iceServers).toEqual([]);
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
@@ -2061,7 +2085,7 @@ describe('calls in the shell', () => {
     input.dispatchEvent(new Event('input', { bubbles: true }));
     $<HTMLButtonElement>('[data-stun-save]')!.click();
     await vi.waitFor(() => expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('other'));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
     expect(FakePc.made[0].config.iceServers).toEqual([{ urls: 'stun:other.example:3478' }]);
   });
@@ -2070,7 +2094,7 @@ describe('calls in the shell', () => {
     const host = stubHost();
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     const callId = JSON.parse(host.used('call_signal')[0].args!.plaintext as string).call_id as string;
@@ -2084,7 +2108,7 @@ describe('calls in the shell', () => {
     stubHost();
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
-    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    ring('audio');
     await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
     FakePc.made[0].state('closed');
     await vi.waitFor(() => expect($('[data-call-no-relay]')).not.toBeNull());

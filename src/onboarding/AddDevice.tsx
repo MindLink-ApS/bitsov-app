@@ -1,3 +1,4 @@
+import { isMobilePlatform } from '../platform';
 import { createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js';
 import { qrSvg } from '../qr';
 import { PairWords } from './PairWords';
@@ -71,7 +72,7 @@ export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobil
           <Show when={ticket()!.uri && ticket()!.expires_at > now()} fallback={<p role="status">{ticket()!.expires_at <= now()
             ? 'This ticket expired. If it was already scanned, finish enrollment on the new device. Otherwise close this ticket and create a new one.'
             : 'This ticket was used. Check whether the new device was added or its request ended. Close this ticket before starting again.'}</p>}>
-            <p data-ticket-where>On the new device, open BitSov and choose to connect to your node (on a computer: “Use a node you already run at home”), then scan or paste this ticket. It works once and expires in five minutes.</p>
+            <p data-ticket-where>On the new device, open BitSov and choose to connect to your node (on a computer: open “Advanced: use a node you already run at home”), then scan or paste this ticket. It works once and expires in five minutes.</p>
             <p class="hint" data-ticket-claim-warning>The new device then asks for your node’s 18-character claim code. Have it ready: it is shown at your node’s owner console with <code>konsensus claim-code --show</code>, and a BitSov box also has it on its sticker.</p>
             <Show when={qr()} fallback={<p class="hint">This ticket is too large for a QR code. Copy and paste the pairing ticket below on the new device.</p>}>{q => <svg class="qr" viewBox={`0 0 ${q().extent} ${q().extent}`} shape-rendering="crispEdges" role="img" aria-label="Add a device pairing ticket">
               <rect width={q().extent} height={q().extent} fill="#fff" /><path d={q().path} fill="#000" />
@@ -85,7 +86,7 @@ export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobil
           <p>Place both devices next to each other. All four words must match in this order.</p>
           <PairWords words={p.words} />
           <div class="form-actions">
-            <button class="primary" disabled={busy() || p.expires_at <= now() || !!error()} onClick={() => void run({action:'approve',op_id:p.op_id})}>Approve with {props.mobile ? 'biometrics' : 'Touch ID'}</button>
+            <button class="primary" disabled={busy() || p.expires_at <= now() || !!error()} onClick={() => void run({action:'approve',op_id:p.op_id})}>Approve with {(props.mobile ?? isMobilePlatform()) ? 'biometrics' : 'Touch ID'}</button>
             <button class="quiet" disabled={busy()} onClick={() => void run({action:'cancel'})}>Words differ</button>
           </div>
           <p class="hint">If they differ, cancel on the new device too. Do not approve.</p>
@@ -125,7 +126,7 @@ export function JoinDevice(props:{api:(input:JoinInput)=>Promise<JoinView>; mobi
       <Match when={view().state === 'idle'}>
         {/* New device: the ticket was scanned or pasted to get here; next the claim code. */}
         <PairSteps current={1} />
-        <p>After scanning or pasting the ticket, enter your node’s 18-character claim code: it is shown at your node’s owner console with <code>konsensus claim-code --show</code>, and a BitSov box also has it on its sticker. Keep an enrolled owner device nearby. Keep a Mac or another non-phone owner device enrolled as well.</p>
+        <p>After scanning or pasting the ticket, enter your node’s 18-character claim code: it is shown at your node’s owner console with <code>konsensus claim-code --show</code>, and a BitSov box also has it on its sticker. Keep an enrolled owner device nearby. Keep a computer or another non-phone owner device enrolled as well.</p>
         <form onSubmit={event => { event.preventDefault(); const value = claim.value; claim.value = ''; void run({action:'start',claim_code:value}); }}>
           <label>Claim code<input ref={claim} name="claim_code" type="password" autocomplete="off" spellcheck={false} required disabled={busy()} /></label>
           <button class="primary" disabled={busy()}>{busy() ? 'Preparing comparison…' : 'Show comparison words'}</button>
@@ -134,7 +135,7 @@ export function JoinDevice(props:{api:(input:JoinInput)=>Promise<JoinView>; mobi
       <Match when={waiting()}>{v => <>
         <PairSteps current={2} />
         <PairWords words={v().words} />
-        <p role="status">Compare these words with your owner device, then approve there with {props.mobile ? 'biometrics or Touch ID' : 'Touch ID'}.</p>
+        <p role="status">Compare these words with your owner device, then approve there with {(props.mobile ?? isMobilePlatform()) ? 'biometrics' : 'Touch ID'}.</p>
         <button class="quiet" disabled={busy()} onClick={() => void run({action:'cancel'})}>Words differ · Cancel</button>
       </>}</Match>
       <Match when={view().state === 'done'}><PairSteps current={3} /><p class="ok-note" role="status">Device added. Your node’s unlock password was not transferred. Keep your other owner device.</p></Match>

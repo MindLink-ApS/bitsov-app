@@ -32,7 +32,7 @@ export function WelcomeHome(props: {
         </article>
         <article>
           <h2>Add a contact</h2>
-          <p class="hint" id={`${id}-contact`}>Paste a profile card to preview it. Camera scanning is not available in this app.</p>
+          <p class="hint" id={`${id}-contact`}>Paste a profile card to preview it. Camera scanning is not available for profile cards.</p>
           <button type="button" class="primary soft" aria-describedby={`${id}-contact`} onClick={props.onAddContact}>Paste a contact’s card</button>
         </article>
         <article>

@@ -34,7 +34,7 @@ it('shows the QR, polls for SAS and never approves without an explicit tap', asy
   expect(root.querySelector('svg[role="img"]')).not.toBeNull();
   expect(root.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('bitsov://pair/test');
   // Where to go on the new device, and the code it will ask for (no box or console jargon).
-  expect(root.querySelector('[data-ticket-where]')!.textContent).toContain('choose to connect to your node (on a computer: “Use a node you already run at home”), then scan or paste this ticket');
+  expect(root.querySelector('[data-ticket-where]')!.textContent).toContain('choose to connect to your node (on a computer: open “Advanced: use a node you already run at home”), then scan or paste this ticket');
   expect(root.querySelector('[data-ticket-claim-warning]')!.textContent).toBe('The new device then asks for your node’s 18-character claim code. Have it ready: it is shown at your node’s owner console with konsensus claim-code --show, and a BitSov box also has it on its sticker.');
   await vi.advanceTimersByTimeAsync(2000); await flush();
   expect([...root.querySelectorAll('[data-pair-word]')].map(e => e.textContent)).toEqual(words);

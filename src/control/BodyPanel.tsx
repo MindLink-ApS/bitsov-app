@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
+import { createEffect, createSignal, For, type JSX, Match, on, onCleanup, Show, Switch, untrack } from 'solid-js';
 import { ago, amount, clock, sats, satsWhole, satUnit, shortId } from './format';
 import {
   feedState,
@@ -16,6 +16,7 @@ import {
 import { freshness } from './state';
 import type { LinkState, PrePaymentRefusals } from './types';
 import { RefusalCounts } from './RefusalCounts';
+import { onEscape } from './escapeStack';
 
 /** One real event brightens its row for this long, then decays. Nothing moves otherwise. */
 const PULSE_MS = 400;
@@ -92,17 +93,20 @@ function InfoButton(props: { id: string }) {
 }
 
 function InfoModal() {
-  onMount(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && infoKey()) { e.stopPropagation(); setInfoKey(null); } };
-    window.addEventListener('keydown', onKey, true);
-    onCleanup(() => window.removeEventListener('keydown', onKey, true));
-  });
+  let dialog: HTMLDivElement | undefined;
+  createEffect(on(() => infoKey() !== null, (open) => {
+    if (!open) return;
+    const opener = document.activeElement as HTMLElement | null;
+    queueMicrotask(() => { if (infoKey() && dialog?.isConnected) dialog.focus(); });
+    onCleanup(onEscape(() => setInfoKey(null)));
+    onCleanup(() => queueMicrotask(() => { if (opener?.isConnected) opener.focus(); }));
+  }));
   onCleanup(() => setInfoKey(null));
   return (
     <Show when={INFO[infoKey() ?? '']}>
       {(i) => (
         <div class="info-scrim" data-info-modal={infoKey()!} onClick={(e) => { if (e.target === e.currentTarget) setInfoKey(null); }}>
-          <div class="info-modal" role="dialog" aria-modal="true" aria-label={i().title}>
+          <div ref={dialog} tabindex="-1" class="info-modal" role="dialog" aria-modal="true" aria-label={i().title}>
             <h3>{i().title}</h3>
             <For each={i().cards}>
               {(c) => (
@@ -251,17 +255,27 @@ function MetabolismOrgan(props: OrganismProps & { fresh: { label: string; stale:
         )
       }
     >
-      <div class="energy" role="table" aria-label="Sats in and out">
-        <span role="columnheader" />
-        <span role="columnheader" class="col">1 h</span>
-        <span role="columnheader" class="col">24 h</span>
-        <span role="rowheader" class="dir">in</span>
-        <span class="sats energy-fig" data-energy="in-1h">{plus(m().hour.in_msat)}</span>
-        <span class="sats energy-fig" data-energy="in-24h">{plus(m().day.in_msat)}</span>
-        <span role="rowheader" class="dir">out</span>
-        <span class="sats energy-fig" data-energy="out-1h">{minus(m().hour.out_msat)}</span>
-        <span class="sats energy-fig" data-energy="out-24h">{minus(m().day.out_msat)}</span>
-      </div>
+      <table class="energy" aria-label="Sats in and out">
+        <thead>
+          <tr>
+            <th scope="col"><span class="sr-only">Direction</span></th>
+            <th scope="col" class="col">1 h</th>
+            <th scope="col" class="col">24 h</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row" class="dir">in</th>
+            <td class="sats energy-fig" data-energy="in-1h">{plus(m().hour.in_msat)}</td>
+            <td class="sats energy-fig" data-energy="in-24h">{plus(m().day.in_msat)}</td>
+          </tr>
+          <tr>
+            <th scope="row" class="dir">out</th>
+            <td class="sats energy-fig" data-energy="out-1h">{minus(m().hour.out_msat)}</td>
+            <td class="sats energy-fig" data-energy="out-24h">{minus(m().day.out_msat)}</td>
+          </tr>
+        </tbody>
+      </table>
       <Show when={m().bars}>{(b) => <Bars bars={b()} now={props.now} />}</Show>
       <Show when={idle(m().hour)}>
         <p class="organ-line" data-energy-idle>No energy crossed in the last hour.</p>

@@ -1,0 +1,5 @@
+xcuserdata/
+build/
+Externals/
+# Frontend dist copied in by `tauri ios build` / `ios dev` (project.yml: path assets).
+assets/

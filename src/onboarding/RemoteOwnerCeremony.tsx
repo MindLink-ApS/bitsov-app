@@ -1,3 +1,4 @@
+import { deviceWord } from '../platform';
 import { BoxIllustration } from './BoxIllustration';
 import { PairWords } from './PairWords';
 import { createSignal, For, onCleanup, Show } from 'solid-js';
@@ -19,6 +20,8 @@ const setupApi = (input: SetupInput): Promise<SetupView> => invoke('remote_owner
  * after submit. JS/IPC copies cannot be physically zeroized. */
 export function RemoteOwnerCeremony(props: {
   api?: (input: SetupInput) => Promise<SetupView>; onComplete: () => void;
+  /** Phone or tablet: the host has no box setup there (remote_owner_setup refuses off the Mac). */
+  phone?: boolean;
 }) {
   const api = props.api ?? setupApi;
   const [step, setStep] = createSignal<'start' | 'compare' | 'phrase' | 'backup' | 'waiting_for_box_approval' | 'starting' | 'done' | 'words_differ' | 'uncertain'>('start');
@@ -97,7 +100,11 @@ export function RemoteOwnerCeremony(props: {
   return <section ref={root} class="panel" aria-label="Set up your BitSov box" data-remote-owner>
     <BoxIllustration />
     <h2>Set up your BitSov box</h2>
-    <Show when={step() === 'start'}>
+    <Show when={props.phone && step() === 'start'}>
+      {/* No password form here: the phone host cannot set up a box, and it has no Touch ID. */}
+      <p data-remote-owner-phone>Setting up a new box needs BitSov on your Mac for now. Finish setup there, then add this {deviceWord() === 'iPad' ? 'iPad' : 'phone'} from the Mac: Settings → Devices → Add a device.</p>
+    </Show>
+    <Show when={!props.phone && step() === 'start'}>
       <p>Choose a password once. This Mac will keep it protected by Touch ID so you can unlock your box after a restart.</p>
       <label for="box-password">Box password</label>
       <input id="box-password" type="password" autocomplete="new-password" disabled={busy()} />

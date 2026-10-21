@@ -1,4 +1,4 @@
-import { isMobilePlatform } from './platform';
+import { appPlatform, deviceWord, isMobilePlatform } from './platform';
 import { pollWatchBatch, statusWatchSamples, watchPoller, type WatchSamples, type WatchUpdates } from './control/watches';
 import type { AssistantId } from './control/assistants';
 import { LockedNode, RememberUnlock } from './onboarding/LockedNode';
@@ -22,7 +22,7 @@ import type { DeviceView, FundingAddress, FundState } from './control/types';
 import { androidQrScannerAvailable, scanPairingLink } from './pairingScanner';
 import { cameraQrScannerAvailable, scanPairingLinkWithCamera } from './cameraQrScanner';
 import { PairingActivityProvider, usePairingActivity, usePairingBlocked } from './pairingActivity';
-import { watchPairingLinks } from './pairingDeepLink';
+import { pairingLinkInboxAvailable, watchPairingLinks } from './pairingDeepLink';
 
 // The control center. First run (Start node → Pair this app → Create/restore
 // identity → Fund) is the shell's first state, shown in the centre track until
@@ -49,7 +49,8 @@ function AppScreen() {
   const sample = sampleRequest(window.location.search, inHost(), import.meta.env.DEV);
   const canScanPairingQr = androidQrScannerAvailable();
   // Android or iOS: the first run has no "This Mac" (the scanner gate above stays Android-only).
-  const onPhone = isMobilePlatform();
+  const platform = appPlatform();
+  const onPhone = isMobilePlatform(platform);
   // A desktop (macOS) webview scans with the camera; jsQR loads only on Scan.
   const desktopScan = !canScanPairingQr && cameraQrScannerAvailable();
   const [pairingRequest, setPairingRequest] = createSignal<{ link: string } | null>(null);
@@ -67,13 +68,17 @@ function AppScreen() {
   };
   let stopPairingLinks: (() => void) | undefined;
   onMount(() => {
-    if (canScanPairingQr) stopPairingLinks = watchPairingLinks(link => setQueuedPairing({ link }));
+    // Android intents and iOS opened URLs share one review-only queue.
+    if (pairingLinkInboxAvailable()) stopPairingLinks = watchPairingLinks(link => setQueuedPairing({ link }));
   });
   onCleanup(() => stopPairingLinks?.());
   // `?sample&organism=v2` shows the organism view against a node with N1/N2.
   const organism = new URLSearchParams(window.location.search).get('organism') === 'v2' ? 'v2' : 'v1';
   const noPeers = new URLSearchParams(window.location.search).get('peers') === '0';
-  const [source, setSource] = createSignal<Source>(sample ? sampleSource({ organism, noPeers }) : hostSource);
+  // `?sample&peers=12`: a long contact list (scripts/ui-layout checks the meeting planner with it).
+  const peerCount = Number(new URLSearchParams(window.location.search).get('peers')) || undefined;
+  const rooms = new URLSearchParams(window.location.search).get('rooms') === '1';
+  const [source, setSource] = createSignal<Source>(sample ? sampleSource({ organism, noPeers, peerCount, rooms }) : hostSource);
   const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
   // Gate G6: the funds UI stays behind an explicit trust disclosure.
   const [sessionTrust, setSessionTrust] = createSignal<string | null>(null);
@@ -249,7 +254,7 @@ function AppScreen() {
     }
   };
   const useSample = (start: SampleStart) => {
-    setSource(sampleSource({ organism, noPeers }));
+    setSource(sampleSource({ organism, noPeers, peerCount, rooms }));
     setSessionTrust(start === 'shell' ? 'sample' : null);
     void poll();
   };
@@ -296,7 +301,7 @@ function AppScreen() {
             onPreviewRemote={(link) => source().remoteAccessPreview(link)}
             onImportRemote={(link) => source().remoteAccessImport(link)}
             onScanRemote={canScanPairingQr ? scanPairingLink : desktopScan ? scanPairingLinkWithCamera : undefined}
-            mobile={canScanPairingQr}
+            mobile={onPhone}
             phone={onPhone}
             onRegisterDevice={async () => setDevice(await source().deviceKeyRegister())}
             onCancelDevice={async () => setDevice(await source().deviceKeyCancel())}
@@ -344,7 +349,7 @@ function AppScreen() {
                   <LocalOwnerCeremony onComplete={() => void poll()} />
                 </Show>
               }>
-                <RemoteOwnerCeremony onComplete={() => void poll()} />
+                <RemoteOwnerCeremony phone={onPhone} onComplete={() => void poll()} />
               </Show>
             </Show>
           </Show>
@@ -382,15 +387,15 @@ function AppScreen() {
     </Show>
     <Show when={pairingRequest()}>{request => (
       <PairingLinkOverlay onClose={closePairing}>
-        <h1>Pair this phone with your node</h1>
-        <p>Review the endpoint and node fingerprint before choosing Use remote node. Opening a link does not pair this phone.</p>
+        <h1>Pair this {deviceWord()} with your node</h1>
+        <p>Review the endpoint and node fingerprint before choosing Use remote node. Opening a link does not pair this {deviceWord()}.</p>
         <Onboarding status={() => ({ ready: false, node_id: null, error: null })}
           pairing={() => INITIAL_PAIRING} trustAck={() => false} onRetry={() => {}}
           selectedTarget="network" initialPairingLink={request().link} pairingInputId="incoming-pairing-link"
           onPreviewRemote={link => source().remoteAccessPreview(link)}
           onImportRemote={link => source().remoteAccessImport(link)}
           onBusyChange={setPairingBusy}
-          onScanRemote={scanPairingLink} mobile phone />
+          onScanRemote={canScanPairingQr ? scanPairingLink : undefined} mobile={onPhone} phone={onPhone} />
         <button type="button" class="quiet" data-close-pairing disabled={pairingBusy()} onClick={closePairing}>Close pairing</button>
       </PairingLinkOverlay>
     )}</Show>
@@ -400,7 +405,7 @@ function AppScreen() {
       <aside role="alert" class="panel" data-owner-warning>{status().owner_warning}</aside>
     </Show>
     <Show when={showRemember()}>
-      <RememberUnlock mobile={canScanPairingQr} onChoose={async (remember) => {
+      <RememberUnlock mobile={onPhone} platform={platform} onChoose={async (remember) => {
         // The host consumes the offer during storage. Keep this dialog mounted
         // across polls so a slow save retains its busy state and any refusal.
         setRememberChoosing(true);
@@ -414,7 +419,8 @@ function AppScreen() {
       }} onDone={() => { setRememberOffer(false); setRememberSaved(false); }} />
     </Show>
     <Show when={!status().locked} fallback={<LockedNode
-      mobile={canScanPairingQr}
+      mobile={onPhone}
+      platform={platform}
       typedUnlockSupported={status().typed_unlock_supported}
       state={status().unlock_state}
       pending={status().pending_device}
@@ -429,11 +435,12 @@ function AppScreen() {
     <Show
       when={trustAck()}
       fallback={
-        <ControlCenter remote={pairing().remote} retryAfterSecs={status().retry_after_secs} onReconnect={retryPairing} source={source()} active={false} ready={status().ready} error={status().error} ownId={status().node_id} firstRun={firstRun} />
+        <ControlCenter remote={pairing().remote} phone={onPhone} retryAfterSecs={status().retry_after_secs} onReconnect={retryPairing} source={source()} active={false} ready={status().ready} error={status().error} ownId={status().node_id} firstRun={firstRun} />
       }
     >
       <ControlCenter
         remote={pairing().remote}
+        phone={onPhone}
         hostedBy={pairing().hosted_by ?? null}
         offline={offlineScreen()}
         retryAfterSecs={status().retry_after_secs}
@@ -485,7 +492,7 @@ function PairingLinkOverlay(props: ParentProps<{ onClose: () => void }>) {
     }
   };
   return <div ref={dialog} class="pairing-link-overlay" role="dialog" aria-modal="true"
-    aria-label="Pair this phone with your node" data-pairing-link-screen tabindex="-1" onKeyDown={onKeyDown}>
+    aria-label={`Pair this ${deviceWord()} with your node`} data-pairing-link-screen tabindex="-1" onKeyDown={onKeyDown}>
     {props.children}
   </div>;
 }

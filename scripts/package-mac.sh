@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# Build an unsigned local BitSov.app (optionally also a .dmg) on Apple Silicon,
-# then check it statically (docs/MAC_PACKAGE.md, plan docs/MAC_PACKAGE_PLAN.md §5).
+# Build, sign and verify BitSov.app (optionally also a .dmg) on Apple Silicon.
+# Ad-hoc by default; see docs/MAC_PACKAGE.md for Developer ID / notary hooks.
 #
-# No signing, notarization or publishing. This script never opens, launches or
-# executes the built app or the bundled node: inspection is file / otool /
-# plutil / codesign -dvv / hdiutil verify only. Nothing here binds a port.
+# No publishing. This script never opens, launches or executes the built app
+# or the bundled node. Notarization is opt-in; nothing here binds a port.
 #
 # Usage: scripts/package-mac.sh [--dmg] [--use-existing-sidecar]
-#   --dmg                   also build the .dmg (CI=true skips Finder layout;
-#                           falls back to a plain image if bundle_dmg.sh fails)
+#   --dmg                   create a plain .dmg from the verified app
+#                           (no Finder layout or Applications shortcut)
 #   --use-existing-sidecar  bundle the sidecar already at
 #                           src-tauri/bin/konsensus-aarch64-apple-darwin instead
 #                           of fetching. Every sidecar is still re-verified
@@ -42,6 +41,23 @@ SIDECAR="src-tauri/bin/konsensus-$TRIPLE"
 APP="src-tauri/target/release/bundle/macos/BitSov.app"
 DMG_DIR="src-tauri/target/release/bundle/dmg"
 
+# The certificate must already be imported/unlocked by the caller. Keep the
+# default independent of Tauri's APPLE_* environment variables.
+SIGNING_IDENTITY="${BITSOV_MAC_SIGNING_IDENTITY:--}"
+NOTARY_PROFILE="${BITSOV_MAC_NOTARY_PROFILE:-}"
+if [ -n "$NOTARY_PROFILE" ] && [ "$SIGNING_IDENTITY" = - ]; then
+  echo "BITSOV_MAC_NOTARY_PROFILE requires a Developer ID signing identity." >&2
+  exit 2
+fi
+SIGN_ARGS=(--force --sign "$SIGNING_IDENTITY")
+if [ "$SIGNING_IDENTITY" != - ]; then
+  SIGN_ARGS+=(--options runtime --timestamp)
+fi
+APP_SIGN_ARGS=("${SIGN_ARGS[@]}")
+if [ "$SIGNING_IDENTITY" != - ]; then
+  APP_SIGN_ARGS+=(--entitlements "${BITSOV_MAC_ENTITLEMENTS:-src-tauri/Entitlements.plist}")
+fi
+
 echo "== 1. sidecar =="
 if [ "$USE_EXISTING" = 1 ]; then
   if [ ! -x "$SIDECAR" ]; then
@@ -59,45 +75,72 @@ test -x "$SIDECAR"
 # No existing-sidecar bypass: verify every entry, including other targets.
 bash scripts/fetch-node-sidecar.sh --verify-only
 
-echo "== 2. unsigned bundle build =="
+echo "== 2. app bundle build =="
 npm ci --ignore-scripts --no-audit --no-fund
-# A stale .app or .dmg from an earlier run (or a restored CI cache) must not be
-# what gets checked or uploaded.
+# Never inspect or upload stale artifacts. Build only the app: Tauri's DMG
+# would snapshot it before our final signing and verification.
 rm -rf src-tauri/target/release/bundle
-BUNDLES="app"
-if [ "$WANT_DMG" = 1 ]; then BUNDLES="app,dmg"; fi
-# The Tauri CLI sets TAURI_ENV_PLATFORM and no TAURI_ENV_DEBUG for this
-# release build, so vite.config.ts leaves assistant.html out of dist (checked
-# below).
-# --ci only disables CLI prompts. The DMG bundler independently reads CI and
-# TAURI_BUNDLER_DMG_IGNORE_CI before passing --skip-jenkins to bundle_dmg.sh.
-# Force both here so a caller's environment cannot enable Finder automation.
 BUILD_LOG="src-tauri/target/package-mac.log"
 mkdir -p src-tauri/target
-DMG_FALLBACK=0
-if CI=true TAURI_BUNDLER_DMG_IGNORE_CI=false \
-  npm run tauri -- build --bundles "$BUNDLES" --no-sign --ci -- --locked 2>&1 | tee "$BUILD_LOG"; then
-  :
-else
-  BUILD_STATUS=("${PIPESTATUS[@]}")
-  # Only recover the generated DMG script's failure, never npm, compilation,
-  # app bundling, or logging failures. The bundle tree was cleared above, and
-  # the fresh app must still pass every static check before image creation.
-  if [ "${BUILD_STATUS[0]}" -ne 0 ] && [ "${BUILD_STATUS[1]}" -eq 0 ] && \
-    [ "$WANT_DMG" = 1 ] && [ -f "$DMG_DIR/bundle_dmg.sh" ] && \
-    grep -qF 'error running bundle_dmg.sh' "$BUILD_LOG"; then
-    DMG_FALLBACK=1
-    echo "Tauri bundle_dmg.sh failed (see $BUILD_LOG); checking the app before falling back to a plain DMG." >&2
-  else
-    echo "Bundle build failed; see $BUILD_LOG. No DMG fallback attempted." >&2
-    exit 1
-  fi
-fi
+# Tauri finishes sidecar placement, resources and Info.plist before returning.
+# Its release environment also excludes assistant.html from dist.
+# Pin the output path even if the caller sets a different Cargo target dir.
+CARGO_TARGET_DIR="$ROOT/src-tauri/target" CI=true TAURI_BUNDLER_DMG_IGNORE_CI=false \
+  npm run tauri -- build --bundles app --no-sign --ci -- --locked 2>&1 | tee "$BUILD_LOG"
 
 echo "== 3. static checks =="
 bash scripts/check-mac-bundle.sh --app "$APP" --sidecar "$SIDECAR" --dist dist
 
-echo "== 4. inspection (informational) =="
+# This byte-for-byte comparison must precede signing: codesign changes the
+# bundled sidecar, but must never change the authenticated source in bin/.
+echo "== 4. final signing (inside out) =="
+# Do not use --deep to sign. Visit real files/directories deepest first;
+# framework symlinks are deliberately not followed or signed twice.
+while IFS= read -r -d '' code; do
+  if [ -f "$code" ] && [ ! -L "$code" ]; then
+    if file -b "$code" | grep -q 'Mach-O'; then
+      # The main executable is signed with its containing app below.
+      if [ "$code" != "$APP/Contents/MacOS/bitsov-app" ]; then
+        codesign "${SIGN_ARGS[@]}" "$code"
+      fi
+    fi
+  elif [ -d "$code" ] && [ ! -L "$code" ]; then
+    case "$code" in
+      *.framework|*.app|*.xpc|*.appex|*.bundle)
+        codesign "${SIGN_ARGS[@]}" "$code" ;;
+    esac
+  fi
+done < <(find "$APP/Contents" -depth -print0)
+codesign "${APP_SIGN_ARGS[@]}" "$APP"
+
+verify_app() {
+  # A linker signature on a standalone executable is not a bundle seal.
+  test -s "$APP/Contents/_CodeSignature/CodeResources"
+  codesign --verify --deep --strict --verbose=2 "$APP"
+}
+
+echo "== 5. signature verification =="
+verify_app
+# Optional future release path. Submit a zip, then staple the app BEFORE DMG
+# creation, so both app.zip and the image can carry the notarization ticket.
+if [ -n "$NOTARY_PROFILE" ]; then
+  NOTARY_ZIP="src-tauri/target/BitSov-notary.zip"
+  rm -f "$NOTARY_ZIP"
+  ditto -c -k --keepParent "$APP" "$NOTARY_ZIP"
+  xcrun notarytool submit "$NOTARY_ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$APP"
+  rm -f "$NOTARY_ZIP"
+  verify_app
+fi
+# Gatekeeper trust is separate from signature integrity. Ad-hoc is expected
+# to be rejected; preserve diagnostics without making that rejection fatal.
+if spctl -a -vv -t exec "$APP"; then
+  echo "Gatekeeper assessment: accepted"
+else
+  echo "Gatekeeper assessment: rejected (informational; expected for ad-hoc builds)"
+fi
+
+echo "== 6. inspection (informational) =="
 file "$APP/Contents/MacOS/bitsov-app" "$APP/Contents/MacOS/konsensus"
 otool -L "$APP/Contents/MacOS/bitsov-app" "$APP/Contents/MacOS/konsensus"
 echo "sidecar Mach-O minimum:"
@@ -106,23 +149,17 @@ codesign -dvv "$APP" 2>&1 || true
 du -sh "$APP"
 
 if [ "$WANT_DMG" = 1 ]; then
-  echo "== 5. dmg =="
-  if [ "$DMG_FALLBACK" = 1 ]; then
-    # This manual package step runs outside Tauri's beforeBundleCommand.
-    bash scripts/fetch-node-sidecar.sh --verify-only
-    bash scripts/check-mac-bundle.sh --app "$APP" --sidecar "$SIDECAR" --dist dist
-    VERSION="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
-    DMG="$DMG_DIR/BitSov_${VERSION}_aarch64.dmg"
-    # Discard partial images from the failed bundler. Use only the checked app
-    # as input, never the macos directory (which may contain a temporary DMG).
-    rm -f "$DMG_DIR"/*.dmg
-    echo "→ falling back to hdiutil create -srcfolder BitSov.app -format UDZO (no Finder layout or Applications shortcut)"
-    hdiutil create -srcfolder "$APP" -volname BitSov -format UDZO "$DMG"
+  echo "== 7. dmg from verified app =="
+  VERSION="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
+  DMG="$DMG_DIR/BitSov_${VERSION}_aarch64.dmg"
+  mkdir -p "$DMG_DIR"
+  hdiutil create -srcfolder "$APP" -volname BitSov -format UDZO "$DMG"
+  if [ "$SIGNING_IDENTITY" != - ]; then
+    codesign --force --sign "$SIGNING_IDENTITY" --timestamp "$DMG"
   fi
-  DMG="$(find "$DMG_DIR" -maxdepth 1 -name '*.dmg' -print | head -n 1)"
-  if [ -z "$DMG" ] || [ ! -s "$DMG" ]; then
-    echo "no .dmg under $DMG_DIR" >&2
-    exit 1
+  if [ -n "$NOTARY_PROFILE" ]; then
+    xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$DMG"
   fi
   # Checksum verification of the image; does not mount it.
   hdiutil verify "$DMG"
@@ -130,4 +167,4 @@ if [ "$WANT_DMG" = 1 ]; then
 fi
 
 echo
-echo 'PACKAGE: PASS (structure and sidecar integrity only)'
+echo 'PACKAGE: PASS (structure, source sidecar integrity and final code signature)'

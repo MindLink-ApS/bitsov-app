@@ -207,6 +207,7 @@ describe('received files and emoji in the thread', () => {
     ta.setSelectionRange(2, 2);
     $<HTMLButtonElement>('[data-emoji]')!.click();
     await vi.waitFor(() => expect($('[data-emoji-picker]')).not.toBeNull());
+    expect($('[data-emoji-picker]')!.getAttribute('role')).toBe('group');
     expect($('[data-emoji-picker]')!.querySelectorAll('[data-emoji-pick]').length).toBe(EMOJIS.length);
     $<HTMLButtonElement>('[data-emoji-pick="👍"]')!.click();
     await vi.waitFor(() => expect(ta.value).toBe('hi👍'));

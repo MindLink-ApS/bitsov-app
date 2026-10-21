@@ -1,9 +1,11 @@
+import { deviceWord, isMobilePlatform } from '../platform';
 import type { JoinInput, JoinView } from './AddDevice';
 import { BoxIllustration } from './BoxIllustration';
 import { LocalNodeSwitch } from './LocalNodeSwitch';
 import { DeviceApprovals } from './DeviceApprovals';
 import { SoftError } from '../control/SoftError';
 import { createEffect, createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
+import { Dynamic } from 'solid-js/web';
 import { normalizePairingLink, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
@@ -31,7 +33,9 @@ const STEP_LABEL = { node: 'Your node', pair: 'Pair this app', identity: 'Your i
 export function onboardingStage(steps: { id: string; status: string }[]): Stage {
   const by = (id: string) => steps.find((s) => s.id === id)?.status;
   const settled = (st?: string) => st === 'done' || st === 'skipped';
-  if (!settled(by('node')) || !settled(by('pair'))) return 'node';
+  // A phone has no node step: only pairing gates the first stage there.
+  const node = by('node');
+  if ((node !== undefined && !settled(node)) || !settled(by('pair'))) return 'node';
   return by('identity') === 'done' ? 'fund' : 'identity';
 }
 
@@ -49,9 +53,9 @@ export function Onboarding(props: {
   onBusyChange?: (busy: boolean) => void;
   onImportRemote?: (link: string) => Promise<RemoteImportView>;
   onScanRemote?: () => Promise<string>;
-  /** A phone (biometric approvals). Defaults to “has a scanner” for older callers. */
+  /** Mobile wording (Android or iOS), independent of scanner capability. */
   mobile?: boolean;
-  /** A phone or tablet build (Android or iOS). Defaults to `mobile` (Android). */
+  /** A phone or tablet build (Android or iOS). Defaults to the runtime platform. */
   phone?: boolean;
   /** Touch ID approvals setup, offered once the app is paired (Settings → Node has the same). */
   onRegisterDevice?: () => Promise<unknown>;
@@ -67,19 +71,19 @@ export function Onboarding(props: {
   const testNodes = (() => {
     try { return localStorage.getItem('bitsov.test-nodes') === '1'; } catch { return false; }
   })();
-  const steps = () => onboardingSteps(props.status(), props.pairing(), props.trustAck());
+  const steps = () => onboardingSteps(props.status(), props.pairing(), props.trustAck(), phone());
   const stage = () => onboardingStage(steps());
   // On a phone the only target is your node (there is no "This Mac").
-  const [internalTarget, setInternalTarget] = createSignal<NodeTarget>((props.phone ?? props.mobile === true) ? 'network' : 'local');
+  const phone = () => props.phone ?? props.mobile ?? isMobilePlatform();
+  const mobileBiometrics = () => props.mobile ?? isMobilePlatform();
+  const device = () => deviceWord() === 'iPad' ? 'iPad' : 'phone';
+  const [internalTarget, setInternalTarget] = createSignal<NodeTarget>(phone() ? 'network' : 'local');
   const target = () => props.selectedTarget ?? internalTarget();
   const setTarget = (t: NodeTarget) => {
     setInternalTarget(t);
     props.onTargetChange?.(t);
   };
   const isEnrolled = () => props.device?.()?.state === 'registered';
-  const mobileBiometrics = () => props.mobile ?? props.onScanRemote !== undefined;
-  /** Running on a phone or tablet (Android or iOS, from isMobilePlatform): there is no "This Mac" to choose. */
-  const phone = () => props.phone ?? props.mobile === true;
   const [approvalsSkipped, setApprovalsSkipped] = createSignal(false);
   const [remoteLink, setRemoteLink] = createSignal('');
   const [previewing, setPreviewing] = createSignal(false);
@@ -199,7 +203,7 @@ export function Onboarding(props: {
       <ol class="steps stepper" aria-label="Setup progress">
         <For each={steps()}>
           {(step) => (
-            <li class={`step ${step.status}`} classList={{ joined: step.id === 'pair' }} data-step={step.id} data-status={step.status}>
+            <li class={`step ${step.status}`} classList={{ joined: step.id === 'pair' && !phone() }} data-step={step.id} data-status={step.status}>
               <span class="pip" aria-hidden="true" />
               {/* Node and pair read as one stage: two pips, one label after both. */}
               <span class="step-label" classList={{ 'sr-only': step.id === 'node' }}>
@@ -233,9 +237,9 @@ export function Onboarding(props: {
       >
         <header class="ob-head" data-ob-head="node">
           <Show when={target() !== 'local'}><BoxIllustration /></Show>
-          <h1>{phone() ? 'Connect this phone to your node' : 'Where should your node run?'}</h1>
+          <h1>{phone() ? `Connect this ${device()} to your node` : 'Where should your node run?'}</h1>
           <p class="lede">{phone()
-            ? 'Every message you send is a small bitcoin payment to the person you are writing to. Your node makes those payments; this phone connects to it.'
+            ? `Every message you send is a small bitcoin payment to the person you are writing to. Your node makes those payments; this ${device()} connects to it.`
             : 'Every message you send is a small bitcoin payment to the person you are writing to. Your node makes those payments, so it needs a home first.'}</p>
         </header>
       </Show>
@@ -284,7 +288,10 @@ export function Onboarding(props: {
             </p>
           </Show>
           {/* Once the node is up the choice is compact: both locations show as pills, no fold. */}
-          <details class="node-target-advanced" open={phone() || target() !== 'local' || stage() !== 'node'}>
+          {/* On a phone there is nothing to fold: a plain block. A <details> with no
+              <summary> makes WebKit add its own OS-language label ("Flere oplysninger"
+              on a Danish phone) and lets the only choice be collapsed. */}
+          <Dynamic component={phone() ? 'div' : 'details'} class="node-target-advanced" open={phone() ? undefined : target() !== 'local' || stage() !== 'node'}>
             <Show when={!phone()}><summary>Advanced: use a node you already run at home</summary></Show>
           {/* A home node uses a remote pairing link. */}
           <button
@@ -319,12 +326,12 @@ export function Onboarding(props: {
                 </div>
               </div>
               <p>{phone()
-                ? 'A computer or server that stays on runs your node; its keys live there. Scan or paste its pairing link to connect this phone.'
+                ? `A computer or server that stays on runs your node; its keys live there. ${props.onScanRemote ? 'Scan or paste' : 'Paste'} its pairing link to connect this ${device()}.`
                 : 'A computer you keep running at home can receive while this Mac is off. Its keys live on that computer. Paste its pairing link; it is saved for the next start.'}</p>
             </div>
           </button>
 
-          </details>
+          </Dynamic>
 
           <Show when={testNodes}>
           {/* Internal testing only; not a product path. */}
@@ -356,11 +363,11 @@ export function Onboarding(props: {
           </Show>
         </div>
         <p class="hint connect-line">
-          {props.pairing().remote ? 'This app connects to your remote node.' : phone() ? 'This phone is not connected to a node yet.' : 'This app connects to the node on this Mac.'}
+          {props.pairing().remote ? 'This app connects to your remote node.' : phone() ? `This ${device()} is not connected to a node yet.` : 'This app connects to the node on this Mac.'}
           <Show when={!props.pairing().remote && target() !== 'local'}> A saved pairing link takes effect at the next start.</Show>
           <Show when={isEnrolled()}>
             {mobileBiometrics()
-              ? ' Biometrics on this phone can approve a contact or budget.'
+              ? ` Biometrics on this ${device()} can approve a contact or budget.`
               : ' Touch ID on this Mac can approve a contact or budget.'}
           </Show>
         </p>
@@ -390,7 +397,7 @@ export function Onboarding(props: {
                 <Show when={isEnrolled()}>
                   <p class="hint">
                     {mobileBiometrics()
-                      ? 'Biometric approvals are already set up on this phone; pairing does not create that key.'
+                      ? `Biometric approvals are already set up on this ${device()}; pairing does not create that key.`
                       : 'Touch ID approvals are already set up on this Mac; pairing does not create that key.'}
                   </p>
                 </Show>
@@ -428,7 +435,7 @@ export function Onboarding(props: {
                 >
                   <span class="touchid-status-pill" data-device-badge="registered">
                     {mobileBiometrics()
-                      ? 'Biometrics Enrolled · Android Keystore'
+                      ? 'Biometric approvals enabled'
                       : 'Touch ID Enrolled · Secure Enclave'}
                   </span>
                 </Show>

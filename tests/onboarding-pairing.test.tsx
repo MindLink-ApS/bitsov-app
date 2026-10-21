@@ -96,6 +96,63 @@ describe('onboarding steps', () => {
   });
 });
 
+describe('phone onboarding has no local-node step', () => {
+  let dispose: (() => void) | undefined;
+  let mount: HTMLElement | undefined;
+  afterEach(() => { dispose?.(); dispose = undefined; mount?.remove(); mount = undefined; });
+  const nodeDown: NodeStatus = { ready: false, node_id: null, error: 'sidecar not available' };
+
+  it('a phone has no "Start node" step, so a local-node error never reads as a failed stage', () => {
+    const steps = onboardingSteps(nodeDown, starting, false, true);
+    expect(steps.map(s => s.id)).toEqual(['pair', 'identity', 'fund']);
+    expect(steps.some(s => s.status === 'failed')).toBe(false);
+    expect(steps[0].status).toBe('active');
+    expect(onboardingStage(steps)).toBe('node');
+  });
+
+  it('once paired to a remote node the phone moves past the node stage', () => {
+    const steps = onboardingSteps(ready, { ...paired, remote: true }, false, true);
+    expect(steps.find(s => s.id === 'pair')!.status).toBe('done');
+    expect(onboardingStage(steps)).not.toBe('node');
+  });
+
+  it('a computer keeps its "Start node" step and its failure', () => {
+    const steps = onboardingSteps(nodeDown, starting, false);
+    expect(steps[0]).toMatchObject({ id: 'node', status: 'failed' });
+  });
+
+  it('the phone stepper renders no failed stage while the local node is down', () => {
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => (
+      <Onboarding status={() => nodeDown} pairing={() => starting} trustAck={() => false} onRetry={() => {}} phone />
+    ), mount);
+    expect(mount.querySelector('.stepper [data-step="node"]')).toBeNull();
+    expect(mount.querySelector('.stepper [data-status="failed"]')).toBeNull();
+    expect(mount.querySelector('.stepper')!.textContent).not.toContain('failed');
+    expect(mount.querySelector('.stepper [data-step="pair"]')!.classList.contains('joined')).toBe(false);
+  });
+
+  it('every <details> in phone and computer onboarding has an explicit summary', () => {
+    for (const phone of [true, false]) {
+      mount = document.createElement('div');
+      document.body.appendChild(mount);
+      dispose = render(() => (
+        <Onboarding status={() => booting} pairing={() => starting} trustAck={() => false} onRetry={() => {}} phone={phone} />
+      ), mount);
+      const details = [...mount.querySelectorAll('details')];
+      // The phone renders its node choice as a plain block (no <details> at all); the computer still folds it.
+      if (!phone) expect(details.length).toBeGreaterThan(0);
+      for (const d of details) {
+        const summary = d.querySelector(':scope > summary');
+        expect(summary, d.outerHTML.slice(0, 80)).not.toBeNull();
+        expect(summary!.textContent!.trim().length + (summary!.getAttribute('aria-label')?.length ?? 0)).toBeGreaterThan(0);
+      }
+      dispose(); dispose = undefined; mount.remove();
+    }
+  });
+});
+
 describe('onboarding stages (3 focused steps)', () => {
   it('maps the four host steps onto node, identity and fund', () => {
     expect(onboardingStage(onboardingSteps(booting, starting, false))).toBe('node');
@@ -298,8 +355,10 @@ describe('pairing panel', () => {
     const node = mount.querySelector<HTMLButtonElement>('[data-target="network"]')!;
     expect(node.textContent).toContain('Your node');
     expect(node.textContent).toContain('connect this phone');
-    expect(mount.querySelector('details.node-target-advanced summary')).toBeNull();
-    expect(mount.querySelector<HTMLDetailsElement>('details.node-target-advanced')!.open).toBe(true);
+    // No <details> on a phone: WebKit would add its own OS-language summary ("Flere oplysninger").
+    expect(mount.querySelector('details.node-target-advanced')).toBeNull();
+    expect(mount.querySelector('.node-target-advanced summary')).toBeNull();
+    expect(mount.querySelector('div.node-target-advanced [data-target="network"]')).not.toBeNull();
     expect(mount.querySelector('[data-remote-access]')).not.toBeNull();
     expect(mount.textContent).not.toMatch(/Use this Mac instead|separate wallet|Keys on this Mac|this Mac must stay awake/);
   });
