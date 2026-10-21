@@ -2,11 +2,12 @@ import { usePairingActivity } from '../pairingActivity';
 import { createEffect, createSignal, Show } from 'solid-js';
 import { setUnlockRemembered, unlockRemembered } from './unlockMemory';
 import { hideLockedHubTrust, HubTrustInfo, lockedHubTrustHidden } from '../control/HubTrust';
-import { deviceWords, type AppPlatform } from '../platform';
+import { appPlatform, deviceWords, isMobilePlatform, type AppPlatform } from '../platform';
 
-/** The platform's words; without `platform`, `mobile` means Android (older callers). */
-const wordsFor = (props: { platform?: AppPlatform; mobile?: boolean }) =>
-  deviceWords(props.platform ?? (props.mobile ? 'android' : 'desktop'));
+/** Prefer the runtime platform; retain the legacy mobile prop for Android callers. */
+const platformFor = (props: { platform?: AppPlatform; mobile?: boolean }) =>
+  props.platform ?? (isMobilePlatform() ? appPlatform() : props.mobile ? 'android' : 'desktop');
+const wordsFor = (props: { platform?: AppPlatform; mobile?: boolean }) => deviceWords(platformFor(props));
 
 export function LockedNode(props: {
   onUnlock: () => Promise<void>;
@@ -14,7 +15,7 @@ export function LockedNode(props: {
   onUnlockWithPassword?: (password: string) => Promise<void>;
   hostError?: string | null;
   mobile?: boolean;
-  /** Which device's words to use (Mac / iPhone / Android phone). */
+  /** Which device's words to use (Mac / iPhone / iPad / Android phone). */
   platform?: AppPlatform;
   typedUnlockSupported?: boolean;
   state?: 'ready' | 'no-password' | 'not-enrolled' | 'pending-approval';
@@ -80,8 +81,8 @@ export function LockedNode(props: {
       <Show when={props.state === 'not-enrolled'}>
         <p>This {wordsFor(props).device} is not an approved owner device yet.</p>
         <p>Unlock the node first using another approved owner device, or at the box. For the first owner device, stop the locked service, start the node with <code>konsensus start --config &lt;path&gt; --owner-control</code>, and type its password at the box’s terminal.</p>
-        <p>Once the node is unlocked, open Settings → {props.mobile ? 'Set up biometric approvals' : 'Set up Touch ID approvals'}. Compare the fingerprint and finish approval at the box, then restart the remote-unlock service.</p>
-        <button disabled>{props.mobile ? 'Set up biometric approvals' : 'Set up Touch ID approvals'}</button>
+        <p>Once the node is unlocked, open Settings → {isMobilePlatform(platformFor(props)) ? 'Set up biometric approvals' : 'Set up Touch ID approvals'}. Compare the fingerprint and finish approval at the box, then restart the remote-unlock service.</p>
+        <button disabled>{isMobilePlatform(platformFor(props)) ? 'Set up biometric approvals' : 'Set up Touch ID approvals'}</button>
         <p class="hint">Setup becomes available in Settings when the node is unlocked.</p>
       </Show>
       <Show when={props.state !== 'not-enrolled' && props.state !== 'pending-approval'}>
@@ -134,12 +135,14 @@ export function LockedNode(props: {
 
 const REMEMBER_TEXT = {
   phone: 'BitSov encrypts it with a key in this phone’s secure hardware that only opens with your fingerprint. Next time, unlock with your fingerprint instead of typing it.',
-  iPhone: 'BitSov saves it on this iPhone, protected by Face ID or Touch ID. Next time, unlock with Face ID or Touch ID instead of typing it.',
+  iPhone: 'BitSov saves it on this iPhone, protected by biometrics. Next time, unlock with biometrics instead of typing it.',
+  iPad: 'BitSov saves it on this iPad, protected by biometrics. Next time, unlock with biometrics instead of typing it.',
   Mac: 'BitSov saves it in this Mac’s Keychain, protected by Touch ID. Next time, unlock with Touch ID instead of typing it.',
 } as const;
 const REMEMBER_BUTTON = {
   phone: 'Remember on this phone (fingerprint)',
-  iPhone: 'Remember on this iPhone (Face ID or Touch ID)',
+  iPhone: 'Remember on this iPhone (biometrics)',
+  iPad: 'Remember on this iPad (biometrics)',
   Mac: 'Remember on this Mac (Touch ID)',
 } as const;
 
@@ -150,7 +153,7 @@ const REMEMBER_BUTTON = {
  */
 export function RememberUnlock(props: {
   mobile?: boolean;
-  /** Which device's words to use (Mac / iPhone / Android phone). */
+  /** Which device's words to use (Mac / iPhone / iPad / Android phone). */
   platform?: AppPlatform;
   onChoose: (remember: boolean) => Promise<void>;
   onDone: () => void;
@@ -179,8 +182,8 @@ export function RememberUnlock(props: {
     >
       <h2>Unlocked. Remember the password on this {wordsFor(props).device}?</h2>
       <p>{REMEMBER_TEXT[wordsFor(props).device]}</p>
-      <p class="hint">If the {wordsFor(props).device === 'iPhone' ? 'faces or fingerprints' : 'fingerprints'} on this {wordsFor(props).device} change, the saved copy stops opening. Type the password once more and choose Remember to replace it.</p>
-      <p class="hint">If your device’s approval key also stops working, another approved owner device or the box must unlock the node first. Then set up {props.mobile ? 'biometric' : 'Touch ID'} approvals again before unlocking from this device.</p>
+      <p class="hint">If the {platformFor(props) === 'ios' ? 'faces or fingerprints' : 'fingerprints'} on this {wordsFor(props).device} change, the saved copy stops opening. Type the password once more and choose Remember to replace it.</p>
+      <p class="hint">If your device’s approval key also stops working, another approved owner device or the box must unlock the node first. Then set up {isMobilePlatform(platformFor(props)) ? 'biometric' : 'Touch ID'} approvals again before unlocking from this device.</p>
       <div class="row">
         <button class="primary" data-remember-yes disabled={busy()} onClick={() => void choose(true)}>{busy() ? 'Saving…' : REMEMBER_BUTTON[wordsFor(props).device]}</button>
         <button class="link" data-remember-no disabled={busy()} onClick={() => void choose(false)}>Not now</button>
@@ -195,7 +198,7 @@ export function RememberUnlock(props: {
 export function PendingApproval(props: {
   pending: { fingerprint: string | null; owner_action: string | null };
   mobile?: boolean;
-  /** Which device's words to use (Mac / iPhone / Android phone). */
+  /** Which device's words to use (Mac / iPhone / iPad / Android phone). */
   platform?: AppPlatform;
   onCancel?: () => Promise<void>;
 }) {

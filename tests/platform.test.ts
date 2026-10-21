@@ -9,15 +9,15 @@ const IPAD_DESKTOP = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKi
 const MAC = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)';
 
 describe('platform-aware device words', () => {
-  it('a Mac keeps Touch ID and "this Mac"; an iPhone says Face ID or Touch ID; Android says "this phone"', () => {
+  it('a Mac keeps Touch ID and "this Mac"; an iPhone says biometrics; Android says "this phone"', () => {
     expect(deviceWords('desktop')).toMatchObject({ device: 'Mac', biometric: 'Touch ID', unlockButton: 'Unlock with Touch ID' });
-    expect(deviceWords('ios')).toMatchObject({ device: 'iPhone', biometric: 'Face ID or Touch ID', unlockButton: 'Unlock with Face ID or Touch ID' });
+    expect(deviceWords('ios')).toMatchObject({ device: 'iPhone', biometric: 'biometrics', unlockButton: 'Unlock with biometrics' });
     expect(deviceWords('android')).toMatchObject({ device: 'phone', biometric: 'your fingerprint', unlockButton: 'Unlock with biometrics' });
   });
 
   it('a cancelled approval names the platform\'s biometric', () => {
     expect(refusalText('device_cancelled', {}, 'desktop')).toBe('Touch ID was cancelled. Nothing was approved.');
-    expect(refusalText('device_cancelled', {}, 'ios')).toBe('Face ID or Touch ID was cancelled. Nothing was approved.');
+    expect(refusalText('device_cancelled', {}, 'ios')).toBe('The biometric check was cancelled. Nothing was approved.');
     expect(refusalText('device_cancelled', {}, 'android')).toBe('The biometric check was cancelled. Nothing was approved.');
     // Outside the app runtime (tests, browser preview) the default stays the Mac wording.
     expect(refusalText('device_cancelled')).toBe('Touch ID was cancelled. Nothing was approved.');

@@ -339,19 +339,19 @@ it('an older host without typed unlock keeps the single Touch ID button', () => 
   expect(mount.querySelector('[data-unlock-saved-path]')).toBeNull();
 });
 
-it('on an iPhone, remembering says this iPhone and Face ID or Touch ID, never this Mac', async () => {
+it('on an iPhone, remembering says this iPhone and biometrics, never this Mac', async () => {
   const mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <RememberUnlock platform="ios" onChoose={async () => {}} onDone={() => {}} />, mount);
   expect(mount.textContent).toContain('Unlocked. Remember the password on this iPhone?');
   expect(mount.textContent).not.toMatch(/this Mac|Keychain/);
-  buttonNamed(mount, 'Remember on this iPhone (Face ID or Touch ID)')!.click();
-  await vi.waitFor(() => expect(mount.querySelector('[data-remember-saved]')?.textContent).toBe('Saved on this iPhone. Next time, unlock with Face ID or Touch ID.'));
+  buttonNamed(mount, 'Remember on this iPhone (biometrics)')!.click();
+  await vi.waitFor(() => expect(mount.querySelector('[data-remember-saved]')?.textContent).toBe('Saved on this iPhone. Next time, unlock with biometrics.'));
 });
 
-it('a locked node on an iPhone unlocks with Face ID or Touch ID', () => {
+it('a locked node on an iPhone unlocks with biometrics', () => {
   rememberedDevice();
   const mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <LockedNode platform="ios" onUnlock={async () => {}} />, mount);
-  expect(buttonNamed(mount, 'Unlock with Face ID or Touch ID')).toBeDefined();
+  expect(buttonNamed(mount, 'Unlock with biometrics')).toBeDefined();
   expect(mount.textContent).not.toContain('Touch ID is available');
 });

@@ -212,8 +212,8 @@ export const needsReset = (tripped: string[]) => tripped.includes('grant_paused'
 export const secondsLeft = (view: ApprovalView, nowMs: number) => Math.max(0, Math.floor(view.expires_at - nowMs / 1000));
 
 /** Owner-facing words for each refusal; `node` is the node's own (sanitized) text, kept for detail. */
-/** The biometric this platform's approvals use: Touch ID on a Mac, Face ID or Touch ID on an iPhone, biometrics on Android. */
-const APPROVAL_BIOMETRIC: Record<AppPlatform, string> = { desktop: 'Touch ID', ios: 'Face ID or Touch ID', android: 'The biometric check' };
+/** The biometric this platform's approvals use: Touch ID on a Mac, biometrics on iOS and Android. */
+const APPROVAL_BIOMETRIC: Record<AppPlatform, string> = { desktop: 'Touch ID', ios: 'The biometric check', android: 'The biometric check' };
 
 export function refusalText(code: string, extra: { reason?: string; remaining_msat?: number } = {}, platform: AppPlatform = appPlatform()): string {
   switch (code) {
