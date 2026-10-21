@@ -423,6 +423,8 @@ export type ActionError = {
     | 'spend_locked'
     | 'spend_expired'
     | 'spend_refused'
+    // Call-rules refusals proven by the host to precede payment.
+    | 'call_id_used' | 'call_busy' | 'call_signal_in_flight' | 'call_signal_invalid' | 'call_not_live'
     | 'owner_only' | 'owner_contact_expired' | 'owner_contact_unavailable'
     | 'sponsor_owner_approval_required'
     | 'budget_paused' | 'budget_exhausted' | 'ceiling_exhausted' | 'first_contact' | 'budget_needed' | 'budget_unreadable'

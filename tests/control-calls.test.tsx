@@ -1673,6 +1673,25 @@ describe('calls in the shell', () => {
     expect(seen).not.toContain('nothing');
   });
 
+  it.each(['call_id_used', 'call_busy', 'call_signal_in_flight', 'call_signal_invalid', 'call_not_live'])(
+    'a hangup refused with %s keeps the paid offer total without an unknown payment', async (code) => {
+      stubHost({ call_signal: (args) => {
+        if (args!.kind === 403) throw { code, message: 'The node refused this call signal before payment. Nothing was paid.' };
+        return { message_id: 'sig', kind: args!.kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+      } });
+      await openShell();
+      await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+      ring('audio');
+      await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+      $<HTMLButtonElement>('[data-call-hangup]')!.click();
+      await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+      await vi.waitFor(() => expect($('[data-call-paid]')?.getAttribute('data-call-paid')).toBe('settled'));
+      expect(text('[data-call-paid]')).toMatch(/^This call paid up to 15 sats:/);
+      expect(text('[data-call-paid]')).not.toMatch(/not known|check pending result/);
+      expect($<HTMLButtonElement>('[data-call-dismiss]')!.disabled).toBe(false);
+    },
+  );
+
   it('a hangup lost in transport (not proven unpaid) is said as not known, not as paid nothing', async () => {
     stubHost({ call_signal: (args) => {
       if (args!.kind === 403) throw 'connection lost';
