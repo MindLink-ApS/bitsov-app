@@ -284,6 +284,7 @@ pub enum RemoteError {
     HandshakeUnavailable,
     Unclaimed,
     LocalNetwork,
+    AndroidLocalNetwork,
     RateLimited(u64),
     Waiting(u64),
     /// Seconds since the pairing ticket expired.
@@ -313,6 +314,7 @@ impl fmt::Display for RemoteError {
             Self::Refused(message) => write!(f, "remote node refused pairing: {message}"),
             Self::Unclaimed => f.write_str("This node isn't set up yet. Finish setup on a Mac, then add this phone."),
             Self::LocalNetwork => f.write_str("Local network access is denied or unavailable. Check BitSov's Local Network permission in Settings and your network connection."),
+            Self::AndroidLocalNetwork => f.write_str("Local network access is unavailable. Allow Nearby devices for BitSov in Android Settings, then return to BitSov or tap Reconnect."),
             Self::HandshakeUnavailable => f.write_str(HANDSHAKE_UNAVAILABLE),
             Self::RateLimited(seconds) => write!(f, "Remote connection limited; waiting {seconds} s"),
             Self::Waiting(seconds) => write!(f, "Remote connection unavailable; waiting {seconds} s"),
@@ -344,7 +346,7 @@ impl From<&RemoteError> for ConnectionError {
     fn from(error: &RemoteError) -> Self {
         let kind = match error {
             RemoteError::Unclaimed => ConnectionErrorKind::Unclaimed,
-            RemoteError::LocalNetwork => ConnectionErrorKind::LocalNetwork,
+            RemoteError::LocalNetwork | RemoteError::AndroidLocalNetwork => ConnectionErrorKind::LocalNetwork,
             RemoteError::HandshakeUnavailable | RemoteError::Waiting(_) => ConnectionErrorKind::Unreachable,
             RemoteError::RateLimited(_) => ConnectionErrorKind::Busy,
             RemoteError::Expired(_) => ConnectionErrorKind::Expired,
@@ -452,7 +454,7 @@ fn validate_code(code: Option<&str>) -> Result<(), RemoteError> {
     Ok(())
 }
 
-fn endpoint_parts(endpoint: &str) -> Result<(&str, u16), RemoteError> {
+pub(crate) fn endpoint_parts(endpoint: &str) -> Result<(&str, u16), RemoteError> {
     if endpoint.len() > 300
         || endpoint.is_empty()
         || !endpoint.is_ascii()
@@ -1856,7 +1858,13 @@ async fn connect_bound(
     let mut last = RemoteError::HandshakeUnavailable;
     for endpoint in endpoints {
         let attempt = async {
-            let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(endpoint))
+            #[cfg(target_os = "android")]
+            let addresses = crate::android_network::resolve(endpoint).await?;
+            #[cfg(target_os = "android")]
+            let target = addresses.as_slice();
+            #[cfg(not(target_os = "android"))]
+            let target = endpoint;
+            let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(target))
                 .await.map_err(|_| RemoteError::HandshakeUnavailable)?
                 .map_err(|error| classify_connect_error(error, cfg!(target_os = "ios"), endpoint))?;
             let (noise, hash) = pinned_handshake_bound(&mut stream, descriptor, key).await?;
@@ -1869,10 +1877,10 @@ async fn connect_bound(
             }
             Err(error @ RemoteError::RateLimited(_)) => return Err(error),
             // Keep the actionable OS error if a later fallback is unreachable.
-            Err(RemoteError::LocalNetwork) => last = RemoteError::LocalNetwork,
+            Err(error @ (RemoteError::LocalNetwork | RemoteError::AndroidLocalNetwork)) => last = error,
             Err(error) => {
                 let error = map_pre_auth_failure(error);
-                if !matches!(last, RemoteError::LocalNetwork) || !matches!(error, RemoteError::HandshakeUnavailable) {
+                if !matches!(last, RemoteError::LocalNetwork | RemoteError::AndroidLocalNetwork) || !matches!(error, RemoteError::HandshakeUnavailable) {
                     last = error;
                 }
             }

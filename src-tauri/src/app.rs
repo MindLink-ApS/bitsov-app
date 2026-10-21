@@ -8772,6 +8772,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
     #[cfg(target_os = "android")]
     let builder = builder
         .plugin(device_key::init())
+        .plugin(crate::android_network::init())
         .plugin(crate::pairing_link_mobile::init())
         .plugin(tauri_plugin_barcode_scanner::init());
     // iOS device keys use the statically linked Apple enclave bridge;
@@ -19965,6 +19966,6 @@ mod peer_readiness_tests {
 #[path = "post_rc7_tests.rs"]
 mod post_rc7_tests;
 
-#[cfg(all(test, feature = "mobile"))]
+#[cfg(all(test, any(mobile, feature = "mobile")))]
 #[path = "mobile_import_tests.rs"]
 mod mobile_import_tests;
