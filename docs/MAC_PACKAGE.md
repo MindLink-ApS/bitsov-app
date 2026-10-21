@@ -1,9 +1,14 @@
 # macOS package (ad-hoc signed by default)
 
+**Draft pin blocked:** rc19.1 is not tagged or signed yet. All five checksum values are
+placeholders; fetch and pre-bundle verification refuse before network access. No rc19.1
+release bytes have been verified.
+See [rc19.1 release gates](NODE_RC19_1_UPGRADE.md).
+
 Internal build of `BitSov.app` for Apple Silicon. By default it has a valid
 ad-hoc signature, no Developer ID identity, and no notarization. It is not published. It is for internal testers who accept a
 Gatekeeper warning. It is not a public download. The protocol pin stays
-`v0.3.0-rc14`. Windows packaging is out of scope.
+`v0.3.0-rc19.1`. Windows packaging is out of scope.
 
 This follows [MAC_PACKAGE_PLAN.md](MAC_PACKAGE_PLAN.md) §1, §2, §4 and §5.
 It deviates from §3; see [Deviation](#deviation-release-excludes-the-assistant-page).
@@ -41,7 +46,7 @@ What the script does:
 
 1. **Sidecar.** Deletes every `src-tauri/bin/konsensus-*`. Then it runs
    `scripts/fetch-node-sidecar.sh` with a throwaway `GNUPGHOME`. That script
-   fetches the pinned rc14 release and checks its signature and hash fail-closed.
+   fetches the pinned rc19.1 release and checks its signature and hash fail-closed.
    For local dev, `--use-existing-sidecar` (or
    `BITSOV_USE_EXISTING_SIDECAR=1`) keeps an existing
    `src-tauri/bin/konsensus-aarch64-apple-darwin` and skips the fetch. The
@@ -128,7 +133,8 @@ requires running the package script on macOS.
 
 Built on macOS 26.6.2 arm64 with Node 22.19.0 using
 `bash scripts/package-mac.sh --dmg --use-existing-sidecar` after the fetch
-script authenticated rc14’s signed checksum manifest. The unchanged source
+script authenticated rc14’s signed checksum manifest. This is historical rc14
+evidence, not rc19.1 acceptance. The unchanged source
 node SHA256 was
 `1b8fdecb87a308aff657a476eb92c5b100496c64076e90a45e3bee0fb2301305`.
 
@@ -257,8 +263,7 @@ gates together and removes the matching checks.
 was 10.13, while the rc7 arm64 sidecar's Mach-O minimum is 11.0 (spike,
 2026-09-14). JSON has no comments, so this note is the record.
 `package-mac.sh` prints the sidecar `minos`. 11.0 is the build floor, not a
-tested support claim. Recheck the rc14 sidecar minos in CI using its published
-signed assets; the historical rc7 inspection is not rc14 binary evidence. No macOS version has runtime evidence yet.
+tested support claim. Recheck the rc19.1 sidecar minos in CI once its signed assets are published; the historical rc7 inspection is not rc19.1 binary evidence. No macOS version has runtime evidence yet.
 
 ## CI artifact
 
@@ -334,4 +339,4 @@ the optional Developer ID/notarization hooks.
 | Gatekeeper on a clean machine | `spctl -a -vv` and a first launch on a machine that has never seen the app, with no existing node or wallet |
 | Publishing | No release, tag, website download, or release metadata until a signed and notarized build exists. `/bitsov/app` stays a waitlist. |
 | PR #13 | `factory/mac-package-spike` stays open. A human decides whether to close it. |
-| Pin | `v0.3.0-rc14` (`d55a88e`); fetch and verify signed checksums before packaging. |
+| Pin | `v0.3.0-rc19.1` (`source SHA pending`); fetch and verify signed checksums before packaging. |

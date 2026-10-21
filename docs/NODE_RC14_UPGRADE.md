@@ -1,5 +1,7 @@
 # Bundled node rc14: upgrade from rc13
 
+Historical release note. The prepared current pin is described in [NODE_RC19_1_UPGRADE.md](NODE_RC19_1_UPGRADE.md); rc19.1 remains blocked pending signed checksums.
+
 The app pins `MindLink-ApS/BitSov-bitsov@v0.3.0-rc14`, source commit
 `d55a88e439fd80dae89e263bef8378fd22c9a103`, replacing rc13
 (`d625e85a04886ac81f76f77a6ae41651dbb3e157`, app #193 / `9f10373`).

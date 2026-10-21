@@ -1,37 +1,40 @@
 # API_READINESS — the node contract CS-1..CS-6 build against
 
-**Pinned protocol:** release **`v0.3.0-rc14`**, source-ref
-**`d55a88e439fd80dae89e263bef8378fd22c9a103`**, repo `MindLink-ApS/BitSov-bitsov`.
-The supplied release facts identify rc14 as published and GPG-signed. Its
-five binary hashes are recorded without network access. The local rc14 tagged
-source was inspected; release signatures and bytes were not verified here.
+**Pinned protocol:** release **`v0.3.0-rc19.1`**, source-ref
+**`PENDING_SIGNED_RC19_1_TAG`**, repo `MindLink-ApS/BitSov-bitsov`.
+rc19.1 is not tagged or signed yet. All five checksum values are placeholders; fetch and
+pre-bundle verification refuse before network access. No rc19.1 release bytes have been
+verified.
+The route inventory below is historical source evidence, not rc19.1 binary acceptance.
 Live CS-1 and other runtime/package acceptance remain CI/operator checks.
 
-rc14 includes pairing, scoped tokens, freshness headers and the opt-in local owner
+rc19.1 includes pairing, scoped tokens, freshness headers and the opt-in local owner
 ceremony. The app retains rc7 fallback and fixture coverage. The table below is
 the historical CS route inventory, with the changed auth/restore boundaries
 called out; route presence does not grant spending or live identity authority.
-See [rc14 upgrade and release checks](NODE_RC14_UPGRADE.md) for the supplied
+See [rc19.1 upgrade and release checks](NODE_RC19_1_UPGRADE.md) for the supplied
 node changes and app integration limits. The rc12 enrolment source review remains
-[historical evidence](NODE_RC12_UPGRADE.md), not an rc14 wire-contract review.
+[historical evidence](NODE_RC12_UPGRADE.md), not an rc19.1 wire-contract review.
 rc13 introduced claim-code / four-word SAS enrolment (`sas_version: 1`) and box approval.
 Remote first run is implemented on main (app #192 + node rc13); runtime
 acceptance on real hardware (Touch ID + a fresh Pi) is still pending. The
 existing app does not display the node's `offline_safety` diagnostics.
 
-rc14 adds forward-only pairing file v6 and durable grant breakers. Breaker reset
-and `konsensus recover` remain owner-console-only; CLN is a receive/read preview
-with no outgoing payments. See the upgrade note before replacing legacy grants.
+Since rc14, owner-device approvals and independent breaker reset, operation
+abandonment, pairing v8 envelope IDs and channel-open operations were added.
+rc19.1 also targets explicit `not_dispatched` call refusals before payment and
+ONB5 LDK dispatch compatibility. See the upgrade note for capability gates,
+retry semantics, security changes and forward-only state.
 
 Base URL: `http://127.0.0.1:$PORT/api/v1` (loopback only — Gate G2). Auth: `Authorization: Bearer <jwt>`
 on REST; `bitsov.v1` + `bitsov.jwt.<token>` subprotocols on `/ws`.
 
-## MVP contract — "fund your node and start talking" (rc14 pin; rc7 compatibility retained)
+## MVP contract — "fund your node and start talking" (rc19.1 pin; rc7 compatibility retained)
 | MVP step | Method | Path | Purpose | Static |
 |---|---|---|---|---|
-| Boot/auth | POST | `/pair/request`, `/pair/confirm`, `/pair/token` | app pairing; `/auth/local` is only the rc7 404 fallback (rc14 smoke may use read/receive) | ✅ |
+| Boot/auth | POST | `/pair/request`, `/pair/confirm`, `/pair/token` | app pairing; `/auth/local` is only the rc7 404 fallback (rc19.1 smoke may use read/receive) | ✅ |
 | Identity | GET | `/identity` | node_id + x25519/secp256k1 pubkeys | ✅ |
-| Recovery | POST | `/identity/verify-mnemonic`, `/identity/restore` | verify needs identity scope; restore exists only on bootstrap in rc14 | ✅ |
+| Recovery | POST | `/identity/verify-mnemonic`, `/identity/restore` | verify needs identity scope; restore exists only on bootstrap in rc19.1 | ✅ |
 | Fund | POST | `/onboarding/start` | first-run funding state machine (tier full → funding_address) | ✅ |
 | Fund | GET | `/onboarding/state` | poll until `funding-seen` | ✅ |
 | Fund | GET | `/payments/balance`, `/payments/funding-address` | balance + deposit address (QR) | ✅ |
@@ -59,7 +62,8 @@ on REST; `bitsov.v1` + `bitsov.jwt.<token>` subprotocols on `/ws`.
 ## Verification
 **Static (no running node) — re-pin check:**
 ```bash
-git -C <BitSov-bitsov checkout> checkout d55a88e439fd80dae89e263bef8378fd22c9a103
+# BLOCKED until the signed rc19.1 tag is available and verified.
+git -C <BitSov-bitsov checkout> checkout v0.3.0-rc19.1
 grep -rhoE '"/api/v1/[^"]+"' crates/konsensus-api/src | tr -d '"' | sort -u
 # every path in the MVP table above must appear. String-literal grep on purpose: the
 # room-member routes are declared across lines, which a single-line `.route("…")` grep misses.

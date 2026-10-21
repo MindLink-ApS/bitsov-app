@@ -50,7 +50,7 @@ Atlas's 21 October ruling requires QR → word match → approval on an already
 paired owner device, without a claim code on the joining device. The current
 host flow cannot implement that ruling against the pinned node contract.
 
-At pinned node source `d55a88e439fd80dae89e263bef8378fd22c9a103`,
+At the then-pinned rc14 node source `d55a88e439fd80dae89e263bef8378fd22c9a103`,
 `crates/konsensus-api/src/pairing/device.rs` loads the claim commitment when
 constructing the second-device SAS digest. `confirm_device_sas` compares the
 submitted digest with that value; a mismatch removes the operation and counts

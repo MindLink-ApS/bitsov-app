@@ -1,5 +1,7 @@
 # Bundled node rc9 and retained rc7 upgrades
 
+Historical release note. The prepared current pin is described in [NODE_RC19_1_UPGRADE.md](NODE_RC19_1_UPGRADE.md); rc19.1 remains blocked pending signed checksums.
+
 The app pins `MindLink-ApS/BitSov-bitsov@v0.3.0-rc9`, signed tag targeting
 `cd75c69ed17eeb812d45bdc666b381ca7da1b697`. The source contract was reviewed via
 GitHub CLI against [UPGRADING.md at rc9](https://github.com/MindLink-ApS/BitSov-bitsov/blob/v0.3.0-rc9/docs/UPGRADING.md).

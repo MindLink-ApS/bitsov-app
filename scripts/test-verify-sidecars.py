@@ -2,12 +2,47 @@
 """G1 pre-bundle regression tests; no network, no build, no sidecar execution."""
 import hashlib
 import json
+import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 
 from sidecar_test_support import ASSETS, PAYLOAD, PAYLOADS, ROOT, ReleaseFixture
+
+
+class DraftPinTests(unittest.TestCase):
+    def test_unpublished_pin_refuses_fetch_and_verify_before_network(self):
+        # Removing the placeholder gate must fail this test, even offline.
+        with tempfile.TemporaryDirectory(prefix="draft-pin-") as tmp:
+            root = Path(tmp)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            source = (ROOT / "scripts/fetch-node-sidecar.sh").read_text()
+            # Keep testing draft refusal after the production release pins are filled.
+            draft_pins = "\n".join(
+                f"PLACEHOLDER_SHA256_FROM_SIGNED_RC19_1  {asset}" for asset in ASSETS.values())
+            source, count = re.subn(r"(?m)^EXPECTED_SHA256SUMS='[^']*'",
+                                    lambda _: f"EXPECTED_SHA256SUMS='{draft_pins}'", source)
+            self.assertEqual(count, 1)
+            (scripts / "fetch-node-sidecar.sh").write_text(source)
+            fakebin = root / "fakebin"
+            fakebin.mkdir()
+            trace = root / "network-called"
+            gh = fakebin / "gh"
+            gh.write_text(f'#!/bin/sh\ntouch "{trace}"\nexit 97\n')
+            gh.chmod(0o755)
+            env = dict(os.environ, PATH=f"{fakebin}:{os.environ['PATH']}")
+            for args in ([], ["--verify-only"]):
+                with self.subTest(args=args):
+                    result = subprocess.run(["bash", "scripts/fetch-node-sidecar.sh", *args],
+                                            cwd=root, env=env, text=True,
+                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn("REFUSED: checksum pin incomplete", result.stdout)
+                    self.assertFalse(trace.exists(), "must refuse before network access")
+                    self.assertFalse((root / "src-tauri").exists())
 
 
 class SidecarTests(unittest.TestCase):
@@ -109,6 +144,31 @@ class SidecarTests(unittest.TestCase):
                 self.assert_refused(result)
                 self.assertIn("expected sha256", result.stdout)
                 self.assertIn(hashlib.sha256(PAYLOAD).hexdigest(), result.stdout)
+
+    def test_each_incomplete_target_pin_blocks_fetch_and_verify(self):
+        script = self.root / "scripts/fetch-node-sidecar.sh"
+        original = script.read_text()
+        for asset, payload in PAYLOADS.items():
+            for invalid in ("PLACEHOLDER_SHA256_FROM_SIGNED_RC19_1", "bad-hash"):
+                with self.subTest(asset=asset, invalid=invalid):
+                    script.write_text(original.replace(hashlib.sha256(payload).hexdigest(), invalid))
+                    for command in (["bash", str(script)], ["bash", str(script), "--verify-only"]):
+                        result = self.run_verify(command)
+                        self.assert_refused(result)
+                        self.assertIn("checksum pin incomplete", result.stdout)
+                        self.assertNotIn("downloading", result.stdout)
+        script.write_text(original)
+
+    def test_valid_signed_manifest_cannot_override_recorded_pin(self):
+        sums = self.root / "release/SHA256SUMS"
+        changed = b"different but signed binary"
+        self.sidecar.write_bytes(changed)
+        sums.write_text(sums.read_text().replace(
+            hashlib.sha256(PAYLOAD).hexdigest(), hashlib.sha256(changed).hexdigest()))
+        self.fixture.sign(sums.parent)
+        result = self.run_verify()
+        self.assert_refused(result)
+        self.assertIn("signed SHA256SUMS differs from the checksum pin", result.stdout)
 
     def test_tampered_or_missing_signature_refused(self):
         sums = self.root / "release/SHA256SUMS"

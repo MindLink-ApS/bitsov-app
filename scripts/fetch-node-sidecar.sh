@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Fetch + VERIFY the pinned, signed BitSov node binary and place it as the Tauri
 # sidecar for this host. The node binary is NEVER committed (Gate G1: bundled binary,
-# fetched + verified, not vendored). v0.3.0-rc14 publishes Linux, macOS and Windows node
+# fetched + verified, not vendored). v0.3.0-rc19.1 targets Linux, macOS and Windows node
 # binaries, so all three hosts can produce a sidecar. Release assets carry no .exe suffix
 # on any host; only the installed Windows sidecar is renamed to .exe (Tauri's resolver).
-# rc14 is published with GPG-signed checksums. Fetch requires release access and
+# rc19.1 is NOT tagged/signed yet. Placeholders refuse before network access.
+# Once populated from the signed manifest, fetch requires release access and
 # both SHA256SUMS and SHA256SUMS.asc; missing assets fail closed. Nothing here publishes it.
 #
 # Verification is fail-closed, in two steps:
@@ -28,17 +29,36 @@
 # verify_release_signature against local test keys, including every refusal class above.
 set -euo pipefail
 
-TAG="v0.3.0-rc14"
+TAG="v0.3.0-rc19.1"
 REPO="MindLink-ApS/BitSov-bitsov"
 KEY_FPR="B299274C200301714DC6F51A7C2D6F8AC842EF6E"
 
-# Expected rc14 SHA256SUMS entries supplied for this pin (not locally verified).
-# Runtime verification below still authenticates the signed release manifest.
-# 1b8fdecb87a308aff657a476eb92c5b100496c64076e90a45e3bee0fb2301305  bitsov-darwin-aarch64
-# f75bb56fca4b5e7bad998cfab1b4b775a863108c0520710b006a9ea78ff64f63  bitsov-darwin-x86_64
-# 6d11b992b939ca0c6ee058e0b82c26ab8dc1ab96b1f61d1e049bef6685fb310c  bitsov-linux-aarch64
-# 07b0ace79c362c5d30431b47856e7ca3bb9515b73aa37a0c342988dd70849e78  bitsov-linux-x86_64
-# 5f8e80990b603e334e574a585217edeb23de70873b2ea4701317fa533ca33a19  bitsov-windows-x86_64
+# DRAFT: replace ALL five placeholders from the verified, signed rc19.1 SHA256SUMS.
+# These are enforced pins, not illustrative hashes. No flag/environment bypass.
+EXPECTED_SHA256SUMS='PLACEHOLDER_SHA256_FROM_SIGNED_RC19_1  bitsov-darwin-aarch64
+PLACEHOLDER_SHA256_FROM_SIGNED_RC19_1  bitsov-darwin-x86_64
+PLACEHOLDER_SHA256_FROM_SIGNED_RC19_1  bitsov-linux-aarch64
+PLACEHOLDER_SHA256_FROM_SIGNED_RC19_1  bitsov-linux-x86_64
+PLACEHOLDER_SHA256_FROM_SIGNED_RC19_1  bitsov-windows-x86_64'
+
+pinned_checksum() {
+  printf '%s\n' "$EXPECTED_SHA256SUMS" | awk -v asset="$1" '
+    $2 == asset { count++; hash = $1; if (NF != 2) malformed = 1 }
+    END {
+      if (count != 1 || malformed || length(hash) != 64 || hash ~ /[^0-9a-fA-F]/) exit 1
+      print tolower(hash)
+    }'
+}
+
+require_complete_checksum_pin() {
+  local asset
+  for asset in bitsov-darwin-aarch64 bitsov-darwin-x86_64 bitsov-linux-aarch64 bitsov-linux-x86_64 bitsov-windows-x86_64; do
+    pinned_checksum "$asset" >/dev/null || {
+      echo "  REFUSED: checksum pin incomplete for $TAG ($asset); replace every placeholder from verified signed SHA256SUMS" >&2
+      return 1
+    }
+  done
+}
 
 # GNU coreutils on Linux, perl shasum on macOS; same check either way.
 sha256_of()    { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | awk '{print $1}'; }
@@ -127,7 +147,7 @@ sidecar_asset() {
 # Checks bytes without executing the binary. A missing/duplicate/malformed entry
 # is not evidence of membership in the pinned release, even in a signed manifest.
 verify_asset_checksum() {
-  local file="$1" asset="$2" sums="$3" expected actual
+  local file="$1" asset="$2" sums="$3" expected actual pinned
   actual="$(sha256_of "$file")" || return 1
   expected="$(awk -v asset="$asset" '
     $2 == asset || $2 == "*" asset {
@@ -142,6 +162,14 @@ verify_asset_checksum() {
       echo "    actual sha256:   $actual" >&2
       return 1
     }
+  pinned="$(pinned_checksum "$asset")" || {
+    echo "  REFUSED: checksum pin incomplete for $TAG ($asset)" >&2
+    return 1
+  }
+  if [ "$expected" != "$pinned" ]; then
+    echo "  REFUSED: signed SHA256SUMS differs from the checksum pin for $TAG ($asset)" >&2
+    return 1
+  fi
   if [ "$actual" != "$expected" ]; then
     echo "  REFUSED: $file does not match $REPO@$TAG ($asset)" >&2
     echo "    expected sha256: $expected" >&2
@@ -184,6 +212,7 @@ main() {
     echo "Usage: $0 [--verify-only]" >&2
     return 2
   fi
+  require_complete_checksum_pin || return 1
   cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT   # TMP stays global for the trap
   if [ "${1:-}" = --verify-only ]; then

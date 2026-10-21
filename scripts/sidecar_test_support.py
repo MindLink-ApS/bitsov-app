@@ -1,10 +1,11 @@
 """Offline release fixture: real GPG/signatures/hashes, only gh is replaced.
 
-The release key pin is changed ONLY in a temporary copy of the production script;
+The release key and checksum pins change ONLY in a temporary production-script copy;
 production has no environment variable or flag for bypassing its trust root.
 """
 import hashlib
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -26,7 +27,7 @@ import os, pathlib, shutil, sys
 args = sys.argv[1:]
 fixture = pathlib.Path(os.environ["RELEASE_FIXTURE"])
 if args[:2] == ["release", "download"]:
-    assert args[2] == "v0.3.0-rc14", args
+    assert args[2] == "v0.3.0-rc19.1", args
     assert args[args.index("--repo") + 1] == "MindLink-ApS/BitSov-bitsov", args
     dest = pathlib.Path(args[args.index("--dir") + 1])
     for i, arg in enumerate(args):
@@ -74,6 +75,13 @@ class ReleaseFixture:
         source = (ROOT / "scripts/fetch-node-sidecar.sh").read_text()
         source = source.replace('KEY_FPR="B299274C200301714DC6F51A7C2D6F8AC842EF6E"',
                                 f'KEY_FPR="{self.pin}"')
+        # Substitute only this temporary copy; work before and after real pins land.
+        fixture_pins = "\n".join(
+            f"{hashlib.sha256(payload).hexdigest()}  {asset}"
+            for asset, payload in PAYLOADS.items())
+        source, count = re.subn(r"(?m)^EXPECTED_SHA256SUMS='[^']*'",
+                                lambda _: f"EXPECTED_SHA256SUMS='{fixture_pins}'", source)
+        assert count == 1, "fixture must replace exactly one checksum pin table"
         (scripts / "fetch-node-sidecar.sh").write_text(source)
         fakebin = root / "fakebin"
         fakebin.mkdir(exist_ok=True)
