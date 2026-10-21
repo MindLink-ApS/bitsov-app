@@ -19,7 +19,7 @@ import { ControlCenter } from './control/Shell';
 import { hostSource, inHost, sampleRequest, type SampleStart, type Source } from './control/source';
 import { sampleSource } from './control/sample';
 import type { DeviceView, FundingAddress, FundState } from './control/types';
-import { androidQrScannerAvailable, scanPairingLink } from './pairingScanner';
+import { mobileQrScannerAvailable, scanPairingLink } from './pairingScanner';
 import { cameraQrScannerAvailable, scanPairingLinkWithCamera } from './cameraQrScanner';
 import { PairingActivityProvider, usePairingActivity, usePairingBlocked } from './pairingActivity';
 import { pairingLinkInboxAvailable, watchPairingLinks } from './pairingDeepLink';
@@ -47,8 +47,8 @@ export default function App() {
 function AppScreen() {
   // Dev mode: sample data with no node (a plain browser tab, or `?sample`).
   const sample = sampleRequest(window.location.search, inHost(), import.meta.env.DEV);
-  const canScanPairingQr = androidQrScannerAvailable();
-  // Android or iOS: the first run has no "This Mac" (the scanner gate above stays Android-only).
+  const canScanPairingQr = mobileQrScannerAvailable();
+  // Android or iOS: the first run has no "This Mac".
   const platform = appPlatform();
   const onPhone = isMobilePlatform(platform);
   // A desktop (macOS) webview scans with the camera; jsQR loads only on Scan.

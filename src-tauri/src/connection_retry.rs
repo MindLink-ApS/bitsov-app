@@ -37,6 +37,7 @@ pub struct RemoteRetry {
     state: std::sync::Mutex<RemoteRetryState>,
     failure_revision: std::sync::atomic::AtomicU64,
     last_error: std::sync::Mutex<ConnectionFailure>,
+    endpoint: std::sync::Mutex<Option<String>>,
 }
 
 #[derive(Default)]
@@ -53,6 +54,17 @@ struct RemoteRetryState {
 }
 
 impl RemoteRetry {
+    /// Only after the old attach and all proxy tasks have stopped, and only
+    /// for a different pinned node. Reconnect must retain the server deadline.
+    pub fn reset_for_replacement(&self) {
+        *self.state.lock().unwrap() = RemoteRetryState::default();
+        self.clear_connection_error();
+    }
+
+    pub fn set_endpoint(&self, endpoint: &str) {
+        *self.endpoint.lock().unwrap() = Some(endpoint.to_owned());
+    }
+
     pub fn connection_error(&self) -> Option<crate::remote_access::ConnectionError> {
         self.last_error.lock().unwrap().error.clone()
     }
@@ -110,7 +122,7 @@ impl RemoteRetry {
         {
             let mut last = self.last_error.lock().unwrap();
             last.revision = last.revision.wrapping_add(1);
-            last.error = Some(error.into());
+            last.error = Some(crate::remote_access::ConnectionError::for_endpoint(error, self.endpoint.lock().unwrap().as_deref()));
         }
         let mut state = self.state.lock().unwrap();
         let hint = match error {

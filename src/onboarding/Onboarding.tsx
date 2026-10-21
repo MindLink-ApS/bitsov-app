@@ -6,7 +6,7 @@ import { DeviceApprovals } from './DeviceApprovals';
 import { SoftError } from '../control/SoftError';
 import { createEffect, createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
 import { Dynamic } from 'solid-js/web';
-import { FIRST_RUN_PHONE_MESSAGE, normalizePairingLink, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
+import { FIRST_RUN_PHONE_MESSAGE, connectionErrorDetail, normalizePairingLink, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
 import { usePairingActivity } from '../pairingActivity';
@@ -111,7 +111,7 @@ export function Onboarding(props: {
     setRemoteLink('');
     setImportError(null);
     try { setRemoteLink(normalizePairingLink(link)); }
-    catch (error) { setImportError(String(error)); }
+    catch (error) { setImportError(connectionErrorDetail(error)); }
   };
   onMount(() => {
     if (props.initialPairingLink !== undefined) prefill(props.initialPairingLink);
@@ -141,7 +141,7 @@ export function Onboarding(props: {
         setPreview({ link, view });
       } catch (error) {
         setRemoteLink('');
-        setImportError(String(error));
+        setImportError(connectionErrorDetail(error));
       } finally { setPreviewing(false); }
       return;
     }
@@ -166,7 +166,7 @@ export function Onboarding(props: {
       setSavedHostedBy(result.hosted_by ?? null);
       setImportResult(result);
     } catch (error) {
-      setImportError(String(error));
+      setImportError(connectionErrorDetail(error));
     } finally { setImporting(false); }
   };
 

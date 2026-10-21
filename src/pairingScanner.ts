@@ -6,11 +6,12 @@ import {
   scan,
 } from '@tauri-apps/plugin-barcode-scanner';
 
-/** The Android barcode-scanner plugin: Android only (iOS has no scanner wired here). */
-export function androidQrScannerAvailable(
+/** Native barcode scanner is registered on both mobile targets. */
+export function mobileQrScannerAvailable(
   userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
+  maxTouchPoints = typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints ?? 0,
 ): boolean {
-  return appPlatform(userAgent, 0) === 'android';
+  return ['android', 'ios'].includes(appPlatform(userAgent, maxTouchPoints));
 }
 
 export async function scanPairingLink(): Promise<string> {
@@ -21,6 +22,7 @@ export async function scanPairingLink(): Promise<string> {
   }
   const result = await scan({
     cameraDirection: 'back',
+    windowed: false,
     formats: [Format.QRCode],
   });
   const link = result.content.trim();

@@ -18,7 +18,7 @@ function mountIn() {
 const CURRENT = 'aa'.repeat(32);
 const LINK = 'bitsov://pair/another-node-ticket';
 const view: RemotePreviewView = { endpoint: 'other.example:4242', node_id_fingerprint: 'cd…ef' };
-const saved: RemoteImportView = { ...view, restart_required: true };
+const saved: RemoteImportView = { ...view, restart_required: false };
 
 function setup(onReplace: (link: string) => Promise<RemoteImportView>) {
   const onPreview = vi.fn(async () => view);
@@ -84,12 +84,12 @@ describe('Settings → Node: Pair another node', () => {
     expect(mount.querySelector<HTMLButtonElement>('[data-pair-another-open]')!.disabled).toBe(false);
   });
 
-  it('replaces only after Replace node, then asks for a restart', async () => {
+  it('replaces only after Replace node, then connects without a restart', async () => {
     const { replace } = setup(async () => saved);
     await reviewAndChoose();
     mount.querySelector<HTMLButtonElement>('[data-pair-another-confirm-yes]')!.click();
     await vi.waitFor(() => expect(replace).toHaveBeenCalledExactlyOnceWith(LINK));
-    await vi.waitFor(() => expect(mount.querySelector('[data-import-result]')?.textContent).toContain('Restart BitSov to connect.'));
+    await vi.waitFor(() => expect(mount.querySelector('[data-import-result]')?.textContent).toContain('Connecting to your node…'));
     mount.querySelector<HTMLButtonElement>('[data-pair-another-close]')!.click();
     await vi.waitFor(() => expect(mount.querySelector('[data-pair-another-saved]')).not.toBeNull());
     expect(mount.querySelector<HTMLButtonElement>('[data-pair-another-open]')!.disabled).toBe(true);
@@ -110,15 +110,15 @@ describe('Settings → Node: Pair another node', () => {
 });
 
 describe('host source', () => {
-  it('replaces through remote_access_replace, never remote_access_import', async () => {
+  it('uses remote_access_connect for a confirmed replacement', async () => {
     const calls: string[] = [];
     vi.resetModules();
     vi.doMock('@tauri-apps/api/core', () => ({
-      invoke: vi.fn(async (cmd: string) => { calls.push(cmd); if (cmd === 'remote_access_replace') throw 'kept the old link'; return saved; }),
+      invoke: vi.fn(async (cmd: string) => { calls.push(cmd); if (cmd === 'remote_access_connect') throw 'kept the old link'; return saved; }),
     }));
     const { hostSource } = await import('../src/control/source');
     await expect(hostSource.remoteAccessReplace(LINK)).rejects.toBe('kept the old link');
-    expect(calls).toEqual(['remote_access_replace']);
+    expect(calls).toEqual(['remote_access_connect']);
     vi.doUnmock('@tauri-apps/api/core');
   });
 });

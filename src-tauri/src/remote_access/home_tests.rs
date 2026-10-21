@@ -345,7 +345,7 @@ fn finalize_preserves_fallback_routes_and_rejects_changed_or_unsigned_pins() {
     assert!(commit_bootstrap(dir.path(),&previous,&id,&box_key,"forged",&live,&live_sig).is_err());
     assert!(commit_bootstrap(dir.path(),&previous,&id,&box_key,&box_sig,"","").is_err());
     let committed=commit_bootstrap(dir.path(),&previous,&id,&box_key,&box_sig,&live,&live_sig).unwrap();
-    let proxy=RemoteProxy {descriptor:Arc::new(Mutex::new(previous.clone())),local_addr:"127.0.0.1:1".parse().unwrap(),
+    let proxy=RemoteProxy {stopped:None,descriptor:Arc::new(Mutex::new(previous.clone())),local_addr:"127.0.0.1:1".parse().unwrap(),
         shutdown:watch::channel(false).0,last_error:Arc::new(Mutex::new(None))};
     proxy.finish_bootstrap(committed.clone()).unwrap();
     assert_eq!(proxy.descriptor.lock().unwrap().node_id,id);

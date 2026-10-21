@@ -7,6 +7,7 @@ import type { ApprovalRequest, ApprovalView, DeviceKeysView } from './ownerAppro
 // the node directly — no socket, no HTTP, no token (Gate G2). Every node call
 // is a host command.
 
+import { isMobilePlatform } from '../platform';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
@@ -98,7 +99,7 @@ export interface Source {
   remoteAccessForget(): Promise<void>;
   remoteAccessPreview(link: string): Promise<RemotePreviewView>;
   remoteAccessImport(link: string): Promise<RemoteImportView>;
-  /** Remote only: replace the saved link with a reviewed, confirmed ticket for another node (next start). */
+  /** Remote only: replace the saved link with a reviewed, confirmed ticket for another node and attach immediately. */
   remoteAccessReplace(link: string): Promise<RemoteImportView>;
   identityRestore(mnemonic: string): Promise<RestoreOutcome>;
   fundState(): Promise<FundState | null>;
@@ -282,8 +283,21 @@ export const hostSource: Source = {
   pairingRetry: () => invoke<PairingView>('pairing_retry'),
   remoteAccessForget: () => invoke<void>('remote_access_forget'),
   remoteAccessPreview: (link) => invoke<RemotePreviewView>('remote_access_preview', { link }),
-  remoteAccessImport: (link) => invoke<RemoteImportView>('remote_access_import', { link }),
-  remoteAccessReplace: (link) => invoke<RemoteImportView>('remote_access_replace', { link }),
+  remoteAccessImport: async (link) => {
+    try { return await invoke<RemoteImportView>('remote_access_connect', { link }); }
+    catch (error) {
+      // Preserve desktop first-owner setup and the next-start switch away
+      // from a local sidecar. Live remote replacement always uses connect.
+      if (!isMobilePlatform() && error && typeof error === 'object' && 'kind' in error) {
+        const localSelected = error.kind === 'busy' && !(await invoke<PairingView>('pairing_status')).remote;
+        if (error.kind === 'unclaimed' || localSelected) {
+          return invoke<RemoteImportView>('remote_access_import', { link });
+        }
+      }
+      throw error;
+    }
+  },
+  remoteAccessReplace: (link) => invoke<RemoteImportView>('remote_access_connect', { link }),
   nodeRepairInitialized: (confirmed) => invoke<void>('node_repair_initialized', { confirmed }),
   nodeRepairPriceFloor: (confirmed) => invoke<void>('node_repair_price_floor', { confirmed }),
   identityRestore: (mnemonic) => invoke<RestoreOutcome>('identity_restore', { mnemonic }),

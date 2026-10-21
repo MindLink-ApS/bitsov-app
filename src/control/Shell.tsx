@@ -36,7 +36,7 @@ import { onEscape } from './escapeStack';
 import { custodyBadge, CustodyBadgeView } from './custody';
 import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
-import { androidQrScannerAvailable, scanPairingLink } from '../pairingScanner';
+import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
 import { callCost, createCallEngine, NO_MEDIA_DEVICES, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
@@ -2053,7 +2053,7 @@ export function ControlCenter(props: Props) {
               currentHostedBy={() => props.hostedBy}
               onPreview={link => source.remoteAccessPreview(link)}
               onReplace={link => source.remoteAccessReplace(link)}
-              onScan={androidQrScannerAvailable() ? scanPairingLink : cameraQrScannerAvailable() ? scanPairingLinkWithCamera : undefined}
+              onScan={mobileQrScannerAvailable() ? scanPairingLink : cameraQrScannerAvailable() ? scanPairingLinkWithCamera : undefined}
               mobile={isMobilePlatform()}
               phone={isMobilePlatform()}
             /> : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />

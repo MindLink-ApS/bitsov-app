@@ -11,20 +11,20 @@ vi.mock('@tauri-apps/plugin-barcode-scanner', () => ({
   ...scanner,
 }));
 
-import { androidQrScannerAvailable, scanPairingLink } from '../src/pairingScanner';
+import { mobileQrScannerAvailable, scanPairingLink } from '../src/pairingScanner';
 
-describe('Android pairing QR scanner', () => {
+describe('Mobile pairing QR scanner', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal('__TAURI_INTERNALS__', {});
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it('is exposed only in an Android Tauri webview', () => {
-    expect(androidQrScannerAvailable('Mozilla/5.0 (Linux; Android 15)')).toBe(true);
-    expect(androidQrScannerAvailable('Mozilla/5.0 (Macintosh; Intel Mac OS X)')).toBe(false);
+  it('is exposed only in a mobile Tauri webview', () => {
+    expect(mobileQrScannerAvailable('Mozilla/5.0 (Linux; Android 15)')).toBe(true);
+    expect(mobileQrScannerAvailable('Mozilla/5.0 (Macintosh; Intel Mac OS X)')).toBe(false);
     vi.unstubAllGlobals();
-    expect(androidQrScannerAvailable('Mozilla/5.0 (Linux; Android 15)')).toBe(false);
+    expect(mobileQrScannerAvailable('Mozilla/5.0 (Linux; Android 15)')).toBe(false);
   });
 
   it('requests camera access and scans only QR codes', async () => {
@@ -40,6 +40,7 @@ describe('Android pairing QR scanner', () => {
     expect(scanner.requestPermissions).toHaveBeenCalledTimes(1);
     expect(scanner.scan).toHaveBeenCalledWith({
       cameraDirection: 'back',
+      windowed: false,
       formats: ['QR_CODE'],
     });
   });
