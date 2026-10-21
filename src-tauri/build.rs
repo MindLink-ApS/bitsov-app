@@ -86,6 +86,8 @@ fn main() {
             "relation_approve",
             "spend_reconcile",
             "op_list",
+            "op_end_call",
+            "op_close_call",
             "budget_status",
             "budget_approve",
             "budget_set",

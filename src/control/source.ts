@@ -13,6 +13,7 @@ import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type {
   OwnerContactApproval,
   OpList,
+  OpView,
   FirstContactQuote,
   FundingAsk,
   FundingStatus,
@@ -202,6 +203,8 @@ export interface Source {
   spendReconcile(): Promise<string>;
   /** H1 read-only history of this app's paid operations, optionally for one peer. */
   opList(peer?: string): Promise<OpList>;
+  /** H2: end one of our call admissions (the host sends the one paid hangup, or none if the offer was unpaid). */
+  opEndCall(callId: string): Promise<OpView>;
   /**
    * A message pays inside the owner's budget with no prompt. `firstContactMsat`
    * is the owner's one-time OK for someone not yet budgeted, with their budget.
@@ -243,6 +246,8 @@ export interface Source {
   fileSave(messageId: string): Promise<FileSaveResult>;
   /** Read-only: what calling this contact costs. */
   callQuote(peer: string): Promise<CallQuote>;
+  /** Validate the admission for local teardown without releasing it. */
+  closeCallAdmission(operationId: string, peer: string, callId: string): Promise<void>;
   /** One paid call signal (kinds 400-403) under the message budget rules. */
   callSignal(peer: string, kind: number, plaintext: string, maxMsat: number): Promise<CallReceipt>;
   // AI track: the host reads through its broker; a remote model gets only a body the owner saw
@@ -354,6 +359,7 @@ export const hostSource: Source = {
     invoke<SpendView>('relation_approve', { peer, budget_msat: budgetMsat, per_act_max_msat: perActMaxMsat }),
   spendReconcile: () => invoke<string>('spend_reconcile'),
   opList: (peer) => invoke<OpList>('op_list', { peer: peer ?? null }),
+  opEndCall: (callId) => invoke<OpView>('op_end_call', { call_id: callId }),
   send: (recipient, isRoom, plaintext, maxMsat, maxRecipientMsat, firstContactMsat) =>
     invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat, max_recipient_msat: maxRecipientMsat ?? null, first_contact_msat: firstContactMsat ?? null }),
   retry: (recipient, plaintext, approvedMsat) => invoke<SendReceipt>('message_retry', { recipient, plaintext, approved_msat: approvedMsat ?? null }),
@@ -380,6 +386,7 @@ export const hostSource: Source = {
   fileFetch: (messageId) => invoke<VoiceBlob>('file_fetch', { message_id: messageId }),
   fileSave: (messageId) => invoke<FileSaveResult>('file_save', { message_id: messageId }),
   callQuote: (peer) => invoke<CallQuote>('call_quote', { peer }),
+  closeCallAdmission: (operationId, peer, callId) => invoke<void>('op_close_call', { operation_id: operationId, peer, call_id: callId }),
   callSignal: (peer, kind, plaintext, maxMsat) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat }),
   aiRead: (topic, sinceMs, assistant) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs, ...(assistant ? { assistant } : {}) }),
   aiLocalTurn: (assistant, question, draftText) => invoke<LocalTurn>('ai_read', { assistant, local_turn: { question, draft_text: draftText } }),

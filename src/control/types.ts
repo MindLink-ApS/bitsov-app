@@ -43,6 +43,8 @@ export type Message = {
   payment_amount_msat: number | null;
   /** Room thread (`room_thread`) only: our one room message, each member's copy. */
   copies?: RoomCopy[];
+  /** Host-bound admission at live receive time; null means no current binding. */
+  admission_operation_id?: string | null;
 };
 
 /** One member's copy of our own room message (genome `RoomCopy`). */
@@ -463,6 +465,10 @@ export type ActionError = {
     // Owner approval from an enrolled owner device (src/control/ownerApproval.ts has the HTTP mapping).
     | 'approval_off' | 'approval_forbidden' | 'approval_budget_exceeded' | 'approval_expired' | 'approval_unknown'
     | 'approval_rate_limited' | 'approval_invalid' | 'approval_unsaved' | 'approval_changed' | 'approval_self'
+    // H2 call admissions: a new offer while an earlier one is still open; ending one the host never recorded;
+    // a second hangup; the node refusing a call signal before payment.
+    | 'call_needs_node_upgrade'
+    | 'call_admission_open' | 'call_not_found' | 'hangup_in_flight' | 'call_identity_changed'
     | 'invalid'
     | 'node';
   message: string;
@@ -728,6 +734,7 @@ export type CallQuote = {
 };
 /** `call_signal`: one paid call signal. `total_msat` is a ceiling, not a settled amount. */
 export type CallReceipt = {
+  operation_id?: string | null;
   message_id: string;
   kind: number;
   amount_msat: number;
