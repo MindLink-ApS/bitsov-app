@@ -60,12 +60,26 @@ jobs:
           cache-all-crates: "true"
           cache-workspace-crates: "true"
       - name: sccache
-        uses: mozilla-actions/sccache-action@v0.0.11
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        continue-on-error: true
+        with:
+          # The explicit stats step below is best-effort, including on startup failure.
+          disable_annotations: true
       - name: Enable sccache for Cargo
         shell: bash
         run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          # Cache outages must cost time, not fail the build (app #280).
+          # Keep the probed server alive; restarting during an outage can fail.
+          export SCCACHE_IDLE_TIMEOUT=0
+          export SCCACHE_GHA_ENABLED=true
+          export SCCACHE_IGNORE_SERVER_IO_ERROR=1
+          if sccache --start-server; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> "$GITHUB_ENV"
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          else
+            echo "::warning::sccache unavailable; compiling without a cache"
+          fi
       - name: Placeholders for the tauri_build checks (sidecar + Windows icon)
         shell: bash
         run: |
