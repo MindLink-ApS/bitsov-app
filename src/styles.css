@@ -1236,7 +1236,6 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .hub-trust-card .hub-trust-card-title { margin: 0; font-family: var(--font-sans); font-size: var(--t-sm); font-weight: 600; color: var(--ink); }
 .hub-trust-card p { margin: 0; font-size: var(--t-sm); line-height: var(--lh-body); color: var(--muted); }
 .hub-channel-confirm { display: flex; flex-direction: column; gap: var(--s-3); }
-.hub-channel-confirm:focus { outline: none; }
 .hub-channel-confirm .row { flex-wrap: wrap; }
 
 /* Incoming intents never replace the current screen. */

@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
+import { createEffect, createSignal, For, type JSX, Match, on, onCleanup, Show, Switch, untrack } from 'solid-js';
 import { ago, amount, clock, sats, satsWhole, satUnit, shortId } from './format';
 import {
   feedState,
@@ -16,6 +16,7 @@ import {
 import { freshness } from './state';
 import type { LinkState, PrePaymentRefusals } from './types';
 import { RefusalCounts } from './RefusalCounts';
+import { onEscape } from './escapeStack';
 
 /** One real event brightens its row for this long, then decays. Nothing moves otherwise. */
 const PULSE_MS = 400;
@@ -92,17 +93,20 @@ function InfoButton(props: { id: string }) {
 }
 
 function InfoModal() {
-  onMount(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && infoKey()) { e.stopPropagation(); setInfoKey(null); } };
-    window.addEventListener('keydown', onKey, true);
-    onCleanup(() => window.removeEventListener('keydown', onKey, true));
-  });
+  let dialog: HTMLDivElement | undefined;
+  createEffect(on(() => infoKey() !== null, (open) => {
+    if (!open) return;
+    const opener = document.activeElement as HTMLElement | null;
+    queueMicrotask(() => { if (infoKey() && dialog?.isConnected) dialog.focus(); });
+    onCleanup(onEscape(() => setInfoKey(null)));
+    onCleanup(() => queueMicrotask(() => { if (opener?.isConnected) opener.focus(); }));
+  }));
   onCleanup(() => setInfoKey(null));
   return (
     <Show when={INFO[infoKey() ?? '']}>
       {(i) => (
         <div class="info-scrim" data-info-modal={infoKey()!} onClick={(e) => { if (e.target === e.currentTarget) setInfoKey(null); }}>
-          <div class="info-modal" role="dialog" aria-modal="true" aria-label={i().title}>
+          <div ref={dialog} tabindex="-1" class="info-modal" role="dialog" aria-modal="true" aria-label={i().title}>
             <h3>{i().title}</h3>
             <For each={i().cards}>
               {(c) => (

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Restore focus after Wallet and info/hub dialogs close, stack dialog Escape handling, focus incoming calls, expose AI composer expansion, and show pending-result checks only for pending work (UI/UX audit 2-8–2-11, 2-21).
+
 - Treat Tauri iOS/iPadOS as mobile independently of Android scanning; use biometric approval wording and name iPad correctly in pairing, unlock, and device copy, with rendered iPhone/iPad regression coverage.
 
 - Update `solid-js` to 1.9.16 and lock `seroval` / `seroval-plugins` to 1.6.8 to fix GHSA-p6vx-979v-rg4c and GHSA-jp82-f5mq-hwhp without overrides.

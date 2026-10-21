@@ -1,6 +1,7 @@
-import { createSignal, createUniqueId, For, onMount, Show } from 'solid-js';
+import { createSignal, createUniqueId, For, onCleanup, onMount, Show } from 'solid-js';
 import { Dynamic } from 'solid-js/web';
 import { SoftError } from './SoftError';
+import { onEscape } from './escapeStack';
 
 // What the MindLink hub (the LSP) can and can't do, in plain words. The
 // sentences are approved copy: change them only with the product owner.
@@ -154,7 +155,12 @@ export function HubChannelConfirm(props: { nodeId: string; onConfirm: () => void
   };
   onMount(() => {
     if (already) void proceed();
-    else dialog?.focus();
+    else {
+      const opener = document.activeElement as HTMLElement | null;
+      dialog?.focus();
+      onCleanup(onEscape(() => { if (!busy()) props.onCancel(); }));
+      onCleanup(() => queueMicrotask(() => { if (opener?.isConnected) opener.focus(); }));
+    }
   });
   return (
     <>
