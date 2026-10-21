@@ -13529,6 +13529,83 @@ mod control_act_tests {
         assert_eq!(paid.lock().unwrap().pays, 2);
     }
 
+    // A3: direct payment is the ordinary money path, independent of call admission.
+    #[tokio::test]
+    async fn a3_in_call_keysend_keeps_admission_and_releases_slot_for_signals() {
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        spend_advance(&node.state, true).await.unwrap();
+        let offer = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap().operation_id.unwrap();
+        let admission = ledger_record(&node, &offer);
+        let before = budget_now(&node.state).spent_msat;
+        let dest = format!("02{}", "bb".repeat(32));
+        let receipt = do_payment_keysend(&node.state, &dest, 5000, None, 10000).await.unwrap();
+        assert_eq!(receipt.status, "settled");
+        assert_eq!(ledger_record(&node, &offer), admission);
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+        assert_eq!(budget_now(&node.state).spent_msat, before + 5000);
+        let posts = node.posts();
+        assert_eq!(posts.iter().filter(|(p, _)| p == "/payments/keysend").count(), 1);
+        assert_eq!(posts.last().unwrap(), &("/payments/keysend".into(), serde_json::json!({
+            "dest_pubkey": dest, "amount_msat": 5000, "memo": null, "max_routing_fee_msat": 5000
+        })));
+        assert_eq!(posts.iter().filter(|(_, b)| b["kind"] == 400).count(), 1);
+        assert_eq!(posts.iter().filter(|(_, b)| b["kind"] == 403).count(), 0);
+        assert_eq!(do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err().code, "call_admission_open");
+        let ice = serde_json::json!({"v":1,"call_id":CALL_ID,"candidate":"candidate:1","sdp_mid":"0","sdp_mline_index":0}).to_string();
+        do_call_signal(&node.state, A, 402, &ice, 15000).await.unwrap();
+        assert_eq!(ledger_record(&node, &offer), admission);
+        do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_eq!(node.posts().iter().filter(|(_, b)| b["kind"] == 403).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a3_in_call_keysend_unknown_fences_money_without_closing_admission() {
+        let (inner, _) = ledger_call_routes();
+        let routes: Routes = Arc::new(move |m,p,b| {
+            if p == "/payments/keysend" {
+                return (200, serde_json::json!({"max_routing_fee_msat":5000,"payment_hash":"cd".repeat(32),"amount_msat":5000,"status":"InFlight"}).to_string());
+            }
+            inner(m,p,b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        spend_advance(&node.state, true).await.unwrap();
+        let offer = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap().operation_id.unwrap();
+        let admission = ledger_record(&node, &offer);
+        let dest = format!("02{}", "bb".repeat(32));
+        assert_eq!(do_payment_keysend(&node.state, &dest, 5000, None, 10000).await.unwrap().status, "inflight");
+        assert_eq!(do_payment_keysend(&node.state, &dest, 5000, None, 10000).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(ledger_record(&node, &offer), admission);
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_some());
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/payments/keysend").count(), 1);
+        assert_eq!(node.posts().iter().filter(|(_, b)| b["kind"] == 403).count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a3_in_call_keysend_obeys_approval_ceiling_and_money_lock() {
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let offer = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap().operation_id.unwrap();
+        let admission = ledger_record(&node, &offer);
+        let dest = format!("02{}", "bb".repeat(32));
+        assert!(do_payment_keysend(&node.state, &dest, 5000, None, 10000).await.is_err());
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_payment_keysend(&node.state, &dest, 5000, None, 9999).await.unwrap_err().code, "price_changed");
+        let guard = node.state.money.lock().await;
+        let payment = do_payment_keysend(&node.state, &dest, 5000, None, 10000);
+        tokio::pin!(payment);
+        assert!(tokio::time::timeout(Duration::from_millis(40), &mut payment).await.is_err());
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/payments/keysend").count(), 0);
+        assert_eq!(ledger_record(&node, &offer), admission);
+        drop(guard);
+        assert_eq!(payment.await.unwrap().status, "settled");
+        assert_eq!(ledger_record(&node, &offer), admission);
+    }
+
     #[tokio::test]
     async fn h2_pending_offer_refuses_second_admission() {
         for recovery in [false, true] {
