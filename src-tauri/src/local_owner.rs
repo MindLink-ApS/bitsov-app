@@ -430,7 +430,7 @@ pub async fn finalize(
         return Err("Touch ID is unavailable. Cancel setup or enable Touch ID on this Mac; no identity was committed.".into());
     }
     let store = device_store(state).map_err(|e| e.message)?;
-    let (blob, mut record) = match local_key(&store).map_err(|e| e.message)? {
+    let (blob, mut record) = match local_key(state, &store).map_err(|e| e.message)? {
         Some(key) => key,
         None => {
             let policy = *state.device_policy.lock().unwrap();
@@ -639,7 +639,7 @@ fn mark_live(state: &NodeState, expected: &str) {
 }
 pub async fn verify_device(state: &NodeState) -> Result<(), String> {
     let store = device_store(state).map_err(|e| e.message)?;
-    let (_, mut record) = local_key(&store).map_err(|e| e.message)?.ok_or("Owner device not enrolled on this Mac. Enroll through the owner console; setup cannot reopen on an initialized node.")?;
+    let (_, mut record) = local_key(state, &store).map_err(|e| e.message)?.ok_or("Owner device not enrolled on this Mac. Enroll through the owner console; setup cannot reopen on an initialized node.")?;
     let binding = device_binding(state).await.map_err(|e| e.message)?;
     let id = key_id(&record.public_key)?;
     if binding.device_approvals.as_deref() != Some("enabled")
