@@ -149,8 +149,10 @@ fn native_refusals_never_return_partial_output_or_retry() {
         assert_eq!(key::create(Policy::Biometry).unwrap_err(), expected);
         assert_eq!(key::public_key(&[1]).unwrap_err(), expected);
         assert_eq!(key::sign(&[1], b"message", "Approve").unwrap_err(), expected);
-        assert_eq!(key::sign_setup(&[1], b"message", "Approve", false).unwrap_err(), expected);
-        NATIVE.with(|n| assert_eq!(n.borrow().calls, 4));
+        for finish in [false, true] {
+            assert_eq!(key::sign_setup(&[1], b"message", "Approve", finish).unwrap_err(), expected);
+        }
+        NATIVE.with(|n| assert_eq!(n.borrow().calls, 5));
     }
 }
 
@@ -159,23 +161,32 @@ fn malformed_native_public_keys_and_blob_lengths_are_rejected() {
     for prefix in [0, 2, 3] {
         reset();
         configure(|n| n.public_prefix = prefix);
-        assert!(key::create(Policy::Biometry).is_err());
-        assert!(key::public_key(&[1]).is_err());
+        assert_eq!(key::create(Policy::Biometry), Err(Error::Other(-6)));
+        assert_eq!(key::public_key(&[1]), Err(Error::Other(-6)));
     }
     for length in [0, 4097] {
         reset();
         configure(|n| n.blob_len = length);
-        assert!(key::create(Policy::Biometry).is_err());
+        assert_eq!(key::create(Policy::Biometry), Err(Error::Other(-6)));
     }
 }
 
 #[test]
 fn malformed_native_signatures_are_rejected_in_both_signing_flows() {
-    for (prefix, length) in [(0x30, 0), (0x30, 73), (0x30, 129), (0x04, 64)] {
+    for (prefix, length, inner_len) in [
+        (0x30, 0, 6), (0x30, 1, 6), (0x30, 73, 71), (0x30, 129, 127),
+        (0x04, 8, 6), (0x30, 8, 5), (0x30, 8, 7), (0x30, 8, 0x80),
+    ] {
         reset();
-        configure(|n| { n.signature[0] = prefix; n.signature_len = length; });
-        assert!(key::sign(&[1], b"message", "Approve").is_err());
-        assert!(key::sign_setup(&[1], b"message", "Approve", true).is_err());
+        configure(|n| {
+            n.signature[0] = prefix; n.signature[1] = inner_len; n.signature_len = length;
+        });
+        assert_eq!(key::sign(&[1], b"message", "Approve"), Err(Error::Other(-6)));
+        for finish in [false, true] {
+            assert_eq!(key::sign_setup(&[1], b"message", "Approve", finish), Err(Error::Other(-6)));
+            NATIVE.with(|n| assert_eq!(n.borrow().finish, i32::from(finish)));
+        }
+        NATIVE.with(|n| assert_eq!(n.borrow().calls, 3, "malformed output must not retry"));
     }
 }
 
@@ -190,7 +201,9 @@ fn maximum_length_p256_der_signature_is_accepted_in_both_flows() {
     assert_eq!(signature.len(), 72);
     configure(|n| { n.signature = signature.clone(); n.signature_len = 72; });
     assert_eq!(key::sign(&[1], b"message", "Approve").unwrap(), signature);
-    assert_eq!(key::sign_setup(&[1], b"message", "Approve", true).unwrap(), signature);
+    for finish in [false, true] {
+        assert_eq!(key::sign_setup(&[1], b"message", "Approve", finish).unwrap(), signature);
+    }
 }
 
 #[test]
