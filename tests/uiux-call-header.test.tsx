@@ -113,6 +113,37 @@ it('the paid-call confirm closes when another sheet opens, and sits below every 
   expect(z).toBeLessThan(6);
 });
 
+it('only the topmost layer handles Escape (stack order, not every open listener)', async () => {
+  const { onEscape, escapeDepth } = await import('../src/control/escapeStack');
+  const closed: string[] = [];
+  const offA = onEscape(() => closed.push('planner'));
+  const offB = onEscape(() => closed.push('settings'));
+  expect(escapeDepth()).toBe(2);
+  esc();
+  expect(closed).toEqual(['settings']);
+  offB();
+  esc();
+  expect(closed).toEqual(['settings', 'planner']);
+  offA();
+  expect(escapeDepth()).toBe(0);
+  esc();
+  expect(closed).toEqual(['settings', 'planner']);
+  // A dialog that handled Escape itself (preventDefault) is not closed twice.
+  const offC = onEscape(() => closed.push('under'));
+  const ev = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+  ev.preventDefault();
+  window.dispatchEvent(ev);
+  expect(closed).toEqual(['settings', 'planner']);
+  offC();
+});
+
+it('a 64-character petname wraps inside the call confirm; Cancel and Ring stay on screen (rendered: scripts/ui-layout/call-confirm-check.mjs)', () => {
+  const s = css();
+  expect(s).toMatch(/\.call-confirm \{ grid-template-columns: minmax\(0, 1fr\); \}/);
+  expect(s).toMatch(/\.call-confirm-text \{[^}]*min-width: 0;[^}]*overflow-wrap: anywhere;/);
+  expect(readFileSync(join(__dirname, '../scripts/ui-layout/call-confirm-check.mjs'), 'utf8')).toContain("'W'.repeat(64)");
+});
+
 it('a long contact name ellipsizes instead of running under the call buttons', () => {
   const s = css();
   expect(s).toMatch(/\.track-head h1 \{[^}]*flex: 0 1 auto;[^}]*min-width: 0;[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/);

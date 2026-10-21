@@ -21,6 +21,7 @@ import {
   type VerifyState,
 } from './petnames';
 import { claimedName } from './state';
+import { onEscape } from './escapeStack';
 import type { Peer } from './types';
 
 export function ContactPanel(props: {
@@ -97,11 +98,9 @@ export function ContactPanel(props: {
   createEffect(() => {
     if (!props.open) return;
     const opener = document.activeElement as HTMLElement | null;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') props.onClose(); };
     queueMicrotask(() => panel?.querySelector<HTMLElement>('[data-contact-close]')?.focus());
-    window.addEventListener('keydown', onKey);
+    onCleanup(onEscape(() => props.onClose()));
     onCleanup(() => {
-      window.removeEventListener('keydown', onKey);
       if (opener && opener.isConnected && panel?.contains(document.activeElement)) opener.focus();
     });
   });

@@ -954,7 +954,10 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 /* Call / Video call ask first: a small confirm under the header buttons, with the price. */
 /* Above the stream and composer (2), below every menu, sheet and modal (avatar 6+, settings 20/21, wallet 18). */
 .call-confirm { position: absolute; top: calc(100% - 4px); right: var(--s-4); z-index: 4; width: max-content; max-width: min(320px, calc(100vw - 2 * var(--s-4))); display: grid; gap: var(--s-2); padding: var(--s-3); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-panel); box-shadow: 0 8px 24px rgb(0 0 0 / 0.18); }
-.call-confirm-text { margin: 0; font-size: var(--t-sm); }
+/* One column that may shrink: a 64-character petname wraps instead of pushing Cancel and Ring off screen. */
+.call-confirm { grid-template-columns: minmax(0, 1fr); }
+.call-confirm-text { margin: 0; font-size: var(--t-sm); min-width: 0; overflow-wrap: anywhere; }
+.call-confirm-actions { min-width: 0; flex-wrap: wrap; }
 .call-confirm-text .hint { display: block; margin-top: 2px; }
 .call-confirm-actions { display: flex; gap: var(--s-2); justify-content: flex-end; }
 .call-button { font-size: var(--t-sm); padding: 4px 10px; }

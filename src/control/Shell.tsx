@@ -31,6 +31,7 @@ import { SoftError } from './SoftError';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { PorchPanel } from './Porch';
 import { ContactPanel } from './ContactPanel';
+import { onEscape } from './escapeStack';
 import { custodyBadge, CustodyBadgeView } from './custody';
 import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
@@ -476,14 +477,7 @@ export function ControlCenter(props: Props) {
   const [walletTab, setWalletTab] = createSignal<WalletTab | null>(null);
   createEffect(() => {
     if (!walletTab()) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !contextOpen()) {
-        e.preventDefault();
-        setWalletTab(null);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    onCleanup(() => window.removeEventListener('keydown', onKey));
+    onCleanup(onEscape(() => { if (!contextOpen()) setWalletTab(null); }));
   });
   const [settingsEl, setSettingsEl] = createSignal<HTMLElement | null>(null);
   let settingsReturnFocus: HTMLElement | null = null;
@@ -494,14 +488,7 @@ export function ControlCenter(props: Props) {
     if (open && panel) {
       settingsReturnFocus = document.activeElement as HTMLElement | null;
       queueMicrotask(() => panel.querySelector<HTMLElement>('[data-settings-close]')?.focus());
-      const onKey = (e: KeyboardEvent) => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          setContextOpen(false);
-        }
-      };
-      window.addEventListener('keydown', onKey);
-      onCleanup(() => window.removeEventListener('keydown', onKey));
+      onCleanup(onEscape(() => setContextOpen(false)));
     } else if (!open && settingsReturnFocus) {
       const back = settingsReturnFocus;
       settingsReturnFocus = null;
@@ -2335,10 +2322,8 @@ function Rail(props: {
   createEffect(() => {
     if (!menuOpen()) return;
     // Escape closes and puts focus back on You; opening moves focus to the first item.
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { setMenuOpen(false); avatar?.focus(); } };
     queueMicrotask(() => document.querySelector<HTMLElement>('[data-avatar-menu] [role="menuitem"]')?.focus());
-    window.addEventListener('keydown', onKey);
-    onCleanup(() => window.removeEventListener('keydown', onKey));
+    onCleanup(onEscape(() => { setMenuOpen(false); avatar?.focus(); }));
   });
   const item = (t: TrackRef, name: string, meta?: JSX.Element) => {
     const key = trackKey(t);
@@ -3077,7 +3062,6 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   };
   createEffect(() => {
     if (!armed()) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') disarm(); };
     // Anything else pressed or focused (the contact name, settings, You, the
     // composer) dismisses the confirm: it must never sit, Ring enabled, over
     // another sheet or modal.
@@ -3086,10 +3070,9 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
       if (t && wrap?.contains(t)) return;
       disarm(false);
     };
-    window.addEventListener('keydown', onKey);
     for (const type of ['pointerdown', 'click', 'focusin']) document.addEventListener(type, onOutside, true);
+    onCleanup(onEscape(() => disarm()));
     onCleanup(() => {
-      window.removeEventListener('keydown', onKey);
       for (const type of ['pointerdown', 'click', 'focusin']) document.removeEventListener(type, onOutside, true);
     });
   });
@@ -3331,10 +3314,9 @@ function MeetingPanel(props: {
   const planOpen = createMemo(planning);
   createEffect(on(planOpen, (open) => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') props.setPlan(null); };
     queueMicrotask(() => document.querySelector<HTMLElement>('[data-meeting-panel="planning"] input:not(:disabled), [data-meeting-panel="planning"] [data-meeting-cancel]')?.focus());
-    window.addEventListener('keydown', onKey);
-    onCleanup(() => window.removeEventListener('keydown', onKey));
+    // Only while it is the top layer: Escape in Settings opened over it closes Settings, not the plan.
+    onCleanup(onEscape(() => props.setPlan(null)));
   }));
   createEffect(on(() => (props.view.phase === 'invited' ? props.view.id : null), (id) => {
     if (id) refresh(untrack(() => props.view.roster).filter((x) => x !== props.ownId.toLowerCase()));
@@ -4134,10 +4116,8 @@ function Composer(props: {
   createEffect(() => {
     if (!emojiOpen()) return;
     // Escape closes the picker and returns focus to the emoji button; opening moves focus into it.
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { setEmojiOpen(false); emojiBtn?.focus(); } };
     queueMicrotask(() => document.querySelector<HTMLElement>('[data-emoji-picker] [data-emoji-pick]')?.focus());
-    window.addEventListener('keydown', onKey);
-    onCleanup(() => window.removeEventListener('keydown', onKey));
+    onCleanup(onEscape(() => { setEmojiOpen(false); emojiBtn?.focus(); }));
   });
   // voice note: recorded here, then sent exactly like a chosen file
   const [recording, setRecording] = createSignal<{ rec: Recording; startedAt: number } | null>(null);
@@ -4757,11 +4737,10 @@ function Composer(props: {
       if (!(e.target as Element | null)?.closest?.('.composer-plus-wrap')) setMenuOpen(false);
     };
     // Escape closes the Pay / Request / Attach menu and returns focus to +.
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { setMenuOpen(false); plusBtn?.focus(); } };
     queueMicrotask(() => plusBtn?.parentElement?.querySelector<HTMLElement>('[role="menuitem"]')?.focus());
     document.addEventListener('click', onDoc);
-    window.addEventListener('keydown', onKey);
-    onCleanup(() => { document.removeEventListener('click', onDoc); window.removeEventListener('keydown', onKey); });
+    onCleanup(onEscape(() => { setMenuOpen(false); plusBtn?.focus(); }));
+    onCleanup(() => document.removeEventListener('click', onDoc));
   });
 
   /**
