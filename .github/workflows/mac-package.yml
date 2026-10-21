@@ -6,39 +6,53 @@ name: Mac Package
 #
 # NOT a merge gate: keep this job OUT of the required status checks. Like the
 # Build workflow's `sidecar` job it depends on network and on the genome's
-# published rc14 release, not only on this repo's source.
+# published release, not only on this repo's source.
 #
-# CI cost rule (app #131): macOS runners bill at 10x Linux, so this runs once per
-# change: on push to main (after merge) and on workflow_dispatch. On a PR it runs
-# only when the `full-ci` label is added; carrying the label does not enable runs
-# on later pushes, so remove and re-add it to request another run. It no longer
-# runs on PR opened / ready_for_review (that billed every change twice).
-# Required gates (Authority Check, Build) are unaffected.
+# CI cost (app #131, private-repo minutes): macos-14 is billed at 10× Linux.
+# This Tauri bundle does not run on pull-request pushes or on every push to
+# main. It runs on the nightly schedule (default branch), on `v*` tags, in the
+# merge queue, on workflow_dispatch, and on a PR that carries `full-ci`.
+# There is no iOS simulator / `tauri ios build` workflow on this repo. The
+# Linux Build job still runs `cargo check --features mobile` on every code PR.
+# Do not add an xcodebuild on macos-14 to the per-PR path; an iOS bundle
+# belongs on these same triggers.
 on:
+  schedule:
+    # Once a day on the default branch. 05:00 UTC, clear of the 06:00 audit.
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+  merge_group:
+  push:
+    tags: ['v*']
   pull_request:
     branches: [main]
-    types: [labeled]
-  push:
-    branches: [main]
-  workflow_dispatch:
+    # `synchronize` makes `full-ci` stick for later pushes. Other PRs hit the
+    # job `if` and do not start a runner.
+    types: [labeled, unlabeled, synchronize, reopened]
 
 permissions:
   contents: read
+  # rust-cache and sccache save to the Actions cache.
+  actions: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # Label-triggered: adding any other label (e.g. merge-ready) starts a run that
-  # the job `if` skips, so never cancel an in-flight run here.
-  cancel-in-progress: false
+  # A new commit on a full-ci PR cancels the previous bundle. Adding another
+  # label must not cancel an in-flight 10× run (cancel-in-progress stays false
+  # for `labeled`). Pushes, tags, the nightly, and the merge queue are not
+  # cancelled.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
 
 jobs:
   mac-package:
     name: Mac package (unsigned .app artifact) — not a merge gate
     runs-on: macos-14
-    # See the CI cost rule at the top of this file.
     if: >-
-      github.event_name != 'pull_request' ||
-      github.event.label.name == 'full-ci'
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'merge_group' ||
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
     timeout-minutes: 45
     env:
       # scripts/fetch-node-sidecar.sh reads the pinned public release with gh.
@@ -49,12 +63,6 @@ jobs:
       - name: GnuPG for the sidecar signature check
         run: command -v gpg || brew install gnupg
 
-      - name: Unit test — bundle checker (no network)
-        run: |
-          bash scripts/test-check-mac-bundle.sh
-          python3 scripts/test-verify-sidecars.py
-          python3 scripts/test-package-mac.py
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -62,16 +70,22 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/cache@v4
+      # Release profile, separate from the Linux dev-test cache. Path crates
+      # (ffi, mock-node) are included; there is no vendor/ tree today.
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            src-tauri/target/
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-release-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-cargo-release-
+          workspaces: src-tauri
+          shared-key: tauri-release-macos
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Enable sccache for Cargo
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - name: Fetch and re-verify every sidecar against rc14 (G1)
         run: |
@@ -80,6 +94,7 @@ jobs:
 
       # Existing files are re-verified by both the package script and Tauri's
       # beforeBundleCommand; this flag skips only the binary download.
+      # The offline bundle-checker unit tests run on Linux in Authority Check.
       - name: Package (unsigned) and check
         run: bash scripts/package-mac.sh --dmg --use-existing-sidecar
 
@@ -100,3 +115,7 @@ jobs:
           path: ${{ runner.temp }}/out/
           if-no-files-found: error
           retention-days: 7
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true

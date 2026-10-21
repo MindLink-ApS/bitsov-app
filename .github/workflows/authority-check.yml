@@ -1,17 +1,22 @@
 name: Authority Check
 
+# Cheap required check. No `if` and no pull_request paths filter: docs-only
+# and `pm/` pulls still run this job, so branch protection gets a completed
+# check when Build skips the compile. Do not move the heavy jobs here.
 on:
   pull_request:
     branches: [main]
   push:
     branches: [main]
+    tags: ['v*']
+  merge_group:
 
 permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # Supersede stale PR runs; never cancel a run on main.
+  # Supersede stale PR runs; never cancel a push, tag, or merge-queue run.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

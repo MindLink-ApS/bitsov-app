@@ -5,35 +5,112 @@ name: Build
 # Tauri crate. Make it a REQUIRED status on main so review happens on a compiled SHA, not
 # on greps.
 #
-# CI cost rule (app #131): this workflow runs on every PR push. A newer push to
-# the same PR cancels the older run; runs on main are never cancelled. The
-# Windows compile check lives in windows-compile.yml (push to main, dispatch,
-# or `full-ci` label). The `sidecar` job stays here (ubuntu-latest, Linux price).
+# CI cost (private repo, minutes are billed):
+# - A newer push to the same PR cancels the older run. Pushes, tags, and merge-queue
+#   runs are not cancelled.
+# - Docs-only and `pm/` pulls skip the heavy jobs. `Authority Check` has no `if` and
+#   is the cheap check that always completes. This workflow does not use
+#   pull_request paths-ignore: a skipped workflow never reports, and a required
+#   `Build (tsc + vite + cargo check)` would stay pending.
+# - macOS / Windows bundles are not in this file. They run nightly, on `v*` tags,
+#   in the merge queue, or with the `full-ci` label (mac-package.yml,
+#   windows-compile.yml). There is no iOS simulator job; `cargo check --features
+#   mobile` below is the Linux mobile compile and stays on every code PR.
+# - The sidecar job is not a merge gate. It waits for this job and reuses the same
+#   Rust cache instead of compiling the crate a second time in parallel.
 on:
   pull_request:
     branches: [main]
+    # No paths-ignore. No `labeled`: adding `merge-ready` must not rebuild.
+    # `full-ci` is read on the next synchronize (and on macOS/Windows immediately).
   push:
     branches: [main]
+    tags: ['v*']
+    # Path filters are not applied to tag pushes. Docs-only pushes skip this
+    # workflow; the pull_request path above cannot, or required checks pend.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'pm/**'
+      - 'LICENSE'
+      - '.gitignore'
+  merge_group:
 
 permissions:
   contents: read
+  pull-requests: read
+  # rust-cache and sccache save to the Actions cache.
+  actions: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # Supersede stale PR runs; never cancel a run on main.
+  # Supersede stale PR runs; never cancel a push, tag, or merge-queue run.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: Classify changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+    outputs:
+      # Pushes, tags, and merge-queue runs always build. A PR builds when any
+      # changed file is outside the docs/`pm/` set, or when it carries `full-ci`.
+      code: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci') || steps.filter.outputs.code == 'true' }}
+    steps:
+      - name: Ensure full-ci label exists
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create "full-ci" \
+            --color "5319e7" \
+            --description "Run the macOS bundle and the Windows compile on this pull request" \
+            --repo "${{ github.repository }}" 2>/dev/null || true
+
+      - name: Detect code changes
+        id: filter
+        if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'merge_group'
+        uses: dorny/paths-filter@v3
+        with:
+          # paths-filter defaults to 'some': a file matches a filter if it
+          # matches ANY pattern, so the '**' entry would make every PR code=true.
+          # With 'every', a file matches only if it matches ALL patterns: '**'
+          # and none of the negated docs-only patterns. The filter is true when
+          # at least one changed file matches, i.e. when anything outside the
+          # docs-only set changed.
+          predicate-quantifier: 'every'
+          filters: |
+            code:
+              - '**'
+              - '!docs/**'
+              - '!pm/**'
+              - '!**/*.md'
+              - '!LICENSE'
+              - '!.gitignore'
+              - '!CODEOWNERS'
+
   build:
     name: Build (tsc + vite + cargo check)
+    needs: changes
+    # A skipped job reports success under branch protection, so this required
+    # check is skipped only when classification succeeded and found docs-only
+    # changes. Any other `changes` result fails closed and runs the job.
+    # `!cancelled()` (not `always()`) bypasses the implicit success() while
+    # still letting PR concurrency cancel this job.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-latest
     # A Build job hung for 6 h on 30 Sep (app #131); a normal run is well under this.
     timeout-minutes: 30
-    # Smaller debug info: the Tauri test binaries link several GB of objects, and
-    # ld died with SIGBUS (signal 7, disk full on the runner) on 1 Oct.
+    # `debug = 0` is debuginfo, not debug assertions. `cfg(debug_assertions)` stays
+    # on. Smaller objects keep the link off the disk ceiling (ld SIGBUS, 1 Oct)
+    # and make the restored cache smaller. Incremental is off because sccache
+    # plus a restored target/ replaces it.
     env:
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
@@ -74,16 +151,24 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/cache@v4
+      # Cache registry crates and path crates (src-tauri/ffi, src-tauri/crates/mock-node).
+      # The default rust-cache mode skips workspace crates, so a lockfile-stable
+      # PR still recompiled them. There is no vendor/ tree in this repo; the
+      # flag is what covers one if it is added.
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            src-tauri/target/
-          key: ${{ runner.os }}-cargo-check-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-check-
+          workspaces: src-tauri
+          shared-key: tauri-dev
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Enable sccache for Cargo
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       # tauri_build validates that bundle.externalBin (bin/konsensus-<triple>) EXISTS at check
       # time. This gate must prove OUR Rust compiles without depending on a genome release
@@ -105,18 +190,9 @@ jobs:
         working-directory: src-tauri
         run: cargo check --locked --features mobile --tests
 
-      # app #16. Behavioural coverage of the node-shutdown policy: signal ordering,
-      # the timeout escalation, and the two cases that must never signal at all
-      # (an already-reaped child, and a pid that is no longer ours). Lives here
-      # rather than in Authority Check because that job is shell-only and has no
-      # gtk/webkit toolchain.
-      - name: Rust — stop-policy behaviour tests
-        working-directory: src-tauri
-        run: cargo test --locked stop_adapter_tests
-
-      # Unfiltered: assistant ACL, Jarvis broker, and mock-node, plus the
-      # stop-policy tests above. Same stable toolchain as `cargo check`. Linux
-      # only — this job is the required Build check, not a new workflow job.
+      # One test invocation. `stop_adapter_tests` is `cfg(not(feature = "mobile"))`
+      # and these features do not enable `mobile`, so the old extra
+      # `cargo test stop_adapter_tests` compiled and ran that module twice.
       - name: Rust — cargo test (src-tauri)
         working-directory: src-tauri
         run: cargo test --locked --features dev-node,local-owner-ceremony
@@ -131,6 +207,10 @@ jobs:
         working-directory: src-tauri
         run: cargo check --locked --features sit-mock --bins --examples
 
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
   # NOT a merge gate: keep this job OUT of the required status checks. It depends on the
   # genome's published release and on network, not on this repo's source. It exercises the
   # REAL sidecar path end to end against the pinned release: download, fail-closed signature
@@ -139,14 +219,20 @@ jobs:
   # drift guard, then the CS-1 smoke boots
   # the fetched node exactly as `init` configured it — zero port or migrations edits — and
   # proves the identity is durable across a restart.
+  #
+  # It used to compile the same crate in parallel with `build` (its own actions/cache
+  # key). It now waits for that job and restores the same rust-cache. Docs-only pulls
+  # skip it with the build. The job name is unchanged.
   sidecar:
     name: Sidecar (fetch + verify, config drift, CS-1 smoke) — not a merge gate
+    needs: [changes, build]
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       GH_TOKEN: ${{ github.token }}
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
@@ -176,19 +262,22 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            src-tauri/target/
-          key: ${{ runner.os }}-cargo-config-drift-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-config-drift-
-            ${{ runner.os }}-cargo-check-
+          workspaces: src-tauri
+          shared-key: tauri-dev
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
 
-      # Runs on every PR/main push, including edits to fetch-node-sidecar.sh's TAG.
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Enable sccache for Cargo
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      # Runs on code changes, including edits to fetch-node-sidecar.sh's TAG.
       # Explicit discovery makes a missing verified binary FAIL rather than SKIP.
       # rc14 supplies both init and the two-phase owner API.
       - name: Bootstrap config matches the pinned node's full-tier init
@@ -235,3 +324,7 @@ jobs:
 
       - name: CS-2 smoke — rc14 host bindings
         run: bash scripts/cs2-local-smoke.sh
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
