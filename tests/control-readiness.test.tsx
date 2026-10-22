@@ -11,6 +11,11 @@ let mount: HTMLElement;
 beforeEach(() => { setShowLegacyRoomsUi(true); });
 afterEach(() => { dispose?.(); mount?.remove(); vi.useRealTimers(); setShowLegacyRoomsUi(false); });
 
+function draftMessage() {
+  const input = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
+  input.value = 'hello'; input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 async function start(ready: boolean | undefined, setup?: (s: ReturnType<typeof sampleSource>) => void) {
   const source = sampleSource({ firstLiveMs: 1e9 });
   setup?.(source);
@@ -23,6 +28,7 @@ async function start(ready: boolean | undefined, setup?: (s: ReturnType<typeof s
   mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
   await vi.waitFor(() => expect(mount.querySelector('[data-send]')).not.toBeNull());
+  draftMessage();
   return { source, status };
 }
 
@@ -34,6 +40,8 @@ describe('node money readiness', () => {
     const [retry, setRetry] = createSignal<number | null>(null);
     mount = document.createElement('div'); document.body.appendChild(mount);
     dispose = render(() => <ControlCenter source={source} active ready retryAfterSecs={retry()} error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
+    await vi.waitFor(() => expect(mount.querySelector('[data-composer] textarea')).not.toBeNull());
+    draftMessage();
     await vi.waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-send]')?.disabled).toBe(false));
     const composer = mount.querySelector('[data-composer-bar]');
     mount.querySelector<HTMLButtonElement>('[data-tab="budget"]')!.click();

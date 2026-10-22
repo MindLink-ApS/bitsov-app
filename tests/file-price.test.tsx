@@ -15,8 +15,8 @@ it('shows the file price in the file composer while approval is pending', async 
   mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
   await new Promise((r) => setTimeout(r, 300));
-  // Approval is pending in sample data: the budget setup card is on screen.
-  expect(mount.querySelector('[data-budget-setup]')).not.toBeNull();
+  // Approval is off in sample data; setup is deferred until Send.
+  expect(mount.querySelector('[data-budget-setup]')).toBeNull();
   mount.querySelector<HTMLButtonElement>('[aria-label="More: attach, pay, request"]')!.click();
   mount.querySelector<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
   await new Promise((r) => setTimeout(r, 50));

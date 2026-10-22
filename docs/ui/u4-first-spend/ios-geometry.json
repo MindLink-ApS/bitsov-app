@@ -1,0 +1,68 @@
+{
+  "inner": [
+    393,
+    852
+  ],
+  "elements": [
+    {
+      "tag": "DIALOG",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 393,
+        "height": 852,
+        "top": 0,
+        "right": 393,
+        "bottom": 852,
+        "left": 0
+      },
+      "client": 852,
+      "scroll": 852
+    },
+    {
+      "tag": "DIV",
+      "rect": {
+        "x": 0,
+        "y": 444.046875,
+        "width": 393,
+        "height": 407.953125,
+        "top": 444.046875,
+        "right": 393,
+        "bottom": 852,
+        "left": 0
+      },
+      "client": 406,
+      "scroll": 406
+    },
+    {
+      "tag": "BUTTON",
+      "rect": {
+        "x": 17,
+        "y": 717,
+        "width": 359,
+        "height": 44,
+        "top": 717,
+        "right": 376,
+        "bottom": 761,
+        "left": 17
+      },
+      "client": 44,
+      "scroll": 44
+    },
+    {
+      "tag": "BUTTON",
+      "rect": {
+        "x": 17,
+        "y": 773,
+        "width": 359,
+        "height": 44,
+        "top": 773,
+        "right": 376,
+        "bottom": 817,
+        "left": 17
+      },
+      "client": 44,
+      "scroll": 44
+    }
+  ]
+}

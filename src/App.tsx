@@ -479,10 +479,12 @@ function AppScreen() {
     <Show
       when={trustAck()}
       fallback={
-        <ControlCenter remote={pairing().remote} phone={onPhone} retryAfterSecs={status().retry_after_secs} onReconnect={retryPairing} source={source()} active={false} ready={status().ready} error={status().error} ownId={status().node_id} firstRun={firstRun} />
+        <ControlCenter localApproval={pairing().state === 'fallback'} spendScoped={pairing().scopes.includes('spend')} remote={pairing().remote} phone={onPhone} retryAfterSecs={status().retry_after_secs} onReconnect={retryPairing} source={source()} active={false} ready={status().ready} error={status().error} ownId={status().node_id} firstRun={firstRun} />
       }
     >
       <ControlCenter
+        localApproval={pairing().state === 'fallback'}
+        spendScoped={pairing().scopes.includes('spend')}
         remote={pairing().remote}
         phone={onPhone}
         hostedBy={pairing().hosted_by ?? null}

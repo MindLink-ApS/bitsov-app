@@ -1,3 +1,4 @@
+import { FirstSpendSheet, type FirstSpendChoice } from './FirstSpendSheet';
 import { createAmountDraft } from './amountDraft';
 import { t as tr, possessive, languagePref, setLanguagePref, type LanguagePref } from '../i18n';
 import { CallRepairs } from './CallRepairs';
@@ -23,7 +24,7 @@ import { readSpendPreset, saveSpendPreset } from './prefs';
 import { WelcomeHome } from './WelcomeHome';
 import { DelayedSpinner } from './DelayedSpinner';
 import { MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
-import { batch, createEffect, createMemo, createResource, createSignal, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
+import { batch, createEffect, createMemo, createResource, createSignal, createUniqueId, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
 import { createStore, produce, reconcile } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
@@ -129,7 +130,6 @@ import type {
   ActionError,
   SendReceipt,
   Artifact,
-  BudgetPreset,
   BudgetRow,
   BudgetView,
   Delivery,
@@ -158,6 +158,9 @@ type Props = {
   watchUpdates?: WatchUpdates;
   watchError?: string | null;
   remote?: boolean;
+  /** AuthMode::Local (rc7 fallback), independent of transport location. */
+  localApproval?: boolean;
+  spendScoped?: boolean;
   /** An Android or iOS build: no node of its own, so no local-node state in the pill. */
   phone?: boolean;
   /** The remote node's display label from its pairing link, if any. */
@@ -232,6 +235,8 @@ type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
  */
 export type Actions = {
   remote?: () => boolean;
+  localApproval?: () => boolean;
+  spendScoped?: () => boolean;
   moneyBlocked: () => boolean;
   /** The request was made (open, or pending at the node), with the host's ids for it (#227). */
   approve: () => Promise<ApprovalResult>;
@@ -1325,6 +1330,8 @@ export function ControlCenter(props: Props) {
   onCleanup(() => voiceUrls.forEach((u) => void u.then(URL.revokeObjectURL, () => undefined)));
   const actions: Actions = {
     remote: () => props.remote === true,
+    localApproval: () => props.localApproval === true,
+    spendScoped: () => props.spendScoped === true,
     moneyBlocked,
     callQuote: (peer) => act(() => source.callQuote(peer)),
     placeCall: (peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); },
@@ -4263,6 +4270,8 @@ function Composer(props: {
 }) {
   const [mode, setMode] = createSignal<Mode>('message');
   const [menuOpen, setMenuOpen] = createSignal(false);
+  const [firstSpendOpen, setFirstSpendOpen] = createSignal(false);
+  const sendReasonId = createUniqueId();
   // B2: the owner's pick of starting preset, and of a first contact's budget.
   const [presetPick, setPresetPick] = createSignal<PresetId | null>(readSpendPreset(props.ownId));
   const [firstPick, setFirstPick] = createSignal<number | null>(null);
@@ -4679,7 +4688,7 @@ function Composer(props: {
   const stand = () => budgetStand(budget(), target(), room(), mode() === 'message' && props.admissionResume ? 0 : shown().msat, readmit());
   createEffect(() => {
     if (props.moneyBlocked) { setDoor(null); return; }
-    if (room() || !doorWanted() || (mode() !== 'message' && mode() !== 'file') || stand().kind !== 'first') return;
+    if (room() || !doorWanted() || (mode() !== 'message' && mode() !== 'file') || !(stand().kind === 'first' || (stand().kind === 'off' && firstSpendOpen()))) return;
     const peer = target();
     if (untrack(door)?.peer === peer) return;
     const request = { peer, quote: null, loading: true };
@@ -4690,6 +4699,10 @@ function Composer(props: {
       if (untrack(door) === request) setDoor({ peer, quote: null, error });
     });
   });
+  const needsFirstSpend = () => viaBudget() && stand().kind === 'off' && !needsTouch();
+  createEffect(() => { if (!needsFirstSpend()) setFirstSpendOpen(false); });
+  createEffect(on(() => trackKey(props.track), () => setFirstSpendOpen(false), { defer: true }));
+  createEffect(on(mode, () => setFirstSpendOpen(false), { defer: true }));
   const presetChosen = () => {
     const b = budget();
     const id = presetPick() ?? b?.preset ?? 'careful';
@@ -4785,6 +4798,20 @@ function Composer(props: {
     return tr('uiUpToIncludesMaxRoutingFee', fmtAmount(cap));
   };
 
+  const firstContactCostLine = (): string | null => {
+    if (!doorWanted() || (!door() && !readmitPrice())) return null;
+    const q = readmitPrice() ?? doorQuote();
+    if (priceProblem()) return priceProblem();
+    if (!q) return tr('firstSpendCostLoading');
+    return tr('firstSpendCost', fmtAmount(q.admission_msat), fmtAmount(q.message_msat),
+      fmtAmount(q.max_routing_fee_msat ?? 0), fmtAmount(q.total_msat));
+  };
+
+  const retryPrice = () => {
+    if (doorWanted() && door()) setDoor(null);
+    props.refreshPrice();
+  };
+
   /** What this mode costs, shown before the button is pressed. */
   /** What one message costs here, whatever the current mode (Send in chat uses it too). */
   const messageShown = (): { msat: number | null; estimate: boolean; basis: string } => {
@@ -4867,7 +4894,7 @@ function Composer(props: {
         case 'paused': return tr('uiResumePayments');
         case 'waiting': return tr('uiWaitingForApproval');
         // The press only allows payments (a preset): say so, as the message button does.
-        case 'off': return presetChosen() ? tr('uiAllowPayments') : tr('uiSend');
+        case 'off': return tr('uiSend');
         case 'first': return tr('uiSendFirst', mode() === 'file' ? tr('fileNoun') : tr('messageNoun'), price);
         case 'contact_used':
         case 'total_used': return tr('uiBudgetUsedUp');
@@ -4895,7 +4922,7 @@ function Composer(props: {
     if (viaBudget() && (mode() === 'message' || mode() === 'file')) {
       const k = stand().kind;
       if (k === 'paused') return tr('uiResumePayments');
-      if (k === 'off' && presetChosen()) return tr('uiAllowPayments');
+      if (k === 'off') return tr('uiSend');
     }
     return tr('uiSend');
   };
@@ -5358,7 +5385,7 @@ function Composer(props: {
    * new price shows on Send, which needs another press. `pressed`: an
    * Approve & send continuing after its approval (its words are in its bubble).
    */
-  const submit = async (shownMsat?: number | null, pressed: Pressed | null = null) => {
+  const submit = async (shownMsat?: number | null, pressed: Pressed | null = null, budgetChoice?: FirstSpendChoice) => {
     if (!pressed && consent() && mode() === 'message' && !approvalCleared()) {
       setNote(tr('uiAMessageIsAlreadyWaitingForApprovalIn'));
       return;
@@ -5371,6 +5398,12 @@ function Composer(props: {
     setNote(null);
     if (shownMsat !== undefined && (mode() !== 'message' || shown().msat !== shownMsat)) {
       setNote(tr('uiTheMessagePriceChangedSinceYouPressedNothing'));
+      return;
+    }
+    if (budgetChoice && !needsFirstSpend()) return;
+    if (!pressed && needsFirstSpend() && !budgetChoice) {
+      if (!ready()) return;
+      setFirstSpendOpen(true);
       return;
     }
     if (needsTouch()) {
@@ -5396,14 +5429,14 @@ function Composer(props: {
         // The one approval (or resume). Where the host names the request that
         // arms autopay, the message waits in its bubble and goes once that very
         // request armed it (approve & send); otherwise the draft stays (plain).
-        const asks = st.kind === 'paused' || presetChosen() !== null;
+        const asks = st.kind === 'paused' || budgetChoice !== undefined;
         const continuing = asks && canContinue('budget');
         if (continuing) startWaiting('budget');
         const started = continuing ? untrack(consent) : null;
         setBusy(true);
         let approved: ApprovalResult = { ok: false, requestId: null, grantedOp: null, bindable: false, waiting: false };
         if (st.kind === 'paused') approved = await props.actions.resume();
-        else if (presetChosen()) approved = await props.actions.approveBudget(presetChosen()!.ceiling_msat, presetChosen()!.id);
+        else if (budgetChoice) approved = await props.actions.approveBudget(budgetChoice.ceiling_msat, budgetChoice.id);
         if (continuing) afterBudget(approved, started);
         setBusy(false);
         if (!continuing) approvedPlain(approved.ok, approved.waiting);
@@ -5699,10 +5732,35 @@ function Composer(props: {
     props.moneyBlocked || (spends() && !!props.budgetStale) || busy() || contactWaiting() || (mode() === 'message' && priceProblem() !== null) ||
     // Touch ID approves the contact, not the draft: no draft needed yet.
     (needsTouch() ? false : viaBudget()
-      ? ['waiting', 'contact_used', 'total_used', 'grant_limited', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok') && !ready())
+      ? ['waiting', 'contact_used', 'total_used', 'grant_limited', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok' || stand().kind === 'off') && !ready())
       : spends() && !line().open
       ? props.spend?.state === 'pending' || props.spend?.state === 'unavailable' || props.spend === null
       : !ready());
+
+  const disabledReason = (): string | null => {
+    if (!disabled()) return null;
+    if (props.moneyBlocked) return tr('firstSpendOffline');
+    if (spends() && props.budgetStale) return tr('firstSpendChecking');
+    if (busy()) return tr('firstSpendBusy');
+    if (contactWaiting()) return tr('uiWaitingForContactApproval');
+    if (mode() === 'message' && priceProblem()) return priceProblem();
+    if (blocked()) return blocked();
+    if (viaBudget()) {
+      switch (stand().kind) {
+        case 'waiting': return tr('uiWaitingForApproval');
+        case 'contact_used':
+        case 'total_used': return tr('uiBudgetUsedUp');
+        case 'grant_limited': return tr('uiNodeGrantLimit');
+        case 'unknown': return tr('firstSpendChecking');
+      }
+    }
+    if (spends() && !line().open && !viaBudget()) {
+      if (props.spend?.state === 'pending') return tr('uiWaitingForApproval');
+      if (!props.spend || props.spend.state === 'unavailable') return tr('uiSpendingUnavailable');
+    }
+    if (mode() === 'message' && !draft().trim()) return tr('uiTypeAMessageFirst');
+    return tr('firstSpendCompleteForm');
+  };
 
   return (
     <form
@@ -5983,6 +6041,7 @@ function Composer(props: {
             class="primary soft send-btn money"
             disabled={disabled()}
             data-send
+            aria-describedby={disabledReason() ? sendReasonId : undefined}
             onClick={(e) => { if (e.detail > 1) e.preventDefault(); }}
             title={sendTitle()}
             aria-label={sendTitle()}
@@ -5991,15 +6050,16 @@ function Composer(props: {
           </button>
         </Show>
       </div>
+      <Show when={disabledReason()}>
+        <p id={sendReasonId} class="hint" data-send-disabled-reason>{disabledReason()}</p>
+      </Show>
       <div class="composer-meta">
       <Show when={mode() === 'message'}>
         <div class="send-price" classList={{ priced: !priceProblem() && (paidLine() !== null || messageShown().msat !== null) }}>
           <span data-send-price aria-live="polite">{priceLine()}</span>
+          <Show when={firstContactCostLine()}><span class="first-contact-cost" data-first-contact-cost>{firstContactCostLine()}</span></Show>
           <Show when={priceProblem() && priceProblem() !== tr('uiPriceLoading')}>
-            {' '}<button type="button" class="link" data-price-retry disabled={busy()} onClick={() => {
-              if (doorWanted() && door()) setDoor(null);
-              props.refreshPrice();
-            }}>{tr('uiRetry')}</button>
+            {' '}<button type="button" class="link" data-price-retry disabled={busy()} onClick={retryPrice}>{tr('uiRetry')}</button>
           </Show>
         </div>
       </Show>
@@ -6167,8 +6227,6 @@ function Composer(props: {
               target={target()}
               priceMsat={shown().msat}
               door={doorQuote()}
-              preset={presetChosen()}
-              onPreset={(id) => { setPresetPick(id); saveSpendPreset(props.ownId, id); }}
               firstPick={firstPick()}
               onFirstPick={setFirstPick}
               error={props.budgetError}
@@ -6179,6 +6237,30 @@ function Composer(props: {
             />
           </Show>
         </Show>
+      </Show>
+      <Show when={firstSpendOpen()}>
+        <FirstSpendSheet
+          presets={budget()?.presets ?? []}
+          initialPreset={presetChosen()?.id ?? null}
+          maxDailyMsat={budget()?.max_daily_msat ?? 0}
+          grantBudgetMsat={props.actions.localApproval?.() ? undefined : budget()?.node_grant?.budget_msat}
+          startsNow={props.actions.localApproval?.() === true || !!budget()?.node_grant}
+          mayStartNow={props.actions.spendScoped?.() === true}
+          lapse={props.spend?.state === 'expired' ? props.spend.lapse : null}
+          dailyExpired={budget()?.autopay.state === 'expired'}
+          onRetry={priceProblem() && priceProblem() !== tr('uiPriceLoading') && !busy() ? retryPrice : undefined}
+          costLine={mode() === 'file' && props.filePrice
+            ? tr('firstSpendFileCost', fmtAmount(props.filePrice.principal_msat), fmtAmount(props.filePrice.max_routing_fee_msat), fmtAmount(props.filePrice.total_msat))
+            : firstContactCostLine() ?? priceLine() ?? tr('uiPriceLoading')}
+          blockedReason={disabledReason()}
+          onPreset={id => { setPresetPick(id); saveSpendPreset(props.ownId, id); }}
+          onCancel={() => setFirstSpendOpen(false)}
+          onAllow={choice => {
+            if (disabled() || !needsFirstSpend()) return;
+            setFirstSpendOpen(false);
+            void submit(undefined, null, choice);
+          }}
+        />
       </Show>
     </form>
   );
@@ -6468,7 +6550,7 @@ const timeLeft = (untilMs: number, nowMs: number) => {
   return min < 60 ? `${min} min` : `${Math.ceil(min / 60)} h`;
 };
 
-const PRESET_NAME: Record<PresetId, string> = { get careful() { return tr('presetCareful'); }, get everyday() { return tr('presetEveryday'); }, get generous() { return tr('presetGenerous'); } };
+
 
 /**
  * Invisible payments (B2). Inside the owner's budget a message just goes: no
@@ -6487,8 +6569,6 @@ function BudgetBar(props: {
   priceMsat: number | null;
   /** A stranger's signed quote, on a first paid message. */
   door: FirstContactQuote | null;
-  preset: BudgetPreset | null;
-  onPreset: (id: PresetId) => void;
   firstPick: number | null;
   onFirstPick: (msat: number) => void;
   error: string | undefined;
@@ -6524,40 +6604,6 @@ function BudgetBar(props: {
             <p class="hint">{tr('uiThisAppCannotApproveItForYouYour')}</p>
           </div>
           </TouchIdFirst>
-        </Match>
-        <Match when={props.stand.kind === 'off'}>
-          <Show when={props.room || props.actions.device()?.state !== 'registered'}>
-            <div class="approval slim-approval budget-setup" data-budget-setup>
-              <span class="slim-label">
-                <strong>{tr('uiApprovalNeeded')}</strong> {props.budget.autopay.state === 'expired' ? tr('uiYourDailyApprovalEnded') : tr('uiLetMessagesPayAsYouChat')} {tr('uiSomeoneNewAlwaysAsksFirst')}
-              </span>
-              <Show when={props.spend?.lapse}>
-                {(lapse) => (
-                  <p class="hint" data-budget-lapse={lapse()}>
-                    {lapse() === 'lost'
-                      ? tr('uiYourNodeCanNoLongerApproveYourLast')
-                      : tr('uiYourLastRequestLapsedBeforeItWasApproved')}
-                  </p>
-                )}
-              </Show>
-              <div class="presets" role="radiogroup" aria-label={tr('uiAppAllInPaymentsLimitRolling24Hours')}>
-                <For each={props.budget.presets}>
-                  {(p) => (
-                    <button
-                      type="button"
-                      class="chip"
-                      role="radio"
-                      aria-checked={props.preset?.id === p.id}
-                      data-preset={p.id}
-                      onClick={() => props.onPreset(p.id)}
-                    >
-                      {PRESET_NAME[p.id]} · {fmtAmount(p.ceiling_msat)} {tr('uiADay')}
-                    </button>
-                  )}
-                </For>
-              </div>
-            </div>
-          </Show>
         </Match>
         <Match when={props.stand.kind === 'first' && (props.stand as Extract<BudgetStandT, { kind: 'first' }>)}>
           {(st) => (
