@@ -549,6 +549,7 @@ export type DeviceState = 'unavailable' | 'none' | 'pending' | 'registered' | 'l
 export type DeviceView = {
   /** Node #301 SAS enrollment routes, detected without issuing a ticket. */
   delegation_supported?: boolean;
+  second_device?: boolean;
   owner_device_count?: number | null;
   /** This Mac has a Secure Enclave the app can use. */
   available: boolean;

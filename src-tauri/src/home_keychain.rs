@@ -22,7 +22,7 @@ fn store(
     device_blob: Option<&[u8]>,
 ) -> Result<(), String> {
     let name = service(node, suffix)?;
-    #[cfg(all(target_os = "macos", desktop, not(feature = "mobile")))]
+    #[cfg(any(target_os = "ios", all(target_os = "macos", desktop, not(feature = "mobile"))))]
     {
         let _ = device_blob;
         let name = crate::profile::current()?.keychain_service(&name);
@@ -43,6 +43,7 @@ fn store(
     }
     #[cfg(not(any(
         target_os = "android",
+        target_os = "ios",
         all(target_os = "macos", desktop, not(feature = "mobile"))
     )))]
     {
@@ -69,7 +70,7 @@ fn read(
     device_blob: Option<&[u8]>,
 ) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
     let name = service(node, suffix)?;
-    #[cfg(all(target_os = "macos", desktop, not(feature = "mobile")))]
+    #[cfg(any(target_os = "ios", all(target_os = "macos", desktop, not(feature = "mobile"))))]
     {
         let _ = (secret, device_blob);
         let name = crate::profile::current()?.keychain_service(&name);
@@ -97,6 +98,7 @@ fn read(
     }
     #[cfg(not(any(
         target_os = "android",
+        target_os = "ios",
         all(target_os = "macos", desktop, not(feature = "mobile"))
     )))]
     {

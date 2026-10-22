@@ -28,6 +28,7 @@ fn setup(endpoint: String, pinned: bool) -> (RemoteDescriptor, Arc<Pins>) {
     let node_id = f["node_id"].as_str().unwrap().to_owned();
     let signature = node.sign(descriptor_signature_message(&node_id, &transport).as_bytes());
     let descriptor = validate_descriptor(StoredDescriptor {
+        enrollment_commitment: None,
         bootstrap_routes: vec![], endpoints: vec![], endpoints_signature: None, box_transport_pubkey: String::new(), box_transport_signature: None,
         v: 1,
         endpoint: endpoint.clone(),
@@ -271,6 +272,7 @@ async fn bootstrap_sas_preserves_one_completed_session_across_requests_and_fallb
     let second = live.local_addr().unwrap().to_string();
     let box_key = hex::encode(X25519PublicKey::from(&StaticSecret::from([9;32])).to_bytes());
     let descriptor = validate_descriptor(StoredDescriptor {
+        enrollment_commitment: None,
         v:2, endpoint:first.clone(), endpoints:vec![first, second], bootstrap_routes:vec![], endpoints_signature:None,
         node_id:String::new(), transport_pubkey:String::new(), transport_signature:String::new(),
         box_transport_pubkey:box_key.clone(), box_transport_signature:None, code:None,sealed_code:None,hosted_by:None,
@@ -333,6 +335,7 @@ fn finalize_preserves_fallback_routes_and_rejects_changed_or_unsigned_pins() {
     let pins=Arc::new(Pins::default());
     let box_key="22".repeat(32);
     let previous=validate_descriptor(StoredDescriptor {
+        enrollment_commitment: None,
         v:2,endpoint:"dead.local:9737".into(),endpoints:vec!["dead.local:9737".into(),"192.168.1.2:9737".into()],bootstrap_routes:vec![],endpoints_signature:None,
         node_id:String::new(),transport_pubkey:String::new(),transport_signature:String::new(),box_transport_pubkey:box_key.clone(),box_transport_signature:None,
         code:None,sealed_code:None,hosted_by:None,
@@ -409,6 +412,7 @@ async fn pr287_lost_receipt_recovers_only_through_pinned_locked_auth() {
         let node = fixture()["node_id"].as_str().unwrap().to_owned();
         let box_key = auth["box_transport_pubkey"].as_str().unwrap().to_owned();
         let descriptor = validate_descriptor(StoredDescriptor {
+        enrollment_commitment: None,
             v: 1, endpoint, endpoints: vec![], bootstrap_routes: vec![], endpoints_signature: None,
             node_id: String::new(), transport_pubkey: String::new(), transport_signature: String::new(),
             box_transport_pubkey: box_key, box_transport_signature: None,
@@ -460,6 +464,7 @@ async fn pr287_precommit_recovery_keeps_bootstrap_available_without_adopting_a_p
         let node = fixture()["node_id"].as_str().unwrap().to_owned();
         let box_key = fixture()["auth"]["box_transport_pubkey"].as_str().unwrap().to_owned();
         let descriptor = validate_descriptor(StoredDescriptor {
+        enrollment_commitment: None,
             v: 1, endpoint: listener.local_addr().unwrap().to_string(), endpoints: vec![],
             bootstrap_routes: vec![], endpoints_signature: None, node_id: String::new(),
             transport_pubkey: String::new(), transport_signature: String::new(),
@@ -544,4 +549,76 @@ async fn owner_ticket_auth_refusal_has_expiry_used_and_revocation_guidance_witho
     assert!(error.contains("expired")); assert!(error.contains("already used")); assert!(error.contains("revoked"));
     assert!(!error.contains(&code));
     let (_,_,request)=server.await.unwrap().unwrap(); assert_eq!(request.code.as_deref(),Some(code.as_str()));
+}
+
+#[tokio::test]
+async fn second_device_lost_pairing_reply_recovers_without_replaying_ticket() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (mut descriptor, _) = setup(listener.local_addr().unwrap().to_string(), true);
+    descriptor.code = Some(format!("second_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([77;32])));
+    let dir = tempfile::tempdir().unwrap();
+    persist_at(&config_path(dir.path()), &descriptor).unwrap();
+    let store = dir.path().join("pairing");
+    let key = ClientKey::load_or_create(&store).unwrap();
+    let server = tokio::spawn(async move {
+        // Consume the signed proof but lose the authenticated response.
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut hs = Builder::new(NOISE_PROTOCOL.parse().unwrap()).local_private_key(&[12;32]).build_responder().unwrap();
+        let mut out = vec![0;MAX_HANDSHAKE_FRAME];
+        let msg = read_frame(&mut stream,MAX_HANDSHAKE_FRAME).await.unwrap(); hs.read_message(&msg,&mut out).unwrap();
+        let n = hs.write_message(&[],&mut out).unwrap(); write_frame(&mut stream,&out[..n]).await.unwrap();
+        let msg = read_frame(&mut stream,MAX_HANDSHAKE_FRAME).await.unwrap(); hs.read_message(&msg,&mut out).unwrap();
+        let mut noise = hs.into_transport_mode().unwrap();
+        let encrypted = read_frame(&mut stream,MAX_TRANSPORT_FRAME).await.unwrap();
+        let first: Value = serde_json::from_slice(&decode_transport(&mut noise,&encrypted,MAX_AUTH_PLAINTEXT).unwrap()).unwrap();
+        assert!(first["code"].as_str().unwrap().starts_with("second_"));
+        drop(stream);
+        let mut auth = fixture()["auth"].clone(); auth["scopes"] = json!([]);
+        let (_, _, next) = responder(listener,12,auth).await.unwrap();
+        assert!(next.code.is_none(), "a sent ticket may never be retried");
+    });
+    let result = authenticate_pinned_transport_and_save_record(dir.path(),descriptor,&key,"Phone",&store,&RemoteRetry::default()).await.unwrap();
+    assert!(!result.has_code());
+    assert!(result.enrollment_commitment().is_some());
+    assert!(!load_persisted(dir.path()).unwrap().unwrap().has_code());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn second_device_one_use_pairing_requires_a_node_identity_before_saving_record() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (mut descriptor, _) = setup(listener.local_addr().unwrap().to_string(), false);
+    descriptor.node_id.clear();
+    descriptor.code = Some(format!("second_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([77;32])));
+    let dir = tempfile::tempdir().unwrap();
+    persist_at(&config_path(dir.path()), &descriptor).unwrap();
+    let store = dir.path().join("pairing");
+    let key = ClientKey::load_or_create(&store).unwrap();
+    let auth = json!({"status":"ok","v":1,"client_id":"0123456789abcdef0123456789abcdef","scopes":[]});
+    let server = tokio::spawn(responder(listener, 12, auth));
+    let result = authenticate_pinned_transport_and_save_record(dir.path(),descriptor,&key,"Phone",&store,&RemoteRetry::default()).await;
+    server.await.unwrap().unwrap();
+    assert!(matches!(result, Err(RemoteError::Invalid(ref message)) if message == "unexpected provisional pairing"));
+    assert!(!store.join(pairing::RECORD_FILE).exists());
+    let saved = saved_descriptor(&std::fs::read(config_path(dir.path())).unwrap()).unwrap();
+    assert!(!saved.has_code(), "the consumed ticket must stay retired");
+}
+
+#[test]
+fn second_device_cleanup_does_not_overwrite_a_replacement_or_forgotten_descriptor() {
+    for replaced in [false, true] {
+        let (mut current, _) = setup("127.0.0.1:9737".into(), true);
+        current.enrollment_commitment = Some([1;32]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_path(dir.path());
+        if replaced {
+            let mut replacement = current.clone();
+            replacement.enrollment_commitment = Some([2;32]);
+            persist_at(&path, &replacement).unwrap();
+        }
+        let before = std::fs::read(&path).ok();
+        assert!(clear_enrollment_commitment(dir.path(), &mut current).is_err());
+        assert_eq!(current.enrollment_commitment, Some([1;32]));
+        assert_eq!(std::fs::read(&path).ok(), before);
+    }
 }

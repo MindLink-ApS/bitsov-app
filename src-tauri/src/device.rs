@@ -21,6 +21,18 @@ use serde::{Deserialize, Serialize};
 
 use bitsov_app::act::{ActionError, Elevation};
 
+/// Display name sent with a device registration on this operating system.
+pub fn registration_name(platform: &str) -> &'static str {
+    match platform {
+        "ios" => "BitSov app on this iPhone",
+        "android" => "BitSov app on this Android phone",
+        "macos" => "BitSov app on this Mac",
+        "windows" => "BitSov app on Windows",
+        "linux" => "BitSov app on Linux",
+        _ => "BitSov app on this device",
+    }
+}
+
 /// The enclave key blob, under the pairing store.
 pub const BLOB_FILE: &str = "device-key.blob";
 /// What the node said about the key, under the pairing store.
@@ -72,6 +84,7 @@ pub struct PendingRegistration {
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct DeviceView {
     pub delegation_supported: bool,
+    pub second_device: bool,
     pub owner_device_count: Option<u64>,
     /// This Mac has a Secure Enclave the app can use.
     pub available: bool,
@@ -140,6 +153,7 @@ impl DeviceView {
     pub fn of(available: bool, record: Option<&Record>, lapsed: bool, now_ms: u64) -> Self {
         let mut view = Self {
             delegation_supported: false,
+            second_device: false,
             owner_device_count: None,
             available,
             state: if available { DeviceState::None } else { DeviceState::Unavailable },
@@ -379,6 +393,26 @@ pub fn load_pending(path: &Path, now_ms: u64) -> Option<Elevation> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_name_identifies_iphone() {
+        assert_eq!(registration_name("ios"), "BitSov app on this iPhone");
+    }
+
+    #[test]
+    fn registration_name_identifies_android_phone() {
+        assert_eq!(registration_name("android"), "BitSov app on this Android phone");
+    }
+
+    #[test]
+    fn registration_name_identifies_mac() {
+        assert_eq!(registration_name("macos"), "BitSov app on this Mac");
+    }
+
+    #[test]
+    fn registration_name_identifies_windows() {
+        assert_eq!(registration_name("windows"), "BitSov app on Windows");
+    }
 
     #[test]
     fn legacy_pending_registration_loads_and_delegation_message_survives_storage() {
