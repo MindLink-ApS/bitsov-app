@@ -1361,14 +1361,14 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(text(`[data-budget-row="${MAYA}"]`)).toContain('6 sats reserved');
     expect(budgetStand(budget, MAYA, false, 44_000).kind).toBe('contact_used');
   });
-  it('labels a settled legacy fee unknown while counting only proven principal', async () => {
+  it('labels a settled legacy network fee not reported while counting only proven principal', async () => {
     stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 1000,
       accounted_msat: 6000, fee_unknown: true }], { spent_msat: 1000, accounted_msat: 6000, fee_unknown: true }));
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     expect(text('[data-tally-total]')).toBe('1 sat / 500 sats');
-    expect(text('[data-fee-unknown]')).toContain('fee unknown');
-    expect(text(`[data-budget-row="${MAYA}"]`)).toContain('fee unknown');
+    expect(text('[data-fee-unknown]')).toContain('network fee not reported');
+    expect(text(`[data-budget-row="${MAYA}"]`)).toContain('network fee not reported');
   });
 
   // ---- "Allow payments" / "Resume payments" as approve & send, bound to armed_by_request ----

@@ -2390,16 +2390,16 @@ function Rail(props: {
         <span class={`dot ${props.pill.tone}`} classList={{ live: props.pill.live }} />
         <span class="what">{props.pill.text}</span>
         <Show when={props.active}>
-          <span class="peers" title="Connected peers">{props.peers.filter((p) => p.connected).length}/{props.peers.length}</span>
+          {/* Contact counts are in node settings; they are not node-readiness steps. */}
           {/* Says "this opens something" without adding words to the status. */}
           <svg class="pill-chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
         </Show>
       </button>
 
       <div class="track-group">
-        <h2>Peers</h2>
+        <h2>Contacts</h2>
         <Show when={props.active} fallback={<p class="track-empty">Available after setup</p>}>
-          <For each={props.peers} fallback={<p class="track-empty">No peers yet</p>}>
+          <For each={props.peers} fallback={<p class="track-empty">No contacts yet</p>}>
             {(p) =>
               item({ kind: 'peer', id: p.node_id.toLowerCase() }, peerName(p, p.node_id), <span class={`dot ${p.connected ? 'ok' : ''}`} title={p.connected ? 'Connected' : 'Offline'} />)
             }

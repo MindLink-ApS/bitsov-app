@@ -159,7 +159,7 @@ describe('node money readiness', () => {
 
   it('does not mistake an older node without the field for unavailable money', async () => {
     const source = sampleSource();
-    expect(nodePill({ ready: true, error: null, overview: await source.nodeOverview(), link: 'open', nowMs: Date.now() }).text).toBe('Node live');
+    expect(nodePill({ ready: true, error: null, overview: await source.nodeOverview(), link: 'open', nowMs: Date.now() }).text).toBe('Connected to your node');
   });
 });
 

@@ -84,7 +84,7 @@ export function paidAmount(principal: number, fee?: number): string {
   const known = fee !== undefined && Number.isSafeInteger(fee) && fee >= 0;
   const total = principal + (known ? fee : 0);
   if (!Number.isSafeInteger(total) || total < 0) return 'paid amount unknown';
-  return `paid ${amount(total)}${known ? '' : ' · fee unknown'}`;
+  return `paid ${amount(total)}${known ? '' : ' · network fee not reported'}`;
 }
 
 /** Additional liabilities never masquerade as paid amounts. */
@@ -93,7 +93,7 @@ export function budgetNote(b?: import('./types').BudgetAccounting): string {
   const notes: string[] = [];
   if (b.unsettled_msat) notes.push(`${amount(b.unsettled_msat)} reserved`);
   if (b.fee_unknown) {
-    notes.push('fee unknown');
+    notes.push('network fee not reported');
     const held = (b.accounted_msat ?? b.spent_msat) - b.spent_msat - (b.unsettled_msat ?? 0);
     if (held > 0) notes.push(`up to ${amount(held)} held for unreported costs`);
   }
