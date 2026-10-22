@@ -15,7 +15,7 @@ for (const lang of ['en', 'da']) {
       await expect(page.locator('.phone-options')).not.toHaveAttribute('open');
       await expect(page.locator('h1')).toBeVisible();
       expect((await page.locator('.phone-line').boundingBox())!.height).toBeLessThan(28);
-      expect(await page.locator('button.primary:visible').count()).toBe(state === 'words' ? 0 : 1);
+      expect(await page.locator('button.primary:visible').count()).toBe(['words', 'connecting'].includes(state) ? 0 : 1);
       for (const button of await page.locator('button.primary:disabled').all()) {
         const id = await button.getAttribute('aria-describedby');
         expect(id).toBeTruthy();

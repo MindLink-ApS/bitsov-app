@@ -276,6 +276,8 @@ pub enum RemoteAuthResponse {
 /// Public ticket identity only; contains no pairing code or other authority.
 #[derive(Debug, Clone, Serialize)]
 pub struct RemotePreviewView {
+    /// Only second-device tickets defer comparison to owner approval.
+    pub second_device: bool,
     pub first_run: bool,
     pub endpoint: String,
     pub node_id_fingerprint: String,
@@ -940,6 +942,7 @@ fn persist_with(
 pub fn preview_pairing_link(link: &str) -> Result<RemotePreviewView, RemoteError> {
     let descriptor = parse_pairing_link(link)?;
     Ok(RemotePreviewView {
+        second_device: descriptor.code.as_deref().is_some_and(|code| code.starts_with("second_")),
         first_run: descriptor.bootstrap_box_key().is_some() && descriptor.node_id().is_empty(),
         endpoint: descriptor.endpoint.clone(),
         node_id_fingerprint: node_id_fingerprint(descriptor.bootstrap_box_key().unwrap_or(&descriptor.node_id)),
@@ -2823,6 +2826,20 @@ mod tests {
             }
             let data = tempfile::tempdir().unwrap();
             assert!(import_pairing_link(data.path(), &at(unix_now() - 20)).is_ok());
+        }
+    }
+
+    #[test]
+    fn preview_only_skips_comparison_for_owner_approved_second_device_tickets() {
+        let node = SigningKey::from_bytes(&[7u8; 32]);
+        for (code, second) in [
+            (format!("second_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0xab;32])), true),
+            (format!("owner_{}", "ab".repeat(32)), false),
+            (base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0xab;32]), false),
+        ] {
+            let link = node_ticket(&node, serde_json::json!({"code":code, "expires_at": 0}));
+            let view = serde_json::to_value(preview_pairing_link(&link).unwrap()).unwrap();
+            assert_eq!(view["second_device"].as_bool(), Some(second));
         }
     }
 

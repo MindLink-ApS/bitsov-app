@@ -44,11 +44,13 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   const [waiting, setWaiting] = createSignal<Extract<JoinView, { state: 'waiting' }>>();
   const [options, setOptions] = createSignal(false);
   let alive = true, generation = 0, joinGeneration = 0, joining = false, joinStarted = false;
+  // Keep an uncommitted link only in memory until comparison or cancellation.
+  let pendingLink = '', compared = false;
   let resumeSaved = true;
   let resume: 'camera' | 'connection' | undefined;
   let previousHostError: ConnectionError | null | undefined;
   usePairingActivity(() => busy() || ['scanner', 'connecting', 'words', 'fingerprint'].includes(screen()));
-  onCleanup(() => { alive = false; generation++; if (screen() === 'scanner') void props.cancelScan?.().catch(() => {}); });
+  onCleanup(() => { alive = false; generation++; pendingLink = ''; if (screen() === 'scanner') void props.cancelScan?.().catch(() => {}); });
   const fail = (e: unknown) => { joinGeneration++; setError(failure(e)); setScreen('error'); };
   const receive = (v: JoinView) => {
     if (v.state === 'waiting') { setWaiting(v); setScreen('words'); }
@@ -58,7 +60,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     if (joining || busy() || !['connecting', 'words'].includes(screen()) || !props.status().ready || props.pairing().state !== 'paired') return;
     const d = props.device();
     if (!d) return;
-    if (d.delegation_supported === false) { setScreen('fingerprint'); return; }
+    if (d.delegation_supported === false) { setScreen(compared ? 'done' : 'fingerprint'); return; }
     if (!d.available || !d.delegation_supported) { fail({ kind: 'other', detail: c().unsupported }); return; }
     joining = true;
     const turn = generation, joinTurn = joinGeneration;
@@ -82,7 +84,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     if (!alive || busy() || waiting() || joinStarted || ['words', 'fingerprint', 'connecting'].includes(screen())) return;
     let link: string;
     try { link = normalizePairingLink(input); } catch { setToast(c().empty); return; }
-    resumeSaved = false;
+    resumeSaved = false; pendingLink = ''; compared = false;
     setManualPaste(false);
     setBusy(true); setToast(''); setError(undefined); setOptions(false); setScreen('connecting');
     const turn = ++generation;
@@ -92,8 +94,23 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       if (!alive || turn !== generation) return;
       if (view.first_run) { fail({ kind: 'unclaimed' }); return; }
       setPreview(view);
+      if (view.second_device !== true) {
+        pendingLink = link;
+        setScreen('fingerprint');
+        return;
+      }
       await props.connect(link);
     } catch (e) { if (alive && turn === generation) fail(e); }
+    finally { link = ''; if (alive && turn === generation) { setBusy(false); void progressJoin(); } }
+  };
+  const confirmComparison = async () => {
+    if (!alive || busy() || screen() !== 'fingerprint') return;
+    if (!pendingLink) { setScreen('done'); return; } // A previously saved legacy pairing.
+    let link = pendingLink; pendingLink = ''; compared = true;
+    const turn = generation;
+    setBusy(true); setScreen('connecting');
+    try { await props.connect(link); }
+    catch (e) { if (alive && turn === generation) fail(e); }
     finally { link = ''; if (alive && turn === generation) { setBusy(false); void progressJoin(); } }
   };
   const scan = async () => {
@@ -128,7 +145,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     finally { if (alive) setBusy(false); }
   };
   const reset = async () => {
-    generation++; resumeSaved = false;
+    generation++; resumeSaved = false; pendingLink = ''; compared = false;
     if (joinStarted || waiting() || props.device()?.state === 'pending') await props.join({ action: 'cancel' });
     await props.forget();
     if (!alive) return;
@@ -218,10 +235,10 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
         <button type="button" class="quiet" disabled={busy()} onClick={() => void run(async () => { generation++; await props.join({ action: 'cancel' }); setWaiting(undefined); fail({ kind: 'mismatch' }); })}>{c().mismatch}</button>
       </Show>
       <Show when={screen() === 'fingerprint'}><code class="phone-fingerprint">{preview()?.node_id_fingerprint ?? props.status().node_id}</code>
-        <PrimaryAction disabledReason={!preview()?.node_id_fingerprint && !props.status().node_id ? c().working : undefined} onClick={() => setScreen('done')}>{c().match}</PrimaryAction>
+        <PrimaryAction disabledReason={!preview()?.node_id_fingerprint && !props.status().node_id ? c().working : undefined} onClick={() => void confirmComparison()}>{c().match}</PrimaryAction>
       </Show>
       <Show when={screen() === 'start' || screen() === 'scanner'}><PrimaryAction disabledReason={busy() ? c().working : !props.scan ? c().unavailable : undefined} onClick={() => void scan()}>{c().scan}</PrimaryAction></Show>
-      <Show when={screen() === 'connecting'}><PrimaryAction disabledReason={c().connecting} onClick={() => {}}>{c().working}</PrimaryAction></Show>
+      <Show when={screen() === 'connecting'}><p class="phone-status" role="status">{c().working}</p></Show>
       <Show when={screen() === 'done'}><PrimaryAction onClick={props.onDone}>{c().open}</PrimaryAction></Show>
       <Show when={screen() === 'error'}><PrimaryAction disabledReason={busy() ? c().working : undefined} onClick={() => void run(recover)}>{errorCopy()[2]}</PrimaryAction></Show>
     </section>
