@@ -129,9 +129,14 @@ export type ApprovalErrorCode = (typeof APPROVAL_ERROR_CODES)[number];
 
 // ---- pure helpers the screens share (and the host uses for the Touch ID reason) ----
 
+// Display only: never build or rewrite the node's signed approval_message.
+// Match owner_approval.rs exactly in every app language: U+202F grouping,
+// decimal dot, and up to three fractional digits from the integer msat.
 const sats = (msat: number) => {
-  const s = msat / 1000;
-  return `${Number.isInteger(s) ? s.toLocaleString('en-US') : s.toLocaleString('en-US', { maximumFractionDigits: 3 })} ${s === 1 ? 'sat' : 'sats'}`;
+  const whole = Math.floor(msat / 1000).toString().replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f');
+  const remainder = msat % 1000;
+  const fraction = remainder ? `.${remainder.toString().padStart(3, '0').replace(/0+$/, '')}` : '';
+  return `${whole}${fraction} ${msat === 1000 ? 'sat' : 'sats'}`;
 };
 const span = (secs: number) =>
   secs % 3600 === 0 ? `${secs / 3600} h` : secs % 60 === 0 ? `${secs / 60} min` : `${secs} s`;

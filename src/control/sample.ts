@@ -1176,7 +1176,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       }
       if (v2 && !isRoom && to === hex('a') && raised[to] === undefined) {
         raised[to] = 3000;
-        return refuse('price_changed', `Maya's price rose to 3 sats, above your ${fmtAmount(maxMsat)} cap. Nothing was dispatched; refresh the quote.`);
+        return refuse('price_changed', `Maya’s price rose to 3 sats, above your ${fmtAmount(maxMsat)} cap. Nothing was dispatched; refresh the quote.`);
       }
       if (amount + fee > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling. Nothing dispatched.');
       if (confirm !== null) book.limits.set(key(to, isRoom), confirm);

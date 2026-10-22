@@ -280,7 +280,7 @@ function pricesAnswer(report: Report<LocalPricesReport>): Answer {
   return {
     text:
       `You charge ${first ?? 'no listed price for a message'}${rest.length ? `; ${rest.join(', ')}` : ''}. ` +
-      `Senders pay these to reach you. This is your node's own table, not anyone else's.`,
+      `Senders pay these to reach you. This is your node’s own table, not anyone else’s.`,
     cards: [],
   };
 }

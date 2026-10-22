@@ -91,11 +91,11 @@ fn changed_and_self_guards_precede_signing_and_preserve_exact_bytes() {
 #[test]
 fn prompt_matches_renderer_approval_reason() {
     assert_eq!(checked_approval(&view(), "owner", view()["approval_message"].as_str().unwrap()).unwrap(),
-        "Let this app spend · Budget: up to 1,234.567 sats · Each payment: up to 1 sat · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
+        "Let this app spend · Budget: up to 1\u{202f}234.567 sats · Each payment: up to 1 sat · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
     let mut v = view();
     v["request"] = json!({"kind":"first_contact","terms":{"recipient":"AB12-CD34","max_total_msat":1,"budget_msat":1000000}});
     assert_eq!(checked_approval(&v, "owner", v["approval_message"].as_str().unwrap()).unwrap(),
-        "Let this app message someone new · To: ab12cd34 · First message: up to 0.001 sats · Contact budget: up to 1,000 sats · Requested by app abcdef…123456");
+        "Let this app message someone new · To: ab12cd34 · First message: up to 0.001 sats · Contact budget: up to 1\u{202f}000 sats · Requested by app abcdef…123456");
 }
 
 #[test]
@@ -139,7 +139,7 @@ async fn existing_device_signer_returns_der_hex_verifiable_with_p256_sha256() {
     let v = view();
     let message = v["approval_message"].as_str().unwrap();
     let signature = sign_checked(&v, "owner", message, |exact, reason| {
-        assert_eq!(reason, "Let this app spend · Budget: up to 1,234.567 sats · Each payment: up to 1 sat · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
+        assert_eq!(reason, "Let this app spend · Budget: up to 1\u{202f}234.567 sats · Each payment: up to 1 sat · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
         device_sign(blob, exact, reason)
     }).await.unwrap();
     assert!(signature
@@ -437,4 +437,33 @@ async fn breaker_approval_signs_exact_message_and_reads_top_level_snapshot() {
     missing.as_object_mut().unwrap().remove("breaker_reset");
     assert_eq!(checked_approval(&missing, "owner", message).unwrap(),
         "Reset this app’s paused spending · Your node did not include the grant’s state · Requested by app abcdef…123456");
+}
+
+// Shared UTF-8 golden snapshots also exercised by the renderer in en and da.
+#[tokio::test]
+async fn shared_terms_and_biometric_snapshots_preserve_signed_bytes() {
+    let fixtures: Value = serde_json::from_str(include_str!("../../tests/fixtures/owner-approval-format.json")).unwrap();
+    for scenario in fixtures["scenarios"].as_array().unwrap() {
+        let v = &scenario["view"];
+        let original = v["approval_message"].as_str().unwrap();
+        let expected = scenario["reason"].as_str().unwrap();
+        let result = sign_checked(v, "owner", original, |message, reason| {
+            assert_eq!(message.as_bytes(), original.as_bytes());
+            assert_eq!(reason.as_bytes(), expected.as_bytes());
+            let lines: Vec<&str> = scenario["lines"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
+            assert_eq!(reason.rsplit_once(" · Requested by app ").unwrap().0, lines.join(" · "));
+            std::future::ready(Ok("test-signature".into()))
+        }).await.unwrap();
+        assert_eq!(result, "test-signature");
+    }
+    for amount in fixtures["amounts"].as_array().unwrap() {
+        let msat = amount["msat"].as_u64().unwrap();
+        let text = amount["text"].as_str().unwrap();
+        assert_eq!(sats(msat), text);
+        let mut v = view();
+        v["client_pubkey"] = json!("ab".repeat(32));
+        v["request"] = json!({"kind":"first_contact", "terms":{"recipient":"a".repeat(64), "max_total_msat":msat, "budget_msat":msat}});
+        let reason = checked_approval(&v, "owner", v["approval_message"].as_str().unwrap()).unwrap();
+        assert_eq!(reason, format!("Let this app message someone new · To: aaaaaa…aaaaaa · First message: up to {text} · Contact budget: up to {text} · Requested by app ababab…ababab"));
+    }
 }
