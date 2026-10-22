@@ -106,14 +106,16 @@ Must-fix before next ship: <list>
 - **NO-GO** on any A violation or an unmet gate for the thing being shipped.
 
 ## G. Executable checks (run these — don't eyeball it)
-Pinned protocol: **release `v0.3.0-rc14`, source-ref `d55a88e439fd80dae89e263bef8378fd22c9a103`, repo `MindLink-ApS/BitSov-bitsov`**.
+Pinned protocol: **release `v0.3.0-rc19.2`, source-ref `04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`, repo `MindLink-ApS/BitSov-bitsov`**.
+`SHA256SUMS` signature verified against `B299274C200301714DC6F51A7C2D6F8AC842EF6E`;
+manifest SHA-256: `142cdd18c20352979bb318664551bbbef10b6e86b6708e14f4751e0c702c0fcb`.
 Five CLI targets: Linux x86_64/aarch64, Darwin aarch64/x86_64 and Windows x86_64.
 The fetcher requires `SHA256SUMS.asc` signed by release key `B299…EF6E`; a signed
-tag alone does not verify release bytes. rc14 is published and GPG-signed per
-the supplied release facts. The five binary hashes are recorded;
-no release assets were fetched or verified locally for this pin. Signature/byte
-verification and package/runtime acceptance remain gates. The app remains
-unpublished. See [rc14 upgrade checks](NODE_RC14_UPGRADE.md) and
+tag alone does not verify release bytes. rc19.2 is signed and published. All five
+binary pins are recorded from its authenticated manifest; fetch and pre-bundle
+verification require both the signed entry and the recorded pin to match.
+Signature/byte verification and package/runtime acceptance remain gates. The app remains
+unpublished. See [rc19.2 upgrade checks](NODE_RC19_2_UPGRADE.md) and
 [API contract](API_READINESS.md). Existing operator identities are preserved.
 Machine form of these checks: `scripts/authority-check.sh` (CI "Authority Check"; the "Build" job
 is the compile gate, PR #9). Run from the app repo root; adjust the Website path to your checkout.

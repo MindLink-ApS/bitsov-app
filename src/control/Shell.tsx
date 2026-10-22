@@ -453,6 +453,8 @@ export function ControlCenter(props: Props) {
   const [allowances, setAllowances] = createStore<Record<string, { total_msat: number; max_routing_fee_msat: number; fee_paid_msat?: number; readmission_msat?: number }>>({});
   const [pendingRevision, setPendingRevision] = createSignal(0);
   const [reconciled, setReconciled] = createSignal(0);
+  let paymentGeneration = 0;
+  const [lastReconciliation, setLastReconciliation] = createSignal<{ text: string } | null>(null);
   const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
   // Rooms (room.ts): what each room send did this session, by room id; the New room picker.
   const [roomSends, setRoomSends] = createStore<Record<string, RoomSend[]>>({});
@@ -1406,8 +1408,20 @@ export function ControlCenter(props: Props) {
     followUpRead: () => (budgetReadApplied() === 0 && budgetInFlight && budgetInFlight.stamp > budgetResetAt ? budgetInFlight.done : null),
     pendingRevision,
     reconcile: async () => {
+      const generation = paymentGeneration;
+      const revision = pendingRevision();
       const r = await act(() => source.spendReconcile());
-      if (r.ok) setReconciled((v) => v + 1);
+      // A delayed check of an older slot cannot clear a newer payment in any
+      // card, including through Reconcile's local onChecked callback.
+      if (generation !== paymentGeneration || revision !== pendingRevision()) {
+        return { ok: false, error: { code: 'spend_unknown', message: 'A newer payment started. Check pending result again.' } };
+      }
+      if (r.ok) {
+        setReconciled((v) => v + 1);
+        setLastReconciliation({ text: r.value });
+        void loadBudget();
+        void loadWallet();
+      }
       // The check may have settled an open operation: re-read the host's record for this chat.
       const here = track();
       if (here) loadOps(here);
@@ -1633,6 +1647,7 @@ export function ControlCenter(props: Props) {
     },
     readInvoice: (bolt11) => act(() => source.invoiceAmount(bolt11)),
     pay: async (t, bolt11, msat) => {
+      paymentGeneration++;
       const r = await act(() => source.pay(bolt11, msat, allIn(msat)));
       void loadBudget();
       if (r.ok) {
@@ -1643,6 +1658,7 @@ export function ControlCenter(props: Props) {
       return recordFailure(t, 'Payment not sent', r);
     },
     keysend: async (t, pubkey, msat, memo) => {
+      paymentGeneration++;
       const r = await act(() => source.keysend(pubkey, msat, memo.trim() || null, allIn(msat)));
       void loadBudget();
       if (r.ok) {
@@ -2108,7 +2124,7 @@ export function ControlCenter(props: Props) {
         </Show>}
         payment={<Show when={callView().callId} keyed>{(callId) =>
           <InCallPay
-            callId={callId} view={callView()} nameOf={nameOf}
+            callId={callId} view={callView()} nameOf={nameOf} reconciliation={lastReconciliation()}
             lightningId={peerById().get(callView().peer?.toLowerCase() ?? '')?.ln_pubkey ?? null}
             blocked={moneyBlocked() || grantUnknown() || (budget() !== null && (!budgetConfirmed() || !!errors.budgetPoll)) || !!budget()?.paused}
             pending={callView().pendingCount > 0 || (budget()?.unsettled_msat ?? 0) > 0}
@@ -2159,6 +2175,7 @@ export function ControlCenter(props: Props) {
             onTab={setWalletTab}
             onClose={() => setWalletTab(null)}
             wallet={wallet()}
+            pendingResult={<Reconcile actions={actions} hasPending={(budget()?.unsettled_msat ?? 0) > 0} />}
             walletError={errors.wallet}
             moneyBlocked={moneyBlocked()}
             spend={spend()}
@@ -2390,16 +2407,16 @@ function Rail(props: {
         <span class={`dot ${props.pill.tone}`} classList={{ live: props.pill.live }} />
         <span class="what">{props.pill.text}</span>
         <Show when={props.active}>
-          <span class="peers" title="Connected peers">{props.peers.filter((p) => p.connected).length}/{props.peers.length}</span>
+          {/* Contact counts are in node settings; they are not node-readiness steps. */}
           {/* Says "this opens something" without adding words to the status. */}
           <svg class="pill-chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
         </Show>
       </button>
 
       <div class="track-group">
-        <h2>Peers</h2>
+        <h2>Contacts</h2>
         <Show when={props.active} fallback={<p class="track-empty">Available after setup</p>}>
-          <For each={props.peers} fallback={<p class="track-empty">No peers yet</p>}>
+          <For each={props.peers} fallback={<p class="track-empty">No contacts yet</p>}>
             {(p) =>
               item({ kind: 'peer', id: p.node_id.toLowerCase() }, peerName(p, p.node_id), <span class={`dot ${p.connected ? 'ok' : ''}`} title={p.connected ? 'Connected' : 'Offline'} />)
             }
@@ -2869,9 +2886,9 @@ function Conversation(props: {
 }
 
 /**
- * A contact's Lightning node id, when the app knows it. The node keeps one
- * per connected peer for its own keysend but exposes none (GET /peers has no
- * such field), so today no invoice payee is ever named as a contact.
+ * Invoice payee naming is intentionally conservative: this helper does not
+ * consume the node-reported GET /peers ln_pubkey mapping used by in-call Pay.
+ * Invoice review therefore displays the decoded Lightning key, not a contact name.
  */
 const contactLightningId = (_peer: string): string | null => null;
 
@@ -4094,6 +4111,7 @@ function AmountField(props: { data: 'pay' | 'request'; label: string; value: str
 /** A direct payment owned by one call card; never enters the call engine. */
 function InCallPay(props: {
   callId: string;
+  reconciliation: { text: string } | null;
   view: CallView;
   nameOf: (id: string) => string;
   lightningId: string | null;
@@ -4119,6 +4137,12 @@ function InCallPay(props: {
     return parsed !== null && inPaymentBounds(parsed) ? parsed : null;
   };
   const blocked = () => props.blocked || props.pending || busy() || result()?.state === 'unknown';
+  // A successful check from wallet/chat has the same authority as this card's
+  // check. Only a new check clears an existing unknown; old checks cannot clear
+  // a later payment, and a failed check never changes this signal.
+  createEffect(on(() => props.reconciliation, checked => {
+    if (checked && result()?.state === 'unknown') setResult({ state: 'checked', text: checked.text });
+  }, { defer: true }));
   usePairingActivity(() => expanded() || busy() || approving());
   // A new unit or mapping requires a new amount; never reinterpret a visible draft.
   createEffect(on(() => [denom(), destination()], () => setAmount(''), { defer: true }));
@@ -4138,7 +4162,7 @@ function InCallPay(props: {
         setResult(r.value.status === 'settled'
           ? { state: 'sent', text: `Sent ${fmtAmount(r.value.amount_msat)} to ${props.nameOf(peer)}.` }
           : r.value.status === 'failed'
-            ? { state: 'failed', text: 'Payment failed.' }
+            ? { state: 'failed', text: `Payment of ${fmtAmount(r.value.amount_msat)} failed. No amount or routing fee was paid.` }
             : { state: 'unknown', text: 'Payment in progress. Settlement is not confirmed. Check pending result before paying again.' });
       } else {
         setResult(provenUnpaid(r.error.code)

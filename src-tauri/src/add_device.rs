@@ -638,7 +638,7 @@ pub(super) async fn join_on_platform(state: &NodeState, input: JoinInput, platfo
             || Instant::now() >= j.deadline
         {
             setup.join = None;
-            return Err(invalid("This enrollment expired, was cancelled, or the node restarted. Cancel any pending setup and start again."));
+            return Err(ActionError::new("enrollment_restart", "This enrollment expired, was cancelled, or the node restarted. Cancel any pending setup and start again."));
         }
         if matches!(input, JoinInput::Status | JoinInput::Poll) {
             return Ok(j.view());
@@ -646,7 +646,7 @@ pub(super) async fn join_on_platform(state: &NodeState, input: JoinInput, platfo
         return Err(invalid("Compare or cancel the current enrollment first."));
     }
     if device::load_record(&store).is_some_and(|r| r.pending.is_some()) {
-        return Err(invalid(
+        return Err(ActionError::new("enrollment_restart",
             "A previous enrollment is pending. Cancel it before starting a new comparison.",
         ));
     }

@@ -130,7 +130,7 @@ button:disabled {
   flex: 1 1 16em;
   min-width: 0;
   font: inherit;
-  font-size: 14px;
+  font-size: max(var(--input-font-min, 0px), 14px);
   color: var(--ink);
   background: var(--surface);
   border: 1px solid var(--line);
@@ -187,3 +187,7 @@ button:disabled {
 .ask-unavailable { font-weight: 600; }
 .ask-error { font-weight: 600; }
 .assistant-page > .assistant-seal { padding-top: 12px; }
+
+@media (max-width: 680px), (pointer: coarse) {
+  :root { --input-font-min: 16px; }
+}

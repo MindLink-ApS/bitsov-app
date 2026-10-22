@@ -5,14 +5,12 @@ Dated ticket rows. Each row: id | opened | evidence | state.
 
 ## Active (this cycle)
 
-Current change: rc14 pin (`d55a88e`) from rc13 (`d625e85`, app #193).
-The supplied release facts identify rc14 as published and GPG-signed. All five
-binary hashes are recorded without fetching or local release verification.
-[NODE_RC14_UPGRADE.md](docs/NODE_RC14_UPGRADE.md) records pairing v6, grant
-breakers, console recovery, LAN limits and CLN's receive/read-only preview.
-Tagged node source confirms unchanged full-tier LDK bootstrap defaults. Remote
-first run is implemented on main (app #192 + node rc13); runtime acceptance on
-real hardware remains pending. The September workflow rows below are historical.
+Current change: draft rc19.2 pin from rc14 (`d55a88e`, app #199),
+replacing the unmerged rc18 proposal #266. rc19.2 is signed and published. All five binary pins match its
+authenticated signed manifest. The Darwin arm64 sidecar passed local fetch and
+`--verify-only`; runtime and packaging acceptance remain separate gates.
+[NODE_RC19_2_UPGRADE.md](docs/NODE_RC19_2_UPGRADE.md) covers the intervening
+changes and forward-only state. The September rows below are historical.
 
 | id | opened | evidence | state |
 |---|---|---|---|
@@ -42,9 +40,9 @@ real hardware remains pending. The September workflow rows below are historical.
 
 | id | opened | evidence | state |
 |---|---|---|---|
-| rc14 acceptance | 2026-10-11 | published and GPG-signed per supplied facts; signature/bytes, Sidecar/Mac Package and runtime acceptance pending | human / CI |
+| rc19.2 acceptance | 2026-10-21 | signed manifest and Darwin arm64 bytes verified; Sidecar/Mac Package and runtime acceptance pending | human / CI |
 | #25 / #13 / #23 | — | J0 model eval spike (draft); Mac package spike (CONFLICTING); Windows icon | open, Rasmus's call |
-| Publish | — | human-only; rc14 release is published and GPG-signed per supplied facts; app unpublished; package-time sidecar verification and platform release gates remain open | hold |
+| Publish | — | human-only; rc19.2 release is signed and published; app unpublished; package-time sidecar verification and platform release gates remain open | hold |
 | PriceOpen | — | out of lane | hold |
 | Live relay | — | out of lane | hold |
 | Cloud/seed | — | out of lane | hold |

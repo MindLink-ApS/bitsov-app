@@ -30,10 +30,11 @@ The Rust host spawns/supervises the node binary and authenticates over `127.0.0.
 
 ## CS-1 local run
 
-The bundled node is pinned to `MindLink-ApS/BitSov-bitsov@v0.3.0-rc14`
-(`d55a88e439fd80dae89e263bef8378fd22c9a103`). The release is published and
-GPG-signed per the supplied release facts; [the upgrade note](docs/NODE_RC14_UPGRADE.md)
-records the five binary hashes, with local release verification still pending.
+The signed bundled-node pin is `MindLink-ApS/BitSov-bitsov@v0.3.0-rc19.2`,
+replacing rc14. rc19.2 is signed and published. All five binary pins match its
+authenticated signed manifest. The Darwin arm64 sidecar passed local fetch and
+`--verify-only`; runtime and packaging acceptance remain separate gates.
+See [the upgrade note](docs/NODE_RC19_2_UPGRADE.md) before upgrading retained state.
 The release-key fingerprint pin is unchanged. Remote first run is implemented on
 main (app #192 + node rc13); runtime acceptance on real hardware (Touch ID + a
 fresh Pi) is still pending.

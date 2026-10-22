@@ -503,7 +503,7 @@ export type OpView = {
   message_id: string | null;
 };
 /** Newest first, at most 100; `skipped` damaged records were left out. */
-export type UnresolvedCall = { index_id: string; acknowledged: boolean };
+export type UnresolvedCall = { index_id: string; acknowledged: boolean; hangup_cap_msat?: number | null };
 export type OpList = { operations: OpView[]; skipped: number; has_more: boolean; unresolved_calls?: UnresolvedCall[] };
 
 /**

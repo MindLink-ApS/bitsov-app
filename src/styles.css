@@ -193,7 +193,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 .link:hover:not(:disabled) { color: var(--ink); }
 .row { display: flex; align-items: center; gap: var(--s-3); width: 100%; }
 .unit { font-size: var(--t-sm); color: var(--muted); }
-input, textarea { font: inherit; font-size: var(--t-md); width: 100%; background: var(--sunk); color: var(--ink); border: 1px solid transparent; border-radius: var(--r-control); padding: 10px 14px; }
+input, textarea { font: inherit; font-size: max(var(--input-font-min, 0px), var(--t-md)); width: 100%; background: var(--sunk); color: var(--ink); border: 1px solid transparent; border-radius: var(--r-control); padding: 10px 14px; }
 textarea { resize: none; }
 input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); background: var(--surface); }
 .hint { font-size: var(--t-sm); color: var(--muted); line-height: var(--lh-body); max-width: 60ch; }
@@ -280,7 +280,7 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .contact-key-warn h3 { color: var(--warn); }
 label.field { display: flex; flex-direction: column; gap: 4px; font-size: var(--t-sm); color: var(--muted); }
 label.field input {
-  font: inherit; color: var(--ink); background: var(--raised); border: 1px solid var(--line);
+  font: inherit; font-size: max(var(--input-font-min, 0px), var(--t-sm)); color: var(--ink); background: var(--raised); border: 1px solid var(--line);
   border-radius: var(--r-control); padding: 8px 10px;
 }
 
@@ -376,7 +376,7 @@ label.field input {
 .send-next { font-size: var(--t-xs); color: var(--muted); }
 
 /* acting from the track: composer modes, the owner's spend window, receipts */
-select { font: inherit; font-size: var(--t-sm); background: var(--sunk); color: var(--ink); border: 1px solid transparent; border-radius: var(--r-control); padding: 6px 8px; }
+select { font: inherit; font-size: max(var(--input-font-min, 0px), var(--t-sm)); background: var(--sunk); color: var(--ink); border: 1px solid transparent; border-radius: var(--r-control); padding: 6px 8px; }
 .modes { display: inline-flex; gap: 2px; align-self: flex-start; background: var(--surface); border: 1px solid transparent; border-radius: var(--r-chip); padding: 2px; }
 .modes.soft { background: var(--raised); }
 .modes button { border: none; background: none; border-radius: var(--r-chip); padding: 3px 12px; font-size: var(--t-sm); color: var(--muted); }
@@ -710,7 +710,7 @@ html[data-theme='light'] .target-badge.honest { color: #6b4c00; }
 .ai-own .hint { margin: 0; color: var(--muted); font-size: var(--t-sm); max-width: 42rem; }
 .ai-own-row { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: flex-end; }
 .ai-own-port { display: flex; flex-direction: column; gap: 2px; font-size: var(--t-xs); color: var(--faint); }
-.ai-own-port input { width: 5.5rem; font-family: var(--font-mono); font-size: var(--t-sm); padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--r-chip); background: var(--surface); color: var(--ink); }
+.ai-own-port input { width: 5.5rem; font-family: var(--font-mono); font-size: max(var(--input-font-min, 0px), var(--t-sm)); padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--r-chip); background: var(--surface); color: var(--ink); }
 .ai-own-models { display: flex; flex-wrap: wrap; gap: var(--s-2); }
 .ai-own-models .chip[aria-selected='true'] { border-color: var(--badge-own-ink); color: var(--badge-own-ink); }
 
@@ -771,7 +771,7 @@ html[data-theme='light'] .target-badge.honest { color: #6b4c00; }
 .ai-extras-close:hover { color: var(--ink); background: var(--raised); }
 .ai-composer-main { display: flex; align-items: flex-end; gap: var(--s-2); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 24px; padding: 5px 6px 5px 8px; width: min(var(--chat-max), 100%); box-shadow: 0 2px 8px rgba(0,0,0,0.08); transition: border-color var(--d-fast) var(--ease), box-shadow var(--d-fast) var(--ease); }
 .ai-composer-main:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 4px 12px rgba(0,0,0,0.16); }
-.ai-composer-main textarea { flex: 1; background: transparent; border: none; padding: 6px 4px; min-height: 32px; max-height: 140px; font-family: inherit; font-size: var(--t-md); color: var(--ink); resize: none; outline: none; }
+.ai-composer-main textarea { flex: 1; background: transparent; border: none; padding: 6px 4px; min-height: 32px; max-height: 140px; font-family: inherit; font-size: max(var(--input-font-min, 0px), var(--t-md)); color: var(--ink); resize: none; outline: none; }
 .ai-plus-btn { width: 32px; height: 32px; border-radius: 50%; border: none; background: var(--raised); color: var(--muted); display: inline-flex; align-items: center; justify-content: center; flex: none; cursor: pointer; transition: all var(--d-fast) var(--ease); margin-bottom: 2px; }
 .ai-plus-btn:hover { color: var(--ink); background: var(--line-strong); }
 .ai-plus-btn.active { color: var(--accent-ink); background: var(--accent); transform: rotate(45deg); }
@@ -1352,7 +1352,7 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .add-device .qr { display: block; width: min(100%, 320px); height: auto; margin: 16px auto; }
 .add-device label { display: grid; gap: 8px; margin-block: 12px; }
 .add-device input, .add-device textarea { width: 100%; min-width: 0; box-sizing: border-box; }
-.add-device textarea { min-height: 84px; overflow-wrap: anywhere; resize: vertical; font-size: 12px; }
+.add-device textarea { min-height: 84px; overflow-wrap: anywhere; resize: vertical; font-size: max(var(--input-font-min, 0px), 12px); }
 .add-device .form-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .add-device .device-comparison { min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 600px) {
@@ -1514,3 +1514,9 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .in-call-pay { display: grid; gap: var(--s-2); }
 .in-call-pay .pay-flow { min-width: 0; }
 .in-call-pay .amount-input { min-width: 0; width: 100%; }
+
+/* U2a: prevent iOS focus zoom without scaling body type or large amount fields.
+ * Include touch phones in landscape; desktop keeps its existing compact sizes. */
+@media (max-width: 680px), (pointer: coarse) {
+  :root { --input-font-min: 16px; }
+}

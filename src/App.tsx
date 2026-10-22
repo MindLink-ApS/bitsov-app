@@ -1,3 +1,6 @@
+import { invoke } from '@tauri-apps/api/core';
+import { PhoneTrust } from './onboarding/PhoneTrust';
+import { PhoneOnboarding } from './onboarding/PhoneOnboarding';
 import { appPlatform, deviceWord, isMobilePlatform } from './platform';
 import { pollWatchBatch, statusWatchSamples, watchPoller, type WatchSamples, type WatchUpdates } from './control/watches';
 import type { AssistantId } from './control/assistants';
@@ -19,7 +22,7 @@ import { ControlCenter } from './control/Shell';
 import { hostSource, inHost, sampleRequest, type SampleStart, type Source } from './control/source';
 import { sampleSource } from './control/sample';
 import type { DeviceView, FundingAddress, FundState } from './control/types';
-import { mobileQrScannerAvailable, scanPairingLink } from './pairingScanner';
+import { cancelPairingScan, mobileQrScannerAvailable, scanPairingLink } from './pairingScanner';
 import { cameraQrScannerAvailable, scanPairingLinkWithCamera } from './cameraQrScanner';
 import { PairingActivityProvider, usePairingActivity, usePairingBlocked } from './pairingActivity';
 import { pairingLinkInboxAvailable, watchPairingLinks } from './pairingDeepLink';
@@ -150,6 +153,12 @@ function AppScreen() {
   );
   const remote = createMemo(() => pairing().remote);
   createEffect(() => setSelectedTarget(remote() || onPhone ? 'network' : 'local'));
+  // Decide from the first persisted pairing snapshot, never from the temporary
+  // empty startup state. Keep this choice through connect and owner approval.
+  const [phoneSetup, setPhoneSetup] = createSignal<boolean | null>(null);
+  const [phoneDone, setPhoneDone] = createSignal(false);
+  const phoneTrustFlow = () => onPhone && phoneDone() && !trustAck();
+  const phoneFlow = () => onPhone && source().mode === 'node' && phoneSetup() === true && !phoneDone() && !trustAck();
   const [device, setDevice] = createSignal<DeviceView | null>(null);
   // The node accepted a typed password; the host holds it for one yes/no.
   const [rememberOffer, setRememberOffer] = createSignal(false);
@@ -229,7 +238,13 @@ function AppScreen() {
     await readStatus();
     void watches.tick(watchesAllowed(), statusWatchSamples(status().ready, status().locked === true, readWatchSamples?.() ?? {}));
     try {
-      setPairing(await source().pairingStatus());
+      const next = await source().pairingStatus();
+      setPairing(next);
+      if (phoneSetup() === null) {
+        // Never infer a new install from the host's temporary remote=false.
+        if (typeof status().phone_setup === 'boolean') setPhoneSetup(status().phone_setup!);
+        else if (status().phone_setup === undefined && (next.remote || ['paired', 'fallback'].includes(next.state) || status().locked)) setPhoneSetup(false);
+      }
     } catch {
       /* keep the last known pairing state; node_status carries host errors */
     }
@@ -276,7 +291,21 @@ function AppScreen() {
   createEffect(() => { if (!offline()) setChangeNode(false); });
   const repairing = () => !!status().initialization_repair && status().initialization_repair !== 'none';
   const setupHidden = () => offline() && !changeNode() && !repairing();
+  const phoneOnboarding = () => <PhoneOnboarding
+    status={status} pairing={pairing} device={device} platform={platform}
+    scan={canScanPairingQr ? scanPairingLink : undefined} cancelScan={cancelPairingScan}
+    preview={link => source().remoteAccessPreview(link)}
+    connect={async link => { try { return await source().remoteAccessImport(link); } finally { await poll(); } }}
+    retry={retryPairing}
+    forget={async () => { await source().remoteAccessForget(); await poll(); }}
+    beginJoin={() => source().joinDevice({ action: 'start_second' })}
+    join={input => source().joinDevice(input)}
+    openSettings={() => invoke<void>('open_app_settings')}
+    openTailscale={() => invoke<void>('open_tailscale')}
+    incoming={queuedPairing()} onConsumeLink={() => setQueuedPairing(null)}
+    onDone={() => { setPhoneDone(true); void poll(); }} />;
   const firstRun = (
+    <Show when={!phoneFlow() && !phoneTrustFlow() && (!onPhone || phoneSetup() !== null)}>
     <div class="first-run" data-first-run>
       {/* While the setup steps are hidden, the offline card is the page: its title is the page's h1. */}
       {offlineScreen(() => (setupHidden() ? 1 : 2))}
@@ -288,6 +317,7 @@ function AppScreen() {
       <Show
         when={status().initialization_repair && status().initialization_repair !== 'none'}
         fallback={<>
+          <Show when={!onPhone || !phoneDone()}>
           <Onboarding
             status={status}
             pairing={pairing}
@@ -306,6 +336,7 @@ function AppScreen() {
             onRegisterDevice={async () => setDevice(await source().deviceKeyRegister())}
             onCancelDevice={async () => setDevice(await source().deviceKeyCancel())}
           />
+          </Show>
 
           <Show
             when={showIdentityGate()}
@@ -372,6 +403,7 @@ function AppScreen() {
       </Show>
       </div>
     </div>
+    </Show>
   );
 
   // The shell reads the node only once it is running AND the trust
@@ -380,7 +412,7 @@ function AppScreen() {
   return (
     <>
     <div class="pairing-link-layer" classList={{ reviewing: pairingRequest() !== null }}>
-    <Show when={queuedPairing()}>
+    <Show when={queuedPairing() && !phoneFlow() && !phoneTrustFlow() && (!onPhone || phoneSetup() !== null)}>
       <aside class="panel pairing-link-banner" data-pairing-link-banner role="status">
         <p>{pairingBlocked() ? 'New pairing link queued. Finish or close the current pairing review or ceremony first. Only the newest incoming link is kept.' : 'A pairing link is waiting. Review it when you are ready.'}</p>
         <button type="button" data-review-pairing disabled={pairingBlocked()} onClick={reviewPairing}>Review incoming link</button>
@@ -395,7 +427,14 @@ function AppScreen() {
           pairing={() => INITIAL_PAIRING} trustAck={() => false} onRetry={() => {}}
           selectedTarget="network" initialPairingLink={request().link} pairingInputId="incoming-pairing-link"
           onPreviewRemote={link => source().remoteAccessPreview(link)}
-          onImportRemote={link => source().remoteAccessImport(link)}
+          onImportRemote={async link => {
+            const imported = await source().remoteAccessImport(link);
+            // Explicit paired-phone review owns replacement. Reopen its usual
+            // enrollment/trust gates, including when replacing the same node.
+            setPhoneDone(false); setPhoneSetup(false);
+            await poll();
+            return imported;
+          }}
           onBusyChange={setPairingBusy}
           onScanRemote={canScanPairingQr ? scanPairingLink : undefined} mobile={onPhone} phone={onPhone} />
         <button type="button" class="quiet" data-close-pairing disabled={pairingBusy()} onClick={closePairing}>Close pairing</button>
@@ -420,6 +459,7 @@ function AppScreen() {
         }
       }} onDone={() => { setRememberOffer(false); setRememberSaved(false); }} />
     </Show>
+    <Show when={phoneFlow()}><div hidden={!!status().locked}>{phoneOnboarding()}</div></Show>
     <Show when={!status().locked} fallback={<LockedNode
       mobile={onPhone}
       platform={platform}
@@ -434,6 +474,8 @@ function AppScreen() {
         try { await source().nodeUnlockPassword(password); } finally { await poll(); }
       } : undefined}
     />}>
+    <Show when={phoneTrustFlow()}><PhoneTrust onContinue={acceptTrust} /></Show>
+    <Show when={!phoneFlow() && !phoneTrustFlow() && (!onPhone || phoneSetup() !== null)}>
     <Show
       when={trustAck()}
       fallback={
@@ -463,6 +505,7 @@ function AppScreen() {
         firstRun={firstRun}
         fund={(guarded, blocked) => <Fund source={guarded} moneyBlocked={blocked} ready={live} />}
       />
+    </Show>
     </Show>
     </Show>
     </div>

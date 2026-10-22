@@ -69,3 +69,15 @@ fn preview_only_parses_and_is_registered_for_main_windows() {
     assert!(source("build.rs").contains("\"remote_access_preview\""));
     assert!(source("src/app.rs").contains("remote_access::preview_pairing_link(link.trim())"));
 }
+
+#[test]
+fn phone_recovery_grants_fixed_destinations_only_on_mobile() {
+    let mobile = source("mobile-capabilities/default.json");
+    let desktop = source("capabilities/default.json");
+    for permission in ["allow-open-app-settings", "allow-open-tailscale", "barcode-scanner:allow-cancel"] {
+        assert!(mobile.contains(permission), "missing {permission}");
+        assert!(!desktop.contains(permission), "mobile-only {permission}");
+    }
+    assert!(!mobile.contains("opener:"));
+    assert!(!mobile.contains("shell:"));
+}

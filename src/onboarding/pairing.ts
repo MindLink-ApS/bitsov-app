@@ -29,6 +29,8 @@ export type ConnectionError = {
 };
 
 export type NodeStatus = {
+  /** Host has inspected the saved descriptor; null means startup is unresolved. */
+  phone_setup?: boolean | null;
   connection_error?: ConnectionError | null;
   locked?: boolean;
   typed_unlock_supported?: boolean;

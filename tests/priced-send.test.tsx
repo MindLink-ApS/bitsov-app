@@ -43,7 +43,7 @@ it('never relabels a retained fee allowance as actual paid', async () => {
   const source = sourceForSend();
   source.send = vi.fn(async (recipient, isRoom) => ({ message_id: 'paid', recipient, is_room: isRoom, delivered: true, amount_msat: 2250, total_msat: 9750, max_routing_fee_msat: 7500, sent_at_ms: Date.now() }));
   await open(source); $<HTMLButtonElement>('[data-send]').click();
-  await vi.waitFor(() => expect(line()).toBe('paid 2.25 sats · fee unknown'));
+  await vi.waitFor(() => expect(line()).toBe('paid 2.25 sats · network fee not reported'));
 });
 it.each([
   { fee: 375, readmission: undefined, ceiling: 7500, paid: '2.625' },
@@ -64,7 +64,7 @@ it('keeps the paid amount unknown for an older node omitting both fee fields', a
   source.send = vi.fn(async (recipient, isRoom) => ({ message_id: 'paid', recipient, is_room: isRoom,
     delivered: true, amount_msat: 2250, sent_at_ms: Date.now() }));
   await open(source); $<HTMLButtonElement>('[data-send]').click();
-  await vi.waitFor(() => expect(line()).toBe('paid 2.25 sats · fee unknown'));
+  await vi.waitFor(() => expect(line()).toBe('paid 2.25 sats · network fee not reported'));
 });
 it.each(['loading', 'failed', 'missing', 'stale', 'fee'] as const)('disables send with an honest reason when price is %s', async (state) => {
   const source = sourceForSend();
@@ -202,8 +202,8 @@ it.each([
   { principal: 0, fee: 375, ceiling: 5000, expected: 'paid 0.375 sats' },
   { fee: 0, ceiling: 5000, expected: 'paid 1 sat' },
   { fee: 375, ceiling: 5000, expected: 'paid 1.375 sats' },
-  { fee: undefined, ceiling: 5000, expected: 'paid 1 sat · fee unknown' },
-  { fee: undefined, ceiling: 0, expected: 'paid 1 sat · fee unknown' },
+  { fee: undefined, ceiling: 5000, expected: 'paid 1 sat · network fee not reported' },
+  { fee: undefined, ceiling: 0, expected: 'paid 1 sat · network fee not reported' },
 ])('bubble uses settlement evidence: $expected (ceiling $ceiling)', async ({ principal = 1000, fee, ceiling, expected }) => {
   const source = sourceForSend();
   source.send = async (recipient, isRoom) => ({ message_id: 'paid', recipient, is_room: isRoom,

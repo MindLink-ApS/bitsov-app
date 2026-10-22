@@ -132,6 +132,7 @@ export function WalletPage(props: {
   spend: SpendView | null;
   /** The one tap that opens the ten-minute window (the composer's SpendBar). */
   spendGate: JSX.Element;
+  pendingResult?: JSX.Element;
   now: number;
   ownId: string;
   /** Contacts and rooms whose node history the activity reads. */
@@ -184,6 +185,7 @@ export function WalletPage(props: {
       </header>
 
       <div class="wallet-body">
+        {props.pendingResult}
         <section class="wallet-hero" data-wallet-balance>
           <span class="label">Node-reported total</span>
           <Show when={split()} fallback={<Show when={!props.walletError} fallback={<SoftError message={props.walletError!} data="wallet-read" onReconnect={props.onReconnect ?? props.onRefresh} />}><DelayedSpinner /></Show>}>

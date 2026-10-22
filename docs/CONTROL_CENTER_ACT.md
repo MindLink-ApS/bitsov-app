@@ -1,7 +1,7 @@
 # Control center: acting from the track (slice B)
 
 Code: `src-tauri/src/act.rs` (rules), the action commands in `src-tauri/src/main.rs`,
-and `src/control/Shell.tsx` (composer, approval, receipts). Bundled node: rc14 `d55a88e`; retained rc7 compatibility
+and `src/control/Shell.tsx` (composer, approval, receipts). Bundled node: rc19.2 `04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`; retained rc7 compatibility
 for the action routes; #76/#77 (`56c0ee0`) for pairing and elevation.
 
 ## Spend authority: the app can only narrow it

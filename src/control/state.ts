@@ -427,7 +427,7 @@ export function nodePill(input: {
   link: LinkState | null;
   nowMs: number;
 }): Pill {
-  if (input.phone && !input.remote) return { tone: 'idle', text: 'Not connected', live: false };
+  if (input.phone && !input.remote) return { tone: 'idle', text: 'Connect to your node', live: false };
   if (input.retryAfterSecs) return { tone: 'warn', text: `Remote connection · waiting ${input.retryAfterSecs} s`, live: false };
   if (input.remote && input.error) return { tone: 'warn', text: 'Remote connection unavailable', live: false };
   if (input.remote && !input.ready) return { tone: 'idle', text: 'Connecting to remote node', live: false };
@@ -439,6 +439,6 @@ export function nodePill(input: {
   }
   if (input.overview.money_ready === false) return { tone: 'warn', text: readinessLine(input.overview, input.nowMs)!, live: input.link === 'open' };
   if (input.overview.money_ready === true && input.link === 'open') return { tone: 'ok', text: 'Local OK · Money ready', live: true };
-  if (input.link === 'open') return { tone: 'ok', text: 'Node live', live: true };
+  if (input.link === 'open') return { tone: 'ok', text: 'Connected to your node', live: true };
   return { tone: 'warn', text: 'Node up, live feed reconnecting', live: false };
 }

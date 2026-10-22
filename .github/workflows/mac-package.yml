@@ -100,7 +100,7 @@ jobs:
             echo "::warning::sccache unavailable; compiling without a cache"
           fi
 
-      - name: Fetch and re-verify every sidecar against rc14 (G1)
+      - name: Fetch and re-verify every sidecar against rc19.2 (G1)
         run: |
           bash scripts/fetch-node-sidecar.sh
           bash scripts/fetch-node-sidecar.sh --verify-only

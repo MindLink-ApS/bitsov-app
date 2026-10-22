@@ -183,6 +183,12 @@ impl RemoteDescriptor {
     }
     pub fn has_live_pin(&self) -> bool { !self.transport_pubkey.is_empty() }
 
+    /// Presentation only: a saved join can precede ticket redemption.
+    pub fn pending_phone_enrollment(&self) -> bool {
+        self.node_id.is_empty() || self.enrollment_commitment.is_some()
+            || self.code.as_deref().is_some_and(|code| code.starts_with("second_") || code.starts_with("owner_"))
+    }
+
     pub fn enrollment_commitment(&self) -> Option<[u8; 32]> { self.enrollment_commitment }
     pub fn ticket_id(&self) -> Option<String> {
         self.code.as_deref().map(crate::second_device::ticket_id)
@@ -2817,6 +2823,20 @@ mod tests {
             }
             let data = tempfile::tempdir().unwrap();
             assert!(import_pairing_link(data.path(), &at(unix_now() - 20)).is_ok());
+        }
+    }
+
+    #[test]
+    fn saved_phone_setup_includes_unredeemed_tickets_but_not_an_ordinary_pairing() {
+        let node = SigningKey::from_bytes(&[7u8; 32]);
+        for (code, pending) in [
+            (format!("second_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0xab;32])), true),
+            (format!("owner_{}", "ab".repeat(32)), true),
+            (base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0xab;32]), false),
+        ] {
+            let link = node_ticket(&node, serde_json::json!({"code":code}));
+            let descriptor = parse_pairing_link_at(&link, NOW).unwrap();
+            assert_eq!(descriptor.pending_phone_enrollment(), pending);
         }
     }
 

@@ -482,6 +482,10 @@ async fn second_device_join_uses_pinned_noise_node_digest_and_never_claims_on_re
             assert_eq!(poll["state"],"waiting");
             assert_eq!(poll["second_device"],true);
             assert!(add_device::join(state,add_device::JoinInput::StartSecond {}).await.is_err());
+            // Process restart loses SAS words but retains the pending operation.
+            *state.add_device.lock().await = add_device::Setup::default();
+            let restarted = add_device::join(state,add_device::JoinInput::Status).await.err().unwrap();
+            assert_eq!(restarted.code, "enrollment_restart");
         } else {
             let error = result.err().unwrap();
             assert!(!error.message.contains("claim code"));
