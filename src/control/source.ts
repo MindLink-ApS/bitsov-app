@@ -206,6 +206,8 @@ export interface Source {
   opList(peer?: string): Promise<OpList>;
   /** H2: end one of our call admissions (the host sends the one paid hangup, or none if the offer was unpaid). */
   opEndCall(callId: string): Promise<OpView>;
+  /** Repair exact host metadata, or acknowledge without releasing any fence. */
+  opRepairCallIndex(indexId: string): Promise<string | null>;
   /**
    * A message pays inside the owner's budget with no prompt. `firstContactMsat`
    * is the owner's one-time OK for someone not yet budgeted, with their budget.
@@ -374,6 +376,7 @@ export const hostSource: Source = {
   spendReconcile: () => invoke<string>('spend_reconcile'),
   opList: (peer) => invoke<OpList>('op_list', { peer: peer ?? null }),
   opEndCall: (callId) => invoke<OpView>('op_end_call', { call_id: callId }),
+  opRepairCallIndex: (indexId) => invoke<string | null>('op_repair_call_index', { index_id: indexId }),
   send: (recipient, isRoom, plaintext, maxMsat, maxRecipientMsat, firstContactMsat) =>
     invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat, max_recipient_msat: maxRecipientMsat ?? null, first_contact_msat: firstContactMsat ?? null }),
   retry: (recipient, plaintext, approvedMsat) => invoke<SendReceipt>('message_retry', { recipient, plaintext, approved_msat: approvedMsat ?? null }),

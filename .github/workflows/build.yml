@@ -16,6 +16,8 @@ name: Build
 #   or when the `full-ci` label is added (mac-package.yml,
 #   windows-compile.yml). There is no iOS simulator job; `cargo check --features
 #   mobile` below is the Linux mobile compile and stays on every code PR.
+# - Android Rust gets one cached ARM64 cross-check on relevant PRs only. It uses
+#   the runner's NDK, without Gradle, an APK, or a target matrix.
 # - The sidecar job is not a merge gate. It waits for this job and reuses the same
 #   Rust cache instead of compiling the crate a second time in parallel.
 on:
@@ -56,6 +58,7 @@ jobs:
       # Non-pull_request events do not read steps.filter: that step is skipped
       # and this expression is already true.
       code: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci') || steps.filter.outputs.code == 'true' }}
+      android: ${{ steps.filter.outputs.android }}
     steps:
       # pull_request only. paths-filter reads the PR file list from the API.
       # On push and merge_group it needs a checkout, which this job does not
@@ -82,6 +85,56 @@ jobs:
               - '!LICENSE'
               - '!.gitignore'
               - '!CODEOWNERS'
+            # One brace pattern because predicate-quantifier is 'every'.
+            # src-tauri/** includes the generated Android project.
+            android:
+              - '{src-tauri/**,.github/workflows/build.yml}'
+
+  android-check:
+    name: Android Rust (aarch64 cargo check)
+    needs: changes
+    # Fail closed if classification fails; skip unrelated PRs and non-PR events.
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.android == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Android Rust target
+        run: rustup target add aarch64-linux-android
+
+      - name: Configure the preinstalled Android NDK
+        run: |
+          TOOLCHAIN="${ANDROID_NDK_HOME:?}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          # API 24 matches gen/android/app/build.gradle.kts minSdk.
+          test -x "$TOOLCHAIN/aarch64-linux-android24-clang"
+          test -x "$TOOLCHAIN/llvm-ar"
+          {
+            echo "CC_aarch64_linux_android=$TOOLCHAIN/aarch64-linux-android24-clang"
+            echo "CXX_aarch64_linux_android=$TOOLCHAIN/aarch64-linux-android24-clang++"
+            echo "AR_aarch64_linux_android=$TOOLCHAIN/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android24-clang"
+          } >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: tauri-android-check
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+
+      # Real target cfg selects the mobile code without the host-only mobile
+      # feature. Limit workspace selection to the app, not the desktop FFI crate.
+      # --tests type-checks tests; it neither links nor runs Android binaries.
+      - name: Rust — Android library and tests
+        working-directory: src-tauri
+        run: cargo check --locked -p bitsov-app --target aarch64-linux-android --lib --tests
 
   build:
     name: Build (tsc + vite + cargo check)

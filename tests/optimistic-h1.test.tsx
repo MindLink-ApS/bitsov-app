@@ -482,7 +482,8 @@ describe('the host op list (H1 op_list, read only)', () => {
     list = ops([op({ state: 'dispatching' })]);
     await go(`peer:${B}`);
     await go(`peer:${A}`);
-    await vi.waitFor(() => expect(source.opList).toHaveBeenCalledTimes(3));
+    // One owner repair read plus the three thread history reads.
+    await vi.waitFor(() => expect(source.opList).toHaveBeenCalledTimes(4));
     await settleTick();
     expect($('[data-failed-check]')).not.toBeNull();
     expect($('[data-failed-op]')).toBeNull();

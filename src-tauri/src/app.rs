@@ -1639,7 +1639,7 @@ async fn connect_remote_at(state: &NodeState, app_data_dir: &Path, wait: bool) -
                         }
                     }
                 }
-            } else if !wait {
+            } else {
                 finish_remote_auth(state, app_data_dir).await;
             }
             Ok(())
@@ -2546,9 +2546,9 @@ async fn remote_access_connect(
     state: State<'_, NodeState>,
     link: String,
 ) -> Result<RemoteImportView, remote_access::ConnectionError> {
-    reject_sealed_window(&window)?;
+    reject_sealed_window(&window).map_err(|_| remote_access::ConnectionError::main_window_only())?;
     drop(window);
-    let dir = app.path().app_data_dir().map_err(|_| remote_access::ConnectionError::other())?;
+    let dir = app.path().app_data_dir().map_err(|_| remote_access::ConnectionError::app_data_unavailable())?;
     remote_access_connect_at(&app, &state, &dir, &link).await
 }
 
@@ -2588,6 +2588,12 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     let result = match remote_access::import_pairing_link(dir, link.trim()) {
         Ok(result) => result,
         Err(error) => {
+            // Join teardown under remote_change/recovery, outside the spawned
+            // task's cancellation select. A second Connect/Forget must wait for
+            // the surviving listener and its sockets to close before rebinding.
+            *state.ready.lock().unwrap() = false;
+            let previous = state.remote_proxy.lock().unwrap().take();
+            if let Some(proxy) = previous { proxy.stop_and_wait().await; }
             spawn_remote_connect(app, dir, true);
             return Err((&error).into());
         }
@@ -2611,6 +2617,11 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     *state.readmission_ask.lock().unwrap() = None;
     *state.owner_contact.lock().unwrap() = None;
     *state.front_door_ask.lock().unwrap() = None;
+    // Config fallbacks describe the old node; the remint cooldown also gates
+    // paired auth. Neither its policy/network nor its cooldown transfers.
+    *state.room_routing_policy.lock().unwrap() = None;
+    *state.configured_network.lock().unwrap() = None;
+    *state.last_remint.lock().unwrap() = None;
     *devices = add_device::Setup::default();
     state.second_join_complete.store(false, Ordering::SeqCst);
     let previous = state.remote_proxy.lock().unwrap().take();
@@ -2711,43 +2722,6 @@ fn spawn_remote_connect<R: tauri::Runtime>(app: &AppHandle<R>, app_data_dir: &Pa
             }
         }
     });
-}
-
-/// Replace the saved remote link with a reviewed ticket for another node, after
-/// the owner confirmed it. Only for an app already using a remote node; it
-/// changes the next start and never the live connection. Fails
-/// closed and keeps the old link on any error.
-#[tauri::command(rename_all = "snake_case")]
-fn remote_access_replace(
-    window: WebviewWindow<impl tauri::Runtime>,
-    app: AppHandle<impl tauri::Runtime>,
-    state: State<'_, NodeState>,
-    link: String,
-) -> Result<RemoteImportView, String> {
-    reject_sealed_window(&window)?;
-    if !state.remote_mode.load(Ordering::SeqCst) {
-        return Err("this app is not using a remote node; pair one from the setup screen".into());
-    }
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("no app data dir: {error}"))?;
-    // An unresolved first-run recovery journal is bound to the current node; the
-    // next start would check the new node against it and refuse. Take the same
-    // locks that first run and unlock hold while they save or clear that journal,
-    // so the check and the replace cannot race them. Busy fails closed.
-    #[cfg(all(desktop, not(feature = "mobile")))]
-    {
-        return remote_owner::replace_link_when_idle(
-            &state,
-            &app_data_dir.join(PAIRING_STORE_DIR),
-            &app_data_dir,
-            &link,
-        );
-    }
-    #[cfg(not(all(desktop, not(feature = "mobile"))))]
-    remote_access::replace_pairing_link(&app_data_dir, link.trim())
-        .map_err(|error| error.to_string())
 }
 
 /// Forget the saved remote link for the next startup. Do not switch a live
@@ -4258,7 +4232,11 @@ fn locked_spend_journal(state: &NodeState) -> Result<Journal, ActionError> {
         if let Some(id) = pending.operation_id.clone() {
             let record = journal.operation_record(&id)?;
             let may_be_call = record.as_ref().is_none_or(|r| r.kind == "legacy" || r.kind.starts_with("call_"));
-            if may_be_call {
+            let proven_unsent = pending.non_dispatch_proven && pending.resumable
+                && pending.accounting_msat.is_none() && pending.paid.is_none()
+                && pending.undelivered.is_none() && pending.evidence_reservation_msat.is_none()
+                && record.as_ref().is_some_and(|r| r.state == spend_journal::OperationState::Unpaid);
+            if may_be_call && !proven_unsent {
                 // Pre-A2 grace releases retained their operation id. They have
                 // no durable proof that the original call cannot still pay.
                 // Confirmed abandonment clears that id and never enters here.
@@ -4577,7 +4555,10 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
             let call_id = payload.as_ref().and_then(|v| v["call_id"].as_str());
             let blocked = if kind == 400 {
                 calls.iter().find(|r| spend_journal::admission_open(r, &calls))
-                    .map(|r| (r, "call_admission_open", "End the existing call before starting another admission. Nothing was paid."))
+                    .map(|r| (r, "call_admission_open", if payload.as_ref().and_then(|v| v["sdp"].as_str())
+                        .is_some_and(|sdp| sdp.lines().any(|line| line.starts_with("a=x-bitsov-restart-of:"))) {
+                            "Your last call is still closing. End it, then call again."
+                        } else { "End the existing call before starting another admission. Nothing was paid." }))
             } else {
                 let offer = calls.iter().filter(|r| r.call_id.as_deref() == call_id
                     && matches!(r.kind.as_str(), "call_offer" | "call_recovery"))
@@ -4728,6 +4709,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         Some(id) => close_charge(state, id, None, None),
         None => Ok(()),
     };
+    pending.non_dispatch_proven = false;
     pending.dispatched_at = Some(spend_journal::timestamp_ms());
     journal.save(&pending)?;
     // Journal I/O can take time. Recheck immediately before issuing the request.
@@ -4807,6 +4789,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
                 // this very message again (under the contact's re-admission
                 // quote) reuses its id, so it can never be paid twice.
                 pending.resumable = true;
+                pending.non_dispatch_proven = fresh_operation || prior.as_ref().is_some_and(|p| p.non_dispatch_proven);
                 pending.budgeted = false;
                 pending.accounting_msat = None;
                 pending.paid = None;
@@ -5017,6 +5000,14 @@ async fn do_op_list(state: &NodeState, peer: Option<&str>) -> Result<spend_journ
         .await.map_err(spend_journal::unknown)?
     }.await;
     act::with_op(Fallback(existing_operation.as_deref()), result)
+}
+
+/// Repair metadata only. Money and admission closure still belong to op_end_call.
+async fn do_op_repair_call_index(state: &NodeState, index_id: &str) -> Result<Option<String>, ActionError> {
+    let _money = state.money.lock().await;
+    let node_id = state.node_id.lock().unwrap().clone()
+        .ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
+    spend_journal(state)?.repair_call_index(&node_id, index_id)
 }
 
 /// Waits for any money POST in flight (`NodeState::money`), then reads its record.
@@ -6038,6 +6029,7 @@ async fn resume_admission_send(state: &NodeState, pending_id: &str, peer: &str, 
     // Consume permission durably before exactly one POST. A lost answer must
     // be checked again; saved accounting is never authority to resume.
     pending.admission_resume = false;
+    pending.non_dispatch_proven = false;
     pending.dispatched_at = Some(spend_journal::timestamp_ms());
     journal.save(&pending)?;
     journal.record_outcome(&pending, spend_journal::OperationState::Dispatching, None)?;
@@ -7240,25 +7232,40 @@ struct DeviceKeyReply {
     owner_action: String,
 }
 
-/// Where this Mac's registration stands; asks the node while one is pending,
-/// and notices a key the owner revoked.
-/// The local key, only when the record and the enclave blob agree. A record
-/// whose blob is missing, unreadable or holds another key is dropped, so setup
-/// is offered again rather than "registered" forever.
-fn local_key(store: &Path) -> Option<(Vec<u8>, device::Record)> {
-    let record = device::load_record(store)?;
-    let consistent = device::load_blob(store).filter(|blob| {
-        device_key::public_key(blob).is_ok_and(|public| hex::encode(public) == record.public_key)
-    });
-    match consistent {
-        Some(blob) => Some((blob, record)),
-        None => {
-            // Not on a Mac without an enclave, where nothing can be read back.
-            if device_key::enclave_available() {
-                device::forget(store);
-            }
-            None
+/// Read the local key only when its public key agrees with the registration.
+/// A bridge/transport failure is retryable, not evidence of invalidation.
+fn local_key(state: &NodeState, store: &Path) -> Result<Option<(Vec<u8>, device::Record)>, ActionError> {
+    local_key_with(state, store, device_key::public_key)
+}
+
+fn local_key_with(
+    state: &NodeState,
+    store: &Path,
+    public_key: impl FnOnce(&[u8]) -> Result<[u8; device_key::PUBLIC_KEY_LEN], device_key::DeviceKeyError>,
+) -> Result<Option<(Vec<u8>, device::Record)>, ActionError> {
+    // Keep cleanup in the same critical section as the read, so registration
+    // cannot publish a new record between observing absence and removing it.
+    let _guard = state.device_lifecycle.lock().unwrap();
+    let Some(record) = device::load_record(store) else { return Ok(None); };
+    let blob = match device::read_private(&store.join(device::BLOB_FILE)) {
+        Ok(Some(blob)) => blob,
+        Ok(None) => {
+            // Only a confirmed missing blob makes the record stale. Never
+            // remove a blob here, including one created after the read.
+            let _ = std::fs::remove_file(store.join(device::RECORD_FILE));
+            return Ok(None);
         }
+        Err(_) => return Ok(None),
+    };
+    match public_key(&blob) {
+        Ok(public) if hex::encode(public) == record.public_key => Ok(Some((blob, record))),
+        Ok(_) | Err(device_key::DeviceKeyError::Invalid) => {
+            device::forget(store);
+            Ok(None)
+        }
+        // Propagate transient failures so registration cannot overwrite the key
+        // by treating a failed read as a missing enrollment.
+        Err(error) => Err(device_error(error)),
     }
 }
 
@@ -7279,7 +7286,7 @@ async fn do_device_key_status(state: &NodeState) -> Result<device::DeviceView, A
 
 async fn do_device_key_status_local(state: &NodeState) -> Result<device::DeviceView, ActionError> {
     let store = device_store(state)?;
-    let Some((_, record)) = local_key(&store) else { return Ok(device_view(state, None)) };
+    let Some((_, record)) = local_key(state, &store)? else { return Ok(device_view(state, None)) };
     // What this poll found, applied only if the record is still the one polled.
     let before = record.clone();
     let mut updated = record;
@@ -7378,7 +7385,7 @@ async fn do_device_key_register(state: &NodeState) -> Result<device::DeviceView,
         return Err(device_error(device_key::DeviceKeyError::BiometryUnavailable));
     }
     let store = device_store(state)?;
-    let existing = local_key(&store);
+    let existing = local_key(state, &store)?;
     if let Some((_, r)) = existing.as_ref().filter(|(_, r)| r.registered) {
         return Ok(device_view(state, Some(r)));
     }
@@ -7481,7 +7488,7 @@ async fn do_relation_approve(
     // at the dialog, or while the node answers, opens nothing.
     let fence = approval_fence(state);
     let store = device_store(state)?;
-    let Some((blob, record)) = local_key(&store).filter(|(_, r)| r.registered) else {
+    let Some((blob, record)) = local_key(state, &store)?.filter(|(_, r)| r.registered) else {
         return Err(ActionError::new("device_not_registered", if cfg!(target_os = "android") {
             "Set up biometric approvals first."
         } else {
@@ -7662,6 +7669,17 @@ async fn relation_approve(
     reject_sealed_window(&window)?;
     drop(window);
     do_relation_approve(state.inner(), &peer, budget_msat, per_act_max_msat).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn op_repair_call_index(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    index_id: String,
+) -> Result<Option<String>, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_op_repair_call_index(state.inner(), &index_id).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -8944,7 +8962,6 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             remote_access_connect,
             pairing_link_take,
             remote_access_forget,
-            remote_access_replace,
             node_overview,
             live_link,
             peers_list,
@@ -8994,6 +9011,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             spend_reconcile,
             op_list,
             op_end_call,
+            op_repair_call_index,
             op_close_call,
             budget_status,
             budget_approve,
@@ -9137,6 +9155,93 @@ mod test_support;
 #[cfg(test)]
 mod device_sign_error_tests {
     use super::*;
+
+    #[test]
+    fn local_key_waits_for_registration_before_cleaning_a_missing_blob() {
+        let state = Arc::new(NodeState::for_api("http://127.0.0.1:1/api/v1"));
+        let dir = tempfile::tempdir().unwrap();
+        device::save_record(dir.path(), &device::Record::default()).unwrap();
+        let guard = state.device_lifecycle.lock().unwrap();
+        let reader_state = Arc::clone(&state);
+        let store = dir.path().to_path_buf();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = local_key_with(&reader_state, &store, |_| Ok([4; 65]));
+            done_tx.send(()).unwrap();
+            result
+        });
+        started_rx.recv().unwrap();
+        let early = done_rx.recv_timeout(Duration::from_millis(100));
+        let blob = b"new wrapped key";
+        let record = device::Record { public_key: hex::encode([4; 65]), registered: true, ..Default::default() };
+        device::save_blob(dir.path(), blob).unwrap();
+        device::save_record(dir.path(), &record).unwrap();
+        drop(guard);
+        let result = reader.join().unwrap().unwrap();
+        assert!(matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "key reads must wait for registration to finish publishing");
+        assert_eq!(result, Some((blob.to_vec(), record.clone())));
+        assert_eq!(device::load_blob(dir.path()).as_deref(), Some(blob.as_slice()));
+        assert_eq!(device::load_record(dir.path()), Some(record));
+    }
+
+    #[test]
+    fn local_key_removes_the_stale_record_when_the_blob_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = device::Record { registered: true, ..Default::default() };
+        device::save_record(dir.path(), &record).unwrap();
+        assert!(local_key_with(&NodeState::for_api("http://127.0.0.1:1/api/v1"), dir.path(), |_| panic!("missing blob must not reach the bridge"))
+            .unwrap().is_none());
+        assert!(!dir.path().join(device::RECORD_FILE).exists());
+        assert!(!dir.path().join(device::BLOB_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_key_preserves_the_record_and_blob_on_a_private_file_read_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let record = device::Record { registered: true, ..Default::default() };
+        let blob = b"synthetic wrapped key";
+        device::save_record(dir.path(), &record).unwrap();
+        device::save_blob(dir.path(), blob).unwrap();
+        let path = dir.path().join(device::BLOB_FILE);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(device::read_private(&path).is_err());
+        assert!(local_key_with(&NodeState::for_api("http://127.0.0.1:1/api/v1"), dir.path(), |_| panic!("unreadable blob must not reach the bridge"))
+            .unwrap().is_none());
+        assert_eq!(device::load_record(dir.path()), Some(record));
+        assert_eq!(std::fs::read(path).unwrap(), blob);
+    }
+
+    #[test]
+    fn local_key_preserves_transport_failures_but_forgets_invalid_or_mismatched_keys() {
+        use device_key::DeviceKeyError::*;
+        for public in [Err(Other(-6)), Err(Unavailable), Err(Cancelled), Err(BiometryUnavailable),
+            Err(Invalid), Ok([5; 65]), Ok([4; 65])] {
+            let dir = tempfile::tempdir().unwrap();
+            let blob = b"synthetic wrapped key";
+            let record = device::Record { public_key: hex::encode([4; 65]), registered: true, ..Default::default() };
+            device::save_blob(dir.path(), blob).unwrap();
+            device::save_record(dir.path(), &record).unwrap();
+            let result = local_key_with(&NodeState::for_api("http://127.0.0.1:1/api/v1"), dir.path(), |_| public);
+            match public {
+                value if value == Err(Invalid) || value == Ok([5; 65]) => {
+                    assert!(result.unwrap().is_none());
+                    assert!(device::load_blob(dir.path()).is_none());
+                    assert!(device::load_record(dir.path()).is_none());
+                }
+                _ => {
+                    assert_eq!(device::load_blob(dir.path()).as_deref(), Some(blob.as_slice()));
+                    assert_eq!(device::load_record(dir.path()), Some(record));
+                    if public.is_err() { assert!(result.is_err(), "transient failure must not offer key creation"); }
+                    else { assert!(result.unwrap().is_some()); }
+                }
+            }
+        }
+    }
 
     #[test]
     fn malformed_signature_transport_error_does_not_forget_key_or_registration() {
@@ -13517,6 +13622,68 @@ mod control_act_tests {
         result
     }
 
+    #[tokio::test]
+    async fn recovery_fast_peer_end_binds_fresh_dispatch_without_paying_cleanup() {
+        for reason in ["hangup", "busy"] {
+            let (routes, paid) = ledger_call_routes();
+            let (routes, hold) = hold_compose(routes, 0, None, false);
+            let node = fake(AuthMode::Local, routes);
+            approve_calls(&node).await;
+            let (offer, captured) = tokio::join!(
+                do_call_signal(&node.state, A, 400, OFFER, 15000),
+                during_call(&hold, async {
+                    capture_call_observation(&node.state, &inbound_call_event(403, reason)).unwrap()
+                }),
+            );
+            let captured = captured.expect("fresh dispatch must retain the early peer end");
+            assert_eq!(Some(captured.offer.op_id.clone()), offer.unwrap().operation_id);
+            assert!(persist_call_observation(&node.state, &captured).await.unwrap());
+            do_op_end_call(&node.state, CALL_ID).await.unwrap();
+            assert_eq!(paid.lock().unwrap().pays, 1);
+            assert_eq!(composes(&node), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_proven_capped_call_stays_released_without_abandon() {
+        let (routes, _) = ledger_call_routes();
+        let refuse = Arc::new(AtomicBool::new(true));
+        let flag = refuse.clone();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if m == "POST" && p == "/messages/compose" && flag.load(Ordering::SeqCst) {
+                return readmission_coded_reply();
+            }
+            routes(m, p, b)
+        }));
+        approve_calls(&node).await;
+        assert_eq!(do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err().code, "readmission_capped");
+        let restarted = reopen(&node);
+        {
+            let journal = locked_spend_journal(&restarted).unwrap();
+            let p = journal.pending().unwrap().unwrap();
+            assert!(p.resumable && !p.budgeted, "node-proven unsent slot must stay released");
+        }
+        refuse.store(false, Ordering::SeqCst);
+        approve_calls(&node).await;
+        let next = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+        do_call_signal(&node.state, A, 400, &next, 15000).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_host_call_fields_never_reach_compose() {
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        let bodies = compose_bodies(&node);
+        assert_eq!(bodies.len(), 2);
+        for body in bodies {
+            assert!(body.as_object().unwrap().keys().all(|k| !k.starts_with("host_")));
+            assert!(body["operation_id"].is_string());
+        }
+    }
+
     // #220: the original POST is still held before payment after its host
     // timeout. A concurrent lookup is only a snapshot, even beyond #228's grace.
     #[tokio::test]
@@ -13791,6 +13958,7 @@ mod control_act_tests {
             let first = first.unwrap();
             let error = second.unwrap_err();
             assert_eq!(error.code, "call_admission_open");
+            if recovery { assert_eq!(error.message, "Your last call is still closing. End it, then call again."); }
             assert_eq!(error.operation_id, first.operation_id);
             assert_eq!(composes(&node), 1);
             assert_eq!(paid.lock().unwrap().pays, 1);
@@ -13988,7 +14156,8 @@ mod control_act_tests {
                 let (offer, ()) = tokio::join!(
                     do_call_signal(&node.state, A, 400, OFFER, 15000),
                     during_call(&hold, async {
-                        assert!(capture_call_observation(&node.state, &inbound_call_event(403, "hangup")).unwrap().is_none());
+                        // A fresh dispatch now retains and persists the early end.
+                        observe_call_event(&node.state, &inbound_call_event(403, "hangup")).await;
                     }),
                 );
                 offer.unwrap();
@@ -14003,7 +14172,7 @@ mod control_act_tests {
             let restarted = reopen(&node);
             do_budget_approve(&restarted, 500000, budget::PresetId::Careful).await.unwrap();
             do_op_end_call(&restarted, CALL_ID).await.unwrap();
-            assert_eq!(paid.lock().unwrap().pays, 2);
+            assert_eq!(paid.lock().unwrap().pays, if held == 0 { 1 } else { 2 });
             let records = spend_journal(&restarted).unwrap().call_operations(OWN, Some(A)).unwrap();
             assert!(records.iter().all(|r| !spend_journal::admission_open(r, &records)));
         }
@@ -19253,7 +19422,6 @@ mod assistant_acl_tests {
                 "remote_access_connect",
                 "pairing_link_take",
                 "remote_access_forget",
-                "remote_access_replace",
                 // Control center reads (main window only, ACL + reject_sealed_window).
                 "node_overview",
                 "live_link",
@@ -19306,6 +19474,7 @@ mod assistant_acl_tests {
                 "spend_reconcile",
                 "op_list",
                 "op_end_call",
+                "op_repair_call_index",
                 "op_close_call",
                 "budget_status",
                 "budget_approve",
@@ -19704,8 +19873,11 @@ mod assistant_acl_tests {
                 .map(str::trim)
                 .find(|line| !line.is_empty() && !line.starts_with("//"))
                 .unwrap_or("");
+            let expected = if name == "remote_access_connect" {
+                "reject_sealed_window(&window).map_err(|_| remote_access::ConnectionError::main_window_only())?;"
+            } else { "reject_sealed_window(&window)?;" };
             assert_eq!(
-                first, "reject_sealed_window(&window)?;",
+                first, expected,
                 "{name} must reject the assistant window before doing anything else"
             );
             assert!(!body.contains("window_label"));
@@ -20012,7 +20184,6 @@ mod assistant_acl_tests {
                 super::remote_access_import,
                 super::remote_access_connect,
                 super::remote_access_forget,
-                super::remote_access_replace,
             ])
             // `test = true` skips the macOS Info.plist embed. A second plain
             // generate_context!() defines `_EMBED_INFO_PLIST` again and cargo
@@ -20133,7 +20304,7 @@ mod assistant_acl_tests {
         // Do not invoke forget against the user's real app-data directory in
         // this mock app. The persistence tests use isolated temporary folders.
         assert_handler_ran(invoke(&main, "node_unlock", serde_json::json!({})), "not locked");
-        for cmd in ["node_unlock", "pairing_status", "trust_acknowledge", "pairing_retry", "remote_access_preview", "remote_access_import", "remote_access_connect", "remote_access_forget", "remote_access_replace"] {
+        for cmd in ["node_unlock", "pairing_status", "trust_acknowledge", "pairing_retry", "remote_access_preview", "remote_access_import", "remote_access_connect", "remote_access_forget"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
     }

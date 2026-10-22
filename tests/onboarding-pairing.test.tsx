@@ -711,7 +711,8 @@ describe('pairing panel', () => {
     await vi.waitFor(() => expect(mount!.textContent).toContain('This pairing link expired.'));
     expect(onImportRemote).toHaveBeenCalledExactlyOnceWith(link);
     expect(mount.querySelector('[data-import-result]')).toBeNull();
-    expect(input.value).toBe('');
+    expect(input.value).toBe(link);
+    expect(mount.querySelector('[data-pairing-preview]')).not.toBeNull();
   });
 
   it('keeps paste usable after scan cancellation without exposing native errors', async () => {

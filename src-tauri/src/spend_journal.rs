@@ -79,6 +79,10 @@ pub struct Pending {
     /// not abandon it; otherwise the next send creates a new operation.
     #[serde(default)]
     pub resumable: bool,
+    /// This exact POST was refused by the node before any dispatch/payment.
+    /// Unlike a legacy grace release, this is durable non-dispatch proof.
+    #[serde(default)]
+    pub non_dispatch_proven: bool,
     /// Admission-only prepared: only an exact same-id compose may continue.
     /// Unlike `resumable`, this never permits replacing or dismissing the slot.
     #[serde(default)]
@@ -332,7 +336,7 @@ impl Journal {
             request_hash: blake3::hash(format!("{path}\n{body}").as_bytes()).to_hex().to_string(),
             max_msat, target: None, over_budget: false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false,
             peer: operation_id.as_ref().and(body["recipient"].as_str()).map(str::to_string),
-            operation_id, dispatched_at: None, op, resumable: false, admission_resume: false, compose_fee_msat: body["max_routing_fee_msat"].as_u64(), operation_record: None,
+            operation_id, dispatched_at: None, op, resumable: false, non_dispatch_proven: false, admission_resume: false, compose_fee_msat: body["max_routing_fee_msat"].as_u64(), operation_record: None,
         };
         if let Some(id) = &pending.operation_id {
             let signal_kind = body["kind"].as_u64().unwrap_or(0);
@@ -440,6 +444,54 @@ impl Journal {
         if record.created_ms != offer.created_ms { return Ok(()); }
         if ended { record.call_closed = true; } else { record.call_answered = true; }
         self.write_operation(&record)
+    }
+
+    /// Owner-requested repair. Acknowledging damage never releases an admission
+    /// or payment. Only the exact indexed record (or its durable pending snapshot)
+    /// can restore membership; corrupt mappings are never guessed from history.
+    pub fn repair_call_index(&self, node_id: &str, index_id: &str) -> Result<Option<String>, ActionError> {
+        if index_id.len() != 64 || !index_id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+            return Err(ActionError::invalid("invalid call index id"));
+        }
+        let filename = format!("{index_id}.json");
+        let path = self.dir.join("call-index").join(&filename);
+        if !path.exists() && !self.dir.join("call-index-unresolved").join(&filename).exists() {
+            return Err(damaged_record());
+        }
+        let index = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<CallIndex>(&b).ok());
+        if let Some(index) = index {
+            let record = self.operation_record(&index.op_id).ok().flatten().or_else(|| {
+                // Reading the raw slot avoids automatic repair of damaged files.
+                read_pending(&self.dir).ok().flatten().filter(|p|
+                    p.node_id == node_id && p.operation_id.as_deref() == Some(index.op_id.as_str()))
+                    .and_then(|p| p.operation_record)
+            });
+            if let Some(record) = record.filter(|r| r.op_id == index.op_id && r.node_id == node_id
+                && r.created_ms == index.created_ms && matches!(r.kind.as_str(), "call_offer" | "call_recovery")
+                && r.call_id.as_deref().is_some_and(|call|
+                    call_index_path(&self.dir, &r.node_id, &r.peer, call) == path)) {
+                let marker = self.dir.join("call-index-unresolved").join(&filename);
+                std::fs::create_dir_all(marker.parent().unwrap()).map_err(unknown)?;
+                File::create(&marker).and_then(|f| f.sync_all()).map_err(unknown)?;
+                File::open(marker.parent().unwrap()).and_then(|f| f.sync_all()).map_err(unknown)?;
+                self.write_operation(&record)?;
+                // Keep the owner-visible repair entry across restart until
+                // actual closure evidence exists. Repair is not closure.
+                let records = self.call_operations_for(node_id, Some(&record.peer), record.call_id.as_deref())?;
+                let ambiguous_unpaid = record.state == OperationState::Unpaid && read_pending(&self.dir)?
+                    .is_some_and(|p| p.operation_id.as_deref() == Some(record.op_id.as_str()) && !p.non_dispatch_proven);
+                if !admission_open(&record, &records) && !ambiguous_unpaid {
+                    std::fs::remove_file(&marker).map_err(unknown)?;
+                    File::open(marker.parent().unwrap()).and_then(|f| f.sync_all()).map_err(unknown)?;
+                }
+                return Ok(record.call_id);
+            }
+        }
+        let ack = self.dir.join("call-index-acknowledged").join(blake3::hash(node_id.as_bytes()).to_hex().as_str());
+        std::fs::create_dir_all(&ack).map_err(unknown)?;
+        File::create(ack.join(filename)).and_then(|f| f.sync_all()).map_err(unknown)?;
+        File::open(ack).and_then(|f| f.sync_all()).map_err(unknown)?;
+        Ok(None)
     }
 
     /// Call-only index, scoped to the authenticated node and optionally peer.
@@ -606,6 +658,13 @@ pub struct OpList {
     pub operations: Vec<OpView>,
     pub skipped: usize,
     pub has_more: bool,
+    pub unresolved_calls: Vec<UnresolvedCall>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UnresolvedCall {
+    pub index_id: String,
+    pub acknowledged: bool,
 }
 
 fn damaged_record() -> ActionError {
@@ -635,6 +694,29 @@ fn history_entries(dir: &Path) -> Result<impl Iterator<Item = std::io::Result<st
     }
 }
 
+fn unresolved_calls(dir: &Path, node_id: &str) -> Result<Vec<UnresolvedCall>, ActionError> {
+    let mut names = std::collections::BTreeSet::new();
+    for folder in ["call-index", "call-index-unresolved"] {
+        for entry in read_entries(&dir.join(folder))? { names.insert(entry.file_name()); }
+    }
+    let mut rows = Vec::new();
+    for name in names {
+        let Some(id) = name.to_str().and_then(|n| n.strip_suffix(".json")) else { continue };
+        if id.len() != 64 || !id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) { continue; }
+        let path = dir.join("call-index").join(&name);
+        let record = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<CallIndex>(&b).ok())
+            .filter(|i| i.op_id.len() == 36 && i.op_id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-'))
+            .and_then(|i| read_operation(&dir.join("ops").join(format!("{}.json", i.op_id)), Some(&i.op_id)).ok().flatten());
+        let valid = record.as_ref().is_some_and(|r| matches!(r.kind.as_str(), "call_offer" | "call_recovery")
+            && r.call_id.as_deref().is_some_and(|c| call_index_path(dir, &r.node_id, &r.peer, c) == path));
+        if valid && !dir.join("call-index-unresolved").join(&name).exists() { continue; }
+        if valid && record.as_ref().is_some_and(|r| r.node_id != node_id) { continue; }
+        rows.push(UnresolvedCall { index_id: id.into(), acknowledged: dir.join("call-index-acknowledged")
+            .join(blake3::hash(node_id.as_bytes()).to_hex().as_str()).join(&name).exists() });
+    }
+    Ok(rows)
+}
+
 pub fn list_operations(dir: &Path, node_id: &str, peer: Option<&str>, limit: usize) -> Result<OpList, ActionError> {
     let limit = limit.clamp(1, OP_LIST_LIMIT);
     let mut rows = std::collections::BTreeMap::new();
@@ -652,7 +734,7 @@ pub fn list_operations(dir: &Path, node_id: &str, peer: Option<&str>, limit: usi
         rows.insert((record.created_ms, record.op_id.clone()), record);
         if rows.len() > limit { rows.pop_first(); }
     }
-    Ok(OpList { operations: rows.into_values().rev().map(Into::into).collect(), skipped, has_more: matched > limit })
+    Ok(OpList { operations: rows.into_values().rev().map(Into::into).collect(), skipped, has_more: matched > limit, unresolved_calls: unresolved_calls(dir, node_id)? })
 }
 
 /// Read an atomic index/record snapshot when a live signal arrives, before
@@ -675,9 +757,10 @@ pub fn read_call_admission(dir: &Path, node_id: &str, peer: &str, call: &str) ->
     Ok(Some(record))
 }
 
-/// Snapshot the latest completed dispatch at local receive time. Do not bind
-/// a queued peer signal to an offer that is still being dispatched, and never
-/// use the peer's envelope clock as a host generation clock.
+/// Capture at receive time. A fresh wire ID can bind to its dispatching offer;
+/// persistence waits for the money lock and the renderer waits for its receipt.
+/// Reused IDs retain the older completed binding: never guess a new generation
+/// from the peer's envelope clock.
 pub fn read_completed_call_admission(dir: &Path, node_id: &str, peer: &str, call: &str) -> Result<Option<OperationRecord>, ActionError> {
     let Some(latest) = read_call_admission(dir, node_id, peer, call)? else { return Ok(None) };
     if latest.state != OperationState::Dispatching { return Ok(Some(latest)); }
@@ -701,7 +784,7 @@ pub fn read_completed_call_admission(dir: &Path, node_id: &str, peer: &str, call
             completed = Some(record);
         }
     }
-    Ok(completed)
+    Ok(completed.or(Some(latest)))
 }
 
 /// Settling or failing a paid offer does not prove its admission is closed.
@@ -922,6 +1005,74 @@ mod tests {
         std::fs::create_dir_all(dir.join("ops")).unwrap();
         std::fs::write(dir.join("ops").join(format!("{}.json", record.op_id)), serde_json::to_vec(&record).unwrap()).unwrap();
         record
+    }
+
+    #[test]
+    fn recovery_index_acknowledgement_preserves_fence_until_exact_record_is_repaired() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let offer = history_fixture(dir.path(), 1, OperationState::Paid, "call_offer");
+        journal.write_operation(&offer).unwrap();
+        let path = call_index_path(dir.path(), "node", "peer", offer.call_id.as_deref().unwrap());
+        let id = path.file_stem().unwrap().to_str().unwrap();
+        std::fs::remove_file(journal.operation_path(&offer.op_id).unwrap()).unwrap();
+        initialize_history(dir.path()).unwrap();
+        let rows = list_operations(dir.path(), "node", None, 100).unwrap();
+        assert_eq!(rows.unresolved_calls.len(), 1);
+        assert!(!rows.unresolved_calls[0].acknowledged);
+        assert!(journal.repair_call_index("node", id).unwrap().is_none());
+        assert!(list_operations(dir.path(), "node", None, 100).unwrap().unresolved_calls[0].acknowledged);
+        assert!(journal.call_operations("node", Some("peer")).is_err());
+        assert!(path.exists(), "acknowledgement must never delete evidence");
+        // Only restoration of this exact record can remove the damaged-index fence.
+        journal.write_operation(&offer).unwrap();
+        assert_eq!(journal.repair_call_index("node", id).unwrap(), offer.call_id);
+        let records = journal.call_operations("node", Some("peer")).unwrap();
+        assert!(admission_open(&offer, &records), "repair must not close a paid admission");
+        assert_eq!(list_operations(dir.path(), "node", None, 100).unwrap().unresolved_calls.len(), 1);
+        journal.observe_call(&offer, true).unwrap();
+        journal.repair_call_index("node", id).unwrap();
+        assert!(list_operations(dir.path(), "node", None, 100).unwrap().unresolved_calls.is_empty());
+        assert!(journal.repair_call_index("node", "../ops").is_err());
+    }
+
+    #[test]
+    fn recovery_index_restores_exact_pending_snapshot_without_releasing_payment() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let call = "0123456789abcdef0123456789abcdef";
+        let body = json!({"recipient":"peer", "kind":400, "plaintext":json!({"call_id":call}).to_string()});
+        let p = journal.begin_operation("node", "/messages/compose", &body, 2000,
+            Some((new_operation_id().unwrap(), operation(&body)))).unwrap();
+        let before = std::fs::read(dir.path().join("spend-pending.json")).unwrap();
+        let path = call_index_path(dir.path(), "node", "peer", call);
+        let id = path.file_stem().unwrap().to_str().unwrap();
+        std::fs::write(journal.operation_path(p.operation_id.as_deref().unwrap()).unwrap(), "damaged").unwrap();
+        assert_eq!(list_operations(dir.path(), "node", None, 100).unwrap().unresolved_calls.len(), 1);
+        assert_eq!(journal.repair_call_index("node", id).unwrap().as_deref(), Some(call));
+        assert_eq!(std::fs::read(dir.path().join("spend-pending.json")).unwrap(), before);
+        let restored = journal.operation_record(p.operation_id.as_deref().unwrap()).unwrap().unwrap();
+        assert_eq!(restored.state, OperationState::Dispatching);
+        assert!(admission_open(&restored, &[]));
+        assert_eq!(list_operations(dir.path(), "node", None, 100).unwrap().unresolved_calls.len(), 1);
+    }
+
+    #[test]
+    fn recovery_index_repair_never_uses_another_identity_or_guesses_a_corrupt_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let offer = history_fixture(dir.path(), 1, OperationState::Paid, "call_offer");
+        journal.write_operation(&offer).unwrap();
+        let path = call_index_path(dir.path(), "node", "peer", offer.call_id.as_deref().unwrap());
+        let id = path.file_stem().unwrap().to_str().unwrap();
+        assert!(journal.repair_call_index("other", id).unwrap().is_none());
+        std::fs::write(&path, "PRIVATE damaged").unwrap();
+        drop(journal);
+        initialize_history(dir.path()).unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        assert!(journal.repair_call_index("node", id).unwrap().is_none());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "PRIVATE damaged");
+        assert!(journal.call_operations("node", None).is_err());
     }
 
     #[test]
@@ -1357,7 +1508,7 @@ mod tests {
     #[test]
     fn reconciliation_needs_exact_terminal_outgoing_evidence() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, admission_resume: false, compose_fee_msat: None, operation_record: None };
+            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, non_dispatch_proven: false, admission_resume: false, compose_fee_msat: None, operation_record: None };
         assert_eq!(terminal(&p, &[]), None);
         assert_eq!(terminal(&p, &[json!({"payment_hash":"other", "amount_msat":2000, "direction":"outgoing", "status":"settled"})]), None);
         for status in ["pending", "inflight", "expired", "unknown"] {
@@ -1373,7 +1524,7 @@ mod tests {
     #[test]
     fn message_reconciliation_rejects_other_sender_and_recipient() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, admission_resume: false, compose_fee_msat: None, operation_record: None };
+            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, non_dispatch_proven: false, admission_resume: false, compose_fee_msat: None, operation_record: None };
         let mut row = json!({"id":"abc", "sender":"other", "recipient":"peer", "payment_amount_msat":2000});
         assert_eq!(terminal(&p, &[row.clone()]), None);
         row["sender"] = json!("node");

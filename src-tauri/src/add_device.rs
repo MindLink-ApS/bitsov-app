@@ -154,7 +154,7 @@ async fn owner(state: &NodeState) -> Result<Owner, ActionError> {
     if !state.remote_mode.load(Ordering::SeqCst) {
         return Err(refusal(403));
     }
-    let (blob, record) = local_key(&device_store(state)?)
+    let (blob, record) = local_key(state, &device_store(state)?)?
         .filter(|(_, r)| r.registered)
         .ok_or_else(|| refusal(403))?;
     let key_id = record
@@ -669,7 +669,7 @@ pub(super) async fn join_on_platform(state: &NodeState, input: JoinInput, platfo
     {
         return Err(refusal(403));
     }
-    let (blob, mut record) = match local_key(&store) {
+    let (blob, mut record) = match local_key(state, &store)? {
         Some(key) => key,
         None => {
             let policy = *state.device_policy.lock().unwrap();
