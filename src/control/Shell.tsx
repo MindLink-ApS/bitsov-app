@@ -1764,7 +1764,8 @@ export function ControlCenter(props: Props) {
       <Show when={props.active && !isMobilePlatform()}>
         <OwnerApprovalSheets approvals={approvals()} error={approvalsError()} now={now()}
           memory={approvalsMemory} approve={approveOwner} recheck={recheckApproval}
-          blocked={contextOpen() || walletTab() !== null} />
+          blocked={contextOpen() || walletTab() !== null}
+          onNotificationReview={() => { setContextOpen(false); setWalletTab(null); }} />
       </Show>
       <Rail
         callView={callView()}

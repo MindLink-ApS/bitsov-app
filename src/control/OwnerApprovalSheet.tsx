@@ -1,10 +1,12 @@
+import { isTauri } from '@tauri-apps/api/core';
+import { createApprovalNotifications } from './ownerApprovalNotification';
 import { createEffect, createSignal, createUniqueId, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { language, t } from '../i18n';
 import { approvalReason, secondsLeft, type ApprovalView } from './ownerApproval';
 import { approveOwnerRequest, type OwnerApprovalsProps } from './OwnerApprovals';
 import { onEscape } from './escapeStack';
 
-type Props = OwnerApprovalsProps & { memory: NonNullable<OwnerApprovalsProps['memory']>; blocked?: boolean };
+type Props = OwnerApprovalsProps & { memory: NonNullable<OwnerApprovalsProps['memory']>; blocked?: boolean; onNotificationReview?: () => void };
 
 const hasOtherModal = () => [...document.querySelectorAll('dialog[open], [aria-modal="true"]')]
   .some(el => !el.matches('[data-owner-sheet-scrim]') && !el.closest('[data-owner-sheet-scrim]'));
@@ -17,6 +19,15 @@ export function OwnerApprovalSheets(props: Props) {
   const presented = new Set<string>();
   let returnFocus: HTMLElement | null = null;
   const pending = () => props.approvals.filter(v => v.status === 'pending' && secondsLeft(v, props.now) > 0 && !props.memory.said()[v.op_id]?.ok);
+  onMount(() => {
+    if (!isTauri() || !/Macintosh|Mac OS X/.test(navigator.userAgent)) return;
+    const notifications = createApprovalNotifications(id => {
+      props.onNotificationReview?.();
+      props.memory.setReview(id);
+    });
+    createEffect(() => notifications.update(props.error ? [] : pending().map(v => v.op_id)));
+    onCleanup(notifications.dispose);
+  });
   // Other flows own their current sheet. Queue arrivals until it closes.
   onMount(() => {
     const inspect = () => setOtherModal(hasOtherModal());
@@ -43,6 +54,19 @@ export function OwnerApprovalSheets(props: Props) {
     const current = active();
     const live = pending();
     const error = props.error;
+    const requested = props.memory.review();
+    const selected = live.find(v => v.op_id === requested);
+    if (selected && current?.op_id !== selected.op_id && !props.blocked && !otherModal()
+        && !error && props.memory.busy() === null) {
+      presented.add(selected.op_id);
+      untrack(() => {
+        setNotice('');
+        returnFocus ??= props.memory.reviewOpener ?? document.activeElement as HTMLElement | null;
+        props.memory.reviewOpener = null;
+        setActive(selected);
+      });
+      return;
+    }
     if (current) {
       if (props.memory.busy() === current.op_id) return;
       // Keep the result with its request until the owner dismisses it.
@@ -54,7 +78,6 @@ export function OwnerApprovalSheets(props: Props) {
       return;
     }
     if (props.blocked || otherModal() || error || props.memory.busy() !== null) return;
-    const requested = props.memory.review();
     const next = live.find(v => v.op_id === requested) ?? live.find(v => !presented.has(v.op_id));
     if (next) {
       presented.add(next.op_id);

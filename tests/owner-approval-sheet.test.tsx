@@ -188,3 +188,24 @@ it('keeps a failed Touch ID result visible if the request expires during approva
   expect($('[data-owner-approval-sheet]').textContent).toContain('This request expired. Nothing was approved.');
   expect(($('[data-owner-sheet-approve]') as HTMLButtonElement).disabled).toBe(true);
 });
+
+it('a notification review selects the exact request over an already open sheet', async () => {
+  const s = setup([request(), request('b')]); await tick();
+  s.memory.setReview('b'); await tick();
+  expect($('[data-owner-approval-sheet]').getAttribute('data-owner-approval-sheet')).toBe('b');
+  expect(s.approve).not.toHaveBeenCalled();
+});
+it('clears an old expiry notice when a notification reopens a deferred request', async () => {
+  const a = request();
+  const b = { ...request('b'), expires_at: NOW / 1000 + 600 };
+  const s = setup([a, b]); await tick();
+  $('[data-owner-sheet-dismiss]').click(); await tick();
+  $('[data-owner-sheet-dismiss]').click(); await tick();
+  s.memory.setReview('a'); await tick();
+  s.setNow(NOW + 301_000); await tick();
+  expect($('[data-owner-sheet-status]').textContent).toContain('This request expired.');
+  s.memory.setReview('b'); await tick();
+  expect($('[data-owner-approval-sheet]').getAttribute('data-owner-approval-sheet')).toBe('b');
+  $('[data-owner-sheet-dismiss]').click(); await tick();
+  expect($('[data-owner-sheet-status]')).toBeNull();
+});

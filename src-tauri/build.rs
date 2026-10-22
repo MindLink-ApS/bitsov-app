@@ -133,14 +133,14 @@ fn main() {
         .permissions_path_pattern("./permissions/manual/**/*");
 
     let mut attributes = tauri_build::Attributes::new().app_manifest(manifest);
-    // Release bundles keep the main capability only. The assistant window is not
+    // Release bundles keep only capabilities scoped to the main window. The assistant window is not
     // created in release, and a window with no capability has no grants. Debug
     // and test builds still compile capabilities/assistant.json so the ACL test
     // can resolve that label.
     if matches!(target_os.as_str(), "ios" | "android") || mobile_feature {
         attributes = attributes.capabilities_path_pattern("./mobile-capabilities/default.json");
     } else if std::env::var("PROFILE").as_deref() == Ok("release") {
-        attributes = attributes.capabilities_path_pattern("./capabilities/default.json");
+        attributes = attributes.capabilities_path_pattern("./capabilities/default*.json");
     }
 
     if let Err(error) = tauri_build::try_build(attributes) {
