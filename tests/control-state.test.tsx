@@ -33,7 +33,7 @@ describe('sats display', () => {
     expect(sats(1000)).toBe('1');
     expect(sats(4242)).toBe('4.242');
     expect(sats(1500)).toBe('1.5');
-    expect(sats(482_500_000)).toBe('482 500');
+    expect(sats(482_500_000)).toBe('482\u202f500');
     expect(satUnit(1000)).toBe('sat');
     expect(satUnit(2000)).toBe('sats');
     expect(satUnit(1500)).toBe('sats');
@@ -86,7 +86,7 @@ describe('cost to send', () => {
   const now = 1_000_000_000;
 
   it("uses the peer's advertised price when the node has it", () => {
-    const c = costToSend({ kind: 'peer', id: A }, quote({ peer_msat: 2000, peer_age_secs: 240 }), { name: 'Maya’s', nowMs: now })!;
+    const c = costToSend({ kind: 'peer', id: A }, quote({ peer_msat: 2000, peer_age_secs: 240 }), { name: 'Maya', nowMs: now })!;
     expect(c.msat).toBe(2000);
     expect(c.estimate).toBe(false);
     expect(c.basis).toBe('Maya’s price, updated 4 min ago; up to 0 sats network fee');

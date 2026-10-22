@@ -5,8 +5,8 @@ import { t, language } from '../i18n';
 
 import { denom } from './prefs';
 
-/** Always use ASCII spaces between digit groups; never group fractional digits. */
-const groupDigits = (value: string) => value.replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+/** Use narrow no-break spaces so a number cannot wrap between digit groups. */
+const groupDigits = (value: string) => value.replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f');
 const groupAmount = (value: string) => {
   const [whole, fraction] = value.split('.');
   return groupDigits(whole) + (fraction === undefined ? '' : `.${fraction}`);

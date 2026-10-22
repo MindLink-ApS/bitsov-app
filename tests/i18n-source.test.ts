@@ -7,9 +7,10 @@ import { SAMPLE_ROOMS, SAMPLE_ROOM_ID } from '../src/control/sample';
 // it to the table; identifiers, protocol tokens and user/node data are not copy.
 const scopes: Record<string, string[]> = {
   'Shell.tsx': ['SettingsDisplay', 'CallSettings', 'Rail', 'TrackHead', 'PayeeLine', 'MessageView', 'ArtifactView', 'RequestCard', 'DELIVERY_TEXT', 'CallNetworkNote', 'CallButtons', 'CallPanel', 'AmountField', 'InCallPay', 'Composer', 'TouchIdFirst', 'SpendBar', 'DeviceSetup', 'TouchApproval', 'Reconcile', 'BudgetBar'],
-  'WalletPage.tsx': ['WalletPage', 'ActivityView', 'SendView', 'AmountInput', 'CopyButton', 'KIND_FILTERS', 'DIRECTION_FILTERS'],
+  'WalletPage.tsx': ['ReceiveView', 'WalletPage', 'ActivityView', 'SendView', 'AmountInput', 'CopyButton', 'KIND_FILTERS', 'DIRECTION_FILTERS'],
   'OnCallPill.tsx': ['OnCallPill', 'CALL_STATE_WORD'],
-  'state.ts': ['nodePill', 'spendLine', 'costToSend', 'peerName', 'peerNotReadyMessage'],
+  'state.ts': ['undeliveredCopy', 'admissionCopy', 'nodePill', 'spendLine', 'costToSend', 'peerName', 'peerNotReadyMessage'],
+  'HubTrust.tsx': ['HubTrust', 'HubTrustInfo', 'HubChannelConfirm'],
   'custody.tsx': ['custodyBadge'],
 };
 const names = new Set(['aria-label', 'title', 'placeholder', 'label', 'stays']);

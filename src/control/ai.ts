@@ -1,3 +1,4 @@
+import { language } from '../i18n';
 // The AI track's rules as pure functions: what a question asks for, how an
 // answer is composed from the host's broker read, how old it is, and what a
 // proposed action prefills. Nothing here reads the node, sends, or spends.
@@ -90,6 +91,7 @@ export function satsIn(text: string): number | null {
   // A space may split a fraction or a grouped amount, not just words. Refuse
   // its trailing token too ("1 / 2 sats", "1 500 sats").
   if (/(?:^|\s)[\d.,/+−-]+$/.test(text.slice(0, m.index).trimEnd())) return null;
+  if (language() === 'da' && m[1].includes(',')) return null;
   const n = Number(m[1].replace(/,/g, ''));
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 }

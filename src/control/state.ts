@@ -1,4 +1,4 @@
-import { t } from '../i18n';
+import { t, possessive } from '../i18n';
 import { MONEY_NOT_READY, readinessLine } from './readiness';
 import { feeCeiling } from './format';
 // Control-center state as pure functions over plain data, so the rules are
@@ -151,9 +151,9 @@ export function costToSend(
       const when = ago((opts.nowMs ?? Date.now()) - age * 1000, opts.nowMs ?? Date.now());
       return {
         msat: Math.max(quote.peer_msat, MIN_PAYMENT_MSAT) + (quote.max_routing_fee_msat ?? 0),
-        basis: quote.peer_stale
-          ? t('extraPriceFromAStaleTable', opts.name ?? t('extraTheir'), when, feeCeiling(quote.max_routing_fee_msat ?? 0))
-          : t('extraPriceUpdated', opts.name ?? t('extraTheir'), when, feeCeiling(quote.max_routing_fee_msat ?? 0)),
+        basis: opts.name === undefined
+          ? t('extraTheirPriceUpdated', when, feeCeiling(quote.max_routing_fee_msat ?? 0))
+          : t('extraPriceUpdated', possessive(opts.name), when, feeCeiling(quote.max_routing_fee_msat ?? 0)),
         estimate: quote.peer_stale,
       };
     }
@@ -224,13 +224,9 @@ const APPROVAL_OFF_REASONS = new Set(['seed_not_encrypted', 'seed_password_not_t
 export function undeliveredCopy(u: Undelivered): { title: string; body: string; detail: string } {
   const paid = `${sats(u.paid_msat)} ${satUnit(u.paid_msat)}`;
   return {
-    title: `Paid ${paid} · not delivered yet`,
-    body: u.retry
-      ? 'Do not send again. Retry delivery pays nothing new.'
-      : 'Do not send again — that could pay twice.',
-    detail: u.retry
-      ? 'Payment settled; message not delivered. Retry re-sends the proof already paid for. If more is due (message price or admission after a reconnect), it stops before paying and asks first with the price.'
-      : 'Payment settled; message not delivered. Check the pending result before sending anything else.',
+    title: t('undeliveredTitle', paid),
+    body: t(u.retry ? 'undeliveredRetryBody' : 'undeliveredStopBody'),
+    detail: t(u.retry ? 'undeliveredRetryDetail' : 'undeliveredStopDetail'),
   };
 }
 
@@ -238,13 +234,11 @@ export function undeliveredCopy(u: Undelivered): { title: string; body: string; 
 export function admissionCopy(a: AdmissionPrice): { body: string; detail: string; action: string } {
   const s = (m: number) => `${sats(m)} ${satUnit(m)}`;
   return {
-    body: a.quoted
-      ? `Needs up to ${s(a.total_msat)} more (admission + message + fees).`
-      : `Needs about ${s(a.total_msat)} more if admission is due again.`,
+    body: t(a.quoted ? 'admissionQuotedBody' : 'admissionEstimatedBody', s(a.total_msat)),
     detail: a.quoted
-      ? `Their price: ${s(a.admission_msat)} to be admitted again, then ${s(a.message_msat)} for this message. Plus up to ${s(a.max_routing_fee_msat ?? 0)} network fees (${s(a.total_msat)} in all). If still admitted, pays only the message and its fee.`
-      : `This message’s ${s(a.message_msat)}, and about ${s(a.admission_msat)} if admission is asked again. Plus up to ${s(a.max_routing_fee_msat ?? 0)} network fees (${s(a.total_msat)} in all). Node refuses before paying if the real price is higher.`,
-    action: `Approve up to ${s(a.total_msat)} and retry`,
+      ? t('admissionQuotedDetail', s(a.admission_msat), s(a.message_msat), s(a.max_routing_fee_msat ?? 0), s(a.total_msat))
+      : t('admissionEstimatedDetail', s(a.message_msat), s(a.admission_msat), s(a.max_routing_fee_msat ?? 0), s(a.total_msat)),
+    action: t('admissionAction', s(a.total_msat)),
   };
 }
 

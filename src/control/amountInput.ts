@@ -3,6 +3,7 @@
 // float multiplication, and nothing finer than one msat is ever rounded away.
 // An amount that cannot be exact is refused (null), never nudged.
 
+import { language, type Language } from '../i18n';
 import type { Denom } from './prefs';
 
 /** The host's bounds for a typed keysend or invoice amount (act.rs MIN/MAX_PAYMENT_MSAT). */
@@ -16,8 +17,14 @@ const PLACES: Record<Denom, number> = { sats: 3, btc: 11 };
 /** `21`, `0.5`, `.5`, `5.`: digits with at most one dot. Spaces and `_` are ignored. */
 const SHAPE = /^(\d*)(?:\.(\d*))?$/;
 
+/** Danish dot-grouped thousands must never silently become a fractional sat.
+ * A zero whole part is an unambiguous fraction; BTC keeps its full decimal syntax. */
+export const ambiguousThousands = (text: string, denom: Denom, locale: Language = language()): boolean =>
+  locale === 'da' && denom === 'sats' && /^0*[1-9]\d*(?:\.\d{3})+$/.test(text.replace(/[\s_]/g, ''));
+
 /** Exact msat for `text` read in `denom`, or null when empty, zero, too precise or too large. */
-export function parseAmount(text: string, denom: Denom): number | null {
+export function parseAmount(text: string, denom: Denom, locale: Language = language()): number | null {
+  if (ambiguousThousands(text, denom, locale)) return null;
   const m = SHAPE.exec(text.replace(/[\s_]/g, ''));
   if (!m) return null;
   const [, whole, frac = ''] = m;
@@ -32,10 +39,12 @@ export function parseAmount(text: string, denom: Denom): number | null {
 }
 
 /** The input text for an exact msat in `denom` (no grouping), so it parses back to the same msat. */
-export function amountText(msat: number, denom: Denom): string {
+export function amountText(msat: number, denom: Denom, locale: Language = language()): string {
   const places = PLACES[denom];
   const n = BigInt(Math.trunc(msat));
   const unit = 10n ** BigInt(places);
   const frac = (n % unit).toString().padStart(places, '0').replace(/0+$/, '');
-  return frac ? `${n / unit}.${frac}` : `${n / unit}`;
+  const text = frac ? `${n / unit}.${frac}` : `${n / unit}`;
+  // A fourth, zero-valued decimal disambiguates generated editable fractions.
+  return ambiguousThousands(text, denom, locale) ? `${text}0` : text;
 }
