@@ -53,14 +53,44 @@ idempotent; a confirmed abandonment has cleared that ID and remains released.
 #278's allow-list and fresh-operation/retry conditions remain intact; no new
 node `call_not_found` refusal mapping is inferred.
 
+## Recovery and owner repair follow-up
+
+Atlas confirmed that caller-side paid recovery stays refused while the original
+admission is open. The recovery card says “Your last call is still closing. End
+it, then call again.” End call uses `op_end_call` for the original admission;
+only confirmed closure offers Call again, with a fresh quote and explicit Ring.
+An uncertain or refused end cannot offer a successful redial.
+
+`op_list.unresolved_calls` exposes opaque index references, including acknowledged
+ones. The owner can ask `op_repair_call_index` to restore only an exact indexed
+record or matching durable pending snapshot. A valid repaired record then goes
+through ordinary `op_end_call`; repairing metadata does not close an admission.
+Its durable repair entry remains visible until host evidence confirms closure,
+including when ending is refused or unknown and after restart.
+If the host cannot prove the record's identity, generation and call mapping,
+it persists an acknowledgement and leaves every admission/payment fence and
+original file intact. A corrupt mapping is never reconstructed by guessing from
+history. The panel remains available for a later check after evidence is restored.
+
+A peer hangup/busy received during a fresh offer dispatch captures that exact
+operation before waiting on the money lock. The renderer queues the bound event
+until its offer receipt arrives. A reused wire ID retains the prior completed
+binding so delayed old signals cannot close its new admission.
+
+A node's capped-readmission refusal for a fresh or already-proven-unsent attempt
+persists `non_dispatch_proven` in the pending slot before it becomes resumable.
+Restoration respects that proof only with an Unpaid record and no payment or
+partial-payment evidence. A new dispatch clears the proof durably before POST.
+Legacy slots without proof still fail closed on nodes without abandonment.
+
 The renderer retains presentation totals only. The host owns admission,
 payment evidence, cleanup deduplication, and authorization. Meeting legs keep
 their existing renderer engine; shared host call guards still apply.
 
 ## Validation
 
-Verified on 2026-10-21: 1,013 app library tests and 12 FFI tests passed
-(one Touch ID test ignored); 1,765 Vitest tests across 98 files passed.
+Verified on 2026-10-21: 1,019 app library tests and 12 FFI tests passed
+(one Touch ID test ignored); 1,772 Vitest tests across 98 files passed.
 TypeScript, production build, authority, and `git diff --check` passed.
 
 Run headlessly, without `cargo fmt` or launching the app:

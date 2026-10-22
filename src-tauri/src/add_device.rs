@@ -8,6 +8,8 @@ use bitsov_app::{
     sas,
 };
 use zeroize::Zeroizing;
+#[path = "add_device/second.rs"]
+mod second;
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -16,6 +18,7 @@ pub enum Input {
     Mint,
     Poll,
     Approve { op_id: String },
+    Reject { op_id: String },
     Cancel,
 }
 #[derive(Serialize)]
@@ -24,16 +27,20 @@ pub enum View {
     Unsupported,
     Ready {
         owner: bool,
+        second_device: bool,
     },
     Ticket {
         uri: String,
+        second_device: bool,
         expires_at: i64,
         pending: Vec<Comparison>,
     },
     Done,
+    Rejected,
 }
 #[derive(Serialize)]
 pub struct Comparison {
+    can_approve: bool,
     op_id: String,
     name: String,
     words: [String; 4],
@@ -49,12 +56,13 @@ struct Ticket {
 }
 #[derive(Default)]
 pub struct Setup {
+    second: Option<second::Session>,
     ticket: Option<Ticket>,
     join: Option<Joining>,
 }
 
 impl Setup {
-    pub fn is_active(&self) -> bool { self.ticket.is_some() || self.join.is_some() }
+    pub fn is_active(&self) -> bool { self.ticket.is_some() || self.second.as_ref().is_some_and(second::Session::is_active) || self.join.is_some() }
 }
 
 fn refusal(status: u16) -> ActionError {
@@ -146,7 +154,7 @@ async fn owner(state: &NodeState) -> Result<Owner, ActionError> {
     if !state.remote_mode.load(Ordering::SeqCst) {
         return Err(refusal(403));
     }
-    let (blob, record) = local_key(&device_store(state)?)
+    let (blob, record) = local_key(state, &device_store(state)?)?
         .filter(|(_, r)| r.registered)
         .ok_or_else(|| refusal(403))?;
     let key_id = record
@@ -176,6 +184,7 @@ async fn ready(state: &NodeState) -> Result<View, ActionError> {
         return Ok(View::Unsupported);
     }
     Ok(View::Ready {
+        second_device: false,
         owner: owner(state).await.is_ok(),
     })
 }
@@ -207,6 +216,7 @@ async fn pending(state: &NodeState, owner: &Owner) -> Result<Vec<PendingDevice>,
 }
 fn ticket_view(t: &Ticket) -> View {
     View::Ticket {
+        second_device: false,
         uri: if expiry_deadline(t.expires_at) > now_unix() && t.pending.is_empty() {
             t.uri.to_string()
         } else {
@@ -218,6 +228,7 @@ fn ticket_view(t: &Ticket) -> View {
             .pending
             .iter()
             .map(|p| Comparison {
+                can_approve: true,
                 op_id: p.op_id.clone(),
                 name: p
                     .name
@@ -234,9 +245,14 @@ fn ticket_view(t: &Ticket) -> View {
 pub async fn run(state: &NodeState, input: Input) -> Result<View, ActionError> {
     let _connection = state.remote_recovery.lock().await;
     let mut setup = state.add_device.lock().await;
+    if setup.second.is_some() || node_offers(state, bitsov_app::second_device::CAPABILITY).await {
+        return second::run(state, &mut setup, input).await;
+    }
+    if matches!(input, Input::Reject { .. }) { return Err(invalid("This node does not support second-device rejection.")); }
     if matches!(input, Input::Cancel) {
         setup.ticket = None;
         return Ok(View::Ready {
+            second_device: false,
             owner: key_id(state).is_some(),
         });
     }
@@ -393,7 +409,7 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, ActionError> {
             setup.ticket = None;
             Ok(View::Done)
         }
-        Input::Status | Input::Cancel => unreachable!(),
+        Input::Status | Input::Cancel | Input::Reject { .. } => unreachable!(),
     }
 }
 
@@ -402,18 +418,20 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, ActionError> {
 pub enum JoinInput {
     Status,
     Start { claim_code: Zeroizing<String> },
+    StartSecond {},
     Poll,
     Cancel,
 }
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum JoinView {
-    Idle,
+    Idle { second_device: bool },
     Waiting {
+        second_device: bool,
         words: [&'static str; 4],
         expires_at: i64,
     },
-    Done,
+    Done { second_device: bool },
 }
 struct Joining {
     op_id: String,
@@ -422,10 +440,12 @@ struct Joining {
     words: [&'static str; 4],
     expires_at: i64,
     deadline: Instant,
+    second_device: bool,
 }
 impl Joining {
     fn view(&self) -> JoinView {
         JoinView::Waiting {
+            second_device: self.second_device,
             words: self.words,
             expires_at: expiry_deadline(self.expires_at),
         }
@@ -475,7 +495,7 @@ async fn bound_request(
         .await
         .map_err(|_| enrollment_lost(finalizing))?;
     if !(200..300).contains(&status) {
-        return Err(enrollment_refusal(status, finalizing));
+        return Err(enrollment_refusal(status, finalizing && body["sas_version"] != 2));
     }
     Ok(reply)
 }
@@ -495,6 +515,9 @@ pub(super) fn accept_enrollment_reply(
     bytes: &[u8],
     now: i64,
 ) -> Result<Enrollment, ActionError> {
+    accept_enrollment_version(state, store, record, bytes, now, 1)
+}
+fn accept_enrollment_version(state: &NodeState, store: &Path, record: &mut device::Record, bytes: &[u8], now: i64, version: u8) -> Result<Enrollment, ActionError> {
     // Decode only the cancellation handle first. Other fields may be missing,
     // malformed, or from a newer protocol; none may strand a created operation.
     #[derive(Deserialize)]
@@ -519,9 +542,9 @@ pub(super) fn accept_enrollment_reply(
     })?;
     if !canonical_hex(&pending.op_id, OP_ID_BYTES)
         || !canonical_hex(&pending.box_nonce, 16)
-        || pending.sas_version != 1
+        || pending.sas_version != version
         || !canonical_hex(&pending.key_id, 16)
-        || !valid_expiry(pending.expires_at, now, ENROLLMENT_TTL_SECS)
+        || !valid_expiry(pending.expires_at, now, if version == 2 { bitsov_app::second_device::TTL } else { ENROLLMENT_TTL_SECS })
     {
         return Err(invalid(
             "Invalid or expired device enrollment reply. Cancel pending setup before trying again.",
@@ -550,7 +573,44 @@ pub(super) fn accept_enrollment_reply(
     Ok(pending)
 }
 
+pub fn has_second_ticket(state: &NodeState) -> bool {
+    state.remote_descriptor.lock().unwrap().as_ref().is_some_and(|d| d.enrollment_commitment().is_some())
+}
+pub fn is_second_join(state: &NodeState) -> bool {
+    has_second_ticket(state)
+        && matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(s) if s.scopes.is_empty())
+}
+
+pub fn second_completion_pending(state: &NodeState) -> bool {
+    has_second_ticket(state) && !state.second_join_complete.load(Ordering::SeqCst)
+}
+
+/// Called while remote_recovery is held, from either enrollment or ordinary
+/// device-status polling. The renderer must never observe completion first.
+pub async fn complete_second_join(state: &NodeState) -> Result<(), ActionError> {
+    if !second_completion_pending(state) { return Ok(()); }
+    refresh_paired(state).await.map_err(|_| invalid("Device approved. Reconnect to refresh its access."))?;
+    if is_second_join(state) { return Err(invalid("The node has not granted this device access yet.")); }
+    let dir = state.pairing.lock().unwrap().as_ref().map(|c| c.data_dir.clone()).ok_or_else(|| refusal(403))?;
+    finish_auth(state, &dir).await;
+    if state.error.lock().unwrap().is_some() || !*state.ready.lock().unwrap() {
+        return Err(invalid("Device approved. Reconnect to finish setup."));
+    }
+    {
+        let mut descriptor = state.remote_descriptor.lock().unwrap();
+        let descriptor = descriptor.as_mut().ok_or_else(|| refusal(403))?;
+        remote_access::clear_enrollment_commitment(&dir, descriptor)
+            .map_err(|_| invalid("Device approved. Reconnect to finish setup."))?;
+    }
+    state.second_join_complete.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
 pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, ActionError> {
+    join_on_platform(state, input, std::env::consts::OS).await
+}
+
+pub(super) async fn join_on_platform(state: &NodeState, input: JoinInput, platform: &str) -> Result<JoinView, ActionError> {
     let _connection = state.remote_recovery.lock().await;
     let mut setup = state.add_device.lock().await;
     if !state.remote_mode.load(Ordering::SeqCst) {
@@ -560,12 +620,13 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
     if matches!(input, JoinInput::Cancel) {
         do_device_key_cancel(state).await?;
         setup.join = None;
-        return Ok(JoinView::Idle);
+        return Ok(JoinView::Idle { second_device: has_second_ticket(state) });
     }
     let view = do_device_key_status_local(state).await?;
     if view.state == device::DeviceState::Registered {
+        complete_second_join(state).await?;
         setup.join = None;
-        return Ok(JoinView::Done);
+        return Ok(JoinView::Done { second_device: state.second_join_complete.load(Ordering::SeqCst) || has_second_ticket(state) });
     }
     if let Some(j) = &setup.join {
         let same_record = device::load_record(&store).is_some_and(|r| {
@@ -589,17 +650,23 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
             "A previous enrollment is pending. Cancel it before starting a new comparison.",
         ));
     }
-    let JoinInput::Start { claim_code } = input else {
-        return Ok(JoinView::Idle);
+    let second_device = has_second_ticket(state);
+    let claim = match input {
+        JoinInput::StartSecond {} if is_second_join(state) => None,
+        JoinInput::Start { claim_code } if !second_device => Some(Zeroizing::new(sas::claim_commitment(&claim_code).map_err(invalid)?)),
+        JoinInput::StartSecond {} | JoinInput::Start { .. } => return Err(invalid("Use the enrollment method authorized by this pairing. Scan a new second-device ticket if needed.")),
+        _ => return Ok(JoinView::Idle { second_device }),
     };
-    let claim = Zeroizing::new(sas::claim_commitment(&claim_code).map_err(invalid)?);
-    drop(claim_code);
     if !device_available(state) {
         return Err(device_error(
             device_key::DeviceKeyError::BiometryUnavailable,
         ));
     }
-    let binding = device_binding(state).await?;
+    let binding = if second_device {
+        let node = state.node_id.lock().unwrap().clone().ok_or_else(|| refusal(403))?;
+        let client_id = match &*state.auth.lock().unwrap() { AuthMode::Paired(s) => s.client_id.clone(), _ => return Err(refusal(403)) };
+        DeviceBinding { node: bitsov_app::home_node::identity_fingerprint(&node), client_id, device_keys: vec![], owner_device_count: None, device_approvals: None }
+    } else { device_binding(state).await? };
     check_binding(state, &binding)?;
     if binding
         .device_approvals
@@ -608,12 +675,7 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
     {
         return Err(refusal(403));
     }
-    if cfg!(target_os = "android") && binding.owner_device_count.unwrap_or(0) == 0 {
-        return Err(invalid(
-            "Keep an enrolled Mac or another non-phone owner device before enrolling this phone.",
-        ));
-    }
-    let (blob, mut record) = match local_key(&store) {
+    let (blob, mut record) = match local_key(state, &store)? {
         Some(key) => key,
         None => {
             let policy = *state.device_policy.lock().unwrap();
@@ -631,11 +693,7 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
             (blob, record)
         }
     };
-    let name = if cfg!(target_os = "android") {
-        "BitSov app on Android"
-    } else {
-        "BitSov app on this Mac"
-    };
+    let name = device::registration_name(platform);
     let proof = device_sign(
         blob.clone(),
         device::registration_message(&binding.node, &binding.client_id, &record.public_key),
@@ -662,8 +720,8 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
         .clone()
         .ok_or_else(|| invalid("Reconnect to your node first."))?;
     let mut connection =
-        remote_access::BootstrapConnection::connect_device(&descriptor, &ctx.key, name)
-            .await
+        if second_device { remote_access::BootstrapConnection::connect_second_device(&descriptor, &ctx.key, name).await }
+            else { remote_access::BootstrapConnection::connect_device(&descriptor, &ctx.key, name).await }
             .map_err(|_| {
                 invalid("Could not start enrollment on your home node. Reconnect and try again.")
             })?;
@@ -675,11 +733,11 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
         &token,
         "/api/v1/pair/device-key",
         serde_json::json!({
-            "public_key":record.public_key, "name":name, "proof":proof, "sas_version":1,
+            "public_key":record.public_key, "name":name, "proof":proof, "sas_version":if second_device {2} else {1},
         }),
     )
     .await?;
-    let pending = accept_enrollment_reply(state, &store, &mut record, &bytes, now_unix())?;
+    let pending = accept_enrollment_version(state, &store, &mut record, &bytes, now_unix(), if second_device {2} else {1})?;
     let public: [u8; 65] = hex::decode(&record.public_key)
         .map_err(|_| invalid("Invalid device key."))?
         .try_into()
@@ -688,7 +746,9 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
         .map_err(|_| invalid("Invalid comparison nonce."))?
         .try_into()
         .map_err(|_| invalid("Invalid comparison nonce."))?;
-    let digest = sas::digest(&connection.binding, &public, &nonce, &claim);
+    let digest = if second_device {
+        sas::digest_v2(&connection.binding, &public, &nonce, &descriptor.enrollment_commitment().ok_or_else(|| invalid("Scan a second-device ticket first."))?)
+    } else { sas::digest(&connection.binding, &public, &nonce, claim.as_ref().unwrap()) };
     drop(claim);
     // Persist the operation BEFORE prompting, so a cancelled prompt or a lost
     // reply can be withdrawn. Neither the claim code nor SAS digest is persisted.
@@ -708,11 +768,12 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
         &token,
         &format!("/api/v1/pair/device-key/{}/finalize", pending.op_id),
         serde_json::json!({
-            "sas_version":1, "sas_digest":digest.to_hex().as_str(), "proof":proof,
+            "sas_version":if second_device {2} else {1}, "sas_digest":digest.to_hex().as_str(), "proof":proof,
         }),
     )
     .await?;
     let j = Joining {
+        second_device,
         op_id: pending.op_id,
         store,
         public_key: record.public_key,
@@ -729,6 +790,30 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn second_device_joining_view_preserves_clock_skew() {
+        let joining = Joining { op_id: "aa".repeat(12), store: PathBuf::new(),
+            public_key: String::new(), words: ["word";4], expires_at: 1000,
+            deadline: Instant::now(), second_device: true };
+        assert_eq!(serde_json::to_value(joining.view()).unwrap()["expires_at"], 1030);
+    }
+    #[test]
+    fn second_device_enrollment_accepts_bounded_clock_skew_and_preserves_deadline() {
+        let state = NodeState::default();
+        let dir = tempfile::tempdir().unwrap();
+        for (expiry, accepted) in [(0, false), (970, false), (971, true), (1000, true),
+            (1270, true), (1300, true), (1330, true), (1331, false)] {
+            let reply = serde_json::json!({"op_id":"aa".repeat(12),"key_id":"66".repeat(16),
+                "fingerprint":"fixture","expires_at":expiry,"sas_version":2,"box_nonce":"55".repeat(16)});
+            let mut record = device::Record::default();
+            let result = accept_enrollment_version(&state, dir.path(), &mut record,
+                &serde_json::to_vec(&reply).unwrap(), 1000, 2);
+            assert_eq!(result.is_ok(), accepted, "expiry={expiry}");
+            if accepted {
+                assert_eq!(record.pending.unwrap().expires_at_ms, ((expiry + 30) * 1000) as u64);
+            }
+        }
+    }
     #[test]
     fn renderer_expiry_preserves_the_host_clock_skew_allowance() {
         let now = now_unix();

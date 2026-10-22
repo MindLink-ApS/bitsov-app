@@ -155,12 +155,14 @@ export function Onboarding(props: {
       // Cancel, or a link edited meanwhile, saves nothing.
       if (!confirmed || preview() !== reviewed || remoteLink() !== reviewed.link) return;
     }
+    // Keep the reviewed ticket in this screen until connect succeeds. Native
+    // inbox receipts are take-once, so a retry must not depend on another tap.
     setImporting(true);
-    setRemoteLink('');
-    setPreview(null);
     try {
       if (!props.onImportRemote) throw new Error('Remote access import is unavailable.');
       const result = await props.onImportRemote(reviewed.link);
+      setRemoteLink('');
+      setPreview(null);
       setRemoteRevision(n => n + 1);
       setRemoteChoiceEdited(true);
       setSavedHostedBy(result.hosted_by ?? null);

@@ -503,7 +503,8 @@ export type OpView = {
   message_id: string | null;
 };
 /** Newest first, at most 100; `skipped` damaged records were left out. */
-export type OpList = { operations: OpView[]; skipped: number; has_more: boolean };
+export type UnresolvedCall = { index_id: string; acknowledged: boolean };
+export type OpList = { operations: OpView[]; skipped: number; has_more: boolean; unresolved_calls?: UnresolvedCall[] };
 
 /**
  * Retry delivery paid nothing new, and delivering a paid, undelivered message
@@ -548,6 +549,7 @@ export type DeviceState = 'unavailable' | 'none' | 'pending' | 'registered' | 'l
 export type DeviceView = {
   /** Node #301 SAS enrollment routes, detected without issuing a ticket. */
   delegation_supported?: boolean;
+  second_device?: boolean;
   owner_device_count?: number | null;
   /** This Mac has a Secure Enclave the app can use. */
   available: boolean;

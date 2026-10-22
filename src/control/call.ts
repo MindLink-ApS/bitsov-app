@@ -206,6 +206,8 @@ const CLOSE_RANK = { closed: 0, closing: 1, refused: 2, unknown: 3 } as const;
  */
 const peerEnd = (confirmed: string) => ({ record: false, confirmed }) as const;
 
+export const RECOVERY_CLOSING = 'Your last call is still closing. End it, then call again.';
+
 export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
   liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, offline: false,
@@ -603,7 +605,7 @@ export function createCallEngine(deps: CallDeps) {
         .catch((error): Outcome<CallReceipt> => ({ ok: false, error: asActionError(error) })).then(result => {
         const operationId = result.ok ? result.value.operation_id
           : result.error.operation_id;
-        if (kind === CALL_OFFER && operationId) {
+        if (kind === CALL_OFFER && operationId && (result.ok || !provenUnpaid(result.error.code))) {
           if (view.callId !== callId || !active()) closeAdmission(operationId, peer!, targetId!);
           else {
             const operations = admissionOps.get(callId!) ?? new Map<string, string>();
@@ -689,7 +691,8 @@ export function createCallEngine(deps: CallDeps) {
         admissions.add(id);
       } else {
         restartAnswerPending = false;
-        recoveryRefused(conn, r.error.message);
+        if (provenUnpaid(r.error.code)) own = own.filter((call) => call !== id);
+        recoveryRefused(conn, r.error.code === 'call_admission_open' ? RECOVERY_CLOSING : r.error.message);
       }
     } catch (error) {
       if (pc === conn) restartAnswerPending = false;

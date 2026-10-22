@@ -351,8 +351,14 @@ async fn connect_reaches_ready_and_replaces_a_ready_node_without_restart() {
     let (second, second_id, second_node) = connected_node(41).await;
     let mut proxy_address = None;
     for (link, expected) in [(first, first_id), (second, second_id)] {
+        *state.room_routing_policy.lock().unwrap() = Some(("ldk".into(), act::RoutingFeePolicy::default()));
+        *state.configured_network.lock().unwrap() = Some("regtest".into());
+        *state.last_remint.lock().unwrap() = Some(Instant::now());
         let result = remote_access_connect_at(app.handle(), &state, dir.path(), &link).await.unwrap();
         assert!(!result.restart_required);
+        assert!(state.room_routing_policy.lock().unwrap().is_none());
+        assert!(state.configured_network.lock().unwrap().is_none());
+        assert!(state.last_remint.lock().unwrap().is_none());
         let ready = tokio::time::timeout(Duration::from_secs(5), async {
             while !state.status_snapshot().ready { tokio::time::sleep(Duration::from_millis(10)).await; }
         }).await;
@@ -370,4 +376,53 @@ async fn connect_reaches_ready_and_replaces_a_ready_node_without_restart() {
     proxy.stop_and_wait().await;
     first_node.abort();
     second_node.abort();
+}
+
+#[tokio::test]
+async fn failed_import_replaces_surviving_proxy_and_finishes_auth() {
+    let app = app();
+    let state = app.state::<NodeState>();
+    let dir = tempfile::tempdir().unwrap();
+    let (old, old_id, old_node) = connected_node(42).await;
+    remote_access::import_pairing_link(dir.path(), &old).unwrap();
+    let descriptor = remote_access::load_persisted(dir.path()).unwrap().unwrap();
+    let store = dir.path().join(PAIRING_STORE_DIR);
+    let key = Arc::new(ClientKey::load_or_create(&store).unwrap());
+    let proxy = remote_access::start_proxy(&state.api_base, dir.path(), descriptor, key,
+        PAIRING_CLIENT_NAME, store, state.remote_proxy_auth.clone(), state.remote_retry.clone()).await.unwrap();
+    let addr = proxy.local_addr();
+    let mut idle = tokio::net::TcpStream::connect(addr).await.unwrap();
+    *state.remote_proxy.lock().unwrap() = Some(proxy);
+    state.remote_mode.store(true, Ordering::SeqCst);
+    // A previously ready connection must be hidden during failed-import teardown.
+    *state.ready.lock().unwrap() = true;
+    // A directory at the atomic-write staging path makes import fail without
+    // damaging the previous persisted descriptor.
+    let staging = dir.path().join(remote_access::REMOTE_CONFIG_DIR).join(format!("{}.tmp", remote_access::REMOTE_CONFIG_FILE));
+    std::fs::create_dir(&staging).unwrap();
+    let next = ticket_for("127.0.0.1:1".into(), false, 41);
+    let result = remote_access_connect_at(app.handle(), &state, dir.path(), &next).await;
+    assert!(!state.status_snapshot().ready, "failed import must hide readiness before reconnecting");
+    std::fs::remove_dir(staging).unwrap();
+    assert!(result.is_err());
+    assert_eq!(remote_access::load_persisted(dir.path()).unwrap().unwrap().node_id(), old_id);
+    let recovered = tokio::time::timeout(Duration::from_secs(5), async {
+        while !state.status_snapshot().ready { tokio::time::sleep(Duration::from_millis(10)).await; }
+    }).await;
+    assert!(recovered.is_ok(), "failed import must resume the cancelled authentication");
+    assert_eq!(state.status_snapshot().node_id.as_deref(), Some(old_id.as_str()));
+    let mut byte = [0; 1];
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(1), idle.read(&mut byte)).await.unwrap(), Ok(0) | Err(_)));
+    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
+    assert_eq!(proxy.local_addr(), addr);
+    proxy.stop_and_wait().await;
+    old_node.abort();
+}
+
+#[tokio::test]
+async fn connect_reports_the_sealed_window_rejection() {
+    let app = app();
+    let window = tauri::WebviewWindowBuilder::new(&app, "assistant", Default::default()).build().unwrap();
+    let error = remote_access_connect(window, app.handle().clone(), app.state::<NodeState>(), "".into()).await.unwrap_err();
+    assert_eq!(error.detail, "this command is only available to the main window");
 }

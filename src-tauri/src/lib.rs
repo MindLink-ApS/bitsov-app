@@ -27,6 +27,7 @@ mod ios_install;
 pub mod remote_access;
 pub mod sas;
 pub mod delegation;
+pub mod second_device;
 
 pub mod connection_retry;
 

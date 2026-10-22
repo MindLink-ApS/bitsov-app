@@ -7,7 +7,7 @@ pub mod device_key;
 pub mod client_keychain;
 #[cfg(target_os = "ios")]
 pub mod pairing_link;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod home_keychain;
 #[cfg(target_os = "macos")]
 pub mod model_launch;

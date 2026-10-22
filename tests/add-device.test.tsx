@@ -168,3 +168,54 @@ it('the new device sees the same steps: the claim code next, then compare, then 
   expect(steps()).toEqual(['done', 'done', 'done']);
   expect(root.textContent).toContain('Device added');
 });
+
+it('second-device start never renders or sends a claim code', async () => {
+  const calls: JoinInput[] = [];
+  const root = mount(() => <JoinDevice api={async input => {
+    calls.push({...input});
+    return input.action === 'start_second' ? {state:'waiting', words, expires_at:Date.now()/1000+300} : {state:'idle', second_device:true};
+  }} />);
+  await flush();
+  expect(root.querySelector('input')).toBeNull();
+  expect(root.textContent).not.toMatch(/claim code|sticker|claim-code/);
+  await click(root, 'Show comparison words');
+  expect(calls[calls.length - 1]).toEqual({action:'start_second'});
+  expect(root.querySelectorAll('[data-pair-word]').length).toBe(4);
+  expect(root.textContent).toContain('Approve on your other device');
+  expect(root.textContent).not.toContain('owner console');
+});
+
+it('never flashes claim input while second-device status is loading', async () => {
+  let resolve!: (v: any) => void;
+  const root = mount(() => <JoinDevice api={() => new Promise(r => { resolve = r; })} />);
+  expect(root.querySelector('input')).toBeNull();
+  resolve({state:'idle', second_device:true}); await flush();
+  expect(root.querySelector('input')).toBeNull();
+});
+it('second-device owner hides claim instructions and sends a signed rejection action', async () => {
+  const calls: AddInput[] = [];
+  const root = mount(() => <AddDevice mobile api={async input => {
+    calls.push(input);
+    if (input.action === 'reject') return {state:'rejected'};
+    return {state:'ticket',second_device:true,uri:'',expires_at:Date.now()/1000+300,pending:[{op_id:'aa',name:'Phone',words,expires_at:Date.now()/1000+300,can_approve:true}]};
+  }} />); await flush();
+  expect(root.textContent).not.toMatch(/claim code|claim-code|sticker/);
+  await click(root, 'Words differ');
+  expect(calls[calls.length-1]).toEqual({action:'reject',op_id:'aa'});
+  expect(root.textContent).toContain('Stopped. Nothing was added.');
+});
+it('another owner’s QR leaves Approve disabled with its reason', async () => {
+  const root = mount(() => <AddDevice api={async () => ({state:'ticket',second_device:true,uri:'',expires_at:0,pending:[{op_id:'aa',name:'Phone',words,expires_at:Date.now()/1000+300,can_approve:false}]})} />);
+  await flush();
+  const approve = [...root.querySelectorAll('button')].find(b => b.textContent?.includes('Approve with'))!;
+  expect(approve.disabled).toBe(true);
+  expect(root.textContent).toContain('Approve on the device that showed the QR.');
+});
+it.each(['waiting','done'] as const)('reopening a second-device join at %s never restores claim instructions', async state => {
+  const root = mount(() => <JoinDevice api={async () => state === 'waiting'
+    ? {state,second_device:true,words,expires_at:Date.now()/1000+300}
+    : {state,second_device:true}} />);
+  await flush();
+  expect(root.textContent).not.toMatch(/claim code|claim-code|sticker/);
+  expect(root.textContent).toContain('Prepare comparison words');
+});
