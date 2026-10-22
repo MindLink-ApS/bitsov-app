@@ -307,7 +307,7 @@ fn checked_approval(view: &Value, client: &str, displayed: &str) -> Result<Strin
     }
     // Renderer approvalReason / termLines, without petnames. Both use UTC for
     // expiry so locale and timezone differences cannot change the prompt.
-    let mut lines = match terms.request {
+    let lines = match terms.request {
         ApprovalRequest::BreakerReset {} => breaker_lines(view)?,
         ApprovalRequest::SpendGrant {
             budget_msat,
@@ -345,11 +345,24 @@ fn checked_approval(view: &Value, client: &str, displayed: &str) -> Result<Strin
             lines
         }
     };
-    lines.push(format!(
-        "Requested by app {}",
+    let attribution = format!(
+        " · Requested by app {}",
         short_key(&terms.client_pubkey)
-    ));
-    Ok(lines.join(" · "))
+    );
+    let mut details = lines.join(" · ");
+    // Android takes 300 UTF-16 units. Reserve the entire attribution, and
+    // shorten only the variable terms; never split a Unicode scalar value.
+    let available = 300 - attribution.encode_utf16().count();
+    if details.encode_utf16().count() > available {
+        let mut remaining = available - 1; // ellipsis
+        details = details.chars().take_while(|c| {
+            if c.len_utf16() > remaining { return false; }
+            remaining -= c.len_utf16();
+            true
+        }).collect();
+        details.push('…');
+    }
+    Ok(format!("{details}{attribution}"))
 }
 
 fn breaker_lines(view: &Value) -> Result<Vec<String>, ActionError> {
@@ -408,20 +421,9 @@ fn short_key(key: &str) -> String {
     }
 }
 // Display only; the node-owned approval_message is checked and signed verbatim.
-// Match ownerApproval.ts in every language: U+202F grouping and decimal dot.
+// Match ownerApproval.ts in every language: grouped whole sats or integer msat.
 fn sats(msat: u64) -> String {
-    let whole = (msat / 1000).to_string();
-    let mut value = String::new();
-    for (i, c) in whole.chars().enumerate() {
-        if i > 0 && (whole.len() - i) % 3 == 0 {
-            value.push('\u{202f}');
-        }
-        value.push(c);
-    }
-    if msat % 1000 != 0 {
-        value.push_str(format!(".{:03}", msat % 1000).trim_end_matches('0'));
-    }
-    format!("{value} {}", if msat == 1000 { "sat" } else { "sats" })
+    bitsov_app::format::grouped_amount(msat)
 }
 fn span(secs: i64) -> String {
     if secs % 3600 == 0 {

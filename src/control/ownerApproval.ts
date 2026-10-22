@@ -131,12 +131,11 @@ export type ApprovalErrorCode = (typeof APPROVAL_ERROR_CODES)[number];
 
 // Display only: never build or rewrite the node's signed approval_message.
 // Match owner_approval.rs exactly in every app language: U+202F grouping,
-// decimal dot, and up to three fractional digits from the integer msat.
+// whole sats or integer msat, never ambiguous decimal sats.
 const sats = (msat: number) => {
-  const whole = Math.floor(msat / 1000).toString().replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f');
-  const remainder = msat % 1000;
-  const fraction = remainder ? `.${remainder.toString().padStart(3, '0').replace(/0+$/, '')}` : '';
-  return `${whole}${fraction} ${msat === 1000 ? 'sat' : 'sats'}`;
+  const fractional = msat % 1000 !== 0;
+  const value = (fractional ? msat : msat / 1000).toString().replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f');
+  return `${value} ${fractional ? 'msat' : msat === 1000 ? 'sat' : 'sats'}`;
 };
 const span = (secs: number) =>
   secs % 3600 === 0 ? `${secs / 3600} h` : secs % 60 === 0 ? `${secs / 60} min` : `${secs} s`;
@@ -192,9 +191,21 @@ export function termLines(view: ApprovalView, nameOf?: (id: string) => string | 
   ];
 }
 
-/** The Touch ID reason: the terms in one line, plus the requesting app and expiry. */
+/** The biometric reason: terms plus attribution, within Android's 300 UTF-16 units. */
 export function approvalReason(view: ApprovalView): string {
-  return `${termLines(view).join(' · ')} · Requested by app ${shortKey(view.client_pubkey)}`;
+  const attribution = ` · Requested by app ${shortKey(view.client_pubkey)}`;
+  let details = termLines(view).join(' · ');
+  const available = 300 - attribution.length;
+  if (details.length > available) {
+    let shortened = '';
+    // Iterate code points so a cut never leaves half of a surrogate pair.
+    for (const c of details) {
+      if (shortened.length + c.length > available - 1) break;
+      shortened += c;
+    }
+    details = `${shortened}…`;
+  }
+  return `${details}${attribution}`;
 }
 
 /** A breaker_reset view's snapshot (ApprovalView.breaker_reset); null when absent or malformed. */

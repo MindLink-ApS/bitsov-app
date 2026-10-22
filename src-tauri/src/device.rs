@@ -12,7 +12,7 @@
 //! Nothing here holds authority on its own. The blob signs nothing without
 //! the owner's finger, and a signature is only the terms it covers.
 
-use bitsov_app::format::amount;
+use bitsov_app::format::grouped_amount;
 #[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -255,8 +255,8 @@ pub fn intent_message(node: &str, client_id: &str, i: &Intent) -> String {
 pub fn intent_reason(contact: &str, budget_msat: u64, per_act_max_msat: u64) -> String {
     format!(
         "approve paying up to {} per day, at most {} per message, to {contact}",
-        amount(budget_msat),
-        amount(per_act_max_msat)
+        grouped_amount(budget_msat),
+        grouped_amount(per_act_max_msat)
     )
 }
 
@@ -461,13 +461,15 @@ mod tests {
 
     #[test]
     fn the_dialog_names_the_contact_by_key_and_both_amounts() {
-        assert_eq!(intent_reason("Maya", 200_000, 21_187), "approve paying up to 200 sats per day, at most 21187 msat per message, to Maya");
+        assert_eq!(intent_reason("Maya", 200_000, 21_187), "approve paying up to 200 sats per day, at most 21\u{202f}187 msat per message, to Maya");
         assert_eq!(contact_key(PEER), "node aaaaaaaa…aaaaaaaa");
         assert_eq!(intent_reason(&contact_key(PEER), 200_000, 2_000), "approve paying up to 200 sats per day, at most 2 sats per message, to node aaaaaaaa…aaaaaaaa");
         // Built from the signed intent alone: no label, node-side or local, can reach it.
         let peer = format!("AB12CD34{}EF56AB78", "0".repeat(48));
         let intent = Intent::contact("k1", &peer, 200_000, 2_000, 5).unwrap();
         assert_eq!(contact_intent_reason(&intent), "approve paying up to 200 sats per day, at most 2 sats per message, to node ab12cd34…ef56ab78");
+        let large = Intent::contact("k1", &peer, 1_234_567_000, 1_000_001, 5).unwrap();
+        assert_eq!(contact_intent_reason(&large), "approve paying up to 1\u{202f}234\u{202f}567 sats per day, at most 1\u{202f}000\u{202f}001 msat per message, to node ab12cd34…ef56ab78");
         assert_eq!(default_per_act(Some(2_000), 200_000), 2_000);
         assert_eq!(default_per_act(None, 200_000), 10_000);
         assert_eq!(default_per_act(Some(500_000), 200_000), 200_000);

@@ -6,3 +6,18 @@ pub fn amount(msat: u64) -> String {
     if msat.is_multiple_of(1000) { format!("{} sats", msat / 1000) }
     else { format!("{msat} msat") }
 }
+
+/// Native approval prompts use the same locale-independent U+202F grouping
+/// as the renderer, retaining integer msat for every fractional sat amount.
+pub fn grouped_amount(msat: u64) -> String {
+    let text = amount(msat);
+    let (digits, unit) = text.split_once(' ').expect("amount has a unit");
+    let mut grouped = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            grouped.push('\u{202f}');
+        }
+        grouped.push(c);
+    }
+    format!("{grouped} {unit}")
+}
