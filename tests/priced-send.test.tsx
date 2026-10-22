@@ -161,7 +161,7 @@ it.each(['No route or channel to this peer yet.', 'Peer offline.', 'Quote unavai
   expect($<HTMLButtonElement>('[data-send]').disabled).toBe(true);
 });
 
-it.each([['da-DK', '9.75 sats'], ['en-US', '9.75 sats']])('uses exact locale-safe units under Send in %s', async (locale, price) => {
+it.each([['da-DK', '9,75 sats'], ['en-US', '9.75 sats']])('uses exact locale-safe units under Send in %s', async (locale, price) => {
   vi.spyOn(navigator, 'language', 'get').mockReturnValue(locale);
   await open(sourceForSend());
   await vi.waitFor(() => expect(line()).toBe(locale.startsWith('da') ? `højst ${price} · inklusive maksimalt routinggebyr` : `up to ${price} · includes max routing fee`));
@@ -173,7 +173,7 @@ it.each(['chain_unavailable', 'not_synced'])('keeps Send disabled with the peer 
   const source = sourceForSend();
   source.priceQuote = async () => { throw { code: 'peer_not_ready', reason, message: 'Peer unavailable' }; };
   await open(source);
-  await vi.waitFor(() => expect(line()).toBe("Maya's node isn't ready to receive yet (its chain connection is down)"));
+  await vi.waitFor(() => expect(line()).toBe("Maya’s node isn't ready to receive yet (its chain connection is down)"));
   expect($<HTMLButtonElement>('[data-send]').disabled).toBe(true);
   enter(); expect(source.send).not.toHaveBeenCalled();
 });
@@ -181,7 +181,7 @@ it('preserves peer readiness when the host embeds it in the conversation quote',
   const source = sourceForSend();
   source.priceQuote = async () => ({ ...quote, send_unavailable: 'peer_not_ready:chain_unavailable' });
   await open(source);
-  await vi.waitFor(() => expect(line()).toBe("Maya's node isn't ready to receive yet (its chain connection is down)"));
+  await vi.waitFor(() => expect(line()).toBe("Maya’s node isn't ready to receive yet (its chain connection is down)"));
   expect($<HTMLButtonElement>('[data-send]').disabled).toBe(true);
 });
 it('preserves a first-contact readiness refusal under Send and recovers on retry', async () => {
@@ -190,7 +190,7 @@ it('preserves a first-contact readiness refusal under Send and recovers on retry
   source.budgetStatus = async () => ({ ...await read(), autopay: { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 100000, ceiling_msat: 500000 }, rows: [] });
   source.firstContactQuote = async () => { throw { code: 'peer_not_ready', reason: 'not_synced' }; };
   await open(source);
-  await vi.waitFor(() => expect(line()).toBe("Maya's node isn't ready to receive yet (its chain connection is down)"));
+  await vi.waitFor(() => expect(line()).toBe("Maya’s node isn't ready to receive yet (its chain connection is down)"));
   expect($<HTMLButtonElement>('[data-send]').disabled).toBe(true);
   source.firstContactQuote = async (recipient) => ({ recipient, admission_msat: 1000, message_msat: 2000, max_routing_fee_msat: 10000, total_msat: 13000, expires_at: Math.floor(Date.now() / 1000) + 60 });
   $<HTMLButtonElement>('[data-price-retry]').click();
