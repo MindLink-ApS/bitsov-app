@@ -1,12 +1,15 @@
 import { isTauri } from '@tauri-apps/api/core';
 import { createApprovalNotifications } from './ownerApprovalNotification';
 import { createEffect, createSignal, createUniqueId, onCleanup, onMount, Show, untrack } from 'solid-js';
-import { t } from '../i18n';
-import { approvalReason, secondsLeft, shortKey, type ApprovalView } from './ownerApproval';
+import { language, t } from '../i18n';
+import { approvalReason, secondsLeft, type ApprovalView } from './ownerApproval';
 import { approveOwnerRequest, type OwnerApprovalsProps } from './OwnerApprovals';
 import { onEscape } from './escapeStack';
 
 type Props = OwnerApprovalsProps & { memory: NonNullable<OwnerApprovalsProps['memory']>; blocked?: boolean; onNotificationReview?: () => void };
+
+const hasOtherModal = () => [...document.querySelectorAll('dialog[open], [aria-modal="true"]')]
+  .some(el => !el.matches('[data-owner-sheet-scrim]') && !el.closest('[data-owner-sheet-scrim]'));
 
 /** Shell-owned queue: a dismissal defers presentation, never removes a node request. */
 export function OwnerApprovalSheets(props: Props) {
@@ -27,19 +30,26 @@ export function OwnerApprovalSheets(props: Props) {
   });
   // Other flows own their current sheet. Queue arrivals until it closes.
   onMount(() => {
-    const inspect = () => setOtherModal([...document.querySelectorAll('dialog[open], [aria-modal="true"]')]
-      .some(el => !el.matches('[data-owner-sheet-scrim]') && !el.closest('[data-owner-sheet-scrim]')));
+    const inspect = () => setOtherModal(hasOtherModal());
     const observer = new MutationObserver(inspect);
     observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['open', 'aria-modal'] });
     inspect(); onCleanup(() => observer.disconnect());
   });
   const restoreFocus = () => queueMicrotask(() => {
-    if (active()) return;
+    if (active() || hasOtherModal()) return;
     if (returnFocus?.isConnected) returnFocus.focus();
     returnFocus = null;
   });
-  const dismiss = () => { props.memory.setReview(null); setActive(null); restoreFocus(); };
+  const dismiss = () => {
+    if (props.memory.busy() !== null) return;
+    props.memory.setReview(null); setActive(null); restoreFocus();
+  };
   onCleanup(restoreFocus);
+  createEffect(() => {
+    if (!notice()) return;
+    const timer = setTimeout(() => setNotice(''), 5_000);
+    onCleanup(() => clearTimeout(timer));
+  });
   createEffect(() => {
     const current = active();
     const live = pending();
@@ -50,6 +60,7 @@ export function OwnerApprovalSheets(props: Props) {
         && !error && props.memory.busy() === null) {
       presented.add(selected.op_id);
       untrack(() => {
+        setNotice('');
         returnFocus ??= props.memory.reviewOpener ?? document.activeElement as HTMLElement | null;
         props.memory.reviewOpener = null;
         setActive(selected);
@@ -58,9 +69,9 @@ export function OwnerApprovalSheets(props: Props) {
     }
     if (current) {
       if (props.memory.busy() === current.op_id) return;
-      if (props.memory.said()[current.op_id]?.ok) {
-        setNotice(props.memory.said()[current.op_id].text); dismiss();
-      } else if (!live.some(v => v.op_id === current.op_id)) {
+      // Keep the result with its request until the owner dismisses it.
+      if (props.memory.said()[current.op_id]) return;
+      if (!live.some(v => v.op_id === current.op_id)) {
         setNotice(error || t(secondsLeft(current, props.now) === 0 ? 'ownerApprovalExpired' : 'ownerApprovalGone'));
         dismiss();
       }
@@ -71,7 +82,7 @@ export function OwnerApprovalSheets(props: Props) {
     if (next) {
       presented.add(next.op_id);
       untrack(() => {
-        if (!returnFocus) setNotice('');
+        setNotice('');
         returnFocus ??= props.memory.reviewOpener ?? document.activeElement as HTMLElement | null;
         props.memory.reviewOpener = null;
         setActive(next);
@@ -80,24 +91,28 @@ export function OwnerApprovalSheets(props: Props) {
   });
   return <>
     <Show when={notice() && !active()}><p class="owner-sheet-status" role="status" data-owner-sheet-status>{notice()}</p></Show>
-    <Show when={active()} keyed>{v => <OwnerApprovalSheet view={v} count={pending().filter(item => item.op_id === v.op_id || !presented.has(item.op_id)).length}
+    <Show when={!props.blocked && !otherModal()}>
+    <Show when={active()} keyed>{v => <OwnerApprovalSheet view={v} count={pending().length}
       memory={props.memory} now={props.now} approvals={props.approvals} approve={props.approve}
-      recheck={props.recheck} onDismiss={dismiss} notice={notice()} />}</Show>
+      recheck={props.recheck} onDismiss={dismiss} />}</Show>
+    </Show>
   </>;
 }
 
-function OwnerApprovalSheet(props: Props & { view: ApprovalView; count: number; notice: string; onDismiss: () => void }) {
+function OwnerApprovalSheet(props: Props & { view: ApprovalView; count: number; onDismiss: () => void }) {
   const title = createUniqueId();
   let scrim!: HTMLDialogElement;
   let sheet!: HTMLDivElement;
   let disposed = false;
   const busy = () => props.memory.busy() !== null;
   const outcome = () => props.memory.said()[props.view.op_id];
+  const waiting = () => props.approvals.some(v => v.op_id === props.view.op_id && v.status === 'pending' && secondsLeft(v, props.now) > 0);
+  const dismiss = () => { if (!busy()) props.onDismiss(); };
   onMount(() => {
     scrim.showModal(); sheet.focus();
-    const keepFocus = (e: FocusEvent) => { if (!sheet.contains(e.target as Node)) sheet.focus(); };
+    const keepFocus = (e: FocusEvent) => { if (!hasOtherModal() && !sheet.contains(e.target as Node)) sheet.focus(); };
     document.addEventListener('focusin', keepFocus);
-    onCleanup(onEscape(props.onDismiss));
+    onCleanup(onEscape(dismiss));
     onCleanup(() => {
       document.removeEventListener('focusin', keepFocus);
       // The close event can be queued by WebKit; do not let it dismiss the next sheet.
@@ -106,8 +121,12 @@ function OwnerApprovalSheet(props: Props & { view: ApprovalView; count: number; 
     });
   });
   return <dialog ref={scrim} class="owner-sheet-scrim" data-owner-sheet-scrim aria-labelledby={title}
-    onCancel={e => { e.preventDefault(); props.onDismiss(); }} onClose={() => { if (!disposed) props.onDismiss(); }}
-    onClick={e => { if (e.target === e.currentTarget) props.onDismiss(); }}>
+    onCancel={e => { e.preventDefault(); dismiss(); }} onClose={() => {
+      if (disposed) return;
+      if (busy()) { if (!scrim.open && !hasOtherModal()) scrim.showModal(); }
+      else dismiss();
+    }}
+    onClick={e => { if (e.target === e.currentTarget) dismiss(); }}>
     <div ref={sheet} class="owner-approval-sheet" tabindex="-1" data-owner-approval-sheet={props.view.op_id}
       onKeyDown={e => {
         if (e.key !== 'Tab') return;
@@ -116,20 +135,20 @@ function OwnerApprovalSheet(props: Props & { view: ApprovalView; count: number; 
         if (e.shiftKey && (document.activeElement === first || document.activeElement === sheet)) { e.preventDefault(); last?.focus(); }
         else if (!e.shiftKey && (document.activeElement === last || document.activeElement === sheet)) { e.preventDefault(); first?.focus(); }
       }}>
-      <Show when={props.notice}><p class="hint" role="status" data-owner-sheet-status>{props.notice}</p></Show>
-      <Show when={props.count > 1}><p class="hint" data-owner-approval-queue>{t('ownerApprovalQueue', props.count)}</p></Show>
+      <Show when={!outcome()?.ok && props.count > 1}><p class="hint" data-owner-approval-queue>{t('ownerApprovalQueue', props.count)}</p></Show>
       <h2 id={title}>{t('ownerApprovalTitle')}</h2>
       {/* The host reason is intentionally verbatim, including its language and U+202F amounts. */}
       <p class="owner-sheet-terms" data-owner-sheet-terms>{approvalReason(props.view)}</p>
-      <p class="hint">{t('ownerApprovalRequester', shortKey(props.view.client_pubkey))}</p>
+      <Show when={language() === 'da'}><p class="hint">{t('ownerApprovalTermsLanguage')}</p></Show>
       <details class="quiet-detail"><summary>{t('ownerApprovalSignedMessage')}</summary>
         <pre class="approval-message">{props.view.approval_message}</pre>
       </details>
       <Show when={outcome()}>{s => <p role={s().ok ? 'status' : 'alert'} class={s().ok ? 'ok-note' : 'err-note'}>{s().text}</p>}</Show>
-      <button type="button" class="primary money" data-owner-sheet-approve disabled={busy()}
-        onClick={() => void approveOwnerRequest(props, props.memory, props.view)}>{t(busy() ? 'ownerApprovalApproving' : 'ownerApprovalApprove')}</button>
-      <button type="button" class="soft" data-owner-sheet-dismiss onClick={props.onDismiss}>{t('firstSpendNotNow')}</button>
-      <p class="hint">{t('ownerApprovalDefer')}</p>
+      <Show when={!outcome()?.ok}><button type="button" class="primary money" data-owner-sheet-approve disabled={busy() || !waiting()}
+        onClick={() => void approveOwnerRequest(props, props.memory, props.view)}>{t(busy() ? 'ownerApprovalApproving' : 'ownerApprovalApprove')}</button></Show>
+      <button type="button" class="soft" data-owner-sheet-dismiss disabled={busy()} onClick={dismiss}>{t(outcome() ? 'ownerApprovalDismiss' : 'firstSpendNotNow')}</button>
+      <Show when={busy()}><p class="hint" role="status">{t('ownerApprovalApproving')}</p></Show>
+      <Show when={!busy() && !outcome()}><p class="hint">{t('ownerApprovalDefer')}</p></Show>
     </div>
   </dialog>;
 }

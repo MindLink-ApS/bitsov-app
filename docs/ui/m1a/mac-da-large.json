@@ -9,28 +9,28 @@
       "tag": "DIV",
       "rect": {
         "x": 96,
-        "y": 44,
+        "y": 63,
         "width": 1088,
-        "height": 712,
-        "top": 44,
+        "height": 674,
+        "top": 63,
         "right": 1184,
-        "bottom": 756,
+        "bottom": 737,
         "left": 96
       },
-      "client": 710,
-      "scroll": 710,
+      "client": 672,
+      "scroll": 672,
       "font": "28px"
     },
     {
       "tag": "BUTTON",
       "rect": {
         "x": 117,
-        "y": 459,
+        "y": 440,
         "width": 1046,
         "height": 88,
-        "top": 459,
+        "top": 440,
         "right": 1163,
-        "bottom": 547,
+        "bottom": 528,
         "left": 117
       },
       "client": 88,
@@ -41,12 +41,12 @@
       "tag": "BUTTON",
       "rect": {
         "x": 117,
-        "y": 559,
+        "y": 540,
         "width": 1046,
         "height": 88,
-        "top": 559,
+        "top": 540,
         "right": 1163,
-        "bottom": 647,
+        "bottom": 628,
         "left": 117
       },
       "client": 86,
@@ -54,5 +54,5 @@
       "font": "25px"
     }
   ],
-  "text": "1 af 2Anmodning om godkendelseLet this app spend · Budget: up to 2 000 sats · Each payment: up to 10 sats · For: 10 min · To: any contact, within the budget · Requested by app cdcdcd…cdcdcdAnmodet af app cdcdcd…cdcdcd. Din node oplyser ikke appens navn; sammenlign med den app, der spurgte.Den præcise besked, din Mac signererbitsov-approval-v1\npreview=preview-aGodkend med Touch IDIkke nuIkke nu giver ingen tilladelse. Du kan åbne anmodningen igen i Indstillinger → Node."
+  "text": "1 af 2Anmodning om godkendelseLet this app spend · Budget: up to 2 000 sats · Each payment: up to 10 sats · For: 10 min · To: any contact, within the budget · Requested by app cdcdcd…cdcdcdVilkårene vises på engelsk, præcis som din Mac signerer dem.Den præcise besked, din Mac signererbitsov-approval-v1\npreview=preview-aGodkend med Touch IDIkke nuIkke nu giver ingen tilladelse. Du kan åbne anmodningen igen i Indstillinger → Node."
 }

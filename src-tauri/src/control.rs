@@ -1225,7 +1225,8 @@ mod tests {
     fn overview_allowlists_reported_networks() {
         for (reported, want) in [("bitcoin", Some("mainnet")), ("mainnet", Some("mainnet")),
             ("testnet", Some("testnet")), ("signet", Some("signet")), ("regtest", Some("regtest")),
-            ("future-network", None), ("", None)] {
+            ("future-network", None), ("", None), ("Bitcoin", None), ("SIGNET", None),
+            (" signet", None), ("signet ", None), ("\tsignet\n", None), ("signet\u{00a0}", None)] {
             let status = serde_json::from_value(serde_json::json!({
                 "status":"ok", "node_id":"remote", "network":reported
             })).unwrap();

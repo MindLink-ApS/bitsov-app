@@ -1,6 +1,7 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isPermissionGranted, onAction, registerActionTypes, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { t } from '../i18n';
+import { safeApprovalText } from './ownerApproval';
 
 // Never put request data (even the op id) in the OS payload. IDs are process-local.
 let nextNotificationId = 1;
@@ -36,12 +37,12 @@ export function createApprovalNotifications(review: (id: string) => void) {
       }
       if (!permitted || !live(id)) return;
       // The locked macOS backend only waits for body clicks when an action exists.
-      await registerActionTypes([{ id: 'bitsov-owner-approval', actions: [{ id: 'review', title: t('ownerApprovalReview') }] }]);
+      await registerActionTypes([{ id: 'bitsov-owner-approval', actions: [{ id: 'review', title: safeApprovalText(t('ownerApprovalReview')) }] }]);
       if (!live(id) || await window.isFocused()) return;
       const notificationId = nextNotificationId++;
       requests.set(notificationId, id);
       // Only static, localized text. No names, amounts, memo, trip codes or signed bytes.
-      sendNotification({ id: notificationId, title: 'BitSov', actionTypeId: 'bitsov-owner-approval', body: t('ownerApprovalNotification') });
+      sendNotification({ id: notificationId, title: safeApprovalText('BitSov'), actionTypeId: 'bitsov-owner-approval', body: safeApprovalText(t('ownerApprovalNotification')) });
     } catch { /* Permission/native failures must never interrupt owner approval. */ }
   }
   return {

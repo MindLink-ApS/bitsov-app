@@ -436,7 +436,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
     const av = avatar();
     return {
       node_id: mine()?.node_id ?? '0'.repeat(64),
-      network: mine()?.network ?? 'regtest',
+      network: mine()?.network ?? 'unknown',
       endpoint: mine()?.endpoint ?? 'local',
       reach: mine()?.reach ?? 'public',
       seq: mine()?.seq ?? 0,

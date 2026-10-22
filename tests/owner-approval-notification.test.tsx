@@ -1,10 +1,11 @@
 import { createSignal } from 'solid-js';
 import { render } from 'solid-js/web';
 import { OwnerApprovalSheets } from '../src/control/OwnerApprovalSheet';
-import { approvalMemory } from '../src/control/OwnerApprovals';
+import { approvalMemory, approveOwnerRequest } from '../src/control/OwnerApprovals';
 import type { ApprovalView } from '../src/control/ownerApproval';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { setLanguagePref } from '../src/i18n';
+import * as i18n from '../src/i18n';
 import { createApprovalNotifications } from '../src/control/ownerApprovalNotification';
 
 const native = vi.hoisted(() => ({
@@ -58,6 +59,61 @@ it('opens the clicked request and restores the window, even with multiple arriva
   expect(native.show).toHaveBeenCalledOnce();
   expect(native.unminimize).toHaveBeenCalledOnce();
   expect(native.setFocus).toHaveBeenCalledOnce();
+});
+it('sanitizes localized notification and action text with the approval display rules', async () => {
+  const translate = i18n.t;
+  vi.spyOn(i18n, 't').mockImplementation((key, ...args) => {
+    if (key === 'ownerApprovalNotification') return '\u202eAn app\n is asking · Approval： yes';
+    if (key === 'ownerApprovalReview') return 'Review\u0000 · Request: now';
+    return translate(key, ...args);
+  });
+  const n = setup(); n.update(['private-request']); await flush();
+  expect(native.sendNotification).toHaveBeenCalledWith(expect.objectContaining({
+    body: 'An app is asking / Approval= yes',
+  }));
+  expect(native.registerActionTypes).toHaveBeenCalledWith([{ id: 'bitsov-owner-approval', actions: [{
+    id: 'review', title: 'Review / Request= now',
+  }] }]);
+});
+
+it.each(['not-now', 'Escape', 'scrim', 'cancel', 'close'])('a notification click during Touch ID keeps %s locked, then opens the clicked request', async kind => {
+  native.isTauri.mockReturnValue(true);
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Macintosh');
+  const now = Date.now();
+  const request = (id: string): ApprovalView => ({ op_id: id, node: 'n', client_id: 'phone', client_pubkey: 'cd'.repeat(32), epoch: 4, grant_op: null,
+    request: { kind: 'spend_grant', terms: { budget_msat: 2000, per_call_max_msat: 1000, window_secs: 600 } },
+    nonce: '11'.repeat(16), expires_at: now / 1000 + 300, approval_message: `private signed bytes ${id}`, status: 'pending', owner_action: null });
+  const approvals = [request('a'), request('b')];
+  const memory = approvalMemory();
+  let finish!: (value: { ok: true; value: ApprovalView }) => void;
+  const approve = vi.fn(() => new Promise<{ ok: true; value: ApprovalView }>(resolve => { finish = resolve; }));
+  const mount = document.createElement('div'); document.body.append(mount);
+  const unmount = render(() => <OwnerApprovalSheets approvals={approvals} now={now} memory={memory} approve={approve} />, mount);
+  dispose = () => { unmount(); mount.remove(); };
+  await flush();
+  const approval = approveOwnerRequest({ approvals, now, approve }, memory, approvals[0]);
+  await flush();
+  click({ actionId: 'tap', notification: { id: native.sendNotification.mock.calls[1][0].id } }); await flush();
+  const dialog = mount.querySelector<HTMLDialogElement>('dialog')!;
+  const dismiss = mount.querySelector<HTMLButtonElement>('[data-owner-sheet-dismiss]')!;
+  expect(dismiss.disabled).toBe(true);
+  expect(dialog.textContent).toContain('Waiting for Touch ID…');
+  if (kind === 'not-now') dismiss.click();
+  else if (kind === 'Escape') document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  else if (kind === 'scrim') dialog.click();
+  else if (kind === 'cancel') {
+    const event = new Event('cancel', { cancelable: true }); dialog.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+  } else dialog.close();
+  await flush();
+  expect(mount.querySelector('[data-owner-approval-sheet="a"]')).not.toBeNull();
+  expect(dialog.open).toBe(true);
+  expect(dismiss.disabled).toBe(true);
+  finish({ ok: true, value: { ...approvals[0], status: 'consumed' } }); await approval; await flush();
+  expect(mount.querySelector('[data-owner-approval-sheet="b"]')).not.toBeNull();
+  expect(mount.textContent).not.toContain('Approved.');
+  expect(document.querySelectorAll('dialog[open]')).toHaveLength(1);
+  expect(approve).toHaveBeenCalledExactlyOnceWith('a', 'private signed bytes a');
 });
 it('quietly falls back on denied permission without asking repeatedly', async () => {
   native.isPermissionGranted.mockResolvedValue(false); native.requestPermission.mockResolvedValue('denied');

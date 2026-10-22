@@ -2,16 +2,18 @@
 // read, only the error when the read fails, and "no messages" once a read came
 // back empty (with the contact's status only when we have a budget line).
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createSignal } from 'solid-js';
 import { render } from 'solid-js/web';
 import { ControlCenter } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID, SAMPLE_PRESETS } from '../src/control/sample';
+import { setLanguagePref } from '../src/i18n';
 import type { BudgetView } from '../src/control/types';
 
 const A = 'a'.repeat(64);
 const B = 'b'.repeat(64);
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
-afterEach(() => { dispose?.(); mount?.remove(); vi.restoreAllMocks(); });
+afterEach(() => { dispose?.(); mount?.remove(); vi.restoreAllMocks(); setLanguagePref('en'); });
 const $ = (s: string) => mount.querySelector<HTMLElement>(s);
 const budget = (rows: BudgetView['rows']): BudgetView => ({
   paused: false, waiting_for_owner: false, preset: 'careful',
@@ -130,4 +132,46 @@ describe('an empty chat says only what is known', () => {
       expect($('[data-thread-empty]')).toBeNull();
     });
   });
+});
+
+it('reactively localizes the empty chat heading and its payment explanation', async () => {
+  const source = sampleSource({ firstLiveMs: 1e9 });
+  source.messages = vi.fn(async () => []);
+  source.budgetStatus = vi.fn(async () => budget([{ target: A, room: false, limit_msat: 50_000, spent_msat: 2_000 }]));
+  await open(source);
+  await vi.waitFor(() => expect($('[data-thread-empty]')?.getAttribute('data-thread-empty')).toBe('known'));
+  setLanguagePref('da');
+  expect($('[data-thread-empty] h2')?.textContent).toBe('Ingen beskeder her endnu');
+  expect($('[data-thread-empty] .hint')?.textContent).toMatch(/^Hver besked til .+ betaler deres pris\.$/);
+  setLanguagePref('en');
+  expect($('[data-thread-empty] h2')?.textContent).toBe('No messages here yet');
+});
+
+import { RoomThread, type RoomSend } from '../src/control/RoomPanel';
+it('localizes the room empty state, notices, composer and payment outcomes in Danish', () => {
+  const [sends, setSends] = createSignal<RoomSend[]>([]);
+  setLanguagePref('da');
+  mount = document.createElement('div'); document.body.append(mount);
+  dispose = render(() => <RoomThread read="ok" room={{ id: 'room', roster: [SAMPLE_OWN_ID, A], salt: '00', at: 0 }}
+    ownId={SAMPLE_OWN_ID} nameOf={() => 'Ada'} messages={[]} deliveries={{}} earlier loadingEarlier={false}
+    onEarlier={() => {}} sends={sends()} fresh={{}} seenEntrances={new Set()} info={() => undefined}
+    quote={async () => null} moneyBlocked canSpend={false} now={0} send={async () => []}
+    onLeave={() => {}} onContext={() => {}} />, mount);
+  expect($('[data-thread-empty] h2')?.textContent).toBe('Ingen beskeder her endnu');
+  expect($('[data-thread-empty] .hint')?.textContent).toBe('En besked her betaler hvert medlem deres egen pris.');
+  expect($('[data-room-honesty]')?.textContent).toContain('ende-til-ende-krypteret');
+  expect($('[data-room-earlier]')?.textContent).toBe('Vis tidligere beskeder');
+  expect($('[data-room-blocked]')?.textContent).toBe('Betalinger er ikke klar endnu, så der kan ikke sendes fra dette rum.');
+  expect($('[data-room-draft]')?.getAttribute('placeholder')).toBe('Besked til Ada');
+  $('[data-room-leave]')!.click();
+  expect($('[data-room-leave-confirm]')?.textContent).toContain('Vil du forlade dette rum?');
+  expect($('[data-room-leave-no]')?.textContent).toBe('Bliv');
+  expect($('[data-room-cost-leg]')?.textContent).toContain('Ikke i dine kontakter. Ikke opkrævet.');
+  setSends([{ at: 0, text: 'hello', outcomes: [{ peer: A, state: 'refused', paidMsat: 1000, note: null }] }]);
+  expect($('[data-room-send]')?.textContent).toContain('Din rumbesked · op til 1 sat i alt');
+  expect($('[data-room-leg] strong')?.textContent).toBe('Til Ada:');
+  expect($('[data-room-leg-note]')?.textContent).toContain('betalt, afvist af deres node; send den ikke igen · du betalte op til 1 sat');
+  setSends([]);
+  setLanguagePref('en');
+  expect($('[data-thread-empty] h2')?.textContent).toBe('No messages here yet');
 });
