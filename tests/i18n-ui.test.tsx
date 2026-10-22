@@ -1,0 +1,72 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { render } from 'solid-js/web';
+import { ControlCenter } from '../src/control/Shell';
+import { sampleSource, SAMPLE_OWN_ID } from '../src/control/sample';
+import { setLanguagePref } from '../src/i18n';
+
+let dispose: (() => void) | undefined;
+let mount: HTMLDivElement;
+afterEach(() => { dispose?.(); mount?.remove(); vi.restoreAllMocks(); setLanguagePref('system'); });
+const find = <T extends HTMLElement = HTMLElement>(selector: string) => mount.querySelector<T>(selector)!;
+const type = (selector: string, value: string) => {
+  const input = find<HTMLInputElement>(selector);
+  input.value = value;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+};
+async function open() {
+  const source = sampleSource({ firstLiveMs: 1e9 });
+  source.spendStatus = async () => ({ state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600000, pending: null, window_ms: 600000 });
+  source.keysend = vi.fn(async (_key, amount) => ({ method: 'keysend' as const, status: 'settled' as const, amount_msat: amount, paid_at_ms: Date.now() }));
+  mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
+  await vi.waitFor(() => expect(find('[data-composer]')).not.toBeNull());
+  return source;
+}
+it('changes mounted settings, composer and wallet labels without a reload', async () => {
+  vi.spyOn(navigator, 'language', 'get').mockReturnValue('da-DK');
+  setLanguagePref('system');
+  await open();
+  expect(find('textarea').getAttribute('aria-label')).toBe('Besked til Maya');
+  const unnamed = `[data-track="peer:${'c'.repeat(64)}"] .name`;
+  expect(find(unnamed).textContent).toContain('Kontakt uden navn');
+  find('[data-profile]').click(); find('[data-open-settings]').click();
+  expect(find('[data-tab="general"]').textContent).toBe('Generelt');
+  find('[data-tab="general"]').click();
+  const select = find<HTMLSelectElement>('[data-language-pref]');
+  select.value = 'en'; select.dispatchEvent(new Event('change', { bubbles: true }));
+  expect(document.documentElement.lang).toBe('en');
+  expect(find('[data-tab="general"]').textContent).toBe('General');
+  expect(find('[data-theme-option="light"]').textContent).toBe('Light');
+  expect(find(unnamed).textContent).toContain('Unnamed contact');
+  expect(find('[data-track="ai"] .name').textContent).toBe('Ask your node');
+  expect(find('textarea').getAttribute('aria-label')).toBe('Message Maya');
+  find('[data-settings-close]').click();
+  find('[data-profile]').click(); find('[data-open-wallet]').click();
+  setLanguagePref('da');
+  expect(find('[data-wallet-close]').textContent).toBe('← Tilbage');
+  expect(find('[data-wallet-tab="receive"]').textContent).toBe('Modtag');
+  expect(find('[data-wallet-activity]').textContent).toContain('Modtaget');
+});
+it.each(['en', 'da'] as const)('preserves pay review values, recipient and one explicit confirmation in %s', async locale => {
+  setLanguagePref(locale);
+  const source = await open();
+  const payee = '02' + '5a'.repeat(32);
+  find('[data-composer-mode="pay"]').click();
+  const tabs = [...mount.querySelectorAll<HTMLButtonElement>('[data-composer-panel="pay"] [role="tab"]')];
+  tabs[1].click();
+  type('[data-pay-amount]', '1250'); type('[data-pay-pubkey]', payee);
+  await vi.waitFor(() => expect(find('[data-send]').textContent).toContain(locale === 'da' ? 'Betal' : 'Pay'));
+  find('[data-composer]').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  await vi.waitFor(() => expect(find('[data-pay-review]')).not.toBeNull());
+  expect(find('[data-review-amount]').textContent).toBe('1 250 sats');
+  expect(find('[data-review-fee]').textContent).toBe(locale === 'da' ? 'højst 10 sats' : 'up to 10 sats');
+  expect(find('[data-review-total]').textContent).toBe('1 260 sats');
+  expect(find('[data-payee]').getAttribute('title')).toBe(payee);
+  expect(find('[data-payee]').textContent).toContain(locale === 'da' ? 'ikke bekræftet som Maya' : 'not verified as Maya');
+  expect(find('[data-pay-confirm]').textContent?.trim()).toBe(locale === 'da' ? 'Bekræft og betal' : 'Confirm and pay');
+  expect(source.keysend).not.toHaveBeenCalled();
+  find('[data-pay-confirm]').click();
+  await vi.waitFor(() => expect(source.keysend).toHaveBeenCalledOnce());
+  expect(vi.mocked(source.keysend).mock.calls[0].slice(0, 3)).toEqual([payee, 1250000, null]);
+  await vi.waitFor(() => expect(find('[data-artifact="payment"]').textContent).toContain('1 250'));
+});

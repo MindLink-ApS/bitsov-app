@@ -1,8 +1,16 @@
+import { t, language } from '../i18n';
 // Display helpers. Keep msat precision in the selected denomination.
 // Denomination (sats vs BTC) follows the settings toggle — amounts stay msat.
 // Call sites must use amount() (or sats()+satUnit()); never append a unit literal.
 
 import { denom } from './prefs';
+
+/** Always use ASCII spaces between digit groups; never group fractional digits. */
+const groupDigits = (value: string) => value.replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+const groupAmount = (value: string) => {
+  const [whole, fraction] = value.split('.');
+  return groupDigits(whole) + (fraction === undefined ? '' : `.${fraction}`);
+};
 
 /** 1 BTC = 1e8 sats = 1e11 msat. */
 const MSAT_PER_BTC = 100_000_000_000;
@@ -10,7 +18,11 @@ const MSAT_PER_BTC = 100_000_000_000;
 /** Number only (no unit). BTC mode keeps every msat digit (up to 11 fractional places). */
 export function sats(msat: number): string {
   if (denom() === 'btc') return btc(msat);
-  return (msat / 1000).toLocaleString(navigator.language, { maximumFractionDigits: 3 });
+  if (!Number.isSafeInteger(msat)) return groupAmount((msat / 1000).toFixed(3).replace(/\.?0+$/, ''));
+  const absolute = Math.abs(msat);
+  const whole = Math.floor(absolute / 1000);
+  const fraction = String(absolute % 1000).padStart(3, '0').replace(/0+$/, '');
+  return `${msat < 0 ? '-' : ''}${groupDigits(String(whole))}${fraction ? `.${fraction}` : ''}`;
 }
 
 /**
@@ -24,9 +36,9 @@ export function btc(msat: number): string {
   const abs = Math.abs(n);
   const whole = Math.floor(abs / MSAT_PER_BTC);
   const fracMsat = abs - whole * MSAT_PER_BTC;
-  if (fracMsat === 0) return `${sign}${whole}`;
+  if (fracMsat === 0) return `${sign}${groupDigits(String(whole))}`;
   const frac = String(fracMsat).padStart(11, '0').replace(/0+$/, '');
-  return `${sign}${whole}.${frac}`;
+  return `${sign}${groupDigits(String(whole))}.${frac}`;
 }
 
 /** `sat` / `sats` / `BTC`, matching the number returned by sats(). */
@@ -38,20 +50,20 @@ export const satUnit = (msat: number) => {
 /** Number and unit together. Prefer this at every display site. */
 export const amount = (msat: number) => `${sats(msat)} ${satUnit(msat)}`;
 
-export const satsWhole = (value: number) => value.toLocaleString(navigator.language);
+export const satsWhole = (value: number) => groupAmount(String(value));
 
 /** `1a2b3c4d…9f8e7d6c` for a 64-hex id. */
 export const shortId = (id: string) => (id.length > 20 ? `${id.slice(0, 8)}…${id.slice(-8)}` : id);
 
 export function ago(thenMs: number, nowMs: number): string {
   const s = Math.max(0, Math.round((nowMs - thenMs) / 1000));
-  if (s < 5) return 'just now';
-  if (s < 60) return `${s}s ago`;
+  if (s < 5) return t('uiJustNow');
+  if (s < 60) return t('uiSAgo', s);
   const m = Math.round(s / 60);
-  if (m < 60) return `${m} min ago`;
+  if (m < 60) return t('uiMinAgo', m);
   const h = Math.round(m / 60);
-  if (h < 48) return `${h} h ago`;
-  return `${Math.round(h / 24)} days ago`;
+  if (h < 48) return t('uiHAgo', h);
+  return t('uiDaysAgo', Math.round(h / 24));
 }
 
 export function uptime(secs: number): string {
@@ -69,7 +81,7 @@ export function clock(ms: number): string {
 }
 
 export function day(ms: number): string {
-  return new Date(ms).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  return new Date(ms).toLocaleDateString(language(), { weekday: 'short', month: 'short', day: 'numeric' });
 }
 
 /** Ordinary caller limit; the host passes it to the node, which can only narrow it. */
@@ -77,25 +89,25 @@ export function routingFee(msat: number): number {
   return msat === 0 ? 0 : Math.min(Math.max(5000, Math.floor(msat / 100)), 10000);
 }
 export const allIn = (msat: number) => msat + routingFee(msat);
-export const feeCeiling = (msat: number) => `up to ${amount(msat)} network fee`;
+export const feeCeiling = (msat: number) => t('uiUpToNetworkFee', amount(msat));
 
 /** Settled principal is known even when an older node cannot report its fee. */
 export function paidAmount(principal: number, fee?: number): string {
   const known = fee !== undefined && Number.isSafeInteger(fee) && fee >= 0;
   const total = principal + (known ? fee : 0);
-  if (!Number.isSafeInteger(total) || total < 0) return 'paid amount unknown';
-  return `paid ${amount(total)}${known ? '' : ' · network fee not reported'}`;
+  if (!Number.isSafeInteger(total) || total < 0) return t('uiPaidAmountUnknown');
+  return t('uiPaid498', amount(total), known ? '' : t('uiNetworkFeeNotReported'));
 }
 
 /** Additional liabilities never masquerade as paid amounts. */
 export function budgetNote(b?: import('./types').BudgetAccounting): string {
   if (!b) return '';
   const notes: string[] = [];
-  if (b.unsettled_msat) notes.push(`${amount(b.unsettled_msat)} reserved`);
+  if (b.unsettled_msat) notes.push(t('uiReserved', amount(b.unsettled_msat)));
   if (b.fee_unknown) {
-    notes.push('network fee not reported');
+    notes.push(t('uiNetworkFeeNotReported502'));
     const held = (b.accounted_msat ?? b.spent_msat) - b.spent_msat - (b.unsettled_msat ?? 0);
-    if (held > 0) notes.push(`up to ${amount(held)} held for unreported costs`);
+    if (held > 0) notes.push(t('uiUpToHeldForUnreportedCosts', amount(held)));
   }
   return notes.join(' · ');
 }

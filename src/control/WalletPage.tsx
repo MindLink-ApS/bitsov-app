@@ -1,3 +1,5 @@
+import { activityLabel } from './wallet';
+import { t } from '../i18n';
 import { SettledPayment } from './SettledPayment';
 import { SoftError } from './SoftError';
 import { DelayedSpinner } from './DelayedSpinner';
@@ -84,7 +86,7 @@ function CopyButton(props: { text: string; label: string }) {
         timer = window.setTimeout(() => setDone(false), r === 'failed' ? 4000 : 1500);
       })}
     >
-      {done() === 'copied' ? 'Copied' : done() === 'failed' ? 'Copy failed — select it by hand' : props.label}
+      {done() === 'copied' ? t('extraCopied') : done() === 'failed' ? t('extraCopyFailedSelectItByHand') : props.label}
     </button>
   );
 }
@@ -93,8 +95,8 @@ function AmountInput(props: { data: string; label: string; value: string; onInpu
   const problem = (): string | null => {
     if (props.value.trim() === '') return null;
     const msat = parseAmount(props.value, denom());
-    if (msat === null) return `Use digits and one dot, at most ${denom() === 'btc' ? 11 : 3} decimals.`;
-    return inPaymentBounds(msat) ? null : `Between ${fmtAmount(MIN_PAYMENT_MSAT)} and ${fmtAmount(MAX_PAYMENT_MSAT)}.`;
+    if (msat === null) return t('uiUseDigitsAndOneDotAtMostDecimals', denom() === 'btc' ? 11 : 3);
+    return inPaymentBounds(msat) ? null : t('uiBetweenAnd', fmtAmount(MIN_PAYMENT_MSAT), fmtAmount(MAX_PAYMENT_MSAT));
   };
   return (
     <>
@@ -107,7 +109,7 @@ function AmountInput(props: { data: string; label: string; value: string; onInpu
           placeholder="0"
           value={props.value}
           onInput={(e) => props.onInput(e.currentTarget.value)}
-          aria-label={`${props.label} in ${unitName()}${props.optional ? ' (optional)' : ''}`}
+          aria-label={t('extraIn', props.label, unitName(), props.optional ? t('extraOptional') : '')}
           aria-invalid={problem() !== null}
         />
         <span class="amount-unit">{unitName()}</span>
@@ -170,24 +172,24 @@ export function WalletPage(props: {
   });
 
   const tabs: { id: WalletTab; label: string }[] = [
-    { id: 'activity', label: 'Activity' },
-    { id: 'channels', label: 'Channels' },
-    { id: 'receive', label: 'Receive' },
-    { id: 'send', label: 'Send' },
+    { id: 'activity', get label() { return t('uiActivity'); } },
+    { id: 'channels', get label() { return t('uiChannels'); } },
+    { id: 'receive', get label() { return t('uiReceive'); } },
+    { id: 'send', get label() { return t('uiSend'); } },
   ];
 
   return (
-    <div class="wallet-page" role="dialog" aria-modal="true" aria-label="Wallet" data-wallet-page={props.tab}>
+    <div class="wallet-page" role="dialog" aria-modal="true" aria-label={t('uiWallet')} data-wallet-page={props.tab}>
       <header class="wallet-top">
-        <button type="button" class="link" data-wallet-close ref={(el) => queueMicrotask(() => el.isConnected && el.focus())} onClick={() => props.onClose()} aria-label="Close wallet">← Back</button>
-        <h1>Wallet</h1>
-        <button type="button" class="link" data-wallet-refresh onClick={() => props.onRefresh()}>Refresh</button>
+        <button type="button" class="link" data-wallet-close ref={(el) => queueMicrotask(() => el.isConnected && el.focus())} onClick={() => props.onClose()} aria-label={t('uiCloseWallet')}>{t('uiBack450')}</button>
+        <h1>{t('uiWallet')}</h1>
+        <button type="button" class="link" data-wallet-refresh onClick={() => props.onRefresh()}>{t('uiRefresh')}</button>
       </header>
 
       <div class="wallet-body">
         {props.pendingResult}
         <section class="wallet-hero" data-wallet-balance>
-          <span class="label">Node-reported total</span>
+          <span class="label">{t('uiNodeReportedTotal')}</span>
           <Show when={split()} fallback={<Show when={!props.walletError} fallback={<SoftError message={props.walletError!} data="wallet-read" onReconnect={props.onReconnect ?? props.onRefresh} />}><DelayedSpinner /></Show>}>
             {(s) => (
               <>
@@ -196,81 +198,81 @@ export function WalletPage(props: {
                 </span>
                 <CustodyBadgeView mode={props.custody} />
                 <span class="hint" data-balance-pending={s().pending ?? 'unknown'}>
-                  {s().pending === null ? 'Pending on-chain: Unknown' : `${fmtAmount(s().pending!)} pending`}
+                  {s().pending === null ? t('uiPendingOnChainUnknown') : t('uiPending', fmtAmount(s().pending!))}
                 </span>
                 <Show when={s().hasBreakdown} fallback={<>
                   <div class="wallet-split">
                     <div class="split" data-balance-spendable="unknown">
-                      <span class="split-name">Spendable</span>
-                      <span class="split-amount unknown">Unknown</span>
-                      <span class="hint">Funds available to spend, excluding reserves and locked funds.</span>
+                      <span class="split-name">{t('uiSpendable')}</span>
+                      <span class="split-amount unknown">{t('uiUnknown')}</span>
+                      <span class="hint">{t('uiFundsAvailableToSpendExcludingReservesAndLocked')}</span>
                     </div>
                     <div class="split" data-balance-reserved="unknown">
-                      <span class="split-name">Reserved (channel fee reserve)</span>
-                      <span class="split-amount unknown">Unknown</span>
-                      <span class="hint">Held back for channel closing fees; unavailable to spend.</span>
+                      <span class="split-name">{t('uiReservedChannelFeeReserve')}</span>
+                      <span class="split-amount unknown">{t('uiUnknown')}</span>
+                      <span class="hint">{t('uiHeldBackForChannelClosingFeesUnavailableTo')}</span>
                     </div>
                     <div class="split" data-balance-closing="unknown">
-                      <span class="split-name">Closing/locked</span>
-                      <span class="split-amount unknown">Unknown</span>
-                      <span class="hint">Waiting for a channel closure or time lock; unavailable to spend.</span>
+                      <span class="split-name">{t('uiClosingLocked')}</span>
+                      <span class="split-amount unknown">{t('uiUnknown')}</span>
+                      <span class="hint">{t('uiWaitingForAChannelClosureOrTimeLock')}</span>
                     </div>
                   </div>
                   <p class="hint wallet-basis" data-wallet-basis>
-                    Your node reports one total, but does not report these amounts separately. The total is not a spendable balance.
+                    {t('uiYourNodeReportsOneTotalButDoesNot')}
                   </p>
                 </>}>
                   <div class="wallet-split">
                     <div class="split" data-balance-lightning={s().lightning ?? 'unknown'}>
-                      <span class="split-name">Lightning spendable (outbound capacity)</span>
-                      <span class="split-amount" classList={{ unknown: s().lightning === null }}>{s().lightning === null ? 'Unknown' : fmtAmount(s().lightning!)}</span>
-                      <span class="hint">Outbound capacity, not a guarantee a payment of this size will route: routing fees, per-HTLC limits and remote liquidity still apply.</span>
+                      <span class="split-name">{t('uiLightningSpendableOutboundCapacity')}</span>
+                      <span class="split-amount" classList={{ unknown: s().lightning === null }}>{s().lightning === null ? t('uiUnknown') : fmtAmount(s().lightning!)}</span>
+                      <span class="hint">{t('uiOutboundCapacityNotAGuaranteeAPaymentOf')}</span>
                     </div>
                     <div class="split" data-balance-onchain-total={s().onchainTotal ?? 'unknown'}>
-                      <span class="split-name">On-chain total</span>
-                      <span class="split-amount" classList={{ unknown: s().onchainTotal === null }}>{s().onchainTotal === null ? 'Unknown' : fmtAmount(s().onchainTotal!)}</span>
-                      <span class="hint">Total on-chain wallet funds, including unconfirmed funds and the anchor reserve.</span>
+                      <span class="split-name">{t('uiOnChainTotal')}</span>
+                      <span class="split-amount" classList={{ unknown: s().onchainTotal === null }}>{s().onchainTotal === null ? t('uiUnknown') : fmtAmount(s().onchainTotal!)}</span>
+                      <span class="hint">{t('uiTotalOnChainWalletFundsIncludingUnconfirmedFunds')}</span>
                     </div>
                     <div class="split" data-balance-onchain={s().onchain ?? 'unknown'}>
-                      <span class="split-name">On-chain spendable</span>
-                      <span class="split-amount" classList={{ unknown: s().onchain === null }}>{s().onchain === null ? 'Unknown' : fmtAmount(s().onchain!)}</span>
-                      <span class="hint">Spendable after confirmation requirements and the anchor reserve.</span>
+                      <span class="split-name">{t('uiOnChainSpendable')}</span>
+                      <span class="split-amount" classList={{ unknown: s().onchain === null }}>{s().onchain === null ? t('uiUnknown') : fmtAmount(s().onchain!)}</span>
+                      <span class="hint">{t('uiSpendableAfterConfirmationRequirementsAndTheAnchorReserve')}</span>
                     </div>
                     <div class="split" data-balance-reserved={s().reserved ?? 'unknown'}>
-                      <span class="split-name">Reserved (anchor closing fees)</span>
-                      <span class="split-amount" classList={{ unknown: s().reserved === null }}>{s().reserved === null ? 'Unknown' : fmtAmount(s().reserved!)}</span>
-                      <span class="hint">On-chain funds held for anchor-channel closing fees; already included in the on-chain total.</span>
+                      <span class="split-name">{t('uiReservedAnchorClosingFees')}</span>
+                      <span class="split-amount" classList={{ unknown: s().reserved === null }}>{s().reserved === null ? t('uiUnknown') : fmtAmount(s().reserved!)}</span>
+                      <span class="hint">{t('uiOnChainFundsHeldForAnchorChannelClosing')}</span>
                     </div>
                     <div class="split" data-balance-closing={s().closing ?? 'unknown'}>
-                      <span class="split-name">Closing (closures and sweeps)</span>
-                      <span class="split-amount" classList={{ unknown: s().closing === null }}>{s().closing === null ? 'Unknown' : fmtAmount(s().closing!)}</span>
-                      <span class="hint">Tracked closures, time locks and sweeps; some proceeds may already be spendable on-chain.</span>
+                      <span class="split-name">{t('uiClosingClosuresAndSweeps')}</span>
+                      <span class="split-amount" classList={{ unknown: s().closing === null }}>{s().closing === null ? t('uiUnknown') : fmtAmount(s().closing!)}</span>
+                      <span class="hint">{t('uiTrackedClosuresTimeLocksAndSweepsSomeProceeds')}</span>
                     </div>
                     <Show when={(s().contested ?? 0) > 0}>
                       <div class="split" data-balance-contested={s().contested}>
-                        <span class="split-name">Contested</span>
+                        <span class="split-name">{t('uiContested')}</span>
                         <span class="split-amount">{fmtAmount(s().contested!)}</span>
-                        <span class="hint">Conditional claims, not guaranteed wallet funds or spendable liquidity.</span>
+                        <span class="hint">{t('uiConditionalClaimsNotGuaranteedWalletFundsOrSpendable')}</span>
                       </div>
                     </Show>
                   </div>
                   <p class="hint wallet-basis" data-wallet-basis>
-                    These categories overlap and do not add up to the node-reported total. Closing includes sweeps before sweep fees; proceeds may already be in the on-chain total or spendable on-chain. Do not add closing to on-chain funds or subtract it from on-chain spendable. Unknown means the node did not report that category. The total is not a spendable balance.
+                    {t('uiTheseCategoriesOverlapAndDoNotAddUp')}
                   </p>
                 </Show>
               </>
             )}
           </Show>
           <p class="hint wallet-basis" data-wallet-online>
-            Your home node must stay online to monitor and protect your Lightning channels; there is no watchtower yet.
+            {t('uiYourHomeNodeMustStayOnlineToMonitor')}
           </p>
           <div class="wallet-actions">
-            <button type="button" class="primary soft money" data-wallet-go="receive" onClick={() => props.onTab('receive')}>Receive</button>
-            <button type="button" class="primary soft money" data-wallet-go="send" onClick={() => props.onTab('send')}>Send</button>
+            <button type="button" class="primary soft money" data-wallet-go="receive" onClick={() => props.onTab('receive')}>{t('uiReceive')}</button>
+            <button type="button" class="primary soft money" data-wallet-go="send" onClick={() => props.onTab('send')}>{t('uiSend')}</button>
           </div>
         </section>
 
-        <div class="modes soft wallet-tabs" role="tablist" aria-label="Wallet">
+        <div class="modes soft wallet-tabs" role="tablist" aria-label={t('uiWallet')}>
           <For each={tabs}>
             {(t) => (
               <button type="button" role="tab" aria-selected={props.tab === t.id} data-wallet-tab={t.id} onClick={() => props.onTab(t.id)}>{t.label}</button>
@@ -308,15 +310,15 @@ export function WalletPage(props: {
 // ---- activity ----------------------------------------------------------------
 
 const KIND_FILTERS: { id: KindFilter; label: string }[] = [
-  { id: 'all', label: 'All' },
-  { id: 'messages', label: 'Messages' },
-  { id: 'calls', label: 'Calls' },
-  { id: 'payments', label: 'Payments' },
+  { id: 'all', get label() { return t('extraAll'); } },
+  { id: 'messages', get label() { return t('extraMessages'); } },
+  { id: 'calls', get label() { return t('extraCalls'); } },
+  { id: 'payments', get label() { return t('extraPayments'); } },
 ];
 const DIRECTION_FILTERS: { id: DirectionFilter; label: string }[] = [
-  { id: 'all', label: 'In and out' },
-  { id: 'in', label: 'Received' },
-  { id: 'out', label: 'Sent' },
+  { id: 'all', get label() { return t('extraInAndOut'); } },
+  { id: 'in', get label() { return t('extraReceived'); } },
+  { id: 'out', get label() { return t('extraSent'); } },
 ];
 const ICON: Record<Activity['kind'], string> = { message: '✉', call: '☎', file: '▤', payment: '⚡', invoice: '⚡' };
 
@@ -355,20 +357,20 @@ function ActivityView(props: {
   return (
     <section class="wallet-panel" data-wallet-activity>
       <div class="wallet-filters">
-        <div class="modes soft small" role="radiogroup" aria-label="What">
+        <div class="modes soft small" role="radiogroup" aria-label={t('extraWhat')}>
           <For each={KIND_FILTERS}>
             {(f) => <button type="button" role="radio" aria-checked={kind() === f.id} data-activity-filter={f.id} onClick={() => setKind(f.id)}>{f.label}</button>}
           </For>
         </div>
-        <div class="modes soft small" role="radiogroup" aria-label="Direction">
+        <div class="modes soft small" role="radiogroup" aria-label={t('extraDirection')}>
           <For each={DIRECTION_FILTERS}>
             {(f) => <button type="button" role="radio" aria-checked={direction() === f.id} data-activity-direction={f.id} onClick={() => setDirection(f.id)}>{f.label}</button>}
           </For>
         </div>
       </div>
       <p class="wallet-totals" data-activity-totals>
-        <span>Received <strong data-activity-in={totals().in}>{fmtAmount(totals().in)}</strong></span>
-        <span>Sent <strong data-activity-out={totals().out}>{fmtAmount(totals().out)}</strong></span>
+        <span>{t('extraReceived')} <strong data-activity-in={totals().in}>{fmtAmount(totals().in)}</strong></span>
+        <span>{t('extraSent')} <strong data-activity-out={totals().out}>{fmtAmount(totals().out)}</strong></span>
       </p>
       <Show when={!loading() || shown().length > 0} fallback={<DelayedSpinner />}>
         <ul class="wallet-list" data-activity-list>
@@ -376,13 +378,13 @@ function ActivityView(props: {
             kind() === 'all' && direction() === 'all'
               ? (
                 <li class="empty hint" data-activity-empty="none">
-                  No payments yet. Payments you send and receive in this app show here.
+                  {t('extraNoPaymentsYetPaymentsYouSendAndReceive')}
                   <Show when={props.onReceive}>
-                    {' '}<button type="button" class="link" data-activity-receive onClick={() => props.onReceive!()}>Receive</button>
+                    {' '}<button type="button" class="link" data-activity-receive onClick={() => props.onReceive!()}>{t('uiReceive')}</button>
                   </Show>
                 </li>
               )
-              : <li class="empty hint" data-activity-empty="filtered">Nothing matches this filter.</li>
+              : <li class="empty hint" data-activity-empty="filtered">{t('extraNothingMatchesThisFilter')}</li>
           }>
             {(a, i) => {
               const newDay = () => i() === 0 || day(shown()[i() - 1].at) !== day(a.at);
@@ -393,7 +395,7 @@ function ActivityView(props: {
                   <li class="wallet-row" data-activity={a.kind} data-activity-dir={a.direction} data-activity-id={a.id}>
                     <span class={`wallet-icon ${a.kind}`} aria-hidden="true">{ICON[a.kind]}</span>
                     <span class="wallet-row-main">
-                      <span class="wallet-row-title">{a.label}</span>
+                      <span class="wallet-row-title">{activityLabel(a)}</span>
                       <span class="hint">
                         {a.who ? `${props.nameOf(a.who)} · ` : ''}{clock(a.at)}{status() ? ` · ${status()}` : ''}
                       </span>
@@ -409,7 +411,7 @@ function ActivityView(props: {
         </ul>
       </Show>
       <p class="hint" data-activity-scope>
-        Messages and calls are the latest your node keeps with each contact. Lightning payments and invoices are the ones made in this app on this {deviceWord() === 'computer' ? 'Mac' : deviceWord()}; your node does not list the others yet, and on-chain deposits are not listed here.
+        {t('extraMessagesAndCallsAreTheLatestYourNode')} {deviceWord() === 'computer' ? t('uiMac') : deviceWord() === 'phone' ? t('phone') : deviceWord()}{t('extraYourNodeDoesNotListTheOthersYet')}
       </p>
     </section>
   );
@@ -646,10 +648,10 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
   const needsApproval = () => !props.moneyBlocked && !line().open;
   const approvable = () => needsApproval() && !busy() && planned() !== null && props.spend?.state !== 'pending' && props.spend?.state !== 'unavailable';
   const buttonLabel = () => {
-    if (!needsApproval()) return 'Review';
-    if (props.spend?.state === 'pending') return 'Waiting for approval';
-    if (props.spend?.state === 'unavailable') return 'Spending unavailable';
-    return 'Approve spending';
+    if (!needsApproval()) return t('extraReview');
+    if (props.spend?.state === 'pending') return t('uiWaitingForApproval');
+    if (props.spend?.state === 'unavailable') return t('uiSpendingUnavailable');
+    return t('uiApproveSpending');
   };
 
   const openReview = async (e: Event) => {
@@ -679,9 +681,9 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
       const receipt = r.value;
       if (receipt.status === 'settled') {
         const knownFee = receipt.fee_paid_msat !== undefined && Number.isSafeInteger(receipt.fee_paid_msat) && receipt.fee_paid_msat >= 0;
-        setResult({ ok: true, settledMsat: receipt.amount_msat, text: knownFee ? `Network fee: ${fmtAmount(receipt.fee_paid_msat!)}.` : 'Network fee: unknown.' });
+        setResult({ ok: true, settledMsat: receipt.amount_msat, text: knownFee ? t('extraNetworkFee', fmtAmount(receipt.fee_paid_msat!)) : t('extraNetworkFeeUnknown') });
       } else {
-        setResult({ ok: receipt.status !== 'failed', text: receipt.status === 'failed' ? 'Payment failed.' : 'Payment in progress. Settlement is not confirmed yet.' });
+        setResult({ ok: receipt.status !== 'failed', text: receipt.status === 'failed' ? t('extraPaymentFailed') : t('extraPaymentInProgressSettlementIsNotConfirmedYet') });
       }
     } else {
       setResult({ ok: false, text: r.error.message });
@@ -690,9 +692,9 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
 
   const hint = (): string | null => {
     const r = recipient();
-    if (r.kind === 'onchain') return 'Sending on-chain is an owner action at your node. This app sends over Lightning only.';
-    if (r.kind === 'unknown' && to().trim()) return 'That is not a Lightning invoice or a node ID.';
-    if (r.kind === 'invoice' && !read() && !readError()) return 'Reading the invoice…';
+    if (r.kind === 'onchain') return t('extraSendingOnChainIsAnOwnerActionAt');
+    if (r.kind === 'unknown' && to().trim()) return t('extraThatIsNotALightningInvoiceOrA');
+    if (r.kind === 'invoice' && !read() && !readError()) return t('extraReadingTheInvoice');
     return null;
   };
 
@@ -702,17 +704,17 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
         when={review()}
         fallback={
           <form class="wallet-form" onSubmit={(e) => void openReview(e)}>
-            <AmountInput data="data-send-amount" label="Amount to send" value={amount()} onInput={setAmount} />
-            <textarea data-send-to rows={2} placeholder="Paste a Lightning invoice or a node ID" value={to()} onInput={(e) => setTo(e.currentTarget.value)} aria-label="Send to" />
+            <AmountInput data="data-send-amount" label={t('extraAmountToSend')} value={amount()} onInput={setAmount} />
+            <textarea data-send-to rows={2} placeholder={t('extraPasteALightningInvoiceOrANodeID')} value={to()} onInput={(e) => setTo(e.currentTarget.value)} aria-label={t('extraSendTo')} />
             <Show when={recipient().kind === 'node'}>
-              <input data-send-memo placeholder="Note (optional)" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="Note" />
+              <input data-send-memo placeholder={t('uiNoteOptional')} value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label={t('uiNote')} />
             </Show>
             <Show when={hint()}>{(h) => <p class="hint" data-send-hint>{h()}</p>}</Show>
             <Show when={readError()}>{(e) => <p class="err-note" data-send-error role="alert">{e()}</p>}</Show>
             <Show when={read()}>
               {(inv) => (
                 <p class="hint" data-send-invoice={inv().amount_msat}>
-                  Invoice for {fmtAmount(inv().amount_msat)} to node {shortId(inv().payee)}
+                  {t('uiInvoiceFor')} {fmtAmount(inv().amount_msat)} {t('extraToNode')} {shortId(inv().payee)}
                   {inv().description ? ` · “${inv().description}”` : ''}
                 </p>
               )}
@@ -720,24 +722,24 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
             <Show when={mismatch()}>
               {(m) => (
                 <p class="err-note" data-send-mismatch>
-                  This invoice asks for {fmtAmount(m())}, not the amount above.{' '}
-                  <button type="button" class="link" data-send-use-invoice onClick={() => setAmount(amountText(m(), denom()))}>Use {fmtAmount(m())}</button>
+                  {t('extraThisInvoiceAsksFor')} {fmtAmount(m())}{t('extraNotTheAmountAbove')}{' '}
+                  <button type="button" class="link" data-send-use-invoice onClick={() => setAmount(amountText(m(), denom()))}>{t('extraUse')} {fmtAmount(m())}</button>
                 </p>
               )}
             </Show>
             <div class="composer-bar">
               <div class="cost" data-cost>
-                <span class="label">Total at most</span>
+                <span class="label">{t('uiTotalAtMost')}</span>
                 <Show when={msat() !== null} fallback={<span class="sats">…</span>}>
                   <span class="sats" data-cost-msat={allIn(msat()!)}>{sats(allIn(msat()!))}<span class="unit">{satUnit(allIn(msat()!))}</span></span>
                 </Show>
-                <span class="basis">The amount and a network fee of at most {fmtAmount(routingFee(msat() ?? 0))}</span>
+                <span class="basis">{t('extraTheAmountAndANetworkFeeOfAt')} {fmtAmount(routingFee(msat() ?? 0))}</span>
               </div>
               <button type="submit" class="primary soft money" data-send-review disabled={!ready() && !approvable()}>{buttonLabel()}</button>
             </div>
-            <Show when={props.moneyBlocked}><p class="hint" data-send-blocked>Payments are not ready yet.</p></Show>
+            <Show when={props.moneyBlocked}><p class="hint" data-send-blocked>{t('extraPaymentsAreNotReadyYet')}</p></Show>
             <Show when={!props.moneyBlocked && !line().open}>
-              <p class="hint" data-send-window>Payments need your ten-minute approval at your node first. Approving pays nothing.</p>
+              <p class="hint" data-send-window>{t('extraPaymentsNeedYourTenMinuteApprovalAtYour')}</p>
               {props.spendGate}
             </Show>
           </form>
@@ -745,33 +747,33 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
       >
         {(rv) => (
           <div class="pay-review" data-wallet-review data-review-msat={rv().msat} data-review-max-msat={allIn(rv().msat)}>
-            <p class="pay-review-title">{rv().kind === 'invoice' ? 'Pay this Lightning invoice' : 'Pay a Lightning node directly'}</p>
+            <p class="pay-review-title">{rv().kind === 'invoice' ? t('uiPayThisLightningInvoice') : t('uiPayALightningNodeDirectly')}</p>
             <p class="hint" data-review-payee>
-              To node {shortId(rv().kind === 'invoice' ? (rv() as { payee: string }).payee : (rv() as { pubkey: string }).pubkey)}
+              {t('extraToNode95')} {shortId(rv().kind === 'invoice' ? (rv() as { payee: string }).payee : (rv() as { pubkey: string }).pubkey)}
             </p>
             <dl>
-              <dt>Amount</dt>
+              <dt>{t('uiAmount')}</dt>
               <dd data-review-amount>{fmtAmount(rv().msat)}</dd>
-              <dt>Network fee</dt>
-              <dd data-review-fee>up to {fmtAmount(routingFee(rv().msat))}</dd>
-              <dt>Total at most</dt>
+              <dt>{t('uiNetworkFee')}</dt>
+              <dd data-review-fee>{t('uiUpTo178')} {fmtAmount(routingFee(rv().msat))}</dd>
+              <dt>{t('uiTotalAtMost')}</dt>
               <dd data-review-total>{fmtAmount(allIn(rv().msat))}</dd>
               <Show when={rv().kind === 'keysend' && (rv() as { memo: string }).memo.trim()}>
-                <dt>Note</dt>
+                <dt>{t('uiNote')}</dt>
                 <dd>{(rv() as { memo: string }).memo.trim()}</dd>
               </Show>
             </dl>
             <div class="composer-bar">
-              <button type="button" class="link" data-review-back disabled={busy()} onClick={() => setReview(null)}>Back</button>
-              <span class="basis">You pay the real fee, never above this.</span>
+              <button type="button" class="link" data-review-back disabled={busy()} onClick={() => setReview(null)}>{t('uiBack')}</button>
+              <span class="basis">{t('uiYouPayTheRealFeeNeverAboveThis')}</span>
               <button type="button" class="primary soft money" data-wallet-confirm disabled={busy() || props.moneyBlocked || !line().open} onClick={() => void confirm()}>
-                Confirm and pay
+                {t('uiConfirmAndPay')}
               </button>
             </div>
           </div>
         )}
       </Show>
-      <Show when={busy()}><p class="hint" data-send-paying>Paying…</p></Show>
+      <Show when={busy()}><p class="hint" data-send-paying>{t('uiPaying')}</p></Show>
       <Show when={result()}>
         {(r) => <div data-send-result={r().ok ? 'ok' : 'failed'}>
           <Show when={r().settledMsat !== undefined}><SettledPayment direction="sent" msat={r().settledMsat!} /></Show>

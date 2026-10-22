@@ -1,3 +1,4 @@
+import { t as tr, languagePref, setLanguagePref, type LanguagePref } from '../i18n';
 import { CallRepairs } from './CallRepairs';
 import { provenUnpaid } from './paymentOutcome';
 import { AddDevice } from '../onboarding/AddDevice';
@@ -1791,7 +1792,7 @@ export function ControlCenter(props: Props) {
           <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
             onEnded={() => { void loadBudget(); void loadWallet(); }} />
           <Show when={moneyBlocked()}>
-            <p class="hint money-notice" data-money-notice role="status">{!live() ? 'Waiting for the connection. Your node will retry automatically.' : MONEY_NOT_READY} Sending, paying, calls, first contact, files, rooms, channels and gifts will be available when it is ready.</p>
+            <p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p>
           </Show>
           <Show when={introNotice()}>
             {(n) => (
@@ -1987,7 +1988,7 @@ export function ControlCenter(props: Props) {
         ref={setSettingsEl}
         class="context settings-modal"
         classList={{ open: contextOpen() }}
-        aria-label="Profile and settings"
+        aria-label={tr('uiProfileAndSettings')}
         aria-hidden={contextOpen() ? 'false' : 'true'}
         aria-modal={contextOpen() ? true : undefined}
         role="dialog"
@@ -1995,15 +1996,15 @@ export function ControlCenter(props: Props) {
       >
         <div class="row settings-head">
           <div class="tabs" role="tablist" style={{ flex: 1 }}>
-            <button role="tab" aria-selected={tab() === 'general'} data-tab="general" onClick={() => { setTab('general'); setContextOpen(true); }}>General</button>
-            <button role="tab" aria-selected={tab() === 'body'} data-tab="body" onClick={() => { setTab('body'); setContextOpen(true); }}>Body</button>
-            <button role="tab" aria-selected={tab() === 'node'} data-tab="node" onClick={() => { setTab('node'); setContextOpen(true); }}>Node</button>
-            <button role="tab" aria-selected={tab() === 'devices'} data-tab="devices" onClick={() => { setTab('devices'); setContextOpen(true); }}>Devices</button>
-            <button role="tab" aria-selected={tab() === 'wallet'} data-tab="wallet" onClick={() => { setTab('wallet'); setContextOpen(true); }}>Wallet</button>
-            <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => { setTab('budget'); setContextOpen(true); }}>Budget</button>
-            <button role="tab" aria-selected={tab() === 'frontdoor'} data-tab="frontdoor" onClick={() => { setTab('frontdoor'); setContextOpen(true); }}>Profile</button>
+            <button role="tab" aria-selected={tab() === 'general'} data-tab="general" onClick={() => { setTab('general'); setContextOpen(true); }}>{tr('uiGeneral')}</button>
+            <button role="tab" aria-selected={tab() === 'body'} data-tab="body" onClick={() => { setTab('body'); setContextOpen(true); }}>{tr('uiBody')}</button>
+            <button role="tab" aria-selected={tab() === 'node'} data-tab="node" onClick={() => { setTab('node'); setContextOpen(true); }}>{tr('uiNode')}</button>
+            <button role="tab" aria-selected={tab() === 'devices'} data-tab="devices" onClick={() => { setTab('devices'); setContextOpen(true); }}>{tr('uiDevices')}</button>
+            <button role="tab" aria-selected={tab() === 'wallet'} data-tab="wallet" onClick={() => { setTab('wallet'); setContextOpen(true); }}>{tr('uiWallet')}</button>
+            <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => { setTab('budget'); setContextOpen(true); }}>{tr('uiBudget')}</button>
+            <button role="tab" aria-selected={tab() === 'frontdoor'} data-tab="frontdoor" onClick={() => { setTab('frontdoor'); setContextOpen(true); }}>{tr('uiProfile')}</button>
           </div>
-          <button class="quiet context-toggle" data-settings-close onClick={() => setContextOpen(false)} aria-label="Close settings">Close</button>
+          <button class="quiet context-toggle" data-settings-close onClick={() => setContextOpen(false)} aria-label={tr('uiCloseSettings')}>{tr('uiClose')}</button>
         </div>
         <Switch>
           <Match when={tab() === 'general'}>
@@ -2229,7 +2230,7 @@ function CallSettings(props: { own: OwnStun | null }) {
   const save = () => {
     const v = draft().trim();
     if (v && stunServer(v).length === 0) {
-      setError('Use stun:host or stun:host:port. TURN relays are not supported.');
+      setError(tr('extraUseStunHostOrStunHostPortTURN'));
       return;
     }
     setError(null);
@@ -2240,37 +2241,37 @@ function CallSettings(props: { own: OwnStun | null }) {
   const using = () => effectiveStun();
   return (
     <section data-call-settings>
-      <h3>Calls</h3>
+      <h3>{tr('extraCalls')}</h3>
       <p class="hint" data-stun-note data-stun-using={using() ? (using() === ownUrl() ? 'own' : 'other') : stunOff() ? 'off' : 'none'}>
         {using()
           ? using() === ownUrl()
-            ? `Calls ask your own node (${using()}) for your public address. No third party is contacted; your node sees your IP address each time you place or accept a call.${stunPref() ? '' : ' This is the default.'}`
-            : `Calls ask ${using()} for your public address, so that server sees your IP address each time you place or accept a call.`
+            ? tr('extraCallsAskYourOwnNodeForYourPublic', using(), stunPref() ? '' : tr('extraThisIsTheDefault'))
+            : tr('extraCallsAskForYourPublicAddressSoThat', using())
           : stunOff()
-            ? 'STUN is turned off: calls contact no third party and connect only on the same network (or a VPN).'
-            : 'No STUN server: calls contact no third party and connect only on the same network (or a VPN). Calls across routers need a STUN server, for example one run on your own node.'}
+            ? tr('extraSTUNIsTurnedOffCallsContactNoThird')
+            : tr('extraNoSTUNServerCallsContactNoThirdParty')}
       </p>
-      <p class="hint" data-call-relay-limit>There is no relay yet. Some networks (strict or carrier-grade NAT, often mobile data) block direct calls even with STUN; those calls will not connect.</p>
+      <p class="hint" data-call-relay-limit>{tr('extraThereIsNoRelayYetSomeNetworksStrict')}</p>
       <Show when={ownUrl() && using() !== ownUrl()}>
         <div class="row">
           <button type="button" class="soft" data-stun-own onClick={() => { setDraft(ownUrl()!); setError(null); }}>
-            Use my node ({ownUrl()})
+            {tr('extraUseMyNode')}{ownUrl()})
           </button>
         </div>
         <Show when={draft().trim() === ownUrl()}>
-          <p class="hint" data-stun-own-confirm>Press Save to use your node. It then sees your IP address each time you place or accept a call.</p>
+          <p class="hint" data-stun-own-confirm>{tr('extraPressSaveToUseYourNodeItThen')}</p>
         </Show>
       </Show>
       <Show when={props.own && !ownUrl()}>
         <p class="hint" data-stun-own-hint>
-          {`Your node answers STUN on UDP port ${props.own!.port}, but it has no public address set ([network] advertised_addr), so it cannot be offered here. You can enter stun:your-public-address:${props.own!.port} yourself.`}
+          {tr('extraYourNodeAnswersSTUNOnUDPPortBut', props.own!.port, props.own!.port)}
         </p>
       </Show>
       <div class="row">
-        <input data-stun-input placeholder="stun:host:3478" value={draft()} onInput={(e) => setDraft(e.currentTarget.value)} aria-label="STUN server for calls (optional)" />
-        <button type="button" class="soft" data-stun-save onClick={save}>Save</button>
+        <input data-stun-input placeholder="stun:host:3478" value={draft()} onInput={(e) => setDraft(e.currentTarget.value)} aria-label={tr('extraSTUNServerForCallsOptional')} />
+        <button type="button" class="soft" data-stun-save onClick={save}>{tr('extraSave')}</button>
         <Show when={using()}>
-          <button type="button" class="soft" data-stun-clear onClick={() => { setDraft(''); setStunOff(); setError(null); }}>Turn off</button>
+          <button type="button" class="soft" data-stun-clear onClick={() => { setDraft(''); setStunOff(); setError(null); }}>{tr('extraTurnOff')}</button>
         </Show>
       </div>
       <Show when={error()}>
@@ -2282,19 +2283,19 @@ function CallSettings(props: { own: OwnStun | null }) {
 
 function SettingsDisplay(props: { own: OwnStun | null }) {
   const themes: { id: ThemePref; label: string }[] = [
-    { id: 'system', label: 'System' },
-    { id: 'light', label: 'Light' },
-    { id: 'dark', label: 'Dark' },
+    { id: 'system', get label() { return tr('uiSystem'); } },
+    { id: 'light', get label() { return tr('uiLight'); } },
+    { id: 'dark', get label() { return tr('uiDark'); } },
   ];
   const denoms: { id: Denom; label: string }[] = [
-    { id: 'sats', label: 'Sats' },
-    { id: 'btc', label: 'BTC' },
+    { id: 'sats', get label() { return tr('uiSats'); } },
+    { id: 'btc', get label() { return tr('uiBTC'); } },
   ];
   return (
     <div class="panel settings-display" data-panel="display">
-      <h2>Display</h2>
-      <h3>Theme</h3>
-      <div class="modes soft" role="radiogroup" aria-label="Theme" data-theme-toggle>
+      <h2>{tr('uiDisplay')}</h2>
+      <h3>{tr('uiTheme')}</h3>
+      <div class="modes soft" role="radiogroup" aria-label={tr('uiTheme')} data-theme-toggle>
         <For each={themes}>
           {(t) => (
             <button
@@ -2309,8 +2310,14 @@ function SettingsDisplay(props: { own: OwnStun | null }) {
           )}
         </For>
       </div>
-      <h3>Amounts</h3>
-      <div class="modes soft" role="radiogroup" aria-label="Denomination" data-denom-toggle>
+      <h3>{tr('language')}</h3>
+      <select data-language-pref aria-label={tr('language')} value={languagePref()} onChange={e => setLanguagePref(e.currentTarget.value as LanguagePref)}>
+        <option value="system">{tr('uiSystem')}</option>
+        <option value="da">Dansk</option>
+        <option value="en">English</option>
+      </select>
+      <h3>{tr('uiAmounts')}</h3>
+      <div class="modes soft" role="radiogroup" aria-label={tr('uiDenomination')} data-denom-toggle>
         <For each={denoms}>
           {(d) => (
             <button
@@ -2325,7 +2332,7 @@ function SettingsDisplay(props: { own: OwnStun | null }) {
           )}
         </For>
       </div>
-      <p class="hint">Balances and costs use this unit everywhere. Your node still counts each payment in millisatoshis (1 sat = 1,000).</p>
+      <p class="hint">{tr('uiBalancesAndCostsUseThisUnitEverywhereYour')}</p>
       <CallSettings own={props.own} />
     </div>
   );
@@ -2379,7 +2386,7 @@ function Rail(props: {
     queueMicrotask(() => document.querySelector<HTMLElement>('[data-avatar-menu] [role="menuitem"]')?.focus());
     onCleanup(onEscape(() => { setMenuOpen(false); avatar?.focus(); }));
   });
-  const item = (t: TrackRef, name: string, meta?: JSX.Element) => {
+  const item = (t: TrackRef, name: string | (() => string), meta?: JSX.Element) => {
     const key = trackKey(t);
     return (
       <button
@@ -2389,21 +2396,21 @@ function Rail(props: {
         disabled={!props.active}
         onClick={() => props.onOpen(t)}
       >
-        <span class="name">{name}</span>
+        <span class="name">{typeof name === 'function' ? name() : name}</span>
         <Show when={(props.unread[key] ?? 0) > 0} fallback={meta}>
-          <span class="badge" aria-label={`${props.unread[key]} new`}>{props.unread[key]}</span>
+          <span class="badge" aria-label={tr('uiNew', props.unread[key])}>{props.unread[key]}</span>
         </Show>
       </button>
     );
   };
 
   return (
-    <nav class="rail" classList={{ 'rail-setup': !props.active }} aria-label="Tracks" inert={props.behind}>
+    <nav class="rail" classList={{ 'rail-setup': !props.active }} aria-label={tr('uiTracks')} inert={props.behind}>
       <div class="mark">
         Bit<span>Sov</span>
       </div>
       <OnCallPill view={props.callView} onReturn={props.onReturnToCall} />
-      <button class="node-pill" title={`${props.pill.text} · open node settings`} aria-haspopup="dialog" data-pill={props.pill.tone} onClick={() => (props.onNode ?? props.onProfile)()} disabled={!props.active}>
+      <button class="node-pill" title={tr('uiOpenNodeSettings', props.pill.text)} aria-haspopup="dialog" data-pill={props.pill.tone} onClick={() => (props.onNode ?? props.onProfile)()} disabled={!props.active}>
         <span class={`dot ${props.pill.tone}`} classList={{ live: props.pill.live }} />
         <span class="what">{props.pill.text}</span>
         <Show when={props.active}>
@@ -2414,23 +2421,23 @@ function Rail(props: {
       </button>
 
       <div class="track-group">
-        <h2>Contacts</h2>
-        <Show when={props.active} fallback={<p class="track-empty">Available after setup</p>}>
-          <For each={props.peers} fallback={<p class="track-empty">No contacts yet</p>}>
+        <h2>{tr('uiContacts')}</h2>
+        <Show when={props.active} fallback={<p class="track-empty">{tr('uiAvailableAfterSetup')}</p>}>
+          <For each={props.peers} fallback={<p class="track-empty">{tr('uiNoContactsYet')}</p>}>
             {(p) =>
-              item({ kind: 'peer', id: p.node_id.toLowerCase() }, peerName(p, p.node_id), <span class={`dot ${p.connected ? 'ok' : ''}`} title={p.connected ? 'Connected' : 'Offline'} />)
+              item({ kind: 'peer', id: p.node_id.toLowerCase() }, () => peerName(p, p.node_id), <span class={`dot ${p.connected ? 'ok' : ''}`} title={p.connected ? tr('uiConnected') : tr('uiOffline')} />)
             }
           </For>
         </Show>
       </div>
 
       <div class="track-group" data-rooms-soon={props.active && props.nodeRooms ? undefined : ''}>
-        <h2>Rooms</h2>
+        <h2>{tr('uiRooms')}</h2>
         <Show
           when={props.active && props.nodeRooms}
           fallback={
             <p class="track-empty" data-rooms-coming-soon>
-              {props.active ? 'This node does not support rooms yet.' : 'Room availability is checked after setup.'}
+              {props.active ? tr('uiThisNodeDoesNotSupportRoomsYet') : tr('uiRoomAvailabilityIsCheckedAfterSetup')}
             </p>
           }
         >
@@ -2438,7 +2445,7 @@ function Rail(props: {
             {(r) => item({ kind: 'bound', id: r.id }, props.boundName(r.id), <span class="meta">{r.roster.length}</span>)}
           </For>
           <button class="track-link new-track" data-room-new onClick={() => props.onNewRoom()}>
-            + New room
+            {tr('uiNewRoom')}
           </button>
         </Show>
         <Show when={showLegacyRoomsUi && props.active && props.rooms.length > 0}>
@@ -2450,18 +2457,18 @@ function Rail(props: {
 
       <Show when={props.active && props.knocks.length > 0}>
         <div class="track-group" data-door-group>
-          <h2>At your door</h2>
+          <h2>{tr('uiAtYourDoor')}</h2>
           <For each={props.knocks}>
             {(id) => (
               <button
                 class="track-link knock"
                 data-door-track={`peer:${id}`}
                 aria-current={props.openKey === `peer:${id}`}
-                title="Paid your door price. Not a contact."
+                title={tr('uiPaidYourDoorPriceNotAContact')}
                 onClick={() => props.onOpen({ kind: 'peer', id })}
               >
                 <span class="name id">{shortId(id)}</span>
-                <Show when={(props.unread[`peer:${id}`] ?? 0) > 0} fallback={<span class="meta">paid</span>}>
+                <Show when={(props.unread[`peer:${id}`] ?? 0) > 0} fallback={<span class="meta">{tr('uiPaid')}</span>}>
                   <span class="badge">{props.unread[`peer:${id}`]}</span>
                 </Show>
               </button>
@@ -2471,17 +2478,17 @@ function Rail(props: {
       </Show>
 
       <div class="track-group" data-assistants>
-        <h2>Assistants</h2>
+        <h2>{tr('uiAssistants')}</h2>
         <Show when={props.active}>
           <For each={Object.entries(ASSISTANTS) as [AssistantId, typeof ASSISTANTS[AssistantId]][]}>
-            {([id, assistant]) => item({ kind: 'assistant', id }, assistant.name, <span class="meta">read-only</span>)}
+            {([id, assistant]) => item({ kind: 'assistant', id }, assistant.name, <span class="meta">{tr('uiReadOnly')}</span>)}
           </For>
         </Show>
-        <Show when={props.active}>{item({ kind: 'ai' }, 'Ask your node', <span class="meta">local</span>)}</Show>
+        <Show when={props.active}>{item({ kind: 'ai' }, () => tr('uiAskYourNode'), <span class="meta">{tr('uiLocal')}</span>)}</Show>
       </div>
 
       <div class="track-group">
-        <h2>Browse</h2>
+        <h2>{tr('uiBrowse')}</h2>
         <Show when={props.active}>
           <button
             class="track-link"
@@ -2489,8 +2496,8 @@ function Rail(props: {
             aria-current={props.openKey === 'discover'}
             onClick={() => props.onOpen({ kind: 'discover' })}
           >
-            <span class="name">Profiles</span>
-            <span class="meta">paste a card</span>
+            <span class="name">{tr('uiProfiles')}</span>
+            <span class="meta">{tr('uiPasteACard')}</span>
           </button>
           <button
             class="track-link"
@@ -2498,39 +2505,39 @@ function Rail(props: {
             aria-current={props.openKey === 'porch'}
             onClick={() => props.onOpen({ kind: 'porch' })}
           >
-            <span class="name">Porch</span>
-            <span class="meta">cards & pages · paid</span>
+            <span class="name">{tr('uiPorch')}</span>
+            <span class="meta">{tr('uiCardsPagesPaid')}</span>
           </button>
         </Show>
       </div>
 
       <div class="rail-foot">
         <Show when={props.active}>
-          <button class="track-link new-track" data-track="new" aria-label="New" aria-current={props.openKey === 'new'} onClick={() => props.onOpen({ kind: 'new' })}>
-            + New
+          <button class="track-link new-track" data-track="new" aria-label={tr('uiNew58')} aria-current={props.openKey === 'new'} onClick={() => props.onOpen({ kind: 'new' })}>
+            {tr('uiNew59')}
           </button>
         </Show>
         <Show when={props.sample}>
-          <span class="mode-tag" data-sample>Sample data, no node</span>
+          <span class="mode-tag" data-sample>{tr('uiSampleDataNoNode')}</span>
         </Show>
         <div class="avatar-menu-wrap">
           <Show when={menuOpen()}>
             <div class="avatar-scrim" onClick={() => setMenuOpen(false)} />
-            <div class="avatar-menu" role="menu" aria-label="You" data-avatar-menu>
+            <div class="avatar-menu" role="menu" aria-label={tr('uiYou')} data-avatar-menu>
               <button type="button" role="menuitem" class="avatar-menu-item wallet" data-open-wallet onClick={() => choose(props.onWallet)}>
-                <span class="name">Wallet</span>
+                <span class="name">{tr('uiWallet')}</span>
                 <Show when={props.balanceMsat !== null}>
                   <span class="meta sats" data-avatar-balance>{fmtAmount(props.balanceMsat!)}</span>
                 </Show>
               </button>
               <Show when={(props.approvalsWaiting ?? 0) > 0 && props.onApprovals}>
                 <button type="button" role="menuitem" class="avatar-menu-item" data-open-approvals onClick={() => choose(props.onApprovals!)}>
-                  <span class="name">Approvals waiting</span>
+                  <span class="name">{tr('uiApprovalsWaiting')}</span>
                   <span class="meta" data-approvals-count>{props.approvalsWaiting}</span>
                 </button>
               </Show>
               <button type="button" role="menuitem" class="avatar-menu-item" data-open-settings onClick={() => choose(props.onProfile)}>
-                <span class="name">Profile and settings</span>
+                <span class="name">{tr('uiProfileAndSettings')}</span>
               </button>
             </div>
           </Show>
@@ -2540,16 +2547,16 @@ function Rail(props: {
             class="profile-avatar"
             data-profile
             disabled={!props.active}
-            aria-label="You: wallet, profile and settings"
+            aria-label={tr('uiYouWalletProfileAndSettings')}
             aria-haspopup="menu"
             aria-expanded={menuOpen()}
-            title="Wallet, profile and settings"
+            title={tr('uiWalletProfileAndSettings')}
             onClick={() => setMenuOpen((v) => !v)}
           >
             <span class="avatar-mark" aria-hidden="true">BS</span>
-            <span class="avatar-label">You</span>
+            <span class="avatar-label">{tr('uiYou')}</span>
             <Show when={(props.approvalsWaiting ?? 0) > 0}>
-              <span class="approvals-badge" data-approvals-badge aria-label={`${props.approvalsWaiting} approval${props.approvalsWaiting === 1 ? '' : 's'} waiting`}>{props.approvalsWaiting}</span>
+              <span class="approvals-badge" data-approvals-badge aria-label={tr('uiApprovalWaiting', props.approvalsWaiting ?? 0, props.approvalsWaiting === 1 ? '' : tr('pluralApprovalSuffix'))}>{props.approvalsWaiting}</span>
             </Show>
           </button>
         </div>
@@ -2580,14 +2587,14 @@ function TrackHead(props: {
           class="track-title-btn"
           data-contact-open
           onClick={() => props.onContact?.()}
-          aria-label={`Contact ${props.title}`}
+          aria-label={tr('uiContact', props.title)}
         >
           <h1>{props.title}</h1>
           <Show when={props.keyChanged}>
-            <span class="contact-pill warn" data-contact-pill="key-changed">Key changed</span>
+            <span class="contact-pill warn" data-contact-pill="key-changed">{tr('uiKeyChanged')}</span>
           </Show>
           <Show when={props.verified && !props.keyChanged}>
-            <span class="contact-pill ok" data-contact-pill="verified">Verified</span>
+            <span class="contact-pill ok" data-contact-pill="verified">{tr('uiVerified')}</span>
           </Show>
         </button>
       </Show>
@@ -2597,14 +2604,14 @@ function TrackHead(props: {
         type="button"
         class="quiet context-toggle icon-btn"
         onClick={() => props.onContext()}
-        title="Settings"
-        aria-label="Settings"
+        title={tr('uiSettings')}
+        aria-label={tr('uiSettings')}
       >
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3" />
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
         </svg>
-        <span class="sr-only">Settings</span>
+        <span class="sr-only">{tr('uiSettings')}</span>
       </button>
     </header>
   );
@@ -2900,7 +2907,7 @@ function PayeeLine(props: { payee: string; peer: string; name: string }) {
   const v = () => payeeView(props.payee, contactLightningId(props.peer), props.name);
   return (
     <span class="payee" classList={{ unverified: !v().verified }} data-payee={v().verified ? 'verified' : 'unverified'} title={props.payee}>
-      {v().verified ? `Pays ${v().text}’s Lightning node.` : `Pays ${v().text}.`}
+      {v().verified ? tr('uiPaysSLightningNode', v().text) : tr('uiPays', v().text)}
     </span>
   );
 }
@@ -2917,26 +2924,26 @@ function RequestCard(props: { inv: InvoiceAmount; peer: string; name: string; bl
   const purpose = () => (props.inv.description === null ? null : cleanPurpose(props.inv.description));
   return (
     <div class="request-card" data-request-card data-request-msat={props.inv.amount_msat} data-request-status={done() ?? 'open'}>
-      <span class="kind">Payment request from {props.name}</span>
+      <span class="kind">{tr('chatPaymentRequestFrom')} {props.name}</span>
       <span class="sats big">{sats(props.inv.amount_msat)} <span class="unit">{satUnit(props.inv.amount_msat)}</span></span>
-      <Show when={purpose()} fallback={<span class="hint">No purpose given</span>}>
-        <span class="purpose" data-request-purpose>For: {purpose()}</span>
+      <Show when={purpose()} fallback={<span class="hint">{tr('chatNoPurposeGiven')}</span>}>
+        <span class="purpose" data-request-purpose>{tr('chatFor')} {purpose()}</span>
       </Show>
       <PayeeLine payee={props.inv.payee} peer={props.peer} name={props.name} />
       <Show
         when={done()}
         fallback={
           <>
-            <span class="hint">Expires at {clock(props.inv.expires_at_ms)}. Nothing is paid until you confirm.</span>
+            <span class="hint">{tr('chatExpiresAt')} {clock(props.inv.expires_at_ms)}{tr('chatNothingIsPaidUntilYouConfirm')}</span>
             <button type="button" class="primary money" data-request-pay disabled={props.blocked} onClick={() => props.onPay(props.inv.bolt11)}>
-              Pay
+              {tr('uiPay')}
             </button>
           </>
         }
       >
         {(status) => (
           <span class="request-paid" data-request-paid={status()}>
-            {status() === 'settled' ? 'Paid. You paid this invoice.' : 'Payment in progress. Check its receipt below before trying again.'}
+            {status() === 'settled' ? tr('chatPaidYouPaidThisInvoice') : tr('chatPaymentInProgressCheckItsReceiptBelowBefore')}
           </span>
         )}
       </Show>
@@ -3012,11 +3019,11 @@ function MessageView(props: {
         when={payable()}
         fallback={
           <div class="bubble" classList={{ file: props.m.kind === 200 }} data-kind={props.m.kind}>
-            <Show when={props.m.kind === 200} fallback={props.m.plaintext ?? 'Encrypted content not available on this device'}>
+            <Show when={props.m.kind === 200} fallback={props.m.plaintext ?? tr('extraEncryptedContentNotAvailableOnThisDevice')}>
               <Show
                 when={!props.out && props.fileFetch && props.fileSave}
                 fallback={
-                  <Show when={props.voiceUrl && isVoiceNote(props.m.kind, props.m.plaintext)} fallback={<span class="file-name">{props.m.plaintext ?? 'File'}</span>}>
+                  <Show when={props.voiceUrl && isVoiceNote(props.m.kind, props.m.plaintext)} fallback={<span class="file-name">{props.m.plaintext ?? tr('extraFile')}</span>}>
                     <VoiceNote id={props.m.id} name={fileNameOf(props.m.plaintext) ?? 'file'} load={props.voiceUrl!} />
                   </Show>
                 }
@@ -3042,13 +3049,13 @@ function MessageView(props: {
         <Show when={props.paid !== undefined || props.m.payment_amount_msat != null}>
           <span
             class="sats-meta"
-            title={props.out ? paidLabel() : `${fmtAmount(amount())} · to you`}
+            title={props.out ? paidLabel() : tr('extraToYou', fmtAmount(amount()))}
           >
             <Bolt />
             <span class="sats">{props.out ? paidLabel() : fmtAmount(amount())}</span>
           </span>
           <Show when={props.out && props.allowance?.readmission_msat}>
-            <span data-readmission-paid>incl. admission again {sats(props.allowance!.readmission_msat!)} {satUnit(props.allowance!.readmission_msat!)}</span>
+            <span data-readmission-paid>{tr('extraInclAdmissionAgain')} {sats(props.allowance!.readmission_msat!)} {satUnit(props.allowance!.readmission_msat!)}</span>
           </Show>
         </Show>
         <span>{clock(props.m.timestamp)}</span>
@@ -3063,9 +3070,9 @@ function MessageView(props: {
 function CallNetworkNote(props: { onOpenSettings?: () => void }) {
   return <Show when={!effectiveStun()}>
     <p class="hint call-network-note" data-call-network-note>
-      Calls may not connect across networks yet. {stunOff() ? 'STUN is turned off.' : 'No STUN server is set.'} Choose one in Settings → General → Calls.
+      {tr('uiCallsMayNotConnectAcrossNetworksYet')} {stunOff() ? tr('uiSTUNIsTurnedOff') : tr('uiNoSTUNServerIsSet')} {tr('uiChooseOneInSettingsGeneralCalls')}
       <Show when={props.onOpenSettings}>
-        {' '}<button type="button" class="link" data-call-settings-link onClick={() => props.onOpenSettings!()}>Open call settings</button>
+        {' '}<button type="button" class="link" data-call-settings-link onClick={() => props.onOpenSettings!()}>{tr('uiOpenCallSettings')}</button>
       </Show>
     </p>
   </Show>;
@@ -3093,9 +3100,9 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   };
   const off = () => props.blocked || cost() === null || props.actions.callActive();
   const title = () =>
-    why() ?? (quote() && cost() === null ? `${props.name}’s node does not take calls yet` : cost() !== null
-      ? `Up to ${fmtAmount(cost()!)}: ${fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat)} to ring (their call price plus ${feeCeiling(quote()!.offer_max_routing_fee_msat)}), then ${fmtAmount(signalCost(quote()!))} to hang up. Includes up to ${fmtAmount(callCost(quote()!)!)} more for recovery after the original admission is confirmed closed. Media goes directly between you; it is not billed. ${effectiveStun() ? `Uses the STUN server ${effectiveStun()} to find a route.` : stunOff() ? 'STUN is turned off, so calls connect only on the same network (Settings).' : 'No STUN server is set, so calls connect only on the same network (Settings).'}`
-      : 'Reading their call price…');
+    why() ?? (quote() && cost() === null ? tr('uiSNodeDoesNotTakeCallsYet', props.name) : cost() !== null
+      ? tr('uiUpToToRingTheirCallPricePlus', fmtAmount(cost()!), fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat), feeCeiling(quote()!.offer_max_routing_fee_msat), fmtAmount(signalCost(quote()!)), fmtAmount(callCost(quote()!)!), effectiveStun() ? tr('uiUsesTheSTUNServerToFindARoute', effectiveStun()) : stunOff() ? tr('uiSTUNIsTurnedOffSoCallsConnectOnly') : tr('uiNoSTUNServerIsSetSoCallsConnect'))
+      : tr('uiReadingTheirCallPrice'));
   const place = (media: CallMedia) => { const q = quote(); if (q && !off()) props.actions.placeCall(props.peer, media, q); };
   // A call pays and rings someone, so one tap only asks: the call/video button
   // opens a small confirm with the price, and Ring places it. A mis-tap on the
@@ -3131,16 +3138,16 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
       for (const type of ['pointerdown', 'click', 'focusin']) document.removeEventListener(type, onOutside, true);
     });
   });
-  const callWord = (media: CallMedia) => (media === 'video' ? 'Video call' : 'Call');
+  const callWord = (media: CallMedia) => (media === 'video' ? tr('uiVideoCall') : tr('uiCall'));
   return (
     <div class="call-buttons" data-call-buttons ref={wrap}>
-      <button type="button" class="soft call-button icon-btn" data-call="audio" disabled={off()} title={title()} aria-label={`Call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`} aria-haspopup="dialog" aria-expanded={armed() === 'audio'} onClick={() => arm('audio')}>
+      <button type="button" class="soft call-button icon-btn" data-call="audio" disabled={off()} title={title()} aria-label={tr('uiCall95', props.name, cost() !== null ? tr('uiUpTo', fmtAmount(cost()!)) : '')} aria-haspopup="dialog" aria-expanded={armed() === 'audio'} onClick={() => arm('audio')}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z" /></svg>
       </button>
-      <button type="button" class="soft call-button icon-btn" data-call="video" disabled={off()} title={title()} aria-haspopup="dialog" aria-expanded={armed() === 'video'} onClick={() => arm('video')} aria-label={`Video call ${props.name}${cost() !== null ? `, up to ${fmtAmount(cost()!)}` : ''}`}>
+      <button type="button" class="soft call-button icon-btn" data-call="video" disabled={off()} title={title()} aria-haspopup="dialog" aria-expanded={armed() === 'video'} onClick={() => arm('video')} aria-label={tr('uiVideoCall98', props.name, cost() !== null ? tr('uiUpTo', fmtAmount(cost()!)) : '')}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="12" height="12" rx="2" /><path d="m15 10 6-3v10l-6-3z" /></svg>
       </button>
-      <button type="button" class="soft call-button icon-btn quiet" data-call="meeting" disabled={off()} title={`Start a meeting with ${props.name} and up to ${MAX_PARTICIPANTS - 2} more contacts. The price shows before anyone is rung.`} aria-label={`Start a meeting with ${props.name}`} onClick={() => props.actions.planMeeting(props.peer)}>
+      <button type="button" class="soft call-button icon-btn quiet" data-call="meeting" disabled={off()} title={tr('uiStartAMeetingWithAndUpToMore', props.name, MAX_PARTICIPANTS - 2)} aria-label={tr('uiStartAMeetingWith', props.name)} onClick={() => props.actions.planMeeting(props.peer)}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3" /><path d="M3 20a6 6 0 0 1 12 0" /><circle cx="17" cy="9" r="2.5" /><path d="M17 14a5 5 0 0 1 4 5" /></svg>
       </button>
       <Show when={armed()}>
@@ -3148,11 +3155,11 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
           <div class="call-confirm" role="dialog" aria-label={`${callWord(media())} ${props.name}?`} data-call-confirm-box={media()}>
             <p class="call-confirm-text">
               <strong>{callWord(media())} {props.name}?</strong>
-              <Show when={cost() !== null}>{' '}<span class="hint">Up to {fmtAmount(cost()!)}. Nothing is paid until you press Ring.</span></Show>
+              <Show when={cost() !== null}>{' '}<span class="hint">{tr('uiUpTo105')} {fmtAmount(cost()!)}{tr('uiNothingIsPaidUntilYouPressRing')}</span></Show>
             </p>
             <div class="call-confirm-actions">
-              <button type="button" class="soft" data-call-confirm-cancel onClick={() => disarm()}>Cancel</button>
-              <button ref={ringBtn} type="button" class="primary soft money" data-call-confirm={media()} disabled={off()} onClick={() => { const m = media(); setArmed(null); place(m); }}>Ring</button>
+              <button type="button" class="soft" data-call-confirm-cancel onClick={() => disarm()}>{tr('uiCancel')}</button>
+              <button ref={ringBtn} type="button" class="primary soft money" data-call-confirm={media()} disabled={off()} onClick={() => { const m = media(); setArmed(null); place(m); }}>{tr('uiRing')}</button>
             </div>
           </div>
         )}
@@ -3164,7 +3171,8 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
 /** The call panel's title: the same word as the pill. */
 const CALL_TITLE = CALL_STATE_WORD;
 const END_REASON: Record<string, string> = {
-  hangup: 'Hung up', declined: 'Declined', busy: 'Busy', timeout: 'No answer', failed: 'Connection failed',
+  get hangup() { return tr('callHungUp'); }, get declined() { return tr('callDeclined'); },
+  get busy() { return tr('callBusy'); }, get timeout() { return tr('callNoAnswer'); }, get failed() { return tr('callFailed'); },
 };
 
 function MediaView(props: { stream: MediaStream | null; video: boolean; muted: boolean; kind: 'local' | 'remote' }) {
@@ -3212,7 +3220,7 @@ function CallPanel(props: {
     const q = await props.quote(peer);
     if (props.view.callId !== call || props.view.phase !== 'ended') return;
     if (q.ok && callCost(q.value) !== null) setAgain(q.value);
-    else setAgainError(q.ok ? 'Their node does not take calls yet.' : q.error.message);
+    else setAgainError(q.ok ? tr('uiTheirNodeDoesNotTakeCallsYet') : q.error.message);
   };
   let panel: HTMLElement | undefined;
   createEffect(on(() => props.view.phase === 'incoming' ? props.view.callId : null, (callId) => {
@@ -3236,9 +3244,9 @@ function CallPanel(props: {
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
-      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? 'Call spending approval' : `${CALL_TITLE[v().phase]} ${who()}`}>
+      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[v().phase]} ${who()}`}>
         <header>
-          <strong data-call-title aria-live="polite">{CALL_TITLE[v().phase]}{v().media === 'video' ? ' (video)' : ''}</strong>
+          <strong data-call-title aria-live="polite">{CALL_TITLE[v().phase]}{v().media === 'video' ? tr('uiVideo') : ''}</strong>
           <span class="who">{who()}</span>
           <Show when={(v().phase === 'live' || v().phase === 'reconnecting') && v().liveAt !== null}>
             <span class="duration" data-call-duration>{duration(Math.max(0, tick() - v().liveAt!))}</span>
@@ -3251,14 +3259,14 @@ function CallPanel(props: {
         </Show>
         {/* Not on the ended card: it promises a recovery that can no longer happen. */}
         <Show when={v().phase !== 'ended'}>
-          <p class="hint" data-call-recovery-note>The connection may recover on its own. A new paid recovery admission waits until the original call is confirmed closed.</p>
+          <p class="hint" data-call-recovery-note>{tr('uiTheConnectionMayRecoverOnItsOwnA')}</p>
         </Show>
         {/* While reconnecting: what is happening, and when the call ends if it does not come back (display only). */}
         <Show when={v().phase === 'reconnecting'}>
           <p class="hint" role="status" data-call-reconnecting>
-            Connection lost. Reconnecting…
-            <Show when={v().dropAt !== null}>{' '}If it isn’t back in <span data-call-drop-in>{Math.max(0, Math.ceil((v().dropAt! - tick()) / 1000))}</span> s, the call ends.</Show>
-            <Show when={v().recoveryUsedBefore}>{' '}This call already used its one recovery; waiting for the connection to come back on its own.</Show>
+            {tr('uiConnectionLostReconnecting')}
+            <Show when={v().dropAt !== null}>{' '}{tr('uiIfItIsnTBackIn')} <span data-call-drop-in>{Math.max(0, Math.ceil((v().dropAt! - tick()) / 1000))}</span> {tr('uiSTheCallEnds')}</Show>
+            <Show when={v().recoveryUsedBefore}>{' '}{tr('uiThisCallAlreadyUsedItsOneRecoveryWaiting')}</Show>
           </p>
         </Show>
         <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting')}>
@@ -3273,91 +3281,91 @@ function CallPanel(props: {
         {/* The host reports each signal's ceiling, not settled fees: after the call, "up to" is the honest total. */}
         <Show when={v().phase === 'ended'} fallback={
           <Show when={v().paidMsat > 0}>
-            <p class="hint" data-call-paid>Signal cost cap: {fmtAmount(v().paidMsat)} (includes maximum routing fees; settled amount may be lower). Media is not billed.</p>
+            <p class="hint" data-call-paid>{tr('uiSignalCostCap')} {fmtAmount(v().paidMsat)} {tr('uiIncludesMaximumRoutingFeesSettledAmountMayBe')}</p>
           </Show>
         }>
           <Switch>
             {/* Something is still in flight: never "paid nothing" (or a final total) until it settles. */}
             <Match when={v().pendingCount > 0}>
               <p class="hint" data-call-paid="pending">
-                {v().paidMsat > 0 ? `This call paid up to ${fmtAmount(v().paidMsat)} so far. ` : ''}
-                {v().unknownCount > 0 ? `${v().unknownCount === 1 ? 'One signal’s result is not known yet' : `${v().unknownCount} signals’ results are not known yet`}: check pending result. ` : ''}
-                {v().pendingCount === 1 ? 'A payment for this call is still settling' : `${v().pendingCount} payments for this call are still settling`}: up to {fmtAmount(v().pendingMsat)}. The total updates when {v().pendingCount === 1 ? 'it finishes' : 'they finish'}. Media was not billed.
+                {v().paidMsat > 0 ? tr('uiThisCallPaidUpToSoFar', fmtAmount(v().paidMsat)) : ''}
+                {v().unknownCount > 0 ? tr('uiCheckPendingResult', v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)) : ''}
+                {v().pendingCount === 1 ? tr('uiAPaymentForThisCallIsStillSettling') : tr('uiPaymentsForThisCallAreStillSettling', v().pendingCount)}{tr('uiUpTo126')} {fmtAmount(v().pendingMsat)}{tr('uiTheTotalUpdatesWhen')} {v().pendingCount === 1 ? tr('uiItFinishes') : tr('uiTheyFinish')}{tr('uiMediaWasNotBilled')}
               </p>
             </Match>
             <Match when={v().unknownCount > 0}>
               <p class="hint" data-call-paid="unknown">
-                {v().paidMsat > 0 ? `This call paid up to ${fmtAmount(v().paidMsat)}.` : 'No payment from this call is confirmed.'}{' '}
-                {v().unknownCount === 1 ? 'One signal’s result is not known yet' : `${v().unknownCount} signals’ results are not known yet`} (up to {fmtAmount(v().paidMsat + v().unknownMsat)} in all if {v().unknownCount === 1 ? 'it' : 'they'} went through): check pending result. Media was not billed.
+                {v().paidMsat > 0 ? tr('uiThisCallPaidUpTo', fmtAmount(v().paidMsat)) : tr('uiNoPaymentFromThisCallIsConfirmed')}{' '}
+                {v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)} {tr('uiUpTo133')} {fmtAmount(v().paidMsat + v().unknownMsat)} {tr('uiInAllIf')} {v().unknownCount === 1 ? tr('itPronoun') : tr('theyPronoun')} {tr('uiWentThroughCheckPendingResultMediaWasNot')}
               </p>
             </Match>
             <Match when={v().paidMsat > 0}>
-              <p class="hint" data-call-paid="settled">This call paid up to {fmtAmount(v().paidMsat)}: each signal’s price plus its routing-fee cap; the exact fees are not reported. Media was not billed.</p>
+              <p class="hint" data-call-paid="settled">{tr('uiThisCallPaidUpTo136')} {fmtAmount(v().paidMsat)}{tr('uiEachSignalSPricePlusItsRoutingFee')}</p>
             </Match>
             {/* A call that started (it has an id) and paid nothing; pre-flight refusals already say "Nothing was paid". */}
             <Match when={v().callId !== null}>
-              <p class="hint" data-call-paid="nothing">This call paid nothing.</p>
+              <p class="hint" data-call-paid="nothing">{tr('uiThisCallPaidNothing')}</p>
             </Match>
           </Switch>
         </Show>
         <Show when={v().connection}>
-          {(connection) => <p class="hint" data-call-connection>Connection: {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} (local) / {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} (remote)</p>}
+          {(connection) => <p class="hint" data-call-connection>{tr('uiConnection')} {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} {tr('uiLocal140')} {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} {tr('uiRemote')}</p>}
         </Show>
         <Show when={v().phase === 'ended'}>
           <p class="hint" data-call-ended>{v().stuck
-            ? `A call to ${who()} is still closing at your node. Nothing was paid for this one. End it to call again.`
+            ? tr('uiACallToIsStillClosingAtYour', who())
             : v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
           <Show when={v().reason === 'failed'}>
             {/* A connectivity failure only ('failed': the connection closed, was lost, or never connected); no relay exists yet. No money claim here. */}
-            <p class="hint" data-call-no-relay>Some networks need a relay to connect a call, and your node does not offer one yet.</p>
+            <p class="hint" data-call-no-relay>{tr('uiSomeNetworksNeedARelayToConnectA')}</p>
           </Show>
         </Show>
         <Show when={v().phase === 'ended' && v().close && (v().close!.status !== 'closed' || !!v().close!.message) ? v().close : null}>
           {(close) => (
             <p class={close().status === 'refused' || close().status === 'unknown' ? 'err-note' : 'hint'} role={close().status === 'closing' ? 'status' : 'alert'} data-call-close={close().status}>
-              {close().status === 'closing' ? 'Ending the call at your node…' : close().message}
+              {close().status === 'closing' ? tr('uiEndingTheCallAtYourNode') : close().message}
             </p>
           )}
         </Show>
         {/* Display only: the browser reports no network. Recovery itself stays ICE-driven. */}
         <Show when={v().offline && v().phase !== 'ended' && v().phase !== 'idle'}>
-          <p class="hint" role="status" data-call-offline>You are offline. The call reconnects by itself if your network comes back in time.</p>
+          <p class="hint" role="status" data-call-offline>{tr('uiYouAreOfflineTheCallReconnectsByItself')}</p>
         </Show>
         <Show when={v().phase !== 'ended' && v().error}>
           {/* Only a recovery that could not start is framed as one (the call still waits); any other error (a camera, say) as it is. */}
-          <p class="hint" data-call-error>{v().recoveryError === RECOVERY_CLOSING ? RECOVERY_CLOSING : v().phase === 'reconnecting' && v().recoveryError !== null ? `Recovery could not start: ${v().recoveryError} Still waiting for the connection to come back on its own.` : v().error}</p>
+          <p class="hint" data-call-error>{v().recoveryError === RECOVERY_CLOSING ? RECOVERY_CLOSING : v().phase === 'reconnecting' && v().recoveryError !== null ? tr('uiRecoveryCouldNotStartStillWaitingForThe', v().recoveryError ?? '') : v().error}</p>
         </Show>
         {props.payment}
         <div class="call-actions">
           <Switch>
             <Match when={v().phase === 'incoming'}>
-              <button type="button" class="primary soft money" data-call-accept disabled={props.blocked} onClick={() => props.accept()}>Accept{price(answer())}</button>
-              <button type="button" class="soft" data-call-decline disabled={props.blocked} onClick={() => props.decline()}>Decline{price(answer())}</button>
+              <button type="button" class="primary soft money" data-call-accept disabled={props.blocked} onClick={() => props.accept()}>{tr('uiAccept')}{price(answer())}</button>
+              <button type="button" class="soft" data-call-decline disabled={props.blocked} onClick={() => props.decline()}>{tr('uiDecline')}{price(answer())}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
               <Show when={v().stuck}>
-                <button type="button" class="soft money" data-call-end-stuck onClick={() => props.endStuck()}>End that call</button>
+                <button type="button" class="soft money" data-call-end-stuck onClick={() => props.endStuck()}>{tr('uiEndThatCall')}</button>
               </Show>
               <Show when={v().close?.status === 'refused' && !v().stuck}>
-                <button type="button" class="soft money" data-call-close-retry onClick={() => props.closeAgain()}>Try ending it again</button>
+                <button type="button" class="soft money" data-call-close-retry onClick={() => props.closeAgain()}>{tr('uiTryEndingItAgain')}</button>
               </Show>
               <Show when={v().outgoing && v().close?.status === 'closed' && !v().stuck && v().pendingCount === 0 && v().unknownCount === 0}>
-                <Show when={again()} fallback={<button type="button" class="soft" data-call-again disabled={props.blocked} onClick={() => void offerAgain()}>Call again</button>}>
-                  {(q) => <button type="button" class="primary money" data-call-again-confirm disabled={props.blocked} onClick={() => props.callAgain(v().peer!, v().media, q())}>Ring · up to {fmtAmount(2 * callCost(q())!)}</button>}
+                <Show when={again()} fallback={<button type="button" class="soft" data-call-again disabled={props.blocked} onClick={() => void offerAgain()}>{tr('uiCallAgain')}</button>}>
+                  {(q) => <button type="button" class="primary money" data-call-again-confirm disabled={props.blocked} onClick={() => props.callAgain(v().peer!, v().media, q())}>{tr('uiRingUpTo')} {fmtAmount(2 * callCost(q())!)}</button>}
                 </Show>
                 <Show when={againError()}><p class="hint" role="status">{againError()}</p></Show>
               </Show>
-              <button type="button" class="soft" data-call-dismiss disabled={v().pendingCount > 0} title={v().pendingCount > 0 ? 'Closes once the payment has settled' : undefined} onClick={() => props.dismiss()}>Close</button>
+              <button type="button" class="soft" data-call-dismiss disabled={v().pendingCount > 0} title={v().pendingCount > 0 ? tr('uiClosesOnceThePaymentHasSettled') : undefined} onClick={() => props.dismiss()}>{tr('uiClose')}</button>
             </Match>
             <Match when={v().phase !== 'idle'}>
               <Show when={v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting'}>
-                <button type="button" class="soft" data-call-mute aria-pressed={v().muted} onClick={() => props.mute()}>Mute</button>
+                <button type="button" class="soft" data-call-mute aria-pressed={v().muted} onClick={() => props.mute()}>{tr('uiMute')}</button>
                 <Show when={v().media === 'video'}>
-                  <button type="button" class="soft" data-call-camera aria-pressed={v().camera} onClick={() => props.camera()}>Camera</button>
+                  <button type="button" class="soft" data-call-camera aria-pressed={v().camera} onClick={() => props.camera()}>{tr('uiCamera')}</button>
                 </Show>
               </Show>
               <button type="button" class="danger soft" data-call-hangup onClick={() => props.hangup()}>
-                {v().recoveryError === RECOVERY_CLOSING ? 'End call' : v().phase === 'calling' ? 'Cancel' : 'Hang up'}
+                {v().recoveryError === RECOVERY_CLOSING ? tr('uiEndCall') : v().phase === 'calling' ? tr('uiCancel') : tr('uiHangUp')}
               </button>
             </Match>
           </Switch>
@@ -3709,11 +3717,11 @@ const FAILURE_LABEL: Partial<Record<ActionError['code'], string>> = {
 };
 
 const DELIVERY_TEXT: Record<Delivery['status'], string> = {
-  accepted: 'Delivered',
-  sent: 'Sent',
-  queued: 'Queued',
-  delivered: 'Delivered',
-  rejected: 'Rejected',
+  get accepted() { return tr('chatDelivered'); },
+  get sent() { return tr('extraSent'); },
+  get queued() { return tr('chatQueued'); },
+  get delivered() { return tr('chatDelivered'); },
+  get rejected() { return tr('chatRejected'); },
 };
 
 /** Single ✓ when acked/delivered; other states keep one short word (details in title). */
@@ -3811,11 +3819,11 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
             <article class="msg out unsent" data-unsent={u().why}>
               <div class="bubble">{u().text}</div>
               <div class="stamp">
-                <span class="sats" data-unsent-reason>{u().why === 'held' ? 'Waiting for payment check · ' : 'Not sent · nothing paid · '}{u().reason}</span>
+                <span class="sats" data-unsent-reason>{u().why === 'held' ? tr('chatWaitingForPaymentCheck') : tr('chatNotSentNothingPaid')}{u().reason}</span>
               </div>
               <div class="unsent-actions">
-                <button type="button" class="link" data-unsent-restore onClick={() => props.onRestore?.(u().id)}>Put back in the box</button>
-                <button type="button" class="link" data-unsent-discard onClick={() => props.onDiscard?.(u().id)}>Discard</button>
+                <button type="button" class="link" data-unsent-restore onClick={() => props.onRestore?.(u().id)}>{tr('chatPutBackInTheBox')}</button>
+                <button type="button" class="link" data-unsent-discard onClick={() => props.onDiscard?.(u().id)}>{tr('chatDiscard')}</button>
               </div>
             </article>
           );
@@ -3828,7 +3836,7 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
             <article class="msg out sending" data-sending={m().waiting ? 'waiting' : ''} aria-busy="true">
               <div class="bubble">{m().text}</div>
               <div class="stamp">
-                <span class="sats" data-sending-cap={m().capMsat}>{m().waiting ? (m().waitWord === 'allowed' ? 'Sends when allowed' : 'Sends when approved') : 'Sending'} · up to {fmtAmount(m().capMsat)}</span>
+                <span class="sats" data-sending-cap={m().capMsat}>{m().waiting ? (m().waitWord === 'allowed' ? tr('chatSendsWhenAllowed') : tr('chatSendsWhenApproved')) : tr('chatSending')} {tr('chatUpTo')} {fmtAmount(m().capMsat)}</span>
               </div>
             </article>
           );
@@ -3846,19 +3854,19 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
           });
           return (
             <div class="artifact out" data-artifact="invoice">
-              <span class="kind">Invoice · you receive</span>
+              <span class="kind">{tr('chatInvoiceYouReceive')}</span>
               <span class="sats big">{sats(inv().amount_msat)} <span class="unit">{satUnit(inv().amount_msat)}</span></span>
               <Show when={inv().note}>
                 <span class="hint">{inv().note}</span>
               </Show>
               <Show when={qr()}>
-                <svg class="qr" viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label="Invoice as a QR code">
+                <svg class="qr" viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label={tr('chatInvoiceAsAQRCode')}>
                   <rect width={qr()!.extent} height={qr()!.extent} fill="#ffffff" />
                   <path d={qr()!.path} fill="#000000" />
                 </svg>
               </Show>
               <code class="address" data-bolt11>{inv().bolt11}</code>
-              <span class="hint">Expires at {clock(inv().expires_at_ms)}. Paying it sends sats to your node.</span>
+              <span class="hint">{tr('chatExpiresAt')} {clock(inv().expires_at_ms)}{tr('chatPayingItSendsSatsToYourNode')}</span>
             </div>
           );
         }}
@@ -3872,9 +3880,9 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
                 <Bolt />
                 <Show
                   when={r().status !== 'failed'}
-                  fallback={<span class="err-note">Payment of <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)} failed</span>}
+                  fallback={<span class="err-note">{tr('chatPaymentOf')} <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)} {tr('chatFailed')}</span>}
                 >
-                  <span>You sent <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)}{r().method === 'keysend' ? ' · direct (keysend)' : ''}</span>
+                  <span>{tr('chatYouSent')} <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)}{r().method === 'keysend' ? tr('chatDirectKeysend') : ''}</span>
                 </Show>
                 <span class="hint">{clock(r().paid_at_ms)}</span>
               </span>
@@ -3887,12 +3895,12 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
           const r = () => (a() as Extract<Artifact, { type: 'file' }>).receipt;
           return (
             <div class="artifact out" data-artifact="file">
-              <span class="kind">File</span>
+              <span class="kind">{tr('extraFile')}</span>
               <span class="file-name">{r().filename} <span class="hint">{kb(r().size_bytes)}</span></span>
               <span class="stamp">
                 <Bolt />
                 <span class="sats">{sats((r().total_msat ?? r().amount_msat + (r().max_routing_fee_msat ?? 0)))}</span>
-                <span>{satUnit((r().total_msat ?? r().amount_msat + (r().max_routing_fee_msat ?? 0)))} all-in ceiling ({feeCeiling(r().max_routing_fee_msat ?? 0)}) · {clock(r().sent_at_ms)}</span>
+                <span>{satUnit((r().total_msat ?? r().amount_msat + (r().max_routing_fee_msat ?? 0)))} {tr('chatAllInCeiling')}{feeCeiling(r().max_routing_fee_msat ?? 0)}) · {clock(r().sent_at_ms)}</span>
                 <Show when={props.delivery}>
                   <DeliveryMark d={props.delivery!} />
                 </Show>
@@ -3915,14 +3923,14 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
                 {/* The whole message stays readable here; no resend while the payment result is open. */}
                 <blockquote class="failed-text" data-failed-text>{f().text}</blockquote>
                 <Show when={!provenUnpaid(f().error.code) && f().error.code !== 'payment_settled_undelivered' && f().error.code !== 'failed_paid' && !f().confirmedBy && (!f().op || OPEN_OP.has(f().op!.state))}>
-                  <span class="hint" data-failed-check>Check pending result before sending it again.</span>
+                  <span class="hint" data-failed-check>{tr('chatCheckPendingResultBeforeSendingItAgain')}</span>
                 </Show>
               </Show>
               <Show when={!f().confirmedBy && f().op && !OPEN_OP.has(f().op!.state) && f().op}>
-                {(op) => <span class="hint" data-failed-op={op().state}>{opStateText(op(), 'This app’s record of the payment named here')}</span>}
+                {(op) => <span class="hint" data-failed-op={op().state}>{opStateText(op(), tr('chatThisAppSRecordOfThePaymentNamed'))}</span>}
               </Show>
               <Show when={f().confirmedBy}>
-                <span class="hint" data-failed-confirmed={f().confirmedBy}>The payment named here now has a receipt: its message is in this chat. These words are kept here; check the chat before sending them again.</span>
+                <span class="hint" data-failed-confirmed={f().confirmedBy}>{tr('chatThePaymentNamedHereNowHasAReceipt')}</span>
               </Show>
             </div>
           );
@@ -3933,8 +3941,8 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
           const op = () => (a() as Extract<Artifact, { type: 'restored' }>).op;
           return (
             <div class="artifact out failed" data-artifact="restored" data-op-state={op().state}>
-              <span class="kind">Message sent before this app restarted</span>
-              <span>Up to {sats(op().cap_msat)} {satUnit(op().cap_msat)}. This app keeps no copy of the words.</span>
+              <span class="kind">{tr('chatMessageSentBeforeThisAppRestarted')}</span>
+              <span>{tr('uiUpTo105')} {sats(op().cap_msat)} {satUnit(op().cap_msat)}{tr('chatThisAppKeepsNoCopyOfTheWords')}</span>
               <span class="hint" data-restored-state>{opStateText(op())}</span>
             </div>
           );
@@ -4079,8 +4087,8 @@ function AmountField(props: { data: 'pay' | 'request'; label: string; value: str
   const problem = (): string | null => {
     if (props.value.trim() === '') return null;
     const msat = parseAmount(props.value, denom());
-    if (msat === null) return `Use digits and one dot, at most ${denom() === 'btc' ? 11 : 3} decimals.`;
-    return inPaymentBounds(msat) ? null : `Between ${fmtAmount(MIN_PAYMENT_MSAT)} and ${fmtAmount(MAX_PAYMENT_MSAT)}.`;
+    if (msat === null) return tr('uiUseDigitsAndOneDotAtMostDecimals', denom() === 'btc' ? 11 : 3);
+    return inPaymentBounds(msat) ? null : tr('uiBetweenAnd', fmtAmount(MIN_PAYMENT_MSAT), fmtAmount(MAX_PAYMENT_MSAT));
   };
   const invalid = () => problem() !== null;
   return (
@@ -4096,7 +4104,7 @@ function AmountField(props: { data: 'pay' | 'request'; label: string; value: str
           placeholder="0"
           value={props.value}
           onInput={(e) => props.onInput(e.currentTarget.value)}
-          aria-label={`${props.label} in ${unitName()}`}
+          aria-label={tr('uiIn', props.label, unitName())}
           aria-invalid={invalid()}
         />
         <span class="amount-unit">{unitName()}</span>
@@ -4160,50 +4168,50 @@ function InCallPay(props: {
       const r = await props.actions.keysend({ kind: 'peer', id: peer }, dest, value, '');
       if (r.ok) {
         setResult(r.value.status === 'settled'
-          ? { state: 'sent', text: `Sent ${fmtAmount(r.value.amount_msat)} to ${props.nameOf(peer)}.` }
+          ? { state: 'sent', text: tr('uiSentTo', fmtAmount(r.value.amount_msat), props.nameOf(peer)) }
           : r.value.status === 'failed'
-            ? { state: 'failed', text: `Payment of ${fmtAmount(r.value.amount_msat)} failed. No amount or routing fee was paid.` }
-            : { state: 'unknown', text: 'Payment in progress. Settlement is not confirmed. Check pending result before paying again.' });
+            ? { state: 'failed', text: tr('uiPaymentOfFailedNoAmountOrRoutingFee', fmtAmount(r.value.amount_msat)) }
+            : { state: 'unknown', text: tr('uiPaymentInProgressSettlementIsNotConfirmedCheck') });
       } else {
         setResult(provenUnpaid(r.error.code)
-          ? { state: 'failed', text: `Payment not sent. ${r.error.message}` }
-          : { state: 'unknown', text: `Payment outcome unknown. Check pending result before paying again. ${r.error.message}` });
+          ? { state: 'failed', text: tr('uiPaymentNotSent', r.error.message) }
+          : { state: 'unknown', text: tr('uiPaymentOutcomeUnknownCheckPendingResultBeforePaying', r.error.message) });
       }
     } catch {
-      setResult({ state: 'unknown', text: 'Payment outcome unknown. Check pending result before paying again.' });
+      setResult({ state: 'unknown', text: tr('uiPaymentOutcomeUnknownCheckPendingResultBeforePaying169') });
     } finally { setBusy(false); }
   };
-  return <section class="in-call-pay" data-in-call-pay aria-label="Direct payment during call">
+  return <section class="in-call-pay" data-in-call-pay aria-label={tr('uiDirectPaymentDuringCall')}>
     <Show when={live()}>
-      <button type="button" class="soft money" data-call-pay aria-expanded={expanded()} disabled={blocked() || !destination()} onClick={() => setExpanded(!expanded())}>Pay</button>
-      <Show when={!destination()}><p class="hint">Their Lightning payment address is unavailable. Your node must report it before you can pay this contact.</p></Show>
-      <Show when={props.pending}><p class="hint">Check pending result before paying.</p></Show>
+      <button type="button" class="soft money" data-call-pay aria-expanded={expanded()} disabled={blocked() || !destination()} onClick={() => setExpanded(!expanded())}>{tr('uiPay')}</button>
+      <Show when={!destination()}><p class="hint">{tr('uiTheirLightningPaymentAddressIsUnavailableYourNode')}</p></Show>
+      <Show when={props.pending}><p class="hint">{tr('uiCheckPendingResultBeforePaying')}</p></Show>
       <Show when={expanded()}>
         <div class="pay-flow">
-          <strong>Pay {props.nameOf(peer)}</strong>
-          <p class="hint">Direct payment to their node’s reported Lightning address.</p>
-          <AmountField data="pay" label={`Amount to pay ${props.nameOf(peer)}`} value={amount()} onInput={setAmount} />
+          <strong>{tr('uiPay')} {props.nameOf(peer)}</strong>
+          <p class="hint">{tr('uiDirectPaymentToTheirNodeSReportedLightning')}</p>
+          <AmountField data="pay" label={tr('uiAmountToPay', props.nameOf(peer))} value={amount()} onInput={setAmount} />
           <Show when={msat() !== null}>
             <dl class="pay-review">
-              <dt>Amount</dt><dd>{fmtAmount(msat()!)}</dd>
-              <dt>Network fee</dt><dd data-call-pay-fee>up to {fmtAmount(routingFee(msat()!))}</dd>
-              <dt>Total at most</dt><dd data-call-pay-total>{fmtAmount(allIn(msat()!))}</dd>
+              <dt>{tr('uiAmount')}</dt><dd>{fmtAmount(msat()!)}</dd>
+              <dt>{tr('uiNetworkFee')}</dt><dd data-call-pay-fee>{tr('uiUpTo178')} {fmtAmount(routingFee(msat()!))}</dd>
+              <dt>{tr('uiTotalAtMost')}</dt><dd data-call-pay-total>{fmtAmount(allIn(msat()!))}</dd>
             </dl>
           </Show>
-          <SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.pending} stays="Your amount stays here. After approval, press Confirm and pay. Approving pays nothing." />
+          <SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.pending} stays={tr('uiYourAmountStaysHereAfterApprovalPressConfirm')} />
           <Show when={!open() && props.spend?.state !== 'pending' && props.spend?.state !== 'unavailable'}>
             <button type="button" class="soft" data-call-pay-approve disabled={blocked() || approving()} onClick={async () => {
               if (blocked() || approving()) return;
               setApproving(true);
               try { await props.actions.approve(); } finally { setApproving(false); }
-            }}>Approve spending</button>
+            }}>{tr('uiApproveSpending')}</button>
           </Show>
-          <button type="button" class="primary soft money" data-call-pay-confirm disabled={blocked() || !live() || !open() || !destination() || msat() === null} onClick={() => void pay()}>Confirm and pay</button>
-          <button type="button" class="link" onClick={() => setExpanded(false)}>Cancel</button>
+          <button type="button" class="primary soft money" data-call-pay-confirm disabled={blocked() || !live() || !open() || !destination() || msat() === null} onClick={() => void pay()}>{tr('uiConfirmAndPay')}</button>
+          <button type="button" class="link" onClick={() => setExpanded(false)}>{tr('uiCancel')}</button>
         </div>
       </Show>
     </Show>
-    <Show when={busy()}><p class="hint" role="status" data-call-pay-status="sending">Sending payment…</p></Show>
+    <Show when={busy()}><p class="hint" role="status" data-call-pay-status="sending">{tr('uiSendingPayment')}</p></Show>
     <Show when={result()}>{(r) => <p class={r().state === 'failed' ? 'err-note' : 'hint'} role="status" data-call-pay-status={r().state}>{r().text}</p>}</Show>
     <Show when={props.pending || result()?.state === 'unknown'}>
       <Reconcile actions={props.actions} hasPending onChecked={(text) => {
@@ -4357,11 +4365,11 @@ function Composer(props: {
     if (generation !== voiceGeneration) return;
     composerRevision++;
     if (!clip) {
-      setNote('Nothing was recorded.');
+      setNote(tr('uiNothingWasRecorded'));
       return;
     }
     if (clip.size > FILE_MAX_BYTES) {
-      setNote('That clip is over 1.4 MB, too large to send. Nothing was sent; record a shorter one.');
+      setNote(tr('uiThatClipIsOver14MBToo'));
       return;
     }
     if (fileInput) fileInput.value = '';
@@ -4383,7 +4391,7 @@ function Composer(props: {
       setRecordedMs(0);
       setRecording({ rec, startedAt: Date.now() });
     } catch (e) {
-      setNote(e instanceof Error ? e.message : 'This window cannot record audio.');
+      setNote(e instanceof Error ? e.message : tr('uiThisWindowCannotRecordAudio'));
     } finally {
       setStarting(false);
     }
@@ -4430,14 +4438,14 @@ function Composer(props: {
     setDeviceWait(null);
     if (pending && !pending.recipient) void props.actions.ownerCancel(pending.approval.id);
     const message = pending?.message ?? device?.message ?? asking;
-    if (leaving && message) props.actions.keepUnsent(message.track, message.text, 'You left before the owner approved this first contact.');
+    if (leaving && message) props.actions.keepUnsent(message.track, message.text, tr('uiYouLeftBeforeTheOwnerApprovedThisFirst'));
   };
   /** Approved on the other device: wait for the node's grant for this recipient, then send at once. */
   const deviceApproved = (w: NonNullable<ReturnType<typeof deviceWait>>, view: ApprovalView) => {
     setDeviceWait(null);
     if (!view.grant_op) {
       setOwnerExpired(true);
-      setNote('Contact approval expired. Nothing was sent. Ask again.');
+      setNote(tr('uiContactApprovalExpiredNothingWasSentAskAgain'));
       return;
     }
     setOwnerWait({
@@ -4470,7 +4478,7 @@ function Composer(props: {
     const expire = () => {
       cancelOwner();
       setOwnerExpired(true);
-      setNote('Contact approval expired. Nothing was sent. Get a fresh quote to try again.');
+      setNote(tr('uiContactApprovalExpiredNothingWasSentGetA'));
     };
     const tick = async () => {
       if (ownerWait() !== pending) return;
@@ -4567,7 +4575,7 @@ function Composer(props: {
         if (!p || p.key !== trackKey(props.track) || (room() && !p.unsentId)) return;
         if (p.unsentId && (draft().trim() || mode() !== 'message')) {
           // Never over a newer message: the Unsent card stays until the box is free.
-          setNote('Send or clear the message in the box first, then put the unsent one back.');
+          setNote(tr('uiSendOrClearTheMessageInTheBox'));
           props.onPrefillUsed?.();
           return;
         }
@@ -4696,7 +4704,7 @@ function Composer(props: {
   const blocked = (): string | null => {
     if (room() && props.roomQuote && props.roomQuote.unreachable.length > 0) {
       const names = props.roomQuote.unreachable.map(props.nameOf).join(', ');
-      return `Not every member is a connected peer (${names}). Your node would skip them without telling you, so this room cannot send yet.`;
+      return tr('uiNotEveryMemberIsAConnectedPeerYour', names);
     }
     return null;
   };
@@ -4735,35 +4743,35 @@ function Composer(props: {
 
   const priceProblem = (): string | null => {
     if (props.admissionResume && mode() === 'message') return null;
-    if (ownerExpired()) return 'Contact approval expired · get a fresh quote';
+    if (ownerExpired()) return tr('uiContactApprovalExpiredGetAFreshQuote');
     if (!room()) {
       if (props.quoteError) return props.quoteError;
-      if (!props.quote) return 'price loading…';
-      if (props.quote.send_unavailable) return peerNotReadyMessage(props.quote.send_unavailable, props.name) ?? `price unavailable · ${props.quote.send_unavailable}`;
+      if (!props.quote) return tr('uiPriceLoading');
+      if (props.quote.send_unavailable) return peerNotReadyMessage(props.quote.send_unavailable, props.name) ?? tr('uiPriceUnavailable', props.quote.send_unavailable);
     }
-    if (readmitPrice()) return Number.isSafeInteger(readmitPrice()!.total_msat) && readmitPrice()!.total_msat > 0 ? null : 'price unavailable · invalid price';
-    if (room()) return props.cost ? null : 'price loading…';
+    if (readmitPrice()) return Number.isSafeInteger(readmitPrice()!.total_msat) && readmitPrice()!.total_msat > 0 ? null : tr('uiPriceUnavailableInvalidPrice');
+    if (room()) return props.cost ? null : tr('uiPriceLoading');
     if (doorWanted() && door()) {
       const d = door()!;
-      if (d.loading) return 'price loading…';
-      if (!d.quote) return peerNotReadyMessage(d.error, props.name) ?? 'price unavailable · first-contact quote unavailable';
-      if (!Number.isSafeInteger(d.quote.total_msat) || d.quote.total_msat <= 0) return 'price unavailable · invalid price';
-      if (d.quote.expires_at * 1000 <= props.now) return 'price unavailable · first-contact quote expired';
+      if (d.loading) return tr('uiPriceLoading');
+      if (!d.quote) return peerNotReadyMessage(d.error, props.name) ?? tr('uiPriceUnavailableFirstContactQuoteUnavailable');
+      if (!Number.isSafeInteger(d.quote.total_msat) || d.quote.total_msat <= 0) return tr('uiPriceUnavailableInvalidPrice');
+      if (d.quote.expires_at * 1000 <= props.now) return tr('uiPriceUnavailableFirstContactQuoteExpired');
       return null;
     }
     const q = props.quote!;
-    if (q.peer_msat === null) return 'price unavailable · peer has not shared a price';
-    if (!Number.isSafeInteger(q.peer_msat) || q.peer_msat < 0) return 'price unavailable · invalid peer price';
-    if (q.peer_stale) return 'price unavailable · peer price is stale';
+    if (q.peer_msat === null) return tr('uiPriceUnavailablePeerHasNotSharedAPrice');
+    if (!Number.isSafeInteger(q.peer_msat) || q.peer_msat < 0) return tr('uiPriceUnavailableInvalidPeerPrice');
+    if (q.peer_stale) return tr('uiPriceUnavailablePeerPriceIsStale');
     if (!Number.isSafeInteger(q.max_routing_fee_msat) || q.max_routing_fee_msat! < 0)
-      return 'price unavailable · routing fee allowance missing';
-    if (!props.cost || !Number.isSafeInteger(props.cost.msat)) return 'price unavailable · invalid price';
+      return tr('uiPriceUnavailableRoutingFeeAllowanceMissing');
+    if (!props.cost || !Number.isSafeInteger(props.cost.msat)) return tr('uiPriceUnavailableInvalidPrice');
     return null;
   };
   const paymentResult = (result: Outcome<unknown>) => {
     if (!result.ok) {
       if (['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered'].includes(result.error.code))
-        setPaidLine('paid amount unknown · check payment result');
+        setPaidLine(tr('uiPaidAmountUnknownCheckPaymentResult'));
       return;
     }
     const receipt = result.value as SendReceipt;
@@ -4778,16 +4786,16 @@ function Composer(props: {
     if (paidLine()) return paidLine();
     if (priceProblem()) return priceProblem();
     const cap = messageShown().msat;
-    if (cap === null) return 'price loading…';
-    if (readmitPrice() || (raisedFrom() !== null && cap > raisedFrom()!)) return `price went up to ${fmtAmount(cap)}, send?`;
-    return `up to ${fmtAmount(cap)} · includes max routing fee`;
+    if (cap === null) return tr('uiPriceLoading');
+    if (readmitPrice() || (raisedFrom() !== null && cap > raisedFrom()!)) return tr('uiPriceWentUpToSend', fmtAmount(cap));
+    return tr('uiUpToIncludesMaxRoutingFee', fmtAmount(cap));
   };
 
   /** What this mode costs, shown before the button is pressed. */
   /** What one message costs here, whatever the current mode (Send in chat uses it too). */
   const messageShown = (): { msat: number | null; estimate: boolean; basis: string } => {
     const resume = props.admissionResume;
-    if (resume) return { msat: resume.cap_msat, estimate: false, basis: 'Original cap, including admission already paid. Only the same message can resume.' };
+    if (resume) return { msat: resume.cap_msat, estimate: false, basis: tr('uiOriginalCapIncludingAdmissionAlreadyPaidOnlyThe') };
     const problem = priceProblem();
     if (problem) return { msat: null, estimate: false, basis: problem };
     const again = readmitPrice();
@@ -4795,7 +4803,7 @@ function Composer(props: {
       return {
         msat: again.total_msat,
         estimate: false,
-        basis: `${props.name} asks for admission again: ${sats(again.admission_msat)} ${satUnit(again.admission_msat)}, then ${fmtAmount(again.message_msat)} for this message; ${feeCeiling(again.max_routing_fee_msat ?? 0)}`,
+        basis: tr('uiAsksForAdmissionAgainThenForThisMessage', props.name, sats(again.admission_msat), satUnit(again.admission_msat), fmtAmount(again.message_msat), feeCeiling(again.max_routing_fee_msat ?? 0)),
       };
     }
     const q = doorWanted() ? doorQuote() : null;
@@ -4803,13 +4811,13 @@ function Composer(props: {
       return {
         msat: q.total_msat,
         estimate: false,
-        basis: `${props.name}’s own quote: ${fmtAmount(q.admission_msat)} to open their door, then ${fmtAmount(q.message_msat)} for this message; ${feeCeiling(q.max_routing_fee_msat ?? 0)}`,
+        basis: tr('uiSOwnQuoteToOpenTheirDoorThen', props.name, fmtAmount(q.admission_msat), fmtAmount(q.message_msat), feeCeiling(q.max_routing_fee_msat ?? 0)),
       };
     }
     const c = props.cost;
-    if (!c) return { msat: null, estimate: false, basis: room() ? 'Reading each member’s price…' : 'Reading their price…' };
+    if (!c) return { msat: null, estimate: false, basis: room() ? tr('uiReadingEachMemberSPrice') : tr('uiReadingTheirPrice') };
     const basis = doorWanted()
-      ? `${c.basis}. First-contact admission must fit this ceiling; otherwise nothing is paid and a new price needs your confirmation.`
+      ? tr('uiFirstContactAdmissionMustFitThisCeilingOtherwise', c.basis)
       : c.basis;
     return { msat: c.msat, estimate: c.estimate, basis };
   };
@@ -4821,18 +4829,18 @@ function Composer(props: {
       case 'pay':
         if (payKind() === 'invoice') {
           return invoiceMsat() === null
-            ? { msat: null, estimate: false, basis: 'Paste an invoice to see what it asks for' }
-            : { msat: allIn(invoiceMsat()!), estimate: false, basis: `Includes ${feeCeiling(routingFee(invoiceMsat()!))}` };
+            ? { msat: null, estimate: false, basis: tr('uiPasteAnInvoiceToSeeWhatItAsks') }
+            : { msat: allIn(invoiceMsat()!), estimate: false, basis: tr('uiIncludes', feeCeiling(routingFee(invoiceMsat()!))) };
         }
         return amountMsat() === null
-          ? { msat: null, estimate: false, basis: 'Enter an amount' }
-          : { msat: allIn(amountMsat()!), estimate: false, basis: `Includes ${feeCeiling(routingFee(amountMsat()!))}` };
+          ? { msat: null, estimate: false, basis: tr('uiEnterAnAmount') }
+          : { msat: allIn(amountMsat()!), estimate: false, basis: tr('uiIncludes', feeCeiling(routingFee(amountMsat()!))) };
       case 'request':
-        return { msat: 0, estimate: false, basis: 'Receiving is free' };
+        return { msat: 0, estimate: false, basis: tr('uiReceivingIsFree') };
       case 'file':
         return props.filePrice === null
-          ? { msat: null, estimate: false, basis: 'Reading the file price…' }
-          : { msat: props.filePrice.total_msat, estimate: false, basis: `File price plus ${feeCeiling(props.filePrice.max_routing_fee_msat)}` };
+          ? { msat: null, estimate: false, basis: tr('uiReadingTheFilePrice') }
+          : { msat: props.filePrice.total_msat, estimate: false, basis: tr('uiFilePricePlus', feeCeiling(props.filePrice.max_routing_fee_msat)) };
     }
   };
 
@@ -4852,50 +4860,50 @@ function Composer(props: {
   };
 
   const label = () => {
-    if (paying()) return 'Paying…';
-    if (deviceWait()) return 'Waiting for your other device';
-    if (ownerWait()) return 'Waiting for contact approval';
+    if (paying()) return tr('uiPaying');
+    if (deviceWait()) return tr('uiWaitingForYourOtherDevice');
+    if (ownerWait()) return tr('uiWaitingForContactApproval');
     if (needsTouch()) {
-      return isMobilePlatform() ? 'Approve with biometrics' : 'Approve with Touch ID';
+      return isMobilePlatform() ? tr('uiApproveWithBiometrics') : tr('uiApproveWithTouchID');
     }
     if (viaBudget()) {
       const s = shown();
       const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
       switch (stand().kind) {
-        case 'paused': return 'Resume payments';
-        case 'waiting': return 'Waiting for approval';
+        case 'paused': return tr('uiResumePayments');
+        case 'waiting': return tr('uiWaitingForApproval');
         // The press only allows payments (a preset): say so, as the message button does.
-        case 'off': return presetChosen() ? 'Allow payments' : 'Send';
-        case 'first': return `Send first ${mode() === 'file' ? 'file' : 'message'}${price}`;
+        case 'off': return presetChosen() ? tr('uiAllowPayments') : tr('uiSend');
+        case 'first': return tr('uiSendFirst', mode() === 'file' ? tr('fileNoun') : tr('messageNoun'), price);
         case 'contact_used':
-        case 'total_used': return 'Budget used up';
-        case 'grant_limited': return 'Node grant limit';
-        default: return `Send${price}`;
+        case 'total_used': return tr('uiBudgetUsedUp');
+        case 'grant_limited': return tr('uiNodeGrantLimit');
+        default: return tr('uiSend230', price);
       }
     }
     if (spends() && !line().open) {
-      if (props.spend?.state === 'pending') return 'Waiting for approval';
-      if (props.spend?.state === 'unavailable') return 'Spending unavailable';
-      return canContinue('grant') ? 'Approve & send' : 'Send';
+      if (props.spend?.state === 'pending') return tr('uiWaitingForApproval');
+      if (props.spend?.state === 'unavailable') return tr('uiSpendingUnavailable');
+      return canContinue('grant') ? tr('uiApproveSend') : tr('uiSend');
     }
     const s = shown();
     const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
-    return { message: 'Send', pay: 'Pay', request: 'Create invoice', file: 'Send file' }[mode()] + (mode() === 'request' ? '' : price);
+    return { message: tr('uiSend'), pay: tr('uiPay'), request: tr('uiCreateInvoice'), file: tr('uiSendFile') }[mode()] + (mode() === 'request' ? '' : price);
   };
 
   /** The Send button's text, title and accessible name: what this press does. */
   const sendTitle = () => {
     if (!needsTouch() && !viaBudget() && spends() && !line().open && props.spend?.state !== 'pending' && props.spend?.state !== 'unavailable' && canContinue('grant')) {
-      return 'Approve & send';
+      return tr('uiApproveSend');
     }
-    if (needsTouch()) return isMobilePlatform() ? 'Approve with biometrics' : 'Approve with Touch ID';
+    if (needsTouch()) return isMobilePlatform() ? tr('uiApproveWithBiometrics') : tr('uiApproveWithTouchID');
     // A budget press only approves or resumes; it sends nothing.
     if (viaBudget() && (mode() === 'message' || mode() === 'file')) {
       const k = stand().kind;
-      if (k === 'paused') return 'Resume payments';
-      if (k === 'off' && presetChosen()) return 'Allow payments';
+      if (k === 'paused') return tr('uiResumePayments');
+      if (k === 'off' && presetChosen()) return tr('uiAllowPayments');
     }
-    return 'Send';
+    return tr('uiSend');
   };
   /** Pay / Request / File panels close back to the single message bar. */
   const closePanel = () => {
@@ -4976,13 +4984,13 @@ function Composer(props: {
   const [approvalPending, setApprovalPending] = createSignal(false);
   const approvedPlain = (ok: boolean, waiting = false) => {
     if (!ok || mode() !== 'message' || !untrack(draft).trim()) return;
-    if (waiting) { setApprovalPending(true); setNote('Waiting for your approval at the node…'); return; }
-    setNote('Approved. Press Send to send it.');
+    if (waiting) { setApprovalPending(true); setNote(tr('uiWaitingForYourApprovalAtTheNode')); return; }
+    setNote(tr('uiApprovedPressSendToSendIt'));
   };
   createEffect(() => {
     if (!approvalPending()) return;
     const k = stand().kind;
-    if (k === 'ok' || k === 'first') { setApprovalPending(false); setNote('Approved. Press Send to send it.'); }
+    if (k === 'ok' || k === 'first') { setApprovalPending(false); setNote(tr('uiApprovedPressSendToSendIt')); }
     // Completed into a limit (contact or daily total used, node grant limit), or turned off again: the
     // waiting note ends; the budget line under the composer explains the limit.
     else if (k !== 'waiting') { setApprovalPending(false); setNote(null); }
@@ -5015,8 +5023,8 @@ function Composer(props: {
       props.actions.settleWaiting(c.track, c.bubble, '');
       setDraft(c.text);
       setDrafted(true);
-      setNote('Approved. Press Send to send it.');
-    } else props.actions.settleWaiting(c.track, c.bubble, 'Approved; press Send to send it.');
+      setNote(tr('uiApprovedPressSendToSendIt'));
+    } else props.actions.settleWaiting(c.track, c.bubble, tr('uiApprovedPressSendToSendIt238'));
   };
   const approvalCleared = () => !needsTouch() && (viaBudget() ? stand().kind === 'ok' || stand().kind === 'first' : !spends() || line().open);
   /**
@@ -5030,7 +5038,7 @@ function Composer(props: {
     const c = untrack(consent);
     if (!c) return;
     const ok = typeof r === 'boolean' ? r : r.ok;
-    if (!ok) { dropConsent('It was not approved.'); return; }
+    if (!ok) { dropConsent(tr('uiItWasNotApproved')); return; }
     if (typeof r === 'boolean') { backToPlain(); return; }
     if (!r.bindable || (r.grantedOp === null && r.requestId === null)) { backToPlain(); return; }
     setConsent({ ...c, approved: true, key: r.grantedOp, requestId: r.requestId });
@@ -5044,15 +5052,15 @@ function Composer(props: {
     const c = untrack(consent);
     // Only the wait this tap started: one that already ended is never bound again.
     if (!c || c !== started) return;
-    if (!r.ok) { dropConsent('It was not approved.'); return; }
+    if (!r.ok) { dropConsent(tr('uiItWasNotApproved')); return; }
     if (!r.envelopeId) { backToPlain(); return; }
     setConsent({ ...c, approved: true, envelope: r.envelopeId, readsFrom: r.readsFrom });
   };
-  const LAPSED = 'The approval was cancelled or lapsed before it went through.';
-  const TOUCH_AGAIN = `It needs ${isMobilePlatform() ? 'biometric approval' : 'Touch ID'} again. Press Send to ask.`;
-  const BUDGET_AGAIN = 'Payments need approving again. Press Send to ask.';
-  const BUDGET_SHORT = 'Allowed, but your budget does not cover this message. Nothing was sent.';
-  const PRICE_MOVED = 'The message price changed before it was sent. Nothing was sent; check the price and press Send.';
+  const LAPSED = () => tr('uiTheApprovalWasCancelledOrLapsedBeforeIt');
+  const TOUCH_AGAIN = () => tr('uiItNeedsAgainPressSendToAsk', isMobilePlatform() ? tr('uiBiometricApproval') : tr('uiTouchID'));
+  const BUDGET_AGAIN = () => tr('uiPaymentsNeedApprovingAgainPressSendToAsk');
+  const BUDGET_SHORT = () => tr('uiAllowedButYourBudgetDoesNotCoverThis');
+  const PRICE_MOVED = () => tr('uiTheMessagePriceChangedBeforeItWasSent');
   /** The budget stand for an approved message at the price it was approved at (whatever the composer's mode now). */
   const standFor = (p: Pressed) => budgetStand(budget(), (p.track as { id: string }).id, p.track.kind === 'room', p.msat, p.track.kind !== 'room' && readmit()).kind;
   /**
@@ -5093,18 +5101,18 @@ function Composer(props: {
     const c = consent();
     if (!c || c.kind !== 'touch') return;
     // Before the approval answers too: once this Mac's approvals stop, the wait ends for good.
-    if (props.actions.device()?.state !== 'registered') { dropConsent(`${isMobilePlatform() ? `Biometric approvals on this ${deviceWord()}` : 'Touch ID approvals on this Mac'} stopped before it went through.`); return; }
+    if (props.actions.device()?.state !== 'registered') { dropConsent(tr('uiStoppedBeforeItWentThrough', isMobilePlatform() ? tr('uiBiometricApprovalsOnThis', deviceWord() === 'phone' ? tr('phone') : deviceWord()) : tr('uiTouchIDApprovalsOnThisMac'))); return; }
     if (!c.approved) return;
     if (props.actions.budgetReadApplied() < c.readsFrom) return;
     const g = budget()?.node_grant ?? null;
-    if (!g) { dropConsent(c.keySeen ? LAPSED : TOUCH_AGAIN); return; }
+    if (!g) { dropConsent(c.keySeen ? LAPSED() : TOUCH_AGAIN()); return; }
     const ids = g.envelope_id_by_recipient;
     if (!ids) { backToPlain(); return; }
     const peer = (c.track as { id: string }).id.toLowerCase();
     const until = g.envelopes?.[peer];
     const now = Math.max(props.now, Date.now());
-    if (g.expires_at_ms <= now || ids[peer] !== c.envelope || !until || until <= now) { dropConsent(c.keySeen ? LAPSED : TOUCH_AGAIN); return; }
-    if (!touchCovers(g, peer, c.msat)) { dropConsent(TOUCH_AGAIN); return; }
+    if (g.expires_at_ms <= now || ids[peer] !== c.envelope || !until || until <= now) { dropConsent(c.keySeen ? LAPSED() : TOUCH_AGAIN()); return; }
+    if (!touchCovers(g, peer, c.msat)) { dropConsent(TOUCH_AGAIN()); return; }
     if (!c.keySeen) setConsent({ ...c, keySeen: true });
   });
   /**
@@ -5116,7 +5124,7 @@ function Composer(props: {
   const afterBudget = (r: ApprovalResult, started: Pressed | null) => {
     const c = untrack(consent);
     if (!c || c !== started) return;
-    if (!r.ok) { dropConsent('It was not approved.'); return; }
+    if (!r.ok) { dropConsent(tr('uiItWasNotApproved')); return; }
     if (r.requestId === null) { backToPlain(); return; }
     setConsent({ ...c, approved: true, requestId: r.requestId, readsFrom: r.readsFrom ?? Number.MAX_SAFE_INTEGER });
   };
@@ -5146,17 +5154,17 @@ function Composer(props: {
     if (budgetLive(c, b, now)) {
       // Allowed, but this message is over a limit the budget sets: it is not sent.
       const k = untrack(stand).kind;
-      if (k === 'contact_used' || k === 'total_used' || k === 'grant_limited') { dropConsent(BUDGET_SHORT); return; }
+      if (k === 'contact_used' || k === 'total_used' || k === 'grant_limited') { dropConsent(BUDGET_SHORT()); return; }
       if (!c.keySeen) setConsent({ ...c, keySeen: true });
       return;
     }
-    if (c.keySeen || b.paused || b.autopay.state === 'open') { dropConsent(LAPSED); return; }
+    if (c.keySeen || b.paused || b.autopay.state === 'open') { dropConsent(LAPSED()); return; }
     const sp = props.spend;
     const pendingOp = sp?.state === 'pending' ? sp.pending?.op_id ?? null : null;
-    if (pendingOp !== null && pendingOp !== c.requestId) { dropConsent(LAPSED); return; }
+    if (pendingOp !== null && pendingOp !== c.requestId) { dropConsent(LAPSED()); return; }
     if (b.waiting_for_owner || pendingOp === c.requestId) { if (!c.requestSeen) setConsent({ ...c, requestSeen: true }); return; }
     // The call returned R, so a fresh read that shows neither R waiting nor R live means it was cancelled or lapsed.
-    dropConsent(LAPSED);
+    dropConsent(LAPSED());
   });
   // The approval it waits on was cancelled, lapsed or replaced: the consent ends with it.
   createEffect(() => {
@@ -5167,9 +5175,9 @@ function Composer(props: {
     const granted = open ? sp!.granted_op ?? null : null;
     if (c.key !== null) {
       // Bound to the grant its own call armed: another grant, or the window closing after it was seen, ends it.
-      if (open && granted !== null && granted !== c.key) { dropConsent(LAPSED); return; }
+      if (open && granted !== null && granted !== c.key) { dropConsent(LAPSED()); return; }
       if (open && granted === c.key) { if (!c.keySeen) setConsent({ ...c, keySeen: true }); return; }
-      if (c.keySeen) dropConsent(LAPSED);
+      if (c.keySeen) dropConsent(LAPSED());
       return;
     }
     // Bound to its node request R: the window that request's completion armed (armed_by_request === R).
@@ -5178,32 +5186,32 @@ function Composer(props: {
       if (!('armed_by_request' in sp!)) { backToPlain(); return; }
       if (sp!.armed_by_request === c.requestId) { if (!c.keySeen) setConsent({ ...c, keySeen: true }); return; }
       // Another request (or an immediate approval) opened this window: R's did not.
-      dropConsent(LAPSED);
+      dropConsent(LAPSED());
       return;
     }
-    if (c.keySeen) { dropConsent(LAPSED); return; }
+    if (c.keySeen) { dropConsent(LAPSED()); return; }
     if (sp?.state === 'pending') {
-      if (sp.pending?.op_id && sp.pending.op_id !== c.requestId) { dropConsent(LAPSED); return; }
+      if (sp.pending?.op_id && sp.pending.op_id !== c.requestId) { dropConsent(LAPSED()); return; }
       if (!c.requestSeen) setConsent({ ...c, requestSeen: true });
       return;
     }
     // Closed after its request was seen pending: it lapsed or was cancelled. Before that, the view may
     // still be the one from before the request (a budget approval refreshes spending afterwards): wait.
-    if (c.requestSeen) dropConsent(LAPSED);
+    if (c.requestSeen) dropConsent(LAPSED());
   });
   createEffect(on(() => messageShown().msat, (msat) => {
     const c = untrack(consent);
     // Another chat's price is not this message's: leaving is said as leaving (below).
-    if (c && trackKey(props.track) === trackKey(c.track) && msat !== c.msat) dropConsent('The price changed while it waited for approval.');
+    if (c && trackKey(props.track) === trackKey(c.track) && msat !== c.msat) dropConsent(tr('uiThePriceChangedWhileItWaitedForApproval'));
   }, { defer: true }));
-  createEffect(on(() => trackKey(props.track), () => { cancelHanded(); dropConsent('You left this chat before it was approved.'); }, { defer: true }));
-  createEffect(() => { if (props.moneyBlocked) dropConsent('Your node went offline before it was approved.'); });
+  createEffect(on(() => trackKey(props.track), () => { cancelHanded(); dropConsent(tr('uiYouLeftThisChatBeforeItWasApproved')); }, { defer: true }));
+  createEffect(() => { if (props.moneyBlocked) dropConsent(tr('uiYourNodeWentOfflineBeforeItWasApproved')); });
   createEffect(on(consent, (c) => {
     if (!c) return;
-    const timer = setTimeout(() => { if (untrack(consent) === c) dropConsent('It was not approved within 10 minutes.'); }, Math.max(0, c.until - Date.now()));
+    const timer = setTimeout(() => { if (untrack(consent) === c) dropConsent(tr('uiItWasNotApprovedWithin10Minutes')); }, Math.max(0, c.until - Date.now()));
     onCleanup(() => clearTimeout(timer));
   }));
-  onCleanup(() => { cancelHanded(); dropConsent('You left before it was approved.'); });
+  onCleanup(() => { cancelHanded(); dropConsent(tr('uiYouLeftBeforeItWasApproved')); });
   // Its own approval succeeded and cleared: the waiting bubble goes once, through
   // the ordinary path. Transient guards (busy, a stale budget read, a contact
   // wait) keep it waiting rather than ending it.
@@ -5221,21 +5229,21 @@ function Composer(props: {
       if (k === 'first') {
         // A first contact needs its own approval: the words go back to the box, with the reason.
         backToPlain();
-        setNote('This first contact needs its own approval. Press Send to ask for it.');
+        setNote(tr('uiThisFirstContactNeedsItsOwnApprovalPress'));
         return;
       }
-      if (k !== 'ok') { dropConsent(LAPSED); return; }
+      if (k !== 'ok') { dropConsent(LAPSED()); return; }
     } else {
       // Only the window its own approval armed (its grant op G, or its request R).
       const sp = props.spend;
       if (sp?.state !== 'open') return;
       if (c.key !== null ? sp.granted_op !== c.key : !(c.requestId !== null && 'armed_by_request' in sp && sp.armed_by_request === c.requestId)) return;
     }
-    if (Date.now() >= c.until) { dropConsent('It was not approved within 10 minutes.'); return; }
+    if (Date.now() >= c.until) { dropConsent(tr('uiItWasNotApprovedWithin10Minutes')); return; }
     setConsent(null);
     void (async () => {
       await submit(c.msat, c);
-      if (!c.taken) props.actions.settleWaiting(c.track, c.bubble, untrack(note) ?? 'It could not be sent after the approval.');
+      if (!c.taken) props.actions.settleWaiting(c.track, c.bubble, untrack(note) ?? tr('uiItCouldNotBeSentAfterTheApproval'));
     })();
   });
   /**
@@ -5251,7 +5259,7 @@ function Composer(props: {
     p.cancelReason = reason;
   };
   function cancelHanded() {
-    untrack(handed).forEach((p) => cancel(p, 'You left this chat before it was sent.'));
+    untrack(handed).forEach((p) => cancel(p, tr('uiYouLeftThisChatBeforeItWasSent')));
     setHanded([]);
   }
   /**
@@ -5278,23 +5286,23 @@ function Composer(props: {
     const gone = list.filter((p) => {
       if (p.cancelled) return true;
       // The price it was approved at is not this contact's price any more: never sent at the old one.
-      if (here === trackKey(p.track) && price !== null && price !== p.msat) { cancel(p, PRICE_MOVED); return true; }
+      if (here === trackKey(p.track) && price !== null && price !== p.msat) { cancel(p, PRICE_MOVED()); return true; }
       if (p.kind === 'touch') {
-        if (!deviceOn) { cancel(p, `${isMobilePlatform() ? `Biometric approvals on this ${deviceWord()}` : 'Touch ID approvals on this Mac'} stopped before it went through.`); return true; }
+        if (!deviceOn) { cancel(p, tr('uiStoppedBeforeItWentThrough', isMobilePlatform() ? tr('uiBiometricApprovalsOnThis', deviceWord() === 'phone' ? tr('phone') : deviceWord()) : tr('uiTouchIDApprovalsOnThisMac'))); return true; }
         if (!fresh || props.actions.budgetReadApplied() < p.readsFrom) return false;
         const peer = (p.track as { id: string }).id.toLowerCase();
         const until = g?.envelopes?.[peer];
-        if (!g || g.expires_at_ms <= now || g.envelope_id_by_recipient?.[peer] !== p.envelope || !until || until <= now) { cancel(p, LAPSED); return true; }
+        if (!g || g.expires_at_ms <= now || g.envelope_id_by_recipient?.[peer] !== p.envelope || !until || until <= now) { cancel(p, LAPSED()); return true; }
         return false;
       }
       if (p.kind === 'budget') {
         if (!fresh || props.actions.budgetReadApplied() < p.readsFrom) return false;
-        if (!budgetLive(p, budget(), now)) { cancel(p, LAPSED); return true; }
+        if (!budgetLive(p, budget(), now)) { cancel(p, LAPSED()); return true; }
         // Allowed by its own R, but this message is over (or waiting on) a budget limit: not sent, even if it recovers later.
-        if (here === trackKey(p.track) && standFor(p) !== 'ok') { cancel(p, BUDGET_SHORT); return true; }
+        if (here === trackKey(p.track) && standFor(p) !== 'ok') { cancel(p, BUDGET_SHORT()); return true; }
         return false;
       }
-      if (!windowStill(p, sp, now)) { cancel(p, LAPSED); return true; }
+      if (!windowStill(p, sp, now)) { cancel(p, LAPSED()); return true; }
       return false;
     });
     if (gone.length) setHanded(list.filter((p) => !gone.includes(p)));
@@ -5307,7 +5315,7 @@ function Composer(props: {
    * touched.
    */
   createEffect(on(props.actions.spendCancels, () => {
-    const CANCELLED = 'You cancelled the request. Nothing was sent.';
+    const CANCELLED = tr('uiYouCancelledTheRequestNothingWasSent');
     const byRequest = (p: Pressed) => p.kind === 'budget' || p.kind === 'grant';
     const c = untrack(consent);
     if (c && byRequest(c)) dropConsent(CANCELLED);
@@ -5329,17 +5337,17 @@ function Composer(props: {
   /** Why a handed-off approve & send must not go now (it becomes a Not sent card), or null. */
   const stillBound = (p: Pressed): string | null => untrack(() => {
     setHanded((list) => list.filter((x) => x !== p));
-    if (p.cancelled) return p.cancelReason ?? 'You left this chat before it was sent.';
-    if (trackKey(props.track) !== trackKey(p.track)) return 'You left this chat before it was sent.';
-    if (props.moneyBlocked) return 'Your node went offline before it was sent.';
-    if (Date.now() >= p.until) return 'It was not approved within 10 minutes.';
+    if (p.cancelled) return p.cancelReason ?? tr('uiYouLeftThisChatBeforeItWasSent');
+    if (trackKey(props.track) !== trackKey(p.track)) return tr('uiYouLeftThisChatBeforeItWasSent');
+    if (props.moneyBlocked) return tr('uiYourNodeWentOfflineBeforeItWasSent');
+    if (Date.now() >= p.until) return tr('uiItWasNotApprovedWithin10Minutes');
     // A budget read known to be stale proves nothing, for either kind.
-    if (props.budgetStale) return p.kind === 'touch' ? TOUCH_AGAIN : p.kind === 'budget' ? BUDGET_AGAIN : 'Spending needs approving again. Press Send to ask.';
+    if (props.budgetStale) return p.kind === 'touch' ? TOUCH_AGAIN() : p.kind === 'budget' ? BUDGET_AGAIN() : tr('uiSpendingNeedsApprovingAgainPressSendToAsk');
     // Only at the price it was approved at (null: the price is being read again, so it is not confirmed).
-    if (messageShown().msat !== p.msat) return PRICE_MOVED;
-    if (p.kind === 'touch') return touchLive(p) ? null : TOUCH_AGAIN;
-    if (p.kind === 'budget') return !budgetLive(p, budget(), Date.now()) ? LAPSED : standFor(p) !== 'ok' ? BUDGET_SHORT : null;
-    return windowStill(p, props.spend, Date.now()) ? null : LAPSED;
+    if (messageShown().msat !== p.msat) return PRICE_MOVED();
+    if (p.kind === 'touch') return touchLive(p) ? null : TOUCH_AGAIN();
+    if (p.kind === 'budget') return !budgetLive(p, budget(), Date.now()) ? LAPSED() : standFor(p) !== 'ok' ? BUDGET_SHORT() : null;
+    return windowStill(p, props.spend, Date.now()) ? null : LAPSED();
   });
   /** The bubble a send uses: the waiting one it continues (handed over now), else a new one. */
   const bubbleFor = (t: TrackRef, text: string, cap: number, pressed: Pressed | null) => {
@@ -5358,7 +5366,7 @@ function Composer(props: {
    */
   const submit = async (shownMsat?: number | null, pressed: Pressed | null = null) => {
     if (!pressed && consent() && mode() === 'message' && !approvalCleared()) {
-      setNote('A message is already waiting for approval in this chat. It sends when approved.');
+      setNote(tr('uiAMessageIsAlreadyWaitingForApprovalIn'));
       return;
     }
     if (props.moneyBlocked || (spends() && props.budgetStale) || busy() || contactWaiting()) return;
@@ -5368,11 +5376,11 @@ function Composer(props: {
     if (wait) { setNote(wait); return; }
     setNote(null);
     if (shownMsat !== undefined && (mode() !== 'message' || shown().msat !== shownMsat)) {
-      setNote('The message price changed since you pressed. Nothing was sent. Check the price on Send and press it to send.');
+      setNote(tr('uiTheMessagePriceChangedSinceYouPressedNothing'));
       return;
     }
     if (needsTouch()) {
-      if (pressed) { setNote(TOUCH_AGAIN); return; }
+      if (pressed) { setNote(TOUCH_AGAIN()); return; }
       // Where the host names each contact's envelope, the message waits in its
       // bubble and goes once that very envelope is live (approve & send);
       // otherwise this contact is approved and the draft stays (plain flow).
@@ -5390,7 +5398,7 @@ function Composer(props: {
     if (viaBudget()) {
       const st = stand();
       if (st.kind === 'paused' || st.kind === 'off') {
-        if (pressed) { setNote(BUDGET_AGAIN); return; }
+        if (pressed) { setNote(BUDGET_AGAIN()); return; }
         // The one approval (or resume). Where the host names the request that
         // arms autopay, the message waits in its bubble and goes once that very
         // request armed it (approve & send); otherwise the draft stays (plain).
@@ -5411,7 +5419,7 @@ function Composer(props: {
       if (!ready(pressed?.text)) {
         // A press before the price is known must not look like a send: the draft
         // stays, and the owner sees why nothing moved (real-window step 10).
-        setNote((pressed ? pressed.text : draft()).trim() ? 'The message price is not ready yet. Nothing was sent. Wait for the cost, then press Send.' : 'Type a message first.');
+        setNote((pressed ? pressed.text : draft()).trim() ? tr('uiTheMessagePriceIsNotReadyYetNothing') : tr('uiTypeAMessageFirst'));
         return;
       }
       setBusy(true);
@@ -5483,7 +5491,7 @@ function Composer(props: {
       // is remote-only and happens on another owner device).
       if (pressed && first !== undefined && !room()) {
         // A first contact needs its own approval: an Approve & send does not chain into a second one.
-        setNote('This first contact needs its own approval. Press Send to ask for it.');
+        setNote(tr('uiThisFirstContactNeedsItsOwnApprovalPress'));
         setBusy(false);
         return;
       }
@@ -5558,7 +5566,7 @@ function Composer(props: {
       return;
     }
     if (spends() && !line().open) {
-      if (pressed) { setNote('Spending needs approving again. Press Send to ask.'); return; }
+      if (pressed) { setNote(tr('uiSpendingNeedsApprovingAgainPressSendToAsk')); return; }
       // The one tap asks the node for a spending window. Where the host names the
       // request or the grant it armed, the message then goes once (Approve & send).
       startWaiting('grant');
@@ -5571,8 +5579,8 @@ function Composer(props: {
     if (!ready(pressed?.text)) {
       setNote(
         mode() === 'message' && (pressed ? pressed.text : draft()).trim()
-          ? 'The message price is not ready yet. Nothing was sent. Wait for the cost, then press Send.'
-          : 'Nothing was sent yet — finish the fields first.',
+          ? tr('uiTheMessagePriceIsNotReadyYetNothing')
+          : tr('uiNothingWasSentYetFinishTheFieldsFirst'),
       );
       return;
     }
@@ -5726,41 +5734,41 @@ function Composer(props: {
           composerRevision++;
           setFile(e.currentTarget.files?.[0] ?? null);
         }}
-        aria-label="File to send"
+        aria-label={tr('uiFileToSend')}
       />
 
       <Switch>
         <Match when={mode() === 'file'}>
           <div class="composer-panel file-panel" data-composer-panel="file">
             <div class="panel-head">
-              <strong>Send a file</strong>
-              <button type="button" class="link" data-composer-close aria-label="Close" onClick={closePanel}>✕</button>
+              <strong>{tr('uiSendAFile')}</strong>
+              <button type="button" class="link" data-composer-close aria-label={tr('uiClose')} onClick={closePanel}>✕</button>
             </div>
             <div class="composer-main">
               <button
                 type="button"
                 class="attach soft icon-btn"
                 data-file-choose
-                aria-label="Choose a file"
-                title="Choose a file"
+                aria-label={tr('uiChooseAFile')}
+                title={tr('uiChooseAFile')}
                 onClick={() => fileInput?.click()}
               >
                 +
               </button>
               <div class="file-chip" data-file-chip>
-                <Show when={file()} fallback={<span class="hint">{recording() ? `Recording… up to ${duration(recording()?.rec.limitMs ?? VOICE_MAX_MS)}` : `Choose a file for ${props.name}`}</span>}>
+                <Show when={file()} fallback={<span class="hint">{recording() ? tr('uiRecordingUpTo', duration(recording()?.rec.limitMs ?? VOICE_MAX_MS)) : tr('uiChooseAFileFor', props.name)}</span>}>
                   {(f) => (
                     <Show when={voicePreview()} fallback={<span class="file-name">{f().name}</span>}>
-                      <audio controls src={voicePreview()!} data-voice-preview aria-label="Voice note preview" />
+                      <audio controls src={voicePreview()!} data-voice-preview aria-label={tr('uiVoiceNotePreview')} />
                     </Show>
                   )}
                 </Show>
                 <button type="button" class="link" onClick={closePanel}>
-                  Remove
+                  {tr('uiRemove')}
                 </button>
                 {/* The price shows here in every state, approval pending or not, as it does under the message bar. */}
                 <span class="hint" data-file-price={mode() === 'file' && shown().msat !== null ? shown().msat! : undefined}>
-                  {shown().msat !== null ? `up to ${fmtAmount(shown().msat!)} · includes max routing fee` : shown().basis} · files up to 1.4 MB
+                  {shown().msat !== null ? tr('uiUpToIncludesMaxRoutingFee', fmtAmount(shown().msat!)) : shown().basis} {tr('uiFilesUpTo14MB')}
                 </span>
               </div>
               <button type="submit" class="primary soft money" disabled={disabled()} data-send title={label()} aria-label={label()}>
@@ -5772,20 +5780,20 @@ function Composer(props: {
         <Match when={mode() === 'pay'}>
           <div class="fields pay-flow composer-panel" data-composer-panel="pay">
             <div class="panel-head">
-              <strong>Pay {props.name}</strong>
-              <button type="button" class="link" data-composer-close aria-label="Done" onClick={closePanel}>Done</button>
+              <strong>{tr('uiPay')} {props.name}</strong>
+              <button type="button" class="link" data-composer-close aria-label={tr('uiDone')} onClick={closePanel}>{tr('uiDone')}</button>
             </div>
-            <div class="modes soft small" role="tablist" aria-label="How to pay">
-              <button type="button" role="tab" aria-selected={payKind() === 'invoice'} onClick={() => { if (payKind() === 'invoice') return; composerRevision++; setPayKind('invoice'); }}>Invoice</button>
-              <button type="button" role="tab" aria-selected={payKind() === 'keysend'} onClick={() => { if (payKind() === 'keysend') return; composerRevision++; setPayKind('keysend'); }}>Direct</button>
+            <div class="modes soft small" role="tablist" aria-label={tr('uiHowToPay')}>
+              <button type="button" role="tab" aria-selected={payKind() === 'invoice'} onClick={() => { if (payKind() === 'invoice') return; composerRevision++; setPayKind('invoice'); }}>{tr('uiInvoice')}</button>
+              <button type="button" role="tab" aria-selected={payKind() === 'keysend'} onClick={() => { if (payKind() === 'keysend') return; composerRevision++; setPayKind('keysend'); }}>{tr('uiDirect')}</button>
             </div>
             <Show
               when={payKind() === 'invoice'}
               fallback={
                 <>
-                  <AmountField data="pay" label="Amount to pay" value={amount()} onInput={setAmount} />
-                  <input data-pay-pubkey placeholder="Their Lightning node ID" value={pubkey()} onInput={(e) => setPubkey(e.currentTarget.value)} aria-label="Lightning node pubkey" />
-                  <input data-pay-note placeholder="Note (optional)" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="Note" />
+                  <AmountField data="pay" label={tr('uiAmountToPay283')} value={amount()} onInput={setAmount} />
+                  <input data-pay-pubkey placeholder={tr('uiTheirLightningNodeID')} value={pubkey()} onInput={(e) => setPubkey(e.currentTarget.value)} aria-label={tr('uiLightningNodePubkey')} />
+                  <input data-pay-note placeholder={tr('uiNoteOptional')} value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label={tr('uiNote')} />
                 </>
               }
             >
@@ -5793,14 +5801,14 @@ function Composer(props: {
                 <span class="amount-value">{invoiceMsat() === null ? '0' : sats(invoiceMsat()!)}</span>
                 <span class="amount-unit">{invoiceMsat() === null ? unitName() : satUnit(invoiceMsat()!)}</span>
               </div>
-              <textarea data-pay-invoice rows={2} placeholder={`Paste an invoice from ${props.name}`} value={bolt11()} onInput={(e) => setBolt11(e.currentTarget.value)} aria-label="Lightning invoice" />
+              <textarea data-pay-invoice rows={2} placeholder={tr('uiPasteAnInvoiceFrom', props.name)} value={bolt11()} onInput={(e) => setBolt11(e.currentTarget.value)} aria-label={tr('uiLightningInvoice')} />
             </Show>
             <Show
               when={review()}
               fallback={
                 <div class="composer-bar">
                   <div class="cost" data-cost>
-                    <span class="label">Cost to send</span>
+                    <span class="label">{tr('uiCostToSend')}</span>
                     <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
                       <span class="sats" data-cost-msat={shown().msat!}>
                         {sats(shown().msat!)}
@@ -5822,32 +5830,32 @@ function Composer(props: {
                     fallback={
                       <>
                         {/* A typed pubkey is not bound to this chat's contact either. */}
-                        <p class="pay-review-title">Pay a Lightning node directly</p>
+                        <p class="pay-review-title">{tr('uiPayALightningNodeDirectly')}</p>
                         <PayeeLine payee={(rv() as { pubkey: string }).pubkey.toLowerCase()} peer={target()} name={props.name} />
                       </>
                     }
                   >
                     {/* Whoever sent or pasted the invoice need not be who it pays. */}
-                    <p class="pay-review-title">Pay this Lightning invoice</p>
+                    <p class="pay-review-title">{tr('uiPayThisLightningInvoice')}</p>
                     <PayeeLine payee={(rv() as { payee: string }).payee} peer={target()} name={props.name} />
                   </Show>
                   <dl>
-                    <dt>Amount</dt>
+                    <dt>{tr('uiAmount')}</dt>
                     <dd data-review-amount>{fmtAmount(rv().msat)}</dd>
-                    <dt>Network fee</dt>
-                    <dd data-review-fee>up to {fmtAmount(routingFee(rv().msat))}</dd>
-                    <dt>Total at most</dt>
+                    <dt>{tr('uiNetworkFee')}</dt>
+                    <dd data-review-fee>{tr('uiUpTo178')} {fmtAmount(routingFee(rv().msat))}</dd>
+                    <dt>{tr('uiTotalAtMost')}</dt>
                     <dd data-review-total>{fmtAmount(allIn(rv().msat))}</dd>
                     <Show when={rv().kind === 'keysend' && (rv() as { memo: string }).memo.trim()}>
-                      <dt>Note</dt>
+                      <dt>{tr('uiNote')}</dt>
                       <dd>{(rv() as { memo: string }).memo.trim()}</dd>
                     </Show>
                   </dl>
                   <div class="composer-bar">
-                    <button type="button" class="link" data-pay-back disabled={busy()} onClick={() => setReview(null)}>Back</button>
-                    <span class="basis">You pay the real fee, never above this.</span>
+                    <button type="button" class="link" data-pay-back disabled={busy()} onClick={() => setReview(null)}>{tr('uiBack')}</button>
+                    <span class="basis">{tr('uiYouPayTheRealFeeNeverAboveThis')}</span>
                     <button type="button" class="primary soft money" data-pay-confirm disabled={busy() || props.moneyBlocked} onClick={() => void confirmPay()}>
-                      Confirm and pay
+                      {tr('uiConfirmAndPay')}
                     </button>
                   </div>
                 </div>
@@ -5858,14 +5866,14 @@ function Composer(props: {
         <Match when={mode() === 'request'}>
           <div class="fields pay-flow composer-panel" data-composer-panel="request">
             <div class="panel-head">
-              <strong>Request from {props.name}</strong>
-              <button type="button" class="link" data-composer-close aria-label="Done" onClick={closePanel}>Done</button>
+              <strong>{tr('uiRequestFrom')} {props.name}</strong>
+              <button type="button" class="link" data-composer-close aria-label={tr('uiDone')} onClick={closePanel}>{tr('uiDone')}</button>
             </div>
-            <AmountField data="request" label="Amount to request" value={amount()} onInput={setAmount} />
-            <input data-request-note placeholder="What for? e.g. dinner" value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label="What it is for" />
+            <AmountField data="request" label={tr('uiAmountToRequest')} value={amount()} onInput={setAmount} />
+            <input data-request-note placeholder={tr('uiWhatForEGDinner')} value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label={tr('uiWhatItIsFor')} />
             <div class="composer-bar">
               <div class="cost" data-cost>
-                <span class="basis" data-request-hint>Makes an invoice and QR here. Send it in chat so {props.name} can pay it. Receiving is free.</span>
+                <span class="basis" data-request-hint>{tr('uiMakesAnInvoiceAndQRHereSendIt')} {props.name} {tr('uiCanPayItReceivingIsFree')}</span>
               </div>
               <button type="submit" class="primary soft money" disabled={disabled()} data-send>
                 {label()}
@@ -5875,10 +5883,10 @@ function Composer(props: {
               {(inv) => (
                 <div class="composer-bar" data-request-created>
                   <span class="basis">
-                    Invoice for {fmtAmount(inv().amount_msat)} is ready. Send it to {props.name} as a chat message; it pays like any message.
+                    {tr('uiInvoiceFor')} {fmtAmount(inv().amount_msat)} {tr('uiIsReadySendItTo')} {props.name} {tr('uiAsAChatMessageItPaysLikeAny')}
                   </span>
                   <button type="button" class="primary soft money" data-send-in-chat disabled={props.moneyBlocked || busy() || contactWaiting()} onClick={() => void sendInChat()}>
-                    Send in chat{chatPrice()}
+                    {tr('uiSendInChat')}{chatPrice()}
                   </button>
                 </div>
               )}
@@ -5897,9 +5905,9 @@ function Composer(props: {
           type="button"
           class="attach soft icon-btn"
           data-emoji
-          aria-label="Emoji"
+          aria-label={tr('uiEmoji')}
           aria-expanded={emojiOpen()}
-          title="Emoji"
+          title={tr('uiEmoji')}
           disabled={mode() !== 'message'}
           onClick={() => setEmojiOpen((v) => !v)}
         >
@@ -5908,7 +5916,7 @@ function Composer(props: {
         <textarea
           ref={(el) => { draftInput = el; }}
           rows={1}
-          placeholder={`Message ${props.name}`}
+          placeholder={tr('uiMessage', props.name)}
           value={draft()}
           disabled={mode() !== 'message'}
           onInput={(e) => setDraft(e.currentTarget.value)}
@@ -5919,7 +5927,7 @@ function Composer(props: {
               if (!e.repeat) void submit();
             }
           }}
-          aria-label={`Message ${props.name}`}
+          aria-label={tr('uiMessage', props.name)}
         />
         <Show when={!room()}>
           <button
@@ -5927,8 +5935,8 @@ function Composer(props: {
             class="attach soft icon-btn voice-record"
             classList={{ recording: recording() !== null }}
             data-voice-record={recording() ? 'stop' : 'start'}
-            aria-label={recording() ? 'Stop recording' : 'Record a voice note'}
-            title={recording() ? 'Stop recording' : `Record a voice note (up to ${duration(VOICE_MAX_MS)})`}
+            aria-label={recording() ? tr('uiStopRecording') : tr('uiRecordAVoiceNote')}
+            title={recording() ? tr('uiStopRecording') : tr('uiRecordAVoiceNoteUpTo', duration(VOICE_MAX_MS))}
             disabled={starting() || busy()}
             onClick={() => void (recording() ? stopRecording() : startVoice())}
           >
@@ -5940,10 +5948,10 @@ function Composer(props: {
               type="button"
               class="attach soft icon-btn"
               data-composer-plus
-              aria-label="More: attach, pay, request"
+              aria-label={tr('uiMoreAttachPayRequest')}
               aria-haspopup="menu"
               aria-expanded={menuOpen()}
-              title="Attach, pay or request"
+              title={tr('uiAttachPayOrRequest')}
               onClick={() => setMenuOpen((v) => !v)}
             >
               +
@@ -5968,7 +5976,7 @@ function Composer(props: {
                       setNote(null);
                     }}
                   >
-                    {{ message: 'Message', pay: 'Pay', request: 'Request', file: 'Attach' }[m]}
+                    {{ message: tr('uiMessage315'), pay: tr('uiPay'), request: tr('uiRequest'), file: tr('uiAttach') }[m]}
                   </button>
                 )}
               </For>
@@ -5993,30 +6001,30 @@ function Composer(props: {
       <Show when={mode() === 'message'}>
         <div class="send-price" classList={{ priced: !priceProblem() && (paidLine() !== null || messageShown().msat !== null) }}>
           <span data-send-price aria-live="polite">{priceLine()}</span>
-          <Show when={priceProblem() && priceProblem() !== 'price loading…'}>
+          <Show when={priceProblem() && priceProblem() !== tr('uiPriceLoading')}>
             {' '}<button type="button" class="link" data-price-retry disabled={busy()} onClick={() => {
               if (doorWanted() && door()) setDoor(null);
               props.refreshPrice();
-            }}>Retry</button>
+            }}>{tr('uiRetry')}</button>
           </Show>
         </div>
       </Show>
       <details class="composer-info" data-composer-info>
-        <summary aria-label="Cost and rules" title="Cost and rules"><span aria-hidden="true">ⓘ</span></summary>
+        <summary aria-label={tr('uiCostAndRules')} title={tr('uiCostAndRules')}><span aria-hidden="true">ⓘ</span></summary>
         <Show when={breakdown()}>
           {(b) => (
             <>
               <dl class="price-breakdown" data-price-breakdown>
-                <dt>{props.name}’s price</dt>
+                <dt>{props.name}{tr('uiSPrice')}</dt>
                 <dd>{fmtAmount(b().priceMsat)}</dd>
-                <dt>Routing fee, at most</dt>
+                <dt>{tr('uiRoutingFeeAtMost')}</dt>
                 <dd>{fmtAmount(b().routingMsat)}</dd>
-                <dt class="total">You pay at most</dt>
+                <dt class="total">{tr('uiYouPayAtMost')}</dt>
                 <dd class="total">{fmtAmount(b().ceilingMsat)}</dd>
               </dl>
               <p class="hint price-note">
-                A ceiling, not a charge: the amount actually paid shows under the message.
-                <Show when={b().routingMsat >= b().priceMsat}> Routing can cost more than the message itself.</Show>
+                {tr('uiACeilingNotAChargeTheAmountActually')}
+                <Show when={b().routingMsat >= b().priceMsat}> {tr('uiRoutingCanCostMoreThanTheMessageItself')}</Show>
               </p>
             </>
           )}
@@ -6024,7 +6032,7 @@ function Composer(props: {
         <Show when={mode() === 'message' || mode() === 'file'}>
           <div class="composer-bar cost-only">
             <div class="cost" data-cost>
-              <span class="label">Cost to send</span>
+              <span class="label">{tr('uiCostToSend')}</span>
               <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
                 <span class="sats" data-cost-msat={shown().msat!}>
                   {shown().estimate ? '≈ ' : ''}
@@ -6037,15 +6045,15 @@ function Composer(props: {
           </div>
         </Show>
         <Show when={mode() === 'pay'}>
-          <p data-budget-payment><strong>Payment rules.</strong> App invoice payments and keysend reserve principal plus the network fee ceiling against the app daily all-in limit; any finite node grant still applies.</p>
+          <p data-budget-payment><strong>{tr('uiPaymentRules')}</strong> {tr('uiAppInvoicePaymentsAndKeysendReservePrincipalPlus')}</p>
         </Show>
         <Show when={mode() === 'file'}>
-          <p data-budget-file><strong>File spend rules.</strong> Files reserve principal plus the network fee ceiling against the same app all-in limit and contact budget, including during the ten-minute window.</p>
+          <p data-budget-file><strong>{tr('uiFileSpendRules')}</strong> {tr('uiFilesReservePrincipalPlusTheNetworkFeeCeiling')}</p>
         </Show>
       </details>
       </div>
       <Show when={emojiOpen()}>
-        <div class="emoji-picker" data-emoji-picker role="group" aria-label="Emoji">
+        <div class="emoji-picker" data-emoji-picker role="group" aria-label={tr('uiEmoji')}>
           <For each={[...EMOJIS]}>
             {(e) => (
               <button
@@ -6077,18 +6085,18 @@ function Composer(props: {
         {(p) => (
           <>
             <p class="hint" data-readmission-quote>
-              {props.name} asks for admission again, {sats(p().admission_msat)} {satUnit(p().admission_msat)}. Nothing was paid. Send again: {sats(p().total_msat)} {satUnit(p().total_msat)} in all.
+              {props.name} {tr('uiAsksForAdmissionAgain')} {sats(p().admission_msat)} {satUnit(p().admission_msat)}{tr('uiNothingWasPaidSendAgain')} {sats(p().total_msat)} {satUnit(p().total_msat)} {tr('uiInAll')}
             </p>
             <details class="quiet-detail" data-readmission-detail>
-              <summary>Details</summary>
-              <p>The same message keeps its operation, so it is never paid twice.</p>
+              <summary>{tr('uiDetails')}</summary>
+              <p>{tr('uiTheSameMessageKeepsItsOperationSoIt')}</p>
             </details>
           </>
         )}
       </Show>
       <Show when={drafted()}>
         <p class="drafted" data-drafted>
-          Drafted in the AI track. Check it and the cost, then {mode() === 'request' ? 'create the invoice' : 'send it'} yourself.
+          {tr('uiDraftedInTheAITrackCheckItAnd')} {mode() === 'request' ? tr('uiCreateTheInvoice') : tr('uiSendIt')} {tr('uiYourself')}
         </p>
       </Show>
       <Show when={blocked()}>
@@ -6103,7 +6111,7 @@ function Composer(props: {
           setOwnerExpired(false);
           setNote(null);
           props.refreshPrice();
-        }}>Get a fresh quote</button>
+        }}>{tr('uiGetAFreshQuote')}</button>
       </Show>
       <Show when={breaker()}>
         {(reason) => <BreakerCard
@@ -6130,31 +6138,31 @@ function Composer(props: {
       <Show when={ownerWait()?.recipient ? ownerWait() : null}>
         {/* Approved on the other device: the node's grant is checked, then the message goes at once. */}
         <div class="approval" data-contact-approval="device-approved">
-          <p class="ok-note" role="status">Approved on your other device. Sending as soon as your node confirms it · {ownerCountdown()} s</p>
-          <button type="button" class="link" data-contact-cancel onClick={() => cancelOwner()}>Cancel</button>
+          <p class="ok-note" role="status">{tr('uiApprovedOnYourOtherDeviceSendingAsSoon')} {ownerCountdown()} {tr('uiS')}</p>
+          <button type="button" class="link" data-contact-cancel onClick={() => cancelOwner()}>{tr('uiCancel')}</button>
         </div>
       </Show>
       <Show when={ownerWait() && !ownerWait()!.recipient ? ownerWait() : null}>
         {(pending) => <TouchIdFirst actions={props.actions} stays={<p class="hint" data-touch-id-stays-text="first-contact">
-            This message sends automatically once your node’s owner approves this contact. Editing it or{' '}
-            <button type="button" class="link" data-contact-cancel-visible onClick={() => cancelOwner()}>Cancel</button> stops it.
+            {tr('uiThisMessageSendsAutomaticallyOnceYourNodeS')}{' '}
+            <button type="button" class="link" data-contact-cancel-visible onClick={() => cancelOwner()}>{tr('uiCancel')}</button> {tr('uiStopsIt')}
           </p>}><div class="approval" data-contact-approval="pending" data-contact-request={JSON.stringify(pending().approval.request)}>
-          <p><strong>Approve this contact at your node.</strong> Run this command once in the owner’s terminal from the node’s data directory, with owner control enabled. The app never receives an owner credential.</p>
-          <p>The command approves this contact’s budget and first-message cap. This draft sends after approval. Editing it or pressing Cancel stops the wait.</p>
+          <p><strong>{tr('uiApproveThisContactAtYourNode')}</strong> {tr('uiRunThisCommandOnceInTheOwnerS')}</p>
+          <p>{tr('uiTheCommandApprovesThisContactSBudgetAnd')}</p>
           <Show when={pending().approval.approval_window_secs !== undefined}>
-            <p role="status" data-contact-countdown>Waiting for remote approval · {Math.floor(ownerCountdown() / 60)}:{String(ownerCountdown() % 60).padStart(2, '0')} remaining</p>
+            <p role="status" data-contact-countdown>{tr('uiWaitingForRemoteApproval')} {Math.floor(ownerCountdown() / 60)}:{String(ownerCountdown() % 60).padStart(2, '0')} {tr('uiRemaining')}</p>
           </Show>
-          <textarea readonly aria-label="Owner approval command" data-contact-owner-command data-command={pending().approval.owner_command} value={pending().approval.owner_command} />
-          <button type="button" class="link" onClick={async () => { try { await navigator.clipboard.writeText(pending().approval.owner_command); } catch { setNote('Select and copy the command above.'); } }}>Copy command</button>
-          <button type="button" class="link" data-contact-cancel onClick={() => cancelOwner()}>Cancel</button>
-          <p class="hint">Cancel does not revoke an approval already issued at the node; it expires within {pending().approval.approval_window_secs !== undefined ? 'five' : 'two'} minutes.</p>
+          <textarea readonly aria-label={tr('uiOwnerApprovalCommand')} data-contact-owner-command data-command={pending().approval.owner_command} value={pending().approval.owner_command} />
+          <button type="button" class="link" onClick={async () => { try { await navigator.clipboard.writeText(pending().approval.owner_command); } catch { setNote(tr('uiSelectAndCopyTheCommandAbove')); } }}>{tr('uiCopyCommand')}</button>
+          <button type="button" class="link" data-contact-cancel onClick={() => cancelOwner()}>{tr('uiCancel')}</button>
+          <p class="hint">{tr('uiCancelDoesNotRevokeAnApprovalAlreadyIssued')} {pending().approval.approval_window_secs !== undefined ? 'five' : 'two'} {tr('uiMinutes')}</p>
         </div></TouchIdFirst>}
       </Show>
       <Show when={spends()}>
-        <Show when={!props.budgetStale} fallback={<p class="spend-line" data-budget-stale>Spend grant stale — checking your node. Auto-pay unavailable until confirmed.</p>}>
+        <Show when={!props.budgetStale} fallback={<p class="spend-line" data-budget-stale>{tr('uiSpendGrantStaleCheckingYourNodeAutoPay')}</p>}>
           <Show
             when={viaBudget()}
-            fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} stays={mode() === 'message' ? (consent() ? 'Your message waits in its bubble and sends once this approval goes through.' : 'Your draft is kept. Nothing is sent until you press Send after approval.') : undefined} />}
+            fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} stays={mode() === 'message' ? (consent() ? tr('uiYourMessageWaitsInItsBubbleAndSends') : tr('uiYourDraftIsKeptNothingIsSentUntil')) : undefined} />}
           >
             <BudgetBar
               stand={stand()}
@@ -6208,8 +6216,8 @@ const [touchIdOffersShown, setTouchIdOffersShown] = createSignal(0);
  */
 function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: JSX.Element }) {
   const mobile = isMobilePlatform();
-  const device = mobile ? deviceWord() : 'Mac';
-  const tap = mobile ? 'biometric' : 'Touch ID';
+  const device = mobile ? (deviceWord() === 'phone' ? tr('phone') : deviceWord()) : tr('uiMac');
+  const tap = mobile ? 'biometric' : tr('uiTouchID');
   const Offer = () => {
     setTouchIdOffersShown((n) => n + 1);
     onCleanup(() => setTouchIdOffersShown((n) => n - 1));
@@ -6217,23 +6225,23 @@ function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: J
     return (
       <div class="approval touch-id-first" data-touch-id-first>
         <p>
-          <strong>Approve on this {device} with {mobile ? 'biometrics' : 'Touch ID'}.</strong>{' '}
+          <strong>{tr('uiApproveOnThis')} {device} {tr('uiWith')} {mobile ? 'biometrics' : tr('uiTouchID')}.</strong>{' '}
           {lapsed()
-            ? `Your last setup request lapsed. Set it up again: your node’s owner approves this ${device} once more.`
-            : `Set it up once: your node’s owner approves this ${device} one time.`}{' '}
+            ? tr('uiYourLastSetupRequestLapsedSetItUp', device)
+            : tr('uiSetItUpOnceYourNodeSOwner', device)}{' '}
           {/* Only promised where the node says it does it; otherwise, said as it is today. */}
           {props.actions.ownerDeviceApproval?.()
-            ? `After that, one ${tap} tap approves a contact here, without a command at the node.`
-            : `Your node does not yet accept ${mobile ? 'biometric' : 'Touch ID'} approvals in place of its command, so for now approve as shown under Other ways; once it does, one ${tap} tap will approve a contact here.`}
+            ? tr('uiAfterThatOneTapApprovesAContactHere', tap)
+            : tr('uiYourNodeDoesNotYetAcceptApprovalsIn', mobile ? 'biometric' : tr('uiTouchID'), tap)}
         </p>
         <div class="form-actions">
           <button type="button" class="primary soft" data-touch-id-setup onClick={() => props.actions.openNodeSettings?.()}>
-            Set up {mobile ? 'biometric' : 'Touch ID'} approvals
+            {tr('uiSetUp')} {mobile ? 'biometric' : tr('uiTouchID')} {tr('uiApprovals')}
           </button>
         </div>
         <div data-touch-id-stays>{props.stays}</div>
         <details class="other-ways" data-other-ways>
-          <summary>Other ways</summary>
+          <summary>{tr('uiOtherWays')}</summary>
           {props.children}
         </details>
       </div>
@@ -6243,7 +6251,7 @@ function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: J
 }
 
 /** What is true while a spend request waits, for whichever action raised it (the default holds for every consumer). */
-const SPEND_WAIT_DEFAULT = 'Nothing is paid until you press it again after approval.';
+const spendWaitDefault = () => tr('spendWaitDefault');
 
 function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions; hasPending?: boolean; stays?: string }) {
   const line = () => spendLine(props.spend, props.now);
@@ -6265,17 +6273,17 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
       <Switch>
         <Match when={props.spend?.state === 'open' && line().open}>
           <details class="quiet-detail passive-status" data-spend-status>
-            <summary aria-label="Spending status" title="Spending status">ⓘ</summary>
+            <summary aria-label={tr('uiSpendingStatus')} title={tr('uiSpendingStatus')}>ⓘ</summary>
             <p class="spend-line">
               <span class="dot ok" /> {line().text}.{' '}
-              <button type="button" class="link" data-spend-lock onClick={() => void props.actions.lock()}>Lock now</button>
+              <button type="button" class="link" data-spend-lock onClick={() => void props.actions.lock()}>{tr('uiLockNow')}</button>
             </p>
             <details class="quiet-detail" data-spend-detail>
-              <summary>Details</summary>
+              <summary>{tr('uiDetails')}</summary>
               <p>
                 {props.spend?.basis === 'app_lock'
-                  ? 'This node version does not limit app tokens, so this window is the app’s own lock, kept in memory only.'
-                  : 'Your node’s owner grant is in effect; this app uses it for ten minutes per approval.'}
+                  ? tr('uiThisNodeVersionDoesNotLimitAppTokens')
+                  : tr('uiYourNodeSOwnerGrantIsInEffect')}
               </p>
             </details>
           </details>
@@ -6283,19 +6291,18 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
         <Match when={props.spend?.state === 'pending' && props.spend.pending}>
           {(p) => (
             <TouchIdFirst actions={props.actions} stays={<p class="hint" data-touch-id-stays-text="spend">
-              {props.stays ?? SPEND_WAIT_DEFAULT}{' '}
-              <button type="button" class="link" data-spend-cancel-visible onClick={() => void props.actions.cancelSpend()}>Cancel request</button>
+              {props.stays ?? spendWaitDefault()}{' '}
+              <button type="button" class="link" data-spend-cancel-visible onClick={() => void props.actions.cancelSpend()}>{tr('uiCancelRequest')}</button>
             </p>}>
             <div class="approval" data-approval="pending">
               <p>
-                <strong>Confirm at your node.</strong> Your node asks its owner to approve this app spending. Run this on
-                the node's computer. It shows the terms and asks for the short code your node's terminal shows:
+                <strong>{tr('uiConfirmAtYourNode')}</strong> {tr('uiYourNodeAsksItsOwnerToApproveThis')}
               </p>
               <code class="address" data-owner-action>{p().owner_action}</code>
               <p class="hint">
-                This app cannot approve it for you. The request lapses in {minutes(p().expires_at_ms)} min. Your draft is kept.{' '}
+                {tr('uiThisAppCannotApproveItForYouThe')} {minutes(p().expires_at_ms)} {tr('uiMinYourDraftIsKept')}{' '}
                 <button type="button" class="link" data-spend-cancel onClick={() => void props.actions.cancelSpend()}>
-                  Cancel request
+                  {tr('uiCancelRequest')}
                 </button>
               </p>
             </div>
@@ -6306,7 +6313,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
           {(p) => (
             <div class="approval" data-approval="unavailable">
               <p>
-                <strong>This node cannot grant spending to the app.</strong> Receiving still works. Your node says:
+                <strong>{tr('uiThisNodeCannotGrantSpendingToTheApp')}</strong> {tr('uiReceivingStillWorksYourNodeSays')}
               </p>
               <code class="address" data-owner-action>{p().owner_action}</code>
             </div>
@@ -6317,10 +6324,10 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
             <p class="spend-line" data-spend-lapse={lapse()}>
               <span class="dot" />{' '}
               {lapse() === 'lost'
-                ? 'Your node can no longer approve that request (for example, it restarted).'
-                : 'That request lapsed before it was approved.'}{' '}
+                ? tr('uiYourNodeCanNoLongerApproveThatRequest')
+                : tr('uiThatRequestLapsedBeforeItWasApproved')}{' '}
               <button type="button" class="link" data-spend-ask-again disabled={props.actions.moneyBlocked() || asking()} onClick={() => void askAgain()}>
-                Ask again
+                {tr('uiAskAgain')}
               </button>
             </p>
           )}
@@ -6329,8 +6336,8 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
           <p class="spend-line">
             <span class="dot" /> {line().text}.{' '}
             {props.spend?.state === 'expired'
-              ? 'Approve again to keep sending.'
-              : 'Sending spends sats from your node. One approval covers the next ten minutes and is never saved.'}
+              ? tr('uiApproveAgainToKeepSending')
+              : tr('uiSendingSpendsSatsFromYourNodeOneApproval')}
           </p>
         </Match>
       </Switch>
@@ -6359,12 +6366,12 @@ function DeviceSetup(props: { device: DeviceView | null; now: number; actions: A
   // One home for Touch ID approvals (Settings → Node, and onboarding after
   // pairing); the spend bar only points there instead of repeating it.
   const mobile = isMobilePlatform();
-  const what = () => (mobile ? 'Biometric approvals' : 'Touch ID approvals');
+  const what = () => (mobile ? tr('extraBiometricApprovals') : tr('extraTouchIDApprovals'));
   const note = () => {
     switch (props.device?.state) {
-      case 'off': return `${what()} are off.`;
-      case 'pending': return `${what()} are waiting for your node’s owner.`;
-      case 'none': case 'lapsed': return `${what()} are not set up.`;
+      case 'off': return tr('extraAreOff', what());
+      case 'pending': return tr('extraAreWaitingForYourNodeSOwner', what());
+      case 'none': case 'lapsed': return tr('extraAreNotSetUp', what());
       default: return null;
     }
   };
@@ -6373,7 +6380,7 @@ function DeviceSetup(props: { device: DeviceView | null; now: number; actions: A
       <p class="hint" data-device-settings-hint={props.device?.state}>
         {note()}{' '}
         <button type="button" class="link" data-device-settings-link onClick={() => props.actions.openNodeSettings?.()}>
-          Settings → Node
+          {tr('extraSettingsNode')}
         </button>
       </p>
     </Show>
@@ -6395,17 +6402,15 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
         <span class="line-text">
           {/* The petname is local; Touch ID names the same key, never a name. */}
           <strong>
-            Approve {props.name} (node <code data-touch-peer>{shortId(props.peer)}</code>) with {mobile ? 'biometrics' : 'Touch ID'}.
-          </strong> Up
-          to <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT)}</span> a day, at most{' '}
-          <span data-touch-per-act>{fmtAmount(perAct())}</span> per message, for 24 hours.
+            {tr('uiApprove')} {props.name} {tr('extraNode')} <code data-touch-peer>{shortId(props.peer)}</code>{tr('extraWith')} {mobile ? tr('biometrics') : tr('uiTouchID')}.
+          </strong> {tr('uiUpTo105')} <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT)}</span> {tr('extraADayAtMost')}{' '}
+          <span data-touch-per-act>{fmtAmount(perAct())}</span> {tr('extraPerMessageFor24Hours')}
         </span>
       </p>
       <details class="quiet-detail" data-touch-detail>
-        <summary>Details</summary>
+        <summary>{tr('uiDetails')}</summary>
         <p>
-          {mobile ? 'The biometric prompt' : 'Touch ID'} shows the same amounts for node {shortId(props.peer)}. Your node checks every payment against them;
-          nothing else can be paid under this approval.
+          {mobile ? tr('extraTheBiometricPrompt') : tr('uiTouchID')} {tr('extraShowsTheSameAmountsForNode')} {shortId(props.peer)}{tr('extraYourNodeChecksEveryPaymentAgainstThemNothing')}
         </p>
       </details>
     </div>
@@ -6446,12 +6451,12 @@ function Reconcile(props: { actions: Actions; hasPending?: boolean; onChecked?: 
     <>
       <Show when={props.hasPending}>
         <button type="button" class="link" data-spend-reconcile disabled={checking()} onClick={() => void reconcile()}>
-          Check pending result
+          {tr('uiCheckPendingResult390')}
         </button>
       </Show>
       <Show when={undelivered()}>
         <button type="button" class="link" data-stop-retrying disabled={checking()} onClick={() => void stop()}>
-          Stop retrying
+          {tr('uiStopRetrying')}
         </button>
       </Show>
       <Show when={result()}><p class="hint" data-reconciliation>{result()}</p></Show>
@@ -6469,7 +6474,7 @@ const timeLeft = (untilMs: number, nowMs: number) => {
   return min < 60 ? `${min} min` : `${Math.ceil(min / 60)} h`;
 };
 
-const PRESET_NAME: Record<PresetId, string> = { careful: 'Careful', everyday: 'Everyday', generous: 'Generous' };
+const PRESET_NAME: Record<PresetId, string> = { get careful() { return tr('presetCareful'); }, get everyday() { return tr('presetEveryday'); }, get generous() { return tr('presetGenerous'); } };
 
 /**
  * Invisible payments (B2). Inside the owner's budget a message just goes: no
@@ -6498,7 +6503,7 @@ function BudgetBar(props: {
   hasPending?: boolean;
 }) {
   const worth = (msat: number) => messagesWorth(msat, props.priceMsat);
-  const who = () => (props.room ? 'this room' : props.name);
+  const who = () => (props.room ? tr('uiThisRoom') : props.name);
   const firstOptions = (suggest: number, ceiling: number) =>
     [...new Set([suggest, suggest * 2, suggest * 5].map((v) => Math.min(v, ceiling)))].filter((v) => v >= (props.priceMsat ?? 0));
   return (
@@ -6506,24 +6511,23 @@ function BudgetBar(props: {
       <Switch>
         <Match when={props.stand.kind === 'paused'}>
           <p class="spend-line" data-budget-paused>
-            <span class="dot warn" /> <span class="line-text">Payments are paused. New app payments are blocked. In-flight payments, owner commands and background workers can still spend.</span>
+            <span class="dot warn" /> <span class="line-text">{tr('uiPaymentsArePausedNewAppPaymentsAreBlocked')}</span>
           </p>
         </Match>
         <Match when={props.stand.kind === 'waiting'}>
           <TouchIdFirst actions={props.actions} stays={<p class="hint" data-touch-id-stays-text="budget">
             {props.waitingSend
-              ? 'Your message waits in its bubble and sends once this approval goes through.'
-              : 'Your draft is kept. Nothing is sent until you press Send after approval.'}
+              ? tr('uiYourMessageWaitsInItsBubbleAndSends')
+              : tr('uiYourDraftIsKeptNothingIsSentUntil')}
           </p>}>
           <div class="approval" data-approval="pending">
             <p>
-              <strong>Confirm at your node.</strong> One approval lets messages pay for the next 24 hours, up to your app all-in payment limit.
-              Run this on the node's computer. It shows the terms and asks for the short code your node's terminal shows:
+              <strong>{tr('uiConfirmAtYourNode')}</strong> {tr('uiOneApprovalLetsMessagesPayForTheNext')}
             </p>
             <Show when={props.spend?.pending}>
               {(p) => <code class="address" data-owner-action>{p().owner_action}</code>}
             </Show>
-            <p class="hint">This app cannot approve it for you. Your draft is kept.</p>
+            <p class="hint">{tr('uiThisAppCannotApproveItForYouYour')}</p>
           </div>
           </TouchIdFirst>
         </Match>
@@ -6531,18 +6535,18 @@ function BudgetBar(props: {
           <Show when={props.room || props.actions.device()?.state !== 'registered'}>
             <div class="approval slim-approval budget-setup" data-budget-setup>
               <span class="slim-label">
-                <strong>Approval needed.</strong> {props.budget.autopay.state === 'expired' ? 'Your daily approval ended.' : 'Let messages pay as you chat.'} (Someone new always asks first)
+                <strong>{tr('uiApprovalNeeded')}</strong> {props.budget.autopay.state === 'expired' ? tr('uiYourDailyApprovalEnded') : tr('uiLetMessagesPayAsYouChat')} {tr('uiSomeoneNewAlwaysAsksFirst')}
               </span>
               <Show when={props.spend?.lapse}>
                 {(lapse) => (
                   <p class="hint" data-budget-lapse={lapse()}>
                     {lapse() === 'lost'
-                      ? 'Your node can no longer approve your last request (for example, it restarted). Approve again to ask again.'
-                      : 'Your last request lapsed before it was approved. Approve again to ask again.'}
+                      ? tr('uiYourNodeCanNoLongerApproveYourLast')
+                      : tr('uiYourLastRequestLapsedBeforeItWasApproved')}
                   </p>
                 )}
               </Show>
-              <div class="presets" role="radiogroup" aria-label="App all-in payments limit, rolling 24 hours">
+              <div class="presets" role="radiogroup" aria-label={tr('uiAppAllInPaymentsLimitRolling24Hours')}>
                 <For each={props.budget.presets}>
                   {(p) => (
                     <button
@@ -6553,7 +6557,7 @@ function BudgetBar(props: {
                       data-preset={p.id}
                       onClick={() => props.onPreset(p.id)}
                     >
-                      {PRESET_NAME[p.id]} · {fmtAmount(p.ceiling_msat)} a day
+                      {PRESET_NAME[p.id]} · {fmtAmount(p.ceiling_msat)} {tr('uiADay')}
                     </button>
                   )}
                 </For>
@@ -6567,18 +6571,17 @@ function BudgetBar(props: {
               <Show when={st().again ? props.door : null}>
                 {(q) => (
                   <p class="door-quote" data-door-quote={q().total_msat} data-readmit>
-                    {who()} reconnected and asks to be admitted again: <strong>{fmtAmount(q().admission_msat)}</strong>, then{' '}
-                    <strong>{fmtAmount(q().message_msat)}</strong> for this message, <strong>{fmtAmount(q().total_msat)}</strong> in
-                    all, including {feeCeiling(q().max_routing_fee_msat ?? 0)}. Nothing is paid until you send.
+                    {who()} {tr('uiReconnectedAndAsksToBeAdmittedAgain')} <strong>{fmtAmount(q().admission_msat)}</strong>{tr('uiThen')}{' '}
+                    <strong>{fmtAmount(q().message_msat)}</strong> {tr('uiForThisMessage')} <strong>{fmtAmount(q().total_msat)}</strong> {tr('uiInAllIncluding')} {feeCeiling(q().max_routing_fee_msat ?? 0)}{tr('uiNothingIsPaidUntilYouSend')}
                   </p>
                 )}
               </Show>
               <Show when={st().again ? null : props.door}>
                 {(q) => (
                   <p class="door-quote" data-door-quote={q().total_msat}>
-                    {who()}’s door: <strong>{fmtAmount(q().admission_msat)}</strong> once to reach them, then{' '}
-                    <strong>{fmtAmount(q().message_msat)}</strong> a message. This first message costs{' '}
-                    <strong>{fmtAmount(q().total_msat)}</strong> in all, including {feeCeiling(q().max_routing_fee_msat ?? 0)}. Nothing is paid until you send.
+                    {who()}{tr('uiSDoor')} <strong>{fmtAmount(q().admission_msat)}</strong> {tr('uiOnceToReachThemThen')}{' '}
+                    <strong>{fmtAmount(q().message_msat)}</strong> {tr('uiAMessageThisFirstMessageCosts')}{' '}
+                    <strong>{fmtAmount(q().total_msat)}</strong> {tr('uiInAllIncluding')} {feeCeiling(q().max_routing_fee_msat ?? 0)}{tr('uiNothingIsPaidUntilYouSend')}
                   </p>
                 )}
               </Show>
@@ -6586,16 +6589,15 @@ function BudgetBar(props: {
                 when={st().again}
                 fallback={
                   <p>
-                    <strong>First paid message to {who()}.</strong> Asked once. After it, messages to {who()} pay automatically, up to:
+                    <strong>{tr('uiFirstPaidMessageTo')} {who()}.</strong> {tr('uiAskedOnceAfterItMessagesTo')} {who()} {tr('uiPayAutomaticallyUpTo')}
                   </p>
                 }
               >
                 <p>
-                  <strong>Admit {who()} again.</strong> Asked once. After it, your node pays a reconnect to {who()} from their
-                  budget without asking, up to:
+                  <strong>{tr('uiAdmit')} {who()} {tr('uiAgain')}</strong> {tr('uiAskedOnceAfterItYourNodePaysA')} {who()} {tr('uiFromTheirBudgetWithoutAskingUpTo')}
                 </p>
               </Show>
-              <div class="presets" role="radiogroup" aria-label={`Daily budget for ${who()}`}>
+              <div class="presets" role="radiogroup" aria-label={tr('uiDailyBudgetFor', who())}>
                 <For each={firstOptions(st().suggest, st().ceiling)}>
                   {(msat) => (
                     <button
@@ -6606,7 +6608,7 @@ function BudgetBar(props: {
                       data-first-budget={msat}
                       onClick={() => props.onFirstPick(msat)}
                     >
-                      {fmtAmount(msat)} a day<Show when={worth(msat)}> · {worth(msat)}</Show>
+                      {fmtAmount(msat)} {tr('uiADay')}<Show when={worth(msat)}> · {worth(msat)}</Show>
                     </button>
                   )}
                 </For>
@@ -6615,31 +6617,30 @@ function BudgetBar(props: {
           )}
         </Match>
         <Match when={props.stand.kind === 'grant_limited'}>
-          <p class="spend-line" data-node-grant-limit>Your node’s spend grant cannot cover this payment. It has {fmtAmount(props.budget.node_grant?.remaining_msat ?? 0)} left and allows at most {fmtAmount(props.budget.node_grant?.per_call_max_msat ?? 0)} per payment. Ask your node’s owner for a new grant.</p>
+          <p class="spend-line" data-node-grant-limit>{tr('uiYourNodeSSpendGrantCannotCoverThis')} {fmtAmount(props.budget.node_grant?.remaining_msat ?? 0)} {tr('uiLeftAndAllowsAtMost')} {fmtAmount(props.budget.node_grant?.per_call_max_msat ?? 0)} {tr('uiPerPaymentAskYourNodeSOwnerFor')}</p>
         </Match>
         <Match when={props.stand.kind === 'contact_used' && (props.stand as Extract<BudgetStandT, { kind: 'contact_used' }>)}>
           {(st) => (
             <div class="approval budget-used" data-budget-used="contact">
               <p>
-                <strong>Budget for {who()} used up.</strong> {fmtAmount(st().spent)} of {fmtAmount(st().limit)} in the last 24 hours, and this
-                message costs {props.priceMsat === null ? '…' : fmtAmount(props.priceMsat)}.
+                <strong>{tr('uiBudgetFor')} {who()} {tr('uiUsedUp')}</strong> {fmtAmount(st().spent)} {tr('uiOf')} {fmtAmount(st().limit)} {tr('uiInTheLast24HoursAndThisMessage')} {props.priceMsat === null ? '…' : fmtAmount(props.priceMsat)}.
                 <Show when={budgetNote(props.budget.rows.find(r => r.target === props.target && r.room === props.room))}>{note => <> {note()}.</>}</Show>
-                {' '}It frees up as older payments pass 24 hours.
+                {' '}{tr('uiItFreesUpAsOlderPaymentsPass24')}
               </p>
               <Show
                 when={st().raiseTo}
                 fallback={
                   <p class="hint">
-                    This budget already equals your app all-in limit.{' '}
+                    {tr('uiThisBudgetAlreadyEqualsYourAppAllIn')}{' '}
                     <button type="button" class="link" data-budget-raise-total disabled={props.actions.moneyBlocked()} onClick={() => void props.actions.approveBudget(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat), props.budget.preset)}>
-                      Raise the app all-in limit to {fmtAmount(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat))}
+                      {tr('uiRaiseTheAppAllInLimitTo')} {fmtAmount(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat))}
                     </button>
                   </p>
                 }
               >
                 {(to) => (
                   <button type="button" class="primary small money" data-budget-raise disabled={props.actions.moneyBlocked()} onClick={() => void props.actions.setBudget(props.target, props.room, to())}>
-                    Raise to {fmtAmount(to())} a day
+                    {tr('uiRaiseTo')} {fmtAmount(to())} {tr('uiADay')}
                   </button>
                 )}
               </Show>
@@ -6650,13 +6651,12 @@ function BudgetBar(props: {
           {(st) => (
             <div class="approval budget-used" data-budget-used="total">
               <p>
-                <strong>Your app all-in limit is used up.</strong> {fmtAmount(st().spent)} of {fmtAmount(st().ceiling)} in the last 24 hours. Raising
-                it is a new approval. {budgetNote(props.budget)}
+                <strong>{tr('uiYourAppAllInLimitIsUsedUp')}</strong> {fmtAmount(st().spent)} {tr('uiOf')} {fmtAmount(st().ceiling)} {tr('uiInTheLast24HoursRaisingItIs')} {budgetNote(props.budget)}
               </p>
               <Show when={st().raiseTo}>
                 {(to) => (
                   <button type="button" class="primary small money" data-budget-raise-total disabled={props.actions.moneyBlocked()} onClick={() => void props.actions.approveBudget(to(), props.budget.preset)}>
-                    Approve {fmtAmount(to())} a day
+                    {tr('uiApprove')} {fmtAmount(to())} {tr('uiADay')}
                   </button>
                 )}
               </Show>
@@ -6669,11 +6669,11 @@ function BudgetBar(props: {
               <p class="spend-line" data-budget-line>
                 <span class="dot ok" />
                 <span class="line-text">
-                  Pays automatically · {fmtAmount(st().spent)} of {fmtAmount(st().limit)} to {who()} in 24 h
+                  {tr('uiPaysAutomatically')} {fmtAmount(st().spent)} {tr('uiOf')} {fmtAmount(st().limit)} {tr('uiTo')} {who()} {tr('uiIn24H')}
                   <Show when={budgetNote(props.budget.rows.find(r => r.target === props.target && r.room === props.room))}>{note => <> · {note()}</>}</Show>
-                  {' '}· approval ends in{' '}
-                  {hoursLeft(props.budget.autopay.open_until_ms, props.now, props.budget.window_ms)} h ·{' '}
-                  <button type="button" class="link" data-pause-all onClick={() => void props.actions.pauseAll()}>Pause app payments</button>
+                  {' '}{tr('uiApprovalEndsIn')}{' '}
+                  {hoursLeft(props.budget.autopay.open_until_ms, props.now, props.budget.window_ms)} {tr('uiH')}{' '}
+                  <button type="button" class="link" data-pause-all onClick={() => void props.actions.pauseAll()}>{tr('uiPauseAppPayments')}</button>
                 </span>
               </p>
             </div>

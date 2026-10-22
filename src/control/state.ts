@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 import { MONEY_NOT_READY, readinessLine } from './readiness';
 import { feeCeiling } from './format';
 // Control-center state as pure functions over plain data, so the rules are
@@ -41,7 +42,7 @@ export const peerName = (peer: Peer | undefined, id: string): string => {
   contactRevision();
   const pet = petnameOf(id);
   if (pet) return pet;
-  return `Unnamed contact (${shortId(id)})`;
+  return t('extraUnnamedContact', shortId(id));
 };
 
 /** Remote-supplied name (peer label / profile card). Suggestion only — never truth. */
@@ -151,14 +152,14 @@ export function costToSend(
       return {
         msat: Math.max(quote.peer_msat, MIN_PAYMENT_MSAT) + (quote.max_routing_fee_msat ?? 0),
         basis: quote.peer_stale
-          ? `${opts.name ?? 'Their'} price, from a stale table (${when}); ${feeCeiling(quote.max_routing_fee_msat ?? 0)}`
-          : `${opts.name ?? 'Their'} price, updated ${when}; ${feeCeiling(quote.max_routing_fee_msat ?? 0)}`,
+          ? t('extraPriceFromAStaleTable', opts.name ?? t('extraTheir'), when, feeCeiling(quote.max_routing_fee_msat ?? 0))
+          : t('extraPriceUpdated', opts.name ?? t('extraTheir'), when, feeCeiling(quote.max_routing_fee_msat ?? 0)),
         estimate: quote.peer_stale,
       };
     }
     return {
       msat: Math.max(quote.own_msat, MIN_PAYMENT_MSAT) + (quote.max_routing_fee_msat ?? 0),
-      basis: (quote.peer_stale ? 'Estimate from your own price; the peer table is stale' : `Estimate from your own price; ${opts.name ?? 'this peer'} has not shared theirs yet`) + `; ${feeCeiling(quote.max_routing_fee_msat ?? 0)}`,
+      basis: (quote.peer_stale ? t('extraEstimateFromYourOwnPriceThePeerTable') : t('extraEstimateFromYourOwnPriceHasNotShared', opts.name ?? t('extraThisPeer'))) + `; ${feeCeiling(quote.max_routing_fee_msat ?? 0)}`,
       estimate: true,
     };
   }
@@ -170,8 +171,8 @@ export function costToSend(
     return {
       msat: room.total_msat,
       basis:
-        `${n} ${n === 1 ? 'member' : 'members'}, each paid their own price` +
-        (own > 0 ? `; ${own} estimated from yours` : '') + `; ${feeCeiling(room.max_routing_fee_msat ?? 0)} across all members`,
+        t('extraEachPaidTheirOwnPrice', n, n === 1 ? t('member') : t('members')) +
+        (own > 0 ? t('extraEstimatedFromYours', own) : '') + t('extraAcrossAllMembers', feeCeiling(room.max_routing_fee_msat ?? 0)),
       estimate: room.estimate,
     };
   }
@@ -187,7 +188,7 @@ export function peerNotReadyMessage(error: unknown, name: string): string | null
     reason = error.slice('peer_not_ready:'.length);
   }
   return reason === 'chain_unavailable' || reason === 'not_synced'
-    ? `${name}'s node isn't ready to receive yet (its chain connection is down)`
+    ? t('extraSNodeIsnTReadyToReceiveYet', name)
     : null;
 }
 
@@ -388,20 +389,20 @@ export function streamItems(messages: Message[], artifacts: Artifact[]): StreamI
 
 /** The composer's spend line. */
 export function spendLine(view: SpendView | null, nowMs: number): { open: boolean; text: string } {
-  if (!view) return { open: false, text: 'Checking spending approval…' };
+  if (!view) return { open: false, text: t('extraCheckingSpendingApproval') };
   switch (view.state) {
     case 'open': {
       const left = Math.max(0, Math.ceil(((view.open_until_ms ?? nowMs) - nowMs) / 60_000));
-      return { open: left > 0, text: `Spending approved, ${left} min left` };
+      return { open: left > 0, text: t('extraSpendingApprovedMinLeft', left) };
     }
     case 'pending':
-      return { open: false, text: 'Waiting for your approval at the node' };
+      return { open: false, text: t('extraWaitingForYourApprovalAtTheNode') };
     case 'unavailable':
-      return { open: false, text: 'This node cannot grant spending to the app' };
+      return { open: false, text: t('extraThisNodeCannotGrantSpendingToTheApp') };
     case 'expired':
-      return { open: false, text: 'Spending approval expired' };
+      return { open: false, text: t('extraSpendingApprovalExpired') };
     default:
-      return { open: false, text: 'Spending needs your approval' };
+      return { open: false, text: t('extraSpendingNeedsYourApproval') };
   }
 }
 
@@ -427,18 +428,18 @@ export function nodePill(input: {
   link: LinkState | null;
   nowMs: number;
 }): Pill {
-  if (input.phone && !input.remote) return { tone: 'idle', text: 'Connect to your node', live: false };
-  if (input.retryAfterSecs) return { tone: 'warn', text: `Remote connection · waiting ${input.retryAfterSecs} s`, live: false };
-  if (input.remote && input.error) return { tone: 'warn', text: 'Remote connection unavailable', live: false };
-  if (input.remote && !input.ready) return { tone: 'idle', text: 'Connecting to remote node', live: false };
-  if (input.error) return { tone: 'err', text: 'Node stopped', live: false };
-  if (!input.ready) return { tone: 'idle', text: 'Starting node', live: false };
-  if (!input.overview) return { tone: 'ok', text: 'Node running', live: false };
+  if (input.phone && !input.remote) return { tone: 'idle', text: t('uiConnectToYourNode'), live: false };
+  if (input.retryAfterSecs) return { tone: 'warn', text: t('uiRemoteConnectionWaitingS', input.retryAfterSecs), live: false };
+  if (input.remote && input.error) return { tone: 'warn', text: t('uiRemoteConnectionUnavailable'), live: false };
+  if (input.remote && !input.ready) return { tone: 'idle', text: t('uiConnectingToRemoteNode'), live: false };
+  if (input.error) return { tone: 'err', text: t('uiNodeStopped'), live: false };
+  if (!input.ready) return { tone: 'idle', text: t('uiStartingNode'), live: false };
+  if (!input.overview) return { tone: 'ok', text: t('uiNodeRunning'), live: false };
   if (freshness(input.overview.read_at, input.nowMs).stale) {
-    return { tone: 'warn', text: 'Node not answering', live: false };
+    return { tone: 'warn', text: t('uiNodeNotAnswering'), live: false };
   }
   if (input.overview.money_ready === false) return { tone: 'warn', text: readinessLine(input.overview, input.nowMs)!, live: input.link === 'open' };
-  if (input.overview.money_ready === true && input.link === 'open') return { tone: 'ok', text: 'Local OK · Money ready', live: true };
-  if (input.link === 'open') return { tone: 'ok', text: 'Connected to your node', live: true };
-  return { tone: 'warn', text: 'Node up, live feed reconnecting', live: false };
+  if (input.overview.money_ready === true && input.link === 'open') return { tone: 'ok', text: t('uiLocalOKMoneyReady'), live: true };
+  if (input.link === 'open') return { tone: 'ok', text: t('uiConnectedToYourNode'), live: true };
+  return { tone: 'warn', text: t('uiNodeUpLiveFeedReconnecting'), live: false };
 }

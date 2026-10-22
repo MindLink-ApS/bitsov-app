@@ -1,3 +1,4 @@
+import { language, systemLanguage } from '../i18n';
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { appPlatform, type AppPlatform } from '../platform';
 import type { DeviceView } from '../control/types';
@@ -32,7 +33,7 @@ function failure(error: unknown): { kind: Failure; detail: string } {
 }
 
 export function PhoneOnboarding(props: PhoneOnboardingProps) {
-  const c = () => phoneCopy[(props.locale ?? navigator.language).toLowerCase().startsWith('da') ? 'da' : 'en'];
+  const c = () => phoneCopy[props.locale ? systemLanguage(props.locale) : language()];
   const [screen, setScreen] = createSignal<Screen>('start');
   const [error, setError] = createSignal<{ kind: Failure; detail: string }>();
   const [busy, setBusy] = createSignal(false);

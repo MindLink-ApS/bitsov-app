@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 // A chat message whose whole body is a BOLT11 invoice: a cheap shape filter
 // only. Nothing here pays, trusts the text or names a payee. What a request
 // card and the Pay review show (payee, amount, purpose, expiry) comes from the
@@ -30,11 +31,11 @@ export type NotPayable = 'invalid' | 'expired' | 'wrong_network' | 'no_amount' |
 export type ChatInvoiceRead = { ok: true; invoice: ChatInvoice } | { ok: false; reason: NotPayable };
 
 export const NOT_PAYABLE_NOTE: Record<NotPayable, string> = {
-  invalid: 'Looks like an invoice, but it is not a valid one.',
-  expired: 'This invoice has expired.',
-  wrong_network: 'This invoice is for another Bitcoin network.',
-  no_amount: 'This invoice names no amount, so the app cannot show its cost.',
-  out_of_bounds: 'The app pays invoices between 1 sat and 1 BTC only.',
+  get invalid() { return t('chatLooksLikeAnInvoiceButItIsNot'); },
+  get expired() { return t('chatThisInvoiceHasExpired'); },
+  get wrong_network() { return t('chatThisInvoiceIsForAnotherBitcoinNetwork'); },
+  get no_amount() { return t('chatThisInvoiceNamesNoAmountSoTheApp'); },
+  get out_of_bounds() { return t('chatTheAppPaysInvoicesBetween1SatAnd'); },
 };
 
 /** BOLT11 allows up to 639 bytes of description; the card shows less. */
@@ -251,5 +252,5 @@ export const shortPayee = (payee: string) => `${payee.slice(0, 8)}…${payee.sli
 export function payeeView(payee: string, contactLn: string | null, name: string): { verified: boolean; text: string } {
   return contactLn !== null && contactLn.toLowerCase() === payee
     ? { verified: true, text: name }
-    : { verified: false, text: `Lightning node ${shortPayee(payee)}, not verified as ${name}` };
+    : { verified: false, text: t('chatLightningNodeNotVerifiedAs', shortPayee(payee), name) };
 }
