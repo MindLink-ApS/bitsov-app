@@ -1,11 +1,11 @@
 # Local owner ceremony (opt-in)
 
-**Draft pin blocked:** rc19.1 is not tagged or signed yet. All five checksum values are
-placeholders; fetch and pre-bundle verification refuse before network access. No rc19.1
+**Draft pin blocked:** rc19.2 is tagged; signing is in progress. All five checksum values are
+placeholders; fetch and pre-bundle verification refuse before network access. No rc19.2
 release bytes have been verified.
-See [rc19.1 release gates](NODE_RC19_1_UPGRADE.md).
+See [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
 
-The bundled `v0.3.0-rc19.1` node (`source SHA pending`) contains #237, so
+The bundled `v0.3.0-rc19.2` node (`04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`) contains #237, so
 `BUNDLED_NODE_SUPPORTS_LOCAL_OWNER` is true. This is still opt-in on macOS:
 `local-owner-ceremony` remains a non-default Cargo feature and
 `BITSOV_LOCAL_OWNER_CEREMONY=1` remains required. External and remote nodes
@@ -17,7 +17,7 @@ repair and then price-floor consent remain reachable. They never receive a new
 password or first-device enrollment on upgrade. Encrypted ceremony installs
 continue to use the existing Keychain item on restart. See
 [rc7 → rc9 upgrade checks](NODE_RC9_UPGRADE.md) and
-[current rc19.1 changes and compatibility gaps](NODE_RC19_1_UPGRADE.md).
+[current rc19.2 changes and compatibility gaps](NODE_RC19_2_UPGRADE.md).
 
 Implementation plan:
 1. Add a native, narrowly scoped Keychain adapter and descriptor-only launch.
@@ -52,7 +52,7 @@ Development activation uses a node binary built with #237 and a fresh private
 `BITSOV_LOCAL_OWNER_CEREMONY=1`, Cargo features `dev-node,local-owner-ceremony`, and
 `src-tauri/tauri.dev-node.conf.json`. The normal dev launcher supplies only
 `dev-node`; it does not turn on this ceremony. Enabling the runtime variable alone
-has no effect. The bundled rc19.1 path needs only `local-owner-ceremony` and the runtime opt-in;
+has no effect. The bundled rc19.2 path needs only `local-owner-ceremony` and the runtime opt-in;
 `dev-node` is only for an unverified development override.
 
 The node determines emptiness and authority. Encrypted ceremony installations with no
@@ -100,9 +100,9 @@ also inherits `cookie_mode = "adaptive"`, the twelve reviewed `[dos_edge]`
 limits, and empty `[node]` / `[tower.clients]`; these are explicitly listed in
 the guard. The rc12 source review found no new config fields or serialized init
 defaults. The existing writer retains setup port 8080 and channel/total caps of
-1,000,000/2,000,000 sats. No rc19.1 tagged source or binary is available yet;
+1,000,000/2,000,000 sats. rc19.2 is tagged, but no signed release binary has been verified yet;
 retain the strict guard without new allowances until release verification. Config
-compatibility must still be checked against the verified rc19.1 binary in CI.
+compatibility must still be checked against the verified rc19.2 binary in CI.
 The optional Lightning delay remains omitted in the app bootstrap config. The rc12 policy introduced 2016
 blocks at home-profile startup (`--local-owner-device` or
 `--remote-unlock`, embedded LDK, service disabled), with a 288-block floor for
@@ -118,7 +118,7 @@ fail-closed refusal and skips real-binary checks. Once populated, it fetches and
 features enabled. This runs on every PR and main push, so every bundled pin
 change is covered; the explicit path prevents an absent binary from skipping CI.
 The job also runs the real create/finalize/restart lifecycle against the same
-verified rc19.1 binary, before the live-network CS-1 smoke. The existing Sidecar job remains outside required merge checks because it
+verified rc19.2 binary, before the live-network CS-1 smoke. The existing Sidecar job remains outside required merge checks because it
 depends on release downloads; inspect its config-drift step before promoting a
 pin. Review any failure against the new node defaults and update the writer or
 the explicit intentional-difference list rather than broadly ignoring sections.

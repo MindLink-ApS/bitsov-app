@@ -1,9 +1,9 @@
 # CS-1 runbook — desktop app shell (Linux + macOS since `v0.3.0-rc5`; B10 landed)
 
-**Draft pin blocked:** rc19.1 is not tagged or signed yet. All five checksum values are
-placeholders; fetch and pre-bundle verification refuse before network access. No rc19.1
+**Draft pin blocked:** rc19.2 is tagged; signing is in progress. All five checksum values are
+placeholders; fetch and pre-bundle verification refuse before network access. No rc19.2
 release bytes have been verified.
-See [rc19.1 release gates](NODE_RC19_1_UPGRADE.md).
+See [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
 
 **Scope (only):** app shell → bundle/spawn the node → loopback auth (`/auth/local`) →
 identity screen → authority verdict. No funding, rooms, messaging, mobile, calls, hosted, AI.
@@ -29,15 +29,15 @@ both lockfiles (`package-lock.json`, `src-tauri/Cargo.lock`) are committed.
 ## What it does
 1. Rust host runs `konsensus init` on first run, then `konsensus start --config …` as a
    **supervised sidecar** (killed on exit; init exit status + stderr are checked).
-2. Polls health, pairs with rc19.1, then reads identity. Only a 404 on pair/request
-   selects the retained rc7 auth/local fallback. The smoke uses rc19.1 read-scoped
+2. Polls health, pairs with rc19.2, then reads identity. Only a 404 on pair/request
+   selects the retained rc7 auth/local fallback. The smoke uses rc19.2 read-scoped
    auth/local directly; it is not a pairing or owner-device test.
 3. SolidJS UI reflects state; it never talks to the node directly and holds no shell/kill authority.
 
 ## Boundary (do not break)
 Node = bundled binary, no `konsensus-*` crate dep (G1). Control plane loopback-only (G2).
 Shell capability is scoped to the `konsensus` sidecar only; CSP is set (not null). Node CLI +
-API paths pinned to BitSov-bitsov `v0.3.0-rc19.1 / source SHA pending`. `scripts/authority-check.sh` checks the app-source boundary;
+API paths pinned to BitSov-bitsov `v0.3.0-rc19.2 / 04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`. `scripts/authority-check.sh` checks the app-source boundary;
 `fetch-node-sidecar.sh` verifies sidecar authenticity and integrity.
 
 ## Local pass/fail smoke
@@ -75,8 +75,8 @@ Two splints carried since CS-1.5.1 are gone: the node fixed both at the root in 
 
 `konsensus start` uses fresh init defaults unchanged. On a retained rc7 upgrade,
 the host can repair the page price only after separate consent; see
-[NODE_RC19_1_UPGRADE.md](NODE_RC19_1_UPGRADE.md).
-Acceptance: `npm run smoke:cs1` must boot rc19.1 with zero config edits; the non-gating `sidecar` CI job
+[NODE_RC19_2_UPGRADE.md](NODE_RC19_2_UPGRADE.md).
+Acceptance: `npm run smoke:cs1` must boot rc19.2 with zero config edits; the non-gating `sidecar` CI job
 runs the same smoke after signed checksums enable the pin. During this draft,
 it asserts the checksum-placeholder refusal instead.
 

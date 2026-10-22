@@ -5,19 +5,19 @@ discipline for this feature, taken verbatim from the genome's
 `docs/security/pairing.md` (BitSov-bitsov `56c0ee0`, PR #77). Nothing here, in
 the app copy, or in release notes may be quoted as saying more.
 
-## Status: rc19.1 pinned; release-binary CI pending
+## Status: rc19.2 pinned; release-binary CI pending
 
-The app pins `v0.3.0-rc19.1` (`source SHA pending`), which includes pairing and local owner
+The app pins `v0.3.0-rc19.2` (`04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`), which includes pairing and local owner
 bootstrap. Mock tests cover pairing, token refresh, restore refusal, explicit
 marker repair followed by separate price consent, and owner ceremony UI.
-The old rc7 404 fallback remains tested. rc19.1 is not tagged or signed yet. All five
+The old rc7 404 fallback remains tested. rc19.2 is tagged; signing is in progress. All five
 checksum values are placeholders; fetch and pre-bundle verification refuse before
-network access. No rc19.1 release bytes have been verified.
+network access. No rc19.2 release bytes have been verified.
 Config drift, owner lifecycle and CS-1 remain CI checks; a signed/hardened Mac
 interactive run remains separate
 acceptance. Remote first run is implemented on main (app #192 + node rc13);
 runtime acceptance on real hardware (Touch ID + a fresh Pi) is still pending.
-See [upgrade checks](NODE_RC19_1_UPGRADE.md) and [local owner ceremony](LOCAL_OWNER_CEREMONY.md).
+See [upgrade checks](NODE_RC19_2_UPGRADE.md) and [local owner ceremony](LOCAL_OWNER_CEREMONY.md).
 
 ## Node choices
 
@@ -156,7 +156,7 @@ retry. The successful marker removes the need for the prompt on later starts.
 The screen advises keeping a backup because normal startup can apply newer
 database migrations.
 
-The rc19.1 pin uses the existing first-run `init` flow when owner opt-in is off.
+The rc19.2 pin uses the existing first-run `init` flow when owner opt-in is off.
 With opt-in enabled, fresh installs use the two-phase owner ceremony; retained
 plaintext identities use ordinary startup and never enter that ceremony.
 Restore readiness applies when the managed node is already in bootstrap mode;

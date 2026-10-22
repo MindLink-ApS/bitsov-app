@@ -106,14 +106,15 @@ Must-fix before next ship: <list>
 - **NO-GO** on any A violation or an unmet gate for the thing being shipped.
 
 ## G. Executable checks (run these — don't eyeball it)
-Pinned protocol: **release `v0.3.0-rc19.1`, source-ref `PENDING_SIGNED_RC19_1_TAG`, repo `MindLink-ApS/BitSov-bitsov`**.
+Pinned protocol: **release `v0.3.0-rc19.2`, source-ref `04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`, repo `MindLink-ApS/BitSov-bitsov`**.
+Signed-release verification remains `PENDING_SIGNED_RC19_2_TAG`.
 Five CLI targets: Linux x86_64/aarch64, Darwin aarch64/x86_64 and Windows x86_64.
 The fetcher requires `SHA256SUMS.asc` signed by release key `B299…EF6E`; a signed
-tag alone does not verify release bytes. rc19.1 is not tagged or signed yet. All five
+tag alone does not verify release bytes. rc19.2 is tagged; signing is in progress. All five
 checksum values are placeholders; fetch and pre-bundle verification refuse before
-network access. No rc19.1 release bytes have been verified.
+network access. No rc19.2 release bytes have been verified.
 Signature/byte verification and package/runtime acceptance remain gates. The app remains
-unpublished. See [rc19.1 upgrade checks](docs/NODE_RC19_1_UPGRADE.md) and
+unpublished. See [rc19.2 upgrade checks](docs/NODE_RC19_2_UPGRADE.md) and
 [API contract](docs/API_READINESS.md). Existing operator identities are preserved.
 Machine form of these checks: `scripts/authority-check.sh` (CI "Authority Check"; the "Build" job
 is the compile gate, PR #9). Run from the app repo root; adjust the Website path to your checkout.

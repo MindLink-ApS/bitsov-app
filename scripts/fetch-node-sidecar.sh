@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Fetch + VERIFY the pinned, signed BitSov node binary and place it as the Tauri
 # sidecar for this host. The node binary is NEVER committed (Gate G1: bundled binary,
-# fetched + verified, not vendored). v0.3.0-rc19.1 targets Linux, macOS and Windows node
+# fetched + verified, not vendored). v0.3.0-rc19.2 targets Linux, macOS and Windows node
 # binaries, so all three hosts can produce a sidecar. Release assets carry no .exe suffix
 # on any host; only the installed Windows sidecar is renamed to .exe (Tauri's resolver).
-# rc19.1 is NOT tagged/signed yet. Placeholders refuse before network access.
+# rc19.2 is tagged; signing is in progress. Placeholders refuse before network access.
 # Once populated from the signed manifest, fetch requires release access and
 # both SHA256SUMS and SHA256SUMS.asc; missing assets fail closed. Nothing here publishes it.
 #
@@ -29,17 +29,17 @@
 # verify_release_signature against local test keys, including every refusal class above.
 set -euo pipefail
 
-TAG="v0.3.0-rc19.1"
+TAG="v0.3.0-rc19.2"
 REPO="MindLink-ApS/BitSov-bitsov"
 KEY_FPR="B299274C200301714DC6F51A7C2D6F8AC842EF6E"
 
-# DRAFT: replace ALL five placeholders from the verified, signed rc19.1 SHA256SUMS.
+# DRAFT: replace ALL five placeholders from the verified, signed rc19.2 SHA256SUMS.
 # These are enforced pins, not illustrative hashes. No flag/environment bypass.
-EXPECTED_SHA256SUMS='PLACEHOLDER_SHA256_FROM_SIGNED_RC19_1  bitsov-darwin-aarch64
-PLACEHOLDER_SHA256_FROM_SIGNED_RC19_1  bitsov-darwin-x86_64
-PLACEHOLDER_SHA256_FROM_SIGNED_RC19_1  bitsov-linux-aarch64
-PLACEHOLDER_SHA256_FROM_SIGNED_RC19_1  bitsov-linux-x86_64
-PLACEHOLDER_SHA256_FROM_SIGNED_RC19_1  bitsov-windows-x86_64'
+EXPECTED_SHA256SUMS='PLACEHOLDER_SHA256_FROM_SIGNED_RC19_2  bitsov-darwin-aarch64
+PLACEHOLDER_SHA256_FROM_SIGNED_RC19_2  bitsov-darwin-x86_64
+PLACEHOLDER_SHA256_FROM_SIGNED_RC19_2  bitsov-linux-aarch64
+PLACEHOLDER_SHA256_FROM_SIGNED_RC19_2  bitsov-linux-x86_64
+PLACEHOLDER_SHA256_FROM_SIGNED_RC19_2  bitsov-windows-x86_64'
 
 pinned_checksum() {
   printf '%s\n' "$EXPECTED_SHA256SUMS" | awk -v asset="$1" '

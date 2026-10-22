@@ -1,9 +1,9 @@
 # CS-2 runbook — first-run fund flow (M1)
 
-**Draft pin blocked:** rc19.1 is not tagged or signed yet. All five checksum values are
-placeholders; fetch and pre-bundle verification refuse before network access. No rc19.1
+**Draft pin blocked:** rc19.2 is tagged; signing is in progress. All five checksum values are
+placeholders; fetch and pre-bundle verification refuse before network access. No rc19.2
 release bytes have been verified.
-See [rc19.1 release gates](NODE_RC19_1_UPGRADE.md).
+See [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
 
 **Scope (only):** create-or-restore identity → local-trust disclosure → start the tier-`full`
 onboarding for an amount → show the deposit address (text + QR) → poll until the node reports
@@ -40,7 +40,7 @@ sidecar, mints a loopback JWT via `/auth/local`, and reads `/identity`.
 
 ```bash
 npm ci
-./scripts/fetch-node-sidecar.sh     # fetch + VERIFY the signed node (after rc19.1 release gates)
+./scripts/fetch-node-sidecar.sh     # fetch + VERIFY the signed node (after rc19.2 release gates)
 scripts/authority-check.sh          # must print AUTHORITY: PASS before you build
 npm run smoke:cs2                   # static binding checks — runs on any OS
 npm run tauri dev
@@ -59,7 +59,7 @@ npm run tauri dev
   carries a token, mnemonic, or private key, and the app never asks for the seed
   (`/identity/mnemonic` needs a fresh signed challenge and is not called). The recovery-phrase
   input is write-only: masked, `autocomplete="off"`, cleared the moment it is submitted.
-- **Pinned contract** — BitSov-bitsov `v0.3.0-rc19.1` / `source SHA pending`. The `funding-seen` literal lives
+- **Pinned contract** — BitSov-bitsov `v0.3.0-rc19.2` / `04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`. The `funding-seen` literal lives
   in `src-tauri/src/main.rs` only; the renderer reads a derived `funded` boolean.
 
 `scripts/cs2-local-smoke.sh` enforces all of the above statically, and

@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 //   into the app config. Older pins can omit these fields too. New fields and
 //   changed defaults must fail until deliberately reviewed here. The three
 //   known rc7/owner-node web default differences are listed separately below.
-// Defaults last reviewed for rc14; rc19.1 signed-binary validation is pending. LAN setup
+// Defaults last reviewed for rc14; rc19.2 signed-binary validation is pending. LAN setup
 // limits are internal constants; grant breakers live in pairing records, not TOML.
 const OMITTED_DEFAULTS: &str = r#"
 disk_free_floor_bytes = 2147483648

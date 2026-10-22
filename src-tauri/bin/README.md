@@ -7,8 +7,8 @@ re-verifies existing sidecars against the pinned release before bundling (see be
 Sidecars are named with the Rust target triple
 Tauri's resolver expects: `bin/konsensus-<target-triple>[.exe]`.
 
-## Targets prepared for `v0.3.0-rc19.1`
-The rc19.1 draft pin expects Linux, macOS and Windows node binaries:
+## Targets prepared for `v0.3.0-rc19.2`
+The rc19.2 draft pin expects Linux, macOS and Windows node binaries:
 
 | host | release asset | installed sidecar |
 | --- | --- | --- |
@@ -27,13 +27,13 @@ runs on Linux and macOS (the Darwin `SKIP` was retired with `v0.3.0-rc5`) and st
 ```bash
 ./scripts/fetch-node-sidecar.sh     # downloads the pinned binary for this host, verifies GPG + sha256, installs it
 ```
-The script pins `v0.3.0-rc19.1` and verifies, fail-closed, that `SHA256SUMS.asc` is a valid
+The script pins `v0.3.0-rc19.2` and verifies, fail-closed, that `SHA256SUMS.asc` is a valid
 signature by the pinned release key `B299274C…`; if that key is not in your keyring it imports
 `RELEASE_KEY.asc` from BitSov-bitsov `main` into a throwaway keyring (fingerprint checked against
-the pin; your keyring is never written). rc19.1 is not tagged or signed yet. All five
+the pin; your keyring is never written). rc19.2 is tagged; signing is in progress. All five
 checksum values are placeholders; fetch and pre-bundle verification refuse before
-network access. No rc19.1 release bytes have been verified.
-See [the upgrade note](../../docs/NODE_RC19_1_UPGRADE.md). Fetching fails closed if release access or signed
+network access. No rc19.2 release bytes have been verified.
+See [the upgrade note](../../docs/NODE_RC19_2_UPGRADE.md). Fetching fails closed if release access or signed
 assets are unavailable. Nothing here publishes anything. Record the sha256 in the authority
 ledger; `scripts/authority-check.sh` checks source/configuration, not sidecar integrity. The
 released artifact is the `konsensus` binary (CLI `konsensus init` / `konsensus start`).

@@ -22,7 +22,7 @@ class DraftPinTests(unittest.TestCase):
             source = (ROOT / "scripts/fetch-node-sidecar.sh").read_text()
             # Keep testing draft refusal after the production release pins are filled.
             draft_pins = "\n".join(
-                f"PLACEHOLDER_SHA256_FROM_SIGNED_RC19_1  {asset}" for asset in ASSETS.values())
+                f"PLACEHOLDER_SHA256_FROM_SIGNED_RC19_2  {asset}" for asset in ASSETS.values())
             source, count = re.subn(r"(?m)^EXPECTED_SHA256SUMS='[^']*'",
                                     lambda _: f"EXPECTED_SHA256SUMS='{draft_pins}'", source)
             self.assertEqual(count, 1)
@@ -149,7 +149,7 @@ class SidecarTests(unittest.TestCase):
         script = self.root / "scripts/fetch-node-sidecar.sh"
         original = script.read_text()
         for asset, payload in PAYLOADS.items():
-            for invalid in ("PLACEHOLDER_SHA256_FROM_SIGNED_RC19_1", "bad-hash"):
+            for invalid in ("PLACEHOLDER_SHA256_FROM_SIGNED_RC19_2", "bad-hash"):
                 with self.subTest(asset=asset, invalid=invalid):
                     script.write_text(original.replace(hashlib.sha256(payload).hexdigest(), invalid))
                     for command in (["bash", str(script)], ["bash", str(script), "--verify-only"]):

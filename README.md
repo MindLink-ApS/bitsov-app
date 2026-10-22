@@ -30,11 +30,11 @@ The Rust host spawns/supervises the node binary and authenticates over `127.0.0.
 
 ## CS-1 local run
 
-The prepared bundled-node pin is `MindLink-ApS/BitSov-bitsov@v0.3.0-rc19.1`,
-replacing rc14. rc19.1 is not tagged or signed yet. All five checksum values are
-placeholders; fetch and pre-bundle verification refuse before network access. No rc19.1
+The prepared bundled-node pin is `MindLink-ApS/BitSov-bitsov@v0.3.0-rc19.2`,
+replacing rc14. rc19.2 is tagged; signing is in progress. All five checksum values are
+placeholders; fetch and pre-bundle verification refuse before network access. No rc19.2
 release bytes have been verified.
-See [the upgrade note](docs/NODE_RC19_1_UPGRADE.md) before enabling the pin.
+See [the upgrade note](docs/NODE_RC19_2_UPGRADE.md) before enabling the pin.
 The release-key fingerprint pin is unchanged. Remote first run is implemented on
 main (app #192 + node rc13); runtime acceptance on real hardware (Touch ID + a
 fresh Pi) is still pending.
