@@ -206,6 +206,9 @@ pub struct LightningReadiness {
 /// `GET /status` — `HealthResponse`. The subset the Node panel shows.
 #[derive(Deserialize, Clone, Debug)]
 pub struct NodeStatusResponse {
+    /// Node-reported network also works for remote paired clients.
+    #[serde(default)]
+    pub network: Option<String>,
     #[serde(default)]
     pub money_ready: Option<bool>,
     #[serde(default)]
@@ -254,7 +257,7 @@ pub struct NodeStatusResponse {
 /// Capabilities the renderer may act on. Anything else the node lists is dropped.
 /// `owner_device_approval_v1`: the node approves spend windows and first contact
 /// from an enrolled owner device (node #303); the renderer only changes copy on it.
-pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1", "room_binding_v1", "porch_read_v1", "porch_quote_v1", "front_door_v1", "owner_device_approval_v1", "owner_device_approval_breaker_reset_v1"];
+pub const KNOWN_CAPABILITIES: &[&str] = &["energy_v1", "membrane_v1", "call_meeting_v1", "room_binding_v1", "porch_read_v1", "porch_quote_v1", "front_door_v1", "owner_device_approval_v1", "owner_device_approval_breaker_reset_v1", "starter_channel_request_v1"];
 
 pub fn known_capabilities(listed: &[String]) -> Vec<String> {
     KNOWN_CAPABILITIES
@@ -572,9 +575,8 @@ pub struct NodeOverview {
     /// Its URL, only when well-formed and naming the reported port.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stun_url: Option<String>,
-    /// The Bitcoin network in the LDK config the host started the node with,
-    /// named as `act::bolt11_network` names a currency. Absent for other backends or
-    /// an unreadable config: the app then does not know its network.
+    /// Node-reported Bitcoin network, normalized for invoice comparison.
+    /// Older local LDK nodes fall back to their host configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
     /// Where the seed lives, as the badge shows it: see [`custody_mode`].
@@ -627,7 +629,7 @@ pub fn custody_mode(reported: Option<&str>, verified_local_node: bool) -> Option
 /// An LDK config's `network` as the app names networks; unknown names are none.
 pub fn ldk_network_name(configured: &str) -> Option<&'static str> {
     match configured {
-        "bitcoin" => Some("mainnet"),
+        "bitcoin" | "mainnet" => Some("mainnet"),
         "testnet" => Some("testnet"),
         "signet" => Some("signet"),
         "regtest" => Some("regtest"),
@@ -672,7 +674,7 @@ impl NodeOverview {
             capabilities: known_capabilities(&status.api_capabilities),
             stun_url: own_stun_url(status.stun_url.as_deref(), status.stun_port),
             stun_port: status.stun_port,
-            network: None,
+            network: status.network.as_deref().and_then(ldk_network_name).map(str::to_string),
             // Provenance is applied by the caller (`verified_local_node`); raw
             // report only, so tests can project both sides.
             custody_mode: match status.custody_mode.as_deref() {
@@ -1217,6 +1219,37 @@ mod tests {
                 assert_eq!(projected["readiness"]["events"][0]["timestamp"], 1725000000u64);
             }
         }
+    }
+
+    #[test]
+    fn overview_allowlists_reported_networks() {
+        for (reported, want) in [("bitcoin", Some("mainnet")), ("mainnet", Some("mainnet")),
+            ("testnet", Some("testnet")), ("signet", Some("signet")), ("regtest", Some("regtest")),
+            ("future-network", None), ("", None)] {
+            let status = serde_json::from_value(serde_json::json!({
+                "status":"ok", "node_id":"remote", "network":reported
+            })).unwrap();
+            assert_eq!(NodeOverview::from_status(status, 1).network.as_deref(), want);
+        }
+    }
+
+    #[test]
+    fn overview_normalizes_node_bitcoin_network_for_invoice_comparison() {
+        let status: NodeStatusResponse = serde_json::from_value(serde_json::json!({
+            "status": "ok", "node_id": "remote", "network": "bitcoin"
+        })).unwrap();
+        assert_eq!(NodeOverview::from_status(status, 1).network.as_deref(), Some("mainnet"));
+    }
+
+    #[test]
+    fn overview_preserves_starter_capability_and_remote_network() {
+        let status: NodeStatusResponse = serde_json::from_value(serde_json::json!({
+            "status": "ok", "node_id": "remote", "network": "signet",
+            "api_capabilities": ["starter_channel_request_v1", "unknown"]
+        })).unwrap();
+        let view = NodeOverview::from_status(status, 1);
+        assert_eq!(view.network.as_deref(), Some("signet"));
+        assert_eq!(view.capabilities, ["starter_channel_request_v1"]);
     }
 
     #[test]

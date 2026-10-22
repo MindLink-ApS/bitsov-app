@@ -3097,12 +3097,14 @@ async fn get_json<T: serde::de::DeserializeOwned>(state: &NodeState, path: &str)
 
 async fn read_node_overview(state: &NodeState) -> Result<control::NodeOverview, String> {
     let status: control::NodeStatusResponse = get_json(state, "/status").await?;
+    // An invalid report is unknown, never permission to use a different chain.
+    let network_reported = status.network.is_some();
     let mut overview = control::NodeOverview::from_status(status, now_ms());
     // Local seed labels need verified provenance, not a loopback URL alone.
     overview.custody_mode =
         control::custody_mode(overview.custody_mode, verified_local_node(state));
     // Only while the node answering is the LDK node that config started.
-    if overview.lightning_backend.as_deref() == Some("ldk") {
+    if !network_reported && overview.lightning_backend.as_deref() == Some("ldk") {
         overview.network = state.configured_network.lock().unwrap().clone();
     }
     Ok(overview)
@@ -4186,6 +4188,94 @@ async fn payments_overview(
     reject_sealed_window(&window)?;
     drop(window);
     read_wallet(state.inner()).await
+}
+
+/// Read-only discovery, scoped to the node identity the renderer is showing.
+async fn read_starter_current(state: &NodeState, node_id: &str) -> Result<bitsov_app::starter::Status, String> {
+    require_starter_build()?;
+    read_starter_current_enabled(state, node_id).await
+        .map_err(|_| "Could not read starter balance status.".into())
+}
+
+// Private enabled paths let boundary tests exercise both modes without mutating
+// process environment. IPC always enters through the build-gated wrappers.
+fn require_starter_build() -> Result<(), String> {
+    if option_env!("VITE_STARTER_BALANCE") == Some("1") { Ok(()) }
+    else { Err("Starter balance is disabled in this build.".into()) }
+}
+
+async fn read_starter_current_enabled(state: &NodeState, node_id: &str) -> Result<bitsov_app::starter::Status, String> {
+    let _change = state.remote_change.lock().await;
+    read_starter_on_connection(state, node_id).await
+}
+
+// Caller holds remote_change across discovery, auth refresh, dispatch and reply.
+async fn read_starter_on_connection(state: &NodeState, node_id: &str) -> Result<bitsov_app::starter::Status, String> {
+    let overview = read_node_overview(state).await?;
+    if overview.node_id != node_id || overview.network.as_deref() != Some("signet")
+        || !overview.capabilities.iter().any(|c| c == "starter_channel_request_v1") {
+        return Err("Starter balance is unavailable for this node.".into());
+    }
+    get_json(state, bitsov_app::starter::PATH).await
+}
+
+/// Receive scope only. Never enter the spend/owner-approval flow or accept amounts.
+async fn do_starter_request(
+    state: &NodeState, node_id: &str, request_id: &str,
+) -> Result<bitsov_app::starter::Status, String> {
+    require_starter_build()?;
+    do_starter_request_enabled(state, node_id, request_id).await
+        .map_err(|_| "Could not confirm the starter balance request.".into())
+}
+
+async fn do_starter_request_enabled(
+    state: &NodeState, node_id: &str, request_id: &str,
+) -> Result<bitsov_app::starter::Status, String> {
+    let _change = state.remote_change.lock().await;
+    let id = control::room_id(request_id).map_err(|_| "Invalid starter request UUID.".to_string())?;
+    if id.as_bytes()[14] != b'4' || !matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b') {
+        return Err("Invalid starter request UUID.".into());
+    }
+    if !matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(s) if s.scopes.iter().any(|v| v == "receive")) {
+        return Err("A paired receive session is required.".into());
+    }
+    let generation = *state.remote_connect_generation.borrow();
+    let discovery = read_starter_on_connection(state, node_id).await?;
+    if !discovery.hub_configured {
+        return Err("No starter hub is configured.".into());
+    }
+    if *state.remote_connect_generation.borrow() != generation
+        || state.node_id.lock().unwrap().as_deref() != Some(node_id) {
+        return Err("The connected node changed.".into());
+    }
+    let (status, body) = call_api(state, reqwest::Method::POST, bitsov_app::starter::PATH,
+        Some(serde_json::json!({"request_id": id}))).await?;
+    // Another paired device may already have started the node's one request.
+    // Adopt the node's current root; never invent a replacement UUID here.
+    if status == reqwest::StatusCode::CONFLICT
+        && serde_json::from_str::<serde_json::Value>(&body).ok()
+            .is_some_and(|v| v["code"] == "starter_already_requested") {
+        return read_starter_on_connection(state, node_id).await;
+    }
+    decode(bitsov_app::starter::PATH, status, &body)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn starter_current(
+    window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, node_id: String,
+) -> Result<bitsov_app::starter::Status, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_starter_current(state.inner(), &node_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn starter_request(
+    window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, node_id: String, request_id: String,
+) -> Result<bitsov_app::starter::Status, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_starter_request(state.inner(), &node_id, &request_id).await
 }
 
 // ---- control center actions (slice B) -----------------------------------------
@@ -9039,6 +9129,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             first_contact_status,
             first_contact_cancel,
             payments_overview,
+            starter_current,
+            starter_request,
             energy_read,
             membrane_read,
             spend_status,
@@ -10424,6 +10516,7 @@ mod control_act_tests {
     //! spend window is checked before any request, bodies are exact, a node
     //! refusal locks the window, and the owner-grant path on a paired node.
     include!("add_device_tests.rs");
+    include!("starter_tests.rs");
     #[tokio::test]
     async fn rc7_and_malformed_capabilities_refuse_all_variable_sends() {
         for status in [
@@ -19665,6 +19758,8 @@ mod assistant_acl_tests {
                 "first_contact_status",
                 "first_contact_cancel",
                 "payments_overview",
+                "starter_current",
+                "starter_request",
                 // Organism reads (genome N1/N2), same guard.
                 "energy_read",
                 "membrane_read",

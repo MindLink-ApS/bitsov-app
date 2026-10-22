@@ -177,7 +177,7 @@ describe('reading a chat invoice', () => {
     expect('invoicePayee' in bolt11Module).toBe(false);
     const maya = pubOf(MAYA_KEY);
     for (const body of [invoice(), invoice({ key: STRANGER_KEY }), invoice({ payeeTags: [maya] }), invoice({ payeeTags: [pubOf(STRANGER_KEY)] }), ...NONCANONICAL]) {
-      const r = readChatInvoice(body, 0, null); // expiry aside
+      const r = readChatInvoice(body, 0, 'regtest'); // expiry aside
       const inv = r?.ok ? r.invoice : null;
       expect(inv).not.toBeNull();
       expect(inv).not.toHaveProperty('payee');
@@ -198,7 +198,7 @@ describe('reading a chat invoice', () => {
   it('checks the host reading against network, bounds and expiry', () => {
     const read = { ...hostDecode(invoice()) };
     expect(bolt11Module.hostReadProblem(read, NOW, 'regtest')).toBeNull();
-    expect(bolt11Module.hostReadProblem(read, NOW, null)).toBeNull();
+    expect(bolt11Module.hostReadProblem(read, NOW, null)).toBe('wrong_network');
     expect(bolt11Module.hostReadProblem(read, NOW, 'mainnet')).toBe('wrong_network');
     expect(bolt11Module.hostReadProblem({ ...read, amount_msat: 0 }, NOW, 'regtest')).toBe('no_amount');
     expect(bolt11Module.hostReadProblem({ ...read, amount_msat: 999 }, NOW, 'regtest')).toBe('out_of_bounds');
@@ -233,14 +233,24 @@ describe('reading a chat invoice', () => {
     expect(payeeView(pubOf(STRANGER_KEY), maya, 'Maya').verified).toBe(false);
   });
 
+  it.each([null, 'unknown', 'future-network'])('fails closed for unknown home network %s', home => {
+    const bolt11 = invoice();
+    expect(readChatInvoice(bolt11, NOW, home)).toEqual({ ok: false, reason: 'wrong_network' });
+    expect(bolt11Module.hostReadProblem(hostDecode(bolt11), NOW, home)).toBe('wrong_network');
+  });
+
+  it('refuses a mainnet invoice on a remote signet node in both checks', () => {
+    const bolt11 = invoice({ hrp: 'lnbc210n' });
+    expect(readChatInvoice(bolt11, NOW, 'signet')).toEqual({ ok: false, reason: 'wrong_network' });
+    expect(bolt11Module.hostReadProblem(hostDecode(bolt11), NOW, 'signet')).toBe('wrong_network');
+  });
+
   it('reads each network and amount unit exactly', () => {
-    const at = (hrp: string) => readChatInvoice(invoice({ hrp }), NOW, null);
+    const at = (hrp: string) => readChatInvoice(invoice({ hrp }), NOW, NET[HRP.exec(hrp)![1]]);
     expect(at('lnbcrt210n')).toMatchObject({ ok: true, invoice: { msat: 21_000, network: 'regtest', purpose: 'dinner' } });
     expect(at('lntb1m')).toMatchObject({ ok: true, invoice: { msat: 100_000_000, network: 'testnet' } });
     expect(at('lntbs20u')).toMatchObject({ ok: true, invoice: { msat: 2_000_000, network: 'signet' } });
     expect(at('lnbc10000p')).toMatchObject({ ok: true, invoice: { msat: 1000, network: 'mainnet' } });
-    // Unknown home network: not refused on network.
-    expect(at('lnbc10000p')).toMatchObject({ ok: true });
   });
 
   it('refuses what the app cannot pay, with a reason', () => {
@@ -679,10 +689,12 @@ describe('a request in chat', () => {
     expect(host.used('payment_pay')).toHaveLength(0);
   });
 
-  it('without a known home network, a well-formed invoice still shows its card', async () => {
-    stubHost({ messages_list: () => [msg('in-1', invoice({ hrp: 'lnbc210n' }))] }, null);
+  it.each([null, 'future-network', 'signet'])('refuses a mainnet invoice for unknown or remote signet network %s', async network => {
+    const host = stubHost({ messages_list: () => [msg('in-1', invoice({ hrp: 'lnbc210n' }))] }, network);
     await openShell();
-    await vi.waitFor(() => expect($('[data-message="in-1"] [data-request-card]')).not.toBeNull());
+    await vi.waitFor(() => expect(text('[data-message="in-1"] [data-request-plain]')).toBe('This invoice is for another Bitcoin network.'));
+    expect($('[data-message="in-1"] [data-request-card]')).toBeNull();
+    expect(host.used('payment_pay')).toHaveLength(0);
   });
   // Codex #85 delta 2: card and confirm show only the host's decode.
   it('card and confirm show the host’s payee and amount, and pay its canonical invoice', async () => {

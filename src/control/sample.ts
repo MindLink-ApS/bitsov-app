@@ -1034,6 +1034,8 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     firstContactStatus: async () => { throw new Error('Sample data has no independent owner request.'); },
     firstContactCancel: async () => {},
     wallet: () => ok(WALLET),
+    starterCurrent: () => ok({ state: 'not_requested', hub_configured: false }),
+    starterRequest: () => Promise.reject(new Error('Starter requests need a paired signet node.')),
     spendStatus: () => {
       settleSpend();
       if (spend.state === 'pending' && ++spendPolls >= GRANT_AFTER_POLLS) {
