@@ -88,7 +88,7 @@ jobs:
             # One brace pattern because predicate-quantifier is 'every'.
             # src-tauri/** includes the generated Android project.
             android:
-              - '{src-tauri/**,.github/workflows/build.yml}'
+              - '{src-tauri/**,scripts/check-android-release.py,.github/workflows/build.yml}'
 
   android-check:
     name: Android Rust (aarch64 cargo check)
@@ -134,7 +134,22 @@ jobs:
       # --tests type-checks tests; it neither links nor runs Android binaries.
       - name: Rust — Android library and tests
         working-directory: src-tauri
-        run: cargo check --locked -p bitsov-app --target aarch64-linux-android --lib --tests
+        env:
+          TAURI_ANDROID_PROJECT_PATH: ${{ github.workspace }}/src-tauri/gen/android
+          WRY_ANDROID_PACKAGE: tech.mindlink.bitsov
+          WRY_ANDROID_LIBRARY: bitsov_app
+          WRY_ANDROID_KOTLIN_FILES_OUT_DIR: ${{ github.workspace }}/src-tauri/gen/android/app/src/main/java/tech/mindlink/bitsov/generated
+        run: |
+          mkdir -p "$WRY_ANDROID_KOTLIN_FILES_OUT_DIR"
+          # Tauri's build script does not track TAURI_ANDROID_PROJECT_PATH.
+          # Regenerate even when a pre-slice cache has no emitted rules.
+          cargo clean -p tauri --target aarch64-linux-android
+          cargo check --locked -p bitsov-app --target aarch64-linux-android --lib --tests
+
+      # Inspect rules emitted by the locked dependency, without Gradle/SDK/APK.
+      # Missing generated output fails rather than silently skipping the check.
+      - name: Android release — keep rules and safe defaults
+        run: python3 scripts/check-android-release.py --generated
 
   build:
     name: Build (tsc + vite + cargo check)
