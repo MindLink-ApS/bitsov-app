@@ -4264,6 +4264,6 @@ mod onboarding_error_tests {
     }
 }
 
-#[cfg(all(test, target_os = "macos", not(feature = "mobile")))]
+#[cfg(test)]
 #[path = "remote_access/second_tests.rs"]
 pub(crate) mod second_tests;

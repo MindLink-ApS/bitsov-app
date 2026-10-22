@@ -236,7 +236,7 @@ it('clears an unfinished manual paste when onboarding unmounts', async () => {
 it.each(['android', 'ios'] as const)('%s clears an unfinished manual paste on reset and scanner handoff', async platform => {
   vi.stubGlobal('navigator', {});
   const props = mount({ platform, scan: () => new Promise(() => {}) });
-  for (const action of ['Forget this box', "Scan your box's QR"]) {
+  for (const action of ['Forget this box', "Scan your box’s QR"]) {
     button('Paste link').click(); await tick();
     const input = document.querySelector<HTMLInputElement>('input')!;
     input.value = 'bitsov://pair/private-unsubmitted';

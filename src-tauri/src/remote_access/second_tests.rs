@@ -1,5 +1,13 @@
 //! Wire fixture: pinned Noise and independent node SAS v2 bytes; never runs a node binary.
 use super::*;
+// Only the desktop macOS enrollment tests use the Keystore-independent wire
+// server. The ticket validation regression below must also run on Linux CI.
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+pub(crate) use fixtures::{node, first_node, claim_code};
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+mod fixtures {
+use super::*;
 use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{json, Value};
 
@@ -105,6 +113,8 @@ async fn respond(stream: &mut TcpStream, noise: &mut TransportState, status: u16
     let response = format!("HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\n\r\n{body}",body.len());
     let bytes = encode_transport(noise,response.as_bytes()).unwrap();
     write_frame(stream,&bytes).await.unwrap();
+}
+
 }
 
 #[test]

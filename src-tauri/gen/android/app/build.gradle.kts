@@ -37,14 +37,17 @@ android {
             }
         }
         getByName("release") {
-            optimization {
-               enable = true
-            }
+            // Use the legacy DSL consistently with Tauri's generated .pro
+            // files. AGP 9.3's optimization DSL uses keepRules/*.keep instead.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            isDebuggable = false
+            isJniDebuggable = false
+            // Unsigned until a separately reviewed distribution/signing setup.
             proguardFiles(
-                *fileTree(".") {
-                  include("**/*.pro")
-                  exclude("build/**")
-                }.files.toTypedArray()
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+                "proguard-tauri.pro",
             )
         }
     }
@@ -67,17 +70,14 @@ rust {
     rootDirRel = "../../../"
 }
 
-configurations.configureEach {
-    // Use the bundled, offline ML Kit model instead of the Play Services
-    // downloader pulled by the official scanner plugin.
-    exclude(group = "com.google.android.gms", module = "play-services-mlkit-barcode-scanning")
-}
-
 dependencies {
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("androidx.biometric:biometric:1.1.0")
+    // Bundle the offline model. Its transitive play-services-mlkit-barcode-
+    // scanning dependency also supplies BarcodeScanner/BarcodeScanning API
+    // classes; excluding it globally makes R8 fail (and breaks scanning).
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.lifecycle:lifecycle-process:2.10.0")
