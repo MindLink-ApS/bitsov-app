@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 import { deviceWord, isMobilePlatform } from '../platform';
 import { createEffect, createSignal, For, onCleanup, Show } from 'solid-js';
 import type { ActionError } from './types';
@@ -17,7 +18,9 @@ export function approvalMemory() {
   // The approve in flight (by op id): it outlives the panel, so leaving and coming
   // back never offers a second Approve while the first is unresolved.
   const [busy, setBusy] = createSignal<string | null>(null);
-  return { hidden, setHidden, kept, setKept, said, setSaid, busy, setBusy };
+  // A list review replaces Settings; remember its visible opener for focus restoration.
+  const [review, setReview] = createSignal<string | null>(null);
+  return { reviewOpener: null as HTMLElement | null, review, setReview, hidden, setHidden, kept, setKept, said, setSaid, busy, setBusy };
 }
 export type ApprovalMemory = ReturnType<typeof approvalMemory>;
 
@@ -40,7 +43,8 @@ const clock = (secs: number) => `${Math.floor(secs / 60)}:${String(secs % 60).pa
  * and signs it with Touch ID. Dismiss only hides it here: there is no decline;
  * it expires at the node by itself.
  */
-export function OwnerApprovals(props: {
+export type OwnerApprovalsProps = {
+  onReview?: (opId: string) => void;
   approvals: ApprovalView[];
   now: number;
   mobile?: boolean;
@@ -52,11 +56,11 @@ export function OwnerApprovals(props: {
   recheck?: (opId: string) => Promise<'pending' | 'gone' | 'unknown'>;
   /** Owned by the shell so outcomes survive leaving and reopening this panel; local if absent. */
   memory?: ApprovalMemory;
-}) {
+};
+
+export function OwnerApprovals(props: OwnerApprovalsProps) {
   const memory = props.memory ?? approvalMemory();
-  const { hidden, setHidden, kept, setKept, said, setSaid, busy, setBusy } = memory;
-  /** An "Approved" is final: nothing later (a stale reply, a second press) overwrites it. */
-  const settle = (opId: string, outcome: { ok: boolean; text: string }) => setSaid((s) => settleOutcome(s, opId, outcome));
+  const { hidden, setHidden, kept, setKept, said, busy } = memory;
   const mobile = () => props.mobile ?? isMobilePlatform();
   const device = () => mobile() ? (deviceWord() === 'iPad' ? 'iPad' : 'phone') : 'Mac';
   const tap = () => (mobile() ? 'biometrics' : 'Touch ID');
@@ -73,41 +77,16 @@ export function OwnerApprovals(props: {
     setHidden((h) => new Set(h).add(opId));
     setKept((k) => { const { [opId]: _gone, ...rest } = k; return rest; });
   };
-  const approve = async (v: ApprovalView) => {
-    if (busy() !== null || said()[v.op_id]?.ok) return;
-    setBusy(v.op_id);
-    setKept((k) => ({ ...k, [v.op_id]: v }));
-    setSaid((s) => { if (s[v.op_id]?.ok) return s; const { [v.op_id]: _old, ...rest } = s; return rest; });
-    try {
-      const r = await props.approve(v.op_id, v.approval_message);
-      if (r.ok) {
-        settle(v.op_id, { ok: true, text: 'Approved. The app that asked can go on now.' });
-      } else if (r.error.code === 'node') {
-        // The request may have reached the node: never say "nothing was approved" here.
-        settle(v.op_id, { ok: false, text: 'Couldn’t confirm whether the approval went through. Checking your node…' });
-        const now = await (props.recheck?.(v.op_id) ?? Promise.resolve('unknown' as const));
-        settle(v.op_id, {
-          ok: false,
-          text: now === 'pending'
-            ? 'Couldn’t confirm the approval. Your node still lists this request as waiting, so it was not approved; you can try again.'
-            : now === 'gone'
-              ? 'Couldn’t confirm the approval. Your node no longer lists this request (it was approved or it expired). Check with the app that asked.'
-              : 'Couldn’t confirm whether the approval went through, and your node could not be read. Check with the app that asked.',
-        });
-      } else {
-        settle(v.op_id, { ok: false, text: refusalText(r.error.code, { reason: r.error.reason, remaining_msat: r.error.remaining_msat }) });
-      }
-    } finally { setBusy(null); }
-  };
+  const approve = (v: ApprovalView) => approveOwnerRequest(props, memory, v);
   return (
     <section class="panel owner-approvals" data-owner-approvals aria-labelledby="owner-approvals-title">
-      <h2 id="owner-approvals-title">Approvals waiting for you</h2>
+      <h2 id="owner-approvals-title">{t('ownerApprovalListTitle')}</h2>
       <Show when={props.error}>
         <p class="err-note" role="alert" data-owner-approvals-error>{props.error}</p>
       </Show>
       <Show when={shown().length > 0} fallback={
         <Show when={!props.error}>
-          <p class="hint" data-owner-approvals-empty>Nothing is waiting. Requests from your other apps show here; each expires after five minutes.</p>
+          <p class="hint" data-owner-approvals-empty>{t('ownerApprovalEmpty')}</p>
         </Show>
       }>
         <ul class="owner-approval-list" role="list">
@@ -118,35 +97,37 @@ export function OwnerApprovals(props: {
                   <For each={termLines(v, props.nameOf)}>{(line, i) => <li classList={{ lead: i() === 0 }}>{line}</li>}</For>
                 </ul>
                 <p class="hint" data-approval-client>
-                  Requested by app <code>{shortKey(v.client_pubkey)}</code>. Your node does not name the app; compare this with the app that asked.
+                  {t('ownerApprovalRequester', shortKey(v.client_pubkey))}
                 </p>
                 <Show when={!said()[v.op_id]?.ok}>
                   <p class="hint" data-approval-expires>
-                    {waiting(v.op_id) ? `Expires in ${clock(secondsLeft(v, props.now))} unless you approve it.` : 'This request is no longer waiting at your node.'}
+                    {waiting(v.op_id) ? t('ownerApprovalExpires', clock(secondsLeft(v, props.now))) : t('ownerApprovalGone')}
                   </p>
                 </Show>
                 <details class="quiet-detail" data-approval-message>
-                  <summary>Exact message your {device()} signs</summary>
+                  <summary>{t('ownerApprovalSignedDevice', device())}</summary>
                   <pre class="approval-message">{v.approval_message}</pre>
                 </details>
                 <Show when={busy() === v.op_id}>
-                  <p class="hint" role="status" data-approval-busy>Confirm with {tap()}…</p>
+                  <p class="hint" role="status" data-approval-busy>{t('ownerApprovalConfirm', tap())}</p>
                 </Show>
                 <Show when={said()[v.op_id]}>
                   {(s) => <p class={s().ok ? 'ok-note' : 'err-note'} role={s().ok ? 'status' : 'alert'} data-approval-result={s().ok ? 'ok' : 'refused'}>{s().text}</p>}
                 </Show>
                 <div class="form-actions">
                   <Show when={!said()[v.op_id]?.ok && waiting(v.op_id)}>
-                    <button type="button" class="primary soft money" data-approval-approve disabled={busy() !== null} onClick={() => void approve(v)}>
-                      {busy() === v.op_id ? 'Approving…' : `Approve with ${tap()}`}
+                    <button type="button" class="primary soft money" data-approval-approve disabled={busy() !== null} onClick={() => props.onReview ? props.onReview(v.op_id) : void approve(v)} data-approval-review={props.onReview ? true : undefined}>
+                      {props.onReview ? t('ownerApprovalReview') : busy() === v.op_id ? t('ownerApprovalBusy') : t('ownerApprovalApproveDevice', tap())}
                     </button>
                   </Show>
-                  <button type="button" class="soft" data-approval-dismiss disabled={busy() === v.op_id} onClick={() => dismiss(v.op_id)}>
-                    {said()[v.op_id] || !waiting(v.op_id) ? 'Dismiss' : 'Not now'}
-                  </button>
+                  <Show when={!props.onReview || !waiting(v.op_id)}>
+                    <button type="button" class="soft" data-approval-dismiss disabled={busy() === v.op_id} onClick={() => dismiss(v.op_id)}>
+                      {said()[v.op_id] || !waiting(v.op_id) ? t('ownerApprovalDismiss') : t('firstSpendNotNow')}
+                    </button>
+                  </Show>
                 </div>
-                <Show when={!said()[v.op_id] && waiting(v.op_id)}>
-                  <p class="hint">Not now only hides it here. Nothing is sent; it expires by itself.</p>
+                <Show when={!props.onReview && !said()[v.op_id] && waiting(v.op_id)}>
+                  <p class="hint">{t('ownerApprovalHidden')}</p>
                 </Show>
               </li>
             )}
@@ -155,6 +136,35 @@ export function OwnerApprovals(props: {
       </Show>
     </section>
   );
+}
+
+export async function approveOwnerRequest(props: OwnerApprovalsProps, memory: ApprovalMemory, v: ApprovalView) {
+  const { busy, setBusy, setKept, said, setSaid } = memory;
+  const settle = (opId: string, outcome: { ok: boolean; text: string }) => setSaid(s => settleOutcome(s, opId, outcome));
+  if (busy() !== null || said()[v.op_id]?.ok) return;
+  setBusy(v.op_id);
+  setKept((k) => ({ ...k, [v.op_id]: v }));
+  setSaid((s) => { if (s[v.op_id]?.ok) return s; const { [v.op_id]: _old, ...rest } = s; return rest; });
+  try {
+    const r = await props.approve(v.op_id, v.approval_message);
+    if (r.ok) {
+      settle(v.op_id, { ok: true, text: t('ownerApprovalApproved') });
+    } else if (r.error.code === 'node') {
+      // The request may have reached the node: never say "nothing was approved" here.
+      settle(v.op_id, { ok: false, text: t('ownerApprovalChecking') });
+      const now = await (props.recheck?.(v.op_id) ?? Promise.resolve('unknown' as const));
+      settle(v.op_id, {
+        ok: false,
+        text: now === 'pending'
+          ? t('ownerApprovalStillPending')
+          : now === 'gone'
+            ? t('ownerApprovalUnconfirmedGone')
+            : t('ownerApprovalUnconfirmed'),
+      });
+    } else {
+      settle(v.op_id, { ok: false, text: refusalText(r.error.code, { reason: r.error.reason, remaining_msat: r.error.remaining_msat }) });
+    }
+  } finally { setBusy(null); }
 }
 
 /**

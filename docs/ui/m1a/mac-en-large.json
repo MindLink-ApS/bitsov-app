@@ -1,0 +1,58 @@
+{
+  "inner": [
+    1280,
+    800
+  ],
+  "focus": "preview-a",
+  "elements": [
+    {
+      "tag": "DIV",
+      "rect": {
+        "x": 96,
+        "y": 63,
+        "width": 1088,
+        "height": 674,
+        "top": 63,
+        "right": 1184,
+        "bottom": 737,
+        "left": 96
+      },
+      "client": 672,
+      "scroll": 672,
+      "font": "28px"
+    },
+    {
+      "tag": "BUTTON",
+      "rect": {
+        "x": 117,
+        "y": 478,
+        "width": 1046,
+        "height": 88,
+        "top": 478,
+        "right": 1163,
+        "bottom": 566,
+        "left": 117
+      },
+      "client": 88,
+      "scroll": 88,
+      "font": "28px"
+    },
+    {
+      "tag": "BUTTON",
+      "rect": {
+        "x": 117,
+        "y": 578,
+        "width": 1046,
+        "height": 88,
+        "top": 578,
+        "right": 1163,
+        "bottom": 666,
+        "left": 117
+      },
+      "client": 86,
+      "scroll": 86,
+      "font": "25px"
+    }
+  ],
+  "text": "1 of 2Approval requestedLet this app spend · Budget: up to 2 000 sats · Each payment: up to 10 sats · For: 10 min · To: any contact, within the budget · Requested by app cdcdcd…cdcdcdRequested by app cdcdcd…cdcdcd. Your node does not name the app; compare this with the app that asked.Exact message your Mac signsbitsov-approval-v1\npreview=preview-aApprove with Touch IDNot nowNot now grants nothing. You can reopen this request in Settings → Node."
+}

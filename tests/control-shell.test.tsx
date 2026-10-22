@@ -1004,25 +1004,33 @@ describe('control center shell', () => {
       return host;
     }
 
-    it('shows a badge and an entry; the list approves with the exact message shown', async () => {
+    it('opens on arrival, defers without granting, and reopens from the list with the exact approval bytes', async () => {
       const { calls } = await open({});
+      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approval-queue]')?.textContent).toBe('1 of 2'));
+      expect(mount.querySelectorAll('[data-owner-approval-sheet]')).toHaveLength(1);
+      click('[data-owner-sheet-dismiss]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approval-sheet]')?.getAttribute('data-owner-approval-sheet')).toBe('op-b'));
+      click('[data-owner-sheet-dismiss]');
+      expect(calls.some(c => c.cmd === 'owner_approval_approve')).toBe(false);
       await vi.waitFor(() => expect(mount.querySelector('[data-approvals-badge]')?.textContent).toBe('2'));
       click('[data-profile]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-approvals-count]')?.textContent).toBe('2'));
       click('[data-open-approvals]');
       await vi.waitFor(() => expect(mount.querySelectorAll('[data-owner-approval]')).toHaveLength(2));
-      mount.querySelector<HTMLButtonElement>('[data-owner-approval="op-a"] [data-approval-approve]')!.click();
+      click('[data-owner-approval="op-a"] [data-approval-review]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approval-sheet]')).not.toBeNull());
+      expect(mount.querySelector('[data-settings-open="true"]')).toBeNull();
+      click('[data-owner-sheet-approve]');
       await vi.waitFor(() => expect(calls.some((c) => c.cmd === 'owner_approval_approve')).toBe(true));
       const call = calls.find((c) => c.cmd === 'owner_approval_approve')!;
       expect(call.args).toEqual({ opId: 'op-a', approvalMessage: 'bitsov-approval-v1\nop=op-a' });
     });
 
-    it('a list that cannot be read is said, and no stale Approve stays', async () => {
+    it.each(['pending', 'keys'])('an unreadable %s read is said, never called withdrawn, and no stale Approve stays', async failedRead => {
       let fail = false;
       const host = stubHost({
         pairing_status: () => ({ ...paired, remote: true }),
         node_overview: overview(['owner_device_approval_v1']),
-        owner_device_keys: () => ({ device_approvals: 'enabled', owner_device_count: 2, device_keys: [] }),
+        owner_device_keys: () => { if (fail && failedRead === 'keys') throw { code: 'approval_forbidden', message: 'revoked' }; return { device_approvals: 'enabled', owner_device_count: 2, device_keys: [] }; },
         owner_approvals_pending: () => { if (fail) throw { code: 'approval_forbidden', message: 'revoked' }; return [pendingView('op-a')]; },
       });
       void host;
@@ -1030,10 +1038,12 @@ describe('control center shell', () => {
       await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
       [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
       await vi.waitFor(() => expect(mount.querySelector('[data-approvals-badge]')).not.toBeNull());
-      click('[data-profile]');
-      click('[data-open-approvals]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-approval-approve]')).not.toBeNull());
       fail = true;
+      await vi.waitFor(() => expect(mount.querySelector('[data-owner-sheet-status]')?.textContent).toContain('Your node refused'), { timeout: 15_000 });
+      expect(mount.querySelector('[data-owner-approval-sheet]')).toBeNull();
+      click('[data-profile]');
+      click('[data-open-settings]');
+      click('[data-tab="node"]');
       await vi.waitFor(() => expect(mount.querySelector('[data-owner-approvals-error]')?.textContent).toContain('Your node refused'), { timeout: 15_000 });
       expect(mount.querySelector('[data-approval-approve]')).toBeNull();
       expect(mount.querySelector('[data-owner-approvals-empty]')).toBeNull();
@@ -1074,10 +1084,11 @@ describe('control center shell', () => {
       await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
       [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
       await vi.waitFor(() => expect(mount.querySelector('[data-approvals-badge]')).not.toBeNull());
+      await vi.waitFor(() => expect(mount.querySelector('[data-owner-sheet-approve]')).not.toBeNull());
+      click('[data-owner-sheet-approve]');
+      click('[data-owner-sheet-dismiss]');
       click('[data-profile]');
       click('[data-open-approvals]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-approval-approve]')).not.toBeNull());
-      mount.querySelector<HTMLButtonElement>('[data-approval-approve]')!.click();
       await vi.waitFor(() => expect(host.calls.filter((c) => c.cmd === 'owner_approval_approve')).toHaveLength(1));
       click('[data-tab="body"]');
       await vi.waitFor(() => expect(mount.querySelector('[data-owner-approvals]')).toBeNull());
@@ -1102,10 +1113,12 @@ describe('control center shell', () => {
       await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
       [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
       await vi.waitFor(() => expect(mount.querySelector('[data-approvals-badge]')).not.toBeNull());
+      await vi.waitFor(() => expect(mount.querySelector('[data-owner-sheet-approve]')).not.toBeNull());
+      click('[data-owner-sheet-approve]');
+      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approval-sheet] [role="alert"]')).not.toBeNull());
+      click('[data-owner-sheet-dismiss]');
       click('[data-profile]');
       click('[data-open-approvals]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-approval-approve]')).not.toBeNull());
-      mount.querySelector<HTMLButtonElement>('[data-approval-approve]')!.click();
       await vi.waitFor(() => expect(mount.querySelector('[data-approval-result="refused"]')?.textContent).toContain('(2 sats left)'));
       click('[data-tab="body"]');
       await vi.waitFor(() => expect(mount.querySelector('[data-owner-approvals]')).toBeNull());
