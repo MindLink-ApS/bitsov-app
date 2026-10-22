@@ -242,8 +242,6 @@ fn registered_key_id_matches_known_sec1_p256_key() {
 #[test]
 fn breaker_expiry_formats_calendar_boundaries_and_refuses_out_of_range() {
     let mut v = breaker_view();
-    // Keep the calendar under test visible in the bounded biometric prompt.
-    v["breaker_reset"]["tripped"] = json!([]);
     let message = v["approval_message"].as_str().unwrap().to_owned();
     for (timestamp, expected) in [
         (0, "1970-01-01 00:00:00 UTC"),
@@ -428,7 +426,7 @@ async fn breaker_approval_signs_exact_message_and_reads_top_level_snapshot() {
     let message = v["approval_message"].as_str().unwrap();
     let signature = sign_checked(&v, "owner", message, |exact, reason| {
         assert_eq!(exact.as_bytes(), message.as_bytes());
-        assert_eq!(reason, "Reset this app’s paused spending · Tripped: paused after failed payments, too many payments this minute, too many payments this hour, spending too fast, future_trip · Budget: up to 10 sats, 8\u{202f}766 msat left · Each payment: up to 1 sat · Grant ends: 2033-05-18 03:33:2… · Requested by app abcdef…123456");
+        assert_eq!(reason, "Reset this app’s paused spending · Tripped: paused after failed payments, too many payments this minute, +3 more · Budget: up to 10 sats, 8\u{202f}766 msat left · Each payment: up to 1 sat · Grant ends: 2033-05-18 03:33:20 UTC · Device resets in the last day: 2 of 3 · Requested by app abcdef…123456");
         std::future::ready(Ok("signature".into()))
     }).await.unwrap();
     assert_eq!(signature, "signature");
@@ -456,7 +454,7 @@ async fn shared_terms_and_biometric_snapshots_preserve_signed_bytes() {
             assert!(reason.encode_utf16().count() <= 300);
             assert!(reason.ends_with(" · Requested by app abcdef…123456"));
             if v["request"]["kind"] == "breaker_reset" {
-                assert_eq!(breaker_lines(v).unwrap().join(" · "), lines.join(" · "));
+                assert_eq!(breaker_lines(v, None).unwrap().join(" · "), lines.join(" · "));
             }
             std::future::ready(Ok("test-signature".into()))
         }).await.unwrap();
@@ -483,14 +481,22 @@ async fn prompt_limit_preserves_attribution_and_unicode_without_touching_signed_
     let fixtures: Value = serde_json::from_str(include_str!("../../tests/fixtures/owner-approval-format.json")).unwrap();
     for case in fixtures["prompt_cases"].as_array().unwrap() {
         let mut v = fixtures["scenarios"][2]["view"].clone();
-        v["breaker_reset"]["tripped"] = json!([case["trip"]]);
+        v["breaker_reset"]["tripped"] = case["tripped"].clone();
+        for (key, value) in case["snapshot"].as_object().unwrap() {
+            v["breaker_reset"][key] = value.clone();
+        }
         if let Some(length) = case["raw_utf16_length"].as_u64() {
-            let full = format!("{} · Requested by app abcdef…123456", breaker_lines(&v).unwrap().join(" · "));
+            let full = format!("{} · Requested by app abcdef…123456", breaker_lines(&v, None).unwrap().join(" · "));
             assert_eq!(full.encode_utf16().count(), length as usize);
         }
         let original = v["approval_message"].as_str().unwrap();
         sign_checked(&v, "owner", original, |message, reason| {
             assert_eq!(message.as_bytes(), original.as_bytes());
+            let prompt_lines: Vec<&str> = reason.split(" · ").collect();
+            for line in breaker_lines(&v, None).unwrap().iter().skip(2).take(3) {
+                assert!(prompt_lines.contains(&line.as_str()), "missing full line: {line}");
+            }
+            assert!(reason.ends_with(" · Requested by app abcdef…123456"));
             assert_eq!(reason.as_bytes(), case["reason"].as_str().unwrap().as_bytes());
             assert!(reason.encode_utf16().count() <= 300);
             std::future::ready(Ok("test-signature".into()))

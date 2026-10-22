@@ -305,10 +305,15 @@ fn checked_approval(view: &Value, client: &str, displayed: &str) -> Result<Strin
             "Your node returned no approval requester.",
         ));
     }
+    let attribution = format!(
+        " · Requested by app {}",
+        short_key(&terms.client_pubkey)
+    );
+    let available = 300 - attribution.encode_utf16().count();
     // Renderer approvalReason / termLines, without petnames. Both use UTC for
     // expiry so locale and timezone differences cannot change the prompt.
     let lines = match terms.request {
-        ApprovalRequest::BreakerReset {} => breaker_lines(view)?,
+        ApprovalRequest::BreakerReset {} => breaker_lines(view, Some(available))?,
         ApprovalRequest::SpendGrant {
             budget_msat,
             per_call_max_msat,
@@ -345,27 +350,10 @@ fn checked_approval(view: &Value, client: &str, displayed: &str) -> Result<Strin
             lines
         }
     };
-    let attribution = format!(
-        " · Requested by app {}",
-        short_key(&terms.client_pubkey)
-    );
-    let mut details = lines.join(" · ");
-    // Android takes 300 UTF-16 units. Reserve the entire attribution, and
-    // shorten only the variable terms; never split a Unicode scalar value.
-    let available = 300 - attribution.encode_utf16().count();
-    if details.encode_utf16().count() > available {
-        let mut remaining = available - 1; // ellipsis
-        details = details.chars().take_while(|c| {
-            if c.len_utf16() > remaining { return false; }
-            remaining -= c.len_utf16();
-            true
-        }).collect();
-        details.push('…');
-    }
-    Ok(format!("{details}{attribution}"))
+    Ok(format!("{}{attribution}", lines.join(" · ")))
 }
 
-fn breaker_lines(view: &Value) -> Result<Vec<String>, ActionError> {
+fn breaker_lines(view: &Value, available: Option<usize>) -> Result<Vec<String>, ActionError> {
     #[derive(Deserialize)]
     struct Snapshot {
         tripped: Vec<String>,
@@ -399,6 +387,26 @@ fn breaker_lines(view: &Value) -> Result<Vec<String>, ActionError> {
         format!("Grant ends: {}", approval_date(snapshot.grant_expires_at)?),
         format!("Device resets in the last day: {} of 3", snapshot.resets_last_day),
     ]);
+    if let Some(available) = available {
+        if lines.join(" · ").encode_utf16().count() > available {
+            // Match approvalReason: preserve all amounts, expiry and attribution;
+            // shorten only the trip list, keeping complete Unicode descriptions.
+            lines[1] = format!("Tripped: {}", if trips.is_empty() { "nothing".into() } else { format!("+{} more", trips.len()) });
+            // Extreme amounts may also require omitting the informational reset
+            // count from the prompt (it remains in the full terms view).
+            if lines.join(" · ").encode_utf16().count() > available { lines.pop(); }
+            let mut prefix = String::new();
+            for (i, trip) in trips.iter().enumerate() {
+                if i > 0 { prefix.push_str(", "); }
+                prefix.push_str(trip);
+                let remaining = trips.len() - i - 1;
+                let suffix = if remaining > 0 { format!(", +{remaining} more") } else { String::new() };
+                let candidate = format!("Tripped: {prefix}{suffix}");
+                if lines.join(" · ").encode_utf16().count() - lines[1].encode_utf16().count() + candidate.encode_utf16().count() > available { break; }
+                lines[1] = candidate;
+            }
+        }
+    }
     Ok(lines)
 }
 
