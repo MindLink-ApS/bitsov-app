@@ -6696,6 +6696,11 @@ async fn do_op_close_call(state: &NodeState, operation_id: &str, peer: &str, cal
 /// money lock joins any offer/hangup receipt already in flight. Only a matching
 /// unknown offer is reconciled; unrelated sends retain their existing fence.
 async fn do_op_end_call(state: &NodeState, call_id: &str) -> Result<spend_journal::OpView, ActionError> {
+    do_op_end_call_with_limit(state, call_id, None).await
+}
+
+/// A priced owner repair can lower, never raise, the admission's saved ceiling.
+async fn do_op_end_call_with_limit(state: &NodeState, call_id: &str, max_msat: Option<u64>) -> Result<spend_journal::OpView, ActionError> {
     let mut operation_id = pending_operation_id(state).unwrap_or_default();
     let result = async {
         if call_id.len() != 32 || !call_id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
@@ -6761,6 +6766,7 @@ async fn do_op_end_call(state: &NodeState, call_id: &str) -> Result<spend_journa
             // an upper bound; the normal call path checks today's signal quote.
             None => offer.cap_msat,
         };
+        let cap = max_msat.map_or(cap, |limit| cap.min(limit));
         let payload = serde_json::json!({"v": 1, "call_id": call_id, "reason": "hangup"}).to_string();
         let id = match do_call_signal_for_admission(state, &offer.peer, act::KIND_CALL_HANGUP, &payload, cap, Some(&offer)).await {
             Ok(receipt) => receipt.operation_id.ok_or_else(|| spend_journal::unknown("The node did not identify the hangup operation."))?,
@@ -7716,10 +7722,14 @@ async fn op_end_call(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     call_id: String,
+    max_msat: Option<u64>,
 ) -> Result<spend_journal::OpView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_op_end_call(state.inner(), &call_id).await
+    match max_msat {
+        Some(limit) => do_op_end_call_with_limit(state.inner(), &call_id, Some(limit)).await,
+        None => do_op_end_call(state.inner(), &call_id).await,
+    }
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -13702,6 +13712,133 @@ mod control_act_tests {
     }
 
     #[tokio::test]
+    async fn recovery_repair_end_cannot_exceed_displayed_or_saved_limit() {
+        let (routes, paid) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let offer = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        let saved = ledger_record(&node, offer.operation_id.as_deref().unwrap())["hangup_cap_msat"].as_u64().unwrap();
+        assert_eq!(do_op_end_call_with_limit(&node.state, CALL_ID, Some(1)).await.unwrap_err().code, "price_changed");
+        assert_eq!(composes(&node), 1, "a stale lower displayed limit cannot pay a hangup");
+        do_op_end_call_with_limit(&node.state, CALL_ID, Some(u64::MAX)).await.unwrap();
+        assert_eq!(compose_bodies(&node)[1]["max_total_msat"], saved, "renderer input cannot raise the saved ceiling");
+        assert_eq!(paid.lock().unwrap().pays, 2);
+    }
+
+    // M1: a proof bit alone cannot release a restored call slot. Exercise each
+    // independent condition; terminal records survive journal normalization.
+    #[tokio::test]
+    async fn recovery_proof_release_requires_clean_resumable_unpaid_record() {
+        use spend_journal::OperationState as S;
+        for condition in ["clean", "not_resumable", "accounting", "paid", "undelivered", "evidence", "settled", "failed_paid"] {
+            let (routes, _) = ledger_call_routes();
+            let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                if m == "POST" && p == "/messages/compose" { return readmission_coded_reply(); }
+                routes(m, p, b)
+            }));
+            approve_calls(&node).await;
+            assert_eq!(do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err().code, "readmission_capped");
+            let journal = spend_journal(&node.state).unwrap();
+            let mut p = journal.pending().unwrap().unwrap();
+            assert!(p.non_dispatch_proven);
+            match condition {
+                "not_resumable" => p.resumable = false,
+                "accounting" => p.accounting_msat = Some(0),
+                "paid" => p.paid = Some(budget::Paid { msat: 0, fee_unknown: true }),
+                "undelivered" => p.undelivered = Some(spend_journal::Undelivered {
+                    peer: A.into(), paid_msat: 0, retry: false, op: p.op.clone().unwrap(),
+                    admission_msat: 0, in_flight: false, attempts: 0, payment_hash: None,
+                }),
+                "evidence" => p.evidence_reservation_msat = Some(0),
+                _ => {}
+            }
+            journal.save(&p).unwrap();
+            journal.record_outcome(&p, match condition { "settled" => S::Settled, "failed_paid" => S::FailedPaid, _ => S::Unpaid }, None).unwrap();
+            drop(journal);
+            let restarted = reopen(&node);
+            let _money = restarted.money.lock().await;
+            let journal = locked_spend_journal(&restarted).unwrap();
+            let held = journal.pending().unwrap().unwrap();
+            let record = journal.operation_record(held.operation_id.as_deref().unwrap()).unwrap().unwrap();
+            if condition == "clean" {
+                assert!(held.resumable && !held.budgeted);
+                assert_eq!(record.state, S::Unpaid);
+            } else {
+                assert!(!held.resumable, "{condition}");
+                assert_eq!(record.state, if condition == "undelivered" { S::PaidUndelivered } else { S::Unknown }, "{condition}");
+                assert!(spend_journal::admission_open(&record, &[]), "{condition}");
+                assert!(held.budgeted || held.accounting_msat.is_some(), "{condition}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_proven_call_redispatch_clears_proof_before_post_and_refences_on_cancel() {
+        let (routes, _) = ledger_call_routes();
+        let first = Arc::new(AtomicBool::new(true));
+        let flag = first.clone();
+        let routes: Routes = Arc::new(move |m, p, b| {
+            if m == "POST" && p == "/messages/compose" && flag.swap(false, Ordering::SeqCst) {
+                return readmission_coded_reply();
+            }
+            routes(m, p, b)
+        });
+        let (routes, hold) = hold_compose(routes, 1, None, false);
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        assert_eq!(do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err().code, "readmission_capped");
+        let prior = pending(&node).unwrap();
+        assert!(prior.non_dispatch_proven && prior.resumable);
+        {
+            let send = do_call_signal(&node.state, A, 400, OFFER, 15000);
+            tokio::pin!(send);
+            tokio::select! {
+                result = &mut send => panic!("held POST returned early: {result:?}"),
+                _ = async {
+                    while !hold.arrived.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(1)).await; }
+                } => {}
+            }
+            // Observe the actual durable slot at node arrival, before any reply.
+            let dispatched = spend_journal::read_pending(&node._dir.path().join("app-spend")).unwrap().unwrap();
+            assert_eq!(dispatched.operation_id, prior.operation_id);
+            assert!(!dispatched.non_dispatch_proven && !dispatched.resumable);
+            // Dropping the future deterministically models a lost reply/crash.
+        }
+        hold.release.send(()).unwrap();
+        let restarted = reopen(&node);
+        let _money = restarted.money.lock().await;
+        let journal = locked_spend_journal(&restarted).unwrap();
+        let held = journal.pending().unwrap().unwrap();
+        assert!(!held.non_dispatch_proven && !held.resumable && held.budgeted);
+        let record = journal.operation_record(held.operation_id.as_deref().unwrap()).unwrap().unwrap();
+        assert!(spend_journal::admission_open(&record, &[]));
+    }
+
+    // M2: call slots without proof are fenced before dispatch. A message slot
+    // reaches the shared capped arm with the same restored Unpaid/resumable
+    // state, so it pins the prior-proof guard without bypassing call admission.
+    #[tokio::test]
+    async fn recovery_capped_resend_cannot_invent_non_dispatch_proof() {
+        for prior_proven in [false, true] {
+            let (node, ops) = ops_fake(|n| n.readmission_capped = true);
+            spend_advance(&node.state, true).await.unwrap();
+            assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "readmission_capped");
+            let journal = spend_journal(&node.state).unwrap();
+            let mut p = journal.pending().unwrap().unwrap();
+            assert!(p.non_dispatch_proven, "a fresh capped operation is proven unsent");
+            p.non_dispatch_proven = prior_proven;
+            journal.save(&p).unwrap();
+            drop(journal);
+            assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "readmission_capped");
+            let held = pending(&node).unwrap();
+            assert_eq!(held.operation_id, p.operation_id);
+            assert!(held.resumable && !held.budgeted);
+            assert_eq!(held.non_dispatch_proven, prior_proven, "a refusal of a resend cannot prove the earlier dispatch unpaid");
+            assert_eq!(ops.lock().unwrap().pays, 0);
+        }
+    }
+
+    #[tokio::test]
     async fn recovery_host_call_fields_never_reach_compose() {
         let (routes, _) = ledger_call_routes();
         let node = fake(AuthMode::Local, routes);
@@ -14579,15 +14716,30 @@ mod control_act_tests {
     #[tokio::test]
     async fn call_node_timeout_is_bounded_and_keeps_the_payment_pending() {
         let (inner, _) = ledger_call_routes();
-        let mut node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
-            if p == "/messages/compose" { std::thread::sleep(Duration::from_millis(500)); }
-            inner(m, p, b)
-        }));
-        node.state.spend_timeout = Duration::from_millis(150);
+        let (routes, hold) = hold_compose(inner, 0, None, false);
+        let mut node = fake(AuthMode::Local, routes);
+        // Keep the client's fallback beyond the virtual observation window,
+        // so only the per-money-request timeout can satisfy this assertion.
+        node.state.http = remote_access::http_client_builder().timeout(Duration::from_secs(120)).build().unwrap();
+        node.state.spend_timeout = Duration::from_secs(30);
         do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
         with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
-        let error = tokio::time::timeout(Duration::from_secs(2), do_call_signal(&node.state, A, 400, OFFER, 15_000))
-            .await.expect("bounded call request").unwrap_err();
+        let send = do_call_signal(&node.state, A, 400, OFFER, 15_000);
+        tokio::pin!(send);
+        // Preflight and filesystem scheduling are not part of the timeout
+        // assertion. First observe the POST; keep its response held throughout.
+        tokio::select! {
+            result = &mut send => panic!("held call returned early: {result:?}"),
+            _ = async {
+                while !hold.arrived.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(1)).await; }
+            } => {}
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(31)).await;
+        let error = tokio::time::timeout(Duration::from_secs(1), &mut send)
+            .await.expect("the configured spend deadline must expire").unwrap_err();
+        tokio::time::resume();
+        hold.release.send(()).unwrap();
         assert_eq!(error.code, "spend_unknown");
         assert!(error.message.contains("node"));
         assert_eq!(composes(&node), 1);
@@ -14605,8 +14757,9 @@ mod control_act_tests {
         let s = &node.state;
         do_budget_approve(s, 500_000, budget::PresetId::Everyday).await.unwrap();
         with_book(s, true, |b| b.set_limit(A, false, 50_000)).unwrap();
-        let error = tokio::time::timeout(Duration::from_secs(2), do_call_signal(s, A, 400, OFFER, 15_000))
-            .await.expect("a refusal must not leave the call waiting").unwrap_err();
+        // The mock supplies an explicit refusal. Do not time filesystem and
+        // preflight scheduling; the held-POST test above pins the spend deadline.
+        let error = do_call_signal(s, A, 400, OFFER, 15_000).await.unwrap_err();
         assert_eq!(error.code, "spend_refused");
         assert!(error.message.contains("cannot spend"));
         let view = budget_now(s);

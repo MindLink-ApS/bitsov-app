@@ -205,7 +205,7 @@ export interface Source {
   /** H1 read-only history of this app's paid operations, optionally for one peer. */
   opList(peer?: string): Promise<OpList>;
   /** H2: end one of our call admissions (the host sends the one paid hangup, or none if the offer was unpaid). */
-  opEndCall(callId: string): Promise<OpView>;
+  opEndCall(callId: string, maxMsat?: number): Promise<OpView>;
   /** Repair exact host metadata, or acknowledge without releasing any fence. */
   opRepairCallIndex(indexId: string): Promise<string | null>;
   /**
@@ -375,7 +375,7 @@ export const hostSource: Source = {
     invoke<SpendView>('relation_approve', { peer, budget_msat: budgetMsat, per_act_max_msat: perActMaxMsat }),
   spendReconcile: () => invoke<string>('spend_reconcile'),
   opList: (peer) => invoke<OpList>('op_list', { peer: peer ?? null }),
-  opEndCall: (callId) => invoke<OpView>('op_end_call', { call_id: callId }),
+  opEndCall: (callId, maxMsat) => invoke<OpView>('op_end_call', { call_id: callId, ...(maxMsat === undefined ? {} : { max_msat: maxMsat }) }),
   opRepairCallIndex: (indexId) => invoke<string | null>('op_repair_call_index', { index_id: indexId }),
   send: (recipient, isRoom, plaintext, maxMsat, maxRecipientMsat, firstContactMsat) =>
     invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat, max_recipient_msat: maxRecipientMsat ?? null, first_contact_msat: firstContactMsat ?? null }),

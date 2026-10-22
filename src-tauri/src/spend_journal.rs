@@ -463,13 +463,16 @@ impl Journal {
             let record = self.operation_record(&index.op_id).ok().flatten().or_else(|| {
                 // Reading the raw slot avoids automatic repair of damaged files.
                 read_pending(&self.dir).ok().flatten().filter(|p|
-                    p.node_id == node_id && p.operation_id.as_deref() == Some(index.op_id.as_str()))
-                    .and_then(|p| p.operation_record)
+                    p.operation_id.as_deref() == Some(index.op_id.as_str()))
+                    .and_then(|p| p.operation_record.filter(|r| r.node_id == p.node_id))
             });
-            if let Some(record) = record.filter(|r| r.op_id == index.op_id && r.node_id == node_id
+            if let Some(record) = record.filter(|r| r.op_id == index.op_id
                 && r.created_ms == index.created_ms && matches!(r.kind.as_str(), "call_offer" | "call_recovery")
                 && r.call_id.as_deref().is_some_and(|call|
                     call_index_path(&self.dir, &r.node_id, &r.peer, call) == path)) {
+                if record.node_id != node_id {
+                    return Err(ActionError::new("call_identity_changed", "This call record belongs to another node identity. Nothing was acknowledged or paid."));
+                }
                 let marker = self.dir.join("call-index-unresolved").join(&filename);
                 std::fs::create_dir_all(marker.parent().unwrap()).map_err(unknown)?;
                 File::create(&marker).and_then(|f| f.sync_all()).map_err(unknown)?;
@@ -665,6 +668,8 @@ pub struct OpList {
 pub struct UnresolvedCall {
     pub index_id: String,
     pub acknowledged: bool,
+    /// Verified saved ceiling; absent records can only be checked/acknowledged.
+    pub hangup_cap_msat: Option<u64>,
 }
 
 fn damaged_record() -> ActionError {
@@ -706,12 +711,15 @@ fn unresolved_calls(dir: &Path, node_id: &str) -> Result<Vec<UnresolvedCall>, Ac
         let path = dir.join("call-index").join(&name);
         let record = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<CallIndex>(&b).ok())
             .filter(|i| i.op_id.len() == 36 && i.op_id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-'))
-            .and_then(|i| read_operation(&dir.join("ops").join(format!("{}.json", i.op_id)), Some(&i.op_id)).ok().flatten());
+            .and_then(|i| read_operation(&dir.join("ops").join(format!("{}.json", i.op_id)), Some(&i.op_id)).ok().flatten()
+                .filter(|r| r.created_ms == i.created_ms));
         let valid = record.as_ref().is_some_and(|r| matches!(r.kind.as_str(), "call_offer" | "call_recovery")
             && r.call_id.as_deref().is_some_and(|c| call_index_path(dir, &r.node_id, &r.peer, c) == path));
         if valid && !dir.join("call-index-unresolved").join(&name).exists() { continue; }
         if valid && record.as_ref().is_some_and(|r| r.node_id != node_id) { continue; }
-        rows.push(UnresolvedCall { index_id: id.into(), acknowledged: dir.join("call-index-acknowledged")
+        let hangup_cap_msat = record.as_ref().filter(|r| valid && r.node_id == node_id)
+            .map(|r| r.hangup_cap_msat.unwrap_or(r.cap_msat));
+        rows.push(UnresolvedCall { index_id: id.into(), hangup_cap_msat, acknowledged: dir.join("call-index-acknowledged")
             .join(blake3::hash(node_id.as_bytes()).to_hex().as_str()).join(&name).exists() });
     }
     Ok(rows)
@@ -1049,12 +1057,38 @@ mod tests {
         let id = path.file_stem().unwrap().to_str().unwrap();
         std::fs::write(journal.operation_path(p.operation_id.as_deref().unwrap()).unwrap(), "damaged").unwrap();
         assert_eq!(list_operations(dir.path(), "node", None, 100).unwrap().unresolved_calls.len(), 1);
+        assert!(journal.repair_call_index("other", id).is_err(), "foreign pending snapshots cannot be acknowledged either");
+        assert!(!dir.path().join("call-index-acknowledged").exists());
         assert_eq!(journal.repair_call_index("node", id).unwrap().as_deref(), Some(call));
         assert_eq!(std::fs::read(dir.path().join("spend-pending.json")).unwrap(), before);
         let restored = journal.operation_record(p.operation_id.as_deref().unwrap()).unwrap().unwrap();
         assert_eq!(restored.state, OperationState::Dispatching);
         assert!(admission_open(&restored, &[]));
         assert_eq!(list_operations(dir.path(), "node", None, 100).unwrap().unresolved_calls.len(), 1);
+    }
+
+    #[test]
+    fn recovery_index_prices_only_the_exact_verified_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let mut offer = history_fixture(dir.path(), 1, OperationState::Paid, "call_offer");
+        offer.hangup_cap_msat = Some(6000);
+        journal.write_operation(&offer).unwrap();
+        let path = call_index_path(dir.path(), "node", "peer", offer.call_id.as_deref().unwrap());
+        let id = path.file_stem().unwrap().to_str().unwrap();
+        // Repair retains a visible marker until confirmed closure.
+        journal.repair_call_index("node", id).unwrap();
+        let price = || list_operations(dir.path(), "node", None, 100).unwrap().unresolved_calls[0].hangup_cap_msat;
+        assert_eq!(price(), Some(6000));
+        offer.hangup_cap_msat = None;
+        journal.write_operation(&offer).unwrap();
+        assert_eq!(price(), Some(offer.cap_msat), "legacy offers use the same fallback as op_end_call");
+        offer.created_ms += 1;
+        std::fs::write(journal.operation_path(&offer.op_id).unwrap(), serde_json::to_vec(&offer).unwrap()).unwrap();
+        assert_eq!(price(), None, "another generation is not a price quote");
+        std::fs::remove_file(journal.operation_path(&offer.op_id).unwrap()).unwrap();
+        assert_eq!(price(), None, "missing evidence must not invent a limit");
+        assert!(list_operations(dir.path(), "other", None, 100).unwrap().unresolved_calls.iter().all(|r| r.hangup_cap_msat.is_none()));
     }
 
     #[test]
@@ -1065,7 +1099,10 @@ mod tests {
         journal.write_operation(&offer).unwrap();
         let path = call_index_path(dir.path(), "node", "peer", offer.call_id.as_deref().unwrap());
         let id = path.file_stem().unwrap().to_str().unwrap();
-        assert!(journal.repair_call_index("other", id).unwrap().is_none());
+        let before = std::fs::read(&path).unwrap();
+        assert!(journal.repair_call_index("other", id).is_err());
+        assert!(!dir.path().join("call-index-acknowledged").exists());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
         std::fs::write(&path, "PRIVATE damaged").unwrap();
         drop(journal);
         initialize_history(dir.path()).unwrap();
