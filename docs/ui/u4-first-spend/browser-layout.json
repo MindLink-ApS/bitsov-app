@@ -1,0 +1,80 @@
+[
+  {
+    "width": 393,
+    "height": 852,
+    "language": "en",
+    "metrics": {
+      "width": 391,
+      "scrollWidth": 391,
+      "height": 388,
+      "scrollHeight": 388
+    },
+    "focusTrap": true,
+    "twoHundredPercentText": true
+  },
+  {
+    "width": 393,
+    "height": 852,
+    "language": "da",
+    "metrics": {
+      "width": 391,
+      "scrollWidth": 391,
+      "height": 388,
+      "scrollHeight": 388
+    },
+    "focusTrap": true,
+    "twoHundredPercentText": true
+  },
+  {
+    "width": 1280,
+    "height": 800,
+    "language": "en",
+    "metrics": {
+      "width": 478,
+      "scrollWidth": 478,
+      "height": 341,
+      "scrollHeight": 341
+    },
+    "focusTrap": true,
+    "twoHundredPercentText": true
+  },
+  {
+    "width": 1280,
+    "height": 800,
+    "language": "da",
+    "metrics": {
+      "width": 478,
+      "scrollWidth": 478,
+      "height": 341,
+      "scrollHeight": 341
+    },
+    "focusTrap": true,
+    "twoHundredPercentText": true
+  },
+  {
+    "width": 852,
+    "height": 393,
+    "language": "en",
+    "metrics": {
+      "width": 478,
+      "scrollWidth": 478,
+      "height": 341,
+      "scrollHeight": 341
+    },
+    "focusTrap": true,
+    "twoHundredPercentText": true
+  },
+  {
+    "width": 852,
+    "height": 393,
+    "language": "da",
+    "metrics": {
+      "width": 478,
+      "scrollWidth": 478,
+      "height": 341,
+      "scrollHeight": 341
+    },
+    "focusTrap": true,
+    "twoHundredPercentText": true
+  }
+]

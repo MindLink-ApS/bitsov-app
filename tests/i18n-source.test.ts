@@ -10,6 +10,7 @@ const scopes: Record<string, string[]> = {
   'WalletPage.tsx': ['ReceiveView', 'WalletPage', 'ActivityView', 'SendView', 'AmountInput', 'CopyButton', 'KIND_FILTERS', 'DIRECTION_FILTERS'],
   'OnCallPill.tsx': ['OnCallPill', 'CALL_STATE_WORD'],
   'state.ts': ['undeliveredCopy', 'admissionCopy', 'nodePill', 'spendLine', 'costToSend', 'peerName', 'peerNotReadyMessage'],
+  'FirstSpendSheet.tsx': ['FirstSpendSheet'],
   'HubTrust.tsx': ['HubTrust', 'HubTrustInfo', 'HubChannelConfirm'],
   'custody.tsx': ['custodyBadge'],
 };
