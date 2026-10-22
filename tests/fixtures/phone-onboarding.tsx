@@ -14,7 +14,7 @@ render(() => state === 'trust' ? <PhoneTrust locale={params.get('lang') ?? 'en'}
   status={() => ({ ready: connected && state !== 'connecting', node_id: connected ? 'ABCDEF012345' : null, error: null, connection_error })}
   pairing={() => ({ ...INITIAL_PAIRING, remote: connected, state: connected ? 'paired' : 'starting' })}
   device={() => ({ available: true, delegation_supported: state !== 'fingerprint', state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null })}
-  scan={async () => { if (state === 'camera') throw { kind: 'camera' }; return new Promise(() => {}); }}
+  scan={async () => { if (state === 'camera') throw { kind: 'camera' }; if (state === 'legacy') return 'bitsov://pair/synthetic'; return new Promise(() => {}); }}
   preview={async () => ({ endpoint: 'test-box', node_id_fingerprint: 'ABCDEF012345' })}
   connect={async () => ({ endpoint: 'test-box', node_id_fingerprint: 'ABCDEF012345', restart_required: false })}
   retry={async () => {}} forget={async () => {}} beginJoin={async () => ({ state: 'idle', second_device: true })}
