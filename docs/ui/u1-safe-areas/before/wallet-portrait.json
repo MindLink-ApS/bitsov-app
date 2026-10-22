@@ -1,0 +1,90 @@
+{
+  "url": "http://127.0.0.1:1423/?sample",
+  "viewport": "width=device-width, initial-scale=1.0",
+  "width": 393,
+  "height": 759,
+  "visual": {
+    "width": 393,
+    "height": 759,
+    "top": 0
+  },
+  "insets": {
+    "top": "0px",
+    "right": "0px",
+    "bottom": "0px",
+    "left": "0px"
+  },
+  "text": "BitSov\nConnect to your node\nMaya\nJosh\nUnnamed contact (cccccccc\u2026cccccccc)\nGamma VM\nNode\nWallet\nInbox\nAsk your node\nProfiles\nPorch\n+ New\nBS\nMaya\nSettings\n\nSun, Sep 27\n\nMorning. My node came back up on ",
+  "rects": {
+    ".cc": {
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 393,
+        "height": 759,
+        "top": 0,
+        "right": 393,
+        "bottom": 759,
+        "left": 0
+      },
+      "padding": "0px"
+    },
+    ".rail": {
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 393,
+        "height": 61,
+        "top": 0,
+        "right": 393,
+        "bottom": 61,
+        "left": 0
+      },
+      "padding": "8px 0px 8px 12px"
+    },
+    ".composer": {
+      "rect": {
+        "x": 0,
+        "y": 359.578125,
+        "width": 393,
+        "height": 399.421875,
+        "top": 359.578125,
+        "right": 393,
+        "bottom": 759,
+        "left": 0
+      },
+      "padding": "12px 16px 16px"
+    },
+    ".wallet-page": {
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 393,
+        "height": 759,
+        "top": 0,
+        "right": 393,
+        "bottom": 759,
+        "left": 0
+      },
+      "padding": "0px"
+    },
+    ".wallet-head": null,
+    ".settings": null,
+    ".settings-head": {
+      "rect": {
+        "x": 16,
+        "y": 20,
+        "width": 361,
+        "height": 57,
+        "top": 20,
+        "right": 377,
+        "bottom": 77,
+        "left": 16
+      },
+      "padding": "0px 0px 12px"
+    },
+    ".call-panel": null,
+    ".phone-onboarding": null,
+    ".phone-options": null
+  }
+}

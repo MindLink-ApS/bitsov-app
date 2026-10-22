@@ -1,0 +1,85 @@
+{
+  "url": "http://127.0.0.1:1423/tests/fixtures/phone-onboarding.html?state=fingerprint&theme=light",
+  "viewport": "width=device-width,initial-scale=1,viewport-fit=cover",
+  "width": 393,
+  "height": 852,
+  "visual": {
+    "width": 393,
+    "height": 852,
+    "top": 0
+  },
+  "insets": {
+    "top": "59px",
+    "right": "0px",
+    "bottom": "34px",
+    "left": "0px"
+  },
+  "platform": "ios",
+  "text": "Does this match your other screen?\n\nCompare the code on both screens.\n\nABCDEF012345\nThey match\nThey don't match\nOther options",
+  "rects": {
+    ".cc": null,
+    ".rail": null,
+    ".composer": null,
+    ".composer-main": null,
+    ".composer textarea": null,
+    ".meeting-panel": null,
+    ".wallet-page": null,
+    ".wallet-head": null,
+    ".wallet-top": null,
+    ".settings": null,
+    ".settings-head": null,
+    ".call-panel": null,
+    ".phone-onboarding": {
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 393,
+        "height": 852,
+        "top": 0,
+        "right": 393,
+        "bottom": 852,
+        "left": 0
+      },
+      "padding": "59px 24px 34px"
+    },
+    ".phone-options": {
+      "rect": {
+        "x": 24,
+        "y": 770,
+        "width": 345,
+        "height": 48,
+        "top": 770,
+        "right": 369,
+        "bottom": 818,
+        "left": 24
+      },
+      "padding": "0px"
+    },
+    "[data-phone-face]": {
+      "rect": {
+        "x": 24,
+        "y": 95,
+        "width": 345,
+        "height": 643,
+        "top": 95,
+        "right": 369,
+        "bottom": 738,
+        "left": 24
+      },
+      "padding": "0px"
+    },
+    ".phone-primary": {
+      "rect": {
+        "x": 24,
+        "y": 449.515625,
+        "width": 345,
+        "height": 44,
+        "top": 449.515625,
+        "right": 369,
+        "bottom": 493.515625,
+        "left": 24
+      },
+      "padding": "0px"
+    }
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "url": "http://127.0.0.1:1423/tests/fixtures/phone-onboarding.html?state=words&theme=light",
+  "viewport": "width=device-width,initial-scale=1,viewport-fit=cover",
+  "width": 852,
+  "height": 393,
+  "visual": {
+    "width": 852,
+    "height": 393,
+    "top": 0
+  },
+  "insets": {
+    "top": "0px",
+    "right": "59px",
+    "bottom": "20px",
+    "left": "59px"
+  },
+  "platform": "ios",
+  "text": "Do these words match?\n\nApprove on your other device.\n\nabandon\nability\nable\nabout\nThey don't match\nOther options",
+  "rects": {
+    ".cc": null,
+    ".rail": null,
+    ".composer": null,
+    ".composer-main": null,
+    ".composer textarea": null,
+    ".meeting-panel": null,
+    ".wallet-page": null,
+    ".wallet-head": null,
+    ".wallet-top": null,
+    ".settings": null,
+    ".settings-head": null,
+    ".call-panel": null,
+    ".phone-onboarding": {
+      "rect": {
+        "x": 206,
+        "y": 0,
+        "width": 440,
+        "height": 504.3125,
+        "top": 0,
+        "right": 646,
+        "bottom": 504.3125,
+        "left": 206
+      },
+      "padding": "28px 24px 24px"
+    },
+    ".phone-options": {
+      "rect": {
+        "x": 230,
+        "y": 432.3125,
+        "width": 392,
+        "height": 48,
+        "top": 432.3125,
+        "right": 622,
+        "bottom": 480.3125,
+        "left": 230
+      },
+      "padding": "0px"
+    },
+    "[data-phone-face]": {
+      "rect": {
+        "x": 230,
+        "y": 64,
+        "width": 392,
+        "height": 336.3125,
+        "top": 64,
+        "right": 622,
+        "bottom": 400.3125,
+        "left": 230
+      },
+      "padding": "0px"
+    },
+    ".phone-primary": null
+  }
+}
