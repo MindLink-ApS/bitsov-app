@@ -1623,7 +1623,12 @@ async fn connect_remote_at(state: &NodeState, app_data_dir: &Path, wait: bool) -
     };
     tokio::select! {
         biased;
-        _ = cancelled.changed() => Ok(()),
+        _ = cancelled.changed() => {
+            // Cancellation can win before startup reads the saved descriptor.
+            // Resolve the phone route, but preserve any decision already made.
+            state.phone_setup.lock().unwrap().get_or_insert(true);
+            Ok(())
+        },
         result = async {
             // Reconnect/focus joins an existing attempt without changing its backoff.
             // Bootstrap/import can wait, but cancellation also retires queued work.
@@ -9536,6 +9541,26 @@ time.sleep(60)
 #[cfg(all(test, desktop, not(feature = "mobile")))]
 mod remote_onboarding_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_startup_resolves_phone_setup_without_overwriting_a_known_route() {
+        for initial in [None, Some(false), Some(true)] {
+            let state = NodeState::for_identifier("app.bitsov.desktop");
+            *state.phone_setup.lock().unwrap() = initial;
+            let dir = tempfile::tempdir().unwrap();
+            let _recovery = state.remote_recovery.lock().await;
+            let startup = connect_remote_at(&state, dir.path(), true);
+            tokio::pin!(startup);
+            tokio::select! {
+                biased;
+                _ = &mut startup => panic!("startup must wait for recovery"),
+                _ = tokio::task::yield_now() => {}
+            }
+            state.remote_connect_generation.send_modify(|generation| *generation += 1);
+            tokio::time::timeout(Duration::from_secs(1), startup).await.unwrap().unwrap();
+            assert_eq!(state.status_snapshot().phone_setup, Some(initial.unwrap_or(true)));
+        }
+    }
 
     #[tokio::test]
     async fn reconnect_during_first_local_startup_never_attaches_remote() {

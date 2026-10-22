@@ -69,6 +69,7 @@ import type {
 } from './types';
 
 export type RemotePreviewView = {
+  second_device?: boolean;
   first_run?: boolean;
   endpoint: string;
   node_id_fingerprint: string;

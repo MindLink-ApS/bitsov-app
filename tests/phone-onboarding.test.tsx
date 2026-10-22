@@ -12,7 +12,7 @@ function mount(extra: Partial<PhoneOnboardingProps> = {}) {
   const props: PhoneOnboardingProps = {
     status: () => ({ ready: false, node_id: null, error: null }), pairing: () => INITIAL_PAIRING,
     device: () => null, locale: 'en', scan: vi.fn().mockResolvedValue('bitsov://pair/synthetic'),
-    preview: vi.fn().mockResolvedValue({ endpoint: 'box:443', node_id_fingerprint: 'ABCD' }),
+    preview: vi.fn().mockResolvedValue({ second_device: true, endpoint: 'box:443', node_id_fingerprint: 'ABCD' }),
     connect: vi.fn().mockResolvedValue({ endpoint: 'box:443', node_id_fingerprint: 'ABCD', restart_required: false }),
     retry: vi.fn().mockResolvedValue(undefined), forget: vi.fn().mockResolvedValue(undefined),
     beginJoin: vi.fn().mockResolvedValue({ state: 'waiting', words: ['alpha', 'beta', 'gamma', 'delta'], expires_at: Date.now()/1000 + 300 }),
@@ -244,4 +244,44 @@ it('offers a new QR after a process restart lost the in-memory comparison', asyn
   button('Scan the new QR').click(); await tick();
   expect(join).toHaveBeenCalledWith({ action: 'cancel' });
   expect(props.scan).toHaveBeenCalledOnce();
+});
+
+it.each(['incoming', 'scan', 'paste'] as const)('compares a legacy %s preview before committing it', async route => {
+  vi.stubGlobal('navigator', { clipboard: { readText: async () => 'bitsov://pair/synthetic' } });
+  const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  const props = mount({ status, pairing,
+    incoming: route === 'incoming' ? { link: 'bitsov://pair/synthetic' } : undefined,
+    preview: vi.fn().mockResolvedValue({ second_device: false, endpoint: 'box', node_id_fingerprint: 'ABCD' }),
+    device: () => ({ available: false, delegation_supported: false, state: 'unavailable', fingerprint: null, owner_action: null, expires_at_ms: null }),
+  });
+  if (route !== 'incoming') button(route === 'scan' ? "Scan your box's QR" : 'Paste link').click();
+  await tick();
+  expect(vi.mocked(props.connect).mock.calls.length).toBe(0);
+  expect(document.querySelector('.phone-fingerprint')?.textContent).toBe('ABCD');
+  button('They match').click(); button('They match')?.click(); await tick();
+  expect(vi.mocked(props.connect).mock.calls.length).toBe(1);
+  expect(button('Open BitSov')).toBeUndefined();
+  setPairing({ ...INITIAL_PAIRING, remote: true, state: 'paired' });
+  setStatus({ ready: true, node_id: 'box', error: null }); await tick();
+  expect(button('Open BitSov')).toBeTruthy();
+  expect(props.beginJoin).not.toHaveBeenCalled();
+});
+it('cancels a legacy preview without committing and discards its pending link', async () => {
+  const props = mount({
+    preview: vi.fn().mockResolvedValue({ endpoint: 'box', node_id_fingerprint: 'ABCD' }),
+  });
+  button("Scan your box's QR").click(); await tick();
+  expect(vi.mocked(props.connect).mock.calls.length).toBe(0);
+  button('Cancel').click(); await tick();
+  expect(button("Scan your box's QR")).toBeTruthy();
+  expect(document.querySelector('.phone-fingerprint')).toBeNull();
+  expect(vi.mocked(props.connect).mock.calls.length).toBe(0);
+  expect(props.join).not.toHaveBeenCalled();
+});
+it('shows connecting progress without a dummy primary action', async () => {
+  mount({ incoming: { link: 'bitsov://pair/synthetic' }, connect: () => new Promise(() => {}) });
+  await tick();
+  expect(document.querySelectorAll('button.primary')).toHaveLength(0);
+  expect(document.querySelector('[role="status"]')?.textContent).toBe('Please wait…');
 });
