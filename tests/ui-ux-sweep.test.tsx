@@ -52,6 +52,15 @@ it('keeps the sweep contrast, token, and focus fixes', () => {
   expect(readFileSync('src/control/Shell.tsx', 'utf8')).toContain('1 sat = 1,000');
 });
 
+it('keeps the 2026-10-22 narrow-layout fixes', () => {
+  const source = css();
+  expect(source).toContain('.composer-info:not([open]) > :not(summary) { display: none; }');
+  expect(source).toContain('.track-head > .track-title-btn { min-width: 44px; }');
+  expect(source).toContain('env(safe-area-inset-bottom, 0px)');
+  expect(source).toContain('color-mix(in srgb, var(--ok) 50%, transparent)');
+  expect(source).not.toContain('rgba(79, 191, 123');
+});
+
 it('keeps the energy figures at the body size with tabular numerals inside the table', () => {
   const source = css();
   // `.energy td { font: inherit }` would otherwise reset .energy-fig and .sats.

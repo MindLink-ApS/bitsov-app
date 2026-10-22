@@ -16,7 +16,7 @@ import { isMoneyNotReady } from './control/readiness';
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show, type ParentProps } from 'solid-js';
 import { qrSvg } from './qr';
 import { Onboarding, type NodeTarget } from './onboarding/Onboarding';
-import { FIRST_RUN_PHONE_MESSAGE, INITIAL_PAIRING, type NodeStatus, type PairingView } from './onboarding/pairing';
+import { FIRST_RUN_PHONE_MESSAGE, firstRunGuidance, INITIAL_PAIRING, type NodeStatus, type PairingView } from './onboarding/pairing';
 import { amount as fmtAmount } from './control/format';
 import { ControlCenter } from './control/Shell';
 import { hostSource, inHost, sampleRequest, type SampleStart, type Source } from './control/source';
@@ -354,7 +354,7 @@ function AppScreen() {
               >
                 <div class="state error">
                   <Show when={onPhone && status().error === FIRST_RUN_PHONE_MESSAGE} fallback={<SoftError message={status().error!} summary="Your node is unavailable." onReconnect={retryPairing} />}>
-                    <p>{FIRST_RUN_PHONE_MESSAGE}</p>
+                    <p role="status">{deviceWord() === 'iPad' ? firstRunGuidance('iPad') : FIRST_RUN_PHONE_MESSAGE}</p>
                   </Show>
                   <Show when={import.meta.env.DEV && source().mode === 'node'}>
                     <button class="quiet" data-use-sample onClick={() => useSample('shell')}>

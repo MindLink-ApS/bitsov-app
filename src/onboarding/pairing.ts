@@ -1,4 +1,10 @@
-export const FIRST_RUN_PHONE_MESSAGE = "This node isn't set up yet. Finish setup on a Mac, then add this phone.";
+/** Same guidance, naming the device in the reader's hand. The phone sentence is the host status string. */
+export function firstRunGuidance(device: 'phone' | 'iPad'): string {
+  return `This node isn't set up yet. Finish setup on a Mac, then add this ${device}.`;
+}
+
+/** Host status string for an unclaimed node. The UI may name an iPad; the match stays this sentence. */
+export const FIRST_RUN_PHONE_MESSAGE = firstRunGuidance('phone');
 
 // First-run onboarding model: Start node → Pair this app → Create/restore identity → Fund.
 // Pure functions over what the host reports (`node_status`, `pairing_status`), so the

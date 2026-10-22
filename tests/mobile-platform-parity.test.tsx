@@ -11,6 +11,7 @@ import { appPlatform, deviceWord, deviceWords, isMobilePlatform } from '../src/p
 import { cameraQrScannerAvailable } from '../src/cameraQrScanner';
 import { Onboarding } from '../src/onboarding/Onboarding';
 import { mobileQrScannerAvailable } from '../src/pairingScanner';
+import { phoneCopy } from '../src/onboarding/phoneCopy';
 
 const ANDROID = 'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/130.0 Mobile Safari/537.36';
 const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148';
@@ -110,7 +111,7 @@ describe.each([
     expect($('[data-remember-unlock]').textContent).toContain(`this ${namedDevice}`);
   });
 
-  it('App renders saved first-run ticket guidance without an unavailable error or reconnect button', async () => {
+  it('App routes saved first-run tickets through phoneCopy without an unavailable error or reconnect button', async () => {
     const message = "This node isn't set up yet. Finish setup on a Mac, then add this phone.";
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
       if (cmd === 'node_status') return Promise.resolve({ phone_setup: true, ready: false, node_id: null, error: message, connection_error: { kind: 'unclaimed', detail: message } });
@@ -119,8 +120,49 @@ describe.each([
     } });
     show(() => <App />);
     await vi.waitFor(() => expect(mount.textContent).toContain("This box isn't set up yet"));
+    expect($('[data-phone-onboarding="error"] h1').textContent).toBe("This box isn't set up yet");
+    expect(mount.textContent).toContain(phoneCopy.en.unclaimedLine);
+    expect($('[data-first-run]')).toBeNull();
     expect(mount.textContent).not.toContain('Your node is unavailable');
     expect(Array.from(mount.querySelectorAll('button')).some(b => b.textContent === 'Reconnect')).toBe(false);
+  });
+
+  it('App preserves device-specific first-run guidance outside the new phone setup flow', async () => {
+    const message = "This node isn't set up yet. Finish setup on a Mac, then add this phone.";
+    vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
+      if (cmd === 'node_status') return Promise.resolve({ phone_setup: false, ready: false, node_id: null, error: message });
+      if (cmd === 'pairing_status') return Promise.resolve({ state: 'starting', remote: false, scopes: [], bootstrap: null });
+      return Promise.reject('unavailable');
+    } });
+    show(() => <App />);
+    const shown = device === 'iPad'
+      ? "This node isn't set up yet. Finish setup on a Mac, then add this iPad."
+      : message;
+    await vi.waitFor(() => expect($('.state.error [role="status"]')?.textContent).toBe(shown));
+    expect($('[data-phone-onboarding]')).toBeNull();
+    if (device === 'iPad') expect(mount.textContent).not.toContain('this phone');
+    expect(mount.textContent).not.toContain('Your node is unavailable');
+    expect(Array.from(mount.querySelectorAll('button')).some(b => b.textContent === 'Reconnect')).toBe(false);
+  });
+
+  it('first-run ticket review names the device and still blocks import', async () => {
+    const save = vi.fn();
+    show(() => <Onboarding status={() => ({ ready: false, node_id: null, error: null })}
+      pairing={() => ({ state: 'starting', remote: false, scopes: [], bootstrap: null, short_code: null, code_from_node: false, reason: null })}
+      trustAck={() => false} onRetry={() => {}} phone mobile selectedTarget="network"
+      onPreviewRemote={async () => ({ endpoint: 'box:9737', node_id_fingerprint: '22…22', first_run: true })}
+      onImportRemote={save} initialPairingLink="bitsov://pair/test" />);
+    const form = $<HTMLFormElement>('form[data-remote-access]');
+    form.requestSubmit();
+    const shown = device === 'iPad'
+      ? "This node isn't set up yet. Finish setup on a Mac, then add this iPad."
+      : "This node isn't set up yet. Finish setup on a Mac, then add this phone.";
+    await vi.waitFor(() => expect($('[data-pairing-preview]')?.textContent).toBe(shown));
+    if (device === 'iPad') expect(mount.textContent).not.toContain('this phone');
+    expect(form.querySelector('button[type="submit"]')).toBeNull();
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await Promise.resolve();
+    expect(save).not.toHaveBeenCalled();
   });
 
   it('App pairing names the device in first run and the incoming-link dialog, with a native scanner on both mobile platforms', async () => {

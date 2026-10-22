@@ -6,7 +6,7 @@ import { DeviceApprovals } from './DeviceApprovals';
 import { SoftError } from '../control/SoftError';
 import { createEffect, createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
 import { Dynamic } from 'solid-js/web';
-import { FIRST_RUN_PHONE_MESSAGE, connectionErrorDetail, normalizePairingLink, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
+import { connectionErrorDetail, firstRunGuidance, normalizePairingLink, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
 import { usePairingActivity } from '../pairingActivity';
@@ -577,7 +577,7 @@ export function Onboarding(props: {
             <Show when={review().view.hosted_by}>{label => <p>Hosted by <bdi>{label()}</bdi></p>}</Show>
             <p>Compare these details with your node before confirming.</p>
             </>}>
-              <p>{FIRST_RUN_PHONE_MESSAGE}</p>
+              <p role="status">{firstRunGuidance(device() === 'iPad' ? 'iPad' : 'phone')}</p>
             </Show>
           </div>
         )}</Show>

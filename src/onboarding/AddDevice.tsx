@@ -54,6 +54,7 @@ export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobil
   return <section class="panel add-device" data-add-device>
     <h2>Devices</h2>
     <Switch>
+      <Match when={!view() && !error()}><p role="status">Checking…</p></Match>
       <Match when={view()?.state === 'unsupported'}>
         <Show when={props.local} fallback={<p data-add-device-unsupported="node">Your node does not offer adding devices yet. A newer version of your node adds it.</p>}>
           <p data-add-device-unsupported="local">This Mac runs its own node, and only this Mac can use it. To use BitSov on your phone as well, run your node on a computer or server that stays on (or one someone runs for you), and connect this Mac and your phone to it.</p>
@@ -127,6 +128,7 @@ export function JoinDevice(props:{api:(input:JoinInput)=>Promise<JoinView>; mobi
   return <section class="panel add-device" data-join-device>
     <h2>Add this device</h2>
     <Switch>
+      <Match when={!view() && !error()}><p role="status">Checking…</p></Match>
       <Match when={view()?.state === 'idle'}>
         <Show when={(view() as {second_device?:boolean}).second_device} fallback={<>
         {/* New device: the ticket was scanned or pasted to get here; next the claim code. */}

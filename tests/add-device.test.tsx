@@ -189,8 +189,10 @@ it('never flashes claim input while second-device status is loading', async () =
   let resolve!: (v: any) => void;
   const root = mount(() => <JoinDevice api={() => new Promise(r => { resolve = r; })} />);
   expect(root.querySelector('input')).toBeNull();
+  expect(root.textContent).toContain('Checking…');
   resolve({state:'idle', second_device:true}); await flush();
   expect(root.querySelector('input')).toBeNull();
+  expect(root.textContent).not.toContain('Checking…');
 });
 it('second-device owner hides claim instructions and sends a signed rejection action', async () => {
   const calls: AddInput[] = [];
@@ -210,6 +212,16 @@ it('another owner’s QR leaves Approve disabled with its reason', async () => {
   const approve = [...root.querySelectorAll('button')].find(b => b.textContent?.includes('Approve with'))!;
   expect(approve.disabled).toBe(true);
   expect(root.textContent).toContain('Approve on the device that showed the QR.');
+});
+it('says Checking until the owner device list returns', async () => {
+  let resolve!: (v: AddView) => void;
+  const root = mount(() => <AddDevice api={() => new Promise(r => { resolve = r; })} />);
+  expect(root.textContent).toContain('Checking…');
+  expect(root.textContent).not.toContain('Add a device');
+  resolve({ state: 'ready', owner: true });
+  await flush();
+  expect(root.textContent).not.toContain('Checking…');
+  expect(root.textContent).toContain('Add a device');
 });
 it.each(['waiting','done'] as const)('reopening a second-device join at %s never restores claim instructions', async state => {
   const root = mount(() => <JoinDevice api={async () => state === 'waiting'
