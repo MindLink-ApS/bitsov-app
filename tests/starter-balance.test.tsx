@@ -202,3 +202,23 @@ it('opens a dedicated starter screen with one action and returns to the wallet',
   expect(host.querySelector('[data-wallet-balance]')).not.toBeNull();
   expect(host.querySelector('[data-starter-balance]')).toBeNull();
 });
+
+it('adopts and persists the other device current request returned after a conflict', async () => {
+  const otherId = '87654321-4321-4321-8321-cba987654321';
+  const request = vi.fn(async (_id: string) => ({ ...pending, request_id: otherId }));
+  mount(empty, {}, request); await flush(); host.querySelector('button')!.click(); await flush();
+  expect(request.mock.calls[0][0]).not.toBe(otherId);
+  expect(localStorage.getItem('bitsov.starter-request.node-a')).toBe(otherId);
+  expect(host.textContent).toContain('Requested');
+  dispose!(); host.remove();
+  const replay = vi.fn(async (id: string) => ({ ...pending, request_id: id }));
+  mount(empty, {}, replay); await flush(); host.querySelector('button')!.click(); await flush();
+  expect(replay).toHaveBeenCalledWith(otherId);
+});
+it('shows fixed request failure copy and never raw node error text', async () => {
+  const request = vi.fn(async (_id: string): Promise<StarterStatus> => { throw new Error('NODE_SECRET <script>route</script>'); });
+  mount(empty, {}, request); await flush(); host.querySelector('button')!.click(); await flush();
+  expect(host.textContent).toContain('Could not confirm the request.');
+  expect(host.textContent).not.toContain('NODE_SECRET');
+  expect(host.textContent).not.toContain('<script>');
+});

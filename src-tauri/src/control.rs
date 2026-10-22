@@ -629,7 +629,7 @@ pub fn custody_mode(reported: Option<&str>, verified_local_node: bool) -> Option
 /// An LDK config's `network` as the app names networks; unknown names are none.
 pub fn ldk_network_name(configured: &str) -> Option<&'static str> {
     match configured {
-        "bitcoin" => Some("mainnet"),
+        "bitcoin" | "mainnet" => Some("mainnet"),
         "testnet" => Some("testnet"),
         "signet" => Some("signet"),
         "regtest" => Some("regtest"),
@@ -674,9 +674,7 @@ impl NodeOverview {
             capabilities: known_capabilities(&status.api_capabilities),
             stun_url: own_stun_url(status.stun_url.as_deref(), status.stun_port),
             stun_port: status.stun_port,
-            network: status.network.map(|network| {
-                if network == "bitcoin" { "mainnet".into() } else { network }
-            }),
+            network: status.network.as_deref().and_then(ldk_network_name).map(str::to_string),
             // Provenance is applied by the caller (`verified_local_node`); raw
             // report only, so tests can project both sides.
             custody_mode: match status.custody_mode.as_deref() {
@@ -1220,6 +1218,18 @@ mod tests {
                 assert_eq!(projected["readiness"]["retry_attempt"], 3);
                 assert_eq!(projected["readiness"]["events"][0]["timestamp"], 1725000000u64);
             }
+        }
+    }
+
+    #[test]
+    fn overview_allowlists_reported_networks() {
+        for (reported, want) in [("bitcoin", Some("mainnet")), ("mainnet", Some("mainnet")),
+            ("testnet", Some("testnet")), ("signet", Some("signet")), ("regtest", Some("regtest")),
+            ("future-network", None), ("", None)] {
+            let status = serde_json::from_value(serde_json::json!({
+                "status":"ok", "node_id":"remote", "network":reported
+            })).unwrap();
+            assert_eq!(NodeOverview::from_status(status, 1).network.as_deref(), want);
         }
     }
 

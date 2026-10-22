@@ -3097,12 +3097,14 @@ async fn get_json<T: serde::de::DeserializeOwned>(state: &NodeState, path: &str)
 
 async fn read_node_overview(state: &NodeState) -> Result<control::NodeOverview, String> {
     let status: control::NodeStatusResponse = get_json(state, "/status").await?;
+    // An invalid report is unknown, never permission to use a different chain.
+    let network_reported = status.network.is_some();
     let mut overview = control::NodeOverview::from_status(status, now_ms());
     // Local seed labels need verified provenance, not a loopback URL alone.
     overview.custody_mode =
         control::custody_mode(overview.custody_mode, verified_local_node(state));
     // Only while the node answering is the LDK node that config started.
-    if overview.network.is_none() && overview.lightning_backend.as_deref() == Some("ldk") {
+    if !network_reported && overview.lightning_backend.as_deref() == Some("ldk") {
         overview.network = state.configured_network.lock().unwrap().clone();
     }
     Ok(overview)
@@ -4190,6 +4192,19 @@ async fn payments_overview(
 
 /// Read-only discovery, scoped to the node identity the renderer is showing.
 async fn read_starter_current(state: &NodeState, node_id: &str) -> Result<bitsov_app::starter::Status, String> {
+    require_starter_build()?;
+    read_starter_current_enabled(state, node_id).await
+        .map_err(|_| "Could not read starter balance status.".into())
+}
+
+// Private enabled paths let boundary tests exercise both modes without mutating
+// process environment. IPC always enters through the build-gated wrappers.
+fn require_starter_build() -> Result<(), String> {
+    if option_env!("VITE_STARTER_BALANCE") == Some("1") { Ok(()) }
+    else { Err("Starter balance is disabled in this build.".into()) }
+}
+
+async fn read_starter_current_enabled(state: &NodeState, node_id: &str) -> Result<bitsov_app::starter::Status, String> {
     let _change = state.remote_change.lock().await;
     read_starter_on_connection(state, node_id).await
 }
@@ -4206,6 +4221,14 @@ async fn read_starter_on_connection(state: &NodeState, node_id: &str) -> Result<
 
 /// Receive scope only. Never enter the spend/owner-approval flow or accept amounts.
 async fn do_starter_request(
+    state: &NodeState, node_id: &str, request_id: &str,
+) -> Result<bitsov_app::starter::Status, String> {
+    require_starter_build()?;
+    do_starter_request_enabled(state, node_id, request_id).await
+        .map_err(|_| "Could not confirm the starter balance request.".into())
+}
+
+async fn do_starter_request_enabled(
     state: &NodeState, node_id: &str, request_id: &str,
 ) -> Result<bitsov_app::starter::Status, String> {
     let _change = state.remote_change.lock().await;

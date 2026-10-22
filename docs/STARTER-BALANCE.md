@@ -1,7 +1,8 @@
 # Signet starter balance
 
 The wallet's “Get your starter balance” entry is disabled by default. Build
-with `VITE_STARTER_BALANCE=1` to enable discovery. It appears only when the
+with `VITE_STARTER_BALANCE=1` in the parent process environment to enable both
+the renderer and host (for example, `VITE_STARTER_BALANCE=1 npm run tauri -- build`). It appears only when the
 node reports `network: "signet"`, advertises `starter_channel_request_v1`, and
 the authenticated starter GET returns `hub_configured: true`. Mainnet and
 unknown networks remain hidden. Opening the entry shows a dedicated screen
@@ -29,3 +30,24 @@ amount is a historical, node-confirmed receipt. Current wallet spendability
 continues to come from the node's wallet breakdown, since a historical starter
 receipt does not prove a channel remains usable. Copy is available in English
 and Danish and uses the app's space-grouped amount formatter.
+
+## Build gate and payment networks
+
+The single source of truth is the build process environment: only the exact
+value `VITE_STARTER_BALANCE=1` enables starter balance. Vite explicitly defines
+its renderer constant from `process.env`; Vite-only `.env` / `.env.local` /
+mode files cannot enable this flag. Rust captures the same variable with
+`option_env!`, and `build.rs` tracks changes so switching it rebuilds the host.
+Restart the dev/build process when changing it; separately built frontend and
+host artifacts must use the same environment. No runtime setting enables it.
+The registered IPC commands and main-window grants remain stable on desktop
+and mobile, but both starter commands refuse before network access when off.
+The assistant retains no starter grants. Starter command failures return fixed
+copy; raw node error bodies and transport details are discarded.
+
+For local and remote nodes, a reported network takes precedence over host
+configuration. Only `bitcoin`/`mainnet`, `testnet`, `signet`, and `regtest` are
+accepted (`bitcoin` normalizes to `mainnet`). An unrecognized report becomes
+unknown and cannot fall back to configuration; only an absent report from an
+older LDK node may use the configured network. The BOLT11 checks refuse both
+unknown networks and invoice/network mismatches before offering chat payment.

@@ -53,7 +53,7 @@ const INVOICE_LIKE = /^(?:lightning:)?ln[a-z0-9]{2,}$/i;
 /**
  * Read a message body as an invoice. `null`: not invoice-shaped at all (plain
  * text, no note). Otherwise the invoice, or why it is not payable here.
- * `homeNetwork` null means this node's network is unknown: not refused on it.
+ * `homeNetwork` null means this node's network is unknown: payments fail closed.
  */
 export function readChatInvoice(body: string | null | undefined, nowMs: number, homeNetwork: string | null): ChatInvoiceRead | null {
   if (typeof body !== 'string') return null;
@@ -61,7 +61,7 @@ export function readChatInvoice(body: string | null | undefined, nowMs: number, 
   if (text.length === 0 || text.length > BODY_MAX || !INVOICE_LIKE.test(text) || !text.includes('1')) return null;
   const inv = decode(text.replace(/^lightning:/i, ''));
   if (!inv) return { ok: false, reason: 'invalid' };
-  if (homeNetwork !== null && inv.network !== homeNetwork) return { ok: false, reason: 'wrong_network' };
+  if (inv.network !== homeNetwork) return { ok: false, reason: 'wrong_network' };
   if (inv.msat === null || inv.msat === 0) return { ok: false, reason: 'no_amount' };
   if (inv.msat < MIN_PAYMENT_MSAT || inv.msat > MAX_PAYMENT_MSAT) return { ok: false, reason: 'out_of_bounds' };
   if (inv.expiresAtMs <= nowMs) return { ok: false, reason: 'expired' };
@@ -92,7 +92,7 @@ export function invoicePaymentHash(text: string): string | null {
  * is. The host decoded it; these are the same refusals as for the shape.
  */
 export function hostReadProblem(read: InvoiceAmount, nowMs: number, homeNetwork: string | null): NotPayable | null {
-  if (homeNetwork !== null && read.network !== homeNetwork) return 'wrong_network';
+  if (!Object.values(NETWORKS).includes(homeNetwork as InvoiceNetwork) || read.network !== homeNetwork) return 'wrong_network';
   if (!(read.amount_msat > 0)) return 'no_amount';
   if (read.amount_msat < MIN_PAYMENT_MSAT || read.amount_msat > MAX_PAYMENT_MSAT) return 'out_of_bounds';
   if (read.expires_at_ms <= nowMs) return 'expired';
