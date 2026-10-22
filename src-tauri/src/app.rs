@@ -117,7 +117,7 @@ mod owner_contact;
 /// this; only a debug `dev-node` build may move the port (`dev_node::api_base`).
 const API_BASE: &str = "http://127.0.0.1:3141/api/v1";
 
-/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc14` / `d55a88e`): the funding
+/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc19.2` / `04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`): the funding
 /// state machine moves to this step once the node has observed the required deposit
 /// in its own wallet. Kept host-side so the renderer never re-implements the contract.
 const FUNDING_SEEN: &str = "funding-seen";
