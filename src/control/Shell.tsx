@@ -28,7 +28,7 @@ import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
 import { amount as fmtAmount, paidAmount, budgetNote, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
-import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
+import { ambiguousThousands, amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
@@ -2698,7 +2698,7 @@ function Conversation(props: {
   });
   const cost = () =>
     costToSend(props.track, props.quote, {
-      name: props.track.kind === 'peer' ? `${props.name}’s` : undefined,
+      name: props.track.kind === 'peer' ? props.name : undefined,
       room: props.roomQuote,
       nowMs: props.now,
     });
@@ -4086,6 +4086,7 @@ function AmountField(props: { data: 'pay' | 'request'; label: string; value: str
   /** Why the typed amount cannot be used, before any review. */
   const problem = (): string | null => {
     if (props.value.trim() === '') return null;
+    if (ambiguousThousands(props.value, denom())) return tr('amountUseSpaces');
     const msat = parseAmount(props.value, denom());
     if (msat === null) return tr('uiUseDigitsAndOneDotAtMostDecimals', denom() === 'btc' ? 11 : 3);
     return inPaymentBounds(msat) ? null : tr('uiBetweenAnd', fmtAmount(MIN_PAYMENT_MSAT), fmtAmount(MAX_PAYMENT_MSAT));
@@ -5866,7 +5867,7 @@ function Composer(props: {
         <Match when={mode() === 'request'}>
           <div class="fields pay-flow composer-panel" data-composer-panel="request">
             <div class="panel-head">
-              <strong>{tr('uiRequestFrom')} {props.name}</strong>
+              <strong>{tr('uiRequestFrom', props.name)}</strong>
               <button type="button" class="link" data-composer-close aria-label={tr('uiDone')} onClick={closePanel}>{tr('uiDone')}</button>
             </div>
             <AmountField data="request" label={tr('uiAmountToRequest')} value={amount()} onInput={setAmount} />
@@ -6704,9 +6705,10 @@ function BudgetPanel(props: {
   const [note, setNote] = createSignal<string | null>(null);
   const pct = (spent: number, of: number) => `${Math.min(100, of > 0 ? (spent / of) * 100 : 0).toFixed(1)}%`;
   const save = async (row: BudgetRow) => {
-    const n = Number(value());
-    if (!Number.isFinite(n) || n < 0) return setNote('Enter a number of sats, or 0 to forget.');
-    const r = await props.actions.setBudget(row.target, row.room, Math.round(n * 1000));
+    if (ambiguousThousands(value(), 'sats')) return setNote(tr('amountUseSpaces'));
+    const msat = value().trim() === '0' ? 0 : parseAmount(value(), 'sats');
+    if (msat === null) return setNote(tr('budgetInvalidAmount'));
+    const r = await props.actions.setBudget(row.target, row.room, msat);
     if (r.ok) {
       setEditing(null);
       setNote(null);
@@ -6802,15 +6804,15 @@ function BudgetPanel(props: {
                       <Show
                         when={editing() === key()}
                         fallback={
-                          <button type="button" class="link" data-budget-edit onClick={() => { setEditing(key()); setValue(String((row.limit_msat ?? 0) / 1000)); setNote(null); }}>
-                            {row.limit_msat === null ? 'Set a budget' : 'Change'}
+                          <button type="button" class="link" data-budget-edit onClick={() => { setEditing(key()); setValue(amountText(row.limit_msat ?? 0, 'sats')); setNote(null); }}>
+                            {tr(row.limit_msat === null ? 'budgetSet' : 'budgetChange')}
                           </button>
                         }
                       >
                         <form class="row" onSubmit={(e) => { e.preventDefault(); void save(row); }}>
-                          <input inputmode="numeric" value={value()} onInput={(e) => setValue(e.currentTarget.value)} aria-label={`Sats a day for ${props.nameOf(row.target, row.room)}`} data-budget-input />
-                          <button type="submit" class="small" data-budget-save disabled={props.actions.moneyBlocked()}>Save</button>
-                          <button type="button" class="link" onClick={() => setEditing(null)}>Cancel</button>
+                          <input inputmode="decimal" value={value()} onInput={(e) => setValue(e.currentTarget.value)} aria-label={tr('budgetDailySats', props.nameOf(row.target, row.room))} data-budget-input />
+                          <button type="submit" class="small" data-budget-save disabled={props.actions.moneyBlocked()}>{tr('budgetSave')}</button>
+                          <button type="button" class="link" onClick={() => setEditing(null)}>{tr('uiCancel')}</button>
                         </form>
                       </Show>
                     </Show>

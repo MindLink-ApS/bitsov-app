@@ -190,7 +190,7 @@ describe('Body panel', () => {
   it('shows what it has, and says plainly what it cannot read', async () => {
     start();
     await vi.waitFor(() => expect($('[data-door]')?.textContent).toContain('Door open at 1 sat a message'));
-    await vi.waitFor(() => expect($('[data-nucleus-chain]')?.textContent).toContain('860 123'));
+    await vi.waitFor(() => expect($('[data-nucleus-chain]')?.textContent).toContain('860\u202f123'));
     expect($('[data-membrane-quiet]')?.textContent).toMatch(/^No knocks since \d\d:\d\d\.$/);
     expect($('[data-membrane-n2]')?.textContent).toContain('not visible yet');
     expect($('[data-immune]')?.textContent).toBe('Evidence keeping: not built.');
@@ -238,14 +238,14 @@ describe('Body panel', () => {
 
   it('greys to the last reading when the node stops answering, never to zero', async () => {
     const { source } = start();
-    await vi.waitFor(() => expect($('[data-nucleus-chain]')?.textContent).toContain('860 123'));
+    await vi.waitFor(() => expect($('[data-nucleus-chain]')?.textContent).toContain('860\u202f123'));
     dispose?.();
     mount.remove();
     // Same data, but the host now reports the node stopped.
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <ControlCenter source={source} active={true} ready={true} error="node exited" ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
-    await vi.waitFor(() => expect($('[data-nucleus-chain]')?.textContent).toContain('860 123'));
+    await vi.waitFor(() => expect($('[data-nucleus-chain]')?.textContent).toContain('860\u202f123'));
     expect($('[data-panel="body"]')?.classList.contains('down')).toBe(true);
     expect($('[data-organ="nucleus"]')?.classList.contains('stale')).toBe(true);
   });

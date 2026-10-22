@@ -260,9 +260,9 @@ describe('composing an answer', () => {
       return answerFrom(r, { kind: 'read', topic, sinceMs: null, window: null }, names);
     };
     expect(read('balance').text).toBe(
-      'Your node reports 482 500 sats. That is Lightning and spendable on-chain together. Your local channel balance is 420 000 sats.',
+      'Your node reports 482\u202f500 sats. That is Lightning and spendable on-chain together. Your local channel balance is 420\u202f000 sats.',
     );
-    expect(read('node').text).toBe('Your node is healthy: 3 peers connected, at block 860 123, up 3d 4h.');
+    expect(read('node').text).toBe('Your node is healthy: 3 peers connected, at block 860\u202f123, up 3d 4h.');
     expect(read('node').cards[0].type).toBe('node');
     expect(read('prices').text).toMatch(/^You charge 1 sat for a message; 3 sats for a file/);
   });

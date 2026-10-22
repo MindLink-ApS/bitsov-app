@@ -75,3 +75,20 @@ describe('host payment bounds (1 sat to 1 BTC)', () => {
     expect(inPaymentBounds(msat)).toBe(ok);
   });
 });
+
+describe('Danish thousands ambiguity', () => {
+  it.each(['1.000', '1.250', '01.000', '01.250', '12.345', '1234.567', ' 1.250 '])('rejects %s in Danish sats only', text => {
+    expect(parseAmount(text, 'sats', 'da')).toBeNull();
+    expect(parseAmount(text, 'sats', 'en')).not.toBeNull();
+    expect(parseAmount(text, 'btc', 'da')).not.toBeNull();
+  });
+  it.each(['en', 'da'] as const)('keeps genuine decimals and pasted spaces exact in %s', locale => {
+    for (const text of ['1 250', '1\u202f250', '1\u00a0250', '1_250']) expect(parseAmount(text, 'sats', locale)).toBe(1250000);
+    expect(parseAmount('1.25', 'sats', locale)).toBe(1250);
+    expect(parseAmount('0.001', 'sats', locale)).toBe(1);
+    expect(parseAmount('1.2500', 'sats', locale)).toBe(1250);
+    expect(parseAmount('1.2345', 'sats', locale)).toBeNull();
+    expect(parseAmount('0.00000000001', 'btc', locale)).toBe(1);
+    for (const msat of [1001, 1250, 1234567]) expect(parseAmount(amountText(msat, 'sats', locale), 'sats', locale)).toBe(msat);
+  });
+});

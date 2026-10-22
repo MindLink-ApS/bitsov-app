@@ -1,3 +1,4 @@
+import { setLanguagePref } from '../src/i18n';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
@@ -139,6 +140,7 @@ describe('invisible payments in the composer and the context panel', () => {
   });
 
   afterEach(() => {
+    setLanguagePref('en');
     dispose?.();
     dispose = undefined;
     mount?.remove();
@@ -780,10 +782,10 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>('[data-track="new"]')!.click();
     await vi.waitFor(() => expect($('[data-starter-include]')).not.toBeNull());
-    expect(text('[data-starter-purse]')).toContain('0 sats of 100 000 sats');
+    expect(text('[data-starter-purse]')).toContain('0 sats of 100\u202f000 sats');
     $<HTMLButtonElement>('[data-starter-include]')!.click();
     await vi.waitFor(() => expect($('[data-starter-offered]')).not.toBeNull());
-    expect(text('[data-starter-offered]')).toContain('up to 20 000 sats');
+    expect(text('[data-starter-offered]')).toContain('up to 20\u202f000 sats');
     expect(text('[data-intro-link]')).toBe(OFFER_LINK);
     expect(host.used('sponsor_approve')).toHaveLength(0);
 
@@ -791,13 +793,13 @@ describe('invisible payments in the composer and the context panel', () => {
     $<HTMLButtonElement>('[data-starter-review] button[type="submit"]')!.click();
     await vi.waitFor(() => expect($(`[data-starter-candidate="${STRANGER}"]`)).not.toBeNull());
     expect(host.used('sponsor_candidate')[0].args).toEqual({ request: 'bitsov://sponsor-request#REQ' });
-    expect(text('[data-starter-candidate]')).toContain('Lightning gift: 20 000 sats. Network fee: at most 100 sats.');
+    expect(text('[data-starter-candidate]')).toContain('Lightning gift: 20\u202f000 sats. Network fee: at most 100 sats.');
     // The code is typed from their screen, not taken from ours.
     expect(text('[data-starter-candidate]')).not.toContain('482913');
     expect($<HTMLButtonElement>('[data-starter-approve]')!.disabled).toBe(true);
     type('[data-starter-their-code]', '48-29 13');
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-starter-approve]')!.disabled).toBe(false));
-    expect(text('[data-starter-approve]')).toBe('Sponsor up to 20 100 sats');
+    expect(text('[data-starter-approve]')).toBe('Sponsor up to 20\u202f100 sats');
     $<HTMLButtonElement>('[data-starter-approve]')!.click();
     await vi.waitFor(() => expect($('[data-starter-owner-command]')).not.toBeNull());
     expect($<HTMLTextAreaElement>('[data-starter-owner-command]')!.value).toBe('owner command for the frozen gift');
@@ -1089,7 +1091,7 @@ describe('invisible payments in the composer and the context panel', () => {
     type('[data-intro-text]', OFFER_LINK);
     $<HTMLButtonElement>('[data-intro-open] button[type="submit"]')!.click();
     await vi.waitFor(() => expect($('[data-door-starter]')).not.toBeNull());
-    expect(text('[data-door-starter]')).toContain('Starter bitcoin available after they approve: 20 000 sats');
+    expect(text('[data-door-starter]')).toContain('Starter bitcoin available after they approve: 20\u202f000 sats');
     expect(text('[data-door-starter]')).toContain('not a pass');
     expect(host.used('sponsor_request')).toHaveLength(0);
     // Not a sponsor: no review panel on this node.
@@ -1099,7 +1101,7 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('sponsor_request')[0].args).toEqual({ text: OFFER_LINK });
     expect(text('[data-starter-code]')).toContain('482 913');
     expect($('[data-door-starter] svg.qr')?.getAttribute('aria-label')).toBe('Your starter-bitcoin request as a QR code');
-    await vi.waitFor(() => expect(text('[data-starter-status="received"]')).toContain('Received 20 000 sats in your own node'));
+    await vi.waitFor(() => expect(text('[data-starter-status="received"]')).toContain('Received 20\u202f000 sats in your own node'));
     expect(host.used('sponsor_request_status')[0].args).toEqual({ payment_hash: 'ef'.repeat(32) });
     for (const cmd of ['message_send', 'introduction_open', 'sponsor_approve']) expect(host.used(cmd)).toHaveLength(0);
   });
@@ -1196,6 +1198,31 @@ describe('invisible payments in the composer and the context panel', () => {
     type('[data-budget-input]', '10');
     $<HTMLButtonElement>('[data-budget-save]')!.click();
     await vi.waitFor(() => expect(host.used('budget_set')[0]?.args).toEqual({ target: MAYA, room: false, limit_msat: 10_000 }));
+  });
+
+  it.each(['en', 'da'] as const)('parses grouped budget edits exactly and explains invalid input in %s', async locale => {
+    setLanguagePref(locale);
+    const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 5000000, spent_msat: 0 }]));
+    await openShell();
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    await vi.waitFor(() => expect($('[data-budget-edit]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-budget-edit]')!.click();
+    for (const invalid of ['', '1e3', '0x10', '1.2345', ...(locale === 'da' ? ['1.000', '1.250'] : [])]) {
+      type('[data-budget-input]', invalid);
+      $<HTMLButtonElement>('[data-budget-save]')!.click();
+      expect(host.used('budget_set')).toHaveLength(0);
+      expect(text('[data-panel="budget"]')).toContain(locale === 'da'
+        ? (invalid === '1.000' || invalid === '1.250' ? 'Brug mellemrum: 1 000' : 'Indtast et beløb i sats eller 0 for at glemme.')
+        : 'Enter a number of sats, or 0 to forget.');
+    }
+    type('[data-budget-input]', '1 000');
+    $<HTMLButtonElement>('[data-budget-save]')!.click();
+    await vi.waitFor(() => expect(host.used('budget_set')[0]?.args).toEqual({ target: MAYA, room: false, limit_msat: 1000000 }));
+    await vi.waitFor(() => expect($('[data-budget-edit]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-budget-edit]')!.click();
+    type('[data-budget-input]', '0');
+    $<HTMLButtonElement>('[data-budget-save]')!.click();
+    await vi.waitFor(() => expect(host.used('budget_set')[1]?.args).toEqual({ target: MAYA, room: false, limit_msat: 0 }));
   });
 
   it('refreshes a higher room fee quote and waits for another tap at the displayed all-in price', async () => {
