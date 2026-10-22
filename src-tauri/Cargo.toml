@@ -59,6 +59,10 @@ shared_child = "1.1"
 tauri-plugin-shell = "2"
 rfd = "0.15"
 
+# Local approval notifications on the Mac only (official Tauri 2 plugin).
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri-plugin-notification = "=2.7.0"
+
 # iOS uses the same safe Apple enclave bridge, without desktop supervision.
 [target.'cfg(target_os = "ios")'.dependencies]
 bitsov-ffi = { path = "ffi" }

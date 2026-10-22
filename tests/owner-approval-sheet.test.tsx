@@ -26,7 +26,7 @@ function setup(initial: ApprovalView[] = []) {
     <OwnerApprovals approvals={approvals()} now={now()} memory={memory} approve={approve} onReview={memory.setReview} />
     <OwnerApprovalSheets approvals={approvals()} now={now()} memory={memory} approve={approve} blocked={blocked()} error={error()} />
   </>, mount);
-  return { setApprovals, setNow, setBlocked, setError, approve };
+  return { setApprovals, setNow, setBlocked, setError, approve, memory };
 }
 const tick = () => new Promise<void>(r => queueMicrotask(r));
 describe.each(['en', 'da'] as const)('owner approval sheet (%s)', lang => {
@@ -124,4 +124,11 @@ it('waits for an in-flight approval before presenting the next requester', async
   expect($('[data-owner-approval-sheet]')).toBeNull();
   finish({ ok: true, value: { ...request(), status: 'consumed' } }); await tick();
   expect($('[data-owner-approval-sheet]')?.getAttribute('data-owner-approval-sheet')).toBe('b');
+});
+
+it('a notification review selects the exact request over an already open sheet', async () => {
+  const s = setup([request(), request('b')]); await tick();
+  s.memory.setReview('b'); await tick();
+  expect($('[data-owner-approval-sheet]').getAttribute('data-owner-approval-sheet')).toBe('b');
+  expect(s.approve).not.toHaveBeenCalled();
 });

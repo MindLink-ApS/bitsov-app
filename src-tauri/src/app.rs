@@ -9047,6 +9047,8 @@ fn resume_ios_startup(app: &AppHandle) -> bool {
 /// Normal CS-1 / CS-2 desktop shell: NodeState, wallet commands, bootstrap.
 fn app_builder() -> tauri::Builder<tauri::Wry> {
     let builder = tauri::Builder::default();
+    #[cfg(all(target_os = "macos", not(feature = "mobile")))]
+    let builder = builder.plugin(tauri_plugin_notification::init());
     #[cfg(all(desktop, not(feature = "mobile")))]
     let builder = builder
         // Voice notes and calls: let the webview use the mic/camera without a
@@ -20074,8 +20076,8 @@ mod assistant_acl_tests {
 
         let caps = load_capabilities();
         assert!(
-            build_rs.contains("PROFILE") && build_rs.contains("capabilities/default.json"),
-            "release builds must compile the main capability only"
+            build_rs.contains("PROFILE") && build_rs.contains("capabilities/default*.json"),
+            "release builds must compile only main-window capabilities"
         );
         let vite = fs::read_to_string(manifest_dir().join("../vite.config.ts")).expect("vite");
         assert!(
@@ -20120,8 +20122,17 @@ mod assistant_acl_tests {
         }
 
         let main_caps: Vec<_> = caps.iter().filter(|cap| applies_to(cap, "main")).collect();
-        assert_eq!(main_caps.len(), 1, "main must keep a single capability");
-        let main = main_caps[0];
+        assert_eq!(main_caps.len(), 2, "main has its app and macOS notification capabilities");
+        for cap in &main_caps {
+            assert_eq!(string_list(cap, "windows"), vec!["main".to_string()]);
+            assert!(cap.get("remote").map(|v| v.is_null()).unwrap_or(true));
+        }
+        let notification = main_caps.iter().find(|cap| cap["identifier"] == "approval-notification").expect("notification capability");
+        assert_eq!(string_list(notification, "platforms"), vec!["macOS".to_string()]);
+        let notification_perms = permission_identifiers(notification);
+        assert_eq!(notification_perms.len(), 10, "only local delivery, action/listener and window restoration grants");
+        assert!(notification_perms.iter().all(|id| id.starts_with("notification:allow-") || id.starts_with("core:window:allow-")));
+        let main = *main_caps.iter().find(|cap| cap["identifier"] == "default").expect("main app capability");
         assert_eq!(string_list(main, "windows"), vec!["main".to_string()]);
         assert!(!applies_to(main, "assistant"));
         let main_perms = permission_identifiers(main);
