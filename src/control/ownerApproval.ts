@@ -133,6 +133,10 @@ export type ApprovalErrorCode = (typeof APPROVAL_ERROR_CODES)[number];
 // Match owner_approval.rs exactly in every app language: U+202F grouping,
 // whole sats or integer msat, never ambiguous decimal sats.
 const sats = (msat: number) => {
+  // Tauri passes JSON numbers, not decimal strings. Beyond 2^53 - 1 the
+  // original u64 is already lost: never display a rounded amount or unit.
+  // The host prompt still formats the exact u64; signed bytes are untouched.
+  if (!Number.isSafeInteger(msat ?? 0)) return 'amount too large';
   const fractional = msat % 1000 !== 0;
   const value = (fractional ? msat : msat / 1000).toString().replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f');
   return `${value} ${fractional ? 'msat' : msat === 1000 ? 'sat' : 'sats'}`;
@@ -194,18 +198,26 @@ export function termLines(view: ApprovalView, nameOf?: (id: string) => string | 
 /** The biometric reason: terms plus attribution, within Android's 300 UTF-16 units. */
 export function approvalReason(view: ApprovalView): string {
   const attribution = ` · Requested by app ${shortKey(view.client_pubkey)}`;
-  let details = termLines(view).join(' · ');
+  const lines = termLines(view);
   const available = 300 - attribution.length;
-  if (details.length > available) {
-    let shortened = '';
-    // Iterate code points so a cut never leaves half of a surrogate pair.
-    for (const c of details) {
-      if (shortened.length + c.length > available - 1) break;
-      shortened += c;
+  const snap = breakerSnapshot(view);
+  if (snap && lines.join(' · ').length > available) {
+    // Reserve every amount, expiry and attribution. Keep only complete trip
+    // descriptions, so even unknown Unicode codes are never cut mid-codepoint.
+    lines[1] = `Tripped: ${snap.tripped.length ? `+${snap.tripped.length} more` : 'nothing'}`;
+    // At u64 extremes even the minimal trip summary may not fit alongside the
+    // reset count. That informational line remains in the full terms view.
+    if (lines.join(' · ').length > available) lines.pop();
+    let prefix = '';
+    for (let i = 0; i < snap.tripped.length; i++) {
+      prefix += `${i ? ', ' : ''}${tripText(snap.tripped[i])}`;
+      const remaining = snap.tripped.length - i - 1;
+      const candidate = `Tripped: ${prefix}${remaining ? `, +${remaining} more` : ''}`;
+      if (lines.join(' · ').length - lines[1].length + candidate.length > available) break;
+      lines[1] = candidate;
     }
-    details = `${shortened}…`;
   }
-  return `${details}${attribution}`;
+  return `${lines.join(' · ')}${attribution}`;
 }
 
 /** A breaker_reset view's snapshot (ApprovalView.breaker_reset); null when absent or malformed. */
@@ -221,7 +233,7 @@ const TRIP_TEXT: Record<BreakerTrip, string> = {
   rate_limit_hour: 'too many payments this hour',
   velocity_limit: 'spending too fast',
 };
-export const tripText = (t: string) => TRIP_TEXT[t as BreakerTrip] ?? t;
+export const tripText = (t: string) => Object.prototype.hasOwnProperty.call(TRIP_TEXT, t) ? TRIP_TEXT[t as BreakerTrip] : t;
 /** Only a failure pause needs a reset; rate and velocity limits recover with time on their own. */
 export const needsReset = (tripped: string[]) => tripped.includes('grant_paused');
 
