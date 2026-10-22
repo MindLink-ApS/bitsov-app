@@ -11,6 +11,7 @@ import { appPlatform, deviceWord, deviceWords, isMobilePlatform } from '../src/p
 import { cameraQrScannerAvailable } from '../src/cameraQrScanner';
 import { Onboarding } from '../src/onboarding/Onboarding';
 import { mobileQrScannerAvailable } from '../src/pairingScanner';
+import { phoneCopy } from '../src/onboarding/phoneCopy';
 
 const ANDROID = 'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/130.0 Mobile Safari/537.36';
 const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148';
@@ -120,7 +121,7 @@ describe.each([
     show(() => <App />);
     await vi.waitFor(() => expect(mount.textContent).toContain("This box isn't set up yet"));
     expect($('[data-phone-onboarding="error"] h1').textContent).toBe("This box isn't set up yet");
-    expect(mount.textContent).toContain('Set up the box on a Mac first.');
+    expect(mount.textContent).toContain(phoneCopy.en.unclaimedLine);
     expect($('[data-first-run]')).toBeNull();
     expect(mount.textContent).not.toContain('Your node is unavailable');
     expect(Array.from(mount.querySelectorAll('button')).some(b => b.textContent === 'Reconnect')).toBe(false);
