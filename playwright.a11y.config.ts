@@ -6,6 +6,7 @@ const port = 1421;
 
 export default defineConfig({
   testDir: 'tests/a11y',
+  testIgnore: 'inputs.spec.ts', // Dedicated WebKit run: playwright.inputs.config.ts.
   timeout: 45_000,
   fullyParallel: false,
   retries: 0,

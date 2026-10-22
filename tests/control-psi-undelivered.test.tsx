@@ -240,7 +240,7 @@ describe('paid, not delivered: in the conversation', () => {
     $<HTMLButtonElement>('[data-retry-approve]')!.click();
     await vi.waitFor(() => expect($('[data-artifact="undelivered"]')).toBeNull());
     expect(host.used('message_retry').map((c) => c.args!.approved_msat)).toEqual([null, 14000]);
-    expect(text('article.msg.out')).toContain('paid 4 sats · fee unknown');
+    expect(text('article.msg.out')).toContain('paid 4 sats · network fee not reported');
     expect(host.used('message_send')).toHaveLength(1);
     await vi.waitFor(() => expect(mount.textContent).toContain('hello Maya'));
   });
