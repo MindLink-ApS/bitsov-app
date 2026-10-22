@@ -980,7 +980,7 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 .call-button.quiet { opacity: 0.75; }
 .call-button svg { display: block; }
 .call-panel {
-  position: fixed; right: var(--s-6); bottom: var(--s-6); z-index: 50;
+  position: fixed; right: max(var(--s-6), env(safe-area-inset-right, 0px)); bottom: max(var(--s-6), env(safe-area-inset-bottom, 0px)); z-index: 50;
   width: min(340px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: var(--s-2);
   padding: var(--s-4); border: 1px solid var(--line-strong); border-radius: 14px;
   background: var(--raised); color: var(--ink); box-shadow: 0 12px 32px rgba(0, 0, 0, .35);
@@ -996,9 +996,9 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
   100% { opacity: 1; transform: translateY(0) scale(1); }
 }
 @keyframes incoming-call-glow {
-  0% { box-shadow: 0 12px 32px rgba(0, 0, 0, .35), 0 0 0 0 rgba(79, 191, 123, 0.5); }
-  60% { box-shadow: 0 12px 32px rgba(0, 0, 0, .35), 0 0 0 16px rgba(79, 191, 123, 0); }
-  100% { box-shadow: 0 12px 32px rgba(0, 0, 0, .35), 0 0 0 0 rgba(79, 191, 123, 0); }
+  0% { box-shadow: 0 12px 32px rgba(0, 0, 0, .35), 0 0 0 0 color-mix(in srgb, var(--ok) 50%, transparent); }
+  60% { box-shadow: 0 12px 32px rgba(0, 0, 0, .35), 0 0 0 16px color-mix(in srgb, var(--ok) 0%, transparent); }
+  100% { box-shadow: 0 12px 32px rgba(0, 0, 0, .35), 0 0 0 0 color-mix(in srgb, var(--ok) 0%, transparent); }
 }
 [data-call-accept], [data-meeting-join] {
   animation: accept-button-pulse 2s ease-in-out infinite;
@@ -1156,6 +1156,9 @@ button.danger { background: var(--err); color: var(--err-ink); border: none; }
 .composer-info > summary { list-style: none; cursor: pointer; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; color: var(--faint); font-size: var(--t-sm); transition: background var(--d-fast) var(--ease), color var(--d-fast) var(--ease); }
 .composer-info > summary::-webkit-details-marker { display: none; }
 .composer-info > summary:hover, .composer-info[open] > summary { color: var(--ink); background: var(--raised); }
+/* `.price-breakdown { display: grid }` overrides the user-agent rule that hides
+   closed <details> children, so the amounts painted beside the ⓘ and ran off a 360 px screen. */
+.composer-info:not([open]) > :not(summary) { display: none; }
 .composer-info[open] { flex-basis: 100%; display: flex; flex-direction: column; align-items: stretch; gap: var(--s-2); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-panel); padding: var(--s-2) var(--s-3) var(--s-3); animation: arrive var(--d-mid) var(--ease-out); font-size: var(--t-sm); color: var(--muted); }
 .composer-info[open] > summary { align-self: flex-end; }
 .price-breakdown { display: grid; grid-template-columns: 1fr auto; gap: 3px 0; margin: 0; font-size: var(--t-sm); }
@@ -1407,7 +1410,15 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   .context-toggle, .composer .attach, .ai-ask-btn, .info-btn, .icon-btn { min-width: 44px; }
   .send-btn.primary, .primary.soft.send-btn, .send-btn, .composer .attach { height: 44px; min-height: 44px; border-radius: 22px; }
   .node-target-section.compact .node-target-card { min-height: 44px; }
-  .track-title-btn, .composer-info > summary { min-width: 44px; }
+  /* `.track-head > .track-title-btn` sets min-width: 0 so a long name can ellipsize.
+     That beats a bare `.track-title-btn` rule, so a short name ("Maya", "Josh") stayed under 44 px. */
+  .track-head > .track-title-btn { min-width: 44px; }
+  .composer-info > summary { min-width: 44px; }
+  /* nowrap + flex: 1 let "Accept · 12,345 sats" and "Decline · …" overflow a phone call card. */
+  .call-panel .call-actions,
+  .call-repairs .call-actions { flex-direction: column; align-items: stretch; }
+  .call-panel .call-actions button,
+  .call-repairs .call-actions button { flex: none; width: 100%; white-space: normal; text-align: center; }
   /* Message bar: the text gets its own full row; emoji, voice, + and Send sit under it. */
   .signal-bar { flex-wrap: wrap; row-gap: var(--s-2); }
   .signal-bar > textarea { order: -1; flex: 1 1 100%; }
@@ -1432,7 +1443,7 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 /* The contact pickers (meeting planner, New room) and the meeting itself share .meeting-panel and
    grow with the contact list; the panel scrolls inside the screen instead of running off the top
    (12 contacts at 375 x 667 put the planner's top at -174 px and New room's header off screen). */
-.meeting-panel { max-height: calc(100dvh - 48px); overflow-y: auto; }
+.meeting-panel { max-height: calc(100dvh - 48px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); overflow-y: auto; }
 /* Phone: checkboxes in assistant watches and the meeting planner get a thumb-sized row. */
 @media (max-width: 480px) {
   .ai-watches label, .meeting-panel .meeting-legs label { min-height: 44px; display: flex !important; align-items: center; gap: var(--s-2); }
@@ -1499,7 +1510,7 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .call-repairs { flex: 0 0 auto; max-height: 35vh; overflow: auto; padding: var(--s-3) var(--s-4); border-bottom: 1px solid var(--line-strong); background: var(--raised); }
 .call-repairs .call-actions { align-items: center; margin-top: var(--s-2); }
 /* Keep in-call payment and approval controls reachable on short screens. */
-.call-panel[data-call-panel] { max-height: calc(100dvh - 48px); overflow-y: auto; }
+.call-panel[data-call-panel] { max-height: calc(100dvh - 48px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); overflow-y: auto; }
 .in-call-pay { display: grid; gap: var(--s-2); }
 .in-call-pay .pay-flow { min-width: 0; }
 .in-call-pay .amount-input { min-width: 0; width: 100%; }

@@ -118,7 +118,9 @@ describe.each([
       return Promise.reject('unavailable');
     } });
     show(() => <App />);
-    await vi.waitFor(() => expect(mount.textContent).toContain(message));
+    const shown = device === 'iPad' ? message.replace('this phone', 'this iPad') : message;
+    await vi.waitFor(() => expect(mount.textContent).toContain(shown));
+    if (device === 'iPad') expect(mount.textContent).not.toContain('this phone');
     expect(mount.textContent).not.toContain('Your node is unavailable');
     expect(Array.from(mount.querySelectorAll('button')).some(b => b.textContent === 'Reconnect')).toBe(false);
   });
