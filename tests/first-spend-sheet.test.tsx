@@ -105,3 +105,21 @@ it('Escape and the scrim dismiss without allowing', () => {
   button('[data-first-spend-scrim]').click();
   expect(cancel).toHaveBeenCalledTimes(2); expect(allow).not.toHaveBeenCalled();
 });
+
+it('traps focus, dismisses by swipe, and restores focus to the opener without allowing', async () => {
+  const opener = document.createElement('button'); document.body.append(opener); opener.focus();
+  const { cancel, allow } = setup();
+  const sheet = button('[data-first-spend-sheet]');
+  expect(document.activeElement).toBe(sheet);
+  sheet.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }));
+  expect(document.activeElement).toBe(button('[data-first-spend-cancel]'));
+  document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+  expect(document.activeElement).toBe(mount.querySelector('summary'));
+  opener.focus(); expect(document.activeElement).toBe(sheet);
+  const grabber = mount.querySelector('.first-spend-grabber')!;
+  grabber.dispatchEvent(new PointerEvent('pointerdown', { clientY: 100, pointerId: 1, bubbles: true }));
+  grabber.dispatchEvent(new PointerEvent('pointerup', { clientY: 180, pointerId: 1, bubbles: true }));
+  expect(cancel).toHaveBeenCalledOnce(); expect(allow).not.toHaveBeenCalled();
+  dispose?.(); dispose = undefined;
+  await Promise.resolve(); expect(document.activeElement).toBe(opener); opener.remove();
+});

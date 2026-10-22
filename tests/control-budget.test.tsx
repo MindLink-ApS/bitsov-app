@@ -206,6 +206,121 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('message_send')).toHaveLength(0);
   });
 
+  describe.each(['en', 'da'] as const)('U4 round 1 (%s)', lang => {
+    it.each(['owner', 'grant', 'local', 'legacy', 'grant-ended'] as const)('shows the real approval path and submits its effective custom amount: %s', async path => {
+      const host = stubHost(budgetView({ node_grant: path === 'grant' ? {
+        budget_msat: 300_500, remaining_msat: 200_000, per_call_max_msat: 50_000,
+        expires_at_ms: Date.now() + DAY, envelopes: null,
+      } : null }), { pairing_status: () => ({ ...paired, state: path === 'local' ? 'fallback' : 'paired', scopes: ['grant', 'legacy', 'grant-ended'].includes(path) ? ['read', 'receive', 'spend'] : paired.scopes }),
+        ...(path === 'grant-ended' ? { node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 2, e2ee_sessions: 1, pending_deliveries: 0, lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: [] }) } : {}),
+      });
+      await openShell(); setLanguagePref(lang);
+      type('[data-composer] textarea', 'custom budget'); sendOnly();
+      await vi.waitFor(() => expect($<HTMLButtonElement>('[data-first-spend-allow]')!.disabled).toBe(false));
+      const owner = lang === 'en' ? 'Approve at your box' : 'Godkend på din boks';
+      const disclaimer = lang === 'en' ? 'It grants no permission by itself.' : 'Det giver ikke i sig selv nogen tilladelse.';
+      if (path === 'owner') {
+        expect(text('[data-first-spend-sheet]')).toContain(owner);
+        expect(text('[data-first-spend-sheet]')).toContain(disclaimer);
+      } else {
+        expect(text('[data-first-spend-sheet]')).not.toContain(owner);
+        expect(text('[data-first-spend-sheet]')).not.toContain(disclaimer);
+        expect(text('[data-first-spend-sheet]')).toContain(['legacy', 'grant-ended'].includes(path)
+          ? (lang === 'en' ? 'Allow may start payments immediately' : 'Tillad kan starte betalinger med det samme')
+          : (lang === 'en' ? 'Starts now, up to' : 'Starter nu, op til'));
+      }
+      $<HTMLElement>('[data-first-spend-sheet] summary')!.click();
+      expect(text('[data-first-spend-sheet]')).not.toContain(lang === 'en' ? 'These presets come from your node' : 'Disse forudindstillinger kommer fra din node');
+      if (path === 'grant') {
+        expect(text('[data-preset="generous"]')).toContain(lang === 'en' ? '300.5 sats' : '300,5 sats');
+        expect(text('[data-first-spend-allow]')).toContain(lang === 'en' ? '300.5 sats' : '300,5 sats');
+      }
+      $<HTMLButtonElement>('[data-first-spend-custom]')!.click();
+      if (lang === 'da') {
+        type('[data-first-spend-amount]', '1.000');
+        expect(text('[data-first-spend-reason]')).toBe('Brug mellemrum: 1 000');
+        expect($<HTMLButtonElement>('[data-first-spend-allow]')!.disabled).toBe(true);
+        expect(host.used('budget_approve')).toHaveLength(0);
+      }
+      type('[data-first-spend-amount]', '1 250');
+      expect(text('[data-first-spend-allow]').replace(/\s/g, ' ')).toContain(path === 'grant' ? (lang === 'en' ? '300.5 sats' : '300,5 sats') : '1 250 sats');
+      $<HTMLButtonElement>('[data-first-spend-allow]')!.click();
+      await vi.waitFor(() => expect(host.used('budget_approve')).toHaveLength(1));
+      expect(host.used('budget_approve')[0].args).toEqual({ ceiling_msat: path === 'grant' ? 300_500 : 1_250_000, preset: 'careful' });
+      expect(host.used('message_send')).toHaveLength(0);
+    });
+
+    it.each(['lost', 'expired'] as const)('restores daily expiry and request lapse: %s', async lapse => {
+      stubHost(budgetView({ autopay: { state: 'expired', open_until_ms: null, ceiling_msat: null, basis: null } }), {
+        spend_status: () => ({ ...locked, state: 'expired', lapse }),
+      });
+      await openShell(); setLanguagePref(lang);
+      type('[data-composer] textarea', 'hello'); sendOnly();
+      expect(text('[data-first-spend-sheet]')).toContain(lang === 'en' ? 'Your daily approval ended.' : 'Din døgn-godkendelse udløb.');
+      expect(text('[data-budget-lapse]')).toContain(lang === 'en'
+        ? (lapse === 'lost' ? 'Your node can no longer approve' : 'Your last request lapsed')
+        : (lapse === 'lost' ? 'Din node kan ikke længere godkende' : 'Din sidste anmodning udløb'));
+    });
+
+    it.each(['expired', 'failed'] as const)('retries a %s quote inside the sheet without approving', async problem => {
+      let attempts = 0;
+      const host = stubHost(budgetView(), { first_contact_quote: args => {
+        attempts++;
+        if (attempts === 1 && problem === 'failed') throw new Error('offline');
+        return { recipient: args!.peer, admission_msat: 1000, message_msat: 1000, max_routing_fee_msat: 0, total_msat: 2000,
+          expires_at: Math.floor(Date.now() / 1000) + (attempts === 1 ? -1 : 60) };
+      } });
+      await openShell(); setLanguagePref(lang);
+      type('[data-composer] textarea', 'hello'); sendOnly();
+      await vi.waitFor(() => expect($('[data-first-spend-retry]')).not.toBeNull());
+      expect($<HTMLButtonElement>('[data-first-spend-allow]')!.disabled).toBe(true);
+      expect($('[data-first-spend-reason]')).toBeNull(); // Cost line already explains the disabled action.
+      const primary = $<HTMLButtonElement>('[data-first-spend-allow]')!;
+      expect($(`#${primary.getAttribute('aria-describedby')}`)).toBe($('[data-first-spend-cost]'));
+      $<HTMLButtonElement>('[data-first-spend-retry]')!.click();
+      await vi.waitFor(() => expect(primary.disabled).toBe(false));
+      expect(attempts).toBe(2);
+      expect(text('[data-first-spend-cost]')).toContain(lang === 'en' ? 'Entry fee:' : 'Adgangsgebyr:');
+      expect(host.used('budget_approve')).toHaveLength(0);
+      expect(host.used('message_send')).toHaveLength(0);
+    });
+
+    it('swipe closes the sheet, keeps the draft and restores Send focus without approving', async () => {
+      const host = stubHost(budgetView()); await openShell(); setLanguagePref(lang);
+      type('[data-composer] textarea', 'keep this draft');
+      const send = $<HTMLButtonElement>('[data-send]')!; send.focus(); sendOnly();
+      const sheet = $('[data-first-spend-sheet]')!;
+      await vi.waitFor(() => expect($<HTMLButtonElement>('[data-first-spend-allow]')!.disabled).toBe(false));
+      sheet.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }));
+      expect(document.activeElement).toBe($('[data-first-spend-cancel]'));
+      document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+      expect(sheet.contains(document.activeElement)).toBe(true);
+      const grabber = $('.first-spend-grabber')!;
+      grabber.dispatchEvent(new PointerEvent('pointerdown', { clientY: 100, pointerId: 1, bubbles: true }));
+      grabber.dispatchEvent(new PointerEvent('pointerup', { clientY: 180, pointerId: 1, bubbles: true }));
+      expect($('[data-first-spend-sheet]')).toBeNull();
+      await Promise.resolve(); expect(document.activeElement).toBe(send);
+      expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('keep this draft');
+      expect(host.used('budget_approve')).toHaveLength(0); expect(host.used('message_send')).toHaveLength(0);
+    });
+
+    it('does not show an entry-fee loading line before a fetch starts', async () => {
+      const host = stubHost(budgetView()); await openShell(); setLanguagePref(lang);
+      $<HTMLElement>(`[data-track="peer:${NEW}"]`)!.click();
+      expect(host.used('first_contact_quote')).toHaveLength(0);
+      expect($('[data-first-contact-cost]')).toBeNull();
+      $<HTMLElement>(`[data-track="peer:${MAYA}"]`)!.click();
+      type('[data-composer] textarea', 'hello');
+      await vi.waitFor(() => expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(false));
+      sendOnly();
+      await vi.waitFor(() => expect($<HTMLButtonElement>('[data-first-spend-allow]')!.disabled).toBe(false));
+      $<HTMLButtonElement>('[data-first-spend-cancel]')!.click();
+      $<HTMLElement>(`[data-track="peer:${NEW}"]`)!.click();
+      expect(host.used('first_contact_quote')).toHaveLength(1);
+      expect($('[data-first-contact-cost]')).toBeNull();
+    });
+  });
+
   it('U4: disabled Send explains an empty draft, and a stale node disables an open sheet', async () => {
     let unavailable = false;
     const host = stubHost(budgetView(), { budget_status: () => {

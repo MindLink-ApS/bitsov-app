@@ -158,6 +158,9 @@ type Props = {
   watchUpdates?: WatchUpdates;
   watchError?: string | null;
   remote?: boolean;
+  /** AuthMode::Local (rc7 fallback), independent of transport location. */
+  localApproval?: boolean;
+  spendScoped?: boolean;
   /** An Android or iOS build: no node of its own, so no local-node state in the pill. */
   phone?: boolean;
   /** The remote node's display label from its pairing link, if any. */
@@ -232,6 +235,8 @@ type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
  */
 export type Actions = {
   remote?: () => boolean;
+  localApproval?: () => boolean;
+  spendScoped?: () => boolean;
   moneyBlocked: () => boolean;
   /** The request was made (open, or pending at the node), with the host's ids for it (#227). */
   approve: () => Promise<ApprovalResult>;
@@ -1325,6 +1330,8 @@ export function ControlCenter(props: Props) {
   onCleanup(() => voiceUrls.forEach((u) => void u.then(URL.revokeObjectURL, () => undefined)));
   const actions: Actions = {
     remote: () => props.remote === true,
+    localApproval: () => props.localApproval === true,
+    spendScoped: () => props.spendScoped === true,
     moneyBlocked,
     callQuote: (peer) => act(() => source.callQuote(peer)),
     placeCall: (peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); },
@@ -4790,12 +4797,17 @@ function Composer(props: {
   };
 
   const firstContactCostLine = (): string | null => {
-    if (!doorWanted()) return null;
+    if (!doorWanted() || (!door() && !readmitPrice())) return null;
     const q = readmitPrice() ?? doorQuote();
     if (priceProblem()) return priceProblem();
     if (!q) return tr('firstSpendCostLoading');
     return tr('firstSpendCost', fmtAmount(q.admission_msat), fmtAmount(q.message_msat),
       fmtAmount(q.max_routing_fee_msat ?? 0), fmtAmount(q.total_msat));
+  };
+
+  const retryPrice = () => {
+    if (doorWanted() && door()) setDoor(null);
+    props.refreshPrice();
   };
 
   /** What this mode costs, shown before the button is pressed. */
@@ -6045,10 +6057,7 @@ function Composer(props: {
           <span data-send-price aria-live="polite">{priceLine()}</span>
           <Show when={firstContactCostLine()}><span class="first-contact-cost" data-first-contact-cost>{firstContactCostLine()}</span></Show>
           <Show when={priceProblem() && priceProblem() !== tr('uiPriceLoading')}>
-            {' '}<button type="button" class="link" data-price-retry disabled={busy()} onClick={() => {
-              if (doorWanted() && door()) setDoor(null);
-              props.refreshPrice();
-            }}>{tr('uiRetry')}</button>
+            {' '}<button type="button" class="link" data-price-retry disabled={busy()} onClick={retryPrice}>{tr('uiRetry')}</button>
           </Show>
         </div>
       </Show>
@@ -6232,6 +6241,12 @@ function Composer(props: {
           presets={budget()?.presets ?? []}
           initialPreset={presetChosen()?.id ?? null}
           maxDailyMsat={budget()?.max_daily_msat ?? 0}
+          grantBudgetMsat={props.actions.localApproval?.() ? undefined : budget()?.node_grant?.budget_msat}
+          startsNow={props.actions.localApproval?.() === true || !!budget()?.node_grant}
+          mayStartNow={props.actions.spendScoped?.() === true}
+          lapse={props.spend?.state === 'expired' ? props.spend.lapse : null}
+          dailyExpired={budget()?.autopay.state === 'expired'}
+          onRetry={priceProblem() && priceProblem() !== tr('uiPriceLoading') && !busy() ? retryPrice : undefined}
           costLine={mode() === 'file' && props.filePrice
             ? tr('firstSpendFileCost', fmtAmount(props.filePrice.principal_msat), fmtAmount(props.filePrice.max_routing_fee_msat), fmtAmount(props.filePrice.total_msat))
             : firstContactCostLine() ?? priceLine() ?? tr('uiPriceLoading')}
