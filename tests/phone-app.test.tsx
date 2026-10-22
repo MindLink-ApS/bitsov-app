@@ -1,19 +1,20 @@
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from '../src/App';
-import { INITIAL_PAIRING } from '../src/onboarding/pairing';
+import { INITIAL_PAIRING, type ConnectionError } from '../src/onboarding/pairing';
 
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 const tick = async () => { for (let i = 0; i < 70; i++) await Promise.resolve(); };
 const button = (text: string) => [...document.querySelectorAll('button')].find(b => b.textContent?.includes(text))!;
-function mount(platform: string, existing = false, legacy = false) {
+function mount(platform: string, existing = false, legacy = false, connection_error?: ConnectionError) {
   vi.useFakeTimers();
   vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(platform);
-  const state = { connected: existing, approved: false, trusted: false, locked: false, inbox: 'bitsov://pair/synthetic' as string | null };
+  const state = { connected: existing, approved: false, trusted: false, locked: false, inbox: connection_error ? null : 'bitsov://pair/synthetic' as string | null };
   const actions: unknown[] = [];
   const invoke = vi.fn(async (cmd: string, args?: any) => {
-    if (cmd === 'node_status') return { phone_setup: !existing, locked: state.locked, ready: state.connected && !state.locked, node_id: state.connected ? 'ab'.repeat(32) : null, error: null };
+    if (cmd === 'node_status') return { phone_setup: !existing, locked: state.locked, ready: state.connected && !state.locked, node_id: state.connected ? 'ab'.repeat(32) : null, error: null, connection_error };
+    if (cmd === 'open_app_settings' || cmd === 'open_tailscale') return;
     if (cmd === 'pairing_status') return { ...INITIAL_PAIRING, remote: state.connected, state: state.connected ? 'paired' : 'starting' };
     if (cmd === 'pairing_link_take') { const link = state.inbox; state.inbox = null; return link; }
     if (cmd === 'remote_access_preview') return { first_run: false, second_device: !legacy, endpoint: 'box:443', node_id_fingerprint: 'abcd' };
@@ -32,6 +33,15 @@ function mount(platform: string, existing = false, legacy = false) {
   return { state, actions, invoke };
 }
 describe.each(['iPhone', 'Android'])('%s first-run onboarding', platform => {
+  it.each([
+    ['local_network', 'Open Settings', 'open_app_settings'],
+    ['tailscale', 'Open Tailscale', 'open_tailscale'],
+  ] as const)('wires %s recovery to a fixed host command without destination input', async (kind, label, command) => {
+    const { invoke } = mount(platform, false, false, { kind, detail: '' });
+    await tick();
+    button(label).click(); await tick();
+    expect(invoke.mock.calls.filter(([cmd]) => cmd.startsWith('open_')).map(([cmd, args]) => [cmd, args])).toEqual([[command, {}]]);
+  });
   it('consumes the cold link, joins code-free, then still requires trust', async () => {
     const { state, actions } = mount(platform);
     await tick(); await vi.advanceTimersByTimeAsync(1500); await tick();
@@ -82,9 +92,9 @@ describe.each(['iPhone', 'Android'])('%s first-run onboarding', platform => {
     expect(invoke.mock.calls.some(([cmd]) => cmd === 'remote_access_connect')).toBe(false);
   });
 });
-it('resumes a saved second-device enrollment without consuming a replacement link', async () => {
+it.each(['iPhone', 'Android'])('%s resumes a saved second-device enrollment without consuming a replacement link', async platform => {
   vi.useFakeTimers();
-  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone');
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(platform);
   let imports = 0;
   vi.stubGlobal('__TAURI_INTERNALS__', { invoke: async (cmd: string) => {
     if (cmd === 'node_status') return { phone_setup: true, ready: true, node_id: 'ab'.repeat(32), error: null };

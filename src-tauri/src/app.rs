@@ -5979,7 +5979,7 @@ async fn do_conversation_send(
 }
 
 /// Slice B's call shape: no first-contact confirmation. Tests only.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(all(test, desktop, not(feature = "mobile")))]
 async fn do_message_send(
     state: &NodeState,
     recipient: &str,
@@ -5994,6 +5994,7 @@ async fn do_message_send(
 /// A message pays inside the owner's budget without a prompt, or under the
 /// ten-minute window. `first_contact_msat` is the owner's one-time OK for a
 /// contact or room not yet in the book, with the budget they chose for it.
+#[cfg(all(test, desktop, not(feature = "mobile")))]
 async fn do_message_send_with(
     state: &NodeState,
     recipient: &str,
@@ -8914,7 +8915,7 @@ fn run() {
 /// During deferred iOS cleanup only status reads may enter the app. In
 /// particular import/Forget must not write app data that could make the next
 /// fresh-install inspection preserve an orphaned identity.
-#[cfg(any(target_os = "ios", all(test, unix)))]
+#[cfg(any(target_os = "ios", all(test, unix, desktop, not(feature = "mobile"))))]
 fn guard_ios_startup<R: tauri::Runtime>(
     handler: impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static,
 ) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {

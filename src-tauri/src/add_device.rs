@@ -508,6 +508,7 @@ pub(super) struct Enrollment {
     sas_version: u8,
     box_nonce: String,
 }
+#[cfg(all(test, desktop, not(feature = "mobile")))]
 pub(super) fn accept_enrollment_reply(
     state: &NodeState,
     store: &Path,

@@ -204,16 +204,48 @@ it('paste cannot replace enrollment after its polling connection fails', async (
   expect(button('Paste link').disabled).toBe(true); button('Paste link').click(); await tick();
   expect(readText).not.toHaveBeenCalled(); expect(props.connect).not.toHaveBeenCalled();
 });
-it('offers manual paste after clipboard refusal without echoing the failure', async () => {
-  vi.stubGlobal('navigator', { clipboard: { readText: () => Promise.reject('private failure') } });
-  const props = mount(); button('Paste link').click(); await tick();
+it.each([
+  ['android', 'refused'], ['android', 'missing'], ['ios', 'refused'], ['ios', 'missing'],
+] as const)('%s offers masked manual paste when clipboard access is %s', async (platform, access) => {
+  const readText = vi.fn().mockRejectedValue('private failure');
+  vi.stubGlobal('navigator', access === 'missing' ? {} : { clipboard: { readText } });
+  const props = mount({ platform });
+  expect(readText).not.toHaveBeenCalled();
+  button('Paste link').click(); await tick();
   const input = document.querySelector<HTMLInputElement>('input[aria-label="Pairing link"]');
   expect(input).not.toBeNull();
+  expect(input!.type).toBe('password');
+  expect(input!.autocomplete).toBe('off');
+  expect(document.querySelector<HTMLDetailsElement>('.phone-options')!.open).toBe(true);
   expect(document.body.textContent).not.toContain('private failure');
   input!.value = 'bitsov://pair/synthetic'; input!.dispatchEvent(new Event('input', { bubbles: true }));
   button('Use link').click(); await tick();
-  expect(props.connect).toHaveBeenCalledOnce();
+  expect(props.connect).toHaveBeenCalledExactlyOnceWith('bitsov://pair/synthetic');
+  expect(input!.value).toBe('');
   expect(document.querySelector('input')).toBeNull();
+});
+it('clears an unfinished manual paste when onboarding unmounts', async () => {
+  vi.stubGlobal('navigator', {});
+  mount({ platform: 'android' });
+  button('Paste link').click(); await tick();
+  const input = document.querySelector<HTMLInputElement>('input')!;
+  input.value = 'bitsov://pair/private-unsubmitted';
+  dispose!(); dispose = undefined;
+  expect(input.value).toBe('');
+});
+it.each(['android', 'ios'] as const)('%s clears an unfinished manual paste on reset and scanner handoff', async platform => {
+  vi.stubGlobal('navigator', {});
+  const props = mount({ platform, scan: () => new Promise(() => {}) });
+  for (const action of ['Forget this box', "Scan your box's QR"]) {
+    button('Paste link').click(); await tick();
+    const input = document.querySelector<HTMLInputElement>('input')!;
+    input.value = 'bitsov://pair/private-unsubmitted';
+    button(action).click(); await tick();
+    expect(input.value).toBe('');
+    expect(document.querySelector('input')).toBeNull();
+    expect(props.preview).not.toHaveBeenCalled();
+    expect(props.connect).not.toHaveBeenCalled();
+  }
 });
 it('uses the Android permission name on the local-network recovery screen', async () => {
   mount({ platform: 'android', status: () => ({ ready: false, node_id: null, error: null, connection_error: { kind: 'local_network', detail: '' } }) });

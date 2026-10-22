@@ -40,6 +40,10 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   const [cancellingScan, setCancellingScan] = createSignal(false);
   const [manualPaste, setManualPaste] = createSignal(false);
   let pasteInput: HTMLInputElement | undefined;
+  const clearManualPaste = () => {
+    if (pasteInput) pasteInput.value = '';
+    setManualPaste(false);
+  };
   const [toast, setToast] = createSignal('');
   const [preview, setPreview] = createSignal<RemotePreviewView>();
   const [waiting, setWaiting] = createSignal<Extract<JoinView, { state: 'waiting' }>>();
@@ -51,7 +55,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   let resume: 'camera' | 'connection' | undefined;
   let previousHostError: ConnectionError | null | undefined;
   usePairingActivity(() => busy() || ['scanner', 'connecting', 'words', 'fingerprint'].includes(screen()));
-  onCleanup(() => { alive = false; generation++; pendingLink = ''; if (screen() === 'scanner') void props.cancelScan?.().catch(() => {}); });
+  onCleanup(() => { alive = false; generation++; pendingLink = ''; if (pasteInput) pasteInput.value = ''; if (screen() === 'scanner') void props.cancelScan?.().catch(() => {}); });
   const fail = (e: unknown) => { joinGeneration++; setError(failure(e)); setScreen('error'); };
   const receive = (v: JoinView) => {
     if (v.state === 'waiting') { setWaiting(v); setScreen('words'); }
@@ -86,7 +90,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     let link: string;
     try { link = normalizePairingLink(input); } catch { setToast(c().empty); return; }
     resumeSaved = false; pendingLink = ''; compared = false;
-    setManualPaste(false);
+    clearManualPaste();
     setBusy(true); setToast(''); setError(undefined); setOptions(false); setScreen('connecting');
     const turn = ++generation;
     joinStarted = false;
@@ -116,6 +120,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   };
   const scan = async () => {
     if (!alive || busy() || !props.scan) return;
+    clearManualPaste();
     setBusy(true); setOptions(false); setToast(''); setScreen('scanner');
     const turn = ++generation;
     try {
@@ -146,6 +151,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     finally { if (alive) setBusy(false); }
   };
   const reset = async () => {
+    clearManualPaste();
     generation++; resumeSaved = false; pendingLink = ''; compared = false;
     if (joinStarted || waiting() || props.device()?.state === 'pending') await props.join({ action: 'cancel' });
     await props.forget();

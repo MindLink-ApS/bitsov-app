@@ -18,6 +18,7 @@ impl AppProfile {
         self.remote_only
     }
 
+    #[cfg(any(test, target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))]
     pub(crate) fn keychain_service(self, service: &str) -> String {
         if self.remote_only {
             format!("{REMOTE_TEST_IDENTIFIER}.{service}")
@@ -35,6 +36,7 @@ pub(crate) fn install(identifier: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))]
 pub(crate) fn current() -> Result<AppProfile, String> {
     // Never fall back to production names if a caller runs before setup.
     PROFILE.get().copied().ok_or_else(|| "The app storage profile is not initialized.".into())
