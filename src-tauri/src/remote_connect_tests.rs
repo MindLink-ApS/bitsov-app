@@ -426,3 +426,23 @@ async fn connect_reports_the_sealed_window_rejection() {
     let error = remote_access_connect(window, app.handle().clone(), app.state::<NodeState>(), "".into()).await.unwrap_err();
     assert_eq!(error.detail, "this command is only available to the main window");
 }
+
+#[tokio::test]
+async fn phone_setup_is_unknown_until_saved_descriptor_has_been_checked() {
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    assert_eq!(state.status_snapshot().phone_setup, None);
+    let dir = tempfile::tempdir().unwrap();
+    connect_remote_at(&state, dir.path(), true).await.unwrap();
+    assert_eq!(state.status_snapshot().phone_setup, Some(true));
+}
+
+#[tokio::test]
+async fn unreadable_saved_descriptor_routes_to_review_and_error_recovery() {
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    let dir = tempfile::tempdir().unwrap();
+    let remote = dir.path().join(remote_access::REMOTE_CONFIG_DIR);
+    std::fs::create_dir_all(&remote).unwrap();
+    std::fs::write(remote.join(remote_access::REMOTE_CONFIG_FILE), b"invalid").unwrap();
+    assert!(connect_remote_at(&state, dir.path(), true).await.is_err());
+    assert_eq!(state.status_snapshot().phone_setup, Some(false));
+}

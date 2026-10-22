@@ -53,3 +53,11 @@ describe('Mobile pairing QR scanner', () => {
     expect(scanner.scan).not.toHaveBeenCalled();
   });
 });
+it('marks camera denial for Settings recovery and rejects non-pairing QR content', async () => {
+  scanner.checkPermissions.mockResolvedValue('denied');
+  scanner.requestPermissions.mockResolvedValue('denied');
+  await expect(scanPairingLink()).rejects.toMatchObject({ kind: 'camera' });
+  scanner.checkPermissions.mockResolvedValue('granted');
+  scanner.scan.mockResolvedValue({ content: 'unrelated QR' });
+  await expect(scanPairingLink()).rejects.toThrow();
+});

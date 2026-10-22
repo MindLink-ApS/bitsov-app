@@ -1,4 +1,5 @@
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
+import { appPlatform, type AppPlatform } from '../platform';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
 import { usePairingActivity } from '../pairingActivity';
@@ -10,7 +11,7 @@ import './phoneOnboarding.css';
 
 export type PhoneOnboardingProps = {
   status: () => NodeStatus; pairing: () => PairingView; device: () => DeviceView | null;
-  locale?: string; scan?: () => Promise<string>; cancelScan?: () => Promise<void>;
+  platform?: AppPlatform; locale?: string; scan?: () => Promise<string>; cancelScan?: () => Promise<void>;
   preview: (link: string) => Promise<RemotePreviewView>; connect: (link: string) => Promise<RemoteImportView>;
   retry: () => Promise<unknown>; forget: () => Promise<unknown>;
   /** No secret input: this must use an owner-approved second-device contract. */
@@ -20,10 +21,11 @@ export type PhoneOnboardingProps = {
   incoming?: { link: string } | null; onConsumeLink?: () => void; onDone: () => void;
 };
 type Screen = 'start' | 'scanner' | 'connecting' | 'words' | 'fingerprint' | 'done' | 'error';
-type Failure = ConnectionError['kind'] | 'camera' | 'mismatch' | 'approval_expired';
-const kinds = new Set<Failure>(['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired']);
+type Failure = ConnectionError['kind'] | 'camera' | 'mismatch' | 'approval_expired' | 'unsupported';
+const kinds = new Set<Failure>(['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired', 'unsupported']);
 function failure(error: unknown): { kind: Failure; detail: string } {
   const outer = error && typeof error === 'object' ? error as Record<string, unknown> : {};
+  if (outer.code === 'enrollment_restart') return { kind: 'approval_expired', detail: '' };
   const e = outer.connection_error && typeof outer.connection_error === 'object' ? outer.connection_error as Record<string, unknown> : outer;
   // Only structured, sanitized host diagnostics are accepted. Never echo scanner/clipboard errors.
   return { kind: kinds.has(e.kind as Failure) ? e.kind as Failure : 'other', detail: typeof e.detail === 'string' ? e.detail.replace(/bitsov:\/\/pair\/[^\s]+/g, '[redacted]') : '' };
@@ -35,6 +37,8 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   const [error, setError] = createSignal<{ kind: Failure; detail: string }>();
   const [busy, setBusy] = createSignal(false);
   const [cancellingScan, setCancellingScan] = createSignal(false);
+  const [manualPaste, setManualPaste] = createSignal(false);
+  let pasteInput: HTMLInputElement | undefined;
   const [toast, setToast] = createSignal('');
   const [preview, setPreview] = createSignal<RemotePreviewView>();
   const [waiting, setWaiting] = createSignal<Extract<JoinView, { state: 'waiting' }>>();
@@ -64,6 +68,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       receive(v);
       if (v.state === 'idle' && (joinStarted || screen() === 'words')) { fail({ kind: 'approval_expired' }); return; }
       if (v.state === 'idle' && !joinStarted) {
+        if (v.second_device !== true) { fail({ kind: 'unsupported' }); return; }
         joinStarted = true;
         const next = await props.beginJoin();
         if (alive && turn === generation && joinTurn === joinGeneration) {
@@ -78,6 +83,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     let link: string;
     try { link = normalizePairingLink(input); } catch { setToast(c().empty); return; }
     resumeSaved = false;
+    setManualPaste(false);
     setBusy(true); setToast(''); setError(undefined); setOptions(false); setScreen('connecting');
     const turn = ++generation;
     joinStarted = false;
@@ -113,7 +119,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       const link = await navigator.clipboard.readText();
       if (alive && turn === generation) await connect(link);
     }
-    catch { if (alive && turn === generation) setToast(c().empty); }
+    catch { if (alive && turn === generation) { setManualPaste(true); setOptions(true); setToast(''); } }
   };
   const run = async (action: () => Promise<unknown>) => {
     if (busy()) return;
@@ -142,7 +148,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       await props.openSettings();
     } else if (kind === 'tailscale') {
       resume = 'connection'; await props.openTailscale();
-    } else if (['expired', 'used', 'clock', 'approval_expired'].includes(kind ?? '')) {
+    } else if (['expired', 'used', 'clock', 'approval_expired', 'unsupported'].includes(kind ?? '')) {
       await reset(); setBusy(false); await scan();
     } else if (['unclaimed', 'mismatch', 'claim_mismatch'].includes(kind ?? '')) await reset();
     else await retry();
@@ -177,14 +183,15 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   const errorCopy = () => {
     const t = c();
     switch (error()?.kind) {
+      case 'unsupported': return [t.update, t.updateLine, t.newQr];
       case 'unclaimed': return [t.unclaimed, t.unclaimedLine, t.restart];
-      case 'local_network': return [t.localNetwork, t.localNetworkLine, t.settings];
+      case 'local_network': return [t.localNetwork, (props.platform ?? appPlatform()) === 'android' ? t.nearbyLine : t.localNetworkLine, t.settings];
       case 'tailscale': return [t.unreachable, t.tailscaleLine, t.tailscale];
       case 'unreachable': return [t.unreachable, t.unreachableLine, t.retry];
       case 'approval_expired': return [t.approvalExpired, t.expiredLine, t.newQr];
       case 'expired': case 'used': return [t.expired, t.expiredLine, t.newQr];
       case 'clock': return [t.expired, t.clockLine, t.newQr];
-      case 'camera': return [t.camera, t.cameraLine, t.settings];
+      case 'camera': return [t.camera, (props.platform ?? appPlatform()) === 'android' ? t.androidCameraLine : t.cameraLine, t.settings];
       case 'mismatch': return [t.stopped, t.stoppedLine, t.restart];
       case 'claim_mismatch': return [t.claimMismatch, t.claimMismatchLine, t.restart];
       case 'busy': return [t.busy, t.busyLine, t.retry];
@@ -221,6 +228,15 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     <details class="phone-options" open={options()} onToggle={e => setOptions(e.currentTarget.open)}>
       <summary>{c().options}</summary>
       <button type="button" disabled={busy() || !!waiting() || joinStarted || ['words', 'connecting', 'fingerprint'].includes(screen())} onClick={() => void paste()}>{c().paste}</button>
+      <Show when={manualPaste()}><form onSubmit={e => {
+        e.preventDefault();
+        const link = pasteInput?.value ?? '';
+        if (pasteInput) pasteInput.value = '';
+        void connect(link);
+      }}>
+        <label>{c().manualPaste}<input ref={pasteInput} aria-label={c().link} type="password" autocomplete="off" autocapitalize="none" spellcheck={false} /></label>
+        <button type="submit" disabled={busy()}>{c().useLink}</button>
+      </form></Show>
       <Show when={screen() === 'scanner'}><button type="button" disabled={cancellingScan()} onClick={() => {
         if (cancellingScan()) return;
         setCancellingScan(true);

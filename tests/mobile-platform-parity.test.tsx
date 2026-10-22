@@ -113,12 +113,12 @@ describe.each([
   it('App renders saved first-run ticket guidance without an unavailable error or reconnect button', async () => {
     const message = "This node isn't set up yet. Finish setup on a Mac, then add this phone.";
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
-      if (cmd === 'node_status') return Promise.resolve({ ready: false, node_id: null, error: message });
+      if (cmd === 'node_status') return Promise.resolve({ phone_setup: true, ready: false, node_id: null, error: message, connection_error: { kind: 'unclaimed', detail: message } });
       if (cmd === 'pairing_status') return Promise.resolve({ state: 'starting', remote: false, scopes: [], bootstrap: null });
       return Promise.reject('unavailable');
     } });
     show(() => <App />);
-    await vi.waitFor(() => expect(mount.textContent).toContain(message));
+    await vi.waitFor(() => expect(mount.textContent).toContain("This box isn't set up yet"));
     expect(mount.textContent).not.toContain('Your node is unavailable');
     expect(Array.from(mount.querySelectorAll('button')).some(b => b.textContent === 'Reconnect')).toBe(false);
   });

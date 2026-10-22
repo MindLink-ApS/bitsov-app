@@ -225,6 +225,8 @@ struct NodeState {
     /// tunnel. Its drop/stop signal closes the process-local listener.
     remote_proxy: Mutex<Option<RemoteProxy>>,
     remote_mode: AtomicBool,
+    /// Startup routing is unknown until the saved descriptor was read.
+    phone_setup: Mutex<Option<bool>>,
     home_locked: AtomicBool,
     home_last_probe: Mutex<Option<Instant>>,
     home_unlock_state: Mutex<&'static str>,
@@ -406,6 +408,7 @@ impl NodeState {
         let (local_owner, owner_warning) = (false, None);
         let (unlock_state, pending_device) = home_unlock::locked_view(self);
         Status {
+            phone_setup: *self.phone_setup.lock().unwrap(),
             typed_unlock_supported: cfg!(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile")))),
             unlock_state,
             pending_device,
@@ -443,6 +446,7 @@ impl NodeState {
             pairing_view: Mutex::new(PairingView::starting()),
             remote_proxy: Mutex::new(None),
             remote_mode: AtomicBool::new(false),
+            phone_setup: Mutex::new(None),
             home_locked: AtomicBool::new(false),
             home_last_probe: Mutex::new(None),
             home_unlock_state: Mutex::new("ready"),
@@ -517,6 +521,7 @@ impl NodeState {
 
 #[derive(Serialize, Clone)]
 struct Status {
+    phone_setup: Option<bool>,
     typed_unlock_supported: bool,
     unlock_state: &'static str,
     pending_device: Option<device::DeviceView>,
@@ -1629,7 +1634,18 @@ async fn connect_remote_at(state: &NodeState, app_data_dir: &Path, wait: bool) -
                 guard
             };
             if state.remote_proxy.lock().unwrap().is_none() {
-                match remote_access::load_persisted(app_data_dir).map_err(|error| error.to_string())? {
+                let saved = match remote_access::load_persisted(app_data_dir) {
+                    Ok(saved) => saved,
+                    Err(error) => {
+                        // A broken existing descriptor must expose recovery, never
+                        // auto-import a queued link or leave startup unresolved.
+                        state.phone_setup.lock().unwrap().get_or_insert(false);
+                        return Err(error.to_string());
+                    }
+                };
+                state.phone_setup.lock().unwrap().get_or_insert_with(|| saved.as_ref().is_none_or(|d|
+                    d.pending_phone_enrollment()));
+                match saved {
                     Some(descriptor) => attach_remote(state, app_data_dir, descriptor).await,
                     None => {
                         #[cfg(any(mobile, feature = "mobile"))]
@@ -2525,6 +2541,19 @@ async fn pairing_link_take(
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     Ok(None)
+}
+
+/// Open only fixed mobile recovery destinations, scoped to the main webview.
+#[tauri::command]
+async fn open_app_settings(window: WebviewWindow<impl tauri::Runtime>) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    crate::phone_recovery::open(false).await
+}
+
+#[tauri::command]
+async fn open_tailscale(window: WebviewWindow<impl tauri::Runtime>) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    crate::phone_recovery::open(true).await
 }
 
 /// Parse a ticket for owner review. No app state, storage or network access.
@@ -8928,6 +8957,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
         .plugin(device_key::init())
         .plugin(crate::android_network::init())
         .plugin(crate::pairing_link_mobile::init())
+        .plugin(crate::phone_recovery::init())
         .plugin(tauri_plugin_barcode_scanner::init());
     // iOS device keys use the statically linked Apple enclave bridge;
     // the QR scanner is the only mobile plugin. Pairing
@@ -8961,6 +8991,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             remote_access_import,
             remote_access_connect,
             pairing_link_take,
+            open_app_settings,
+            open_tailscale,
             remote_access_forget,
             node_overview,
             live_link,
@@ -19421,6 +19453,8 @@ mod assistant_acl_tests {
                 "remote_access_import",
                 "remote_access_connect",
                 "pairing_link_take",
+                "open_app_settings",
+                "open_tailscale",
                 "remote_access_forget",
                 // Control center reads (main window only, ACL + reject_sealed_window).
                 "node_overview",
@@ -19819,7 +19853,7 @@ mod assistant_acl_tests {
         let main_perms = permission_identifiers(main);
         assert!(main_perms.iter().any(|id| id == "core:default"));
         for command in &commands {
-            if command == "pairing_link_take" {
+            if ["pairing_link_take", "open_app_settings", "open_tailscale"].contains(&command.as_str()) {
                 assert!(
                     !main_perms.iter().any(|id| id == &allow_perm(command)),
                     "the Android intent inbox must not be granted on desktop"

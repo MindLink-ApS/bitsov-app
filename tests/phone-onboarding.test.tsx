@@ -16,7 +16,7 @@ function mount(extra: Partial<PhoneOnboardingProps> = {}) {
     connect: vi.fn().mockResolvedValue({ endpoint: 'box:443', node_id_fingerprint: 'ABCD', restart_required: false }),
     retry: vi.fn().mockResolvedValue(undefined), forget: vi.fn().mockResolvedValue(undefined),
     beginJoin: vi.fn().mockResolvedValue({ state: 'waiting', words: ['alpha', 'beta', 'gamma', 'delta'], expires_at: Date.now()/1000 + 300 }),
-    join: vi.fn().mockResolvedValue({ state: 'idle' }), openSettings: vi.fn().mockResolvedValue(undefined),
+    join: vi.fn().mockResolvedValue({ state: 'idle', second_device: true }), openSettings: vi.fn().mockResolvedValue(undefined),
     openTailscale: vi.fn().mockResolvedValue(undefined), onDone: vi.fn(), ...extra,
   };
   dispose = render(() => <PhoneOnboarding {...props} />, document.body);
@@ -40,7 +40,7 @@ it('auto-connects a scan, displays ordered words and only the owner can approve'
   setPairing({ ...INITIAL_PAIRING, remote: true, state: 'paired' });
   setStatus({ ready: true, node_id: 'box', error: null }); await tick();
   expect([...document.querySelectorAll('[data-pair-word]')].map(e => e.textContent)).toEqual(['alpha', 'beta', 'gamma', 'delta']);
-  expect(document.body.textContent).toContain('Approve on your other device if these match');
+  expect(document.body.textContent).toContain('Approve on your other device.');
   expect(button('They match')).toBeUndefined();
   expect(props.beginJoin).toHaveBeenCalledWith();
   button("They don't match").click(); await tick();
@@ -95,7 +95,7 @@ it('ships Danish copy while preserving the protocol words', () => {
 });
 it('only reaches Done after the host reports completion', async () => {
   vi.useFakeTimers();
-  const join = vi.fn().mockResolvedValueOnce({ state: 'idle' }).mockResolvedValue({ state: 'done' });
+  const join = vi.fn().mockResolvedValueOnce({ state: 'idle', second_device: true }).mockResolvedValue({ state: 'done' });
   const props = mount({ status: () => ({ ready: true, node_id: 'box', error: null }), pairing: () => ({ ...INITIAL_PAIRING, remote: true, state: 'paired' }), device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }), join });
   await tick(); expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('words');
   expect(props.onDone).not.toHaveBeenCalled();
@@ -181,7 +181,7 @@ it('discards a clipboard read superseded by scanning and cancelling', async () =
 it('does not resume a late approval poll after mismatched words are cancelled', async () => {
   vi.useFakeTimers();
   let finish!: (v: { state: 'done' }) => void;
-  const join = vi.fn().mockResolvedValueOnce({ state: 'waiting', words: ['one', 'two', 'three', 'four'], expires_at: Date.now()/1000+300 }).mockImplementation(input => input.action === 'cancel' ? Promise.resolve({ state: 'idle' }) : new Promise(resolve => { finish = resolve; }));
+  const join = vi.fn().mockResolvedValueOnce({ state: 'waiting', words: ['one', 'two', 'three', 'four'], expires_at: Date.now()/1000+300 }).mockImplementation(input => input.action === 'cancel' ? Promise.resolve({ state: 'idle', second_device: true }) : new Promise(resolve => { finish = resolve; }));
   mount({ status: () => ({ ready: true, node_id: 'box', error: null }), pairing: () => ({ ...INITIAL_PAIRING, remote: true, state: 'paired' }), device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }), join });
   await tick(); await vi.advanceTimersByTimeAsync(1500);
   button("They don't match").click(); await tick(); finish({ state: 'done' }); await tick();
@@ -203,4 +203,45 @@ it('paste cannot replace enrollment after its polling connection fails', async (
   await tick(); await vi.advanceTimersByTimeAsync(1500);
   expect(button('Paste link').disabled).toBe(true); button('Paste link').click(); await tick();
   expect(readText).not.toHaveBeenCalled(); expect(props.connect).not.toHaveBeenCalled();
+});
+it('offers manual paste after clipboard refusal without echoing the failure', async () => {
+  vi.stubGlobal('navigator', { clipboard: { readText: () => Promise.reject('private failure') } });
+  const props = mount(); button('Paste link').click(); await tick();
+  const input = document.querySelector<HTMLInputElement>('input[aria-label="Pairing link"]');
+  expect(input).not.toBeNull();
+  expect(document.body.textContent).not.toContain('private failure');
+  input!.value = 'bitsov://pair/synthetic'; input!.dispatchEvent(new Event('input', { bubbles: true }));
+  button('Use link').click(); await tick();
+  expect(props.connect).toHaveBeenCalledOnce();
+  expect(document.querySelector('input')).toBeNull();
+});
+it('uses the Android permission name on the local-network recovery screen', async () => {
+  mount({ platform: 'android', status: () => ({ ready: false, node_id: null, error: null, connection_error: { kind: 'local_network', detail: '' } }) });
+  await tick();
+  expect(document.querySelector('.phone-line')?.textContent).toContain('Nearby devices');
+  expect(document.querySelector('.phone-line')?.textContent).not.toContain('Local Network');
+});
+it('refuses a legacy enrollment instead of repeatedly attempting code-free join', async () => {
+  const props = mount({
+    status: () => ({ ready: true, node_id: 'box', error: null }),
+    pairing: () => ({ ...INITIAL_PAIRING, remote: true, state: 'paired' }),
+    device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }),
+    join: vi.fn().mockResolvedValue({ state: 'idle', second_device: false }),
+  });
+  await tick();
+  expect(props.beginJoin).not.toHaveBeenCalled();
+  expect(button('Scan the new QR')).toBeTruthy();
+});
+it('offers a new QR after a process restart lost the in-memory comparison', async () => {
+  const join = vi.fn().mockRejectedValueOnce({ code: 'enrollment_restart', message: 'sanitized host error' }).mockResolvedValue({ state: 'idle', second_device: true });
+  const props = mount({
+    status: () => ({ ready: true, node_id: 'box', error: null }),
+    pairing: () => ({ ...INITIAL_PAIRING, remote: true, state: 'paired' }),
+    device: () => ({ available: true, delegation_supported: true, state: 'pending', fingerprint: null, owner_action: null, expires_at_ms: null }), join,
+  });
+  await tick();
+  expect(button('Scan the new QR')).toBeTruthy();
+  button('Scan the new QR').click(); await tick();
+  expect(join).toHaveBeenCalledWith({ action: 'cancel' });
+  expect(props.scan).toHaveBeenCalledOnce();
 });

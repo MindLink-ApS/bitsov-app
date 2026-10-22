@@ -37,6 +37,8 @@ fn main() {
             "remote_access_import",
             "remote_access_connect",
             "pairing_link_take",
+            "open_app_settings",
+            "open_tailscale",
             "remote_access_forget",
             "node_overview",
             "live_link",
