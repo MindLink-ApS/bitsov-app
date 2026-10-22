@@ -2727,7 +2727,7 @@ function Conversation(props: {
       </span>
     ) : (
       <span class="id">
-        {props.members === null ? 'Reading members…' : `${props.members.length} members · ${props.nodeRooms ? 'Legacy room' : 'Rooms unavailable on this node'}`}
+        {props.members === null ? tr('chatReadingMembers') : tr('chatMembers', props.members.length, tr(props.nodeRooms ? 'chatLegacyRoom' : 'chatRoomsUnavailable'))}
       </span>
     );
 
@@ -2761,23 +2761,20 @@ function Conversation(props: {
         <Show when={props.introduced}>
           {(c) => (
             <p class="day" data-introduced={c().node_id}>
-              Opened from {props.name}’s signed introduction. Estimated from their card: admission {fmtAmount(allIn(c().admission_msat))} including {feeCeiling(routingFee(c().admission_msat))}, each
-              message {fmtAmount(allIn(c().message_msat))} including {feeCeiling(routingFee(c().message_msat))} (estimated ceilings). You confirm their node’s own quote before anything is paid, and every
-              message pays.
+              {tr('chatIntroduction', props.name, fmtAmount(allIn(c().admission_msat)), feeCeiling(routingFee(c().admission_msat)), fmtAmount(allIn(c().message_msat)), feeCeiling(routingFee(c().message_msat)))}
             </p>
           )}
         </Show>
         <Show when={props.doorstep}>
           {(c) => (
             <p class="day" data-doorstep={c().node_id}>
-              Opened from {props.name}’s profile. Card snapshot (display only): admission {fmtAmount(allIn(c().admission_msat))}, each
-              message {fmtAmount(allIn(c().message_msat))}. Knock uses their live first-contact quote — you confirm before anything is paid.
+              {tr('chatDoorstep', props.name, fmtAmount(allIn(c().admission_msat)), fmtAmount(allIn(c().message_msat)))}
             </p>
           )}
         </Show>
         <Show when={props.track.kind === 'room'}>
           <p class="day" data-room-day-notice>
-            {props.nodeRooms ? 'This is a legacy room. Create a new room to use group chat.' : 'This node does not support rooms yet.'} Members added here are not notified yet. A room message pays each member their own price, separately.
+            {tr(props.nodeRooms ? 'chatLegacyNotice' : 'chatUnsupportedRoom')} {tr('chatLegacyMembers')}
           </p>
         </Show>
         <For
@@ -2787,16 +2784,16 @@ function Conversation(props: {
             // read shows only its error (below). Only a read that came back empty says "no messages".
             <Show when={props.read === 'ok'} fallback={<Show when={props.read === 'pending'}><div class="empty-track" data-thread-loading><DelayedSpinner /></div></Show>}>
               <div class="empty-track" data-thread-empty={props.track.kind === 'room' ? 'room' : knownContact() ? 'known' : 'unknown'}>
-                <h2>No messages here yet</h2>
+                <h2>{tr('chatEmpty')}</h2>
                 <Show when={props.track.kind === 'room'}>
                   <p class="hint">
-                    {props.nodeRooms ? 'This is a legacy room. Create a new room to use group chat.' : 'This node does not support rooms yet.'} A message here pays each member separately, and reaches each one when their payment settles.
+                    {tr(props.nodeRooms ? 'chatLegacyNotice' : 'chatUnsupportedRoom')} {tr('chatLegacyPayment')}
                   </p>
                 </Show>
                 {/* Only a budget line (we have paid them before) is said; whether they would need a first
                     contact is the node's to say, on the door card, never guessed here. */}
                 <Show when={props.track.kind === 'peer' && knownContact()}>
-                  <p class="hint">Each message to {props.name} pays their price.</p>
+                  <p class="hint">{tr('chatEachMessage', props.name)}</p>
                 </Show>
               </div>
             </Show>

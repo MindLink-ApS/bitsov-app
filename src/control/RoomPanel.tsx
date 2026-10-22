@@ -7,6 +7,7 @@
  * going offline withdraws the review. Skipped members are never charged.
  */
 import { createEffect, createMemo, createSignal, For, on, Show, Switch, Match, type JSX } from 'solid-js';
+import { t, type CopyKey } from '../i18n';
 import { createStore, reconcile } from 'solid-js/store';
 import { amount as fmtAmount, clock, day, sats, satUnit } from './format';
 import {
@@ -78,14 +79,14 @@ export function NewRoomPanel(props: {
 /** One send of this session: what each member's leg did. */
 export type RoomSend = { at: number; text: string; outcomes: LegOutcome[] };
 
-const OUTCOME: Record<LegOutcome['state'], string> = {
-  sent: 'sent',
-  skipped: 'skipped',
-  refused: 'paid, refused by their node; do not send it again',
-  failed: 'not sent',
-  undelivered: 'paid, not delivered yet',
-  unknown: 'outcome unknown, may have been paid',
-  stopped: 'not sent',
+const OUTCOME: Record<LegOutcome['state'], CopyKey> = {
+  sent: 'roomSent',
+  skipped: 'roomSkipped',
+  refused: 'roomRefused',
+  failed: 'roomNotSent',
+  undelivered: 'roomUndelivered',
+  unknown: 'roomUnknown',
+  stopped: 'roomNotSent',
 };
 
 type Review = { legs: LegPlan[]; total: number; text: string };
@@ -191,45 +192,45 @@ export function RoomThread(props: {
   createEffect(on(() => items().length, () => queueMicrotask(() => stream?.scrollTo?.({ top: stream.scrollHeight }))));
 
   const legLine = (l: LegPlan) =>
-    l.state === 'pay' ? `${l.estimate ? '≈ ' : ''}${fmtAmount(l.msat)}` : l.state === 'skip' ? l.reason : 'reading price…';
+    l.state === 'pay' ? `${l.estimate ? '≈ ' : ''}${fmtAmount(l.msat)}` : l.state === 'skip' ? l.reason : t('roomReadingPrice');
 
   return (
     <>
       <header class="track-head" data-room-head={props.room.id}>
         <h1 data-room-title>{title()}</h1>
-        <div class="sub"><span class="id">You and {others().length} · each message pays each member</span></div>
-        <button type="button" class="quiet" data-room-leave onClick={() => setLeaving(true)}>Leave</button>
-        <button class="quiet context-toggle" onClick={() => props.onContext()}>Settings</button>
+        <div class="sub"><span class="id">{t('roomMembers', others().length)}</span></div>
+        <button type="button" class="quiet" data-room-leave onClick={() => setLeaving(true)}>{t('roomLeave')}</button>
+        <button class="quiet context-toggle" onClick={() => props.onContext()}>{t('uiSettings')}</button>
       </header>
       <Show when={leaving()}>
         <div class="approval" data-room-leave-confirm>
-          <p>Leave this room? It is hidden on this device only. Nobody is told and nothing is paid; members may keep sending, and their messages stay hidden here.</p>
+          <p>{t('roomLeaveConfirm')}</p>
           <div class="call-actions">
-            <button type="button" class="primary soft" data-room-leave-yes onClick={() => { setLeaving(false); props.onLeave(); }}>Leave</button>
-            <button type="button" class="soft" data-room-leave-no onClick={() => setLeaving(false)}>Stay</button>
+            <button type="button" class="primary soft" data-room-leave-yes onClick={() => { setLeaving(false); props.onLeave(); }}>{t('roomLeave')}</button>
+            <button type="button" class="soft" data-room-leave-no onClick={() => setLeaving(false)}>{t('roomStay')}</button>
           </div>
         </div>
       </Show>
       <div class="stream" ref={stream} data-stream data-room-stream>
         <div class="chat-column">
           <p class="day" data-room-honesty>
-            Each message is a separate paid, end-to-end encrypted message to each member. There is no group key and no moderation.
+            {t('roomHonesty')}
           </p>
           <Show when={props.earlier}>
             <button type="button" class="link" data-room-earlier disabled={props.loadingEarlier} onClick={() => props.onEarlier()}>
-              {props.loadingEarlier ? 'Loading…' : 'Show earlier messages'}
+              {props.loadingEarlier ? t('chatLoading') : t('chatEarlier')}
             </button>
           </Show>
           <For each={[...keyedItems().keys()]} fallback={
             <Switch>
               <Match when={props.read === 'ok'}>
                 <div class="empty-track" data-thread-empty="room">
-                  <h2>No messages here yet</h2>
-                  <p class="hint">A message here pays each member their own price.</p>
+                  <h2>{t('chatEmpty')}</h2>
+                  <p class="hint">{t('roomEmptyHint')}</p>
                 </div>
               </Match>
               <Match when={props.read === 'failed'}>
-                <p class="err-note" role="alert" data-thread-error>{props.error ?? 'Could not read this room’s messages.'}</p>
+                <p class="err-note" role="alert" data-thread-error>{props.error ?? t('roomReadError')}</p>
               </Match>
               <Match when={props.read === 'pending'}>
                 <div class="empty-track" data-thread-loading><DelayedSpinner /></div>
@@ -251,7 +252,7 @@ export function RoomThread(props: {
                         // A member's node refused our paid copy: said plainly, per member.
                         const refusals = () => e().copies.flatMap((c) => {
                           const d = props.deliveries[c.id];
-                          return d?.status === 'rejected' ? [{ peer: c.recipient, words: roomRefusalWords(d.reason) ?? 'Their node refused it.' }] : [];
+                          return d?.status === 'rejected' ? [{ peer: c.recipient, words: roomRefusalWords(d.reason) ?? t('roomNodeRefused') }] : [];
                         });
                         return (
                           <article class={`msg ${out() ? 'out' : 'in'}`} classList={{ fresh: entrance.fresh() }} onAnimationEnd={entrance.finish}
@@ -261,13 +262,13 @@ export function RoomThread(props: {
                             <div class="stamp">
                               <span>{clock(e().timestamp)}</span>
                               <Show when={out() && e().copies.length > 0}>
-                                <span data-room-to> · to {e().copies.map((c) => props.nameOf(c.recipient)).join(', ')}</span>
+                                <span data-room-to> · {t('roomTo', e().copies.map((c) => props.nameOf(c.recipient)).join(', '))}</span>
                               </Show>
                             </div>
                             <For each={refusals()}>
                               {(r) => (
                                 <p class="hint" data-room-refused={r.peer}>
-                                  {props.nameOf(r.peer)}: {r.words} It was paid; do not send it again.
+                                  {props.nameOf(r.peer)}: {r.words} {t('roomPaidNoRetry')}
                                 </p>
                               )}
                             </For>
@@ -281,13 +282,13 @@ export function RoomThread(props: {
                           <span class="kind" data-room-send-msat={s().outcomes.reduce((t, o) => t + o.paidMsat, 0)}>
                             {s().outcomes.every((o) => o.state === 'sent')
                               ? roomCostCopy(s().outcomes.map((o) => o.paidMsat), 'paid')
-                              : `Your room message · up to ${fmtAmount(s().outcomes.reduce((t, o) => t + o.paidMsat, 0))} in all`}
+                              : t('roomMessageTotal', fmtAmount(s().outcomes.reduce((t, o) => t + o.paidMsat, 0)))}
                           </span>
                           <ul class="room-legs">
                             <For each={s().outcomes}>
                               {(o) => (
                                 <li data-room-leg={o.peer} data-leg-state={o.state}>
-                                  <strong>To {props.nameOf(o.peer)}:</strong>{' '}
+                                  <strong>{t('roomToLabel', props.nameOf(o.peer))}</strong>{' '}
                                   <span class="hint" data-room-leg-note>{legOutcome(o)}</span>
                                 </li>
                               )}
@@ -319,8 +320,8 @@ export function RoomThread(props: {
                 </For>
               </ul>
               <div class="composer-main">
-                <textarea rows={1} data-room-draft placeholder={`Message ${title()}`} value={draft()} onInput={(e) => setDraft(e.currentTarget.value)}
-                  aria-label="Room message" disabled={props.moneyBlocked}
+                <textarea rows={1} data-room-draft placeholder={t('uiMessage', title())} value={draft()} onInput={(e) => setDraft(e.currentTarget.value)}
+                  aria-label={t('roomMessage')} disabled={props.moneyBlocked}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
                       e.preventDefault();
@@ -330,24 +331,24 @@ export function RoomThread(props: {
               </div>
               <div class="composer-bar">
                 <div class="cost" data-cost>
-                  <span class="label">Cost to send</span>
+                  <span class="label">{t('uiCostToSend')}</span>
                   <Show when={total() !== null} fallback={<span class="sats">…</span>}>
                     <span class="sats" data-cost-msat={total()!}>{estimate() ? '≈ ' : ''}{sats(total()!)}<span class="unit">{satUnit(total()!)}</span></span>
                   </Show>
                   <span class="basis">{legs().some((l) => l.state === 'reading')
-                    ? 'Reading member prices…'
+                    ? t('roomReadingPrices')
                     : total() === null
-                      ? 'No members can receive this message right now'
+                      ? t('roomNoRecipients')
                       : roomCostCopy(legs().flatMap((l) => l.state === 'pay' ? [l.msat] : []), 'pay', legs().every((l) => l.state === 'pay'))}</span>
                 </div>
-                <button type="submit" class="primary soft money" data-send disabled={!ready()}>Send</button>
+                <button type="submit" class="primary soft money" data-send disabled={!ready()}>{t('uiSend')}</button>
               </div>
             </>
           }
         >
           {(rv) => (
             <div class="pay-review" data-room-review data-review-msat={rv().total}>
-              <p class="pay-review-title">Send to {rv().legs.filter((l) => l.state === 'pay').length} of {rv().legs.length}</p>
+              <p class="pay-review-title">{t('roomSendTo', rv().legs.filter((l) => l.state === 'pay').length, rv().legs.length)}</p>
               <p>{roomCostCopy(rv().legs.flatMap((l) => l.state === 'pay' ? [l.msat] : []), 'pay', rv().legs.every((l) => l.state === 'pay'))}</p>
               <blockquote class="pay-review-text" data-review-text>{rv().text}</blockquote>
               <dl>
@@ -356,25 +357,25 @@ export function RoomThread(props: {
                     <>
                       <dt>{props.nameOf(l.peer)}</dt>
                       <dd data-review-leg={l.peer} data-review-leg-msat={l.state === 'pay' ? l.msat : 0}>
-                        {l.state === 'pay' ? `at most ${fmtAmount(l.msat)}` : l.state === 'skip' ? l.reason : 'skipped'}
+                        {l.state === 'pay' ? t('roomAtMost', fmtAmount(l.msat)) : l.state === 'skip' ? l.reason : t('roomSkipped')}
                       </dd>
                     </>
                   )}
                 </For>
-                <dt>Total at most</dt>
+                <dt>{t('roomTotalAtMost')}</dt>
                 <dd data-review-total>{fmtAmount(rv().total)}</dd>
               </dl>
               <div class="composer-bar">
-                <button type="button" class="link" data-room-back disabled={busy()} onClick={() => setReview(null)}>Back</button>
-                <span class="basis">One member at a time, each at most the price above. A member whose price went up is not sent to.</span>
+                <button type="button" class="link" data-room-back disabled={busy()} onClick={() => setReview(null)}>{t('uiBack')}</button>
+                <span class="basis">{t('roomReviewHint')}</span>
                 <button type="button" class="primary soft money" data-room-confirm disabled={busy() || props.moneyBlocked || !props.canSpend} onClick={() => void confirm()}>
-                  Confirm and send
+                  {t('roomConfirmSend')}
                 </button>
               </div>
             </div>
           )}
         </Show>
-        <Show when={props.moneyBlocked}><p class="hint" data-room-blocked>Payments are not ready yet, so this room cannot send.</p></Show>
+        <Show when={props.moneyBlocked}><p class="hint" data-room-blocked>{t('roomBlocked')}</p></Show>
         <Show when={!props.moneyBlocked && !props.canSpend}>{props.spendGate}</Show>
       </form>
     </>
@@ -387,16 +388,16 @@ export function RoomThread(props: {
  */
 function legOutcome(o: LegOutcome): string {
   if (o.state === 'failed' && o.paidMsat === 0 && o.note) return o.note;
-  const reached = o.principalMsat !== undefined ? ` (${fmtAmount(o.principalMsat)} to them, plus a network fee)` : '';
-  const paid = o.paidMsat > 0 ? ` · ${o.state === 'unknown' ? 'possibly paid' : 'you paid'} up to ${fmtAmount(o.paidMsat)}${reached}` : ' · not charged';
-  return `${OUTCOME[o.state]}${paid}${o.note && o.state !== 'sent' ? ` · ${o.note}` : ''}`;
+  const reached = o.principalMsat !== undefined ? t('roomReached', fmtAmount(o.principalMsat)) : '';
+  const paid = o.paidMsat > 0 ? ` · ${t(o.state === 'unknown' ? 'roomPossiblyPaid' : 'roomYouPaid', fmtAmount(o.paidMsat), reached)}` : ` · ${t('roomNotCharged')}`;
+  return `${t(OUTCOME[o.state])}${paid}${o.note && o.state !== 'sent' ? ` · ${o.note}` : ''}`;
 }
 
 /** Only say “each member” when everyone has the same ceiling and nobody is skipped. */
 function roomCostCopy(amounts: number[], verb: 'pay' | 'paid', allMembers = true): string {
   const total = fmtAmount(amounts.reduce((sum, n) => sum + n, 0));
   if (allMembers && amounts.length > 0 && amounts.every((n) => n === amounts[0])) {
-    return `You ${verb} up to ${fmtAmount(amounts[0])} to each member (${total} in all)`;
+    return t(verb === 'pay' ? 'roomPayEach' : 'roomPaidEach', fmtAmount(amounts[0]), total);
   }
-  return `You ${verb} up to ${total} in all, at each recipient’s own price`;
+  return t(verb === 'pay' ? 'roomPayTotal' : 'roomPaidTotal', total);
 }

@@ -72,7 +72,7 @@ export type BreakerStatus = {
 };
 /** The node's snapshot of the requesting pairing's grant: ApprovalView.breaker_reset (read-only). */
 export type BreakerSnapshot = {
-  /** BreakerTrip values; any other string is shown as the node wrote it. */
+  /** BreakerTrip values; unknown strings are sanitized for display only. */
   tripped: string[];
   breakers: BreakerStatus;
   budget_msat: number;
@@ -145,10 +145,11 @@ const span = (secs: number) =>
   secs % 3600 === 0 ? `${secs / 3600} h` : secs % 60 === 0 ? `${secs / 60} min` : `${secs} s`;
 
 // Match the host's Touch ID prompt regardless of locale or timezone.
+// Chrono uses a sign and at least four year digits; JS pads signed years to six.
 const approvalDate = (seconds: number) => {
   const date = new Date(seconds * 1000);
   return Number.isFinite(date.getTime())
-    ? date.toISOString().replace('T', ' ').replace('.000Z', ' UTC')
+    ? date.toISOString().replace(/^([+-])0+(\d{4,})-/, '$1$2-').replace('T', ' ').replace('.000Z', ' UTC')
     : 'unavailable';
 };
 
@@ -233,7 +234,14 @@ const TRIP_TEXT: Record<BreakerTrip, string> = {
   rate_limit_hour: 'too many payments this hour',
   velocity_limit: 'spending too fast',
 };
-export const tripText = (t: string) => Object.prototype.hasOwnProperty.call(TRIP_TEXT, t) ? TRIP_TEXT[t as BreakerTrip] : t;
+// Display-only, mirrored in owner_approval.rs. Strip controls, bidi/formatting
+// and line separators before replacing punctuation, so removal cannot create
+// a new term delimiter or a Label: impersonation. Keep the existing prompt cap.
+const safeTripCode = (code: string) => code
+  .replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g, '')
+  .replace(/·/g, '/')
+  .replace(/[:：﹕꞉∶]/g, '=');
+export const tripText = (t: string) => Object.prototype.hasOwnProperty.call(TRIP_TEXT, t) ? TRIP_TEXT[t as BreakerTrip] : safeTripCode(t);
 /** Only a failure pause needs a reset; rate and velocity limits recover with time on their own. */
 export const needsReset = (tripped: string[]) => tripped.includes('grant_paused');
 
