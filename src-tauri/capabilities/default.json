@@ -57,6 +57,8 @@
     "allow-first-contact-status",
     "allow-first-contact-cancel",
     "allow-payments-overview",
+    "allow-starter-current",
+    "allow-starter-request",
     "allow-energy-read",
     "allow-membrane-read",
     "allow-spend-status",
