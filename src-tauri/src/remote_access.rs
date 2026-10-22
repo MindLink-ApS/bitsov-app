@@ -284,6 +284,7 @@ pub enum RemoteError {
     HandshakeUnavailable,
     Unclaimed,
     LocalNetwork,
+    AndroidLocalNetwork,
     RateLimited(u64),
     Waiting(u64),
     /// Seconds since the pairing ticket expired.
@@ -313,6 +314,7 @@ impl fmt::Display for RemoteError {
             Self::Refused(message) => write!(f, "remote node refused pairing: {message}"),
             Self::Unclaimed => f.write_str("This node isn't set up yet. Finish setup on a Mac, then add this phone."),
             Self::LocalNetwork => f.write_str("Local network access is denied or unavailable. Check BitSov's Local Network permission in Settings and your network connection."),
+            Self::AndroidLocalNetwork => f.write_str("Local network access is unavailable. Allow Nearby devices for BitSov in Android Settings, then return to BitSov or tap Reconnect."),
             Self::HandshakeUnavailable => f.write_str(HANDSHAKE_UNAVAILABLE),
             Self::RateLimited(seconds) => write!(f, "Remote connection limited; waiting {seconds} s"),
             Self::Waiting(seconds) => write!(f, "Remote connection unavailable; waiting {seconds} s"),
@@ -323,7 +325,7 @@ impl fmt::Display for RemoteError {
 impl std::error::Error for RemoteError {}
 
 /// Stable renderer contract. Detail is diagnostic copy, never a ticket or key.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ConnectionError {
     pub kind: ConnectionErrorKind,
     pub detail: String,
@@ -335,28 +337,63 @@ pub enum ConnectionErrorKind {
     Unclaimed,
     LocalNetwork,
     Unreachable,
+    Tailscale,
     Busy,
     Expired,
+    Clock,
+    Used,
+    ClaimMismatch,
     Other,
+}
+
+pub const USED_TICKET_MESSAGE: &str = "This ticket expired, was already used, or its owner was revoked. Ask an enrolled owner device for a new ticket.";
+
+impl ConnectionError {
+    pub fn main_window_only() -> Self {
+        Self { kind: ConnectionErrorKind::Other, detail: "this command is only available to the main window".into() }
+    }
+    pub fn app_data_unavailable() -> Self {
+        Self { kind: ConnectionErrorKind::Other, detail: "The app data directory is unavailable. Remote pairing could not be saved.".into() }
+    }
+    pub fn other() -> Self { Self::from(&RemoteError::Local(String::new())) }
+    pub fn busy() -> Self { Self::from(&RemoteError::RateLimited(0)) }
+    pub fn for_endpoint(error: &RemoteError, endpoint: Option<&str>) -> Self {
+        let mut result = Self::from(error);
+        if result.kind == ConnectionErrorKind::Unreachable && endpoint.is_some_and(is_tailscale_endpoint) {
+            result.kind = ConnectionErrorKind::Tailscale;
+            result.detail = "Check that Tailscale is connected on this device and your node.".into();
+        }
+        result
+    }
+}
+
+fn is_tailscale_endpoint(endpoint: &str) -> bool {
+    endpoint_parts(endpoint).is_ok_and(|(host, _)| {
+        if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+            let bytes = ip.octets();
+            bytes[0] == 100 && (64..=127).contains(&bytes[1])
+        } else { host.trim_end_matches('.').to_ascii_lowercase().ends_with(".ts.net") }
+    })
 }
 
 impl From<&RemoteError> for ConnectionError {
     fn from(error: &RemoteError) -> Self {
-        let kind = match error {
-            RemoteError::Unclaimed => ConnectionErrorKind::Unclaimed,
-            RemoteError::LocalNetwork => ConnectionErrorKind::LocalNetwork,
-            RemoteError::HandshakeUnavailable | RemoteError::Waiting(_) => ConnectionErrorKind::Unreachable,
-            RemoteError::RateLimited(_) => ConnectionErrorKind::Busy,
-            RemoteError::Expired(_) => ConnectionErrorKind::Expired,
-            _ => ConnectionErrorKind::Other,
+        use ConnectionErrorKind::*;
+        let (kind, detail) = match error {
+            RemoteError::Unclaimed => (Unclaimed, error.to_string()),
+            RemoteError::LocalNetwork | RemoteError::AndroidLocalNetwork => (LocalNetwork, error.to_string()),
+            RemoteError::HandshakeUnavailable | RemoteError::Waiting(_) | RemoteError::Transport(_) =>
+                (Unreachable, "The remote node could not be reached.".into()),
+            RemoteError::RateLimited(_) => (Busy, "The remote connection is busy. Try again shortly.".into()),
+            // A very old expiry can also mean the device clock is wrong. This
+            // is a recovery hint, never proof of clock skew or an expiry bypass.
+            RemoteError::Expired(seconds) if *seconds > 86_400 =>
+                (Clock, "Check this device's date and time, or request a fresh pairing link.".into()),
+            RemoteError::Expired(_) => (Expired, error.to_string()),
+            RemoteError::Refused(message) if message == USED_TICKET_MESSAGE => (Used, USED_TICKET_MESSAGE.into()),
+            _ => (Other, "The remote connection could not be established.".into()),
         };
-        // Never forward arbitrary peer messages, paths, or parser input through
-        // this UI contract: a peer can echo the authentication code it received.
-        let detail = if kind == ConnectionErrorKind::Other {
-            "The remote connection could not be established.".to_string()
-        } else {
-            error.to_string()
-        };
+        // Peer text may echo authentication codes. Only fixed local copy crosses.
         Self { kind, detail }
     }
 }
@@ -452,7 +489,7 @@ fn validate_code(code: Option<&str>) -> Result<(), RemoteError> {
     Ok(())
 }
 
-fn endpoint_parts(endpoint: &str) -> Result<(&str, u16), RemoteError> {
+pub(crate) fn endpoint_parts(endpoint: &str) -> Result<(&str, u16), RemoteError> {
     if endpoint.len() > 300
         || endpoint.is_empty()
         || !endpoint.is_ascii()
@@ -917,34 +954,6 @@ pub fn replaces_another_node(current: &RemoteDescriptor, next: &RemoteDescriptor
     !pinned_identity(current).eq_ignore_ascii_case(pinned_identity(next))
 }
 
-/// Replace the saved remote link with a ticket for another node, for the next
-/// start. Fails closed: the ticket is parsed first, a saved link must still
-/// exist, and the new file is written beside it and renamed over it, so any
-/// failure keeps the old link. Node-scoped keychain items and the pairing
-/// record are untouched here; the new node's first pairing replaces the record.
-pub fn replace_pairing_link(
-    app_data_dir: &Path,
-    link: &str,
-) -> Result<RemoteImportView, RemoteError> {
-    let next = parse_pairing_link(link)?;
-    let sealer = at_rest::installed();
-    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
-    let path = config_path(app_data_dir);
-    let current = load_with(&path, sealer)?.ok_or_else(|| {
-        RemoteError::Local("no saved remote node to replace; restart BitSov and try again".into())
-    })?;
-    if !replaces_another_node(&current, &next) {
-        return Err(RemoteError::Invalid("this ticket is for the node you already use".into()));
-    }
-    persist_with(&path, &next, sealer)?;
-    Ok(RemoteImportView {
-        endpoint: next.endpoint.clone(),
-        node_id_fingerprint: node_id_fingerprint(pinned_identity(&next)),
-        hosted_by: next.hosted_by.clone(),
-        restart_required: true,
-    })
-}
-
 /// Forget only the startup link. Local keys, identity and live transport are untouched.
 pub fn forget_persisted(app_data_dir: &Path) -> Result<(), RemoteError> {
     let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
@@ -1367,7 +1376,7 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
                 }
                 let reason: String = if code == "authentication_failed"
                     && descriptor.code.as_deref().is_some_and(|c| c.starts_with("owner_")) {
-                    "This ticket expired, was already used, or its owner was revoked. Ask an enrolled owner device for a new ticket.".into()
+                    USED_TICKET_MESSAGE.into()
                 } else { format!("{code}: {message}").chars().take(160).collect() };
                 Err(RemoteError::Refused(reason))
             }
@@ -1856,7 +1865,13 @@ async fn connect_bound(
     let mut last = RemoteError::HandshakeUnavailable;
     for endpoint in endpoints {
         let attempt = async {
-            let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(endpoint))
+            #[cfg(target_os = "android")]
+            let addresses = crate::android_network::resolve(endpoint).await?;
+            #[cfg(target_os = "android")]
+            let target = addresses.as_slice();
+            #[cfg(not(target_os = "android"))]
+            let target = endpoint;
+            let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(target))
                 .await.map_err(|_| RemoteError::HandshakeUnavailable)?
                 .map_err(|error| classify_connect_error(error, cfg!(target_os = "ios"), endpoint))?;
             let (noise, hash) = pinned_handshake_bound(&mut stream, descriptor, key).await?;
@@ -1869,10 +1884,10 @@ async fn connect_bound(
             }
             Err(error @ RemoteError::RateLimited(_)) => return Err(error),
             // Keep the actionable OS error if a later fallback is unreachable.
-            Err(RemoteError::LocalNetwork) => last = RemoteError::LocalNetwork,
+            Err(error @ (RemoteError::LocalNetwork | RemoteError::AndroidLocalNetwork)) => last = error,
             Err(error) => {
                 let error = map_pre_auth_failure(error);
-                if !matches!(last, RemoteError::LocalNetwork) || !matches!(error, RemoteError::HandshakeUnavailable) {
+                if !matches!(last, RemoteError::LocalNetwork | RemoteError::AndroidLocalNetwork) || !matches!(error, RemoteError::HandshakeUnavailable) {
                     last = error;
                 }
             }
@@ -2183,6 +2198,7 @@ pub struct RemoteProxy {
     descriptor: Arc<Mutex<RemoteDescriptor>>,
     local_addr: SocketAddr,
     shutdown: watch::Sender<bool>,
+    stopped: Option<tokio::sync::oneshot::Receiver<()>>,
     last_error: Arc<Mutex<Option<String>>>,
 }
 
@@ -2206,6 +2222,12 @@ impl RemoteProxy {
 
     pub fn stop(&self) {
         let _ = self.shutdown.send(true);
+    }
+
+    /// Release the listener and every accepted socket before another proxy binds.
+    pub async fn stop_and_wait(mut self) {
+        self.stop();
+        if let Some(stopped) = self.stopped.take() { let _ = stopped.await; }
     }
 
     pub fn last_error(&self) -> Option<String> {
@@ -2274,6 +2296,7 @@ pub async fn start_proxy(
     let config_path = config_path(app_data_dir);
     let client_name: Arc<str> = Arc::from(client_name);
     let (shutdown, mut stopped) = watch::channel(false);
+    let (closed, closed_rx) = tokio::sync::oneshot::channel();
     // HTTP keep-alive and WebSocket connections each retain one remote
     // TCP/Noise tunnel. Independent byte streams are never interleaved; this
     // bounded set is the safe reusable pool without adding a mux wire protocol.
@@ -2286,9 +2309,12 @@ pub async fn start_proxy(
         let key = key.clone();
         let last_error = last_error.clone();
         async move {
+            let mut connections = tokio::task::JoinSet::new();
             let mut accept_backoff = Duration::from_millis(10);
             loop {
                 tokio::select! {
+                    biased;
+                    _ = connections.join_next(), if !connections.is_empty() => {}
                     changed = stopped.changed() => {
                         if changed.is_err() || *stopped.borrow() {
                             break;
@@ -2332,7 +2358,7 @@ pub async fn start_proxy(
                         let tunnel_permits = tunnel_permits.clone();
                         let retry = retry.clone();
                         let mut connection_stopped = stopped.clone();
-                        tokio::spawn(async move {
+                        connections.spawn(async move {
                             let (local_http, initial_local) =
                                 match authenticated_prefix(&mut stream, &local_auth).await {
                                     Ok(prefix) => prefix,
@@ -2395,6 +2421,10 @@ pub async fn start_proxy(
                     }
                 }
             }
+            drop(listener);
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
+            let _ = closed.send(());
         }
     });
 
@@ -2402,6 +2432,7 @@ pub async fn start_proxy(
         descriptor,
         local_addr: actual_addr,
         shutdown,
+        stopped: Some(closed_rx),
         last_error,
     })
 }
@@ -2740,46 +2771,6 @@ mod tests {
         let node = SigningKey::from_bytes(&[seed; 32]);
         let transport = X25519PublicKey::from(&StaticSecret::from([seed.wrapping_add(1); 32])).to_bytes();
         signed_link("127.0.0.1:4242".into(), &node, transport, &test_code(seed))
-    }
-
-    #[test]
-    fn replacing_needs_a_saved_link_and_another_node() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(replace_pairing_link(dir.path(), &link_for(21)), Err(RemoteError::Local(_))));
-        assert!(load_persisted(dir.path()).unwrap().is_none());
-
-        import_pairing_link(dir.path(), &link_for(21)).unwrap();
-        let before = std::fs::read(config_path(dir.path())).unwrap();
-        assert!(matches!(replace_pairing_link(dir.path(), &link_for(21)), Err(RemoteError::Invalid(_))));
-        assert!(matches!(replace_pairing_link(dir.path(), "bitsov://pair/not-a-ticket"), Err(RemoteError::Invalid(_))));
-        assert_eq!(std::fs::read(config_path(dir.path())).unwrap(), before);
-    }
-
-    #[test]
-    fn replacing_swaps_the_saved_link_for_the_new_node() {
-        let dir = tempfile::tempdir().unwrap();
-        import_pairing_link(dir.path(), &link_for(21)).unwrap();
-        let view = replace_pairing_link(dir.path(), &link_for(31)).unwrap();
-        assert!(view.restart_required);
-        let saved = load_persisted(dir.path()).unwrap().unwrap();
-        let expected = parse_pairing_link(&link_for(31)).unwrap();
-        assert_eq!(saved.node_id(), expected.node_id());
-        assert!(saved.has_code());
-        assert_eq!(view.node_id_fingerprint, node_id_fingerprint(expected.node_id()));
-    }
-
-    #[test]
-    fn a_failed_replacement_keeps_the_old_link() {
-        let dir = tempfile::tempdir().unwrap();
-        import_pairing_link(dir.path(), &link_for(21)).unwrap();
-        let before = std::fs::read(config_path(dir.path())).unwrap();
-        // A directory where the temporary file goes makes the write fail.
-        let tmp = config_path(dir.path()).with_file_name(format!("{REMOTE_CONFIG_FILE}.tmp"));
-        std::fs::create_dir_all(&tmp).unwrap();
-        assert!(replace_pairing_link(dir.path(), &link_for(31)).is_err());
-        assert_eq!(std::fs::read(config_path(dir.path())).unwrap(), before);
-        let kept = load_persisted(dir.path()).unwrap().unwrap();
-        assert_eq!(kept.node_id(), parse_pairing_link(&link_for(21)).unwrap().node_id());
     }
 
     #[test]

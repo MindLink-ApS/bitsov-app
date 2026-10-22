@@ -7,12 +7,14 @@ import type { ApprovalRequest, ApprovalView, DeviceKeysView } from './ownerAppro
 // the node directly — no socket, no HTTP, no token (Gate G2). Every node call
 // is a host command.
 
+import { isMobilePlatform } from '../platform';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { NodeStatus, PairingView } from '../onboarding/pairing';
 import type {
   OwnerContactApproval,
   OpList,
+  OpView,
   FirstContactQuote,
   FundingAsk,
   FundingStatus,
@@ -97,7 +99,7 @@ export interface Source {
   remoteAccessForget(): Promise<void>;
   remoteAccessPreview(link: string): Promise<RemotePreviewView>;
   remoteAccessImport(link: string): Promise<RemoteImportView>;
-  /** Remote only: replace the saved link with a reviewed, confirmed ticket for another node (next start). */
+  /** Remote only: replace the saved link with a reviewed, confirmed ticket for another node and attach immediately. */
   remoteAccessReplace(link: string): Promise<RemoteImportView>;
   identityRestore(mnemonic: string): Promise<RestoreOutcome>;
   fundState(): Promise<FundState | null>;
@@ -202,6 +204,10 @@ export interface Source {
   spendReconcile(): Promise<string>;
   /** H1 read-only history of this app's paid operations, optionally for one peer. */
   opList(peer?: string): Promise<OpList>;
+  /** H2: end one of our call admissions (the host sends the one paid hangup, or none if the offer was unpaid). */
+  opEndCall(callId: string): Promise<OpView>;
+  /** Repair exact host metadata, or acknowledge without releasing any fence. */
+  opRepairCallIndex(indexId: string): Promise<string | null>;
   /**
    * A message pays inside the owner's budget with no prompt. `firstContactMsat`
    * is the owner's one-time OK for someone not yet budgeted, with their budget.
@@ -243,6 +249,8 @@ export interface Source {
   fileSave(messageId: string): Promise<FileSaveResult>;
   /** Read-only: what calling this contact costs. */
   callQuote(peer: string): Promise<CallQuote>;
+  /** Validate the admission for local teardown without releasing it. */
+  closeCallAdmission(operationId: string, peer: string, callId: string): Promise<void>;
   /** One paid call signal (kinds 400-403) under the message budget rules. */
   callSignal(peer: string, kind: number, plaintext: string, maxMsat: number): Promise<CallReceipt>;
   // AI track: the host reads through its broker; a remote model gets only a body the owner saw
@@ -277,8 +285,21 @@ export const hostSource: Source = {
   pairingRetry: () => invoke<PairingView>('pairing_retry'),
   remoteAccessForget: () => invoke<void>('remote_access_forget'),
   remoteAccessPreview: (link) => invoke<RemotePreviewView>('remote_access_preview', { link }),
-  remoteAccessImport: (link) => invoke<RemoteImportView>('remote_access_import', { link }),
-  remoteAccessReplace: (link) => invoke<RemoteImportView>('remote_access_replace', { link }),
+  remoteAccessImport: async (link) => {
+    try { return await invoke<RemoteImportView>('remote_access_connect', { link }); }
+    catch (error) {
+      // Preserve desktop first-owner setup and the next-start switch away
+      // from a local sidecar. Live remote replacement always uses connect.
+      if (!isMobilePlatform() && error && typeof error === 'object' && 'kind' in error) {
+        const localSelected = error.kind === 'busy' && !(await invoke<PairingView>('pairing_status')).remote;
+        if (error.kind === 'unclaimed' || localSelected) {
+          return invoke<RemoteImportView>('remote_access_import', { link });
+        }
+      }
+      throw error;
+    }
+  },
+  remoteAccessReplace: (link) => invoke<RemoteImportView>('remote_access_connect', { link }),
   nodeRepairInitialized: (confirmed) => invoke<void>('node_repair_initialized', { confirmed }),
   nodeRepairPriceFloor: (confirmed) => invoke<void>('node_repair_price_floor', { confirmed }),
   identityRestore: (mnemonic) => invoke<RestoreOutcome>('identity_restore', { mnemonic }),
@@ -354,6 +375,8 @@ export const hostSource: Source = {
     invoke<SpendView>('relation_approve', { peer, budget_msat: budgetMsat, per_act_max_msat: perActMaxMsat }),
   spendReconcile: () => invoke<string>('spend_reconcile'),
   opList: (peer) => invoke<OpList>('op_list', { peer: peer ?? null }),
+  opEndCall: (callId) => invoke<OpView>('op_end_call', { call_id: callId }),
+  opRepairCallIndex: (indexId) => invoke<string | null>('op_repair_call_index', { index_id: indexId }),
   send: (recipient, isRoom, plaintext, maxMsat, maxRecipientMsat, firstContactMsat) =>
     invoke<SendReceipt>('message_send', { recipient, is_room: isRoom, plaintext, max_msat: maxMsat, max_recipient_msat: maxRecipientMsat ?? null, first_contact_msat: firstContactMsat ?? null }),
   retry: (recipient, plaintext, approvedMsat) => invoke<SendReceipt>('message_retry', { recipient, plaintext, approved_msat: approvedMsat ?? null }),
@@ -380,6 +403,7 @@ export const hostSource: Source = {
   fileFetch: (messageId) => invoke<VoiceBlob>('file_fetch', { message_id: messageId }),
   fileSave: (messageId) => invoke<FileSaveResult>('file_save', { message_id: messageId }),
   callQuote: (peer) => invoke<CallQuote>('call_quote', { peer }),
+  closeCallAdmission: (operationId, peer, callId) => invoke<void>('op_close_call', { operation_id: operationId, peer, call_id: callId }),
   callSignal: (peer, kind, plaintext, maxMsat) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat }),
   aiRead: (topic, sinceMs, assistant) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs, ...(assistant ? { assistant } : {}) }),
   aiLocalTurn: (assistant, question, draftText) => invoke<LocalTurn>('ai_read', { assistant, local_turn: { question, draft_text: draftText } }),

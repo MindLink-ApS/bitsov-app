@@ -5,7 +5,7 @@ import type { RemoteImportView, RemotePreviewView } from '../control/source';
 import { shortId } from '../control/format';
 
 /** Settings → Node, remote only: replace this app's node with another one.
- *  Like first-run import it changes only the next start, after an explicit confirmation. */
+ *  Like first-run connect it attaches after an explicit confirmation. */
 export function PairAnotherNode(props: {
   currentNodeId: () => string | null | undefined;
   currentHostedBy?: () => string | null | undefined;
@@ -48,7 +48,7 @@ export function PairAnotherNode(props: {
     <Show when={open()} fallback={<>
       <button type="button" class="quiet" data-pair-another-open disabled={saved() !== null} onClick={() => setOpen(true)}>Pair another node</button>
       <Show when={saved()} fallback={<p class="hint">Switch this app to a different node with a pairing ticket from it.</p>}>
-        <p class="hint" role="status" data-pair-another-saved>New node saved. Restart BitSov to connect to it.</p>
+        <p class="hint" role="status" data-pair-another-saved>New node saved. Connecting to it…</p>
       </Show>
     </>}>
       <Onboarding
@@ -77,7 +77,7 @@ export function PairAnotherNode(props: {
           <p><bdi data-pair-another-current>{currentLabel()}</bdi> will no longer be this app’s node.</p>
           <p>New node: <bdi>{asked().view.endpoint}</bdi>, fingerprint <bdi>{asked().view.node_id_fingerprint}</bdi>.</p>
           <p>Funds and contacts stay on the old node. You can pair back later with a new ticket from that node.</p>
-          <p class="hint">Nothing changes until you confirm. The switch happens when you restart BitSov.</p>
+          <p class="hint">Nothing changes until you confirm.</p>
           <div class="form-actions">
             <button type="button" class="primary" data-pair-another-confirm-yes onClick={() => answer(true)}>Replace node</button>
             <button type="button" class="quiet" data-pair-another-confirm-no onClick={() => answer(false)}>Cancel</button>

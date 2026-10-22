@@ -141,6 +141,9 @@ pub struct Message {
     /// this lists each member's copy. Empty everywhere else.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copies: Vec<RoomCopy>,
+    /// Host-only receive-time binding; never trust a value supplied by the node.
+    #[serde(default, skip_deserializing)]
+    pub admission_operation_id: Option<String>,
 }
 
 /// One member's copy of our own room message (genome `RoomCopy`).
@@ -982,6 +985,7 @@ pub fn parse_ws_frame(text: &str) -> Option<LiveEvent> {
             plaintext: env.plaintext,
             payment_amount_msat: env.payment_proof.and_then(|p| p.amount_msat),
             copies: Vec::new(),
+            admission_operation_id: None,
         },
         room_id,
     })

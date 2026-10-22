@@ -90,3 +90,60 @@ cover stalled handshakes, retry sleeps, successful replacement and code removal,
 rejected imports, proxy publication during cancellation, first local startup,
 and parity between both iOS Local Network descriptions. Read-only review found
 no remaining blockers. Physical-device acceptance was not performed.
+
+## Android parity audit (#285–#288)
+
+Android shares immediate connect-after-import, actual Reconnect authentication,
+unclaimed-box rejection before key creation/dial, generation cancellation on
+Forget/valid new tickets, and recovery after canceled startup. Invalid tickets
+do not cancel recovery; Forget retains an already established proxy by design.
+The mobile regression suite is now also included under actual Android test cfg.
+
+The locked Tao/Tauri versions deliver Android Activity resume as main-window
+`WindowEvent::Resumed`; focus also triggers recovery. Android launch/new intents
+still use the bounded, take-once inbox and explicit owner confirmation before
+import. Foreground recovery uses the saved descriptor, without replaying a
+consumed QR code or resetting the shared retry budget.
+
+Two Android-specific changes close gaps:
+
+- This project targets SDK 37. Android 17 requires `ACCESS_LOCAL_NETWORK`, so
+  the native plugin checks/requests it before LAN dialing (and before `.local`
+  resolution). Denial reports `local_network` with Android Nearby devices
+  Settings guidance, without an endless transport retry. Returning after a
+  Settings grant uses existing foreground recovery. Requests are coalesced and
+  prompt at most once per process; older Android requires no new grant. Local
+  interface prefixes include globally addressed IPv6; denied LAN addresses do
+  not discard public alternatives. Forget/replacement cancels connection work
+  even while the native permission exchange completes.
+- Explicit legacy/cloud/device-transfer exclusions keep identity, descriptors,
+  and intent receipts install-bound. `allowBackup=false` alone is insufficient
+  on some Android 12+ devices. A normal restart preserves the sealed client key;
+  fresh app storage creates a new seed. Keystore failures never silently rotate
+  an existing identity. These exclusions prevent future transfer; they do not
+  delete already-restored data.
+
+iOS's orphan-Keychain deletion and locked-cleanup startup gate do not apply:
+Android's seed lives in app-private sealed storage, and its Keystore wrapping
+key has no user-authentication/unlocked-device requirement. iOS socket-error
+heuristics remain iOS-only; Android 17 permission denial is checked natively,
+since TCP denial can appear as a timeout.
+
+Platform references: [Android LAN permission](https://developer.android.com/privacy-and-security/local-network-permission)
+and [Android 12 backup/transfer changes](https://developer.android.com/about/versions/12/behavior-changes-12#backup-restore).
+Host tests and compile checks do not establish physical-device permission,
+reinstall, or lifecycle acceptance.
+
+Validation: no-sidecar `cargo test --lib -- --test-threads=1` passed 992 app
+tests and 12 FFI tests (one existing FFI test ignored); `--features mobile`
+passed 561 tests. `cargo check --target aarch64-linux-android --tests` passed,
+including actual Android cfg. TypeScript, Vitest (99 files / 1,706 tests),
+frontend build, and authority passed. The Kotlin plugin compiled against the
+Android/Tauri APIs; three JVM policy tests and Android XML resource compilation
+passed. Existing build-size and test/dead-code warnings remain.
+
+The mobile run exposed an existing test race: polling the recovery mutex could
+make recovery's own `try_lock` skip. Its regression now supplies the client
+record a real attach saves and observes the resumed dial without competing for
+the mutex. The corrected isolated test and complete mobile suite passed.
+No `cargo fmt` or window-opening executable was run.

@@ -76,9 +76,26 @@ are unchanged.
 ## Verification
 
 - `TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --manifest-path src-tauri/Cargo.toml --lib`
+- `cargo test --manifest-path src-tauri/ffi/Cargo.toml --test apple_device_key_contract`
 - `bash scripts/test-ios-keychain.sh` (headless, fake Keychain, synthetic data)
 - `npx tsc --noEmit`, `npm test`, `npm run build`, `npm run authority`
 - `TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-apple-ios`
+
+The host Rust contract test substitutes the native ABI with a mock and exercises
+the production Apple wrapper without Keychain access or authentication UI. It
+covers hardware/biometric availability, policy and message forwarding, native
+refusals without fallback, invalid input bounds, and malformed native output.
+The wrapper requires a 65-byte uncompressed public key and a signature of 2–72
+bytes with the DER SEQUENCE prefix (`0x30`) and a short-form length byte equal to
+the remaining byte count. It does not parse the INTEGERs or verify the curve
+point or signature; the node performs cryptographic verification. Malformed
+native output from create, public-key lookup, or either signing flow is a
+transport failure (`Other(-6)`), never key invalidation. Signing transport
+failures preserve the stored key and enrollment record; only `device_invalid`
+triggers their deletion on signing failure.
+The Swift mock harness requires access to LocalAuthentication services even
+though it never prompts or reads real keys. A restrictive process sandbox can
+prevent `LAContext` from retaining its no-interaction setting.
 
 Install-lifecycle tests cover fresh cleanup, existing-state preservation,
 interrupted cleanup retries, and recovery from conflicting orphaned identities.

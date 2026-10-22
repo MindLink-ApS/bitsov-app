@@ -1,3 +1,5 @@
+import { CallRepairs } from './CallRepairs';
+import { provenUnpaid } from './paymentOutcome';
 import { AddDevice } from '../onboarding/AddDevice';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
 import { ConnectionCard, nextLastCall, type NodeAnswer, type StunSource, type TrackedCall } from './ConnectionCard';
@@ -35,8 +37,8 @@ import { onEscape } from './escapeStack';
 import { custodyBadge, CustodyBadgeView } from './custody';
 import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
-import { androidQrScannerAvailable, scanPairingLink } from '../pairingScanner';
-import { callCost, createCallEngine, NO_MEDIA_DEVICES, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
+import { callCost, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
 import { NewRoomPanel, RoomThread, type RoomSend, type ThreadRead } from './RoomPanel';
@@ -1228,6 +1230,7 @@ export function ControlCenter(props: Props) {
   const [callApproval, setCallApproval] = createSignal(false);
   const [callApproving, setCallApproving] = createSignal(false);
   const calls = createCallEngine({
+    closeAdmission: (operationId, peer, callId) => source.closeCallAdmission(operationId, peer, callId),
     authorize: async () => {
       const pairing = await act(() => source.pairingStatus());
       if (!pairing.ok) {
@@ -1259,6 +1262,19 @@ export function ControlCenter(props: Props) {
     // No STUN unless the owner set one: host candidates only.
     iceServers: () => stunServer(effectiveStun()),
     busy: () => meetingOn(),
+    // H2: the host ends our admission (one paid hangup, or none if the offer was never paid).
+    endCall: async (callId) => {
+      const r = await act(() => source.opEndCall(callId));
+      void loadBudget();
+      void loadWallet();
+      return r;
+    },
+    stuckCall: async (peer, opId) => {
+      const list = await act(() => source.opList(peer));
+      if (!list.ok) return null;
+      const open = list.value.operations.filter((o) => (o.kind === 'call_offer' || o.kind === 'call_recovery') && o.call_id);
+      return (opId ? open.find((o) => o.op_id === opId) : open[0])?.call_id ?? null;
+    },
     provenUnpaid: (code) => provenUnpaid(code),
   });
   // The latest call and its route (candidate types only), kept after the call for the connection card.
@@ -1756,6 +1772,8 @@ export function ControlCenter(props: Props) {
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
         <section class="track" aria-label="Track" inert={walletTab() !== null || contextOpen()}>
           {props.offline}
+          <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
+            onEnded={() => { void loadBudget(); void loadWallet(); }} />
           <Show when={moneyBlocked()}>
             <p class="hint money-notice" data-money-notice role="status">{!live() ? 'Waiting for the connection. Your node will retry automatically.' : MONEY_NOT_READY} Sending, paying, calls, first contact, files, rooms, channels and gifts will be available when it is ready.</p>
           </Show>
@@ -2038,7 +2056,7 @@ export function ControlCenter(props: Props) {
               currentHostedBy={() => props.hostedBy}
               onPreview={link => source.remoteAccessPreview(link)}
               onReplace={link => source.remoteAccessReplace(link)}
-              onScan={androidQrScannerAvailable() ? scanPairingLink : cameraQrScannerAvailable() ? scanPairingLinkWithCamera : undefined}
+              onScan={mobileQrScannerAvailable() ? scanPairingLink : cameraQrScannerAvailable() ? scanPairingLinkWithCamera : undefined}
               mobile={isMobilePlatform()}
               phone={isMobilePlatform()}
             /> : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
@@ -2088,6 +2106,15 @@ export function ControlCenter(props: Props) {
             <button type="button" class="soft" onClick={() => setCallApproval(false)}>Close</button>
           </div>
         </Show>}
+        payment={<Show when={callView().callId} keyed>{(callId) =>
+          <InCallPay
+            callId={callId} view={callView()} nameOf={nameOf}
+            lightningId={peerById().get(callView().peer?.toLowerCase() ?? '')?.ln_pubkey ?? null}
+            blocked={moneyBlocked() || grantUnknown() || (budget() !== null && (!budgetConfirmed() || !!errors.budgetPoll)) || !!budget()?.paused}
+            pending={callView().pendingCount > 0 || (budget()?.unsettled_msat ?? 0) > 0}
+            spend={spend()} spendError={errors.spend ?? errors.spendPoll} now={now()} actions={actions}
+          />
+        }</Show>}
         blocked={moneyBlocked()}
         view={callView()}
         streams={callStreams()}
@@ -2099,6 +2126,9 @@ export function ControlCenter(props: Props) {
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
         dismiss={() => { setCallApproval(false); calls.dismiss(); }}
+        closeAgain={() => void calls.closeAgain()}
+        endStuck={() => void calls.endStuck()}
+        callAgain={(peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); }}
       />
       <MeetingPanel
         view={meetingView()}
@@ -3047,7 +3077,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   const off = () => props.blocked || cost() === null || props.actions.callActive();
   const title = () =>
     why() ?? (quote() && cost() === null ? `${props.name}’s node does not take calls yet` : cost() !== null
-      ? `Up to ${fmtAmount(cost()!)}: ${fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat)} to ring (their call price plus ${feeCeiling(quote()!.offer_max_routing_fee_msat)}), then ${fmtAmount(signalCost(quote()!))} to hang up. Includes up to ${fmtAmount(callCost(quote()!)!)} more for one automatic recovery (another admission and hangup). Media goes directly between you; it is not billed. ${effectiveStun() ? `Uses the STUN server ${effectiveStun()} to find a route.` : stunOff() ? 'STUN is turned off, so calls connect only on the same network (Settings).' : 'No STUN server is set, so calls connect only on the same network (Settings).'}`
+      ? `Up to ${fmtAmount(cost()!)}: ${fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat)} to ring (their call price plus ${feeCeiling(quote()!.offer_max_routing_fee_msat)}), then ${fmtAmount(signalCost(quote()!))} to hang up. Includes up to ${fmtAmount(callCost(quote()!)!)} more for recovery after the original admission is confirmed closed. Media goes directly between you; it is not billed. ${effectiveStun() ? `Uses the STUN server ${effectiveStun()} to find a route.` : stunOff() ? 'STUN is turned off, so calls connect only on the same network (Settings).' : 'No STUN server is set, so calls connect only on the same network (Settings).'}`
       : 'Reading their call price…');
   const place = (media: CallMedia) => { const q = quote(); if (q && !off()) props.actions.placeCall(props.peer, media, q); };
   // A call pays and rings someone, so one tap only asks: the call/video button
@@ -3130,6 +3160,7 @@ function MediaView(props: { stream: MediaStream | null; video: boolean; muted: b
 
 /** The call card: incoming (accept/decline with price), ringing, live (mute, camera, duration, hang up), ended. */
 function CallPanel(props: {
+  payment: JSX.Element;
   panelRef: (el: HTMLElement) => void;
   approvalOpen: boolean;
   approval: JSX.Element;
@@ -3144,11 +3175,28 @@ function CallPanel(props: {
   mute: () => void;
   camera: () => void;
   dismiss: () => void;
+  /** H2: ask the host again to end this call's admission. */
+  closeAgain: () => void;
+  /** H2: end the earlier call the host still holds open to this contact. */
+  endStuck: () => void;
+  callAgain: (peer: string, media: CallMedia, quote: CallQuote) => void;
   /** Opens Settings → General, where the STUN server is chosen. */
   openCallSettings?: () => void;
 }) {
   const [tick, setTick] = createSignal(Date.now());
   const [answer, setAnswer] = createSignal<number | null>(null);
+  const [again, setAgain] = createSignal<CallQuote | null>(null);
+  const [againError, setAgainError] = createSignal<string | null>(null);
+  createEffect(on(() => props.view.callId, () => { setAgain(null); setAgainError(null); }));
+  const offerAgain = async () => {
+    const call = props.view.callId;
+    const peer = props.view.peer;
+    if (!peer) return;
+    const q = await props.quote(peer);
+    if (props.view.callId !== call || props.view.phase !== 'ended') return;
+    if (q.ok && callCost(q.value) !== null) setAgain(q.value);
+    else setAgainError(q.ok ? 'Their node does not take calls yet.' : q.error.message);
+  };
   let panel: HTMLElement | undefined;
   createEffect(on(() => props.view.phase === 'incoming' ? props.view.callId : null, (callId) => {
     if (!callId) return;
@@ -3186,7 +3234,7 @@ function CallPanel(props: {
         </Show>
         {/* Not on the ended card: it promises a recovery that can no longer happen. */}
         <Show when={v().phase !== 'ended'}>
-          <p class="hint" data-call-recovery-note>A network interruption may trigger one paid recovery attempt within your budget. Recovery uses another call admission and signalling fees.</p>
+          <p class="hint" data-call-recovery-note>The connection may recover on its own. A new paid recovery admission waits until the original call is confirmed closed.</p>
         </Show>
         {/* While reconnecting: what is happening, and when the call ends if it does not come back (display only). */}
         <Show when={v().phase === 'reconnecting'}>
@@ -3239,11 +3287,20 @@ function CallPanel(props: {
           {(connection) => <p class="hint" data-call-connection>Connection: {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} (local) / {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} (remote)</p>}
         </Show>
         <Show when={v().phase === 'ended'}>
-          <p class="hint" data-call-ended>{v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
+          <p class="hint" data-call-ended>{v().stuck
+            ? `A call to ${who()} is still closing at your node. Nothing was paid for this one. End it to call again.`
+            : v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
           <Show when={v().reason === 'failed'}>
             {/* A connectivity failure only ('failed': the connection closed, was lost, or never connected); no relay exists yet. No money claim here. */}
             <p class="hint" data-call-no-relay>Some networks need a relay to connect a call, and your node does not offer one yet.</p>
           </Show>
+        </Show>
+        <Show when={v().phase === 'ended' && v().close && (v().close!.status !== 'closed' || !!v().close!.message) ? v().close : null}>
+          {(close) => (
+            <p class={close().status === 'refused' || close().status === 'unknown' ? 'err-note' : 'hint'} role={close().status === 'closing' ? 'status' : 'alert'} data-call-close={close().status}>
+              {close().status === 'closing' ? 'Ending the call at your node…' : close().message}
+            </p>
+          )}
         </Show>
         {/* Display only: the browser reports no network. Recovery itself stays ICE-driven. */}
         <Show when={v().offline && v().phase !== 'ended' && v().phase !== 'idle'}>
@@ -3251,8 +3308,9 @@ function CallPanel(props: {
         </Show>
         <Show when={v().phase !== 'ended' && v().error}>
           {/* Only a recovery that could not start is framed as one (the call still waits); any other error (a camera, say) as it is. */}
-          <p class="hint" data-call-error>{v().phase === 'reconnecting' && v().recoveryError !== null ? `Recovery could not start: ${v().recoveryError} Still waiting for the connection to come back on its own.` : v().error}</p>
+          <p class="hint" data-call-error>{v().recoveryError === RECOVERY_CLOSING ? RECOVERY_CLOSING : v().phase === 'reconnecting' && v().recoveryError !== null ? `Recovery could not start: ${v().recoveryError} Still waiting for the connection to come back on its own.` : v().error}</p>
         </Show>
+        {props.payment}
         <div class="call-actions">
           <Switch>
             <Match when={v().phase === 'incoming'}>
@@ -3260,6 +3318,18 @@ function CallPanel(props: {
               <button type="button" class="soft" data-call-decline disabled={props.blocked} onClick={() => props.decline()}>Decline{price(answer())}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
+              <Show when={v().stuck}>
+                <button type="button" class="soft money" data-call-end-stuck onClick={() => props.endStuck()}>End that call</button>
+              </Show>
+              <Show when={v().close?.status === 'refused' && !v().stuck}>
+                <button type="button" class="soft money" data-call-close-retry onClick={() => props.closeAgain()}>Try ending it again</button>
+              </Show>
+              <Show when={v().outgoing && v().close?.status === 'closed' && !v().stuck && v().pendingCount === 0 && v().unknownCount === 0}>
+                <Show when={again()} fallback={<button type="button" class="soft" data-call-again disabled={props.blocked} onClick={() => void offerAgain()}>Call again</button>}>
+                  {(q) => <button type="button" class="primary money" data-call-again-confirm disabled={props.blocked} onClick={() => props.callAgain(v().peer!, v().media, q())}>Ring · up to {fmtAmount(2 * callCost(q())!)}</button>}
+                </Show>
+                <Show when={againError()}><p class="hint" role="status">{againError()}</p></Show>
+              </Show>
               <button type="button" class="soft" data-call-dismiss disabled={v().pendingCount > 0} title={v().pendingCount > 0 ? 'Closes once the payment has settled' : undefined} onClick={() => props.dismiss()}>Close</button>
             </Match>
             <Match when={v().phase !== 'idle'}>
@@ -3270,7 +3340,7 @@ function CallPanel(props: {
                 </Show>
               </Show>
               <button type="button" class="danger soft" data-call-hangup onClick={() => props.hangup()}>
-                {v().phase === 'calling' ? 'Cancel' : 'Hang up'}
+                {v().recoveryError === RECOVERY_CLOSING ? 'End call' : v().phase === 'calling' ? 'Cancel' : 'Hang up'}
               </button>
             </Match>
           </Switch>
@@ -3980,39 +4050,6 @@ export function opStateText(op: OpView, subject = 'This app’s record'): string
     default: return `${subject} could not be read.`;
   }
 }
-/**
- * Codes the host returns only when nothing was paid for this send (audited
- * against src-tauri/src/app.rs on this branch; `message_send`,
- * `message_retry`, `file_send`, all through money_post_with, POST at 4266).
- * Before the POST only: owner_*, price_changed, price_cap_unavailable,
- * price_quote_unavailable, peer_not_ready, room_unreachable, invalid,
- * retry_unavailable (confirm_first_contact 3735-3745, ceiling 3875,
- * require_price_caps 5216-5222, room_sendable, compose_body validation,
- * do_message_retry 5508-5522). After the POST but proven unpaid by the host
- * (it releases the reservation and abandons the journal): spend_refused
- * 4272-4277, not_ready 4279-4282, not_dispatched 4285-4289, grant_* node
- * refusals 4291-4297 ("before reserving or paying anything"),
- * price_cap_exceeded / readmission_capped 4300-4321, operation_mismatch
- * 4323-4329, readmission_quoted 5456 and retry_needs_admission 5536-5544
- * (after a refused POST, no second compose), and the local budget/approval
- * codes, which are before the POST except in readmit_under_quote 5451-5454,
- * which itself only runs after a refused POST. Everything else is unresolved:
- * spend_unknown, payment_unknown, budget_unreadable (raw after a paid retry,
- * refine_retry_fee 4413), app_not_ready (close_charge 4040 after payment),
- * node (transport loss can follow dispatch), and any code not listed.
- * Call-rules reasons below are mapped only for HTTP 400 on a 1:1 call compose;
- * the node's reserve_outgoing refuses before operation creation or payment.
- */
-const PROVEN_UNPAID = new Set([
-  'owner_only', 'owner_contact_unavailable', 'owner_contact_expired', 'sponsor_owner_approval_required',
-  'price_changed', 'price_cap_unavailable', 'price_quote_unavailable', 'peer_not_ready', 'room_unreachable', 'invalid', 'retry_unavailable',
-  'spend_refused', 'not_ready', 'not_dispatched', 'price_cap_exceeded', 'readmission_capped', 'readmission_quoted', 'operation_mismatch', 'retry_needs_admission',
-  'call_id_used', 'call_busy', 'call_signal_in_flight', 'call_signal_invalid', 'call_not_live',
-  'grant_ended', 'grant_per_call', 'grant_exhausted', 'grant_recipient', 'grant_unpriced', 'grant_paused', 'grant_failures_pending', 'grant_rate_limited',
-  'grant_velocity', 'grant_ledger', 'grant_refused', 'grant_first_contact', 'grant_readmission', 'grant_no_envelope', 'grant_unknown',
-  'spend_locked', 'spend_expired', 'budget_needed', 'budget_paused', 'budget_exhausted', 'ceiling_exhausted', 'budget_ledger_full', 'first_contact',
-]);
-const provenUnpaid = (code: string) => PROVEN_UNPAID.has(code);
 
 const kb = (bytes: number) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(bytes < 10_240 ? 1 : 0)} KB`);
 
@@ -4052,6 +4089,104 @@ function AmountField(props: { data: 'pay' | 'request'; label: string; value: str
       </Show>
     </>
   );
+}
+
+/** A direct payment owned by one call card; never enters the call engine. */
+function InCallPay(props: {
+  callId: string;
+  view: CallView;
+  nameOf: (id: string) => string;
+  lightningId: string | null;
+  blocked: boolean;
+  pending: boolean;
+  spend: SpendView | null;
+  spendError: string | undefined;
+  now: number;
+  actions: Actions;
+}) {
+  // The keyed parent remounts for a new call. A late receipt stays with this call.
+  const peer = props.view.peer!;
+  const [expanded, setExpanded] = createSignal(false);
+  const [amount, setAmount] = createSignal('');
+  const [busy, setBusy] = createSignal(false);
+  const [approving, setApproving] = createSignal(false);
+  const [result, setResult] = createSignal<{ state: 'sent' | 'failed' | 'unknown' | 'checked'; text: string } | null>(null);
+  const destination = createMemo(() => props.lightningId && /^(02|03)[0-9a-f]{64}$/i.test(props.lightningId) ? props.lightningId.toLowerCase() : null);
+  const live = () => props.view.callId === props.callId && props.view.peer === peer && props.view.phase === 'live';
+  const open = () => spendLine(props.spend, props.now).open;
+  const msat = () => {
+    const parsed = parseAmount(amount(), denom());
+    return parsed !== null && inPaymentBounds(parsed) ? parsed : null;
+  };
+  const blocked = () => props.blocked || props.pending || busy() || result()?.state === 'unknown';
+  usePairingActivity(() => expanded() || busy() || approving());
+  // A new unit or mapping requires a new amount; never reinterpret a visible draft.
+  createEffect(on(() => [denom(), destination()], () => setAmount(''), { defer: true }));
+  createEffect(() => { if (!live()) { setExpanded(false); setAmount(''); } });
+  const pay = async () => {
+    const dest = destination();
+    const value = msat();
+    if (!live() || !expanded() || blocked() || !open() || !dest || value === null) return;
+    // Consume the displayed amount synchronously, before the host can yield.
+    setBusy(true);
+    setExpanded(false);
+    setAmount('');
+    setResult(null);
+    try {
+      const r = await props.actions.keysend({ kind: 'peer', id: peer }, dest, value, '');
+      if (r.ok) {
+        setResult(r.value.status === 'settled'
+          ? { state: 'sent', text: `Sent ${fmtAmount(r.value.amount_msat)} to ${props.nameOf(peer)}.` }
+          : r.value.status === 'failed'
+            ? { state: 'failed', text: 'Payment failed.' }
+            : { state: 'unknown', text: 'Payment in progress. Settlement is not confirmed. Check pending result before paying again.' });
+      } else {
+        setResult(provenUnpaid(r.error.code)
+          ? { state: 'failed', text: `Payment not sent. ${r.error.message}` }
+          : { state: 'unknown', text: `Payment outcome unknown. Check pending result before paying again. ${r.error.message}` });
+      }
+    } catch {
+      setResult({ state: 'unknown', text: 'Payment outcome unknown. Check pending result before paying again.' });
+    } finally { setBusy(false); }
+  };
+  return <section class="in-call-pay" data-in-call-pay aria-label="Direct payment during call">
+    <Show when={live()}>
+      <button type="button" class="soft money" data-call-pay aria-expanded={expanded()} disabled={blocked() || !destination()} onClick={() => setExpanded(!expanded())}>Pay</button>
+      <Show when={!destination()}><p class="hint">Their Lightning payment address is unavailable. Your node must report it before you can pay this contact.</p></Show>
+      <Show when={props.pending}><p class="hint">Check pending result before paying.</p></Show>
+      <Show when={expanded()}>
+        <div class="pay-flow">
+          <strong>Pay {props.nameOf(peer)}</strong>
+          <p class="hint">Direct payment to their node’s reported Lightning address.</p>
+          <AmountField data="pay" label={`Amount to pay ${props.nameOf(peer)}`} value={amount()} onInput={setAmount} />
+          <Show when={msat() !== null}>
+            <dl class="pay-review">
+              <dt>Amount</dt><dd>{fmtAmount(msat()!)}</dd>
+              <dt>Network fee</dt><dd data-call-pay-fee>up to {fmtAmount(routingFee(msat()!))}</dd>
+              <dt>Total at most</dt><dd data-call-pay-total>{fmtAmount(allIn(msat()!))}</dd>
+            </dl>
+          </Show>
+          <SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.pending} stays="Your amount stays here. After approval, press Confirm and pay. Approving pays nothing." />
+          <Show when={!open() && props.spend?.state !== 'pending' && props.spend?.state !== 'unavailable'}>
+            <button type="button" class="soft" data-call-pay-approve disabled={blocked() || approving()} onClick={async () => {
+              if (blocked() || approving()) return;
+              setApproving(true);
+              try { await props.actions.approve(); } finally { setApproving(false); }
+            }}>Approve spending</button>
+          </Show>
+          <button type="button" class="primary soft money" data-call-pay-confirm disabled={blocked() || !live() || !open() || !destination() || msat() === null} onClick={() => void pay()}>Confirm and pay</button>
+          <button type="button" class="link" onClick={() => setExpanded(false)}>Cancel</button>
+        </div>
+      </Show>
+    </Show>
+    <Show when={busy()}><p class="hint" role="status" data-call-pay-status="sending">Sending payment…</p></Show>
+    <Show when={result()}>{(r) => <p class={r().state === 'failed' ? 'err-note' : 'hint'} role="status" data-call-pay-status={r().state}>{r().text}</p>}</Show>
+    <Show when={props.pending || result()?.state === 'unknown'}>
+      <Reconcile actions={props.actions} hasPending onChecked={(text) => {
+        if (result()?.state === 'unknown') setResult({ state: 'checked', text });
+      }} />
+    </Show>
+  </section>;
 }
 
 type Mode = 'message' | 'pay' | 'request' | 'file';
@@ -6254,7 +6389,7 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
 }
 
 /** Read-only: match an unknown outcome to the node's own records. Never re-sends. */
-function Reconcile(props: { actions: Actions; hasPending?: boolean }) {
+function Reconcile(props: { actions: Actions; hasPending?: boolean; onChecked?: (text: string) => void }) {
   const [result, setResult] = createSignal<string | null>(null);
   const [checking, setChecking] = createSignal(false);
   // Paid, not delivered: the owner may stop retrying (it dispatches nothing).
@@ -6273,6 +6408,7 @@ function Reconcile(props: { actions: Actions; hasPending?: boolean }) {
     setResult(outcome.ok ? outcome.value : outcome.error.message);
     setUndelivered(!outcome.ok && outcome.error.code === 'undelivered_pending' ? outcome.error.pending_id ?? null : null);
     setChecking(false);
+    if (outcome.ok) props.onChecked?.(outcome.value);
   };
   const stop = async () => {
     if (checking()) return;

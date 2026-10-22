@@ -12,9 +12,10 @@
  * one offer and one hangup for the caller, one answer for the callee.
  */
 import { appPlatform, type AppPlatform } from '../platform';
+import { provenUnpaid } from './paymentOutcome';
 import { asActionError } from './state';
 import { amount } from './format';
-import type { ActionError, CallQuote, CallReceipt, Message, NodeGrantSummary } from './types';
+import type { ActionError, CallQuote, CallReceipt, Message, NodeGrantSummary, OpView } from './types';
 
 export const CALL_OFFER = 400;
 export const CALL_ANSWER = 401;
@@ -174,17 +175,50 @@ export type CallView = {
   recoveryUsedBefore: boolean;
   /** Display only: why a recovery could not start (recoveryRefused), apart from any other error (a camera, a hangup). */
   recoveryError: string | null;
+  /** H2: ending this call's own admissions at the host; null when none was ours. */
+  close: CallClose | null;
+  /** H2: an earlier call to this peer is still open at the host (`call_admission_open`). */
+  stuck: { opId: string | null } | null;
 };
+
+/** `closed`: the host ended it (or nothing was owed); `unknown`: check pending result; `refused`: still open. */
+export type CallClose = { status: 'closing' | 'closed' | 'unknown' | 'refused'; message: string | null };
+
+const CLOSE_UNKNOWN = 'Ending the call: the result is not known yet. Check pending result before calling them again.';
+/** What one `op_end_call` answer means for the owner. A failed read never says "ended". */
+export function closeOutcome(r: Outcome<OpView>): CallClose {
+  if (r.ok) return r.value.state === 'dispatching' || r.value.state === 'unknown'
+    ? { status: 'unknown', message: CLOSE_UNKNOWN } : { status: 'closed', message: null };
+  switch (r.error.code) {
+    // Nothing of this call is recorded at the host: nothing is open.
+    case 'call_not_found': return { status: 'closed', message: null };
+    case 'spend_unknown': case 'payment_unknown': return { status: 'unknown', message: CLOSE_UNKNOWN };
+    case 'price_changed': case 'price_cap_exceeded':
+      return { status: 'refused', message: 'Couldn’t end the call: their node now asks more to end it than this call allowed. Nothing was paid. Calling them again waits until it is ended.' };
+    default: return { status: 'refused', message: `Couldn’t end the call: ${r.error.message}` };
+  }
+}
+const CLOSE_RANK = { closed: 0, closing: 1, refused: 2, unknown: 3 } as const;
+/**
+ * Their hangup, bound by the host to one exact admission (`confirmed`, its
+ * wire call id): the host closes that admission itself on that evidence, so it
+ * is not ended from here. Every other admission of ours is still ended.
+ */
+const peerEnd = (confirmed: string) => ({ record: false, confirmed }) as const;
+
+export const RECOVERY_CLOSING = 'Your last call is still closing. End it, then call again.';
 
 export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
   liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, offline: false,
-  dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null,
+  close: null, stuck: null, dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
 export type CallDeps = {
+  /** Report local teardown by exact admission. Host keeps cleanup pending. No send. */
+  closeAdmission?: (operationId: string, peer: string, callId: string) => Promise<void>;
   /** Check current spend permission and show the shell’s approval path before capture. */
   authorize?: () => Promise<boolean>;
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
@@ -201,10 +235,13 @@ export type CallDeps = {
   iceServers?: () => RTCIceServer[];
   /** Something else (a meeting) holds the mic: an incoming offer rings out. */
   busy?: () => boolean;
+  /** H2 `op_end_call`: end one of our admissions (by its wire call id). Absent: hangups are paid here, as before H2. */
+  endCall?: (callId: string) => Promise<Outcome<OpView>>;
+  /** The call id of the host's open admission `opId` to `peer` (from `op_list`); null if not found. */
+  stuckCall?: (peer: string, opId: string | null) => Promise<string | null>;
   /**
-   * The shell's proven-unpaid classification, for the tally only. With it,
-   * any failed signal not proven unpaid counts as unknown; without it, only
-   * the explicit unknown codes do (a thrown signal always does).
+   * Optional display classification override. By default the tally shares
+   * the host's proven-unpaid error classification with the shell.
    */
   provenUnpaid?: (code: string) => boolean;
 };
@@ -275,6 +312,14 @@ export function createCallEngine(deps: CallDeps) {
   let videoSender: RTCRtpSender | null = null;
   /** The call the owner cancelled while its offer was being prepared or paid. */
   let cancelled: string | null = null;
+  /** Our admissions in this call (an offer once it went to the host, and each recovery offer). */
+  let own: string[] = [];
+  /** Ids `op_end_call` was asked for: each once, unless the owner asks again. */
+  const closing = new Set<string>();
+  /** Capture the actual host completion, independently of the renderer timeout. */
+  const offersInFlight = new Map<string, Promise<Outcome<CallReceipt>>>();
+  /** Per displayed call: ids whose end was refused, which the owner may ask again. Another call's answer never touches it. */
+  const refusedClose = new Map<string, string[]>();
   /** Removes the network listeners of the current connection (display only). */
   let offNetwork: (() => void) | null = null;
   // Serialises user actions: a double click never pays twice.
@@ -296,6 +341,7 @@ export function createCallEngine(deps: CallDeps) {
     wireId = null;
     pendingRestartId = null;
     admissions.clear();
+    pendingPeerEnds.clear();
     negotiated = false;
     answerInFlight = false;
     restartAttempted = false;
@@ -328,10 +374,67 @@ export function createCallEngine(deps: CallDeps) {
     offerSdp = null;
     deps.onStreams(null, null);
   };
-  const end = (reason: HangupReason | null, error: string | null = null) => {
+  /** Ask the host to end each admission once; the worst answer is what the card says. */
+  const closeAdmissions = async (ids: string[], callId: string | null) => {
+    const endCall = deps.endCall;
+    const todo = ids.filter((id) => !closing.has(id));
+    if (!endCall || todo.length === 0) return;
+    todo.forEach((id) => closing.add(id));
+    if (view.callId === callId) set({ close: { status: 'closing', message: null } });
+    let worst: CallClose = { status: 'closed', message: null };
+    const refused: string[] = [];
+    for (const id of todo) {
+      const cap = quote ? signalCost(quote) : 0;
+      if (view.callId === callId) owe(cap);
+      // Snapshot overlap before awaiting endCall: either reply can arrive first.
+      const offer = offersInFlight.get(id);
+      const ask = async (): Promise<Outcome<OpView>> => {
+        try { return await endCall(id); } catch (error) { return { ok: false, error: asActionError(error) }; }
+      };
+      let r = await ask();
+      if (!r.ok && r.error.code === 'call_not_found' && offer) {
+        const result = await offer;
+        // Only positive non-dispatch evidence can avoid the second host check.
+        // Paid/unknown errors and thrown IPC failures all retain cleanup intent.
+        if (result.ok || !provenUnpaid(result.error.code)) r = await ask();
+      }
+      const c = closeOutcome(r);
+      if (c.status === 'refused') refused.push(id);
+      if (CLOSE_RANK[c.status] > CLOSE_RANK[worst.status]) worst = c;
+      if (view.callId === callId) {
+        const unknown = c.status === 'unknown' || (!r.ok && r.error.code !== 'call_not_found' && !provenUnpaid(r.error.code));
+        set({ pendingCount: view.pendingCount - 1, pendingMsat: view.pendingMsat - cap,
+          paidMsat: view.paidMsat + (r.ok && r.value.kind === 'call_hangup' ? r.value.paid_msat ?? 0 : 0),
+          unknownCount: view.unknownCount + Number(unknown), unknownMsat: view.unknownMsat + (unknown ? cap : 0) });
+      }
+    }
+    if (callId) {
+      // Only this call's own entry: a late answer for call A never clears call B's "Try ending it again".
+      const left = (refusedClose.get(callId) ?? []).filter((id) => !todo.includes(id)).concat(refused);
+      if (left.length) refusedClose.set(callId, left); else refusedClose.delete(callId);
+    }
+    if (view.callId === callId) set({ close: worst });
+  };
+  const admissionOps = new Map<string, Map<string, string>>();
+  /** Their hangup for one of our offers, waiting for that offer's receipt to bring the host-bound op id. */
+  const pendingPeerEnds = new Map<string, { callId: string; reason: HangupReason }>();
+  const closeAdmission = (operationId: string, peer: string, callId: string): Promise<void> =>
+    deps.closeAdmission?.(operationId, peer, callId).catch(() => { /* Host preserves the fence on storage failure. */ }) ?? Promise.resolve();
+  /** Local teardown validates identity only; op_end_call performs node-confirmed cleanup. */
+  const end = (reason: HangupReason | null, error: string | null = null, opts: { record?: boolean; endAtHost?: boolean; confirmed?: string } = {}) => {
+    const { record = true, endAtHost = true, confirmed } = opts;
+    const peer = view.peer;
+    const operations = [...(view.callId ? admissionOps.get(view.callId) ?? [] : [])];
+    if (view.callId) admissionOps.delete(view.callId);
+    // The admission the host confirmed closed (their bound hangup) is not ended again; the rest are.
+    const ids = own.filter((id) => id !== confirmed);
+    const callId = view.callId;
+    own = [];
     teardown();
     healedRefusal = null;
     set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null });
+    const recorded = record && peer ? Promise.all(operations.map(([operationId, wireCallId]) => closeAdmission(operationId, peer, wireCallId))) : Promise.resolve();
+    if (endAtHost && ids.length) void recorded.then(() => closeAdmissions(ids, callId));
   };
 
   const acquireMedia = (constraints: MediaStreamConstraints): Promise<MediaStream> => new Promise((resolve, reject) => {
@@ -489,8 +592,7 @@ export function createCallEngine(deps: CallDeps) {
       const next: Partial<CallView> = { pendingCount: view.pendingCount - 1, pendingMsat: view.pendingMsat - maxMsat };
       if (outcome?.ok) next.paidMsat = view.paidMsat + outcome.value.total_msat;
       else if (code === 'payment_settled_undelivered' || code === 'failed_paid') next.paidMsat = view.paidMsat + maxMsat;
-      else if (outcome === null ? !deps.provenUnpaid?.(code)
-        : deps.provenUnpaid ? !deps.provenUnpaid(code) : code === 'spend_unknown' || code === 'payment_unknown' || code === 'undelivered_pending') {
+      else if (!(deps.provenUnpaid ?? provenUnpaid)(code)) {
         next.unknownCount = view.unknownCount + 1;
         next.unknownMsat = view.unknownMsat + maxMsat;
       }
@@ -498,7 +600,28 @@ export function createCallEngine(deps: CallDeps) {
     };
     let r: Outcome<CallReceipt>;
     try {
-      r = await Promise.race([deps.signal(peer!, kind, JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat), timeout]);
+      const signal = Promise.resolve().then(() => deps.signal(peer!, kind,
+        JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat))
+        .catch((error): Outcome<CallReceipt> => ({ ok: false, error: asActionError(error) })).then(result => {
+        const operationId = result.ok ? result.value.operation_id
+          : result.error.operation_id;
+        if (kind === CALL_OFFER && operationId && (result.ok || !provenUnpaid(result.error.code))) {
+          if (view.callId !== callId || !active()) closeAdmission(operationId, peer!, targetId!);
+          else {
+            const operations = admissionOps.get(callId!) ?? new Map<string, string>();
+            operations.set(operationId, targetId!);
+            admissionOps.set(callId!, operations);
+            const pendingEnd = pendingPeerEnds.get(operationId);
+            if (pendingEnd?.callId === targetId) end(pendingEnd.reason, null, peerEnd(targetId!));
+          }
+        }
+        return result;
+      });
+      if (kind === CALL_OFFER) {
+        offersInFlight.set(targetId!, signal);
+        void signal.then(() => offersInFlight.delete(targetId!));
+      }
+      r = await Promise.race([signal, timeout]);
     } catch (error) {
       // A rejection after dispatch may still have paid: counted, then rethrown unchanged.
       tally(null, asActionError(error).code);
@@ -559,6 +682,7 @@ export function createCallEngine(deps: CallDeps) {
       if (pc !== conn) return;
       pendingRestartId = id;
       restartAnswerPending = true;
+      own.push(id);
       const sdp = `${conn.localDescription!.sdp.trimEnd()}\r\n${RESTART_ATTRIBUTE}${view.callId}\r\n`;
       const r = await pay(CALL_OFFER, { media: view.media, sdp }, q.offer_msat + q.offer_max_routing_fee_msat, id);
       if (pc !== conn) return;
@@ -567,7 +691,8 @@ export function createCallEngine(deps: CallDeps) {
         admissions.add(id);
       } else {
         restartAnswerPending = false;
-        recoveryRefused(conn, r.error.message);
+        if (provenUnpaid(r.error.code)) own = own.filter((call) => call !== id);
+        recoveryRefused(conn, r.error.code === 'call_admission_open' ? RECOVERY_CLOSING : r.error.message);
       }
     } catch (error) {
       if (pc === conn) restartAnswerPending = false;
@@ -654,6 +779,7 @@ export function createCallEngine(deps: CallDeps) {
       wireId = callId;
       admissions.add(callId);
       claim(callId);
+      own = [];
       set({ ...IDLE, phase: 'calling', peer, callId, media, outgoing: true, camera: media === 'video' });
       let conn: RTCPeerConnection;
       try {
@@ -668,9 +794,24 @@ export function createCallEngine(deps: CallDeps) {
       }
       // Cancelled before the offer went out: nothing is paid.
       if (cancelled === callId || view.callId !== callId || !active()) return;
+      // From here the host may hold this admission: every end asks it to close it.
+      own.push(callId);
       const r = await pay(CALL_OFFER, { media, sdp: conn.localDescription!.sdp }, q.offer_msat + q.offer_max_routing_fee_msat);
-      // Cancelled while the offer was in flight: the mic is already off; send nothing more.
+      // Cancelled while the offer was in flight: the mic is already off; the host ends it if it was paid.
       if (cancelled === callId || view.callId !== callId || !active()) return;
+      if (!r.ok && r.error.code === 'call_needs_node_upgrade') {
+        // Refused before dispatch (proven unpaid): no admission exists, nothing to end at the host.
+        own = own.filter((id) => id !== callId);
+        end(null, 'Your node needs an update before paid calls work. Nothing was paid.');
+        return;
+      }
+      if (!r.ok && r.error.code === 'call_admission_open') {
+        // Refused before paying: an earlier call to them is still open at the host. Say so; never a silent block.
+        own = own.filter((id) => id !== callId);
+        end(null, 'An earlier call to them is still being ended at your node. Nothing was paid for this one.');
+        set({ stuck: { opId: r.error.operation_id ?? null } });
+        return;
+      }
       if (!r.ok) {
         end(null, r.error.message);
         return;
@@ -749,13 +890,16 @@ export function createCallEngine(deps: CallDeps) {
       const callId = view.callId;
       const notify = view.phase !== 'calling' && view.phase !== 'incoming' && quote;
       const ids = [...admissions].reverse();
+      const mine = new Set(deps.endCall ? own : []);
       const owner = { peer: view.peer, callId }; // Keep late cleanup bound to this peer.
       cancelled = callId;
       // Every hangup owed is pending before the call ends, not one by one as each is sent.
-      if (notify) ids.forEach(() => owe(signalCost(notify)));
-      end('hangup');
+      if (notify) ids.filter(id => !mine.has(id)).forEach(() => owe(signalCost(notify)));
+      const operationIds = [...(admissionOps.get(callId!) ?? [])];
+      end('hangup', null, { record: !notify });
       if (notify) {
         for (const id of ids) {
+          if (mine.has(id)) continue;
           try {
             const r = await pay(CALL_HANGUP, { reason: 'hangup' }, signalCost(notify), id, owner, true);
             if (!r.ok && view.callId === callId) set({ error: r.error.message });
@@ -763,6 +907,8 @@ export function createCallEngine(deps: CallDeps) {
             if (view.callId === callId) set({ error: asActionError(error).message });
           }
         }
+        // Without op_end_call (pre-H2 deps), record the closure after the paid hangup, as H2 does.
+        if (!deps.endCall) for (const [operationId, wireCallId] of operationIds) void closeAdmission(operationId, owner.peer!, wireCallId);
       }
     },
 
@@ -771,7 +917,36 @@ export function createCallEngine(deps: CallDeps) {
       // Also invalidate a preflight that has not entered Calling yet.
       if (!active()) { teardown(); return; }
       if (view.phase === 'calling') cancelled = view.callId;
-      end('hangup');
+      end('hangup', null, { endAtHost: false });
+    },
+
+    /** The owner asks again to end an admission the host refused to end. */
+    closeAgain: async () => {
+      const callId = view.callId;
+      const ids = callId ? refusedClose.get(callId) : undefined;
+      if (!callId || !ids?.length) return;
+      refusedClose.delete(callId);
+      ids.forEach((id) => closing.delete(id));
+      await closeAdmissions(ids, callId);
+    },
+
+    /** `call_admission_open`: the owner ends the earlier call the host still holds. */
+    endStuck: async () => {
+      const stuck = view.stuck;
+      const peer = view.peer;
+      const callId = view.callId;
+      if (!stuck || !peer || !deps.endCall || !deps.stuckCall || view.phase !== 'ended') return;
+      set({ stuck: null, close: { status: 'closing', message: null } });
+      let earlier: string | null = null;
+      try { earlier = await deps.stuckCall(peer, stuck.opId); } catch { earlier = null; }
+      if (view.callId !== callId) return;
+      if (!earlier) {
+        set({ close: { status: 'refused', message: 'Couldn’t find the earlier call to end. Check pending result.' } });
+        return;
+      }
+      closing.delete(earlier);
+      await closeAdmissions([earlier], callId);
+      if (view.callId === callId && view.close?.status === 'closed') set({ close: { status: 'closed', message: 'The earlier call is ended. You can call them again.' } });
     },
 
     toggleMute: () => {
@@ -876,7 +1051,20 @@ export function createCallEngine(deps: CallDeps) {
           if (ours && pc) await pc.addIceCandidate({ candidate: s.candidate!, sdpMid: s.sdp_mid ?? null, sdpMLineIndex: s.sdp_mline_index ?? null }).catch(() => undefined);
           return;
         default:
-          if (view.peer === peer && (admissions.has(s.call_id) || pendingRestartId === s.call_id) && active()) end(s.reason ?? 'hangup');
+          if (view.peer === peer && (admissions.has(s.call_id) || pendingRestartId === s.call_id) && active()) {
+            // Incoming calls have no outgoing admission. For our offers, only
+            // the host's exact binding can end this generation of the card.
+            if (view.outgoing) {
+              if (!m.admission_operation_id) return;
+              if (admissionOps.get(view.callId!)?.get(m.admission_operation_id) !== s.call_id) {
+                // The host can finish dispatch before the renderer gets its
+                // receipt. Apply this event only when that exact id arrives.
+                pendingPeerEnds.set(m.admission_operation_id, { callId: s.call_id, reason: s.reason ?? 'hangup' });
+                return;
+              }
+            }
+            end(s.reason ?? 'hangup', null, peerEnd(s.call_id));
+          }
       }
     },
   };

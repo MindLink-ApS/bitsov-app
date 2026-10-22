@@ -53,6 +53,10 @@ pub struct Setup {
     join: Option<Joining>,
 }
 
+impl Setup {
+    pub fn is_active(&self) -> bool { self.ticket.is_some() || self.join.is_some() }
+}
+
 fn refusal(status: u16) -> ActionError {
     let message = match status {
         403 => "Only an enrolled owner device can add devices. This pairing or approval key is not authorized, or was revoked.",
@@ -142,7 +146,7 @@ async fn owner(state: &NodeState) -> Result<Owner, ActionError> {
     if !state.remote_mode.load(Ordering::SeqCst) {
         return Err(refusal(403));
     }
-    let (blob, record) = local_key(&device_store(state)?)
+    let (blob, record) = local_key(state, &device_store(state)?)?
         .filter(|(_, r)| r.registered)
         .ok_or_else(|| refusal(403))?;
     let key_id = record
@@ -429,14 +433,25 @@ impl Joining {
 }
 
 fn enrollment_refusal(status: u16, finalizing: bool) -> ActionError {
-    invalid(match status {
+    let mut error = invalid(match status {
         403 if finalizing => "The comparison could not be verified. Check the 18-character claim code shown at your node's owner console with `konsensus claim-code --show`, or on a BitSov box's sticker. Cancel the pending setup before trying again.",
         403 => "This pairing cannot enroll an owner device, or setup is closed. Use an enrolled owner device and check that the home node is unlocked.",
         404 | 405 => "This node does not support this enrollment request, or the request was lost. Cancel pending setup and reconnect.",
         409 | 410 => "The enrollment expired or the node restarted. Cancel pending setup and start again.",
         429 => "Another enrollment is pending, or requests are too frequent. Finish or cancel it on the joining device, or wait up to 15 minutes for it to expire.",
         _ => "The node did not confirm enrollment. Check its connection before trying again.",
-    })
+    });
+    use crate::remote_access::{ConnectionError, ConnectionErrorKind};
+    error.connection_error = Some(ConnectionError {
+        kind: match (status, finalizing) {
+            (403, true) => ConnectionErrorKind::ClaimMismatch,
+            (429, _) => ConnectionErrorKind::Busy,
+            (409 | 410, _) => ConnectionErrorKind::Expired,
+            _ => ConnectionErrorKind::Other,
+        },
+        detail: error.message.clone(),
+    });
+    error
 }
 fn enrollment_lost(finalizing: bool) -> ActionError {
     invalid(if finalizing {
@@ -598,7 +613,7 @@ pub async fn join(state: &NodeState, input: JoinInput) -> Result<JoinView, Actio
             "Keep an enrolled Mac or another non-phone owner device before enrolling this phone.",
         ));
     }
-    let (blob, mut record) = match local_key(&store) {
+    let (blob, mut record) = match local_key(state, &store)? {
         Some(key) => key,
         None => {
             let policy = *state.device_policy.lock().unwrap();
@@ -743,6 +758,8 @@ mod tests {
     #[test]
     fn finalize_refusal_names_the_owner_console_and_box_sticker() {
         let error = enrollment_refusal(403, true);
+        assert_eq!(serde_json::to_value(&error).unwrap()["kind"], "claim_mismatch");
+        assert_eq!(serde_json::to_value(enrollment_refusal(429, false)).unwrap()["kind"], "busy");
         assert!(error.message.contains("18-character claim code"));
         assert!(error.message.contains("your node's owner console"));
         assert!(error.message.contains("konsensus claim-code --show"));

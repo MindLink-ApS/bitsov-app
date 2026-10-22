@@ -170,7 +170,7 @@ pub async fn remember(state: &NodeState, remember: bool) -> Result<(), String> {
         .unwrap()
         .clone()
         .ok_or("Pairing is unavailable.")?;
-    let (blob, record) = local_key(&ctx.store)
+    let (blob, record) = local_key(state, &ctx.store).map_err(|e| e.message)?
         .ok_or("This device has no enrolled approval key for this node.")?;
     if !record.registered {
         return Err("This device's approval key has not been approved.".into());
@@ -220,7 +220,12 @@ pub fn remember_available(state: &NodeState) -> bool {
 pub fn locked_view(state: &NodeState) -> (&'static str, Option<device::DeviceView>) {
     if !state.home_locked.load(Ordering::SeqCst) { return ("ready", None); }
     let ctx = state.pairing.lock().unwrap().clone();
-    let key = ctx.and_then(|ctx| local_key(&ctx.store));
+    let key = match ctx.map(|ctx| local_key(state, &ctx.store)).unwrap_or(Ok(None)) {
+        Ok(key) => key,
+        // A transient bridge read cannot revoke enrollment. Keep the unlock
+        // path available; an explicit attempt reports the retryable error.
+        Err(_) => return (*state.home_unlock_state.lock().unwrap(), None),
+    };
     let Some((_, record)) = key else { return ("not-enrolled", None); };
     let view = device::DeviceView::of(true, Some(&record), false, now_ms());
     if view.state == device::DeviceState::Pending { return ("pending-approval", Some(view)); }
@@ -264,7 +269,7 @@ async fn unlock_with(
     if binding.client_id != connection.client_id || binding.fingerprint != status.fingerprint {
         return Err("This device's saved unlock binding does not match the node.".into());
     }
-    let (blob, record) = local_key(&ctx.store).ok_or_else(|| {
+    let (blob, record) = local_key(state, &ctx.store).map_err(|e| e.message)?.ok_or_else(|| {
         if cfg!(target_os = "android") {
             "This device has no enrolled approval key for this node."
         } else {
@@ -289,8 +294,7 @@ async fn unlock_with(
     let signature = device_sign(blob.clone(), message, "Unlock your BitSov home node".into())
         .await
         .map_err(|e| {
-            if e.code == "device_invalid" {
-                device::forget(&ctx.store);
+            if forget_invalid_signing_key(&ctx.store, &e) {
                 *state.home_unlock_state.lock().unwrap() = "not-enrolled";
             }
             e.message

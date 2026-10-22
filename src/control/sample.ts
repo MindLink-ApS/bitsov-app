@@ -1150,6 +1150,8 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     },
     spendReconcile: () => ok('No pending spend.'),
     opList: () => ok({ operations: [], skipped: 0, has_more: false }),
+    opEndCall: () => refuse('call_not_found', 'Sample data places no calls.'),
+    opRepairCallIndex: () => ok(null),
     // The sample never leaves a payment settled but undelivered.
     retry: () => refuse('retry_unavailable', 'Nothing to retry.'),
     dismissUndelivered: () => refuse('retry_unavailable', 'Nothing is waiting for delivery.'),
@@ -1263,6 +1265,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       return { message_id: id, recipient: recipient.toLowerCase(), filename, size_bytes, delivered: true, amount_msat: FILE_PRICE_MSAT, total_msat: allIn(FILE_PRICE_MSAT), max_routing_fee_msat: routingFee(FILE_PRICE_MSAT), sent_at_ms: Date.now(), accepted: true, state: 'acked' };
     },
     callQuote: () => ok({ offer_msat: 10_000, offer_max_routing_fee_msat: 5000, signal_msat: 1000, signal_max_routing_fee_msat: 5000, call_total_msat: 21_000 }),
+    closeCallAdmission: async () => {},
     callSignal: () => refuse('invalid', 'Calls need a real node. Sample data cannot ring anyone.'),
     voiceNote: async (messageId) => {
       const note = voiceNotes.get(messageId);
