@@ -39,7 +39,9 @@ struct DelegationNode {
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
 fn delegation_node() -> DelegationNode { delegation_fixture(false) }
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
-fn delegation_fixture(second: bool) -> DelegationNode {
+fn delegation_fixture(second: bool) -> DelegationNode { delegation_fixture_with_skew(second, 0) }
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+fn delegation_fixture_with_skew(second: bool, skew: i64) -> DelegationNode {
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
     use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_ASN1};
@@ -55,7 +57,7 @@ fn delegation_fixture(second: bool) -> DelegationNode {
     let sig = |message: &[u8]| {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(seed.sign(message).to_bytes())
     };
-    let expiry = now_unix() + 300;
+    let expiry = now_unix() + 300 + skew;
     let value = serde_json::json!({"v":2,"endpoint":endpoint,"endpoints":[endpoint],"node_id":node_id,
         "transport_pubkey":live,"transport_signature":sig(format!("bitsov-remote-transport-v1:{node_id}:{live}").as_bytes()),
         "box_transport_pubkey":box_key,"box_transport_signature":sig(format!("bitsov-box-transport-v1:{node_id}:{box_key}").as_bytes()),
@@ -121,7 +123,10 @@ fn delegation_fixture(second: bool) -> DelegationNode {
         if path.starts_with("/pair/device-key/pending?") {
             return (
                 200,
-                serde_json::json!({"pending":[p.lock().unwrap().clone()]}).to_string(),
+                {
+                    let p = p.lock().unwrap();
+                    serde_json::json!({"pending":if p.is_array() { p.clone() } else { serde_json::json!([p.clone()]) }}).to_string()
+                },
             );
         }
         if path.contains("/delegation?") {
@@ -537,8 +542,11 @@ async fn second_device_background_poll_promotes_access_before_registered_view() 
     // identity request failing once. Never expose completion before retry.
     assert!(do_device_key_status(state).await.is_err());
     assert!(matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(s) if s.scopes == ["read","receive"]));
+    assert!(remote_access::load_persisted(dir.path()).unwrap().unwrap().enrollment_commitment().is_some());
     let view = do_device_key_status(state).await.unwrap();
     assert_eq!(view.state,device::DeviceState::Registered);
+    assert!(remote_access::load_persisted(dir.path()).unwrap().unwrap().enrollment_commitment().is_none());
+    assert!(state.remote_descriptor.lock().unwrap().as_ref().unwrap().enrollment_commitment().is_none());
     assert!(!view.second_device);
     assert!(matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(s) if s.scopes == ["read","receive"]));
     assert!(*state.ready.lock().unwrap());
@@ -612,4 +620,30 @@ async fn phone_first_join_accepts_zero_owner_devices_and_requires_console_claim(
         assert!(!device::load_record(&device_store(state).unwrap()).unwrap().registered);
         server.await.unwrap();
     }
+}
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[tokio::test]
+async fn second_device_mint_accepts_clock_skew_but_refuses_overlong_tickets() {
+    for (skew, accepted) in [(-30, true), (30, true), (60, false)] {
+        let d = delegation_fixture_with_skew(true, skew);
+        assert_eq!(add_device::run(&d.node.state, add_device::Input::Mint).await.is_ok(), accepted, "skew={skew}");
+    }
+}
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[tokio::test]
+async fn second_device_poll_skips_bad_entries_and_keeps_valid_comparisons() {
+    let d = delegation_fixture(true);
+    let valid = d.pending.lock().unwrap().clone();
+    let mut malformed = valid.clone(); malformed["expires_at"] = "bad".into();
+    let mut wrong_words = valid.clone(); wrong_words["sas_words"][0] = "abandon".into();
+    let mut expired = valid.clone(); expired["expires_at"] = (now_unix() - 31).into();
+    *d.pending.lock().unwrap() = serde_json::json!([malformed, valid, wrong_words, expired]);
+    let view = serde_json::to_value(add_device::run(&d.node.state, add_device::Input::Poll).await.unwrap()).unwrap();
+    assert_eq!(view["pending"].as_array().unwrap().len(), 1);
+    assert_eq!(view["pending"][0]["op_id"], valid["op_id"]);
+    assert!(d.node.posts().is_empty());
+    *d.pending.lock().unwrap() = valid;
+    assert!(add_device::run(&d.node.state, add_device::Input::Approve {op_id:"aa".repeat(12)}).await.is_ok());
 }

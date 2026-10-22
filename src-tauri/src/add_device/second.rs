@@ -28,12 +28,12 @@ fn view(session: &Session) -> View {
         return View::Ready { owner: true, second_device: true };
     }
     View::Ticket {
-        uri: session.uri.as_ref().filter(|_| session.expires_at > now_unix() && session.pending.is_empty()).map(|u| u.to_string()).unwrap_or_default(),
-        expires_at: session.expires_at,
+        uri: session.uri.as_ref().filter(|_| expiry_deadline(session.expires_at) > now_unix() && session.pending.is_empty()).map(|u| u.to_string()).unwrap_or_default(),
+        expires_at: expiry_deadline(session.expires_at),
         second_device: true,
         pending: session.pending.iter().map(|p| Comparison {
             op_id: p.op_id.clone(), name: p.name.clone(), words: p.sas_words.clone(),
-            expires_at: p.expires_at, can_approve: p.can_approve(session.ticket_id.as_deref()),
+            expires_at: expiry_deadline(p.expires_at), can_approve: p.can_approve(session.ticket_id.as_deref()),
         }).collect(),
     }
 }
@@ -63,9 +63,12 @@ pub(super) async fn run(state: &NodeState, setup: &mut Setup, input: Input) -> R
             let mut pending = Vec::new();
             for value in list.pending {
                 if value["sas_version"] != 2 || value["approval_message"].is_null() { continue; }
-                let p: Pending = serde_json::from_value(value).map_err(|_| invalid("Invalid second-device comparison."))?;
-                validate(&p, &owner, &ctx)?;
-                pending.push(p);
+                match serde_json::from_value::<Pending>(value) {
+                    Ok(p) if validate(&p, &owner, &ctx).is_ok() => pending.push(p),
+                    // One malformed, stale, or mismatched operation must not
+                    // hide other devices. Never log peer-supplied fields.
+                    _ => eprintln!("Skipped an invalid second-device comparison; nothing was signed."),
+                }
             }
             if !pending.is_empty() {
                 if let Some(uri) = &mut session.uri { uri.clear(); }
@@ -92,7 +95,7 @@ pub(super) async fn run(state: &NodeState, setup: &mut Setup, input: Input) -> R
             let issued: Issued = decode_act("second-device ticket", &text)?;
             let descriptor = remote_access::parse_pairing_link(&issued.uri).map_err(|_| invalid("Invalid second-device ticket."))?;
             if Some(descriptor.node_id()) != state.node_id.lock().unwrap().as_deref()
-                || issued.expires_at <= now_unix() || issued.expires_at > now_unix() + protocol::TTL {
+                || !valid_expiry(issued.expires_at, now_unix(), protocol::TTL) {
                 return Err(invalid("The ticket is expired or belongs to another node."));
             }
             session.ticket_id = descriptor.ticket_id();
@@ -128,5 +131,30 @@ pub(super) async fn run(state: &NodeState, setup: &mut Setup, input: Input) -> R
             Ok(if reject { View::Rejected } else { View::Done })
         }
         Input::Cancel => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn second_device_renderer_deadlines_include_clock_skew() {
+        let now = now_unix();
+        let mut session = Session {
+            uri: Some(Zeroizing::new("node-issued-ticket".into())),
+            expires_at: now - 20,
+            ..Default::default()
+        };
+        let rendered = serde_json::to_value(view(&session)).unwrap();
+        assert_eq!(rendered["uri"], "node-issued-ticket");
+        assert_eq!(rendered["expires_at"], now + 10);
+        let mut pending: Pending = serde_json::from_str(include_str!("../../tests/fixtures/node356-pending.json")).unwrap();
+        pending.expires_at = now - 20;
+        session.pending.push(pending);
+        let rendered = serde_json::to_value(view(&session)).unwrap();
+        assert_eq!(rendered["pending"][0]["expires_at"], now + 10);
+        session.pending.clear();
+        session.expires_at = now - 30;
+        assert_eq!(serde_json::to_value(view(&session)).unwrap()["uri"], "");
     }
 }

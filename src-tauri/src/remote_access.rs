@@ -723,9 +723,9 @@ fn validate_link(link: PairingLinkV1, now: i64) -> Result<RemoteDescriptor, Remo
     if link.expires_at < 0 {
         return Err(RemoteError::Invalid("ticket expiry is invalid".into()));
     }
-    // Owner tickets cross device clocks; match the enrollment UI's bounded
+    // One-use tickets cross device clocks; match the enrollment UI's bounded
     // allowance. The node still enforces the ticket's original deadline.
-    let deadline = if link.code.starts_with("owner_") {
+    let deadline = if link.code.starts_with("owner_") || link.code.starts_with("second_") {
         crate::delegation::expiry_deadline(link.expires_at)
     } else {
         link.expires_at
@@ -1949,6 +1949,24 @@ pub fn commit_bootstrap(app_dir: &Path, previous: &RemoteDescriptor,
     Ok(descriptor)
 }
 
+/// Remove the consumed ticket hash only after enrollment and access refresh.
+/// Do not resurrect a forgotten descriptor or overwrite a replacement import.
+pub fn clear_enrollment_commitment(app_dir: &Path, descriptor: &mut RemoteDescriptor) -> Result<(), RemoteError> {
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    let path = config_path(app_dir);
+    let mut saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes))
+        .ok_or_else(|| RemoteError::Local("pairing ticket was forgotten or replaced".into()))?;
+    if saved.node_id != descriptor.node_id || saved.endpoint != descriptor.endpoint
+        || saved.transport_pubkey != descriptor.transport_pubkey || saved.code.is_some()
+        || saved.enrollment_commitment != descriptor.enrollment_commitment {
+        return Err(RemoteError::Local("pairing ticket was forgotten or replaced".into()));
+    }
+    saved.enrollment_commitment = None;
+    persist_at(&path, &saved)?;
+    descriptor.enrollment_commitment = None;
+    Ok(())
+}
+
 /// Identity proofs obtained inside an authenticated, already pinned session.
 pub struct TransportProofs {
     pub pin: BoxPin,
@@ -2199,6 +2217,9 @@ pub async fn authenticate_pinned_transport_and_save_record(
     }).await?;
     let mut descriptor = current.into_inner().unwrap();
     if descriptor.enrollment_commitment.is_some() {
+        if scopes.is_empty() && descriptor.node_id.is_empty() {
+            return Err(RemoteError::Invalid("unexpected provisional pairing".into()));
+        }
         let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
         let saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
         if !saved.is_some_and(|d| d.node_id == descriptor.node_id && d.endpoint == descriptor.endpoint
@@ -2782,17 +2803,21 @@ mod tests {
     }
 
     #[test]
-    fn owner_ticket_import_allows_only_thirty_seconds_of_clock_skew() {
+    fn owner_and_second_device_ticket_imports_allow_only_thirty_seconds_of_clock_skew() {
         let node = SigningKey::from_bytes(&[7u8; 32]);
-        let at = |expires_at| node_ticket(&node, serde_json::json!({
-            "code": format!("owner_{}", "ab".repeat(32)), "expires_at": expires_at
-        }));
-        for (expiry, accepted) in [(NOW - 30, false), (NOW - 29, true),
-            (NOW, true), (NOW + 300, true)] {
-            assert_eq!(parse_pairing_link_at(&at(expiry), NOW).is_ok(), accepted, "{expiry}");
+        for prefix in ["owner_", "second_"] {
+            let code = if prefix == "owner_" { "ab".repeat(32) }
+                else { base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0xab;32]) };
+            let at = |expires_at| node_ticket(&node, serde_json::json!({
+                "code": format!("{prefix}{code}"), "expires_at": expires_at
+            }));
+            for (expiry, accepted) in [(NOW - 30, false), (NOW - 29, true),
+                (NOW, true), (NOW + 270, true), (NOW + 300, true), (NOW + 330, true)] {
+                assert_eq!(parse_pairing_link_at(&at(expiry), NOW).is_ok(), accepted, "{prefix} {expiry}");
+            }
+            let data = tempfile::tempdir().unwrap();
+            assert!(import_pairing_link(data.path(), &at(unix_now() - 20)).is_ok());
         }
-        let data = tempfile::tempdir().unwrap();
-        assert!(import_pairing_link(data.path(), &at(unix_now() - 20)).is_ok());
     }
 
     #[test]

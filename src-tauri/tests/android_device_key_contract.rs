@@ -6,8 +6,8 @@ fn project_file(path: &str) -> String {
 }
 
 const PLUGIN: &str = "gen/android/app/src/main/java/tech/mindlink/bitsov/DeviceKeyPlugin.kt";
-const MACOS_KEYCHAIN_CFG: &str =
-    "#[cfg(all(target_os = \"macos\", desktop, not(feature = \"mobile\")))]";
+const APPLE_HOME_KEYCHAIN_CFG: &str =
+    "#[cfg(any(target_os = \"ios\", all(target_os = \"macos\", desktop, not(feature = \"mobile\"))))]";
 
 /// The brace-balanced block after the first `{` following each `marker`.
 fn blocks_after<'a>(source: &'a str, marker: &str) -> Vec<&'a str> {
@@ -747,13 +747,13 @@ fn android_at_rest_key_is_hardware_bound_and_opening_never_creates_it() {
 }
 
 #[test]
-fn macos_keychain_home_path_keeps_its_keychain_calls() {
+fn apple_keychain_home_paths_keep_their_keychain_calls() {
     let keychain = project_file("src/home_keychain.rs");
-    assert_eq!(keychain.matches(MACOS_KEYCHAIN_CFG).count(), 2);
+    assert_eq!(keychain.matches(APPLE_HOME_KEYCHAIN_CFG).count(), 2);
 
     let store = normalized(block_after(
         block_after(&keychain, "\nfn store("),
-        MACOS_KEYCHAIN_CFG,
+        APPLE_HOME_KEYCHAIN_CFG,
     ));
     for required in [
         "let _=device_blob;",
@@ -768,7 +768,7 @@ fn macos_keychain_home_path_keeps_its_keychain_calls() {
 
     let read = normalized(block_after(
         block_after(&keychain, "\nfn read("),
-        MACOS_KEYCHAIN_CFG,
+        APPLE_HOME_KEYCHAIN_CFG,
     ));
     for required in [
         "let _=(secret,device_blob);",
@@ -856,4 +856,32 @@ fn android_plugins_are_registered_without_enabling_them_on_desktop() {
     assert!(mobile_capability.contains("\"barcode-scanner:allow-scan\""));
     assert!(mobile_capability.contains("\"barcode-scanner:allow-check-permissions\""));
     assert!(mobile_capability.contains("\"barcode-scanner:allow-request-permissions\""));
+}
+
+#[test]
+fn ios_home_keychain_only_stores_device_local_public_metadata() {
+    let swift = project_file("native/home_metadata.swift");
+    let valid = normalized(block_after(&swift, "static func valid("));
+    assert!(valid.contains("[\"box-transport\",\"unlock-binding\"].contains(String(fields[3]))"));
+    assert!(valid.contains("fields.count==4&&fields[0]==\"bitsov\"&&fields[1]==\"node\""));
+    assert!(valid.contains("fields[2].utf8.count==64"));
+    assert!(valid.contains("fields[2].utf8.allSatisfy{(48...57).contains($0)||(97...102).contains($0)}"));
+    let bridge = normalized(block_after(&swift, "public func bitsov_home_store("));
+    in_order(&bridge, &["secret==0", "else{return errSecParam}", "HomeMetadata().store("]);
+    let query = normalized(block_after(&swift, "private func query("));
+    assert!(query.contains("kSecAttrSynchronizable:false"));
+    assert!(query.contains("kSecUseDataProtectionKeychain:true"));
+    let store = normalized(block_after(&swift, "func store("));
+    in_order(&store, &["guard Self.valid(service)", "else{return errSecParam}", "let base=query(service,context)",
+        "attributes[kSecAttrAccessible]=kSecAttrAccessibleWhenUnlockedThisDeviceOnly", "let status=add(attributes as CFDictionary,nil)",
+        "return update(base as CFDictionary,[kSecValueData:data,kSecAttrAccessible:kSecAttrAccessibleWhenUnlockedThisDeviceOnly]as CFDictionary)"]);
+    let read = normalized(block_after(&swift, "func read("));
+    in_order(&read, &["guard Self.valid(service)else{return errSecParam}", "var attributes=query(service,context)", "let status=copy("]);
+    for body in [&store, &read] { assert!(body.contains("context.interactionNotAllowed=true")); }
+    assert_eq!(swift.matches("kSecAttrSynchronizable").count(), 1, "no sync override");
+    for forbidden in ["kSecAttrAccessGroup", "kSecUseKeychain", "kSecMatchSearchList", "seed-password"] {
+        assert!(!swift.contains(forbidden), "iOS metadata must not enable {forbidden}");
+    }
+    let build = project_file("ffi/build.rs");
+    assert!(build.contains("if ios { compiler.args([\"../native/client_keychain.swift\", \"../native/pairing_link.swift\", \"../native/home_metadata.swift\"]); }"));
 }

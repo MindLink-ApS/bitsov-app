@@ -42,3 +42,37 @@ See [implementation and verification notes](../SECOND_DEVICE_JOIN.md) for the
 host contract, fixture provenance, retry coverage and the earlier child-exit test
 timeout that passed in the final full run. No `cargo fmt` or window-opening
 binary was run; no real tickets, claim codes or comparison words were logged.
+
+## PR #300 round 1 — fixes after e10306b1
+
+The Apple Keychain contract now deliberately covers the shared macOS/iOS cfg
+and separately pins iOS secret refusal, the two public metadata item names,
+WhenUnlockedThisDeviceOnly on insert and update, and disabled synchronization.
+Second-device validation, ticket import and renderer deadlines reuse the v1
+30-second skew allowance; the node still enforces expiry. A bad pending item
+is skipped with a fixed diagnostic without preventing other comparisons.
+The provisional one-use path requires a node identity before saving its pairing
+record. Successful enrollment clears the consumed ticket hash from disk and
+memory only after access refresh and setup succeed, with replacement/forget
+protection. Waiting copy directs the new device to its other device.
+
+Verification:
+
+- Full workspace test run, including the app's `tests/` integration suites:
+  `TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --locked --manifest-path src-tauri/Cargo.toml --features dev-node,local-owner-ceremony --no-fail-fast -- --test-threads=4`
+  → 1,173 passed, 0 failed, 1 existing hardware test ignored. This includes
+  1,074 app unit tests and 53 app integration tests.
+- `npx tsc --noEmit` → PASS.
+- `npm test` → 100 files / 1,804 tests PASS.
+- `npm run build` → PASS (existing large-chunk warning).
+- `npm run authority` → PASS.
+- `cargo check --locked -p bitsov-app --target aarch64-linux-android --lib --tests`
+  with NDK 27.2 API 24 clang and the no-sidecar override → PASS.
+- `cargo check --locked -p bitsov-app --target aarch64-apple-ios --lib --tests`
+  with the no-sidecar override → PASS.
+- Independent review → no actionable findings; `git diff --check` → PASS.
+
+The first parallel full Rust run hit three unchanged short-timeout tests;
+all passed in the complete four-thread rerun. Mobile checks required normal
+access to Tauri's generated Cargo-registry cache and Swift's module cache.
+No `cargo fmt` or window-opening application was run.

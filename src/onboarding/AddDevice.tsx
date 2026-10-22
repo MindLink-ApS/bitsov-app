@@ -144,7 +144,7 @@ export function JoinDevice(props:{api:(input:JoinInput)=>Promise<JoinView>; mobi
       <Match when={waiting()}>{v => <>
         <PairSteps secondDevice={secondDevice()} current={2} />
         <PairWords words={v().words} />
-        <p role="status">Compare these words with your node’s owner console and approve there, or compare with an enrolled owner device and approve there with {(props.mobile ?? isMobilePlatform()) ? 'biometrics' : 'Touch ID'}.</p>
+        <p role="status"><Show when={secondDevice()} fallback={<>Compare these words with your node’s owner console and approve there, or compare with an enrolled owner device and approve there with {(props.mobile ?? isMobilePlatform()) ? 'biometrics' : 'Touch ID'}.</>}>Approve on your other device. Compare all four words there and approve with its biometrics.</Show></p>
         <button class="quiet" disabled={busy()} onClick={() => void run({action:'cancel'})}>Words differ · Cancel</button>
       </>}</Match>
       <Match when={view()?.state === 'done'}><PairSteps secondDevice={secondDevice()} current={3} /><p class="ok-note" role="status">Device added. Your node’s unlock password was not transferred. Keep access to your node’s owner console.</p></Match>

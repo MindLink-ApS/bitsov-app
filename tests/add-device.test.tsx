@@ -181,6 +181,8 @@ it('second-device start never renders or sends a claim code', async () => {
   await click(root, 'Show comparison words');
   expect(calls[calls.length - 1]).toEqual({action:'start_second'});
   expect(root.querySelectorAll('[data-pair-word]').length).toBe(4);
+  expect(root.textContent).toContain('Approve on your other device');
+  expect(root.textContent).not.toContain('owner console');
 });
 
 it('never flashes claim input while second-device status is loading', async () => {

@@ -1,5 +1,5 @@
 //! Node N-2DEV wire contract. No authority or signing key lives here.
-use crate::delegation::canonical_hex;
+use crate::delegation::{canonical_hex, valid_expiry};
 use serde::Deserialize;
 
 pub const CAPABILITY: &str = "second_device_enrollment_v1";
@@ -55,8 +55,16 @@ mod tests {
         assert!(wrong.validate(&p.node, "owner", 7, &p.approver_key, 1000).is_err());
         assert!(p.validate(&p.node, "non-owner", 7, &p.approver_key, 1000).is_err());
         assert!(p.validate(&p.node, "owner", 8, &p.approver_key, 1000).is_err());
-        assert!(p.validate(&p.node, "owner", 7, &p.approver_key, 1300).is_err());
-        assert!(p.validate(&p.node, "owner", 7, &p.approver_key, 999).is_err());
+        assert!(p.validate(&p.node, "owner", 7, &p.approver_key, 1330).is_err());
+        assert!(p.validate(&p.node, "owner", 7, &p.approver_key, 969).is_err());
+    }
+    #[test]
+    fn comparison_accepts_only_bounded_clock_skew() {
+        let p = fixture(); // Node issued at 1000, expires at 1300.
+        for (now, accepted) in [(969, false), (970, true), (999, true), (1000, true),
+            (1030, true), (1299, true), (1300, true), (1329, true), (1330, false)] {
+            assert_eq!(p.validate(&p.node, "owner", 7, &p.approver_key, now).is_ok(), accepted, "now={now}");
+        }
     }
     #[test]
     fn approval_is_bound_to_current_qr_or_console() {
@@ -97,7 +105,7 @@ impl Pending {
         let bad = "Invalid second-device comparison. Nothing was signed; start again.";
         if self.node != node || self.approver_client != client || self.approver_epoch != epoch
             || self.approver_key != key || self.client_id.is_empty() || self.client_id == client
-            || self.sas_version != 2 || self.expires_at <= now || self.expires_at > now.saturating_add(TTL)
+            || self.sas_version != 2 || !valid_expiry(self.expires_at, now, TTL)
             || self.device_name != self.name || self.name.is_empty() || self.name.chars().count() > 64
             || self.name.trim() != self.name || self.name.chars().any(|c| c.is_control() || matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'))
             || self.public_key != self.device_key || !self.device_key.starts_with("04")

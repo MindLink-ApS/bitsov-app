@@ -447,7 +447,7 @@ impl Joining {
         JoinView::Waiting {
             second_device: self.second_device,
             words: self.words,
-            expires_at: if self.second_device { self.expires_at } else { expiry_deadline(self.expires_at) },
+            expires_at: expiry_deadline(self.expires_at),
         }
     }
 }
@@ -544,7 +544,7 @@ fn accept_enrollment_version(state: &NodeState, store: &Path, record: &mut devic
         || !canonical_hex(&pending.box_nonce, 16)
         || pending.sas_version != version
         || !canonical_hex(&pending.key_id, 16)
-        || if version == 2 { pending.expires_at <= now || pending.expires_at > now.saturating_add(bitsov_app::second_device::TTL) } else { !valid_expiry(pending.expires_at, now, ENROLLMENT_TTL_SECS) }
+        || !valid_expiry(pending.expires_at, now, if version == 2 { bitsov_app::second_device::TTL } else { ENROLLMENT_TTL_SECS })
     {
         return Err(invalid(
             "Invalid or expired device enrollment reply. Cancel pending setup before trying again.",
@@ -563,7 +563,7 @@ fn accept_enrollment_version(state: &NodeState, store: &Path, record: &mut devic
         delegation_message: None,
         op_id: pending.op_id.clone(),
         owner_action: String::new(),
-        expires_at_ms: ((if version == 2 { pending.expires_at } else { expiry_deadline(pending.expires_at) }).max(0) as u64).saturating_mul(1000),
+        expires_at_ms: (expiry_deadline(pending.expires_at).max(0) as u64).saturating_mul(1000),
     });
     {
         let _guard = state.device_lifecycle.lock().unwrap();
@@ -596,6 +596,12 @@ pub async fn complete_second_join(state: &NodeState) -> Result<(), ActionError> 
     if state.error.lock().unwrap().is_some() || !*state.ready.lock().unwrap() {
         return Err(invalid("Device approved. Reconnect to finish setup."));
     }
+    {
+        let mut descriptor = state.remote_descriptor.lock().unwrap();
+        let descriptor = descriptor.as_mut().ok_or_else(|| refusal(403))?;
+        remote_access::clear_enrollment_commitment(&dir, descriptor)
+            .map_err(|_| invalid("Device approved. Reconnect to finish setup."))?;
+    }
     state.second_join_complete.store(true, Ordering::SeqCst);
     Ok(())
 }
@@ -620,7 +626,7 @@ pub(super) async fn join_on_platform(state: &NodeState, input: JoinInput, platfo
     if view.state == device::DeviceState::Registered {
         complete_second_join(state).await?;
         setup.join = None;
-        return Ok(JoinView::Done { second_device: has_second_ticket(state) });
+        return Ok(JoinView::Done { second_device: state.second_join_complete.load(Ordering::SeqCst) || has_second_ticket(state) });
     }
     if let Some(j) = &setup.join {
         let same_record = device::load_record(&store).is_some_and(|r| {
@@ -628,7 +634,7 @@ pub(super) async fn join_on_platform(state: &NodeState, input: JoinInput, platfo
         });
         if store != j.store
             || !same_record
-            || now_unix() >= if j.second_device { j.expires_at } else { expiry_deadline(j.expires_at) }
+            || now_unix() >= expiry_deadline(j.expires_at)
             || Instant::now() >= j.deadline
         {
             setup.join = None;
@@ -774,7 +780,7 @@ pub(super) async fn join_on_platform(state: &NodeState, input: JoinInput, platfo
         words: sas::words(&digest),
         expires_at: pending.expires_at,
         deadline: Instant::now()
-            + Duration::from_secs(((if second_device { pending.expires_at } else { expiry_deadline(pending.expires_at) }) - now_unix()).max(0) as u64),
+            + Duration::from_secs((expiry_deadline(pending.expires_at) - now_unix()).max(0) as u64),
     };
     let view = j.view();
     setup.join = Some(j);
@@ -784,6 +790,30 @@ pub(super) async fn join_on_platform(state: &NodeState, input: JoinInput, platfo
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn second_device_joining_view_preserves_clock_skew() {
+        let joining = Joining { op_id: "aa".repeat(12), store: PathBuf::new(),
+            public_key: String::new(), words: ["word";4], expires_at: 1000,
+            deadline: Instant::now(), second_device: true };
+        assert_eq!(serde_json::to_value(joining.view()).unwrap()["expires_at"], 1030);
+    }
+    #[test]
+    fn second_device_enrollment_accepts_bounded_clock_skew_and_preserves_deadline() {
+        let state = NodeState::default();
+        let dir = tempfile::tempdir().unwrap();
+        for (expiry, accepted) in [(0, false), (970, false), (971, true), (1000, true),
+            (1270, true), (1300, true), (1330, true), (1331, false)] {
+            let reply = serde_json::json!({"op_id":"aa".repeat(12),"key_id":"66".repeat(16),
+                "fingerprint":"fixture","expires_at":expiry,"sas_version":2,"box_nonce":"55".repeat(16)});
+            let mut record = device::Record::default();
+            let result = accept_enrollment_version(&state, dir.path(), &mut record,
+                &serde_json::to_vec(&reply).unwrap(), 1000, 2);
+            assert_eq!(result.is_ok(), accepted, "expiry={expiry}");
+            if accepted {
+                assert_eq!(record.pending.unwrap().expires_at_ms, ((expiry + 30) * 1000) as u64);
+            }
+        }
+    }
     #[test]
     fn renderer_expiry_preserves_the_host_clock_skew_allowance() {
         let now = now_unix();

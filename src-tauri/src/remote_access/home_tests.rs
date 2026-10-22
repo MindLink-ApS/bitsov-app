@@ -583,3 +583,42 @@ async fn second_device_lost_pairing_reply_recovers_without_replaying_ticket() {
     assert!(!load_persisted(dir.path()).unwrap().unwrap().has_code());
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn second_device_one_use_pairing_requires_a_node_identity_before_saving_record() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (mut descriptor, _) = setup(listener.local_addr().unwrap().to_string(), false);
+    descriptor.node_id.clear();
+    descriptor.code = Some(format!("second_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([77;32])));
+    let dir = tempfile::tempdir().unwrap();
+    persist_at(&config_path(dir.path()), &descriptor).unwrap();
+    let store = dir.path().join("pairing");
+    let key = ClientKey::load_or_create(&store).unwrap();
+    let auth = json!({"status":"ok","v":1,"client_id":"0123456789abcdef0123456789abcdef","scopes":[]});
+    let server = tokio::spawn(responder(listener, 12, auth));
+    let result = authenticate_pinned_transport_and_save_record(dir.path(),descriptor,&key,"Phone",&store,&RemoteRetry::default()).await;
+    server.await.unwrap().unwrap();
+    assert!(matches!(result, Err(RemoteError::Invalid(ref message)) if message == "unexpected provisional pairing"));
+    assert!(!store.join(pairing::RECORD_FILE).exists());
+    let saved = saved_descriptor(&std::fs::read(config_path(dir.path())).unwrap()).unwrap();
+    assert!(!saved.has_code(), "the consumed ticket must stay retired");
+}
+
+#[test]
+fn second_device_cleanup_does_not_overwrite_a_replacement_or_forgotten_descriptor() {
+    for replaced in [false, true] {
+        let (mut current, _) = setup("127.0.0.1:9737".into(), true);
+        current.enrollment_commitment = Some([1;32]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_path(dir.path());
+        if replaced {
+            let mut replacement = current.clone();
+            replacement.enrollment_commitment = Some([2;32]);
+            persist_at(&path, &replacement).unwrap();
+        }
+        let before = std::fs::read(&path).ok();
+        assert!(clear_enrollment_commitment(dir.path(), &mut current).is_err());
+        assert_eq!(current.enrollment_commitment, Some([1;32]));
+        assert_eq!(std::fs::read(&path).ok(), before);
+    }
+}

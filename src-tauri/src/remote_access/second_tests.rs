@@ -112,6 +112,6 @@ fn second_ticket_expiry_and_consumption_leave_no_replayable_code() {
     // Same signed fixture as transport tests; the expiration check precedes signature parsing.
     let mut expired = PairingLinkV1::default();
     expired.code = format!("second_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([77;32]));
-    expired.expires_at = unix_now()-1;
+    expired.expires_at = unix_now()-30;
     assert!(matches!(validate_link(expired,unix_now()),Err(RemoteError::Expired(_))));
 }
