@@ -95,13 +95,29 @@ describe('host/renderer approval formatting parity', () => {
     setLanguagePref(locale);
     for (const scenario of approvalFormat.scenarios) {
       const view = scenario.view as ApprovalView;
+      const original = new TextEncoder().encode(view.approval_message);
       expect(termLines(view)).toEqual(scenario.lines);
       expect(new TextEncoder().encode(approvalReason(view))).toEqual(new TextEncoder().encode(scenario.reason));
+      expect(approvalReason(view).length).toBeLessThanOrEqual(300);
+      expect(approvalReason(view)).toMatch(/ · Requested by app abcdef…123456$/);
+      expect(new TextEncoder().encode(view.approval_message)).toEqual(original);
+    }
+    for (const testCase of approvalFormat.prompt_cases) {
+      const view = structuredClone(approvalFormat.scenarios[2].view) as ApprovalView;
+      view.breaker_reset!.tripped = [testCase.trip];
+      const original = new TextEncoder().encode(view.approval_message);
+      if (testCase.raw_utf16_length !== null) {
+        expect(`${termLines(view).join(' · ')} · Requested by app abcdef…123456`.length).toBe(testCase.raw_utf16_length);
+      }
+      expect(new TextEncoder().encode(approvalReason(view))).toEqual(new TextEncoder().encode(testCase.reason));
+      expect(approvalReason(view).length).toBeLessThanOrEqual(300);
+      expect(new TextEncoder().encode(view.approval_message)).toEqual(original);
     }
     for (const { msat, text } of approvalFormat.amounts) {
       const view = base({ kind: 'first_contact', terms: { recipient: A, max_total_msat: msat, budget_msat: msat } });
       const lines = ['Let this app message someone new', 'To: aaaaaa…aaaaaa', `First message: up to ${text}`, `Contact budget: up to ${text}`];
       expect(termLines(view)).toEqual(lines);
+      expect(refusalText('approval_budget_exceeded', { remaining_msat: msat })).toContain(`(${text} left)`);
       expect(approvalReason(view)).toBe(`${lines.join(' · ')} · Requested by app ababab…ababab`);
     }
   });
