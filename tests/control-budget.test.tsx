@@ -210,7 +210,7 @@ describe('invisible payments in the composer and the context panel', () => {
     it.each(['owner', 'grant', 'local', 'legacy', 'grant-ended'] as const)('shows the real approval path and submits its effective custom amount: %s', async path => {
       const host = stubHost(budgetView({ node_grant: path === 'grant' ? {
         budget_msat: 300_500, remaining_msat: 200_000, per_call_max_msat: 50_000,
-        expires_at_ms: Date.now() + DAY, envelopes: null,
+        expires_at_ms: new Date(2030, 0, 2, 14, 30).getTime(), envelopes: null,
       } : null }), { pairing_status: () => ({ ...paired, state: path === 'local' ? 'fallback' : 'paired', scopes: ['grant', 'legacy', 'grant-ended'].includes(path) ? ['read', 'receive', 'spend'] : paired.scopes }),
         ...(path === 'grant-ended' ? { node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 2, e2ee_sessions: 1, pending_deliveries: 0, lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: [] }) } : {}),
       });
@@ -232,8 +232,11 @@ describe('invisible payments in the composer and the context panel', () => {
       $<HTMLElement>('[data-first-spend-sheet] summary')!.click();
       expect(text('[data-first-spend-sheet]')).not.toContain(lang === 'en' ? 'These presets come from your node' : 'Disse forudindstillinger kommer fra din node');
       if (path === 'grant') {
-        expect(text('[data-preset="generous"]')).toContain(lang === 'en' ? '300.5 sats' : '300,5 sats');
-        expect(text('[data-first-spend-allow]')).toContain(lang === 'en' ? '300.5 sats' : '300,5 sats');
+        expect(mount.querySelectorAll('[data-first-spend-sheet] [data-preset]')).toHaveLength(1);
+        expect(text('[data-preset="careful"]').replace(/\s/g, ' ')).toContain('300 500 msat');
+        expect(text('[data-first-spend-grant]')).toContain('200 sats');
+        expect(text('[data-first-spend-grant]')).toContain('14:30');
+        expect(text('[data-first-spend-allow]').replace(/\s/g, ' ')).toContain('300 500 msat');
       }
       $<HTMLButtonElement>('[data-first-spend-custom]')!.click();
       if (lang === 'da') {
@@ -242,11 +245,28 @@ describe('invisible payments in the composer and the context panel', () => {
         expect($<HTMLButtonElement>('[data-first-spend-allow]')!.disabled).toBe(true);
         expect(host.used('budget_approve')).toHaveLength(0);
       }
-      type('[data-first-spend-amount]', '1 250');
-      expect(text('[data-first-spend-allow]').replace(/\s/g, ' ')).toContain(path === 'grant' ? (lang === 'en' ? '300.5 sats' : '300,5 sats') : '1 250 sats');
+      type('[data-first-spend-amount]', '1 250.5');
+      expect(text('[data-first-spend-allow]').replace(/\s/g, ' ')).toContain(path === 'grant' ? '300 500 msat' : '1 250 500 msat');
       $<HTMLButtonElement>('[data-first-spend-allow]')!.click();
       await vi.waitFor(() => expect(host.used('budget_approve')).toHaveLength(1));
-      expect(host.used('budget_approve')[0].args).toEqual({ ceiling_msat: path === 'grant' ? 300_500 : 1_250_000, preset: 'careful' });
+      expect(host.used('budget_approve')[0].args).toEqual({ ceiling_msat: path === 'grant' ? 300_500 : 1_250_500, preset: 'careful' });
+      expect(host.used('message_send')).toHaveLength(0);
+    });
+
+    it('explains a live grant below one sat and prevents approval', async () => {
+      const host = stubHost(budgetView({ node_grant: {
+        budget_msat: 300_500, remaining_msat: 500, per_call_max_msat: 50_000,
+        expires_at_ms: Date.now() + 60_000, envelopes: null,
+      } }), { pairing_status: () => ({ ...paired, scopes: ['read', 'receive', 'spend'] }) });
+      await openShell(); setLanguagePref(lang);
+      type('[data-composer] textarea', 'kept draft'); sendOnly();
+      await vi.waitFor(() => expect(text('[data-first-spend-reason]')).toContain(lang === 'en' ? 'less than 1 sat' : 'mindre end 1 sat'));
+      expect(text('[data-first-spend-grant]')).toContain('500 msat');
+      const primary = $<HTMLButtonElement>('[data-first-spend-allow]')!;
+      expect(primary.disabled).toBe(true);
+      expect($(`#${primary.getAttribute('aria-describedby')}`)).toBe($('[data-first-spend-reason]'));
+      primary.click();
+      expect(host.used('budget_approve')).toHaveLength(0);
       expect(host.used('message_send')).toHaveLength(0);
     });
 

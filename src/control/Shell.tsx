@@ -6240,7 +6240,7 @@ function Composer(props: {
           presets={budget()?.presets ?? []}
           initialPreset={presetChosen()?.id ?? null}
           maxDailyMsat={budget()?.max_daily_msat ?? 0}
-          grantBudgetMsat={props.actions.localApproval?.() ? undefined : budget()?.node_grant?.budget_msat}
+          grant={props.actions.localApproval?.() ? undefined : budget()?.node_grant ?? undefined}
           startsNow={props.actions.localApproval?.() === true || !!budget()?.node_grant}
           mayStartNow={props.actions.spendScoped?.() === true}
           lapse={props.spend?.state === 'expired' ? props.spend.lapse : null}

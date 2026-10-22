@@ -4,20 +4,20 @@ import { render } from 'solid-js/web';
 import { FirstSpendSheet } from '../src/control/FirstSpendSheet';
 import { setLanguagePref } from '../src/i18n';
 import { SAMPLE_PRESETS } from '../src/control/sample';
-import type { BudgetPreset } from '../src/control/types';
+import type { BudgetPreset, NodeGrantSummary, PresetId } from '../src/control/types';
 
 let dispose: (() => void) | undefined;
 let mount: HTMLDivElement;
 afterEach(() => { dispose?.(); mount?.remove(); setLanguagePref('en'); });
 const text = (el: Element | null) => el?.textContent?.replace(/\s+/g, ' ') ?? '';
 const button = (selector: string) => mount.querySelector<HTMLButtonElement>(selector)!;
-function setup(options: { presets?: BudgetPreset[]; reason?: string; max?: number; cost?: string } = {}) {
+function setup(options: { presets?: BudgetPreset[]; reason?: string; max?: number; cost?: string; grant?: NodeGrantSummary; initialPreset?: PresetId } = {}) {
   const allow = vi.fn();
   const cancel = vi.fn();
   const [reason, setReason] = createSignal(options.reason ?? null);
   mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <FirstSpendSheet presets={options.presets ?? SAMPLE_PRESETS}
-    initialPreset="careful" maxDailyMsat={options.max ?? 100_000_000}
+    initialPreset={options.initialPreset ?? "careful"} grant={options.grant} startsNow={!!options.grant} maxDailyMsat={options.max ?? 100_000_000}
     costLine={options.cost ?? 'Entry fee: 1 sat · message: 2 sats · routing fee at most: 5 sats · total at most: 8 sats'}
     blockedReason={reason()} onAllow={allow} onCancel={cancel} onPreset={() => {}} />, mount);
   return { allow, cancel, setReason };
@@ -59,6 +59,56 @@ describe.each(['en', 'da'] as const)('first spend sheet (%s)', (lang) => {
     expect(allow).not.toHaveBeenCalled();
     button('[data-first-spend-allow]').click();
     expect(allow).toHaveBeenCalledWith({ ceiling_msat: 1_250_000, id: 'everyday' });
+  });
+  it('uses the box unit for fractional custom limits and passes the exact msat amount', () => {
+    setLanguagePref(lang); const { allow } = setup();
+    mount.querySelector('summary')!.click(); button('[data-first-spend-custom]').click();
+    const input = mount.querySelector<HTMLInputElement>('[data-first-spend-amount]')!;
+    input.value = '1 250.5'; input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(text(mount.querySelector('h2'))).toContain('1 250 500 msat');
+    expect(text(button('[data-first-spend-allow]'))).toContain('1 250 500 msat');
+    button('[data-first-spend-allow]').click();
+    expect(allow).toHaveBeenCalledWith({ ceiling_msat: 1_250_500, id: 'careful' });
+  });
+  it.each([300_500, 2_000_000])('collapses equal capped presets and preserves the selected policy (%s msat)', budget => {
+    setLanguagePref(lang);
+    const { allow } = setup({ initialPreset: 'generous', grant: {
+      budget_msat: budget, remaining_msat: 200_000, per_call_max_msat: 50_000,
+      expires_at_ms: new Date(2030, 0, 2, 14, 30).getTime(), envelopes: null,
+    } });
+    const chips = Array.from(mount.querySelectorAll('[data-preset]'));
+    expect(chips).toHaveLength(budget === 300_500 ? 1 : 2);
+    expect(new Set(chips.map(text)).size).toBe(chips.length);
+    const selected = mount.querySelectorAll('[data-preset][aria-checked="true"]');
+    expect(selected).toHaveLength(1);
+    expect(text(selected[0])).toContain(budget === 300_500 ? '300 500 msat' : '2 000 sats');
+    const grant = mount.querySelector('[data-first-spend-grant]');
+    expect(text(grant)).toContain('200 sats');
+    expect(text(grant)).toContain('14:30');
+    expect(text(grant)).not.toContain('300 500');
+    expect(grant?.closest('details')).toBeNull();
+    // Clicking the already selected collapsed amount must not silently change
+    // the saved contact/room policy to the representative chip's preset.
+    (selected[0] as HTMLButtonElement).click();
+    button('[data-first-spend-custom]').click();
+    (selected[0] as HTMLButtonElement).click();
+    button('[data-first-spend-allow]').click();
+    expect(allow).toHaveBeenCalledWith({ ceiling_msat: budget, id: 'generous' });
+  });
+  it.each([[300_500, 0], [300_500, 500], [300_500, 999], [300_500, 1000], [500, 500]])('explains a grant of %s msat with %s msat left without an impossible amount range', (budget, remaining) => {
+    setLanguagePref(lang);
+    const { allow } = setup({ grant: {
+      budget_msat: budget, remaining_msat: remaining, per_call_max_msat: 50_000,
+      expires_at_ms: Date.now() + 60_000, envelopes: null,
+    } });
+    const primary = button('[data-first-spend-allow]');
+    expect(primary.disabled).toBe(remaining < 1000);
+    if (remaining < 1000) {
+      const reason = text(mount.querySelector(`#${primary.getAttribute('aria-describedby')}`));
+      expect(reason).toContain(lang === 'en' ? 'less than 1 sat' : 'mindre end 1 sat');
+      expect(reason).toContain(lang === 'en' ? 'owner' : 'ejer');
+      primary.click(); expect(allow).not.toHaveBeenCalled();
+    }
   });
   it('Not now dismisses without requesting approval', () => {
     setLanguagePref(lang); const { allow, cancel } = setup();
