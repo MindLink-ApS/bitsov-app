@@ -30,7 +30,7 @@ function expectDisclosure(root: Element, level: 2 | 3) {
   const card = root.querySelector('[data-hub-trust]')!;
   expect(card).not.toBeNull();
   const title = card.querySelector(`h${level}`)!;
-  expect(title.textContent).toBe("What MindLink's hub can and can't do");
+  expect(title.textContent).toBe("Your Lightning provider");
   expect(card.getAttribute('aria-labelledby')).toBe(title.id);
   const paragraphs = [...card.querySelectorAll('.hub-trust-card p')].map((p) => p.textContent);
   expect(paragraphs).toEqual(COPY);
@@ -42,7 +42,7 @@ const toggle = (root: Element) => root.querySelector<HTMLButtonElement>('[data-h
 
 describe('hub trust disclosure', () => {
   it('keeps the approved copy verbatim', () => {
-    expect(HUB_TRUST_TITLE).toBe("What MindLink's hub can and can't do");
+    expect(HUB_TRUST_TITLE).toBe("Your Lightning provider");
     expect(HUB_TRUST_CARDS.flatMap((c) => c.lines)).toEqual(COPY);
   });
 
@@ -54,7 +54,7 @@ describe('hub trust disclosure', () => {
     const panel = () => mount.querySelector('[data-panel="node"]')!;
     await vi.waitFor(() => expect(panel().querySelector('[data-hub-trust-toggle]')).not.toBeNull());
 
-    expect(toggle(panel()).textContent).toBe("ⓘWhat MindLink's hub can and can't do");
+    expect(toggle(panel()).textContent).toBe("ⓘYour Lightning provider");
     expect(toggle(panel()).getAttribute('aria-expanded')).toBe('false');
     expect(panel().querySelector('[data-hub-trust]')).toBeNull();
 

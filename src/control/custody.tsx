@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 import { Show } from 'solid-js';
 import type { CustodyMode } from './types';
 
@@ -11,33 +12,33 @@ export function custodyBadge(mode: CustodyMode | null | undefined): CustodyBadge
   switch (mode) {
     case 'local_seed':
       return {
-        label: 'Seed on this machine',
+        label: t('extraSeedOnThisMachine'),
         tone: 'plain',
-        title: 'Your recovery phrase is stored unencrypted on this machine, in the node this app started. Any program running as you here can read it.',
+        title: t('extraYourRecoveryPhraseIsStoredUnencryptedOnThis'),
       };
     case 'encrypted_seed':
       return {
-        label: 'Encrypted seed',
+        label: t('extraEncryptedSeed'),
         tone: 'ok',
-        title: 'Your recovery phrase is encrypted on this machine, in the node this app started. The node unlocks it while it runs.',
+        title: t('extraYourRecoveryPhraseIsEncryptedOnThisMachine'),
       };
     case 'hosted_custody':
       return {
-        label: 'Hosted custody',
+        label: t('extraHostedCustody'),
         tone: 'warn',
-        title: 'Seed on another computer or server, or this connection is not proven local. Whoever can reach that machine can spend its bitcoin and read its messages.',
+        title: t('extraSeedOnAnotherComputerOrServerOrThis'),
       };
     case 'money_signer':
       return {
-        label: 'Money on your device',
+        label: t('extraMoneyOnYourDevice'),
         tone: 'warn',
-        title: 'Lightning and on-chain keys, and owner approvals, stay on your device. The NodeId chat-identity private key stays on the server. Messages are stored on the server.',
+        title: t('extraLightningAndOnChainKeysAndOwnerApprovals'),
       };
     case 'remote_signer':
       return {
-        label: 'Your keys, remote node',
+        label: t('extraYourKeysRemoteNode'),
         tone: 'ok',
-        title: 'Money keys, owner approvals, and the identity root stay on your device, which signs every payment and identity act. Transport and storage keys, and message plaintext, stay on the server.',
+        title: t('extraMoneyKeysOwnerApprovalsAndTheIdentityRoot'),
       };
     default:
       return null;

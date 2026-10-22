@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 import type { Source } from './source';
 import type { NodeOverview } from './types';
 import { ago } from './format';
@@ -40,14 +41,14 @@ export function readinessSource(get: () => Source, blocked: () => boolean, refus
 
 export function readinessLine(node: NodeOverview | null, now: number): string | null {
   if (node?.money_ready == null) return null;
-  const reading = `Read ${ago(node.read_at, now)}`;
-  if (node.money_ready) return `Local OK · Money ready · ${reading}`;
+  const reading = t('extraRead', ago(node.read_at, now));
+  if (node.money_ready) return t('extraLocalOKMoneyReady', reading);
   const state = node.readiness;
   const event = state?.events[state.events.length - 1];
   const retry = state?.retry_after_secs != null
-    ? `Retrying · attempt ${state.retry_attempt} · retry delay ${state.retry_after_secs}s`
-    : state?.state === 'retrying' ? `Retrying · attempt ${state.retry_attempt}`
-    : state?.state === 'synchronizing' ? 'Synchronizing'
-    : state?.state === 'failed' || state?.state === 'stopped' ? 'Retry stopped' : 'Waiting for readiness';
-  return `Local OK · Money not ready yet · ${retry}${event ? ` · state changed ${ago(event.timestamp * 1000, now)}` : ''} · ${reading}`;
+    ? t('extraRetryingAttemptRetryDelayS', state.retry_attempt, state.retry_after_secs)
+    : state?.state === 'retrying' ? t('extraRetryingAttempt', state.retry_attempt)
+    : state?.state === 'synchronizing' ? t('extraSynchronizing')
+    : state?.state === 'failed' || state?.state === 'stopped' ? t('extraRetryStopped') : t('extraWaitingForReadiness');
+  return t('extraLocalOKMoneyNotReadyYet', retry, event ? t('extraStateChanged', ago(event.timestamp * 1000, now)) : '', reading);
 }

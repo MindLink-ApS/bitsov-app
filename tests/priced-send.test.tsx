@@ -161,10 +161,10 @@ it.each(['No route or channel to this peer yet.', 'Peer offline.', 'Quote unavai
   expect($<HTMLButtonElement>('[data-send]').disabled).toBe(true);
 });
 
-it.each([['da-DK', '9,75 sats'], ['en-US', '9.75 sats']])('uses exact locale-safe units under Send in %s', async (locale, price) => {
+it.each([['da-DK', '9.75 sats'], ['en-US', '9.75 sats']])('uses exact locale-safe units under Send in %s', async (locale, price) => {
   vi.spyOn(navigator, 'language', 'get').mockReturnValue(locale);
   await open(sourceForSend());
-  await vi.waitFor(() => expect(line()).toBe(`up to ${price} · includes max routing fee`));
+  await vi.waitFor(() => expect(line()).toBe(locale.startsWith('da') ? `højst ${price} · inklusive maksimalt routinggebyr` : `up to ${price} · includes max routing fee`));
   expect($('[data-cost-msat]').getAttribute('data-cost-msat')).toBe('9750');
   expect($('[data-cost-msat]').textContent).toBe(price.replace(' ', ''));
 });

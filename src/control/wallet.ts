@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 /**
  * The Wallet page's reads, in plain words. Display only: nothing here pays.
  * Sending goes through the composer's own actions (`pay`, `keysend`) and the
@@ -119,10 +120,10 @@ export type KindFilter = 'all' | 'messages' | 'calls' | 'payments';
 export type DirectionFilter = 'all' | 'in' | 'out';
 
 const CALL_LABEL: Record<number, string> = {
-  [CALL_OFFER]: 'Call',
-  [CALL_ANSWER]: 'Answered a call',
-  [CALL_ICE]: 'Call setup',
-  [CALL_HANGUP]: 'Call ended',
+  get [CALL_OFFER]() { return t('uiCall'); },
+  get [CALL_ANSWER]() { return t('extraAnsweredACall'); },
+  get [CALL_ICE]() { return t('extraCallSetup'); },
+  get [CALL_HANGUP]() { return t('callEnded'); },
 };
 
 /** Paid messages, calls and files, from the node's history with one contact or room. */
@@ -140,7 +141,7 @@ export function messageActivity(messages: Message[], own: string): Activity[] {
         direction: out ? 'out' : 'in',
         msat: m.payment_amount_msat,
         who: (out ? m.recipient : m.sender).toLowerCase(),
-        label: kind === 'call' ? CALL_LABEL[m.kind] ?? 'Call' : kind === 'file' ? (out ? 'Sent a file' : 'Received a file') : out ? 'Message sent' : 'Message received',
+        label: kind === 'call' ? CALL_LABEL[m.kind] ?? t('uiCall') : kind === 'file' ? (out ? t('extraSentAFile') : t('extraReceivedAFile')) : out ? t('extraMessageSent') : t('extraMessageReceived'),
       };
     });
 }
@@ -275,16 +276,29 @@ export function resetActivityLog() {
   saveLog([]);
 }
 
+/** Translate legacy persisted labels at display time; never translate invoice notes. */
+export function activityLabel(a: Activity): string {
+  if (a.kind === 'payment') {
+    if (a.label === 'Paid an invoice') return t('walletPaidInvoice');
+    if (a.label === 'Paid a node directly') return t('walletPaidDirect');
+  }
+  if (a.kind === 'invoice') {
+    if (a.label === 'Invoice') return t('uiInvoice');
+    if (a.label.startsWith('Invoice · ')) return t('walletInvoiceNote', a.label.slice('Invoice · '.length));
+  }
+  return a.label;
+}
+
 /** Plain words for a payment or invoice status. */
 export function statusWords(a: Activity, now: number): string | null {
   if (a.kind === 'invoice') {
-    if (a.status === 'paid') return 'Received';
-    if (a.status === 'failed') return 'Not paid';
+    if (a.status === 'paid') return t('extraReceived');
+    if (a.status === 'failed') return t('extraNotPaid');
     const expires = (a as LoggedActivity).expiresAt;
-    return expires && expires < now ? 'Expired' : 'Waiting to be paid';
+    return expires && expires < now ? t('extraExpired') : t('extraWaitingToBePaid');
   }
   if (a.kind === 'payment') {
-    return a.status === 'settled' ? 'Paid' : a.status === 'failed' ? 'Failed' : 'In progress';
+    return a.status === 'settled' ? t('extraPaid') : a.status === 'failed' ? t('extraFailed') : t('extraInProgress');
   }
   return null;
 }

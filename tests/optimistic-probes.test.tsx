@@ -138,6 +138,8 @@ describe('room caps snapshot', () => {
   it('a queued room send uses the member caps quoted at the press, not a later quote', async () => {
     const { source, pending } = deferredSource();
     const room = SAMPLE_ROOM_ID.toLowerCase();
+    // This legacy-room scenario supplies its own room, not a product demo.
+    source.rooms = async () => [{ id: room, name: 'Test room', created_by: SAMPLE_OWN_ID, created_at: null }];
     let q: RoomQuote = { room_id: room, members: [
       { node_id: A, msat: 10000, advertised: true, connected: true },
       { node_id: B, msat: 20000, advertised: true, connected: true },

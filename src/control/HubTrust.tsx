@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 import { createSignal, createUniqueId, For, onCleanup, onMount, Show } from 'solid-js';
 import { Dynamic } from 'solid-js/web';
 import { SoftError } from './SoftError';
@@ -6,7 +7,7 @@ import { onEscape } from './escapeStack';
 // What the MindLink hub (the LSP) can and can't do, in plain words. The
 // sentences are approved copy: change them only with the product owner.
 
-export const HUB_TRUST_TITLE = "What MindLink's hub can and can't do";
+export const HUB_TRUST_TITLE = 'Your Lightning provider';
 
 export const HUB_TRUST_CARDS: readonly { heading: string; lines: readonly string[] }[] = [
   {
@@ -47,9 +48,9 @@ export function HubTrust(props: { level: Level; titleId?: string; onDismiss?: ()
   return (
     <section class="panel disclosure hub-trust" aria-labelledby={titleId()} data-hub-trust>
       <div class="hub-trust-head">
-        <Dynamic component={`h${props.level}`} id={titleId()} class="hub-trust-title" classList={{ 'sr-only': props.quietTitle }}>{HUB_TRUST_TITLE}</Dynamic>
+        <Dynamic component={`h${props.level}`} id={titleId()} class="hub-trust-title" classList={{ 'sr-only': props.quietTitle }}>{t('hubTitle')}</Dynamic>
         <Show when={props.onDismiss}>
-          <button type="button" class="quiet" data-hub-trust-dismiss aria-label={`Hide: ${HUB_TRUST_TITLE}`} onClick={() => props.onDismiss!()}>Hide</button>
+          <button type="button" class="quiet" data-hub-trust-dismiss aria-label={`Hide: ${t('hubTitle')}`} onClick={() => props.onDismiss!()}>Hide</button>
         </Show>
       </div>
       <ul class="hub-trust-cards" role="list">
@@ -88,7 +89,7 @@ export function HubTrustInfo(props: { level: Level; initiallyOpen?: boolean; onH
         onClick={() => (open() ? hide() : setOpen(true))}
       >
         <span aria-hidden="true">ⓘ</span>
-        <span>{HUB_TRUST_TITLE}</span>
+        <span>{t('hubTitle')}</span>
       </button>
       <div id={panelId}>
         <Show when={open()}>

@@ -1,3 +1,4 @@
+import { watchSystemLanguage } from './i18n';
 import { render } from 'solid-js/web';
 import App from './App';
 import { applyResolvedTheme, resolveTheme, themePref, watchSystemTheme } from './control/prefs';
@@ -6,6 +7,7 @@ import './assistant/endpoint.css';
 
 applyResolvedTheme(resolveTheme(themePref()));
 watchSystemTheme();
+watchSystemLanguage();
 
 const root = document.getElementById('root');
 if (root) render(() => <App />, root);

@@ -49,7 +49,7 @@ it('keeps the sweep contrast, token, and focus fixes', () => {
   expect(source).toContain('--t-hero: 64px');
   expect(line(source, '.wallet-total')).toContain('font-size: var(--t-hero)');
   expect(readFileSync('index.html', 'utf8')).toContain('rel="icon"');
-  expect(readFileSync('src/control/Shell.tsx', 'utf8')).toContain('1 sat = 1,000');
+  expect(readFileSync('src/appCopy.ts', 'utf8')).toContain('1 sat = 1 000');
 });
 
 it('keeps the 2026-10-22 narrow-layout fixes', () => {

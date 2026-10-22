@@ -1,10 +1,11 @@
+import { language, systemLanguage } from '../i18n';
 import { createSignal, Show } from 'solid-js';
 import { usePairingActivity } from '../pairingActivity';
 import { PrimaryAction } from './PrimaryAction';
 
 /** G6 remains an explicit acknowledgement after enrollment, before the shell. */
 export function PhoneTrust(props: { onContinue: () => Promise<void>; locale?: string }) {
-  const da = () => (props.locale ?? navigator.language).toLowerCase().startsWith('da');
+  const da = () => (props.locale ? systemLanguage(props.locale) : language()) === 'da';
   const [saving, setSaving] = createSignal(false);
   const [failed, setFailed] = createSignal(false);
   usePairingActivity(saving);
