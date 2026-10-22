@@ -330,7 +330,7 @@ impl Pending {
         Ok(view)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
     pub fn write_receipt(&self, recipient: &str, cap: u64, expires_at: i64) {
         std::fs::write(self.dir.as_ref().unwrap().path().join("receipt.json"), serde_json::json!({
             "recipient": recipient, "max_total_msat": cap, "expires_at": expires_at,

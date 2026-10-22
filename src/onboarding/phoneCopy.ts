@@ -1,7 +1,7 @@
 export const phoneCopy = {
   en: {
     start: 'Connect to your box', startLine: 'Other device → Add a device.',
-    scan: "Scan your box's QR", scanning: 'Scan the QR', scanLine: 'Allow the camera to scan the QR.',
+    scan: "Scan your box’s QR", scanning: 'Scan the QR', scanLine: 'Allow the camera to scan the QR.',
     connecting: 'Connecting to your box', connectingLine: 'Keep your other device nearby.',
     words: 'Do these words match?', wordsLine: 'Approve on your other device.', mismatch: "They don't match",
     done: "You're connected", doneLine: 'This phone now uses your box.', open: 'Open BitSov',
@@ -18,7 +18,7 @@ export const phoneCopy = {
     unreachable: "Can't reach your box", unreachableLine: 'Check that your box is on.',
     tailscaleLine: 'Turn on Tailscale, then return.',
     localNetwork: 'Allow BitSov on your local network', localNetworkLine: 'Enable Local Network in Settings.',
-    approvalExpired: 'Approval timed out', expired: 'This QR has expired', expiredLine: 'Ask the owner for a new QR.', clockLine: "Check this phone's date and time.",
+    approvalExpired: 'Approval timed out', expired: 'This QR has expired', expiredLine: 'Ask the owner for a new QR.', clockLine: "Check this phone’s date and time.",
     unclaimed: "This box isn't set up yet", unclaimedLine: 'Set up on your computer first.',
     claimMismatch: 'This phone could not be added', claimMismatchLine: 'Ask the owner to update the box.',
     busy: 'Your box is busy', busyLine: 'Wait a moment, then try again.',

@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'vitest';
 import { render } from 'solid-js/web';
-import { possessive, setLanguagePref, t } from '../src/i18n';
+import { copy, possessive, setLanguagePref, t } from '../src/i18n';
 import { costToSend, peerNotReadyMessage } from '../src/control/state';
 import { HubTrust, HubChannelConfirm } from '../src/control/HubTrust';
 let dispose: (() => void) | undefined;
@@ -68,4 +68,24 @@ it.each(['en', 'da'] as const)('inflects names in the peer-not-ready message in 
     expect(peerNotReadyMessage({ code: 'peer_not_ready', reason: 'chain_unavailable' }, name))
       .toBe(locale === 'da' ? `${da} node er ikke klar til at modtage endnu (dens kædeforbindelse er nede)` : `${name}’s node isn't ready to receive yet (its chain connection is down)`);
   }
+});
+
+it.each(['en', 'da'] as const)('uses typographic apostrophes for %s possessives without changing names', locale => {
+  setLanguagePref(locale);
+  for (const [name, english, danish] of [
+    ['Rasmus', 'Rasmus’s', 'Rasmus’'],
+    ['Lars', 'Lars’s', 'Lars’'],
+    ['Alex', 'Alex’s', 'Alex’'],
+    ['Luz', 'Luz’s', 'Luz’'],
+    ['MAX', 'MAX’s', 'MAX’'],
+    ['Maya', 'Maya’s', 'Mayas'],
+    ["O'Connor", "O'Connor’s", "O'Connors"],
+  ]) {
+    expect(possessive(name)).toBe(locale === 'en' ? english : danish);
+  }
+  // Keep literal and interpolated possessives in the merged copy table consistent.
+  // Exclude the English contraction “That's”; user-provided names are not copy.
+  const asciiPossessives = Object.entries(copy[locale]).filter(([, value]) =>
+    /(?:\}|\b(?![Tt]hat\b)[\p{L}]+)'s\b|[sxz]'(?=\s|$)/u.test(value));
+  expect(asciiPossessives).toEqual([]);
 });

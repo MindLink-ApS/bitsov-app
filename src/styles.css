@@ -1374,7 +1374,7 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   /* On a phone the pinned pair stays small: + New shows as "+" (its name stays "+ New"). */
   .profile-avatar { min-width: 44px; min-height: 44px; justify-content: center; }
   /* Its menu opens down from the bar, inside the screen (a scrolling strip would clip it). */
-  .avatar-menu { position: fixed; top: calc(var(--bar-h) + env(safe-area-inset-top, 0px)); right: var(--s-3); left: auto; bottom: auto; min-width: min(260px, calc(100vw - 2 * var(--s-3))); transform-origin: top right; }
+  .avatar-menu { position: fixed; top: calc(var(--bar-h) + env(safe-area-inset-top, 0px)); right: max(var(--s-3), var(--safe-area-right, 0px)); left: auto; bottom: auto; min-width: min(260px, calc(100vw - 2 * var(--s-3))); transform-origin: top right; }
   .avatar-menu-item { min-height: 44px; align-items: center; }
 }
 

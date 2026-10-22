@@ -349,6 +349,7 @@ pub fn save_record(store: &Path, record: &Record) -> Result<(), ActionError> {
         .map_err(|e| ActionError::new("device_key", format!("Could not save the device key record: {e}")))
 }
 
+#[cfg(test)]
 pub fn load_blob(store: &Path) -> Option<Vec<u8>> {
     read_private(&store.join(BLOB_FILE)).ok().flatten()
 }
