@@ -9,28 +9,28 @@
       "tag": "DIV",
       "rect": {
         "x": 96,
-        "y": 63,
+        "y": 107,
         "width": 1088,
-        "height": 674,
-        "top": 63,
+        "height": 586,
+        "top": 107,
         "right": 1184,
-        "bottom": 737,
+        "bottom": 693,
         "left": 96
       },
-      "client": 672,
-      "scroll": 672,
+      "client": 584,
+      "scroll": 584,
       "font": "28px"
     },
     {
       "tag": "BUTTON",
       "rect": {
         "x": 117,
-        "y": 478,
+        "y": 434,
         "width": 1046,
         "height": 88,
-        "top": 478,
+        "top": 434,
         "right": 1163,
-        "bottom": 566,
+        "bottom": 522,
         "left": 117
       },
       "client": 88,
@@ -41,12 +41,12 @@
       "tag": "BUTTON",
       "rect": {
         "x": 117,
-        "y": 578,
+        "y": 534,
         "width": 1046,
         "height": 88,
-        "top": 578,
+        "top": 534,
         "right": 1163,
-        "bottom": 666,
+        "bottom": 622,
         "left": 117
       },
       "client": 86,
@@ -54,5 +54,5 @@
       "font": "25px"
     }
   ],
-  "text": "1 of 2Approval requestedLet this app spend · Budget: up to 2 000 sats · Each payment: up to 10 sats · For: 10 min · To: any contact, within the budget · Requested by app cdcdcd…cdcdcdRequested by app cdcdcd…cdcdcd. Your node does not name the app; compare this with the app that asked.Exact message your Mac signsbitsov-approval-v1\npreview=preview-aApprove with Touch IDNot nowNot now grants nothing. You can reopen this request in Settings → Node."
+  "text": "1 of 2Approval requestedLet this app spend · Budget: up to 2 000 sats · Each payment: up to 10 sats · For: 10 min · To: any contact, within the budget · Requested by app cdcdcd…cdcdcdExact message your Mac signsbitsov-approval-v1\npreview=preview-aApprove with Touch IDNot nowNot now grants nothing. You can reopen this request in Settings → Node."
 }

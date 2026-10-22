@@ -9,28 +9,28 @@
       "tag": "DIV",
       "rect": {
         "x": 368,
-        "y": 189.5,
+        "y": 199,
         "width": 544,
-        "height": 421,
-        "top": 189.5,
+        "height": 402,
+        "top": 199,
         "right": 912,
-        "bottom": 610.5,
+        "bottom": 601,
         "left": 368
       },
-      "client": 419,
-      "scroll": 419,
+      "client": 400,
+      "scroll": 400,
       "font": "14px"
     },
     {
       "tag": "BUTTON",
       "rect": {
         "x": 389,
-        "y": 439.5,
+        "y": 430,
         "width": 502,
         "height": 44,
-        "top": 439.5,
+        "top": 430,
         "right": 891,
-        "bottom": 483.5,
+        "bottom": 474,
         "left": 389
       },
       "client": 44,
@@ -41,12 +41,12 @@
       "tag": "BUTTON",
       "rect": {
         "x": 389,
-        "y": 495.5,
+        "y": 486,
         "width": 502,
         "height": 44,
-        "top": 495.5,
+        "top": 486,
         "right": 891,
-        "bottom": 539.5,
+        "bottom": 530,
         "left": 389
       },
       "client": 42,
@@ -54,5 +54,5 @@
       "font": "12.5px"
     }
   ],
-  "text": "1 af 2Anmodning om godkendelseLet this app spend · Budget: up to 2 000 sats · Each payment: up to 10 sats · For: 10 min · To: any contact, within the budget · Requested by app cdcdcd…cdcdcdAnmodet af app cdcdcd…cdcdcd. Din node oplyser ikke appens navn; sammenlign med den app, der spurgte.Den præcise besked, din Mac signererbitsov-approval-v1\npreview=preview-aGodkend med Touch IDIkke nuIkke nu giver ingen tilladelse. Du kan åbne anmodningen igen i Indstillinger → Node."
+  "text": "1 af 2Anmodning om godkendelseLet this app spend · Budget: up to 2 000 sats · Each payment: up to 10 sats · For: 10 min · To: any contact, within the budget · Requested by app cdcdcd…cdcdcdVilkårene vises på engelsk, præcis som din Mac signerer dem.Den præcise besked, din Mac signererbitsov-approval-v1\npreview=preview-aGodkend med Touch IDIkke nuIkke nu giver ingen tilladelse. Du kan åbne anmodningen igen i Indstillinger → Node."
 }
