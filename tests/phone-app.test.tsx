@@ -7,7 +7,7 @@ let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 const tick = async () => { for (let i = 0; i < 70; i++) await Promise.resolve(); };
 const button = (text: string) => [...document.querySelectorAll('button')].find(b => b.textContent?.includes(text))!;
-function mount(platform: string, existing = false) {
+function mount(platform: string, existing = false, legacy = false) {
   vi.useFakeTimers();
   vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(platform);
   const state = { connected: existing, approved: false, trusted: false, locked: false, inbox: 'bitsov://pair/synthetic' as string | null };
@@ -16,9 +16,9 @@ function mount(platform: string, existing = false) {
     if (cmd === 'node_status') return { phone_setup: !existing, locked: state.locked, ready: state.connected && !state.locked, node_id: state.connected ? 'ab'.repeat(32) : null, error: null };
     if (cmd === 'pairing_status') return { ...INITIAL_PAIRING, remote: state.connected, state: state.connected ? 'paired' : 'starting' };
     if (cmd === 'pairing_link_take') { const link = state.inbox; state.inbox = null; return link; }
-    if (cmd === 'remote_access_preview') return { first_run: false, endpoint: 'box:443', node_id_fingerprint: 'abcd' };
+    if (cmd === 'remote_access_preview') return { first_run: false, second_device: !legacy, endpoint: 'box:443', node_id_fingerprint: 'abcd' };
     if (cmd === 'remote_access_connect') { state.connected = true; return { restart_required: false }; }
-    if (cmd === 'device_key_status') return { available: true, delegation_supported: true, second_device: true, state: state.approved ? 'registered' : 'none' };
+    if (cmd === 'device_key_status') return { available: !legacy, delegation_supported: !legacy, second_device: !legacy, state: state.approved ? 'registered' : 'none' };
     if (cmd === 'join_device') {
       actions.push(args.input);
       if (state.approved) return { state: 'done', second_device: true };
@@ -49,6 +49,19 @@ describe.each(['iPhone', 'Android'])('%s first-run onboarding', platform => {
     expect(document.querySelectorAll('button.primary')).toHaveLength(1);
     button('I understand').click(); await tick();
     expect(state.trusted).toBe(true);
+  });
+  it('holds a legacy cold link at comparison before connecting, then still requires trust', async () => {
+    const { state, actions } = mount(platform, false, true);
+    await tick(); await vi.advanceTimersByTimeAsync(1500); await tick();
+    expect(document.querySelector('[data-phone-onboarding="fingerprint"]')).not.toBeNull();
+    expect(state.connected).toBe(false);
+    button('They match').click(); await tick();
+    expect(state.connected).toBe(true);
+    await vi.advanceTimersByTimeAsync(1500); await tick();
+    expect(actions).toHaveLength(0);
+    button('Open BitSov').click(); await tick();
+    expect(document.querySelector('[data-phone-trust]')).not.toBeNull();
+    expect(state.trusted).toBe(false);
   });
   it('keeps the words ceremony mounted while the box requires unlocking', async () => {
     const { state } = mount(platform); await tick(); await vi.advanceTimersByTimeAsync(1500); await tick();
