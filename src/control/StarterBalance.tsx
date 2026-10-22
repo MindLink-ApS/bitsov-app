@@ -34,11 +34,13 @@ function StarterStep(props: { nodeId: string; api: StarterApi } & Navigation) {
   const [savedId, setSavedId] = createSignal<string | null>(null);
   try { setSavedId(localStorage.getItem(key)); } catch { setError('storage'); }
 
-  const accept = (next: StarterStatus) => {
+  const accept = (next: StarterStatus, fromRequest = false) => {
     if (!alive) return;
     // Retryable refusals are still a live lineage: the node creates successors.
     // The app continues to persist and replay the original owner request ID.
-    const olderTerminal = next.request_id !== savedId() && savedId() !== null
+    // A POST response (including host-side 409 adoption) settles this intent.
+    // Only a background read may be an older terminal result.
+    const olderTerminal = !fromRequest && next.request_id !== savedId() && savedId() !== null
       && (confirmed(next) || (next.state === 'refused' && !scheduled(next) && !adopting(next)));
     try {
       if (olderTerminal) {
@@ -82,7 +84,7 @@ function StarterStep(props: { nodeId: string; api: StarterApi } & Navigation) {
         localStorage.setItem(key, id);
         setSavedId(id);
       } catch { setError('storage'); return; }
-      try { accept(await props.api.request(id)); }
+      try { accept(await props.api.request(id), true); }
       catch { if (alive) setError('request'); }
     } finally { inFlight.delete(key); if (alive) setBusy(false); }
   };

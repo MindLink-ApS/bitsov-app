@@ -28,11 +28,16 @@ it.each([
 ])('hides the step and does not discover when ineligible: %j', async options => {
   const api = mount(empty, options); await flush(); expect(host.textContent).toBe(''); expect(api.current).not.toHaveBeenCalled();
 });
-it('defaults the build flag off', async () => {
+it('uses the exact build flag when no enabled override is supplied', async () => {
   host = document.createElement('div');
   const current = vi.fn(async () => empty);
   dispose = render(() => <StarterBalance network="signet" nodeId="node-a" capabilities={['starter_channel_request_v1']} api={{ current, request: async () => pending }} />, host);
-  await flush(); expect(host.textContent).toBe(''); expect(current).not.toHaveBeenCalled();
+  await flush();
+  if (import.meta.env.VITE_STARTER_BALANCE === '1') {
+    expect(host.textContent).toContain('Get your starter balance'); expect(current).toHaveBeenCalledTimes(1);
+  } else {
+    expect(host.textContent).toBe(''); expect(current).not.toHaveBeenCalled();
+  }
 });
 it('hides an unconfigured hub', async () => { mount({ ...empty, hub_configured: false }); await flush(); expect(host.textContent).toBe(''); });
 it('uses not_requested discovery, free hub-funded copy and plain alias text', async () => {
@@ -221,4 +226,22 @@ it('shows fixed request failure copy and never raw node error text', async () =>
   expect(host.textContent).toContain('Could not confirm the request.');
   expect(host.textContent).not.toContain('NODE_SECRET');
   expect(host.textContent).not.toContain('<script>');
+});
+
+it.each(['ready', 'refused'] as const)('adopts an already-terminal %s response after a conflict without replaying the write-ahead ID', async state => {
+  const otherId = '87654321-4321-4321-8321-cba987654321';
+  const terminal: StarterStatus = { ...pending, request_id: otherId, state, verified: state === 'ready', retry_allowed: false };
+  const request = vi.fn(async (_id: string) => terminal);
+  mount(empty, {}, request); await flush(); host.querySelector('button')!.click(); await flush();
+  const writeAheadId = request.mock.calls[0][0];
+  expect(localStorage.getItem('bitsov.starter-request.node-a')).toBeNull();
+  expect(host.textContent).not.toContain('Could not confirm the request.');
+  expect(host.textContent).toContain(state === 'ready' ? 'Ready' : 'Request refused');
+  if (state === 'ready') expect(host.querySelector('button')).toBeNull();
+  else {
+    expect(host.querySelector('button')?.textContent).toBe('Request again');
+    host.querySelector('button')!.click(); await flush();
+    expect(request.mock.calls[1][0]).not.toBe(writeAheadId);
+    expect(request.mock.calls[1][0]).not.toBe(otherId);
+  }
 });
