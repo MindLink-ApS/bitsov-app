@@ -373,12 +373,12 @@ fn breaker_lines(view: &Value, available: Option<usize>) -> Result<Vec<String>, 
     }
     let snapshot: Snapshot = serde_json::from_value(snapshot.clone())
         .map_err(|_| ActionError::new("node", "Your node returned unreadable breaker reset terms."))?;
-    let trips: Vec<&str> = snapshot.tripped.iter().map(|trip| match trip.as_str() {
-        "grant_paused" => "paused after failed payments",
-        "rate_limit_minute" => "too many payments this minute",
-        "rate_limit_hour" => "too many payments this hour",
-        "velocity_limit" => "spending too fast",
-        other => other,
+    let trips: Vec<String> = snapshot.tripped.iter().map(|trip| match trip.as_str() {
+        "grant_paused" => "paused after failed payments".into(),
+        "rate_limit_minute" => "too many payments this minute".into(),
+        "rate_limit_hour" => "too many payments this hour".into(),
+        "velocity_limit" => "spending too fast".into(),
+        other => safe_trip_code(other),
     }).collect();
     lines.extend([
         format!("Tripped: {}", if trips.is_empty() { "nothing".into() } else { trips.join(", ") }),
@@ -408,6 +408,18 @@ fn breaker_lines(view: &Value, available: Option<usize>) -> Result<Vec<String>, 
         }
     }
     Ok(lines)
+}
+
+// Display-only, mirrored in ownerApproval.ts; never applied to approval_message.
+fn safe_trip_code(code: &str) -> String {
+    code.chars().filter(|c| !matches!(c,
+        '\u{0000}'..='\u{001f}' | '\u{007f}'..='\u{009f}' | '\u{00ad}' | '\u{061c}' |
+        '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}'
+    )).map(|c| match c {
+        '·' => '/',
+        ':' | '：' | '﹕' | '꞉' | '∶' => '=',
+        other => other,
+    }).collect()
 }
 
 fn approval_date(seconds: i64) -> Result<String, ActionError> {

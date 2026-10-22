@@ -16,6 +16,7 @@
  * and never charged. Leaving is local: the room is hidden on this device.
  */
 import { createRoot, createSignal } from 'solid-js';
+import { t } from '../i18n';
 import { costToSend } from './state';
 import type { ActionError, Message, PriceQuote, RoomCopy, SendReceipt } from './types';
 
@@ -200,11 +201,11 @@ export function roomThread(messages: Message[], own: string): RoomEntry[] {
 export function roomRefusalWords(reason: string | null | undefined): string | null {
   const code = (reason ?? '').split(':')[0].trim();
   switch (code) {
-    case 'room_binding_invalid': return 'Their node could not match this room’s details, so it refused the message.';
-    case 'room_sender_not_member': return 'Their node does not list you in this room, so it refused the message.';
-    case 'room_recipient_not_member': return 'Their node is not in this room’s member list, so it refused the message.';
-    case 'room_binding_unsupported': return 'Their node cannot take room messages yet.';
-    case 'room_member_no_session': return 'There was no secure session with them.';
+    case 'room_binding_invalid': return t('roomBindingInvalid');
+    case 'room_sender_not_member': return t('roomSenderNotMember');
+    case 'room_recipient_not_member': return t('roomRecipientNotMember');
+    case 'room_binding_unsupported': return t('roomBindingUnsupported');
+    case 'room_member_no_session': return t('roomNoSession');
     default: return null;
   }
 }
@@ -299,11 +300,11 @@ export type LegPlan =
   | { peer: string; state: 'reading' };
 
 export const SKIP = {
-  contact: 'Not in your contacts. Not charged.',
-  connected: 'Not connected right now. Not charged.',
-  update: 'Their node needs an update for rooms. Not charged.',
-  session: 'No secure session yet: message them once first. Not charged.',
-  price: 'Could not read their price. Not charged.',
+  get contact() { return t('roomSkipContact'); },
+  get connected() { return t('roomSkipConnected'); },
+  get update() { return t('roomSkipUpdate'); },
+  get session() { return t('roomSkipSession'); },
+  get price() { return t('roomSkipPrice'); },
 } as const;
 
 /**
@@ -413,7 +414,7 @@ export async function sendRoom(
       note: e.message,
       error: e,
     });
-    stop = 'Not sent: the room send stopped at an earlier member. Not charged.';
+    stop = t('roomStopped');
   }
   return out;
 }

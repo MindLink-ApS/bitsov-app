@@ -1,9 +1,15 @@
-import { createSignal, createUniqueId, For, onCleanup, onMount, Show } from 'solid-js';
+import { createMemo, createSignal, createUniqueId, For, onCleanup, onMount, Show } from 'solid-js';
 import { t } from '../i18n';
-import { satsWhole } from './format';
+import { clock, day, satsWhole } from './format';
 import { ambiguousThousands, parseAmount } from './amountInput';
 import { onEscape } from './escapeStack';
-import type { BudgetPreset, PresetId, SpendLapse } from './types';
+import type { BudgetPreset, NodeGrantSummary, PresetId, SpendLapse } from './types';
+
+// Display only: match the box's whole-sat / integer-msat convention, regardless
+// of the wallet denomination. Never round the amount passed to budget_approve.
+const budgetAmount = (msat: number) => msat % 1000 === 0
+  ? `${satsWhole(msat / 1000)} ${msat === 1000 ? 'sat' : 'sats'}`
+  : `${satsWhole(msat)} msat`;
 
 export type FirstSpendChoice = Pick<BudgetPreset, 'id' | 'ceiling_msat'>;
 
@@ -13,7 +19,7 @@ export function FirstSpendSheet(props: {
   initialPreset: PresetId | null;
   maxDailyMsat: number;
   /** Same clamp as arm_want: the grant total, not its remaining balance. */
-  grantBudgetMsat?: number;
+  grant?: Pick<NodeGrantSummary, 'budget_msat' | 'remaining_msat' | 'expires_at_ms'>;
   startsNow?: boolean;
   /** Spend-scoped paired token, but the host exposes no G1 capability here. */
   mayStartNow?: boolean;
@@ -31,20 +37,31 @@ export function FirstSpendSheet(props: {
   const [amount, setAmount] = createSignal('');
   const preset = () => props.presets.find(p => p.id === picked()) ?? props.presets.find(p => p.id === 'careful') ?? props.presets[0];
   const chosen = () => custom() ? parseAmount(amount(), 'sats') : preset()?.ceiling_msat ?? null;
-  const withinGrant = (n: number) => Math.min(n, props.grantBudgetMsat ?? Infinity);
+  const withinGrant = (n: number) => Math.min(n, props.grant?.budget_msat ?? Infinity);
   const ceiling = () => chosen() === null ? null : withinGrant(chosen()!);
-  const maximum = () => Math.min(props.maxDailyMsat, props.grantBudgetMsat ?? Infinity);
+  const maximum = () => Math.min(props.maxDailyMsat, props.grant?.budget_msat ?? Infinity);
+  const distinctPresets = createMemo(() => {
+    const seen = new Set<number>();
+    return props.presets.filter(p => {
+      const n = withinGrant(p.ceiling_msat);
+      if (seen.has(n)) return false;
+      seen.add(n);
+      return true;
+    });
+  });
   const reason = () => {
     if (props.blockedReason) return props.blockedReason;
     if (!preset()) return t('firstSpendNoPresets');
+    if (props.grant && (props.grant.remaining_msat < 1000 || props.grant.budget_msat < 1000))
+      return t('firstSpendGrantTooLow');
     if (custom() && ambiguousThousands(amount(), 'sats')) return t('amountUseSpaces');
     const n = ceiling();
     if (n === null || !Number.isSafeInteger(n) || n < 1000 || n > maximum())
-      return t('firstSpendAmountReason', satsWhole(maximum() / 1000));
+      return t('firstSpendAmountReason', budgetAmount(maximum()));
     return null;
   };
-  // This sheet is explicitly in sats, independent of the wallet denomination.
-  const daily = () => ceiling() === null ? null : satsWhole(ceiling()! / 1000);
+  // Input is in sats; fractional ceilings use exact integer msat, as at the box.
+  const daily = () => ceiling() === null ? null : budgetAmount(ceiling()!);
   const titleId = createUniqueId();
   const reasonId = createUniqueId();
   const amountId = createUniqueId();
@@ -102,6 +119,11 @@ export function FirstSpendSheet(props: {
         }>
           <p>{daily() === null ? t('firstSpendStartsNowUnavailable') : t('firstSpendStartsNow', daily()!)}</p>
         </Show>
+        <Show when={props.grant}>{grant => (
+          <p class="hint" data-first-spend-grant>
+            {t('firstSpendGrantRemaining', budgetAmount(grant().remaining_msat), `${day(grant().expires_at_ms)} ${clock(grant().expires_at_ms)}`)}
+          </p>
+        )}</Show>
         <Show when={props.dailyExpired}><p class="hint">{t('uiYourDailyApprovalEnded')}</p></Show>
         <Show when={props.lapse}><p class="hint" data-budget-lapse={props.lapse}>
           {t(props.lapse === 'lost' ? 'uiYourNodeCanNoLongerApproveYourLast' : 'uiYourLastRequestLapsedBeforeItWasApproved')}
@@ -109,12 +131,19 @@ export function FirstSpendSheet(props: {
         <p id={costId} class="first-spend-cost money" data-first-spend-cost>{props.costLine}</p>
         <details class="first-spend-options">
           <summary>{t('firstSpendOtherOptions')}</summary>
-          <p class="hint">{t('firstSpendAppPresets', satsWhole(maximum() / 1000))}</p>
+          <p class="hint">{t('firstSpendAppPresets', budgetAmount(maximum()))}</p>
           <div class="presets" role="radiogroup" aria-label={t('uiAppAllInPaymentsLimitRolling24Hours')}>
-            <For each={props.presets}>{p => (
-              <button type="button" class="chip" role="radio" aria-checked={!custom() && preset()?.id === p.id}
-                data-preset={p.id} onClick={() => { setPicked(p.id); setCustom(false); props.onPreset(p.id); }}>
-                {t('firstSpendDaily', satsWhole(withinGrant(p.ceiling_msat) / 1000))}
+            <For each={distinctPresets()}>{p => (
+              <button type="button" class="chip" role="radio" aria-checked={!custom() && ceiling() === withinGrant(p.ceiling_msat)}
+                data-preset={p.id} onClick={() => {
+                  // Equal capped amounts represent the saved policy too. Selecting
+                  // that amount again must not silently replace its contact limits.
+                  if (withinGrant(preset()?.ceiling_msat ?? NaN) !== withinGrant(p.ceiling_msat)) {
+                    setPicked(p.id); props.onPreset(p.id);
+                  }
+                  setCustom(false);
+                }}>
+                {t('firstSpendDaily', budgetAmount(withinGrant(p.ceiling_msat)))}
               </button>
             )}</For>
             <button type="button" class="chip" role="radio" aria-checked={custom()} data-first-spend-custom

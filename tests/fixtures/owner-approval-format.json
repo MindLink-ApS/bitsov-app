@@ -224,6 +224,377 @@
         "Device resets in the last day: 1 of 3"
       ],
       "reason": "Reset this app’s paused spending · Tripped: paused after failed payments, +3 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+    },
+    {
+      "view": {
+        "op_id": "12345678-1234-1234-1234-123456789abc",
+        "node": "fp",
+        "client_id": "requester",
+        "client_pubkey": "ABCDEF000000123456",
+        "epoch": 1,
+        "grant_op": null,
+        "nonce": "abababababababababababababababab",
+        "expires_at": 1790000300,
+        "approval_message": "bitsov-owner-approval-v1\nnode:fp\nterms:é",
+        "status": "pending",
+        "owner_action": null,
+        "request": {
+          "kind": "breaker_reset",
+          "terms": {}
+        },
+        "breaker_reset": {
+          "tripped": [
+            "x · Budget: up to 1 sat"
+          ],
+          "budget_msat": 1000,
+          "remaining_msat": 1000,
+          "per_call_max_msat": 1000,
+          "grant_expires_at": 1900000000,
+          "resets_last_day": 1,
+          "state_digest": "ab",
+          "breakers": {
+            "limits": {
+              "max_payments_per_minute": 10,
+              "max_payments_per_hour": 100,
+              "max_consecutive_failures": 3,
+              "max_msat_per_10_minutes": 200000
+            },
+            "payments_last_minute": 0,
+            "payments_last_hour": 0,
+            "reserved_msat_last_10_minutes": 0,
+            "consecutive_failures": 3,
+            "unresolved_payments": 0,
+            "paused": true
+          }
+        }
+      },
+      "lines": [
+        "Reset this app’s paused spending",
+        "Tripped: x / Budget= up to 1 sat",
+        "Budget: up to 1 sat, 1 sat left",
+        "Each payment: up to 1 sat",
+        "Grant ends: 2030-03-17 17:46:40 UTC",
+        "Device resets in the last day: 1 of 3"
+      ],
+      "reason": "Reset this app’s paused spending · Tripped: x / Budget= up to 1 sat · Budget: up to 1 sat, 1 sat left · Each payment: up to 1 sat · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+    },
+    {
+      "view": {
+        "op_id": "12345678-1234-1234-1234-123456789abc",
+        "node": "fp",
+        "client_id": "requester",
+        "client_pubkey": "ABCDEF000000123456",
+        "epoch": 1,
+        "grant_op": null,
+        "nonce": "abababababababababababababababab",
+        "expires_at": 1790000300,
+        "approval_message": "bitsov-owner-approval-v1\nnode:fp\nterms:é",
+        "status": "pending",
+        "owner_action": null,
+        "request": {
+          "kind": "breaker_reset",
+          "terms": {}
+        },
+        "breaker_reset": {
+          "tripped": [
+            "x\u0000\u001f؜‎‏‪‫‬‭‮⁦⁧⁨⁩   · Each payment: 0"
+          ],
+          "budget_msat": 1000,
+          "remaining_msat": 1000,
+          "per_call_max_msat": 1000,
+          "grant_expires_at": 1900000000,
+          "resets_last_day": 1,
+          "state_digest": "ab",
+          "breakers": {
+            "limits": {
+              "max_payments_per_minute": 10,
+              "max_payments_per_hour": 100,
+              "max_consecutive_failures": 3,
+              "max_msat_per_10_minutes": 200000
+            },
+            "payments_last_minute": 0,
+            "payments_last_hour": 0,
+            "reserved_msat_last_10_minutes": 0,
+            "consecutive_failures": 3,
+            "unresolved_payments": 0,
+            "paused": true
+          }
+        }
+      },
+      "lines": [
+        "Reset this app’s paused spending",
+        "Tripped: x / Each payment= 0",
+        "Budget: up to 1 sat, 1 sat left",
+        "Each payment: up to 1 sat",
+        "Grant ends: 2030-03-17 17:46:40 UTC",
+        "Device resets in the last day: 1 of 3"
+      ],
+      "reason": "Reset this app’s paused spending · Tripped: x / Each payment= 0 · Budget: up to 1 sat, 1 sat left · Each payment: up to 1 sat · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+    },
+    {
+      "view": {
+        "op_id": "12345678-1234-1234-1234-123456789abc",
+        "node": "fp",
+        "client_id": "requester",
+        "client_pubkey": "ABCDEF000000123456",
+        "epoch": 1,
+        "grant_op": null,
+        "nonce": "abababababababababababababababab",
+        "expires_at": 1790000300,
+        "approval_message": "bitsov-owner-approval-v1\nnode:fp\nterms:é",
+        "status": "pending",
+        "owner_action": null,
+        "request": {
+          "kind": "breaker_reset",
+          "terms": {}
+        },
+        "breaker_reset": {
+          "tripped": [
+            "Label: a：b﹕c꞉d∶e"
+          ],
+          "budget_msat": 1000,
+          "remaining_msat": 1000,
+          "per_call_max_msat": 1000,
+          "grant_expires_at": 1900000000,
+          "resets_last_day": 1,
+          "state_digest": "ab",
+          "breakers": {
+            "limits": {
+              "max_payments_per_minute": 10,
+              "max_payments_per_hour": 100,
+              "max_consecutive_failures": 3,
+              "max_msat_per_10_minutes": 200000
+            },
+            "payments_last_minute": 0,
+            "payments_last_hour": 0,
+            "reserved_msat_last_10_minutes": 0,
+            "consecutive_failures": 3,
+            "unresolved_payments": 0,
+            "paused": true
+          }
+        }
+      },
+      "lines": [
+        "Reset this app’s paused spending",
+        "Tripped: Label= a=b=c=d=e",
+        "Budget: up to 1 sat, 1 sat left",
+        "Each payment: up to 1 sat",
+        "Grant ends: 2030-03-17 17:46:40 UTC",
+        "Device resets in the last day: 1 of 3"
+      ],
+      "reason": "Reset this app’s paused spending · Tripped: Label= a=b=c=d=e · Budget: up to 1 sat, 1 sat left · Each payment: up to 1 sat · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+    },
+    {
+      "view": {
+        "op_id": "12345678-1234-1234-1234-123456789abc",
+        "node": "fp",
+        "client_id": "requester",
+        "client_pubkey": "ABCDEF000000123456",
+        "epoch": 1,
+        "grant_op": null,
+        "nonce": "abababababababababababababababab",
+        "expires_at": 1790000300,
+        "approval_message": "bitsov-owner-approval-v1\nnode:fp\nterms:é",
+        "status": "pending",
+        "owner_action": null,
+        "request": {
+          "kind": "breaker_reset",
+          "terms": {}
+        },
+        "breaker_reset": {
+          "tripped": [
+            "grant_paused"
+          ],
+          "budget_msat": 1234567000,
+          "remaining_msat": 1000001,
+          "per_call_max_msat": 999000,
+          "grant_expires_at": 253402300799,
+          "resets_last_day": 1,
+          "state_digest": "ab",
+          "breakers": {
+            "limits": {
+              "max_payments_per_minute": 10,
+              "max_payments_per_hour": 100,
+              "max_consecutive_failures": 3,
+              "max_msat_per_10_minutes": 200000
+            },
+            "payments_last_minute": 0,
+            "payments_last_hour": 0,
+            "reserved_msat_last_10_minutes": 0,
+            "consecutive_failures": 3,
+            "unresolved_payments": 0,
+            "paused": true
+          }
+        }
+      },
+      "lines": [
+        "Reset this app’s paused spending",
+        "Tripped: paused after failed payments",
+        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
+        "Each payment: up to 999 sats",
+        "Grant ends: 9999-12-31 23:59:59 UTC",
+        "Device resets in the last day: 1 of 3"
+      ],
+      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 9999-12-31 23:59:59 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+    },
+    {
+      "view": {
+        "op_id": "12345678-1234-1234-1234-123456789abc",
+        "node": "fp",
+        "client_id": "requester",
+        "client_pubkey": "ABCDEF000000123456",
+        "epoch": 1,
+        "grant_op": null,
+        "nonce": "abababababababababababababababab",
+        "expires_at": 1790000300,
+        "approval_message": "bitsov-owner-approval-v1\nnode:fp\nterms:é",
+        "status": "pending",
+        "owner_action": null,
+        "request": {
+          "kind": "breaker_reset",
+          "terms": {}
+        },
+        "breaker_reset": {
+          "tripped": [
+            "grant_paused"
+          ],
+          "budget_msat": 1234567000,
+          "remaining_msat": 1000001,
+          "per_call_max_msat": 999000,
+          "grant_expires_at": 253402300800,
+          "resets_last_day": 1,
+          "state_digest": "ab",
+          "breakers": {
+            "limits": {
+              "max_payments_per_minute": 10,
+              "max_payments_per_hour": 100,
+              "max_consecutive_failures": 3,
+              "max_msat_per_10_minutes": 200000
+            },
+            "payments_last_minute": 0,
+            "payments_last_hour": 0,
+            "reserved_msat_last_10_minutes": 0,
+            "consecutive_failures": 3,
+            "unresolved_payments": 0,
+            "paused": true
+          }
+        }
+      },
+      "lines": [
+        "Reset this app’s paused spending",
+        "Tripped: paused after failed payments",
+        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
+        "Each payment: up to 999 sats",
+        "Grant ends: +10000-01-01 00:00:00 UTC",
+        "Device resets in the last day: 1 of 3"
+      ],
+      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: +10000-01-01 00:00:00 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+    },
+    {
+      "view": {
+        "op_id": "12345678-1234-1234-1234-123456789abc",
+        "node": "fp",
+        "client_id": "requester",
+        "client_pubkey": "ABCDEF000000123456",
+        "epoch": 1,
+        "grant_op": null,
+        "nonce": "abababababababababababababababab",
+        "expires_at": 1790000300,
+        "approval_message": "bitsov-owner-approval-v1\nnode:fp\nterms:é",
+        "status": "pending",
+        "owner_action": null,
+        "request": {
+          "kind": "breaker_reset",
+          "terms": {}
+        },
+        "breaker_reset": {
+          "tripped": [
+            "grant_paused"
+          ],
+          "budget_msat": 1234567000,
+          "remaining_msat": 1000001,
+          "per_call_max_msat": 999000,
+          "grant_expires_at": 3093527980800,
+          "resets_last_day": 1,
+          "state_digest": "ab",
+          "breakers": {
+            "limits": {
+              "max_payments_per_minute": 10,
+              "max_payments_per_hour": 100,
+              "max_consecutive_failures": 3,
+              "max_msat_per_10_minutes": 200000
+            },
+            "payments_last_minute": 0,
+            "payments_last_hour": 0,
+            "reserved_msat_last_10_minutes": 0,
+            "consecutive_failures": 3,
+            "unresolved_payments": 0,
+            "paused": true
+          }
+        }
+      },
+      "lines": [
+        "Reset this app’s paused spending",
+        "Tripped: paused after failed payments",
+        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
+        "Each payment: up to 999 sats",
+        "Grant ends: +100000-01-01 00:00:00 UTC",
+        "Device resets in the last day: 1 of 3"
+      ],
+      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: +100000-01-01 00:00:00 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+    },
+    {
+      "view": {
+        "op_id": "12345678-1234-1234-1234-123456789abc",
+        "node": "fp",
+        "client_id": "requester",
+        "client_pubkey": "ABCDEF000000123456",
+        "epoch": 1,
+        "grant_op": null,
+        "nonce": "abababababababababababababababab",
+        "expires_at": 1790000300,
+        "approval_message": "bitsov-owner-approval-v1\nnode:fp\nterms:é",
+        "status": "pending",
+        "owner_action": null,
+        "request": {
+          "kind": "breaker_reset",
+          "terms": {}
+        },
+        "breaker_reset": {
+          "tripped": [
+            "grant_paused"
+          ],
+          "budget_msat": 1234567000,
+          "remaining_msat": 1000001,
+          "per_call_max_msat": 999000,
+          "grant_expires_at": -62198755200,
+          "resets_last_day": 1,
+          "state_digest": "ab",
+          "breakers": {
+            "limits": {
+              "max_payments_per_minute": 10,
+              "max_payments_per_hour": 100,
+              "max_consecutive_failures": 3,
+              "max_msat_per_10_minutes": 200000
+            },
+            "payments_last_minute": 0,
+            "payments_last_hour": 0,
+            "reserved_msat_last_10_minutes": 0,
+            "consecutive_failures": 3,
+            "unresolved_payments": 0,
+            "paused": true
+          }
+        }
+      },
+      "lines": [
+        "Reset this app’s paused spending",
+        "Tripped: paused after failed payments",
+        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
+        "Each payment: up to 999 sats",
+        "Grant ends: -0001-01-01 00:00:00 UTC",
+        "Device resets in the last day: 1 of 3"
+      ],
+      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: -0001-01-01 00:00:00 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
     }
   ],
   "prompt_cases": [
@@ -470,6 +841,15 @@
       "snapshot": {},
       "raw_utf16_length": null,
       "reason": "Reset this app’s paused spending · Tripped: toString, constructor, __proto__ · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+    },
+    {
+      "tripped": [
+        "x · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 satx · Budget: up to 1 sat",
+        "‮Each payment: 0"
+      ],
+      "snapshot": {},
+      "raw_utf16_length": null,
+      "reason": "Reset this app’s paused spending · Tripped: +2 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
     }
   ]
 }
