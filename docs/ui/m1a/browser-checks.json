@@ -1,0 +1,118 @@
+[
+  {
+    "language": "en",
+    "size": "default",
+    "geometry": {
+      "rect": {
+        "x": 368,
+        "y": 223.21875,
+        "width": 544,
+        "height": 353.546875,
+        "top": 223.21875,
+        "right": 912,
+        "bottom": 576.765625,
+        "left": 368
+      },
+      "client": 352,
+      "scroll": 352,
+      "font": "14px"
+    },
+    "restoredFocus": {
+      "tag": "BUTTON",
+      "html": "<button type=\"button\" class=\"profile-avatar\" data-profile=\"\" aria-haspopup=\"menu\" aria-label=\"You: wallet, profile and settings\" aria-expanded=\"false\" title=\"Wallet, profile and se",
+      "visible": true
+    },
+    "queue": "a then b; dismiss and reopen pass",
+    "focusTrap": true,
+    "modalSuspension": true,
+    "pendingCountIncludesDeferred": true,
+    "errors": []
+  },
+  {
+    "language": "en",
+    "size": "large",
+    "geometry": {
+      "rect": {
+        "x": 96,
+        "y": 105.4375,
+        "width": 1088,
+        "height": 589.109375,
+        "top": 105.4375,
+        "right": 1184,
+        "bottom": 694.546875,
+        "left": 96
+      },
+      "client": 587,
+      "scroll": 587,
+      "font": "28px"
+    },
+    "restoredFocus": {
+      "tag": "BUTTON",
+      "html": "<button type=\"button\" class=\"profile-avatar\" data-profile=\"\" aria-haspopup=\"menu\" aria-label=\"You: wallet, profile and settings\" aria-expanded=\"false\" title=\"Wallet, profile and se",
+      "visible": true
+    },
+    "queue": "a then b; dismiss and reopen pass",
+    "focusTrap": true,
+    "modalSuspension": true,
+    "pendingCountIncludesDeferred": true,
+    "errors": []
+  },
+  {
+    "language": "da",
+    "size": "default",
+    "geometry": {
+      "rect": {
+        "x": 368,
+        "y": 197.84375,
+        "width": 544,
+        "height": 404.296875,
+        "top": 197.84375,
+        "right": 912,
+        "bottom": 602.140625,
+        "left": 368
+      },
+      "client": 402,
+      "scroll": 402,
+      "font": "14px"
+    },
+    "restoredFocus": {
+      "tag": "BUTTON",
+      "html": "<button type=\"button\" class=\"profile-avatar\" data-profile=\"\" aria-haspopup=\"menu\" aria-label=\"Dig: tegnebog, profil og indstillinger\" aria-expanded=\"false\" title=\"Tegnebog, profil ",
+      "visible": true
+    },
+    "queue": "a then b; dismiss and reopen pass",
+    "focusTrap": true,
+    "modalSuspension": true,
+    "pendingCountIncludesDeferred": true,
+    "errors": []
+  },
+  {
+    "language": "da",
+    "size": "large",
+    "geometry": {
+      "rect": {
+        "x": 96,
+        "y": 60.6875,
+        "width": 1088,
+        "height": 678.609375,
+        "top": 60.6875,
+        "right": 1184,
+        "bottom": 739.296875,
+        "left": 96
+      },
+      "client": 677,
+      "scroll": 677,
+      "font": "28px"
+    },
+    "restoredFocus": {
+      "tag": "BUTTON",
+      "html": "<button type=\"button\" class=\"profile-avatar\" data-profile=\"\" aria-haspopup=\"menu\" aria-label=\"Dig: tegnebog, profil og indstillinger\" aria-expanded=\"false\" title=\"Tegnebog, profil ",
+      "visible": true
+    },
+    "queue": "a then b; dismiss and reopen pass",
+    "focusTrap": true,
+    "modalSuspension": true,
+    "pendingCountIncludesDeferred": true,
+    "errors": []
+  }
+]

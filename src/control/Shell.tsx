@@ -1,3 +1,4 @@
+import { OwnerApprovalSheets } from './OwnerApprovalSheet';
 import { FirstSpendSheet, type FirstSpendChoice } from './FirstSpendSheet';
 import { createAmountDraft } from './amountDraft';
 import { t as tr, possessive, languagePref, setLanguagePref, type LanguagePref } from '../i18n';
@@ -673,17 +674,17 @@ export function ControlCenter(props: Props) {
   // Kept outcomes outlive the Settings panel (Node → Body → Node), until Dismiss.
   const approvalsMemory = approvalMemory();
   /** A list read that failed in transport says so; a refusal says the node's reason. */
-  const listError = (e: ActionError) => (e.code === 'node' ? 'Couldn’t read your node’s approvals list. It is read again shortly.' : refusalText(e.code, e));
+  const listError = (e: ActionError) => (e.code === 'node' ? tr('ownerApprovalReadError') : refusalText(e.code, e));
   const loadApprovals = async () => {
     if (!approvalsCapable()) { setDeviceKeys(null); setApprovals([]); setApprovalsError(null); return; }
     const keys = await act(() => source.deviceKeys());
     // A failed discovery keeps what was known, but no entry may be acted on from it.
-    if (!keys.ok) { setApprovals([]); setApprovalsError(listError(keys.error)); return; }
+    if (!keys.ok) { setApprovalsError(listError(keys.error)); setApprovals([]); return; }
     setDeviceKeys(keys.value);
     if (!canApprove()) { setApprovals([]); setApprovalsError(null); return; }
     const pending = await act(() => source.approvalsPending());
     if (pending.ok) { setApprovals(pending.value.filter((v) => v.status === 'pending')); setApprovalsError(null); }
-    else { setApprovals([]); setApprovalsError(listError(pending.error)); }
+    else { setApprovalsError(listError(pending.error)); setApprovals([]); }
   };
   /** After an approve the host could not confirm: is the request still waiting at the node? */
   const recheckApproval = async (opId: string): Promise<'pending' | 'gone' | 'unknown'> => {
@@ -693,6 +694,11 @@ export function ControlCenter(props: Props) {
     return pending.value.some((v) => v.op_id === opId && v.status === 'pending') ? 'pending' : 'gone';
   };
   createEffect(on(approvalsCapable, (on) => { if (on) void loadApprovals(); else { setDeviceKeys(null); setApprovals([]); setApprovalsError(null); } }));
+  const approveOwner = async (opId: string, message: string) => {
+    const r = await act(() => source.approvalApprove(opId, message));
+    void loadApprovals();
+    return r;
+  };
   const approvalsWaiting = () => (canApprove() ? approvals().filter((v) => v.expires_at * 1000 > now()).length : 0);
   const loadBudget = () => {
     const revision = ++budgetRevision;
@@ -1755,6 +1761,11 @@ export function ControlCenter(props: Props) {
 
   return (
     <div class="cc" classList={{ 'no-context': !props.active }} data-mode={source.mode}>
+      <Show when={props.active && !isMobilePlatform()}>
+        <OwnerApprovalSheets approvals={approvals()} error={approvalsError()} now={now()}
+          memory={approvalsMemory} approve={approveOwner} recheck={recheckApproval}
+          blocked={contextOpen() || walletTab() !== null} />
+      </Show>
       <Rail
         callView={callView()}
         onReturnToCall={() => {
@@ -2053,6 +2064,7 @@ export function ControlCenter(props: Props) {
               {/* A discovery error shows on its own, even when the very first read failed. */}
               <Show when={canApprove() || (approvalsCapable() && approvalsError() !== null)}>
                 <OwnerApprovals
+                  onReview={!isMobilePlatform() ? id => { approvalsMemory.reviewOpener = settingsReturnFocus; approvalsMemory.setReview(id); setContextOpen(false); } : undefined}
                   approvals={approvals()}
                   error={approvalsError()}
                   recheck={recheckApproval}
@@ -2060,11 +2072,7 @@ export function ControlCenter(props: Props) {
                   now={now()}
                   mobile={isMobilePlatform()}
                   nameOf={(id) => { const p = peerById().get(id.toLowerCase()); return p ? peerName(p, p.node_id) : null; }}
-                  approve={async (opId, message) => {
-                    const r = await act(() => source.approvalApprove(opId, message));
-                    void loadApprovals();
-                    return r;
-                  }}
+                  approve={approveOwner}
                 />
               </Show>
               <DeviceApprovals
