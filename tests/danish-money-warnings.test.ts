@@ -6,7 +6,7 @@ afterEach(() => setLanguagePref('en'));
 it('preserves both paid-but-undelivered warnings exactly in Danish', () => {
   setLanguagePref('da');
   expect(undeliveredCopy({ paid_msat: 1500, retry: true })).toEqual({
-    title: 'Betalt 1.5 sats · endnu ikke leveret',
+    title: 'Betalt 1,5 sats · endnu ikke leveret',
     body: 'Send ikke igen. Et nyt leveringsforsøg betaler intet nyt.',
     detail: 'Betalingen er gennemført; beskeden er ikke leveret. Et nyt forsøg sender det allerede betalte bevis igen. Hvis der skal betales mere (beskedpris eller adgang efter en genforbindelse), stopper den før betaling og spørger først med prisen.',
   });
@@ -21,12 +21,12 @@ it('preserves quoted versus estimated admission, fee ceilings, and approval in D
   const price = { admission_msat: 1500, message_msat: 2000, max_routing_fee_msat: 500, total_msat: 4000 };
   expect(admissionCopy({ ...price, quoted: true })).toEqual({
     body: 'Kræver højst 4 sats mere (adgang + besked + gebyrer).',
-    detail: 'Deres pris: 1.5 sats for adgang igen, derefter 2 sats for denne besked. Plus højst 0.5 sats i netværksgebyrer (4 sats i alt). Hvis du stadig har adgang, betales kun beskeden og dens gebyr.',
+    detail: 'Deres pris: 1,5 sats for adgang igen, derefter 2 sats for denne besked. Plus højst 0,5 sats i netværksgebyrer (4 sats i alt). Hvis du stadig har adgang, betales kun beskeden og dens gebyr.',
     action: 'Godkend højst 4 sats og prøv igen',
   });
   expect(admissionCopy({ ...price, quoted: false })).toEqual({
     body: 'Kræver cirka 4 sats mere, hvis adgang skal betales igen.',
-    detail: 'Denne beskeds 2 sats og cirka 1.5 sats, hvis der kræves adgang igen. Plus højst 0.5 sats i netværksgebyrer (4 sats i alt). Noden afviser før betaling, hvis den faktiske pris er højere.',
+    detail: 'Denne beskeds 2 sats og cirka 1,5 sats, hvis der kræves adgang igen. Plus højst 0,5 sats i netværksgebyrer (4 sats i alt). Noden afviser før betaling, hvis den faktiske pris er højere.',
     action: 'Godkend højst 4 sats og prøv igen',
   });
 });

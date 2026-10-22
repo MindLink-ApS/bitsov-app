@@ -7,9 +7,12 @@ import { denom } from './prefs';
 
 /** Use narrow no-break spaces so a number cannot wrap between digit groups. */
 const groupDigits = (value: string) => value.replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f');
+// Display only: Danish decimal commas are refused by the input parser, never
+// mistaken for thousands. Editable amounts retain amountText()'s exact syntax.
+const satsDecimal = () => language() === 'da' ? ',' : '.';
 const groupAmount = (value: string) => {
   const [whole, fraction] = value.split('.');
-  return groupDigits(whole) + (fraction === undefined ? '' : `.${fraction}`);
+  return groupDigits(whole) + (fraction === undefined ? '' : `${satsDecimal()}${fraction}`);
 };
 
 /** 1 BTC = 1e8 sats = 1e11 msat. */
@@ -22,7 +25,7 @@ export function sats(msat: number): string {
   const absolute = Math.abs(msat);
   const whole = Math.floor(absolute / 1000);
   const fraction = String(absolute % 1000).padStart(3, '0').replace(/0+$/, '');
-  return `${msat < 0 ? '-' : ''}${groupDigits(String(whole))}${fraction ? `.${fraction}` : ''}`;
+  return `${msat < 0 ? '-' : ''}${groupDigits(String(whole))}${fraction ? `${satsDecimal()}${fraction}` : ''}`;
 }
 
 /**

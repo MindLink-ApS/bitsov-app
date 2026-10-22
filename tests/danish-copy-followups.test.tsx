@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'vitest';
 import { render } from 'solid-js/web';
-import { setLanguagePref, t } from '../src/i18n';
+import { copy, possessive, setLanguagePref, t } from '../src/i18n';
 import { costToSend } from '../src/control/state';
 import { HubTrust, HubChannelConfirm } from '../src/control/HubTrust';
 let dispose: (() => void) | undefined;
@@ -54,8 +54,28 @@ it('localizes the provider channel confirmation as well as its cards', () => {
   expect(mount.textContent).toContain('Indstillinger → Node');
 });
 
-it.each([['Rasmus', "Rasmus'"], ['Lars', "Lars'"], ['Alex', "Alex'"], ['Luz', "Luz'"], ['MAX', "MAX'"], ['Maya', 'Mayas']])('uses the Danish possessive for %s', (name, possessive) => {
+it.each([['Rasmus', 'Rasmus’'], ['Lars', 'Lars’'], ['Alex', 'Alex’'], ['Luz', 'Luz’'], ['MAX', 'MAX’'], ['Maya', 'Mayas']])('uses the Danish possessive for %s', (name, possessive) => {
   setLanguagePref('da');
   const quote = { kind: 0, own_msat: 1000, peer_msat: 2000, peer_stale: false, peer_age_secs: 0, max_routing_fee_msat: 0 };
   expect(costToSend({ kind: 'peer', id: 'a' }, quote, { name, nowMs: 1 })!.basis).toContain(`${possessive} pris`);
+});
+
+it.each(['en', 'da'] as const)('uses typographic apostrophes for %s possessives without changing names', locale => {
+  setLanguagePref(locale);
+  for (const [name, english, danish] of [
+    ['Rasmus', 'Rasmus’s', 'Rasmus’'],
+    ['Lars', 'Lars’s', 'Lars’'],
+    ['Alex', 'Alex’s', 'Alex’'],
+    ['Luz', 'Luz’s', 'Luz’'],
+    ['MAX', 'MAX’s', 'MAX’'],
+    ['Maya', 'Maya’s', 'Mayas'],
+    ["O'Connor", "O'Connor’s", "O'Connors"],
+  ]) {
+    expect(possessive(name)).toBe(locale === 'en' ? english : danish);
+  }
+  // Keep literal and interpolated possessives in the merged copy table consistent.
+  // Exclude the English contraction “That's”; user-provided names are not copy.
+  const asciiPossessives = Object.entries(copy[locale]).filter(([, value]) =>
+    /(?:\}|\b(?![Tt]hat\b)[\p{L}]+)'s\b|[sxz]'(?=\s|$)/u.test(value));
+  expect(asciiPossessives).toEqual([]);
 });
