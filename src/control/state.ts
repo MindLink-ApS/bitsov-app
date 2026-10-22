@@ -188,7 +188,7 @@ export function peerNotReadyMessage(error: unknown, name: string): string | null
     reason = error.slice('peer_not_ready:'.length);
   }
   return reason === 'chain_unavailable' || reason === 'not_synced'
-    ? t('extraSNodeIsnTReadyToReceiveYet', name)
+    ? t('extraSNodeIsnTReadyToReceiveYet', possessive(name))
     : null;
 }
 

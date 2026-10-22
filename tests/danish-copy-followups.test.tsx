@@ -1,7 +1,7 @@
 import { afterEach, expect, it } from 'vitest';
 import { render } from 'solid-js/web';
 import { copy, possessive, setLanguagePref, t } from '../src/i18n';
-import { costToSend } from '../src/control/state';
+import { costToSend, peerNotReadyMessage } from '../src/control/state';
 import { HubTrust, HubChannelConfirm } from '../src/control/HubTrust';
 let dispose: (() => void) | undefined;
 let mount: HTMLDivElement;
@@ -58,6 +58,16 @@ it.each([['Rasmus', 'Rasmus’'], ['Lars', 'Lars’'], ['Alex', 'Alex’'], ['Lu
   setLanguagePref('da');
   const quote = { kind: 0, own_msat: 1000, peer_msat: 2000, peer_stale: false, peer_age_secs: 0, max_routing_fee_msat: 0 };
   expect(costToSend({ kind: 'peer', id: 'a' }, quote, { name, nowMs: 1 })!.basis).toContain(`${possessive} pris`);
+});
+
+it.each(['en', 'da'] as const)('inflects names in the peer-not-ready message in %s', locale => {
+  setLanguagePref(locale);
+  for (const [name, da] of [['Rasmus', 'Rasmus’'], ['Maya', 'Mayas']]) {
+    expect(t('uiSNodeDoesNotTakeCallsYet', possessive(name)))
+      .toBe(locale === 'da' ? `${da} node modtager ikke opkald endnu` : `${name}’s node does not take calls yet`);
+    expect(peerNotReadyMessage({ code: 'peer_not_ready', reason: 'chain_unavailable' }, name))
+      .toBe(locale === 'da' ? `${da} node er ikke klar til at modtage endnu (dens kædeforbindelse er nede)` : `${name}’s node isn't ready to receive yet (its chain connection is down)`);
+  }
 });
 
 it.each(['en', 'da'] as const)('uses typographic apostrophes for %s possessives without changing names', locale => {

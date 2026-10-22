@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { APPROVAL_ERROR_CODES, approvalReason, refusalText, secondsLeft, shortKey, termLines, type ApprovalView } from '../src/control/ownerApproval';
 
 const base = (request: ApprovalView['request']): ApprovalView => ({
@@ -82,5 +82,27 @@ describe('breaker reset (node #304)', () => {
   it('only a failure pause needs a reset; rate and velocity limits recover with time', () => {
     expect(needsReset(['grant_paused'])).toBe(true);
     expect(needsReset(['rate_limit_minute', 'rate_limit_hour', 'velocity_limit'])).toBe(false);
+  });
+});
+
+// Both suites consume these UTF-8 snapshots: formatting is independent of the
+// app language, and never changes the node-owned signed approval_message.
+import approvalFormat from './fixtures/owner-approval-format.json';
+import { setLanguagePref } from '../src/i18n';
+describe('host/renderer approval formatting parity', () => {
+  afterEach(() => setLanguagePref('en'));
+  it.each(['en', 'da'] as const)('matches the shared terms and biometric snapshots in %s', locale => {
+    setLanguagePref(locale);
+    for (const scenario of approvalFormat.scenarios) {
+      const view = scenario.view as ApprovalView;
+      expect(termLines(view)).toEqual(scenario.lines);
+      expect(new TextEncoder().encode(approvalReason(view))).toEqual(new TextEncoder().encode(scenario.reason));
+    }
+    for (const { msat, text } of approvalFormat.amounts) {
+      const view = base({ kind: 'first_contact', terms: { recipient: A, max_total_msat: msat, budget_msat: msat } });
+      const lines = ['Let this app message someone new', 'To: aaaaaa…aaaaaa', `First message: up to ${text}`, `Contact budget: up to ${text}`];
+      expect(termLines(view)).toEqual(lines);
+      expect(approvalReason(view)).toBe(`${lines.join(' · ')} · Requested by app ababab…ababab`);
+    }
   });
 });

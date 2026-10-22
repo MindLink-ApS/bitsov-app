@@ -407,12 +407,14 @@ fn short_key(key: &str) -> String {
         format!("{}…{}", &key[..6], &key[key.len() - 6..])
     }
 }
+// Display only; the node-owned approval_message is checked and signed verbatim.
+// Match ownerApproval.ts in every language: U+202F grouping and decimal dot.
 fn sats(msat: u64) -> String {
     let whole = (msat / 1000).to_string();
     let mut value = String::new();
     for (i, c) in whole.chars().enumerate() {
         if i > 0 && (whole.len() - i) % 3 == 0 {
-            value.push(',');
+            value.push('\u{202f}');
         }
         value.push(c);
     }
