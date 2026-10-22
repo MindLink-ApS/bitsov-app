@@ -1,0 +1,115 @@
+{
+  "url": "http://127.0.0.1:1423/tests/fixtures/safe-areas.html?surface=meeting",
+  "viewport": "width=device-width,initial-scale=1,viewport-fit=cover",
+  "width": 852,
+  "height": 393,
+  "visual": {
+    "width": 852,
+    "height": 393,
+    "top": 0
+  },
+  "insets": {
+    "top": "0px",
+    "right": "59px",
+    "bottom": "20px",
+    "left": "59px"
+  },
+  "platform": "ios",
+  "text": "BitSov \u00b7 Static preview\nMaya\n\nA selectable sample message.\n\nOther options\nStatic meeting preview\nSample contact 1\nSample contact 2\nSample contact 3\nSample contact 4\nSample contact 5\nSample contact 6\nS",
+  "rects": {
+    ".cc": {
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 852,
+        "height": 393,
+        "top": 0,
+        "right": 852,
+        "bottom": 393,
+        "left": 0
+      },
+      "padding": "0px 59px 20px"
+    },
+    ".rail": {
+      "rect": {
+        "x": 59,
+        "y": 0,
+        "width": 248,
+        "height": 373,
+        "top": 0,
+        "right": 307,
+        "bottom": 373,
+        "left": 59
+      },
+      "padding": "20px 12px 16px"
+    },
+    ".composer": {
+      "rect": {
+        "x": 307,
+        "y": 240.71875,
+        "width": 486,
+        "height": 132.28125,
+        "top": 240.71875,
+        "right": 793,
+        "bottom": 373,
+        "left": 307
+      },
+      "padding": "12px 16px 16px"
+    },
+    ".composer-main": null,
+    ".composer textarea": {
+      "rect": {
+        "x": 323,
+        "y": 253.71875,
+        "width": 454,
+        "height": 71.59375,
+        "top": 253.71875,
+        "right": 777,
+        "bottom": 325.3125,
+        "left": 323
+      },
+      "padding": "10px 14px"
+    },
+    ".meeting-panel": {
+      "rect": {
+        "x": 453,
+        "y": 24,
+        "width": 340,
+        "height": 345,
+        "top": 24,
+        "right": 793,
+        "bottom": 369,
+        "left": 453
+      },
+      "padding": "16px"
+    },
+    ".wallet-page": null,
+    ".wallet-head": null,
+    ".wallet-top": null,
+    ".settings": null,
+    ".settings-head": null,
+    ".call-panel": {
+      "rect": {
+        "x": 453,
+        "y": 24,
+        "width": 340,
+        "height": 345,
+        "top": 24,
+        "right": 793,
+        "bottom": 369,
+        "left": 453
+      },
+      "padding": "16px"
+    },
+    ".phone-onboarding": null,
+    ".phone-options": null,
+    "[data-phone-face]": null,
+    ".phone-primary": null,
+    ".locked-node": null,
+    "[data-remember-unlock]": null,
+    "[data-remember-unlock] h2": null,
+    ".pairing-link-banner": null,
+    ".pairing-link-overlay": null,
+    ".pairing-link-banner h2": null
+  }
+}

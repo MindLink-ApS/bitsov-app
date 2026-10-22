@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Static safe-area fixture</title></head>
+<body><div id="root">
+  <!-- No application runtime, event handlers, media, or payment APIs. -->
+  <main class="cc" inert><nav class="rail">BitSov · Static preview</nav><section class="track"><header class="track-head">Maya</header><div class="stream"><p class="bubble">A selectable sample message.</p></div><footer class="composer"><textarea aria-label="Message" placeholder="Message"></textarea><div class="composer-bar"><button>Other options</button></div></footer></section></main>
+  <aside class="call-panel" data-call-panel="live" role="dialog" aria-label="Static call preview" inert>
+    <header><strong>Connected</strong><span class="who">Maya</span><span class="duration">00:42</span></header>
+    <p class="hint" data-call-recovery-note>The connection may recover on its own. A new paid recovery admission waits until the original call is confirmed closed.</p>
+    <p class="hint" data-call-paid>Signal cost cap: 42 sats (includes maximum routing fees; settled amount may be lower). Media is not billed.</p>
+    <div class="call-actions"><button class="soft">Mute</button><button class="danger">End</button></div>
+    <p class="hint">Static preview · no active call</p>
+  </aside>
+</div><script type="module" src="./safe-areas.ts"></script></body></html>

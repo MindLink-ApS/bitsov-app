@@ -49,8 +49,7 @@ describe('phone layout (375 px)', () => {
   });
 
   it('the meeting planner and New room (shared .meeting-panel) are held inside the screen and scroll (rendered: npm run check:layout)', () => {
-    expect(css).toMatch(/\n\.meeting-panel \{ max-height: calc\(100dvh - 48px - env\(safe-area-inset-top, 0px\) - env\(safe-area-inset-bottom, 0px\)\); overflow-y: auto; \}/);
-    expect(css).toMatch(/\n\.call-panel\[data-call-panel\] \{ max-height: calc\(100dvh - 48px - env\(safe-area-inset-top, 0px\) - env\(safe-area-inset-bottom, 0px\)\); overflow-y: auto; \}/);
+    expect(css).toContain('.meeting-panel, .call-panel[data-call-panel] { max-height: calc(100dvh - max(var(--s-6), env(safe-area-inset-top, 0px)) - max(var(--s-6), env(safe-area-inset-bottom, 0px))); overflow-y: auto; }');
     expect(readFileSync(join(__dirname, '../src/control/RoomPanel.tsx'), 'utf8')).toMatch(/class="call-panel meeting-panel room-panel" data-room-panel="new"/);
     expect(readFileSync(join(__dirname, '../scripts/ui-layout/meeting-planner-check.mjs'), 'utf8')).toContain('[data-room-panel="new"]');
     expect(readFileSync(join(__dirname, '../scripts/ui-layout/meeting-planner-check.mjs'), 'utf8')).toContain('width: 375, height: 667');

@@ -1,0 +1,54 @@
+{
+  "url": "http://127.0.0.1:1423/tests/fixtures/phone-onboarding.html?state=start&theme=light",
+  "viewport": "viewport-fit=cover, width=device-width,initial-scale=1, viewport-fit=cover",
+  "width": 393,
+  "height": 852,
+  "visual": {
+    "width": 393,
+    "height": 852,
+    "top": 0
+  },
+  "insets": {
+    "top": "59px",
+    "right": "0px",
+    "bottom": "34px",
+    "left": "0px"
+  },
+  "text": "Connect to your box\n\nOther device \u2192 Add a device.\n\nScan your box's QR\nOther options",
+  "rects": {
+    ".cc": null,
+    ".rail": null,
+    ".composer": null,
+    ".wallet-page": null,
+    ".wallet-head": null,
+    ".settings": null,
+    ".settings-head": null,
+    ".call-panel": null,
+    ".phone-onboarding": {
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 393,
+        "height": 852,
+        "top": 0,
+        "right": 393,
+        "bottom": 852,
+        "left": 0
+      },
+      "padding": "59px 24px 34px"
+    },
+    ".phone-options": {
+      "rect": {
+        "x": 24,
+        "y": 770,
+        "width": 345,
+        "height": 48,
+        "top": 770,
+        "right": 369,
+        "bottom": 818,
+        "left": 24
+      },
+      "padding": "0px"
+    }
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "url": "http://127.0.0.1:1423/tests/fixtures/safe-areas.html?surface=locked",
+  "viewport": "width=device-width,initial-scale=1,viewport-fit=cover",
+  "width": 852,
+  "height": 393,
+  "visual": {
+    "width": 852,
+    "height": 393,
+    "top": 0
+  },
+  "insets": {
+    "top": "0px",
+    "right": "59px",
+    "bottom": "20px",
+    "left": "59px"
+  },
+  "platform": "ios",
+  "text": "Node locked\nLocked after a restart. Unlock to receive.\n\nYour node restarted (for example after a power cut). It cannot read your keys until you unlock it from this device. Tap Unlock - it takes a few ",
+  "rects": {
+    ".cc": null,
+    ".rail": null,
+    ".composer": null,
+    ".composer-main": null,
+    ".composer textarea": null,
+    ".meeting-panel": null,
+    ".wallet-page": null,
+    ".wallet-head": null,
+    ".wallet-top": null,
+    ".settings": null,
+    ".settings-head": null,
+    ".call-panel": null,
+    ".phone-onboarding": null,
+    ".phone-options": null,
+    "[data-phone-face]": null,
+    ".phone-primary": null,
+    ".locked-node": {
+      "rect": {
+        "x": 106,
+        "y": 27.5,
+        "width": 640,
+        "height": 935.65625,
+        "top": 27.5,
+        "right": 746,
+        "bottom": 963.15625,
+        "left": 106
+      },
+      "padding": "0px 16px"
+    },
+    "[data-remember-unlock]": null,
+    "[data-remember-unlock] h2": null,
+    ".pairing-link-banner": null,
+    ".pairing-link-overlay": null,
+    ".pairing-link-banner h2": null
+  }
+}

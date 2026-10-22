@@ -1,0 +1,92 @@
+[
+  {
+    "width": 390,
+    "surface": "chat",
+    "match": true
+  },
+  {
+    "width": 390,
+    "surface": "wallet",
+    "match": true
+  },
+  {
+    "width": 390,
+    "surface": "settings",
+    "match": true
+  },
+  {
+    "width": 390,
+    "surface": "call",
+    "match": true
+  },
+  {
+    "width": 390,
+    "surface": "meeting",
+    "match": true
+  },
+  {
+    "width": 390,
+    "surface": "locked",
+    "match": true
+  },
+  {
+    "width": 390,
+    "surface": "remember",
+    "match": true
+  },
+  {
+    "width": 390,
+    "surface": "banner",
+    "match": true
+  },
+  {
+    "width": 390,
+    "surface": "reviewing",
+    "match": true
+  },
+  {
+    "width": 1280,
+    "surface": "chat",
+    "match": true
+  },
+  {
+    "width": 1280,
+    "surface": "wallet",
+    "match": true
+  },
+  {
+    "width": 1280,
+    "surface": "settings",
+    "match": true
+  },
+  {
+    "width": 1280,
+    "surface": "call",
+    "match": true
+  },
+  {
+    "width": 1280,
+    "surface": "meeting",
+    "match": true
+  },
+  {
+    "width": 1280,
+    "surface": "locked",
+    "match": true
+  },
+  {
+    "width": 1280,
+    "surface": "remember",
+    "match": true
+  },
+  {
+    "width": 1280,
+    "surface": "banner",
+    "match": true
+  },
+  {
+    "width": 1280,
+    "surface": "reviewing",
+    "match": true
+  }
+]

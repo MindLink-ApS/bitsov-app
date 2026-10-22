@@ -1,0 +1,97 @@
+{
+  "url": "http://127.0.0.1:1423/tests/fixtures/safe-areas.html",
+  "viewport": "width=device-width,initial-scale=1,viewport-fit=cover",
+  "width": 393,
+  "height": 852,
+  "visual": {
+    "width": 393,
+    "height": 852,
+    "top": 0
+  },
+  "insets": {
+    "top": "59px",
+    "right": "0px",
+    "bottom": "34px",
+    "left": "0px"
+  },
+  "platform": "ios",
+  "text": "BitSov \u00b7 Static preview\nMaya\n\nA selectable sample message.\n\nOther options\nConnected\nMaya\n00:42\n\nThe connection may recover on its own. A new paid recovery admission waits until the original call is co",
+  "rects": {
+    ".cc": {
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 393,
+        "height": 852,
+        "top": 0,
+        "right": 393,
+        "bottom": 852,
+        "left": 0
+      },
+      "padding": "59px 0px 34px"
+    },
+    ".rail": {
+      "rect": {
+        "x": 0,
+        "y": 59,
+        "width": 393,
+        "height": 60,
+        "top": 59,
+        "right": 393,
+        "bottom": 119,
+        "left": 0
+      },
+      "padding": "8px 0px 8px 12px"
+    },
+    ".composer": {
+      "rect": {
+        "x": 0,
+        "y": 665.40625,
+        "width": 393,
+        "height": 152.59375,
+        "top": 665.40625,
+        "right": 393,
+        "bottom": 818,
+        "left": 0
+      },
+      "padding": "12px 16px 16px"
+    },
+    ".composer-main": null,
+    ".composer textarea": {
+      "rect": {
+        "x": 16,
+        "y": 678.40625,
+        "width": 361,
+        "height": 71.59375,
+        "top": 678.40625,
+        "right": 377,
+        "bottom": 750,
+        "left": 16
+      },
+      "padding": "10px 14px"
+    },
+    ".meeting-panel": null,
+    ".wallet-page": null,
+    ".wallet-head": null,
+    ".wallet-top": null,
+    ".settings": null,
+    ".settings-head": null,
+    ".call-panel": {
+      "rect": {
+        "x": 29,
+        "y": 498.6875,
+        "width": 340,
+        "height": 319.3125,
+        "top": 498.6875,
+        "right": 369,
+        "bottom": 818,
+        "left": 29
+      },
+      "padding": "16px"
+    },
+    ".phone-onboarding": null,
+    ".phone-options": null,
+    "[data-phone-face]": null,
+    ".phone-primary": null
+  }
+}

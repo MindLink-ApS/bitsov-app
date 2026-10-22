@@ -1,0 +1,79 @@
+{
+  "url": "http://127.0.0.1:1423/tests/fixtures/safe-areas.html?surface=reviewing",
+  "viewport": "width=device-width,initial-scale=1,viewport-fit=cover",
+  "width": 852,
+  "height": 393,
+  "visual": {
+    "width": 852,
+    "height": 393,
+    "top": 0
+  },
+  "insets": {
+    "top": "0px",
+    "right": "59px",
+    "bottom": "20px",
+    "left": "59px"
+  },
+  "platform": "ios",
+  "text": "Static incoming link preview\nDismiss\n\nStatic endpoint review\n\nClose pairing",
+  "rects": {
+    ".cc": null,
+    ".rail": null,
+    ".composer": null,
+    ".composer-main": null,
+    ".composer textarea": null,
+    ".meeting-panel": null,
+    ".wallet-page": null,
+    ".wallet-head": null,
+    ".wallet-top": null,
+    ".settings": null,
+    ".settings-head": null,
+    ".call-panel": null,
+    ".phone-onboarding": null,
+    ".phone-options": null,
+    "[data-phone-face]": null,
+    ".phone-primary": null,
+    ".locked-node": null,
+    "[data-remember-unlock]": null,
+    "[data-remember-unlock] h2": null,
+    ".pairing-link-banner": {
+      "rect": {
+        "x": 59,
+        "y": 12,
+        "width": 734,
+        "height": 97.59375,
+        "top": 12,
+        "right": 793,
+        "bottom": 109.59375,
+        "left": 59
+      },
+      "padding": "16px"
+    },
+    ".pairing-link-overlay": {
+      "rect": {
+        "x": 0,
+        "y": 109.59375,
+        "width": 852,
+        "height": 283.40625,
+        "top": 109.59375,
+        "right": 852,
+        "bottom": 393,
+        "left": 0
+      },
+      "padding": "24px 59px"
+    },
+    ".pairing-link-banner h2": {
+      "rect": {
+        "x": 76,
+        "y": 29,
+        "width": 700,
+        "height": 18.59375,
+        "top": 29,
+        "right": 776,
+        "bottom": 47.59375,
+        "left": 76
+      },
+      "padding": "0px"
+    }
+  }
+}

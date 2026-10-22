@@ -1,0 +1,128 @@
+{
+  "url": "http://127.0.0.1:1423/?sample",
+  "viewport": "width=device-width, initial-scale=1.0, viewport-fit=cover",
+  "width": 393,
+  "height": 852,
+  "visual": {
+    "width": 393,
+    "height": 852,
+    "top": 0
+  },
+  "insets": {
+    "top": "59px",
+    "right": "0px",
+    "bottom": "34px",
+    "left": "0px"
+  },
+  "platform": "ios",
+  "text": "BitSov\nForbind til din node\nMaya\nJosh\nKontakt uden navn (cccccccc\u2026cccccccc)\nGamma VM\nNode\nWallet\nInbox\nSp\u00f8rg din node\nProfiler\nForrum\n+ Ny\nBS\nMaya\nIndstillinger\n\ns\u00f8n. 27. sep.\n\nMorning. My node came b",
+  "rects": {
+    ".cc": {
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 393,
+        "height": 852,
+        "top": 0,
+        "right": 393,
+        "bottom": 852,
+        "left": 0
+      },
+      "padding": "59px 0px 34px"
+    },
+    ".rail": {
+      "rect": {
+        "x": 0,
+        "y": 59,
+        "width": 393,
+        "height": 61,
+        "top": 59,
+        "right": 393,
+        "bottom": 120,
+        "left": 0
+      },
+      "padding": "8px 0px 8px 12px"
+    },
+    ".composer": {
+      "rect": {
+        "x": 0,
+        "y": 418.578125,
+        "width": 393,
+        "height": 399.421875,
+        "top": 418.578125,
+        "right": 393,
+        "bottom": 818,
+        "left": 0
+      },
+      "padding": "12px 16px 16px"
+    },
+    ".composer-main": {
+      "rect": {
+        "x": 16,
+        "y": 431.578125,
+        "width": 361,
+        "height": 104.796875,
+        "top": 431.578125,
+        "right": 377,
+        "bottom": 536.375,
+        "left": 16
+      },
+      "padding": "5px 6px 5px 10px"
+    },
+    ".composer textarea": {
+      "rect": {
+        "x": 27,
+        "y": 437.578125,
+        "width": 343,
+        "height": 40.796875,
+        "top": 437.578125,
+        "right": 370,
+        "bottom": 478.375,
+        "left": 27
+      },
+      "padding": "8px 6px"
+    },
+    ".meeting-panel": null,
+    ".wallet-page": null,
+    ".wallet-head": null,
+    ".wallet-top": null,
+    ".settings": null,
+    ".settings-modal.open": {
+      "rect": {
+        "x": 0,
+        "y": 59,
+        "width": 393,
+        "height": 759,
+        "top": 59,
+        "right": 393,
+        "bottom": 818,
+        "left": 0
+      },
+      "padding": "0px 16px"
+    },
+    ".settings-head": {
+      "rect": {
+        "x": 16,
+        "y": 59,
+        "width": 361,
+        "height": 57,
+        "top": 59,
+        "right": 377,
+        "bottom": 116,
+        "left": 16
+      },
+      "padding": "0px 0px 12px"
+    },
+    ".call-panel": null,
+    ".phone-onboarding": null,
+    ".phone-options": null,
+    "[data-phone-face]": null,
+    ".phone-primary": null,
+    ".locked-node": null,
+    "[data-remember-unlock]": null,
+    "[data-remember-unlock] h2": null,
+    ".pairing-link-banner": null,
+    ".pairing-link-overlay": null,
+    ".pairing-link-banner h2": null
+  }
+}

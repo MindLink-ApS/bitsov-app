@@ -6,6 +6,7 @@ import { INITIAL_PAIRING, type ConnectionError } from '../../src/onboarding/pair
 import '../../src/styles.css';
 const params = new URLSearchParams(location.search);
 const state = params.get('state') ?? 'start';
+document.documentElement.dataset.platform = params.get('platform') === 'android' ? 'android' : 'ios';
 const connected = ['words', 'done', 'fingerprint', 'connecting', 'approval_expired'].includes(state);
 const errors = ['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other'];
 const connection_error = errors.includes(state) ? { kind: state as ConnectionError['kind'], detail: 'Synthetic diagnostic, hidden by default.' } : undefined;
