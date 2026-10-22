@@ -1,3 +1,4 @@
+import type { StarterStatus } from './starter';
 import type { AddInput, AddView, JoinInput, JoinView } from '../onboarding/AddDevice';
 import type { WatchSample, WatchUpdate } from './watches';
 import type { AssistantId, AssistantThread, ThreadRequest, LocalTurn } from './assistants';
@@ -161,6 +162,8 @@ export interface Source {
   firstContactStatus(id: string, recipient?: string): Promise<OwnerContactApproval>;
   firstContactCancel(id: string): Promise<void>;
   wallet(): Promise<WalletOverview>;
+  starterCurrent(nodeId: string): Promise<StarterStatus>;
+  starterRequest(nodeId: string, requestId: string): Promise<StarterStatus>;
   /** Node-wide energy (genome N1). Call only when the overview lists `energy_v1`. */
   energy(span: EnergySpan): Promise<EnergyRead>;
   /** The node's membrane ring, newest first (genome N2). Only with `membrane_v1`. */
@@ -353,6 +356,8 @@ export const hostSource: Source = {
   firstContactStatus: (id, recipient) => invoke<OwnerContactApproval>('first_contact_status', { id, recipient: recipient ?? null }),
   firstContactCancel: (id) => invoke<void>('first_contact_cancel', { id }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
+  starterCurrent: (nodeId) => invoke<StarterStatus>('starter_current', { node_id: nodeId }),
+  starterRequest: (nodeId, requestId) => invoke<StarterStatus>('starter_request', { node_id: nodeId, request_id: requestId }),
   energy: (span) => invoke<EnergyRead>('energy_read', { span }),
   membrane: (limit) => invoke<MembraneRead>('membrane_read', { limit: limit ?? null }),
   onLive: (handler) => listen<LiveEvent>(LIVE_EVENT, (e) => handler(e.payload)),

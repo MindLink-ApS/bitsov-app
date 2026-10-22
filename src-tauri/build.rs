@@ -69,6 +69,8 @@ fn main() {
             "first_contact_status",
             "first_contact_cancel",
             "payments_overview",
+            "starter_current",
+            "starter_request",
             "energy_read",
             "membrane_read",
             "spend_status",

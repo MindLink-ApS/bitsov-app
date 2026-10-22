@@ -1,4 +1,5 @@
 import { createAmountDraft } from './amountDraft';
+import { StarterBalance, type StarterBalanceProps } from './StarterBalance';
 import { activityLabel } from './wallet';
 import { t } from '../i18n';
 import { SettledPayment } from './SettledPayment';
@@ -138,6 +139,7 @@ export function WalletPage(props: {
   /** The one tap that opens the ten-minute window (the composer's SpendBar). */
   spendGate: JSX.Element;
   pendingResult?: JSX.Element;
+  starter?: StarterBalanceProps;
   now: number;
   ownId: string;
   /** Contacts and rooms whose node history the activity reads. */
@@ -153,6 +155,7 @@ export function WalletPage(props: {
   custody?: CustodyMode | null;
 }) {
   const split = () => (props.wallet ? splitBalance(props.wallet) : null);
+  const [starterOpen, setStarterOpen] = createSignal(false);
 
   // Invoices we issued: read whether they were paid while this page is open.
   let reading = false;
@@ -184,12 +187,16 @@ export function WalletPage(props: {
   return (
     <div class="wallet-page" role="dialog" aria-modal="true" aria-label={t('uiWallet')} data-wallet-page={props.tab}>
       <header class="wallet-top">
-        <button type="button" class="link" data-wallet-close ref={(el) => queueMicrotask(() => el.isConnected && el.focus())} onClick={() => props.onClose()} aria-label={t('uiCloseWallet')}>{t('uiBack450')}</button>
-        <h1>{t('uiWallet')}</h1>
-        <button type="button" class="link" data-wallet-refresh onClick={() => props.onRefresh()}>{t('uiRefresh')}</button>
+        <button type="button" class="link" data-wallet-close ref={(el) => queueMicrotask(() => el.isConnected && el.focus())} onClick={() => starterOpen() ? setStarterOpen(false) : props.onClose()} aria-label={t(starterOpen() ? 'uiBack450' : 'uiCloseWallet')}>{t('uiBack450')}</button>
+        <h1>{t(starterOpen() ? 'starterTitle' : 'uiWallet')}</h1>
+        <Show when={!starterOpen()}><button type="button" class="link" data-wallet-refresh onClick={() => props.onRefresh()}>{t('uiRefresh')}</button></Show>
       </header>
 
       <div class="wallet-body">
+        <Show when={props.starter}>
+          <StarterBalance {...props.starter!} open={starterOpen()} onOpen={() => setStarterOpen(true)} onHidden={() => setStarterOpen(false)} />
+        </Show>
+        <Show when={!starterOpen()}>
         {props.pendingResult}
         <section class="wallet-hero" data-wallet-balance>
           <span class="label">{t('uiNodeReportedTotal')}</span>
@@ -305,6 +312,7 @@ export function WalletPage(props: {
             <SendView moneyBlocked={props.moneyBlocked} spend={props.spend} spendGate={props.spendGate} now={props.now} actions={props.actions} />
           </Match>
         </Switch>
+        </Show>
       </div>
     </div>
   );

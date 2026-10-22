@@ -2177,6 +2177,8 @@ export function ControlCenter(props: Props) {
             onTab={setWalletTab}
             onClose={() => setWalletTab(null)}
             wallet={wallet()}
+            starter={{ nodeId: ownId(), network: overview()?.network, capabilities: overview()?.capabilities,
+              api: { current: () => source.starterCurrent(ownId()), request: id => source.starterRequest(ownId(), id) } }}
             pendingResult={<Reconcile actions={actions} hasPending={(budget()?.unsettled_msat ?? 0) > 0} />}
             walletError={errors.wallet}
             moneyBlocked={moneyBlocked()}

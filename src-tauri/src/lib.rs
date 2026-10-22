@@ -14,6 +14,7 @@ pub mod introduction;
 pub mod front_door;
 pub mod porch;
 pub mod sponsor;
+pub mod starter;
 pub mod ai;
 pub mod spend_journal;
 pub mod control;

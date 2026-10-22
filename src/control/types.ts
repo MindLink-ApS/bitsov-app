@@ -216,7 +216,7 @@ export type NodeOverview = {
   stun_port?: number | null;
   /** `stun:host:port` for it at the node's public host; absent without one. Offered, never applied. */
   stun_url?: string | null;
-  /** The LDK network the host started the node with (`mainnet`, `regtest`, …); absent when unknown. */
+  /** Node-reported Bitcoin network, with local LDK config fallback; absent when unknown. */
   network?: string | null;
   /** Where the node's seed lives (node REMOTE-SIGNER.md §2); absent from older nodes. */
   custody_mode?: CustodyMode | null;

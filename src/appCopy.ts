@@ -1,6 +1,25 @@
 /** First migrated app surfaces. Values are display copy, never protocol tokens.
  * {0}, {1}, … insert values verbatim (especially money and recipients). */
 export const appEn = {
+  "starterTitle": "Get your starter balance",
+  "starterFree": "Free. The hub funds your starter balance.",
+  "starterRequested": "Requested",
+  "starterWaiting": "Waiting for the hub",
+  "starterOpening": "Channel opening",
+  "starterReady": "Ready",
+  "starterRefused": "Request refused",
+  "starterFailed": "Request failed",
+  "starterRetrying": "Retrying in {0} min",
+  "starterPending": "Your node will confirm when the starter balance has arrived.",
+  "starterReceived": "Your node confirmed a starter balance of {0}.",
+  "starterSpendable": "Check your wallet for what is spendable now.",
+  "starterStorageError": "Could not save your request. Check your device storage before trying again.",
+  "starterReadError": "Could not check the latest status. Your request stays saved.",
+  "starterRequestError": "Could not confirm the request. Retry safely with the same request.",
+  "starterRetry": "Retry request",
+  "starterGet": "Get starter balance",
+  "starterAgain": "Request again",
+
   "amountUseSpaces": "Use spaces: 1 000",
   "amountDraftCleared": "Amount cleared after changing unit or language. Enter it again.",
   "budgetInvalidAmount": "Enter a number of sats, or 0 to forget.",
@@ -691,6 +710,25 @@ export const appEn = {
 };
 
 export const appDa: Record<keyof typeof appEn, string> = {
+  "starterTitle": "Få din startsaldo",
+  "starterFree": "Gratis. Hubben finansierer din startsaldo.",
+  "starterRequested": "Anmodning sendt",
+  "starterWaiting": "Venter på hubben",
+  "starterOpening": "Kanalen åbnes",
+  "starterReady": "Klar",
+  "starterRefused": "Anmodning afvist",
+  "starterFailed": "Anmodningen mislykkedes",
+  "starterRetrying": "Prøver igen om {0} min",
+  "starterPending": "Din node bekræfter, når startsaldoen er modtaget.",
+  "starterReceived": "Din node har bekræftet en startsaldo på {0}.",
+  "starterSpendable": "Se i din tegnebog, hvad du kan bruge nu.",
+  "starterStorageError": "Kunne ikke gemme din anmodning. Tjek lagerpladsen på din enhed, før du prøver igen.",
+  "starterReadError": "Kunne ikke hente den seneste status. Din anmodning er stadig gemt.",
+  "starterRequestError": "Kunne ikke bekræfte anmodningen. Prøv sikkert igen med samme anmodning.",
+  "starterRetry": "Prøv anmodningen igen",
+  "starterGet": "Hent startsaldo",
+  "starterAgain": "Anmod igen",
+
   "amountUseSpaces": "Brug mellemrum: 1 000",
   "amountDraftCleared": "Beløbet blev ryddet efter skift af enhed eller sprog. Indtast det igen.",
   "budgetInvalidAmount": "Indtast et beløb i sats eller 0 for at glemme.",
