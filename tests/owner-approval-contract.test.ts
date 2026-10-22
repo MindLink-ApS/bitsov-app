@@ -104,16 +104,24 @@ describe('host/renderer approval formatting parity', () => {
     }
     for (const testCase of approvalFormat.prompt_cases) {
       const view = structuredClone(approvalFormat.scenarios[2].view) as ApprovalView;
-      view.breaker_reset!.tripped = [testCase.trip];
+      Object.assign(view.breaker_reset!, testCase.snapshot, { tripped: testCase.tripped });
       const original = new TextEncoder().encode(view.approval_message);
       if (testCase.raw_utf16_length !== null) {
         expect(`${termLines(view).join(' · ')} · Requested by app abcdef…123456`.length).toBe(testCase.raw_utf16_length);
       }
+      const promptLines = approvalReason(view).split(' · ');
+      for (const line of termLines(view).slice(2, 5)) expect(promptLines).toContain(line);
+      expect(promptLines[promptLines.length - 1]).toBe('Requested by app abcdef…123456');
       expect(new TextEncoder().encode(approvalReason(view))).toEqual(new TextEncoder().encode(testCase.reason));
       expect(approvalReason(view).length).toBeLessThanOrEqual(300);
       expect(new TextEncoder().encode(view.approval_message)).toEqual(original);
     }
-    for (const { msat, text } of approvalFormat.amounts) {
+    for (const amount of approvalFormat.amounts) {
+      const { msat } = amount;
+      const text = amount.renderer_text ?? amount.text;
+      // JSON/Tauri delivers numbers, not decimal strings. Above 2^53 the
+      // renderer must explicitly decline to display an already rounded amount.
+      if (amount.renderer_text) expect(Number.isSafeInteger(msat)).toBe(false);
       const view = base({ kind: 'first_contact', terms: { recipient: A, max_total_msat: msat, budget_msat: msat } });
       const lines = ['Let this app message someone new', 'To: aaaaaa…aaaaaa', `First message: up to ${text}`, `Contact budget: up to ${text}`];
       expect(termLines(view)).toEqual(lines);
