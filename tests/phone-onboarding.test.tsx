@@ -279,6 +279,37 @@ it('cancels a legacy preview without committing and discards its pending link', 
   expect(vi.mocked(props.connect).mock.calls.length).toBe(0);
   expect(props.join).not.toHaveBeenCalled();
 });
+it.each(['en', 'da'])('rejects a legacy comparison through a visible quiet button (%s)', async locale => {
+  const props = mount({ locale,
+    preview: vi.fn().mockResolvedValue({ second_device: false, endpoint: 'box', node_id_fingerprint: 'ABCD' }),
+  });
+  const scanLabel = locale === 'da' ? 'Scan boksens QR-kode' : "Scan your box's QR";
+  button(scanLabel).click(); await tick();
+  const confirm = button(locale === 'da' ? 'De er ens' : 'They match');
+  const mismatch = button(locale === 'da' ? 'De er ikke ens' : "They don't match");
+  expect(mismatch).toBeTruthy();
+  expect(mismatch.closest('details')).toBeNull();
+  expect(mismatch.classList.contains('quiet')).toBe(true);
+  expect(mismatch.disabled).toBe(false);
+  expect(document.querySelector('details')?.open).toBe(false);
+  expect(document.querySelectorAll('button.primary')).toHaveLength(1);
+  mismatch.click(); await tick();
+  expect(props.forget).toHaveBeenCalledOnce();
+  expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('start');
+  expect(document.querySelector('.phone-fingerprint')).toBeNull();
+  expect(document.body.textContent).not.toContain('ABCD');
+  confirm.click(); await tick(); // A stale confirmation cannot commit the rejected link.
+  expect(props.connect).not.toHaveBeenCalled(); // connect is the import boundary.
+  expect(props.beginJoin).not.toHaveBeenCalled();
+  expect(props.join).not.toHaveBeenCalled();
+  expect(props.onDone).not.toHaveBeenCalled();
+
+  vi.mocked(props.scan!).mockResolvedValueOnce('bitsov://pair/replacement');
+  button(scanLabel).click(); await tick();
+  expect(props.connect).not.toHaveBeenCalled();
+  button(locale === 'da' ? 'De er ens' : 'They match').click(); await tick();
+  expect(props.connect).toHaveBeenCalledExactlyOnceWith('bitsov://pair/replacement');
+});
 it('shows connecting progress without a dummy primary action', async () => {
   mount({ incoming: { link: 'bitsov://pair/synthetic' }, connect: () => new Promise(() => {}) });
   await tick();

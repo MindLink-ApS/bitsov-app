@@ -2,16 +2,16 @@ import { expect, test } from '@playwright/test';
 
 test.use({ viewport: { width: 390, height: 844 } });
 for (const lang of ['en', 'da']) {
-  for (const state of ['start', 'scanner', 'connecting', 'words', 'done', 'fingerprint', 'unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired']) {
+  for (const state of ['start', 'scanner', 'connecting', 'words', 'done', 'fingerprint', 'legacy', 'unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired']) {
     test(`phone 390×844 ${lang} ${state}`, async ({ page }, testInfo) => {
       const errors: string[] = [];
       page.on('pageerror', e => errors.push(e.message));
       const fixtureState = state === 'mismatch' ? 'words' : state;
       await page.goto(`/tests/fixtures/phone-onboarding.html?lang=${lang}&state=${fixtureState}`, { waitUntil: 'networkidle' });
-      if (['scanner', 'camera'].includes(state)) await page.locator('button.primary').click();
+      if (['scanner', 'camera', 'legacy'].includes(state)) await page.locator('button.primary').click();
       if (state === 'mismatch') await page.getByRole('button', { name: lang === 'da' ? 'De er ikke ens' : "They don't match", exact: true }).click();
       const main = page.locator('[data-phone-onboarding]');
-      await expect(main).toHaveAttribute('data-phone-onboarding', ['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired'].includes(state) ? 'error' : state);
+      await expect(main).toHaveAttribute('data-phone-onboarding', ['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired'].includes(state) ? 'error' : state === 'legacy' ? 'fingerprint' : state);
       await expect(page.locator('.phone-options')).not.toHaveAttribute('open');
       await expect(page.locator('h1')).toBeVisible();
       expect((await page.locator('.phone-line').boundingBox())!.height).toBeLessThan(28);
@@ -25,7 +25,20 @@ for (const lang of ['en', 'da']) {
       const options = await page.locator('.phone-options').boundingBox();
       expect(options!.y + options!.height).toBeLessThanOrEqual(844);
       expect(errors).toEqual([]);
+      if (['fingerprint', 'legacy'].includes(state)) {
+        const mismatch = page.getByRole('button', { name: lang === 'da' ? 'De er ikke ens' : "They don't match", exact: true });
+        await expect(mismatch).toBeVisible();
+        await expect(mismatch).toHaveClass('quiet');
+        await expect(mismatch).toBeInViewport();
+      }
       await page.screenshot({ path: testInfo.outputPath(`${lang}-${state}.png`) });
+      if (['fingerprint', 'legacy'].includes(state)) {
+        await page.getByRole('button', { name: lang === 'da' ? 'De er ikke ens' : "They don't match", exact: true }).click();
+        await expect(main).toHaveAttribute('data-phone-onboarding', 'start');
+        await expect(page.locator('.phone-fingerprint')).toHaveCount(0);
+        await expect(page.locator('button.primary:visible')).toHaveCount(1);
+        await expect(page.locator('.phone-options')).not.toHaveAttribute('open');
+      }
     });
   }
 }

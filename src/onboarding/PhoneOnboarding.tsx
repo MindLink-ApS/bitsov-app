@@ -236,6 +236,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       </Show>
       <Show when={screen() === 'fingerprint'}><code class="phone-fingerprint">{preview()?.node_id_fingerprint ?? props.status().node_id}</code>
         <PrimaryAction disabledReason={!preview()?.node_id_fingerprint && !props.status().node_id ? c().working : undefined} onClick={() => void confirmComparison()}>{c().match}</PrimaryAction>
+        <button type="button" class="quiet" disabled={busy()} onClick={() => void run(reset)}>{c().mismatch}</button>
       </Show>
       <Show when={screen() === 'start' || screen() === 'scanner'}><PrimaryAction disabledReason={busy() ? c().working : !props.scan ? c().unavailable : undefined} onClick={() => void scan()}>{c().scan}</PrimaryAction></Show>
       <Show when={screen() === 'connecting'}><p class="phone-status" role="status">{c().working}</p></Show>
