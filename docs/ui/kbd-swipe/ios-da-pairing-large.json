@@ -1,0 +1,80 @@
+{
+  "viewport": {
+    "height": 483,
+    "top": 349,
+    "scale": 1,
+    "inner": 503
+  },
+  "keyboard": "true",
+  "focused": "INPUT",
+  "elements": [
+    {
+      "tag": "DIV",
+      "cls": "client-852-body-852-inner-503",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 393,
+        "height": 483,
+        "top": 0,
+        "right": 393,
+        "bottom": 483,
+        "left": 0
+      },
+      "client": 483,
+      "scroll": 483,
+      "scrollTop": 0
+    },
+    {
+      "tag": "MAIN",
+      "cls": "phone-onboarding",
+      "rect": {
+        "x": 0,
+        "y": 59,
+        "width": 393,
+        "height": 424,
+        "top": 59,
+        "right": 393,
+        "bottom": 483,
+        "left": 0
+      },
+      "client": 424,
+      "scroll": 666,
+      "scrollTop": 77
+    },
+    {
+      "tag": "INPUT",
+      "cls": "",
+      "rect": {
+        "x": 24,
+        "y": 373.09375,
+        "width": 345,
+        "height": 46.796875,
+        "top": 373.09375,
+        "right": 369,
+        "bottom": 419.890625,
+        "left": 24
+      },
+      "client": 45,
+      "scroll": 45,
+      "scrollTop": 0
+    },
+    {
+      "tag": "BUTTON",
+      "cls": "",
+      "rect": {
+        "x": 24,
+        "y": 427.890625,
+        "width": 345,
+        "height": 44,
+        "top": 427.890625,
+        "right": 369,
+        "bottom": 471.890625,
+        "left": 24
+      },
+      "client": 42,
+      "scroll": 42,
+      "scrollTop": 0
+    }
+  ]
+}
