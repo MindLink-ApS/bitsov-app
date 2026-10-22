@@ -1,3 +1,4 @@
+import { setLanguagePref } from '../src/i18n';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
@@ -109,6 +110,7 @@ describe('acting from the track', () => {
 
   afterEach(() => {
     setShowLegacyRoomsUi(false);
+    setLanguagePref('en');
     dispose?.();
     dispose = undefined;
     mount?.remove();
@@ -1007,6 +1009,56 @@ describe('acting from the track', () => {
       await new Promise((r) => setTimeout(r, 0));
       expect(host.used('payment_keysend')).toHaveLength(0);
       expect(host.used('invoice_create')).toHaveLength(0);
+    });
+
+    it.each((['pay', 'request'] as const).flatMap(mode => ([
+      ['da', '1.000', 'unit'], ['da', '1.000', 'language'],
+      ['da', '0.0001', 'unit'], ['en', '0.0001', 'unit'],
+    ] as const).map(([locale, draft, change]) => ({ mode, locale, draft, change }))))(
+      'clears rejected $locale $mode draft $draft on $change change', async ({ mode, locale, draft, change }) => {
+      const host = stubHost();
+      host.spend.v = openView();
+      await openShell();
+      $<HTMLButtonElement>(`[data-composer-mode="${mode}"]`)!.click();
+      if (mode === 'pay') { direct(); type('[data-pay-pubkey]', PUB); }
+      setLanguagePref(locale);
+      const input = `[data-${mode}-amount]`;
+      type(input, draft);
+      expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
+      if (change === 'unit') setDenom('btc'); else setLanguagePref('en');
+      await vi.waitFor(() => expect($<HTMLInputElement>(input)!.value).toBe(''));
+      expect($('[data-amount-cleared]')).not.toBeNull();
+      expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
+      submit();
+      expect($('[data-pay-review]')).toBeNull();
+      expect(host.used('payment_keysend')).toHaveLength(0);
+      expect(host.used('invoice_create')).toHaveLength(0);
+      type(input, '2');
+      expect($('[data-amount-cleared]')).toBeNull();
+    });
+
+    it('preserves fractional sats exactly through English and Danish language switches', async () => {
+      const host = stubHost();
+      await openShell();
+      $<HTMLButtonElement>('[data-composer-mode="request"]')!.click();
+      type('[data-request-amount]', '1.001');
+      setLanguagePref('da');
+      expect($<HTMLInputElement>('[data-request-amount]')!.value).toBe('1.0010');
+      expect($('[data-amount-invalid]')).toBeNull();
+      setLanguagePref('en');
+      expect($<HTMLInputElement>('[data-request-amount]')!.value).toBe('1.001');
+      submit();
+      await vi.waitFor(() => expect(host.used('invoice_create')[0]?.args?.amount_msat).toBe(1001));
+    });
+
+    it('keeps the English 1.000 draft at one sat on a unit switch', async () => {
+      stubHost();
+      await openShell();
+      $<HTMLButtonElement>('[data-composer-mode="request"]')!.click();
+      type('[data-request-amount]', '1.000');
+      setDenom('btc');
+      expect($<HTMLInputElement>('[data-request-amount]')!.value).toBe('0.00000001');
+      expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(false);
     });
 
     it('keeps the same msat when the denomination switches', async () => {

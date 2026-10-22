@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { amountText, inPaymentBounds, parseAmount } from '../src/control/amountInput';
+import { ambiguousThousands, amountText, inPaymentBounds, parseAmount } from '../src/control/amountInput';
 
 // Pay and Request read typed amounts as exact integer msat. Anything finer
 // than one msat is refused, never rounded into a different amount.
@@ -91,4 +91,9 @@ describe('Danish thousands ambiguity', () => {
     expect(parseAmount('0.00000000001', 'btc', locale)).toBe(1);
     for (const msat of [1001, 1250, 1234567]) expect(parseAmount(amountText(msat, 'sats', locale), 'sats', locale)).toBe(msat);
   });
+});
+
+it('explains Danish multi-group thousands with the spaces hint', () => {
+  expect(parseAmount('1.000.000', 'sats', 'da')).toBeNull();
+  expect(ambiguousThousands('1.000.000', 'sats', 'da')).toBe(true);
 });

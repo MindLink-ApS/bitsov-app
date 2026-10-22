@@ -1,3 +1,4 @@
+import { setLanguagePref } from '../src/i18n';
 import { asActionError } from '../src/control/state';
 import { sampleSource } from '../src/control/sample';
 import { setStunPref, setDenom } from '../src/control/prefs';
@@ -2149,6 +2150,21 @@ describe('calls in the shell', () => {
     expect(text('[data-call-pay-status]')).not.toContain('Old payment');
     expect($<HTMLButtonElement>('[data-call-pay]')!.disabled).toBe(true);
     expect(host.used('payment_keysend')).toHaveLength(2);
+  });
+
+  it.each(['unit', 'language'])('in-call Pay clears a rejected Danish draft on %s change', async change => {
+    const host = payHost();
+    await liveCall();
+    try {
+      setLanguagePref('da');
+      enterCallAmount('1.000');
+      if (change === 'unit') setDenom('btc'); else setLanguagePref('en');
+      expect($<HTMLInputElement>('[data-in-call-pay] [data-pay-amount]')!.value).toBe('');
+      expect($('[data-in-call-pay] [data-amount-cleared]')).not.toBeNull();
+      expect($<HTMLButtonElement>('[data-call-pay-confirm]')!.disabled).toBe(true);
+      $<HTMLButtonElement>('[data-call-pay-confirm]')!.click();
+      expect(host.used('payment_keysend')).toHaveLength(0);
+    } finally { setLanguagePref('en'); }
   });
 
   it('in-call Pay clears the typed amount when the denomination changes', async () => {

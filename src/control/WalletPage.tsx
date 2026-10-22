@@ -1,3 +1,4 @@
+import { createAmountDraft } from './amountDraft';
 import { activityLabel } from './wallet';
 import { t } from '../i18n';
 import { SettledPayment } from './SettledPayment';
@@ -91,7 +92,7 @@ function CopyButton(props: { text: string; label: string }) {
   );
 }
 
-function AmountInput(props: { data: string; label: string; value: string; onInput: (v: string) => void; optional?: boolean }) {
+function AmountInput(props: { data: string; label: string; value: string; onInput: (v: string) => void; optional?: boolean; cleared?: boolean }) {
   const problem = (): string | null => {
     if (props.value.trim() === '') return null;
     if (ambiguousThousands(props.value, denom())) return t('amountUseSpaces');
@@ -115,6 +116,7 @@ function AmountInput(props: { data: string; label: string; value: string; onInpu
         />
         <span class="amount-unit">{unitName()}</span>
       </label>
+      <Show when={props.cleared}><p class="hint" role="status" data-amount-cleared>{t('amountDraftCleared')}</p></Show>
       <Show when={problem()}>{(p) => <p class="hint" data-amount-invalid>{p()}</p>}</Show>
     </>
   );
@@ -472,7 +474,7 @@ function ChannelsView(props: { wallet: WalletOverview | null; nameOf: (id: strin
 
 function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; reads: WalletReads; now: number }) {
   const [how, setHow] = createSignal<'lightning' | 'onchain'>('lightning');
-  const [amount, setAmount] = createSignal('');
+  const [amount, setAmount, amountCleared] = createAmountDraft();
   const [note, setNote] = createSignal('');
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -522,7 +524,7 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
         <button type="button" role="tab" aria-selected={how() === 'lightning'} data-receive-how="lightning" onClick={() => setHow('lightning')}>{t('receiveLightning')}</button>
         <button type="button" role="tab" aria-selected={how() === 'onchain'} data-receive-how="onchain" onClick={() => setHow('onchain')}>{t('receiveOnChain')}</button>
       </div>
-      <AmountInput data="data-receive-amount" label={t('receiveAmount')} value={amount()} onInput={setAmount} optional={how() === 'onchain'} />
+      <AmountInput data="data-receive-amount" label={t('receiveAmount')} value={amount()} onInput={setAmount} cleared={amountCleared()} optional={how() === 'onchain'} />
       <Show
         when={how() === 'lightning'}
         fallback={
@@ -598,7 +600,7 @@ type Review =
   | { kind: 'keysend'; pubkey: string; msat: number; memo: string };
 
 function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spendGate: JSX.Element; now: number; actions: WalletActions }) {
-  const [amount, setAmount] = createSignal('');
+  const [amount, setAmount, amountCleared] = createAmountDraft();
   const [to, setTo] = createSignal('');
   const [memo, setMemo] = createSignal('');
   const [read, setRead] = createSignal<InvoiceAmount | null>(null);
@@ -705,7 +707,7 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
         when={review()}
         fallback={
           <form class="wallet-form" onSubmit={(e) => void openReview(e)}>
-            <AmountInput data="data-send-amount" label={t('extraAmountToSend')} value={amount()} onInput={setAmount} />
+            <AmountInput data="data-send-amount" label={t('extraAmountToSend')} value={amount()} onInput={setAmount} cleared={amountCleared()} />
             <textarea data-send-to rows={2} placeholder={t('extraPasteALightningInvoiceOrANodeID')} value={to()} onInput={(e) => setTo(e.currentTarget.value)} aria-label={t('extraSendTo')} />
             <Show when={recipient().kind === 'node'}>
               <input data-send-memo placeholder={t('uiNoteOptional')} value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label={t('uiNote')} />

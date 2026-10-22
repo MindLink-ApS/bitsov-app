@@ -432,6 +432,32 @@ describe('the Wallet page', () => {
     expect(text('[data-balance-reserved] .split-amount')).toBe('Unknown');
   });
 
+  it.each(['receive', 'send'] as const)('protects %s drafts on unit and language changes', async tab => {
+    const host = stubHost();
+    await openWallet(tab);
+    setLanguagePref('da');
+    const input = `[data-${tab}-amount]`;
+    const button = tab === 'receive' ? '[data-receive-create]' : '[data-send-review]';
+    if (tab === 'send') type('[data-send-to]', PAYEE);
+    for (const change of ['unit', 'language']) {
+      setDenom('sats'); setLanguagePref('da');
+      type(input, '1.000');
+      if (change === 'unit') setDenom('btc'); else setLanguagePref('en');
+      expect($<HTMLInputElement>(input)!.value).toBe('');
+      expect($('[data-amount-cleared]')).not.toBeNull();
+      expect($<HTMLButtonElement>(button)!.disabled).toBe(true);
+      click(button);
+    }
+    expect(host.used('invoice_create')).toHaveLength(0);
+    expect(moneyCalls(host)).toHaveLength(0);
+    setDenom('sats');
+    type(input, '1500');
+    setDenom('btc');
+    expect($<HTMLInputElement>(input)!.value).toBe('0.000015');
+    setDenom('sats');
+    expect($<HTMLInputElement>(input)!.value).toBe('1500');
+  });
+
   it('Channels: each peer, size, what you can send and receive, and its state in plain words', async () => {
     stubHost();
     await openWallet('channels');

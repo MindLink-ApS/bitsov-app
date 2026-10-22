@@ -1,3 +1,4 @@
+import { setLanguagePref } from '../src/i18n';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
@@ -922,4 +923,15 @@ describe('the AI track', () => {
     expect(host.used('ai_send')).toHaveLength(1);
     expect(host.used('ai_local_select')[0]?.args).toMatchObject({ model: 'tiny-local' });
   });
+});
+
+it('refuses Danish comma amounts without changing English AI drafts', () => {
+  try {
+    setLanguagePref('da');
+    expect(satsIn('Pay Maya 1,000 sats')).toBeNull();
+    expect(satsIn('Pay Maya 1000 sats')).toBe(1000);
+    expect(satsIn('Pay Maya 1.000 sats')).toBeNull();
+    setLanguagePref('en');
+    expect(satsIn('Pay Maya 1,000 sats')).toBe(1000);
+  } finally { setLanguagePref('en'); }
 });

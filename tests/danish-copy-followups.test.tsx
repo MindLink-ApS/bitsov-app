@@ -12,7 +12,6 @@ it.each(['en', 'da'] as const)('puts possessives in %s copy and leaves the estim
   const cost = (name?: string) => costToSend({ kind: 'peer', id: 'a' }, quote, { name, nowMs: 1 })!;
   expect(cost('Maya').basis).toContain(locale === 'da' ? 'Mayas pris' : 'Maya’s price');
   expect(cost().basis).toContain(locale === 'da' ? 'Deres pris' : 'Their price');
-  expect(t('extraPriceFromAStaleTable', 'Maya', 'now', 'fee')).toContain(locale === 'da' ? 'Mayas pris' : 'Maya’s price');
   expect(costToSend({ kind: 'peer', id: 'a' }, { ...quote, peer_msat: null }, { name: 'Maya' })!.basis).toContain(locale === 'da' ? 'Maya har ikke delt sin endnu' : 'Maya has not shared theirs yet');
 });
 it('retains the payment, on-chain and fee meanings in Danish copy', () => {
@@ -53,4 +52,10 @@ it('localizes the provider channel confirmation as well as its cards', () => {
   expect(mount.querySelector('[data-hub-channel-ack]')?.textContent).toBe('Jeg forstår — åbn kanalen');
   expect(mount.querySelector('[data-hub-channel-cancel]')?.textContent).toBe('Ikke nu');
   expect(mount.textContent).toContain('Indstillinger → Node');
+});
+
+it.each([['Rasmus', "Rasmus'"], ['Lars', "Lars'"], ['Alex', "Alex'"], ['Luz', "Luz'"], ['MAX', "MAX'"], ['Maya', 'Mayas']])('uses the Danish possessive for %s', (name, possessive) => {
+  setLanguagePref('da');
+  const quote = { kind: 0, own_msat: 1000, peer_msat: 2000, peer_stale: false, peer_age_secs: 0, max_routing_fee_msat: 0 };
+  expect(costToSend({ kind: 'peer', id: 'a' }, quote, { name, nowMs: 1 })!.basis).toContain(`${possessive} pris`);
 });

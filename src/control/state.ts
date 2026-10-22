@@ -1,4 +1,4 @@
-import { t } from '../i18n';
+import { t, possessive } from '../i18n';
 import { MONEY_NOT_READY, readinessLine } from './readiness';
 import { feeCeiling } from './format';
 // Control-center state as pure functions over plain data, so the rules are
@@ -153,7 +153,7 @@ export function costToSend(
         msat: Math.max(quote.peer_msat, MIN_PAYMENT_MSAT) + (quote.max_routing_fee_msat ?? 0),
         basis: opts.name === undefined
           ? t('extraTheirPriceUpdated', when, feeCeiling(quote.max_routing_fee_msat ?? 0))
-          : t('extraPriceUpdated', opts.name, when, feeCeiling(quote.max_routing_fee_msat ?? 0)),
+          : t('extraPriceUpdated', possessive(opts.name), when, feeCeiling(quote.max_routing_fee_msat ?? 0)),
         estimate: quote.peer_stale,
       };
     }

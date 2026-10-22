@@ -20,7 +20,7 @@ const SHAPE = /^(\d*)(?:\.(\d*))?$/;
 /** Danish dot-grouped thousands must never silently become a fractional sat.
  * A zero whole part is an unambiguous fraction; BTC keeps its full decimal syntax. */
 export const ambiguousThousands = (text: string, denom: Denom, locale: Language = language()): boolean =>
-  locale === 'da' && denom === 'sats' && /^0*[1-9]\d*\.\d{3}$/.test(text.replace(/[\s_]/g, ''));
+  locale === 'da' && denom === 'sats' && /^0*[1-9]\d*(?:\.\d{3})+$/.test(text.replace(/[\s_]/g, ''));
 
 /** Exact msat for `text` read in `denom`, or null when empty, zero, too precise or too large. */
 export function parseAmount(text: string, denom: Denom, locale: Language = language()): number | null {

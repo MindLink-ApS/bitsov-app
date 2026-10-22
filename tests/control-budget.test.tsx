@@ -1200,6 +1200,21 @@ describe('invisible payments in the composer and the context panel', () => {
     await vi.waitFor(() => expect(host.used('budget_set')[0]?.args).toEqual({ target: MAYA, room: false, limit_msat: 10_000 }));
   });
 
+  it('clears a rejected Danish budget draft before English can reinterpret it', async () => {
+    const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 5000000, spent_msat: 0 }]));
+    await openShell();
+    setLanguagePref('da');
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    await vi.waitFor(() => expect($('[data-budget-edit]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-budget-edit]')!.click();
+    type('[data-budget-input]', '1.000');
+    setLanguagePref('en');
+    expect($<HTMLInputElement>('[data-budget-input]')!.value).toBe('');
+    expect($('[data-panel="budget"] [data-amount-cleared]')).not.toBeNull();
+    $<HTMLButtonElement>('[data-budget-save]')!.click();
+    expect(host.used('budget_set')).toHaveLength(0);
+  });
+
   it.each(['en', 'da'] as const)('parses grouped budget edits exactly and explains invalid input in %s', async locale => {
     setLanguagePref(locale);
     const host = stubHost(open([{ target: MAYA, room: false, limit_msat: 5000000, spent_msat: 0 }]));
