@@ -6,6 +6,9 @@
   "permissions": [
     "core:default",
     "barcode-scanner:allow-scan",
+    "barcode-scanner:allow-cancel",
+    "allow-open-app-settings",
+    "allow-open-tailscale",
     "barcode-scanner:allow-check-permissions",
     "barcode-scanner:allow-request-permissions",
     "allow-node-status",

@@ -27,6 +27,7 @@ fn build_device_key_swift() {
     println!("cargo:rerun-if-changed=../native/client_keychain.swift");
     println!("cargo:rerun-if-changed=../native/home_metadata.swift");
     println!("cargo:rerun-if-changed=../native/pairing_link.swift");
+    println!("cargo:rerun-if-changed=../native/phone_recovery.swift");
     let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("aarch64") => "arm64",
         Ok("x86_64") => "x86_64",
@@ -64,7 +65,7 @@ fn build_device_key_swift() {
 
     let lib = out_dir.join("libbitsov_device_key.a");
     let mut compiler = Command::new(&swiftc);
-    if ios { compiler.args(["../native/client_keychain.swift", "../native/pairing_link.swift", "../native/home_metadata.swift"]); }
+    if ios { compiler.args(["../native/client_keychain.swift", "../native/pairing_link.swift", "../native/home_metadata.swift", "../native/phone_recovery.swift"]); }
     let status = compiler
         .args([
             "-emit-library",

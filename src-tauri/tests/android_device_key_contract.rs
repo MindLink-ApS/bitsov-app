@@ -883,5 +883,6 @@ fn ios_home_keychain_only_stores_device_local_public_metadata() {
         assert!(!swift.contains(forbidden), "iOS metadata must not enable {forbidden}");
     }
     let build = project_file("ffi/build.rs");
-    assert!(build.contains("if ios { compiler.args([\"../native/client_keychain.swift\", \"../native/pairing_link.swift\", \"../native/home_metadata.swift\"]); }"));
+    let ios_compile = build.lines().find(|line| line.contains("if ios { compiler.args(")).unwrap();
+    assert!(ios_compile.contains("../native/home_metadata.swift"));
 }

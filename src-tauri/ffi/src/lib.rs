@@ -21,3 +21,6 @@ pub fn effective_uid() -> u32 {
     // SAFETY: getuid takes no arguments and has no failure case.
     unsafe { libc::getuid() as u32 }
 }
+
+#[cfg(target_os = "ios")]
+pub mod phone_recovery;

@@ -1,5 +1,7 @@
+import { normalizePairingLink } from './onboarding/pairing';
 import { appPlatform } from './platform';
 import {
+  cancel,
   checkPermissions,
   Format,
   requestPermissions,
@@ -18,7 +20,7 @@ export async function scanPairingLink(): Promise<string> {
   let permission = await checkPermissions();
   if (permission !== 'granted') permission = await requestPermissions();
   if (permission !== 'granted') {
-    throw new Error('Camera access is required to scan a pairing QR code.');
+    throw Object.assign(new Error('Camera access is required to scan a pairing QR code.'), { kind: 'camera' });
   }
   const result = await scan({
     cameraDirection: 'back',
@@ -27,5 +29,7 @@ export async function scanPairingLink(): Promise<string> {
   });
   const link = result.content.trim();
   if (!link) throw new Error('The scanned QR code was empty.');
-  return link;
+  return normalizePairingLink(link);
 }
+
+export const cancelPairingScan = () => cancel();
