@@ -1,7 +1,8 @@
+import { t } from '../src/i18n';
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from '../src/App';
-import { HubChannelConfirm, HUB_TRUST_CARDS, HUB_TRUST_TITLE } from '../src/control/HubTrust';
+import { HubChannelConfirm, HUB_TRUST_CARDS } from '../src/control/HubTrust';
 import { ControlCenter } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID } from '../src/control/sample';
 import { LockedNode } from '../src/onboarding/LockedNode';
@@ -35,15 +36,15 @@ function expectDisclosure(root: Element, level: 2 | 3) {
   const paragraphs = [...card.querySelectorAll('.hub-trust-card p')].map((p) => p.textContent);
   expect(paragraphs).toEqual(COPY);
   const headings = [...card.querySelectorAll(`.hub-trust-card h${level + 1}`)].map((h) => h.textContent);
-  expect(headings).toEqual(HUB_TRUST_CARDS.map((c) => c.heading));
+  expect(headings).toEqual(HUB_TRUST_CARDS.map((c) => t(c.heading)));
 }
 
 const toggle = (root: Element) => root.querySelector<HTMLButtonElement>('[data-hub-trust-toggle]')!;
 
 describe('hub trust disclosure', () => {
   it('keeps the approved copy verbatim', () => {
-    expect(HUB_TRUST_TITLE).toBe("Your Lightning provider");
-    expect(HUB_TRUST_CARDS.flatMap((c) => c.lines)).toEqual(COPY);
+    expect(t('hubTitle')).toBe("Your Lightning provider");
+    expect(HUB_TRUST_CARDS.flatMap((c) => c.lines.map(key => t(key)))).toEqual(COPY);
   });
 
   it('is always reachable from the settings Node panel as an ⓘ card, and can be hidden again', async () => {

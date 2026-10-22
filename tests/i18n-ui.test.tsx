@@ -58,9 +58,9 @@ it.each(['en', 'da'] as const)('preserves pay review values, recipient and one e
   await vi.waitFor(() => expect(find('[data-send]').textContent).toContain(locale === 'da' ? 'Betal' : 'Pay'));
   find('[data-composer]').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   await vi.waitFor(() => expect(find('[data-pay-review]')).not.toBeNull());
-  expect(find('[data-review-amount]').textContent).toBe('1 250 sats');
+  expect(find('[data-review-amount]').textContent).toBe('1\u202f250 sats');
   expect(find('[data-review-fee]').textContent).toBe(locale === 'da' ? 'højst 10 sats' : 'up to 10 sats');
-  expect(find('[data-review-total]').textContent).toBe('1 260 sats');
+  expect(find('[data-review-total]').textContent).toBe('1\u202f260 sats');
   expect(find('[data-payee]').getAttribute('title')).toBe(payee);
   expect(find('[data-payee]').textContent).toContain(locale === 'da' ? 'ikke bekræftet som Maya' : 'not verified as Maya');
   expect(find('[data-pay-confirm]').textContent?.trim()).toBe(locale === 'da' ? 'Bekræft og betal' : 'Confirm and pay');
@@ -68,5 +68,23 @@ it.each(['en', 'da'] as const)('preserves pay review values, recipient and one e
   find('[data-pay-confirm]').click();
   await vi.waitFor(() => expect(source.keysend).toHaveBeenCalledOnce());
   expect(vi.mocked(source.keysend).mock.calls[0].slice(0, 3)).toEqual([payee, 1250000, null]);
-  await vi.waitFor(() => expect(find('[data-artifact="payment"]').textContent).toContain('1 250'));
+  await vi.waitFor(() => expect(find('[data-artifact="payment"]').textContent).toContain('1\u202f250'));
+});
+it.each(['en', 'da'] as const)('uses bare contact names and localized amount guidance in %s', async locale => {
+  setLanguagePref(locale);
+  await open();
+  expect(find('[data-cost]').textContent).toContain(locale === 'da' ? 'Mayas pris' : 'Maya’s price');
+  find('[data-composer-mode="pay"]').click();
+  const tabs = [...mount.querySelectorAll<HTMLButtonElement>('[data-composer-panel="pay"] [role="tab"]')];
+  tabs[1].click();
+  expect(find('[data-pay-amount]').getAttribute('aria-label')).toBe(locale === 'da' ? 'Beløb til betaling i sats' : 'Amount to pay in sats');
+  type('[data-pay-amount]', '1.250');
+  if (locale === 'da') {
+    expect(find('[data-composer]').textContent).toContain('Brug mellemrum: 1 000');
+    expect(find<HTMLInputElement>('[data-pay-amount]').getAttribute('aria-invalid')).toBe('true');
+  } else expect(find<HTMLInputElement>('[data-pay-amount]').getAttribute('aria-invalid')).toBe('false');
+  type('[data-pay-amount]', '1 250');
+  expect(find<HTMLInputElement>('[data-pay-amount]').getAttribute('aria-invalid')).toBe('false');
+  find('[data-composer-mode="request"]').click();
+  expect(find('[data-composer]').textContent).toContain(locale === 'da' ? 'Anmod Maya om betaling' : 'Request from Maya');
 });

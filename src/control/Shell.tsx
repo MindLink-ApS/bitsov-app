@@ -1,4 +1,5 @@
-import { t as tr, languagePref, setLanguagePref, type LanguagePref } from '../i18n';
+import { createAmountDraft } from './amountDraft';
+import { t as tr, possessive, languagePref, setLanguagePref, type LanguagePref } from '../i18n';
 import { CallRepairs } from './CallRepairs';
 import { provenUnpaid } from './paymentOutcome';
 import { AddDevice } from '../onboarding/AddDevice';
@@ -28,7 +29,7 @@ import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
 import { amount as fmtAmount, paidAmount, budgetNote, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
-import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
+import { ambiguousThousands, amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
@@ -2698,7 +2699,7 @@ function Conversation(props: {
   });
   const cost = () =>
     costToSend(props.track, props.quote, {
-      name: props.track.kind === 'peer' ? `${props.name}’s` : undefined,
+      name: props.track.kind === 'peer' ? props.name : undefined,
       room: props.roomQuote,
       nowMs: props.now,
     });
@@ -4082,10 +4083,11 @@ const kb = (bytes: number) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).t
 const unitName = () => (denom() === 'btc' ? 'BTC' : 'sats');
 
 /** Amount first: one big field in the chosen denomination. Refuses, never rounds, a finer amount. */
-function AmountField(props: { data: 'pay' | 'request'; label: string; value: string; onInput: (v: string) => void }) {
+function AmountField(props: { data: 'pay' | 'request'; label: string; value: string; onInput: (v: string) => void; cleared?: boolean }) {
   /** Why the typed amount cannot be used, before any review. */
   const problem = (): string | null => {
     if (props.value.trim() === '') return null;
+    if (ambiguousThousands(props.value, denom())) return tr('amountUseSpaces');
     const msat = parseAmount(props.value, denom());
     if (msat === null) return tr('uiUseDigitsAndOneDotAtMostDecimals', denom() === 'btc' ? 11 : 3);
     return inPaymentBounds(msat) ? null : tr('uiBetweenAnd', fmtAmount(MIN_PAYMENT_MSAT), fmtAmount(MAX_PAYMENT_MSAT));
@@ -4109,6 +4111,7 @@ function AmountField(props: { data: 'pay' | 'request'; label: string; value: str
         />
         <span class="amount-unit">{unitName()}</span>
       </label>
+      <Show when={props.cleared}><p class="hint" role="status" data-amount-cleared>{tr('amountDraftCleared')}</p></Show>
       <Show when={invalid()}>
         <p class="hint" data-amount-invalid>{problem()}</p>
       </Show>
@@ -4133,7 +4136,7 @@ function InCallPay(props: {
   // The keyed parent remounts for a new call. A late receipt stays with this call.
   const peer = props.view.peer!;
   const [expanded, setExpanded] = createSignal(false);
-  const [amount, setAmount] = createSignal('');
+  const [amount, setAmount, amountCleared] = createAmountDraft({ clearOnUnitChange: true });
   const [busy, setBusy] = createSignal(false);
   const [approving, setApproving] = createSignal(false);
   const [result, setResult] = createSignal<{ state: 'sent' | 'failed' | 'unknown' | 'checked'; text: string } | null>(null);
@@ -4153,7 +4156,7 @@ function InCallPay(props: {
   }, { defer: true }));
   usePairingActivity(() => expanded() || busy() || approving());
   // A new unit or mapping requires a new amount; never reinterpret a visible draft.
-  createEffect(on(() => [denom(), destination()], () => setAmount(''), { defer: true }));
+  createEffect(on(destination, () => setAmount(''), { defer: true }));
   createEffect(() => { if (!live()) { setExpanded(false); setAmount(''); } });
   const pay = async () => {
     const dest = destination();
@@ -4190,7 +4193,7 @@ function InCallPay(props: {
         <div class="pay-flow">
           <strong>{tr('uiPay')} {props.nameOf(peer)}</strong>
           <p class="hint">{tr('uiDirectPaymentToTheirNodeSReportedLightning')}</p>
-          <AmountField data="pay" label={tr('uiAmountToPay', props.nameOf(peer))} value={amount()} onInput={setAmount} />
+          <AmountField data="pay" label={tr('uiAmountToPay', props.nameOf(peer))} value={amount()} onInput={setAmount} cleared={amountCleared()} />
           <Show when={msat() !== null}>
             <dl class="pay-review">
               <dt>{tr('uiAmount')}</dt><dd>{fmtAmount(msat()!)}</dd>
@@ -4275,7 +4278,7 @@ function Composer(props: {
   const [invoiceRead, setInvoiceRead] = createSignal<InvoiceAmount | null>(null);
   const invoiceMsat = () => invoiceRead()?.amount_msat ?? null;
   const [pubkey, setPubkey] = createSignal('');
-  const [amount, setAmount] = createSignal('');
+  const [amount, setAmount, amountCleared] = createAmountDraft();
   const [memo, setMemo] = createSignal('');
   /** The typed amount as exact msat in the current denomination, or null when not exact or outside 1 sat to 1 BTC. */
   const amountMsat = () => {
@@ -4550,17 +4553,6 @@ function Composer(props: {
         setFirstPick(null);
       },
       { defer: true },
-    ),
-  );
-  // Switching sats/BTC rewrites the typed amount, so it still means the same msat.
-  createEffect(
-    on(
-      denom,
-      (next, prev) => {
-        if (!prev) return;
-        const msat = parseAmount(untrack(amount), prev);
-        if (msat !== null) setAmount(amountText(msat, next));
-      },
     ),
   );
   createEffect(on([mode, payKind, bolt11, invoiceRead, pubkey, amount, memo, denom, () => trackKey(props.track)], () => setReview(null), { defer: true }));
@@ -5791,7 +5783,7 @@ function Composer(props: {
               when={payKind() === 'invoice'}
               fallback={
                 <>
-                  <AmountField data="pay" label={tr('uiAmountToPay283')} value={amount()} onInput={setAmount} />
+                  <AmountField data="pay" label={tr('uiAmountToPay283')} value={amount()} onInput={setAmount} cleared={amountCleared()} />
                   <input data-pay-pubkey placeholder={tr('uiTheirLightningNodeID')} value={pubkey()} onInput={(e) => setPubkey(e.currentTarget.value)} aria-label={tr('uiLightningNodePubkey')} />
                   <input data-pay-note placeholder={tr('uiNoteOptional')} value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label={tr('uiNote')} />
                 </>
@@ -5866,10 +5858,10 @@ function Composer(props: {
         <Match when={mode() === 'request'}>
           <div class="fields pay-flow composer-panel" data-composer-panel="request">
             <div class="panel-head">
-              <strong>{tr('uiRequestFrom')} {props.name}</strong>
+              <strong>{tr('uiRequestFrom', props.name)}</strong>
               <button type="button" class="link" data-composer-close aria-label={tr('uiDone')} onClick={closePanel}>{tr('uiDone')}</button>
             </div>
-            <AmountField data="request" label={tr('uiAmountToRequest')} value={amount()} onInput={setAmount} />
+            <AmountField data="request" label={tr('uiAmountToRequest')} value={amount()} onInput={setAmount} cleared={amountCleared()} />
             <input data-request-note placeholder={tr('uiWhatForEGDinner')} value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label={tr('uiWhatItIsFor')} />
             <div class="composer-bar">
               <div class="cost" data-cost>
@@ -6015,7 +6007,7 @@ function Composer(props: {
           {(b) => (
             <>
               <dl class="price-breakdown" data-price-breakdown>
-                <dt>{props.name}{tr('uiSPrice')}</dt>
+                <dt>{tr('uiNamedPrice', possessive(props.name))}</dt>
                 <dd>{fmtAmount(b().priceMsat)}</dd>
                 <dt>{tr('uiRoutingFeeAtMost')}</dt>
                 <dd>{fmtAmount(b().routingMsat)}</dd>
@@ -6700,13 +6692,14 @@ function BudgetPanel(props: {
   actions: Actions;
 }) {
   const [editing, setEditing] = createSignal<string | null>(null);
-  const [value, setValue] = createSignal('');
+  const [value, setValue, amountCleared] = createAmountDraft({ unit: () => 'sats', allowZero: true });
   const [note, setNote] = createSignal<string | null>(null);
   const pct = (spent: number, of: number) => `${Math.min(100, of > 0 ? (spent / of) * 100 : 0).toFixed(1)}%`;
   const save = async (row: BudgetRow) => {
-    const n = Number(value());
-    if (!Number.isFinite(n) || n < 0) return setNote('Enter a number of sats, or 0 to forget.');
-    const r = await props.actions.setBudget(row.target, row.room, Math.round(n * 1000));
+    if (ambiguousThousands(value(), 'sats')) return setNote(tr('amountUseSpaces'));
+    const msat = value().trim() === '0' ? 0 : parseAmount(value(), 'sats');
+    if (msat === null) return setNote(tr('budgetInvalidAmount'));
+    const r = await props.actions.setBudget(row.target, row.room, msat);
     if (r.ok) {
       setEditing(null);
       setNote(null);
@@ -6802,15 +6795,15 @@ function BudgetPanel(props: {
                       <Show
                         when={editing() === key()}
                         fallback={
-                          <button type="button" class="link" data-budget-edit onClick={() => { setEditing(key()); setValue(String((row.limit_msat ?? 0) / 1000)); setNote(null); }}>
-                            {row.limit_msat === null ? 'Set a budget' : 'Change'}
+                          <button type="button" class="link" data-budget-edit onClick={() => { setEditing(key()); setValue(amountText(row.limit_msat ?? 0, 'sats')); setNote(null); }}>
+                            {tr(row.limit_msat === null ? 'budgetSet' : 'budgetChange')}
                           </button>
                         }
                       >
                         <form class="row" onSubmit={(e) => { e.preventDefault(); void save(row); }}>
-                          <input inputmode="numeric" value={value()} onInput={(e) => setValue(e.currentTarget.value)} aria-label={`Sats a day for ${props.nameOf(row.target, row.room)}`} data-budget-input />
-                          <button type="submit" class="small" data-budget-save disabled={props.actions.moneyBlocked()}>Save</button>
-                          <button type="button" class="link" onClick={() => setEditing(null)}>Cancel</button>
+                          <input inputmode="decimal" value={value()} onInput={(e) => setValue(e.currentTarget.value)} aria-label={tr('budgetDailySats', props.nameOf(row.target, row.room))} data-budget-input />
+                          <button type="submit" class="small" data-budget-save disabled={props.actions.moneyBlocked()}>{tr('budgetSave')}</button>
+                          <button type="button" class="link" onClick={() => setEditing(null)}>{tr('uiCancel')}</button>
                         </form>
                       </Show>
                     </Show>
@@ -6818,6 +6811,7 @@ function BudgetPanel(props: {
                 );
               }}
             </For>
+            <Show when={editing() && amountCleared()}><p class="hint" role="status" data-amount-cleared>{tr('amountDraftCleared')}</p></Show>
             <Show when={note() && note() !== MONEY_NOT_READY}><p class="err-note" role="alert">{note()}</p></Show>
             <Show when={props.error}><p class="err-note" role="alert">{props.error}</p></Show>
             <p class="hint">

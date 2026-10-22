@@ -47,3 +47,8 @@ export function watchSystemLanguage() {
 export function t(key: CopyKey, ...values: (string | number)[]): string {
   return copy[language()][key].replace(/\{(\d+)\}/g, (slot, index: string) => String(values[Number(index)] ?? slot));
 }
+
+/** Names are inflected before insertion; the rest of the sentence stays translated. */
+export function possessive(name: string): string {
+  return language() === 'da' ? `${name}${/[sxz]$/i.test(name) ? "'" : 's'}` : `${name}’s`;
+}

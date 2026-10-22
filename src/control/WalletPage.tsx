@@ -1,3 +1,4 @@
+import { createAmountDraft } from './amountDraft';
 import { activityLabel } from './wallet';
 import { t } from '../i18n';
 import { SettledPayment } from './SettledPayment';
@@ -17,7 +18,7 @@ import { qrSvg } from '../qr';
 import { copyPlainText } from '../assistant/copy';
 import { deviceWord } from '../platform';
 import { amount as fmtAmount, allIn, clock, day, routingFee, sats, satUnit, shortId } from './format';
-import { amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
+import { ambiguousThousands, amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { denom } from './prefs';
 import type { CustodyMode, FundingAddress, InvoiceAmount, InvoiceStatus, InvoiceView, Message, PaymentReceipt, SpendView, WalletOverview } from './types';
 import { CustodyBadgeView } from './custody';
@@ -91,9 +92,10 @@ function CopyButton(props: { text: string; label: string }) {
   );
 }
 
-function AmountInput(props: { data: string; label: string; value: string; onInput: (v: string) => void; optional?: boolean }) {
+function AmountInput(props: { data: string; label: string; value: string; onInput: (v: string) => void; optional?: boolean; cleared?: boolean }) {
   const problem = (): string | null => {
     if (props.value.trim() === '') return null;
+    if (ambiguousThousands(props.value, denom())) return t('amountUseSpaces');
     const msat = parseAmount(props.value, denom());
     if (msat === null) return t('uiUseDigitsAndOneDotAtMostDecimals', denom() === 'btc' ? 11 : 3);
     return inPaymentBounds(msat) ? null : t('uiBetweenAnd', fmtAmount(MIN_PAYMENT_MSAT), fmtAmount(MAX_PAYMENT_MSAT));
@@ -114,6 +116,7 @@ function AmountInput(props: { data: string; label: string; value: string; onInpu
         />
         <span class="amount-unit">{unitName()}</span>
       </label>
+      <Show when={props.cleared}><p class="hint" role="status" data-amount-cleared>{t('amountDraftCleared')}</p></Show>
       <Show when={problem()}>{(p) => <p class="hint" data-amount-invalid>{p()}</p>}</Show>
     </>
   );
@@ -471,7 +474,7 @@ function ChannelsView(props: { wallet: WalletOverview | null; nameOf: (id: strin
 
 function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; reads: WalletReads; now: number }) {
   const [how, setHow] = createSignal<'lightning' | 'onchain'>('lightning');
-  const [amount, setAmount] = createSignal('');
+  const [amount, setAmount, amountCleared] = createAmountDraft();
   const [note, setNote] = createSignal('');
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -506,7 +509,7 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
     const inv = invoice();
     if (!inv) return null;
     const logged = received();
-    return logged ? statusWords(logged, props.now) : 'Waiting to be paid';
+    return logged ? statusWords(logged, props.now) : t('extraWaitingToBePaid');
   };
   const uri = () => {
     const a = address();
@@ -517,38 +520,38 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
 
   return (
     <section class="wallet-panel wallet-receive" data-wallet-receive={how()}>
-      <div class="modes soft" role="tablist" aria-label="Receive how">
-        <button type="button" role="tab" aria-selected={how() === 'lightning'} data-receive-how="lightning" onClick={() => setHow('lightning')}>Lightning</button>
-        <button type="button" role="tab" aria-selected={how() === 'onchain'} data-receive-how="onchain" onClick={() => setHow('onchain')}>On-chain</button>
+      <div class="modes soft" role="tablist" aria-label={t('receiveHow')}>
+        <button type="button" role="tab" aria-selected={how() === 'lightning'} data-receive-how="lightning" onClick={() => setHow('lightning')}>{t('receiveLightning')}</button>
+        <button type="button" role="tab" aria-selected={how() === 'onchain'} data-receive-how="onchain" onClick={() => setHow('onchain')}>{t('receiveOnChain')}</button>
       </div>
-      <AmountInput data="data-receive-amount" label="Amount to receive" value={amount()} onInput={setAmount} optional={how() === 'onchain'} />
+      <AmountInput data="data-receive-amount" label={t('receiveAmount')} value={amount()} onInput={setAmount} cleared={amountCleared()} optional={how() === 'onchain'} />
       <Show
         when={how() === 'lightning'}
         fallback={
           <>
-            <p class="hint" data-receive-note>Amount is optional. It goes into the QR code only; any amount sent to this address arrives.</p>
+            <p class="hint" data-receive-note>{t('receiveOptional')}</p>
             <Show when={amount().trim() !== '' && msat() !== null && uri() === null}>
-              <p class="hint" data-receive-whole>On-chain amounts are whole sats.</p>
+              <p class="hint" data-receive-whole>{t('receiveWhole')}</p>
             </Show>
             <Show
               when={address()}
               fallback={
-                <Show when={!props.moneyBlocked} fallback={<p class="hint">Your node is not ready to give an address yet.</p>}>
+                <Show when={!props.moneyBlocked} fallback={<p class="hint">{t('receiveNotReady')}</p>}>
                   <Show when={addressError()} fallback={<DelayedSpinner />}>
-                    <div data-receive-error><SoftError message={addressError()!} summary="Your node has no address to show." /></div>
+                    <div data-receive-error><SoftError message={addressError()!} summary={t('receiveNoAddress')} /></div>
                   </Show>
                 </Show>
               }
             >
               {(a) => (
                 <div class="wallet-request" data-receive-address={a().address}>
-                  <Show when={uri()}>{(u) => <QR value={u()} label="On-chain address as a QR code" />}</Show>
+                  <Show when={uri()}>{(u) => <QR value={u()} label={t('receiveAddressQR')} />}</Show>
                   <code class="address">{a().address}</code>
                   <div class="row wallet-request-actions">
-                    <CopyButton text={a().address} label="Copy address" />
+                    <CopyButton text={a().address} label={t('receiveCopyAddress')} />
                   </div>
                   <p class="hint">
-                    Send only bitcoin{a().network ? ` on ${a().network}` : ''} to this address. It stays valid. Deposits appear after your node sees them on-chain, which can take a while.
+                    {t('receiveBitcoinOnly', a().network ? t('receiveNetwork', a().network!) : '')}
                   </p>
                 </div>
               )}
@@ -557,30 +560,30 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
         }
       >
         <form class="wallet-form" onSubmit={create}>
-          <input data-receive-memo placeholder="What for? (optional)" value={note()} onInput={(e) => setNote(e.currentTarget.value)} aria-label="What it is for" />
+          <input data-receive-memo placeholder={t('receiveWhatFor')} value={note()} onInput={(e) => setNote(e.currentTarget.value)} aria-label={t('uiWhatItIsFor')} />
           <Show when={!invoice()}>
             <button type="submit" class="primary soft money" data-receive-create disabled={props.moneyBlocked || busy() || msat() === null}>
-              {busy() ? 'Creating…' : 'Create invoice'}
+              {busy() ? t('receiveCreating') : t('uiCreateInvoice')}
             </button>
-            <p class="hint" data-receive-hint>Your node needs an amount for a Lightning invoice. Receiving is free.</p>
+            <p class="hint" data-receive-hint>{t('receiveHint')}</p>
           </Show>
         </form>
         <Show when={invoice()}>
           {(inv) => (
             <div class="wallet-request" data-receive-invoice data-receive-status={status() ?? ''}>
               <Show when={received()?.status === 'paid'} fallback={<>
-                <QR value={inv().bolt11.toUpperCase()} label="Lightning invoice as a QR code" />
+                <QR value={inv().bolt11.toUpperCase()} label={t('receiveInvoiceQR')} />
                 <span class="wallet-request-amount">{fmtAmount(inv().amount_msat)}</span>
               </>}>
                 <SettledPayment direction="received" msat={received()?.msat ?? null} />
               </Show>
-              <span class="wallet-status" classList={{ ok: status() === 'Received' }} data-receive-state>{status()}</span>
+              <span class="wallet-status" classList={{ ok: received()?.status === 'paid' }} data-receive-state>{status()}</span>
               <code class="address" data-bolt11>{inv().bolt11}</code>
               <div class="row wallet-request-actions">
-                <CopyButton text={inv().bolt11} label="Copy invoice" />
-                <button type="button" class="link" data-receive-new onClick={() => { setInvoice(null); setAmount(''); setNote(''); }}>New request</button>
+                <CopyButton text={inv().bolt11} label={t('receiveCopyInvoice')} />
+                <button type="button" class="link" data-receive-new onClick={() => { setInvoice(null); setAmount(''); setNote(''); }}>{t('receiveNew')}</button>
               </div>
-              <p class="hint">Expires at {clock(inv().expires_at_ms)}. Paying it sends sats to your node.</p>
+              <p class="hint">{t('receiveExpires', clock(inv().expires_at_ms))}</p>
             </div>
           )}
         </Show>
@@ -597,7 +600,7 @@ type Review =
   | { kind: 'keysend'; pubkey: string; msat: number; memo: string };
 
 function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spendGate: JSX.Element; now: number; actions: WalletActions }) {
-  const [amount, setAmount] = createSignal('');
+  const [amount, setAmount, amountCleared] = createAmountDraft();
   const [to, setTo] = createSignal('');
   const [memo, setMemo] = createSignal('');
   const [read, setRead] = createSignal<InvoiceAmount | null>(null);
@@ -704,7 +707,7 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
         when={review()}
         fallback={
           <form class="wallet-form" onSubmit={(e) => void openReview(e)}>
-            <AmountInput data="data-send-amount" label={t('extraAmountToSend')} value={amount()} onInput={setAmount} />
+            <AmountInput data="data-send-amount" label={t('extraAmountToSend')} value={amount()} onInput={setAmount} cleared={amountCleared()} />
             <textarea data-send-to rows={2} placeholder={t('extraPasteALightningInvoiceOrANodeID')} value={to()} onInput={(e) => setTo(e.currentTarget.value)} aria-label={t('extraSendTo')} />
             <Show when={recipient().kind === 'node'}>
               <input data-send-memo placeholder={t('uiNoteOptional')} value={memo()} onInput={(e) => setMemo(e.currentTarget.value)} aria-label={t('uiNote')} />
