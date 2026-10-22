@@ -12,7 +12,24 @@ import unittest
 from sidecar_test_support import ASSETS, PAYLOAD, PAYLOADS, ROOT, ReleaseFixture
 
 
-class DraftPinTests(unittest.TestCase):
+class ProductionPinTests(unittest.TestCase):
+    def test_published_pins_are_complete_and_match_signed_release(self):
+        # Literal entries authenticated from the published SHA256SUMS. Exercise
+        # the production lookup, without the fixture's replacement pin table.
+        expected = """ebebac6106643a1cbdd3b074ef8cc4ae97ab8030e9db9f87ea2331e139db603a  bitsov-darwin-aarch64
+5f0021dfdd48c43d562c5466af27a03cd009b1290cf0c6e9e3ae7bb68167ce3d  bitsov-darwin-x86_64
+5579bde984273410e28dedc70e3b8a3152aab0637c95e105c6af0bcd65c14881  bitsov-linux-aarch64
+df59ed5649b10dc317cd9c9643109b4e14104d4475661f02cefa8b28d45dcf27  bitsov-linux-x86_64
+74905b8b6454722c15b3ddd8198c28551c5d70be83141bacad3608382fccb8d9  bitsov-windows-x86_64"""
+        result = subprocess.run([
+            "bash", "-c",
+            'source scripts/fetch-node-sidecar.sh; require_complete_checksum_pin; '
+            'for asset in "$@"; do printf "%s  %s\\n" "$(pinned_checksum "$asset")" "$asset"; done',
+            "pins", *[line.split()[1] for line in expected.splitlines()],
+        ], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stdout.strip(), expected)
+
     def test_unpublished_pin_refuses_fetch_and_verify_before_network(self):
         # Removing the placeholder gate must fail this test, even offline.
         with tempfile.TemporaryDirectory(prefix="draft-pin-") as tmp:

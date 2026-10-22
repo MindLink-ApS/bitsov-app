@@ -1,6 +1,6 @@
 # Bundled node rc11: upgrade from rc9
 
-Historical release note. The prepared current pin is described in [NODE_RC19_2_UPGRADE.md](NODE_RC19_2_UPGRADE.md); rc19.2 remains blocked pending signed checksums.
+Historical release note. The current signed pin is described in [NODE_RC19_2_UPGRADE.md](NODE_RC19_2_UPGRADE.md); runtime and packaging acceptance remain separate gates.
 
 Historical rc11 pin (app #174). The current pin and its changes are documented
 in [NODE_RC14_UPGRADE.md](NODE_RC14_UPGRADE.md).

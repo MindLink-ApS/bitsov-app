@@ -10,9 +10,9 @@ LANE: BitSov app factory (`MindLink-ApS/bitsov-app`)
 ## QUEUE-HEAD
 
 **Draft rc19.2 pin** (2026-10-21), replacing main's rc14 pin and the stale
-rc18 proposal #266. rc19.2 is tagged; signing is in progress. All five checksum values are
-placeholders; fetch and pre-bundle verification refuse before network access. No rc19.2
-release bytes have been verified.
+rc18 proposal #266. rc19.2 is signed and published. All five binary pins match its
+authenticated signed manifest. The Darwin arm64 sidecar passed local fetch and
+`--verify-only`; runtime and packaging acceptance remain separate gates.
 Changes include owner approvals, pairing v8, channel operations, call refusal
 semantics, ONB5 on LDK and local API/CLI/release security hardening.
 See [the upgrade and release checklist](docs/NODE_RC19_2_UPGRADE.md).
@@ -30,7 +30,7 @@ Runs on Linux + macOS since `v0.3.0-rc5` (Darwin SKIP retired, PR #9). Publish s
 | What | SHA / ref |
 |---|---|
 | Main baseline | `7fc9294` (2026-09-27) |
-| Protocol pin | `v0.3.0-rc19.2`; source `04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`; signed checksums pending; fetch intentionally blocked |
+| Protocol pin | `v0.3.0-rc19.2`; source `04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`; signed manifest SHA-256 `142cdd18c20352979bb318664551bbbef10b6e86b6708e14f4751e0c702c0fcb`; Darwin arm64 fetch and re-verification passed |
 | Genome #77 | BitSov-bitsov #77 (pairing, identity-free bootstrap, owner CLI) merged at `56c0ee0` on 2026-09-26. Included in the rc19.2 pin |
 | App quit stops node | #17 `0190baa` (fixes #16) |
 | Jarvis J1–J4 | #21 `8cc34eb` J1 mock node + 50-question fixture; #22 `3543229` J2 broker with metadata allowlist; #20 `61dd969` J3 sealed assistant window + command ACL; #26 `dbd3d9e` J4 broker over the mock node, e2e; #27 `32c49bc` J4 review fixes |
@@ -45,13 +45,13 @@ Runs on Linux + macOS since `v0.3.0-rc5` (Darwin SKIP retired, PR #9). Publish s
 
 - **rc19.2 acceptance.** Inspect Sidecar and Mac Package CI; runtime/packaging checks were not run locally. Remote first run is implemented on main (app #192 + node rc13); runtime acceptance on real hardware (Touch ID + a fresh Pi) is still pending.
 - **Darwin / Windows notarization.** Signed macOS/Windows node sidecars have shipped since `v0.3.0-rc5` (B10 landed; Darwin SKIP retired, PR #9). They are GPG-signed only, not notarized or Authenticode-signed, so Gatekeeper and SmartScreen block them by default. No Mac/Win app build ships without a verified signed node sidecar. Publish stays human.
-- **Publish** is human-only. rc19.2 is tagged; signing is in progress; signed-byte verification remains a gate. The app itself is unpublished (`/bitsov/app` stays a waitlist, G5). Package-time sidecar verification must be enforced before public downloads.
+- **Publish** is human-only. rc19.2 is signed and published; package-time signed-byte verification remains mandatory. The app itself is unpublished (`/bitsov/app` stays a waitlist, G5). Package-time sidecar verification must be enforced before public downloads.
 
 ## HUMAN
 
 Publish stays human. No PriceOpen. No live relay. No cloud/seed.
 
-- Genome: rc19.2 is tagged; signing is in progress; no release publishing occurs in this app change.
+- Genome: rc19.2 is signed and published; no release publishing occurs in this app change.
 - Tag, GPG signing, publish, seed.
 - macOS notarization / Windows Authenticode.
 - Rasmus decides on the open PRs: #25 (J0 local model eval spike, draft) and #13 (Mac package spike, CONFLICTING). #23 (Windows icon) is also open.

@@ -1,8 +1,8 @@
 # macOS package (ad-hoc signed by default)
 
-**Draft pin blocked:** rc19.2 is tagged; signing is in progress. All five checksum values are
-placeholders; fetch and pre-bundle verification refuse before network access. No rc19.2
-release bytes have been verified.
+**Signed pin:** rc19.2 is published, and all five binary pins come from its
+verified signed `SHA256SUMS`. Fetch and pre-bundle verification enforce those pins.
+Runtime, packaging and hardware acceptance remain separate gates.
 See [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
 
 Internal build of `BitSov.app` for Apple Silicon. By default it has a valid
@@ -263,7 +263,7 @@ gates together and removes the matching checks.
 was 10.13, while the rc7 arm64 sidecar's Mach-O minimum is 11.0 (spike,
 2026-09-14). JSON has no comments, so this note is the record.
 `package-mac.sh` prints the sidecar `minos`. 11.0 is the build floor, not a
-tested support claim. Recheck the rc19.2 sidecar minos in CI once its signed assets are published; the historical rc7 inspection is not rc19.2 binary evidence. No macOS version has runtime evidence yet.
+tested support claim. Recheck the rc19.2 sidecar minos in CI using its published signed assets; the historical rc7 inspection is not rc19.2 binary evidence. No macOS version has runtime evidence yet.
 
 ## CI artifact
 

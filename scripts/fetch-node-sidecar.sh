@@ -4,8 +4,7 @@
 # fetched + verified, not vendored). v0.3.0-rc19.2 targets Linux, macOS and Windows node
 # binaries, so all three hosts can produce a sidecar. Release assets carry no .exe suffix
 # on any host; only the installed Windows sidecar is renamed to .exe (Tauri's resolver).
-# rc19.2 is tagged; signing is in progress. Placeholders refuse before network access.
-# Once populated from the signed manifest, fetch requires release access and
+# rc19.2 is signed and published. Fetch requires release access and
 # both SHA256SUMS and SHA256SUMS.asc; missing assets fail closed. Nothing here publishes it.
 #
 # Verification is fail-closed, in two steps:
@@ -33,13 +32,14 @@ TAG="v0.3.0-rc19.2"
 REPO="MindLink-ApS/BitSov-bitsov"
 KEY_FPR="B299274C200301714DC6F51A7C2D6F8AC842EF6E"
 
-# DRAFT: replace ALL five placeholders from the verified, signed rc19.2 SHA256SUMS.
+# Binary pins copied from the verified, signed rc19.2 SHA256SUMS.
+# Manifest sha256: 142cdd18c20352979bb318664551bbbef10b6e86b6708e14f4751e0c702c0fcb
 # These are enforced pins, not illustrative hashes. No flag/environment bypass.
-EXPECTED_SHA256SUMS='PLACEHOLDER_SHA256_FROM_SIGNED_RC19_2  bitsov-darwin-aarch64
-PLACEHOLDER_SHA256_FROM_SIGNED_RC19_2  bitsov-darwin-x86_64
-PLACEHOLDER_SHA256_FROM_SIGNED_RC19_2  bitsov-linux-aarch64
-PLACEHOLDER_SHA256_FROM_SIGNED_RC19_2  bitsov-linux-x86_64
-PLACEHOLDER_SHA256_FROM_SIGNED_RC19_2  bitsov-windows-x86_64'
+EXPECTED_SHA256SUMS='ebebac6106643a1cbdd3b074ef8cc4ae97ab8030e9db9f87ea2331e139db603a  bitsov-darwin-aarch64
+5f0021dfdd48c43d562c5466af27a03cd009b1290cf0c6e9e3ae7bb68167ce3d  bitsov-darwin-x86_64
+5579bde984273410e28dedc70e3b8a3152aab0637c95e105c6af0bcd65c14881  bitsov-linux-aarch64
+df59ed5649b10dc317cd9c9643109b4e14104d4475661f02cefa8b28d45dcf27  bitsov-linux-x86_64
+74905b8b6454722c15b3ddd8198c28551c5d70be83141bacad3608382fccb8d9  bitsov-windows-x86_64'
 
 pinned_checksum() {
   printf '%s\n' "$EXPECTED_SHA256SUMS" | awk -v asset="$1" '

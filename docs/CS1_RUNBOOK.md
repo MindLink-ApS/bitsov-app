@@ -1,8 +1,8 @@
 # CS-1 runbook — desktop app shell (Linux + macOS since `v0.3.0-rc5`; B10 landed)
 
-**Draft pin blocked:** rc19.2 is tagged; signing is in progress. All five checksum values are
-placeholders; fetch and pre-bundle verification refuse before network access. No rc19.2
-release bytes have been verified.
+**Signed pin:** rc19.2 is published, and all five binary pins come from its
+verified signed `SHA256SUMS`. Fetch and pre-bundle verification enforce those pins.
+Runtime, packaging and hardware acceptance remain separate gates.
 See [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
 
 **Scope (only):** app shell → bundle/spawn the node → loopback auth (`/auth/local`) →
@@ -77,8 +77,7 @@ Two splints carried since CS-1.5.1 are gone: the node fixed both at the root in 
 the host can repair the page price only after separate consent; see
 [NODE_RC19_2_UPGRADE.md](NODE_RC19_2_UPGRADE.md).
 Acceptance: `npm run smoke:cs1` must boot rc19.2 with zero config edits; the non-gating `sidecar` CI job
-runs the same smoke after signed checksums enable the pin. During this draft,
-it asserts the checksum-placeholder refusal instead.
+fetches and re-verifies the signed pin, then runs the same smoke.
 
 rc7 fixes #66: fresh init writes a primary/fallback pair, and startup validates
 fee-estimate payloads before selecting an endpoint. The old rc6

@@ -1,8 +1,8 @@
 # App release checklist
 
-**Draft pin blocked:** rc19.2 is tagged; signing is in progress. All five checksum values are
-placeholders; fetch and pre-bundle verification refuse before network access. No rc19.2
-release bytes have been verified.
+**Signed pin:** rc19.2 is published, and all five binary pins come from its
+verified signed `SHA256SUMS`. Fetch and pre-bundle verification enforce those pins.
+Runtime, packaging and hardware acceptance remain separate gates.
 See [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
 
 ## G1: only the pinned, verified node may be bundled

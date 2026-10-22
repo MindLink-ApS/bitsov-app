@@ -6,9 +6,9 @@ Dated ticket rows. Each row: id | opened | evidence | state.
 ## Active (this cycle)
 
 Current change: draft rc19.2 pin from rc14 (`d55a88e`, app #199),
-replacing the unmerged rc18 proposal #266. rc19.2 is tagged; signing is in progress. All five
-checksum values are placeholders; fetch and pre-bundle verification refuse before
-network access. No rc19.2 release bytes have been verified.
+replacing the unmerged rc18 proposal #266. rc19.2 is signed and published. All five binary pins match its
+authenticated signed manifest. The Darwin arm64 sidecar passed local fetch and
+`--verify-only`; runtime and packaging acceptance remain separate gates.
 [NODE_RC19_2_UPGRADE.md](docs/NODE_RC19_2_UPGRADE.md) covers the intervening
 changes and forward-only state. The September rows below are historical.
 
@@ -40,9 +40,9 @@ changes and forward-only state. The September rows below are historical.
 
 | id | opened | evidence | state |
 |---|---|---|---|
-| rc19.2 acceptance | 2026-10-21 | tagged; signing in progress; checksum placeholders block fetching; signature/bytes, Sidecar/Mac Package and runtime acceptance pending | human / CI |
+| rc19.2 acceptance | 2026-10-21 | signed manifest and Darwin arm64 bytes verified; Sidecar/Mac Package and runtime acceptance pending | human / CI |
 | #25 / #13 / #23 | — | J0 model eval spike (draft); Mac package spike (CONFLICTING); Windows icon | open, Rasmus's call |
-| Publish | — | human-only; rc19.2 release is tagged; signing in progress; checksum placeholders block fetching; app unpublished; package-time sidecar verification and platform release gates remain open | hold |
+| Publish | — | human-only; rc19.2 release is signed and published; app unpublished; package-time sidecar verification and platform release gates remain open | hold |
 | PriceOpen | — | out of lane | hold |
 | Live relay | — | out of lane | hold |
 | Cloud/seed | — | out of lane | hold |

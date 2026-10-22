@@ -10,9 +10,9 @@ the app copy, or in release notes may be quoted as saying more.
 The app pins `v0.3.0-rc19.2` (`04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`), which includes pairing and local owner
 bootstrap. Mock tests cover pairing, token refresh, restore refusal, explicit
 marker repair followed by separate price consent, and owner ceremony UI.
-The old rc7 404 fallback remains tested. rc19.2 is tagged; signing is in progress. All five
-checksum values are placeholders; fetch and pre-bundle verification refuse before
-network access. No rc19.2 release bytes have been verified.
+The old rc7 404 fallback remains tested. rc19.2 is signed and published. All five
+binary pins are recorded from its authenticated manifest; fetch and pre-bundle
+verification require both the signed entry and the recorded pin to match.
 Config drift, owner lifecycle and CS-1 remain CI checks; a signed/hardened Mac
 interactive run remains separate
 acceptance. Remote first run is implemented on main (app #192 + node rc13);

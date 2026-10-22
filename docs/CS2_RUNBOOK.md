@@ -1,8 +1,8 @@
 # CS-2 runbook — first-run fund flow (M1)
 
-**Draft pin blocked:** rc19.2 is tagged; signing is in progress. All five checksum values are
-placeholders; fetch and pre-bundle verification refuse before network access. No rc19.2
-release bytes have been verified.
+**Signed pin:** rc19.2 is published, and all five binary pins come from its
+verified signed `SHA256SUMS`. Fetch and pre-bundle verification enforce those pins.
+Runtime, packaging and hardware acceptance remain separate gates.
 See [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
 
 **Scope (only):** create-or-restore identity → local-trust disclosure → start the tier-`full`
@@ -40,7 +40,7 @@ sidecar, mints a loopback JWT via `/auth/local`, and reads `/identity`.
 
 ```bash
 npm ci
-./scripts/fetch-node-sidecar.sh     # fetch + VERIFY the signed node (after rc19.2 release gates)
+./scripts/fetch-node-sidecar.sh     # fetch + VERIFY the signed node
 scripts/authority-check.sh          # must print AUTHORITY: PASS before you build
 npm run smoke:cs2                   # static binding checks — runs on any OS
 npm run tauri dev

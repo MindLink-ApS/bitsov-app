@@ -2,10 +2,10 @@
 
 **Pinned protocol:** release **`v0.3.0-rc19.2`**, source-ref
 **`04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`**, repo `MindLink-ApS/BitSov-bitsov`.
-Signed-release verification remains `PENDING_SIGNED_RC19_2_TAG`.
-rc19.2 is tagged; signing is in progress. All five checksum values are placeholders; fetch and
-pre-bundle verification refuse before network access. No rc19.2 release bytes have been
-verified.
+`SHA256SUMS` signature verified against `B299274C200301714DC6F51A7C2D6F8AC842EF6E`;
+manifest SHA-256: `142cdd18c20352979bb318664551bbbef10b6e86b6708e14f4751e0c702c0fcb`.
+All five binary pins match the authenticated signed manifest. Fetch and pre-bundle
+verification enforce both the signature and the recorded binary hashes.
 The route inventory below is historical source evidence, not rc19.2 binary acceptance.
 Live CS-1 and other runtime/package acceptance remain CI/operator checks.
 
@@ -63,7 +63,7 @@ on REST; `bitsov.v1` + `bitsov.jwt.<token>` subprotocols on `/ws`.
 ## Verification
 **Static (no running node) — re-pin check:**
 ```bash
-# BLOCKED until the signed rc19.2 tag is available and verified.
+# Signed rc19.2 release; source commit 04fe65e03aad949ade90c10c8e8ccf36daf2b0f6.
 git -C <BitSov-bitsov checkout> checkout v0.3.0-rc19.2
 grep -rhoE '"/api/v1/[^"]+"' crates/konsensus-api/src | tr -d '"' | sort -u
 # every path in the MVP table above must appear. String-literal grep on purpose: the

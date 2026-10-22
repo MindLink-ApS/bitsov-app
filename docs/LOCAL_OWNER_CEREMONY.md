@@ -1,8 +1,8 @@
 # Local owner ceremony (opt-in)
 
-**Draft pin blocked:** rc19.2 is tagged; signing is in progress. All five checksum values are
-placeholders; fetch and pre-bundle verification refuse before network access. No rc19.2
-release bytes have been verified.
+**Signed pin:** rc19.2 is published, and all five binary pins come from its
+verified signed `SHA256SUMS`. Fetch and pre-bundle verification enforce those pins.
+Runtime, packaging and hardware acceptance remain separate gates.
 See [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
 
 The bundled `v0.3.0-rc19.2` node (`04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`) contains #237, so
@@ -100,8 +100,8 @@ also inherits `cookie_mode = "adaptive"`, the twelve reviewed `[dos_edge]`
 limits, and empty `[node]` / `[tower.clients]`; these are explicitly listed in
 the guard. The rc12 source review found no new config fields or serialized init
 defaults. The existing writer retains setup port 8080 and channel/total caps of
-1,000,000/2,000,000 sats. rc19.2 is tagged, but no signed release binary has been verified yet;
-retain the strict guard without new allowances until release verification. Config
+1,000,000/2,000,000 sats. rc19.2's signed manifest and binary pins are verified;
+retain the strict guard without new allowances. Config
 compatibility must still be checked against the verified rc19.2 binary in CI.
 The optional Lightning delay remains omitted in the app bootstrap config. The rc12 policy introduced 2016
 blocks at home-profile startup (`--local-owner-device` or
@@ -111,8 +111,7 @@ The list permits two reviewed sets of inherited web defaults: rc7's 50 msat
 content/page price and 4 MiB page limit, and the owner node's 1000 msat and 256 KiB.
 Other values or mixtures fail; neither set is written by the app.
 
-While draft checksum placeholders remain, the **Sidecar** job asserts the
-fail-closed refusal and skips real-binary checks. Once populated, it fetches and verifies the pin in
+The **Sidecar** job fetches and re-verifies the signed pin in
 `scripts/fetch-node-sidecar.sh`, then runs this exact test with
 `BITSOV_OWNER_TEST_BINARY` pointing to that verified binary and the ceremony/dev
 features enabled. This runs on every PR and main push, so every bundled pin
