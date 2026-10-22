@@ -2018,7 +2018,7 @@ describe('calls in the shell', () => {
   });
 
   it.each([
-    ['failed', /failed/i], ['inflight', /not confirmed|unknown/i],
+    ['failed', /Payment of 5 sats failed.*No amount or routing fee was paid/i], ['inflight', /not confirmed|unknown/i],
     ['spend_unknown', /unknown/i], ['not_dispatched', /not sent|failed/i],
   ])('in-call Pay reports %s honestly and leaves the call live', async (status, words) => {
     const host = payHost({ payment_keysend: () => {
@@ -2057,6 +2057,98 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect(text('[data-call-pay-status]')).toMatch(/sent/i));
     expect($('[data-call-panel="live"]')).toBeNull();
     expect(host.used('payment_keysend')).toHaveLength(1);
+  });
+
+  it('hangup tears down media when the host refuses closure during a pending keysend', async () => {
+    let finish!: (v: unknown) => void;
+    const host = payHost({
+      payment_keysend: () => new Promise(resolve => { finish = resolve; }),
+      op_end_call: () => { throw { code: 'spend_unknown', message: 'Check the pending payment.' }; },
+    });
+    await liveCall(); enterCallAmount();
+    $<HTMLButtonElement>('[data-call-pay-confirm]')!.click();
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect(host.used('op_end_call')).toHaveLength(1));
+    await vi.waitFor(() => expect(text('[data-call-close]')).toMatch(/unknown|pending/i));
+    expect(FakePc.made[0].closed).toBe(true);
+    expect($('[data-call-panel="ended"]')).not.toBeNull();
+    expect($('[data-call-again]')).toBeNull();
+    finish({ method: 'keysend', amount_msat: 5000, max_routing_fee_msat: 5000, status: 'settled', paid_at_ms: Date.now() });
+    await vi.waitFor(() => expect(text('[data-call-pay-status]')).toMatch(/sent/i));
+    expect($('[data-call-panel="live"]')).toBeNull();
+    expect(host.used('op_end_call')).toHaveLength(1);
+    expect(host.used('payment_keysend')).toHaveLength(1);
+    expect(host.used('call_signal')).toHaveLength(1);
+  });
+
+  it('wallet reconciliation re-enables in-call Pay without an automatic payment', async () => {
+    let resolved = false;
+    let pending = false;
+    const host = payHost({
+      budget_status: () => ({ ...openBudget(), unsettled_msat: pending ? 10000 : 0 }),
+      payment_keysend: () => { pending = true; return ({ method: 'keysend', amount_msat: 5000, max_routing_fee_msat: 5000, status: 'inflight', paid_at_ms: Date.now() }); },
+      spend_reconcile: () => { if (!resolved) throw { code: 'spend_unknown', message: 'Still pending.' }; pending = false; return 'Payment settled; the pending slot is clear.'; },
+    });
+    await liveCall(); enterCallAmount();
+    $<HTMLButtonElement>('[data-call-pay-confirm]')!.click();
+    await vi.waitFor(() => expect($('[data-call-pay-status="unknown"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    $<HTMLButtonElement>('[data-open-wallet]')!.click();
+    await vi.waitFor(() => expect($('[data-wallet-tab="send"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-wallet-tab="send"]')!.click();
+    await vi.waitFor(() => expect($('[data-wallet-page] [data-spend-reconcile]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-wallet-page] [data-spend-reconcile]')!.click();
+    await vi.waitFor(() => expect(text('[data-wallet-page] [data-reconciliation]')).toContain('Still pending'));
+    expect($<HTMLButtonElement>('[data-call-pay]')!.disabled).toBe(true);
+    resolved = true;
+    $<HTMLButtonElement>('[data-wallet-page] [data-spend-reconcile]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-pay]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-wallet-close]')!.click();
+    expect(text('[data-call-pay-status]')).toContain('Payment settled');
+    expect(host.used('payment_keysend')).toHaveLength(1);
+    enterCallAmount('7');
+    expect(host.used('payment_keysend')).toHaveLength(1);
+    $<HTMLButtonElement>('[data-call-pay-confirm]')!.click();
+    await vi.waitFor(() => expect(host.used('payment_keysend')).toHaveLength(2));
+    expect(host.used('op_end_call')).toHaveLength(0);
+  });
+
+  it.each(['wallet', 'call'])('a delayed %s check cannot clear a newer unknown in-call payment', async (first) => {
+    let pending = false;
+    let checks = 0;
+    let finishOld!: (text: string) => void;
+    const host = payHost({
+      budget_status: () => ({ ...openBudget(), unsettled_msat: pending ? 10000 : 0 }),
+      payment_keysend: () => { pending = true; return { method: 'keysend', amount_msat: 5000, max_routing_fee_msat: 5000, status: 'inflight', paid_at_ms: Date.now() }; },
+      spend_reconcile: () => ++checks === 1 ? new Promise<string>(resolve => { finishOld = resolve; }) : (pending = false, 'First payment checked.'),
+    });
+    await liveCall(); enterCallAmount();
+    $<HTMLButtonElement>('[data-call-pay-confirm]')!.click();
+    await vi.waitFor(() => expect($('[data-call-pay-status="unknown"]')).not.toBeNull());
+    const openWallet = async () => {
+      $<HTMLButtonElement>('[data-profile]')!.click();
+      $<HTMLButtonElement>('[data-open-wallet]')!.click();
+      await vi.waitFor(() => expect($('[data-wallet-page] [data-spend-reconcile]')).not.toBeNull());
+    };
+    if (first === 'wallet') await openWallet();
+    $<HTMLButtonElement>(first === 'wallet' ? '[data-wallet-page] [data-spend-reconcile]' : '[data-in-call-pay] [data-spend-reconcile]')!.click();
+    await vi.waitFor(() => expect(finishOld).toBeDefined());
+    if (first === 'wallet') $<HTMLButtonElement>('[data-wallet-close]')!.click();
+    else await openWallet();
+    $<HTMLButtonElement>(first === 'wallet' ? '[data-in-call-pay] [data-spend-reconcile]' : '[data-wallet-page] [data-spend-reconcile]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-pay]')!.disabled).toBe(false));
+    if (first === 'call') $<HTMLButtonElement>('[data-wallet-close]')!.click();
+    enterCallAmount();
+    $<HTMLButtonElement>('[data-call-pay-confirm]')!.click();
+    await vi.waitFor(() => expect($('[data-call-pay-status="unknown"]')).not.toBeNull());
+    finishOld('Old payment settled.');
+    // Drain the deferred IPC completion and Solid effects in this event-loop turn.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect($('[data-call-pay-status="unknown"]')).not.toBeNull();
+    expect(text('[data-call-pay-status]')).not.toContain('Old payment');
+    expect($<HTMLButtonElement>('[data-call-pay]')!.disabled).toBe(true);
+    expect(host.used('payment_keysend')).toHaveLength(2);
   });
 
   it('in-call Pay clears the typed amount when the denomination changes', async () => {
@@ -2717,19 +2809,20 @@ describe('calls in the shell', () => {
     let reviewed = false;
     const host = stubHost({
       op_list: () => ({ operations: [], skipped: 1, has_more: false,
-        unresolved_calls: reviewed && repaired ? [] : [{ index_id: index, acknowledged: reviewed }] }),
+        unresolved_calls: reviewed && repaired ? [] : [{ index_id: index, acknowledged: reviewed, hangup_cap_msat: 5000 }] }),
       op_repair_call_index: () => { reviewed = true; return repaired; },
     });
     await openShell();
     await vi.waitFor(() => expect($('[data-call-repair]')).not.toBeNull());
     expect(text('[data-call-repairs]')).toContain('Unresolved call record');
+    expect(text('[data-call-repair]')).toContain('up to 5 sats');
     expect(host.used('op_end_call')).toHaveLength(0);
     $<HTMLButtonElement>('[data-call-repair]')!.click();
     await vi.waitFor(() => expect(host.used('op_repair_call_index').length).toBeGreaterThanOrEqual(1));
     expect(host.used('op_repair_call_index')[0].args).toEqual({ index_id: index });
     if (repaired) {
       await vi.waitFor(() => expect(host.used('op_end_call')).toHaveLength(1));
-      expect(host.used('op_end_call')[0].args).toEqual({ call_id: ID });
+      expect(host.used('op_end_call')[0].args).toEqual({ call_id: ID, max_msat: 5000 });
       await vi.waitFor(() => expect(text('[data-call-repair-result]')).toContain('ended'));
     } else {
       await vi.waitFor(() => expect(text('[data-call-repair-result]')).toContain('still blocked'));
@@ -2739,21 +2832,42 @@ describe('calls in the shell', () => {
     expect(host.used('call_signal')).toHaveLength(0);
   });
 
-  it('repair keeps its owner action when ending the repaired admission is refused', async () => {
+  it.each(['price_changed', 'payment_unknown'])('repair keeps its owner action when ending returns %s', async (code) => {
     const index = 'b'.repeat(64);
     const host = stubHost({
-      op_list: () => ({ operations: [], skipped: 0, has_more: false, unresolved_calls: [{ index_id: index, acknowledged: false }] }),
+      op_list: () => ({ operations: [], skipped: 0, has_more: false, unresolved_calls: [{ index_id: index, acknowledged: false, hangup_cap_msat: 5000 }] }),
       op_repair_call_index: () => ID,
-      op_end_call: () => { throw { code: 'price_changed', message: 'Price changed.' }; },
+      op_end_call: () => { throw { code, message: 'End not confirmed.' }; },
     });
     await openShell();
     await vi.waitFor(() => expect($('[data-call-repair]')).not.toBeNull());
     $<HTMLButtonElement>('[data-call-repair]')!.click();
-    await vi.waitFor(() => expect(text('[data-call-repair-result]')).toContain('Couldn’t end the call'));
+    await vi.waitFor(() => expect(text('[data-call-repair-result]')).toContain(code === 'payment_unknown' ? 'not known yet' : 'Couldn’t end the call'));
+    expect(host.used('op_repair_call_index')).toHaveLength(1);
+    expect($('[data-call-again]')).toBeNull();
     expect($<HTMLButtonElement>('[data-call-repair]')!.disabled).toBe(false);
     $<HTMLButtonElement>('[data-call-repair]')!.click();
     await vi.waitFor(() => expect(host.used('op_end_call')).toHaveLength(2));
     expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it('repair without a verified saved price checks metadata without paying a hangup', async () => {
+    let repaired = false;
+    const host = stubHost({
+      op_list: () => ({ operations: [], skipped: 0, has_more: false, unresolved_calls: [{ index_id: 'c'.repeat(64), acknowledged: false, hangup_cap_msat: repaired ? 6000 : null }] }),
+      op_repair_call_index: () => { repaired = true; return ID; },
+    });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-call-repair]')).not.toBeNull());
+    expect(text('[data-call-repair]')).toBe('Check repair / acknowledge');
+    $<HTMLButtonElement>('[data-call-repair]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-repair-result]')).toContain('Review the saved limit'));
+    expect(host.used('op_end_call')).toHaveLength(0);
+    await vi.waitFor(() => expect(text('[data-call-repair]')).toContain('up to 6 sats'));
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-repair]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-repair]')!.click();
+    await vi.waitFor(() => expect(host.used('op_end_call')).toHaveLength(1));
+    expect(host.used('op_end_call')[0].args).toEqual({ call_id: ID, max_msat: 6000 });
   });
 
   it('recovery End call offers a priced Call again only after host closure', async () => {

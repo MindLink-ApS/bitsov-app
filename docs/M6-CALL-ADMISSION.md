@@ -70,7 +70,15 @@ including when ending is refused or unknown and after restart.
 If the host cannot prove the record's identity, generation and call mapping,
 it persists an acknowledgement and leaves every admission/payment fence and
 original file intact. A corrupt mapping is never reconstructed by guessing from
-history. The panel remains available for a later check after evidence is restored.
+history. A verified record belonging to another node is refused without writing
+an acknowledgement under the current identity. The panel remains available for
+a later check after evidence is restored.
+
+Repair and end displays the exact record's saved hangup ceiling (the original
+offer ceiling for legacy records). The renderer supplies that displayed limit
+to `op_end_call`; the host uses the lower of it and its saved ceiling. A missing
+or mismatched record has no price, so the first tap only repairs/acknowledges.
+After repair exposes a verified price, a separate explicit tap may end the call.
 
 A peer hangup/busy received during a fresh offer dispatch captures that exact
 operation before waiting on the money lock. The renderer queues the bound event
@@ -87,16 +95,58 @@ The renderer retains presentation totals only. The host owns admission,
 payment evidence, cleanup deduplication, and authorization. Meeting legs keep
 their existing renderer engine; shared host call guards still apply.
 
+## M6 polish regressions
+
+- Successful reconciliation in the wallet or chat clears an existing unknown
+  in-call payment. A check started before a newer payment cannot clear that
+  payment, through either the shared result or the card's local callback.
+- Host refusal to end a call while keysend is pending still tears down local
+  media; the unresolved closure and late payment receipt remain on the ended card.
+- `recovery_proof_release_requires_clean_resumable_unpaid_record` kills M1
+  (trusting the proof bit alone). It checks resumability, all four evidence
+  fields (including zero-valued evidence), and terminal record states.
+- `recovery_capped_resend_cannot_invent_non_dispatch_proof` kills M2
+  (setting proof unconditionally in the capped arm). A non-fresh message resend
+  reaches that shared arm without bypassing the earlier call-admission fence;
+  it must retain its previous proof value and operation ID.
+- A held same-ID call redispatch verifies proof is cleared on disk before the
+  POST can reply. Cancelling that future and reopening preserves the spend fence.
+- Repair tests cover exact-generation pricing, legacy ceilings, missing evidence,
+  foreign identities (including pending snapshots), and unknown end results.
+- The 32-thread run reproduced `call_node_timeout_is_bounded_and_keeps_the_payment_pending`
+  exceeding its outer two-second preflight/filesystem deadline. It now observes
+  the actual POST, holds its response, and advances Tokio time to verify the
+  configured spend timeout. The adjacent explicit-refusal test also stops
+  timing preflight; it still asserts the refusal releases the reservation,
+  disables automatic spending, and retains the saved preset. The original Grok report did not name its two tests,
+  so attribution to that earlier run remains unconfirmed.
+
 ## Validation
 
-Verified on 2026-10-21: 1,019 app library tests and 12 FFI tests passed
-(one Touch ID test ignored); 1,772 Vitest tests across 98 files passed.
+Verified on 2026-10-21: 1,079 app library tests, 57 non-window app
+integration tests (including four with `sit-mock`), 12 FFI tests
+(one Touch ID test ignored), and seven mock-node pairing tests passed.
+The library/integration gate used 32 test threads. The unsupported-platform
+integration target is inactive on macOS. All 1,810 Vitest tests across 100 files,
 TypeScript, production build, authority, and `git diff --check` passed.
+M1 and M2 each failed their new regression when applied and passed after
+restoration. Removing the money-request timeout also failed the deterministic
+timeout regression; restoring it passed.
 
 Run headlessly, without `cargo fmt` or launching the app:
 
 ```sh
-TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
+export TAURI_CONFIG='{"bundle":{"externalBin":[]}}'
+cargo test --manifest-path src-tauri/Cargo.toml --locked \
+  --features dev-node,local-owner-ceremony --lib \
+  --test android_device_key_contract --test android_pairing_contract \
+  --test delegation_contract --test mac_keychain_contract \
+  --test mac_pairing_errors --test mac_typed_unlock_contract \
+  --test onboarding_assistant --test pairing --test platform_gating \
+  --test pr47_budget -- --test-threads=32
+cargo test --manifest-path src-tauri/Cargo.toml --locked \
+  --features dev-node,local-owner-ceremony,sit-mock \
+  --test onboarding_assistant -- --test-threads=32
 npx tsc --noEmit
 npx vitest run --configLoader runner --maxWorkers=4
 npm run build
