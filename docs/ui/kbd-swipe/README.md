@@ -35,7 +35,8 @@ reserved space while editing so enabling Allow or switching between sats and
 integer msat does not move the buttons. Typing does not trigger programmatic scrolling.
 Focusing the composer pins the stream to the last message. Other focused inputs
 scroll only their inner containers, also revealing a following primary and sheet
-Cancel when they fit together. Longer sheets remain scrollable. This applies to
+Cancel when they fit together, falling back to the primary alone when necessary.
+Longer sheets remain scrollable. This applies to
 amount/invoice forms, the Wallet/M7 starter screen, pairing and settings too.
 
 ## Back routing
@@ -77,10 +78,14 @@ control and element bounds. The active iPhone Duo simulator was untouched.
 The additional `ios-{en,da}-first-spend-{starts-now,may-start-now}-default.*`
 captures exercise both immediate-payment timing variants with the same typing
 and geometry assertions.
-The OS content size is `large` (the default). The previous `-large` images and
+The first-spend captures, including both timing variants, were refreshed for
+U2b follow-ups on 2026-10-23 at **17px root / 17px body**. Their JSON records
+these fonts and the `large` OS content size; the harness asserts both sizes
+and rejects stale geometry. Composer and pairing images remain historical
+#318 evidence from before U2b. The previous `-large` images and
 JSON were removed: their geometry was identical because Dynamic Type did not
 reach the WKWebView. These captures make **no large-text accessibility claim**;
-Dynamic Type conversion remains U2b.
+Default/AX5 evidence is maintained in `../u2b-dynamic-type/`.
 
 The isolated preview renders the actual `ControlCenter`, `FirstSpendSheet` and
 `PhoneOnboarding` with the production stylesheet/controllers and sample data.
@@ -139,3 +144,12 @@ WKWebView layout checks with sample data, not a real-node transaction run.
   Its follow-up suggested timing-variant coverage; native testing reproduced and
   fixed the same wrapping issue in that copy.
 - `cargo fmt` was not run. No real Send, Pay, Allow, Approve or Call was pressed.
+
+## U2b follow-up refresh — 2026-10-23
+
+All six first-spend default captures (en/da × standard/starts-now/may-start-now)
+were rerun at 17/17 root/body sizes. The original assertions remain: positive
+geometry, both actions inside the keyboard viewport, Allow disabled-to-enabled,
+whole/fractional amounts and deletion, and stationary actions/scrollTop across
+nine samples per capture. The rerun caught the 2px disabled-border difference;
+reserving that border fixes the movement without changing the authorization.

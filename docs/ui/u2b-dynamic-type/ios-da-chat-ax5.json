@@ -1,7 +1,7 @@
 {
   "scene": "chat",
   "lang": "da",
-  "generatedAt": 1792735590093,
+  "generatedAt": 1792739886207,
   "ready": true,
   "rootFont": "53px",
   "bodyFont": "34px",
@@ -31,16 +31,42 @@
   "elements": [
     {
       "tag": "SPAN",
+      "class": "what",
+      "text": "Forbundet til din node",
+      "rect": {
+        "x": 150.0625,
+        "y": 78,
+        "width": 112,
+        "height": 62,
+        "top": 78,
+        "right": 262.0625,
+        "bottom": 140,
+        "left": 150.0625
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        112,
+        62
+      ],
+      "scroll": [
+        112,
+        62
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
       "class": "sats",
       "text": "2 sats",
       "rect": {
         "x": 33,
-        "y": -683.609375,
+        "y": -683.703125,
         "width": 62.734375,
         "height": 28,
-        "top": -683.609375,
+        "top": -683.703125,
         "right": 95.734375,
-        "bottom": -655.609375,
+        "bottom": -655.703125,
         "left": 33
       },
       "font": "22px",
@@ -61,12 +87,12 @@
       "text": "betalt 1 sat \u00b7 netv\u00e6rksgebyr ikke oplyst",
       "rect": {
         "x": 51.609375,
-        "y": -337.078125,
+        "y": -337.171875,
         "width": 301.1337890625,
         "height": 62.09375,
-        "top": -337.078125,
+        "top": -337.171875,
         "right": 352.7431640625,
-        "bottom": -274.984375,
+        "bottom": -275.078125,
         "left": 51.609375
       },
       "font": "22px",
@@ -87,12 +113,12 @@
       "text": "2 sats",
       "rect": {
         "x": 33,
-        "y": 89.640625,
+        "y": 89.546875,
         "width": 62.734375,
         "height": 28,
-        "top": 89.640625,
+        "top": 89.546875,
         "right": 95.734375,
-        "bottom": 117.640625,
+        "bottom": 117.546875,
         "left": 33
       },
       "font": "22px",
@@ -113,12 +139,12 @@
       "text": "betalt 1 sat \u00b7 netv\u00e6rksgebyr ikke oplyst",
       "rect": {
         "x": 51.609375,
-        "y": 330.796875,
+        "y": 330.703125,
         "width": 301.1337890625,
         "height": 62.09375,
-        "top": 330.796875,
+        "top": 330.703125,
         "right": 352.7431640625,
-        "bottom": 392.890625,
+        "bottom": 392.796875,
         "left": 51.609375
       },
       "font": "22px",

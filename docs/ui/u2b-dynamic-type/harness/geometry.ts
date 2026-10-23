@@ -2,7 +2,7 @@
 // content is reachable; horizontal overflow and clipped text are failures.
 export function geometry(scene: string, lang: string) {
   const root = document.documentElement;
-  const selectors = '.sats, .money-text, .money, [data-send-price], .cost, .wallet-totals, .wallet-total, .wallet-row-amount, .split-amount, .owner-approval-terms, .owner-sheet-terms, .first-spend-sheet p, .first-spend-sheet h2, .first-spend-sheet button, .first-spend-sheet input, .owner-approval-sheet button, .wallet-page button, [data-first-spend-keyboard-summary], [data-first-spend-keyboard-summary] > *, .approval';
+  const selectors = '.node-pill .what, .sats, .money-text, .money, [data-send-price], .cost, .wallet-totals, .wallet-total, .wallet-row-amount, .split-amount, .owner-approval-terms, .owner-sheet-terms, .first-spend-sheet p, .first-spend-sheet h2, .first-spend-sheet button, .first-spend-sheet input, .owner-approval-sheet button, .wallet-page button, [data-first-spend-keyboard-summary], [data-first-spend-keyboard-summary] > *, .approval';
   const elements = [...document.querySelectorAll<HTMLElement>(selectors)].filter(el =>
     el.getClientRects().length && !el.closest('[inert]') && getComputedStyle(el).visibility !== 'hidden');
   const measured = elements.map(el => {
@@ -15,6 +15,22 @@ export function geometry(scene: string, lang: string) {
       const summary = document.querySelector('[data-first-spend-keyboard-summary]')?.getBoundingClientRect();
       if (summary && rect.top < summary.bottom - 1) failures.push('input-covered-by-quote');
       if (rect.bottom > visualViewport!.height + 1 || rect.top < 0) failures.push('input-outside-viewport');
+    }
+    if (el.matches('[data-first-spend-allow]') && root.dataset.keyboardOpen === 'true'
+      && (rect.top < 0 || rect.bottom > visualViewport!.height + 1)) failures.push('primary-outside-viewport');
+    // Check each digit run using its text range, so wrapping inside an amount
+    // fails even when the containing receipt has no horizontal overflow.
+    if (el.matches('.money-text, .sats, .wallet-total, .wallet-row-amount, .split-amount')) {
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        for (const match of node.textContent!.matchAll(/[0-9]+/g)) {
+          const digits = document.createRange();
+          digits.setStart(node, match.index!); digits.setEnd(node, match.index! + match[0].length);
+          if (new Set([...digits.getClientRects()].filter(r => r.width && r.height).map(r => r.top)).size > 1) {
+            failures.push('broken-digit-run');
+          }
+        }
+      }
     }
     if (rect.left < -1 || rect.right > visualViewport!.width + 1) failures.push('outside-viewport-width');
     if (el.clientWidth && el.scrollWidth > el.clientWidth + 1) failures.push('horizontal-overflow');

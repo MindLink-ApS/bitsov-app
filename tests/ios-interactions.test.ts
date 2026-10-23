@@ -137,3 +137,31 @@ it('keeps an amount input below the enlarged sticky quote when actions no longer
   expect(sheet.scrollTop).toBe(130);
   stop();
 });
+
+// Native AX5 geometry: input + Allow fits; adding Not now does not.
+it.each([
+  [217, 606, 670, 136],
+  [154, 530, 586, 116],
+])('reveals the primary first, retaining Cancel when both fit (quote bottom %s)', (quoteBottom, allowBottom, cancelBottom, scroll) => {
+  vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(852);
+  vi.stubGlobal('visualViewport', Object.assign(new EventTarget(), { height: 482, offsetTop: 0, scale: 1 }));
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => { callback(0); return 1; });
+  document.body.innerHTML = '<div class="first-spend-sheet" style="overflow-y:auto"><div style="position:sticky;top:0">Exact cost</div><input><button class="primary">Allow</button><button data-first-spend-cancel>Not now</button></div>';
+  const sheet = document.querySelector<HTMLElement>('.first-spend-sheet')!;
+  const input = document.querySelector('input')!;
+  const [allow, cancel] = document.querySelectorAll('button');
+  Object.defineProperty(sheet, 'scrollHeight', { value: 1000 });
+  Object.defineProperty(sheet, 'clientHeight', { value: 422 });
+  vi.spyOn(sheet, 'getBoundingClientRect').mockReturnValue({ top: 60, bottom: 482 } as DOMRect);
+  vi.spyOn(sheet.firstElementChild!, 'getBoundingClientRect').mockReturnValue({ top: 72, bottom: quoteBottom } as DOMRect);
+  vi.spyOn(input, 'getBoundingClientRect').mockReturnValue({ top: 414, bottom: 466, height: 52 } as DOMRect);
+  vi.spyOn(allow, 'getBoundingClientRect').mockReturnValue({ top: allowBottom - 52, bottom: allowBottom, height: 52 } as DOMRect);
+  vi.spyOn(cancel, 'getBoundingClientRect').mockReturnValue({ top: cancelBottom - 52, bottom: cancelBottom, height: 52 } as DOMRect);
+  const stop = installKeyboardViewport();
+  try {
+    input.focus();
+    expect(sheet.scrollTop).toBe(scroll);
+    input.value = '1250.5'; input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(sheet.scrollTop).toBe(scroll);
+  } finally { stop(); }
+});
