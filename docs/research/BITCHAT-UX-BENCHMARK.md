@@ -262,17 +262,17 @@ The steps BitSov *can* cut without weakening money or security clarity:
 
 BitSov doctrine applied throughout:
 - payment is the connection, so there is **no free first message**;
-- **Bitcoin is never identity**;
+- **keys are identity, never a Bitcoin address**;
 - **never trade money or security clarity for polish**;
 - **one action per screen**.
 
 **1. No profile gate before the first act.** BitChat assigns `anon####` and lets you talk at once.
 - *Adopt:* never add a nickname or profile step to BitSov onboarding. Default the contact's display name from their card, and let the petname be edited later in ContactPanel.
-- *Don't adopt:* anonymous throwaway identity. BitSov identity is the node, not a nickname, and never a Bitcoin address or key.
+- *Don't adopt:* anonymous throwaway identity. In BitSov, keys are identity, never a Bitcoin address. The user's node key identifies them; Bitcoin anchors energy and admission, not identity.
 
 **2. Empty states that name the next action.** BitChat's empty `#mesh` explains its reach and how to switch. BitSov's empty Chats list says only "No contacts yet".
-- *Adopt:* an empty state with one primary action ("Add someone") and one line saying that messages cost what the other person sets, and that the price is shown before anything is paid.
-- *Don't adopt:* stacking help text. Keep one action, one sentence.
+- *Adopt:* an empty state with one primary action ("Add someone") explaining that first contact costs an entry fee plus the message price, both set by the other person; show those prices and the maximum routing fee and total before payment.
+- *Don't adopt:* stacking help text. Keep one primary action and concise copy without hiding the entry fee.
 
 **3. The composer says where the words go.** "message %@ — private" / "message #mesh — public, nearby".
 - *Adopt:* add a scope word to BitSov's placeholder, for example "Message Maya · private", and "Message room · N members" for rooms.
@@ -287,7 +287,7 @@ BitSov doctrine applied throughout:
 - *Don't adopt:* read receipts as a side effect. If BitSov ever adds them, they are an act with a price and the user's consent, not an implicit leak.
 
 **6. A wipe that is reachable and confirmed.** BitChat now confirms even the triple-tap, so "a fumbled tap must never be able to wipe the device". There is also a visible "DANGER ZONE" button.
-- *Adopt:* a visible "Remove BitSov from this phone" in You → Settings. It sits behind a destructive confirm, which says plainly that the box, its funds and its identity are untouched. It extends the existing "Forget this box".
+- *Adopt:* a visible "Remove BitSov from this phone" in You → Settings. It sits behind a destructive confirm, which says plainly that the box, its funds and its identity remain, while this phone's pairing and device key are revoked on the box and its local data is removed. It extends the existing "Forget this box"; an offline box means revocation is still pending (I-8).
 - *Don't adopt:* the hidden triple-tap gesture. Undiscoverable destructive actions conflict with security clarity. Never imply a wipe destroys funds or the node.
 
 **7. Verification in both directions, from one sheet.** "show my qr" and "scan someone else's qr", with "✓ VERIFIED" / "⚠️ NOT VERIFIED" and a device-local alias.
@@ -333,7 +333,8 @@ Small, one-PR tickets. Every ticket needs Danish and English copy, a Dynamic Typ
 - *Files:* `src/control/Shell.tsx` (around the `uiNoContactsYet` fallback), `src/appCopy.ts`
 - *Acceptance:*
   - When there are no contacts, the list shows one primary button, "Add someone". It opens Discover (or the scan from I-1).
-  - It shows one line of copy, roughly "Messages cost what the other person sets. You’ll see the price before anything is paid."
+  - It shows concise copy, roughly "Reaching someone new costs an entry fee plus a message price, both set by them. You’ll see these prices, the maximum routing fee and the total before anything is paid."
+  - After choosing a person, show their entry fee (Knock) and message price, plus the maximum routing fee and total, before any payment; scanning or opening their card never pays automatically.
   - No other buttons appear.
 
 **I-3. The composer placeholder states the scope**
@@ -378,10 +379,13 @@ Small, one-PR tickets. Every ticket needs Danish and English copy, a Dynamic Typ
 **I-8. "Remove BitSov from this phone"**
 - *Files:* `src/onboarding/PhoneOnboarding.tsx` ("Forget this box"), You → Settings in `src/control/Shell.tsx`, `src/appCopy.ts`
 - *Acceptance:*
-  - A visible destructive item opens a confirmation. The confirmation states that the box, its funds and its identity are not affected, and what *is* removed from this phone (pairing, local names, cached messages).
+  - A visible destructive item opens a confirmation. The confirmation states that the box, its funds and its identity remain, that this phone's pairing and device/approval key will be revoked on the box, and what is removed from this phone (pairing credentials, local device key, local names, cached messages).
+  - Revoke this phone's pairing and device/approval key on the box and confirm success before wiping the local credentials needed for that request. Local deletion alone must never be reported as revocation.
+  - If the box is offline or revocation fails, show "This phone is still authorised on your box" and keep removal pending, with a retry or instructions to revoke it from another trusted device. Do not claim removal is complete until revocation is confirmed.
   - There is no gesture shortcut.
-  - After confirming, the app returns to phone onboarding.
+  - After confirmed revocation and local cleanup, the app returns to phone onboarding.
   - The list of removed data is checked against actual local storage before the copy ships.
+  - Tests prove that the removed phone's pairing and device key are rejected by the box (including spend approvals), that offline/failed revocation stays pending with the warning, and that retry completes cleanup without affecting the box's funds, identity or other devices.
 
 **I-9. Compact offline banner in chat**
 - *Files:* `src/control/OfflineNode.tsx`, `src/control/Shell.tsx`, `src/appCopy.ts`
@@ -418,22 +422,23 @@ Small, one-PR tickets. Every ticket needs Danish and English copy, a Dynamic Typ
 ### Where it fits
 BitChat's courier model (`WHITEPAPER.md` §6.2) solves the case "both people are out of reach of the internet". It does this by moving sealed ciphertext through nearby phones. BitSov's doctrine already provides two pieces it could build on:
 - zero plaintext at any layer;
-- the node as identity anchor.
+- keys are identity, never a Bitcoin address.
 
-A sealed envelope carried over BLE fits "zero plaintext". The phone is a thin client of the user's box, so the natural shape is:
-- **the phone carries sealed, already-paid envelopes** to the box (or to a peer's box) when it gets back in range;
-- **it never settles payments offline.**
+A sealed envelope carried over BLE fits "zero plaintext", but carriage is not paid delivery. Follow the node's [M2 offline-delivery design](https://github.com/MindLink-ApS/BitSov-bitsov/blob/design/m2-offline-delivery/docs/design/M2-OFFLINE-DELIVERY.md), §§1–3, Mode A (a proposal, not shipped):
+- **the sender's node holds the sealed, unpaid message in its durable outbox** while the recipient's node is offline;
+- **when the recipient reconnects and both nodes are reachable, the sender's node pays, then delivers with the settled payment proof**; the recipient admits the message only after verifying that proof;
+- a future phone BLE carrier could move a copy of the sealed, unpaid envelope, but the sender's outbox remains the source of truth. Carriage alone never admits or displays the message to the recipient.
 
 ### Where it conflicts
 
 **1. Payment is the connection.**
-- A message delivered over BLE without a Lightning payment would be a free first message. That breaks the doctrine.
-- Any offline design must either:
-  - carry a **pre-authorised, budget-bounded payment** that only settles when it reaches the recipient's node (this needs node-protocol support that does not exist today), or
-  - be limited to contacts already admitted and paid for, with the price charged on arrival.
-- Both options mean money is "pending" for longer. That status must be shown exactly, as "Paid / not delivered yet" is today.
+- A Lightning payment cannot settle while the recipient's node is offline. Carrying ciphertext never substitutes for a settled, recipient-bound payment.
+- M2 Mode A holds messages for existing contacts and pays on reconnect, within the sender's budget. Previous admission does not make the next message free; first contact still requires both nodes online.
+- Mode A requires the sender's node to be online when payment occurs. M2's held-HTLC Mode B is a separate, post-MVP proposal for non-overlapping availability, not an already-paid offline envelope.
+- Show **held / unpaid** separately from **paying**, **paid / not delivered yet**, and **delivered**. A budget reservation is not a settled payment; optional relay carriage fees do not pay the recipient's message price.
 
-**2. Bitcoin is never identity, and the node is the anchor.**
+**2. Keys are identity, never a Bitcoin address.**
+- Bitcoin anchors energy and admission, not identity; the user's node key identifies them.
 - BitChat's BLE peer ID is a stable device fingerprint, and the whitepaper itself says it can be tracked.
 - A BitSov BLE layer must not broadcast the node ID or any payment identifier.
 - Rotating, unlinkable tags (like BitChat's daily HMAC recipient tag) are the minimum.
@@ -444,7 +449,7 @@ A sealed envelope carried over BLE fits "zero plaintext". The phone is a thin cl
 
 **4. Scope and boundary.**
 - `docs/ARCHITECTURE_BOUNDARY.md` says the app consumes the node API and does not implement protocol logic.
-- A mesh transport is protocol work. It belongs in the node repo first. The app would show only a transport badge and delivery states (lesson 5).
+- This is a **node + app concern**. The node owns the durable outbox, payment, proof verification and admission. A future local BLE/radio transport belongs in the app, which carries opaque envelopes through the node API and shows consent, price and delivery states (lesson 5). The app must not implement payment or admission protocol logic.
 
 ### Verdict
-It is plausible later, as a **node-protocol feature** for already-admitted contacts with settle-on-arrival payments. It is not an app-side feature, and not a way to get a free first message. Until then, the honest UI stays: "New messages can’t be sent until your node is back."
+It is plausible later as a **node + app feature** following M2 Mode A: the sender holds an unpaid message for an existing contact and pays when both nodes reconnect. BLE would add app-side carriage; it cannot bypass the node's payment and admission checks. Until the node supports held messages and the app exposes them, the honest UI stays: "New messages can’t be sent until your node is back."
