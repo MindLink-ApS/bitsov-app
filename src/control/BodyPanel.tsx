@@ -391,7 +391,7 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
         <Show when={props.door} fallback={props.doorError ? <span data-door-fresh="stale">Door price could not be read.</span> : 'Door price not read yet.'}>
           {(d) => (
             <>
-              Door open at <span class="sats">{sats(d().msat)}</span> {satUnit(d().msat)} a message
+              Door open at <span class="sats">{sats(d().msat, true)}</span> {satUnit(d().msat)} a message
               <span class="organ-note"> · your price</span>
               <span class="organ-note" classList={{ stale: doorFresh()!.stale }} data-door-fresh={doorFresh()!.stale ? 'stale' : 'fresh'}>
                 {' '}· {doorFresh()!.label}
@@ -451,7 +451,7 @@ function MembraneLine(props: { e: MembraneEntry; hot: boolean; nameOf: (id: stri
             return (
               <span>
                 <span class="ok-word">admitted</span> {a().first_contact ? shortId(a().sender) : props.nameOf(a().sender)}
-                <Show when={a().paid_msat}> · paid <span class="sats">{sats(a().paid_msat!)}</span> {satUnit(a().paid_msat!)}</Show>
+                <Show when={a().paid_msat}> · paid <span class="sats">{sats(a().paid_msat!, true)}</span> {satUnit(a().paid_msat!)}</Show>
                 <Show when={a().first_contact}> · first contact, not added</Show>
               </span>
             );
@@ -463,8 +463,8 @@ function MembraneLine(props: { e: MembraneEntry; hot: boolean; nameOf: (id: stri
             return (
               <span data-membrane-readmission>
                 <span class="ok-word">paid again</span> {props.nameOf(a().counterparty)} · {gateWords('readmission')}
-                <Show when={a().paid_msat}> · <span class="sats">{sats(a().paid_msat!)}</span> {satUnit(a().paid_msat!)}</Show>
-                <Show when={a().cap_msat}> · within their budget of <span class="sats">{sats(a().cap_msat!)}</span> {satUnit(a().cap_msat!)}</Show>
+                <Show when={a().paid_msat}> · <span class="sats">{sats(a().paid_msat!, true)}</span> {satUnit(a().paid_msat!)}</Show>
+                <Show when={a().cap_msat}> · within their budget of <span class="sats">{sats(a().cap_msat!, true)}</span> {satUnit(a().cap_msat!)}</Show>
               </span>
             );
           }}
@@ -484,7 +484,7 @@ function MembraneLine(props: { e: MembraneEntry; hot: boolean; nameOf: (id: stri
               >
                 <span title={r().detail} data-membrane-inbound={r().code}>
                   <span class="err-word">refused</span> {r().sender ? props.nameOf(r().sender!) : 'unsigned'} · {gateWords(r().code)}
-                  <Show when={r().required_msat}> · needed <span class="sats">{sats(r().required_msat!)}</span> {satUnit(r().required_msat!)}</Show>
+                  <Show when={r().required_msat}> · needed <span class="sats">{sats(r().required_msat!, true)}</span> {satUnit(r().required_msat!)}</Show>
                 </span>
               </Show>
             );
@@ -561,7 +561,7 @@ function SetpointsOrgan(props: OrganismProps) {
               <Show when={x().grant}>
                 {(g) => (
                   <p class="organ-line" data-setpoint-grant>
-                    Finite node grant: <span class="sats">{amount(g().remaining_msat)}</span> of {amount(g().budget_msat)} left, {hoursLeft(g().expires_at_ms, props.now)} h
+                    Finite node grant: <span class="sats">{amount(g().remaining_msat, true)}</span> of {amount(g().budget_msat)} left, {hoursLeft(g().expires_at_ms, props.now)} h
                   </p>
                 )}
               </Show>
@@ -600,7 +600,7 @@ function SetpointBar(props: { label: string; spent: number; limit: number; note:
     <div class="organ-row setpoint" classList={{ hot: hot(), reached: props.spent >= props.limit }} data-setpoint={props.data}>
       <span class="who">{props.label}</span>
       <span class="meter" aria-hidden="true"><span style={{ width: pct(props.spent, props.limit) }} /></span>
-      <span class="sats">{amount(props.spent)}/{amount(props.limit)}</span>
+      <span class="sats">{amount(props.spent, true)}/{amount(props.limit, true)}</span>
       <span class="organ-note">{props.note}</span>
     </div>
   );
@@ -628,7 +628,7 @@ function NucleusOrgan(props: OrganismProps) {
       </p>
       <p class="organ-line" data-nucleus-chain>
         <Show when={n().block_height !== null} fallback="Block height unknown">
-          block <span class="sats">{satsWhole(n().block_height!)}</span>
+          block <span class="sats">{satsWhole(n().block_height!, true)}</span>
         </Show>
         <span class="organ-note"> · {n().chain_backend ?? 'chain source unknown'}</span>
       </p>

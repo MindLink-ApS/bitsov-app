@@ -32,7 +32,9 @@ export const appEn = {
   "approvalRefusalIncomplete": "This did not complete. Nothing was approved.",
   "approvalBiometric": "The biometric check",
 
+  "ownerApprovalNotification": "An app is asking for your approval",
   "ownerApprovalTitle": "Approval requested",
+  "ownerApprovalRequesterShort": "Requested by app {0}",
   "ownerApprovalQueue": "1 of {0}",
   "ownerApprovalApprove": "Approve with Touch ID",
   "ownerApprovalApproving": "Waiting for Touch ID…",
@@ -867,7 +869,9 @@ export const appDa: Record<keyof typeof appEn, string> = {
   "approvalRefusalIncomplete": "Dette blev ikke gennemført. Intet blev godkendt.",
   "approvalBiometric": "Den biometriske kontrol",
 
+  "ownerApprovalNotification": "En app beder om din godkendelse",
   "ownerApprovalTitle": "Anmodning om godkendelse",
+  "ownerApprovalRequesterShort": "Anmodet af app {0}",
   "ownerApprovalQueue": "1 af {0}",
   "ownerApprovalApprove": "Godkend med Touch ID",
   "ownerApprovalApproving": "Venter på Touch ID…",
