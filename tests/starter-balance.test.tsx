@@ -185,7 +185,8 @@ it('ignores an old-node reply after switching identity without unmounting the wa
   expect(localStorage.getItem('bitsov.starter-request.node-a')).toBe(saved);
   expect(localStorage.getItem('bitsov.starter-request.node-b')).toBeNull();
 });
-it('opens a dedicated starter screen with one action and returns to the wallet', async () => {
+it.each(['en', 'da'] as const)('opens a dedicated starter screen with a Back label and returns to the wallet in %s', async locale => {
+  setLanguagePref(locale);
   host = document.createElement('div'); document.body.append(host);
   const request = vi.fn(async () => pending);
   const unused = async (): Promise<never> => { throw new Error('Unexpected wallet action'); };
@@ -197,6 +198,9 @@ it('opens a dedicated starter screen with one action and returns to the wallet',
     starter={{ enabled: true, network: 'signet', nodeId: 'node-a', capabilities: ['starter_channel_request_v1'], api: { current: async () => empty, request } }} />, host);
   await flush();
   host.querySelector<HTMLButtonElement>('[data-starter-entry]')!.click(); await flush();
+  const back = host.querySelector<HTMLButtonElement>('[data-wallet-close]')!;
+  expect(back.getAttribute('aria-label')).toBe(locale === 'en' ? '← Back' : '← Tilbage');
+  expect(back.getAttribute('aria-label')).toBe(back.textContent);
   expect(host.querySelector('[data-wallet-balance]')).toBeNull();
   expect(host.querySelector('[data-wallet-refresh]')).toBeNull();
   expect(host.querySelector('[data-wallet-go="send"]')).toBeNull();
@@ -206,6 +210,7 @@ it('opens a dedicated starter screen with one action and returns to the wallet',
   host.querySelector<HTMLButtonElement>('[data-wallet-close]')!.click(); await flush();
   expect(host.querySelector('[data-wallet-balance]')).not.toBeNull();
   expect(host.querySelector('[data-starter-balance]')).toBeNull();
+  expect(back.getAttribute('aria-label')).toBe(locale === 'en' ? '← Back, Close wallet' : '← Tilbage, Luk tegnebog');
 });
 
 it('adopts and persists the other device current request returned after a conflict', async () => {

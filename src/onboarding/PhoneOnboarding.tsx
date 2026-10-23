@@ -1,5 +1,5 @@
 import { language, systemLanguage } from '../i18n';
-import { createEffect, createSignal, createUniqueId, For, on, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show } from 'solid-js';
 import { appPlatform, type AppPlatform } from '../platform';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
@@ -37,15 +37,6 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   const [screen, setScreen] = createSignal<Screen>('start');
   const lineId = createUniqueId();
   let heading: HTMLHeadingElement | undefined;
-  // A step change unmounts the previous action. Put focus on the heading so
-  // keyboard and screen-reader users are not left on the body.
-  createEffect(on(screen, () => {
-    queueMicrotask(() => {
-      if (!heading) return;
-      if (document.activeElement === heading) heading.blur();
-      heading.focus();
-    });
-  }));
   const [error, setError] = createSignal<{ kind: Failure; detail: string }>();
   const [busy, setBusy] = createSignal(false);
   const [cancellingScan, setCancellingScan] = createSignal(false);
@@ -245,6 +236,24 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       default: return [t.start, t.startLine];
     }
   };
+  // Focus is the sole announcement path for the face. Track error changes too:
+  // another failure can change the recovery instruction without changing screen.
+  const focusKey = createMemo(() => JSON.stringify([
+    screen(), ...(screen() === 'error' ? [error()?.kind, error()?.detail, ...face().slice(0, 2)] : []),
+  ]));
+  let focusQueued = false;
+  createEffect(on(focusKey, () => {
+    // Several synchronous updates can settle on one face (including on mount).
+    // Focus only after its text/description have rendered, and only once.
+    if (focusQueued) return;
+    focusQueued = true;
+    queueMicrotask(() => {
+      focusQueued = false;
+      if (!alive || !heading?.isConnected) return;
+      if (document.activeElement === heading) heading.blur();
+      heading.focus();
+    });
+  }));
   return <main class="phone-onboarding" data-phone-onboarding={screen()} lang={c() === phoneCopy.da ? 'da' : 'en'}>
     <div class="phone-progress" aria-hidden="true"><For each={[0, 1, 2]}>{n => <span classList={{ filled: n === 0 || n === 1 && ['words', 'fingerprint', 'done'].includes(screen()) || n === 2 && screen() === 'done' }} />}</For></div>
     <section data-phone-face>

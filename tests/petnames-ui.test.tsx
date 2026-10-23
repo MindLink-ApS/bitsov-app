@@ -16,6 +16,7 @@ import {
   setPetname,
   verifyState,
 } from '../src/control/petnames';
+import { setLanguagePref } from '../src/i18n';
 import type { Peer } from '../src/control/types';
 
 let dispose: (() => void) | undefined;
@@ -25,6 +26,7 @@ afterEach(() => {
   mount?.remove();
   resetContactsForTests();
   vi.useRealTimers();
+  setLanguagePref('en');
 });
 beforeEach(() => resetContactsForTests());
 
@@ -132,4 +134,21 @@ it('marks front-door display names as self-claimed suggestions', async () => {
   $<HTMLButtonElement>('[data-discover-read]').click();
   await vi.waitFor(() => expect($('[data-fd-claimed]')).not.toBeNull());
   expect($('[data-fd-claimed]').textContent).toMatch(/self-claimed/i);
+});
+
+it.each(['en', 'da'] as const)('includes the visible verification state in the contact title name in %s', async locale => {
+  setLanguagePref(locale);
+  await openMaya();
+  const name = () => $('[data-contact-open]').getAttribute('aria-label');
+  expect(name()).toBe(locale === 'en' ? 'Contact Maya' : 'Kontakt Maya');
+  markVerified(maya);
+  await vi.waitFor(() => expect($('[data-contact-pill="verified"]')).not.toBeNull());
+  expect(name()).toBe(locale === 'en' ? 'Contact Maya, Verified' : 'Kontakt Maya, Bekræftet');
+  expect(replaceContactKey(maya, OLD)).toBe(true);
+  expect(replaceContactKey(OLD, maya)).toBe(true);
+  await vi.waitFor(() => expect($('[data-contact-pill="key-changed"]')).not.toBeNull());
+  expect($('[data-contact-pill="verified"]')).toBeNull();
+  expect(name()).toBe(locale === 'en' ? 'Contact Maya, Key changed' : 'Kontakt Maya, Nøgle ændret');
+  $('[data-contact-open]').click();
+  await vi.waitFor(() => expect($('[data-contact-panel="open"]')).not.toBeNull());
 });

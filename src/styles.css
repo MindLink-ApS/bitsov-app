@@ -1568,6 +1568,7 @@ html:is([data-platform='ios'], [data-platform='android']) :is(.info-modal, .qr-s
 .first-spend-options summary { cursor: pointer; min-height: 2.75rem; display: flex; align-items: center; text-decoration: underline; }
 .first-spend-options .presets { display: flex; flex-wrap: wrap; gap: var(--s-2); margin-block: var(--s-3); }
 .first-spend-options .chip { color: var(--ink); background: var(--surface); border-color: var(--faint); }
+.first-spend-options .chip[aria-checked='false']:hover:not(:disabled) { border-color: var(--faint); }
 .first-spend-options .chip[aria-checked='true'] { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
 .first-spend-options input { width: 100%; font-size: max(1rem, 16px); }
 .first-spend-cost { line-height: var(--lh-body); }

@@ -1,4 +1,5 @@
 import { createSignal, Show } from 'solid-js';
+import { usePairingActivity } from '../pairingActivity';
 import type { LinkState } from './types';
 import type { CallView } from './call';
 
@@ -86,7 +87,9 @@ export function ConnectionCard(props: {
   copy?: (text: string) => Promise<void>;
 }) {
   const [localChecking, setChecking] = createSignal(false);
-  const checking = () => props.checking ?? localChecking();
+  // A parent reporting idle must not hide the card's own in-flight check.
+  const checking = () => props.checking || localChecking();
+  usePairingActivity(checking);
   const [copied, setCopied] = createSignal<'yes' | 'no' | null>(null);
   const lines = () => connectionSummary(props);
   const check = async () => {

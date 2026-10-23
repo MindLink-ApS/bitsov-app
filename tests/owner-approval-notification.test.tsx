@@ -251,3 +251,59 @@ it.each(['wallet', 'settings', 'starter', 'idle-wallet', 'idle-settings'] as con
   press(panel !== 'settings' ? '[data-wallet-close]' : '[data-settings-close]'); await flush();
   await vi.waitFor(() => expect(mount.querySelector('[data-owner-approval-sheet="selected-request"]')).not.toBeNull());
 });
+
+it.each(['reconcile', 'connection'] as const)('preserves the %s check and its result when an approval notification is clicked', async check => {
+  const { ControlCenter } = await import('../src/control/Shell');
+  const { sampleSource, SAMPLE_OWN_ID } = await import('../src/control/sample');
+  native.isTauri.mockReturnValue(true);
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Macintosh');
+  const source = sampleSource({ firstLiveMs: 1e9 });
+  const overview = await source.nodeOverview();
+  source.nodeOverview = async () => ({ ...overview, capabilities: ['owner_device_approval_v1'] });
+  source.deviceKeys = async () => ({ device_approvals: 'enabled', owner_device_count: 1, device_keys: [] });
+  source.approvalsPending = async () => ['first-request', 'clicked-request'].map(op_id => ({
+    op_id, node: 'n', client_id: 'phone', client_pubkey: 'cd'.repeat(32), epoch: 4, grant_op: null,
+    request: { kind: 'spend_grant' as const, terms: { budget_msat: 2000000, per_call_max_msat: 1000, window_secs: 600 } },
+    nonce: '11'.repeat(16), expires_at: Date.now() / 1000 + 300, approval_message: 'signed bytes', status: 'pending' as const, owner_action: null,
+  }));
+  const budget = await source.budgetStatus();
+  source.budgetStatus = async () => ({ ...budget, unsettled_msat: check === 'reconcile' ? 2000 : 0 });
+  let finish!: () => void;
+  source.spendReconcile = async () => {
+    await new Promise<void>(resolve => { finish = resolve; });
+    return 'Previous action settled.';
+  };
+  const [answer, setAnswer] = createSignal<{ at: number; ms: number } | null>(null);
+  const checkedAt = new Date(2026, 9, 22, 12, 4, 31).getTime();
+  const onCheckNode = async () => {
+    await new Promise<void>(resolve => { finish = resolve; });
+    setAnswer({ at: checkedAt, ms: 85 });
+  };
+  const mount = document.createElement('div'); document.body.append(mount);
+  // Deliberately leave the parent idle: the card's own pending promise must
+  // register with the real settings scope, without the shell's checkingNode guard.
+  const unmount = render(() => <ControlCenter source={source} active ready remote error={null} ownId={SAMPLE_OWN_ID}
+    firstRun={null} onCheckNode={onCheckNode} checkingNode={false} nodeAnswer={answer()} />, mount);
+  dispose = () => { unmount(); mount.remove(); };
+  const press = (selector: string) => mount.querySelector<HTMLButtonElement>(selector)!.click();
+  await vi.waitFor(() => expect(native.sendNotification).toHaveBeenCalledTimes(2));
+  press('[data-owner-sheet-dismiss]');
+  press(check === 'reconcile' ? '[data-tab="wallet"]' : '[data-tab="node"]');
+  if (check === 'reconcile') press('[data-open-wallet-page]');
+  const panel = check === 'reconcile' ? '[data-wallet-page]' : '[data-settings][aria-hidden="false"]';
+  const button = `${panel} ${check === 'reconcile' ? '[data-spend-reconcile]' : '[data-connection-check]'}`;
+  await vi.waitFor(() => expect(mount.querySelector(button)).not.toBeNull());
+  press(button);
+  expect(mount.querySelector<HTMLButtonElement>(button)!.disabled).toBe(true);
+  click({ actionId: 'tap', notification: { id: native.sendNotification.mock.calls[1][0].id } }); await flush();
+  expect(mount.querySelector(panel)).not.toBeNull();
+  expect(mount.querySelector('[data-owner-approval-sheet]')).toBeNull();
+  finish(); await flush();
+  expect(mount.querySelector(panel)).not.toBeNull();
+  expect(mount.querySelector<HTMLButtonElement>(button)!.disabled).toBe(false);
+  expect(mount.querySelector(`${panel} ${check === 'reconcile' ? '[data-reconciliation]' : '[data-connection-line="2"]'}`)?.textContent)
+    .toBe(check === 'reconcile' ? 'Previous action settled.' : `Last status check: ${new Date(checkedAt).toLocaleTimeString()} · 85 ms (this app ↔ its host)`);
+  expect(mount.querySelector('[data-owner-approval-sheet]')).toBeNull();
+  press(check === 'reconcile' ? '[data-wallet-close]' : '[data-settings-close]'); await flush();
+  await vi.waitFor(() => expect(mount.querySelector('[data-owner-approval-sheet="clicked-request"]')).not.toBeNull());
+});
