@@ -116,6 +116,7 @@ fn main() {
             "voice_note_fetch",
             "file_fetch",
             "file_save",
+            "call_audio_session",
             "call_quote",
             "call_signal",
             "porch_quote",

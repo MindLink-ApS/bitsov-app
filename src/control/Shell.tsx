@@ -1,3 +1,5 @@
+import { MediaView } from './CallMedia';
+import { invoke } from '@tauri-apps/api/core';
 import { OwnerApprovalSheets } from './OwnerApprovalSheet';
 import { FirstSpendSheet, type FirstSpendChoice } from './FirstSpendSheet';
 import { createAmountDraft } from './amountDraft';
@@ -1247,6 +1249,7 @@ export function ControlCenter(props: Props) {
   const [callApproval, setCallApproval] = createSignal(false);
   const [callApproving, setCallApproving] = createSignal(false);
   const calls = createCallEngine({
+    audioSession: appPlatform() === 'ios' ? (live) => invoke<void>('call_audio_session', { live }) : undefined,
     closeAdmission: (operationId, peer, callId) => source.closeCallAdmission(operationId, peer, callId),
     authorize: async () => {
       const pairing = await act(() => source.pairingStatus());
@@ -1302,6 +1305,12 @@ export function ControlCenter(props: Props) {
   const stunSource = (): StunSource => (stunOff() ? 'off' : stunPref() ? 'custom' : nodeStun() ? 'node' : overview() ? 'none' : 'checking');
   // Closing the window ends the call here without paying; only Hang up pays.
   onCleanup(() => calls.endLocal());
+  if (appPlatform() === 'ios') {
+    const visibility = () => calls.setBackgrounded(document.visibilityState === 'hidden');
+    document.addEventListener('visibilitychange', visibility);
+    visibility();
+    onCleanup(() => document.removeEventListener('visibilitychange', visibility));
+  }
 
   // Meetings: up to 4 people, one ordinary paid 1:1 call per pair (meeting.ts).
   const [meetingView, setMeetingView] = createSignal<MeetingView>(MEETING_IDLE);
@@ -3210,14 +3219,6 @@ const END_REASON: Record<string, string> = {
   get hangup() { return tr('callHungUp'); }, get declined() { return tr('callDeclined'); },
   get busy() { return tr('callBusy'); }, get timeout() { return tr('callNoAnswer'); }, get failed() { return tr('callFailed'); },
 };
-
-function MediaView(props: { stream: MediaStream | null; video: boolean; muted: boolean; kind: 'local' | 'remote' }) {
-  let el: HTMLMediaElement | undefined;
-  createEffect(() => { if (el) el.srcObject = props.stream; });
-  return props.video
-    ? <video ref={(v) => { el = v; }} autoplay playsinline muted={props.muted} class={`call-video ${props.kind}`} data-call-media={props.kind} />
-    : <audio ref={(a) => { el = a; }} autoplay muted={props.muted} data-call-media={props.kind} />;
-}
 
 /** The call card: incoming (accept/decline with price), ringing, live (mute, camera, duration, hang up), ended. */
 function CallPanel(props: {
