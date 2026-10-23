@@ -456,6 +456,77 @@ describe('invisible payments in the composer and the context panel', () => {
     expect($('[data-budget="ok"]')).toBeNull();
   });
 
+  it.each([
+    ['en', 'device_remote_unsupported', "Your node can't take device approvals over remote access yet. Nothing was approved. Update your node, or approve at the node."],
+    ['en', 'device_unsupported', 'This node version does not take device approvals. Approve at the node instead.'],
+    ['da', 'device_remote_unsupported', 'Din node kan endnu ikke modtage enhedsgodkendelser via fjernadgang. Intet blev godkendt. Opdater din node, eller godkend direkte på noden.'],
+    ['en', 'device_cancelled', 'Touch ID was cancelled.'],
+    ['en', 'node', 'The node could not be reached.'],
+  ] as const)('shows a %s %s approval failure in budget mode and keeps the draft', async (lang, code, expected) => {
+    const host = stubHost(budgetView({
+      node_grant: { budget_msat: 200_000, remaining_msat: 200_000, per_call_max_msat: 200_000, expires_at_ms: Date.now() + DAY, envelopes: {} },
+    }), {
+      pairing_status: () => ({ ...paired, remote: true, trust_acknowledged_node_id: OWN }),
+      device_key_status: () => ({ available: true, state: 'registered', fingerprint: 'fixture', owner_action: null, expires_at_ms: null }),
+      relation_approve: () => { throw { code, message: code === 'device_remote_unsupported' ? 'Host fallback' : expected }; },
+    });
+    await openShell();
+    setLanguagePref(lang);
+    type('[data-composer] textarea', 'hello Maya');
+    await waitFor(() => expect(text('[data-send]')).toBe(lang === 'da' ? 'Godkend med Touch ID' : 'Approve with Touch ID'));
+    expect($('[data-budget]')).not.toBeNull();
+    sendOnly();
+    await waitFor(() => expect(text('[data-budget-error][role="alert"]')).toBe(expected));
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Maya');
+    expect(host.used('message_send')).toHaveLength(0);
+    expect(host.used('relation_approve')).toHaveLength(1);
+  });
+
+  it.each(['chat', 'budget', 'late-chat', 'late-budget', 'poll'] as const)('isolates contact approval errors from %s changes', async (kind) => {
+    let rejectApproval: ((error: unknown) => void) | undefined;
+    const host = stubHost(budgetView({
+      node_grant: { budget_msat: 200_000, remaining_msat: 200_000, per_call_max_msat: 200_000, expires_at_ms: Date.now() + DAY, envelopes: {} },
+    }), {
+      device_key_status: () => ({ available: true, state: 'registered', fingerprint: 'fixture', owner_action: null, expires_at_ms: null }),
+      relation_approve: () => new Promise((_resolve, reject) => { rejectApproval = reject; }),
+      budget_pause: () => { throw { code: 'node', message: 'Newer budget failure' }; },
+      ...(kind === 'poll' ? { spend_status: () => { throw { code: 'node', message: 'Spend poll failure' }; } } : {}),
+    });
+    await openShell();
+    type('[data-composer] textarea', 'hello Maya');
+    if (kind === 'poll') {
+      await waitFor(() => expect(host.used('spend_status').length).toBeGreaterThan(0));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(text('[data-budget-error]')).toBe('');
+      return;
+    }
+    await waitFor(() => expect(text('[data-send]')).toBe('Approve with Touch ID'));
+    sendOnly();
+    await waitFor(() => expect(rejectApproval).toBeDefined());
+    if (!kind.startsWith('late-')) {
+      rejectApproval!({ code: 'node', message: 'Contact approval failure' });
+      await waitFor(() => expect(text('[data-budget-error]')).toBe('Contact approval failure'));
+    }
+    if (kind.endsWith('chat')) {
+      $<HTMLButtonElement>(`[data-track="peer:${NEW}"]`)!.click();
+      type('[data-composer] textarea', 'hello Nadia');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(text('[data-budget-error]')).toBe('');
+      $<HTMLButtonElement>(`[data-track="peer:${MAYA}"]`)!.click();
+      await vi.advanceTimersByTimeAsync(0);
+    } else {
+      $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+      $<HTMLButtonElement>('[data-pause-all]')!.click();
+      await waitFor(() => expect(text('[data-budget-error]')).toBe('Newer budget failure'));
+    }
+    if (kind.startsWith('late-')) {
+      rejectApproval!({ code: 'node', message: 'Contact approval failure' });
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(text('[data-budget-error]')).toBe(kind.endsWith('chat') ? '' : 'Newer budget failure');
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
   it('uses restored auto-pay for a registered device without opening manual payments', async () => {
     stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }], {
       node_grant: { budget_msat: 5_000_000, remaining_msat: 4_995_000, per_call_max_msat: 50_000, expires_at_ms: Date.now() + DAY, envelopes: { [MAYA]: Date.now() + DAY } },

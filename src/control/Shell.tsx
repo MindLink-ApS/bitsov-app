@@ -557,6 +557,18 @@ export function ControlCenter(props: Props) {
     }
   }));
   const [errors, setErrors] = createStore<Record<string, string | undefined>>({});
+  const [contactApprovalError, setContactApprovalError] = createSignal<{ peer: string; message: string } | null>(null);
+  let contactApprovalRevision = 0;
+  const clearContactApprovalError = () => {
+    ++contactApprovalRevision;
+    setContactApprovalError(null);
+  };
+  // Invalidate in-flight failures too: returning to a chat must not revive them.
+  createEffect(on(() => track() ? trackKey(track()!) : null, clearContactApprovalError));
+  const approvalErrorFor = (t: TrackRef) => {
+    const error = contactApprovalError();
+    return t.kind === 'peer' && error?.peer === t.id.toLowerCase() ? error.message : undefined;
+  };
   const [contextOpen, setContextOpen] = createSignal(false);
   /** The full-screen Wallet page, on this tab; null when closed. */
   const [walletTab, setWalletTab] = createSignal<WalletTab | null>(null);
@@ -731,7 +743,7 @@ export function ControlCenter(props: Props) {
   const loadSpend = () => attempt('spendPoll', () => source.spendStatus(), (value) => {
     const resolved = spend()?.state !== 'open' && value.state === 'open';
     setSpend(value);
-    if (resolved) setErrors('spend', undefined);
+    if (resolved) { setErrors('spend', undefined); clearContactApprovalError(); }
   });
   // Never an error line of its own: without a device key the console path stays.
   const loadDevice = () => source.deviceKeyStatus().then(setDevice, () => setDevice(null));
@@ -1451,6 +1463,7 @@ export function ControlCenter(props: Props) {
     fileFetch: (messageId) => source.fileFetch(messageId),
     fileSave: (messageId) => source.fileSave(messageId),
     approve: async () => {
+      clearContactApprovalError();
       setErrors('spend', undefined);
       const r = await act(() => source.spendRequest());
       if (r.ok) setSpend(r.value);
@@ -1458,11 +1471,13 @@ export function ControlCenter(props: Props) {
       return approvalResult(r);
     },
     lock: async () => {
+      clearContactApprovalError();
       setErrors('spend', undefined);
       const r = await act(() => source.spendLock());
       if (r.ok) setSpend(r.value);
     },
     cancelSpend: async () => {
+      clearContactApprovalError();
       setErrors('spend', undefined);
       const r = await act(() => source.spendCancel());
       if (r.ok) {
@@ -1481,6 +1496,7 @@ export function ControlCenter(props: Props) {
       setContextOpen(true);
     },
     registerDevice: async () => {
+      clearContactApprovalError();
       setErrors('spend', undefined);
       const r = await act(() => source.deviceKeyRegister());
       if (r.ok) {
@@ -1494,14 +1510,17 @@ export function ControlCenter(props: Props) {
     },
     noEnvelopeFor,
     approveContact: async (peer, perActMsat) => {
-      setErrors('spend', undefined);
+      clearContactApprovalError();
+      const revision = contactApprovalRevision;
       const r = await act(() => source.relationApprove(peer, null, perActMsat));
       if (r.ok) {
         setSpend(r.value);
-        setErrors('spend', undefined);
         if (noEnvelopeFor() === peer) setNoEnvelopeFor(null);
       } else {
-        setErrors('spend', r.error.message);
+        if (revision === contactApprovalRevision) setContactApprovalError({
+          peer: peer.toLowerCase(),
+          message: r.error.code === 'device_remote_unsupported' ? tr('relationApprovalRemoteUnsupported') : r.error.message,
+        });
         if (r.error.code === 'device_invalid') void loadDevice();
       }
       // The read started next is the first one after this approval returned.
@@ -1533,6 +1552,7 @@ export function ControlCenter(props: Props) {
       return r;
     },
     approveBudget: async (ceilingMsat, preset) => {
+      clearContactApprovalError();
       setErrors('budget', undefined);
       const r = await act(() => source.budgetApprove(ceilingMsat, preset));
       if (r.ok) {
@@ -1547,6 +1567,7 @@ export function ControlCenter(props: Props) {
       return { ...approvalResult(r), readsFrom };
     },
     setBudget: async (target, room, limitMsat) => {
+      clearContactApprovalError();
       const r = await act(() => source.budgetSet(target, room, limitMsat));
       if (r.ok) {
         setBudget(r.value);
@@ -1556,6 +1577,7 @@ export function ControlCenter(props: Props) {
       return r;
     },
     pauseAll: async () => {
+      clearContactApprovalError();
       setErrors('budget', undefined);
       const r = await act(() => source.budgetPause());
       if (r.ok) setBudget(r.value);
@@ -1563,6 +1585,7 @@ export function ControlCenter(props: Props) {
       void loadSpend();
     },
     resume: async () => {
+      clearContactApprovalError();
       setErrors('budget', undefined);
       const r = await act(() => source.budgetResume());
       if (r.ok) {
@@ -2117,6 +2140,7 @@ export function ControlCenter(props: Props) {
                     spendError={errors.spend ?? errors.spendPoll}
                     budget={budget()}
                     budgetError={errors.budget ?? errors.budgetPoll}
+                    approvalError={approvalErrorFor(t())}
                     budgetStale={grantUnknown() || (budget() !== null && (!budgetConfirmed() || !!errors.budgetPoll))}
                     actions={actions}
                     now={now()}
@@ -2861,6 +2885,7 @@ function Conversation(props: {
   spendError: string | undefined;
   budget: BudgetView | null;
   budgetError: string | undefined;
+  approvalError?: string;
   budgetStale: boolean;
   actions: Actions;
   now: number;
@@ -3071,6 +3096,7 @@ function Conversation(props: {
         spendError={props.spendError}
         budget={props.budget}
         budgetError={props.budgetError}
+        approvalError={props.approvalError}
         budgetStale={props.budgetStale}
         actions={props.actions}
         nameOf={props.nameOf}
@@ -4442,6 +4468,7 @@ function Composer(props: {
   spendError: string | undefined;
   budget?: BudgetView | null;
   budgetError?: string;
+  approvalError?: string;
   budgetStale?: boolean;
   actions: Actions;
   nameOf: (id: string) => string;
@@ -6401,7 +6428,7 @@ function Composer(props: {
         <Show when={!props.budgetStale} fallback={<p class="spend-line" data-budget-stale>{tr('uiSpendGrantStaleCheckingYourNodeAutoPay')}</p>}>
           <Show
             when={viaBudget()}
-            fallback={<SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} stays={mode() === 'message' ? (consent() ? tr('uiYourMessageWaitsInItsBubbleAndSends') : tr('uiYourDraftIsKeptNothingIsSentUntil')) : undefined} />}
+            fallback={<SpendBar spend={props.spend} error={props.approvalError ?? props.spendError} now={props.now} actions={props.actions} hasPending={props.hasPending} stays={mode() === 'message' ? (consent() ? tr('uiYourMessageWaitsInItsBubbleAndSends') : tr('uiYourDraftIsKeptNothingIsSentUntil')) : undefined} />}
           >
             <BudgetBar
               stand={stand()}
@@ -6414,7 +6441,7 @@ function Composer(props: {
               door={doorQuote()}
               firstPick={firstPick()}
               onFirstPick={setFirstPick}
-              error={props.budgetError}
+              error={props.budgetError ?? props.approvalError}
               now={props.now}
               actions={props.actions}
               hasPending={props.hasPending}
