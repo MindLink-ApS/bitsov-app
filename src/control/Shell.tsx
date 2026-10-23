@@ -427,7 +427,7 @@ export function ControlCenter(props: Props) {
       const q = await source.priceQuote((t as { id: string }).id);
       if (read === quoteRead && track() && trackKey(track()!) === trackKey(t)) setQuote(q);
     } catch (error) {
-      if (read === quoteRead && track() && trackKey(track()!) === trackKey(t)) setQuoteError(peerNotReadyMessage(error, t.kind === 'peer' ? nameOf(t.id) : 'This peer') ?? 'price unavailable · could not read peer price');
+      if (read === quoteRead && track() && trackKey(track()!) === trackKey(t)) setQuoteError(peerNotReadyMessage(error, t.kind === 'peer' ? nameOf(t.id) : tr('caThisPeer')) ?? tr('caPriceUnavailableCouldNotReadPeerPrice'));
     }
   };
   const [roomQuote, setRoomQuote] = createSignal<RoomQuote | null>(null);
@@ -1078,7 +1078,7 @@ export function ControlCenter(props: Props) {
   // behind it wait; once the queue is empty a new press goes to the host.
   let queueHold = false;
   // Why the queue holds, said on each message it keeps back.
-  let holdWhy = 'Not sent, nothing paid: an earlier payment’s result is not known yet.';
+  let holdWhy = tr('caNotSentNothingPaidAnEarlierPaymentSResult');
   // Only a pending check lifts "check first"; a released undelivered record lifts the paid hold.
   createEffect(on(reconciled, () => { setCheckFirst(false); queueHold = false; }, { defer: true }));
   createEffect(on(pendingRevision, () => { queueHold = false; }, { defer: true }));
@@ -1097,37 +1097,37 @@ export function ControlCenter(props: Props) {
       return run;
     },
     held: () => untrack(checkFirst) || queueHold,
-    blocked: () => (checkFirst() ? 'A payment result is not known yet. Nothing was sent. Check pending result, then press Send.' : null),
+    blocked: () => (checkFirst() ? tr('caAPaymentResultIsNotKnownYetNothingWas') : null),
     settled: (r, t, text, at) => {
       // Only a code proven unpaid is "refused" (words back, resend offered); anything else is held as unknown.
       const outcome = r.ok ? 'sent' : provenUnpaid(r.error.code) ? 'refused' : paidUndelivered(r) || r.error.code === 'failed_paid' ? 'paid' : 'unknown';
-      if (outcome === 'unknown') { setCheckFirst(true); holdWhy = 'Not sent, nothing paid: an earlier payment’s result is not known yet.'; }
+      if (outcome === 'unknown') { setCheckFirst(true); holdWhy = tr('caNotSentNothingPaidAnEarlierPaymentSResult'); }
       if (outcome === 'paid') {
         queueHold = true;
         if (!untrack(checkFirst)) holdWhy = paidUndelivered(r)
-          ? 'Not sent, nothing paid: an earlier message was paid but not delivered. Check pending result first.'
-          : 'Not sent, nothing paid: an earlier message was paid but refused by their node. Check pending result first.';
+          ? tr('caNotSentNothingPaidAnEarlierMessageWasPaid')
+          : tr('caNotSentNothingPaidAnEarlierMessageWasPaid515');
       }
       const here = box && box.key() === trackKey(t) ? box : null;
       if (!r.ok && outcome === 'refused') {
         // Back in the box only where it was typed: the same composer, untouched since the press.
         if (here && here.id === at.box && here.revision() === at.revision && !here.draft()) {
           here.setDraft(text);
-          if (!here.note()) here.setNote('Not sent. Your message is back in the box; press Send to try again.');
+          if (!here.note()) here.setNote(tr('caNotSentYourMessageIsBackInTheBox'));
         } else {
           addArtifact(t, { type: 'unsent', text, why: 'refused', reason: r.error.message });
-          if (here && !here.note()) here.setNote('Not sent. Nothing was paid. The message is kept in this chat: put it back in the box to try again.');
+          if (here && !here.note()) here.setNote(tr('caNotSentNothingWasPaidTheMessageIsKept'));
         }
       }
-      if (here && outcome === 'unknown') here.setNote('The payment result is not known yet. Check pending result before sending it again.');
-      announce(outcome === 'sent' ? 'Message sent.' : outcome === 'paid' ? (paidUndelivered(r) ? 'Paid, not delivered.' : 'Paid, refused by their node.') : outcome === 'unknown' ? 'Message payment result unknown.' : 'Message not sent.');
+      if (here && outcome === 'unknown') here.setNote(tr('caThePaymentResultIsNotKnownYetCheckPending'));
+      announce(outcome === 'sent' ? tr('caMessageSent') : outcome === 'paid' ? (paidUndelivered(r) ? tr('caPaidNotDelivered') : tr('caPaidRefusedByTheirNode')) : outcome === 'unknown' ? tr('caMessagePaymentResultUnknown') : tr('caMessageNotSent'));
     },
     holdBack: (t, bubble, text) => {
       batch(() => {
         dropArtifact(t, bubble);
-        addArtifact(t, { type: 'unsent', text, why: 'held', reason: untrack(checkFirst) ? 'Not sent, nothing paid: an earlier payment’s result is not known yet.' : holdWhy });
+        addArtifact(t, { type: 'unsent', text, why: 'held', reason: untrack(checkFirst) ? tr('caNotSentNothingPaidAnEarlierPaymentSResult') : holdWhy });
       });
-      announce(untrack(checkFirst) ? 'Message held: an earlier payment is not checked yet.' : 'Message held: an earlier message was paid but not finished.');
+      announce(untrack(checkFirst) ? tr('caMessageHeldAnEarlierPaymentIsNotCheckedYet') : tr('caMessageHeldAnEarlierMessageWasPaidButNot'));
     },
     withdraw: (t, bubble, text, reason) => {
       // Checked before anything was dispatched: nothing was paid.
@@ -1135,7 +1135,7 @@ export function ControlCenter(props: Props) {
         dropArtifact(t, bubble);
         addArtifact(t, { type: 'unsent', text, why: 'refused', reason });
       });
-      announce('Message not sent.');
+      announce(tr('caMessageNotSent'));
     },
     attach: (b) => {
       box = b;
@@ -1221,8 +1221,8 @@ export function ControlCenter(props: Props) {
     const b = budget();
     if (!b || spendLine(spend(), now()).open) return null;
     const stand = budgetStand(b, peer, false, msat);
-    if (stand.kind === 'first') return 'No budget for them yet: message them once in their chat first. Not charged.';
-    if (stand.kind === 'contact_used') return 'Their budget is used up for today. Not charged.';
+    if (stand.kind === 'first') return tr('caNoBudgetForThemYetMessageThemOnceIn');
+    if (stand.kind === 'contact_used') return tr('caTheirBudgetIsUsedUpForTodayNotCharged');
     return null;
   };
   const createRoom = async (picks: string[]) => {
@@ -1274,7 +1274,7 @@ export function ControlCenter(props: Props) {
     },
     getUserMedia: (c) => navigator.mediaDevices?.getUserMedia
       ? navigator.mediaDevices.getUserMedia(c)
-      : Promise.reject(Object.assign(new Error('No media devices in this webview'), { name: NO_MEDIA_DEVICES })),
+      : Promise.reject(Object.assign(new Error(tr('caNoMediaDevicesInThisWebview')), { name: NO_MEDIA_DEVICES })),
     peerConnection: (config) => new RTCPeerConnection(config),
     now: () => Date.now(),
     onView: setCallView,
@@ -1329,7 +1329,7 @@ export function ControlCenter(props: Props) {
     },
     getUserMedia: (c) => navigator.mediaDevices?.getUserMedia
       ? navigator.mediaDevices.getUserMedia(c)
-      : Promise.reject(Object.assign(new Error('No media devices in this webview'), { name: NO_MEDIA_DEVICES })),
+      : Promise.reject(Object.assign(new Error(tr('caNoMediaDevicesInThisWebview')), { name: NO_MEDIA_DEVICES })),
     peerConnection: (config) => new RTCPeerConnection(config),
     ownId: () => ownId(),
     canMeet: (peer) => nodeMeets() && peerById().get(peer.toLowerCase())?.meetings === true,
@@ -1440,7 +1440,7 @@ export function ControlCenter(props: Props) {
       // A delayed check of an older slot cannot clear a newer payment in any
       // card, including through Reconcile's local onChecked callback.
       if (generation !== paymentGeneration || revision !== pendingRevision()) {
-        return { ok: false, error: { code: 'spend_unknown', message: 'A newer payment started. Check pending result again.' } };
+        return { ok: false, error: { code: 'spend_unknown', message: tr('caANewerPaymentStartedCheckPendingResultAgain') } };
       }
       if (r.ok) {
         setReconciled((v) => v + 1);
@@ -1530,7 +1530,7 @@ export function ControlCenter(props: Props) {
     discardUnsent: (t, id) => dropArtifact(t, id),
     queue,
     send: async (t, text, maxMsat, firstContactMsat, pendingBubble) => {
-      if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: 'nothing to send to' } };
+      if (t.kind !== 'peer' && t.kind !== 'room') return { ok: false, error: { code: 'invalid', message: tr('caNothingToSendTo') } };
       // Optimistic: the message shows at once as "Sending · up to N"; the
       // settled message (or its failure card) replaces it below.
       const sendingId = pendingBubble ?? addArtifact(t, { type: 'sending', text, capMsat: maxMsat });
@@ -1573,7 +1573,7 @@ export function ControlCenter(props: Props) {
         if (r.ok) sentOne(t, r.value, text, false);
         for (const m of released) reclaimEcho(t, m);
         // Unknown or partly paid: the failure card keeps the whole text, with no resend.
-        return recordFailure(t, !r.ok && r.error.code === 'room_partial' ? 'Room send incomplete' : 'Message not sent', r, !r.ok && !provenUnpaid(r.error.code) ? text : undefined);
+        return recordFailure(t, !r.ok && r.error.code === 'room_partial' ? tr('caRoomSendIncomplete') : tr('caMessageNotSent535'), r, !r.ok && !provenUnpaid(r.error.code) ? text : undefined);
       });
     },
     retryDelivery: async (t, artifactId, approvedMsat) => {
@@ -1583,17 +1583,17 @@ export function ControlCenter(props: Props) {
       const key = trackKey(t);
       const a = (artifacts[key] ?? []).find((x) => x.id === artifactId);
       if (t.kind !== 'peer' || a?.type !== 'undelivered' || !a.paid.retry) {
-        return { ok: false, error: { code: 'retry_unavailable', message: 'Nothing to retry.' } };
+        return { ok: false, error: { code: 'retry_unavailable', message: tr('caNothingToRetry') } };
       }
       // Only the price the card shows can be approved.
       if (approvedMsat !== undefined && approvedMsat !== a.admission?.total_msat) {
-        return { ok: false, error: { code: 'retry_unavailable', message: 'Nothing to approve.' } };
+        return { ok: false, error: { code: 'retry_unavailable', message: tr('caNothingToApprove') } };
       }
       const text = a.text;
       const update = (next: Partial<Extract<Artifact, { type: 'undelivered' }>> | null) =>
         setArtifacts(key, (old) => (old ?? []).flatMap((x) => (x.id !== artifactId ? [x] : next ? [{ ...x, ...next } as Artifact] : [])));
       const current = () => !moneyBlocked() && submittedApprovalRevision === retryApprovalRevision && submittedView === viewGeneration && (artifacts[key] ?? []).some((x) => x.id === artifactId && x.type === 'undelivered' && x.pendingId === a.pendingId);
-      const waiting: Outcome<unknown> = { ok: false, error: { code: 'owner_only', message: 'Approve this retry at your node, then check approval.' } };
+      const waiting: Outcome<unknown> = { ok: false, error: { code: 'owner_only', message: tr('caApproveThisRetryAtYourNodeThenCheckApproval') } };
       if (approvedMsat !== undefined) {
         const ownerApproval = a.ownerApproval;
         if (ownerApproval) {
@@ -1627,7 +1627,7 @@ export function ControlCenter(props: Props) {
         sentOne(t, r.value, text);
       } else if (r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
         const paid = r.error.undelivered;
-        update({ paid, admission: null, pendingId: r.error.pending_id ?? a.pendingId, note: `Still not delivered. Paid for this message so far: ${sats(paid.paid_msat)} ${satUnit(paid.paid_msat)}.` });
+        update({ paid, admission: null, pendingId: r.error.pending_id ?? a.pendingId, note: tr('caStillNotDeliveredPaidForThisMessageSoFar', sats(paid.paid_msat), satUnit(paid.paid_msat)) });
       } else if (r.error.code === 'not_ready') {
         // The shared notice owns this refusal; the paid card stays retryable.
         update({ ownerApproval: null, note: null });
@@ -1646,7 +1646,7 @@ export function ControlCenter(props: Props) {
     },
     stopRetrying: async (t, pendingId) => {
       // Only the record this card (or the pending check) showed: never another one.
-      if (!pendingId) return { ok: false, error: { code: 'retry_unavailable', message: 'Check the pending result first.' } };
+      if (!pendingId) return { ok: false, error: { code: 'retry_unavailable', message: tr('caCheckThePendingResultFirst') } };
       const r = await act(() => props.source.dismissUndelivered(pendingId));
       void loadBudget();
       if (r.ok) {
@@ -1662,7 +1662,7 @@ export function ControlCenter(props: Props) {
             setArtifacts(key, (old) => (old ?? []).filter((x) => !(x.type === 'undelivered' && x.pendingId === pendingId)));
           }
         }
-        if (t) addArtifact(t, { type: 'failed', action: 'Stopped retrying', error: { code: 'undelivered_pending', message: r.value } });
+        if (t) addArtifact(t, { type: 'failed', action: tr('caStoppedRetrying'), error: { code: 'undelivered_pending', message: r.value } });
       }
       return r;
     },
@@ -1681,7 +1681,7 @@ export function ControlCenter(props: Props) {
         void loadWallet();
       }
       if (r.ok && r.value.status === 'failed') paymentFailures++;
-      return recordFailure(t, 'Payment not sent', r);
+      return recordFailure(t, tr('caPaymentNotSent'), r);
     },
     keysend: async (t, pubkey, msat, memo) => {
       paymentGeneration++;
@@ -1692,12 +1692,12 @@ export function ControlCenter(props: Props) {
         void loadWallet();
       }
       if (r.ok && r.value.status === 'failed') paymentFailures++;
-      return recordFailure(t, 'Payment not sent', r);
+      return recordFailure(t, tr('caPaymentNotSent'), r);
     },
     file: async (t, file, maxMsat, firstContactMsat) => {
-      if (t.kind !== 'peer') return { ok: false, error: { code: 'invalid', message: 'Files go to one peer at a time.' } };
+      if (t.kind !== 'peer') return { ok: false, error: { code: 'invalid', message: tr('caFilesGoToOnePeerAtATime') } };
       const data = await readBase64(file).catch(() => null);
-      if (data === null) return { ok: false, error: { code: 'invalid', message: 'the file could not be read' } };
+      if (data === null) return { ok: false, error: { code: 'invalid', message: tr('caTheFileCouldNotBeRead') } };
       const r = await act(() => source.fileSend(t.id, file.name, file.type, data, maxMsat, firstContactMsat));
       void loadBudget();
       void loadWallet();
@@ -1711,7 +1711,7 @@ export function ControlCenter(props: Props) {
         setThreads('fresh', r.value.message_id, true);
         setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sentFileMessage(r.value, ownId())]));
       }
-      return recordFailure(t, 'File not sent', r);
+      return recordFailure(t, tr('caFileNotSent'), r);
     },
   };
 
@@ -1720,15 +1720,15 @@ export function ControlCenter(props: Props) {
 
   const trackName = (t: TrackRef): string => {
     if (t.kind === 'peer') return peerName(peerById().get(t.id), t.id);
-    if (t.kind === 'room') return rooms().find((r) => r.id.toLowerCase() === t.id)?.name ?? 'Room';
+    if (t.kind === 'room') return rooms().find((r) => r.id.toLowerCase() === t.id)?.name ?? tr('caRoom');
     if (t.kind === 'bound') return boundName(t.id);
     if (t.kind === 'ai') return 'AI';
     if (t.kind === 'assistant') return ASSISTANTS[t.id].name;
-    if (t.kind === 'discover') return 'Browse';
-    if (t.kind === 'porch') return 'Porch';
-    return 'Start something';
+    if (t.kind === 'discover') return tr('uiBrowse');
+    if (t.kind === 'porch') return tr('uiPorch');
+    return tr('caStartSomething');
   };
-  const nameOf = (id: string) => (id.toLowerCase() === ownId().toLowerCase() ? 'You' : peerName(peerById().get(id.toLowerCase()), id));
+  const nameOf = (id: string) => (id.toLowerCase() === ownId().toLowerCase() ? tr('uiYou') : peerName(peerById().get(id.toLowerCase()), id));
   /** Resolve only an unambiguous mapping reported by the node. */
   const channelName = (pubkey: string) => {
     const matches = peers().filter((p) => p.ln_pubkey?.toLowerCase() === pubkey.toLowerCase());
@@ -1737,12 +1737,12 @@ export function ControlCenter(props: Props) {
   /** A room is named by its other members, as the owner calls them. */
   const boundName = (id: string) => {
     const own = ownId().toLowerCase();
-    return localRoom(id)?.roster.filter((p) => p !== own).map(nameOf).join(', ') || 'Room';
+    return localRoom(id)?.roster.filter((p) => p !== own).map(nameOf).join(', ') || tr('caRoom');
   };
   const trackKeyName = (key: string) => {
     const [kind, id] = key.split(':');
     if (kind === 'bound') return boundName(id ?? '');
-    return kind === 'room' ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id ?? key);
+    return kind === 'room' ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? tr('caRoom') : nameOf(id ?? key);
   };
   const roomContacts = () => peers().map((p) => ({
     id: p.node_id.toLowerCase(), name: peerName(p, p.node_id),
@@ -1825,7 +1825,7 @@ export function ControlCenter(props: Props) {
       />
 
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
-        <section class="track" aria-label="Track" inert={walletTab() !== null || contextOpen()}>
+        <section class="track" aria-label={tr('caTrack')} inert={walletTab() !== null || contextOpen()}>
           <Show when={track()}><button type="button" class="link ios-back" data-ios-back="thread" onClick={() => setTrack(null)}>{tr('uiBack')}</button></Show>
           {props.offline}
           <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
@@ -1836,13 +1836,11 @@ export function ControlCenter(props: Props) {
           <Show when={introNotice()}>
             {(n) => (
               <p class="ok-note intro-notice" data-intro-notice={n().node_id} role="status">
-                Connected to {shortId(n().node_id)} from their introduction. Nothing was paid.{' '}
+                {tr('caConnectedTo')}{' '}{shortId(n().node_id)}{' '}{tr('caFromTheirIntroductionNothingWasPaid')}{' '}
                 <button type="button" class="link" data-intro-notice-open onClick={() => openIntroduced(n())}>
-                  Open conversation
-                </button>{' '}
+                  {tr('caOpenConversation')}</button>{' '}
                 <button type="button" class="link" onClick={() => setIntroNotice(null)}>
-                  Dismiss
-                </button>
+                  {tr('ownerApprovalDismiss')}</button>
               </p>
             )}
           </Show>
@@ -1850,7 +1848,7 @@ export function ControlCenter(props: Props) {
             <Show when={peersLoaded()} fallback={
               <div class="empty-track">
                 <Show when={errors.peers} fallback={<DelayedSpinner />}>
-                  <SoftError message={errors.peers!} summary="We could not load your contacts." onReconnect={async () => { await props.onReconnect?.(); await loadPeers(); }} />
+                  <SoftError message={errors.peers!} summary={tr('caCouldNotLoadContacts')} onReconnect={async () => { await props.onReconnect?.(); await loadPeers(); }} />
                 </Show>
               </div>
             }>{welcomeHome()}</Show>
@@ -2126,7 +2124,7 @@ export function ControlCenter(props: Props) {
               onCancel={async () => setDevice(await source.deviceKeyCancel())} />
           </Match>
           <Match when={tab() === 'wallet'}>
-            <button type="button" class="primary soft" data-open-wallet-page onClick={() => openWallet()}>Open Wallet</button>
+            <button type="button" class="primary soft" data-open-wallet-page onClick={() => openWallet()}>{tr('caOpenWallet')}</button>
             <WalletPanel moneyBlocked={moneyBlocked()} wallet={wallet()} error={errors.wallet} onReconnect={async () => { await props.onReconnect?.(); await loadWallet(); }} fund={props.fund?.(source, moneyBlocked)} />
           </Match>
           <Match when={tab() === 'budget'}>
@@ -2134,7 +2132,7 @@ export function ControlCenter(props: Props) {
               budget={budget()}
               error={errors.budget ?? errors.budgetPoll}
               now={now()}
-              nameOf={(id, room) => (room ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? 'Room' : nameOf(id))}
+              nameOf={(id, room) => (room ? rooms().find((r) => r.id.toLowerCase() === id)?.name ?? tr('caRoom') : nameOf(id))}
               actions={actions}
             />
           </Match>
@@ -2151,16 +2149,16 @@ export function ControlCenter(props: Props) {
         approvalOpen={callApproval()}
         approval={<Show when={callApproval()}>
           <div data-call-approval>
-            <strong>Approve spending before calling</strong>
-            <p class="hint">Spending needs approval. After approval, press Call or Accept again.</p>
-            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} stays="Nothing is paid until you press Call or Accept again after approval." />
+            <strong>{tr('caApproveSpendingBeforeCalling')}</strong>
+            <p class="hint">{tr('caSpendingNeedsApprovalAfterApprovalPressCallOrAccept')}</p>
+            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} stays={tr('caNothingIsPaidUntilYouPressCallOrAccept')} />
             <Show when={spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
               <button type="button" class="soft" data-call-approve disabled={moneyBlocked() || callApproving()} onClick={async () => {
                 setCallApproving(true);
                 try { await actions.approve(); } finally { setCallApproving(false); }
-              }}>Approve spending</button>
+              }}>{tr('uiApproveSpending')}</button>
             </Show>
-            <button type="button" class="soft" onClick={() => setCallApproval(false)}>Close</button>
+            <button type="button" class="soft" onClick={() => setCallApproval(false)}>{tr('uiClose')}</button>
           </div>
         </Show>}
         payment={<Show when={callView().callId} keyed>{(callId) =>
@@ -3069,13 +3067,13 @@ function MessageView(props: {
                 when={!props.out && props.fileFetch && props.fileSave}
                 fallback={
                   <Show when={props.voiceUrl && isVoiceNote(props.m.kind, props.m.plaintext)} fallback={<span class="file-name">{props.m.plaintext ?? tr('extraFile')}</span>}>
-                    <VoiceNote id={props.m.id} name={fileNameOf(props.m.plaintext) ?? 'file'} load={props.voiceUrl!} />
+                    <VoiceNote id={props.m.id} name={fileNameOf(props.m.plaintext) ?? tr('fileNoun')} load={props.voiceUrl!} />
                   </Show>
                 }
               >
                 <ReceivedFile
                   id={props.m.id}
-                  name={fileNameOf(props.m.plaintext) ?? 'file'}
+                  name={fileNameOf(props.m.plaintext) ?? tr('fileNoun')}
                   voice={isVoiceNote(props.m.kind, props.m.plaintext) ? props.voiceUrl : undefined}
                   loadFile={props.fileFetch!}
                   save={props.fileSave!}
@@ -3370,7 +3368,7 @@ function CallPanel(props: {
         </Show>
         <Show when={v().phase !== 'ended' && v().error}>
           {/* Only a recovery that could not start is framed as one (the call still waits); any other error (a camera, say) as it is. */}
-          <p class="hint" data-call-error>{v().recoveryError === RECOVERY_CLOSING ? RECOVERY_CLOSING : v().phase === 'reconnecting' && v().recoveryError !== null ? tr('uiRecoveryCouldNotStartStillWaitingForThe', v().recoveryError ?? '') : v().error}</p>
+          <p class="hint" data-call-error>{v().recoveryError === RECOVERY_CLOSING ? tr('caRecoveryClosing') : v().phase === 'reconnecting' && v().recoveryError !== null ? tr('uiRecoveryCouldNotStartStillWaitingForThe', v().recoveryError ?? '') : v().error}</p>
         </Show>
         {props.payment}
         <div class="call-actions">
@@ -3413,7 +3411,7 @@ function CallPanel(props: {
 }
 
 const LEG_STATE: Record<LegState, string> = {
-  waiting: 'Waiting', placing: 'Preparing…', ringing: 'Ringing', incoming: 'Ringing you', connecting: 'Connecting', live: 'Live', reconnecting: 'Reconnecting…', ended: 'Ended', nolink: 'No link',
+  get waiting() { return tr('caWaiting'); }, get placing() { return tr('caPreparing'); }, get ringing() { return tr('callRinging'); }, get incoming() { return tr('caRingingYou'); }, get connecting() { return tr('callConnecting'); }, get live() { return tr('callLive'); }, get reconnecting() { return tr('callReconnecting'); }, get ended() { return tr('caEnded'); }, get nolink() { return tr('caNoLink'); },
 };
 
 /**
@@ -3488,8 +3486,8 @@ function MeetingPanel(props: {
   return (
     <>
       <Show when={planning()}>
-        <aside class="call-panel meeting-panel" data-meeting-panel="planning" role="dialog" aria-label="Plan a meeting">
-          <header><strong>Meeting</strong><span class="who">you and up to {MAX_PARTICIPANTS - 1} contacts</span></header>
+        <aside class="call-panel meeting-panel" data-meeting-panel="planning" role="dialog" aria-label={tr('caPlanAMeeting')}>
+          <header><strong>{tr('caMeeting')}</strong><span class="who">{tr('caYouAndUpTo')}{' '}{MAX_PARTICIPANTS - 1}{' '}{tr('caContacts')}</span></header>
           <ul class="meeting-legs">
             <For each={props.contacts}>
               {(c) => (
@@ -3501,36 +3499,36 @@ function MeetingPanel(props: {
                     <span classList={{ muted: !pickable(c.id) }}>{c.name}</span>
                   </label>
                   <Switch>
-                    <Match when={props.nodeMeets && !c.connected}><span class="hint" data-meeting-pick-note={c.id}> not connected</span></Match>
-                    <Match when={props.nodeMeets && !c.meetings}><span class="hint" data-meeting-pick-note={c.id}> needs update</span></Match>
-                    <Match when={quotes[c.id] === undefined}><span class="hint" data-meeting-pick-note={c.id}> reading price…</span></Match>
-                    <Match when={!priced(c.id)}><span class="hint" data-meeting-pick-note={c.id}> does not take calls</span></Match>
+                    <Match when={props.nodeMeets && !c.connected}><span class="hint" data-meeting-pick-note={c.id}>{' '}{tr('caNotConnected')}</span></Match>
+                    <Match when={props.nodeMeets && !c.meetings}><span class="hint" data-meeting-pick-note={c.id}>{' '}{tr('caNeedsUpdate')}</span></Match>
+                    <Match when={quotes[c.id] === undefined}><span class="hint" data-meeting-pick-note={c.id}>{' '}{tr('roomReadingPrice')}</span></Match>
+                    <Match when={!priced(c.id)}><span class="hint" data-meeting-pick-note={c.id}>{' '}{tr('caDoesNotTakeCalls')}</span></Match>
                   </Switch>
                 </li>
               )}
             </For>
           </ul>
-          <Show when={!props.nodeMeets}><p class="hint" data-meeting-node-update>Your node needs an update before it can hold meetings.</p></Show>
-          <Show when={props.blocked}><p class="hint" data-meeting-blocked>Payments are not ready yet, so nobody can be invited.</p></Show>
-          <p class="hint" data-meeting-note>You ring each person you pick (their call price, once each). Picked contacts who are not each other’s contacts will not hear each other. Media goes directly between you; it is not billed.</p>
+          <Show when={!props.nodeMeets}><p class="hint" data-meeting-node-update>{tr('caYourNodeNeedsAnUpdateBeforeItCanHold590')}</p></Show>
+          <Show when={props.blocked}><p class="hint" data-meeting-blocked>{tr('caPaymentsAreNotReadyYetSoNobodyCanBe')}</p></Show>
+          <p class="hint" data-meeting-note>{tr('caYouRingEachPersonYouPickTheirCallPrice')}</p>
           <div class="call-actions">
             <button type="button" class="primary soft money" data-meeting-invite disabled={planCost() === null} onClick={() => props.invite(props.plan!, 'audio', shown(props.plan!))}
-              aria-label={`Invite${planCost() !== null ? `, up to ${fmtAmount(planCost()!)}` : ''}`}>
-              Invite{price(planCost())}
+              aria-label={tr('caInviteExtra500', planCost() !== null ? tr('uiUpTo', fmtAmount(planCost()!)) : '')}>
+              {tr('caInvite')}{price(planCost())}
             </button>
             <button type="button" class="soft" data-meeting-invite-video disabled={planCost() === null} onClick={() => props.invite(props.plan!, 'video', shown(props.plan!))}
-              aria-label={`Video invite${planCost() !== null ? `, up to ${fmtAmount(planCost()!)}` : ''}`}>
-              Video invite{price(planCost())}
+              aria-label={tr('caVideoInvite', planCost() !== null ? tr('uiUpTo', fmtAmount(planCost()!)) : '')}>
+              {tr('caVideoInvite597')}{price(planCost())}
             </button>
-            <button type="button" class="soft" data-meeting-cancel onClick={() => props.setPlan(null)}>Cancel</button>
+            <button type="button" class="soft" data-meeting-cancel onClick={() => props.setPlan(null)}>{tr('cancel')}</button>
           </div>
         </aside>
       </Show>
       <Show when={v().phase !== 'idle' && !planning()}>
-        <aside class="call-panel meeting-panel" data-meeting-panel={v().phase} role="dialog" aria-label={`Meeting ${v().phase}`}>
+        <aside class="call-panel meeting-panel" data-meeting-panel={v().phase} role="dialog" aria-label={tr('caMeetingPhase', tr(({ idle: 'caMeetingIdle', invited: 'caMeetingInvited', active: 'caMeetingActive', ended: 'caMeetingEndedPhase' } as const)[v().phase]))}>
           <header>
-            <strong data-meeting-title>{v().phase === 'invited' ? 'Meeting invite' : v().phase === 'ended' ? 'Meeting ended' : `Meeting · ${v().roster.length} people`}</strong>
-            <span class="who">{v().phase === 'invited' ? `${host()} invites you, with ${others() || 'nobody else'}` : ''}</span>
+            <strong data-meeting-title>{v().phase === 'invited' ? tr('caMeetingInvite') : v().phase === 'ended' ? tr('caMeetingEnded') : tr('caMeetingPeople', v().roster.length)}</strong>
+            <span class="who">{v().phase === 'invited' ? tr('caInvitesYouWith', host(), others() || tr('caNobodyElse')) : ''}</span>
           </header>
           <Show when={v().phase === 'active' || (v().phase === 'ended' && v().legs.length > 0)}>
             <ul class="meeting-legs">
@@ -3545,29 +3543,27 @@ function MeetingPanel(props: {
             </ul>
           </Show>
           <Show when={v().phase === 'invited'}>
-            <p class="hint" data-meeting-ignore>Ignore it: nothing is paid, and the invite ends by itself after a minute.</p>
+            <p class="hint" data-meeting-ignore>{tr('caIgnoreItNothingIsPaidAndTheInviteEnds')}</p>
           </Show>
           {/* Receipts carry each signal's ceiling, not settled fees: "up to" is the honest total. */}
           <Switch>
             {/* Something is still in flight: never "paid nothing" (or a final total) until it settles. */}
             <Match when={v().pendingCount > 0}>
               <p class="hint" data-meeting-paid="pending">
-                {v().paidMsat > 0 ? `Paid up to ${fmtAmount(v().paidMsat)} so far for this meeting’s signals. ` : ''}
-                {v().unknownCount > 0 ? `${v().unknownCount === 1 ? 'One signal’s result is not known yet' : `${v().unknownCount} signals’ results are not known yet`}: check pending result. ` : ''}
-                {v().pendingCount === 1 ? 'A payment for this meeting is still settling' : `${v().pendingCount} payments for this meeting are still settling`}: up to {fmtAmount(v().pendingMsat)}. The total updates when {v().pendingCount === 1 ? 'it finishes' : 'they finish'}. Media is not billed.
-              </p>
+                {v().paidMsat > 0 ? tr('caPaidUpToSoFarForThisMeetingS', fmtAmount(v().paidMsat)) : ''}
+                {v().unknownCount > 0 ? tr('uiCheckPendingResult', v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)) : ''}
+                {v().pendingCount === 1 ? tr('caAPaymentForThisMeetingIsStillSettling') : tr('caPaymentsForThisMeetingAreStillSettling', v().pendingCount)}{tr('uiUpTo126')}{' '}{fmtAmount(v().pendingMsat)}{tr('uiTheTotalUpdatesWhen')}{' '}{v().pendingCount === 1 ? tr('uiItFinishes') : tr('uiTheyFinish')}{tr('caMediaIsNotBilled')}</p>
             </Match>
             <Match when={v().unknownCount > 0}>
               <p class="hint" data-meeting-paid="unknown">
-                {v().paidMsat > 0 ? `Paid up to ${fmtAmount(v().paidMsat)} for this meeting’s signals.` : 'No payment for this meeting is confirmed.'}{' '}
-                {v().unknownCount === 1 ? 'One signal’s result is not known yet' : `${v().unknownCount} signals’ results are not known yet`} (up to {fmtAmount(v().paidMsat + v().unknownMsat)} in all if {v().unknownCount === 1 ? 'it' : 'they'} went through): check pending result. Media is not billed.
-              </p>
+                {v().paidMsat > 0 ? tr('caPaidUpToForThisMeetingSSignals', fmtAmount(v().paidMsat)) : tr('caNoPaymentForThisMeetingIsConfirmed')}{' '}
+                {v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)}{' '}{tr('uiUpTo133')}{' '}{fmtAmount(v().paidMsat + v().unknownMsat)}{' '}{tr('uiInAllIf')}{' '}{v().unknownCount === 1 ? tr('itPronoun') : tr('theyPronoun')}{' '}{tr('caWentThroughCheckPendingResultMediaIsNotBilled')}</p>
             </Match>
             <Match when={v().paidMsat > 0}>
-              <p class="hint" data-meeting-paid="settled">Paid up to {fmtAmount(v().paidMsat)} for this meeting’s signals (each signal’s price plus its routing-fee cap). Media is not billed.</p>
+              <p class="hint" data-meeting-paid="settled">{tr('caPaidUpTo')}{' '}{fmtAmount(v().paidMsat)}{' '}{tr('caForThisMeetingSSignalsEachSignalSPrice')}</p>
             </Match>
             <Match when={v().phase === 'ended'}>
-              <p class="hint" data-meeting-paid="nothing">This meeting paid nothing.</p>
+              <p class="hint" data-meeting-paid="nothing">{tr('caThisMeetingPaidNothing')}</p>
             </Match>
           </Switch>
           <Show when={v().phase === 'ended' && v().error}>
@@ -3577,23 +3573,23 @@ function MeetingPanel(props: {
             <Switch>
               <Match when={v().phase === 'invited'}>
                 <button type="button" class="primary soft money" data-meeting-join disabled={props.blocked || joinPrice() === null} onClick={() => props.join(shown(v().roster))}
-                  aria-label={`Join${joinPrice() !== null ? `, up to ${fmtAmount(joinPrice()!)}` : ''}`}>
-                  Join{price(joinPrice())}
+                  aria-label={tr('caJoinExtra506', joinPrice() !== null ? tr('uiUpTo', fmtAmount(joinPrice()!)) : '')}>
+                  {tr('caJoin')}{price(joinPrice())}
                 </button>
                 <button type="button" class="soft" data-meeting-decline disabled={props.blocked || declinePrice() === null} onClick={() => props.decline(shown(v().roster))}
-                  aria-label={`Decline${declinePrice() !== null ? `, up to ${fmtAmount(declinePrice()!)}` : ''}`}>
-                  Decline{declinePrice() !== null ? ` · up to ${sats(declinePrice()!)} ${satUnit(declinePrice()!)}` : ''}
+                  aria-label={tr('caDecline', declinePrice() !== null ? tr('uiUpTo', fmtAmount(declinePrice()!)) : '')}>
+                  {tr('uiDecline')}{declinePrice() !== null ? tr('caUpTo', sats(declinePrice()!), satUnit(declinePrice()!)) : ''}
                 </button>
               </Match>
               <Match when={v().phase === 'active'}>
-                <button type="button" class="soft" data-meeting-mute aria-pressed={v().muted} onClick={() => props.mute()}>Mute</button>
+                <button type="button" class="soft" data-meeting-mute aria-pressed={v().muted} onClick={() => props.mute()}>{tr('uiMute')}</button>
                 <Show when={v().media === 'video'}>
-                  <button type="button" class="soft" data-meeting-camera aria-pressed={v().camera} onClick={() => props.camera()}>Camera</button>
+                  <button type="button" class="soft" data-meeting-camera aria-pressed={v().camera} onClick={() => props.camera()}>{tr('uiCamera')}</button>
                 </Show>
-                <button type="button" class="danger soft" data-meeting-leave onClick={() => props.leave()}>Leave</button>
+                <button type="button" class="danger soft" data-meeting-leave onClick={() => props.leave()}>{tr('roomLeave')}</button>
               </Match>
               <Match when={v().phase === 'ended'}>
-                <button type="button" class="soft" data-meeting-dismiss disabled={v().pendingCount > 0} title={v().pendingCount > 0 ? 'Closes once the payment has settled' : undefined} onClick={() => props.dismiss()}>Close</button>
+                <button type="button" class="soft" data-meeting-dismiss disabled={v().pendingCount > 0} title={v().pendingCount > 0 ? tr('uiClosesOnceThePaymentHasSettled') : undefined} onClick={() => props.dismiss()}>{tr('uiClose')}</button>
               </Match>
             </Switch>
           </div>
@@ -3689,14 +3685,13 @@ function ReceivedFile(props: {
             {(b) => <>{kb(b().size_bytes)} · {shortMime(b().mime_type)}</>}
           </Show>
         }>
-          Over 1.4 MB · not saved
-        </Show>
-        <Show when={err() === 'gone'}> · not stored</Show>
-        <Show when={err() === 'save'}> · could not save</Show>
+          {tr('caOver14MBNotSaved')}</Show>
+        <Show when={err() === 'gone'}>{' '}{tr('caNotStored')}</Show>
+        <Show when={err() === 'save'}>{' '}{tr('caCouldNotSave')}</Show>
       </p>
       <Show when={err() !== 'large' && err() !== 'gone'}>
         <button type="button" class="link" data-file-save disabled={busy() || saved()} onClick={() => void onSave()}>
-          {saved() ? 'Saved' : busy() ? '…' : 'Save'}
+          {saved() ? tr('caSaved641') : busy() ? '…' : tr('extraSave')}
         </button>
       </Show>
     </div>
@@ -3705,12 +3700,12 @@ function ReceivedFile(props: {
 
 function shortMime(mime: string): string {
   const m = mime.toLowerCase().split(';')[0]!.trim();
-  if (m.startsWith('image/')) return m.slice(6) || 'image';
-  if (m.startsWith('audio/')) return m.slice(6) || 'audio';
-  if (m.startsWith('text/')) return m.slice(5) || 'text';
+  if (m.startsWith('image/')) return m.slice(6) || tr('caImageExtra517');
+  if (m.startsWith('audio/')) return m.slice(6) || tr('caAudio');
+  if (m.startsWith('text/')) return m.slice(5) || tr('caText');
   if (m === 'application/pdf') return 'pdf';
-  if (m === 'application/octet-stream') return 'file';
-  return m || 'file';
+  if (m === 'application/octet-stream') return tr('fileNoun');
+  return m || tr('fileNoun');
 }
 
 function VoiceNote(props: { id: string; name: string; load: (messageId: string) => Promise<string> }) {
@@ -3735,8 +3730,8 @@ function VoiceNote(props: { id: string; name: string; load: (messageId: string) 
         fallback={
           <button type="button" class="voice-play" data-voice-play disabled={busy() || missing() !== null} onClick={() => void open()}>
             {missing() === 'not_audio'
-              ? `File · ${props.name} (not audio, not played)`
-              : missing() === 'gone' ? 'Voice note · not stored on this device' : busy() ? 'Loading…' : '▶ Voice note'}
+              ? tr('caFileNotAudioNotPlayed', props.name)
+              : missing() === 'gone' ? tr('caVoiceNoteNotStoredOnThisDevice') : busy() ? tr('chatLoading') : tr('caVoiceNote')}
           </button>
         }
       >
@@ -3748,9 +3743,9 @@ function VoiceNote(props: { id: string; name: string; load: (messageId: string) 
 
 /** A send whose money is not settled either way, named on its card. Never "not sent". */
 const FAILURE_LABEL: Partial<Record<ActionError['code'], string>> = {
-  spend_unknown: 'Outcome unknown / pending',
-  payment_unknown: 'Payment unknown · not resent',
-  failed_paid: 'Paid · refused by their node',
+  get spend_unknown() { return tr('caOutcomeUnknownPending'); },
+  get payment_unknown() { return tr('caPaymentUnknownNotResent'); },
+  get failed_paid() { return tr('caPaidRefusedByTheirNode649'); },
 };
 
 const DELIVERY_TEXT: Record<Delivery['status'], string> = {
@@ -3793,17 +3788,16 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
   return (
     <div class="door-card" data-door={`${c.side}-${c.verdict}`} data-code={c.side === 'out' ? c.code : undefined} classList={{ refused: c.verdict === 'refused' }} role="note">
       <p class="door-rule">
-        <span>{clock(props.at)} · door</span>
+        <span>{clock(props.at)}{' '}{tr('caDoor')}</span>
       </p>
       <Switch>
         <Match when={c.side === 'in' && c.verdict === 'admitted' && (c as Extract<DoorCard, { verdict: 'admitted' }>)}>
           {(x) => (
             <>
               <p class="door-head">
-                <span class="id" title={x().sender}>{shortId(x().sender)}</span> paid <Show when={x().paid_msat !== null} fallback="your price">{amt(x().paid_msat!)}</Show> to reach you
-              </p>
-              <p class="door-proof">settled · recipient-bound · single-use</p>
-              <p class="door-note">Not a contact, and not added. Nothing is kept beyond this message.</p>
+                <span class="id" title={x().sender}>{shortId(x().sender)}</span>{' '}{tr('uiPaid')}{' '}<Show when={x().paid_msat !== null} fallback={tr('caYourPriceLower')}>{amt(x().paid_msat!)}</Show>{' '}{tr('caToReachYou')}</p>
+              <p class="door-proof">{tr('caSettledRecipientBoundSingleUse')}</p>
+              <p class="door-note">{tr('caNotAContactAndNotAddedNothingIsKept')}</p>
             </>
           )}
         </Match>
@@ -3811,14 +3805,14 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
           {(x) => (
             <>
               <p class="door-head">
-                Refused at your door · {gateWords(x().code)}
+                {tr('caRefusedAtYourDoor')}{' '}{gateWords(x().code)}
               </p>
               <p class="door-proof">
-                <Show when={x().required_msat !== null}>needed {amt(x().required_msat!)}</Show>
+                <Show when={x().required_msat !== null}>{tr('caNeeded656')}{' '}{amt(x().required_msat!)}</Show>
                 <Show when={x().required_msat !== null && x().paid_msat !== null}> · </Show>
-                <Show when={x().paid_msat !== null}>paid {amt(x().paid_msat!)}</Show>
+                <Show when={x().paid_msat !== null}>{tr('uiPaid')}{' '}{amt(x().paid_msat!)}</Show>
               </p>
-              <p class="door-note">Signed by {props.nameOf(x().sender)}. Nothing was stored or delivered.</p>
+              <p class="door-note">{tr('caSignedBy')}{' '}{props.nameOf(x().sender)}{tr('caNothingWasStoredOrDelivered')}</p>
             </>
           )}
         </Match>
@@ -3829,13 +3823,13 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
                 when={x().code === 'readmission_capped'}
                 fallback={
                   <>
-                    <p class="door-head">Not sent · their price is above your cap</p>
+                    <p class="door-head">{tr('caNotSentTheirPriceIsAboveYourCap')}</p>
                     <p class="door-proof">{x().detail}</p>
-                    <p class="door-note">Nothing was paid. Reopen the track to read their current price.</p>
+                    <p class="door-note">{tr('caNothingWasPaidReopenTheTrackToReadTheir')}</p>
                   </>
                 }
               >
-                <p class="door-head">Not sent · they ask for admission again</p>
+                <p class="door-head">{tr('caNotSentTheyAskForAdmissionAgain')}</p>
                 <p class="door-proof">{x().detail}</p>
               </Show>
             </>
@@ -4017,7 +4011,7 @@ function UndeliveredView(props: {
       <span class="kind">{copy().title}</span>
       <span data-undelivered-line>{copy().body}</span>
       <details class="quiet-detail" data-undelivered-detail>
-        <summary>Details</summary>
+        <summary>{tr('uiDetails')}</summary>
         <p>{copy().detail}</p>
       </details>
       <Show when={props.a.paid.retry && props.onRetry}>
@@ -4025,7 +4019,7 @@ function UndeliveredView(props: {
           when={props.a.admission}
           fallback={
             <button type="button" class="link" data-retry-delivery disabled={props.moneyBlocked || busy()} onClick={() => void run(() => props.onRetry!(props.a.id))}>
-              {busy() ? 'Retrying…' : 'Retry delivery'}
+              {busy() ? tr('caRetrying') : tr('caRetryDelivery')}
             </button>
           }
         >
@@ -4033,11 +4027,11 @@ function UndeliveredView(props: {
             <>
               <p class="hint" data-admission-price={adm().total_msat} data-admission-line>{admissionCopy(adm()).body}</p>
               <details class="quiet-detail" data-admission-detail>
-                <summary>Details</summary>
+                <summary>{tr('uiDetails')}</summary>
                 <p>{admissionCopy(adm()).detail}</p>
               </details>
               <button type="button" class="link" data-retry-approve disabled={props.moneyBlocked || busy()} onClick={() => void run(() => props.onRetry!(props.a.id, adm().total_msat))}>
-                {busy() ? 'Checking…' : props.a.ownerApproval ? 'Check approval and retry' : admissionCopy(adm()).action}
+                {busy() ? tr('caChecking') : props.a.ownerApproval ? tr('caCheckApprovalAndRetry') : admissionCopy(adm()).action}
               </button>
             </>
           )}
@@ -4045,11 +4039,10 @@ function UndeliveredView(props: {
       </Show>
       <Show when={props.onStop}>
         <button type="button" class="link" data-stop-retrying disabled={busy()} onClick={() => void run(() => props.onStop!(props.a.pendingId))}>
-          Stop retrying
-        </button>
+          {tr('uiStopRetrying')}</button>
       </Show>
       <Show when={props.a.ownerApproval}>
-        {(approval) => <div data-retry-owner><p>Approve at your node, then check.</p><code class="address">{approval().owner_command}</code></div>}
+        {(approval) => <div data-retry-owner><p>{tr('caApproveAtYourNodeThenCheck')}</p><code class="address">{approval().owner_command}</code></div>}
       </Show>
       <Show when={props.a.note}>
         <p class="hint" data-retry-note>{props.a.note}</p>
@@ -4098,18 +4091,18 @@ const RESTORE_OP = new Set<OperationState>(['dispatching', 'unknown', 'paid', 'p
  * absent: amount not known). `settled` also covers a paid message whose
  * retries were stopped, so it never says "sent" or "delivered".
  */
-export function opStateText(op: OpView, subject = 'This app’s record'): string {
-  const paid = op.paid_msat === null ? 'an unknown amount' : `${sats(op.paid_msat)} ${satUnit(op.paid_msat)}`;
+export function opStateText(op: OpView, subject = tr('caThisAppSRecord')): string {
+  const paid = op.paid_msat === null ? tr('caAnUnknownAmount') : `${sats(op.paid_msat)} ${satUnit(op.paid_msat)}`;
   switch (op.state) {
-    case 'dispatching': case 'unknown': return `${subject}: the result is not known yet. Check pending result before sending it again.`;
-    case 'admission_resumable': return `${subject}: admission paid ${paid}, message not sent. Send the same message with the same cap to resume it.`;
-    case 'unpaid': return `${subject}: not paid. Nothing left your wallet for it.`;
-    case 'paid': return `${subject}: paid ${paid}; delivery not confirmed yet. Check pending result.`;
-    case 'paid_undelivered': return `${subject}: paid ${paid}, not delivered. Check pending result to retry delivery or stop retrying.`;
-    case 'failed_paid': return `${subject}: paid ${paid}; their node refused it.`;
-    case 'settled': return `${subject}: paid ${paid}, finished. Delivery is not confirmed here.`;
-    case 'closed': return `${subject}: closed.`;
-    default: return `${subject} could not be read.`;
+    case 'dispatching': case 'unknown': return tr('caTheResultIsNotKnownYetCheckPendingResult', subject);
+    case 'admission_resumable': return tr('caAdmissionPaidMessageNotSentSendTheSameMessage', subject, paid);
+    case 'unpaid': return tr('caNotPaidNothingLeftYourWalletForIt', subject);
+    case 'paid': return tr('caPaidDeliveryNotConfirmedYetCheckPendingResult', subject, paid);
+    case 'paid_undelivered': return tr('caPaidNotDeliveredCheckPendingResultToRetryDelivery', subject, paid);
+    case 'failed_paid': return tr('caPaidTheirNodeRefusedIt', subject, paid);
+    case 'settled': return tr('caPaidFinishedDeliveryIsNotConfirmedHere', subject, paid);
+    case 'closed': return tr('caClosed', subject);
+    default: return tr('caCouldNotBeRead', subject);
   }
 }
 
@@ -6212,7 +6205,7 @@ function Composer(props: {
           now={props.now}
           status={props.actions.approvalStatus}
           fallback={w().view.owner_action}
-          after="This message sends when approved, exactly as you wrote it."
+          after={tr('caSendsWhenApproved')}
           onStop={() => setDeviceWait(null)}
           onApproved={(v) => deviceApproved(w(), v)}
         />}
@@ -6237,7 +6230,7 @@ function Composer(props: {
           <textarea readonly aria-label={tr('uiOwnerApprovalCommand')} data-contact-owner-command data-command={pending().approval.owner_command} value={pending().approval.owner_command} />
           <button type="button" class="link" onClick={async () => { try { await navigator.clipboard.writeText(pending().approval.owner_command); } catch { setNote(tr('uiSelectAndCopyTheCommandAbove')); } }}>{tr('uiCopyCommand')}</button>
           <button type="button" class="link" data-contact-cancel onClick={() => cancelOwner()}>{tr('uiCancel')}</button>
-          <p class="hint">{tr('uiCancelDoesNotRevokeAnApprovalAlreadyIssued')} {pending().approval.approval_window_secs !== undefined ? 'five' : 'two'} {tr('uiMinutes')}</p>
+          <p class="hint">{tr('uiCancelDoesNotRevokeAnApprovalAlreadyIssued')} {pending().approval.approval_window_secs !== undefined ? tr('caFive') : tr('caTwo')} {tr('uiMinutes')}</p>
         </div></TouchIdFirst>}
       </Show>
       <Show when={spends()}>
@@ -6320,8 +6313,8 @@ const [touchIdOffersShown, setTouchIdOffersShown] = createSignal(0);
  */
 function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: JSX.Element }) {
   const mobile = isMobilePlatform();
-  const device = mobile ? (deviceWord() === 'phone' ? tr('phone') : deviceWord()) : tr('uiMac');
-  const tap = mobile ? 'biometric' : tr('uiTouchID');
+  const device = () => mobile ? (deviceWord() === 'phone' ? tr('phone') : deviceWord()) : tr('uiMac');
+  const tap = () => mobile ? tr('caBiometric') : tr('uiTouchID');
   const Offer = () => {
     setTouchIdOffersShown((n) => n + 1);
     onCleanup(() => setTouchIdOffersShown((n) => n - 1));
@@ -6329,18 +6322,18 @@ function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: J
     return (
       <div class="approval touch-id-first" data-touch-id-first>
         <p>
-          <strong>{tr('uiApproveOnThis')} {device} {tr('uiWith')} {mobile ? 'biometrics' : tr('uiTouchID')}.</strong>{' '}
+          <strong>{tr('uiApproveOnThis')} {device()} {tr('uiWith')} {mobile ? tr('biometrics') : tr('uiTouchID')}.</strong>{' '}
           {lapsed()
-            ? tr('uiYourLastSetupRequestLapsedSetItUp', device)
-            : tr('uiSetItUpOnceYourNodeSOwner', device)}{' '}
+            ? tr('uiYourLastSetupRequestLapsedSetItUp', device())
+            : tr('uiSetItUpOnceYourNodeSOwner', device())}{' '}
           {/* Only promised where the node says it does it; otherwise, said as it is today. */}
           {props.actions.ownerDeviceApproval?.()
-            ? tr('uiAfterThatOneTapApprovesAContactHere', tap)
-            : tr('uiYourNodeDoesNotYetAcceptApprovalsIn', mobile ? 'biometric' : tr('uiTouchID'), tap)}
+            ? tr('uiAfterThatOneTapApprovesAContactHere', tap())
+            : tr('uiYourNodeDoesNotYetAcceptApprovalsIn', mobile ? tr('caBiometric') : tr('uiTouchID'), tap())}
         </p>
         <div class="form-actions">
           <button type="button" class="primary soft" data-touch-id-setup onClick={() => props.actions.openNodeSettings?.()}>
-            {tr('uiSetUp')} {mobile ? 'biometric' : tr('uiTouchID')} {tr('uiApprovals')}
+            {tr('uiSetUp')} {mobile ? tr('caBiometric') : tr('uiTouchID')} {tr('uiApprovals')}
           </button>
         </div>
         <div data-touch-id-stays>{props.stays}</div>
@@ -6578,7 +6571,7 @@ const hoursLeft = (untilMs: number | null, nowMs: number, windowMs = 86_400_000)
 /** A node grant's remaining life: minutes under an hour, else whole hours. */
 const timeLeft = (untilMs: number, nowMs: number) => {
   const min = Math.max(1, Math.ceil((untilMs - nowMs) / 60_000));
-  return min < 60 ? `${min} min` : `${Math.ceil(min / 60)} h`;
+  return min < 60 ? `${min} min` : tr('caHExtra625', Math.ceil(min / 60));
 };
 
 
@@ -6784,44 +6777,41 @@ function BudgetPanel(props: {
       setNote(null);
     } else setNote(r.error.message);
   };
-  const directPaymentName = (target: string) => target === 'app:invoice-payments' ? 'Invoice payments'
-    : target === 'app:keysend-payments' ? 'Keysend payments' : null;
+  const directPaymentName = (target: string) => target === 'app:invoice-payments' ? tr('caInvoicePayments')
+    : target === 'app:keysend-payments' ? tr('caKeysendPayments') : null;
   const status = (b: BudgetView) => {
-    if (b.paused) return 'Paused · new app payments blocked';
-    if (b.waiting_for_owner) return 'Waiting for node approval';
-    if (b.autopay.state === 'open') return `Autopay open · ${hoursLeft(b.autopay.open_until_ms, props.now, b.window_ms)} h left`;
-    if (b.autopay.state === 'expired') return 'Daily approval ended';
-    return 'Not approved this session';
+    if (b.paused) return tr('caPausedNewAppPaymentsBlocked');
+    if (b.waiting_for_owner) return tr('caWaitingForNodeApproval');
+    if (b.autopay.state === 'open') return tr('caAutopayOpenHLeft', hoursLeft(b.autopay.open_until_ms, props.now, b.window_ms));
+    if (b.autopay.state === 'expired') return tr('caDailyApprovalEnded');
+    return tr('caNotApprovedThisSession');
   };
   const statusDetail = (b: BudgetView) => {
-    if (b.paused) return 'In-flight payments and spending outside this app can continue.';
-    if (b.waiting_for_owner) return 'Confirm the pending approval at your node.';
-    if (b.autopay.state === 'open') return 'Messages and files pay inside this all-in limit until it ends.';
-    if (b.autopay.state === 'expired') return 'Approve again from any conversation.';
-    return 'Approve an app all-in limit from any conversation.';
+    if (b.paused) return tr('caInFlightPaymentsAndSpendingOutsideThisAppCan');
+    if (b.waiting_for_owner) return tr('caConfirmThePendingApprovalAtYourNode');
+    if (b.autopay.state === 'open') return tr('caMessagesAndFilesPayInsideThisAllInLimit');
+    if (b.autopay.state === 'expired') return tr('caApproveAgainFromAnyConversation');
+    return tr('caApproveAnAppAllInLimitFromAnyConversation');
   };
   return (
     <div class="panel" data-panel="budget">
-      <h2>App payment budget</h2>
+      <h2>{tr('caAppPaymentBudget')}</h2>
       <details class="quiet-detail hint" data-budget-scope>
-        <summary><strong>App all-in · rolling 24 h</strong> — what it covers</summary>
+        <summary><strong>{tr('caAppAllInRolling24H')}</strong>{' '}{tr('caWhatItCovers')}</summary>
         <p>
-          Covers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. Paid totals use reported principal and fees. In-flight ceilings are reserved separately; unreported fees remain unknown.
-          Not covered: channel opening/closing, on-chain transfers and fees, owner-direct CLI/API, or background workers.
-          G1 is a separate finite node grant; it does not refill daily. Not a wallet-wide limit.
-        </p>
+          {tr('caCoversAutomaticAndManualWindowMessagesRoomSendsFiles')}</p>
       </details>
       <Show when={props.budget} fallback={<Show when={!props.error} fallback={<p class="err-note">{props.error}</p>}><DelayedSpinner /></Show>}>
         {(b) => (
           <>
             <div class="tally" data-tally>
-              <span class="label">Known paid in the last 24 hours</span>
+              <span class="label">{tr('caKnownPaidInTheLast24Hours')}</span>
               <span class="sats big" data-tally-total>
                 {fmtAmount(b().spent_msat, true)} <span class="unit">/ {fmtAmount(b().ceiling_msat, true)}</span>
               </span>
               <span class="meter" aria-hidden="true"><span style={{ width: pct(b().spent_msat, b().ceiling_msat) }} /></span>
               <Show when={b().unsettled_msat > 0}>
-                <span class="hint" data-unsettled>{fmtAmount(b().unsettled_msat)} reserved at send ceilings; outcome not known yet.</span>
+                <span class="hint" data-unsettled>{fmtAmount(b().unsettled_msat)}{' '}{tr('caReservedAtSendCeilingsOutcomeNotKnownYet')}</span>
               </Show>
               <Show when={b().fee_unknown}>
                 <span class="hint" data-fee-unknown>{budgetNote({ ...b(), unsettled_msat: 0, accounted_msat: (b().accounted_msat ?? b().spent_msat) - b().unsettled_msat })}</span>
@@ -6829,7 +6819,7 @@ function BudgetPanel(props: {
               <Show when={b().node_grant}>
                 {(g) => (
                   <span class="hint" data-node-grant>
-                    Your finite node grant allows {fmtAmount(g().remaining_msat)} of {fmtAmount(g().budget_msat)} more, at most {fmtAmount(g().per_call_max_msat)} per payment, for {timeLeft(g().expires_at_ms, props.now)}.
+                    {tr('caYourFiniteNodeGrantAllows')}{' '}{fmtAmount(g().remaining_msat)}{' '}{tr('uiOf')}{' '}{fmtAmount(g().budget_msat)}{' '}{tr('caMoreAtMost')}{' '}{fmtAmount(g().per_call_max_msat)}{' '}{tr('caPerPaymentFor')}{' '}{timeLeft(g().expires_at_ms, props.now)}.
                   </span>
                 )}
               </Show>
@@ -6838,23 +6828,21 @@ function BudgetPanel(props: {
               <span class={`dot ${b().paused ? 'warn' : b().autopay.state === 'open' ? 'ok' : ''}`} /> <span class="line-text">{status(b())}</span>
             </p>
             <details class="quiet-detail" data-budget-status-detail>
-              <summary>Details</summary>
+              <summary>{tr('uiDetails')}</summary>
               <p>{statusDetail(b())}</p>
             </details>
             <Show
               when={b().paused}
               fallback={
                 <button type="button" class="pause-all" data-pause-all onClick={() => void props.actions.pauseAll()}>
-                  Pause app payments
-                </button>
+                  {tr('uiPauseAppPayments')}</button>
               }
             >
               <button type="button" class="primary money" data-resume disabled={props.actions.moneyBlocked()} onClick={() => void props.actions.resume()}>
-                Resume payments
-              </button>
+                {tr('uiResumePayments')}</button>
             </Show>
-            <h3>By action, contact and room</h3>
-            <For each={b().rows} fallback={<p class="hint">No one has a budget yet. Your first paid message to someone sets theirs.</p>}>
+            <h3>{tr('caByActionContactAndRoom')}</h3>
+            <For each={b().rows} fallback={<p class="hint">{tr('caNoOneHasABudgetYetYourFirstPaid')}</p>}>
               {(row) => {
                 const key = () => `${row.room ? 'room' : 'peer'}:${row.target}`;
                 return (
@@ -6863,7 +6851,7 @@ function BudgetPanel(props: {
                       <span class="who">{directPaymentName(row.target) ?? props.nameOf(row.target, row.room)}</span>
                       <span class="sats" data-row-tally>
                         {fmtAmount(row.spent_msat, true)}
-                        <span class="unit">{row.limit_msat === null ? ', approved by hand' : `/ ${fmtAmount(row.limit_msat, true)}`}</span>
+                        <span class="unit">{row.limit_msat === null ? tr('caApprovedByHand') : `/ ${fmtAmount(row.limit_msat, true)}`}</span>
                       </span>
                     </div>
                     <Show when={budgetNote(row)}>{note => <span class="hint">{note()}</span>}</Show>
@@ -6894,12 +6882,7 @@ function BudgetPanel(props: {
             <Show when={note() && note() !== MONEY_NOT_READY}><p class="err-note" role="alert">{note()}</p></Show>
             <Show when={props.error}><p class="err-note" role="alert">{props.error}</p></Show>
             <p class="hint">
-              A budget can go up to the app all-in limit you approved; raising the total is a new approval. Budgets and this tally are
-              saved on this device. Your approval is not: after a restart, approve once more. 0 forgets a contact, so they are asked
-              again. Files, invoice payments and keysend still need the ten-minute manual approval and count against this app limit;
-              any node grant applies separately. When a contact with a budget reconnects and
-              asks to be admitted again, your node pays that from their budget without asking; anyone else asks you once.
-            </p>
+              {tr('caABudgetCanGoUpToTheAppAll')}</p>
           </>
         )}
       </Show>
@@ -7084,7 +7067,7 @@ function NewTrack(props: {
           if (kit.candidate?.newcomer !== c.newcomer || kit.candidate?.payment_hash !== c.payment_hash ||
               kit.candidate?.code !== c.code || kit.gift_msat !== c.gift_msat || kit.fee_msat !== c.fee_max_msat) {
             stopGiftWait();
-            setCandErr('The node status differs from the reviewed gift. Review the request again.');
+            setCandErr(tr('caTheNodeStatusDiffersFromTheReviewedGiftReview'));
             return;
           }
           if (kit.state !== 'candidate' && kit.state !== 'offered') {
@@ -7246,25 +7229,23 @@ function NewTrack(props: {
     setBusy(false);
   };
   const button = (what: string) =>
-    open() ? what : props.spend?.state === 'pending' ? 'Waiting for approval' : 'Approve first';
+    open() ? what : props.spend?.state === 'pending' ? tr('uiWaitingForApproval') : tr('caApproveFirst');
   const waiting = () => props.spend?.state === 'pending' || props.spend?.state === 'unavailable';
 
   return (
     <>
-      <TrackHead title="Start something" onContext={props.onContext} />
+      <TrackHead title={tr('caStartSomething')} onContext={props.onContext} />
       <SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} />
       <div class="stream">
         <Show
           when={mineLive()}
           fallback={
             <div class="empty-track" data-new-track>
-              <h2>Share your node id</h2>
+              <h2>{tr('caShareYourNodeId')}</h2>
               <p class="hint">
-                Anyone who knows it can offer to pay you to talk. Knowing an id is not admission: each message is
-                admitted only when its payment settles. To open someone else’s profile card, use Browse.
-              </p>
+                {tr('caAnyoneWhoKnowsItCanOfferToPayYou')}</p>
               <Show when={qr()}>
-                <svg class="qr" viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label="Your node id as a QR code">
+                <svg class="qr" viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label={tr('caYourNodeIdAsAQRCode')}>
                   <rect width={qr()!.extent} height={qr()!.extent} fill="#ffffff" />
                   <path d={qr()!.path} fill="#000000" />
                 </svg>
@@ -7276,21 +7257,18 @@ function NewTrack(props: {
                   fallback={
                     <>
                       <button type="button" class="quiet" data-starter-include disabled={props.moneyBlocked} onClick={() => void includeStarter()}>
-                        {open() ? `Include starter bitcoin · ${fmtAmount(sponsor()!.gift_msat)}` : 'Include starter bitcoin · approve first'}
+                        {open() ? tr('caIncludeStarterBitcoin', fmtAmount(sponsor()!.gift_msat)) : tr('caIncludeStarterBitcoinApproveFirst')}
                       </button>
                       <p class="hint" data-starter-purse>
-                        You fund it from your own node, only after you approve their request. {fmtAmount(sponsor()!.purse_used_msat)} of{' '}
-                        {fmtAmount(sponsor()!.purse_msat)} used in the last 24 hours.
-                      </p>
+                        {tr('caYouFundItFromYourOwnNodeOnlyAfter')}{' '}{fmtAmount(sponsor()!.purse_used_msat)}{' '}{tr('uiOf')}{' '}
+                        {fmtAmount(sponsor()!.purse_msat)}{' '}{tr('caUsedInTheLast24Hours')}</p>
                     </>
                   }
                 >
                   {(st) => (
                     <>
                       <p data-starter-offered>
-                        Starter bitcoin: up to <strong>{fmtAmount(st().gift_msat)}</strong>, after you approve their request. It is theirs
-                        once it arrives; every message still pays.
-                      </p>
+                        {tr('caStarterBitcoinUpTo')}{' '}<strong>{fmtAmount(st().gift_msat)}</strong>{tr('caAfterYouApproveTheirRequestItIsTheirsOnce')}</p>
                       <code class="address" data-intro-link>{mine()!.offer_link ?? mine()!.link}</code>
                     </>
                   )}
@@ -7301,7 +7279,7 @@ function NewTrack(props: {
               </Show>
               <Show when={showLegacyIntroductionUi && mine()}>
                 <p class="hint" data-intro-expired>
-                  Your introduction expired. <button type="button" class="link" onClick={loadMine}>Make a new one</button>
+                  {tr('caYourIntroductionExpired')}{' '}<button type="button" class="link" onClick={loadMine}>{tr('caMakeANewOne')}</button>
                 </p>
               </Show>
               <Show when={mineErr()}>
@@ -7312,42 +7290,36 @@ function NewTrack(props: {
         >
           {(m) => (
             <div class="empty-track" data-new-track data-intro-mine>
-              <h2>Your introduction</h2>
+              <h2>{tr('caYourIntroduction')}</h2>
               <p class="hint">
-                Let someone scan this, or send them the link. It shows your node key, where to reach it and your current
-                prices, signed by your node. It is not admission: whoever uses it pays your price for every message.
-              </p>
+                {tr('caLetSomeoneScanThisOrSendThemTheLink')}</p>
               <Show when={qr()}>
-                <svg class="qr" viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label="Your introduction as a QR code">
+                <svg class="qr" viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label={tr('caYourIntroductionAsAQRCode')}>
                   <rect width={qr()!.extent} height={qr()!.extent} fill="#ffffff" />
                   <path d={qr()!.path} fill="#000000" />
                 </svg>
               </Show>
               <p data-intro-prices>
-                Admission: <strong>{fmtAmount(allIn(m().admission_msat))}</strong> including {feeCeiling(routingFee(m().admission_msat))}. Each message: <strong>{fmtAmount(allIn(m().message_msat))}</strong> including {feeCeiling(routingFee(m().message_msat))} (estimated ceilings).
-              </p>
+                {tr('caAdmission')}{' '}<strong>{fmtAmount(allIn(m().admission_msat))}</strong>{' '}{tr('caIncluding')}{' '}{feeCeiling(routingFee(m().admission_msat))}{tr('caEachMessage')}{' '}<strong>{fmtAmount(allIn(m().message_msat))}</strong>{' '}{tr('caIncluding')}{' '}{feeCeiling(routingFee(m().message_msat))}{' '}{tr('caEstimatedCeilings')}</p>
               <p class="hint">
-                Valid for about {minutesLeft(m().expires_at)} min. <button type="button" class="link" onClick={loadMine}>New card</button>
+                {tr('caValidForAbout')}{' '}{minutesLeft(m().expires_at)}{' '}{tr('caMin')}{' '}<button type="button" class="link" onClick={loadMine}>{tr('caNewCard')}</button>
               </p>
               <Show
                 when={m().starter}
                 fallback={
                   <Show when={sponsor()?.enabled}>
                     <button type="button" class="quiet" data-starter-include disabled={props.moneyBlocked} onClick={() => void includeStarter()}>
-                      {open() ? `Include starter bitcoin · ${fmtAmount(sponsor()!.gift_msat)}` : 'Include starter bitcoin · approve first'}
+                      {open() ? tr('caIncludeStarterBitcoin', fmtAmount(sponsor()!.gift_msat)) : tr('caIncludeStarterBitcoinApproveFirst')}
                     </button>
                     <p class="hint" data-starter-purse>
-                      You fund it from your own node, only after you approve their request. {fmtAmount(sponsor()!.purse_used_msat)} of{' '}
-                      {fmtAmount(sponsor()!.purse_msat)} used in the last 24 hours.
-                    </p>
+                      {tr('caYouFundItFromYourOwnNodeOnlyAfter')}{' '}{fmtAmount(sponsor()!.purse_used_msat)}{' '}{tr('uiOf')}{' '}
+                      {fmtAmount(sponsor()!.purse_msat)}{' '}{tr('caUsedInTheLast24Hours')}</p>
                   </Show>
                 }
               >
                 {(st) => (
                   <p data-starter-offered>
-                    Starter bitcoin: up to <strong>{fmtAmount(st().gift_msat)}</strong>, after you approve their request. It is theirs
-                    once it arrives; every message still pays.
-                  </p>
+                    {tr('caStarterBitcoinUpTo')}{' '}<strong>{fmtAmount(st().gift_msat)}</strong>{tr('caAfterYouApproveTheirRequestItIsTheirsOnce')}</p>
                 )}
               </Show>
               <Show when={kitErr() && kitErr() !== MONEY_NOT_READY}>
@@ -7368,8 +7340,8 @@ function NewTrack(props: {
                 void reviewRequest();
               }}
             >
-              <h2>Starter bitcoin request</h2>
-              <p class="hint">Paste the request shown on their screen after they scanned your introduction.</p>
+              <h2>{tr('caStarterBitcoinRequest')}</h2>
+              <p class="hint">{tr('caPasteTheRequestShownOnTheirScreenAfterThey')}</p>
               <textarea
                 data-starter-request-text
                 rows={3}
@@ -7382,23 +7354,22 @@ function NewTrack(props: {
                   setTheirCode('');
                   setRequest(e.currentTarget.value);
                 }}
-                aria-label="Starter bitcoin request"
+                aria-label={tr('caStarterBitcoinRequest')}
               />
               <button type="submit" class="primary" classList={{ money: !open() }} data-starter-request-submit disabled={!request().trim() || requestLocked()}>
-                {open() ? 'Review request' : 'Approve first'}
+                {open() ? tr('ownerApprovalReview') : tr('caApproveFirst')}
               </button>
               <Show when={cand()}>
                 {(c) => (
                   <div class="artifact" data-starter-candidate={c().newcomer}>
-                    <span class="kind">Starter bitcoin · {shortId(c().newcomer)}</span>
+                    <span class="kind">{tr('caStarterBitcoin')}{' '}{shortId(c().newcomer)}</span>
                     <p>
-                      Lightning gift: <strong>{fmtAmount(c().gift_msat)}</strong>. Network fee: at most {fmtAmount(c().fee_max_msat)}.
+                      {tr('caLightningGift')}{' '}<strong>{fmtAmount(c().gift_msat)}</strong>{tr('caNetworkFeeAtMost')}{' '}{fmtAmount(c().fee_max_msat)}.
                     </p>
                     <span class="hint">
-                      They own it once it arrives and can keep or withdraw it. It is not a pass: their messages still pay.
-                    </span>
+                      {tr('caTheyOwnItOnceItArrivesAndCanKeep')}</span>
                     <label class="door-allow">
-                      <span>Code on their screen</span>
+                      <span>{tr('caCodeOnTheirScreen')}</span>
                       <input
                         data-starter-their-code
                         disabled={requestLocked()}
@@ -7406,7 +7377,7 @@ function NewTrack(props: {
                         maxLength={6}
                         value={theirCode()}
                         onInput={(e) => setTheirCode(e.currentTarget.value.replace(/\D/g, '').slice(0, 6))}
-                        aria-label="Code on their screen"
+                        aria-label={tr('caCodeOnTheirScreen')}
                       />
                     </label>
                     <span class="row" style={{ gap: 'var(--s-2)' }}>
@@ -7417,23 +7388,22 @@ function NewTrack(props: {
                         disabled={requestLocked() || theirCode().length !== 6}
                         onClick={() => void prepareGift()}
                       >
-                        {giving() ? 'Preparing…' : `Sponsor up to ${fmtAmount(c().gift_msat + c().fee_max_msat)}`}
+                        {giving() ? tr('caPreparing') : tr('caSponsorUpTo', fmtAmount(c().gift_msat + c().fee_max_msat))}
                       </button>
                       <button type="button" class="quiet" data-starter-cancel disabled={giving() || cancelling() || giftPending()} onClick={() => void cancelKit()}>
-                        Cancel
-                      </button>
+                        {tr('cancel')}</button>
                     </span>
                   </div>
                 )}
               </Show>
               <Show when={ownerRequired()}>
                 <div class="approval" data-starter-owner-approval="pending">
-                  <p><strong>Approve this gift at your node.</strong> Run this command once in the owner’s terminal from the node’s data directory, with owner control enabled. The app never receives an owner credential.</p>
-                  <Show when={ownerWait()} fallback={<p>Review the request and compare the code to prepare the owner command.</p>}>
+                  <p><strong>{tr('caApproveThisGiftAtYourNode')}</strong>{' '}{tr('uiRunThisCommandOnceInTheOwnerS')}</p>
+                  <Show when={ownerWait()} fallback={<p>{tr('caReviewTheRequestAndCompareTheCodeToPrepare')}</p>}>
                     {(pending) => <>
-                      <textarea readonly aria-label="Owner approval command" data-starter-owner-command value={pending().owner_command} />
-                      <button type="button" class="link" onClick={() => void navigator.clipboard.writeText(pending().owner_command).catch(() => setCandErr('Select and copy the command above.'))}>Copy command</button>
-                      <p class="hint">Waiting for the node to report this gift funded. Cancel asks the node to withdraw the kit before dispatch; tracking continues until withdrawal is confirmed, and it cannot undo a payment already sent.</p>
+                      <textarea readonly aria-label={tr('uiOwnerApprovalCommand')} data-starter-owner-command value={pending().owner_command} />
+                      <button type="button" class="link" onClick={() => void navigator.clipboard.writeText(pending().owner_command).catch(() => setCandErr(tr('uiSelectAndCopyTheCommandAbove')))}>{tr('uiCopyCommand')}</button>
+                      <p class="hint">{tr('caWaitingForTheNodeToReportThisGiftFunded')}</p>
                     </>}
                   </Show>
                 </div>
@@ -7442,10 +7412,10 @@ function NewTrack(props: {
                 {(g) => (
                   <p class={g().state === 'funded' ? 'ok-note' : 'err-note'} data-starter-gift={g().state}>
                     {g().state === 'funded'
-                      ? `Sent ${fmtAmount(g().paid_msat)}. It is theirs now.`
+                      ? tr('caSentItIsTheirsNow', fmtAmount(g().paid_msat))
                       : g().state === 'paying' || g().state === 'unknown'
-                        ? 'Payment pending — do not send again. Your node keeps it reserved until the outcome is known.'
-                        : `Gift ${g().state}. This kit is closed.`}
+                        ? tr('caPaymentPendingDoNotSendAgainYourNodeKeeps')
+                        : tr('caGiftThisKitIsClosed', g().state)}
                   </p>
                 )}
               </Show>
@@ -7463,8 +7433,8 @@ function NewTrack(props: {
               readCard();
             }}
           >
-            <h2>Open an introduction</h2>
-            <p class="hint">Paste a bitsov://introduce link someone showed or sent you. Reading it sends nothing.</p>
+            <h2>{tr('caOpenAnIntroduction')}</h2>
+            <p class="hint">{tr('caPasteABitsovIntroduceLinkSomeoneShowedOrSent')}</p>
             <textarea
               data-intro-text
               rows={3}
@@ -7477,55 +7447,48 @@ function NewTrack(props: {
                 setCard(null);
                 setCardErr(null);
               }}
-              aria-label="Introduction link"
+              aria-label={tr('caIntroductionLink')}
             />
             <button type="submit" class="primary" disabled={!pasted().trim() || opening()}>
-              Read card
-            </button>
+              {tr('caReadCard')}</button>
             <Show when={card()}>
               {(c) => (
                 <div class="artifact" data-door-card={c().node_id}>
-                  <span class="kind">Door card · {shortId(c().node_id)}</span>
-                  <span>Signed by the key it names.</span>
+                  <span class="kind">{tr('caDoorCard')}{' '}{shortId(c().node_id)}</span>
+                  <span>{tr('caSignedByTheKeyItNames')}</span>
                   <p data-door-prices>
-                    Admission: <strong>{fmtAmount(allIn(c().admission_msat))}</strong> including {feeCeiling(routingFee(c().admission_msat))}. Each message: <strong>{fmtAmount(allIn(c().message_msat))}</strong> including {feeCeiling(routingFee(c().message_msat))} (estimated ceilings).
-                  </p>
+                    {tr('caAdmission')}{' '}<strong>{fmtAmount(allIn(c().admission_msat))}</strong>{' '}{tr('caIncluding')}{' '}{feeCeiling(routingFee(c().admission_msat))}{tr('caEachMessage')}{' '}<strong>{fmtAmount(allIn(c().message_msat))}</strong>{' '}{tr('caIncluding')}{' '}{feeCeiling(routingFee(c().message_msat))}{' '}{tr('caEstimatedCeilings')}</p>
                   <Show when={c().starter}>
                     {(st) => (
                       <div class="door-starter" data-door-starter>
                         <p>
-                          Starter bitcoin available after they approve: <strong>{fmtAmount(st().gift_msat)}</strong>.
+                          {tr('caStarterBitcoinAvailableAfterTheyApprove')}{' '}<strong>{fmtAmount(st().gift_msat)}</strong>.
                         </p>
                         <Show
                           when={ask()}
                           fallback={
                             <>
                               <span class="hint">
-                                Requesting makes one invoice to your own node for exactly this amount and shows it as a QR for
-                                them. Nothing is sent. It is a gift, not a pass: your messages still pay.
-                              </span>
+                                {tr('caRequestingMakesOneInvoiceToYourOwnNodeFor')}</span>
                               <button type="button" class="quiet" data-door-request-starter disabled={props.moneyBlocked} onClick={requestStarter}>
-                                Request starter bitcoin
-                              </button>
+                                {tr('caRequestStarterBitcoin')}</button>
                             </>
                           }
                         >
                           {(a) => (
                             <>
                               <Show when={askQr()}>
-                                <svg class="qr" viewBox={`0 0 ${askQr()!.extent} ${askQr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label="Your starter-bitcoin request as a QR code">
+                                <svg class="qr" viewBox={`0 0 ${askQr()!.extent} ${askQr()!.extent}`} shape-rendering="crispEdges" role="img" aria-label={tr('caYourStarterBitcoinRequestAsAQRCode')}>
                                   <rect width={askQr()!.extent} height={askQr()!.extent} fill="#ffffff" />
                                   <path d={askQr()!.path} fill="#000000" />
                                 </svg>
                               </Show>
                               <p data-starter-code>
-                                Show this to them. Code: <strong>{a().code.slice(0, 3)} {a().code.slice(3)}</strong>. They type it
-                                before approving.
-                              </p>
+                                {tr('caShowThisToThemCode')}{' '}<strong>{a().code.slice(0, 3)} {a().code.slice(3)}</strong>{tr('caTheyTypeItBeforeApproving')}</p>
                               <p class="hint" data-starter-status={arrived() ? 'received' : 'waiting'}>
                                 {arrived()
-                                  ? `Received ${fmtAmount(arrived()!.amount_msat)} in your own node.`
-                                  : 'Waiting for starter bitcoin…'}
+                                  ? tr('caReceivedInYourOwnNode', fmtAmount(arrived()!.amount_msat))
+                                  : tr('caWaitingForStarterBitcoin')}
                               </p>
                               <code class="address" data-starter-request>{a().request}</code>
                             </>
@@ -7538,13 +7501,10 @@ function NewTrack(props: {
                     )}
                   </Show>
                   <span class="hint">
-                    Prices from their signed card. Before anything is paid, your node asks theirs for a fresh quote and you
-                    confirm the total.
-                  </span>
+                    {tr('caPricesFromTheirSignedCardBeforeAnythingIsPaid')}</span>
                   <Show when={c().reach === 'local'}>
                     <span class="hint" data-door-local>
-                      Local network address ({c().endpoint}). Continue only if you are on the same network as them.
-                    </span>
+                      {tr('caLocalNetworkAddress')}{c().endpoint}{tr('caContinueOnlyIfYouAreOnTheSameNetwork')}</span>
                     <label class="door-allow">
                       <input
                         type="checkbox"
@@ -7555,19 +7515,19 @@ function NewTrack(props: {
                           : null)}
                         disabled={opening()}
                       />
-                      <span>Allow this local address</span>
+                      <span>{tr('caAllowThisLocalAddress')}</span>
                     </label>
                   </Show>
                   <details>
-                    <summary>Details</summary>
+                    <summary>{tr('uiDetails')}</summary>
                     <code class="address">{c().node_id}</code>
-                    <span class="hint">Address {c().endpoint} · {c().network}</span>
+                    <span class="hint">{tr('endpoint')}{' '}{c().endpoint} · {c().network}</span>
                   </details>
                   <Show
                     when={cardLive()}
-                    fallback={<span class="err-note" data-door-expired>This card has expired. Ask them for a fresh one.</span>}
+                    fallback={<span class="err-note" data-door-expired>{tr('caThisCardHasExpiredAskThemForAFresh')}</span>}
                   >
-                    <span class="hint">Continuing connects your node to theirs. It pays nothing and adds no contact.</span>
+                    <span class="hint">{tr('caContinuingConnectsYourNodeToTheirsItPaysNothing')}</span>
                     <span class="row" style={{ gap: 'var(--s-2)' }}>
                       <button
                         type="button"
@@ -7576,11 +7536,10 @@ function NewTrack(props: {
                         disabled={opening() || (c().reach === 'local' && !allowLocal(c()))}
                         onClick={continueCard}
                       >
-                        {opening() ? 'Connecting…' : 'Continue'}
+                        {opening() ? tr('caConnecting') : tr('caContinue')}
                       </button>
                       <button type="button" class="quiet" onClick={() => { readRevision += 1; setLocalConsent(null); setCard(null); }} disabled={opening()}>
-                        Cancel
-                      </button>
+                        {tr('cancel')}</button>
                     </span>
                   </Show>
                 </div>
@@ -7603,30 +7562,28 @@ function NewTrack(props: {
               });
             }}
           >
-            <h2>Invite someone</h2>
+            <h2>{tr('caInviteSomeone')}</h2>
             <p class="hint">
-              An invite is bound to one person’s key and lets their node connect to yours. It is not a free pass: every
-              message still pays to be admitted.
-            </p>
-            <input data-invitee placeholder="Their node id (64 hex)" value={invitee()} onInput={(e) => setInvitee(e.currentTarget.value)} aria-label="Their node id" />
-            <input data-addr placeholder="Your node’s reachable address, host:port" value={addr()} onInput={(e) => setAddr(e.currentTarget.value)} aria-label="Your node’s address" />
+              {tr('caAnInviteIsBoundToOnePersonSKey')}</p>
+            <input data-invitee placeholder={tr('caTheirNodeId64Hex')} value={invitee()} onInput={(e) => setInvitee(e.currentTarget.value)} aria-label={tr('caTheirNodeId')} />
+            <input data-addr placeholder={tr('caYourNodeSReachableAddressHostPort')} value={addr()} onInput={(e) => setAddr(e.currentTarget.value)} aria-label={tr('caYourNodeSAddress')} />
             <label class="row">
-              <span class="hint">Valid for</span>
-              <select value={hours()} onChange={(e) => setHours(Number(e.currentTarget.value))} aria-label="Valid for">
-                <option value={24}>1 day</option>
-                <option value={72}>3 days</option>
-                <option value={168}>7 days</option>
+              <span class="hint">{tr('caValidFor')}</span>
+              <select value={hours()} onChange={(e) => setHours(Number(e.currentTarget.value))} aria-label={tr('caValidFor')}>
+                <option value={24}>{tr('ca1Day')}</option>
+                <option value={72}>{tr('ca3Days')}</option>
+                <option value={168}>{tr('ca7Days')}</option>
               </select>
             </label>
             <button type="submit" class="primary" classList={{ money: !open() }} data-invite-create-submit disabled={props.moneyBlocked || busy() || (open() ? !invitee() || !addr() : waiting())}>
-              {button('Create invite')}
+              {button(tr('caCreateInvite'))}
             </button>
             <Show when={made()}>
               {(m) => (
                 <div class="artifact" data-invite-link>
-                  <span class="kind">Invite · until {day(m().until)}</span>
+                  <span class="kind">{tr('caInviteUntil')}{' '}{day(m().until)}</span>
                   <code class="address">{m().link}</code>
-                  <span class="hint">Send it to them yourself. The app sends nothing on your behalf.</span>
+                  <span class="hint">{tr('caSendItToThemYourselfTheAppSendsNothing')}</span>
                 </div>
               )}
             </Show>
@@ -7647,17 +7604,16 @@ function NewTrack(props: {
               });
             }}
           >
-            <h2>Accept an invite</h2>
-            <p class="hint">Paste a bitsov://invite link someone sent you. Your node connects to theirs.</p>
-            <textarea data-invite-token rows={3} placeholder="bitsov://invite/…" value={token()} onInput={(e) => setToken(e.currentTarget.value)} aria-label="Invite link" />
+            <h2>{tr('caAcceptAnInvite')}</h2>
+            <p class="hint">{tr('caPasteABitsovInviteLinkSomeoneSentYouYour')}</p>
+            <textarea data-invite-token rows={3} placeholder="bitsov://invite/…" value={token()} onInput={(e) => setToken(e.currentTarget.value)} aria-label={tr('caInviteLink')} />
             <button type="submit" class="primary" classList={{ money: !open() }} data-invite-accept-submit disabled={props.moneyBlocked || busy() || (open() ? !token().trim() : waiting())}>
-              {button('Accept invite')}
+              {button(tr('caAcceptInvite'))}
             </button>
             <Show when={redeemed()}>
               {(r) => (
                 <p class="ok-note" data-redeemed>
-                  Accepted. Connecting to {shortId(r().inviter)} at {r().addr}. Messages between you still pay to be admitted.
-                </p>
+                  {tr('caAcceptedConnectingTo')}{' '}{shortId(r().inviter)}{' '}{tr('caAt')}{' '}{r().addr}{tr('caMessagesBetweenYouStillPayToBeAdmitted')}</p>
               )}
             </Show>
             <Show when={errs.redeem && errs.redeem !== MONEY_NOT_READY ? errs.redeem : null}>
@@ -7666,8 +7622,7 @@ function NewTrack(props: {
           </form>
         </div>
         <p class="send-next">
-          Invites change your node, so they use the same owner approval as spending. Profile cards live under Browse.
-          <Show when={!props.nodeRooms}> This node does not support rooms yet.</Show>
+          {tr('caInvitesChangeYourNodeSoTheyUseTheSame')}<Show when={!props.nodeRooms}>{' '}{tr('uiThisNodeDoesNotSupportRoomsYet')}</Show>
         </p>
       </div>
     </>
@@ -7679,10 +7634,10 @@ function NewTrack(props: {
 function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Element; onForgetRemote?: () => Promise<void>; pairAnother?: JSX.Element; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
   const fresh = () => freshness(props.overview?.read_at ?? null, props.now);
   const linkText = () =>
-    props.link === 'open' ? 'Live' : props.link === 'connecting' ? 'Connecting' : props.link === 'closed' ? 'Reconnecting' : 'Waiting';
+    props.link === 'open' ? tr('callLive') : props.link === 'connecting' ? tr('callConnecting') : props.link === 'closed' ? tr('caReconnecting') : tr('caWaiting');
   return (
     <div class="panel" data-panel="node">
-      <h2>Your node</h2>
+      <h2>{tr('caYourNode832')}</h2>
       {props.deviceApprovals}
       <Show when={props.onForgetRemote}><LocalNodeSwitch onForget={() => props.onForgetRemote!()} /></Show>
       {props.pairAnother}
@@ -7691,37 +7646,37 @@ function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Elem
       <Show when={props.overview} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>
         {(o) => (
           <dl class="facts">
-            <dt>Status</dt>
+            <dt>{tr('caStatus')}</dt>
             <dd>
               <span class="row" style={{ 'justify-content': 'flex-end', gap: 'var(--s-2)' }}>
                 <span class={`dot ${o().status === 'ok' ? 'ok' : 'warn'}`} />
-                {o().status === 'ok' ? 'Healthy' : o().status}
+                {o().status === 'ok' ? tr('caHealthy') : o().status}
               </span>
             </dd>
-            <dt>Node id</dt>
+            <dt>{tr('caNodeId')}</dt>
             <dd class="id" title={o().node_id}>{shortId(o().node_id)}</dd>
             <Show when={custodyBadge(o().custody_mode)}>
-              <dt>Keys</dt>
+              <dt>{tr('caKeys')}</dt>
               <dd><CustodyBadgeView mode={o().custody_mode} /></dd>
             </Show>
-            <dt>Live feed</dt>
+            <dt>{tr('caLiveFeed')}</dt>
             <dd data-link={props.link ?? 'none'}>{linkText()}</dd>
-            <dt>Peers connected</dt>
+            <dt>{tr('caPeersConnected')}</dt>
             <dd class="sats">{o().connected_peers}</dd>
-            <dt>Encrypted sessions</dt>
+            <dt>{tr('caEncryptedSessions')}</dt>
             <dd class="sats">{o().e2ee_sessions}</dd>
-            <dt>Waiting to deliver</dt>
+            <dt>{tr('caWaitingToDeliver')}</dt>
             <dd class="sats">{o().pending_deliveries}</dd>
-            <dt>Block height</dt>
-            <dd class="sats">{o().block_height !== null ? satsWhole(o().block_height!, true) : 'unknown'}</dd>
-            <dt>Lightning</dt>
-            <dd>{o().lightning_available ? o().lightning_backend ?? 'available' : 'unavailable'}</dd>
-            <dt>Chain source</dt>
-            <dd>{o().chain_backend ?? 'unknown'}</dd>
-            <dt>Uptime</dt>
+            <dt>{tr('caBlockHeight')}</dt>
+            <dd class="sats">{o().block_height !== null ? satsWhole(o().block_height!, true) : tr('caUnknown')}</dd>
+            <dt>{tr('receiveLightning')}</dt>
+            <dd>{o().lightning_available ? o().lightning_backend ?? tr('caAvailable') : tr('caUnavailableExtra63')}</dd>
+            <dt>{tr('caChainSource')}</dt>
+            <dd>{o().chain_backend ?? tr('caUnknown')}</dd>
+            <dt>{tr('caUptime')}</dt>
             <dd class="sats">{uptime(o().uptime_secs)}</dd>
             <dt>API</dt>
-            <dd>{o().version ?? 'unknown'}</dd>
+            <dd>{o().version ?? tr('caUnknown')}</dd>
           </dl>
         )}
       </Show>
@@ -7731,8 +7686,8 @@ function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Elem
       <Show when={props.error}>
         <SoftError message={props.error!} onReconnect={props.onReconnect} />
       </Show>
-      <h3>Peers</h3>
-      <For each={props.peers} fallback={<p class="hint">Your node has no peers yet.</p>}>
+      <h3>{tr('caPeers')}</h3>
+      <For each={props.peers} fallback={<p class="hint">{tr('caYourNodeHasNoPeersYet')}</p>}>
         {(p) => (
           <div class="row" style={{ 'justify-content': 'space-between', 'font-size': 'var(--t-sm)' }}>
             <span class="row" style={{ gap: 'var(--s-2)', 'min-width': 0 }}>
@@ -7743,7 +7698,7 @@ function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Elem
           </div>
         )}
       </For>
-      <p class="hint">Your peer list is private to this node. It is not who may reach you; payment decides that.</p>
+      <p class="hint">{tr('caYourPeerListIsPrivateToThisNodeIt')}</p>
     </div>
   );
 }
@@ -7753,8 +7708,8 @@ function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | nu
   return (
     <>
       <div class="panel" data-panel="wallet">
-        <h2>Wallet</h2>
-        <p class="hint" data-budget-wallet-warning>Channel and on-chain actions, their fees, and owner-direct commands are outside the app daily all-in limit. Opening or closing a channel can commit funds and incur on-chain fees. Check the amount and fee policy at the owner action; this app limit will not stop it.</p>
+        <h2>{tr('uiWallet')}</h2>
+        <p class="hint" data-budget-wallet-warning>{tr('caChannelAndOnChainActionsTheirFeesAndOwner')}</p>
         <Show when={props.wallet} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>
           {(w) => (
             <>
@@ -7763,32 +7718,31 @@ function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | nu
                   {sats(w().balance_msat, true)}
                   <span class="unit">{satUnit(w().balance_msat)}</span>
                 </span>
-                <p class="hint">Node-reported total: one figure, not a spendable balance.</p>
+                <p class="hint">{tr('caNodeReportedTotalOneFigureNotASpendableBalance')}</p>
               </div>
               <dl class="facts">
-                <dt>{props.moneyBlocked ? 'Lightning outbound capacity (money not ready)' : 'Lightning outbound capacity'}</dt>
+                <dt>{props.moneyBlocked ? tr('caLightningOutboundCapacityMoneyNotReady') : tr('caLightningOutboundCapacity')}</dt>
                 <dd class="sats">{fmtAmount(w().lightning_spendable_sats == null ? w().lightning_outbound_msat : w().lightning_spendable_sats! * 1000, true)}</dd>
-                <dt>Open channels</dt>
+                <dt>{tr('caOpenChannels')}</dt>
                 <dd class="sats">
-                  {active()} of {w().channels.length} active
-                </dd>
+                  {active()}{' '}{tr('uiOf')}{' '}{w().channels.length}{' '}{tr('caActive')}</dd>
               </dl>
-              <h3>Channels</h3>
-              <For each={w().channels} fallback={<p class="hint" data-channels-empty>{NO_CHANNELS}</p>}>
+              <h3>{tr('uiChannels')}</h3>
+              <For each={w().channels} fallback={<p class="hint" data-channels-empty>{NO_CHANNELS()}</p>}>
                 {(c) => {
                   const share = () => (c.capacity_msat > 0 ? (c.local_balance_msat / c.capacity_msat) * 100 : 0);
                   return (
                     <div class="channel" data-channel={c.channel_id}>
                       <div class="row">
                         <span class="id" title={c.peer_pubkey}>{shortId(c.peer_pubkey)}</span>
-                        <span>{c.active ? 'active' : 'inactive'}</span>
+                        <span>{c.active ? tr('caActive') : tr('caInactive')}</span>
                       </div>
-                      <div class="liquidity" title="Yours (orange) against theirs">
+                      <div class="liquidity" title={tr('caYoursOrangeAgainstTheirs')}>
                         <div style={{ width: `${share()}%`, opacity: c.active ? 1 : 0.4 }} />
                       </div>
                       <div class="row">
-                        <span class="sats">{fmtAmount(c.local_balance_msat, true)} yours</span>
-                        <span class="sats">{fmtAmount(c.remote_balance_msat, true)} theirs</span>
+                        <span class="sats">{fmtAmount(c.local_balance_msat, true)}{' '}{tr('caYours')}</span>
+                        <span class="sats">{fmtAmount(c.remote_balance_msat, true)}{' '}{tr('caTheirs')}</span>
                       </div>
                     </div>
                   );

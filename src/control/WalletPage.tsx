@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 import { usePairingActivity } from '../pairingActivity';
 import { createAmountDraft } from './amountDraft';
 import { StarterBalance, type StarterBalanceProps } from './StarterBalance';
@@ -336,7 +337,7 @@ const DIRECTION_FILTERS: { id: DirectionFilter; label: string }[] = [
 const ICON: Record<Activity['kind'], string> = { message: '✉', call: '☎', file: '▤', payment: '⚡', invoice: '⚡' };
 
 /** One sentence for "no channels", wherever it shows (Wallet → Channels, Settings → Wallet). */
-export const NO_CHANNELS = 'No channels yet. A channel is how your node sends and receives over Lightning; paid messages need one.';
+export const NO_CHANNELS = () => tr('caNoChannelsYetAChannelIsHowYourNode');
 
 function ActivityView(props: {
   /** The Wallet's Receive, offered when nothing has happened yet. */
@@ -441,12 +442,12 @@ function ChannelsView(props: { wallet: WalletOverview | null; nameOf: (id: strin
     <section class="wallet-panel" data-wallet-channels>
       <Show when={props.wallet} fallback={<DelayedSpinner />}>
         <p class="wallet-totals" data-channels-summary>
-          <span>{open().length} of {channels().length} open</span>
-          <span>You can send <strong>{fmtAmount(canSend())}</strong></span>
-          <span>and receive <strong>{fmtAmount(canReceive())}</strong></span>
+          <span>{open().length}{' '}{tr('uiOf')}{' '}{channels().length}{' '}{tr('caOpen867')}</span>
+          <span>{tr('caYouCanSend')}{' '}<strong>{fmtAmount(canSend())}</strong></span>
+          <span>{tr('caAndReceive')}{' '}<strong>{fmtAmount(canReceive())}</strong></span>
         </p>
         <ul class="wallet-channels">
-          <For each={channels()} fallback={<li class="empty hint" data-channels-empty>{NO_CHANNELS}</li>}>
+          <For each={channels()} fallback={<li class="empty hint" data-channels-empty>{NO_CHANNELS()}</li>}>
             {(c) => {
               const words = () => channelWords(c);
               const out = () => (c.capacity_msat > 0 ? (c.local_balance_msat / c.capacity_msat) * 100 : 0);
@@ -454,7 +455,7 @@ function ChannelsView(props: { wallet: WalletOverview | null; nameOf: (id: strin
               return (
                 <li class="wallet-channel" data-channel={c.channel_id} data-channel-state={words().state}>
                   <div class="row">
-                    <strong class="channel-peer" title={c.peer_pubkey}>{props.nameOf(c.peer_pubkey) === 'You' ? shortId(c.peer_pubkey) : props.nameOf(c.peer_pubkey)}</strong>
+                    <strong class="channel-peer" title={c.peer_pubkey}>{props.nameOf(c.peer_pubkey) === tr('uiYou') ? shortId(c.peer_pubkey) : props.nameOf(c.peer_pubkey)}</strong>
                     <span class={`contact-pill ${words().state === 'open' ? 'ok' : 'warn'}`} data-channel-pill>{words().title}</span>
                   </div>
                   <div class="channel-bar" aria-hidden="true">
@@ -462,9 +463,9 @@ function ChannelsView(props: { wallet: WalletOverview | null; nameOf: (id: strin
                     <div class="in" style={{ width: `${inn()}%` }} />
                   </div>
                   <dl class="channel-facts">
-                    <dt>You can send</dt><dd data-channel-out={c.local_balance_msat}>{fmtAmount(c.local_balance_msat)}</dd>
-                    <dt>You can receive</dt><dd data-channel-in={c.remote_balance_msat}>{fmtAmount(c.remote_balance_msat)}</dd>
-                    <dt>Size</dt><dd data-channel-capacity={c.capacity_msat}>{fmtAmount(c.capacity_msat)}</dd>
+                    <dt>{tr('caYouCanSend')}</dt><dd data-channel-out={c.local_balance_msat}>{fmtAmount(c.local_balance_msat)}</dd>
+                    <dt>{tr('caYouCanReceive')}</dt><dd data-channel-in={c.remote_balance_msat}>{fmtAmount(c.remote_balance_msat)}</dd>
+                    <dt>{tr('caSize')}</dt><dd data-channel-capacity={c.capacity_msat}>{fmtAmount(c.capacity_msat)}</dd>
                   </dl>
                   <p class="hint" data-channel-words>{words().line}</p>
                 </li>
@@ -474,8 +475,7 @@ function ChannelsView(props: { wallet: WalletOverview | null; nameOf: (id: strin
         </ul>
       </Show>
       <p class="hint" data-budget-wallet-warning>
-        Opening or closing a channel is an owner action at your node. It can commit funds and pay on-chain fees, outside this app’s daily limit.
-      </p>
+        {tr('caOpeningOrClosingAChannelIsAnOwnerAction')}</p>
     </section>
   );
 }

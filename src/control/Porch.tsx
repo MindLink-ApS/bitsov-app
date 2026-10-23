@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 // Porch reads (Browse): a contact's profile card or a flat page, fetched by
 // this node from theirs. Each read pays once, after one review the owner
 // confirms; cards the node already holds open for free and say so.
@@ -119,26 +120,21 @@ export function PorchPanel(props: Props) {
 
   return (
     <div class="panel porch" data-panel="porch">
-      <h2>Porch</h2>
+      <h2>{tr('uiPorch')}</h2>
       <p class="hint">
-        Read a contact’s profile card or pages straight from their node. Each read pays their page price
-        once, to them, after you confirm it. Pages are shown as text: nothing in them runs or opens.
-      </p>
+        {tr('caReadAContactSProfileCardOrPagesStraight')}</p>
       <Show
         when={props.nodeReads}
         fallback={
           <p class="hint" data-porch-node-off>
-            Your node does not make porch reads yet. Update it to read contacts’ cards and pages.
-          </p>
+            {tr('caYourNodeDoesNotMakePorchReadsYetUpdate')}</p>
         }
       >
         <Show
           when={readable().length > 0}
           fallback={
             <p class="hint" data-porch-none>
-              No connected contact offers porch reads right now. Contacts appear here when their node is
-              connected and advertises porch_quote_v1 (or legacy porch_read_v1).
-            </p>
+              {tr('caNoConnectedContactOffersPorchReadsRightNowContacts')}</p>
           }
         >
           <ul class="porch-peers" data-porch-peers>
@@ -154,7 +150,7 @@ export function PorchPanel(props: Props) {
                     disabled={busy() || props.moneyBlocked}
                     onClick={() => void ask(p.node_id, PORCH_CARD_PATH)}
                   >
-                    Open profile card · page price {cost(p.node_id)}
+                    {tr('caOpenProfileCardPagePrice')}{' '}{cost(p.node_id)}
                   </button>
                 </li>
               )}
@@ -163,12 +159,11 @@ export function PorchPanel(props: Props) {
         </Show>
       </Show>
       <Show when={props.moneyBlocked}>
-        <p class="hint" data-porch-blocked>Payments are not ready yet.</p>
+        <p class="hint" data-porch-blocked>{tr('extraPaymentsAreNotReadyYet')}</p>
       </Show>
       <Show when={!props.moneyBlocked && props.nodeReads && readable().length > 0 && !spendLine(props.spend, props.now).open}>
         <p class="hint" data-porch-window>
-          A read uses this contact’s budget, or your ten-minute approval at your node. Approving pays nothing.
-        </p>
+          {tr('caAReadUsesThisContactSBudgetOrYour')}</p>
         {props.spendGate}
       </Show>
 
@@ -176,29 +171,28 @@ export function PorchPanel(props: Props) {
         {(rv) => (
           <div class="pay-review" data-porch-review data-review-msat={rv().quote.principal_msat} data-review-max-msat={rv().quote.total_msat}>
             <p class="pay-review-title" data-porch-review-what>
-              {rv().path === PORCH_CARD_PATH ? `Read ${props.nameOf(rv().peer)}’s profile card` : `Read ${rv().path} from ${props.nameOf(rv().peer)}`}
+              {rv().path === PORCH_CARD_PATH ? tr('caReadSProfileCard', props.nameOf(rv().peer)) : tr('caReadFrom', rv().path, props.nameOf(rv().peer))}
             </p>
-            <p class="hint">Paid to their node, once. Nothing is retried: reading again pays again.</p>
+            <p class="hint">{tr('caPaidToTheirNodeOnceNothingIsRetriedReading')}</p>
             <dl>
-              <dt>Read</dt>
+              <dt>{tr('caRead')}</dt>
               <dd data-review-amount>{fmtAmount(rv().quote.principal_msat)}</dd>
-              <dt>Network fee</dt>
-              <dd data-review-fee>up to {fmtAmount(rv().quote.max_routing_fee_msat)}</dd>
-              <dt>Total at most</dt>
+              <dt>{tr('uiNetworkFee')}</dt>
+              <dd data-review-fee>{tr('uiUpTo178')}{' '}{fmtAmount(rv().quote.max_routing_fee_msat)}</dd>
+              <dt>{tr('uiTotalAtMost')}</dt>
               <dd data-review-total>{fmtAmount(rv().quote.total_msat)}</dd>
             </dl>
             <div class="composer-bar">
-              <button type="button" class="link" data-porch-back disabled={busy()} onClick={() => setReview(null)}>Back</button>
-              <span class="basis">You pay the real fee, never above this.</span>
+              <button type="button" class="link" data-porch-back disabled={busy()} onClick={() => setReview(null)}>{tr('uiBack')}</button>
+              <span class="basis">{tr('uiYouPayTheRealFeeNeverAboveThis')}</span>
               <button type="button" class="primary soft money" data-porch-confirm disabled={busy() || props.moneyBlocked} onClick={() => void confirm()}>
-                Confirm and pay
-              </button>
+                {tr('uiConfirmAndPay')}</button>
             </div>
           </div>
         )}
       </Show>
       <Show when={busy()}>
-        <p class="hint" data-porch-busy>Asking their node…</p>
+        <p class="hint" data-porch-busy>{tr('caAskingTheirNode')}</p>
       </Show>
       <Show when={error()}>{(m) => <SoftError message={m()} data="porch-error" />}</Show>
 
@@ -210,18 +204,16 @@ export function PorchPanel(props: Props) {
                 <>
                   <Show when={card().cached}>
                     <p class="hint" data-porch-cached>
-                      Cached · held by your node from an earlier read, signature checked. Refresh pays for a new read.
-                    </p>
+                      {tr('caCachedHeldByYourNodeFromAnEarlierRead')}</p>
                   </Show>
                   <Show when={card().stale}>
                     <p class="hint" data-porch-stale>
-                      Their node served an older card than the one your node holds. Showing what they served.
-                    </p>
+                      {tr('caTheirNodeServedAnOlderCardThanTheOne')}</p>
                   </Show>
                   <FrontDoorCardView card={card()} now={props.now} />
                   <Show when={card().cached && offers(s().peer)}>
                     <button type="button" class="link" data-porch-refresh disabled={busy() || props.moneyBlocked} onClick={() => void ask(s().peer, PORCH_CARD_PATH)}>
-                      Refresh · page price {cost(s().peer)}
+                      {tr('caRefreshPagePrice')}{' '}{cost(s().peer)}
                     </button>
                   </Show>
                 </>
@@ -232,7 +224,7 @@ export function PorchPanel(props: Props) {
                 <For each={pagesOf(s().card)}>
                   {(path) => (
                     <button type="button" class="link" data-porch-page-read={path} disabled={busy() || props.moneyBlocked} onClick={() => void ask(s().peer, path)}>
-                      Read {path} · page price {cost(s().peer, path)}
+                      {tr('caRead')}{' '}{path}{' '}{tr('caPagePrice')}{' '}{cost(s().peer, path)}
                     </button>
                   )}
                 </For>
@@ -244,13 +236,13 @@ export function PorchPanel(props: Props) {
                     if (path) void ask(s().peer, path);
                   }}
                 >
-                  <input data-porch-path placeholder="Another page, e.g. notes.md" value={other()} onInput={(e) => setOther(e.currentTarget.value)} aria-label="Page" />
+                  <input data-porch-path placeholder={tr('caAnotherPageEGNotesMd')} value={other()} onInput={(e) => setOther(e.currentTarget.value)} aria-label={tr('caPage')} />
                   <button type="submit" class="link" data-porch-path-read disabled={busy() || props.moneyBlocked || otherPath() === null}>
-                    Read · page price {cost(s().peer, otherPath() ?? '')}
+                    {tr('caReadPagePrice')}{' '}{cost(s().peer, otherPath() ?? '')}
                   </button>
                 </form>
                 <Show when={other().trim() && otherPath() === null}>
-                  <p class="hint" data-porch-path-hint>A page is a single .md or .txt file name, like notes.md.</p>
+                  <p class="hint" data-porch-path-hint>{tr('caAPageIsASingleMdOrTxtFile')}</p>
                 </Show>
               </div>
             </Show>
@@ -261,19 +253,18 @@ export function PorchPanel(props: Props) {
 
       <Show when={held().length > 0}>
         <div class="porch-held" data-porch-held>
-          <h3>Cards your node holds</h3>
+          <h3>{tr('caCardsYourNodeHolds')}</h3>
           <ul>
             <For each={held()}>
               {(c) => (
                 <li data-porch-held-card={c.node_id.toLowerCase()}>
                   <span class="name">{props.nameOf(c.node_id)}</span>
-                  <span class="meta">Cached{c.fresh ? '' : ' · expired'}</span>
+                  <span class="meta">{tr('caCached')}{c.fresh ? '' : tr('caExpired')}</span>
                   <button type="button" class="link" data-porch-held-open onClick={() => setShown({ peer: c.node_id.toLowerCase(), card: c, page: null })}>
-                    Open
-                  </button>
+                    {tr('caOpen')}</button>
                   <Show when={offers(c.node_id)}>
                     <button type="button" class="link" data-porch-held-refresh disabled={busy() || props.moneyBlocked} onClick={() => void ask(c.node_id, PORCH_CARD_PATH)}>
-                      Refresh · page price {cost(c.node_id)}
+                      {tr('caRefreshPagePrice')}{' '}{cost(c.node_id)}
                     </button>
                   </Show>
                 </li>
@@ -291,18 +282,16 @@ function PorchPageView(props: { page: PorchRead }) {
   return (
     <article class="porch-page" data-porch-page={p().path} data-porch-kind={p().kind}>
       <p class="meta">
-        {p().path} · paid {fmtAmount(p().amount_msat)}
+        {p().path}{' '}{tr('caPaid')}{' '}{fmtAmount(p().amount_msat)}
       </p>
       <Switch>
         <Match when={p().status === 'not_found'}>
           <p class="hint" data-porch-not-found>
-            Their node has no page at {p().path}. The read was still paid.
-          </p>
+            {tr('caTheirNodeHasNoPageAt')}{' '}{p().path}{tr('caTheReadWasStillPaid')}</p>
         </Match>
         <Match when={p().status !== 'ok'}>
           <p class="hint" data-porch-unavailable>
-            Their node could not serve {p().path} right now. The read was still paid.
-          </p>
+            {tr('caTheirNodeCouldNotServe')}{' '}{p().path}{' '}{tr('caRightNowTheReadWasStillPaid')}</p>
         </Match>
         <Match when={p().kind === 'markdown'}>
           <For each={parseMarkdown(p().body)}>{(b) => <BlockView block={b} />}</For>
@@ -358,7 +347,7 @@ function Runs(props: { runs: Inline[] }) {
               </span>
             );
           case 'image':
-            return <span class="meta" data-porch-image>[image{r.text ? `: ${r.text}` : ''}]</span>;
+            return <span class="meta" data-porch-image>{tr('caImage')}{r.text ? `: ${r.text}` : ''}]</span>;
           default:
             return <>{r.text}</>;
         }

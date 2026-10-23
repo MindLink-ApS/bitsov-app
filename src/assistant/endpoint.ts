@@ -1,3 +1,4 @@
+import { t as tr, displayDeviceWord } from '../i18n';
 // Which endpoint answers, who gets paid and what leaves: one vocabulary for the
 // sealed assistant window and the AI track. Text only, from the host's
 // `ProviderView`; nothing here reads the node or asks the host.
@@ -14,7 +15,7 @@ export type BadgeInput = Pick<ProviderView, 'kind' | 'host' | 'model' | 'pays' |
 export const OWN_RULES: ProviderView = {
   kind: 'local',
   // A getter: "On this phone" on a phone build.
-  get label() { return `On this ${deviceWord()}`; },
+  get label() { return tr('caOnThis', displayDeviceWord()); },
   enabled: true,
   host: null,
   model: null,
@@ -24,13 +25,13 @@ export const OWN_RULES: ProviderView = {
 };
 
 const TIER: Record<ProviderKind, Tier> = { local: 'own', shared: 'shared', frontier: 'frontier' };
-const TIER_NAME: Record<Tier, string> = { own: 'Own', shared: 'Shared open', frontier: 'Frontier' };
+const TIER_NAME: Record<Tier, string> = { get own() { return tr('caOwn'); }, get shared() { return tr('caSharedOpen'); }, get frontier() { return tr('caFrontier'); } };
 
 /** What each preset lets leave, in a few words. */
 export const PRESET_WORDS: Record<Preset, string> = {
-  counts: 'counts only',
-  rounded: 'rounded figures',
-  exact: 'exact figures and node ids',
+  get counts() { return tr('caCountsOnly1364'); },
+  get rounded() { return tr('caRoundedFigures'); },
+  get exact() { return tr('caExactFiguresAndNodeIds'); },
 };
 
 export type Badge = {
@@ -56,20 +57,20 @@ export function endpointBadge(p: BadgeInput, previewed: Preset | null = null): B
   const name = TIER_NAME[tier];
   // Own, or a remote that is off: nothing can leave and nobody is paid.
   if (tier === 'own' || p.data_leaves === null) {
-    const where = tier === 'own' ? `On this ${deviceWord()} · ${p.model ?? 'rules'}` : `Off on this ${deviceWord()}`;
-    const quiet = { tier, name, where, paid: 'Nobody is paid', leaves: 'Nothing leaves' };
+    const where = tier === 'own' ? tr('caOnThis1367', displayDeviceWord(), p.model ?? tr('caRules')) : tr('caOffOnThis', displayDeviceWord());
+    const quiet = { tier, name, where, paid: tr('caNobodyIsPaid'), leaves: tr('caNothingLeaves1370') };
     return { ...quiet, text: join(quiet) };
   }
-  const where = `${p.model ?? 'model'} at ${p.host ?? 'a remote host'}`;
+  const where = tr('caAtExtra46', p.model ?? tr('caModel'), p.host ?? tr('caARemoteHost'));
   const paid =
     p.pays.rail !== 'fiat' || !p.pays.to
-      ? 'Nobody is paid by this app'
+      ? tr('caNobodyIsPaidByThisApp')
       : isLoopback(p.pays.to)
-        ? 'Paid: your API key (local endpoint)'
-        : `Paid: ${p.pays.to}, your API key`;
+        ? tr('caPaidYourAPIKeyLocalEndpoint')
+        : tr('caPaidYourAPIKey', p.pays.to);
   const preset = previewed ?? p.data_leaves;
   const leaves =
-    `Leaves: the preview you send, ${PRESET_WORDS[preset]}` + (tier === 'frontier' ? '; vendor terms apply' : '');
+    tr('caLeavesThePreviewYouSend', PRESET_WORDS[preset]) + (tier === 'frontier' ? tr('caVendorTermsApply') : '');
   const badge = { tier, name, where, paid, leaves };
   return { ...badge, text: join(badge) };
 }

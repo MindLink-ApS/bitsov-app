@@ -39,7 +39,7 @@ function mountIt(ui: () => any) {
 const $ = <T extends Element = HTMLElement>(sel: string) => mount.querySelector<T>(sel);
 
 it('copyPlainText rejects when nothing was copied, instead of pretending', async () => {
-  vi.stubGlobal('navigator', { ...navigator, clipboard: undefined });
+  vi.stubGlobal('navigator', { ...navigator, language: navigator.language, clipboard: undefined });
   document.execCommand = () => false;
   await expect(copyPlainText('bc1qexample')).rejects.toThrow(/Copy did not work/);
   expect(document.querySelector('textarea')).toBeNull();

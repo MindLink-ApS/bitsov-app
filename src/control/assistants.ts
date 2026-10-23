@@ -1,14 +1,15 @@
+import { t as tr } from '../i18n';
 import type { WatchNotice, WatchRule } from './watches';
 import type { AiTopic, TopicRead } from './types';
 
 export type AssistantId = 'node' | 'wallet' | 'inbox';
 export const ASSISTANTS: Record<AssistantId, { name: string; role: string; topics: AiTopic[]; suggestions: string[] }> = {
-  node: { name: 'Node', role: 'Node health, peers, channels and prices.', topics: ['node', 'channels', 'prices'],
-    suggestions: ['How is my node doing?', 'How much inbound liquidity do I have?', 'What do I charge?'] },
-  wallet: { name: 'Wallet', role: 'Balance, payment history and prices.', topics: ['balance', 'payments', 'prices'],
-    suggestions: ['How much is in my wallet?', 'What did I spend today?', 'What do I charge?'] },
-  inbox: { name: 'Inbox', role: 'Inbox counts only. No message bodies.', topics: ['inbox'],
-    suggestions: ['Who messaged me?'] },
+  node: { get name() { return tr('uiNode'); }, get role() { return tr('caNodeHealthPeersChannelsAndPrices'); }, topics: ['node', 'channels', 'prices'],
+    get suggestions() { return [tr('caHowIsMyNodeDoing'), tr('caHowMuchInboundLiquidityDoIHave'), tr('caWhatDoICharge')]; } },
+  wallet: { get name() { return tr('uiWallet'); }, get role() { return tr('caBalancePaymentHistoryAndPrices'); }, topics: ['balance', 'payments', 'prices'],
+    get suggestions() { return [tr('caHowMuchIsInMyWallet'), tr('caWhatDidISpendToday'), tr('caWhatDoICharge')]; } },
+  inbox: { get name() { return tr('caInbox'); }, get role() { return tr('caInboxCountsOnlyNoMessageBodies'); }, topics: ['inbox'],
+    get suggestions() { return [tr('caWhoMessagedMe')]; } },
 };
 export type AssistantTurn = { at: number; question: string; answer: string };
 export type AssistantThread = { revision: string; turns: AssistantTurn[]; notices?: WatchNotice[]; disabled_watches?: WatchRule[] };
@@ -25,8 +26,8 @@ export type LocalTurn = {
 };
 export function modelProposalText(p: ModelProposal): string {
   switch (p.kind) {
-    case 'pay': return `Payment draft to ${p.peer}: ${p.sats} sats`;
-    case 'request': return `Request draft to ${p.peer}: ${p.sats} sats\n${p.note}`;
-    case 'message': return `Message draft to ${p.recipient}:\n${p.draft_text}`;
+    case 'pay': return tr('caPaymentDraftToSats', p.peer, p.sats);
+    case 'request': return tr('caRequestDraftToSats', p.peer, p.sats, p.note);
+    case 'message': return tr('caMessageDraftTo', p.recipient, p.draft_text);
   }
 }

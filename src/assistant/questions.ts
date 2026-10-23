@@ -1,3 +1,5 @@
+import { t } from '../i18n';
+import type { assistantQuestionsEn } from '../assistantQuestionsCopy';
 import fixture from '../../jarvis/fixtures/questions.json';
 import type { RouteKey } from './source';
 
@@ -20,7 +22,7 @@ function routeOf(source: string): RouteKey | null {
 /** Compiled in from the pinned fixture. Only id, text and route are kept. */
 export const QUESTIONS: readonly Question[] = fixture.questions.map((q) => ({
   id: q.id,
-  text: q.question,
+  get text() { return t(`assistantQuestion${q.id}` as keyof typeof assistantQuestionsEn); },
   route: routeOf(q.sources[0] ?? ''),
 }));
 

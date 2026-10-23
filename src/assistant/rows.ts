@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 /** Global set by the window's initialization script (src-tauri sit_mock.rs). */
 export const ROWS_GLOBAL = '__BITSOV_SIT_ROWS__';
 
@@ -30,6 +31,5 @@ export function rowsText(rows: SitRow[]): string {
 }
 
 /** Shown instead of a blank window when the host handed over no rows. */
-export const NO_ROWS_TEXT =
-  'Nothing to show yet. Close this window and open the assistant again from the BitSov app.\n\n' +
-  'Developers: start the app with npm run tauri:assistant';
+export const NO_ROWS_TEXT = () => tr('caNothingToShowYetCloseThisWindowAndOpen') +
+  tr('caDevelopersStartTheAppWithNpmRunTauriAssistant');

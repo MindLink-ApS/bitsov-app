@@ -30,7 +30,7 @@ export function AssistantPage(props: {
       <SourceLabel source={props.view.source} freshness={props.view.freshness} now={clock} />
       <Show
         when={props.view.rows.length > 0}
-        fallback={<AssistantSurface text={NO_ROWS_TEXT} />}
+        fallback={<AssistantSurface text={NO_ROWS_TEXT()} />}
       >
         <AskPanel
           rows={props.view.rows}

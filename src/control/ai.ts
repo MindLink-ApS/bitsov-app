@@ -1,4 +1,5 @@
-import { language } from '../i18n';
+import { t as tr } from '../i18n';
+import { language, copy, type CopyKey } from '../i18n';
 // The AI track's rules as pure functions: what a question asks for, how an
 // answer is composed from the host's broker read, how old it is, and what a
 // proposed action prefills. Nothing here reads the node, sends, or spends.
@@ -57,11 +58,11 @@ export type Intent =
   | { kind: 'unknown' };
 
 /** What the local answerer can read. Shown as suggestions. */
-export const SUGGESTIONS: readonly string[] = [
-  'What did I spend this week?',
-  'How much is in my wallet?',
-  'How is my node doing?',
-  'Draft a 2-sat message to Maya',
+export const SUGGESTIONS = (): readonly string[] => [
+  tr('caWhatDidISpendThisWeek'),
+  tr('caHowMuchIsInMyWallet'),
+  tr('caHowIsMyNodeDoing'),
+  tr('caDraftA2SatMessageToMaya'),
 ];
 
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -104,11 +105,11 @@ const startOfDay = (ms: number) => {
 
 function timeWindow(text: string, nowMs: number): { sinceMs: number | null; label: string } {
   const t = text.toLowerCase();
-  if (/\btoday\b/.test(t)) return { sinceMs: startOfDay(nowMs), label: 'today' };
-  if (/\byesterday\b/.test(t)) return { sinceMs: startOfDay(nowMs) - DAY_MS, label: 'since yesterday' };
-  if (/\bmonth\b/.test(t)) return { sinceMs: nowMs - 30 * DAY_MS, label: 'in the last 30 days' };
-  if (/\b(ever|all time|in total|so far)\b/.test(t)) return { sinceMs: null, label: 'in the history your node keeps' };
-  return { sinceMs: nowMs - WEEK_MS, label: 'in the last 7 days' };
+  if (/\btoday\b/.test(t)) return { sinceMs: startOfDay(nowMs), label: tr('caToday') };
+  if (/\byesterday\b/.test(t)) return { sinceMs: startOfDay(nowMs) - DAY_MS, label: tr('caSinceYesterday') };
+  if (/\bmonth\b/.test(t)) return { sinceMs: nowMs - 30 * DAY_MS, label: tr('caInTheLast30Days') };
+  if (/\b(ever|all time|in total|so far)\b/.test(t)) return { sinceMs: null, label: tr('caInTheHistoryYourNodeKeeps') };
+  return { sinceMs: nowMs - WEEK_MS, label: tr('caInTheLast7Days') };
 }
 
 const TOPICS: [AiTopic, RegExp][] = [
@@ -120,8 +121,23 @@ const TOPICS: [AiTopic, RegExp][] = [
   ['node', /\b(node|status|health|healthy|uptime|online|block|synced?|peers? connected|how is it doing)\b/],
 ];
 
+// Built-in suggestions keep the existing rule-parser meaning in either language.
+// Free-form text, contact names and draft bodies are never translated.
+const suggestionKeys = [
+  'caWhatDidISpendThisWeek', 'caHowMuchIsInMyWallet', 'caHowIsMyNodeDoing',
+  'caDraftA2SatMessageToMaya', 'caHowMuchInboundLiquidityDoIHave',
+  'caWhatDoICharge', 'caWhatDidISpendToday', 'caWhoMessagedMe',
+  'caDraftAMessageToMaya', 'caPayMaya500Sats', 'caRequest2000SatsFromJosh',
+] as const satisfies readonly CopyKey[];
+function ruleQuestion(text: string): string {
+  const normalized = text.trim().toLocaleLowerCase();
+  const key = suggestionKeys.find(key => copy.da[key].toLocaleLowerCase() === normalized);
+  return key ? copy.en[key] : text;
+}
+
 /** What a question asks for. Actions need exactly one named peer. */
 export function understand(text: string, peers: Peer[], nowMs: number, draft?: DraftInput): Intent {
+  text = ruleQuestion(text);
   const t = text.toLowerCase();
   const amount = satsIn(text);
   const wantsMessage = /\b(draft|write|compose|message|text|tell|reply|ask)\b/.test(t) && !/\bmessages? (did i get|from)\b/.test(t);
@@ -169,16 +185,16 @@ export type Answer = { text: string; cards: Card[] };
 export const value = (a: Amount | undefined | null): number | null => (a && a.state === 'available' ? a.value : null);
 
 const REASON: Record<Unavailable['kind'], string> = {
-  timeout: 'it did not answer in time',
-  upstream_error: 'it returned an error',
-  malformed: 'its reply was not in the expected shape',
-  absent: 'it did not include that figure',
-  stale: 'it marked the figure out of date',
-  overflow: 'a total was too large to add up',
+  get timeout() { return tr('caItDidNotAnswerInTime'); },
+  get upstream_error() { return tr('caItReturnedAnError'); },
+  get malformed() { return tr('caItsReplyWasNotInTheExpectedShape'); },
+  get absent() { return tr('caItDidNotIncludeThatFigure'); },
+  get stale() { return tr('caItMarkedTheFigureOutOfDate'); },
+  get overflow() { return tr('caATotalWasTooLargeToAddUp'); },
 };
 
 const missing = (what: string, reason: Unavailable) =>
-  `Your node did not return ${what}: ${REASON[reason.kind]}. Nothing was guessed.`;
+  tr('caYourNodeDidNotReturnNothingWasGuessed', what, REASON[reason.kind]);
 
 const satsText = (msat: number) => `${sats(msat)} ${satUnit(msat)}`;
 
@@ -187,58 +203,58 @@ function ready<T>(output: ToolOutput | undefined, tool: ToolOutput['tool']): Rep
 }
 
 function balanceAnswer(report: Report<BalanceReport>): Answer {
-  if (report.state === 'unavailable') return { text: missing('its balance', report.reason), cards: [] };
+  if (report.state === 'unavailable') return { text: missing(tr('caItsBalance'), report.reason), cards: [] };
   const b = report.value;
   const total = value(b.wallet_balance);
-  if (total === null) return { text: missing('its balance', { kind: 'absent' }), cards: [] };
+  if (total === null) return { text: missing(tr('caItsBalance'), { kind: 'absent' }), cards: [] };
   const what = {
-    ldk_onchain_plus_lightning: 'That is Lightning and spendable on-chain together.',
-    lnd_channel_balance: 'That is your Lightning channel balance.',
-    node_reported: 'That is the figure your node reports; it does not say which balances it includes.',
+    ldk_onchain_plus_lightning: tr('caThatIsLightningAndSpendableOnChainTogether'),
+    lnd_channel_balance: tr('caThatIsYourLightningChannelBalance'),
+    node_reported: tr('caThatIsTheFigureYourNodeReportsItDoes'),
   }[b.label];
   const out = value(b.channel_local_balance);
-  const send = out === null ? '' : ` Your local channel balance is ${satsText(out)}.`;
-  return { text: `Your node reports ${satsText(total)}. ${what}${send}`, cards: [{ type: 'balance', balance: b, channels: null }] };
+  const send = out === null ? '' : tr('caYourLocalChannelBalanceIs', satsText(out));
+  return { text: tr('caYourNodeReports', satsText(total), what, send), cards: [{ type: 'balance', balance: b, channels: null }] };
 }
 
 function channelsAnswer(report: Report<ChannelsReport>): Answer {
-  if (report.state === 'unavailable') return { text: missing('its channels', report.reason), cards: [] };
+  if (report.state === 'unavailable') return { text: missing(tr('caItsChannels'), report.reason), cards: [] };
   const c = report.value;
   const count = value(c.count) ?? c.channels.length;
   const active = value(c.active_count) ?? c.channels.filter((ch) => ch.active).length;
   const sum = (pick: (ch: ChannelsReport['channels'][number]) => Amount) =>
     c.channels.filter((ch) => ch.active).reduce((n, ch) => n + (value(pick(ch)) ?? 0), 0);
   if (count === 0) {
-    return { text: 'Your node has no Lightning channels yet. A channel is needed before paid messages can be sent.', cards: [] };
+    return { text: tr('caYourNodeHasNoLightningChannelsYetAChannel'), cards: [] };
   }
   return {
     text:
-      `${count} ${count === 1 ? 'channel' : 'channels'}, ${active} active. ` +
-      `Over the active ones you can send ${satsText(sum((ch) => ch.local_balance))} and receive ${satsText(sum((ch) => ch.remote_balance))}.`,
+      tr('caActiveExtra768', count, count === 1 ? tr('caChannel') : tr('caChannels'), active) +
+      tr('caOverTheActiveOnesYouCanSendAndReceive', satsText(sum((ch) => ch.local_balance)), satsText(sum((ch) => ch.remote_balance))),
     cards: [{ type: 'balance', balance: null, channels: c }],
   };
 }
 
 function nodeAnswer(report: Report<HealthReport>): Answer {
-  if (report.state === 'unavailable') return { text: missing('its status', report.reason), cards: [] };
+  if (report.state === 'unavailable') return { text: missing(tr('caItsStatus'), report.reason), cards: [] };
   const h = report.value;
   const parts: string[] = [];
   const peers = value(h.connected_peers);
-  if (peers !== null) parts.push(`${peers} ${peers === 1 ? 'peer' : 'peers'} connected`);
+  if (peers !== null) parts.push(tr('caConnected', peers, peers === 1 ? tr('caPeer') : tr('caPeersExtra774')));
   const height = value(h.block_height);
-  if (height !== null) parts.push(`at block ${satsWhole(height)}`);
+  if (height !== null) parts.push(tr('caAtBlock', satsWhole(height)));
   const up = value(h.uptime);
-  if (up !== null) parts.push(`up ${uptime(up)}`);
-  const head = h.liveness === 'ok' ? 'Your node is healthy' : 'Your node answered but did not report itself healthy';
-  const ln = h.lightning_payment_capable ? '' : ' Lightning cannot send payments right now.';
+  if (up !== null) parts.push(tr('caUp', uptime(up)));
+  const head = h.liveness === 'ok' ? tr('caYourNodeIsHealthy') : tr('caYourNodeAnsweredButDidNotReportItselfHealthy');
+  const ln = h.lightning_payment_capable ? '' : tr('caLightningCannotSendPaymentsRightNow');
   return { text: `${head}${parts.length ? `: ${parts.join(', ')}` : ''}.${ln}`, cards: [{ type: 'node', health: h }] };
 }
 
 function inboxAnswer(report: Report<MessageCountsReport>, nameOf: (id: string) => string): Answer {
-  if (report.state === 'unavailable') return { text: missing('its messages', report.reason), cards: [] };
+  if (report.state === 'unavailable') return { text: missing(tr('caItsMessages'), report.reason), cards: [] };
   const m = report.value;
   const n = value(m.returned_count) ?? 0;
-  if (n === 0) return { text: 'Your node returned no incoming messages.', cards: [] };
+  if (n === 0) return { text: tr('caYourNodeReturnedNoIncomingMessages'), cards: [] };
   const top = [...m.senders]
     .map((s) => ({ name: nameOf(s.sender), count: value(s.count) ?? 0 }))
     .sort((a, b) => b.count - a.count)
@@ -247,46 +263,46 @@ function inboxAnswer(report: Report<MessageCountsReport>, nameOf: (id: string) =
   const withheld = value(m.withheld_senders) ?? 0;
   return {
     text:
-      `Your latest ${n} incoming ${n === 1 ? 'message came' : 'messages came'} from ${m.senders.length} ` +
-      `${m.senders.length === 1 ? 'contact' : 'contacts'}${top.length ? `: ${top.join(', ')}` : ''}.` +
-      (withheld > 0 ? ` ${withheld} had a sender the broker could not check, so they are not named.` : ''),
+      tr('caYourLatestIncomingFrom', n, n === 1 ? tr('caMessageCame') : tr('caMessagesCame'), m.senders.length) +
+      `${m.senders.length === 1 ? tr('caContactExtra777') : tr('caContacts')}${top.length ? `: ${top.join(', ')}` : ''}.` +
+      (withheld > 0 ? tr('caHadASenderTheBrokerCouldNotCheckSo', withheld) : ''),
     cards: [],
   };
 }
 
 const CATEGORY: Record<string, string> = {
-  communication: 'a message',
-  structured_data: 'structured data',
-  files_media: 'a file',
-  collaboration: 'collaboration',
-  realtime_signaling: 'a call signal',
-  web_content: 'web content',
-  relay_storage: 'relay storage',
-  control: 'a control message',
-  app_extension: 'an app extension',
+  get communication() { return tr('caMessageNoun'); },
+  get structured_data() { return tr('caStructuredData'); },
+  get files_media() { return tr('caAFile'); },
+  get collaboration() { return tr('caCollaboration'); },
+  get realtime_signaling() { return tr('caACallSignal'); },
+  get web_content() { return tr('caWebContent'); },
+  get relay_storage() { return tr('caRelayStorage'); },
+  get control() { return tr('caAControlMessage'); },
+  get app_extension() { return tr('caAnAppExtension'); },
 };
 
 function pricesAnswer(report: Report<LocalPricesReport>): Answer {
-  if (report.state === 'unavailable') return { text: missing('its prices', report.reason), cards: [] };
+  if (report.state === 'unavailable') return { text: missing(tr('caItsPrices'), report.reason), cards: [] };
   const p = report.value;
   const line = (category: string) => {
     const price = p.prices.find((x) => x.category === category);
     const msat = value(price?.price);
-    return msat === null ? null : `${satsText(msat)} for ${CATEGORY[category] ?? category}`;
+    return msat === null ? null : tr('caFor', satsText(msat), CATEGORY[category] ?? category);
   };
   const first = line('communication');
   const rest = ['files_media', 'structured_data', 'collaboration'].map(line).filter(Boolean);
-  if (!first && rest.length === 0) return { text: missing('its prices', { kind: 'absent' }), cards: [] };
+  if (!first && rest.length === 0) return { text: missing(tr('caItsPrices'), { kind: 'absent' }), cards: [] };
   return {
     text:
-      `You charge ${first ?? 'no listed price for a message'}${rest.length ? `; ${rest.join(', ')}` : ''}. ` +
-      `Senders pay these to reach you. This is your node’s own table, not anyone else’s.`,
+      tr('caYouCharge', first ?? tr('caNoListedPriceForAMessage'), rest.length ? `; ${rest.join(', ')}` : '') +
+      tr('caSendersPayTheseToReachYouThisIsYour'),
     cards: [],
   };
 }
 
 function paymentsAnswer(report: Report<PaymentsReport>, label: string): Answer {
-  if (report.state === 'unavailable') return { text: missing('your payment history', report.reason), cards: [] };
+  if (report.state === 'unavailable') return { text: missing(tr('caYourPaymentHistory'), report.reason), cards: [] };
   const r = report.value;
   const sent = r.entries.filter((e) => e.direction === 'sent');
   const got = r.entries.filter((e) => e.direction === 'received');
@@ -298,27 +314,27 @@ function paymentsAnswer(report: Report<PaymentsReport>, label: string): Answer {
   const n = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
   let text =
     spent === null
-      ? 'Your spending could not be added up.'
+      ? tr('caYourSpendingCouldNotBeAddedUp')
       : spent === 0
-        ? `No spending was found in the paid-message history read ${label}.`
-        : `${lead} you spent ${satsText(spent)} on paid messages.`;
+        ? tr('caNoSpendingWasFoundInThePaidMessageHistory', label)
+        : tr('caYouSpentOnPaidMessages', lead, satsText(spent));
   text += earned === null
-    ? ' Your received total could not be added up.'
+    ? tr('caYourReceivedTotalCouldNotBeAddedUp')
     : earned === 0
-      ? ` No income was found in the paid-message history read ${label}.`
-      : ` You received ${satsText(earned)} from paid messages ${label}.`;
+      ? tr('caNoIncomeWasFoundInThePaidMessageHistory', label)
+      : tr('caYouReceivedFromPaidMessages', satsText(earned), label);
   // Totals cover all inspected entries; the broker caps the listed subset.
   // Counts from that subset cannot establish whether any spending occurred.
   if (r.entries.length) {
-    text += ` The listed entries include ${n(sent.length, 'sent message', 'sent messages')} to ${n(contacts(sent), 'contact', 'contacts')} and ${n(got.length, 'received message', 'received messages')}.`;
+    text += tr('caTheListedEntriesIncludeToAnd', n(sent.length, tr('caSentMessage'), tr('caSentMessages')), n(contacts(sent), tr('caContactExtra777'), tr('caContacts')), n(got.length, tr('caReceivedMessage'), tr('caReceivedMessages')));
   }
   const caveats: string[] = [];
   const unread = value(r.peers_unread) ?? 0;
-  if (unread > 0) caveats.push(`${n(unread, 'contact', 'contacts')} could not be read, so these totals are a floor`);
+  if (unread > 0) caveats.push(tr('caCouldNotBeReadSoTheseTotalsAreA', n(unread, tr('caContactExtra777'), tr('caContacts'))));
   const partial = value(r.partial_threads) ?? 0;
-  if (partial > 0) caveats.push(`older messages with ${n(partial, 'contact were', 'contacts were')} not read`);
+  if (partial > 0) caveats.push(tr('caOlderMessagesWithNotRead', n(partial, tr('caContactWere'), tr('caContactsWere'))));
   if (caveats.length) text += ` ${caveats.join('; ').replace(/^./, (c) => c.toUpperCase())}.`;
-  text += ' Paid messages only: your node keeps no list of other Lightning payments the app may read.';
+  text += tr('caPaidMessagesOnlyYourNodeKeepsNoListOf');
   return {
     text,
     cards: r.entries.length ? [{ type: 'payments', report: r, window: label }] : [],
@@ -346,30 +362,27 @@ export function answerFrom(
     case 'payments':
       return paymentsAnswer(
         ready<PaymentsReport>(out, 'payments') ?? { state: 'unavailable', reason: { kind: 'absent' } },
-        intent.window ?? 'in the last 7 days',
+        intent.window ?? tr('caInTheLast7Days'),
       );
   }
 }
 
 const NO_READ: Record<NoRead, string> = {
-  not_paired: 'The app is not paired with your node for reads, so nothing was read.',
-  rc7_fallback:
-    'Your node version has no pairing, and the read broker never uses the app’s full-access local token. ' +
-    'Nothing was read. Pair with a node that supports pairing to ask about your own data.',
-  node_unreachable: 'Your node did not answer, so nothing was read.',
+  get not_paired() { return tr('caTheAppIsNotPairedWithYourNodeFor'); },
+  get rc7_fallback() { return tr('caYourNodeVersionHasNoPairingAndTheRead') +
+    tr('caNothingWasReadPairWithANodeThatSupports'); },
+  get node_unreachable() { return tr('caYourNodeDidNotAnswerSoNothingWasRead'); },
 };
 
 export const noReadText = (reason: NoRead) => NO_READ[reason];
 
 export function unknownText(): string {
-  return 'I can answer from your node about your balance, channels, payments, node status, inbox and prices, and I can draft a message, a payment or an invoice for you to send. Try one of the suggestions.';
+  return tr('caICanAnswerFromYourNodeAboutYourBalance');
 }
 
 export function noPeerText(what: Proposal['kind']): string {
-  const verb = { message: 'draft a message', pay: 'prepare a payment', request: 'prepare an invoice' }[what];
-  return `To ${verb} I need exactly one of your contacts by name, and ${what === 'message' ? '' : 'an amount in sats, '}for example “${
-    { message: 'Draft a message to Maya', pay: 'Pay Maya 500 sats', request: 'Request 2000 sats from Josh' }[what]
-  }”.`;
+  const verb = { message: tr('caDraftAMessage'), pay: tr('caPrepareAPayment'), request: tr('caPrepareAnInvoice') }[what];
+  return tr('caToINeedExactlyOneOfYourContactsBy', verb, what === 'message' ? '' : tr('caAnAmountInSats'), { message: tr('caDraftAMessageToMaya'), pay: tr('caPayMaya500Sats'), request: tr('caRequest2000SatsFromJosh') }[what]);
 }
 
 /** What the track says after preparing an action. It never says it sent or paid. */
@@ -377,14 +390,14 @@ export function proposalText(p: Proposal): string {
   switch (p.kind) {
     case 'message':
       return (
-        `I prepared a draft for ${p.name}’s composer. ${p.name} sets the price of a message, and the composer shows it before you send.` +
-        (p.amount_hint !== null ? ` You asked for a ${p.amount_hint}-sat message: the price is theirs, not a choice here.` : '') +
-        ' Nothing is sent until you press Send and approve the spend.'
+        tr('caIPreparedADraftForSComposerSetsThe', p.name, p.name) +
+        (p.amount_hint !== null ? tr('caYouAskedForASatMessageThePriceIs', p.amount_hint) : '') +
+        tr('caNothingIsSentUntilYouPressSendAndApprove')
       );
     case 'pay':
-      return `I prepared a ${satsWhole(p.sats)}-sat payment to ${p.name}. Nothing is paid until you paste their invoice or Lightning key, check the amount and approve it in the composer.`;
+      return tr('caIPreparedASatPaymentToNothingIsPaid', satsWhole(p.sats), p.name);
     case 'request':
-      return `I prepared an invoice for ${satsWhole(p.sats)} sats from ${p.name}. Receiving costs you nothing; the invoice is made only when you press Create invoice.`;
+      return tr('caIPreparedAnInvoiceForSatsFromReceivingCosts', satsWhole(p.sats), p.name);
   }
 }
 
@@ -399,70 +412,70 @@ export type SourceLine = { state: AiFreshness['state']; text: string };
  */
 export function sourceLine(f: AiFreshness, receivedAt: number, nowMs: number): SourceLine {
   const stale = f.node_stale || f.state === 'stale';
-  const why = f.node_stale ? ' Your node marked it out of date.' : '';
-  const skew = f.clock_skew ? ' Your node’s clock is ahead of this computer.' : '';
+  const why = f.node_stale ? tr('caYourNodeMarkedItOutOfDate') : '';
+  const skew = f.clock_skew ? tr('caYourNodeSClockIsAheadOfThisComputer') : '';
   if (f.age_ms === null || f.fresh_for_ms === null) {
     // An absent/unusable As-Of makes the age unknown, not the node's explicit
     // stale signal. Preserve that signal even if a derived state disagrees.
     return stale
-      ? { state: 'stale', text: `Stale. Update time unknown.${why} Ask again to re-read.${skew}` }
-      : { state: 'unknown', text: `Freshness unknown.${skew}` };
+      ? { state: 'stale', text: tr('caStaleUpdateTimeUnknownAskAgainToReRead', why, skew) }
+      : { state: 'unknown', text: tr('caFreshnessUnknown', skew) };
   }
   const elapsed = Math.max(0, nowMs - receivedAt);
   const age = f.age_ms + elapsed;
   const when = ago(nowMs - age, nowMs);
-  const basis = f.node_as_of ? 'by your node’s clock' : 'when the app read it';
+  const basis = f.node_as_of ? tr('caByYourNodeSClock') : tr('caWhenTheAppReadIt');
   if (stale || elapsed >= f.fresh_for_ms) {
-    return { state: 'stale', text: `Stale: updated ${when} (${basis}).${why} Ask again to re-read.${skew}` };
+    return { state: 'stale', text: tr('caStaleUpdatedAskAgainToReRead', when, basis, why, skew) };
   }
-  return { state: 'fresh', text: `Updated ${when} (${basis}).${skew}` };
+  return { state: 'fresh', text: tr('caUpdated', when, basis, skew) };
 }
 
 // ---- disclosure presets --------------------------------------------------------
 
 export const PRESETS: { id: Preset; label: string; detail: string }[] = [
-  { id: 'counts', label: 'Counts only', detail: 'How many, never how much, when or who.' },
-  { id: 'rounded', label: 'Rounded', detail: 'Amounts to two figures, dates to the day, no node ids.' },
-  { id: 'exact', label: 'Exact', detail: 'The figures the broker read, with node ids.' },
+  { id: 'counts', get label() { return tr('caCountsOnly'); }, get detail() { return tr('caHowManyNeverHowMuchWhenOrWho'); } },
+  { id: 'rounded', get label() { return tr('caRounded'); }, get detail() { return tr('caAmountsToTwoFiguresDatesToTheDayNo'); } },
+  { id: 'exact', get label() { return tr('caExact'); }, get detail() { return tr('caTheFiguresTheBrokerReadWithNodeIds'); } },
 ];
 
 // ---- copy text -----------------------------------------------------------------
 
 export function cardText(card: Card, nameOf: (id: string) => string): string {
-  const fig = (a: Amount | undefined) => (value(a) === null ? 'unavailable' : satsText(value(a)!));
+  const fig = (a: Amount | undefined) => (value(a) === null ? tr('caUnavailableExtra63') : satsText(value(a)!));
   switch (card.type) {
     case 'node': {
       const h = card.health;
       return [
-        `Node: ${h.liveness === 'ok' ? 'healthy' : 'not healthy'}`,
-        `Peers connected: ${value(h.connected_peers) ?? 'unavailable'}`,
-        `Encrypted sessions: ${value(h.e2ee_sessions) ?? 'unavailable'}`,
-        `Waiting to deliver: ${value(h.pending_deliveries) ?? 'unavailable'}`,
-        `Block height: ${value(h.block_height) ?? 'unavailable'}`,
-        `Lightning: ${h.lightning_backend}${h.lightning_payment_capable ? ', can pay' : ', cannot pay'}`,
-        `Uptime: ${value(h.uptime) === null ? 'unavailable' : uptime(value(h.uptime)!)}`,
+        tr('caNode', h.liveness === 'ok' ? tr('caHealthyExtra819') : tr('caNotHealthy990')),
+        tr('caPeersConnected991', value(h.connected_peers) ?? tr('caUnavailableExtra63')),
+        tr('caEncryptedSessions992', value(h.e2ee_sessions) ?? tr('caUnavailableExtra63')),
+        tr('caWaitingToDeliver993', value(h.pending_deliveries) ?? tr('caUnavailableExtra63')),
+        tr('caBlockHeight994', value(h.block_height) ?? tr('caUnavailableExtra63')),
+        tr('caLightning', h.lightning_backend, h.lightning_payment_capable ? tr('caCanPay') : tr('caCannotPay')),
+        tr('caUptimeExtra825', value(h.uptime) === null ? tr('caUnavailableExtra63') : uptime(value(h.uptime)!)),
       ].join('\n');
     }
     case 'balance': {
       const lines: string[] = [];
       if (card.balance) {
-        lines.push(`Balance: ${fig(card.balance.wallet_balance)}`, `Lightning, yours: ${fig(card.balance.channel_local_balance)}`, `Lightning, theirs: ${fig(card.balance.channel_remote_balance)}`);
+        lines.push(tr('caBalanceExtra827', fig(card.balance.wallet_balance)), tr('caLightningYours997', fig(card.balance.channel_local_balance)), tr('caLightningTheirs998', fig(card.balance.channel_remote_balance)));
       }
       if (card.channels) {
-        lines.push(`Channels: ${value(card.channels.count) ?? '?'} (${value(card.channels.active_count) ?? '?'} active)`);
+        lines.push(tr('caChannelsActive', value(card.channels.count) ?? '?', value(card.channels.active_count) ?? '?'));
         for (const ch of card.channels.channels) {
-          lines.push(`  ${ch.active ? 'active' : 'inactive'} · ${fig(ch.local_balance)} yours · ${fig(ch.remote_balance)} theirs`);
+          lines.push(tr('caYoursTheirs', ch.active ? tr('caActive') : tr('caInactive'), fig(ch.local_balance), fig(ch.remote_balance)));
         }
       }
       return lines.join('\n');
     }
     case 'payments': {
       const r = card.report;
-      const lines = [`Paid messages ${card.window}: spent ${fig(r.sent_total)}, received ${fig(r.received_total)}`];
+      const lines = [tr('caPaidMessagesSpentReceived', card.window, fig(r.sent_total), fig(r.received_total))];
       for (const e of r.entries) {
-        const who = e.peer.state === 'value' ? nameOf(e.peer.value) : 'withheld';
+        const who = e.peer.state === 'value' ? nameOf(e.peer.value) : tr('caWithheld');
         const when = new Date(e.at_ms).toISOString().slice(0, 16).replace('T', ' ');
-        lines.push(`${when}  ${e.direction === 'sent' ? 'to  ' : 'from'} ${who}  ${fig(e.amount)}`);
+        lines.push(`${when}  ${e.direction === 'sent' ? tr('caTo') : tr('caFrom')} ${who}  ${fig(e.amount)}`);
       }
       return lines.join('\n');
     }

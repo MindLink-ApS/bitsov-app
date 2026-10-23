@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 import { t } from '../i18n';
 /**
  * The Wallet page's reads, in plain words. Display only: nothing here pays.
@@ -51,14 +52,14 @@ export function channelWords(c: Channel): { state: 'open' | 'offline'; title: st
   if (c.active) {
     return {
       state: 'open',
-      title: 'Open',
-      line: `You can send up to ${fmtAmount(c.local_balance_msat)} and receive up to ${fmtAmount(c.remote_balance_msat)} through it.`,
+      title: tr('caOpen'),
+      line: tr('caYouCanSendUpToAndReceiveUpTo', fmtAmount(c.local_balance_msat), fmtAmount(c.remote_balance_msat)),
     };
   }
   return {
     state: 'offline',
-    title: 'Not usable now',
-    line: 'Their node is offline, or the channel is still opening or closing. What you hold in it stays yours.',
+    title: tr('caNotUsableNow'),
+    line: tr('caTheirNodeIsOfflineOrTheChannelIsStill'),
   };
 }
 

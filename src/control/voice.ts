@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 /**
  * Voice notes: a short Opus clip recorded in the webview and sent as an
  * ordinary paid file (KIND_FILE_REF = 200, `audio/webm`). Nothing here pays:
@@ -94,14 +95,14 @@ const browserDeps = (): RecorderDeps | null => {
  * Rejects with a plain sentence when the webview has no microphone.
  */
 export async function startRecording(onLimit: () => void, deps: RecorderDeps | null = browserDeps()): Promise<Recording> {
-  if (!deps) throw new Error('This window cannot record audio.');
+  if (!deps) throw new Error(tr('uiThisWindowCannotRecordAudio'));
   const type = pickRecordType((t) => deps.MediaRecorder.isTypeSupported?.(t) ?? false);
-  if (!type) throw new Error('This window cannot record audio.');
+  if (!type) throw new Error(tr('uiThisWindowCannotRecordAudio'));
   let stream: MediaStream;
   try {
     stream = await deps.getUserMedia({ audio: true });
   } catch {
-    throw new Error('Microphone not available. Allow BitSov to use the microphone and try again.');
+    throw new Error(tr('caMicrophoneNotAvailableAllowBitSovToUseTheMicrophone'));
   }
   const release = () => stream.getTracks().forEach((t) => t.stop());
   let recorder: MediaRecorder;
@@ -117,7 +118,7 @@ export async function startRecording(onLimit: () => void, deps: RecorderDeps | n
       if (actual.startsWith('audio/webm') || actual.startsWith('audio/mp4')) recordedType = actual;
     } catch {
       release();
-      throw new Error('This window cannot record audio.');
+      throw new Error(tr('uiThisWindowCannotRecordAudio'));
     }
   }
   const chunks: Blob[] = [];

@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 /**
  * Soften backend refusal codes so the UI never shows raw snake_case strings
  * as the primary message. Details stay available behind a tap.
@@ -15,7 +16,7 @@ export type SoftenedError = {
 /** Map host/node error text to a calm summary (+ optional detail). */
 export function softenError(raw: unknown): SoftenedError {
   const m = String(raw ?? '').trim();
-  if (!m) return { summary: 'Something went wrong.', detail: null };
+  if (!m) return { summary: tr('caSomethingWentWrong'), detail: null };
 
   // Preserve the entire money warning. In particular, transport/address text
   // inside an unknown or settled outcome must not turn it into a connection error.
@@ -26,7 +27,7 @@ export function softenError(raw: unknown): SoftenedError {
   // The proxy wraps this advice in a 503, sometimes with an endpoint prefix.
   // Extract only the countdown, never an arbitrary technical response body.
   const retry = /\b(?:remote_retry_wait|rate_limited)\b.*?waiting (\d+) s\b/i.exec(m);
-  if (retry) return { summary: `Remote connection unavailable · waiting ${retry[1]} s`, detail: m };
+  if (retry) return { summary: tr('caRemoteConnectionUnavailableWaitingS', retry[1]), detail: m };
 
   if (
     /introduction_unavailable/i.test(m) ||
@@ -34,13 +35,13 @@ export function softenError(raw: unknown): SoftenedError {
     /advertised_addr/i.test(m)
   ) {
     return {
-      summary: 'We could not find a public address for your node yet.',
+      summary: tr('caWeCouldNotFindAPublicAddressForYour'),
       detail: m,
     };
   }
 
   if (/connection[ _]refused|ECONN|network[ _]error|failed to fetch|timed?[ _]out|connection[ _](lost|closed)/i.test(m)) {
-    return { summary: 'We could not connect to your node.', detail: m };
+    return { summary: tr('caWeCouldNotConnectToYourNode'), detail: m };
   }
 
   const technical = (text: string) => /[a-z0-9]+_[a-z0-9_]+|\b(?:Error|TypeError):|[{}\n]|(?:https?:|bitsov:)\/\/|(?:^|\s)\/[\w/.-]+|\b[45]\d\d\b|\b[a-f0-9]{16,}\b|\b[\w.-]+:\d{2,5}\b/i.test(text);
@@ -50,11 +51,11 @@ export function softenError(raw: unknown): SoftenedError {
   if (coded) {
     const [, code, rest] = coded;
     if (/unavailable|not_found|refused|denied|invalid/i.test(code) && !technical(rest)) {
-      return { summary: rest.trim() || 'That is not available right now.', detail: m };
+      return { summary: rest.trim() || tr('caThatIsNotAvailableRightNow'), detail: m };
     }
   }
 
   return technical(m)
-    ? { summary: 'That could not be completed. Open Details for more information.', detail: m }
+    ? { summary: tr('caThatCouldNotBeCompletedOpenDetailsForMore'), detail: m }
     : { summary: m, detail: null };
 }

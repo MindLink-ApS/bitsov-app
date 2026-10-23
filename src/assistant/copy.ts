@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 /**
  * Copy plain text. No network and no Tauri command. Rejects when neither the
  * clipboard API nor the fallback copied anything, so a caller never says
@@ -24,5 +25,5 @@ export async function copyPlainText(text: string): Promise<void> {
   let ok = false;
   try { ok = document.execCommand('copy'); } catch { ok = false; }
   area.remove();
-  if (!ok) throw new Error('Copy did not work here. Select the text and copy it by hand.');
+  if (!ok) throw new Error(tr('caCopyDidNotWorkHereSelectTheTextAnd'));
 }

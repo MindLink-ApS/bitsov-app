@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 import { createSignal, For, Match, onCleanup, onMount, Switch, type JSX } from 'solid-js';
 import { UNAVAILABLE, type Answerer } from './ask';
 import { questionFor } from './questions';
@@ -23,33 +24,30 @@ type AskState =
   | { kind: 'error'; id: string };
 
 const NOT_SENT: Record<RouteKey, string> = {
-  balance: 'its balance',
-  channels: 'its channel list',
-  health: 'its status',
-  messages: 'its messages',
-  pricing: 'its prices',
+  get balance() { return tr('caItsBalance'); },
+  get channels() { return tr('caItsChannelList'); },
+  get health() { return tr('caItsStatus'); },
+  get messages() { return tr('caItsMessages'); },
+  get pricing() { return tr('caItsPrices'); },
 };
 
 const OUT_OF_DATE: Record<RouteKey, string> = {
-  balance: 'balance was',
-  channels: 'channel list was',
-  health: 'status was',
-  messages: 'messages were',
-  pricing: 'prices were',
+  get balance() { return tr('caBalanceWas'); },
+  get channels() { return tr('caChannelListWas'); },
+  get health() { return tr('caStatusWas'); },
+  get messages() { return tr('caMessagesWere'); },
+  get pricing() { return tr('caPricesWere'); },
 };
 
-const RETRY =
-  'Nothing was changed on your node. Wait a minute, then close and reopen the assistant. ' +
-  'If it is still unavailable, check in the BitSov app that your node is running.';
+const RETRY = () => tr('caNothingWasChangedOnYourNodeWaitAMinute') +
+  tr('caIfItIsStillUnavailableCheckInTheBitSov');
 
-const NOT_YET = 'The assistant cannot read this from your node yet.';
+const NOT_YET = () => tr('caTheAssistantCannotReadThisFromYourNodeYet');
 
-const NOT_YET_NEXT =
-  'Nothing was changed on your node. The other questions in the list still work.';
+const NOT_YET_NEXT = () => tr('caNothingWasChangedOnYourNodeTheOtherQuestions');
 
-const ERROR_TEXT =
-  'Something went wrong showing this answer. Nothing was changed on your node. ' +
-  'Try again, or close and reopen the assistant.';
+const ERROR_TEXT = () => tr('caSomethingWentWrongShowingThisAnswerNothingWasChanged') +
+  tr('caTryAgainOrCloseAndReopenTheAssistant');
 
 /**
  * Pick a question, get its answer with where it came from and how old it is.
@@ -83,13 +81,13 @@ export function AskPanel(props: {
   const label = (route: RouteKey | null): Label => {
     const source = props.source;
     if (source.kind === 'mock') {
-      return { source: 'mock', text: `Sample data, not your node. ${mockReasonText(source.reason)}` };
+      return { source: 'mock', text: tr('caSampleDataNotYourNode', mockReasonText(source.reason)) };
     }
     const summary = summarize(props.freshness, props.openMs(), route ?? undefined);
     return {
       source: 'live',
       freshness: summary.state,
-      text: `From your node. ${freshnessText(summary)}`,
+      text: tr('caFromYourNode1340', freshnessText(summary)),
     };
   };
 
@@ -98,31 +96,31 @@ export function AskPanel(props: {
       return {
         kind: 'unavailable',
         id,
-        why: 'This is sample data, and this sample question has no answer on purpose.',
-        next: 'To see your own answers, open the BitSov app and make sure your node is running and paired.',
+        why: tr('caThisIsSampleDataAndThisSampleQuestionHas'),
+        next: tr('caToSeeYourOwnAnswersOpenTheBitSovApp'),
       };
     }
     if (route === null || props.freshness === null) {
-      return { kind: 'unavailable', id, why: NOT_YET, next: NOT_YET_NEXT };
+      return { kind: 'unavailable', id, why: NOT_YET(), next: NOT_YET_NEXT() };
     }
     const read = props.freshness.routes.find((entry) => entry.route === route);
     if (!read || read.state === 'unknown') {
       return {
         kind: 'unavailable',
         id,
-        why: `Your node did not send ${NOT_SENT[route]} when this window opened.`,
-        next: RETRY,
+        why: tr('caYourNodeDidNotSendWhenThisWindowOpened', NOT_SENT[route]),
+        next: RETRY(),
       };
     }
     if (summarize(props.freshness, props.openMs(), route).state === 'stale') {
       return {
         kind: 'unavailable',
         id,
-        why: `Your node’s ${OUT_OF_DATE[route]} out of date, so the assistant will not guess.`,
-        next: RETRY,
+        why: tr('caYourNodeSOutOfDateSoTheAssistant', OUT_OF_DATE[route]),
+        next: RETRY(),
       };
     }
-    return { kind: 'unavailable', id, why: NOT_YET, next: NOT_YET_NEXT };
+    return { kind: 'unavailable', id, why: NOT_YET(), next: NOT_YET_NEXT() };
   };
 
   const settle = (next: AskState) => {
@@ -195,11 +193,10 @@ export function AskPanel(props: {
   const questionText = (id: string) => questionFor(id)?.text ?? id;
 
   return (
-    <section class="ask" aria-label="Ask about your node">
+    <section class="ask" aria-label={tr('caAskAboutYourNode')}>
       <div class="ask-row">
         <label class="ask-label" for="ask-question">
-          Question
-        </label>
+          {tr('caQuestion')}</label>
         <select
           id="ask-question"
           class="ask-select"
@@ -224,8 +221,7 @@ export function AskPanel(props: {
             disabled={loading()}
             onClick={ask}
           >
-            Ask
-          </button>
+            {tr('caAsk')}</button>
           <button
             type="button"
             class="ask-stop"
@@ -234,8 +230,7 @@ export function AskPanel(props: {
             disabled={!loading()}
             onClick={stop}
           >
-            Stop
-          </button>
+            {tr('caStop')}</button>
         </div>
       </div>
       <div
@@ -249,19 +244,17 @@ export function AskPanel(props: {
         <Switch>
           <Match when={state().kind === 'empty'}>
             <p class="ask-hint">
-              Pick a question, then press Enter or Ask. Press Escape to stop or clear.
-            </p>
+              {tr('caPickAQuestionThenPressEnterOrAskPress')}</p>
           </Match>
           <Match when={state().kind === 'loading'}>
-            <p class="ask-hint">Looking up the answer…</p>
+            <p class="ask-hint">{tr('caLookingUpTheAnswer')}</p>
           </Match>
           <Match when={state().kind === 'stopped'}>
             <p class="ask-hint">
-              Stopped. Nothing was changed on your node. Pick a question to ask again.
-            </p>
+              {tr('caStoppedNothingWasChangedOnYourNodePickA')}</p>
           </Match>
           <Match when={state().kind === 'error'}>
-            <p class="ask-error">{ERROR_TEXT}</p>
+            <p class="ask-error">{ERROR_TEXT()}</p>
           </Match>
           <Match when={answered()}>
             {(answered) => (
@@ -291,7 +284,7 @@ export function AskPanel(props: {
             {(missing) => (
               <>
                 <p class="ask-question-text">{questionText(missing().id)}</p>
-                <p class="ask-unavailable">No answer for this question right now.</p>
+                <p class="ask-unavailable">{tr('caNoAnswerForThisQuestionRightNow')}</p>
                 <p class="ask-why" data-testid="unavailable-why">
                   {missing().why}
                 </p>

@@ -63,7 +63,7 @@ describe('money buttons', () => {
   it.each(APPROVE_FIRST)('Shell %s is money while it reads Approve first', (hook) => {
     for (const tag of tagWith('control/Shell.tsx', hook)) expect(tag).toContain('classList={{ money: !open() }}');
     const shell = read('control/Shell.tsx');
-    expect(shell).toMatch(/const button = \(what: string\) =>\s*open\(\) \? what : [^;]*'Approve first'/);
+    expect(shell).toMatch(/const button = \(what: string\) =>\s*open\(\) \? what : [^;]*'caApproveFirst'/);
   });
   it.each(MONEY)('%s %s is a money action', (file, hook) => {
     for (const tag of tagWith(file, hook)) expect(classes(tag), tag.slice(0, 120)).toContain('money');

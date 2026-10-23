@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 /**
  * Contact sheet: local petname + fingerprint Verify (ACCOUNT-LAYER §6).
  * Petnames never leave the device. Peer labels / profile names are suggestions.
@@ -81,11 +82,11 @@ export function ContactPanel(props: {
     setLinkError(null);
     const prev = prevKeyDraft().trim().toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(prev)) {
-      setLinkError('Enter the previous 64-character node key.');
+      setLinkError(tr('caEnterThePrevious64CharacterNodeKey'));
       return;
     }
     if (!replaceContactKey(prev, contactKey())) {
-      setLinkError('Could not link — unknown previous key, or this key already belongs to another contact.');
+      setLinkError(tr('caCouldNotLinkUnknownPreviousKeyOrThisKey'));
       return;
     }
     setPrevKeyDraft('');
@@ -116,7 +117,7 @@ export function ContactPanel(props: {
         ref={panel}
         class="context settings-modal contact-panel"
         classList={{ open: props.open }}
-        aria-label="Contact"
+        aria-label={tr('caContact')}
         aria-hidden={props.open ? 'false' : 'true'}
         aria-modal={props.open ? true : undefined}
         role="dialog"
@@ -124,29 +125,26 @@ export function ContactPanel(props: {
         data-contact-id={contactKey()}
       >
         <div class="row settings-head">
-          <h2 style={{ flex: 1, margin: 0 }}>Contact</h2>
-          <button type="button" class="quiet context-toggle" data-contact-close data-ios-back="contact" onClick={() => props.onClose()} aria-label="Close contact">
-            Close
-          </button>
+          <h2 style={{ flex: 1, margin: 0 }}>{tr('caContact')}</h2>
+          <button type="button" class="quiet context-toggle" data-contact-close data-ios-back="contact" onClick={() => props.onClose()} aria-label={tr('caCloseContact')}>
+            {tr('uiClose')}</button>
         </div>
 
         <Show when={state() === 'key-changed'}>
           <div class="panel contact-key-warn" data-contact-key-changed role="alert">
-            <h3>Node key changed</h3>
+            <h3>{tr('caNodeKeyChanged')}</h3>
             <p class="hint">
-              You linked a new node key to this contact. Verified status was cleared. Compare fingerprints again before you trust this name.
-            </p>
+              {tr('caYouLinkedANewNodeKeyToThisContact')}</p>
             <button type="button" class="quiet" data-contact-dismiss-key onClick={() => dismissKeyWarning(contactKey())}>
-              Dismiss warning
-            </button>
+              {tr('caDismissWarning')}</button>
           </div>
         </Show>
 
         <div class="panel">
-          <h3>Your name for them</h3>
-          <p class="hint">A petname stays on this device. It is never published or sent to their node.</p>
+          <h3>{tr('caYourNameForThem')}</h3>
+          <p class="hint">{tr('caAPetnameStaysOnThisDeviceItIsNever')}</p>
           <label class="field">
-            <span>Petname</span>
+            <span>{tr('caPetname')}</span>
             <input
               type="text"
               data-contact-petname
@@ -161,27 +159,24 @@ export function ContactPanel(props: {
           <Show when={claimed()}>
             {(c) => (
               <p class="hint" data-contact-claimed>
-                They call themselves <strong>{c()}</strong>
-                <span class="claimed-tag"> self-claimed</span>
+                {tr('caTheyCallThemselves')}{' '}<strong>{c()}</strong>
+                <span class="claimed-tag">{' '}{tr('caSelfClaimed')}</span>
                 {' · '}
                 <button type="button" class="link" data-contact-use-claimed onClick={() => useSuggestion()}>
-                  Use as petname
-                </button>
+                  {tr('caUseAsPetname')}</button>
               </p>
             )}
           </Show>
           <Show when={state() === 'verified'}>
             <p class="meta" data-contact-verified-badge>
-              Verified · fingerprint matched
-            </p>
+              {tr('caVerifiedFingerprintMatched')}</p>
           </Show>
         </div>
 
         <div class="panel" data-contact-verify>
-          <h3>Verify</h3>
+          <h3>{tr('caVerify')}</h3>
           <p class="hint">
-            Compare this fingerprint in person or on a call. Matching means you are looking at the same node key.
-          </p>
+            {tr('caCompareThisFingerprintInPersonOrOnACall')}</p>
           <p class="contact-fp-short mono" data-contact-fp-short title={fpText()}>
             {shortFp()}
           </p>
@@ -190,7 +185,7 @@ export function ContactPanel(props: {
           </p>
           <Show
             when={qr()}
-            fallback={<p class="hint">QR unavailable for this key.</p>}
+            fallback={<p class="hint">{tr('caQRUnavailableForThisKey')}</p>}
           >
             {(q) => (
               <svg
@@ -199,7 +194,7 @@ export function ContactPanel(props: {
                 viewBox={`0 0 ${q().extent} ${q().extent}`}
                 shape-rendering="crispEdges"
                 role="img"
-                aria-label="Node key as a QR code"
+                aria-label={tr('caNodeKeyAsAQRCode')}
               >
                 <rect width={q().extent} height={q().extent} fill="#ffffff" />
                 <path d={q().path} fill="#000000" />
@@ -212,20 +207,18 @@ export function ContactPanel(props: {
           <div class="row" style={{ 'justify-content': 'flex-end', gap: 'var(--s-2)' }}>
             <Show when={state() === 'verified'}>
               <button type="button" class="quiet" data-contact-unverify onClick={() => clearVerified(contactKey())}>
-                Clear verified
-              </button>
+                {tr('caClearVerified')}</button>
             </Show>
             <Show
               when={confirming()}
               fallback={
                 <button type="button" class="primary" data-contact-verify-start onClick={() => setConfirming(true)}>
-                  {state() === 'verified' ? 'Verify again' : 'Mark verified'}
+                  {state() === 'verified' ? tr('caVerifyAgain') : tr('caMarkVerified')}
                 </button>
               }
             >
               <button type="button" class="quiet" data-contact-verify-cancel onClick={() => setConfirming(false)}>
-                Cancel
-              </button>
+                {tr('cancel')}</button>
               <button
                 type="button"
                 class="primary"
@@ -235,19 +228,17 @@ export function ContactPanel(props: {
                   setConfirming(false);
                 }}
               >
-                We matched
-              </button>
+                {tr('caWeMatched')}</button>
             </Show>
           </div>
         </div>
 
         <div class="panel" data-contact-replace>
-          <h3>Key replacement</h3>
+          <h3>{tr('caKeyReplacement')}</h3>
           <p class="hint">
-            If this person rotated their node key, paste the previous key you already knew. Only you confirm the link — never from a name or address.
-          </p>
+            {tr('caIfThisPersonRotatedTheirNodeKeyPasteThe')}</p>
           <label class="field">
-            <span>Previous node key</span>
+            <span>{tr('caPreviousNodeKey')}</span>
             <input
               type="text"
               class="mono"
@@ -255,7 +246,7 @@ export function ContactPanel(props: {
               maxlength={64}
               spellcheck={false}
               value={prevKeyDraft()}
-              placeholder="64 hex characters"
+              placeholder={tr('ca64HexCharacters')}
               onInput={(e) => setPrevKeyDraft(e.currentTarget.value)}
             />
           </label>
@@ -268,8 +259,7 @@ export function ContactPanel(props: {
           </Show>
           <div class="row" style={{ 'justify-content': 'flex-end' }}>
             <button type="button" class="quiet" data-contact-replace-link onClick={() => linkReplacement()}>
-              Link as this contact
-            </button>
+              {tr('caLinkAsThisContact')}</button>
           </div>
         </div>
       </aside>
