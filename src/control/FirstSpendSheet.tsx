@@ -104,6 +104,10 @@ export function FirstSpendSheet(props: {
           if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog)) { e.preventDefault(); last?.focus(); }
           else if (!e.shiftKey && (document.activeElement === last || document.activeElement === dialog)) { e.preventDefault(); first?.focus(); }
         }}>
+        <div class="first-spend-keyboard-summary money" data-first-spend-keyboard-summary>
+          <strong data-first-spend-keyboard-daily>{daily() === null ? t('firstSpendAllowUnavailable') : t('firstSpendAllow', daily()!)}</strong>
+          <span data-first-spend-keyboard-cost>{props.costLine}</span>
+        </div>
         <div class="first-spend-grabber" aria-hidden="true"
           onPointerDown={e => { dragY = e.clientY; e.currentTarget.setPointerCapture?.(e.pointerId); }}
           onPointerUp={e => { if (dragY !== null && e.clientY - dragY > 60) props.onCancel(); dragY = null; }}
@@ -114,10 +118,10 @@ export function FirstSpendSheet(props: {
             <p>{t('firstSpendOwnerBox')}</p>
             <p class="hint">{t('firstSpendApprovalOnly')}</p>
           </>}>
-            <p>{daily() === null ? t('firstSpendMayStartNowUnavailable') : t('firstSpendMayStartNow', daily()!)}</p>
+            <p class="first-spend-may-start-now">{daily() === null ? t('firstSpendMayStartNowUnavailable') : t('firstSpendMayStartNow', daily()!)}</p>
           </Show>
         }>
-          <p>{daily() === null ? t('firstSpendStartsNowUnavailable') : t('firstSpendStartsNow', daily()!)}</p>
+          <p class="first-spend-starts-now">{daily() === null ? t('firstSpendStartsNowUnavailable') : t('firstSpendStartsNow', daily()!)}</p>
         </Show>
         <Show when={props.grant}>{grant => (
           <p class="hint" data-first-spend-grant>
@@ -156,7 +160,9 @@ export function FirstSpendSheet(props: {
           </Show>
         </details>
         <Show when={props.onRetry}><button type="button" class="link" data-first-spend-retry onClick={() => props.onRetry?.()}>{t('uiRetry')}</button></Show>
-        <Show when={separateReason()}><p id={reasonId} class="hint" role="status" data-first-spend-reason>{reason()}</p></Show>
+        <div class="first-spend-reason-slot">
+          <Show when={separateReason()}><p id={reasonId} class="hint" role="status" data-first-spend-reason>{reason()}</p></Show>
+        </div>
         <button type="button" class="primary money" data-first-spend-allow disabled={reason() !== null}
           aria-describedby={describedBy()} onClick={allow}>
           {daily() === null ? t('firstSpendAllowUnavailable') : t('firstSpendAllow', daily()!)}

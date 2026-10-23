@@ -1,5 +1,5 @@
 /** Priority follows the existing overlay order, never browser history. */
-const routes = ['contact', 'settings-page', 'settings', 'wallet-starter', 'wallet', 'thread'] as const;
+const routes = ['contact', 'settings-page', 'settings', 'wallet', 'thread'] as const;
 export type BackRoute = typeof routes[number];
 export type BackState = { routes: readonly BackRoute[]; money: boolean; approval: boolean; call: boolean; modal: boolean };
 export function backRoute(state: BackState): BackRoute | null {

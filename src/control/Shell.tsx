@@ -1754,15 +1754,10 @@ export function ControlCenter(props: Props) {
     void loadWallet();
   };
 
-  const welcomeHome = () => <Show when={appPlatform() === 'ios' && peers().length > 0} fallback={<WelcomeHome overview={overview()} moneyBlocked={moneyBlocked()} walletReady={wallet() !== null && !errors.wallet}
+  const welcomeHome = () => <WelcomeHome overview={overview()} moneyBlocked={moneyBlocked()} walletReady={wallet() !== null && !errors.wallet}
       onShare={() => { setTab('frontdoor'); setContextOpen(true); }}
       onAddContact={() => setTrack({ kind: 'discover' })}
-      onAddSats={() => openWallet('receive')} />}>
-      <nav class="ios-chat-list" data-chat-list aria-label={tr('uiContacts')}>
-        <h1>{tr('uiContacts')}</h1>
-        <For each={peers()}>{peer => <button type="button" class="quiet" onClick={() => setTrack({ kind: 'peer', id: peer.node_id.toLowerCase() })}>{nameOf(peer.node_id)}</button>}</For>
-      </nav>
-    </Show>;
+      onAddSats={() => openWallet('receive')} />;
 
   return (
     <div class="cc" classList={{ 'no-context': !props.active }} data-mode={source.mode}

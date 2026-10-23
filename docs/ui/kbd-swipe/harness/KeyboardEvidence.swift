@@ -11,6 +11,19 @@ final class KeyboardEvidence: XCTestCase {
   field.tap()
   XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
   sleep(2)
+  // Only the amount field uses a decimal pad; other scenes are left untouched.
+  if app.keyboards.keys["1"].exists && web.textFields.firstMatch.exists && !web.secureTextFields.firstMatch.exists {
+   for digit in ["1", "2", "5", "0"] {
+    field.typeText(digit)
+    usleep(300_000)
+   }
+   // Fractional msat display and deletion back to a whole-sat amount must not jump either.
+   for key in [".", "5", XCUIKeyboardKey.delete.rawValue, XCUIKeyboardKey.delete.rawValue] {
+    field.typeText(key)
+    usleep(300_000)
+   }
+   sleep(2)
+  }
   let attachment = XCTAttachment(screenshot: app.screenshot())
   attachment.name = "keyboard-up"
   attachment.lifetime = .keepAlways
@@ -29,7 +42,7 @@ final class KeyboardEvidence: XCTestCase {
   let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0)).withOffset(CGVector(dx: 3, dy: 260))
   let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0)).withOffset(CGVector(dx: 210, dy: 260))
   start.press(forDuration: 0.01, thenDragTo: end, withVelocity: 600, thenHoldForDuration: 0)
-  XCTAssertTrue(web.staticTexts["Contacts"].waitForExistence(timeout: 5))
+  XCTAssertTrue(web.staticTexts["Welcome home"].waitForExistence(timeout: 5))
   XCTAssertFalse(input.exists)
   XCTAssertFalse(app.keyboards.firstMatch.exists)
   app.terminate()

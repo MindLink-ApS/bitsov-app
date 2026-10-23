@@ -15,16 +15,15 @@ async function mount() {
   dispose = render(() => <ControlCenter source={sampleSource()} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={null} />, document.body);
   await tick();
 }
-it('uses the real thread Back button and returns to the contact list', async () => {
+it('uses the real thread Back button and returns to Welcome home with its funding and sharing controls', async () => {
   await mount();
   expect(document.querySelector('[data-composer]')).not.toBeNull();
   expect(visibleBackDestination()?.route).toBe('thread');
   visibleBackDestination()!.back(); await tick();
   expect(document.querySelector('[data-composer]')).toBeNull();
-  expect(document.querySelectorAll('[data-chat-list] button').length).toBeGreaterThan(0);
-  click('[data-chat-list] button'); await tick();
-  expect(document.querySelector('[data-composer]')).not.toBeNull();
-  visibleBackDestination()!.back(); await tick();
+  expect(document.querySelector('[data-welcome]')).not.toBeNull();
+  expect(document.querySelector('[data-welcome]')?.textContent).toContain('Add sats');
+  expect(document.querySelector('[data-welcome]')?.textContent).toContain('Share my card / QR');
   expect(visibleBackDestination()).toBeNull();
 });
 it('takes a settings sub-page to settings before closing settings', async () => {
@@ -38,7 +37,7 @@ it('takes a settings sub-page to settings before closing settings', async () => 
 });
 it('blocks the underlying route for an approval, a money form, or a call arriving mid-gesture', async () => {
   await mount();
-  for (const attrs of ['data-first-spend-scrim', 'data-composer-panel="pay"', 'data-swipe-call="true"', 'data-contact-approval="pending"', 'role="dialog"']) {
+  for (const attrs of ['data-first-spend-scrim', 'data-starter-balance', 'data-composer-panel="pay"', 'data-swipe-call="true"', 'data-contact-approval="pending"', 'role="dialog"']) {
     const panel = document.createElement('div'); panel.innerHTML = `<section ${attrs}></section>`;
     document.body.append(panel);
     expect(visibleBackDestination()).toBeNull(); panel.remove();

@@ -1630,8 +1630,6 @@ html[data-platform='ios'] .track > .ios-back { align-self: flex-start; }
 @media (max-width: 680px) {
   html[data-platform='ios'] .first-spend-scrim { padding-bottom: 0; }
 }
-.ios-chat-list { min-height: 0; overflow-y: auto; display: flex; flex-direction: column; padding: var(--s-4); gap: var(--s-2); }
-.ios-chat-list > button { text-align: left; min-height: 44px; flex-shrink: 0; border-bottom-color: var(--line); border-radius: 0; }
 @media (max-width: 680px) {
   /* Keyboard editing gives the conversation the space normally used by the rail.
      Back and the recipient stay visible; all cost/approval text stays in the composer. */
@@ -1650,3 +1648,32 @@ html[data-platform='ios'] .phone-onboarding {
   padding-left: max(24px, var(--safe-area-left));
   padding-right: max(24px, var(--safe-area-right));
 }
+
+/* Keep the exact daily authorization and first-contact quote visible while editing.
+   Reserve validation space so enabling Allow never pulls the buttons upward. */
+.first-spend-keyboard-summary { display: none; }
+.first-spend-reason-slot:empty { display: none; }
+html[data-platform='ios'][data-keyboard-open='true'] .first-spend-keyboard-summary {
+  display: flex; flex-direction: column; flex-shrink: 0; gap: .25rem;
+  position: sticky; top: 0; z-index: 1; background: var(--surface);
+  box-shadow: 0 -.75rem 0 var(--surface);
+  padding-block: .5rem; border-bottom: 1px solid var(--line);
+  font-size: .875rem; line-height: 1.35;
+}
+html[data-platform='ios'][data-keyboard-open='true'] .first-spend-reason-slot {
+  display: block; height: 3rem; flex-shrink: 0; overflow-y: auto;
+}
+
+/* The verbose title can gain a line when sats become integer msat (notably da).
+   Its compact live equivalent is pinned above; reserve three 1.3em rows.
+   The approval timing copy similarly reserves two/four 1.55em rows.
+   Longer text remains scrollable without reflowing the actions. */
+html[data-platform='ios'][data-keyboard-open='true'] .first-spend-sheet h2 {
+  height: 3.9em; flex-shrink: 0; overflow-y: auto;
+}
+
+html[data-platform='ios'][data-keyboard-open='true'] :is(.first-spend-starts-now, .first-spend-may-start-now) {
+  line-height: 1.55; flex-shrink: 0; overflow-y: auto;
+}
+html[data-platform='ios'][data-keyboard-open='true'] .first-spend-starts-now { height: 3.1em; }
+html[data-platform='ios'][data-keyboard-open='true'] .first-spend-may-start-now { height: 6.2em; }

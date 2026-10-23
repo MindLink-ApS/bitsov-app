@@ -4,7 +4,7 @@ import { FirstSpendSheet } from '../../src/control/FirstSpendSheet';
 import { sampleSource, SAMPLE_OWN_ID, SAMPLE_PRESETS } from '../../src/control/sample';
 import { PhoneOnboarding } from '../../src/onboarding/PhoneOnboarding';
 import { INITIAL_PAIRING } from '../../src/onboarding/pairing';
-import { setLanguagePref } from '../../src/i18n';
+import { setLanguagePref, t } from '../../src/i18n';
 import { applyResolvedTheme } from '../../src/control/prefs';
 import { installKeyboardViewport } from '../../src/ios/keyboard';
 import { installEdgeBack } from '../../src/ios/edgeBack';
@@ -37,9 +37,28 @@ if (scene === 'pairing') {
 } else if (scene === 'first-spend') {
   // Mount the actual sheet directly: no Send or Allow press is needed.
   render(() => <FirstSpendSheet presets={SAMPLE_PRESETS} initialPreset="careful" maxDailyMsat={100_000_000}
-    costLine={lang === 'da' ? 'Adgang: 1 sat · besked: 2 sats · routinggebyr højst: 5 sats · i alt højst: 8 sats' : 'Entry fee: 1 sat · message: 2 sats · routing fee at most: 5 sats · total at most: 8 sats'}
+    startsNow={query.get("mode") === "starts-now"} mayStartNow={query.get("mode") === "may-start-now"}
+    costLine={t('firstSpendCost', '1 sat', '2 sats', '5 sats', '8 sats')}
     blockedReason={null} onAllow={forbid} onCancel={() => {}} onPreset={() => {}} />, document.getElementById('root')!);
   setTimeout(() => { document.querySelector<HTMLElement>('.first-spend-options summary')?.click(); document.querySelector<HTMLButtonElement>('[data-first-spend-custom]')?.click(); }, 400);
 } else {
   render(() => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={null} />, document.getElementById('root')!);
+}
+
+// Compare native layout before and after each keystroke; never activate Allow.
+if (scene === 'first-spend') {
+  const measure = () => {
+    const selectors = ['[data-first-spend-keyboard-summary]', '[data-first-spend-keyboard-daily]', '[data-first-spend-keyboard-cost]', '[data-first-spend-amount]', '[data-first-spend-allow]', '[data-first-spend-cancel]'];
+    return { viewportHeight: window.visualViewport!.height,
+      allowDisabled: document.querySelector<HTMLButtonElement>('[data-first-spend-allow]')!.disabled,
+      daily: document.querySelector('[data-first-spend-keyboard-daily]')!.textContent,
+      cost: document.querySelector('[data-first-spend-keyboard-cost]')!.textContent,
+      value: document.querySelector<HTMLInputElement>('[data-first-spend-amount]')!.value,
+      scrollTop: document.querySelector('[data-first-spend-sheet]')!.scrollTop,
+      elements: selectors.map(selector => ({ selector, ...document.querySelector(selector)!.getBoundingClientRect().toJSON() })) };
+  };
+  const evidence: ReturnType<typeof measure>[] = [];
+  (window as any).keyboardTypingEvidence = evidence;
+  document.addEventListener('beforeinput', () => { if (!evidence.length) evidence.push(measure()); });
+  document.addEventListener('input', () => requestAnimationFrame(() => evidence.push(measure())));
 }

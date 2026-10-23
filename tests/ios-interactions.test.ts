@@ -40,7 +40,7 @@ describe('swipe routing', () => {
   it.each([
     [[], null], [['thread'], 'thread'], [['thread', 'settings'], 'settings'],
     [['settings', 'settings-page', 'thread'], 'settings-page'],
-    [['thread', 'wallet'], 'wallet'], [['wallet', 'wallet-starter'], 'wallet-starter'],
+    [['thread', 'wallet'], 'wallet'],
     [['thread', 'contact'], 'contact'],
   ] as [BackRoute[], BackRoute | null][])('takes one visible level back: %j', (routes, expected) => {
     expect(backRoute({ routes, money: false, approval: false, call: false, modal: false })).toBe(expected);

@@ -6,11 +6,697 @@
     "inner": 482
   },
   "keyboard": "true",
+  "typing": [
+    {
+      "viewportHeight": 482,
+      "allowDisabled": true,
+      "daily": "Tillad betalinger",
+      "cost": "Adgangsgebyr: 1 sat \u00b7 besked: 2 sats \u00b7 routinggebyr h\u00f8jst: 5 sats \u00b7 samlet h\u00f8jst: 8 sats",
+      "value": "",
+      "scrollTop": 371,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.359375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.359375,
+          "right": 376,
+          "bottom": 298.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.15625,
+          "width": 359,
+          "height": 44,
+          "top": 370.15625,
+          "right": 376,
+          "bottom": 414.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.15625,
+          "width": 359,
+          "height": 44,
+          "top": 426.15625,
+          "right": 376,
+          "bottom": 470.15625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Tillad 1 sat om dagen",
+      "cost": "Adgangsgebyr: 1 sat \u00b7 besked: 2 sats \u00b7 routinggebyr h\u00f8jst: 5 sats \u00b7 samlet h\u00f8jst: 8 sats",
+      "value": "1",
+      "scrollTop": 371,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.359375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.359375,
+          "right": 376,
+          "bottom": 298.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.15625,
+          "width": 359,
+          "height": 44,
+          "top": 370.15625,
+          "right": 376,
+          "bottom": 414.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.15625,
+          "width": 359,
+          "height": 44,
+          "top": 426.15625,
+          "right": 376,
+          "bottom": 470.15625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Tillad 12 sats om dagen",
+      "cost": "Adgangsgebyr: 1 sat \u00b7 besked: 2 sats \u00b7 routinggebyr h\u00f8jst: 5 sats \u00b7 samlet h\u00f8jst: 8 sats",
+      "value": "12",
+      "scrollTop": 371,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.359375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.359375,
+          "right": 376,
+          "bottom": 298.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.15625,
+          "width": 359,
+          "height": 44,
+          "top": 370.15625,
+          "right": 376,
+          "bottom": 414.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.15625,
+          "width": 359,
+          "height": 44,
+          "top": 426.15625,
+          "right": 376,
+          "bottom": 470.15625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Tillad 125 sats om dagen",
+      "cost": "Adgangsgebyr: 1 sat \u00b7 besked: 2 sats \u00b7 routinggebyr h\u00f8jst: 5 sats \u00b7 samlet h\u00f8jst: 8 sats",
+      "value": "125",
+      "scrollTop": 371,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.359375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.359375,
+          "right": 376,
+          "bottom": 298.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.15625,
+          "width": 359,
+          "height": 44,
+          "top": 370.15625,
+          "right": 376,
+          "bottom": 414.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.15625,
+          "width": 359,
+          "height": 44,
+          "top": 426.15625,
+          "right": 376,
+          "bottom": 470.15625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Tillad 1\u202f250 sats om dagen",
+      "cost": "Adgangsgebyr: 1 sat \u00b7 besked: 2 sats \u00b7 routinggebyr h\u00f8jst: 5 sats \u00b7 samlet h\u00f8jst: 8 sats",
+      "value": "1250",
+      "scrollTop": 371,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.359375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.359375,
+          "right": 376,
+          "bottom": 298.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.15625,
+          "width": 359,
+          "height": 44,
+          "top": 370.15625,
+          "right": 376,
+          "bottom": 414.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.15625,
+          "width": 359,
+          "height": 44,
+          "top": 426.15625,
+          "right": 376,
+          "bottom": 470.15625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Tillad 1\u202f250 sats om dagen",
+      "cost": "Adgangsgebyr: 1 sat \u00b7 besked: 2 sats \u00b7 routinggebyr h\u00f8jst: 5 sats \u00b7 samlet h\u00f8jst: 8 sats",
+      "value": "1250.",
+      "scrollTop": 371,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.359375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.359375,
+          "right": 376,
+          "bottom": 298.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.15625,
+          "width": 359,
+          "height": 44,
+          "top": 370.15625,
+          "right": 376,
+          "bottom": 414.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.15625,
+          "width": 359,
+          "height": 44,
+          "top": 426.15625,
+          "right": 376,
+          "bottom": 470.15625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Tillad 1\u202f250\u202f500 msat om dagen",
+      "cost": "Adgangsgebyr: 1 sat \u00b7 besked: 2 sats \u00b7 routinggebyr h\u00f8jst: 5 sats \u00b7 samlet h\u00f8jst: 8 sats",
+      "value": "1250.5",
+      "scrollTop": 371,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.359375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.359375,
+          "right": 376,
+          "bottom": 298.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.15625,
+          "width": 359,
+          "height": 44,
+          "top": 370.15625,
+          "right": 376,
+          "bottom": 414.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.15625,
+          "width": 359,
+          "height": 44,
+          "top": 426.15625,
+          "right": 376,
+          "bottom": 470.15625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Tillad 1\u202f250 sats om dagen",
+      "cost": "Adgangsgebyr: 1 sat \u00b7 besked: 2 sats \u00b7 routinggebyr h\u00f8jst: 5 sats \u00b7 samlet h\u00f8jst: 8 sats",
+      "value": "1250.",
+      "scrollTop": 371,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.359375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.359375,
+          "right": 376,
+          "bottom": 298.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.15625,
+          "width": 359,
+          "height": 44,
+          "top": 370.15625,
+          "right": 376,
+          "bottom": 414.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.15625,
+          "width": 359,
+          "height": 44,
+          "top": 426.15625,
+          "right": 376,
+          "bottom": 470.15625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Tillad 1\u202f250 sats om dagen",
+      "cost": "Adgangsgebyr: 1 sat \u00b7 besked: 2 sats \u00b7 routinggebyr h\u00f8jst: 5 sats \u00b7 samlet h\u00f8jst: 8 sats",
+      "value": "1250",
+      "scrollTop": 371,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.359375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.359375,
+          "right": 376,
+          "bottom": 298.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.15625,
+          "width": 359,
+          "height": 44,
+          "top": 370.15625,
+          "right": 376,
+          "bottom": 414.15625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.15625,
+          "width": 359,
+          "height": 44,
+          "top": 426.15625,
+          "right": 376,
+          "bottom": 470.15625,
+          "left": 17
+        }
+      ]
+    }
+  ],
   "focused": "INPUT",
   "elements": [
     {
       "tag": "DIV",
-      "cls": "client-852-body-852-inner-482",
+      "cls": "",
       "rect": {
         "x": 0,
         "y": 0,
@@ -39,20 +725,74 @@
         "left": 0
       },
       "client": 421,
-      "scroll": 639,
-      "scrollTop": 212
+      "scroll": 797,
+      "scrollTop": 371
+    },
+    {
+      "tag": "DIV",
+      "cls": "first-spend-keyboard-summary money",
+      "text": "Tillad 1\u202f250 sats om dagenAdgangsgebyr: 1 sat \u00b7 besked: 2 sats \u00b7 routinggebyr h\u00f8jst: 5 sats \u00b7 samlet h\u00f8jst: 8 sats",
+      "rect": {
+        "x": 17,
+        "y": 72,
+        "width": 359,
+        "height": 77.671875,
+        "top": 72,
+        "right": 376,
+        "bottom": 149.671875,
+        "left": 17
+      },
+      "client": 77,
+      "scroll": 77,
+      "scrollTop": 0
+    },
+    {
+      "tag": "STRONG",
+      "cls": "",
+      "text": "Tillad 1\u202f250 sats om dagen",
+      "rect": {
+        "x": 17,
+        "y": 80,
+        "width": 359,
+        "height": 18.890625,
+        "top": 80,
+        "right": 376,
+        "bottom": 98.890625,
+        "left": 17
+      },
+      "client": 19,
+      "scroll": 19,
+      "scrollTop": 0
+    },
+    {
+      "tag": "SPAN",
+      "cls": "",
+      "text": "Adgangsgebyr: 1 sat \u00b7 besked: 2 sats \u00b7 routinggebyr h\u00f8jst: 5 sats \u00b7 samlet h\u00f8jst: 8 sats",
+      "rect": {
+        "x": 17,
+        "y": 102.890625,
+        "width": 359,
+        "height": 37.78125,
+        "top": 102.890625,
+        "right": 376,
+        "bottom": 140.671875,
+        "left": 17
+      },
+      "client": 38,
+      "scroll": 38,
+      "scrollTop": 0
     },
     {
       "tag": "INPUT",
       "cls": "",
       "rect": {
         "x": 17,
-        "y": 280.390625,
+        "y": 251.359375,
         "width": 359,
         "height": 46.796875,
-        "top": 280.390625,
+        "top": 251.359375,
         "right": 376,
-        "bottom": 327.1875,
+        "bottom": 298.15625,
         "left": 17
       },
       "client": 45,
@@ -64,16 +804,16 @@
       "cls": "primary money",
       "rect": {
         "x": 17,
-        "y": 370.5625,
+        "y": 370.15625,
         "width": 359,
         "height": 44,
-        "top": 370.5625,
+        "top": 370.15625,
         "right": 376,
-        "bottom": 414.5625,
+        "bottom": 414.15625,
         "left": 17
       },
-      "client": 42,
-      "scroll": 42,
+      "client": 44,
+      "scroll": 44,
       "scrollTop": 0
     },
     {
@@ -81,12 +821,12 @@
       "cls": "link",
       "rect": {
         "x": 17,
-        "y": 426.5625,
+        "y": 426.15625,
         "width": 359,
         "height": 44,
-        "top": 426.5625,
+        "top": 426.15625,
         "right": 376,
-        "bottom": 470.5625,
+        "bottom": 470.15625,
         "left": 17
       },
       "client": 44,
