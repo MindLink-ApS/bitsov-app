@@ -1,0 +1,98 @@
+name: Starter balance nightly
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: starter-balance-nightly-main
+  cancel-in-progress: false
+
+jobs:
+  changes:
+    name: Check last successful Starter nightly
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      # No checkout or dependencies. Only this workflow's scheduled successes
+      # count; PR, push, manual and unrelated workflow runs cannot suppress it.
+      - name: Compare main with last green nightly
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Manual dispatch on main forces verification, even if unchanged.
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          last_green_sha="$(gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/starter-balance-nightly.yml/runs" \
+            -f branch=main -f event=schedule -f status=success -f per_page=1 \
+            --jq '.workflow_runs[0].head_sha // empty')"
+          # GITHUB_SHA is main's HEAD captured for this scheduled event. The
+          # build checks out exactly that SHA, even if main advances meanwhile.
+          if [[ "$GITHUB_SHA" == "$last_green_sha" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Main unchanged since the last successful Starter nightly: $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  starter-balance:
+    name: Starter balance enabled (build + tests)
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Keep the build token at contents: read; only the cheap gate reads Actions.
+    env:
+      VITE_STARTER_BALANCE: "1"
+      TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      # Keep these checks aligned with starter-balance in build.yml.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Frontend — build and test with starter balance enabled
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          npx vitest run
+      - name: Free disk space if needed
+        run: bash scripts/ci/free-disk-space.sh
+      - name: Tauri Linux prerequisites
+        timeout-minutes: 5
+        uses: ./.github/actions/tauri-prerequisites
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: src-tauri
+          shared-key: tauri-starter-enabled
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+      - name: Rust — build and test with starter balance enabled
+        working-directory: src-tauri
+        run: |
+          cargo test --locked --lib
+          cargo test --locked --test '*' --no-fail-fast
