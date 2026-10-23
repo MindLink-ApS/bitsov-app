@@ -2,6 +2,8 @@
 
 Research note, 2026-10-23. Docs only: nothing in this file has shipped. It compares BitSov's current flows with BitChat. It then turns the useful lessons into small UI tickets.
 
+**Deployment status — 23 October 2026:** BitSov is a closed beta on signet test nodes. The only mainnet evidence is paid admission proven on 1 July 2026. The flows and proposals below do not establish broader mainnet readiness.
+
 ## Sources and method
 
 **BitChat (primary sources only).** I read source code at a pinned commit, not marketing copy:
@@ -175,11 +177,15 @@ Code: `Onboarding.tsx`, `LocalOwnerCeremony.tsx`, `App.tsx`. The stepper is Your
 ### From the shell to a first paid message
 1. Browse → Profiles "paste a card"
 2. Paste a `bitsov://front-door#…` link, then "Read card"
-3. "Knock", which pays their admission (`Discover.tsx:139-196`)
-4. Type the message, then Send
-5. FirstSpendSheet: "Let messages spend up to {0} a day?" → "Allow {0} a day" (`appCopy.ts:117-143`)
-6. Per-contact "Approve with Touch ID" / biometrics, when the device key is registered (`Shell.tsx:4846-4859`)
-7. Send
+3. "Knock" dials an unprivileged connection; it neither pays nor grants admission (`src-tauri/src/app.rs:3521-3522`).
+4. Type the message and review the composer's first-contact quote: entry fee, message price, maximum routing fee and total. The Send flow pays admission and the message at this quote, after any required approval.
+5. Follow the applicable approval path, not all of them:
+   - **First-spend budget path:** Send opens FirstSpendSheet → "Allow {0} a day" authorises a daily budget, subject to owner approval where required. Allow is not a charge; a pending Send can continue after approval (`appCopy.ts:117-143`, `Shell.tsx:5640-5654`).
+   - **Registered-device contact path:** Send requests per-contact Touch ID / biometric approval. This bypasses FirstSpendSheet (`needsFirstSpend` excludes `needsTouch`, `Shell.tsx:4913`).
+   - **Already authorised:** Send proceeds within the existing approval and budget.
+6. When approval is bound to the pending message and remains valid, it sends automatically. Only the plain, unbound approval flow needs another Send; stale or changed terms require renewed review (`Shell.tsx:5195-5228,5620-5654`).
+
+The Discover hint currently associates Knock with paying admission (`Discover.tsx:142-143`); that copy is misleading. The host behaviour above is the implementation baseline.
 
 The app cannot scan a contact's card with the camera. It says so: "This app does not scan profile QR codes with the camera." (`Discover.tsx:142`).
 
@@ -236,15 +242,17 @@ Shipped:
 
 ## (a) Step counts to the first message
 
-Counted from code; not device-timed. A "tap" is a deliberate user action. OS permission prompts count as a tap each.
+Counted from code; not device-timed. Counts cover navigation and confirmation taps; typing, pasting and obtaining a card out of band are excluded. OS permission prompts count as a tap each; biometrics are listed separately. The reach-someone estimate assumes a valid public card (no local-address consent or retries).
 
 | | BitChat iOS | BitChat Android | BitSov iPhone/Android | BitSov Mac |
 |---|---|---|---|---|
 | Setup before the app is usable | Launch → allow Bluetooth: **1 tap** | "Grant permissions" + about 2–3 OS dialogs (nearby devices, location, notifications; depends on Android version). Battery-optimization screen only if needed: **3–4 taps** | Requires a box that was **already set up from a Mac**. Scan → (allow camera) → owner approves words on the other device with biometrics → "Open BitSov" → "I understand — continue": **3–4 taps + 1 biometric on another device** | Node → owner ceremony (write down the phrase, 3-word check) → Touch ID → approvals setup → disclosure → optional funding: **about 7 taps + 2 Touch ID + phrase backup** |
-| Reach someone | Already in `#mesh`. For a DM: open people list → tap a peer (**+2**) | Same | Get a card out of band → Browse → Profiles → paste → "Read card" → "Knock" (paid admission): **about 4 taps** | Same, about 4 taps |
-| Send the first message | Type → Send: **1 tap** | Same | Type → Send → "Allow N a day" → Touch ID / biometric approve → Send: **about 3 taps + 1 biometric** | Same |
-| **Total from install** | **2 taps** (public) / **4** (DM) | **4–5** / **6–7** | **about 10–11 taps + 2 biometrics** (and a prior Mac setup) | **about 14 taps + 3 Touch ID + phrase backup** |
-| Money moved before the first message | none | none | admission (Knock) + message price + routing fee at most | same |
+| Reach someone | Already in `#mesh`. For a DM: open people list → tap a peer (**+2**) | Same | Get a card out of band → Browse → Profiles → paste → "Read card" → "Knock" (unprivileged dial, no payment): **about 4 taps** | Same, about 4 taps |
+| Send the first message | Type → Send: **1 tap** | Same | **Budget path:** Send → Allow: **2 taps**, plus owner approval if required. **Contact biometric path:** Send → biometric: **1 tap + 1 biometric**. Both assume automatic continuation after bound approval. | Same; biometric is Touch ID |
+| **Total from install, bound approval** | **2 taps** (public) / **4** (DM) | **4–5** / **6–7** | **Budget:** about **9–10 taps + 1 onboarding biometric**, plus any budget owner approval. **Contact biometric:** about **8–9 taps + 2 biometrics**. Both require prior Mac setup. | **Budget:** about **13 taps + 2 setup Touch ID**, plus any budget owner approval. **Contact biometric:** about **12 taps + 3 Touch ID**. Both include phrase backup. |
+| Money moved to send the first message | none | none | The first-contact quote at Send charges the entry fee + message price, with routing fees capped by the displayed maximum. Knock pays nothing; Allow only authorises a budget. | same |
+
+**Approval assumptions.** These are alternative paths, not additive steps. The budget totals exclude owner-approval interactions on another device because that flow depends on the node; they are not complete cross-device totals. Automatic continuation requires a bound approval, fresh state and an unchanged quote. In the plain/unbound flow, add **1 Send tap** to the applicable send and install totals: phone budget **10–11**, phone contact biometric **9–10**, Mac budget **14**, Mac contact biometric **13**; biometric counts stay the same. If already authorised, sending is **1 tap** with no new approval. `Shell.tsx:4913,5195-5228,5620-5654` defines these branches. Setup counts retain the setup choices shown above; skipping optional setup changes the totals.
 
 **How to read this.** BitChat's two-tap number is not a target BitSov should chase. Most of BitSov's extra steps exist on purpose:
 - owner custody (the recovery phrase);
@@ -254,7 +262,7 @@ Counted from code; not device-timed. A "tap" is a deliberate user action. OS per
 The steps BitSov *can* cut without weakening money or security clarity:
 1. **No camera scan for contact cards.** Pasting is the only way in today.
 2. **"Browse → Profiles → paste" is three hops** to what should be one "Add someone" action.
-3. **Knock, first Send and Allow are separate moments.** That stays correct, because each has its own price. But the empty state never tells the user about them in advance.
+3. **Explain dialing, payment and budget consent separately.** Knock only dials, the first-contact quote at Send charges the entry fee and message price, and Allow authorises a budget without charging it. Explain these roles in advance; never present them as three purchases or stack alternative approval paths.
 
 ---
 
@@ -275,7 +283,7 @@ BitSov doctrine applied throughout:
 - *Don't adopt:* stacking help text. Keep one primary action and concise copy without hiding the entry fee.
 
 **3. The composer says where the words go.** "message %@ — private" / "message #mesh — public, nearby".
-- *Adopt:* add a scope word to BitSov's placeholder, for example "Message Maya · private", and "Message room · N members" for rooms.
+- *Adopt:* add a scope word to BitSov's placeholder, for example "Message {name} · private", and "Message room · N members" for rooms.
 - *Don't adopt:* moving the price into the placeholder. A placeholder disappears as you type. The persistent cost line and "Send · N sats" stay where they are.
 
 **4. Degraded-state banners name the consequence and one fix.** "bluetooth is off — nobody nearby can reach you. tap to fix."
@@ -316,30 +324,33 @@ BitSov doctrine applied throughout:
 
 ## (c) UI tickets
 
-Small, one-PR tickets. Every ticket needs Danish and English copy, a Dynamic Type AX5 check, and no change to price, budget or approval logic unless stated. iOS tickets come first, then Mac.
+Small, one-PR tickets. Every ticket needs Danish and English copy, a Dynamic Type AX5 check, and no change to price, budget or approval logic unless stated. Every ticket must pass **signet first**: validate its acceptance criteria against closed-beta signet test nodes and record the evidence before considering mainnet. iOS tickets come first, then Mac.
 
 ### iOS (and Android where the phone shell is shared)
 
 **I-1. Scan a contact card with the camera**
 - *Files:* `src/control/Discover.tsx`, `src/pairingScanner.ts` (reuse), `src/appCopy.ts`
 - *Acceptance:*
+  - **Signet first:** validate these criteria on closed-beta signet test nodes and record evidence before considering mainnet.
   - On iPhone, Discover shows "Scan card" next to paste.
   - It opens the native scanner. A `bitsov://front-door#…` QR gives the same result as "Read card".
-  - Scanning **never** knocks by itself. "Knock" stays a separate tap showing the admission price.
+  - Scanning **never** knocks by itself. "Knock" stays a separate, unprivileged dial that pays nothing. Show the entry fee as payable through the first-contact quote at Send, never as a charge for Knock.
   - A wrong QR type (for example a pairing QR) shows a clear error and pays nothing.
   - The line "This app does not scan profile QR codes with the camera." is removed or updated.
 
 **I-2. Empty Chats state with one action**
 - *Files:* `src/control/Shell.tsx` (around the `uiNoContactsYet` fallback), `src/appCopy.ts`
 - *Acceptance:*
+  - **Signet first:** validate these criteria on closed-beta signet test nodes and record evidence before considering mainnet.
   - When there are no contacts, the list shows one primary button, "Add someone". It opens Discover (or the scan from I-1).
   - It shows concise copy, roughly "Reaching someone new costs an entry fee plus a message price, both set by them. You’ll see these prices, the maximum routing fee and the total before anything is paid."
-  - After choosing a person, show their entry fee (Knock) and message price, plus the maximum routing fee and total, before any payment; scanning or opening their card never pays automatically.
+  - After choosing a person, show their entry fee and message price, plus the maximum routing fee and total, in the first-contact quote before Send can pay. Scanning, reading the card and Knock never pay; Allow only authorises a budget, after which an approved pending Send may continue automatically.
   - No other buttons appear.
 
 **I-3. The composer placeholder states the scope**
 - *Files:* `src/control/Shell.tsx` (composer), `src/appCopy.ts`
 - *Acceptance:*
+  - **Signet first:** validate these criteria on closed-beta signet test nodes and record evidence before considering mainnet.
   - 1:1 chats show "Message {name} · private"; rooms show "Message {room} · {n} members".
   - The cost line and "Send · N sats" are unchanged.
   - The U5 chat snapshots are updated.
@@ -347,6 +358,7 @@ Small, one-PR tickets. Every ticket needs Danish and English copy, a Dynamic Typ
 **I-4. Translate control screens and widen the English guard**
 - *Files:* `src/control/Discover.tsx`, `src/control/ContactPanel.tsx`, `src/control/OfflineNode.tsx`, the New track in `Shell.tsx`, `src/appCopy.ts`, `tests/onboarding-copy.test.ts`
 - *Acceptance:*
+  - **Signet first:** validate these criteria on closed-beta signet test nodes and record evidence before considering mainnet.
   - All visible strings in these files come from `appCopy`, with Danish entries.
   - The guard covers these files and fails on new hardcoded English.
   - Signed approval terms stay allowlisted as English.
@@ -354,6 +366,7 @@ Small, one-PR tickets. Every ticket needs Danish and English copy, a Dynamic Typ
 **I-5. Delivery detail sheet**
 - *Files:* `src/control/Shell.tsx` (delivery marks, about lines 3940-3961, and the paid line), `src/appCopy.ts`
 - *Acceptance:*
+  - **Signet first:** validate these criteria on closed-beta signet test nodes and record evidence before considering mainnet.
   - Tapping the paid/delivery line of a sent message opens a sheet with two sections:
     - **Paid:** amount, routing fee, or "not reported".
     - **Delivery:** Sent / Queued / Delivered / Rejected, and time.
@@ -363,6 +376,7 @@ Small, one-PR tickets. Every ticket needs Danish and English copy, a Dynamic Typ
 **I-6. Verified mark in the chat header**
 - *Files:* `src/control/Shell.tsx` (chat header), `src/control/ContactPanel.tsx`, `src/control/petnames.ts`
 - *Acceptance:*
+  - **Signet first:** validate these criteria on closed-beta signet test nodes and record evidence before considering mainnet.
   - The header shows "Verified" or "Not verified" from existing petname state.
   - Tapping it opens the existing verify sheet.
   - "Key changed" takes priority over Verified.
@@ -371,6 +385,7 @@ Small, one-PR tickets. Every ticket needs Danish and English copy, a Dynamic Typ
 **I-7. Pin contacts (local only)**
 - *Files:* `src/control/petnames.ts`, `src/control/Shell.tsx` (chat list), `src/appCopy.ts`
 - *Acceptance:*
+  - **Signet first:** validate these criteria on closed-beta signet test nodes and record evidence before considering mainnet.
   - "Pin" / "Unpin" lives in ContactPanel.
   - Pinned contacts sort first in Chats.
   - Pins are stored on the device only, never sent to the node.
@@ -379,6 +394,7 @@ Small, one-PR tickets. Every ticket needs Danish and English copy, a Dynamic Typ
 **I-8. "Remove BitSov from this phone"**
 - *Files:* `src/onboarding/PhoneOnboarding.tsx` ("Forget this box"), You → Settings in `src/control/Shell.tsx`, `src/appCopy.ts`
 - *Acceptance:*
+  - **Signet first:** validate these criteria on closed-beta signet test nodes and record evidence before considering mainnet.
   - A visible destructive item opens a confirmation. The confirmation states that the box, its funds and its identity remain, that this phone's pairing and device/approval key will be revoked on the box, and what is removed from this phone (pairing credentials, local device key, local names, cached messages).
   - Revoke this phone's pairing and device/approval key on the box and confirm success before wiping the local credentials needed for that request. Local deletion alone must never be reported as revocation.
   - If the box is offline or revocation fails, show "This phone is still authorised on your box" and keep removal pending, with a retry or instructions to revoke it from another trusted device. Do not claim removal is complete until revocation is confirmed.
@@ -390,6 +406,7 @@ Small, one-PR tickets. Every ticket needs Danish and English copy, a Dynamic Typ
 **I-9. Compact offline banner in chat**
 - *Files:* `src/control/OfflineNode.tsx`, `src/control/Shell.tsx`, `src/appCopy.ts`
 - *Acceptance:*
+  - **Signet first:** validate these criteria on closed-beta signet test nodes and record evidence before considering mainnet.
   - When the node is offline and a chat is open, a one-line banner shows: "Your node is offline — new messages can’t be sent" plus "Retry".
   - The full card stays where it is today.
   - The copy matches the existing OfflineNode wording, which already avoids claiming that in-flight payments stopped.
@@ -399,17 +416,21 @@ Small, one-PR tickets. Every ticket needs Danish and English copy, a Dynamic Typ
 
 **M-1. Camera scan of a contact card on Mac**
 - *Files:* `src/control/Discover.tsx`, `src/cameraQrScanner.ts`
-- *Acceptance:* the same behaviour as I-1 using the jsQR camera path, with the same "scan never knocks" rule.
+- *Acceptance:*
+  - **Signet first:** validate these criteria on closed-beta signet test nodes and record evidence before considering mainnet.
+  - The same behaviour as I-1 using the jsQR camera path, with the same "scan never knocks" rule.
 
 **M-2. Empty state, composer scope and delivery sheet on the Mac rail layout**
 - *Files:* `src/control/Shell.tsx`
 - *Acceptance:*
+  - **Signet first:** validate these criteria on closed-beta signet test nodes and record evidence before considering mainnet.
   - I-2, I-3 and I-5 render correctly in the wide/rail layout.
   - The m1a-style browser layout check passes in Danish and English at default and large text.
 
 **M-3. Visible "Danger zone" placement on Mac**
 - *Files:* `src/control/Shell.tsx` (settings)
 - *Acceptance:*
+  - **Signet first:** validate these criteria on closed-beta signet test nodes and record evidence before considering mainnet.
   - "Use this Mac instead" / forget-node actions are grouped under one clearly labelled destructive section, each behind its own confirmation.
   - No funds-affecting action sits in that section without a separate owner approval.
 
