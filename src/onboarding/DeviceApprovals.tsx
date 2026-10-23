@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 import { deviceWord, isMobilePlatform } from '../platform';
 import { JoinDevice, type JoinInput, type JoinView } from './AddDevice';
 import { createSignal, Match, Show, Switch } from 'solid-js';
@@ -27,17 +28,17 @@ export function DeviceApprovals(props: {
   remote: boolean;
 }) {
   const mobile = () => props.mobile ?? isMobilePlatform();
-  const device = () => mobile() ? (deviceWord() === 'iPad' ? 'iPad' : 'phone') : 'Mac';
+  const device = () => mobile() ? (deviceWord() === 'iPad' ? 'iPad' : t('obPhone')) : 'Mac';
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   usePairingActivity(busy);
-  const what = () => (mobile() ? 'biometric approvals' : 'Touch ID approvals');
+  const what = () => (mobile() ? t('obBiometricApprovals') : t('obTouchIdApprovals'));
   const run = async (action: () => Promise<unknown>) => {
     if (busy()) return;
     setBusy(true);
     setError(null);
     try { await action(); }
-    catch (e) { setError(typeof e === 'string' ? e : `Could not start ${what()} setup. Try again when your node is unlocked.`); }
+    catch (e) { setError(typeof e === 'string' ? e : t('obApprovalSetupFailed', what())); }
     finally { setBusy(false); }
   };
   const state = () => {
@@ -50,19 +51,19 @@ export function DeviceApprovals(props: {
     <Show when={!joining()} fallback={<JoinDevice api={input => props.joinDevice!(input)} mobile={mobile()} />}>
     <Show when={state() && state() !== 'unavailable' && (state() !== 'registered' || props.showRegistered)}>
       <section class="panel device-approvals" data-device-approvals={state()!}>
-        <h2>{mobile() ? 'Approve payments with biometrics' : 'Approve payments with Touch ID'}</h2>
+        <h2>{mobile() ? t('obApprovePaymentsBiometrics') : t('obApprovePaymentsTouchId')}</h2>
         <Switch>
           <Match when={state() === 'registered'}>
             <p class="ok-note" data-device-approvals-on>
-              {mobile() ? `Biometric approvals are on for this ${device()}.` : 'Touch ID approvals are on for this Mac.'}
+              {mobile() ? t('obBiometricsOn', device()) : t('obTouchIdOn')}
             </p>
             <Show when={props.device?.owner_device_count === 1}>
-              <p class="hint" role="status">This is your only owner device. Add and keep a second one so you can approve devices if this one is lost. A phone should not be your only owner device.</p>
+              <p class="hint" role="status">{t('obOnlyOwnerDevice')}</p>
             </Show>
           </Match>
           <Match when={state() === 'off'}>
             <p class="hint" data-device-off={props.device?.off_reason ?? 'off'}>
-              <strong>{mobile() ? 'Biometric approvals are off.' : 'Touch ID approvals are off.'}</strong> {props.device?.off_message}
+              <strong>{mobile() ? t('obBiometricsOff') : t('obTouchIdOff')}</strong> {props.device?.off_message}
             </p>
           </Match>
           <Match when={state() === 'pending' && props.device}>
@@ -70,16 +71,15 @@ export function DeviceApprovals(props: {
           </Match>
           <Match when={state() === 'none' || state() === 'lapsed'}>
             <p class="hint">
-              {state() === 'lapsed' ? `Your last ${mobile() ? 'biometric' : 'Touch ID'} setup request lapsed. ` : ''}
-              One {mobile() ? 'biometric' : 'Touch ID'} tap approves a contact’s payments on this {device()},
-              instead of approving each one at your node. Setup asks your node’s owner to approve this {device()} once.
+              {state() === 'lapsed' ? t('obApprovalLapsed', mobile() ? t('obBiometrics') : 'Touch ID') : ''}
+              {t('obApprovalExplanation', mobile() ? t('obBiometrics') : 'Touch ID', device())}
             </p>
             <div class="form-actions">
               <button type="button" class="primary" data-device-register disabled={busy()} onClick={() => void run(props.onRegister)}>
-                {busy() ? 'Starting…' : mobile() ? 'Set up biometric approvals' : 'Set up Touch ID approvals'}
+                {busy() ? t('obStarting') : mobile() ? t('obSetupBiometrics') : t('obSetupTouchId')}
               </button>
               <Show when={props.onSkip}>
-                <button type="button" class="quiet" data-device-approvals-skip disabled={busy()} onClick={() => props.onSkip!()}>Not now</button>
+                <button type="button" class="quiet" data-device-approvals-skip disabled={busy()} onClick={() => props.onSkip!()}>{t('obNotNow')}</button>
               </Show>
             </div>
           </Match>

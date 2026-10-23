@@ -1,11 +1,12 @@
 /** Dependency-free copy lookup; Solid's existing signals keep rendered copy reactive. */
 import { createSignal } from 'solid-js';
+import { onboardingEn, onboardingDa } from './onboarding/onboardingCopy';
 import { phoneCopy } from './onboarding/phoneCopy';
 import { appDa, appEn } from './appCopy';
 
 export const copy = {
-  en: { ...phoneCopy.en, ...appEn },
-  da: { ...phoneCopy.da, ...appDa },
+  en: { ...phoneCopy.en, ...appEn, ...onboardingEn },
+  da: { ...phoneCopy.da, ...appDa, ...onboardingDa },
 };
 export type Language = keyof typeof copy;
 export type LanguagePref = Language | 'system';

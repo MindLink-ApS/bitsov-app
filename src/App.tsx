@@ -1,3 +1,4 @@
+import { t } from './i18n';
 import { invoke } from '@tauri-apps/api/core';
 import { PhoneTrust } from './onboarding/PhoneTrust';
 import { PhoneOnboarding } from './onboarding/PhoneOnboarding';
@@ -16,7 +17,7 @@ import { isMoneyNotReady } from './control/readiness';
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show, type ParentProps } from 'solid-js';
 import { qrSvg } from './qr';
 import { Onboarding, type NodeTarget } from './onboarding/Onboarding';
-import { FIRST_RUN_PHONE_MESSAGE, firstRunGuidance, INITIAL_PAIRING, type NodeStatus, type PairingView } from './onboarding/pairing';
+import { FIRST_RUN_PHONE_MESSAGE, INITIAL_PAIRING, type NodeStatus, type PairingView } from './onboarding/pairing';
 import { amount as fmtAmount } from './control/format';
 import { ControlCenter } from './control/Shell';
 import { hostSource, inHost, sampleRequest, type SampleStart, type Source } from './control/source';
@@ -101,7 +102,7 @@ function AppScreen() {
     if (!key) return;
     if (key !== 'sample') {
       const accepted = await source().trustAcknowledge(status().node_id!, pairing().remote, false);
-      if (!accepted) throw new Error('Could not save trust acknowledgement.');
+      if (!accepted) throw new Error(t('obTrustSaveFailed'));
       // An IPC response for the previous node must never accept its replacement.
       if (trustKey() !== key) return;
     }
@@ -185,7 +186,7 @@ function AppScreen() {
   };
   const watches = watchPoller(samples => pollWatchBatch(source(), samples, watchRevisions), result => {
     setWatchUpdates(old => ({ ...old, ...result.updates }));
-    setWatchError(result.failed ? 'Some watch notices could not be saved. The next status poll will retry.' : null);
+    setWatchError(result.failed ? t('obWatchSaveFailed') : null);
   });
   onCleanup(watches.close);
   const [lastSeen, setLastSeen] = createSignal<{ nodeId: string; at: number } | null>(null);
@@ -310,7 +311,7 @@ function AppScreen() {
       {/* While the setup steps are hidden, the offline card is the page: its title is the page's h1. */}
       {offlineScreen(() => (setupHidden() ? 1 : 2))}
       <Show when={setupHidden()}>
-        <button type="button" class="quiet offline-change" data-offline-change onClick={() => setChangeNode(true)}>Use a different node</button>
+        <button type="button" class="quiet offline-change" data-offline-change onClick={() => setChangeNode(true)}>{t('obUseDifferentNode')}</button>
       </Show>
       <div class="setup-steps" data-setup-steps hidden={setupHidden()}>
 
@@ -347,19 +348,18 @@ function AppScreen() {
                   <Show when={starting()}>
                     <div class="state">
                       <DelayedSpinner />
-                      {pairing().remote ? 'Connecting to your node…' : 'Starting your node…'}
+                      {pairing().remote ? t('obConnectingNode') : t('obStartingNode')}
                     </div>
                   </Show>
                 }
               >
                 <div class="state error">
-                  <Show when={onPhone && status().error === FIRST_RUN_PHONE_MESSAGE} fallback={<SoftError message={status().error!} summary="Your node is unavailable." onReconnect={retryPairing} />}>
-                    <p role="status">{deviceWord() === 'iPad' ? firstRunGuidance('iPad') : FIRST_RUN_PHONE_MESSAGE}</p>
+                  <Show when={onPhone && status().error === FIRST_RUN_PHONE_MESSAGE} fallback={<SoftError message={status().error!} summary={t('obNodeUnavailable')} onReconnect={retryPairing} />}>
+                    <p role="status">{t('obFirstRunDevice', deviceWord() === 'iPad' ? 'iPad' : t('obPhone'))}</p>
                   </Show>
                   <Show when={import.meta.env.DEV && source().mode === 'node'}>
                     <button class="quiet" data-use-sample onClick={() => useSample('shell')}>
-                      Explore with sample data
-                    </button>
+                      {t('obExploreSample')}</button>
                   </Show>
                 </div>
               </Show>
@@ -414,15 +414,15 @@ function AppScreen() {
     <div class="pairing-link-layer" classList={{ reviewing: pairingRequest() !== null }}>
     <Show when={queuedPairing() && !phoneFlow() && !phoneTrustFlow() && (!onPhone || phoneSetup() !== null)}>
       <aside class="panel pairing-link-banner" data-pairing-link-banner role="status">
-        <p>{pairingBlocked() ? 'New pairing link queued. Finish or close the current pairing review or ceremony first. Only the newest incoming link is kept.' : 'A pairing link is waiting. Review it when you are ready.'}</p>
-        <button type="button" data-review-pairing disabled={pairingBlocked()} onClick={reviewPairing}>Review incoming link</button>
-        <button type="button" class="quiet" onClick={() => setQueuedPairing(null)}>Dismiss link</button>
+        <p>{pairingBlocked() ? t('obLinkQueued') : t('obLinkWaiting')}</p>
+        <button type="button" data-review-pairing disabled={pairingBlocked()} onClick={reviewPairing}>{t('obReviewIncoming')}</button>
+        <button type="button" class="quiet" onClick={() => setQueuedPairing(null)}>{t('obDismissLink')}</button>
       </aside>
     </Show>
     <Show when={pairingRequest()}>{request => (
       <PairingLinkOverlay onClose={closePairing}>
-        <h1>Pair this {deviceWord()} with your node</h1>
-        <p>Review the endpoint and node fingerprint before choosing Use remote node. Opening a link does not pair this {deviceWord()}.</p>
+        <h1>{t('obPairDevice', deviceWord() === 'phone' ? t('obPhone') : deviceWord())}</h1>
+        <p>{t('obReviewEndpoint', deviceWord() === 'phone' ? t('obPhone') : deviceWord())}</p>
         <Onboarding status={() => ({ ready: false, node_id: null, error: null })}
           pairing={() => INITIAL_PAIRING} trustAck={() => false} onRetry={() => {}}
           selectedTarget="network" initialPairingLink={request().link} pairingInputId="incoming-pairing-link"
@@ -437,7 +437,7 @@ function AppScreen() {
           }}
           onBusyChange={setPairingBusy}
           onScanRemote={canScanPairingQr ? scanPairingLink : undefined} mobile={onPhone} phone={onPhone} />
-        <button type="button" class="quiet" data-close-pairing disabled={pairingBusy()} onClick={closePairing}>Close pairing</button>
+        <button type="button" class="quiet" data-close-pairing disabled={pairingBusy()} onClick={closePairing}>{t('obClosePairing')}</button>
       </PairingLinkOverlay>
     )}</Show>
     </div>
@@ -539,7 +539,7 @@ function PairingLinkOverlay(props: ParentProps<{ onClose: () => void }>) {
     }
   };
   return <div ref={dialog} class="pairing-link-overlay" role="dialog" aria-modal="true"
-    aria-label={`Pair this ${deviceWord()} with your node`} data-pairing-link-screen tabindex="-1" onKeyDown={onKeyDown}>
+    aria-label={t('obPairDevice', deviceWord() === 'phone' ? t('obPhone') : deviceWord())} data-pairing-link-screen tabindex="-1" onKeyDown={onKeyDown}>
     {props.children}
   </div>;
 }
@@ -576,7 +576,7 @@ function IdentityGate(props: {
     const value = phrase();
     setPhrase('');
     if (!value.trim()) {
-      setError('Enter your 12- or 24-word recovery phrase.');
+      setError(t('obEnterRecovery'));
       return;
     }
     setBusy(true);
@@ -606,14 +606,14 @@ function IdentityGate(props: {
     <div class="state ready">
       <Show when={busy()}>
         <DelayedSpinner />
-        <div>Restarting with your restored identity…</div>
+        <div>{t('obRestartingRestored')}</div>
       </Show>
       <div class="running">
         <div class="dot ok" />
-        <div>Your node is running.</div>
+        <div>{t('obNodeRunning')}</div>
       </div>
       <details class="node-details">
-        <summary>Technical node details & address</summary>
+        <summary>{t('obTechnicalDetails')}</summary>
         <div class="node-id" title={props.nodeId() ?? ''}>
           {short(props.nodeId() ?? '')}
         </div>
@@ -663,7 +663,7 @@ function IdentityGate(props: {
       </Show>
 
       <Show when={restored()}>
-        <p class="ok-note">Identity restored. Your node now runs as {short(restored()!)}.</p>
+        <p class="ok-note">{t('obIdentityRestored', short(restored()!))}</p>
       </Show>
 
       <Show when={props.canRestore}>
@@ -671,12 +671,11 @@ function IdentityGate(props: {
         when={showRestore()}
         fallback={
           <button class="link" data-restore-open onClick={() => setShowRestore(true)}>
-            Restore an existing identity
-          </button>
+            {t('obRestoreIdentity')}</button>
         }
       >
         <form class="panel restore" onSubmit={submitRestore}>
-          <label for="restore-phrase">Recovery phrase (12 or 24 words)</label>
+          <label for="restore-phrase">{t('obRecoveryLabel')}</label>
           <input
             id="restore-phrase"
             type="password"
@@ -689,12 +688,10 @@ function IdentityGate(props: {
             onInput={(e) => setPhrase(e.currentTarget.value)}
           />
           <p class="hint">
-            Replaces this node’s identity with the one your phrase derives, then restarts the
-            node. Do this before you deposit anything.
-          </p>
+            {t('obRestoreHint')}</p>
           <div class="row">
             <button type="submit" class="primary" disabled={busy()}>
-              {busy() ? 'Restoring…' : 'Restore'}
+              {busy() ? t('obRestoring') : t('obRestore')}
             </button>
             <button
               type="button"
@@ -706,8 +703,7 @@ function IdentityGate(props: {
                 setError(null);
               }}
             >
-              Cancel
-            </button>
+              {t('obCancel')}</button>
           </div>
         </form>
       </Show>
@@ -773,7 +769,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
     if (props.moneyBlocked?.()) return;
     const value = Number(amount());
     if (!Number.isInteger(value) || value < 1 || value > 4_294_967_295) {
-      setError('Enter a whole number of sats.');
+      setError(t('obWholeSats'));
       return;
     }
     setBusy(true);
@@ -809,12 +805,10 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
           when={fund()}
           fallback={
             <form class="panel" onSubmit={start}>
-              <h2>Fund your node</h2>
+              <h2>{t('obFundNode')}</h2>
               <p class="hint">
-                Choose how much on-chain bitcoin to deposit. Your node watches its own wallet
-                and tells you when the deposit arrives.
-              </p>
-              <label for="amount">Amount</label>
+                {t('obChooseDeposit')}</p>
+              <label for="amount">{t('obAmount')}</label>
               <div class="row">
                 <input
                   id="amount"
@@ -829,7 +823,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
                 <span class="unit">sats</span>
               </div>
               <button type="submit" class="primary money" data-fund-start disabled={busy() || props.moneyBlocked?.()}>
-                {busy() ? 'Starting…' : 'Get a deposit address'}
+                {busy() ? t('obStarting') : t('obGetDepositAddress')}
               </button>
             </form>
           }
@@ -838,27 +832,25 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
             when={!fund()!.funded}
             fallback={
               <div class="panel funded">
-                <h2>Funding seen</h2>
+                <h2>{t('obFundingSeen')}</h2>
                 <p class="hint">
-                  Your node observed {fmtAmount(received() * 1000)}. Opening a Lightning channel and
-                  sending your first paid message come next. Channel actions and on-chain fees are outside the app daily all-in limit; check their cost at the owner action.
-                </p>
+                  {t('obObservedAmount', fmtAmount(received() * 1000))}{t('obFundingNext')}</p>
                 <Show when={fund()!.funding_evidence}>
-                  <p class="evidence">Evidence: {fund()!.funding_evidence}</p>
+                  <p class="evidence">{t('obEvidence')}{' '}{fund()!.funding_evidence}</p>
                 </Show>
               </div>
             }
           >
             <div class="panel">
-              <h2>Deposit to your node</h2>
+              <h2>{t('obDepositNode')}</h2>
               <Show
                 when={depositAddress()}
                 fallback={
                   <Show
                     when={addressError()}
-                    fallback={<p class="hint">Waiting for the node to produce a deposit address…</p>}
+                    fallback={<p class="hint">{t('obWaitingAddress')}</p>}
                   >
-                    <div data-deposit-error><SoftError message={addressError()!} summary="Your node has no deposit address to show." /></div>
+                    <div data-deposit-error><SoftError message={addressError()!} summary={t('obNoDepositAddress')} /></div>
                   </Show>
                 }
               >
@@ -868,7 +860,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
                     viewBox={`0 0 ${qr()!.extent} ${qr()!.extent}`}
                     shape-rendering="crispEdges"
                     role="img"
-                    aria-label="Deposit address as a QR code"
+                    aria-label={t('obDepositQr')}
                   >
                     <rect width={qr()!.extent} height={qr()!.extent} fill="#ffffff" />
                     <path d={qr()!.path} fill="#000000" />
@@ -876,10 +868,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
                 </Show>
                 <code class="address">{depositAddress()}</code>
                 <p class="hint">
-                  Send on-chain bitcoin to this address
-                  <Show when={address()?.network}>{` (${address()!.network})`}</Show>. It stays
-                  valid — scan it or copy the text above.
-                </p>
+                  {t('obSendOnChain')}<Show when={address()?.network}>{` (${address()!.network})`}</Show>{t('obAddressValid')}</p>
               </Show>
 
               <div class="progress">
@@ -887,13 +876,11 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
                   <div class="fill" style={{ width: `${progress()}%` }} />
                 </div>
                 <div class="numbers">
-                  <strong>{fmtAmount(received() * 1000)}</strong> of {fmtAmount(required() * 1000)} seen
+                  <strong>{fmtAmount(received() * 1000)}</strong>{t('obOfAmountSeen', fmtAmount(required() * 1000))}
                 </div>
               </div>
               <p class="hint">
-                Waiting for your deposit. The node re-checks its wallet every few seconds;
-                on-chain confirmation can take a while.
-              </p>
+                {t('obWaitingDeposit')}</p>
             </div>
           </Show>
         </Show>

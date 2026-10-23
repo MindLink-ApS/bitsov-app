@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 import { usePairingActivity } from '../pairingActivity';
 import { createSignal, onCleanup, Show } from 'solid-js';
 import { Onboarding } from './Onboarding';
@@ -42,15 +43,16 @@ export function PairAnotherNode(props: {
   const currentLabel = () => {
     const id = props.currentNodeId();
     const host = props.currentHostedBy?.();
+    // Consent prompt text stays verbatim in this round, including its inserted label.
     const name = id ? `Node ${shortId(id)}` : 'Your current node';
     return host ? `${name} (hosted by ${host})` : name;
   };
 
   return <div class="pair-another-node" data-pair-another>
     <Show when={open()} fallback={<>
-      <button type="button" class="quiet" data-pair-another-open disabled={saved() !== null} onClick={() => setOpen(true)}>Pair another node</button>
-      <Show when={saved()} fallback={<p class="hint">Switch this app to a different node with a pairing ticket from it.</p>}>
-        <p class="hint" role="status" data-pair-another-saved>New node saved. Connecting to it…</p>
+      <button type="button" class="quiet" data-pair-another-open disabled={saved() !== null} onClick={() => setOpen(true)}>{t('obPairAnother')}</button>
+      <Show when={saved()} fallback={<p class="hint">{t('obSwitchNodeHint')}</p>}>
+        <p class="hint" role="status" data-pair-another-saved>{t('obNewNodeSaved')}</p>
       </Show>
     </>}>
       <Onboarding
@@ -86,7 +88,7 @@ export function PairAnotherNode(props: {
           </div>
         </div>
       )}</Show>
-      <button type="button" class="quiet" data-pair-another-close disabled={busy() && pending() === null} onClick={close}>Close</button>
+      <button type="button" class="quiet" data-pair-another-close disabled={busy() && pending() === null} onClick={close}>{t('obClose')}</button>
     </Show>
   </div>;
 }
