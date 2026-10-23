@@ -41,7 +41,7 @@ it('localizes local ticket validation while preserving host errors', async () =>
     initialPairingLink="not-a-ticket" status={() => ({ ready: false, node_id: null, error: null })}
     pairing={() => INITIAL_PAIRING} trustAck={() => false} onRetry={() => {}} />);
   await Promise.resolve();
-  expect(root.textContent).toContain('Brug en bitsov://pair/-parringskode fra din node.');
+  expect(root.textContent).toContain('Brug et bitsov://pair/-parringslink fra din node.');
   dispose?.();
   const message = 'Node rejected request {0}: device id å42';
   const locked = mount(() => <LockedNode onUnlock={async () => {}} hostError={message} />);
