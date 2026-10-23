@@ -10,7 +10,8 @@
 .phone-onboarding .why { margin: 10px 0 0; line-height: 1.4; font-size: 14px; }
 .phone-options { margin-top: auto; }
 .phone-options summary { cursor: pointer; padding: 12px 0; }
-.phone-options button { width: 100%; margin: 8px 0; }
+.phone-options button { width: 100%; margin: 8px 0; background: var(--raised); color: var(--ink); border: 1px solid var(--faint); }
+.phone-onboarding button:disabled { opacity: 1; color: var(--muted); background: var(--surface); border: 1px solid var(--faint); }
 .phone-options p, .phone-options dd { overflow-wrap: anywhere; }
 .phone-options dd { margin: 0 0 12px; }
 .phone-words { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 0; list-style-position: inside; margin: 8px 0; }

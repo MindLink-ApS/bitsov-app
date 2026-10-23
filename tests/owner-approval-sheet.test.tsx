@@ -48,6 +48,7 @@ describe.each(['en', 'da'] as const)('owner approval sheet (%s)', lang => {
     expect($('[data-owner-approval-sheet]').textContent).toContain('cdcdcd…cdcdcd');
     expect($('[data-owner-approval-queue]').textContent).toBe(lang === 'en' ? '1 of 2' : '1 af 2');
     expect($('[data-owner-approval-sheet] .primary').textContent).toBe(lang === 'en' ? 'Approve with Touch ID' : 'Godkend med Touch ID');
+    expect($('[data-owner-sheet-terms]').getAttribute('lang')).toBe('en');
     expect(s.approve).not.toHaveBeenCalled();
   });
   it.each(['not-now', 'Escape', 'scrim', 'close'])('%s grants nothing, preserves the list, restores focus and can reopen', async kind => {

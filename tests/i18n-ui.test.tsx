@@ -44,6 +44,7 @@ it('changes mounted settings, composer and wallet labels without a reload', asyn
   find('[data-profile]').click(); find('[data-open-wallet]').click();
   setLanguagePref('da');
   expect(find('[data-wallet-close]').textContent).toBe('← Tilbage');
+  expect(find('[data-wallet-close]').getAttribute('aria-label')).toBe('← Tilbage, Luk tegnebog');
   expect(find('[data-wallet-tab="receive"]').textContent).toBe('Modtag');
   expect(find('[data-wallet-activity]').textContent).toContain('Modtaget');
 });
