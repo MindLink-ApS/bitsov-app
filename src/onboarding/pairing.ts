@@ -1,3 +1,5 @@
+import { t } from '../i18n';
+
 /** Same guidance, naming the device in the reader's hand. The phone sentence is the host status string. */
 export function firstRunGuidance(device: 'phone' | 'iPad'): string {
   return `This node isn't set up yet. Finish setup on a Mac, then add this ${device}.`;
@@ -17,7 +19,7 @@ export function normalizePairingLink(input: string): string {
   const prefix = 'bitsov://pair/';
   if (!link.startsWith(prefix) || link.length > prefix.length + 16384 ||
       !/^[A-Za-z0-9_-]+$/.test(link.slice(prefix.length))) {
-    throw new Error('Use a bitsov://pair/ pairing ticket from your node.');
+    throw new Error(t('obUsePairingTicket'));
   }
   return link;
 }

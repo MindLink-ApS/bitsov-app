@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 import { createSignal, For, onCleanup, Show } from 'solid-js';
 import { usePairingActivity } from '../pairingActivity';
 import { invoke } from '@tauri-apps/api/core';
@@ -53,7 +54,7 @@ export function LocalOwnerCeremony(props: { api?: OwnerApi; onComplete: () => vo
       setIndices(reply.backup_check); setPhrase(reply.mnemonic); setStep('phrase');
       disarmExpiry();
       expiryTimer = setTimeout(() => {
-        clear(); setStep('uncertain'); setError('Setup time expired. Cancel this attempt and create a new recovery phrase.');
+        clear(); setStep('uncertain'); setError(t('obLocalSetupExpired'));
       }, Math.max(0, Math.min(30 * 60 * 1000, reply.expires_at * 1000 - Date.now())));
     }
     reply.mnemonic = '';
@@ -64,7 +65,7 @@ export function LocalOwnerCeremony(props: { api?: OwnerApi; onComplete: () => vo
     clear(); setStep('uncertain');
     await api.cancel(ceremonyId);
     ceremonyId = undefined;
-    if (alive) { disarmExpiry(); setStep('start'); setError('Setup cancelled. A new attempt will have a new recovery phrase.'); }
+    if (alive) { disarmExpiry(); setStep('start'); setError(t('obLocalSetupCancelled')); }
   });
   const finalize = () => run(async () => {
     const submitted = words.map(w => w.trim().toLowerCase());
@@ -74,39 +75,39 @@ export function LocalOwnerCeremony(props: { api?: OwnerApi; onComplete: () => vo
       if (alive) { disarmExpiry(); setStep('done'); props.onComplete(); }
     } finally { submitted.fill(''); }
   });
-  return <section ref={root} class="panel" aria-label="Set up this Mac as owner" data-local-owner>
-    <h2>Set up this Mac as owner</h2>
-    <p>Your recovery phrase controls your identity. This Mac keeps its seed password in Keychain and uses Touch ID for device approvals.</p>
-    <p>Development preview: an unsigned app has weaker Keychain protection.</p>
+  return <section ref={root} class="panel" aria-label={t('obSetupMacOwner')} data-local-owner>
+    <h2>{t('obSetupMacOwner')}</h2>
+    <p>{t('obRecoveryControlsIdentity')}</p>
+    <p>{t('obUnsignedPreview')}</p>
     <Show when={step() === 'start'}>
-      <p>Create a new identity on this Mac. Keep its recovery phrase somewhere private and offline.</p>
-      <button disabled={busy()} onClick={create}>Create identity</button>
+      <p>{t('obCreateIdentityHint')}</p>
+      <button disabled={busy()} onClick={create}>{t('obCreateIdentity')}</button>
     </Show>
     <Show when={step() === 'phrase'}>
-      <h3>Write down your recovery phrase</h3>
-      <p>This is its only display. The identity has not been saved yet. Do not take a screenshot.</p>
+      <h3>{t('obWriteRecovery')}</h3>
+      <p>{t('obRecoveryShownOnce')}</p>
       <p class="recovery-phrase" style={{ 'user-select': 'none', 'overflow-wrap': 'anywhere', 'line-height': '2' }}>{phrase()}</p>
-      <button disabled={busy()} onClick={() => { clear(); setStep('backup'); }}>I wrote it down</button>
+      <button disabled={busy()} onClick={() => { clear(); setStep('backup'); }}>{t('obWroteItDown')}</button>
     </Show>
     <Show when={step() === 'backup'}>
-      <p>Enter these three words from your written backup, in this order.</p>
+      <p>{t('obEnterThreeOrdered')}</p>
       <For each={indices()}>{(index, i) => <div>
-        <label for={`backup-${i()}`}>Word {index + 1}</label>
+        <label for={`backup-${i()}`}>{t('obBackupWord', index + 1)}</label>
         <input id={`backup-${i()}`} type="password" autocomplete="off" autocapitalize="none" spellcheck={false}
           onInput={e => { words[i()] = e.currentTarget.value; }} disabled={busy()} />
       </div>}</For>
-      <button disabled={busy()} onClick={finalize}>Confirm backup with Touch ID</button>
+      <button disabled={busy()} onClick={finalize}>{t('obConfirmBackupTouchId')}</button>
     </Show>
     <Show when={step() === 'uncertain'}>
-      <p>Setup is not confirmed. Check the node before continuing. If it did not commit, cancel this attempt and create a new phrase.</p>
+      <p>{t('obLocalSetupUncertain')}</p>
       <button disabled={busy()} onClick={() => run(async () => {
         await api.reconcile(); if (alive) { disarmExpiry(); setStep('done'); props.onComplete(); }
-      })}>Check node and continue</button>
+      })}>{t('obCheckNodeContinue')}</button>
     </Show>
     <Show when={step() !== 'start' && step() !== 'done'}>
-      <button class="quiet" disabled={busy()} onClick={cancel}>Cancel setup</button>
+      <button class="quiet" disabled={busy()} onClick={cancel}>{t('obCancelSetup')}</button>
     </Show>
-    <Show when={step() === 'done'}><p>Identity saved. Checking this Mac’s owner device…</p></Show>
+    <Show when={step() === 'done'}><p>{t('obIdentitySaved')}</p></Show>
     <Show when={error()}><p role="alert">{error()}</p></Show>
   </section>;
 }

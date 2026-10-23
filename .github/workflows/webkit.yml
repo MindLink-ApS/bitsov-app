@@ -1,11 +1,13 @@
 name: WebKit
 
 # Atlas should make "WebKit (safe areas + type + keyboard)" required on main.
-# No path filters: even docs-only PRs receive a completed check, and docs/ui
-# contains the real-component fixtures used by these tests.
+# No workflow path filters: even non-UI PRs receive a successful check.
+# Use full-ci to force tests for changes outside the UI paths below.
+# Gate regression scenarios: python3 scripts/test-webkit-gate.py
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
   merge_group:
@@ -13,28 +15,78 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   webkit:
-    name: WebKit (safe areas + type + keyboard)
+    # A skipped unrelated-label job must not replace the required check result.
+    name: >-
+      ${{ github.event_name == 'pull_request' && github.event.action == 'labeled' &&
+          github.event.label.name != 'full-ci' && 'WebKit (ignored label)' ||
+          'WebKit (safe areas + type + keyboard)' }}
+    if: github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'full-ci'
+    # Job scope keeps unrelated label events from cancelling active WebKit jobs.
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Detect UI changes
+        id: changes
+        if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci')
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          # Only an explicit false skips tests; missing output or errors run them.
+          # Git treats an empty side of A...B as HEAD, so reject missing SHAs.
+          if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
+            echo "::warning::Missing base or head SHA; running WebKit."
+            exit 0
+          fi
+          # Compare from the merge base, and include both sides of renames.
+          if ! git diff --no-renames --name-only -z "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/webkit-changed-files"; then
+            echo "::warning::Unable to detect changed files; running WebKit."
+            exit 0
+          fi
+          # playwright.webkit.config.ts runs tests/a11y via the Vite dev server.
+          # Specs load tests/fixtures, the docs/ui u2b harness, index.html and
+          # assistant.html; those pages import src. Include future HTML entries
+          # and Vite/TypeScript config variants (also in nested directories).
+          # When src/ imports assets outside src/ (e.g. jarvis/fixtures), update
+          # this list and MUST_RUN in scripts/test-webkit-gate.py together.
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              src/*|public/*|tests/a11y/*|tests/fixtures/*|docs/ui/*|jarvis/fixtures/*|\
+              *.html|playwright*.config.*|vite*.config.*|*/vite*.config.*|\
+              tsconfig*.json|*/tsconfig*.json|package*.json|.env*|\
+              .github/workflows/webkit.yml|scripts/test-webkit-gate.py)
+                echo "UI changes detected; running WebKit."
+                exit 0
+                ;;
+            esac
+          done < "$RUNNER_TEMP/webkit-changed-files"
+          echo "No UI changes detected; skipping WebKit setup, install and tests."
+          echo "run=false" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: steps.changes.outputs.run != 'false'
         with:
           node-version: 22
           cache: npm
       - name: Install locked frontend dependencies
+        if: steps.changes.outputs.run != 'false'
         run: npm ci --no-audit --no-fund
       - name: Install WebKit and Linux dependencies
+        if: steps.changes.outputs.run != 'false'
         run: npx playwright install --with-deps webkit
       - name: Safe areas, Dynamic Type, keyboard and inputs
+        if: steps.changes.outputs.run != 'false'
         run: npm run test:webkit
       - name: Preserve failure evidence
         if: failure()
