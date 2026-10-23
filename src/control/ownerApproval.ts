@@ -238,11 +238,11 @@ const TRIP_TEXT: Record<BreakerTrip, string> = {
 // Display-only, mirrored in owner_approval.rs. Strip controls, bidi/formatting
 // and line separators before replacing punctuation, so removal cannot create
 // a new term delimiter or a Label: impersonation. Keep the existing prompt cap.
-const safeTripCode = (code: string) => code
+export const safeApprovalText = (code: string) => code
   .replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g, '')
   .replace(/·/g, '/')
   .replace(/[:：﹕꞉∶]/g, '=');
-export const tripText = (t: string) => Object.prototype.hasOwnProperty.call(TRIP_TEXT, t) ? TRIP_TEXT[t as BreakerTrip] : safeTripCode(t);
+export const tripText = (t: string) => Object.prototype.hasOwnProperty.call(TRIP_TEXT, t) ? TRIP_TEXT[t as BreakerTrip] : safeApprovalText(t);
 /** Only a failure pause needs a reset; rate and velocity limits recover with time on their own. */
 export const needsReset = (tripped: string[]) => tripped.includes('grant_paused');
 

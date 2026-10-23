@@ -83,7 +83,7 @@ describe('Danish thousands ambiguity', () => {
     expect(parseAmount(text, 'btc', 'da')).not.toBeNull();
   });
   it.each(['en', 'da'] as const)('keeps genuine decimals and pasted spaces exact in %s', locale => {
-    for (const text of ['1 250', '1\u202f250', '1\u00a0250', '1_250']) expect(parseAmount(text, 'sats', locale)).toBe(1250000);
+    for (const text of ['1 250', '1\u202f250', '1\u2009250', '1\u00a0250', '1_250']) expect(parseAmount(text, 'sats', locale)).toBe(1250000);
     expect(parseAmount('1.25', 'sats', locale)).toBe(1250);
     expect(parseAmount('0.001', 'sats', locale)).toBe(1);
     expect(parseAmount('1.2500', 'sats', locale)).toBe(1250);

@@ -41,6 +41,28 @@ fn delegation_node() -> DelegationNode { delegation_fixture(false) }
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
 fn delegation_fixture(second: bool) -> DelegationNode { delegation_fixture_with_skew(second, 0) }
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
+fn second_device_fixture(fp: &str, key_id: &str, expires_at: i64) -> serde_json::Value {
+    let raw = include_str!("../tests/fixtures/node356-pending.json")
+        .replace(&"11".repeat(16), fp)
+        .replace("owner", "c1")
+        .replace(&"22".repeat(16), key_id)
+        // Match only expiry fields, never digits inside a generated identifier.
+        .replace("\"expires_at\": 1300", &format!("\"expires_at\": {expires_at}"))
+        .replace("expires_at:1300", &format!("expires_at:{expires_at}"));
+    serde_json::from_str(&raw).unwrap()
+}
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[test]
+fn second_device_fixture_preserves_identifiers_containing_expiry_digits() {
+    let node = "13001111111111111111111111111111";
+    let key = "22222222222213002222222222222222";
+    let pending: bitsov_app::second_device::Pending =
+        serde_json::from_value(second_device_fixture(node, key, 2300)).unwrap();
+    assert!(pending.validate(node, "c1", 7, key, 2000).is_ok());
+}
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
 fn delegation_fixture_with_skew(second: bool, skew: i64) -> DelegationNode {
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
@@ -78,12 +100,7 @@ fn delegation_fixture_with_skew(second: bool, skew: i64) -> DelegationNode {
         .replace(&format!("node:{}", "11".repeat(16)), &format!("node:{fp}"))
         .into();
     if second {
-        let raw = include_str!("../tests/fixtures/node356-pending.json")
-            .replace(&"11".repeat(16), &fp)
-            .replace("owner", "c1")
-            .replace(&"22".repeat(16), &key_id)
-            .replace("1300", &(now_unix() + 300).to_string());
-        fixture = serde_json::from_str(&raw).unwrap();
+        fixture = second_device_fixture(&fp, &key_id, now_unix() + 300);
     }
     let pending = Arc::new(Mutex::new(fixture));
     let enrolled = Arc::new(AtomicBool::new(true));

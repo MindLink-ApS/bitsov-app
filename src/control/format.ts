@@ -5,43 +5,44 @@ import { t, language } from '../i18n';
 
 import { denom } from './prefs';
 
-/** Use narrow no-break spaces so a number cannot wrap between digit groups. */
-const groupDigits = (value: string) => value.replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f');
+/** Use narrow no-break spaces so a number cannot wrap between digit groups.
+ * Opt into display-only thin spaces only inside a white-space: nowrap container. */
+export const groupDigits = (value: string, nowrap = false) => value.replace(/\B(?=(\d{3})+(?!\d))/g, nowrap ? '\u2009' : '\u202f');
 // Display only: Danish decimal commas are refused by the input parser, never
 // mistaken for thousands. Editable amounts retain amountText()'s exact syntax.
 const satsDecimal = () => language() === 'da' ? ',' : '.';
-const groupAmount = (value: string) => {
+const groupAmount = (value: string, nowrap = false) => {
   const [whole, fraction] = value.split('.');
-  return groupDigits(whole) + (fraction === undefined ? '' : `${satsDecimal()}${fraction}`);
+  return groupDigits(whole, nowrap) + (fraction === undefined ? '' : `${satsDecimal()}${fraction}`);
 };
 
 /** 1 BTC = 1e8 sats = 1e11 msat. */
 const MSAT_PER_BTC = 100_000_000_000;
 
 /** Number only (no unit). BTC mode keeps every msat digit (up to 11 fractional places). */
-export function sats(msat: number): string {
-  if (denom() === 'btc') return btc(msat);
-  if (!Number.isSafeInteger(msat)) return groupAmount((msat / 1000).toFixed(3).replace(/\.?0+$/, ''));
+export function sats(msat: number, nowrap = false): string {
+  if (denom() === 'btc') return btc(msat, nowrap);
+  if (!Number.isSafeInteger(msat)) return groupAmount((msat / 1000).toFixed(3).replace(/\.?0+$/, ''), nowrap);
   const absolute = Math.abs(msat);
   const whole = Math.floor(absolute / 1000);
   const fraction = String(absolute % 1000).padStart(3, '0').replace(/0+$/, '');
-  return `${msat < 0 ? '-' : ''}${groupDigits(String(whole))}${fraction ? `${satsDecimal()}${fraction}` : ''}`;
+  return `${msat < 0 ? '-' : ''}${groupDigits(String(whole), nowrap)}${fraction ? `${satsDecimal()}${fraction}` : ''}`;
 }
 
 /**
  * Exact BTC string from msat. No Math.round — 500 msat is 0.000000005 BTC,
  * and values just under 1 BTC never carry into a different sat.
  */
-export function btc(msat: number): string {
+export function btc(msat: number, nowrap = false): string {
   const n = Math.trunc(msat);
   if (!Number.isFinite(n) || n === 0) return '0';
   const sign = n < 0 ? '-' : '';
   const abs = Math.abs(n);
   const whole = Math.floor(abs / MSAT_PER_BTC);
   const fracMsat = abs - whole * MSAT_PER_BTC;
-  if (fracMsat === 0) return `${sign}${groupDigits(String(whole))}`;
+  if (fracMsat === 0) return `${sign}${groupDigits(String(whole), nowrap)}`;
   const frac = String(fracMsat).padStart(11, '0').replace(/0+$/, '');
-  return `${sign}${groupDigits(String(whole))}.${frac}`;
+  return `${sign}${groupDigits(String(whole), nowrap)}.${frac}`;
 }
 
 /** `sat` / `sats` / `BTC`, matching the number returned by sats(). */
@@ -51,9 +52,9 @@ export const satUnit = (msat: number) => {
 };
 
 /** Number and unit together. Prefer this at every display site. */
-export const amount = (msat: number) => `${sats(msat)} ${satUnit(msat)}`;
+export const amount = (msat: number, nowrap = false) => `${sats(msat, nowrap)} ${satUnit(msat)}`;
 
-export const satsWhole = (value: number) => groupAmount(String(value));
+export const satsWhole = (value: number, nowrap = false) => groupAmount(String(value), nowrap);
 
 /** `1a2b3c4d…9f8e7d6c` for a 64-hex id. */
 export const shortId = (id: string) => (id.length > 20 ? `${id.slice(0, 8)}…${id.slice(-8)}` : id);

@@ -10,7 +10,7 @@ import { ConnectionCard, nextLastCall, type NodeAnswer, type StunSource, type Tr
 import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
 import { ASSISTANTS, type AssistantId } from './assistants';
 import { PendingApproval } from '../onboarding/LockedNode';
-import { usePairingActivity } from '../pairingActivity';
+import { PairingActivityProvider, usePairingActivity } from '../pairingActivity';
 import { createMessageEntrance } from './messageEntrance';
 import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
 import { PairAnotherNode } from '../onboarding/PairAnotherNode';
@@ -1154,6 +1154,8 @@ export function ControlCenter(props: Props) {
     untrack(() => logActivity(entries));
   });
 
+  let settingsBusy = () => false;
+  let walletBusy = () => false;
   const [pairingBlockingActions, setPairingBlockingActions] = createSignal(0);
   usePairingActivity(() => pairingBlockingActions() > 0 || contextOpen() || walletTab() !== null ||
     spend()?.state === 'pending' || device()?.state === 'pending' || !!budget()?.waiting_for_owner);
@@ -1765,7 +1767,14 @@ export function ControlCenter(props: Props) {
       <Show when={props.active && !isMobilePlatform()}>
         <OwnerApprovalSheets approvals={approvals()} error={approvalsError()} now={now()}
           memory={approvalsMemory} approve={approveOwner} recheck={recheckApproval}
-          blocked={contextOpen() || walletTab() !== null} />
+          blocked={contextOpen() || walletTab() !== null}
+          onNotificationReview={() => {
+            // Select the request without unmounting an in-flight action or owner ceremony.
+            // The sheet waits behind the panel until the owner leaves it.
+            if (settingsBusy() || walletBusy() || pairingBlockingActions() > 0 || approvalsMemory.busy() !== null ||
+                spend()?.state === 'pending' || device()?.state === 'pending' || budget()?.waiting_for_owner || props.checkingNode) return;
+            setContextOpen(false); setWalletTab(null);
+          }} />
       </Show>
       <Rail
         callView={callView()}
@@ -2005,6 +2014,7 @@ export function ControlCenter(props: Props) {
         data-settings-open={contextOpen() ? 'true' : 'false'}
         onClick={() => setContextOpen(false)}
       />
+      <PairingActivityProvider onActivity={active => { settingsBusy = active; }}>
       <aside
         ref={setSettingsEl}
         class="context settings-modal"
@@ -2124,6 +2134,7 @@ export function ControlCenter(props: Props) {
           </Match>
         </Switch>
       </aside>
+      </PairingActivityProvider>
       <span class="sr-only" role="status" aria-live="polite" data-send-live data-send-live-seq={sendLive().seq}>{sendLive().text}</span>
       <CallPanel
         panelRef={el => { callPanel = el; }}
@@ -2191,6 +2202,7 @@ export function ControlCenter(props: Props) {
       </Show>
       <Show when={props.active && walletTab()}>
         {(tab) => (
+          <PairingActivityProvider onActivity={active => { walletBusy = active; }}>
           <WalletPage
             tab={tab()}
             onTab={setWalletTab}
@@ -2214,6 +2226,7 @@ export function ControlCenter(props: Props) {
             onReconnect={async () => { await props.onReconnect?.(); await loadWallet(); }}
             custody={overview()?.custody_mode}
           />
+          </PairingActivityProvider>
         )}
       </Show>
     </div>
@@ -2549,7 +2562,7 @@ function Rail(props: {
               <button type="button" role="menuitem" class="avatar-menu-item wallet" data-open-wallet onClick={() => choose(props.onWallet)}>
                 <span class="name">{tr('uiWallet')}</span>
                 <Show when={props.balanceMsat !== null}>
-                  <span class="meta sats" data-avatar-balance>{fmtAmount(props.balanceMsat!)}</span>
+                  <span class="meta sats" data-avatar-balance>{fmtAmount(props.balanceMsat!, true)}</span>
                 </Show>
               </button>
               <Show when={(props.approvalsWaiting ?? 0) > 0 && props.onApprovals}>
@@ -2948,7 +2961,7 @@ function RequestCard(props: { inv: InvoiceAmount; peer: string; name: string; bl
   return (
     <div class="request-card" data-request-card data-request-msat={props.inv.amount_msat} data-request-status={done() ?? 'open'}>
       <span class="kind">{tr('chatPaymentRequestFrom')} {props.name}</span>
-      <span class="sats big">{sats(props.inv.amount_msat)} <span class="unit">{satUnit(props.inv.amount_msat)}</span></span>
+      <span class="sats big">{sats(props.inv.amount_msat, true)} <span class="unit">{satUnit(props.inv.amount_msat)}</span></span>
       <Show when={purpose()} fallback={<span class="hint">{tr('chatNoPurposeGiven')}</span>}>
         <span class="purpose" data-request-purpose>{tr('chatFor')} {purpose()}</span>
       </Show>
@@ -3075,7 +3088,7 @@ function MessageView(props: {
             title={props.out ? paidLabel() : tr('extraToYou', fmtAmount(amount()))}
           >
             <Bolt />
-            <span class="sats">{props.out ? paidLabel() : fmtAmount(amount())}</span>
+            <span class="sats">{props.out ? paidLabel() : fmtAmount(amount(), true)}</span>
           </span>
           <Show when={props.out && props.allowance?.readmission_msat}>
             <span data-readmission-paid>{tr('extraInclAdmissionAgain')} {sats(props.allowance!.readmission_msat!)} {satUnit(props.allowance!.readmission_msat!)}</span>
@@ -3773,7 +3786,7 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
   const c = props.card;
   const amt = (msat: number) => (
     <>
-      <span class="sats">{sats(msat)}</span> {satUnit(msat)}
+      <span class="sats">{sats(msat, true)}</span> {satUnit(msat)}
     </>
   );
   return (
@@ -3859,7 +3872,7 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
             <article class="msg out sending" data-sending={m().waiting ? 'waiting' : ''} aria-busy="true">
               <div class="bubble">{m().text}</div>
               <div class="stamp">
-                <span class="sats" data-sending-cap={m().capMsat}>{m().waiting ? (m().waitWord === 'allowed' ? tr('chatSendsWhenAllowed') : tr('chatSendsWhenApproved')) : tr('chatSending')} {tr('chatUpTo')} {fmtAmount(m().capMsat)}</span>
+                <span class="sats" data-sending-cap={m().capMsat}>{m().waiting ? (m().waitWord === 'allowed' ? tr('chatSendsWhenAllowed') : tr('chatSendsWhenApproved')) : tr('chatSending')} {tr('chatUpTo')} {fmtAmount(m().capMsat, true)}</span>
               </div>
             </article>
           );
@@ -3878,7 +3891,7 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
           return (
             <div class="artifact out" data-artifact="invoice">
               <span class="kind">{tr('chatInvoiceYouReceive')}</span>
-              <span class="sats big">{sats(inv().amount_msat)} <span class="unit">{satUnit(inv().amount_msat)}</span></span>
+              <span class="sats big">{sats(inv().amount_msat, true)} <span class="unit">{satUnit(inv().amount_msat)}</span></span>
               <Show when={inv().note}>
                 <span class="hint">{inv().note}</span>
               </Show>
@@ -3903,9 +3916,9 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
                 <Bolt />
                 <Show
                   when={r().status !== 'failed'}
-                  fallback={<span class="err-note">{tr('chatPaymentOf')} <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)} {tr('chatFailed')}</span>}
+                  fallback={<span class="err-note">{tr('chatPaymentOf')} <span class="sats">{sats(r().amount_msat, true)}</span> {satUnit(r().amount_msat)} {tr('chatFailed')}</span>}
                 >
-                  <span>{tr('chatYouSent')} <span class="sats">{sats(r().amount_msat)}</span> {satUnit(r().amount_msat)}{r().method === 'keysend' ? tr('chatDirectKeysend') : ''}</span>
+                  <span>{tr('chatYouSent')} <span class="sats">{sats(r().amount_msat, true)}</span> {satUnit(r().amount_msat)}{r().method === 'keysend' ? tr('chatDirectKeysend') : ''}</span>
                 </Show>
                 <span class="hint">{clock(r().paid_at_ms)}</span>
               </span>
@@ -3922,7 +3935,7 @@ function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: De
               <span class="file-name">{r().filename} <span class="hint">{kb(r().size_bytes)}</span></span>
               <span class="stamp">
                 <Bolt />
-                <span class="sats">{sats((r().total_msat ?? r().amount_msat + (r().max_routing_fee_msat ?? 0)))}</span>
+                <span class="sats">{sats((r().total_msat ?? r().amount_msat + (r().max_routing_fee_msat ?? 0)), true)}</span>
                 <span>{satUnit((r().total_msat ?? r().amount_msat + (r().max_routing_fee_msat ?? 0)))} {tr('chatAllInCeiling')}{feeCeiling(r().max_routing_fee_msat ?? 0)}) · {clock(r().sent_at_ms)}</span>
                 <Show when={props.delivery}>
                   <DeliveryMark d={props.delivery!} />
@@ -5877,7 +5890,7 @@ function Composer(props: {
                     <span class="label">{tr('uiCostToSend')}</span>
                     <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
                       <span class="sats" data-cost-msat={shown().msat!}>
-                        {sats(shown().msat!)}
+                        {sats(shown().msat!, true)}
                         <span class="unit">{satUnit(shown().msat!)}</span>
                       </span>
                     </Show>
@@ -6104,7 +6117,7 @@ function Composer(props: {
               <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
                 <span class="sats" data-cost-msat={shown().msat!}>
                   {shown().estimate ? '≈ ' : ''}
-                  {sats(shown().msat!)}
+                  {sats(shown().msat!, true)}
                   <span class="unit">{satUnit(shown().msat!)}</span>
                 </span>
               </Show>
@@ -6801,7 +6814,7 @@ function BudgetPanel(props: {
             <div class="tally" data-tally>
               <span class="label">Known paid in the last 24 hours</span>
               <span class="sats big" data-tally-total>
-                {fmtAmount(b().spent_msat)} <span class="unit">/ {fmtAmount(b().ceiling_msat)}</span>
+                {fmtAmount(b().spent_msat, true)} <span class="unit">/ {fmtAmount(b().ceiling_msat, true)}</span>
               </span>
               <span class="meter" aria-hidden="true"><span style={{ width: pct(b().spent_msat, b().ceiling_msat) }} /></span>
               <Show when={b().unsettled_msat > 0}>
@@ -6846,8 +6859,8 @@ function BudgetPanel(props: {
                     <div class="row" style={{ 'justify-content': 'space-between', gap: 'var(--s-2)' }}>
                       <span class="who">{directPaymentName(row.target) ?? props.nameOf(row.target, row.room)}</span>
                       <span class="sats" data-row-tally>
-                        {fmtAmount(row.spent_msat)}
-                        <span class="unit">{row.limit_msat === null ? ', approved by hand' : `/ ${fmtAmount(row.limit_msat)}`}</span>
+                        {fmtAmount(row.spent_msat, true)}
+                        <span class="unit">{row.limit_msat === null ? ', approved by hand' : `/ ${fmtAmount(row.limit_msat, true)}`}</span>
                       </span>
                     </div>
                     <Show when={budgetNote(row)}>{note => <span class="hint">{note()}</span>}</Show>
@@ -7697,7 +7710,7 @@ function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Elem
             <dt>Waiting to deliver</dt>
             <dd class="sats">{o().pending_deliveries}</dd>
             <dt>Block height</dt>
-            <dd class="sats">{o().block_height !== null ? satsWhole(o().block_height!) : 'unknown'}</dd>
+            <dd class="sats">{o().block_height !== null ? satsWhole(o().block_height!, true) : 'unknown'}</dd>
             <dt>Lightning</dt>
             <dd>{o().lightning_available ? o().lightning_backend ?? 'available' : 'unavailable'}</dd>
             <dt>Chain source</dt>
@@ -7744,14 +7757,14 @@ function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | nu
             <>
               <div class="big-balance">
                 <span class="sats" data-balance>
-                  {sats(w().balance_msat)}
+                  {sats(w().balance_msat, true)}
                   <span class="unit">{satUnit(w().balance_msat)}</span>
                 </span>
                 <p class="hint">Node-reported total: one figure, not a spendable balance.</p>
               </div>
               <dl class="facts">
                 <dt>{props.moneyBlocked ? 'Lightning outbound capacity (money not ready)' : 'Lightning outbound capacity'}</dt>
-                <dd class="sats">{fmtAmount(w().lightning_spendable_sats == null ? w().lightning_outbound_msat : w().lightning_spendable_sats! * 1000)}</dd>
+                <dd class="sats">{fmtAmount(w().lightning_spendable_sats == null ? w().lightning_outbound_msat : w().lightning_spendable_sats! * 1000, true)}</dd>
                 <dt>Open channels</dt>
                 <dd class="sats">
                   {active()} of {w().channels.length} active
@@ -7771,8 +7784,8 @@ function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | nu
                         <div style={{ width: `${share()}%`, opacity: c.active ? 1 : 0.4 }} />
                       </div>
                       <div class="row">
-                        <span class="sats">{fmtAmount(c.local_balance_msat)} yours</span>
-                        <span class="sats">{fmtAmount(c.remote_balance_msat)} theirs</span>
+                        <span class="sats">{fmtAmount(c.local_balance_msat, true)} yours</span>
+                        <span class="sats">{fmtAmount(c.remote_balance_msat, true)} theirs</span>
                       </div>
                     </div>
                   );

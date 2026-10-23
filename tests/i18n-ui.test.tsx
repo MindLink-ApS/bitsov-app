@@ -69,7 +69,7 @@ it.each(['en', 'da'] as const)('preserves pay review values, recipient and one e
   find('[data-pay-confirm]').click();
   await vi.waitFor(() => expect(source.keysend).toHaveBeenCalledOnce());
   expect(vi.mocked(source.keysend).mock.calls[0].slice(0, 3)).toEqual([payee, 1250000, null]);
-  await vi.waitFor(() => expect(find('[data-artifact="payment"]').textContent).toContain('1\u202f250'));
+  await vi.waitFor(() => expect(find('[data-artifact="payment"]').textContent).toContain('1\u2009250'));
 });
 it.each(['en', 'da'] as const)('uses bare contact names and localized amount guidance in %s', async locale => {
   setLanguagePref(locale);

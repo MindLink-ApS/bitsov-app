@@ -1,3 +1,4 @@
+import { usePairingActivity } from '../pairingActivity';
 import { createAmountDraft } from './amountDraft';
 import { StarterBalance, type StarterBalanceProps } from './StarterBalance';
 import { activityLabel } from './wallet';
@@ -485,6 +486,7 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
   const [amount, setAmount, amountCleared] = createAmountDraft();
   const [note, setNote] = createSignal('');
   const [busy, setBusy] = createSignal(false);
+  usePairingActivity(busy);
   const [error, setError] = createSignal<string | null>(null);
   const [invoice, setInvoice] = createSignal<InvoiceView | null>(null);
   const [address, setAddress] = createSignal<FundingAddress | null>(null);
@@ -615,6 +617,7 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
   const [readError, setReadError] = createSignal<string | null>(null);
   const [review, setReview] = createSignal<Review | null>(null);
   const [busy, setBusy] = createSignal(false);
+  usePairingActivity(busy);
   const [result, setResult] = createSignal<{ ok: boolean; text: string; settledMsat?: number } | null>(null);
   const line = () => spendLine(props.spend, props.now);
   const recipient = () => readRecipient(to());
@@ -742,7 +745,7 @@ function SendView(props: { moneyBlocked: boolean; spend: SpendView | null; spend
               <div class="cost" data-cost>
                 <span class="label">{t('uiTotalAtMost')}</span>
                 <Show when={msat() !== null} fallback={<span class="sats">…</span>}>
-                  <span class="sats" data-cost-msat={allIn(msat()!)}>{sats(allIn(msat()!))}<span class="unit">{satUnit(allIn(msat()!))}</span></span>
+                  <span class="sats" data-cost-msat={allIn(msat()!)}>{sats(allIn(msat()!), true)}<span class="unit">{satUnit(allIn(msat()!))}</span></span>
                 </Show>
                 <span class="basis">{t('extraTheAmountAndANetworkFeeOfAt')} {fmtAmount(routingFee(msat() ?? 0))}</span>
               </div>

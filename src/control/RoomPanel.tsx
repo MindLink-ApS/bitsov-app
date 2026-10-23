@@ -333,7 +333,7 @@ export function RoomThread(props: {
                 <div class="cost" data-cost>
                   <span class="label">{t('uiCostToSend')}</span>
                   <Show when={total() !== null} fallback={<span class="sats">…</span>}>
-                    <span class="sats" data-cost-msat={total()!}>{estimate() ? '≈ ' : ''}{sats(total()!)}<span class="unit">{satUnit(total()!)}</span></span>
+                    <span class="sats" data-cost-msat={total()!}>{estimate() ? '≈ ' : ''}{sats(total()!, true)}<span class="unit">{satUnit(total()!)}</span></span>
                   </Show>
                   <span class="basis">{legs().some((l) => l.state === 'reading')
                     ? t('roomReadingPrices')

@@ -255,7 +255,7 @@ describe('the Wallet page', () => {
     expect(inert($('nav.rail'))).toBe(false);
     // The menu shows the balance once it is read.
     click('[data-profile]');
-    await vi.waitFor(() => expect(text('[data-avatar-balance]')).toBe('480\u202f000 sats'));
+    await vi.waitFor(() => expect(text('[data-avatar-balance]')).toBe('480\u2009000 sats'));
   });
 
   it('labels custody under the balance only when the node reports it, and marks unknown amounts as unknown', async () => {
@@ -413,7 +413,7 @@ describe('the Wallet page', () => {
   });
 
   it.each([
-    [undefined, '300\u202f000 sats'], [null, '300\u202f000 sats'], [210_000, '210\u202f000 sats'], [0, '0 sats'],
+    [undefined, '300\u2009000 sats'], [null, '300\u2009000 sats'], [210_000, '210\u2009000 sats'], [0, '0 sats'],
   ])('side panel uses outbound capacity and prefers a reported spendable value (%s)', async (reported, expected) => {
     stubHost({ payments_overview: () => ({ ...WALLET, lightning_spendable_sats: reported }) });
     await openWallet();

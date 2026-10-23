@@ -7,7 +7,7 @@ const PairingActivity = createContext<{
   register: (active: Accessor<boolean>) => () => void;
 }>();
 
-export function PairingActivityProvider(props: ParentProps) {
+export function PairingActivityProvider(props: ParentProps<{ onActivity?: (active: Accessor<boolean>) => void }>) {
   const [activities, setActivities] = createSignal<Accessor<boolean>[]>([]);
   const value = {
     blocked: () => activities().some(active => active()),
@@ -16,6 +16,10 @@ export function PairingActivityProvider(props: ParentProps) {
       return () => setActivities(current => current.filter(item => item !== active));
     },
   };
+  // Nested panel scopes remain visible to the app-wide pairing guard.
+  usePairingActivity(value.blocked);
+  props.onActivity?.(value.blocked);
+  onCleanup(() => props.onActivity?.(() => false));
   return <PairingActivity.Provider value={value}>{props.children}</PairingActivity.Provider>;
 }
 
