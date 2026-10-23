@@ -59,11 +59,13 @@ jobs:
           # Specs load tests/fixtures, the docs/ui u2b harness, index.html and
           # assistant.html; those pages import src. Include future HTML entries
           # and Vite/TypeScript config variants (also in nested directories).
+          # When src/ imports assets outside src/ (e.g. jarvis/fixtures), update
+          # this list and MUST_RUN in scripts/test-webkit-gate.py together.
           while IFS= read -r -d '' path; do
             case "$path" in
-              src/*|public/*|tests/a11y/*|tests/fixtures/*|docs/ui/*|\
+              src/*|public/*|tests/a11y/*|tests/fixtures/*|docs/ui/*|jarvis/fixtures/*|\
               *.html|playwright*.config.*|vite*.config.*|*/vite*.config.*|\
-              tsconfig*.json|*/tsconfig*.json|package*.json|\
+              tsconfig*.json|*/tsconfig*.json|package*.json|.env*|\
               .github/workflows/webkit.yml|scripts/test-webkit-gate.py)
                 echo "UI changes detected; running WebKit."
                 exit 0
