@@ -67,6 +67,8 @@ describe.each([
     source.spendStatus = async () => ({ state: 'pending', lapse: null, basis: null, open_until_ms: null, window_ms: 600000,
       pending: { op_id: 'ab01', expires_at_ms: Date.now() + 600000, owner_action: 'konsensus grant --op ab01', owner_can_grant: true } });
     show(() => <ControlCenter source={source} remote active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />);
+    await vi.waitFor(() => expect($('[data-track^="peer:"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-track^="peer:"]').click();
     const selector = state === 'none' ? '[data-touch-id-first]' : '[data-device-settings-hint]';
     await vi.waitFor(() => expect($(selector)).not.toBeNull());
     cleanCopy($(selector));
