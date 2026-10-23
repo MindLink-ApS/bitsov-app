@@ -125,7 +125,7 @@ describe('host/renderer approval formatting parity', () => {
       const view = base({ kind: 'first_contact', terms: { recipient: A, max_total_msat: msat, budget_msat: msat } });
       const lines = ['Let this app message someone new', 'To: aaaaaa…aaaaaa', `First message: up to ${text}`, `Contact budget: up to ${text}`];
       expect(termLines(view)).toEqual(lines);
-      expect(refusalText('approval_budget_exceeded', { remaining_msat: msat })).toContain(`(${text} left)`);
+      expect(refusalText('approval_budget_exceeded', { remaining_msat: msat })).toContain(`(${text} ${locale === 'da' ? 'tilbage' : 'left'})`);
       expect(approvalReason(view)).toBe(`${lines.join(' · ')} · Requested by app ababab…ababab`);
     }
   });

@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import { ControlCenter } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID } from '../src/control/sample';
-import { visibleBackDestination } from '../src/ios/edgeBack';
+import { installEdgeBack, visibleBackDestination } from '../src/ios/edgeBack';
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 const tick = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
@@ -44,4 +44,31 @@ it('blocks the underlying route for an approval, a money form, or a call arrivin
     expect(visibleBackDestination()).toBeNull(); panel.remove();
   }
   expect(visibleBackDestination()?.route).toBe('thread');
+});
+
+it.each(['before', 'during'])('never navigates when an owner-approval sheet appears %s an edge swipe', async arrival => {
+  await mount();
+  // Exercise the explicit approval blocker without relying on the generic dialog guard.
+  const sheet = document.createElement('div');
+  sheet.setAttribute('data-owner-approval-sheet', 'request-a');
+  const touch = (type: string, x: number) => {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    const point = { identifier: 1, clientX: x, clientY: 200 };
+    Object.assign(event, { touches: type === 'touchend' ? [] : [point], changedTouches: [point] });
+    document.dispatchEvent(event);
+  };
+  const stop = installEdgeBack();
+  try {
+    expect(visibleBackDestination()?.route).toBe('thread');
+    if (arrival === 'before') document.body.append(sheet);
+    touch('touchstart', 5);
+    if (arrival === 'during') document.body.append(sheet);
+    touch('touchmove', 80); touch('touchend', 110);
+    expect(document.querySelector('[data-composer]')).not.toBeNull();
+    expect(visibleBackDestination()).toBeNull();
+    sheet.remove();
+    touch('touchstart', 5); touch('touchmove', 80); touch('touchend', 110);
+    await tick();
+    expect(document.querySelector('[data-composer]')).toBeNull();
+  } finally { stop(); sheet.remove(); }
 });

@@ -63,7 +63,7 @@ export function visibleBackDestination(): Destination | null {
   const route = backRoute({
     routes: buttons.map(el => el.dataset.iosBack as BackRoute),
     money: any('[data-swipe-money="true"], [data-composer-panel], [data-wallet-send], [data-wallet-receive], [data-starter-balance]'),
-    approval: any('[data-swipe-approval="true"], [data-first-spend-scrim], [data-contact-approval], [data-approval="pending"], [data-ai-card="disclosure"][data-state="preview"], [data-ai-card="disclosure"][data-state="sending"], .owner-approval, [data-phone-onboarding="words"], [data-phone-onboarding="fingerprint"]'),
+    approval: any('[data-swipe-approval="true"], [data-first-spend-scrim], [data-contact-approval], [data-approval="pending"], [data-ai-card="disclosure"][data-state="preview"], [data-ai-card="disclosure"][data-state="sending"], .owner-approval, [data-owner-approval-sheet], [data-phone-onboarding="words"], [data-phone-onboarding="fingerprint"]'),
     call: any('[data-swipe-call="true"]'),
     modal: Array.from(document.querySelectorAll('dialog[open], [role="dialog"]')).some(el => visible(el)
       && !el.matches('[data-settings], [data-wallet-page], [data-contact-panel]')),

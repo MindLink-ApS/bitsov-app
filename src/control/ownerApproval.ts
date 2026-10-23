@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 /**
  * Owner approval from an enrolled owner device (node owner-approval-v1,
  * capability `owner_device_approval_v1`, node #303). Renderer contract only:
@@ -248,28 +249,25 @@ export const needsReset = (tripped: string[]) => tripped.includes('grant_paused'
 export const secondsLeft = (view: ApprovalView, nowMs: number) => Math.max(0, Math.floor(view.expires_at - nowMs / 1000));
 
 /** Owner-facing words for each refusal; `node` is the node's own (sanitized) text, kept for detail. */
-/** The biometric this platform's approvals use: Touch ID on a Mac, biometrics on iOS and Android. */
-const APPROVAL_BIOMETRIC: Record<AppPlatform, string> = { desktop: 'Touch ID', ios: 'The biometric check', android: 'The biometric check' };
-
 export function refusalText(code: string, extra: { reason?: string; remaining_msat?: number } = {}, platform: AppPlatform = appPlatform()): string {
   switch (code) {
     case 'approval_off':
       return extra.reason === 'seed_password_not_typed'
-        ? 'Approvals from your devices are off until the node’s password is typed at the node after its restart.'
+        ? t('approvalRefusalPassword')
         : extra.reason === 'seed_not_encrypted'
-          ? 'Approvals from your devices are off: this node’s keys are not password-protected.'
-          : 'Approvals from your devices are off on this node right now.';
-    case 'approval_forbidden': return 'Your node refused this approval. Nothing was approved.';
-    case 'approval_self': return 'This device made the request, so it cannot approve it. Approve it on your other owner device.';
-    case 'approval_changed': return 'The request changed after it was shown. Nothing was signed. Look at it again.';
+          ? t('approvalRefusalUnencrypted')
+          : t('approvalRefusalOff');
+    case 'approval_forbidden': return t('approvalRefusalForbidden');
+    case 'approval_self': return t('approvalRefusalSelf');
+    case 'approval_changed': return t('approvalRefusalChanged');
     case 'approval_budget_exceeded':
-      return `Your node refused: this is over the remaining budget${extra.remaining_msat !== undefined ? ` (${sats(extra.remaining_msat)} left)` : ''}. Nothing was approved.`;
-    case 'approval_expired': return 'This request expired. Nothing was approved. Ask again from the app that needs it.';
-    case 'approval_unknown': return 'Your node no longer knows this request (it may have restarted). Nothing was approved.';
-    case 'approval_rate_limited': return 'Too many approval requests just now. Wait a little and try again.';
-    case 'approval_invalid': return 'Your node could not read this request. Nothing was approved.';
-    case 'approval_unsaved': return 'Your node could not save the approval; the request is still waiting. Try again.';
-    case 'device_cancelled': return `${APPROVAL_BIOMETRIC[platform]} was cancelled. Nothing was approved.`;
-    default: return 'This did not complete. Nothing was approved.';
+      return t('approvalRefusalBudget', extra.remaining_msat !== undefined ? t('approvalRemaining', sats(extra.remaining_msat)) : '');
+    case 'approval_expired': return t('approvalRefusalExpired');
+    case 'approval_unknown': return t('approvalRefusalUnknown');
+    case 'approval_rate_limited': return t('approvalRefusalRate');
+    case 'approval_invalid': return t('approvalRefusalInvalid');
+    case 'approval_unsaved': return t('approvalRefusalUnsaved');
+    case 'device_cancelled': return t('approvalRefusalCancelled', platform === 'desktop' ? 'Touch ID' : t('approvalBiometric'));
+    default: return t('approvalRefusalIncomplete');
   }
 }
