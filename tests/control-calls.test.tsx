@@ -3176,21 +3176,83 @@ describe('iOS Live call audio and background video', () => {
     await flushAudio();
   });
 
-  it('releases during reconnecting and reacquires only when Live again', async () => {
+  it.each(['disconnect', 'peer repair'] as const)('holds audio through %s while Live and releases only after end', async (repair) => {
     const audioSession = vi.fn(async (_live: boolean) => {});
     const { e } = engine({ audioSession });
     await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(401, { sdp: 'answer' }), OWN);
     const pc = FakePc.made[FakePc.made.length - 1];
     pc.connect();
     await flushAudio();
-    pc.state('disconnected');
+    if (repair === 'disconnect') pc.state('disconnected');
+    else await e.receive(msg(402, { candidate: '', sdp_mid: 'bitsov-restart-v1' }), OWN);
     await flushAudio();
-    expect(audioSession.mock.calls).toEqual([[true], [false]]);
+    expect(e.view().phase).toBe('reconnecting');
+    expect(audioSession.mock.calls).toEqual([[true]]);
+    expect(pc.closed).toBe(false);
+    expect(pc.tracks[0].stop).not.toHaveBeenCalled();
     pc.connect();
     await flushAudio();
-    expect(audioSession.mock.calls).toEqual([[true], [false], [true]]);
+    expect(e.view().phase).toBe('live');
+    expect(audioSession.mock.calls).toEqual([[true]]);
     e.endLocal();
     await flushAudio();
+    expect(e.view().phase).toBe('ended');
+    expect(audioSession.mock.calls).toEqual([[true], [false]]);
+    expect(pc.tracks[0].stop).toHaveBeenCalledOnce();
+    pc.connect();
+    await flushAudio();
+    expect(audioSession.mock.calls).toEqual([[true], [false]]);
+  });
+
+  it.each([false, true])('recovery timeout releases audio only if the call was Live (%s)', async (wasLive) => {
+    vi.useFakeTimers();
+    try {
+      const audioSession = vi.fn(async (_live: boolean) => {});
+      const { e } = engine({ audioSession });
+      await e.place(A, 'audio', QUOTE);
+      await e.receive(msg(401, { sdp: 'answer' }), OWN);
+      const pc = FakePc.made[FakePc.made.length - 1];
+      if (wasLive) pc.connect();
+      await flushAudio();
+      pc.state('disconnected');
+      await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS - 1);
+      expect(e.view().phase).toBe('reconnecting');
+      expect(audioSession.mock.calls).toEqual(wasLive ? [[true]] : []);
+      expect(pc.tracks[0].stop).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(e.view()).toMatchObject({ phase: 'ended', reason: 'failed' });
+      expect(audioSession.mock.calls).toEqual(wasLive ? [[true], [false]] : []);
+      expect(pc.closed).toBe(true);
+      expect(pc.tracks[0].stop).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps callee audio inactive until Live and releases on peer hangup', async () => {
+    const audioSession = vi.fn(async (_live: boolean) => {});
+    const { e } = engine({ audioSession });
+    await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    await flushAudio();
+    expect(e.view().phase).toBe('incoming');
+    expect(audioSession).not.toHaveBeenCalled();
+    await e.accept();
+    await flushAudio();
+    expect(e.view().phase).toBe('connecting');
+    expect(audioSession).not.toHaveBeenCalled();
+    const pc = FakePc.made[FakePc.made.length - 1];
+    pc.connect();
+    await flushAudio();
+    expect(e.view().phase).toBe('live');
+    expect(audioSession.mock.calls).toEqual([[true]]);
+    await e.receive(msg(403, { reason: 'hangup' }), OWN);
+    await flushAudio();
+    expect(e.view()).toMatchObject({ phase: 'ended', reason: 'hangup' });
+    expect(audioSession.mock.calls).toEqual([[true], [false]]);
+    expect(pc.tracks[0].stop).toHaveBeenCalledOnce();
+    e.dismiss();
+    await flushAudio();
+    expect(e.view().phase).toBe('idle');
+    expect(audioSession.mock.calls).toEqual([[true], [false]]);
   });
 
   it('stops background video, preserves audio and does not send or restart camera on return', async () => {

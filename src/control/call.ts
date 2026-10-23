@@ -352,7 +352,10 @@ export function createCallEngine(deps: CallDeps) {
 
   const set = (patch: Partial<CallView>) => {
     view = { ...view, ...patch, state: callState(patch.phase ?? view.phase) };
-    updateAudio(view.phase === 'live');
+    // Repair keeps the same media running. Hold its session until teardown,
+    // but never acquire one for a connection that has not reached Live.
+    updateAudio(pc !== null && (view.phase === 'live' ||
+      (view.phase === 'reconnecting' && view.liveAt !== null)));
     deps.onView(view);
   };
   const active = () => view.phase !== 'idle' && view.phase !== 'ended';
