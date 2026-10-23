@@ -1,5 +1,5 @@
 import { language, systemLanguage } from '../i18n';
-import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createSignal, createUniqueId, For, on, onCleanup, onMount, Show } from 'solid-js';
 import { appPlatform, type AppPlatform } from '../platform';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
@@ -35,6 +35,17 @@ function failure(error: unknown): { kind: Failure; detail: string } {
 export function PhoneOnboarding(props: PhoneOnboardingProps) {
   const c = () => phoneCopy[props.locale ? systemLanguage(props.locale) : language()];
   const [screen, setScreen] = createSignal<Screen>('start');
+  const lineId = createUniqueId();
+  let heading: HTMLHeadingElement | undefined;
+  // A step change unmounts the previous action. Put focus on the heading so
+  // keyboard and screen-reader users are not left on the body.
+  createEffect(on(screen, () => {
+    queueMicrotask(() => {
+      if (!heading) return;
+      if (document.activeElement === heading) heading.blur();
+      heading.focus();
+    });
+  }));
   const [error, setError] = createSignal<{ kind: Failure; detail: string }>();
   const [busy, setBusy] = createSignal(false);
   const [cancellingScan, setCancellingScan] = createSignal(false);
@@ -236,8 +247,9 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   };
   return <main class="phone-onboarding" data-phone-onboarding={screen()} lang={c() === phoneCopy.da ? 'da' : 'en'}>
     <div class="phone-progress" aria-hidden="true"><For each={[0, 1, 2]}>{n => <span classList={{ filled: n === 0 || n === 1 && ['words', 'fingerprint', 'done'].includes(screen()) || n === 2 && screen() === 'done' }} />}</For></div>
-    <section data-phone-face aria-live="polite">
-      <h1>{face()[0]}</h1><p class="phone-line">{face()[1]}</p>
+    <section data-phone-face>
+      <h1 ref={heading} tabindex="-1" aria-describedby={lineId}>{face()[0]}</h1>
+      <p id={lineId} class="phone-line">{face()[1]}</p>
       <Show when={screen() === 'words'}><ol class="phone-words" aria-label={c().words}><For each={waiting()?.words}>{word => <li data-pair-word>{word}</li>}</For></ol>
         <button type="button" class="quiet" disabled={busy()} onClick={() => void run(async () => { generation++; await props.join({ action: 'cancel' }); setWaiting(undefined); fail({ kind: 'mismatch' }); })}>{c().mismatch}</button>
       </Show>

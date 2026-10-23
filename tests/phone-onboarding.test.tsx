@@ -22,8 +22,14 @@ function mount(extra: Partial<PhoneOnboardingProps> = {}) {
   dispose = render(() => <PhoneOnboarding {...props} />, document.body);
   return props;
 }
-it('starts with one action and a collapsed paste route, without a secret input', () => {
+it('starts with one action and a collapsed paste route, without a secret input', async () => {
   mount();
+  await tick();
+  const heading = document.querySelector('h1')!;
+  expect(document.activeElement).toBe(heading);
+  expect(heading.getAttribute('aria-describedby')).toBeTruthy();
+  expect(document.getElementById(heading.getAttribute('aria-describedby')!)?.textContent).toBe('Other device → Add a device.');
+  expect(document.querySelector('[data-phone-face]')?.getAttribute('aria-live')).toBeNull();
   expect(document.querySelectorAll('button.primary')).toHaveLength(1);
   expect(button("Scan your box’s QR")).toBeTruthy();
   expect(document.querySelector('details')?.open).toBe(false);

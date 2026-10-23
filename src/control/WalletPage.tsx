@@ -187,7 +187,7 @@ export function WalletPage(props: {
   return (
     <div class="wallet-page" role="dialog" aria-modal="true" aria-label={t('uiWallet')} data-wallet-page={props.tab}>
       <header class="wallet-top">
-        <button type="button" class="link" data-wallet-close data-ios-back={starterOpen() ? undefined : 'wallet'} ref={(el) => queueMicrotask(() => el.isConnected && el.focus())} onClick={() => starterOpen() ? setStarterOpen(false) : props.onClose()} aria-label={t(starterOpen() ? 'uiBack450' : 'uiCloseWallet')}>{t('uiBack450')}</button>
+        <button type="button" class="link" data-wallet-close data-ios-back={starterOpen() ? undefined : 'wallet'} ref={(el) => queueMicrotask(() => el.isConnected && el.focus())} onClick={() => starterOpen() ? setStarterOpen(false) : props.onClose()} aria-label={starterOpen() ? t('uiBack450') : `${t('uiBack450')}, ${t('uiCloseWallet')}`}>{t('uiBack450')}</button>
         <h1>{t(starterOpen() ? 'starterTitle' : 'uiWallet')}</h1>
         <Show when={!starterOpen()}><button type="button" class="link" data-wallet-refresh onClick={() => props.onRefresh()}>{t('uiRefresh')}</button></Show>
       </header>
