@@ -1,6 +1,15 @@
 import { createUniqueId } from 'solid-js';
 import type { NodeOverview } from './types';
 
+/** Null means the entry is ready; shared by desktop welcome and phone entries. */
+export const shareDisabledReason = (overview: NodeOverview | null): string | null => !overview
+  ? 'Waiting for your node’s capabilities.'
+  : !overview.capabilities?.includes('front_door_v1') ? 'Profile cards are not available on this node yet.' : null;
+export const fundingDisabledReason = (overview: NodeOverview | null, walletReady: boolean, moneyBlocked: boolean): string | null => moneyBlocked
+  ? 'Your node’s wallet is not ready yet.'
+  : !overview || !walletReady ? 'Waiting for your node’s wallet.'
+  : !overview.lightning_available ? 'Receiving sats is not available on this node yet.' : null;
+
 /** Navigation only: no admission, payment, publication or contact creation. */
 export function WelcomeHome(props: {
   overview: NodeOverview | null;
@@ -11,15 +20,10 @@ export function WelcomeHome(props: {
   onAddSats: () => void;
 }) {
   const id = createUniqueId();
-  const shareReason = () => !props.overview ? 'Waiting for your node’s capabilities.'
-    : !props.overview.capabilities?.includes('front_door_v1') ? 'Profile cards are not available on this node yet.'
-    : 'Open your profile to create or share your card and QR.';
-  const canShare = () => props.overview?.capabilities?.includes('front_door_v1') === true;
-  const canFund = () => !!props.overview?.lightning_available && props.walletReady && !props.moneyBlocked;
-  const fundReason = () => props.moneyBlocked ? 'Your node’s wallet is not ready yet.'
-    : !props.overview || !props.walletReady ? 'Waiting for your node’s wallet.'
-    : !props.overview.lightning_available ? 'Receiving sats is not available on this node yet.'
-    : 'Open your wallet to receive bitcoin.';
+  const shareReason = () => shareDisabledReason(props.overview) ?? 'Open your profile to create or share your card and QR.';
+  const canShare = () => shareDisabledReason(props.overview) === null;
+  const canFund = () => fundingDisabledReason(props.overview, props.walletReady, props.moneyBlocked) === null;
+  const fundReason = () => fundingDisabledReason(props.overview, props.walletReady, props.moneyBlocked) ?? 'Open your wallet to receive bitcoin.';
   return (
     <section class="welcome-home" data-welcome aria-label="Welcome home">
       <h1>Welcome home</h1>

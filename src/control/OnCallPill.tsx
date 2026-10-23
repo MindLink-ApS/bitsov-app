@@ -17,7 +17,7 @@ export const CALL_STATE_WORD: Record<CallView['phase'], string> = {
  * closed). An incoming call has its own ring card. Reads the call snapshot;
  * owns only a display clock (live only), never media or signalling.
  */
-export function OnCallPill(props: { view: CallView; onReturn: () => void }) {
+export function OnCallPill(props: { view: CallView; showIncoming?: boolean; onReturn: () => void }) {
   const [now, setNow] = createSignal(Date.now());
   createEffect(() => {
     // Live: the duration. Reconnecting: the seconds left before the call ends (only when known).
@@ -26,7 +26,7 @@ export function OnCallPill(props: { view: CallView; onReturn: () => void }) {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     onCleanup(() => window.clearInterval(timer));
   });
-  const shown = () => props.view.phase !== 'idle' && props.view.phase !== 'incoming';
+  const shown = () => props.view.phase !== 'idle' && (props.showIncoming || props.view.phase !== 'incoming');
   const text = () => {
     // The browser reports no network (display only, #238): said on the pill too.
     const word = CALL_STATE_WORD[props.view.phase] + (props.view.offline ? t('uiOffline504') : '');

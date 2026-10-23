@@ -1,3 +1,4 @@
+import { navigationBlocked } from '../ios/edgeBack';
 import { createPhoneLayout, createPhoneNavigationGuard, PhoneTabs, type PhoneTab } from './PhoneShell';
 import { MediaView } from './CallMedia';
 import { invoke } from '@tauri-apps/api/core';
@@ -25,7 +26,7 @@ import { OWNER_DEVICE_APPROVAL, OWNER_DEVICE_BREAKER_RESET, refusalText, type Ap
 import { HubTrustInfo } from './HubTrust';
 import { pollingSource } from './polling';
 import { readSpendPreset, saveSpendPreset } from './prefs';
-import { WelcomeHome } from './WelcomeHome';
+import { WelcomeHome, shareDisabledReason, fundingDisabledReason } from './WelcomeHome';
 import { DelayedSpinner } from './DelayedSpinner';
 import { MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
 import { batch, createEffect, createMemo, createResource, createSignal, createUniqueId, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
@@ -402,12 +403,15 @@ export function ControlCenter(props: Props) {
     let newest = cutoff ?? -Infinity;
     const read = (async () => {
       let before: number | undefined;
+      // Detection is a bounded probe, not a full-history read. Thread reads
+      // and incoming call events can still add history to the cache.
+      let pages = 0;
       while (phoneShell() && live()) {
         const page = await source.messages(id, before);
         if (before === undefined) newest = Math.max(newest, ...page.map(m => m.timestamp));
         if (page.some(m => isCallKind(m.kind))) return true;
         const oldest = Math.min(...page.map(m => m.timestamp));
-        if (!page.length || !Number.isFinite(oldest) || (cutoff !== undefined && oldest <= cutoff) || (before !== undefined && oldest >= before)) return false;
+        if (++pages >= 3 || !page.length || !Number.isFinite(oldest) || (cutoff !== undefined && oldest <= cutoff) || (before !== undefined && oldest >= before)) return false;
         before = oldest;
       }
       throw new Error('Call history read interrupted');
@@ -1322,8 +1326,12 @@ export function ControlCenter(props: Props) {
   // Calls: media is peer to peer in this webview; each signal is one paid send.
   const [callView, setCallView] = createSignal<CallView>(CALL_IDLE);
   const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
+  const [callMinimized, setCallMinimized] = createSignal(false);
+  createEffect(on(() => callView().callId, () => setCallMinimized(false)));
   const [callApproval, setCallApproval] = createSignal(false);
   const [callApproving, setCallApproving] = createSignal(false);
+  const phoneCallHidden = () => phoneShell() && (callMinimized() || phoneTab() !== 'chats' || contextOpen() || walletTab() !== null);
+  const phoneCallVisible = () => phoneShell() && !phoneCallHidden() && (callView().phase !== 'idle' || callApproval());
   const calls = createCallEngine({
     audioSession: appPlatform() === 'ios' ? (live) => invoke<void>('call_audio_session', { live }) : undefined,
     closeAdmission: (operationId, peer, callId) => source.closeCallAdmission(operationId, peer, callId),
@@ -1848,17 +1856,47 @@ export function ControlCenter(props: Props) {
   const openPhoneSettings = (page: ReturnType<typeof tab>) => { if (phoneGuard.check() || walletBusy()) return; setTab(page); setContextOpen(true); };
   const selectPhoneTab = (next: PhoneTab) => {
     if (phoneGuard.check() || walletBusy() || pairingBlockingActions() > 0) return;
+    setCallMinimized(true);
     if (next === 'chats' && phoneTab() === 'chats') phoneBack();
     if (next === 'wallet') { if (walletTab() === null) openWallet(); }
     else { setWalletTab(null); setPhoneTab(next); }
   };
   const openPhoneTrack = (next: TrackRef) => {
     phoneOpener = document.activeElement as HTMLElement | null;
-    setPhoneTab('chats'); setTrack(next);
+    setCallMinimized(true); setPhoneTab('chats'); setTrack(next);
     queueMicrotask(() => document.querySelector<HTMLButtonElement>('[data-ios-back="thread"]')?.focus());
   };
   const closeWallet = () => { setWalletTab(null); if (phoneShell()) setPhoneTab('chats'); };
 
+  const shareReason = () => shareDisabledReason(overview());
+  const fundReason = () => fundingDisabledReason(overview(), wallet() !== null && !errors.wallet, moneyBlocked());
+  const phoneEntryId = createUniqueId();
+  const returnToCall = () => {
+    if (phoneGuard.check() || walletBusy() || pairingBlockingActions() > 0) return;
+    setContextOpen(false); setWalletTab(null); setPhoneTab('chats'); setCallMinimized(false);
+    if (callView().peer) setTrack({ kind: 'peer', id: callView().peer!.toLowerCase() });
+    queueMicrotask(() => callPanel?.focus());
+  };
+  const minimizeCall = () => {
+    if (phoneGuard.check()) return;
+    setCallMinimized(true);
+    queueMicrotask(() => document.querySelector<HTMLButtonElement>('[data-phone-status] [data-on-call]')?.focus());
+  };
+  createEffect(() => {
+    if (!phoneShell()) return;
+    // Observe the guard revision, but classify the underlay separately: call-local
+    // approval/payment surfaces must stay in the foreground call panel.
+    phoneGuard.revision();
+    if (phoneCallVisible() && (!callPanel || !navigationBlocked(false, callPanel))
+      && Array.from(document.querySelectorAll('[data-call-underlay="true"]')).some(el => navigationBlocked(false, el))) {
+      setCallMinimized(true);
+    } else if (callApproval() && phoneCallHidden() && !phoneGuard.check() && !walletBusy() && !settingsBusy()) {
+      // Authorization can finish after navigation. Present it once any unrelated
+      // sheet closes; never leave approval trapped in a hidden call view.
+      setContextOpen(false); setWalletTab(null); setPhoneTab('chats'); setCallMinimized(false);
+      queueMicrotask(() => callPanel?.focus());
+    }
+  });
   const welcomeHome = () => <WelcomeHome overview={overview()} moneyBlocked={moneyBlocked()} walletReady={wallet() !== null && !errors.wallet}
       onShare={() => { setTab('frontdoor'); setContextOpen(true); }}
       onAddContact={() => setTrack({ kind: 'discover' })}
@@ -1885,11 +1923,7 @@ export function ControlCenter(props: Props) {
             <span class={`dot ${pill().tone}`} classList={{ live: pill().live }} />
             <span class="what">{pill().text}</span>
           </button>
-          <OnCallPill view={callView()} onReturn={() => {
-            setWalletTab(null); setPhoneTab('chats');
-            if (callView().peer) setTrack({ kind: 'peer', id: callView().peer!.toLowerCase() });
-            queueMicrotask(() => callPanel?.focus());
-          }} />
+          <OnCallPill view={callView()} showIncoming onReturn={returnToCall} />
           {props.offline}
           <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
             onEnded={() => { void loadBudget(); void loadWallet(); }} />
@@ -1898,6 +1932,7 @@ export function ControlCenter(props: Props) {
       </Show>
       <Rail
         phone={phoneShell()}
+        callUnderlay={phoneCallVisible()}
         hidden={phoneShell() && (phoneTab() !== 'chats' || track() !== null)}
         listRef={el => { phoneList = el; }}
         callView={callView()}
@@ -1938,11 +1973,11 @@ export function ControlCenter(props: Props) {
         balanceMsat={wallet()?.balance_msat ?? null}
         approvalsWaiting={approvalsWaiting()}
         onApprovals={() => { setTab('node'); setContextOpen(true); }}
-        behind={walletTab() !== null || contextOpen()}
+        behind={walletTab() !== null || contextOpen() || phoneCallVisible()}
       />
 
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
-        <section class="track" aria-label="Track" hidden={phoneShell() && (phoneTab() !== 'chats' || track() === null)} inert={walletTab() !== null || contextOpen()}>
+        <section class="track" aria-label="Track" hidden={phoneShell() && (phoneTab() !== 'chats' || track() === null)} data-call-underlay={phoneCallVisible() ? "true" : undefined} inert={walletTab() !== null || contextOpen() || phoneCallVisible()}>
           <Show when={track()}><button type="button" class="link ios-back" data-ios-back="thread" onClick={phoneBack}><Show when={phoneShell()}><span aria-hidden="true">‹ </span></Show>{tr('uiBack')}</button></Show>
           <Show when={!phoneShell()}>
             {props.offline}
@@ -2138,7 +2173,8 @@ export function ControlCenter(props: Props) {
         <Show when={phoneTab() === 'you'}>
           <section class="phone-page" data-phone-you inert={contextOpen()} aria-label={tr('uiYou')}>
             <h1>{tr('uiYou')}</h1>
-            <button class="primary" data-phone-share onClick={() => openPhoneSettings('frontdoor')}>{tr('phoneShare')}</button>
+            <p class="hint" id={`${phoneEntryId}-share`}>{shareReason()}</p>
+            <button class="primary" data-phone-share disabled={shareReason() !== null} aria-describedby={`${phoneEntryId}-share`} onClick={() => openPhoneSettings('frontdoor')}>{tr('phoneShare')}</button>
             <button class="soft" data-phone-settings onClick={() => openPhoneSettings('body')}>{tr('uiProfileAndSettings')}</button>
             <button class="soft" data-phone-devices onClick={() => openPhoneSettings('devices')}>{tr('phoneAddDevice')}</button>
             <Show when={approvalsWaiting() > 0}><button class="soft" onClick={() => openPhoneSettings('node')}>{tr('uiApprovalsWaiting')} ({approvalsWaiting()})</button></Show>
@@ -2286,6 +2322,8 @@ export function ControlCenter(props: Props) {
       </PairingActivityProvider>
       <span class="sr-only" role="status" aria-live="polite" data-send-live data-send-live-seq={sendLive().seq}>{sendLive().text}</span>
       <CallPanel
+        hidden={phoneCallHidden()}
+        onBack={phoneShell() ? minimizeCall : undefined}
         panelRef={el => { callPanel = el; }}
         openCallSettings={() => { setTab('general'); setContextOpen(true); }}
         approvalOpen={callApproval()}
@@ -2357,6 +2395,7 @@ export function ControlCenter(props: Props) {
             onTab={setWalletTab}
             onClose={closeWallet}
             embedded={phoneShell()}
+            fundingDisabledReason={fundReason()}
             wallet={wallet()}
             starter={{ nodeId: ownId(), network: overview()?.network, capabilities: overview()?.capabilities,
               api: { current: () => source.starterCurrent(ownId()), request: id => source.starterRequest(ownId(), id) } }}
@@ -2527,6 +2566,7 @@ function SettingsDisplay(props: { own: OwnStun | null }) {
 
 function Rail(props: {
   phone?: boolean;
+  callUnderlay?: boolean;
   hidden?: boolean;
   listRef?: (el: HTMLElement) => void;
   callView: CallView;
@@ -2596,7 +2636,7 @@ function Rail(props: {
   };
 
   return (
-    <nav class={props.phone ? 'phone-chat-list' : 'rail'} hidden={props.hidden} ref={props.listRef} tabindex={props.phone ? -1 : undefined} data-phone-list={props.phone ? '' : undefined} classList={{ 'rail-setup': !props.active }} aria-label={tr(props.phone ? 'phoneChats' : 'uiTracks')} inert={props.behind}>
+    <nav class={props.phone ? 'phone-chat-list' : 'rail'} hidden={props.hidden} ref={props.listRef} tabindex={props.phone ? -1 : undefined} data-phone-list={props.phone ? '' : undefined} data-call-underlay={props.callUnderlay ? "true" : undefined} classList={{ 'rail-setup': !props.active }} aria-label={tr(props.phone ? 'phoneChats' : 'uiTracks')} inert={props.behind}>
       <Show when={props.phone}><h1>{tr('phoneChats')}</h1></Show>
       <Show when={!props.phone}>
       <div class="mark">
@@ -3379,6 +3419,8 @@ const END_REASON: Record<string, string> = {
 
 /** The call card: incoming (accept/decline with price), ringing, live (mute, camera, duration, hang up), ended. */
 function CallPanel(props: {
+  hidden?: boolean;
+  onBack?: () => void;
   payment: JSX.Element;
   panelRef: (el: HTMLElement) => void;
   approvalOpen: boolean;
@@ -3438,7 +3480,8 @@ function CallPanel(props: {
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
-      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[v().phase]} ${who()}`}>
+      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" hidden={props.hidden} inert={props.hidden} data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[v().phase]} ${who()}`}>
+        <Show when={props.onBack}><button type="button" class="soft" data-ios-back="call" onClick={() => props.onBack?.()}>{tr('uiBack')}</button></Show>
         <header>
           <strong data-call-title aria-live="polite">{CALL_TITLE[v().phase]}{v().media === 'video' ? tr('uiVideo') : ''}</strong>
           <span class="who">{who()}</span>
@@ -4377,7 +4420,7 @@ function InCallPay(props: {
       setResult({ state: 'unknown', text: tr('uiPaymentOutcomeUnknownCheckPendingResultBeforePaying169') });
     } finally { setBusy(false); }
   };
-  return <section class="in-call-pay" data-in-call-pay aria-label={tr('uiDirectPaymentDuringCall')}>
+  return <section class="in-call-pay" data-in-call-pay data-swipe-money={expanded() || busy() || approving()} aria-label={tr('uiDirectPaymentDuringCall')}>
     <Show when={live()}>
       <button type="button" class="soft money" data-call-pay aria-expanded={expanded()} disabled={blocked() || !destination()} onClick={() => setExpanded(!expanded())}>{tr('uiPay')}</button>
       <Show when={!destination()}><p class="hint">{tr('uiTheirLightningPaymentAddressIsUnavailableYourNode')}</p></Show>

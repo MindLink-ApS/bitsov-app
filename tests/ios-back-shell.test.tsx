@@ -36,9 +36,9 @@ it('takes a settings sub-page to settings before closing settings', async () => 
   visibleBackDestination()!.back(); await tick();
   expect(document.querySelector('[data-settings]')?.getAttribute('aria-hidden')).toBe('true');
 });
-it('blocks the underlying route for an approval, a money form, or a call arriving mid-gesture', async () => {
+it('blocks the underlying route for an approval, a money form, or an unknown dialog arriving mid-gesture', async () => {
   await mount();
-  for (const attrs of ['data-first-spend-scrim', 'data-starter-balance', 'data-composer-panel="pay"', 'data-swipe-call="true"', 'data-contact-approval="pending"', 'role="dialog"']) {
+  for (const attrs of ['data-first-spend-scrim', 'data-starter-balance', 'data-composer-panel="pay"', 'data-contact-approval="pending"', 'role="dialog"']) {
     const panel = document.createElement('div'); panel.innerHTML = `<section ${attrs}></section>`;
     document.body.append(panel);
     expect(visibleBackDestination()).toBeNull(); panel.remove();

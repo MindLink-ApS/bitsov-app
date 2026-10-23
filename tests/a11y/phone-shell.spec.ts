@@ -1,5 +1,17 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 const preview = '/docs/ui/u5-phone-shell/harness/preview.html';
+async function installLiveCallFixture(page: Page) {
+  // Replace only the transport at module load. Never press Call/Pay/Approve.
+  await page.route('**/src/control/call.ts', async route => {
+    const response = await route.fetch();
+    const body = (await response.text()).replace('function createCallEngine(deps) {', 'function createRealCallEngine(deps) {');
+    expect(body).toContain('function createRealCallEngine(deps) {');
+    await route.fulfill({ response, body: body + `
+      import { phoneLiveCall } from '/tests/fixtures/phone-live-call.ts';
+      export function createCallEngine(deps) { return phoneLiveCall(createRealCallEngine, deps); }
+    ` });
+  });
+}
 for (const lang of ['en', 'da']) {
   test(`${lang}: phone navigation, reachable entries and safe-area geometry`, async ({ page }) => {
     await page.goto(`${preview}?scene=list&lang=${lang}`);
@@ -135,4 +147,90 @@ test('pending node approval blocks both navigation paths, including attribute tr
   await page.locator('[data-phone-tab="you"]').evaluate((el: HTMLButtonElement) => el.click());
   await expect(page.locator('[data-composer]')).toBeVisible();
   await expect(page.locator('[data-phone-you]')).toHaveCount(0);
+});
+
+for (const lang of ['en', 'da']) {
+  test(`${lang}: Live call survives Wallet and You, pill and edge Back; capture mid-call Wallet`, async ({ page }) => {
+    await installLiveCallFixture(page);
+    await page.goto(`${preview}?scene=list&lang=${lang}`);
+    const peer = await page.locator('[data-phone-list] [data-track^="peer:"]').first().getAttribute('data-track');
+    await page.evaluate(peer => (window as any).phoneCall.start(peer), peer!.slice(5));
+    const panel = page.locator('[data-call-panel="live"]');
+    const pill = page.locator('[data-phone-status] [data-on-call="live"]');
+    await expect(panel).toBeVisible();
+    await page.evaluate(() => (window as any).callPlayback = document.querySelector('[data-call-media="remote"]'));
+    for (const tab of ['wallet', 'you']) {
+      await page.locator(`[data-phone-tab="${tab}"]`).click();
+      await expect(page.locator(tab === 'wallet' ? '[data-wallet-page]' : '[data-phone-you]')).toBeVisible();
+      await expect(panel).toBeHidden();
+      await expect(pill).toBeVisible();
+      expect(await page.evaluate(() => ({ phase: (window as any).phoneCall.engine.view().phase,
+        sessions: (window as any).phoneCall.sessions,
+        playback: (window as any).callPlayback === document.querySelector('[data-call-media="remote"]'),
+        stream: !!(window as any).callPlayback.srcObject }))).toEqual({ phase: 'live', sessions: [true], playback: true, stream: true });
+      if (tab === 'wallet') {
+        await page.evaluate(() => document.fonts.ready);
+        await page.screenshot({ path: `docs/ui/u5-phone-shell/webkit-${lang}-mid-call-wallet.png`, animations: 'disabled' });
+      }
+      await pill.click();
+      await expect(panel).toBeVisible();
+      await expect(panel).toBeFocused();
+    }
+    await page.evaluate(async () => {
+      // @ts-expect-error Browser module served by Vite.
+      const { visibleBackDestination } = await import('/src/ios/edgeBack.ts');
+      const next = visibleBackDestination();
+      if (next?.route !== 'call') throw new Error('Expected call Back');
+      next.back();
+    });
+    await expect(panel).toBeHidden();
+    await pill.click(); await expect(panel).toBeVisible();
+    expect(await page.evaluate(() => (window as any).phoneCall.sessions)).toEqual([true]);
+  });
+}
+test('landscape status stays within a quarter of the viewport with stacked recovery notices', async ({ page }) => {
+  await page.setViewportSize({ width: 852, height: 393 });
+  await page.goto(`${preview}?scene=offline`);
+  const status = page.locator('[data-phone-status]');
+  await expect(status).toBeVisible();
+  for (const fontSize of ['17px', '53px']) {
+    await page.evaluate(size => document.documentElement.style.fontSize = size, fontSize);
+    expect((await status.boundingBox())!.height).toBeLessThanOrEqual(393 * .25 + 1);
+    await expect(page.locator('[data-phone-tabs]')).toBeInViewport();
+  }
+});
+
+test('the actual expanded in-call Pay form blocks navigation until Cancel', async ({ page }) => {
+  await installLiveCallFixture(page);
+  await page.route('**/src/control/Shell.tsx', async route => {
+    const response = await route.fetch();
+    // Seed the existing form when Live arrives, without pressing Pay. All
+    // transport remains the read-only fixture; production handlers are unchanged.
+    const original = await response.text();
+    const marker = 'const [expanded, setExpanded] = createSignal(false);';
+    expect(original).toContain(marker);
+    const body = original.replace(marker, marker + `
+      createEffect(() => { if (props.view.phase === 'live') setExpanded(true); });
+    `);
+    await route.fulfill({ response, body });
+  });
+  await page.goto(`${preview}?scene=list`);
+  const peer = await page.locator('[data-phone-list] [data-track^="peer:"]').first().getAttribute('data-track');
+  await page.evaluate(peer => (window as any).phoneCall.start(peer), peer!.slice(5));
+  const payment = page.locator('[data-in-call-pay]');
+  await expect(payment).toHaveAttribute('data-swipe-money', 'true');
+  await expect(payment.locator('.pay-flow')).toBeVisible();
+  await expect(page.locator('[data-phone-tabs]')).toHaveAttribute('inert');
+  await expect(page.locator('[data-phone-status]')).toHaveAttribute('inert');
+  expect(await page.evaluate(async () => {
+    // @ts-expect-error Browser module served by Vite.
+    const { visibleBackDestination } = await import('/src/ios/edgeBack.ts');
+    return visibleBackDestination();
+  })).toBeNull();
+  await page.locator('[data-phone-tab="wallet"]').evaluate((el: HTMLButtonElement) => el.click());
+  await expect(page.locator('[data-wallet-page]')).toHaveCount(0);
+  await payment.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.locator('[data-phone-tab="wallet"]').click();
+  await expect(page.locator('[data-wallet-page]')).toBeVisible();
+  expect(await page.evaluate(() => (window as any).phoneCall.sessions)).toEqual([true]);
 });

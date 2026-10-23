@@ -1,5 +1,5 @@
 /** Priority follows the existing overlay order, never browser history. */
-const routes = ['contact', 'settings-page', 'settings', 'wallet', 'thread'] as const;
+const routes = ['contact', 'settings-page', 'settings', 'wallet', 'call', 'thread'] as const;
 export type BackRoute = typeof routes[number];
 export type BackState = { routes: readonly BackRoute[]; money: boolean; approval: boolean; call: boolean; modal: boolean };
 export function backRoute(state: BackState): BackRoute | null {
@@ -54,19 +54,20 @@ export function installEdgeBack(destination: () => Destination | null = visibleB
   };
 }
 
-export const visibleNavigationSurface = (el: Element) => !el.closest('[hidden], [inert], [aria-hidden="true"]')
+export const visibleNavigationSurface = (el: Element, includeCallUnderlay = false) => !el.closest('[hidden], [aria-hidden="true"]')
+  && !el.closest(includeCallUnderlay ? '[inert]:not([data-call-underlay="true"])' : '[inert]')
   && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
 /** Shared by edge Back and phone tabs. Receive is a Wallet destination, so only
  * edge Back blocks it; ordinary page dialogs are routes, not blocking sheets. */
-export function navigationBlocked(includeReceive = false): boolean {
+export function navigationBlocked(includeReceive = false, root: ParentNode = document): boolean {
   const selector = '[data-swipe-money="true"], [data-composer-panel], [data-wallet-send], [data-starter-balance], '
     + '[data-swipe-approval="true"], [data-first-spend-scrim], [data-contact-approval], [data-approval="pending"], '
     + '[data-ai-card="disclosure"][data-state="preview"], [data-ai-card="disclosure"][data-state="sending"], '
     + '.owner-approval, [data-owner-approval-sheet], [data-phone-onboarding="words"], [data-phone-onboarding="fingerprint"], '
-    + '[data-swipe-call="true"]';
-  return Array.from(document.querySelectorAll(selector + (includeReceive ? ', [data-wallet-receive]' : ''))).some(visibleNavigationSurface)
-    || Array.from(document.querySelectorAll('dialog[open], [role="dialog"]')).some(el => visibleNavigationSurface(el)
-      && !el.matches('[data-settings], [data-wallet-page], [data-contact-panel]'));
+    + '[data-call-approval]';
+  return Array.from(root.querySelectorAll(selector + (includeReceive ? ', [data-wallet-receive]' : ''))).some(el => visibleNavigationSurface(el, true))
+    || Array.from(root.querySelectorAll('dialog[open], [role="dialog"]')).some(el => visibleNavigationSurface(el, true)
+      && !el.matches('[data-settings], [data-wallet-page], [data-contact-panel], [data-call-panel]'));
 }
 /** The same buttons handle taps and gestures. New/unrecognized dialogs fail closed. */
 export function visibleBackDestination(): Destination | null {

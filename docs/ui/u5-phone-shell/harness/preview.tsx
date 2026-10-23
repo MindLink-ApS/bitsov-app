@@ -26,7 +26,7 @@ const source = new Proxy(base, { get(target, key: keyof typeof base) {
   if (key === 'opList' && scene === 'repair') return async () => ({ operations: [], skipped: 0, has_more: false, unresolved_calls: [{ index_id: 'c'.repeat(64), acknowledged: false, hangup_cap_msat: 5000 }] });
   if (key === 'onLive') return async (handler: any) => { handler({ type: 'link', state: scene === 'offline' ? 'closed' : 'open', detail: null }); return () => {}; };
   if (key === 'starterCurrent') return async () => ({ state: 'not_requested', hub_configured: true });
-  if (key === 'nodeOverview') return async () => { const value = await base.nodeOverview(); return { ...value, network: 'signet', capabilities: [...(value.capabilities ?? []), 'starter_channel_request_v1'] }; };
+  if (key === 'nodeOverview') return async () => { const value = await base.nodeOverview(); return { ...value, network: 'signet', capabilities: [...(value.capabilities ?? []), 'starter_channel_request_v1', 'front_door_v1'] }; };
   if (typeof target[key] === 'function' && /send|approve|request|signal|pay|keysend|invoice$|accept|join|grant|resume|endCall/i.test(key) && !reads.has(key)) return forbid;
   return target[key];
 } });

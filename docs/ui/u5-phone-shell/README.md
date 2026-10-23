@@ -9,8 +9,9 @@ existing Tauri mobile platform signal plus an iPhone/iPod UA or Android UA with
 Calls appears only after a history read or an observed call. Startup performs
 one sequential has-any-call search, stopping at the first matching contact.
 Results and in-flight reads are cached for the mounted shell; opening Calls
-lazily checks the remaining contacts. A cold negative search can still traverse
-old pages once, preserving calls older than the newest page. Ordinary refreshes
+lazily checks the remaining contacts. Each contact probe reads at most three pages, including on first launch with
+no calls. Calls beyond that window do not make the tab appear on cold launch;
+any calls observed in later thread reads or live events update the cache. Ordinary refreshes
 reuse the cache; live call events replace negative results immediately. After
 an actual websocket gap, negative results check only pages newer than their
 last completed read, so missed events cannot hide Calls forever. Failed reads
@@ -27,9 +28,17 @@ Wallet retains its existing screens and adds the explicitly named Add sats
 entry. You exposes Share my card / QR, profile/settings, add device, and waiting
 approvals where available. Connection status and the money-readiness notice
 remain above every tab. Offline Retry and unresolved-call repairs also remain
-in that status area, which scrolls within 45vh so large text cannot push content
-or tabs offscreen. Contact loading/error state belongs to the Chats list, with
+in that status area, which scrolls within 45vh in portrait and 25dvh in
+landscape so large text cannot push content or tabs offscreen. Share and Add
+sats reuse WelcomeHome’s capability/readiness checks and visible disabled reasons. Contact loading/error state belongs to the Chats list, with
 Reconnect on failure and no false “No contacts yet” message. New labels are in the English/Danish copy table.
+
+A call no longer blocks the header or tabs. Wallet and You hide the call view
+without unmounting its media; the existing call engine owns the Live-only iOS
+audio session until teardown. The On-call pill restores the call and focuses its
+panel. Edge Back minimizes it without hanging up; selecting Chats also returns
+to chat content. Covered chat controls are inert. Money/approval surfaces take
+precedence, including approvals that arrive after navigation.
 
 The tab bar has no overlay z-index. First-spend and owner-approval dialogs retain
 the native top layer; starter retains its full-screen layer above the tabs.
@@ -44,6 +53,17 @@ Android tracks keyboard viewport shrinkage while preserving the pre-keyboard
 height across input focus changes. The tab bar hides under the keyboard.
 U2b's type tokens/caps remain in use. No Rust, money wording, approval payload,
 signed bytes, or payment/call operations changed.
+
+## Follow-up #329 browser evidence
+
+`webkit-{en,da}-mid-call-wallet.png` shows Wallet with the Live return pill and
+phone tabs. These are WebKit captures at 393×852, using the production shell and
+call engine with a fake RTC/native audio boundary and no node or microphone.
+The phone-shell spec verifies the same media element and stream remain mounted,
+the audio-session calls remain `[true]` across Wallet/You/return/Back, and an
+expanded production Pay form blocks navigation until Cancel. The unit test
+checks the actual shell’s native invocation releases only on shell teardown.
+No Send, Pay, Allow, Approve or Call button is pressed to set up these scenes.
 
 ## Native evidence
 

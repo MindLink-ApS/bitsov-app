@@ -15,7 +15,7 @@ import { DelayedSpinner } from './DelayedSpinner';
  * and all-in ceiling), behind the same one-confirm review: frozen when shown,
  * consumed at dispatch, withdrawn by any edit. Receiving pays nothing.
  */
-import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch, type JSX } from 'solid-js';
+import { createEffect, createMemo, createSignal, createUniqueId, For, Match, on, onCleanup, Show, Switch, type JSX } from 'solid-js';
 import { qrSvg } from '../qr';
 import { copyPlainText } from '../assistant/copy';
 import { deviceWord } from '../platform';
@@ -135,6 +135,7 @@ export function WalletPage(props: {
   onClose: () => void;
   /** Phone tab content, below the persistent status and above the tab bar. */
   embedded?: boolean;
+  fundingDisabledReason?: string | null;
   wallet: WalletOverview | null;
   walletError?: string;
   moneyBlocked: boolean;
@@ -157,6 +158,7 @@ export function WalletPage(props: {
   /** Where the seed lives, as the node reports it; absent when not reported. */
   custody?: CustodyMode | null;
 }) {
+  const fundingReasonId = createUniqueId();
   const split = () => (props.wallet ? splitBalance(props.wallet) : null);
   const [starterOpen, setStarterOpen] = createSignal(false);
 
@@ -196,7 +198,10 @@ export function WalletPage(props: {
       </header>
 
       <div class="wallet-body">
-        <Show when={props.embedded && !starterOpen()}><button class="soft" data-phone-add-sats onClick={() => props.onTab('receive')}>{t('phoneAddSats')}</button></Show>
+        <Show when={props.embedded && !starterOpen()}>
+          <button class="soft" data-phone-add-sats disabled={!!props.fundingDisabledReason} aria-describedby={props.fundingDisabledReason ? fundingReasonId : undefined} onClick={() => props.onTab('receive')}>{t('phoneAddSats')}</button>
+          <Show when={props.fundingDisabledReason}><p class="hint" id={fundingReasonId}>{props.fundingDisabledReason}</p></Show>
+        </Show>
         <Show when={props.starter}>
           <StarterBalance {...props.starter!} open={starterOpen()} onOpen={() => setStarterOpen(true)} onHidden={() => setStarterOpen(false)} />
         </Show>

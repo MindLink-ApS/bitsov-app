@@ -5,8 +5,33 @@ import { render } from 'solid-js/web';
 import { ControlCenter } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID } from '../src/control/sample';
 import { visibleBackDestination } from '../src/ios/edgeBack';
+import type { CallEngine } from '../src/control/call';
 import type { LiveEvent } from '../src/control/types';
 import { setLanguagePref } from '../src/i18n';
+let engine: CallEngine;
+let authorizeCall: (() => Promise<boolean>) | undefined;
+vi.mock('../src/control/call', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/control/call')>();
+  return { ...actual, createCallEngine: (deps: Parameters<typeof actual.createCallEngine>[0]) => {
+    authorizeCall = deps.authorize;
+    engine = actual.createCallEngine({ ...deps, authorize: async () => true, signal: async (_peer, kind) => ({ ok: true, value: { message_id: 'fixture-offer', kind, amount_msat: 1000, total_msat: 1000, max_routing_fee_msat: 0, delivered: true, accepted: true, sent_at_ms: Date.now() } }) }); return engine;
+  } };
+});
+const audioSession = vi.fn(async (..._args: unknown[]) => {});
+vi.mock('@tauri-apps/api/core', async importOriginal => ({ ...await importOriginal<typeof import('@tauri-apps/api/core')>(), invoke: (...args: unknown[]) => audioSession(...args) }));
+class PhonePc {
+  static latest: PhonePc;
+  connectionState = 'new'; iceGatheringState = 'complete';
+  localDescription: unknown = null;
+  onconnectionstatechange: (() => void) | null = null;
+  ontrack: ((event: { streams: MediaStream[] }) => void) | null = null;
+  constructor() { PhonePc.latest = this; }
+  addTrack() { return { replaceTrack: async () => {} }; }
+  async createOffer() { return { type: 'offer', sdp: 'v=0 fixture' }; }
+  async setLocalDescription(value: unknown) { this.localDescription = value; }
+  async getStats() { return new Map(); }
+  addEventListener() {} removeEventListener() {} close() { this.connectionState = 'closed'; }
+}
 let dispose: (() => void) | undefined;
 const tick = async () => { for (let i = 0; i < 80; i++) await Promise.resolve(); };
 const click = async (selector: string) => {
@@ -14,8 +39,8 @@ const click = async (selector: string) => {
   expect(button, selector).not.toBeNull(); button!.click(); await tick();
 };
 const visible = (selector: string) => [...document.querySelectorAll(selector)].filter(el => !el.closest('[hidden], [inert], [aria-hidden="true"]'));
-afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.restoreAllMocks(); vi.unstubAllGlobals(); setLanguagePref('en'); });
-async function mount({ platform = 'iPhone', narrow = true, history = false, oldHistory = false, live = true, offline = false, repair = false, peersError = false } = {}) {
+afterEach(async () => { dispose?.(); await tick(); document.body.innerHTML = ''; delete (navigator as any).mediaDevices; audioSession.mockClear(); vi.restoreAllMocks(); vi.unstubAllGlobals(); setLanguagePref('en'); });
+async function mount({ platform = 'iPhone', narrow = true, history = false, oldHistory = false, live = true, offline = false, repair = false, peersError = false, deepHistory = false, unavailable = false } = {}) {
   vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(platform);
   vi.stubGlobal('__TAURI_INTERNALS__', {});
   vi.spyOn(window, 'matchMedia').mockImplementation(query => ({ matches: narrow, media: query, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList);
@@ -24,13 +49,13 @@ async function mount({ platform = 'iPhone', narrow = true, history = false, oldH
   let emit: (event: LiveEvent) => void = () => {};
   source.onLive = async handler => { emit = handler; return () => {}; };
   const overview = source.nodeOverview;
-  source.nodeOverview = async () => { const value = await overview(); return { ...value, capabilities: [...(value.capabilities ?? []), 'room_binding_v1', 'starter_channel_request_v1'], network: 'signet' }; };
+  source.nodeOverview = async () => { const value = await overview(); return { ...value, lightning_available: !unavailable, capabilities: [...(unavailable ? [] : [...(value.capabilities ?? []), 'front_door_v1']), 'room_binding_v1', 'starter_channel_request_v1'], network: 'signet' }; };
   const [connected, setConnected] = createSignal(live);
   const reconnect = vi.fn();
   if (peersError) source.peers = async () => { throw new Error('Contacts unavailable'); };
   if (repair) source.opList = async () => ({ operations: [], skipped: 0, has_more: false, unresolved_calls: [{ index_id: 'c'.repeat(64), acknowledged: false, hangup_cap_msat: 5000 }] });
   const messages = source.messages;
-  source.messages = vi.fn(async (id, before) => (history || (oldHistory && before !== undefined)) ? [{ id: 'past-call', sender: id, recipient: SAMPLE_OWN_ID, kind: 400, plaintext: '{}', timestamp: 1000, payment_amount_msat: 1000 }, ...await messages(id, before)] : (await messages(id, before)).filter(m => m.kind < 400 || m.kind > 403));
+  source.messages = vi.fn(async (id, before) => deepHistory ? [{ id: 'text', sender: id, recipient: SAMPLE_OWN_ID, kind: 0, plaintext: 'text', timestamp: (before ?? 1000) - 1, payment_amount_msat: 1000 }].filter(m => m.timestamp > 900) : (history || (oldHistory && before !== undefined)) ? [{ id: 'past-call', sender: id, recipient: SAMPLE_OWN_ID, kind: 400, plaintext: '{}', timestamp: 1000, payment_amount_msat: 1000 }, ...await messages(id, before)] : (await messages(id, before)).filter(m => m.kind < 400 || m.kind > 403));
   dispose = render(() => <ControlCenter source={source} active ready live={connected()} offline={offline ? <OfflineNode remote onRetry={reconnect} /> : undefined} onReconnect={reconnect} error={null} ownId={SAMPLE_OWN_ID} firstRun={null} />, document.body);
   await tick();
   return { emit, setConnected, source, reconnect };
@@ -217,4 +242,123 @@ it('only checks the newest page of unchanged negative history after a link gap',
   expect(visible('[data-phone-tab="calls"]')).toHaveLength(0);
   expect(vi.mocked(source.messages).mock.calls.length).toBe((await source.peers()).length);
   expect(vi.mocked(source.messages).mock.calls.every(([, before]) => before === undefined)).toBe(true);
+});
+
+async function liveCall() {
+  vi.stubGlobal('RTCPeerConnection', PhonePc);
+  const stream = Object.assign(new MediaStream(), { getTracks: () => [], getAudioTracks: () => [], getVideoTracks: () => [] });
+  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => stream } });
+  const mounted = await mount();
+  const peer = (await mounted.source.peers())[0].node_id;
+  // Only the sample source and fake RTC are used; no Call/approval/payment button is pressed.
+  await engine.place(peer, 'audio', await mounted.source.callQuote(peer));
+  PhonePc.latest.connectionState = 'connected'; PhonePc.latest.onconnectionstatechange?.();
+  PhonePc.latest.ontrack?.({ streams: [stream] });
+  await tick();
+  expect(engine.view().phase).toBe('live');
+  expect(audioSession.mock.calls).toEqual([['call_audio_session', { live: true }]]);
+  return stream;
+}
+it('keeps Live media and the audio session held through Wallet, You and return to call', async () => {
+  const stream = await liveCall();
+  const playback = document.querySelector<HTMLAudioElement>('[data-call-media="remote"]')!;
+  expect(playback.srcObject).toBe(stream);
+  for (const tab of ['wallet', 'you']) {
+    await click(`[data-phone-tab="${tab}"]`);
+    expect(visible(tab === 'wallet' ? '[data-wallet-page]' : '[data-phone-you]')).toHaveLength(1);
+    expect(visible('[data-call-panel]')).toHaveLength(0);
+    expect(visible('[data-phone-status] [data-on-call="live"]')).toHaveLength(1);
+    expect(engine.view().phase).toBe('live');
+    expect(playback.isConnected).toBe(true); expect(playback.srcObject).toBe(stream);
+    expect(audioSession.mock.calls).toEqual([['call_audio_session', { live: true }]]);
+    await click('[data-phone-status] [data-on-call]');
+    expect(visible('[data-call-panel="live"]')).toHaveLength(1);
+    expect(document.activeElement).toBe(document.querySelector('[data-call-panel]'));
+  }
+  dispose?.(); dispose = undefined; await tick();
+  expect(audioSession.mock.calls).toEqual([['call_audio_session', { live: true }], ['call_audio_session', { live: false }]]);
+});
+it('edge Back minimizes the call without ending it and the pill restores it', async () => {
+  await liveCall();
+  expect(visibleBackDestination()?.route).toBe('call');
+  visibleBackDestination()!.back(); await tick();
+  expect(visible('[data-call-panel]')).toHaveLength(0);
+  expect(engine.view().phase).toBe('live');
+  await click('[data-phone-status] [data-on-call]');
+  expect(visible('[data-call-panel="live"]')).toHaveLength(1);
+});
+it.each(['data-first-spend-scrim', 'data-call-approval', 'data-swipe-money', 'data-approval'])('blocks mid-call navigation for %s', async attribute => {
+  await liveCall();
+  const sheet = document.createElement('div');
+  sheet.setAttribute(attribute, attribute === 'data-approval' ? 'pending' : 'true');
+  document.querySelector('[data-call-panel]')!.append(sheet); await tick();
+  expect(visibleBackDestination()).toBeNull();
+  await click('[data-phone-tab="wallet"]');
+  expect(visible('[data-wallet-page]')).toHaveLength(0);
+  sheet.remove(); await tick();
+  await click('[data-phone-tab="wallet"]');
+  expect(visible('[data-wallet-page]')).toHaveLength(1);
+});
+it('bounds a first launch with deep text-only history to three pages per contact', async () => {
+  const { source } = await mount({ deepHistory: true });
+  expect(source.messages).toHaveBeenCalledTimes(3 * (await source.peers()).length);
+  expect(visible('[data-phone-tab="calls"]')).toHaveLength(0);
+});
+it('explains disabled Share and Add sats when node capabilities are absent', async () => {
+  await mount({ unavailable: true });
+  for (const [tab, selector, reason] of [['you', '[data-phone-share]', 'Profile cards are not available'], ['wallet', '[data-phone-add-sats]', 'Receiving sats is not available']]) {
+    await click(`[data-phone-tab="${tab}"]`);
+    const button = document.querySelector<HTMLButtonElement>(selector)!;
+    expect(button.disabled).toBe(true);
+    expect(document.getElementById(button.getAttribute('aria-describedby')!)?.textContent).toContain(reason);
+  }
+});
+
+it('removes the covered chat/list from focus order while the call is foreground', async () => {
+  await liveCall();
+  expect(document.querySelector('[data-phone-list]')?.hasAttribute('inert')).toBe(true);
+  await click('[data-phone-status] [data-on-call]');
+  expect(document.querySelector('.track')?.hasAttribute('inert')).toBe(true);
+  await click('[data-phone-tab="chats"]');
+  expect(visible('[data-call-panel]')).toHaveLength(0);
+  expect(visible('[data-phone-list]')).toHaveLength(1);
+});
+it('reveals a pending approval arriving under a foreground call and keeps navigation blocked', async () => {
+  await liveCall(); await click('[data-phone-status] [data-on-call]');
+  const sheet = document.createElement('div'); sheet.dataset.approval = 'pending';
+  document.querySelector('.track')!.append(sheet);
+  await new Promise(resolve => setTimeout(resolve, 0)); await tick();
+  expect(visible('[data-call-panel]')).toHaveLength(0);
+  expect(visible('[data-approval="pending"]')).toContain(sheet);
+  expect(visibleBackDestination()).toBeNull();
+  await click('[data-phone-tab="wallet"]');
+  expect(visible('[data-wallet-page]')).toHaveLength(0);
+});
+it.each([false, true])('presents a late call approval after navigation, deferring behind another money sheet=%s', async deferred => {
+  await liveCall(); await click('[data-phone-tab="wallet"]');
+  const sheet = document.createElement('div'); sheet.dataset.swipeMoney = 'true';
+  if (deferred) document.body.append(sheet);
+  await authorizeCall!(); await tick();
+  if (deferred) {
+    expect(visible('[data-call-approval]')).toHaveLength(0);
+    sheet.remove(); await new Promise(resolve => setTimeout(resolve, 0)); await tick();
+  }
+  expect(visible('[data-call-approval]')).toHaveLength(1);
+  expect(visibleBackDestination()).toBeNull();
+  await click('[data-phone-tab="you"]');
+  expect(visible('[data-phone-you]')).toHaveLength(0);
+});
+it('reveals an underlay approval after a call-local money sheet closes without unblocking navigation', async () => {
+  await liveCall(); await click('[data-phone-status] [data-on-call]');
+  const payment = document.createElement('div'); payment.dataset.swipeMoney = 'true';
+  document.querySelector('[data-call-panel]')!.append(payment);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const approval = document.createElement('div'); approval.dataset.approval = 'pending';
+  document.querySelector('.track')!.append(approval);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(visible('[data-call-panel]')).toHaveLength(1);
+  payment.remove(); await new Promise(resolve => setTimeout(resolve, 0)); await tick();
+  expect(visible('[data-call-panel]')).toHaveLength(0);
+  expect(visible('[data-approval="pending"]')).toContain(approval);
+  expect(visibleBackDestination()).toBeNull();
 });

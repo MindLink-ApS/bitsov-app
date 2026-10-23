@@ -1867,3 +1867,13 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
     height: min(1.411765rem, 32px);
   }
 }
+
+/* A call occupies only the phone content pane. Keeping it mounted preserves
+   playback while Wallet/You are visible; Back only minimizes this view. */
+html:is([data-platform='ios'], [data-platform='android']) .cc[data-phone-shell='true'] > .call-panel[data-call-panel] {
+  position: relative; grid-area: content; inset: auto; width: auto;
+  min-height: 0; max-height: 100%; margin: 0; border-radius: 0;
+}
+@media (orientation: landscape) {
+  .phone-status { max-height: 25dvh; box-sizing: border-box; }
+}

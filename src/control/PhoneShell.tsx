@@ -64,14 +64,16 @@ export function installAndroidKeyboardVisibility() {
  * edge Back. Check synchronously as well: a sheet can arrive before an observer. */
 export function createPhoneNavigationGuard(enabled: () => boolean) {
   const [blocked, setBlocked] = createSignal(false);
+  // Blockers can replace one another while the boolean stays true.
+  const [revision, setRevision] = createSignal(0);
   const check = () => enabled() && navigationBlocked();
   onMount(() => {
     if (!isMobilePlatform()) return;
-    const update = () => setBlocked(check());
+    const update = () => { setBlocked(check()); setRevision(value => value + 1); };
     const observer = new MutationObserver(update);
     observer.observe(document.body, { subtree: true, childList: true, attributes: true,
       attributeFilter: ['hidden', 'inert', 'aria-hidden', 'open', 'role', 'class', 'style', 'data-approval', 'data-ai-card', 'data-state', 'data-phone-onboarding', 'data-swipe-call', 'data-swipe-approval', 'data-swipe-money'] });
     update(); onCleanup(() => observer.disconnect());
   });
-  return { blocked, check };
+  return { blocked, check, revision };
 }
