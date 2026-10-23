@@ -1,5 +1,5 @@
 import { language, systemLanguage } from '../i18n';
-import { createSignal, Show } from 'solid-js';
+import { createSignal, createUniqueId, onMount, Show } from 'solid-js';
 import { usePairingActivity } from '../pairingActivity';
 import { PrimaryAction } from './PrimaryAction';
 
@@ -8,11 +8,14 @@ export function PhoneTrust(props: { onContinue: () => Promise<void>; locale?: st
   const da = () => (props.locale ? systemLanguage(props.locale) : language()) === 'da';
   const [saving, setSaving] = createSignal(false);
   const [failed, setFailed] = createSignal(false);
+  const lineId = createUniqueId();
+  let heading: HTMLHeadingElement | undefined;
   usePairingActivity(saving);
+  onMount(() => heading?.focus());
   return <main class="phone-onboarding" data-phone-trust>
     <section data-phone-face data-gate="g6-remote-trust">
-      <h1>{da() ? 'Stoler du på boksens vært?' : 'Do you trust the host of this box?'}</h1>
-      <p class="phone-line">{da() ? 'Værten kan bruge dine indskud.' : 'The host can spend your deposits.'}</p>
+      <h1 ref={heading} tabindex="-1" aria-describedby={lineId}>{da() ? 'Stoler du på boksens vært?' : 'Do you trust the host of this box?'}</h1>
+      <p id={lineId} class="phone-line">{da() ? 'Værten kan bruge dine indskud.' : 'The host can spend your deposits.'}</p>
       <PrimaryAction disabledReason={saving() ? (da() ? 'Vent et øjeblik…' : 'Please wait…') : undefined} onClick={() => {
         if (saving()) return;
         setSaving(true); setFailed(false);

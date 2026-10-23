@@ -2609,7 +2609,11 @@ function TrackHead(props: {
           class="track-title-btn"
           data-contact-open
           onClick={() => props.onContact?.()}
-          aria-label={tr('uiContact', props.title)}
+          aria-label={props.keyChanged
+            ? `${tr('uiContact', props.title)}, ${tr('uiKeyChanged')}`
+            : props.verified
+              ? `${tr('uiContact', props.title)}, ${tr('uiVerified')}`
+              : tr('uiContact', props.title)}
         >
           <h1>{props.title}</h1>
           <Show when={props.keyChanged}>
