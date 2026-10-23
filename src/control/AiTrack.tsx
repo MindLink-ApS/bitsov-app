@@ -1037,7 +1037,7 @@ function ProposalCard(props: { p: Proposal; onPrefill: (p: Proposal) => void }) 
           : tr('caOpensTheComposerWithThisFilledInTheCost')}
       </span>
       <button type="button" class="primary" data-ai-prefill onClick={() => props.onPrefill(props.p)}>
-        {tr('caOpenIn')}{' '}{props.p.name}{tr('caSComposer')}</button>
+        {tr('caOpenComposerFor', props.p.name)}</button>
     </div>
   );
 }

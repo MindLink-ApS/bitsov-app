@@ -58,7 +58,7 @@ it('localizes helper copy at read time and uses Danish device and plural words',
   expect(GATE_WORDS.settled).toBe('settled');
   setLanguagePref('da');
   expect(messagesWorth(1000, 1000)).toBe('1 besked');
-  expect(GATE_WORDS.settled).toBe('betalt');
+  expect(GATE_WORDS.settled).toBe('gennemført');
   expect(messagesWorth(2000, 1000)).toBe('2 beskeder');
   expect(freshnessText({ state: 'fresh', ageMs: 5000, clockSkew: false })).toBe('Opdateret for 5 s siden.');
   expect(connectionSummary({ remote: false, link: null, live: false, answer: null, stun: 'checking', lastCall: null }).join('\n')).toContain('kontrollerer…');

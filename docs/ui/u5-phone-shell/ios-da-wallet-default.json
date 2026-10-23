@@ -1,0 +1,893 @@
+{
+  "scene": "wallet",
+  "lang": "da",
+  "generatedAt": 1792745893099,
+  "ready": true,
+  "rootFont": "17px",
+  "bodyFont": "17px",
+  "space": "normal",
+  "viewport": {
+    "width": 393,
+    "height": 852,
+    "top": 0,
+    "scale": 1
+  },
+  "keyboard": "false",
+  "ownerSheetMounted": false,
+  "tabBar": {
+    "x": 0,
+    "y": 769.015625,
+    "width": 393,
+    "height": 82.984375,
+    "top": 769.015625,
+    "right": 393,
+    "bottom": 852,
+    "left": 0
+  },
+  "tabDisplay": "flex",
+  "status": {
+    "x": 0,
+    "y": 59,
+    "width": 393,
+    "height": 83.65625,
+    "top": 59,
+    "right": 393,
+    "bottom": 142.65625,
+    "left": 0
+  },
+  "safeAreas": [
+    {
+      "side": "top",
+      "value": "59px"
+    },
+    {
+      "side": "bottom",
+      "value": "34px"
+    },
+    {
+      "side": "left",
+      "value": "0px"
+    },
+    {
+      "side": "right",
+      "value": "0px"
+    }
+  ],
+  "elements": [
+    {
+      "tag": "BUTTON",
+      "class": "node-pill",
+      "text": "Forbundet til din node",
+      "rect": {
+        "x": 15.984375,
+        "y": 66.984375,
+        "width": 180,
+        "height": 66.6875,
+        "top": 66.984375,
+        "right": 195.984375,
+        "bottom": 133.671875,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        178,
+        65
+      ],
+      "scroll": [
+        178,
+        65
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Chats",
+      "rect": {
+        "x": 3.984375,
+        "y": 774,
+        "width": 128.34375,
+        "height": 44,
+        "top": 774,
+        "right": 132.328125,
+        "bottom": 818,
+        "left": 3.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        128,
+        44
+      ],
+      "scroll": [
+        128,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Tegnebog",
+      "rect": {
+        "x": 132.328125,
+        "y": 774,
+        "width": 128.34375,
+        "height": 44,
+        "top": 774,
+        "right": 260.671875,
+        "bottom": 818,
+        "left": 132.328125
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        128,
+        44
+      ],
+      "scroll": [
+        128,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Dig",
+      "rect": {
+        "x": 260.671875,
+        "y": 774,
+        "width": 128.34375,
+        "height": 44,
+        "top": 774,
+        "right": 389.015625,
+        "bottom": 818,
+        "left": 260.671875
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        128,
+        44
+      ],
+      "scroll": [
+        128,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "link",
+      "text": "\u2190 Tilbage",
+      "rect": {
+        "x": 24,
+        "y": 154.640625,
+        "width": 87.390625,
+        "height": 34.3125,
+        "top": 154.640625,
+        "right": 111.390625,
+        "bottom": 188.953125,
+        "left": 24
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        87,
+        34
+      ],
+      "scroll": [
+        87,
+        39
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "link",
+      "text": "Opdat\u00e9r",
+      "rect": {
+        "x": 295.953125,
+        "y": 154.640625,
+        "width": 73.046875,
+        "height": 34.3125,
+        "top": 154.640625,
+        "right": 369,
+        "bottom": 188.953125,
+        "left": 295.953125
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        73,
+        34
+      ],
+      "scroll": [
+        73,
+        39
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "soft",
+      "text": "Tilf\u00f8j sats",
+      "rect": {
+        "x": 15.984375,
+        "y": 217.921875,
+        "width": 361.03125,
+        "height": 44,
+        "top": 217.921875,
+        "right": 377.015625,
+        "bottom": 261.921875,
+        "left": 15.984375
+      },
+      "font": "16.00001px",
+      "whiteSpace": "normal",
+      "client": [
+        359,
+        42
+      ],
+      "scroll": [
+        359,
+        42
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "link",
+      "text": "F\u00e5 din startsaldo",
+      "rect": {
+        "x": 15.984375,
+        "y": 281.921875,
+        "width": 361.03125,
+        "height": 34.3125,
+        "top": 281.921875,
+        "right": 377.015625,
+        "bottom": 316.234375,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        361,
+        34
+      ],
+      "scroll": [
+        361,
+        39
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "wallet-total",
+      "text": "482\u202f500sats",
+      "rect": {
+        "x": 86.015625,
+        "y": 385,
+        "width": 220.953125,
+        "height": 67.1875,
+        "top": 385,
+        "right": 306.96875,
+        "bottom": 452.1875,
+        "left": 86.015625
+      },
+      "font": "64px",
+      "whiteSpace": "nowrap",
+      "client": [
+        221,
+        67
+      ],
+      "scroll": [
+        221,
+        67
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "split-amount unknown",
+      "text": "Ikke oplyst",
+      "rect": {
+        "x": 32.96875,
+        "y": 579.953125,
+        "width": 327.0625,
+        "height": 26.34375,
+        "top": 579.953125,
+        "right": 360.03125,
+        "bottom": 606.296875,
+        "left": 32.96875
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        327,
+        26
+      ],
+      "scroll": [
+        327,
+        26
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "split-amount unknown",
+      "text": "Ikke oplyst",
+      "rect": {
+        "x": 32.96875,
+        "y": 706.5625,
+        "width": 327.0625,
+        "height": 26.34375,
+        "top": 706.5625,
+        "right": 360.03125,
+        "bottom": 732.90625,
+        "left": 32.96875
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        327,
+        26
+      ],
+      "scroll": [
+        327,
+        26
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "split-amount unknown",
+      "text": "Ikke oplyst",
+      "rect": {
+        "x": 32.96875,
+        "y": 833.171875,
+        "width": 327.0625,
+        "height": 26.34375,
+        "top": 833.171875,
+        "right": 360.03125,
+        "bottom": 859.515625,
+        "left": 32.96875
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        327,
+        26
+      ],
+      "scroll": [
+        327,
+        26
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "primary soft money",
+      "text": "Modtag",
+      "rect": {
+        "x": 106.046875,
+        "y": 1073.1875,
+        "width": 95,
+        "height": 44,
+        "top": 1073.1875,
+        "right": 201.046875,
+        "bottom": 1117.1875,
+        "left": 106.046875
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        95,
+        44
+      ],
+      "scroll": [
+        95,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "primary soft money",
+      "text": "Send",
+      "rect": {
+        "x": 213.03125,
+        "y": 1073.1875,
+        "width": 73.921875,
+        "height": 44,
+        "top": 1073.1875,
+        "right": 286.953125,
+        "bottom": 1117.1875,
+        "left": 213.03125
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        74,
+        44
+      ],
+      "scroll": [
+        74,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Aktivitet",
+      "rect": {
+        "x": 18.984375,
+        "y": 1148.171875,
+        "width": 97.28125,
+        "height": 44,
+        "top": 1148.171875,
+        "right": 116.265625,
+        "bottom": 1192.171875,
+        "left": 18.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        97,
+        44
+      ],
+      "scroll": [
+        97,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Kanaler",
+      "rect": {
+        "x": 118.265625,
+        "y": 1148.171875,
+        "width": 93,
+        "height": 44,
+        "top": 1148.171875,
+        "right": 211.265625,
+        "bottom": 1192.171875,
+        "left": 118.265625
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        93,
+        44
+      ],
+      "scroll": [
+        93,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Modtag",
+      "rect": {
+        "x": 213.265625,
+        "y": 1148.171875,
+        "width": 93.828125,
+        "height": 44,
+        "top": 1148.171875,
+        "right": 307.09375,
+        "bottom": 1192.171875,
+        "left": 213.265625
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        94,
+        44
+      ],
+      "scroll": [
+        94,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Send",
+      "rect": {
+        "x": 18.984375,
+        "y": 1194.171875,
+        "width": 73.28125,
+        "height": 44,
+        "top": 1194.171875,
+        "right": 92.265625,
+        "bottom": 1238.171875,
+        "left": 18.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        73,
+        44
+      ],
+      "scroll": [
+        73,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Alle",
+      "rect": {
+        "x": 18.984375,
+        "y": 1264.171875,
+        "width": 46.375,
+        "height": 44,
+        "top": 1264.171875,
+        "right": 65.359375,
+        "bottom": 1308.171875,
+        "left": 18.984375
+      },
+      "font": "15.000001px",
+      "whiteSpace": "normal",
+      "client": [
+        46,
+        44
+      ],
+      "scroll": [
+        46,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Beskeder",
+      "rect": {
+        "x": 67.359375,
+        "y": 1264.171875,
+        "width": 86.703125,
+        "height": 44,
+        "top": 1264.171875,
+        "right": 154.0625,
+        "bottom": 1308.171875,
+        "left": 67.359375
+      },
+      "font": "15.000001px",
+      "whiteSpace": "normal",
+      "client": [
+        87,
+        44
+      ],
+      "scroll": [
+        87,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Opkald",
+      "rect": {
+        "x": 156.0625,
+        "y": 1264.171875,
+        "width": 70.140625,
+        "height": 44,
+        "top": 1264.171875,
+        "right": 226.203125,
+        "bottom": 1308.171875,
+        "left": 156.0625
+      },
+      "font": "15.000001px",
+      "whiteSpace": "normal",
+      "client": [
+        70,
+        44
+      ],
+      "scroll": [
+        70,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Betalinger",
+      "rect": {
+        "x": 228.203125,
+        "y": 1264.171875,
+        "width": 91.6875,
+        "height": 44,
+        "top": 1264.171875,
+        "right": 319.890625,
+        "bottom": 1308.171875,
+        "left": 228.203125
+      },
+      "font": "15.000001px",
+      "whiteSpace": "normal",
+      "client": [
+        92,
+        44
+      ],
+      "scroll": [
+        92,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Ind og ud",
+      "rect": {
+        "x": 18.984375,
+        "y": 1322.15625,
+        "width": 86.765625,
+        "height": 44,
+        "top": 1322.15625,
+        "right": 105.75,
+        "bottom": 1366.15625,
+        "left": 18.984375
+      },
+      "font": "15.000001px",
+      "whiteSpace": "normal",
+      "client": [
+        87,
+        44
+      ],
+      "scroll": [
+        87,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Modtaget",
+      "rect": {
+        "x": 107.75,
+        "y": 1322.15625,
+        "width": 88.21875,
+        "height": 44,
+        "top": 1322.15625,
+        "right": 195.96875,
+        "bottom": 1366.15625,
+        "left": 107.75
+      },
+      "font": "15.000001px",
+      "whiteSpace": "normal",
+      "client": [
+        88,
+        44
+      ],
+      "scroll": [
+        88,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Sendt",
+      "rect": {
+        "x": 197.96875,
+        "y": 1322.15625,
+        "width": 61.546875,
+        "height": 44,
+        "top": 1322.15625,
+        "right": 259.515625,
+        "bottom": 1366.15625,
+        "left": 197.96875
+      },
+      "font": "15.000001px",
+      "whiteSpace": "normal",
+      "client": [
+        62,
+        44
+      ],
+      "scroll": [
+        62,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "P",
+      "class": "wallet-totals",
+      "text": "Modtaget 5 satsSendt 3 sats",
+      "rect": {
+        "x": 15.984375,
+        "y": 1381.140625,
+        "width": 361.03125,
+        "height": 26.34375,
+        "top": 1381.140625,
+        "right": 377.015625,
+        "bottom": 1407.484375,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        361,
+        26
+      ],
+      "scroll": [
+        361,
+        26
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "wallet-row-amount",
+      "text": "\u22121 sat",
+      "rect": {
+        "x": 321.34375,
+        "y": 1484.3125,
+        "width": 51.671875,
+        "height": 26.34375,
+        "top": 1484.3125,
+        "right": 373.015625,
+        "bottom": 1510.65625,
+        "left": 321.34375
+      },
+      "font": "17px",
+      "whiteSpace": "nowrap",
+      "client": [
+        52,
+        26
+      ],
+      "scroll": [
+        52,
+        26
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "wallet-row-amount in",
+      "text": "+1 sat",
+      "rect": {
+        "x": 321.34375,
+        "y": 1554.90625,
+        "width": 51.671875,
+        "height": 26.34375,
+        "top": 1554.90625,
+        "right": 373.015625,
+        "bottom": 1581.25,
+        "left": 321.34375
+      },
+      "font": "17px",
+      "whiteSpace": "nowrap",
+      "client": [
+        52,
+        26
+      ],
+      "scroll": [
+        52,
+        26
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "wallet-row-amount",
+      "text": "\u22121 sat",
+      "rect": {
+        "x": 321.34375,
+        "y": 1625.5,
+        "width": 51.671875,
+        "height": 26.34375,
+        "top": 1625.5,
+        "right": 373.015625,
+        "bottom": 1651.84375,
+        "left": 321.34375
+      },
+      "font": "17px",
+      "whiteSpace": "nowrap",
+      "client": [
+        52,
+        26
+      ],
+      "scroll": [
+        52,
+        26
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "wallet-row-amount in",
+      "text": "+2 sats",
+      "rect": {
+        "x": 312.140625,
+        "y": 1696.09375,
+        "width": 60.875,
+        "height": 26.34375,
+        "top": 1696.09375,
+        "right": 373.015625,
+        "bottom": 1722.4375,
+        "left": 312.140625
+      },
+      "font": "17px",
+      "whiteSpace": "nowrap",
+      "client": [
+        61,
+        26
+      ],
+      "scroll": [
+        61,
+        26
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "wallet-row-amount",
+      "text": "\u22121 sat",
+      "rect": {
+        "x": 321.34375,
+        "y": 1766.6875,
+        "width": 51.671875,
+        "height": 26.34375,
+        "top": 1766.6875,
+        "right": 373.015625,
+        "bottom": 1793.03125,
+        "left": 321.34375
+      },
+      "font": "17px",
+      "whiteSpace": "nowrap",
+      "client": [
+        52,
+        26
+      ],
+      "scroll": [
+        52,
+        26
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "wallet-row-amount in",
+      "text": "+2 sats",
+      "rect": {
+        "x": 312.140625,
+        "y": 1837.28125,
+        "width": 60.875,
+        "height": 26.34375,
+        "top": 1837.28125,
+        "right": 373.015625,
+        "bottom": 1863.625,
+        "left": 312.140625
+      },
+      "font": "17px",
+      "whiteSpace": "nowrap",
+      "client": [
+        61,
+        26
+      ],
+      "scroll": [
+        61,
+        26
+      ],
+      "failures": []
+    }
+  ],
+  "failures": [],
+  "contentSize": "large",
+  "device": "71E314A6-5C92-4507-994B-7F7E67DE9495"
+}

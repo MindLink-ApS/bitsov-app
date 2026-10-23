@@ -1,0 +1,529 @@
+{
+  "scene": "offline",
+  "lang": "en",
+  "generatedAt": 1792746327483,
+  "ready": true,
+  "rootFont": "53px",
+  "bodyFont": "34px",
+  "space": "normal",
+  "viewport": {
+    "width": 393,
+    "height": 852,
+    "top": 0,
+    "scale": 1
+  },
+  "keyboard": "false",
+  "ownerSheetMounted": false,
+  "tabBar": {
+    "x": 0,
+    "y": 752.90625,
+    "width": 393,
+    "height": 99.09375,
+    "top": 752.90625,
+    "right": 393,
+    "bottom": 852,
+    "left": 0
+  },
+  "tabDisplay": "flex",
+  "status": {
+    "x": 0,
+    "y": 59,
+    "width": 393,
+    "height": 383.390625,
+    "top": 59,
+    "right": 393,
+    "bottom": 442.390625,
+    "left": 0
+  },
+  "safeAreas": [
+    {
+      "side": "top",
+      "value": "59px"
+    },
+    {
+      "side": "bottom",
+      "value": "34px"
+    },
+    {
+      "side": "left",
+      "value": "0px"
+    },
+    {
+      "side": "right",
+      "value": "0px"
+    }
+  ],
+  "elements": [
+    {
+      "tag": "BUTTON",
+      "class": "node-pill",
+      "text": "Starting node",
+      "rect": {
+        "x": 24,
+        "y": -1347,
+        "width": 171.359375,
+        "height": 45,
+        "top": -1347,
+        "right": 195.359375,
+        "bottom": -1302,
+        "left": 24
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        169,
+        43
+      ],
+      "scroll": [
+        169,
+        43
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "primary",
+      "text": "Retry now",
+      "rect": {
+        "x": 127.046875,
+        "y": 378.984375,
+        "width": 138.890625,
+        "height": 52.09375,
+        "top": 378.984375,
+        "right": 265.9375,
+        "bottom": 431.078125,
+        "left": 127.046875
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        139,
+        52
+      ],
+      "scroll": [
+        139,
+        52
+      ],
+      "failures": []
+    },
+    {
+      "tag": "H1",
+      "class": "",
+      "text": "Chats",
+      "rect": {
+        "x": 24,
+        "y": 466.390625,
+        "width": 345,
+        "height": 48,
+        "top": 466.390625,
+        "right": 369,
+        "bottom": 514.390625,
+        "left": 24
+      },
+      "font": "40px",
+      "whiteSpace": "normal",
+      "client": [
+        345,
+        48
+      ],
+      "scroll": [
+        345,
+        48
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Maya",
+      "rect": {
+        "x": 24,
+        "y": 606.78125,
+        "width": 345,
+        "height": 66.6875,
+        "top": 606.78125,
+        "right": 369,
+        "bottom": 673.46875,
+        "left": 24
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        345,
+        67
+      ],
+      "scroll": [
+        345,
+        67
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Josh",
+      "rect": {
+        "x": 24,
+        "y": 679.46875,
+        "width": 345,
+        "height": 66.6875,
+        "top": 679.46875,
+        "right": 369,
+        "bottom": 746.15625,
+        "left": 24
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        345,
+        67
+      ],
+      "scroll": [
+        345,
+        67
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Unnamed contact (cccccccc\u2026cccccccc)",
+      "rect": {
+        "x": 24,
+        "y": 752.15625,
+        "width": 345,
+        "height": 172.0625,
+        "top": 752.15625,
+        "right": 369,
+        "bottom": 924.21875,
+        "left": 24
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        345,
+        172
+      ],
+      "scroll": [
+        345,
+        172
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Gamma VM",
+      "rect": {
+        "x": 24,
+        "y": 930.21875,
+        "width": 345,
+        "height": 66.6875,
+        "top": 930.21875,
+        "right": 369,
+        "bottom": 996.90625,
+        "left": 24
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        345,
+        67
+      ],
+      "scroll": [
+        345,
+        67
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link new-track",
+      "text": "+ New room",
+      "rect": {
+        "x": 24,
+        "y": 1089.296875,
+        "width": 345,
+        "height": 50.09375,
+        "top": 1089.296875,
+        "right": 369,
+        "bottom": 1139.390625,
+        "left": 24
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        48
+      ],
+      "scroll": [
+        343,
+        48
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Noderead-only",
+      "rect": {
+        "x": 24,
+        "y": 1231.78125,
+        "width": 345,
+        "height": 66.6875,
+        "top": 1231.78125,
+        "right": 369,
+        "bottom": 1298.46875,
+        "left": 24
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        345,
+        67
+      ],
+      "scroll": [
+        345,
+        67
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Walletread-only",
+      "rect": {
+        "x": 24,
+        "y": 1304.46875,
+        "width": 345,
+        "height": 66.6875,
+        "top": 1304.46875,
+        "right": 369,
+        "bottom": 1371.15625,
+        "left": 24
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        345,
+        67
+      ],
+      "scroll": [
+        345,
+        67
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Inboxread-only",
+      "rect": {
+        "x": 24,
+        "y": 1377.15625,
+        "width": 345,
+        "height": 66.6875,
+        "top": 1377.15625,
+        "right": 369,
+        "bottom": 1443.84375,
+        "left": 24
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        345,
+        67
+      ],
+      "scroll": [
+        345,
+        67
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Ask your nodelocal",
+      "rect": {
+        "x": 24,
+        "y": 1449.84375,
+        "width": 345,
+        "height": 119.375,
+        "top": 1449.84375,
+        "right": 369,
+        "bottom": 1569.21875,
+        "left": 24
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        345,
+        119
+      ],
+      "scroll": [
+        345,
+        119
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Profilespaste a card",
+      "rect": {
+        "x": 24,
+        "y": 1661.609375,
+        "width": 345,
+        "height": 119.375,
+        "top": 1661.609375,
+        "right": 369,
+        "bottom": 1780.984375,
+        "left": 24
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        345,
+        119
+      ],
+      "scroll": [
+        345,
+        119
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Porchcards & pages \u00b7 paid",
+      "rect": {
+        "x": 24,
+        "y": 1786.984375,
+        "width": 345,
+        "height": 277.4375,
+        "top": 1786.984375,
+        "right": 369,
+        "bottom": 2064.421875,
+        "left": 24
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        345,
+        277
+      ],
+      "scroll": [
+        345,
+        277
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link new-track",
+      "text": "+ New",
+      "rect": {
+        "x": 307,
+        "y": 2088.421875,
+        "width": 44,
+        "height": 44,
+        "top": 2088.421875,
+        "right": 351,
+        "bottom": 2132.421875,
+        "left": 307
+      },
+      "font": "0px",
+      "whiteSpace": "normal",
+      "client": [
+        42,
+        42
+      ],
+      "scroll": [
+        42,
+        42
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Chats",
+      "rect": {
+        "x": 6,
+        "y": 759.90625,
+        "width": 127,
+        "height": 58.09375,
+        "top": 759.90625,
+        "right": 133,
+        "bottom": 818,
+        "left": 6
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        127,
+        58
+      ],
+      "scroll": [
+        127,
+        58
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Wallet",
+      "rect": {
+        "x": 133,
+        "y": 759.90625,
+        "width": 127,
+        "height": 58.09375,
+        "top": 759.90625,
+        "right": 260,
+        "bottom": 818,
+        "left": 133
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        127,
+        58
+      ],
+      "scroll": [
+        127,
+        58
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "You",
+      "rect": {
+        "x": 260,
+        "y": 759.90625,
+        "width": 127,
+        "height": 58.09375,
+        "top": 759.90625,
+        "right": 387,
+        "bottom": 818,
+        "left": 260
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        127,
+        58
+      ],
+      "scroll": [
+        127,
+        58
+      ],
+      "failures": []
+    }
+  ],
+  "failures": [],
+  "contentSize": "accessibility-extra-extra-extra-large",
+  "device": "71E314A6-5C92-4507-994B-7F7E67DE9495"
+}

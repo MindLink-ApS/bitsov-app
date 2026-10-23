@@ -1,0 +1,20 @@
+name: PhoneShellEvidence
+options:
+  deploymentTarget:
+    iOS: '17.0'
+targets:
+  PhoneShellEvidence:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [Tests]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tech.mindlink.phoneshellevidence
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: NO
+        SWIFT_VERSION: 5.0
+        PRODUCT_NAME: PhoneShellEvidence
+        ONLY_ACTIVE_ARCH: YES
+        ARCHS: arm64
+    scheme:
+      testTargets: [PhoneShellEvidence]

@@ -1,0 +1,321 @@
+{
+  "scene": "chat",
+  "lang": "en",
+  "generatedAt": 1792745919407,
+  "ready": true,
+  "rootFont": "53px",
+  "bodyFont": "34px",
+  "space": "normal",
+  "viewport": {
+    "width": 393,
+    "height": 852,
+    "top": 0,
+    "scale": 1
+  },
+  "keyboard": "false",
+  "ownerSheetMounted": false,
+  "tabBar": {
+    "x": 0,
+    "y": 752.90625,
+    "width": 393,
+    "height": 99.09375,
+    "top": 752.90625,
+    "right": 393,
+    "bottom": 852,
+    "left": 0
+  },
+  "tabDisplay": "flex",
+  "status": {
+    "x": 0,
+    "y": 59,
+    "width": 393,
+    "height": 101,
+    "top": 59,
+    "right": 393,
+    "bottom": 160,
+    "left": 0
+  },
+  "safeAreas": [
+    {
+      "side": "top",
+      "value": "59px"
+    },
+    {
+      "side": "bottom",
+      "value": "34px"
+    },
+    {
+      "side": "left",
+      "value": "0px"
+    },
+    {
+      "side": "right",
+      "value": "0px"
+    }
+  ],
+  "elements": [
+    {
+      "tag": "BUTTON",
+      "class": "node-pill",
+      "text": "Connected to your node",
+      "rect": {
+        "x": 24,
+        "y": 71,
+        "width": 180,
+        "height": 76,
+        "top": 71,
+        "right": 204,
+        "bottom": 147,
+        "left": 24
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        178,
+        74
+      ],
+      "scroll": [
+        178,
+        74
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "sats",
+      "text": "2 sats",
+      "rect": {
+        "x": 33,
+        "y": -742.703125,
+        "width": 62.734375,
+        "height": 28,
+        "top": -742.703125,
+        "right": 95.734375,
+        "bottom": -714.703125,
+        "left": 33
+      },
+      "font": "22px",
+      "whiteSpace": "nowrap",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "money-text",
+      "text": "paid 1 sat \u00b7 network fee not reported",
+      "rect": {
+        "x": 51.609375,
+        "y": -396.171875,
+        "width": 292.1533203125,
+        "height": 62.09375,
+        "top": -396.171875,
+        "right": 343.7626953125,
+        "bottom": -334.078125,
+        "left": 51.609375
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "sats",
+      "text": "2 sats",
+      "rect": {
+        "x": 33,
+        "y": 30.546875,
+        "width": 62.734375,
+        "height": 28,
+        "top": 30.546875,
+        "right": 95.734375,
+        "bottom": 58.546875,
+        "left": 33
+      },
+      "font": "22px",
+      "whiteSpace": "nowrap",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "money-text",
+      "text": "paid 1 sat \u00b7 network fee not reported",
+      "rect": {
+        "x": 51.609375,
+        "y": 271.703125,
+        "width": 292.1533203125,
+        "height": 62.09375,
+        "top": 271.703125,
+        "right": 343.7626953125,
+        "bottom": 333.796875,
+        "left": 51.609375
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "primary soft send-btn money",
+      "text": "Send",
+      "rect": {
+        "x": 283.75,
+        "y": 506.3125,
+        "width": 78.25,
+        "height": 44,
+        "top": 506.3125,
+        "right": 362,
+        "bottom": 550.3125,
+        "left": 283.75
+      },
+      "font": "22px",
+      "whiteSpace": "nowrap",
+      "client": [
+        78,
+        44
+      ],
+      "scroll": [
+        78,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "",
+      "text": "up to 7 sats \u00b7 includes max routing fee",
+      "rect": {
+        "x": 88.79217529296875,
+        "y": 612.7109375,
+        "width": 280.20782470703125,
+        "height": 58.796875,
+        "top": 612.7109375,
+        "right": 369,
+        "bottom": 671.5078125,
+        "left": 88.79217529296875
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Chats",
+      "rect": {
+        "x": 6,
+        "y": 759.90625,
+        "width": 127,
+        "height": 58.09375,
+        "top": 759.90625,
+        "right": 133,
+        "bottom": 818,
+        "left": 6
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        127,
+        58
+      ],
+      "scroll": [
+        127,
+        58
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Wallet",
+      "rect": {
+        "x": 133,
+        "y": 759.90625,
+        "width": 127,
+        "height": 58.09375,
+        "top": 759.90625,
+        "right": 260,
+        "bottom": 818,
+        "left": 133
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        127,
+        58
+      ],
+      "scroll": [
+        127,
+        58
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "You",
+      "rect": {
+        "x": 260,
+        "y": 759.90625,
+        "width": 127,
+        "height": 58.09375,
+        "top": 759.90625,
+        "right": 387,
+        "bottom": 818,
+        "left": 260
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        127,
+        58
+      ],
+      "scroll": [
+        127,
+        58
+      ],
+      "failures": []
+    }
+  ],
+  "failures": [],
+  "contentSize": "accessibility-extra-extra-extra-large",
+  "device": "71E314A6-5C92-4507-994B-7F7E67DE9495"
+}

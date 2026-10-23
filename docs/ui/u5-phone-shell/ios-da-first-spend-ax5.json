@@ -1,0 +1,503 @@
+{
+  "scene": "first-spend",
+  "lang": "da",
+  "generatedAt": 1792745959128,
+  "ready": true,
+  "rootFont": "53px",
+  "bodyFont": "34px",
+  "space": "normal",
+  "viewport": {
+    "width": 393,
+    "height": 852,
+    "top": 0,
+    "scale": 1
+  },
+  "keyboard": "false",
+  "ownerSheetMounted": false,
+  "tabBar": {
+    "x": 0,
+    "y": 752.90625,
+    "width": 393,
+    "height": 99.09375,
+    "top": 752.90625,
+    "right": 393,
+    "bottom": 852,
+    "left": 0
+  },
+  "tabDisplay": "flex",
+  "status": {
+    "x": 0,
+    "y": 59,
+    "width": 393,
+    "height": 101,
+    "top": 59,
+    "right": 393,
+    "bottom": 160,
+    "left": 0
+  },
+  "safeAreas": [
+    {
+      "side": "top",
+      "value": "59px"
+    },
+    {
+      "side": "bottom",
+      "value": "34px"
+    },
+    {
+      "side": "left",
+      "value": "0px"
+    },
+    {
+      "side": "right",
+      "value": "0px"
+    }
+  ],
+  "elements": [
+    {
+      "tag": "SPAN",
+      "class": "sats",
+      "text": "2 sats",
+      "rect": {
+        "x": 33,
+        "y": -742.703125,
+        "width": 62.734375,
+        "height": 28,
+        "top": -742.703125,
+        "right": 95.734375,
+        "bottom": -714.703125,
+        "left": 33
+      },
+      "font": "22px",
+      "whiteSpace": "nowrap",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "money-text",
+      "text": "betalt 1 sat \u00b7 netv\u00e6rksgebyr ikke oplyst",
+      "rect": {
+        "x": 51.609375,
+        "y": -396.171875,
+        "width": 301.1337890625,
+        "height": 62.09375,
+        "top": -396.171875,
+        "right": 352.7431640625,
+        "bottom": -334.078125,
+        "left": 51.609375
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "sats",
+      "text": "2 sats",
+      "rect": {
+        "x": 33,
+        "y": 30.546875,
+        "width": 62.734375,
+        "height": 28,
+        "top": 30.546875,
+        "right": 95.734375,
+        "bottom": 58.546875,
+        "left": 33
+      },
+      "font": "22px",
+      "whiteSpace": "nowrap",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "money-text",
+      "text": "betalt 1 sat \u00b7 netv\u00e6rksgebyr ikke oplyst",
+      "rect": {
+        "x": 51.609375,
+        "y": 271.703125,
+        "width": 301.1337890625,
+        "height": 62.09375,
+        "top": 271.703125,
+        "right": 352.7431640625,
+        "bottom": 333.796875,
+        "left": 51.609375
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "primary soft send-btn money",
+      "text": "Send",
+      "rect": {
+        "x": 283.75,
+        "y": 506.3125,
+        "width": 78.25,
+        "height": 44,
+        "top": 506.3125,
+        "right": 362,
+        "bottom": 550.3125,
+        "left": 283.75
+      },
+      "font": "22px",
+      "whiteSpace": "nowrap",
+      "client": [
+        78,
+        44
+      ],
+      "scroll": [
+        78,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "",
+      "text": "h\u00f8jst 7 sats \u00b7 inklusive maksimalt routinggebyr",
+      "rect": {
+        "x": 24.117401123046875,
+        "y": 612.7109375,
+        "width": 344.8825988769531,
+        "height": 58.796875,
+        "top": 612.7109375,
+        "right": 369,
+        "bottom": 671.5078125,
+        "left": 24.117401123046875
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "H2",
+      "class": "",
+      "text": "M\u00e5 beskeder bruge op til 500 sats om dagen?",
+      "rect": {
+        "x": 25,
+        "y": 273.0625,
+        "width": 343,
+        "height": 62.375,
+        "top": 273.0625,
+        "right": 368,
+        "bottom": 335.4375,
+        "left": 25
+      },
+      "font": "24px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        62
+      ],
+      "scroll": [
+        343,
+        62
+      ],
+      "failures": []
+    },
+    {
+      "tag": "P",
+      "class": "",
+      "text": "Godkend p\u00e5 din boks",
+      "rect": {
+        "x": 25,
+        "y": 353.4375,
+        "width": 343,
+        "height": 34.09375,
+        "top": 353.4375,
+        "right": 368,
+        "bottom": 387.53125,
+        "left": 25
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        34
+      ],
+      "scroll": [
+        343,
+        34
+      ],
+      "failures": []
+    },
+    {
+      "tag": "P",
+      "class": "hint",
+      "text": "Tillad starter ejerens godkendelse. Det giver ikke i sig selv nogen tilladelse.",
+      "rect": {
+        "x": 25,
+        "y": 405.53125,
+        "width": 343,
+        "height": 93,
+        "top": 405.53125,
+        "right": 368,
+        "bottom": 498.53125,
+        "left": 25
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        93
+      ],
+      "scroll": [
+        343,
+        93
+      ],
+      "failures": []
+    },
+    {
+      "tag": "P",
+      "class": "first-spend-cost money",
+      "text": "Adgangsgebyr: 1 sat \u00b7 besked: 2 sats \u00b7 routinggebyr h\u00f8jst: 5 sats \u00b7 samlet h\u00f8jst: 8 sats",
+      "rect": {
+        "x": 25,
+        "y": 516.53125,
+        "width": 343,
+        "height": 102.28125,
+        "top": 516.53125,
+        "right": 368,
+        "bottom": 618.8125,
+        "left": 25
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        102
+      ],
+      "scroll": [
+        343,
+        102
+      ],
+      "failures": []
+    },
+    {
+      "tag": "P",
+      "class": "hint",
+      "text": "Appens budgetforudindstillinger. H\u00f8jst 100\u202f000 sats om dagen.",
+      "rect": {
+        "x": 25,
+        "y": 680.8125,
+        "width": 343,
+        "height": 62,
+        "top": 680.8125,
+        "right": 368,
+        "bottom": 742.8125,
+        "left": 25
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        62
+      ],
+      "scroll": [
+        343,
+        62
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "chip",
+      "text": "500 sats om dagen",
+      "rect": {
+        "x": 25,
+        "y": 760.8125,
+        "width": 207.40625,
+        "height": 49,
+        "top": 760.8125,
+        "right": 232.40625,
+        "bottom": 809.8125,
+        "left": 25
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        205,
+        47
+      ],
+      "scroll": [
+        205,
+        47
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "chip",
+      "text": "2\u202f000 sats om dagen",
+      "rect": {
+        "x": 25,
+        "y": 821.8125,
+        "width": 223.984375,
+        "height": 49,
+        "top": 821.8125,
+        "right": 248.984375,
+        "bottom": 870.8125,
+        "left": 25
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        222,
+        47
+      ],
+      "scroll": [
+        222,
+        47
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "chip",
+      "text": "10\u202f000 sats om dagen",
+      "rect": {
+        "x": 25,
+        "y": 882.8125,
+        "width": 232.546875,
+        "height": 49,
+        "top": 882.8125,
+        "right": 257.546875,
+        "bottom": 931.8125,
+        "left": 25
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        231,
+        47
+      ],
+      "scroll": [
+        231,
+        47
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "chip",
+      "text": "Tilpasset",
+      "rect": {
+        "x": 25,
+        "y": 943.8125,
+        "width": 111.59375,
+        "height": 49,
+        "top": 943.8125,
+        "right": 136.59375,
+        "bottom": 992.8125,
+        "left": 25
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        110,
+        47
+      ],
+      "scroll": [
+        110,
+        47
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "primary money",
+      "text": "Tillad 500 sats om dagen",
+      "rect": {
+        "x": 25,
+        "y": 698.8125,
+        "width": 343,
+        "height": 54.09375,
+        "top": 698.8125,
+        "right": 368,
+        "bottom": 752.90625,
+        "left": 25
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        341,
+        52
+      ],
+      "scroll": [
+        341,
+        52
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "link",
+      "text": "Ikke nu",
+      "rect": {
+        "x": 25,
+        "y": 770.90625,
+        "width": 343,
+        "height": 46.09375,
+        "top": 770.90625,
+        "right": 368,
+        "bottom": 817,
+        "left": 25
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        46
+      ],
+      "scroll": [
+        343,
+        46
+      ],
+      "failures": []
+    }
+  ],
+  "failures": [],
+  "contentSize": "accessibility-extra-extra-extra-large",
+  "device": "71E314A6-5C92-4507-994B-7F7E67DE9495"
+}
