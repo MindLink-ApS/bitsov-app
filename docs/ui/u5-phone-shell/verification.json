@@ -23,6 +23,28 @@
       "geometryFailures": 0
     },
     {
+      "file": "ios-da-contacts-error-ax5.json",
+      "scene": "contacts-error",
+      "language": "da",
+      "rootFont": "53px",
+      "contentSize": "accessibility-extra-extra-extra-large",
+      "keyboard": "false",
+      "tabDisplay": "flex",
+      "tabBottom": 852,
+      "geometryFailures": 0
+    },
+    {
+      "file": "ios-da-contacts-error-default.json",
+      "scene": "contacts-error",
+      "language": "da",
+      "rootFont": "17px",
+      "contentSize": "large",
+      "keyboard": "false",
+      "tabDisplay": "flex",
+      "tabBottom": 852,
+      "geometryFailures": 0
+    },
+    {
       "file": "ios-da-first-spend-ax5.json",
       "scene": "first-spend",
       "language": "da",
@@ -80,6 +102,50 @@
     {
       "file": "ios-da-list-default.json",
       "scene": "list",
+      "language": "da",
+      "rootFont": "17px",
+      "contentSize": "large",
+      "keyboard": "false",
+      "tabDisplay": "flex",
+      "tabBottom": 852,
+      "geometryFailures": 0
+    },
+    {
+      "file": "ios-da-offline-ax5.json",
+      "scene": "offline",
+      "language": "da",
+      "rootFont": "53px",
+      "contentSize": "accessibility-extra-extra-extra-large",
+      "keyboard": "false",
+      "tabDisplay": "flex",
+      "tabBottom": 852,
+      "geometryFailures": 0
+    },
+    {
+      "file": "ios-da-offline-default.json",
+      "scene": "offline",
+      "language": "da",
+      "rootFont": "17px",
+      "contentSize": "large",
+      "keyboard": "false",
+      "tabDisplay": "flex",
+      "tabBottom": 852,
+      "geometryFailures": 0
+    },
+    {
+      "file": "ios-da-repair-ax5.json",
+      "scene": "repair",
+      "language": "da",
+      "rootFont": "53px",
+      "contentSize": "accessibility-extra-extra-extra-large",
+      "keyboard": "false",
+      "tabDisplay": "flex",
+      "tabBottom": 852,
+      "geometryFailures": 0
+    },
+    {
+      "file": "ios-da-repair-default.json",
+      "scene": "repair",
       "language": "da",
       "rootFont": "17px",
       "contentSize": "large",
@@ -155,6 +221,28 @@
       "geometryFailures": 0
     },
     {
+      "file": "ios-en-contacts-error-ax5.json",
+      "scene": "contacts-error",
+      "language": "en",
+      "rootFont": "53px",
+      "contentSize": "accessibility-extra-extra-extra-large",
+      "keyboard": "false",
+      "tabDisplay": "flex",
+      "tabBottom": 852,
+      "geometryFailures": 0
+    },
+    {
+      "file": "ios-en-contacts-error-default.json",
+      "scene": "contacts-error",
+      "language": "en",
+      "rootFont": "17px",
+      "contentSize": "large",
+      "keyboard": "false",
+      "tabDisplay": "flex",
+      "tabBottom": 852,
+      "geometryFailures": 0
+    },
+    {
       "file": "ios-en-first-spend-ax5.json",
       "scene": "first-spend",
       "language": "en",
@@ -221,6 +309,50 @@
       "geometryFailures": 0
     },
     {
+      "file": "ios-en-offline-ax5.json",
+      "scene": "offline",
+      "language": "en",
+      "rootFont": "53px",
+      "contentSize": "accessibility-extra-extra-extra-large",
+      "keyboard": "false",
+      "tabDisplay": "flex",
+      "tabBottom": 852,
+      "geometryFailures": 0
+    },
+    {
+      "file": "ios-en-offline-default.json",
+      "scene": "offline",
+      "language": "en",
+      "rootFont": "17px",
+      "contentSize": "large",
+      "keyboard": "false",
+      "tabDisplay": "flex",
+      "tabBottom": 852,
+      "geometryFailures": 0
+    },
+    {
+      "file": "ios-en-repair-ax5.json",
+      "scene": "repair",
+      "language": "en",
+      "rootFont": "53px",
+      "contentSize": "accessibility-extra-extra-extra-large",
+      "keyboard": "false",
+      "tabDisplay": "flex",
+      "tabBottom": 852,
+      "geometryFailures": 0
+    },
+    {
+      "file": "ios-en-repair-default.json",
+      "scene": "repair",
+      "language": "en",
+      "rootFont": "17px",
+      "contentSize": "large",
+      "keyboard": "false",
+      "tabDisplay": "flex",
+      "tabBottom": 852,
+      "geometryFailures": 0
+    },
+    {
       "file": "ios-en-wallet-ax5.json",
       "scene": "wallet",
       "language": "en",
@@ -265,7 +397,19 @@
       "geometryFailures": 0
     }
   ],
-  "nativeMatrix": 20,
+  "nativeMatrix": 32,
   "nativeKeyboard": 4,
-  "prohibitedUiActions": 0
+  "prohibitedUiActions": 0,
+  "round": 1,
+  "baseHead": "b5672071f4374d4854711cd2660964d03df7db33",
+  "webkitPhoneShell": 14,
+  "webkitDynamicType": 27,
+  "typecheck": "passed",
+  "vitest": {
+    "files": 122,
+    "tests": 2236,
+    "result": "passed",
+    "command": "npx vitest run"
+  },
+  "verificationNote": "One earlier concurrent full run timed out in the existing i18n-source audit (5000ms); isolated rerun and final full run passed. Existing Solid disposal warnings remain."
 }

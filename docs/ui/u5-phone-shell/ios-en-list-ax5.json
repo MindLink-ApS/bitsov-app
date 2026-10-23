@@ -1,7 +1,7 @@
 {
   "scene": "list",
   "lang": "en",
-  "generatedAt": 1792742338312,
+  "generatedAt": 1792745915558,
   "ready": true,
   "rootFont": "53px",
   "bodyFont": "34px",
@@ -29,10 +29,10 @@
     "x": 0,
     "y": 59,
     "width": 393,
-    "height": 73.09375,
+    "height": 101,
     "top": 59,
     "right": 393,
-    "bottom": 132.09375,
+    "bottom": 160,
     "left": 0
   },
   "safeAreas": [
@@ -61,22 +61,22 @@
       "rect": {
         "x": 24,
         "y": 71,
-        "width": 295.578125,
-        "height": 48.09375,
+        "width": 180,
+        "height": 76,
         "top": 71,
-        "right": 319.578125,
-        "bottom": 119.09375,
+        "right": 204,
+        "bottom": 147,
         "left": 24
       },
       "font": "22px",
       "whiteSpace": "normal",
       "client": [
-        294,
-        46
+        178,
+        74
       ],
       "scroll": [
-        294,
-        46
+        178,
+        74
       ],
       "failures": []
     },
@@ -86,12 +86,12 @@
       "text": "Chats",
       "rect": {
         "x": 24,
-        "y": 156.09375,
+        "y": 184,
         "width": 345,
         "height": 48,
-        "top": 156.09375,
+        "top": 184,
         "right": 369,
-        "bottom": 204.09375,
+        "bottom": 232,
         "left": 24
       },
       "font": "40px",
@@ -112,12 +112,12 @@
       "text": "Maya",
       "rect": {
         "x": 24,
-        "y": 296.484375,
+        "y": 324.390625,
         "width": 345,
         "height": 66.6875,
-        "top": 296.484375,
+        "top": 324.390625,
         "right": 369,
-        "bottom": 363.171875,
+        "bottom": 391.078125,
         "left": 24
       },
       "font": "22px",
@@ -138,12 +138,12 @@
       "text": "Josh",
       "rect": {
         "x": 24,
-        "y": 369.171875,
+        "y": 397.078125,
         "width": 345,
         "height": 66.6875,
-        "top": 369.171875,
+        "top": 397.078125,
         "right": 369,
-        "bottom": 435.859375,
+        "bottom": 463.765625,
         "left": 24
       },
       "font": "22px",
@@ -164,12 +164,12 @@
       "text": "Unnamed contact (cccccccc\u2026cccccccc)",
       "rect": {
         "x": 24,
-        "y": 441.859375,
+        "y": 469.765625,
         "width": 345,
         "height": 172.0625,
-        "top": 441.859375,
+        "top": 469.765625,
         "right": 369,
-        "bottom": 613.921875,
+        "bottom": 641.828125,
         "left": 24
       },
       "font": "22px",
@@ -190,12 +190,12 @@
       "text": "Gamma VM",
       "rect": {
         "x": 24,
-        "y": 619.921875,
+        "y": 647.828125,
         "width": 345,
         "height": 66.6875,
-        "top": 619.921875,
+        "top": 647.828125,
         "right": 369,
-        "bottom": 686.609375,
+        "bottom": 714.515625,
         "left": 24
       },
       "font": "22px",
@@ -216,12 +216,12 @@
       "text": "+ New room",
       "rect": {
         "x": 24,
-        "y": 779,
+        "y": 806.90625,
         "width": 345,
         "height": 50.09375,
-        "top": 779,
+        "top": 806.90625,
         "right": 369,
-        "bottom": 829.09375,
+        "bottom": 857,
         "left": 24
       },
       "font": "22px",
@@ -242,12 +242,12 @@
       "text": "Noderead-only",
       "rect": {
         "x": 24,
-        "y": 921.484375,
+        "y": 949.390625,
         "width": 345,
         "height": 66.6875,
-        "top": 921.484375,
+        "top": 949.390625,
         "right": 369,
-        "bottom": 988.171875,
+        "bottom": 1016.078125,
         "left": 24
       },
       "font": "22px",
@@ -268,12 +268,12 @@
       "text": "Walletread-only",
       "rect": {
         "x": 24,
-        "y": 994.171875,
+        "y": 1022.078125,
         "width": 345,
         "height": 66.6875,
-        "top": 994.171875,
+        "top": 1022.078125,
         "right": 369,
-        "bottom": 1060.859375,
+        "bottom": 1088.765625,
         "left": 24
       },
       "font": "22px",
@@ -294,12 +294,12 @@
       "text": "Inboxread-only",
       "rect": {
         "x": 24,
-        "y": 1066.859375,
+        "y": 1094.765625,
         "width": 345,
         "height": 66.6875,
-        "top": 1066.859375,
+        "top": 1094.765625,
         "right": 369,
-        "bottom": 1133.546875,
+        "bottom": 1161.453125,
         "left": 24
       },
       "font": "22px",
@@ -320,12 +320,12 @@
       "text": "Ask your nodelocal",
       "rect": {
         "x": 24,
-        "y": 1139.546875,
+        "y": 1167.453125,
         "width": 345,
         "height": 119.375,
-        "top": 1139.546875,
+        "top": 1167.453125,
         "right": 369,
-        "bottom": 1258.921875,
+        "bottom": 1286.828125,
         "left": 24
       },
       "font": "22px",
@@ -346,12 +346,12 @@
       "text": "Profilespaste a card",
       "rect": {
         "x": 24,
-        "y": 1351.3125,
+        "y": 1379.21875,
         "width": 345,
         "height": 119.375,
-        "top": 1351.3125,
+        "top": 1379.21875,
         "right": 369,
-        "bottom": 1470.6875,
+        "bottom": 1498.59375,
         "left": 24
       },
       "font": "22px",
@@ -372,12 +372,12 @@
       "text": "Porchcards & pages \u00b7 paid",
       "rect": {
         "x": 24,
-        "y": 1476.6875,
+        "y": 1504.59375,
         "width": 345,
         "height": 277.4375,
-        "top": 1476.6875,
+        "top": 1504.59375,
         "right": 369,
-        "bottom": 1754.125,
+        "bottom": 1782.03125,
         "left": 24
       },
       "font": "22px",
@@ -398,12 +398,12 @@
       "text": "+ New",
       "rect": {
         "x": 307,
-        "y": 1778.125,
+        "y": 1806.03125,
         "width": 44,
         "height": 44,
-        "top": 1778.125,
+        "top": 1806.03125,
         "right": 351,
-        "bottom": 1822.125,
+        "bottom": 1850.03125,
         "left": 307
       },
       "font": "0px",

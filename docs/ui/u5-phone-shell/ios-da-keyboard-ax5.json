@@ -1,7 +1,7 @@
 {
   "scene": "keyboard",
   "lang": "da",
-  "generatedAt": 1792741981345,
+  "generatedAt": 1792746071235,
   "ready": true,
   "rootFont": "53px",
   "bodyFont": "34px",
@@ -29,10 +29,10 @@
     "x": 0,
     "y": 58.65625,
     "width": 393,
-    "height": 73.09375,
+    "height": 101,
     "top": 58.65625,
     "right": 393,
-    "bottom": 131.75,
+    "bottom": 159.65625,
     "left": 0
   },
   "safeAreas": [
@@ -61,22 +61,22 @@
       "rect": {
         "x": 24,
         "y": 70.65625,
-        "width": 271.609375,
-        "height": 48.09375,
+        "width": 180,
+        "height": 76,
         "top": 70.65625,
-        "right": 295.609375,
-        "bottom": 118.75,
+        "right": 204,
+        "bottom": 146.65625,
         "left": 24
       },
       "font": "22px",
       "whiteSpace": "normal",
       "client": [
-        270,
-        46
+        178,
+        74
       ],
       "scroll": [
-        270,
-        46
+        178,
+        74
       ],
       "failures": []
     },
@@ -86,12 +86,12 @@
       "text": "2 sats",
       "rect": {
         "x": 33,
-        "y": -868.953125,
+        "y": -841.046875,
         "width": 62.734375,
         "height": 28,
-        "top": -868.953125,
+        "top": -841.046875,
         "right": 95.734375,
-        "bottom": -840.953125,
+        "bottom": -813.046875,
         "left": 33
       },
       "font": "22px",
@@ -112,12 +112,12 @@
       "text": "betalt 1 sat \u00b7 netv\u00e6rksgebyr ikke oplyst",
       "rect": {
         "x": 51.609375,
-        "y": -522.421875,
+        "y": -494.515625,
         "width": 301.1337890625,
         "height": 62.09375,
-        "top": -522.421875,
+        "top": -494.515625,
         "right": 352.7431640625,
-        "bottom": -460.328125,
+        "bottom": -432.421875,
         "left": 51.609375
       },
       "font": "22px",
@@ -138,12 +138,12 @@
       "text": "2 sats",
       "rect": {
         "x": 33,
-        "y": -95.703125,
+        "y": -67.796875,
         "width": 62.734375,
         "height": 28,
-        "top": -95.703125,
+        "top": -67.796875,
         "right": 95.734375,
-        "bottom": -67.703125,
+        "bottom": -39.796875,
         "left": 33
       },
       "font": "22px",
@@ -164,12 +164,12 @@
       "text": "betalt 1 sat \u00b7 netv\u00e6rksgebyr ikke oplyst",
       "rect": {
         "x": 51.609375,
-        "y": 145.453125,
+        "y": 173.359375,
         "width": 301.1337890625,
         "height": 62.09375,
-        "top": 145.453125,
+        "top": 173.359375,
         "right": 352.7431640625,
-        "bottom": 207.546875,
+        "bottom": 235.453125,
         "left": 51.609375
       },
       "font": "22px",
@@ -190,12 +190,12 @@
       "text": "Send",
       "rect": {
         "x": 283.75,
-        "y": 349.84375,
+        "y": 377.75,
         "width": 78.25,
         "height": 44,
-        "top": 349.84375,
+        "top": 377.75,
         "right": 362,
-        "bottom": 393.84375,
+        "bottom": 421.75,
         "left": 283.75
       },
       "font": "22px",
@@ -216,12 +216,12 @@
       "text": "h\u00f8jst 7 sats \u00b7 inklusive maksimalt routinggebyr",
       "rect": {
         "x": 24.117401123046875,
-        "y": 407.2421875,
+        "y": 435.1484375,
         "width": 344.8825988769531,
         "height": 58.796875,
-        "top": 407.2421875,
+        "top": 435.1484375,
         "right": 369,
-        "bottom": 466.0390625,
+        "bottom": 493.9453125,
         "left": 24.117401123046875
       },
       "font": "22px",

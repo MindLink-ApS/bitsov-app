@@ -54,20 +54,25 @@ export function installEdgeBack(destination: () => Destination | null = visibleB
   };
 }
 
-const visible = (el: Element) => !el.closest('[hidden], [inert], [aria-hidden="true"]')
+export const visibleNavigationSurface = (el: Element) => !el.closest('[hidden], [inert], [aria-hidden="true"]')
   && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+/** Shared by edge Back and phone tabs. Receive is a Wallet destination, so only
+ * edge Back blocks it; ordinary page dialogs are routes, not blocking sheets. */
+export function navigationBlocked(includeReceive = false): boolean {
+  const selector = '[data-swipe-money="true"], [data-composer-panel], [data-wallet-send], [data-starter-balance], '
+    + '[data-swipe-approval="true"], [data-first-spend-scrim], [data-contact-approval], [data-approval="pending"], '
+    + '[data-ai-card="disclosure"][data-state="preview"], [data-ai-card="disclosure"][data-state="sending"], '
+    + '.owner-approval, [data-owner-approval-sheet], [data-phone-onboarding="words"], [data-phone-onboarding="fingerprint"], '
+    + '[data-swipe-call="true"]';
+  return Array.from(document.querySelectorAll(selector + (includeReceive ? ', [data-wallet-receive]' : ''))).some(visibleNavigationSurface)
+    || Array.from(document.querySelectorAll('dialog[open], [role="dialog"]')).some(el => visibleNavigationSurface(el)
+      && !el.matches('[data-settings], [data-wallet-page], [data-contact-panel]'));
+}
 /** The same buttons handle taps and gestures. New/unrecognized dialogs fail closed. */
 export function visibleBackDestination(): Destination | null {
-  const any = (selector: string) => Array.from(document.querySelectorAll(selector)).some(visible);
-  const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('button[data-ios-back]')).filter(el => visible(el) && !el.disabled);
-  const route = backRoute({
-    routes: buttons.map(el => el.dataset.iosBack as BackRoute),
-    money: any('[data-swipe-money="true"], [data-composer-panel], [data-wallet-send], [data-wallet-receive], [data-starter-balance]'),
-    approval: any('[data-swipe-approval="true"], [data-first-spend-scrim], [data-contact-approval], [data-approval="pending"], [data-ai-card="disclosure"][data-state="preview"], [data-ai-card="disclosure"][data-state="sending"], .owner-approval, [data-owner-approval-sheet], [data-phone-onboarding="words"], [data-phone-onboarding="fingerprint"]'),
-    call: any('[data-swipe-call="true"]'),
-    modal: Array.from(document.querySelectorAll('dialog[open], [role="dialog"]')).some(el => visible(el)
-      && !el.matches('[data-settings], [data-wallet-page], [data-contact-panel]')),
-  });
+  if (navigationBlocked(true)) return null;
+  const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('button[data-ios-back]')).filter(el => visibleNavigationSurface(el) && !el.disabled);
+  const route = backRoute({ routes: buttons.map(el => el.dataset.iosBack as BackRoute), money: false, approval: false, call: false, modal: false });
   const button = buttons.find(el => el.dataset.iosBack === route);
   return route && button ? { route, identity: button, back: () => button.click() } : null;
 }

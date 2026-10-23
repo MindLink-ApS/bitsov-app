@@ -125,8 +125,7 @@ it.each([['iPhone', IPHONE], ['Android', ANDROID]])('assistant, Browse and Walle
   $<HTMLButtonElement>('[data-track="discover"]')!.click();
   await vi.waitFor(() => expect($('[data-panel="discover"]')).not.toBeNull());
   expect($('[data-panel="discover"]')!.textContent).not.toMatch(/desktop app/);
-  $<HTMLButtonElement>('[data-profile]')!.click();
-  $<HTMLButtonElement>('[data-open-wallet]')!.click();
+  $<HTMLButtonElement>('[data-phone-tab="wallet"]')!.click();
   await vi.waitFor(() => expect($('[data-wallet-tab="activity"]')).not.toBeNull());
   $<HTMLButtonElement>('[data-wallet-tab="activity"]')!.click();
   expect(mount.textContent).toContain('made in this app on this phone');

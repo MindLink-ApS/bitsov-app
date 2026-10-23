@@ -12,6 +12,8 @@ async function mount(source: Source) {
   vi.stubGlobal('__TAURI_INTERNALS__', {});
   vi.spyOn(Element.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList);
   dispose = render(() => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={null} />, document.body);
+  await vi.waitFor(() => expect(document.querySelector('[data-phone-list] [data-track^="peer:"]')).not.toBeNull());
+  document.querySelector<HTMLButtonElement>('[data-phone-list] [data-track^="peer:"]')!.click();
   await vi.waitFor(() => expect(document.querySelector('[data-composer]')).not.toBeNull());
 }
 

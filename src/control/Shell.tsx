@@ -376,22 +376,61 @@ export function ControlCenter(props: Props) {
   const [peersLoaded, setPeersLoaded] = createSignal(false);
   const [rooms, setRooms] = createSignal<Room[]>([]);
   const [recentCallPeers, setRecentCallPeers] = createSignal<string[]>([]);
-  const [phoneCallPeers] = createResource(
-    () => phoneShell() && live() ? peers().map(p => p.node_id.toLowerCase()).join(',') : false,
-    async ids => (await Promise.all(ids.split(',').filter(Boolean).map(async id => {
-      // messages_list is paginated; a call may predate the newest 50 messages.
+  // Cache settled/in-flight reads for this shell/source. Reconnects and peer
+  // refreshes reuse them; a live call replaces even a cached negative result.
+  const callHistory = new Map<string, Promise<boolean>>();
+  const callHistoryNewest = new Map<string, number>();
+  const knownCallPeers = new Set<string>();
+  const [callHistoryRevision, setCallHistoryRevision] = createSignal(0);
+  const noteCallHistory = (id: string) => {
+    knownCallPeers.add(id);
+    callHistory.set(id, Promise.resolve(true));
+    setRecentCallPeers(ids => ids.includes(id) ? ids : [...ids, id]);
+  };
+  const reconcileCallHistory = () => {
+    // A fresh websocket does not replay missed messages. Recheck only history
+    // newer than the last completed negative read; retain every positive result.
+    for (const id of callHistory.keys()) if (!knownCallPeers.has(id)) callHistory.delete(id);
+    setCallHistoryRevision(value => value + 1);
+  };
+  const peerHasCall = (id: string): Promise<boolean> => {
+    const cached = callHistory.get(id);
+    if (cached) return cached;
+    const cutoff = callHistoryNewest.get(id);
+    let newest = cutoff ?? -Infinity;
+    const read = (async () => {
       let before: number | undefined;
-      try {
-        while (phoneShell() && live()) {
-          const page = await source.messages(id, before);
-          if (page.some(m => isCallKind(m.kind))) return id;
-          const oldest = Math.min(...page.map(m => m.timestamp));
-          if (!page.length || !Number.isFinite(oldest) || (before !== undefined && oldest >= before)) break;
-          before = oldest;
-        }
-      } catch { /* A failed read is not evidence of a call. */ }
-      return null;
-    }))).filter((id): id is string => id !== null),
+      while (phoneShell() && live()) {
+        const page = await source.messages(id, before);
+        if (before === undefined) newest = Math.max(newest, ...page.map(m => m.timestamp));
+        if (page.some(m => isCallKind(m.kind))) return true;
+        const oldest = Math.min(...page.map(m => m.timestamp));
+        if (!page.length || !Number.isFinite(oldest) || (cutoff !== undefined && oldest <= cutoff) || (before !== undefined && oldest >= before)) return false;
+        before = oldest;
+      }
+      throw new Error('Call history read interrupted');
+    })();
+    callHistory.set(id, read);
+    void read.then(hasCall => {
+      if (callHistory.get(id) !== read) return;
+      if (hasCall) knownCallPeers.add(id);
+      else callHistoryNewest.set(id, newest);
+    }, () => { if (callHistory.get(id) === read) callHistory.delete(id); });
+    return read;
+  };
+  const [phoneCallPeers] = createResource(
+    () => phoneShell() && live() ? { ids: peers().map(p => p.node_id.toLowerCase()), all: phoneTab() === 'calls', revision: callHistoryRevision() } : false,
+    async ({ ids, all }) => {
+      const found: string[] = [];
+      for (const id of ids) {
+        try { if (await peerHasCall(id)) found.push(id); }
+        catch { /* Failed reads are retryable, never cached as no history. */ }
+        // Startup only answers "has any call?". Enumerate the rest on demand.
+        if (found.length && !all) break;
+        if (!phoneShell() || !live()) break;
+      }
+      return found;
+    },
   );
   const callPeers = createMemo(() => [...new Set([...(phoneCallPeers() ?? []), ...recentCallPeers()])]);
   const [members, setMembers] = createStore<Record<string, string[]>>({});
@@ -820,7 +859,10 @@ export function ControlCenter(props: Props) {
       // History can already hold a message still sending here: its bubble claims it, as for the live echo.
       for (const m of page) claimEcho(m, t.kind === 'room' ? t.id : null);
       setThreads('t', key, (old) => mergeMessages(old ?? [], page));
-      if (t.kind === 'peer') foldRooms(page, false);
+      if (t.kind === 'peer') {
+        foldRooms(page, false);
+        if (page.some(m => isCallKind(m.kind))) noteCallHistory(t.id.toLowerCase());
+      }
       // After the thread, so a restored send whose message is already here is not shown twice.
       loadOps(t);
       setEnergyAt(Date.now());
@@ -884,6 +926,7 @@ export function ControlCenter(props: Props) {
           .onLive((event) => {
             if (event.type === 'link') {
               if (mine !== generation) return;
+              if (event.state === 'open' && link() !== null && link() !== 'open') reconcileCallHistory();
               setLink(event.state);
               if (event.state !== 'open') { budgetRevision += 1; setBudgetConfirmed(false); }
               else if (live()) void loadSpend().then(() => { if (mine === generation && live()) return loadBudget(); });
@@ -901,7 +944,7 @@ export function ControlCenter(props: Props) {
             // Call signals ring or steer the call; they are not chat.
             if (event.type === 'message' && isCallKind(event.message.kind)) {
               const other = event.message.sender.toLowerCase() === ownId().toLowerCase() ? event.message.recipient : event.message.sender;
-              setRecentCallPeers(ids => [...new Set([...ids, other.toLowerCase()])]);
+              noteCallHistory(other.toLowerCase());
               // Each engine takes only its own: meeting legs carry a roster.
               void calls.receive(event.message, ownId());
               void meetings.receive(event.message, ownId());
@@ -1796,6 +1839,7 @@ export function ControlCenter(props: Props) {
   const openPhoneSettings = (page: ReturnType<typeof tab>) => { if (phoneGuard.check() || walletBusy()) return; setTab(page); setContextOpen(true); };
   const selectPhoneTab = (next: PhoneTab) => {
     if (phoneGuard.check() || walletBusy() || pairingBlockingActions() > 0) return;
+    if (next === 'chats' && phoneTab() === 'chats') phoneBack();
     if (next === 'wallet') { if (walletTab() === null) openWallet(); }
     else { setWalletTab(null); setPhoneTab(next); }
   };
@@ -1837,6 +1881,9 @@ export function ControlCenter(props: Props) {
             if (callView().peer) setTrack({ kind: 'peer', id: callView().peer!.toLowerCase() });
             queueMicrotask(() => callPanel?.focus());
           }} />
+          {props.offline}
+          <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
+            onEnded={() => { void loadBudget(); void loadWallet(); }} />
           <Show when={moneyBlocked()}><p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p></Show>
         </header>
       </Show>
@@ -1856,6 +1903,9 @@ export function ControlCenter(props: Props) {
         active={props.active}
         sample={source.mode === 'sample'}
         peers={peers()}
+        peersPending={!peersLoaded()}
+        peersError={errors.peers}
+        onReconnect={async () => { await props.onReconnect?.(); await loadPeers(); }}
         rooms={rooms()}
         nodeRooms={nodeRooms()}
         boundRooms={localRooms()}
@@ -1885,9 +1935,11 @@ export function ControlCenter(props: Props) {
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
         <section class="track" aria-label="Track" hidden={phoneShell() && (phoneTab() !== 'chats' || track() === null)} inert={walletTab() !== null || contextOpen()}>
           <Show when={track()}><button type="button" class="link ios-back" data-ios-back="thread" onClick={phoneBack}><Show when={phoneShell()}><span aria-hidden="true">‹ </span></Show>{tr('uiBack')}</button></Show>
-          {props.offline}
-          <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
-            onEnded={() => { void loadBudget(); void loadWallet(); }} />
+          <Show when={!phoneShell()}>
+            {props.offline}
+            <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
+              onEnded={() => { void loadBudget(); void loadWallet(); }} />
+          </Show>
           <Show when={moneyBlocked() && !phoneShell()}>
             <p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p>
           </Show>
@@ -2474,6 +2526,9 @@ function Rail(props: {
   active: boolean;
   sample: boolean;
   peers: Peer[];
+  peersPending?: boolean;
+  peersError?: string;
+  onReconnect?: () => Promise<void>;
   rooms: Room[];
   /** Our node checks room bindings: bound rooms and "New room" replace the coming-soon line. */
   nodeRooms: boolean;
@@ -2553,7 +2608,14 @@ function Rail(props: {
       <div class="track-group">
         <h2>{tr('uiContacts')}</h2>
         <Show when={props.active} fallback={<p class="track-empty">{tr('uiAvailableAfterSetup')}</p>}>
-          <For each={props.peers} fallback={<p class="track-empty">{tr('uiNoContactsYet')}</p>}>
+          <Show when={props.phone && props.peersError}>
+            <SoftError message={props.peersError!} summary="We could not load your contacts." onReconnect={props.onReconnect} />
+          </Show>
+          <For each={props.peers} fallback={
+            <Show when={!props.phone || (!props.peersPending && !props.peersError)} fallback={
+              <Show when={props.phone && props.peersPending && !props.peersError}><DelayedSpinner /></Show>
+            }><p class="track-empty">{tr('uiNoContactsYet')}</p></Show>
+          }>
             {(p) =>
               item({ kind: 'peer', id: p.node_id.toLowerCase() }, () => peerName(p, p.node_id), <span class={`dot ${p.connected ? 'ok' : ''}`} title={p.connected ? tr('uiConnected') : tr('uiOffline')} />)
             }

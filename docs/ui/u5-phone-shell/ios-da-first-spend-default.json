@@ -1,7 +1,7 @@
 {
   "scene": "first-spend",
   "lang": "da",
-  "generatedAt": 1792742334645,
+  "generatedAt": 1792745900408,
   "ready": true,
   "rootFont": "17px",
   "bodyFont": "17px",
@@ -29,10 +29,10 @@
     "x": 0,
     "y": 59,
     "width": 393,
-    "height": 60.96875,
+    "height": 83.65625,
     "top": 59,
     "right": 393,
-    "bottom": 119.96875,
+    "bottom": 142.65625,
     "left": 0
   },
   "safeAreas": [
@@ -60,12 +60,12 @@
       "text": "2 sats",
       "rect": {
         "x": 24.984375,
-        "y": 49,
+        "y": 48.6875,
         "width": 48.4765625,
         "height": 22,
-        "top": 49,
+        "top": 48.6875,
         "right": 73.4609375,
-        "bottom": 71,
+        "bottom": 70.6875,
         "left": 24.984375
       },
       "font": "17px",
@@ -86,12 +86,12 @@
       "text": "betalt 1 sat \u00b7 netv\u00e6rksgebyr ikke oplyst",
       "rect": {
         "x": 60.71875,
-        "y": 169.015625,
+        "y": 168.703125,
         "width": 316.28466796875,
         "height": 22,
-        "top": 169.015625,
+        "top": 168.703125,
         "right": 377.00341796875,
-        "bottom": 191.015625,
+        "bottom": 190.703125,
         "left": 60.71875
       },
       "font": "17px",
@@ -112,12 +112,12 @@
       "text": "2 sats",
       "rect": {
         "x": 24.984375,
-        "y": 320.265625,
+        "y": 319.953125,
         "width": 48.4765625,
         "height": 22,
-        "top": 320.265625,
+        "top": 319.953125,
         "right": 73.4609375,
-        "bottom": 342.265625,
+        "bottom": 341.953125,
         "left": 24.984375
       },
       "font": "17px",
@@ -138,12 +138,12 @@
       "text": "betalt 1 sat \u00b7 netv\u00e6rksgebyr ikke oplyst",
       "rect": {
         "x": 60.71875,
-        "y": 440.28125,
+        "y": 439.96875,
         "width": 316.28466796875,
         "height": 22,
-        "top": 440.28125,
+        "top": 439.96875,
         "right": 377.00341796875,
-        "bottom": 462.28125,
+        "bottom": 461.96875,
         "left": 60.71875
       },
       "font": "17px",
@@ -216,12 +216,12 @@
       "text": "M\u00e5 beskeder bruge op til 500 sats om dagen?",
       "rect": {
         "x": 16.984375,
-        "y": 411,
+        "y": 409,
         "width": 359.03125,
         "height": 46.78125,
-        "top": 411,
+        "top": 409,
         "right": 376.015625,
-        "bottom": 457.78125,
+        "bottom": 455.78125,
         "left": 16.984375
       },
       "font": "18.000008px",
@@ -242,12 +242,12 @@
       "text": "Godkend p\u00e5 din boks",
       "rect": {
         "x": 16.984375,
-        "y": 469.765625,
+        "y": 467.765625,
         "width": 359.03125,
         "height": 26.34375,
-        "top": 469.765625,
+        "top": 467.765625,
         "right": 376.015625,
-        "bottom": 496.109375,
+        "bottom": 494.109375,
         "left": 16.984375
       },
       "font": "17px",
@@ -268,12 +268,12 @@
       "text": "Tillad starter ejerens godkendelse. Det giver ikke i sig selv nogen tilladelse.",
       "rect": {
         "x": 16.984375,
-        "y": 508.09375,
+        "y": 506.09375,
         "width": 359.03125,
         "height": 49.59375,
-        "top": 508.09375,
+        "top": 506.09375,
         "right": 376.015625,
-        "bottom": 557.6875,
+        "bottom": 555.6875,
         "left": 16.984375
       },
       "font": "16.00001px",
@@ -294,12 +294,12 @@
       "text": "Adgangsgebyr: 1 sat \u00b7 besked: 2 sats \u00b7 routinggebyr h\u00f8jst: 5 sats \u00b7 samlet h\u00f8jst: 8 sats",
       "rect": {
         "x": 16.984375,
-        "y": 569.671875,
+        "y": 567.671875,
         "width": 359.03125,
         "height": 79.03125,
-        "top": 569.671875,
+        "top": 567.671875,
         "right": 376.015625,
-        "bottom": 648.703125,
+        "bottom": 646.703125,
         "left": 16.984375
       },
       "font": "17px",
@@ -320,12 +320,12 @@
       "text": "Appens budgetforudindstillinger. H\u00f8jst 100\u202f000 sats om dagen.",
       "rect": {
         "x": 16.984375,
-        "y": 704.6875,
+        "y": 702.6875,
         "width": 359.03125,
         "height": 49.59375,
-        "top": 704.6875,
+        "top": 702.6875,
         "right": 376.015625,
-        "bottom": 754.28125,
+        "bottom": 752.28125,
         "left": 16.984375
       },
       "font": "16.00001px",
@@ -346,12 +346,12 @@
       "text": "500 sats om dagen",
       "rect": {
         "x": 16.984375,
-        "y": 766.265625,
+        "y": 764.265625,
         "width": 171.125,
         "height": 44,
-        "top": 766.265625,
+        "top": 764.265625,
         "right": 188.109375,
-        "bottom": 810.265625,
+        "bottom": 808.265625,
         "left": 16.984375
       },
       "font": "16.00001px",
@@ -372,12 +372,12 @@
       "text": "2\u202f000 sats om dagen",
       "rect": {
         "x": 16.984375,
-        "y": 818.25,
+        "y": 816.25,
         "width": 184.390625,
         "height": 44,
-        "top": 818.25,
+        "top": 816.25,
         "right": 201.375,
-        "bottom": 862.25,
+        "bottom": 860.25,
         "left": 16.984375
       },
       "font": "16.00001px",
@@ -398,12 +398,12 @@
       "text": "10\u202f000 sats om dagen",
       "rect": {
         "x": 16.984375,
-        "y": 870.234375,
+        "y": 868.234375,
         "width": 191.234375,
         "height": 44,
-        "top": 870.234375,
+        "top": 868.234375,
         "right": 208.21875,
-        "bottom": 914.234375,
+        "bottom": 912.234375,
         "left": 16.984375
       },
       "font": "16.00001px",
@@ -424,12 +424,12 @@
       "text": "Tilpasset",
       "rect": {
         "x": 216.203125,
-        "y": 870.234375,
+        "y": 868.234375,
         "width": 94.484375,
         "height": 44,
-        "top": 870.234375,
+        "top": 868.234375,
         "right": 310.6875,
-        "bottom": 914.234375,
+        "bottom": 912.234375,
         "left": 216.203125
       },
       "font": "16.00001px",
@@ -450,10 +450,10 @@
       "text": "Tillad 500 sats om dagen",
       "rect": {
         "x": 16.984375,
-        "y": 716.671875,
+        "y": 714.671875,
         "width": 359.03125,
-        "height": 44.34375,
-        "top": 716.671875,
+        "height": 46.34375,
+        "top": 714.671875,
         "right": 376.015625,
         "bottom": 761.015625,
         "left": 16.984375
@@ -461,11 +461,11 @@
       "font": "17px",
       "whiteSpace": "normal",
       "client": [
-        359,
+        357,
         44
       ],
       "scroll": [
-        359,
+        357,
         44
       ],
       "failures": []

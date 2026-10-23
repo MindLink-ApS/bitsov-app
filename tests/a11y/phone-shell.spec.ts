@@ -91,3 +91,48 @@ test('starter remains reachable when flagged and blocks swipe Back', async ({ pa
   await page.locator('[data-wallet-close]').click();
   await expect(page.locator('[data-starter-entry]')).toBeVisible();
 });
+
+for (const scene of ['offline', 'repair', 'contacts-error']) {
+  test(`${scene}: recovery remains reachable on the landing list`, async ({ page }) => {
+    await page.goto(`${preview}?scene=${scene}`);
+    await expect(page.locator('[data-phone-list]')).toBeVisible();
+    const selector = scene === 'offline' ? '[data-node-offline] button' : scene === 'repair' ? '[data-call-repairs] button' : '[data-phone-list] [data-soft-reconnect]';
+    const control = page.locator(selector).first();
+    await expect(control).toBeVisible();
+    await control.scrollIntoViewIfNeeded();
+    await expect(control).toBeInViewport();
+    if (scene === 'contacts-error') {
+      await expect(page.locator('[data-phone-list]')).toContainText('We could not load your contacts.');
+      await expect(page.locator('[data-phone-list]')).not.toContainText('No contacts yet');
+    }
+  });
+}
+test('landscape iPhone retains tabs and tapping Chats returns to its list', async ({ page }) => {
+  await page.setViewportSize({ width: 852, height: 393 });
+  await page.goto(`${preview}?scene=chat`);
+  await expect(page.locator('[data-composer]')).toBeVisible();
+  await expect(page.locator('[data-phone-tabs]')).toBeVisible();
+  await expect(page.locator('.rail')).toHaveCount(0);
+  await page.locator('[data-phone-tab="chats"]').click();
+  await expect(page.locator('[data-phone-list]')).toBeVisible();
+  await page.screenshot({ path: 'docs/ui/u5-phone-shell/webkit-landscape-list.png' });
+});
+test('pending node approval blocks both navigation paths, including attribute transitions', async ({ page }) => {
+  await page.goto(`${preview}?scene=chat`);
+  await expect(page.locator('[data-composer]')).toBeVisible();
+  await page.evaluate(() => {
+    const card = document.createElement('div'); card.dataset.approval = 'idle';
+    card.textContent = 'Confirm at your node'; document.querySelector('.track')!.append(card);
+  });
+  await expect(page.locator('[data-phone-tabs]')).not.toHaveAttribute('inert');
+  await page.evaluate(() => document.querySelector<HTMLElement>('[data-approval]')!.dataset.approval = 'pending');
+  await expect(page.locator('[data-phone-tabs]')).toHaveAttribute('inert');
+  expect(await page.evaluate(async () => {
+    // @ts-expect-error Vite serves the module at this browser URL.
+    const { visibleBackDestination } = await import('/src/ios/edgeBack.ts');
+    return visibleBackDestination();
+  })).toBeNull();
+  await page.locator('[data-phone-tab="you"]').evaluate((el: HTMLButtonElement) => el.click());
+  await expect(page.locator('[data-composer]')).toBeVisible();
+  await expect(page.locator('[data-phone-you]')).toHaveCount(0);
+});

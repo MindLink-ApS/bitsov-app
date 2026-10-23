@@ -2,7 +2,7 @@
 // content is reachable; horizontal overflow and clipped text are failures.
 export function geometry(scene: string, lang: string) {
   const root = document.documentElement;
-  const selectors = '.phone-tabs button, .phone-status .node-pill, .phone-chat-list .track-link, .phone-page button, .phone-chat-list h1, .phone-page h1, .sats, .money-text, .money, [data-send-price], .cost, .wallet-totals, .wallet-total, .wallet-row-amount, .split-amount, .owner-approval-terms, .owner-sheet-terms, .first-spend-sheet p, .first-spend-sheet h2, .first-spend-sheet button, .first-spend-sheet input, .owner-approval-sheet button, .wallet-page button, [data-first-spend-keyboard-summary], [data-first-spend-keyboard-summary] > *, .approval';
+  const selectors = '[data-node-offline] button, [data-call-repairs] button, [data-soft-summary], [data-soft-reconnect], .phone-tabs button, .phone-status .node-pill, .phone-chat-list .track-link, .phone-page button, .phone-chat-list h1, .phone-page h1, .sats, .money-text, .money, [data-send-price], .cost, .wallet-totals, .wallet-total, .wallet-row-amount, .split-amount, .owner-approval-terms, .owner-sheet-terms, .first-spend-sheet p, .first-spend-sheet h2, .first-spend-sheet button, .first-spend-sheet input, .owner-approval-sheet button, .wallet-page button, [data-first-spend-keyboard-summary], [data-first-spend-keyboard-summary] > *, .approval';
   const elements = [...document.querySelectorAll<HTMLElement>(selectors)].filter(el =>
     el.getClientRects().length && !el.closest('[inert], [hidden], [aria-hidden="true"]') && getComputedStyle(el).visibility !== 'hidden');
   const measured = elements.map(el => {
@@ -27,7 +27,7 @@ export function geometry(scene: string, lang: string) {
     return { tag: el.tagName, class: el.className, text: el.textContent, rect: rect.toJSON(), font: style.fontSize,
       whiteSpace: style.whiteSpace, client: [el.clientWidth, el.clientHeight], scroll: [el.scrollWidth, el.scrollHeight], failures };
   });
-  const readySelectors: Record<string, string> = { list: '[data-phone-list]', chat: '[data-composer]', wallet: '[data-balance-total]', 'first-spend': '[data-first-spend-scrim][open]', you: '[data-phone-you]', keyboard: '[data-composer]', starter: '[data-starter-balance]', pay: '[data-composer-panel="pay"]' };
+  const readySelectors: Record<string, string> = { offline: '[data-node-offline]', repair: '[data-call-repairs]', 'contacts-error': '[data-phone-list] [data-soft-reconnect]', list: '[data-phone-list]', chat: '[data-composer]', wallet: '[data-balance-total]', 'first-spend': '[data-first-spend-scrim][open]', you: '[data-phone-you]', keyboard: '[data-composer]', starter: '[data-starter-balance]', pay: '[data-composer-panel="pay"]' };
   const readySelector = readySelectors[scene];
   return { scene, lang, generatedAt: Date.now(), ready: !!readySelector && !!document.querySelector(readySelector) && document.fonts.status === 'loaded', rootFont: getComputedStyle(root).fontSize, bodyFont: getComputedStyle(document.body).fontSize,
     space: getComputedStyle(document.querySelector('.phone-tabs')!).gap,

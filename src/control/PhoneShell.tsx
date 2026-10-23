@@ -1,12 +1,15 @@
 import { createSignal, For, onCleanup, onMount } from 'solid-js';
-import { isMobilePlatform } from '../platform';
+import { navigationBlocked } from '../ios/edgeBack';
+import { isIpad, isMobilePlatform } from '../platform';
 import { t, type CopyKey } from '../i18n';
 
 export type PhoneTab = 'chats' | 'calls' | 'wallet' | 'you';
 
-/** Match the existing compact breakpoint, but never replace a Mac's shell. */
+/** iPhones/iPods and Android handsets keep tabs across rotation. Tablets use
+ * the compact breakpoint; desktop builds always retain their existing rail. */
 export function createPhoneLayout() {
   if (!isMobilePlatform()) return () => false;
+  if (!isIpad() && (/iPhone|iPod/i.test(navigator.userAgent) || /Android.*Mobile/i.test(navigator.userAgent))) return () => true;
   const media = window.matchMedia('(max-width: 680px)');
   const [narrow, setNarrow] = createSignal(media.matches);
   const change = () => setNarrow(media.matches);
@@ -61,15 +64,13 @@ export function installAndroidKeyboardVisibility() {
  * edge Back. Check synchronously as well: a sheet can arrive before an observer. */
 export function createPhoneNavigationGuard(enabled: () => boolean) {
   const [blocked, setBlocked] = createSignal(false);
-  const check = () => enabled() && Array.from(document.querySelectorAll(
-    '[data-composer-panel], [data-starter-balance], [data-wallet-send], [data-first-spend-scrim], [data-owner-approval-sheet], [data-contact-approval], [data-swipe-approval="true"], [data-swipe-money="true"], dialog[open]',
-  )).some(el => !el.closest('[hidden], [inert], [aria-hidden="true"]') && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden');
+  const check = () => enabled() && navigationBlocked();
   onMount(() => {
     if (!isMobilePlatform()) return;
     const update = () => setBlocked(check());
     const observer = new MutationObserver(update);
     observer.observe(document.body, { subtree: true, childList: true, attributes: true,
-      attributeFilter: ['hidden', 'inert', 'aria-hidden', 'open', 'data-swipe-approval', 'data-swipe-money'] });
+      attributeFilter: ['hidden', 'inert', 'aria-hidden', 'open', 'role', 'class', 'style', 'data-approval', 'data-ai-card', 'data-state', 'data-phone-onboarding', 'data-swipe-call', 'data-swipe-approval', 'data-swipe-money'] });
     update(); onCleanup(() => observer.disconnect());
   });
   return { blocked, check };

@@ -1,7 +1,7 @@
 {
   "scene": "chat",
   "lang": "en",
-  "generatedAt": 1792742341824,
+  "generatedAt": 1792745919407,
   "ready": true,
   "rootFont": "53px",
   "bodyFont": "34px",
@@ -29,10 +29,10 @@
     "x": 0,
     "y": 59,
     "width": 393,
-    "height": 73.09375,
+    "height": 101,
     "top": 59,
     "right": 393,
-    "bottom": 132.09375,
+    "bottom": 160,
     "left": 0
   },
   "safeAreas": [
@@ -61,22 +61,22 @@
       "rect": {
         "x": 24,
         "y": 71,
-        "width": 295.578125,
-        "height": 48.09375,
+        "width": 180,
+        "height": 76,
         "top": 71,
-        "right": 319.578125,
-        "bottom": 119.09375,
+        "right": 204,
+        "bottom": 147,
         "left": 24
       },
       "font": "22px",
       "whiteSpace": "normal",
       "client": [
-        294,
-        46
+        178,
+        74
       ],
       "scroll": [
-        294,
-        46
+        178,
+        74
       ],
       "failures": []
     },
@@ -86,12 +86,12 @@
       "text": "2 sats",
       "rect": {
         "x": 33,
-        "y": -742.609375,
+        "y": -742.703125,
         "width": 62.734375,
         "height": 28,
-        "top": -742.609375,
+        "top": -742.703125,
         "right": 95.734375,
-        "bottom": -714.609375,
+        "bottom": -714.703125,
         "left": 33
       },
       "font": "22px",
@@ -112,12 +112,12 @@
       "text": "paid 1 sat \u00b7 network fee not reported",
       "rect": {
         "x": 51.609375,
-        "y": -396.078125,
+        "y": -396.171875,
         "width": 292.1533203125,
         "height": 62.09375,
-        "top": -396.078125,
+        "top": -396.171875,
         "right": 343.7626953125,
-        "bottom": -333.984375,
+        "bottom": -334.078125,
         "left": 51.609375
       },
       "font": "22px",
@@ -138,12 +138,12 @@
       "text": "2 sats",
       "rect": {
         "x": 33,
-        "y": 30.640625,
+        "y": 30.546875,
         "width": 62.734375,
         "height": 28,
-        "top": 30.640625,
+        "top": 30.546875,
         "right": 95.734375,
-        "bottom": 58.640625,
+        "bottom": 58.546875,
         "left": 33
       },
       "font": "22px",
@@ -164,12 +164,12 @@
       "text": "paid 1 sat \u00b7 network fee not reported",
       "rect": {
         "x": 51.609375,
-        "y": 271.796875,
+        "y": 271.703125,
         "width": 292.1533203125,
         "height": 62.09375,
-        "top": 271.796875,
+        "top": 271.703125,
         "right": 343.7626953125,
-        "bottom": 333.890625,
+        "bottom": 333.796875,
         "left": 51.609375
       },
       "font": "22px",

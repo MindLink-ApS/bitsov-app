@@ -1,7 +1,7 @@
 {
   "scene": "you",
   "lang": "en",
-  "generatedAt": 1792742349445,
+  "generatedAt": 1792745926710,
   "ready": true,
   "rootFont": "53px",
   "bodyFont": "34px",
@@ -29,10 +29,10 @@
     "x": 0,
     "y": 59,
     "width": 393,
-    "height": 73.09375,
+    "height": 101,
     "top": 59,
     "right": 393,
-    "bottom": 132.09375,
+    "bottom": 160,
     "left": 0
   },
   "safeAreas": [
@@ -61,22 +61,22 @@
       "rect": {
         "x": 24,
         "y": 71,
-        "width": 295.578125,
-        "height": 48.09375,
+        "width": 180,
+        "height": 76,
         "top": 71,
-        "right": 319.578125,
-        "bottom": 119.09375,
+        "right": 204,
+        "bottom": 147,
         "left": 24
       },
       "font": "22px",
       "whiteSpace": "normal",
       "client": [
-        294,
-        46
+        178,
+        74
       ],
       "scroll": [
-        294,
-        46
+        178,
+        74
       ],
       "failures": []
     },
@@ -86,12 +86,12 @@
       "text": "You",
       "rect": {
         "x": 24,
-        "y": 156.09375,
+        "y": 184,
         "width": 345,
         "height": 48,
-        "top": 156.09375,
+        "top": 184,
         "right": 369,
-        "bottom": 204.09375,
+        "bottom": 232,
         "left": 24
       },
       "font": "40px",
@@ -112,12 +112,12 @@
       "text": "Share my card / QR",
       "rect": {
         "x": 24,
-        "y": 228.09375,
+        "y": 256,
         "width": 345,
         "height": 52.09375,
-        "top": 228.09375,
+        "top": 256,
         "right": 369,
-        "bottom": 280.1875,
+        "bottom": 308.09375,
         "left": 24
       },
       "font": "22px",
@@ -138,12 +138,12 @@
       "text": "Profile and settings",
       "rect": {
         "x": 24,
-        "y": 304.1875,
+        "y": 332.09375,
         "width": 345,
         "height": 65.59375,
-        "top": 304.1875,
+        "top": 332.09375,
         "right": 369,
-        "bottom": 369.78125,
+        "bottom": 397.6875,
         "left": 24
       },
       "font": "32px",
@@ -164,12 +164,12 @@
       "text": "Add a device",
       "rect": {
         "x": 24,
-        "y": 393.78125,
+        "y": 421.6875,
         "width": 345,
         "height": 65.59375,
-        "top": 393.78125,
+        "top": 421.6875,
         "right": 369,
-        "bottom": 459.375,
+        "bottom": 487.28125,
         "left": 24
       },
       "font": "32px",

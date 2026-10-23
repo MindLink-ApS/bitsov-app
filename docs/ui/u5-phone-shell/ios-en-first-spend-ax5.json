@@ -1,7 +1,7 @@
 {
   "scene": "first-spend",
   "lang": "en",
-  "generatedAt": 1792742353626,
+  "generatedAt": 1792745930331,
   "ready": true,
   "rootFont": "53px",
   "bodyFont": "34px",
@@ -29,10 +29,10 @@
     "x": 0,
     "y": 59,
     "width": 393,
-    "height": 73.09375,
+    "height": 101,
     "top": 59,
     "right": 393,
-    "bottom": 132.09375,
+    "bottom": 160,
     "left": 0
   },
   "safeAreas": [
@@ -60,12 +60,12 @@
       "text": "2 sats",
       "rect": {
         "x": 33,
-        "y": -742.609375,
+        "y": -742.703125,
         "width": 62.734375,
         "height": 28,
-        "top": -742.609375,
+        "top": -742.703125,
         "right": 95.734375,
-        "bottom": -714.609375,
+        "bottom": -714.703125,
         "left": 33
       },
       "font": "22px",
@@ -86,12 +86,12 @@
       "text": "paid 1 sat \u00b7 network fee not reported",
       "rect": {
         "x": 51.609375,
-        "y": -396.078125,
+        "y": -396.171875,
         "width": 292.1533203125,
         "height": 62.09375,
-        "top": -396.078125,
+        "top": -396.171875,
         "right": 343.7626953125,
-        "bottom": -333.984375,
+        "bottom": -334.078125,
         "left": 51.609375
       },
       "font": "22px",
@@ -112,12 +112,12 @@
       "text": "2 sats",
       "rect": {
         "x": 33,
-        "y": 30.640625,
+        "y": 30.546875,
         "width": 62.734375,
         "height": 28,
-        "top": 30.640625,
+        "top": 30.546875,
         "right": 95.734375,
-        "bottom": 58.640625,
+        "bottom": 58.546875,
         "left": 33
       },
       "font": "22px",
@@ -138,12 +138,12 @@
       "text": "paid 1 sat \u00b7 network fee not reported",
       "rect": {
         "x": 51.609375,
-        "y": 271.796875,
+        "y": 271.703125,
         "width": 292.1533203125,
         "height": 62.09375,
-        "top": 271.796875,
+        "top": 271.703125,
         "right": 343.7626953125,
-        "bottom": 333.890625,
+        "bottom": 333.796875,
         "left": 51.609375
       },
       "font": "22px",
@@ -216,12 +216,12 @@
       "text": "Let messages spend up to 500 sats a day?",
       "rect": {
         "x": 25,
-        "y": 306.0625,
+        "y": 304.0625,
         "width": 343,
         "height": 62.375,
-        "top": 306.0625,
+        "top": 304.0625,
         "right": 368,
-        "bottom": 368.4375,
+        "bottom": 366.4375,
         "left": 25
       },
       "font": "24px",
@@ -242,12 +242,12 @@
       "text": "Approve at your box",
       "rect": {
         "x": 25,
-        "y": 386.4375,
+        "y": 384.4375,
         "width": 343,
         "height": 34.09375,
-        "top": 386.4375,
+        "top": 384.4375,
         "right": 368,
-        "bottom": 420.53125,
+        "bottom": 418.53125,
         "left": 25
       },
       "font": "22px",
@@ -268,12 +268,12 @@
       "text": "Allow starts owner approval. It grants no permission by itself.",
       "rect": {
         "x": 25,
-        "y": 438.53125,
+        "y": 436.53125,
         "width": 343,
         "height": 62,
-        "top": 438.53125,
+        "top": 436.53125,
         "right": 368,
-        "bottom": 500.53125,
+        "bottom": 498.53125,
         "left": 25
       },
       "font": "20px",
@@ -294,12 +294,12 @@
       "text": "Entry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
       "rect": {
         "x": 25,
-        "y": 518.53125,
+        "y": 516.53125,
         "width": 343,
         "height": 102.28125,
-        "top": 518.53125,
+        "top": 516.53125,
         "right": 368,
-        "bottom": 620.8125,
+        "bottom": 618.8125,
         "left": 25
       },
       "font": "22px",
@@ -320,12 +320,12 @@
       "text": "App budget presets. Maximum: 100\u202f000 sats a day.",
       "rect": {
         "x": 25,
-        "y": 682.8125,
+        "y": 680.8125,
         "width": 343,
         "height": 62,
-        "top": 682.8125,
+        "top": 680.8125,
         "right": 368,
-        "bottom": 744.8125,
+        "bottom": 742.8125,
         "left": 25
       },
       "font": "20px",
@@ -346,12 +346,12 @@
       "text": "500 sats a day",
       "rect": {
         "x": 25,
-        "y": 762.8125,
+        "y": 760.8125,
         "width": 164.328125,
         "height": 49,
-        "top": 762.8125,
+        "top": 760.8125,
         "right": 189.328125,
-        "bottom": 811.8125,
+        "bottom": 809.8125,
         "left": 25
       },
       "font": "20px",
@@ -372,12 +372,12 @@
       "text": "2\u202f000 sats a day",
       "rect": {
         "x": 25,
-        "y": 823.8125,
+        "y": 821.8125,
         "width": 180.90625,
         "height": 49,
-        "top": 823.8125,
+        "top": 821.8125,
         "right": 205.90625,
-        "bottom": 872.8125,
+        "bottom": 870.8125,
         "left": 25
       },
       "font": "20px",
@@ -398,12 +398,12 @@
       "text": "10\u202f000 sats a day",
       "rect": {
         "x": 25,
-        "y": 884.8125,
+        "y": 882.8125,
         "width": 189.46875,
         "height": 49,
-        "top": 884.8125,
+        "top": 882.8125,
         "right": 214.46875,
-        "bottom": 933.8125,
+        "bottom": 931.8125,
         "left": 25
       },
       "font": "20px",
@@ -424,12 +424,12 @@
       "text": "Custom",
       "rect": {
         "x": 226.46875,
-        "y": 884.8125,
+        "y": 882.8125,
         "width": 98.859375,
         "height": 49,
-        "top": 884.8125,
+        "top": 882.8125,
         "right": 325.328125,
-        "bottom": 933.8125,
+        "bottom": 931.8125,
         "left": 226.46875
       },
       "font": "20px",
@@ -450,10 +450,10 @@
       "text": "Allow 500 sats a day",
       "rect": {
         "x": 25,
-        "y": 700.8125,
+        "y": 698.8125,
         "width": 343,
-        "height": 52.09375,
-        "top": 700.8125,
+        "height": 54.09375,
+        "top": 698.8125,
         "right": 368,
         "bottom": 752.90625,
         "left": 25
@@ -461,11 +461,11 @@
       "font": "22px",
       "whiteSpace": "normal",
       "client": [
-        343,
+        341,
         52
       ],
       "scroll": [
-        343,
+        341,
         52
       ],
       "failures": []

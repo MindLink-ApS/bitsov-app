@@ -1,26 +1,42 @@
 # U5 — phone shell
 
-Phone builds at 680 CSS pixels or narrower use Chats · Wallet · You. Calls is
-inserted only after reading call history (including older message pages) or
-observing a call in this session. Its rows open conversations; they do not call.
-Mac and wide layouts retain the rail.
+iPhones/iPods and Android handsets use Chats · Wallet · You in both portrait
+and landscape, including widths above 680 CSS pixels. Detection requires the
+existing Tauri mobile platform signal plus an iPhone/iPod UA or Android UA with
+`Mobile`. iPads (including their Macintosh UA) and Android tablets retain the
+680px compact breakpoint; Mac builds always retain the rail.
+
+Calls appears only after a history read or an observed call. Startup performs
+one sequential has-any-call search, stopping at the first matching contact.
+Results and in-flight reads are cached for the mounted shell; opening Calls
+lazily checks the remaining contacts. A cold negative search can still traverse
+old pages once, preserving calls older than the newest page. Ordinary refreshes
+reuse the cache; live call events replace negative results immediately. After
+an actual websocket gap, negative results check only pages newer than their
+last completed read, so missed events cannot hide Calls forever. Failed reads
+remain retryable. Rows open conversations; they do not call.
 
 Chats is the root screen. Its list retains contacts, rooms, first contacts at
 the door, assistants, Browse, Porch and New. A conversation pushes over the list;
 the Back button is also the destination used by the existing edge-swipe handler.
-Changing tabs preserves the selected conversation/draft, but incoming messages
+Tapping Chats while already on Chats returns to the list. Changing tabs
+preserves the selected conversation/draft, but incoming messages
 are unread while that conversation is hidden. Returning to Chats clears them.
 
 Wallet retains its existing screens and adds the explicitly named Add sats
 entry. You exposes Share my card / QR, profile/settings, add device, and waiting
 approvals where available. Connection status and the money-readiness notice
-remain above every tab. New labels are in the English/Danish copy table.
+remain above every tab. Offline Retry and unresolved-call repairs also remain
+in that status area, which scrolls within 45vh so large text cannot push content
+or tabs offscreen. Contact loading/error state belongs to the Chats list, with
+Reconnect on failure and no false “No contacts yet” message. New labels are in the English/Danish copy table.
 
 The tab bar has no overlay z-index. First-spend and owner-approval dialogs retain
 the native top layer; starter retains its full-screen layer above the tabs.
 The navigation guard keeps the tabs and status controls inert behind money and
-approval surfaces, including the existing Pay panel. The existing edge-swipe
-blockers are unchanged. Pay's existing form, money copy and submission behavior
+approval surfaces, including the existing Pay panel. Tabs and edge Back share one blocked-surface predicate, including pending
+node approvals, disclosure previews and onboarding ceremonies. Wallet Receive
+remains a tab destination; only edge Back treats it as a blocker. Pay's existing form, money copy and submission behavior
 are unchanged; converting its inner flow is the separate S2 ticket.
 
 The bottom inset belongs to the tab bar once. iOS keeps #318's viewport owner;
@@ -89,3 +105,23 @@ an explicitly configured sample hub and the build flag; it makes no request.
   history and double safe-area issues. Each was corrected and verified.
 - Rust was not touched; conditional Rust tests were not required. `cargo fmt`
   was never run.
+
+## Round 1 revision
+
+The original evidence above describes the initial U5 pass. Round 1 refreshes
+all 20 shell captures and adds 12 native captures for `offline`, `repair` and
+`contacts-error` in English/Danish at default/AX5. `webkit-landscape-list.png`
+records the 852×393 iPhone layout. The recovery captures retain existing English
+recovery copy even when the navigation language is Danish. Offline and repair
+captures scroll the status pane to the recovery action without pressing it.
+
+The regression fixtures now explicitly open a phone conversation instead of
+assuming a wide iPhone starts in the desktop rail. Validation results and the
+capture inventory are recorded in `verification.json`.
+
+Round 1 validation: TypeScript passed; Vitest **122 files / 2,236 tests** passed;
+WebKit phone shell **14/14** and Dynamic Type **27/27** passed. All **36 native
+captures** (32 shell/recovery, 4 keyboard) passed their checks. An earlier
+concurrent full run hit the existing source-copy audit's 5-second timeout;
+its isolated rerun and the final full run passed. Existing Solid disposal
+warnings remain. No Rust changes or `cargo fmt`.

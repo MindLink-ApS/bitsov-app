@@ -31,7 +31,7 @@ try:
     for size, category in [('default','large'), ('ax5','accessibility-extra-extra-extra-large')]:
         sim('ui', DEVICE, 'content_size', category)
         for lang in ['en','da']:
-            for scene in ['list','chat','wallet','you','first-spend']:
+            for scene in ['list','chat','wallet','you','first-spend','offline','repair','contacts-error']:
                 if len(sys.argv) > 1 and scene not in sys.argv[1:]: continue
                 results.append(capture(size, lang, scene))
 finally: sim('ui', DEVICE, 'content_size', 'large')
