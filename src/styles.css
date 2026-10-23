@@ -1618,6 +1618,11 @@ html[data-platform='ios'] :is(.info-modal, .qr-scan-box, .meeting-panel, .call-p
   overflow-y: auto;
 }
 html[data-platform='ios'] :is(.call-panel, .toast) { bottom: calc(var(--keyboard-inset) + max(var(--s-6), var(--safe-area-bottom))); }
+/* Cards are bottom-anchored at s-6, unlike centered info/QR modals. Reserve
+   that same offset in their height budget, including at larger Dynamic Type. */
+html[data-platform='ios'] :is(.meeting-panel, .call-panel[data-call-panel]) {
+  max-height: calc(var(--visible-height, 100dvh) - max(var(--s-4), var(--safe-area-top)) - max(var(--s-6), var(--safe-area-bottom)));
+}
 html[data-platform='ios'] .phone-onboarding {
   height: 100%; min-height: 0; overflow-y: auto;
   padding-bottom: max(24px, var(--safe-area-bottom));

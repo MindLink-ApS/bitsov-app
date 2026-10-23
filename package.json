@@ -9,6 +9,7 @@
     "test": "vitest run --configLoader runner",
     "test:inputs": "playwright test -c playwright.inputs.config.ts",
     "test:safe-areas": "playwright test -c playwright.safe-areas.config.ts",
+    "test:webkit": "playwright test -c playwright.webkit.config.ts",
     "a11y": "playwright test -c playwright.a11y.config.ts",
     "preview": "vite preview",
     "authority": "scripts/authority-check.sh",
