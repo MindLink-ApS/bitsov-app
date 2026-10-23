@@ -357,3 +357,106 @@ fn view_states_cover_pending_paired_failed_fallback() {
     assert_eq!(failed.state, "failed");
     assert!(failed.reason.unwrap().contains("did not verify"));
 }
+
+// Port of PR #379 (304883d8) local_token_challenge + issue_local_token_challenge.
+// Independent of the app's signing helper; verifies the wire header and query id.
+fn verifies_challenge(target: &str, header: Option<&str>, public_hex: &str, now: i64) -> bool {
+    let Some(client_id) = target.strip_prefix("/api/v1/pair/challenge?client_id=") else { return false };
+    let Some((timestamp, signature)) = header.and_then(|v| v.strip_prefix("PairChallenge "))
+        .and_then(|v| v.split_once(':')) else { return false };
+    let Ok(timestamp) = timestamp.parse::<i64>() else { return false };
+    if now.abs_diff(timestamp) > 30 { return false; }
+    if signature.len() != 128 || !signature.bytes().all(|b| b.is_ascii_hexdigit()) { return false; }
+    NodeCrypto.verify(public_hex,
+        format!("bitsov-pair-challenge-v1:{client_id}:{timestamp}").as_bytes(), signature)
+}
+
+#[tokio::test]
+async fn local_challenge_header_verifies_for_ceremony_reuse_and_refresh() {
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    for routes in [PairRoutes::Live, PairRoutes::Bootstrap] {
+        let node_dir = tempfile::tempdir().unwrap();
+        let app_dir = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+        let public = key.public_hex().to_owned();
+        let node = mock(node_dir.path(), routes, now());
+        let codes = PrintedCodes::default();
+        let checked = Arc::new(AtomicUsize::new(0));
+        let count = checked.clone();
+        let server = Server::start_with_challenge_check(node.clone(), codes.clone(), Arc::new(move |target, header| {
+            let time = now();
+            let valid = verifies_challenge(target, header, &public, time);
+            if valid {
+                // Inclusive +/-30 s window; an altered client id or stale proof fails.
+                let ts = header.unwrap().strip_prefix("PairChallenge ").unwrap()
+                    .split_once(':').unwrap().0.parse::<i64>().unwrap();
+                assert!(verifies_challenge(target, header, &public, ts - 30));
+                assert!(verifies_challenge(target, header, &public, ts + 30));
+                assert!(!verifies_challenge(target, header, &public, ts - 31));
+                assert!(!verifies_challenge(target, header, &public, ts + 31));
+                assert!(!verifies_challenge("/api/v1/pair/challenge?client_id=other", header, &public, time));
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+            valid
+        }));
+        let client = client(&server, node_dir.path());
+        pairing::establish(&client, &key, app_dir.path(), NAME, &codes).await.expect("signed ceremony");
+        let Established::Paired { mut session, .. } =
+            pairing::establish(&client, &key, app_dir.path(), NAME, &codes).await.expect("signed reuse")
+        else { panic!("fallback") };
+        pairing::refresh(&mut session, &client, &key).await.expect("signed refresh");
+        assert_eq!(checked.load(Ordering::SeqCst), 3);
+        assert_eq!(node.tokens_issued(), 3);
+    }
+}
+
+#[tokio::test]
+async fn challenge_401_is_a_clear_refusal_without_retry_token_or_fallback() {
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    let node_dir = tempfile::tempdir().unwrap();
+    let app_dir = tempfile::tempdir().unwrap();
+    let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let node = mock(node_dir.path(), PairRoutes::Live, now());
+    let codes = PrintedCodes::default();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let count = attempts.clone();
+    let server = Server::start_with_challenge_check(node.clone(), codes.clone(), Arc::new(move |_, _| {
+        count.fetch_add(1, Ordering::SeqCst);
+        false
+    }));
+    let error = pairing::establish(&client(&server, node_dir.path()), &key, app_dir.path(), NAME, &codes)
+        .await.expect_err("challenge refused");
+    assert!(matches!(error, PairError::Refused { step: "/pair/challenge", status: 401, .. }));
+    let view = PairingView::from_outcome(&Err(error));
+    assert_eq!(view.state, "failed");
+    assert!(view.reason.unwrap().contains("401"));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(node.calls("/api/v1/pair/token"), 0);
+    assert_eq!(node.calls("/api/v1/auth/local"), 0);
+}
+
+#[tokio::test]
+async fn old_node_ignores_local_header_and_remote_challenge_stays_unchanged() {
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    let node_dir = tempfile::tempdir().unwrap();
+    let app_dir = tempfile::tempdir().unwrap();
+    let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let node = mock(node_dir.path(), PairRoutes::Live, now());
+    let codes = PrintedCodes::default();
+    let remote = Arc::new(AtomicBool::new(false));
+    let mode = remote.clone();
+    let server = Server::start_with_challenge_check(node.clone(), codes.clone(), Arc::new(move |_, header| {
+        if mode.load(Ordering::SeqCst) {
+            assert!(header.is_none(), "remote challenge must not gain local credentials");
+        } else {
+            assert!(header.is_some_and(|v| v.starts_with("PairChallenge ")));
+        }
+        // The old mock node ignores the header; no verification is required.
+        true
+    }));
+    let client = client(&server, node_dir.path());
+    pairing::establish(&client, &key, app_dir.path(), NAME, &codes).await.expect("old node accepts header");
+    remote.store(true, Ordering::SeqCst);
+    pairing::establish_remote(&client, &key, app_dir.path()).await.expect("unchanged remote challenge");
+    assert_eq!(node.tokens_issued(), 2);
+}

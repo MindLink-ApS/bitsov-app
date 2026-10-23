@@ -125,6 +125,8 @@ pub struct Server {
     stop: Arc<AtomicBool>,
 }
 
+type ChallengeCheck = Arc<dyn Fn(&str, Option<&str>) -> bool + Send + Sync>;
+
 impl Server {
     pub fn start(node: Arc<PairingMock>, codes: PrintedCodes) -> Self {
         Self::start_with_reads(node, codes, None)
@@ -139,6 +141,24 @@ impl Server {
         codes: PrintedCodes,
         reads: Option<Reads>,
     ) -> Self {
+        Self::start_checked(node, codes, reads, None)
+    }
+
+    #[allow(dead_code)]
+    pub fn start_with_challenge_check(
+        node: Arc<PairingMock>,
+        codes: PrintedCodes,
+        check: ChallengeCheck,
+    ) -> Self {
+        Self::start_checked(node, codes, None, Some(check))
+    }
+
+    fn start_checked(
+        node: Arc<PairingMock>,
+        codes: PrintedCodes,
+        reads: Option<Reads>,
+        check: Option<ChallengeCheck>,
+    ) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral loopback port");
         let addr = listener.local_addr().expect("addr");
         assert_ne!(addr.port(), NODE_PORT, "tests must never hold the node port");
@@ -151,7 +171,7 @@ impl Server {
                     break;
                 }
                 let Ok(stream) = stream else { continue };
-                serve_one(&node, reads.as_ref(), stream);
+                serve_one(&node, reads.as_ref(), check.as_ref(), stream);
                 let lines = node.stdout_lines();
                 for line in &lines[forwarded..] {
                     codes.record_line(line);
@@ -175,7 +195,7 @@ impl Drop for Server {
     }
 }
 
-fn serve_one(node: &PairingMock, reads: Option<&Reads>, stream: TcpStream) {
+fn serve_one(node: &PairingMock, reads: Option<&Reads>, check: Option<&ChallengeCheck>, stream: TcpStream) {
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() || line.is_empty() {
@@ -185,7 +205,7 @@ fn serve_one(node: &PairingMock, reads: Option<&Reads>, stream: TcpStream) {
     let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("").to_string();
     let mut length = 0usize;
-    let mut bearer = None;
+    let mut authorization = None;
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header).is_err() || header == "\r\n" || header.is_empty() {
@@ -195,15 +215,20 @@ fn serve_one(node: &PairingMock, reads: Option<&Reads>, stream: TcpStream) {
         let value = value.trim();
         match name.to_ascii_lowercase().as_str() {
             "content-length" => length = value.parse().unwrap_or(0),
-            "authorization" => bearer = value.strip_prefix("Bearer ").map(str::to_owned),
+            "authorization" => authorization = Some(value.to_owned()),
             _ => {}
         }
     }
+    let bearer = authorization.as_deref().and_then(|v| v.strip_prefix("Bearer "));
     let mut body = vec![0u8; length];
     let _ = reader.read_exact(&mut body);
     let path = target.split('?').next().unwrap_or("");
     let mut extra = String::new();
     let (status, text) = match reads {
+        _ if method == "GET" && path == "/api/v1/pair/challenge"
+            && check.is_some_and(|check| !check(&target, authorization.as_deref())) => {
+            (401, r#"{"error":"pairing proof did not verify"}"#.to_string())
+        }
         Some(reads) if method == "GET" && READ_PATHS.contains(&path) => {
             let (auth, _) = node.handle("GET", "/api/v1/identity", bearer.as_deref(), &[]);
             if auth != 200 {

@@ -5,7 +5,7 @@
 //! exactly the documented fields.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde_json::json;
@@ -162,21 +162,36 @@ impl PairingClient {
     }
 
     /// `GET /pair/challenge` then `POST /pair/token`.
-    pub(crate) async fn token(&self, key: &ClientKey, client_id: &str) -> Result<TokenReply, PairError> {
+    pub(crate) async fn token(&self, key: &ClientKey, client_id: &str, local: bool) -> Result<TokenReply, PairError> {
         const CHALLENGE: &str = "/pair/challenge";
         const TOKEN: &str = "/pair/token";
         #[derive(Deserialize)]
         struct Challenge {
             challenge: String,
         }
-        let (status, text) = self
-            .send(
-                CHALLENGE,
-                self.http
-                    .get(self.url(CHALLENGE))
-                    .query(&[("client_id", client_id)]),
-            )
-            .await?;
+        let mut request = self.http.get(self.url(CHALLENGE)).query(&[("client_id", client_id)]);
+        if local {
+            // PR #379: Unix seconds, +/-30 s, Ed25519 over this exact UTF-8
+            // domain + client id + timestamp. Reuse the paired client key.
+            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)
+                .map_err(|_| PairError::Local("the device clock is before the Unix epoch".into()))?
+                .as_secs();
+            let message = format!("bitsov-pair-challenge-v1:{client_id}:{timestamp}");
+            let mut authorization = reqwest::header::HeaderValue::from_str(
+                &format!("PairChallenge {timestamp}:{}", key.sign_hex(message.as_bytes())),
+            ).map_err(|_| PairError::Local("cannot encode pairing challenge authorization".into()))?;
+            authorization.set_sensitive(true);
+            request = request.header(reqwest::header::AUTHORIZATION, authorization);
+        }
+        let (status, text) = self.send(CHALLENGE, request).await?;
+        if local && status == 401 {
+            // Do not echo a response that could contain the authentication proof.
+            return Err(PairError::Refused {
+                step: CHALLENGE,
+                status,
+                reason: "paired client authentication failed; check the device clock and pairing with this node before reconnecting".into(),
+            });
+        }
         let Challenge { challenge } = decode(CHALLENGE, status, &text)?;
         if !challenge.starts_with(TOKEN_CHALLENGE_PREFIX) {
             return Err(PairError::Malformed {
