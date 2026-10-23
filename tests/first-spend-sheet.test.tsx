@@ -44,6 +44,23 @@ describe.each(['en', 'da'] as const)('first spend sheet (%s)', (lang) => {
     button('[data-first-spend-allow]').click();
     expect(allow).toHaveBeenCalledWith({ ceiling_msat: 500_000, id: 'careful' });
   });
+  it('keeps the keyboard summary in sync with the exact daily limit and complete costs without scrolling on input', () => {
+    setLanguagePref(lang); const { allow } = setup();
+    mount.querySelector('summary')!.click(); button('[data-first-spend-custom]').click();
+    const input = mount.querySelector<HTMLInputElement>('[data-first-spend-amount]')!;
+    const sheet = mount.querySelector<HTMLElement>('[data-first-spend-sheet]')!;
+    sheet.scrollTop = 212;
+    const summary = mount.querySelector('[data-first-spend-keyboard-summary]');
+    expect(summary).not.toBeNull();
+    expect(text(summary)).toContain('Entry fee: 1 sat · message: 2 sats · routing fee at most: 5 sats · total at most: 8 sats');
+    for (const [value, expected] of [['1250', '1 250 sats'], ['1250.5', '1 250 500 msat']]) {
+      input.value = value; input.dispatchEvent(new Event('input', { bubbles: true }));
+      expect(text(summary)).toContain(lang === 'en' ? `Allow ${expected} a day` : `Tillad ${expected} om dagen`);
+      expect(button('[data-first-spend-allow]').disabled).toBe(false);
+      expect(sheet.scrollTop).toBe(212);
+    }
+    expect(allow).not.toHaveBeenCalled();
+  });
   it('shows node presets and custom under Other options without authorizing on selection', () => {
     setLanguagePref(lang); const { allow } = setup();
     mount.querySelector('summary')!.click();

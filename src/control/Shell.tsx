@@ -15,7 +15,7 @@ import { createMessageEntrance } from './messageEntrance';
 import { LocalNodeSwitch } from '../onboarding/LocalNodeSwitch';
 import { PairAnotherNode } from '../onboarding/PairAnotherNode';
 import { cameraQrScannerAvailable, scanPairingLinkWithCamera } from '../cameraQrScanner';
-import { deviceWord, isMobilePlatform } from '../platform';
+import { appPlatform, deviceWord, isMobilePlatform } from '../platform';
 import { DeviceApprovals } from '../onboarding/DeviceApprovals';
 import { approvalMemory, BreakerCard, breakerReason, OwnerApprovals, OwnerApprovalWait, type BreakerReason } from './OwnerApprovals';
 import { OWNER_DEVICE_APPROVAL, OWNER_DEVICE_BREAKER_RESET, refusalText, type ApprovalRequest, type ApprovalView, type DeviceKeysView } from './ownerApproval';
@@ -1760,7 +1760,8 @@ export function ControlCenter(props: Props) {
       onAddSats={() => openWallet('receive')} />;
 
   return (
-    <div class="cc" classList={{ 'no-context': !props.active }} data-mode={source.mode}>
+    <div class="cc" classList={{ 'no-context': !props.active }} data-mode={source.mode}
+      data-swipe-call={!['idle', 'ended'].includes(callView().phase) || !['idle', 'ended'].includes(meetingView().phase)}>
       <Show when={props.active && !isMobilePlatform()}>
         <OwnerApprovalSheets approvals={approvals()} error={approvalsError()} now={now()}
           memory={approvalsMemory} approve={approveOwner} recheck={recheckApproval}
@@ -1808,6 +1809,7 @@ export function ControlCenter(props: Props) {
 
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
         <section class="track" aria-label="Track" inert={walletTab() !== null || contextOpen()}>
+          <Show when={track()}><button type="button" class="link ios-back" data-ios-back="thread" onClick={() => setTrack(null)}>{tr('uiBack')}</button></Show>
           {props.offline}
           <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
             onEnded={() => { void loadBudget(); void loadWallet(); }} />
@@ -2013,8 +2015,10 @@ export function ControlCenter(props: Props) {
         aria-modal={contextOpen() ? true : undefined}
         role="dialog"
         data-settings
+        data-swipe-approval={contextOpen() && ['budget', 'devices'].includes(tab())}
       >
         <div class="row settings-head">
+          <Show when={tab() !== 'body'}><button type="button" class="link ios-back" data-ios-back="settings-page" onClick={() => setTab('body')}>{tr('uiBack')}</button></Show>
           <div class="tabs" role="tablist" style={{ flex: 1 }}>
             <button role="tab" aria-selected={tab() === 'general'} data-tab="general" onClick={() => { setTab('general'); setContextOpen(true); }}>{tr('uiGeneral')}</button>
             <button role="tab" aria-selected={tab() === 'body'} data-tab="body" onClick={() => { setTab('body'); setContextOpen(true); }}>{tr('uiBody')}</button>
@@ -2024,7 +2028,7 @@ export function ControlCenter(props: Props) {
             <button role="tab" aria-selected={tab() === 'budget'} data-tab="budget" onClick={() => { setTab('budget'); setContextOpen(true); }}>{tr('uiBudget')}</button>
             <button role="tab" aria-selected={tab() === 'frontdoor'} data-tab="frontdoor" onClick={() => { setTab('frontdoor'); setContextOpen(true); }}>{tr('uiProfile')}</button>
           </div>
-          <button class="quiet context-toggle" data-settings-close onClick={() => setContextOpen(false)} aria-label={tr('uiCloseSettings')}>{tr('uiClose')}</button>
+          <button class="quiet context-toggle" data-settings-close data-ios-back="settings" onClick={() => setContextOpen(false)} aria-label={tr('uiCloseSettings')}>{tr('uiClose')}</button>
         </div>
         <Switch>
           <Match when={tab() === 'general'}>
@@ -5772,6 +5776,7 @@ function Composer(props: {
     <form
       class="composer"
       data-composer
+      data-swipe-approval={!!consent() || !!contactWaiting()}
       data-mode={mode()}
       onInput={() => { cancelOwner(); composerRevision++; setPaidLine(null); }}
       onKeyDown={(e) => {

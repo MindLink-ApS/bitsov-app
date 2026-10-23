@@ -125,7 +125,7 @@ export function ContactPanel(props: {
       >
         <div class="row settings-head">
           <h2 style={{ flex: 1, margin: 0 }}>Contact</h2>
-          <button type="button" class="quiet context-toggle" data-contact-close onClick={() => props.onClose()} aria-label="Close contact">
+          <button type="button" class="quiet context-toggle" data-contact-close data-ios-back="contact" onClick={() => props.onClose()} aria-label="Close contact">
             Close
           </button>
         </div>

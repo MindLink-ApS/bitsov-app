@@ -1,0 +1,97 @@
+{
+  "viewport": {
+    "height": 852,
+    "top": 0,
+    "scale": 1,
+    "inner": 852
+  },
+  "keyboard": "false",
+  "focused": "BODY",
+  "elements": [
+    {
+      "tag": "DIV",
+      "cls": "client-852-body-852-inner-852",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 393,
+        "height": 852,
+        "top": 0,
+        "right": 393,
+        "bottom": 852,
+        "left": 0
+      },
+      "client": 852,
+      "scroll": 852,
+      "scrollTop": 0
+    },
+    {
+      "tag": "DIV",
+      "cls": "cc",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 393,
+        "height": 852,
+        "top": 0,
+        "right": 393,
+        "bottom": 852,
+        "left": 0
+      },
+      "client": 852,
+      "scroll": 852,
+      "scrollTop": 0
+    },
+    {
+      "tag": "DIV",
+      "cls": "stream",
+      "rect": {
+        "x": 0,
+        "y": 233,
+        "width": 393,
+        "height": 363.828125,
+        "top": 233,
+        "right": 393,
+        "bottom": 596.828125,
+        "left": 0
+      },
+      "client": 364,
+      "scroll": 495,
+      "scrollTop": 131
+    },
+    {
+      "tag": "ARTICLE",
+      "cls": "msg out",
+      "rect": {
+        "x": 44.890625,
+        "y": 486.375,
+        "width": 332.109375,
+        "height": 86.1875,
+        "top": 486.375,
+        "right": 377,
+        "bottom": 572.5625,
+        "left": 44.890625
+      },
+      "client": 86,
+      "scroll": 86,
+      "scrollTop": 0
+    },
+    {
+      "tag": "FORM",
+      "cls": "composer",
+      "rect": {
+        "x": 0,
+        "y": 596.828125,
+        "width": 393,
+        "height": 221.171875,
+        "top": 596.828125,
+        "right": 393,
+        "bottom": 818,
+        "left": 0
+      },
+      "client": 220,
+      "scroll": 220,
+      "scrollTop": 0
+    }
+  ]
+}
