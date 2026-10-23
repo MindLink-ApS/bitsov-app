@@ -8942,6 +8942,22 @@ impl NodeState {
     }
 }
 
+/// Local audio policy only: no node request, payment, or admission mutation.
+#[tauri::command]
+async fn call_audio_session(window: WebviewWindow<impl tauri::Runtime>, live: bool) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    #[cfg(target_os = "ios")]
+    {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        window.app_handle().run_on_main_thread(move || {
+            let _ = send.send(bitsov_ffi::call_audio::set_live(live));
+        }).map_err(|error| error.to_string())?;
+        receive.await.map_err(|_| "Call audio dispatcher closed.".to_string())?
+    }
+    #[cfg(not(target_os = "ios"))]
+    { let _ = (window, live); Ok(()) }
+}
+
 pub(super) fn entry() {
     #[cfg(target_os = "ios")]
     bitsov_ffi::pairing_link::install(|url| crate::pairing_link_ios::receive([url]));
@@ -9010,6 +9026,8 @@ fn run() {
         // A repeated shutdown event is a no-op, and a restore in flight can neither
         // hide its old node from this nor start a new one after it (`stop_for_quit`).
         if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+            #[cfg(target_os = "ios")]
+            bitsov_ffi::call_audio::terminate();
             let state = app.state::<NodeState>();
             if let Some(proxy) = state.remote_proxy.lock().unwrap().take() {
                 proxy.stop();
@@ -9196,6 +9214,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             voice_note_fetch,
             file_fetch,
             file_save,
+            call_audio_session,
             call_quote,
             call_signal,
             porch_quote,
@@ -19882,6 +19901,7 @@ mod assistant_acl_tests {
                 "voice_note_fetch",
                 "file_fetch",
                 "file_save",
+                "call_audio_session",
                 "call_quote",
                 "call_signal",
                 "porch_quote",
