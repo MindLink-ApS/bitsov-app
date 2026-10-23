@@ -64,7 +64,7 @@ export function navigationBlocked(includeReceive = false, root: ParentNode = doc
     + '[data-swipe-approval="true"], [data-first-spend-scrim], [data-contact-approval], [data-approval="pending"], '
     + '[data-ai-card="disclosure"][data-state="preview"], [data-ai-card="disclosure"][data-state="sending"], '
     + '.owner-approval, [data-owner-approval-sheet], [data-phone-onboarding="words"], [data-phone-onboarding="fingerprint"], '
-    + '[data-call-approval]';
+    + '[data-call-approval], [data-phone-shell="true"] [data-call-panel="incoming"]';
   return Array.from(root.querySelectorAll(selector + (includeReceive ? ', [data-wallet-receive]' : ''))).some(el => visibleNavigationSurface(el, true))
     || Array.from(root.querySelectorAll('dialog[open], [role="dialog"]')).some(el => visibleNavigationSurface(el, true)
       && !el.matches('[data-settings], [data-wallet-page], [data-contact-panel], [data-call-panel]'));

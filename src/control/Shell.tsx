@@ -568,7 +568,7 @@ export function ControlCenter(props: Props) {
   createEffect(on(() => walletTab() !== null, (open) => {
     if (!open) return;
     const opener = walletReturnFocus;
-    onCleanup(onEscape(() => { if (!contextOpen()) closeWallet(); }));
+    onCleanup(onEscape(() => { if (!contextOpen() && !phoneCallVisible()) closeWallet(); }));
     onCleanup(() => queueMicrotask(() => { if (opener?.isConnected) opener.focus(); }));
   }));
   const [settingsEl, setSettingsEl] = createSignal<HTMLElement | null>(null);
@@ -580,7 +580,7 @@ export function ControlCenter(props: Props) {
     if (open && panel) {
       settingsReturnFocus = document.activeElement as HTMLElement | null;
       queueMicrotask(() => panel.querySelector<HTMLElement>('[data-settings-close]')?.focus());
-      onCleanup(onEscape(() => setContextOpen(false)));
+      onCleanup(onEscape(() => { if (!phoneCallVisible()) setContextOpen(false); }));
     } else if (!open && settingsReturnFocus) {
       const back = settingsReturnFocus;
       settingsReturnFocus = null;
@@ -1327,16 +1327,17 @@ export function ControlCenter(props: Props) {
   const [callView, setCallView] = createSignal<CallView>(CALL_IDLE);
   const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
   const [callMinimized, setCallMinimized] = createSignal(false);
-  let incomingComposerFocus: HTMLElement | null = null;
-  createEffect(on(() => callView().callId, () => setCallMinimized(false)));
+  let incomingReturnFocus: HTMLElement | null = null;
+  createEffect(on(() => callView().callId, (id, previous) => { if (id !== previous) setCallMinimized(false); }));
   const [callApproval, setCallApproval] = createSignal(false);
   const [callApproving, setCallApproving] = createSignal(false);
-  const phoneCallHidden = () => phoneShell() && (callMinimized() || phoneTab() !== 'chats' || contextOpen() || walletTab() !== null);
+  const phoneCallHidden = () => phoneShell() && callView().phase !== 'incoming'
+    && (callMinimized() || phoneTab() !== 'chats' || contextOpen() || walletTab() !== null);
   const phoneCallVisible = () => phoneShell() && !phoneCallHidden() && (callView().phase !== 'idle' || callApproval());
   createEffect(on(phoneCallHidden, hidden => {
-    if (!hidden || !incomingComposerFocus) return;
-    const target = incomingComposerFocus;
-    incomingComposerFocus = null;
+    if (!hidden || !incomingReturnFocus) return;
+    const target = incomingReturnFocus;
+    incomingReturnFocus = null;
     queueMicrotask(() => {
       if (target.isConnected && !target.closest('[hidden], [inert], [aria-hidden="true"]')) target.focus();
     });
@@ -1372,9 +1373,9 @@ export function ControlCenter(props: Props) {
     now: () => Date.now(),
     onView: view => {
       if (phoneShell() && view.phase === 'incoming' && callView().phase !== 'incoming') {
-        // Capture before the call makes the composer inert and takes focus.
+        // Capture before the ring makes the current page inert and takes focus.
         const active = document.activeElement;
-        incomingComposerFocus = active instanceof HTMLElement && active.closest('[data-composer]') ? active : null;
+        incomingReturnFocus = active instanceof HTMLElement ? active : null;
       }
       setCallView(view);
     },
@@ -1887,12 +1888,18 @@ export function ControlCenter(props: Props) {
   const shareReason = () => shareDisabledReason(overview());
   const fundReason = () => fundingDisabledReason(overview(), wallet() !== null && !errors.wallet, moneyBlocked());
   const phoneEntryId = createUniqueId();
-  const returnToCall = () => {
-    if (phoneGuard.check() || walletBusy() || pairingBlockingActions() > 0) return;
+  const showPhoneCall = () => {
+    incomingReturnFocus = null;
     setContextOpen(false); setWalletTab(null); setPhoneTab('chats'); setCallMinimized(false);
     if (callView().peer) setTrack({ kind: 'peer', id: callView().peer!.toLowerCase() });
     queueMicrotask(() => callPanel?.focus());
   };
+  const returnToCall = () => {
+    if (phoneGuard.check() || walletBusy() || pairingBlockingActions() > 0) return;
+    showPhoneCall();
+  };
+  const callUnderlayBlocked = () => Array.from(document.querySelectorAll('[data-call-underlay="true"]'))
+    .some(el => el.matches('[data-swipe-approval="true"]') || navigationBlocked(false, el));
   const minimizeCall = () => {
     if (phoneGuard.check()) return;
     setCallMinimized(true);
@@ -1906,11 +1913,12 @@ export function ControlCenter(props: Props) {
     // A ring stays answerable above the mounted composer. Once it is answered
     // or declined, the pending composer takes precedence again; no draft is sent.
     if (callView().phase !== 'incoming' && phoneCallVisible() && (!callPanel || !navigationBlocked(false, callPanel))
-      && Array.from(document.querySelectorAll('[data-call-underlay="true"]')).some(el => navigationBlocked(false, el))) {
+      && callUnderlayBlocked()) {
       setCallMinimized(true);
-    } else if (callApproval() && phoneCallHidden() && !phoneGuard.check() && !walletBusy() && !settingsBusy()) {
+    } else if (callApproval() && phoneCallHidden() && !(callView().phase === 'ended' && callView().reason === 'declined')
+      && !phoneGuard.check() && !walletBusy() && !settingsBusy()) {
       // Authorization can finish after navigation. Present it once any unrelated
-      // sheet closes; never leave approval trapped in a hidden call view.
+      // sheet closes. A late declined-hangup refusal must not replace the restored tab.
       setContextOpen(false); setWalletTab(null); setPhoneTab('chats'); setCallMinimized(false);
       queueMicrotask(() => callPanel?.focus());
     }
@@ -2189,7 +2197,7 @@ export function ControlCenter(props: Props) {
 
       <Show when={phoneShell()}>
         <Show when={phoneTab() === 'you'}>
-          <section class="phone-page" data-phone-you inert={contextOpen()} aria-label={tr('uiYou')}>
+          <section class="phone-page" data-phone-you data-call-underlay={phoneCallVisible() ? "true" : undefined} inert={contextOpen() || phoneCallVisible()} aria-label={tr('uiYou')}>
             <h1>{tr('uiYou')}</h1>
             <Show when={shareReason()}><p class="hint" id={`${phoneEntryId}-share`}>{shareReason()}</p></Show>
             <button class="primary" data-phone-share disabled={shareReason() !== null} aria-describedby={shareReason() ? `${phoneEntryId}-share` : undefined} onClick={() => openPhoneSettings('frontdoor')}>{tr('phoneShare')}</button>
@@ -2199,7 +2207,7 @@ export function ControlCenter(props: Props) {
           </section>
         </Show>
         <Show when={phoneTab() === 'calls'}>
-          <section class="phone-page" data-phone-calls inert={contextOpen()} aria-label={tr('phoneCalls')}>
+          <section class="phone-page" data-phone-calls data-call-underlay={phoneCallVisible() ? "true" : undefined} inert={contextOpen() || phoneCallVisible()} aria-label={tr('phoneCalls')}>
             <h1>{tr('phoneCalls')}</h1>
             <For each={callPeers()}>{id => <button class="track-link" onClick={() => openPhoneTrack({ kind: 'peer', id })}>
               <span class="name">{nameOf(id)}</span><span class="meta">{tr('phoneOpenChat')}</span>
@@ -2213,6 +2221,7 @@ export function ControlCenter(props: Props) {
           mounted so existing tests can open tabs; closed until the avatar is pressed. */}
       <div
         class="settings-scrim"
+        inert={phoneCallVisible()}
         classList={{ open: contextOpen() }}
         data-settings-open={contextOpen() ? 'true' : 'false'}
         onClick={() => setContextOpen(false)}
@@ -2227,6 +2236,8 @@ export function ControlCenter(props: Props) {
         aria-modal={contextOpen() ? true : undefined}
         role="dialog"
         data-settings
+        data-call-underlay={phoneCallVisible() ? "true" : undefined}
+        inert={phoneCallVisible()}
         data-swipe-approval={contextOpen() && ['budget', 'devices'].includes(tab())}
       >
         <div class="row settings-head">
@@ -2373,8 +2384,16 @@ export function ControlCenter(props: Props) {
         streams={callStreams()}
         nameOf={nameOf}
         quote={actions.callQuote}
-        accept={() => { if (!moneyBlocked()) void calls.accept(); }}
-        decline={() => void calls.decline()}
+        accept={() => {
+          if (moneyBlocked()) return;
+          if (phoneShell()) {
+            // Keep pending money/approval UI mounted; only an unblocked Answer navigates.
+            if (callUnderlayBlocked() || walletBusy() || settingsBusy() || pairingBlockingActions() > 0) setCallMinimized(true);
+            else showPhoneCall();
+          }
+          void calls.accept();
+        }}
+        decline={() => { if (phoneShell()) setCallMinimized(true); void calls.decline(); }}
         hangup={() => void calls.hangup()}
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
@@ -2413,6 +2432,7 @@ export function ControlCenter(props: Props) {
             onTab={setWalletTab}
             onClose={closeWallet}
             embedded={phoneShell()}
+            callUnderlay={phoneCallVisible()}
             fundingDisabledReason={fundReason()}
             wallet={wallet()}
             starter={{ nodeId: ownId(), network: overview()?.network, capabilities: overview()?.capabilities,

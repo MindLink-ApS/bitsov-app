@@ -12,6 +12,19 @@ async function installLiveCallFixture(page: Page) {
     ` });
   });
 }
+async function expectRingNavigationBlocked(page: Page) {
+  const incoming = page.locator('[data-call-panel="incoming"]');
+  await expect(page.locator('[data-phone-tabs]')).toHaveAttribute('inert');
+  await expect(page.locator('[data-phone-status]')).toHaveAttribute('inert');
+  expect(await page.evaluate(async () => {
+    // @ts-expect-error Browser module served by Vite.
+    const { visibleBackDestination } = await import('/src/ios/edgeBack.ts');
+    return visibleBackDestination();
+  })).toBeNull();
+  await incoming.locator('[data-ios-back="call"]').click();
+  await expect(incoming).toBeVisible();
+  expect(await page.evaluate(() => (window as any).phoneCall.engine.view().phase)).toBe('incoming');
+}
 for (const lang of ['en', 'da']) {
   test(`${lang}: phone navigation, reachable entries and safe-area geometry`, async ({ page }) => {
     await page.goto(`${preview}?scene=list&lang=${lang}`);
@@ -288,6 +301,7 @@ for (const mode of ['pay', 'file']) {
         await button.click({ trial: true }); // Proves hit-testing/focusability; does not act.
       }
       await expect(page.locator('.track')).toHaveAttribute('inert');
+      await expectRingNavigationBlocked(page);
       await page.locator(`[data-call-${action}]`).click();
       await expect.poll(() => page.evaluate(() => (window as any).phoneCall.engine.view().phase)).toBe(action === 'accept' ? 'connecting' : 'ended');
       await expect(composer).toBeVisible();
@@ -304,6 +318,108 @@ for (const mode of ['pay', 'file']) {
       }
       expect(await page.evaluate(() => (window as any).composerWrites)).toEqual([]);
       await expect(page.locator('[data-phone-tabs]')).toHaveAttribute('inert');
+    });
+  }
+}
+
+for (const tab of ['wallet', 'you']) {
+  for (const action of ['accept', 'decline']) {
+    test(`incoming ring on ${tab}: ${action} preserves the tab or opens the call`, async ({ page }) => {
+      await installLiveCallFixture(page);
+      await page.goto(`${preview}?scene=${tab}`);
+      const underlay = page.locator(tab === 'wallet' ? '[data-wallet-page]' : '[data-phone-you]');
+      await expect(underlay).toBeVisible();
+      const opener = page.locator(tab === 'wallet' ? '[data-activity-direction="out"]' : '[data-phone-settings]');
+      if (tab === 'wallet') await opener.click();
+      else await opener.focus();
+      await underlay.evaluate(el => { (window as any).ringUnderlay = el; (window as any).ringFocus = document.activeElement; });
+      await page.addStyleTag({ content: '[data-call-panel], [data-call-accept] { animation: none !important; transition: none !important; }' });
+      const peer = await page.locator('[data-phone-list] [data-track^="peer:"]').last().getAttribute('data-track');
+      await page.evaluate(peer => (window as any).phoneCall.ring(peer), peer!.slice(5));
+      const incoming = page.locator('[data-call-panel="incoming"]');
+      await expect(incoming).toBeVisible();
+      await expect(incoming).toBeFocused();
+      await expect(underlay).toHaveAttribute('inert');
+      for (const selector of ['[data-call-accept]', '[data-call-decline]']) {
+        await expect(incoming.locator(selector)).toBeEnabled();
+        await incoming.locator(selector).click({ trial: true });
+      }
+      await expectRingNavigationBlocked(page);
+      await page.locator(`[data-call-${action}]`).click();
+      await expect.poll(() => page.evaluate(() => (window as any).phoneCall.engine.view().phase)).toBe(action === 'accept' ? 'connecting' : 'ended');
+      if (action === 'accept') {
+        await expect(page.locator('[data-call-panel="connecting"]')).toBeVisible();
+        await expect(page.locator('[data-call-panel="connecting"]')).toBeFocused();
+        await expect(page.locator('[data-phone-tab="chats"]')).toHaveAttribute('aria-current', 'page');
+      } else {
+        await expect(page.locator('[data-call-panel]')).toBeHidden();
+        await expect(underlay).toBeVisible();
+        await expect(underlay).not.toHaveAttribute('inert');
+        expect(await underlay.evaluate(el => el === (window as any).ringUnderlay)).toBe(true);
+        await expect(page.locator(`[data-phone-tab="${tab}"]`)).toHaveAttribute('aria-current', 'page');
+        if (tab === 'wallet') await expect(opener).toHaveAttribute('aria-checked', 'true');
+        await expect.poll(() => page.evaluate(() => document.activeElement === (window as any).ringFocus)).toBe(true);
+      }
+    });
+  }
+}
+
+for (const surface of ['wallet-review', 'you-approval']) {
+  for (const action of ['accept', 'decline']) {
+    test(`incoming ring with ${surface}: ${action} retains the pending surface without writes`, async ({ page }) => {
+      await installLiveCallFixture(page);
+      await page.route('**/docs/ui/u5-phone-shell/harness/preview.tsx', async route => {
+        const response = await route.fetch();
+        const original = await response.text();
+        expect(original).toContain('const forbid = () => {');
+        expect(original).toContain('if (key === "onLive")');
+        await route.fulfill({ response, body: original
+          .replace('const forbid = () => {', 'window.composerWrites = []; const forbid = () => { window.composerWrites.push("forbidden write");')
+          .replace('if (key === "onLive")', `if (key === 'spendStatus') return async () => ({ state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600000, pending: null, window_ms: 600000 }); if (key === 'onLive')`) });
+      });
+      if (surface === 'wallet-review') {
+        await page.route('**/src/control/Shell.tsx', async route => {
+          const response = await route.fetch();
+          const original = await response.text();
+          const marker = 'const [walletTab, setWalletTab] = createSignal(null);';
+          expect(original).toContain(marker);
+          // Seed the destination, without pressing Send. Review remains read-only.
+          await route.fulfill({ response, body: original.replace(marker, 'const [walletTab, setWalletTab] = createSignal("send");')
+            .replace('const [phoneTab, setPhoneTab] = createSignal("chats");', 'const [phoneTab, setPhoneTab] = createSignal("wallet");') });
+        });
+      }
+      await page.goto(`${preview}?scene=${surface === 'wallet-review' ? 'wallet' : 'you'}`);
+      if (surface === 'wallet-review') {
+        await expect(page.locator('[data-phone-tab="wallet"]')).toHaveAttribute('aria-current', 'page');
+        await page.locator('[data-send-to]').fill('02' + 'a'.repeat(64));
+        await page.locator('[data-send-amount]').fill('123');
+        await page.locator('[data-send-memo]').fill('Pending Wallet payment');
+        await expect(page.locator('[data-send-review]')).toHaveText('Review');
+        await page.locator('[data-send-review]').click();
+      } else {
+        await expect(page.locator('[data-phone-you]')).toBeVisible();
+        await page.locator('[data-phone-devices]').click();
+      }
+      const pending = page.locator(surface === 'wallet-review' ? '[data-wallet-review]' : '[data-settings]');
+      await expect(pending).toBeVisible();
+      const before = await pending.textContent();
+      await pending.evaluate(el => { (window as any).pendingSurface = el; });
+      await page.addStyleTag({ content: '[data-call-panel], [data-call-accept] { animation: none !important; transition: none !important; }' });
+      const peer = await page.locator('[data-phone-list] [data-track^="peer:"]').last().getAttribute('data-track');
+      await page.evaluate(peer => (window as any).phoneCall.ring(peer), peer!.slice(5));
+      const incoming = page.locator('[data-call-panel="incoming"]');
+      await expect(incoming).toBeVisible();
+      await expect(incoming).toBeFocused();
+      await expectRingNavigationBlocked(page);
+      await page.locator(`[data-call-${action}]`).click();
+      await expect.poll(() => page.evaluate(() => (window as any).phoneCall.engine.view().phase)).toBe(action === 'accept' ? 'connecting' : 'ended');
+      await expect(page.locator('[data-call-panel]')).toBeHidden();
+      await expect(pending).toBeVisible();
+      expect(await pending.evaluate(el => el === (window as any).pendingSurface)).toBe(true);
+      expect(await pending.textContent()).toBe(before);
+      await expect(page.locator('[data-phone-tabs]')).toHaveAttribute('inert');
+      await expect(page.locator('[data-phone-status]')).toHaveAttribute('inert');
+      expect(await page.evaluate(() => (window as any).composerWrites)).toEqual([]);
     });
   }
 }

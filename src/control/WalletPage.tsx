@@ -135,6 +135,8 @@ export function WalletPage(props: {
   onClose: () => void;
   /** Phone tab content, below the persistent status and above the tab bar. */
   embedded?: boolean;
+  /** Preserve this page and its drafts behind a phone ring. */
+  callUnderlay?: boolean;
   fundingDisabledReason?: string | null;
   wallet: WalletOverview | null;
   walletError?: string;
@@ -190,7 +192,7 @@ export function WalletPage(props: {
   ];
 
   return (
-    <div class="wallet-page" role={props.embedded && !starterOpen() ? "region" : "dialog"} aria-modal={props.embedded && !starterOpen() ? undefined : true} data-wallet-overlay={props.embedded && starterOpen() ? "true" : undefined} aria-label={t('uiWallet')} data-wallet-page={props.tab}>
+    <div class="wallet-page" inert={props.callUnderlay} data-call-underlay={props.callUnderlay ? "true" : undefined} role={props.embedded && !starterOpen() ? "region" : "dialog"} aria-modal={props.embedded && !starterOpen() ? undefined : true} data-wallet-overlay={props.embedded && starterOpen() ? "true" : undefined} aria-label={t('uiWallet')} data-wallet-page={props.tab}>
       <header class="wallet-top">
         <button type="button" class="link" data-wallet-close data-ios-back={starterOpen() ? undefined : 'wallet'} ref={(el) => queueMicrotask(() => el.isConnected && el.focus())} onClick={() => starterOpen() ? setStarterOpen(false) : props.onClose()} aria-label={starterOpen() ? t('uiBack450') : `${t('uiBack450')}, ${t('uiCloseWallet')}`}>{t('uiBack450')}</button>
         <h1>{t(starterOpen() ? 'starterTitle' : 'uiWallet')}</h1>

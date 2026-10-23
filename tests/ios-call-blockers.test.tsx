@@ -17,7 +17,7 @@ async function mount(source: Source) {
   await vi.waitFor(() => expect(document.querySelector('[data-composer]')).not.toBeNull());
 }
 
-it('minimizes an incoming call delivered by the real source event path without accepting it', async () => {
+it('blocks Back while an incoming call delivered by the real source event path stays answerable', async () => {
   const source = sampleSource();
   let emit: Parameters<Source['onLive']>[0] | undefined;
   const listen = source.onLive;
@@ -34,9 +34,11 @@ it('minimizes an incoming call delivered by the real source event path without a
   } });
   await vi.waitFor(() => expect(document.querySelector('[data-call-panel="incoming"]')).not.toBeNull());
   expect(document.querySelector('.cc')?.getAttribute('data-swipe-call')).toBe('true');
-  expect(visibleBackDestination()?.route).toBe('call');
-  visibleBackDestination()!.back();
-  expect(document.querySelector('[data-call-panel]')?.hasAttribute('hidden')).toBe(true);
+  expect(visibleBackDestination()).toBeNull();
+  document.querySelector<HTMLButtonElement>('[data-ios-back="call"]')!.click();
+  expect(document.querySelector('[data-call-panel="incoming"]')?.hasAttribute('hidden')).toBe(false);
+  expect(document.querySelector('[data-phone-tabs]')?.hasAttribute('inert')).toBe(true);
+  expect(document.querySelector('[data-phone-status]')?.hasAttribute('inert')).toBe(true);
   expect(document.querySelector('[data-phone-status] [data-on-call="incoming"]')).not.toBeNull();
   expect(signal).not.toHaveBeenCalled();
 });

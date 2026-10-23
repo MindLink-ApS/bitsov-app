@@ -72,7 +72,7 @@ export function createPhoneNavigationGuard(enabled: () => boolean) {
     const update = () => { setBlocked(check()); setRevision(value => value + 1); };
     const observer = new MutationObserver(update);
     observer.observe(document.body, { subtree: true, childList: true, attributes: true,
-      attributeFilter: ['hidden', 'inert', 'aria-hidden', 'open', 'role', 'class', 'style', 'data-approval', 'data-ai-card', 'data-state', 'data-phone-onboarding', 'data-swipe-call', 'data-swipe-approval', 'data-swipe-money'] });
+      attributeFilter: ['hidden', 'inert', 'aria-hidden', 'open', 'role', 'class', 'style', 'data-approval', 'data-ai-card', 'data-state', 'data-phone-onboarding', 'data-swipe-call', 'data-call-panel', 'data-swipe-approval', 'data-swipe-money'] });
     update(); onCleanup(() => observer.disconnect());
   });
   return { blocked, check, revision };

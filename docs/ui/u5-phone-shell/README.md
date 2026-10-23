@@ -34,16 +34,19 @@ landscape so large text cannot push content or tabs offscreen. Share and Add
 sats reuse WelcomeHome’s capability/readiness checks and visible disabled reasons. Contact loading/error state belongs to the Chats list, with
 Reconnect on failure and no false “No contacts yet” message. New labels are in the English/Danish copy table.
 
-A call no longer blocks the header or tabs. Wallet and You hide the call view
+An ongoing call does not block the header or tabs. Wallet and You hide the call view
 without unmounting its media; the existing call engine owns the Live-only iOS
 audio session until teardown. The On-call pill restores the call and focuses its
 panel. Edge Back minimizes it without hanging up; selecting Chats also returns
 to chat content. Covered chat controls are inert. Money/approval surfaces take
 precedence, including approvals that arrive after navigation. Incoming rings
-are the exception: Accept / Decline remains visible above an open Pay or file
-composer. The composer stays mounted and inert while ringing; answering or
-declining returns to the same pending draft. No draft payment or file is sent
-automatically. Call signaling keeps its existing explicit Accept / Decline cost.
+are the exception: the same focused Accept / Decline panel appears on every
+tab, including Wallet and You. The underlying page stays mounted and inert,
+and tabs, status controls, and call Back are blocked while ringing. Decline
+restores that page and its focus; Accept opens the call unless a pending
+money/approval surface needs to keep its place. Pay/file composers, Wallet
+payment reviews, and settings approvals retain their state after either action.
+No draft payment or file is sent automatically. Call signaling keeps its existing explicit Accept / Decline cost.
 
 The tab bar has no overlay z-index. First-spend and owner-approval dialogs retain
 the native top layer; starter retains its full-screen layer above the tabs.

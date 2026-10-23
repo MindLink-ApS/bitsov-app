@@ -375,3 +375,29 @@ it('localizes unavailable Share and Add sats reasons in Danish', async () => {
     expect(document.getElementById(button.getAttribute('aria-describedby')!)?.textContent).toBe(reason);
   }
 });
+
+it.each(['chats', 'calls', 'wallet', 'you'])('keeps %s intact after a ring is declined, including a late call approval', async tab => {
+  await mount({ history: true });
+  await click(`[data-phone-tab="${tab}"]`);
+  const selector = tab === 'wallet' ? '[data-wallet-page]' : tab === 'chats' ? '[data-phone-list]' : `[data-phone-${tab}]`;
+  const underlay = document.querySelector(selector);
+  const peer = document.querySelector('[data-phone-list] [data-track^="peer:"]')!.getAttribute('data-track')!.slice(5);
+  await engine.receive({ id: 'incoming', sender: peer, recipient: SAMPLE_OWN_ID, kind: 400,
+    plaintext: JSON.stringify({ v: 1, call_id: 'c'.repeat(32), media: 'audio', sdp: 'v=0 fixture offer' }),
+    timestamp: Date.now(), payment_amount_msat: 1000 }, SAMPLE_OWN_ID);
+  await tick();
+  expect(visible('[data-call-panel="incoming"]')).toHaveLength(1);
+  expect(visible(selector)).toHaveLength(0);
+  expect(visibleBackDestination()).toBeNull();
+  await click('[data-ios-back="call"]');
+  expect(engine.view().phase).toBe('incoming');
+  await click('[data-call-decline]');
+  expect(engine.view().reason).toBe('declined');
+  expect(visible(selector)).toContain(underlay);
+  // A rejected hangup signal can report approval after the local decline.
+  // Exercise the same shell approval state through its captured dependency.
+  await authorizeCall!(); await tick();
+  expect(visible('[data-call-panel]')).toHaveLength(0);
+  expect(visible(selector)).toContain(underlay);
+  expect(document.querySelector(`[data-phone-tab="${tab}"]`)?.getAttribute('aria-current')).toBe('page');
+});
