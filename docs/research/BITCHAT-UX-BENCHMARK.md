@@ -98,7 +98,7 @@ What I could not check:
 - **The README feature** says "Triple-tap to instantly clear all data" (both READMEs).
 - **Current iOS main adds a confirmation step** after the triple-tap on the `bitchat/` logo. A comment in the code explains: "Confirm before destroying: … a fumbled tap must never be able to wipe the device. … under duress it costs one extra tap." (`bitchat/Views/ContentHeaderView.swift:53-59`).
   - The dialog reads "wipe all data?" / "wipe everything" (`bitchat/Views/ContentView.swift:555-570`).
-- **There is also a visible button** in Settings under "DANGER ZONE", labelled "panic wipe". Its note says it "erases all messages, keys, and identity. triple-tapping the bitchat/ logo does the same." (`app_info.settings.danger.*`).
+- **There is also a visible button** in Settings under "DANGER ZONE", labelled "panic wipe". Its note says it "erases all messages, keys, and identity. triple-tapping the bitchat/ logo does the same, instantly." (`app_info.settings.danger.panic_note`). That "instantly" is stale: the triple-tap now asks for confirmation too (`ContentHeaderView.swift:53-59`).
 - **What the wipe resets** (`ChatViewModel.swift:1557-1630`):
   - the nickname, back to `anon####`;
   - favourites;
