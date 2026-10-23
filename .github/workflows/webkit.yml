@@ -1,0 +1,45 @@
+name: WebKit
+
+# Atlas should make "WebKit (safe areas + type + keyboard)" required on main.
+# No path filters: even docs-only PRs receive a completed check, and docs/ui
+# contains the real-component fixtures used by these tests.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  webkit:
+    name: WebKit (safe areas + type + keyboard)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install locked frontend dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Install WebKit and Linux dependencies
+        run: npx playwright install --with-deps webkit
+      - name: Safe areas, Dynamic Type, keyboard and inputs
+        run: npm run test:webkit
+      - name: Preserve failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: webkit-failures
+          path: test-results/webkit/
+          retention-days: 7
