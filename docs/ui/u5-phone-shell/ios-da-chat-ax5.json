@@ -1,0 +1,321 @@
+{
+  "scene": "chat",
+  "lang": "da",
+  "generatedAt": 1792742361242,
+  "ready": true,
+  "rootFont": "53px",
+  "bodyFont": "34px",
+  "space": "normal",
+  "viewport": {
+    "width": 393,
+    "height": 852,
+    "top": 0,
+    "scale": 1
+  },
+  "keyboard": "false",
+  "ownerSheetMounted": false,
+  "tabBar": {
+    "x": 0,
+    "y": 752.90625,
+    "width": 393,
+    "height": 99.09375,
+    "top": 752.90625,
+    "right": 393,
+    "bottom": 852,
+    "left": 0
+  },
+  "tabDisplay": "flex",
+  "status": {
+    "x": 0,
+    "y": 59,
+    "width": 393,
+    "height": 73.09375,
+    "top": 59,
+    "right": 393,
+    "bottom": 132.09375,
+    "left": 0
+  },
+  "safeAreas": [
+    {
+      "side": "top",
+      "value": "59px"
+    },
+    {
+      "side": "bottom",
+      "value": "34px"
+    },
+    {
+      "side": "left",
+      "value": "0px"
+    },
+    {
+      "side": "right",
+      "value": "0px"
+    }
+  ],
+  "elements": [
+    {
+      "tag": "BUTTON",
+      "class": "node-pill",
+      "text": "Forbundet til din node",
+      "rect": {
+        "x": 24,
+        "y": 71,
+        "width": 271.609375,
+        "height": 48.09375,
+        "top": 71,
+        "right": 295.609375,
+        "bottom": 119.09375,
+        "left": 24
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        270,
+        46
+      ],
+      "scroll": [
+        270,
+        46
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "sats",
+      "text": "2 sats",
+      "rect": {
+        "x": 33,
+        "y": -742.609375,
+        "width": 62.734375,
+        "height": 28,
+        "top": -742.609375,
+        "right": 95.734375,
+        "bottom": -714.609375,
+        "left": 33
+      },
+      "font": "22px",
+      "whiteSpace": "nowrap",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "money-text",
+      "text": "betalt 1 sat \u00b7 netv\u00e6rksgebyr ikke oplyst",
+      "rect": {
+        "x": 51.609375,
+        "y": -396.078125,
+        "width": 301.1337890625,
+        "height": 62.09375,
+        "top": -396.078125,
+        "right": 352.7431640625,
+        "bottom": -333.984375,
+        "left": 51.609375
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "sats",
+      "text": "2 sats",
+      "rect": {
+        "x": 33,
+        "y": 30.640625,
+        "width": 62.734375,
+        "height": 28,
+        "top": 30.640625,
+        "right": 95.734375,
+        "bottom": 58.640625,
+        "left": 33
+      },
+      "font": "22px",
+      "whiteSpace": "nowrap",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "money-text",
+      "text": "betalt 1 sat \u00b7 netv\u00e6rksgebyr ikke oplyst",
+      "rect": {
+        "x": 51.609375,
+        "y": 271.796875,
+        "width": 301.1337890625,
+        "height": 62.09375,
+        "top": 271.796875,
+        "right": 352.7431640625,
+        "bottom": 333.890625,
+        "left": 51.609375
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "primary soft send-btn money",
+      "text": "Send",
+      "rect": {
+        "x": 283.75,
+        "y": 506.3125,
+        "width": 78.25,
+        "height": 44,
+        "top": 506.3125,
+        "right": 362,
+        "bottom": 550.3125,
+        "left": 283.75
+      },
+      "font": "22px",
+      "whiteSpace": "nowrap",
+      "client": [
+        78,
+        44
+      ],
+      "scroll": [
+        78,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "",
+      "text": "h\u00f8jst 7 sats \u00b7 inklusive maksimalt routinggebyr",
+      "rect": {
+        "x": 24.117401123046875,
+        "y": 612.7109375,
+        "width": 344.8825988769531,
+        "height": 58.796875,
+        "top": 612.7109375,
+        "right": 369,
+        "bottom": 671.5078125,
+        "left": 24.117401123046875
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Chats",
+      "rect": {
+        "x": 6,
+        "y": 759.90625,
+        "width": 127,
+        "height": 58.09375,
+        "top": 759.90625,
+        "right": 133,
+        "bottom": 818,
+        "left": 6
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        127,
+        58
+      ],
+      "scroll": [
+        127,
+        58
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Tegnebog",
+      "rect": {
+        "x": 133,
+        "y": 759.90625,
+        "width": 127,
+        "height": 58.09375,
+        "top": 759.90625,
+        "right": 260,
+        "bottom": 818,
+        "left": 133
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        127,
+        58
+      ],
+      "scroll": [
+        127,
+        58
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Dig",
+      "rect": {
+        "x": 260,
+        "y": 759.90625,
+        "width": 127,
+        "height": 58.09375,
+        "top": 759.90625,
+        "right": 387,
+        "bottom": 818,
+        "left": 260
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        127,
+        58
+      ],
+      "scroll": [
+        127,
+        58
+      ],
+      "failures": []
+    }
+  ],
+  "failures": [],
+  "contentSize": "accessibility-extra-extra-extra-large",
+  "device": "71E314A6-5C92-4507-994B-7F7E67DE9495"
+}

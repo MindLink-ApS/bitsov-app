@@ -133,6 +133,8 @@ export function WalletPage(props: {
   tab: WalletTab;
   onTab: (t: WalletTab) => void;
   onClose: () => void;
+  /** Phone tab content, below the persistent status and above the tab bar. */
+  embedded?: boolean;
   wallet: WalletOverview | null;
   walletError?: string;
   moneyBlocked: boolean;
@@ -186,7 +188,7 @@ export function WalletPage(props: {
   ];
 
   return (
-    <div class="wallet-page" role="dialog" aria-modal="true" aria-label={t('uiWallet')} data-wallet-page={props.tab}>
+    <div class="wallet-page" role={props.embedded && !starterOpen() ? "region" : "dialog"} aria-modal={props.embedded && !starterOpen() ? undefined : true} data-wallet-overlay={props.embedded && starterOpen() ? "true" : undefined} aria-label={t('uiWallet')} data-wallet-page={props.tab}>
       <header class="wallet-top">
         <button type="button" class="link" data-wallet-close data-ios-back={starterOpen() ? undefined : 'wallet'} ref={(el) => queueMicrotask(() => el.isConnected && el.focus())} onClick={() => starterOpen() ? setStarterOpen(false) : props.onClose()} aria-label={starterOpen() ? t('uiBack450') : `${t('uiBack450')}, ${t('uiCloseWallet')}`}>{t('uiBack450')}</button>
         <h1>{t(starterOpen() ? 'starterTitle' : 'uiWallet')}</h1>
@@ -194,6 +196,7 @@ export function WalletPage(props: {
       </header>
 
       <div class="wallet-body">
+        <Show when={props.embedded && !starterOpen()}><button class="soft" data-phone-add-sats onClick={() => props.onTab('receive')}>{t('phoneAddSats')}</button></Show>
         <Show when={props.starter}>
           <StarterBalance {...props.starter!} open={starterOpen()} onOpen={() => setStarterOpen(true)} onHidden={() => setStarterOpen(false)} />
         </Show>

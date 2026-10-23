@@ -1788,3 +1788,48 @@ html[data-platform='ios'] .avatar-mark {
     --t-2xl: clamp(24px, 1.411765rem, 30px);
   }
 }
+
+/* U5: phones use a status row, one content pane and safe-area bottom tabs.
+   The platform/width decision belongs to PhoneShell; a narrow Mac keeps its rail. */
+html:is([data-platform='ios'], [data-platform='android']) .cc[data-phone-shell='true'] {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas: 'status' 'content' 'tabs';
+  padding-bottom: 0;
+}
+.cc[data-phone-shell='true'] [hidden] { display: none !important; }
+.phone-status { grid-area: status; min-width: 0; padding: var(--s-2) var(--s-4); border-bottom: 1px solid var(--line); background: var(--sunk); }
+.phone-status .node-pill { margin: 0; max-width: 100%; white-space: normal; }
+.phone-status .node-pill .what { white-space: normal; overflow-wrap: anywhere; }
+.phone-status .money-notice { margin: var(--s-1) 0 0; padding: 0; }
+.phone-chat-list, .phone-page { grid-area: content; min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: var(--s-4); display: flex; flex-direction: column; gap: var(--s-4); }
+.phone-chat-list > *, .phone-page > * { flex-shrink: 0; }
+.phone-chat-list h1, .phone-page h1 { margin: 0; font-size: var(--t-xl); }
+.phone-chat-list .track-group { display: flex; flex-direction: column; gap: var(--s-1); }
+.phone-chat-list .track-group h2 { display: block; margin: 0 0 var(--s-1); font-size: var(--t-sm); color: var(--muted); }
+.phone-chat-list .track-link, .phone-page .track-link { width: 100%; min-height: 44px; white-space: normal; }
+.phone-chat-list .track-link .name, .phone-page .track-link .name { min-width: 0; white-space: normal; overflow-wrap: anywhere; text-overflow: clip; }
+.phone-chat-list .rail-foot { margin-top: 0; }
+.phone-tabs { grid-area: tabs; display: flex; align-items: stretch; min-width: 0; background: var(--sunk); border-top: 1px solid var(--line); padding: var(--s-1) max(var(--s-1), env(safe-area-inset-right)) max(var(--s-1), env(safe-area-inset-bottom)) max(var(--s-1), env(safe-area-inset-left)); }
+.phone-tabs button { flex: 1; min-width: 0; min-height: 44px; padding: var(--s-2) 2px; border: 0; border-radius: var(--r-control); background: transparent; color: var(--muted); font-size: clamp(15px, .941177rem, 20px); white-space: normal; overflow-wrap: anywhere; }
+.phone-tabs button[aria-current='page'] { color: var(--ink); background: var(--surface); box-shadow: inset 0 2px var(--accent); }
+.phone-tabs button:active { background: var(--line); }
+.cc[data-phone-shell='true'] > .track { grid-area: content; }
+.cc[data-phone-shell='true'] .track > .ios-back { display: inline-flex; align-self: flex-start; min-height: 44px; padding-inline: var(--s-4); }
+html:is([data-platform='ios'], [data-platform='android']) .cc[data-phone-shell='true'] .wallet-page {
+  position: relative; grid-area: content; inset: auto; height: auto; min-height: 0; padding: 0; z-index: auto;
+}
+.cc[data-phone-shell='true'] .wallet-top { padding-top: var(--s-3); }
+.cc[data-phone-shell='true'] .wallet-body { padding-bottom: var(--s-4); }
+.cc[data-phone-shell='true'] .composer { padding-bottom: var(--s-3); }
+html[data-keyboard-open='true'] .cc[data-phone-shell='true'] { grid-template-rows: auto minmax(0, 1fr); grid-template-areas: 'status' 'content'; }
+html[data-keyboard-open='true'] .phone-tabs { display: none; }
+@media (prefers-reduced-motion: no-preference) {
+  .cc[data-phone-shell='true'] > .track:not([hidden]) { animation: phone-push var(--d-mid) var(--ease); }
+  @keyframes phone-push { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: translateX(0); } }
+}
+/* Starter keeps its original full-screen money layer even when Wallet is a tab. */
+html:is([data-platform='ios'], [data-platform='android']) .cc[data-phone-shell='true'] .wallet-page[data-wallet-overlay='true'] {
+  position: fixed; inset: var(--visible-top, 0px) 0 var(--keyboard-inset, 0px); z-index: 30;
+  padding: var(--safe-area-top) var(--safe-area-right) var(--safe-area-bottom) var(--safe-area-left);
+}

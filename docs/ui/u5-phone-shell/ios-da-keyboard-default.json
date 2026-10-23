@@ -1,0 +1,243 @@
+{
+  "scene": "keyboard",
+  "lang": "da",
+  "generatedAt": 1792741951867,
+  "ready": true,
+  "rootFont": "17px",
+  "bodyFont": "17px",
+  "space": "normal",
+  "viewport": {
+    "width": 393,
+    "height": 456,
+    "top": 332,
+    "scale": 1
+  },
+  "keyboard": "true",
+  "ownerSheetMounted": false,
+  "tabBar": {
+    "x": 0,
+    "y": 0,
+    "width": 0,
+    "height": 0,
+    "top": 0,
+    "right": 0,
+    "bottom": 0,
+    "left": 0
+  },
+  "tabDisplay": "none",
+  "status": {
+    "x": 0,
+    "y": 59,
+    "width": 393,
+    "height": 60.96875,
+    "top": 59,
+    "right": 393,
+    "bottom": 119.96875,
+    "left": 0
+  },
+  "safeAreas": [
+    {
+      "side": "top",
+      "value": "59px"
+    },
+    {
+      "side": "bottom",
+      "value": "0px"
+    },
+    {
+      "side": "left",
+      "value": "0px"
+    },
+    {
+      "side": "right",
+      "value": "0px"
+    }
+  ],
+  "elements": [
+    {
+      "tag": "BUTTON",
+      "class": "node-pill",
+      "text": "Forbundet til din node",
+      "rect": {
+        "x": 15.984375,
+        "y": 66.984375,
+        "width": 215.875,
+        "height": 44,
+        "top": 66.984375,
+        "right": 231.859375,
+        "bottom": 110.984375,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        214,
+        42
+      ],
+      "scroll": [
+        214,
+        42
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "sats",
+      "text": "2 sats",
+      "rect": {
+        "x": 24.984375,
+        "y": -199.015625,
+        "width": 48.4765625,
+        "height": 22,
+        "top": -199.015625,
+        "right": 73.4609375,
+        "bottom": -177.015625,
+        "left": 24.984375
+      },
+      "font": "17px",
+      "whiteSpace": "nowrap",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "money-text",
+      "text": "betalt 1 sat \u00b7 netv\u00e6rksgebyr ikke oplyst",
+      "rect": {
+        "x": 60.71875,
+        "y": -79,
+        "width": 316.28466796875,
+        "height": 22,
+        "top": -79,
+        "right": 377.00341796875,
+        "bottom": -57,
+        "left": 60.71875
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "sats",
+      "text": "2 sats",
+      "rect": {
+        "x": 24.984375,
+        "y": 72.25,
+        "width": 48.4765625,
+        "height": 22,
+        "top": 72.25,
+        "right": 73.4609375,
+        "bottom": 94.25,
+        "left": 24.984375
+      },
+      "font": "17px",
+      "whiteSpace": "nowrap",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "money-text",
+      "text": "betalt 1 sat \u00b7 netv\u00e6rksgebyr ikke oplyst",
+      "rect": {
+        "x": 60.71875,
+        "y": 192.265625,
+        "width": 316.28466796875,
+        "height": 22,
+        "top": 192.265625,
+        "right": 377.00341796875,
+        "bottom": 214.265625,
+        "left": 60.71875
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "primary soft send-btn money",
+      "text": "Send",
+      "rect": {
+        "x": 304.09375,
+        "y": 321.0625,
+        "width": 65.921875,
+        "height": 44,
+        "top": 321.0625,
+        "right": 370.015625,
+        "bottom": 365.0625,
+        "left": 304.09375
+      },
+      "font": "17px",
+      "whiteSpace": "nowrap",
+      "client": [
+        66,
+        44
+      ],
+      "scroll": [
+        66,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "",
+      "text": "h\u00f8jst 7 sats \u00b7 inklusive maksimalt routinggebyr",
+      "rect": {
+        "x": 45.557586669921875,
+        "y": 376.046875,
+        "width": 331.4580383300781,
+        "height": 19,
+        "top": 376.046875,
+        "right": 377.015625,
+        "bottom": 395.046875,
+        "left": 45.557586669921875
+      },
+      "font": "15.000001px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    }
+  ],
+  "failures": [],
+  "contentSize": "large",
+  "device": "71E314A6-5C92-4507-994B-7F7E67DE9495"
+}
