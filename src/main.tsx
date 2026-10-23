@@ -5,6 +5,7 @@ import { appPlatform } from './platform';
 import { applyResolvedTheme, resolveTheme, themePref, watchSystemTheme } from './control/prefs';
 import { installKeyboardViewport } from './ios/keyboard';
 import { installEdgeBack } from './ios/edgeBack';
+import { installAndroidKeyboardVisibility } from './control/PhoneShell';
 import './styles.css';
 import './assistant/endpoint.css';
 
@@ -13,6 +14,10 @@ if (appPlatform() === 'ios') {
   const stopKeyboard = installKeyboardViewport();
   const stopBack = installEdgeBack();
   if (import.meta.hot) import.meta.hot.dispose(() => { stopKeyboard(); stopBack(); });
+}
+if (appPlatform() === 'android') {
+  const stopKeyboard = installAndroidKeyboardVisibility();
+  if (import.meta.hot) import.meta.hot.dispose(stopKeyboard);
 }
 applyResolvedTheme(resolveTheme(themePref()));
 watchSystemTheme();

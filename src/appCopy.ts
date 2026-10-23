@@ -1,6 +1,13 @@
 /** First migrated app surfaces. Values are display copy, never protocol tokens.
  * {0}, {1}, … insert values verbatim (especially money and recipients). */
 export const appEn = {
+  "phoneChats": "Chats",
+  "phoneCalls": "Calls",
+  "phoneNavigation": "Main navigation",
+  "phoneShare": "Share my card / QR",
+  "phoneAddSats": "Add sats",
+  "phoneAddDevice": "Add a device",
+  "phoneOpenChat": "Open chat",
   "ownerApprovalListTitle": "Approvals waiting for you",
   "ownerApprovalEmpty": "Nothing is waiting. Requests from your other apps show here; each expires after five minutes.",
   "ownerApprovalExpires": "Expires in {0} unless you approve it.",
@@ -838,6 +845,13 @@ export const appEn = {
 };
 
 export const appDa: Record<keyof typeof appEn, string> = {
+  "phoneChats": "Chats",
+  "phoneCalls": "Opkald",
+  "phoneNavigation": "Hovednavigation",
+  "phoneShare": "Del mit kort / QR",
+  "phoneAddSats": "Tilføj sats",
+  "phoneAddDevice": "Tilføj en enhed",
+  "phoneOpenChat": "Åbn chat",
   "ownerApprovalListTitle": "Godkendelser, der venter på dig",
   "ownerApprovalEmpty": "Ingen anmodninger venter. Anmodninger fra dine andre apps vises her; hver udløber efter fem minutter.",
   "ownerApprovalExpires": "Udløber om {0}, medmindre du godkender den.",

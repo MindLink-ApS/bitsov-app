@@ -1,3 +1,4 @@
+import { createPhoneLayout, createPhoneNavigationGuard, PhoneTabs, type PhoneTab } from './PhoneShell';
 import { MediaView } from './CallMedia';
 import { invoke } from '@tauri-apps/api/core';
 import { OwnerApprovalSheets } from './OwnerApprovalSheet';
@@ -337,6 +338,16 @@ let artifactSeq = 0;
 type NewArtifact = Artifact extends infer A ? (A extends Artifact ? Omit<A, 'id' | 'at'> & { at?: number } : never) : never;
 
 export function ControlCenter(props: Props) {
+  const phoneLayout = createPhoneLayout();
+  const phoneShell = () => props.active && phoneLayout();
+  const phoneGuard = createPhoneNavigationGuard(phoneShell);
+  const [phoneTab, setPhoneTab] = createSignal<PhoneTab>('chats');
+  let phoneList: HTMLElement | undefined;
+  let phoneOpener: HTMLElement | null = null;
+  const phoneBack = () => {
+    setTrack(null);
+    queueMicrotask(() => { if (phoneOpener?.isConnected) phoneOpener.focus(); else phoneList?.focus(); });
+  };
   let callPanel: HTMLElement | undefined;
   const [now, setNow] = createSignal(Date.now());
   const [overview, setOverview] = createSignal<NodeOverview | null>(null);
@@ -366,6 +377,64 @@ export function ControlCenter(props: Props) {
   const [peers, setPeers] = createSignal<Peer[]>([]);
   const [peersLoaded, setPeersLoaded] = createSignal(false);
   const [rooms, setRooms] = createSignal<Room[]>([]);
+  const [recentCallPeers, setRecentCallPeers] = createSignal<string[]>([]);
+  // Cache settled/in-flight reads for this shell/source. Reconnects and peer
+  // refreshes reuse them; a live call replaces even a cached negative result.
+  const callHistory = new Map<string, Promise<boolean>>();
+  const callHistoryNewest = new Map<string, number>();
+  const knownCallPeers = new Set<string>();
+  const [callHistoryRevision, setCallHistoryRevision] = createSignal(0);
+  const noteCallHistory = (id: string) => {
+    knownCallPeers.add(id);
+    callHistory.set(id, Promise.resolve(true));
+    setRecentCallPeers(ids => ids.includes(id) ? ids : [...ids, id]);
+  };
+  const reconcileCallHistory = () => {
+    // A fresh websocket does not replay missed messages. Recheck only history
+    // newer than the last completed negative read; retain every positive result.
+    for (const id of callHistory.keys()) if (!knownCallPeers.has(id)) callHistory.delete(id);
+    setCallHistoryRevision(value => value + 1);
+  };
+  const peerHasCall = (id: string): Promise<boolean> => {
+    const cached = callHistory.get(id);
+    if (cached) return cached;
+    const cutoff = callHistoryNewest.get(id);
+    let newest = cutoff ?? -Infinity;
+    const read = (async () => {
+      let before: number | undefined;
+      while (phoneShell() && live()) {
+        const page = await source.messages(id, before);
+        if (before === undefined) newest = Math.max(newest, ...page.map(m => m.timestamp));
+        if (page.some(m => isCallKind(m.kind))) return true;
+        const oldest = Math.min(...page.map(m => m.timestamp));
+        if (!page.length || !Number.isFinite(oldest) || (cutoff !== undefined && oldest <= cutoff) || (before !== undefined && oldest >= before)) return false;
+        before = oldest;
+      }
+      throw new Error('Call history read interrupted');
+    })();
+    callHistory.set(id, read);
+    void read.then(hasCall => {
+      if (callHistory.get(id) !== read) return;
+      if (hasCall) knownCallPeers.add(id);
+      else callHistoryNewest.set(id, newest);
+    }, () => { if (callHistory.get(id) === read) callHistory.delete(id); });
+    return read;
+  };
+  const [phoneCallPeers] = createResource(
+    () => phoneShell() && live() ? { ids: peers().map(p => p.node_id.toLowerCase()), all: phoneTab() === 'calls', revision: callHistoryRevision() } : false,
+    async ({ ids, all }) => {
+      const found: string[] = [];
+      for (const id of ids) {
+        try { if (await peerHasCall(id)) found.push(id); }
+        catch { /* Failed reads are retryable, never cached as no history. */ }
+        // Startup only answers "has any call?". Enumerate the rest on demand.
+        if (found.length && !all) break;
+        if (!phoneShell() || !live()) break;
+      }
+      return found;
+    },
+  );
+  const callPeers = createMemo(() => [...new Set([...(phoneCallPeers() ?? []), ...recentCallPeers()])]);
   const [members, setMembers] = createStore<Record<string, string[]>>({});
   let watchOverviewAt = 0;
   let watchWalletAt = 0;
@@ -495,7 +564,7 @@ export function ControlCenter(props: Props) {
   createEffect(on(() => walletTab() !== null, (open) => {
     if (!open) return;
     const opener = walletReturnFocus;
-    onCleanup(onEscape(() => { if (!contextOpen()) setWalletTab(null); }));
+    onCleanup(onEscape(() => { if (!contextOpen()) closeWallet(); }));
     onCleanup(() => queueMicrotask(() => { if (opener?.isConnected) opener.focus(); }));
   }));
   const [settingsEl, setSettingsEl] = createSignal<HTMLElement | null>(null);
@@ -571,7 +640,8 @@ export function ControlCenter(props: Props) {
       .filter((e) => !seen.has(e.sender) && !!seen.add(e.sender))
       .map((e) => e.sender);
   });
-  const openKey = () => (track() ? trackKey(track()!) : null);
+  const openKey = () => (phoneShell() && phoneTab() !== 'chats') ? null : (track() ? trackKey(track()!) : null);
+  createEffect(() => { const key = openKey(); if (key) setThreads('unread', key, 0); });
   // Bumped whenever the owner leaves a chat: a retry approval answered after that never goes on to send.
   let viewGeneration = 0;
   createEffect(on(openKey, () => { viewGeneration++; }, { defer: true }));
@@ -651,7 +721,7 @@ export function ControlCenter(props: Props) {
   const loadPeers = () => attempt('peers', () => source.peers(), (value) => {
     setPeers(value);
     setPeersLoaded(true);
-    if (!track()) {
+    if (!track() && !phoneLayout()) {
       const first = value.find((p) => p.connected) ?? value[0];
       if (first) setTrack({ kind: 'peer', id: first.node_id.toLowerCase() });
     }
@@ -791,7 +861,10 @@ export function ControlCenter(props: Props) {
       // History can already hold a message still sending here: its bubble claims it, as for the live echo.
       for (const m of page) claimEcho(m, t.kind === 'room' ? t.id : null);
       setThreads('t', key, (old) => mergeMessages(old ?? [], page));
-      if (t.kind === 'peer') foldRooms(page, false);
+      if (t.kind === 'peer') {
+        foldRooms(page, false);
+        if (page.some(m => isCallKind(m.kind))) noteCallHistory(t.id.toLowerCase());
+      }
       // After the thread, so a restored send whose message is already here is not shown twice.
       loadOps(t);
       setEnergyAt(Date.now());
@@ -855,6 +928,7 @@ export function ControlCenter(props: Props) {
           .onLive((event) => {
             if (event.type === 'link') {
               if (mine !== generation) return;
+              if (event.state === 'open' && link() !== null && link() !== 'open') reconcileCallHistory();
               setLink(event.state);
               if (event.state !== 'open') { budgetRevision += 1; setBudgetConfirmed(false); }
               else if (live()) void loadSpend().then(() => { if (mine === generation && live()) return loadBudget(); });
@@ -871,6 +945,8 @@ export function ControlCenter(props: Props) {
             if (event.type === 'message' && isPorchKind(event.message.kind)) return;
             // Call signals ring or steer the call; they are not chat.
             if (event.type === 'message' && isCallKind(event.message.kind)) {
+              const other = event.message.sender.toLowerCase() === ownId().toLowerCase() ? event.message.recipient : event.message.sender;
+              noteCallHistory(other.toLowerCase());
               // Each engine takes only its own: meeting legs carry a roster.
               void calls.receive(event.message, ownId());
               void meetings.receive(event.message, ownId());
@@ -1301,7 +1377,10 @@ export function ControlCenter(props: Props) {
   // A call counts once it was placed, or answered here: whether it went live, and its route once the stats name one.
   // A call refused before it had an id (their node takes no calls, the grant is too small) is the latest call too.
   const [lastCall, setLastCall] = createSignal<TrackedCall | null>(null);
-  createEffect(() => { const v = callView(); setLastCall((prev) => nextLastCall(prev, v)); });
+  createEffect(() => {
+    const v = callView(); setLastCall((prev) => nextLastCall(prev, v));
+    if (v.callId && v.peer) setRecentCallPeers(ids => ids.includes(v.peer!.toLowerCase()) ? ids : [...ids, v.peer!.toLowerCase()]);
+  });
   const stunSource = (): StunSource => (stunOff() ? 'off' : stunPref() ? 'custom' : nodeStun() ? 'node' : overview() ? 'none' : 'checking');
   // Closing the window ends the call here without paying; only Hang up pays.
   onCleanup(() => calls.endLocal());
@@ -1762,8 +1841,23 @@ export function ControlCenter(props: Props) {
     walletReturnFocus = contextOpen() ? settingsReturnFocus : document.activeElement as HTMLElement | null;
     setContextOpen(false);
     setWalletTab(tab);
+    if (phoneShell()) setPhoneTab('wallet');
     void loadWallet();
   };
+
+  const openPhoneSettings = (page: ReturnType<typeof tab>) => { if (phoneGuard.check() || walletBusy()) return; setTab(page); setContextOpen(true); };
+  const selectPhoneTab = (next: PhoneTab) => {
+    if (phoneGuard.check() || walletBusy() || pairingBlockingActions() > 0) return;
+    if (next === 'chats' && phoneTab() === 'chats') phoneBack();
+    if (next === 'wallet') { if (walletTab() === null) openWallet(); }
+    else { setWalletTab(null); setPhoneTab(next); }
+  };
+  const openPhoneTrack = (next: TrackRef) => {
+    phoneOpener = document.activeElement as HTMLElement | null;
+    setPhoneTab('chats'); setTrack(next);
+    queueMicrotask(() => document.querySelector<HTMLButtonElement>('[data-ios-back="thread"]')?.focus());
+  };
+  const closeWallet = () => { setWalletTab(null); if (phoneShell()) setPhoneTab('chats'); };
 
   const welcomeHome = () => <WelcomeHome overview={overview()} moneyBlocked={moneyBlocked()} walletReady={wallet() !== null && !errors.wallet}
       onShare={() => { setTab('frontdoor'); setContextOpen(true); }}
@@ -1771,7 +1865,7 @@ export function ControlCenter(props: Props) {
       onAddSats={() => openWallet('receive')} />;
 
   return (
-    <div class="cc" classList={{ 'no-context': !props.active }} data-mode={source.mode}
+    <div class="cc" data-phone-shell={phoneShell() ? "true" : undefined} classList={{ 'no-context': !props.active }} data-mode={source.mode}
       data-swipe-call={!['idle', 'ended'].includes(callView().phase) || !['idle', 'ended'].includes(meetingView().phase)}>
       <Show when={props.active && !isMobilePlatform()}>
         <OwnerApprovalSheets approvals={approvals()} error={approvalsError()} now={now()}
@@ -1785,7 +1879,27 @@ export function ControlCenter(props: Props) {
             setContextOpen(false); setWalletTab(null);
           }} />
       </Show>
+      <Show when={phoneShell()}>
+        <header class="phone-status" data-phone-status inert={contextOpen() || phoneGuard.blocked()}>
+          <button class="node-pill" data-pill={pill().tone} onClick={() => openPhoneSettings('node')} aria-haspopup="dialog">
+            <span class={`dot ${pill().tone}`} classList={{ live: pill().live }} />
+            <span class="what">{pill().text}</span>
+          </button>
+          <OnCallPill view={callView()} onReturn={() => {
+            setWalletTab(null); setPhoneTab('chats');
+            if (callView().peer) setTrack({ kind: 'peer', id: callView().peer!.toLowerCase() });
+            queueMicrotask(() => callPanel?.focus());
+          }} />
+          {props.offline}
+          <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
+            onEnded={() => { void loadBudget(); void loadWallet(); }} />
+          <Show when={moneyBlocked()}><p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p></Show>
+        </header>
+      </Show>
       <Rail
+        phone={phoneShell()}
+        hidden={phoneShell() && (phoneTab() !== 'chats' || track() !== null)}
+        listRef={el => { phoneList = el; }}
         callView={callView()}
         onReturnToCall={() => {
           const peer = callView().peer;
@@ -1798,6 +1912,9 @@ export function ControlCenter(props: Props) {
         active={props.active}
         sample={source.mode === 'sample'}
         peers={peers()}
+        peersPending={!peersLoaded()}
+        peersError={errors.peers}
+        onReconnect={async () => { await props.onReconnect?.(); await loadPeers(); }}
         rooms={rooms()}
         nodeRooms={nodeRooms()}
         boundRooms={localRooms()}
@@ -1808,7 +1925,7 @@ export function ControlCenter(props: Props) {
         unread={threads.unread}
         openKey={openKey()}
         ownId={ownId()}
-        onOpen={(next) => setTrack(next)}
+        onOpen={(next) => phoneShell() ? openPhoneTrack(next) : setTrack(next)}
         onProfile={() => {
           setTab('body');
           setContextOpen(true);
@@ -1825,12 +1942,14 @@ export function ControlCenter(props: Props) {
       />
 
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
-        <section class="track" aria-label="Track" inert={walletTab() !== null || contextOpen()}>
-          <Show when={track()}><button type="button" class="link ios-back" data-ios-back="thread" onClick={() => setTrack(null)}>{tr('uiBack')}</button></Show>
-          {props.offline}
-          <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
-            onEnded={() => { void loadBudget(); void loadWallet(); }} />
-          <Show when={moneyBlocked()}>
+        <section class="track" aria-label="Track" hidden={phoneShell() && (phoneTab() !== 'chats' || track() === null)} inert={walletTab() !== null || contextOpen()}>
+          <Show when={track()}><button type="button" class="link ios-back" data-ios-back="thread" onClick={phoneBack}><Show when={phoneShell()}><span aria-hidden="true">‹ </span></Show>{tr('uiBack')}</button></Show>
+          <Show when={!phoneShell()}>
+            {props.offline}
+            <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
+              onEnded={() => { void loadBudget(); void loadWallet(); }} />
+          </Show>
+          <Show when={moneyBlocked() && !phoneShell()}>
             <p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p>
           </Show>
           <Show when={introNotice()}>
@@ -2013,6 +2132,27 @@ export function ControlCenter(props: Props) {
             )}
           </Show>
         </section>
+      </Show>
+
+      <Show when={phoneShell()}>
+        <Show when={phoneTab() === 'you'}>
+          <section class="phone-page" data-phone-you inert={contextOpen()} aria-label={tr('uiYou')}>
+            <h1>{tr('uiYou')}</h1>
+            <button class="primary" data-phone-share onClick={() => openPhoneSettings('frontdoor')}>{tr('phoneShare')}</button>
+            <button class="soft" data-phone-settings onClick={() => openPhoneSettings('body')}>{tr('uiProfileAndSettings')}</button>
+            <button class="soft" data-phone-devices onClick={() => openPhoneSettings('devices')}>{tr('phoneAddDevice')}</button>
+            <Show when={approvalsWaiting() > 0}><button class="soft" onClick={() => openPhoneSettings('node')}>{tr('uiApprovalsWaiting')} ({approvalsWaiting()})</button></Show>
+          </section>
+        </Show>
+        <Show when={phoneTab() === 'calls'}>
+          <section class="phone-page" data-phone-calls inert={contextOpen()} aria-label={tr('phoneCalls')}>
+            <h1>{tr('phoneCalls')}</h1>
+            <For each={callPeers()}>{id => <button class="track-link" onClick={() => openPhoneTrack({ kind: 'peer', id })}>
+              <span class="name">{nameOf(id)}</span><span class="meta">{tr('phoneOpenChat')}</span>
+            </button>}</For>
+          </section>
+        </Show>
+        <PhoneTabs selected={phoneTab()} calls={callPeers().length > 0} onSelect={selectPhoneTab} behind={contextOpen() || phoneGuard.blocked()} />
       </Show>
 
       {/* Profile / settings: Body, Node, Wallet, Budget and display prefs. Always
@@ -2215,7 +2355,8 @@ export function ControlCenter(props: Props) {
           <WalletPage
             tab={tab()}
             onTab={setWalletTab}
-            onClose={() => setWalletTab(null)}
+            onClose={closeWallet}
+            embedded={phoneShell()}
             wallet={wallet()}
             starter={{ nodeId: ownId(), network: overview()?.network, capabilities: overview()?.capabilities,
               api: { current: () => source.starterCurrent(ownId()), request: id => source.starterRequest(ownId(), id) } }}
@@ -2385,12 +2526,18 @@ function SettingsDisplay(props: { own: OwnStun | null }) {
 // ---- rail -----------------------------------------------------------------
 
 function Rail(props: {
+  phone?: boolean;
+  hidden?: boolean;
+  listRef?: (el: HTMLElement) => void;
   callView: CallView;
   onReturnToCall: () => void;
   pill: ReturnType<typeof nodePill>;
   active: boolean;
   sample: boolean;
   peers: Peer[];
+  peersPending?: boolean;
+  peersError?: string;
+  onReconnect?: () => Promise<void>;
   rooms: Room[];
   /** Our node checks room bindings: bound rooms and "New room" replace the coming-soon line. */
   nodeRooms: boolean;
@@ -2449,7 +2596,9 @@ function Rail(props: {
   };
 
   return (
-    <nav class="rail" classList={{ 'rail-setup': !props.active }} aria-label={tr('uiTracks')} inert={props.behind}>
+    <nav class={props.phone ? 'phone-chat-list' : 'rail'} hidden={props.hidden} ref={props.listRef} tabindex={props.phone ? -1 : undefined} data-phone-list={props.phone ? '' : undefined} classList={{ 'rail-setup': !props.active }} aria-label={tr(props.phone ? 'phoneChats' : 'uiTracks')} inert={props.behind}>
+      <Show when={props.phone}><h1>{tr('phoneChats')}</h1></Show>
+      <Show when={!props.phone}>
       <div class="mark">
         Bit<span>Sov</span>
       </div>
@@ -2464,10 +2613,18 @@ function Rail(props: {
         </Show>
       </button>
 
+      </Show>
       <div class="track-group">
         <h2>{tr('uiContacts')}</h2>
         <Show when={props.active} fallback={<p class="track-empty">{tr('uiAvailableAfterSetup')}</p>}>
-          <For each={props.peers} fallback={<p class="track-empty">{tr('uiNoContactsYet')}</p>}>
+          <Show when={props.phone && props.peersError}>
+            <SoftError message={props.peersError!} summary="We could not load your contacts." onReconnect={props.onReconnect} />
+          </Show>
+          <For each={props.peers} fallback={
+            <Show when={!props.phone || (!props.peersPending && !props.peersError)} fallback={
+              <Show when={props.phone && props.peersPending && !props.peersError}><DelayedSpinner /></Show>
+            }><p class="track-empty">{tr('uiNoContactsYet')}</p></Show>
+          }>
             {(p) =>
               item({ kind: 'peer', id: p.node_id.toLowerCase() }, () => peerName(p, p.node_id), <span class={`dot ${p.connected ? 'ok' : ''}`} title={p.connected ? tr('uiConnected') : tr('uiOffline')} />)
             }
@@ -2564,7 +2721,7 @@ function Rail(props: {
         <Show when={props.sample}>
           <span class="mode-tag" data-sample>{tr('uiSampleDataNoNode')}</span>
         </Show>
-        <div class="avatar-menu-wrap">
+        <Show when={!props.phone}><div class="avatar-menu-wrap">
           <Show when={menuOpen()}>
             <div class="avatar-scrim" onClick={() => setMenuOpen(false)} />
             <div class="avatar-menu" role="menu" aria-label={tr('uiYou')} data-avatar-menu>
@@ -2603,7 +2760,7 @@ function Rail(props: {
               <span class="approvals-badge" data-approvals-badge aria-label={tr('uiApprovalWaiting', props.approvalsWaiting ?? 0, props.approvalsWaiting === 1 ? '' : tr('pluralApprovalSuffix'))}>{props.approvalsWaiting}</span>
             </Show>
           </button>
-        </div>
+        </div></Show>
       </div>
     </nav>
   );

@@ -1,0 +1,529 @@
+{
+  "scene": "offline",
+  "lang": "da",
+  "generatedAt": 1792746320350,
+  "ready": true,
+  "rootFont": "17px",
+  "bodyFont": "17px",
+  "space": "normal",
+  "viewport": {
+    "width": 393,
+    "height": 852,
+    "top": 0,
+    "scale": 1
+  },
+  "keyboard": "false",
+  "ownerSheetMounted": false,
+  "tabBar": {
+    "x": 0,
+    "y": 769.015625,
+    "width": 393,
+    "height": 82.984375,
+    "top": 769.015625,
+    "right": 393,
+    "bottom": 852,
+    "left": 0
+  },
+  "tabDisplay": "flex",
+  "status": {
+    "x": 0,
+    "y": 59,
+    "width": 393,
+    "height": 383.390625,
+    "top": 59,
+    "right": 393,
+    "bottom": 442.390625,
+    "left": 0
+  },
+  "safeAreas": [
+    {
+      "side": "top",
+      "value": "59px"
+    },
+    {
+      "side": "bottom",
+      "value": "34px"
+    },
+    {
+      "side": "left",
+      "value": "0px"
+    },
+    {
+      "side": "right",
+      "value": "0px"
+    }
+  ],
+  "elements": [
+    {
+      "tag": "BUTTON",
+      "class": "node-pill",
+      "text": "Starter node",
+      "rect": {
+        "x": 15.984375,
+        "y": -181.015625,
+        "width": 139.796875,
+        "height": 44,
+        "top": -181.015625,
+        "right": 155.78125,
+        "bottom": -137.015625,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        138,
+        42
+      ],
+      "scroll": [
+        138,
+        42
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "primary",
+      "text": "Retry now",
+      "rect": {
+        "x": 139.1875,
+        "y": 386.21875,
+        "width": 114.609375,
+        "height": 44.34375,
+        "top": 386.21875,
+        "right": 253.796875,
+        "bottom": 430.5625,
+        "left": 139.1875
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        115,
+        44
+      ],
+      "scroll": [
+        115,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "H1",
+      "class": "",
+      "text": "Chats",
+      "rect": {
+        "x": 15.984375,
+        "y": 458.375,
+        "width": 361.03125,
+        "height": 24,
+        "top": 458.375,
+        "right": 377.015625,
+        "bottom": 482.375,
+        "left": 15.984375
+      },
+      "font": "20.000008px",
+      "whiteSpace": "normal",
+      "client": [
+        361,
+        24
+      ],
+      "scroll": [
+        361,
+        24
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Maya",
+      "rect": {
+        "x": 15.984375,
+        "y": 537.484375,
+        "width": 361.03125,
+        "height": 44,
+        "top": 537.484375,
+        "right": 377.015625,
+        "bottom": 581.484375,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        361,
+        44
+      ],
+      "scroll": [
+        361,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Josh",
+      "rect": {
+        "x": 15.984375,
+        "y": 585.46875,
+        "width": 361.03125,
+        "height": 44,
+        "top": 585.46875,
+        "right": 377.015625,
+        "bottom": 629.46875,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        361,
+        44
+      ],
+      "scroll": [
+        361,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Kontakt uden navn (cccccccc\u2026cccccccc)",
+      "rect": {
+        "x": 15.984375,
+        "y": 633.453125,
+        "width": 361.03125,
+        "height": 66.6875,
+        "top": 633.453125,
+        "right": 377.015625,
+        "bottom": 700.140625,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        361,
+        67
+      ],
+      "scroll": [
+        361,
+        67
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Gamma VM",
+      "rect": {
+        "x": 15.984375,
+        "y": 704.125,
+        "width": 361.03125,
+        "height": 44,
+        "top": 704.125,
+        "right": 377.015625,
+        "bottom": 748.125,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        361,
+        44
+      ],
+      "scroll": [
+        361,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link new-track",
+      "text": "+ Nyt rum",
+      "rect": {
+        "x": 15.984375,
+        "y": 803.234375,
+        "width": 361.03125,
+        "height": 44,
+        "top": 803.234375,
+        "right": 377.015625,
+        "bottom": 847.234375,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        359,
+        42
+      ],
+      "scroll": [
+        359,
+        42
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Nodeskrivebeskyttet",
+      "rect": {
+        "x": 15.984375,
+        "y": 902.34375,
+        "width": 361.03125,
+        "height": 44,
+        "top": 902.34375,
+        "right": 377.015625,
+        "bottom": 946.34375,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        361,
+        44
+      ],
+      "scroll": [
+        361,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Walletskrivebeskyttet",
+      "rect": {
+        "x": 15.984375,
+        "y": 950.328125,
+        "width": 361.03125,
+        "height": 44,
+        "top": 950.328125,
+        "right": 377.015625,
+        "bottom": 994.328125,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        361,
+        44
+      ],
+      "scroll": [
+        361,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Inboxskrivebeskyttet",
+      "rect": {
+        "x": 15.984375,
+        "y": 998.3125,
+        "width": 361.03125,
+        "height": 44,
+        "top": 998.3125,
+        "right": 377.015625,
+        "bottom": 1042.3125,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        361,
+        44
+      ],
+      "scroll": [
+        361,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Sp\u00f8rg din nodelokal",
+      "rect": {
+        "x": 15.984375,
+        "y": 1046.296875,
+        "width": 361.03125,
+        "height": 44,
+        "top": 1046.296875,
+        "right": 377.015625,
+        "bottom": 1090.296875,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        361,
+        44
+      ],
+      "scroll": [
+        361,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Profilerinds\u00e6t et kort",
+      "rect": {
+        "x": 15.984375,
+        "y": 1145.40625,
+        "width": 361.03125,
+        "height": 44,
+        "top": 1145.40625,
+        "right": 377.015625,
+        "bottom": 1189.40625,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        361,
+        44
+      ],
+      "scroll": [
+        361,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link",
+      "text": "Forrumkort og sider \u00b7 betalt",
+      "rect": {
+        "x": 15.984375,
+        "y": 1193.390625,
+        "width": 361.03125,
+        "height": 44,
+        "top": 1193.390625,
+        "right": 377.015625,
+        "bottom": 1237.390625,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        361,
+        44
+      ],
+      "scroll": [
+        361,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "track-link new-track",
+      "text": "+ Ny",
+      "rect": {
+        "x": 321.03125,
+        "y": 1253.375,
+        "width": 44,
+        "height": 44,
+        "top": 1253.375,
+        "right": 365.03125,
+        "bottom": 1297.375,
+        "left": 321.03125
+      },
+      "font": "0px",
+      "whiteSpace": "normal",
+      "client": [
+        42,
+        42
+      ],
+      "scroll": [
+        42,
+        42
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Chats",
+      "rect": {
+        "x": 3.984375,
+        "y": 774,
+        "width": 128.34375,
+        "height": 44,
+        "top": 774,
+        "right": 132.328125,
+        "bottom": 818,
+        "left": 3.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        128,
+        44
+      ],
+      "scroll": [
+        128,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Tegnebog",
+      "rect": {
+        "x": 132.328125,
+        "y": 774,
+        "width": 128.34375,
+        "height": 44,
+        "top": 774,
+        "right": 260.671875,
+        "bottom": 818,
+        "left": 132.328125
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        128,
+        44
+      ],
+      "scroll": [
+        128,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Dig",
+      "rect": {
+        "x": 260.671875,
+        "y": 774,
+        "width": 128.34375,
+        "height": 44,
+        "top": 774,
+        "right": 389.015625,
+        "bottom": 818,
+        "left": 260.671875
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        128,
+        44
+      ],
+      "scroll": [
+        128,
+        44
+      ],
+      "failures": []
+    }
+  ],
+  "failures": [],
+  "contentSize": "large",
+  "device": "71E314A6-5C92-4507-994B-7F7E67DE9495"
+}

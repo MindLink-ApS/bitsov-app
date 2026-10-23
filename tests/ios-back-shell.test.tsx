@@ -14,16 +14,17 @@ async function mount() {
   vi.spyOn(Element.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList);
   dispose = render(() => <ControlCenter source={sampleSource()} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={null} />, document.body);
   await tick();
+  click('[data-phone-list] [data-track^="peer:"]'); await tick();
 }
-it('uses the real thread Back button and returns to Welcome home with its funding and sharing controls', async () => {
+it('uses the real thread Back button and returns to the phone list with funding and sharing in their tabs', async () => {
   await mount();
   expect(document.querySelector('[data-composer]')).not.toBeNull();
   expect(visibleBackDestination()?.route).toBe('thread');
   visibleBackDestination()!.back(); await tick();
   expect(document.querySelector('[data-composer]')).toBeNull();
-  expect(document.querySelector('[data-welcome]')).not.toBeNull();
-  expect(document.querySelector('[data-welcome]')?.textContent).toContain('Add sats');
-  expect(document.querySelector('[data-welcome]')?.textContent).toContain('Share my card / QR');
+  expect(document.querySelector('[data-phone-list]')?.hasAttribute('hidden')).toBe(false);
+  expect(document.querySelector('[data-phone-tab="wallet"]')).not.toBeNull();
+  expect(document.querySelector('[data-phone-tab="you"]')).not.toBeNull();
   expect(visibleBackDestination()).toBeNull();
 });
 it('takes a settings sub-page to settings before closing settings', async () => {

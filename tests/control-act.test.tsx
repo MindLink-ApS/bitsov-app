@@ -1,3 +1,4 @@
+import { waitFor } from './helpers/fake-clock';
 import { setLanguagePref } from '../src/i18n';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
@@ -105,6 +106,7 @@ describe('acting from the track', () => {
   let mount: HTMLElement;
 
   beforeEach(() => {
+    vi.useFakeTimers();
     setShowLegacyRoomsUi(true);
   });
 
@@ -115,6 +117,7 @@ describe('acting from the track', () => {
     dispose = undefined;
     mount?.remove();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -128,7 +131,7 @@ describe('acting from the track', () => {
   const submit = () => $<HTMLButtonElement>('[data-send]')!.click();
   /** Pay's one confirm tap, after the review shows what will be paid. */
   const confirmPay = async () => {
-    await vi.waitFor(() => expect($('[data-pay-confirm]')).not.toBeNull());
+    await waitFor(() => expect($('[data-pay-confirm]')).not.toBeNull());
     $<HTMLButtonElement>('[data-pay-confirm]')!.click();
   };
 
@@ -136,11 +139,11 @@ describe('acting from the track', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
+    await waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-    await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
+    await waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
     if (opts.waitCost !== false) {
-      await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
+      await waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
     }
   }
 
@@ -152,10 +155,10 @@ describe('acting from the track', () => {
   };
   const pressWaiting = async (host: ReturnType<typeof stubHost>) => {
     type('[data-composer] textarea', 'gm Maya');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
+    await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     submit();
-    await vi.waitFor(() => expect($('[data-sending="waiting"]')).not.toBeNull());
-    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    await waitFor(() => expect($('[data-sending="waiting"]')).not.toBeNull());
+    await waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
   };
 
   it('Approve & send: exactly one send, however many status reads follow the grant', async () => {
@@ -163,9 +166,9 @@ describe('acting from the track', () => {
     await openShell();
     await pressWaiting(host);
     host.spend.v = openView();
-    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1), { timeout: 5000 });
+    await waitFor(() => expect(host.used('message_send')).toHaveLength(1), { timeout: 5000 });
     const reads = host.used('spend_status').length;
-    await vi.waitFor(() => expect(host.used('spend_status').length).toBeGreaterThan(reads + 1), { timeout: 8000 });
+    await waitFor(() => expect(host.used('spend_status').length).toBeGreaterThan(reads + 1), { timeout: 8000 });
     expect(host.used('message_send')).toHaveLength(1);
     expect($('[data-sending]')).toBeNull();
     expect($('[data-unsent]')).toBeNull();
@@ -175,15 +178,15 @@ describe('acting from the track', () => {
     const host = stubHost({ spend_request: () => { throw { code: 'spend_refused', message: 'This pairing cannot ask.' }; } });
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
+    await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     submit();
-    await vi.waitFor(() => expect(unsentReason()).toBe('Not sent · nothing paid · It was not approved.'));
+    await waitFor(() => expect(unsentReason()).toBe('Not sent · nothing paid · It was not approved.'));
     expect(text('[data-unsent] .bubble')).toBe('gm Maya');
     expect(host.used('message_send')).toHaveLength(0);
     expect($('[data-sending]')).toBeNull();
     // Put back in the box restores the words for another try.
     $<HTMLButtonElement>('[data-unsent-restore]')!.click();
-    await vi.waitFor(() => expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya'));
+    await waitFor(() => expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya'));
   });
 
   it.each([['another chat', `room:${ROOM}`], ['Discover (the composer unmounts)', 'discover']])('Approve & send: leaving to %s before the grant ends it unsent; a later grant sends nothing', async (_where, key) => {
@@ -191,12 +194,12 @@ describe('acting from the track', () => {
     await openShell();
     await pressWaiting(host);
     $<HTMLElement>(`[data-track="${key}"]`)!.click();
-    await vi.waitFor(() => expect($(`[data-track="${key}"]`)?.getAttribute('aria-current')).toBe('true'));
+    await waitFor(() => expect($(`[data-track="${key}"]`)?.getAttribute('aria-current')).toBe('true'));
     host.spend.v = openView();
     $<HTMLElement>(`[data-track="peer:${A}"]`)!.click();
-    await vi.waitFor(() => expect(text('[data-unsent] .bubble')).toBe('gm Maya'));
+    await waitFor(() => expect(text('[data-unsent] .bubble')).toBe('gm Maya'));
     expect(unsentReason()).toMatch(/^Not sent · nothing paid · You left/);
-    await new Promise((r) => setTimeout(r, 2500));
+    await vi.advanceTimersByTimeAsync(2500);
     expect(host.used('message_send')).toHaveLength(0);
     nothingPaidIsTrue(host);
   });
@@ -208,7 +211,7 @@ describe('acting from the track', () => {
     type('[data-composer] textarea', 'second thought');
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('second thought');
     host.spend.v = openView();
-    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1), { timeout: 5000 });
+    await waitFor(() => expect(host.used('message_send')).toHaveLength(1), { timeout: 5000 });
     expect(host.used('message_send')[0].args).toMatchObject({ plaintext: 'gm Maya', max_msat: 2000 });
     // The newer draft is untouched and was never sent.
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('second thought');
@@ -220,10 +223,10 @@ describe('acting from the track', () => {
     await openShell();
     await pressWaiting(host);
     host.spend.v = view('locked'); // cancelled at the node
-    await vi.waitFor(() => expect(unsentReason()).toBe('Not sent · nothing paid · The approval was cancelled or lapsed before it went through.'), { timeout: 5000 });
+    await waitFor(() => expect(unsentReason()).toBe('Not sent · nothing paid · The approval was cancelled or lapsed before it went through.'), { timeout: 5000 });
     host.spend.v = openView();
-    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
-    await new Promise((r) => setTimeout(r, 300));
+    await waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
+    await vi.advanceTimersByTimeAsync(300);
     expect(host.used('message_send')).toHaveLength(0);
   }, 15_000);
 
@@ -232,10 +235,10 @@ describe('acting from the track', () => {
     await openShell();
     await pressWaiting(host);
     host.spend.v = view('pending', { pending: { op_id: 'cd34', expires_at_ms: Date.now() + 900_000, owner_action: 'konsensus grant --op cd34', owner_can_grant: true } });
-    await vi.waitFor(() => expect(unsentReason()).toMatch(/cancelled or lapsed/), { timeout: 5000 });
+    await waitFor(() => expect(unsentReason()).toMatch(/cancelled or lapsed/), { timeout: 5000 });
     host.spend.v = openView();
-    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
-    await new Promise((r) => setTimeout(r, 300));
+    await waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
+    await vi.advanceTimersByTimeAsync(300);
     expect(host.used('message_send')).toHaveLength(0);
   }, 15_000);
 
@@ -243,12 +246,12 @@ describe('acting from the track', () => {
     const host = stubHost({ spend_request: () => ({ ...view('open', { basis: 'app_lock', open_until_ms: Date.now() + WINDOW }), request_id: null, granted_op: null }) });
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
+    await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     submit();
-    await vi.waitFor(() => expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya'));
+    await waitFor(() => expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya'));
     expect($('[data-sending]')).toBeNull();
     expect(text('[data-composer-note]')).toBe('Approved. Press Send to send it.');
-    await new Promise((r) => setTimeout(r, 300));
+    await vi.advanceTimersByTimeAsync(300);
     expect(host.used('message_send')).toHaveLength(0);
   });
 
@@ -257,8 +260,8 @@ describe('acting from the track', () => {
     await openShell();
     await pressWaiting(host);
     host.spend.v = openView('ef56', 'gh78'); // armed by another request
-    await vi.waitFor(() => expect(unsentReason()).toMatch(/cancelled or lapsed/), { timeout: 5000 });
-    await new Promise((r) => setTimeout(r, 300));
+    await waitFor(() => expect(unsentReason()).toMatch(/cancelled or lapsed/), { timeout: 5000 });
+    await vi.advanceTimersByTimeAsync(300);
     expect(host.used('message_send')).toHaveLength(0);
   }, 15_000);
 
@@ -266,10 +269,10 @@ describe('acting from the track', () => {
     const host = stubHost({ spend_request: () => { host.spend.v = openView(null, 'cd34'); return { ...host.spend.v, request_id: null }; } });
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
+    await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     submit();
-    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1), { timeout: 5000 });
-    await new Promise((r) => setTimeout(r, 300));
+    await waitFor(() => expect(host.used('message_send')).toHaveLength(1), { timeout: 5000 });
+    await vi.advanceTimersByTimeAsync(300);
     expect(host.used('message_send')).toHaveLength(1);
   }, 15_000);
 
@@ -288,22 +291,22 @@ describe('acting from the track', () => {
     host.spend.v = openView(null, 'cd34');
     await openShell();
     type('[data-composer] textarea', 'one');
-    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
+    await waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
     submit();
-    await vi.waitFor(() => expect(sent).toEqual(['one']));
+    await waitFor(() => expect(sent).toEqual(['one']));
     // The window closes; the next message is an Approve & send whose own call arms cd35.
     host.spend.v = view('locked');
     type('[data-composer] textarea', 'two');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
+    await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
     submit();
-    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
-    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
+    await waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    await waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
     $<HTMLButtonElement>('[data-track="discover"]')!.click();
     release();
-    await new Promise((r) => setTimeout(r, 500));
+    await vi.advanceTimersByTimeAsync(500);
     expect(sent).toEqual(['one']);
     $<HTMLButtonElement>(`[data-track="peer:${A}"]`)!.click();
-    await vi.waitFor(() => expect(unsentReason()).toContain('You left this chat before it was sent.'));
+    await waitFor(() => expect(unsentReason()).toContain('You left this chat before it was sent.'));
   }, 20_000);
 
   it('Approve & send queued behind a send in flight: its window closing and the same grant reopening never revives it', async () => {
@@ -321,28 +324,28 @@ describe('acting from the track', () => {
     host.spend.v = openView(null, 'cd34');
     await openShell();
     type('[data-composer] textarea', 'one');
-    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
+    await waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
     submit();
-    await vi.waitFor(() => expect(sent).toEqual(['one']));
+    await waitFor(() => expect(sent).toEqual(['one']));
     host.spend.v = view('locked');
     type('[data-composer] textarea', 'two');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
+    await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
     submit();
-    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
+    await waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
     const reads = () => host.used('spend_status').length;
     // The window it was armed for closes on a read, then the same grant cd35 is open again.
     host.spend.v = view('locked');
     let n = reads();
-    await vi.waitFor(() => expect(reads()).toBeGreaterThan(n), { timeout: 6000 });
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => expect(reads()).toBeGreaterThan(n), { timeout: 6000 });
+    await vi.advanceTimersByTimeAsync(100);
     host.spend.v = openView(null, 'cd35');
     n = reads();
-    await vi.waitFor(() => expect(reads()).toBeGreaterThan(n), { timeout: 6000 });
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => expect(reads()).toBeGreaterThan(n), { timeout: 6000 });
+    await vi.advanceTimersByTimeAsync(100);
     release();
-    await new Promise((r) => setTimeout(r, 500));
+    await vi.advanceTimersByTimeAsync(500);
     expect(sent).toEqual(['one']);
-    await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'));
+    await waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'));
   }, 30_000);
 
   /** 'one' goes under cd34 and stays in flight; 'two' is an Approve & send whose own call arms `armed`, handed behind it. */
@@ -362,14 +365,14 @@ describe('acting from the track', () => {
     host.spend.v = openView(null, 'cd34');
     await openShell();
     type('[data-composer] textarea', 'one');
-    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
+    await waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
     submit();
-    await vi.waitFor(() => expect(sent).toEqual(['one']));
+    await waitFor(() => expect(sent).toEqual(['one']));
     host.spend.v = view('locked');
     type('[data-composer] textarea', 'two');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
+    await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
     submit();
-    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
+    await waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
     return { host, sent, release };
   }
 
@@ -380,21 +383,21 @@ describe('acting from the track', () => {
     });
     unknown = true;
     const reads = host.used('budget_status').length;
-    await vi.waitFor(() => expect(host.used('budget_status').length).toBeGreaterThan(reads), { timeout: 6000 });
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => expect(host.used('budget_status').length).toBeGreaterThan(reads), { timeout: 6000 });
+    await vi.advanceTimersByTimeAsync(100);
     release();
-    await new Promise((r) => setTimeout(r, 500));
+    await vi.advanceTimersByTimeAsync(500);
     expect(sent).toEqual(['one']);
-    await vi.waitFor(() => expect(unsentReason()).toContain('Spending needs approving again. Press Send to ask.'));
+    await waitFor(() => expect(unsentReason()).toContain('Spending needs approving again. Press Send to ask.'));
   }, 30_000);
 
   it('Codex cxr-touch-1 r3 #2: its spending window running out while queued: never sent, even though the view still says open', async () => {
     const { sent, release } = await grantTwoBehindOne({}, () => view('open', { basis: 'node_grant', open_until_ms: Date.now() + 1500, granted_op: 'cd35', armed_by_request: null }));
-    await new Promise((r) => setTimeout(r, 2500));
+    await vi.advanceTimersByTimeAsync(2500);
     release();
-    await new Promise((r) => setTimeout(r, 500));
+    await vi.advanceTimersByTimeAsync(500);
     expect(sent).toEqual(['one']);
-    await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'));
+    await waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'));
   }, 30_000);
 
   it('Codex budget r1 #2 (every kind): the price moving while it is queued cancels it for good, even if it moves back', async () => {
@@ -419,42 +422,42 @@ describe('acting from the track', () => {
     await openShell();
     for (const words of ['one', 'mid', 'mid2']) {
       type('[data-composer] textarea', words);
-      await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
+      await waitFor(() => expect(text('[data-send]')).toMatch(/^Send/));
       submit();
-      await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(['one', 'mid', 'mid2'].indexOf(words) + 1));
+      await waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(['one', 'mid', 'mid2'].indexOf(words) + 1));
     }
     host.spend.v = view('locked');
     type('[data-composer] textarea', 'two');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
+    await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'), { timeout: 8000 });
     submit();
-    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(4));
+    await waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(4));
     // 'one' is refused: the price is read again at 1 sat while 'two' waits its turn.
     price = 1000;
     gates[0]();
-    await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('1000'));
+    await waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('1000'));
     // 'mid' is refused too: the price is read again, back at the approved 2 sats, before 'two''s turn.
     price = 2000;
     gates[1]();
-    await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
+    await waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
     gates[2]();
-    await new Promise((r) => setTimeout(r, 500));
+    await vi.advanceTimersByTimeAsync(500);
     expect(sent).toEqual(['one', 'mid', 'mid2']);
     const reasons = () => [...mount.querySelectorAll('[data-unsent] [data-unsent-reason]')].map((e) => e.textContent ?? '');
-    await vi.waitFor(() => expect(reasons().some((r) => r.includes('The message price changed before it was sent.'))).toBe(true));
+    await waitFor(() => expect(reasons().some((r) => r.includes('The message price changed before it was sent.'))).toBe(true));
   }, 30_000);
 
   it('Approve & send (spending request): a successful Cancel request ends the wait; the window its request later arms never sends it', async () => {
     const host = stubHost({ spend_cancel: () => view('locked') });
     await openShell();
     await pressWaiting(host);
-    await vi.waitFor(() => expect($('[data-spend-cancel]')).not.toBeNull(), { timeout: 6000 });
+    await waitFor(() => expect($('[data-spend-cancel]')).not.toBeNull(), { timeout: 6000 });
     $<HTMLButtonElement>('[data-spend-cancel]')!.click();
-    await vi.waitFor(() => expect(host.used('spend_cancel')).toHaveLength(1));
-    await vi.waitFor(() => expect(unsentReason()).toContain('You cancelled the request. Nothing was sent.'));
+    await waitFor(() => expect(host.used('spend_cancel')).toHaveLength(1));
+    await waitFor(() => expect(unsentReason()).toContain('You cancelled the request. Nothing was sent.'));
     // A read that overlapped the cancel shows the window ab12 armed anyway.
     host.spend.v = openView('ab12');
     const reads = host.used('spend_status').length;
-    await vi.waitFor(() => expect(host.used('spend_status').length).toBeGreaterThan(reads + 1), { timeout: 8000 });
+    await waitFor(() => expect(host.used('spend_status').length).toBeGreaterThan(reads + 1), { timeout: 8000 });
     expect(host.used('message_send')).toHaveLength(0);
   }, 20_000);
 
@@ -466,9 +469,9 @@ describe('acting from the track', () => {
     });
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
+    await waitFor(() => expect(text('[data-send]')).toBe('Send'));
     submit();
-    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    await waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
     expect($('[data-sending]')).toBeNull();
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('gm Maya');
   });
@@ -478,17 +481,17 @@ describe('acting from the track', () => {
     const host = stubHost({ spend_request: () => new Promise((_resolve, reject) => { refuse = () => reject({ code: 'spend_refused', message: 'Refused.' }); }) });
     await openShell();
     type('[data-composer] textarea', 'gm Maya');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
+    await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     submit();
-    await vi.waitFor(() => expect($('[data-sending="waiting"]')).not.toBeNull());
-    await vi.waitFor(() => expect(refuse).toBeDefined());
+    await waitFor(() => expect($('[data-sending="waiting"]')).not.toBeNull());
+    await waitFor(() => expect(refuse).toBeDefined());
     // Spending opens by some other approval while this request is still out ...
     host.spend.v = openView();
-    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
+    await waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
     // ... then this approval is refused.
     refuse();
-    await vi.waitFor(() => expect(unsentReason()).toBe('Not sent · nothing paid · It was not approved.'));
-    await new Promise((r) => setTimeout(r, 300));
+    await waitFor(() => expect(unsentReason()).toBe('Not sent · nothing paid · It was not approved.'));
+    await vi.advanceTimersByTimeAsync(300);
     expect(host.used('message_send')).toHaveLength(0);
   }, 15_000);
 
@@ -496,13 +499,10 @@ describe('acting from the track', () => {
     const host = stubHost();
     await openShell();
     await pressWaiting(host);
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      vi.setSystemTime(Date.now() + 10 * 60_000 + 1);
-      host.spend.v = openView();
-      await vi.waitFor(() => expect(unsentReason()).toBe('Not sent · nothing paid · It was not approved within 10 minutes.'), { timeout: 5000 });
-      expect(host.used('message_send')).toHaveLength(0);
-    } finally { vi.useRealTimers(); }
+    vi.setSystemTime(Date.now() + 10 * 60_000 + 1);
+    host.spend.v = openView();
+    await waitFor(() => expect(unsentReason()).toBe('Not sent · nothing paid · It was not approved within 10 minutes.'), { timeout: 5000 });
+    expect(host.used('message_send')).toHaveLength(0);
   }, 15_000);
 
   it('Approve & send r1 #4: while its bubble waits, the approval copy says it sends when approved', async () => {
@@ -512,7 +512,7 @@ describe('acting from the track', () => {
     });
     await openShell();
     await pressWaiting(host);
-    await vi.waitFor(() => expect(text('[data-touch-id-stays-text="spend"]')).toContain('Your message waits in its bubble and sends once this approval goes through.'));
+    await waitFor(() => expect(text('[data-touch-id-stays-text="spend"]')).toContain('Your message waits in its bubble and sends once this approval goes through.'));
     expect(text('[data-touch-id-stays-text="spend"]')).not.toContain('until you press Send');
   });
 
@@ -522,9 +522,9 @@ describe('acting from the track', () => {
     type('[data-composer] textarea', 'gm Maya');
 
     // Locked: the button is the approval, and this press also sends the message once it is approved.
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
+    await waitFor(() => expect(text('[data-send]')).toBe('Approve & send'));
     submit();
-    await vi.waitFor(() => expect(text('[data-owner-action]')).toBe('konsensus grant --op ab12'));
+    await waitFor(() => expect(text('[data-owner-action]')).toBe('konsensus grant --op ab12'));
     expect(text('[data-approval="pending"]')).toContain('This app cannot approve it for you');
     expect($('[data-approval="pending"]')).not.toBeNull();
     expect(host.used('message_send')).toHaveLength(0);
@@ -535,22 +535,22 @@ describe('acting from the track', () => {
 
     // The owner grants at their terminal; the next status poll opens the window, and it sends once (no second press).
     host.spend.v = openView();
-    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
+    await waitFor(() => expect($('[data-spend="open"]')).not.toBeNull(), { timeout: 5000 });
     expect(text('[data-spend="open"]')).toContain('ten minutes per approval');
 
-    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
+    await waitFor(() => expect(host.used('message_send')).toHaveLength(1));
     expect(host.used('message_send')[0].args).toEqual({ recipient: A, is_room: false, plaintext: 'gm Maya', max_msat: 2000, max_recipient_msat: null, first_contact_msat: null });
-    await vi.waitFor(() => expect(text('[data-message="sent-1"] .stamp .money-text')).toBe('paid 2 sats · network fee not reported'));
+    await waitFor(() => expect(text('[data-message="sent-1"] .stamp .money-text')).toBe('paid 2 sats · network fee not reported'));
     expect(text('[data-message="sent-1"] .stamp')).not.toContain('ceiling');
     expect(text('[data-message="sent-1"] [data-delivery]').trim()).toBe('Sent');
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
 
     host.emitLive({ type: 'delivery', message_id: 'sent-1', status: 'delivered', reason: null });
-    await vi.waitFor(() => expect($('[data-message="sent-1"] [data-delivery]')?.getAttribute('data-delivery')).toBe('delivered'));
+    await waitFor(() => expect($('[data-message="sent-1"] [data-delivery]')?.getAttribute('data-delivery')).toBe('delivered'));
 
     // Lock now closes it again.
     $<HTMLButtonElement>('[data-spend-lock]')!.click();
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
+    await waitFor(() => expect(text('[data-send]')).toBe('Send'));
   }, 10_000);
 
   it('shows a rejection with the recipient node’s own reason', async () => {
@@ -558,11 +558,11 @@ describe('acting from the track', () => {
     host.spend.v = openView();
     await openShell();
     type('[data-composer] textarea', 'hello');
-    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull());
+    await waitFor(() => expect($('[data-spend="open"]')).not.toBeNull());
     submit();
-    await vi.waitFor(() => expect($('[data-message="sent-1"]')).not.toBeNull());
+    await waitFor(() => expect($('[data-message="sent-1"]')).not.toBeNull());
     host.emitLive({ type: 'delivery', message_id: 'sent-1', status: 'rejected', reason: 'insufficient payment: required 3000 msat, got 2000 msat' });
-    await vi.waitFor(() => expect(text('[data-message="sent-1"] [data-delivery]')).toBe('Rejected: insufficient payment: required 3000 msat, got 2000 msat'));
+    await waitFor(() => expect(text('[data-message="sent-1"] [data-delivery]')).toBe('Rejected: insufficient payment: required 3000 msat, got 2000 msat'));
   });
 
   it('an expired approval re-prompts, records no failure, and keeps the draft', async () => {
@@ -574,10 +574,10 @@ describe('acting from the track', () => {
     host.spend.v = openView();
     await openShell();
     type('[data-composer] textarea', 'still there?');
-    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull());
+    await waitFor(() => expect($('[data-spend="open"]')).not.toBeNull());
     host.spend.v = view('expired');
     submit();
-    await vi.waitFor(() => expect($('[data-spend="expired"]')).not.toBeNull());
+    await waitFor(() => expect($('[data-spend="expired"]')).not.toBeNull());
     expect(text('[data-spend="expired"]')).toContain('Approve again');
     expect($('[data-artifact="failed"]')).toBeNull();
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('still there?');
@@ -591,9 +591,9 @@ describe('acting from the track', () => {
     }).spend.v = openView();
     await openShell();
     type('[data-composer] textarea', 'hi');
-    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull());
+    await waitFor(() => expect($('[data-spend="open"]')).not.toBeNull());
     submit();
-    await vi.waitFor(() => expect(text('[data-artifact="failed"]')).toContain('no route'));
+    await waitFor(() => expect(text('[data-artifact="failed"]')).toContain('no route'));
     expect(text('[data-artifact="failed"]')).toContain('Message not sent');
   });
 
@@ -613,10 +613,10 @@ describe('acting from the track', () => {
     await openShell();
     type('[data-composer] textarea', 'hi');
     submit();
-    await vi.waitFor(() => expect(text('[data-artifact="failed"]')).toContain('Outcome unknown / pending'));
+    await waitFor(() => expect(text('[data-artifact="failed"]')).toContain('Outcome unknown / pending'));
     expect(text('[data-artifact="failed"]')).not.toContain('not sent');
     $<HTMLButtonElement>('[data-spend-reconcile]')!.click();
-    await vi.waitFor(() => expect(text('[data-reconciliation]')).toContain('Previous action settled'));
+    await waitFor(() => expect(text('[data-reconciliation]')).toContain('Previous action settled'));
     expect(host.used('message_send')).toHaveLength(1);
     expect(host.used('spend_reconcile')).toHaveLength(1);
   });
@@ -642,9 +642,9 @@ describe('acting from the track', () => {
     for (const [i, r] of replies.entries()) {
       type('[data-composer] textarea', `hello ${i}`);
       // A send the node took makes the contact's price known: no longer an estimate.
-      await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull());
+      await waitFor(() => expect($('[data-spend="open"]')).not.toBeNull());
       submit();
-      await vi.waitFor(() => expect($(`[data-message="op-${i + 1}"] [data-delivery]`)).not.toBeNull());
+      await waitFor(() => expect($(`[data-message="op-${i + 1}"] [data-delivery]`)).not.toBeNull());
       expect($(`[data-message="op-${i + 1}"] [data-delivery]`)!.getAttribute('data-delivery')).toBe(r.want[0]);
       expect(text(`[data-message="op-${i + 1}"] [data-delivery]`)).toBe(r.want[1]);
     }
@@ -660,13 +660,13 @@ describe('acting from the track', () => {
     await openShell();
     type('[data-composer] textarea', 'hi');
     submit();
-    await vi.waitFor(() => expect($('[data-artifact="failed"][data-code="payment_unknown"]')).not.toBeNull());
+    await waitFor(() => expect($('[data-artifact="failed"][data-code="payment_unknown"]')).not.toBeNull());
     const card = text('[data-artifact="failed"]');
     expect(card).toContain('Payment unknown · not resent');
     expect(card).not.toContain('not sent');
     expect(card).not.toContain('Message not sent');
     $<HTMLButtonElement>('[data-spend-reconcile]')!.click();
-    await vi.waitFor(() => expect(text('[data-reconciliation]')).toContain('Payment unknown'));
+    await waitFor(() => expect(text('[data-reconciliation]')).toContain('Payment unknown'));
     expect(host.used('message_send')).toHaveLength(1);
   });
 
@@ -677,7 +677,7 @@ describe('acting from the track', () => {
     await openShell();
     type('[data-composer] textarea', 'after the restart');
     submit();
-    await vi.waitFor(() => expect($('[data-door="out-refused"][data-code="readmission_capped"]')).not.toBeNull());
+    await waitFor(() => expect($('[data-door="out-refused"][data-code="readmission_capped"]')).not.toBeNull());
     const card = text('[data-door="out-refused"]');
     expect(card).toContain('Not sent · they ask for admission again');
     expect(card).toContain('Not sent - nothing was paid.');
@@ -705,7 +705,7 @@ describe('acting from the track', () => {
     await openShell();
     type('[data-composer] textarea', 'after the restart');
     submit();
-    await vi.waitFor(() => expect($('[data-readmission-quote]')).not.toBeNull());
+    await waitFor(() => expect($('[data-readmission-quote]')).not.toBeNull());
     expect(text('[data-readmission-quote]')).toContain('Maya asks for admission again, 1 sat. Nothing was paid.');
     expect(text('[data-readmission-quote]')).toContain('13 sats in all');
     expect($('[data-cost-msat]')!.getAttribute('data-cost-msat')).toBe('13000');
@@ -715,9 +715,9 @@ describe('acting from the track', () => {
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value, 'the draft stays').toBe('after the restart');
     expect(text('[data-send]').trim().startsWith('Send'), 'Send stays ready for the quoted retry').toBe(true);
     submit();
-    await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(2));
+    await waitFor(() => expect(host.used('message_send')).toHaveLength(2));
     expect(host.used('message_send')[1].args!.max_msat, 'the quoted all-in total').toBe(13_000);
-    await vi.waitFor(() => expect($('[data-readmission-paid]')).not.toBeNull());
+    await waitFor(() => expect($('[data-readmission-paid]')).not.toBeNull());
     expect(text('[data-readmission-paid]')).toContain('incl. admission again 1 sat');
     expect($('[data-readmission-quote]')).toBeNull();
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value, 'draft clears only after the paid send').toBe('');
@@ -730,11 +730,11 @@ describe('acting from the track', () => {
     host.spend.v = openView();
     await openShell({ waitCost: false });
     type('[data-composer] textarea', 'too soon');
-    await vi.waitFor(() => expect($('[data-send]')!.hasAttribute('disabled')).toBe(true));
+    await waitFor(() => expect($('[data-send]')!.hasAttribute('disabled')).toBe(true));
     // Disabled Send cannot click; a form submit still must not clear the draft.
     const form = $('[data-composer]') as HTMLFormElement;
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect($('[data-composer-note]')).not.toBeNull());
+    await waitFor(() => expect($('[data-composer-note]')).not.toBeNull());
     expect(text('[data-send-price]')).toContain('price loading');
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('too soon');
     expect(host.used('message_send')).toHaveLength(0);
@@ -751,9 +751,9 @@ describe('acting from the track', () => {
     await openShell();
     for (const c of codes) {
       type('[data-composer] textarea', `try ${c.code}`);
-      await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull());
+      await waitFor(() => expect($('[data-spend="open"]')).not.toBeNull());
       submit();
-      await vi.waitFor(() => expect($(`[data-artifact="failed"][data-code="${c.code}"]`)).not.toBeNull());
+      await waitFor(() => expect($(`[data-artifact="failed"][data-code="${c.code}"]`)).not.toBeNull());
       expect(text(`[data-artifact="failed"][data-code="${c.code}"]`)).toContain(c.label);
     }
     expect(host.used('message_send')).toHaveLength(2);
@@ -764,12 +764,12 @@ describe('acting from the track', () => {
     host.spend.v = openView();
     await openShell();
     $<HTMLButtonElement>(`[data-track="room:${ROOM}"]`)!.click();
-    await vi.waitFor(() => expect(text('[data-cost]')).toContain('1 member, each paid their own price'));
+    await waitFor(() => expect(text('[data-cost]')).toContain('1 member, each paid their own price'));
     expect($('[data-composer-mode]')).toBeNull();
     type('[data-composer] textarea', 'room hello');
-    await vi.waitFor(() => expect($('[data-spend="open"]')).not.toBeNull());
+    await waitFor(() => expect($('[data-spend="open"]')).not.toBeNull());
     submit();
-    await vi.waitFor(() => expect(host.used('message_send')[0]?.args).toEqual({ recipient: ROOM, is_room: true, plaintext: 'room hello', max_msat: 2000, max_recipient_msat: { [A]: 2000 }, first_contact_msat: null }));
+    await waitFor(() => expect(host.used('message_send')[0]?.args).toEqual({ recipient: ROOM, is_room: true, plaintext: 'room hello', max_msat: 2000, max_recipient_msat: { [A]: 2000 }, first_contact_msat: null }));
   });
 
   it('pays an invoice only after showing what it asks for', async () => {
@@ -780,27 +780,27 @@ describe('acting from the track', () => {
     await openShell();
     $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
     type('[data-pay-invoice]', 'not an invoice');
-    await vi.waitFor(() => expect(text('[data-composer-note]')).toContain('not a Lightning invoice'));
+    await waitFor(() => expect(text('[data-composer-note]')).toContain('not a Lightning invoice'));
     expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
     type('[data-pay-invoice]', 'lntb10n1abc');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Pay · 6 sats'));
+    await waitFor(() => expect(text('[data-send]')).toBe('Pay · 6 sats'));
     expect(text('[data-composer]')).toContain('up to 5 sats network fee');
     expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('6000');
     submit();
-    await vi.waitFor(() => expect($('[data-pay-review]')).not.toBeNull());
+    await waitFor(() => expect($('[data-pay-review]')).not.toBeNull());
     expect(host.used('payment_pay')).toHaveLength(0);
     expect(text('[data-review-amount]')).toBe('1 sat');
     expect(text('[data-review-fee]')).toBe('up to 5 sats');
     expect(text('[data-review-total]')).toBe('6 sats');
     const review = $('[data-pay-review]');
     incoming = 'bitsov://pair/hostile';
-    await vi.waitFor(() => expect($('[data-pairing-link-banner]')).not.toBeNull(), { timeout: 2000 });
+    await waitFor(() => expect($('[data-pairing-link-banner]')).not.toBeNull(), { timeout: 2000 });
     expect($<HTMLButtonElement>('[data-review-pairing]')!.disabled).toBe(true);
     expect($('[data-pay-review]')).toBe(review);
     expect($('[data-pairing-link-screen]')).toBeNull();
     await confirmPay();
-    await vi.waitFor(() => expect(host.used('payment_pay')[0]?.args).toEqual({ bolt11: 'lntb10n1abc', amount_msat: 1000, max_msat: 6000 }));
-    await vi.waitFor(() => expect($('[data-artifact="payment"]')?.getAttribute('data-status')).toBe('settled'));
+    await waitFor(() => expect(host.used('payment_pay')[0]?.args).toEqual({ bolt11: 'lntb10n1abc', amount_msat: 1000, max_msat: 6000 }));
+    await waitFor(() => expect($('[data-artifact="payment"]')?.getAttribute('data-status')).toBe('settled'));
   });
 
   it('creates an invoice to receive without any spending approval', async () => {
@@ -810,9 +810,9 @@ describe('acting from the track', () => {
     expect($('[data-spend]')).toBeNull();
     type('[data-request-amount]', '21');
     type('[data-request-note]', 'coffee');
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Create invoice'));
+    await waitFor(() => expect(text('[data-send]')).toBe('Create invoice'));
     submit();
-    await vi.waitFor(() => expect(text('[data-bolt11]')).toBe('lntb210n1sample'));
+    await waitFor(() => expect(text('[data-bolt11]')).toBe('lntb210n1sample'));
     expect(host.used('invoice_create')[0].args).toEqual({ amount_msat: 21_000, note: 'coffee', expiry_secs: null });
     expect(host.used('spend_request')).toHaveLength(0);
     expect($('[data-artifact="invoice"] svg.qr')).not.toBeNull();
@@ -826,7 +826,7 @@ describe('acting from the track', () => {
     $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
     if (method === 'invoice') {
       type('[data-pay-invoice]', 'lntb10n1abc');
-      await vi.waitFor(() => expect(text('[data-send]')).toBe('Pay · 6 sats'));
+      await waitFor(() => expect(text('[data-send]')).toBe('Pay · 6 sats'));
     expect(text('[data-composer]')).toContain('up to 5 sats network fee');
     } else {
       [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Direct')!.click();
@@ -835,7 +835,7 @@ describe('acting from the track', () => {
     }
     submit();
     await confirmPay();
-    await vi.waitFor(() => expect(text('[data-composer-note]')).toContain('Your app principal limit is used up.'));
+    await waitFor(() => expect(text('[data-composer-note]')).toContain('Your app principal limit is used up.'));
     expect($('[data-artifact="payment"]')).toBeNull();
     expect($('[data-artifact="failed"]')).toBeNull();
     expect(method === 'invoice' ? $<HTMLTextAreaElement>('[data-pay-invoice]')!.value : $<HTMLInputElement>('[data-pay-amount]')!.value)
@@ -858,9 +858,9 @@ describe('acting from the track', () => {
       type('[data-pay-amount]', '0.00000005');
       type('[data-pay-pubkey]', PUB);
       type('[data-pay-note]', 'lunch');
-      await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('10000'));
+      await waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('10000'));
       submit();
-      await vi.waitFor(() => expect($('[data-pay-review]')).not.toBeNull());
+      await waitFor(() => expect($('[data-pay-review]')).not.toBeNull());
       expect(text('[data-review-amount]')).toBe('0.00000005 BTC');
       expect(text('[data-review-fee]')).toBe('up to 0.00000005 BTC');
       expect(text('[data-review-total]')).toBe('0.0000001 BTC');
@@ -868,9 +868,9 @@ describe('acting from the track', () => {
       expect(text('[data-pay-review]')).toContain('lunch');
       expect(host.used('payment_keysend')).toHaveLength(0);
       await confirmPay();
-      await vi.waitFor(() => expect(host.used('payment_keysend')[0]?.args).toEqual({ dest_pubkey: PUB, amount_msat: 5000, memo: 'lunch', max_msat: 10000 }));
+      await waitFor(() => expect(host.used('payment_keysend')[0]?.args).toEqual({ dest_pubkey: PUB, amount_msat: 5000, memo: 'lunch', max_msat: 10000 }));
       expect(host.used('payment_keysend')).toHaveLength(1);
-      await vi.waitFor(() => expect($<HTMLInputElement>('[data-pay-amount]')!.value).toBe(''));
+      await waitFor(() => expect($<HTMLInputElement>('[data-pay-amount]')!.value).toBe(''));
       expect($('[data-pay-review]')).toBeNull();
     });
 
@@ -883,15 +883,15 @@ describe('acting from the track', () => {
       type('[data-pay-amount]', '21');
       type('[data-pay-pubkey]', PUB);
       submit();
-      await vi.waitFor(() => expect(text('[data-review-amount]')).toBe('21 sats'));
+      await waitFor(() => expect(text('[data-review-amount]')).toBe('21 sats'));
       type('[data-pay-amount]', '210');
       expect($('[data-pay-review]')).toBeNull();
       submit();
-      await vi.waitFor(() => expect(text('[data-review-amount]')).toBe('210 sats'));
+      await waitFor(() => expect(text('[data-review-amount]')).toBe('210 sats'));
       $<HTMLButtonElement>('[data-pay-back]')!.click();
       expect($('[data-pay-review]')).toBeNull();
       submit();
-      await vi.waitFor(() => expect($('[data-pay-review]')).not.toBeNull());
+      await waitFor(() => expect($('[data-pay-review]')).not.toBeNull());
       $<HTMLButtonElement>('[data-composer-mode="request"]')!.click();
       $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
       expect($('[data-pay-review]')).toBeNull();
@@ -911,13 +911,13 @@ describe('acting from the track', () => {
       if (tab) [...mount.querySelectorAll<HTMLButtonElement>('button[role="tab"]')].find((b) => b.textContent === tab)!.click();
     };
     const tryAgain = async () => {
-      await new Promise((r) => setTimeout(r, 20));
+      await vi.advanceTimersByTimeAsync(20);
       $<HTMLButtonElement>('[data-pay-confirm]')?.click();
       const send = $<HTMLButtonElement>('[data-send]');
       if (send && !send.disabled) send.click();
-      await new Promise((r) => setTimeout(r, 20));
+      await vi.advanceTimersByTimeAsync(20);
       $<HTMLButtonElement>('[data-pay-confirm]')?.click();
-      await new Promise((r) => setTimeout(r, 20));
+      await vi.advanceTimersByTimeAsync(20);
     };
 
     it.each([
@@ -935,16 +935,16 @@ describe('acting from the track', () => {
         type('[data-pay-pubkey]', PUB);
       } else {
         type('[data-pay-invoice]', 'lntb10n1abc');
-        await vi.waitFor(() => expect(text('[data-send]')).toBe('Pay · 6 sats'));
+        await waitFor(() => expect(text('[data-send]')).toBe('Pay · 6 sats'));
       }
       submit();
       await confirmPay();
-      await vi.waitFor(() => expect(host.used(cmd)).toHaveLength(1));
+      await waitFor(() => expect(host.used(cmd)).toHaveLength(1));
       expect($('[data-pay-confirm]')).toBeNull();
       reselect(tab, 'pay');
       $<HTMLButtonElement>('[data-pay-confirm]')?.click();
       d.done({ method: tab === 'Direct' ? 'keysend' : 'invoice', amount_msat: tab === 'Direct' ? 5000 : 1000, status: 'settled', paid_at_ms: Date.now() });
-      await vi.waitFor(() => expect($('[data-artifact="payment"]')).not.toBeNull());
+      await waitFor(() => expect($('[data-artifact="payment"]')).not.toBeNull());
       await tryAgain();
       expect(host.used(cmd)).toHaveLength(1);
       expect($('[data-pay-confirm]')).toBeNull();
@@ -957,10 +957,10 @@ describe('acting from the track', () => {
       $<HTMLButtonElement>('[data-composer-mode="request"]')!.click();
       type('[data-request-amount]', '21');
       submit();
-      await vi.waitFor(() => expect(host.used('invoice_create')).toHaveLength(1));
+      await waitFor(() => expect(host.used('invoice_create')).toHaveLength(1));
       reselect(null, 'request');
       d.done({ bolt11: 'lntb210n1sample', amount_msat: 21_000, note: null, expires_at_ms: Date.now() + 3_600_000 });
-      await vi.waitFor(() => expect($('[data-artifact="invoice"]')).not.toBeNull());
+      await waitFor(() => expect($('[data-artifact="invoice"]')).not.toBeNull());
       await tryAgain();
       expect(host.used('invoice_create')).toHaveLength(1);
     });
@@ -973,12 +973,12 @@ describe('acting from the track', () => {
       direct();
       type('[data-pay-pubkey]', PUB);
       type('[data-pay-amount]', '0.0005');
-      await vi.waitFor(() => expect($('[data-amount-invalid]')).not.toBeNull());
+      await waitFor(() => expect($('[data-amount-invalid]')).not.toBeNull());
       expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
       submit();
       expect($('[data-pay-review]')).toBeNull();
       type('[data-pay-amount]', '1');
-      await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('6000'));
+      await waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('6000'));
       expect($('[data-amount-invalid]')).toBeNull();
       expect(host.used('payment_keysend')).toHaveLength(0);
     });
@@ -997,16 +997,16 @@ describe('acting from the track', () => {
       direct();
       type('[data-pay-pubkey]', PUB);
       type('[data-pay-amount]', typed);
-      await vi.waitFor(() => expect(text('[data-amount-invalid]')).toBe(message));
+      await waitFor(() => expect(text('[data-amount-invalid]')).toBe(message));
       expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
       submit();
       expect($('[data-pay-review]')).toBeNull();
       $<HTMLButtonElement>('[data-composer-mode="request"]')!.click();
       type('[data-request-amount]', typed);
-      await vi.waitFor(() => expect(text('[data-amount-invalid]')).toBe(message));
+      await waitFor(() => expect(text('[data-amount-invalid]')).toBe(message));
       expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
       submit();
-      await new Promise((r) => setTimeout(r, 0));
+      await vi.advanceTimersByTimeAsync(0);
       expect(host.used('payment_keysend')).toHaveLength(0);
       expect(host.used('invoice_create')).toHaveLength(0);
     });
@@ -1026,7 +1026,7 @@ describe('acting from the track', () => {
       type(input, draft);
       expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
       if (change === 'unit') setDenom('btc'); else setLanguagePref('en');
-      await vi.waitFor(() => expect($<HTMLInputElement>(input)!.value).toBe(''));
+      await waitFor(() => expect($<HTMLInputElement>(input)!.value).toBe(''));
       expect($('[data-amount-cleared]')).not.toBeNull();
       expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
       submit();
@@ -1048,7 +1048,7 @@ describe('acting from the track', () => {
       setLanguagePref('en');
       expect($<HTMLInputElement>('[data-request-amount]')!.value).toBe('1.001');
       submit();
-      await vi.waitFor(() => expect(host.used('invoice_create')[0]?.args?.amount_msat).toBe(1001));
+      await waitFor(() => expect(host.used('invoice_create')[0]?.args?.amount_msat).toBe(1001));
     });
 
     it('keeps the English 1.000 draft at one sat on a unit switch', async () => {
@@ -1067,9 +1067,9 @@ describe('acting from the track', () => {
       $<HTMLButtonElement>('[data-composer-mode="request"]')!.click();
       type('[data-request-amount]', '1500');
       setDenom('btc');
-      await vi.waitFor(() => expect($<HTMLInputElement>('[data-request-amount]')!.value).toBe('0.000015'));
+      await waitFor(() => expect($<HTMLInputElement>('[data-request-amount]')!.value).toBe('0.000015'));
       setDenom('sats');
-      await vi.waitFor(() => expect($<HTMLInputElement>('[data-request-amount]')!.value).toBe('1500'));
+      await waitFor(() => expect($<HTMLInputElement>('[data-request-amount]')!.value).toBe('1500'));
     });
 
     it('requests a BTC amount with a purpose and shows the invoice QR', async () => {
@@ -1080,15 +1080,17 @@ describe('acting from the track', () => {
       expect(text('[data-request-hint]')).toContain('Receiving is free');
       type('[data-request-amount]', '0.00000021');
       type('[data-request-note]', 'dinner');
-      await vi.waitFor(() => expect(text('[data-send]')).toBe('Create invoice'));
+      await waitFor(() => expect(text('[data-send]')).toBe('Create invoice'));
       submit();
-      await vi.waitFor(() => expect($('[data-artifact="invoice"] svg.qr')).not.toBeNull());
+      await waitFor(() => expect($('[data-artifact="invoice"] svg.qr')).not.toBeNull());
       expect(host.used('invoice_create')[0].args).toEqual({ amount_msat: 21_000, note: 'dinner', expiry_secs: null });
       expect(host.used('spend_request')).toHaveLength(0);
     });
   });
 
   it.each(['budget_exhausted', 'ceiling_exhausted'])('explains a refused file (%s) and keeps it selected', async (code) => {
+    // Happy DOM's FileReader uses its own window timers; exercise real file IO.
+    vi.useRealTimers();
     const host = stubHost({ file_send: () => Promise.reject({ code, message: 'The file exceeds your app limit. Raise the budget to send.' }) });
     host.spend.v = openView();
     await openShell();
@@ -1097,7 +1099,7 @@ describe('acting from the track', () => {
     Object.defineProperty(input, 'files', { value: [new File(['hi'], 'hi.txt', { type: 'text/plain' })] });
     input.dispatchEvent(new Event('change', { bubbles: true }));
     submit();
-    await vi.waitFor(() => expect(text('[data-composer-note]')).toContain('Raise the budget to send.'));
+    await waitFor(() => expect(text('[data-composer-note]')).toContain('Raise the budget to send.'));
     expect($('[data-artifact="file"]')).toBeNull();
     expect($('[data-artifact="failed"]')).toBeNull();
     expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(false);
@@ -1106,6 +1108,8 @@ describe('acting from the track', () => {
   });
 
   it('sends a file at the node’s file price and displays paid admission and fee', async () => {
+    // Happy DOM's FileReader uses its own window timers; exercise real file IO.
+    vi.useRealTimers();
     const host = stubHost({ file_send: (args) => ({ message_id: 'file-1', recipient: args!.recipient, filename: args!.filename, size_bytes: 2, delivered: true, amount_msat: 3000, readmission_msat: 1000, fee_paid_msat: 375, total_msat: 8000, max_routing_fee_msat: 4000, sent_at_ms: Date.now() }) });
     host.spend.v = openView();
     await openShell();
@@ -1113,10 +1117,10 @@ describe('acting from the track', () => {
     const input = $<HTMLInputElement>('[data-file-input]')!;
     Object.defineProperty(input, 'files', { value: [new File(['hi'], 'hi.txt', { type: 'text/plain' })] });
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send file · 8 sats'));
+    await waitFor(() => expect(text('[data-send]')).toBe('Send file · 8 sats'));
     submit();
-    await vi.waitFor(() => expect(host.used('file_send')[0]?.args).toEqual({ recipient: A, filename: 'hi.txt', mime_type: 'text/plain', data_b64: 'aGk=', max_msat: 8000, first_contact_msat: null }));
-    await vi.waitFor(() => expect(text('[data-message="file-1"] .file-name')).toBe('hi.txt'));
+    await waitFor(() => expect(host.used('file_send')[0]?.args).toEqual({ recipient: A, filename: 'hi.txt', mime_type: 'text/plain', data_b64: 'aGk=', max_msat: 8000, first_contact_msat: null }));
+    await waitFor(() => expect(text('[data-message="file-1"] .file-name')).toBe('hi.txt'));
     expect(text('[data-message="file-1"] .sats-meta')).toBe('paid 4.375 sats');
     expect($('[data-message="file-1"] .bubble')!.classList.contains('file')).toBe(true);
     expect($('[data-message="file-1"] [data-delivery]')?.getAttribute('data-delivery')).toBe('sent');
@@ -1126,14 +1130,14 @@ describe('acting from the track', () => {
     const host = stubHost();
     await openShell();
     $<HTMLButtonElement>('[data-track="new"]')!.click();
-    await vi.waitFor(() => expect($('[data-invite-create]')).not.toBeNull());
+    await waitFor(() => expect($('[data-invite-create]')).not.toBeNull());
     expect(text('[data-invite-create] button')).toBe('Approve first');
     host.spend.v = openView();
-    await vi.waitFor(() => expect(text('[data-invite-create] button')).toBe('Create invite'), { timeout: 5000 });
+    await waitFor(() => expect(text('[data-invite-create] button')).toBe('Create invite'), { timeout: 5000 });
     type('[data-invitee]', A);
     type('[data-addr]', '203.0.113.5:9735');
     $<HTMLButtonElement>('[data-invite-create] button')!.click();
-    await vi.waitFor(() => expect(text('[data-invite-link]')).toContain('bitsov://invite/tok'));
+    await waitFor(() => expect(text('[data-invite-link]')).toContain('bitsov://invite/tok'));
     expect(host.used('invite_create')[0].args).toEqual({ invitee: A, addr: '203.0.113.5:9735', hours: 72 });
   }, 10_000);
 
@@ -1143,10 +1147,10 @@ describe('acting from the track', () => {
         view('unavailable', { pending: { op_id: 'cd', expires_at_ms: Date.now() + 900_000, owner_action: 'unavailable in this deployment: no owner control socket', owner_can_grant: false } }),
     });
     await openShell();
-    await vi.waitFor(() => expect(text('[data-send]')).toBe('Send'));
+    await waitFor(() => expect(text('[data-send]')).toBe('Send'));
     host.spend.v = view('unavailable', { pending: { op_id: 'cd', expires_at_ms: Date.now() + 900_000, owner_action: 'unavailable in this deployment: no owner control socket', owner_can_grant: false } });
     submit();
-    await vi.waitFor(() => expect(text('[data-approval="unavailable"]')).toContain('Receiving still works'));
+    await waitFor(() => expect(text('[data-approval="unavailable"]')).toContain('Receiving still works'));
     expect($('[data-spend="unavailable"]')).not.toBeNull();
   });
 });

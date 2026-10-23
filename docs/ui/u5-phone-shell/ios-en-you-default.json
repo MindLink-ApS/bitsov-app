@@ -1,0 +1,269 @@
+{
+  "scene": "you",
+  "lang": "en",
+  "generatedAt": 1792745867515,
+  "ready": true,
+  "rootFont": "17px",
+  "bodyFont": "17px",
+  "space": "normal",
+  "viewport": {
+    "width": 393,
+    "height": 852,
+    "top": 0,
+    "scale": 1
+  },
+  "keyboard": "false",
+  "ownerSheetMounted": false,
+  "tabBar": {
+    "x": 0,
+    "y": 769.015625,
+    "width": 393,
+    "height": 82.984375,
+    "top": 769.015625,
+    "right": 393,
+    "bottom": 852,
+    "left": 0
+  },
+  "tabDisplay": "flex",
+  "status": {
+    "x": 0,
+    "y": 59,
+    "width": 393,
+    "height": 83.65625,
+    "top": 59,
+    "right": 393,
+    "bottom": 142.65625,
+    "left": 0
+  },
+  "safeAreas": [
+    {
+      "side": "top",
+      "value": "59px"
+    },
+    {
+      "side": "bottom",
+      "value": "34px"
+    },
+    {
+      "side": "left",
+      "value": "0px"
+    },
+    {
+      "side": "right",
+      "value": "0px"
+    }
+  ],
+  "elements": [
+    {
+      "tag": "BUTTON",
+      "class": "node-pill",
+      "text": "Connected to your node",
+      "rect": {
+        "x": 15.984375,
+        "y": 66.984375,
+        "width": 180,
+        "height": 66.6875,
+        "top": 66.984375,
+        "right": 195.984375,
+        "bottom": 133.671875,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        178,
+        65
+      ],
+      "scroll": [
+        178,
+        65
+      ],
+      "failures": []
+    },
+    {
+      "tag": "H1",
+      "class": "",
+      "text": "You",
+      "rect": {
+        "x": 15.984375,
+        "y": 158.640625,
+        "width": 361.03125,
+        "height": 24,
+        "top": 158.640625,
+        "right": 377.015625,
+        "bottom": 182.640625,
+        "left": 15.984375
+      },
+      "font": "20.000008px",
+      "whiteSpace": "normal",
+      "client": [
+        361,
+        24
+      ],
+      "scroll": [
+        361,
+        24
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "primary",
+      "text": "Share my card / QR",
+      "rect": {
+        "x": 15.984375,
+        "y": 198.625,
+        "width": 361.03125,
+        "height": 44.34375,
+        "top": 198.625,
+        "right": 377.015625,
+        "bottom": 242.96875,
+        "left": 15.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        361,
+        44
+      ],
+      "scroll": [
+        361,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "soft",
+      "text": "Profile and settings",
+      "rect": {
+        "x": 15.984375,
+        "y": 258.953125,
+        "width": 361.03125,
+        "height": 44,
+        "top": 258.953125,
+        "right": 377.015625,
+        "bottom": 302.953125,
+        "left": 15.984375
+      },
+      "font": "16.00001px",
+      "whiteSpace": "normal",
+      "client": [
+        359,
+        42
+      ],
+      "scroll": [
+        359,
+        42
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "soft",
+      "text": "Add a device",
+      "rect": {
+        "x": 15.984375,
+        "y": 318.9375,
+        "width": 361.03125,
+        "height": 44,
+        "top": 318.9375,
+        "right": 377.015625,
+        "bottom": 362.9375,
+        "left": 15.984375
+      },
+      "font": "16.00001px",
+      "whiteSpace": "normal",
+      "client": [
+        359,
+        42
+      ],
+      "scroll": [
+        359,
+        42
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Chats",
+      "rect": {
+        "x": 3.984375,
+        "y": 774,
+        "width": 128.34375,
+        "height": 44,
+        "top": 774,
+        "right": 132.328125,
+        "bottom": 818,
+        "left": 3.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        128,
+        44
+      ],
+      "scroll": [
+        128,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "Wallet",
+      "rect": {
+        "x": 132.328125,
+        "y": 774,
+        "width": 128.34375,
+        "height": 44,
+        "top": 774,
+        "right": 260.671875,
+        "bottom": 818,
+        "left": 132.328125
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        128,
+        44
+      ],
+      "scroll": [
+        128,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "",
+      "text": "You",
+      "rect": {
+        "x": 260.671875,
+        "y": 774,
+        "width": 128.34375,
+        "height": 44,
+        "top": 774,
+        "right": 389.015625,
+        "bottom": 818,
+        "left": 260.671875
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        128,
+        44
+      ],
+      "scroll": [
+        128,
+        44
+      ],
+      "failures": []
+    }
+  ],
+  "failures": [],
+  "contentSize": "large",
+  "device": "71E314A6-5C92-4507-994B-7F7E67DE9495"
+}
