@@ -306,7 +306,7 @@ it('bounds a first launch with deep text-only history to three pages per contact
 });
 it('explains disabled Share and Add sats when node capabilities are absent', async () => {
   await mount({ unavailable: true });
-  for (const [tab, selector, reason] of [['you', '[data-phone-share]', 'Profile cards are not available'], ['wallet', '[data-phone-add-sats]', 'Receiving sats is not available']]) {
+  for (const [tab, selector, reason] of [['you', '[data-phone-share]', 'Profile cards are not available'], ['wallet', '[data-phone-add-sats]', 'Receiving via Lightning is not available']]) {
     await click(`[data-phone-tab="${tab}"]`);
     const button = document.querySelector<HTMLButtonElement>(selector)!;
     expect(button.disabled).toBe(true);
@@ -361,4 +361,17 @@ it('reveals an underlay approval after a call-local money sheet closes without u
   expect(visible('[data-call-panel]')).toHaveLength(0);
   expect(visible('[data-approval="pending"]')).toContain(approval);
   expect(visibleBackDestination()).toBeNull();
+});
+
+it('localizes unavailable Share and Add sats reasons in Danish', async () => {
+  setLanguagePref('da'); await mount({ unavailable: true });
+  for (const [tab, selector, reason] of [
+    ['you', '[data-phone-share]', 'Profilkort er endnu ikke tilgængelige på denne node.'],
+    ['wallet', '[data-phone-add-sats]', 'Modtagelse via Lightning er endnu ikke tilgængelig på denne node.'],
+  ]) {
+    await click(`[data-phone-tab="${tab}"]`);
+    const button = document.querySelector<HTMLButtonElement>(selector)!;
+    expect(button.disabled).toBe(true);
+    expect(document.getElementById(button.getAttribute('aria-describedby')!)?.textContent).toBe(reason);
+  }
 });

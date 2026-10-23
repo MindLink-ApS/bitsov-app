@@ -234,3 +234,76 @@ test('the actual expanded in-call Pay form blocks navigation until Cancel', asyn
   await expect(page.locator('[data-wallet-page]')).toBeVisible();
   expect(await page.evaluate(() => (window as any).phoneCall.sessions)).toEqual([true]);
 });
+
+for (const mode of ['pay', 'file']) {
+  for (const action of ['accept', 'decline']) {
+    test(`incoming ring above ${mode}: ${action} preserves the pending composer without sending`, async ({ page }) => {
+      await installLiveCallFixture(page);
+      await page.route('**/src/control/Shell.tsx', async route => {
+        const response = await route.fetch();
+        const original = await response.text();
+        // Seed the real composer without pressing Pay. All handlers stay real.
+        const marker = 'const [mode, setMode] = createSignal("message");';
+        expect(original).toContain(marker);
+        await route.fulfill({ response, body: original.replace(marker, `const [mode, setMode] = createSignal("${mode === 'pay' ? 'pay' : 'message'}");`) });
+      });
+      await page.route('**/docs/ui/u5-phone-shell/harness/preview.tsx', async route => {
+        const response = await route.fetch();
+        const original = await response.text();
+        const marker = 'const forbid = () => {';
+        expect(original).toContain(marker);
+        await route.fulfill({ response, body: original.replace(marker,
+          'window.composerWrites = []; const forbid = () => { window.composerWrites.push("forbidden write");') });
+      });
+      await page.goto(`${preview}?scene=chat`);
+      if (mode === 'file') {
+        await page.locator('[data-composer-plus]').click();
+        const choosing = page.waitForEvent('filechooser');
+        await page.locator('[data-composer-mode="file"]').click();
+        await (await choosing).setFiles({ name: 'pending.txt', mimeType: 'text/plain', buffer: Buffer.from('Pending file draft') });
+      }
+      // Disable the ring pulse so WebKit's stability check can hit-test the controls.
+      await page.addStyleTag({ content: '[data-call-panel], [data-call-accept] { animation: none !important; transition: none !important; }' });
+      const composer = page.locator(`[data-composer-panel="${mode}"]`);
+      await expect(composer).toBeVisible();
+      if (mode === 'pay') {
+        await composer.getByRole('tab', { name: 'Direct', exact: true }).click();
+        await composer.locator('[data-pay-note]').fill('Pending payment draft');
+        await composer.locator('[data-pay-pubkey]').fill('02' + 'a'.repeat(64));
+        await composer.locator('[data-pay-amount]').fill('123');
+      }
+      if (mode === 'file') await composer.locator('[data-file-choose]').focus();
+      await composer.evaluate(el => {
+        (window as any).pendingComposer = el;
+        (window as any).composerFocus = document.activeElement;
+      });
+      const peer = await page.locator('[data-phone-list] [data-track^="peer:"]').last().getAttribute('data-track');
+      await page.evaluate(peer => (window as any).phoneCall.ring(peer), peer!.slice(5));
+      const incoming = page.locator('[data-call-panel="incoming"]');
+      await expect(incoming).toBeVisible();
+      await expect(incoming).toBeFocused();
+      for (const selector of ['[data-call-accept]', '[data-call-decline]']) {
+        const button = incoming.locator(selector);
+        await expect(button).toBeEnabled();
+        await button.click({ trial: true }); // Proves hit-testing/focusability; does not act.
+      }
+      await expect(page.locator('.track')).toHaveAttribute('inert');
+      await page.locator(`[data-call-${action}]`).click();
+      await expect.poll(() => page.evaluate(() => (window as any).phoneCall.engine.view().phase)).toBe(action === 'accept' ? 'connecting' : 'ended');
+      await expect(composer).toBeVisible();
+      await expect(page.locator('.track')).not.toHaveAttribute('inert');
+      expect(await composer.evaluate(el => el === (window as any).pendingComposer)).toBe(true);
+      await expect.poll(() => page.evaluate(() => document.activeElement === (window as any).composerFocus)).toBe(true);
+      if (mode === 'pay') {
+        await expect(composer.locator('[data-pay-note]')).toHaveValue('Pending payment draft');
+        await expect(composer.locator('[data-pay-pubkey]')).toHaveValue('02' + 'a'.repeat(64));
+        await expect(composer.locator('[data-pay-amount]')).toHaveValue('123');
+      } else {
+        await expect(composer.locator('[data-file-chip]')).toContainText('pending.txt');
+        expect(await page.locator('[data-file-input]').evaluate((el: HTMLInputElement) => el.files?.[0]?.size)).toBe(18);
+      }
+      expect(await page.evaluate(() => (window as any).composerWrites)).toEqual([]);
+      await expect(page.locator('[data-phone-tabs]')).toHaveAttribute('inert');
+    });
+  }
+}

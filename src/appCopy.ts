@@ -1,6 +1,11 @@
 /** First migrated app surfaces. Values are display copy, never protocol tokens.
  * {0}, {1}, … insert values verbatim (especially money and recipients). */
 export const appEn = {
+  "entryWaitingCapabilities": "Waiting for your node’s capabilities.",
+  "entryShareUnavailable": "Profile cards are not available on this node yet.",
+  "entryWalletNotReady": "Your node’s wallet is not ready yet.",
+  "entryWaitingWallet": "Waiting for your node’s wallet.",
+  "entryLightningUnavailable": "Receiving via Lightning is not available on this node yet.",
   "phoneChats": "Chats",
   "phoneCalls": "Calls",
   "phoneNavigation": "Main navigation",
@@ -845,6 +850,11 @@ export const appEn = {
 };
 
 export const appDa: Record<keyof typeof appEn, string> = {
+  "entryWaitingCapabilities": "Venter på din nodes funktioner.",
+  "entryShareUnavailable": "Profilkort er endnu ikke tilgængelige på denne node.",
+  "entryWalletNotReady": "Din nodes tegnebog er ikke klar endnu.",
+  "entryWaitingWallet": "Venter på din nodes tegnebog.",
+  "entryLightningUnavailable": "Modtagelse via Lightning er endnu ikke tilgængelig på denne node.",
   "phoneChats": "Chats",
   "phoneCalls": "Opkald",
   "phoneNavigation": "Hovednavigation",

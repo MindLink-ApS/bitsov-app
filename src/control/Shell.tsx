@@ -1327,11 +1327,20 @@ export function ControlCenter(props: Props) {
   const [callView, setCallView] = createSignal<CallView>(CALL_IDLE);
   const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
   const [callMinimized, setCallMinimized] = createSignal(false);
+  let incomingComposerFocus: HTMLElement | null = null;
   createEffect(on(() => callView().callId, () => setCallMinimized(false)));
   const [callApproval, setCallApproval] = createSignal(false);
   const [callApproving, setCallApproving] = createSignal(false);
   const phoneCallHidden = () => phoneShell() && (callMinimized() || phoneTab() !== 'chats' || contextOpen() || walletTab() !== null);
   const phoneCallVisible = () => phoneShell() && !phoneCallHidden() && (callView().phase !== 'idle' || callApproval());
+  createEffect(on(phoneCallHidden, hidden => {
+    if (!hidden || !incomingComposerFocus) return;
+    const target = incomingComposerFocus;
+    incomingComposerFocus = null;
+    queueMicrotask(() => {
+      if (target.isConnected && !target.closest('[hidden], [inert], [aria-hidden="true"]')) target.focus();
+    });
+  }));
   const calls = createCallEngine({
     audioSession: appPlatform() === 'ios' ? (live) => invoke<void>('call_audio_session', { live }) : undefined,
     closeAdmission: (operationId, peer, callId) => source.closeCallAdmission(operationId, peer, callId),
@@ -1361,7 +1370,14 @@ export function ControlCenter(props: Props) {
       : Promise.reject(Object.assign(new Error('No media devices in this webview'), { name: NO_MEDIA_DEVICES })),
     peerConnection: (config) => new RTCPeerConnection(config),
     now: () => Date.now(),
-    onView: setCallView,
+    onView: view => {
+      if (phoneShell() && view.phase === 'incoming' && callView().phase !== 'incoming') {
+        // Capture before the call makes the composer inert and takes focus.
+        const active = document.activeElement;
+        incomingComposerFocus = active instanceof HTMLElement && active.closest('[data-composer]') ? active : null;
+      }
+      setCallView(view);
+    },
     onStreams: (local, remote) => setCallStreams({ local, remote }),
     // No STUN unless the owner set one: host candidates only.
     iceServers: () => stunServer(effectiveStun()),
@@ -1887,7 +1903,9 @@ export function ControlCenter(props: Props) {
     // Observe the guard revision, but classify the underlay separately: call-local
     // approval/payment surfaces must stay in the foreground call panel.
     phoneGuard.revision();
-    if (phoneCallVisible() && (!callPanel || !navigationBlocked(false, callPanel))
+    // A ring stays answerable above the mounted composer. Once it is answered
+    // or declined, the pending composer takes precedence again; no draft is sent.
+    if (callView().phase !== 'incoming' && phoneCallVisible() && (!callPanel || !navigationBlocked(false, callPanel))
       && Array.from(document.querySelectorAll('[data-call-underlay="true"]')).some(el => navigationBlocked(false, el))) {
       setCallMinimized(true);
     } else if (callApproval() && phoneCallHidden() && !phoneGuard.check() && !walletBusy() && !settingsBusy()) {
@@ -2173,8 +2191,8 @@ export function ControlCenter(props: Props) {
         <Show when={phoneTab() === 'you'}>
           <section class="phone-page" data-phone-you inert={contextOpen()} aria-label={tr('uiYou')}>
             <h1>{tr('uiYou')}</h1>
-            <p class="hint" id={`${phoneEntryId}-share`}>{shareReason()}</p>
-            <button class="primary" data-phone-share disabled={shareReason() !== null} aria-describedby={`${phoneEntryId}-share`} onClick={() => openPhoneSettings('frontdoor')}>{tr('phoneShare')}</button>
+            <Show when={shareReason()}><p class="hint" id={`${phoneEntryId}-share`}>{shareReason()}</p></Show>
+            <button class="primary" data-phone-share disabled={shareReason() !== null} aria-describedby={shareReason() ? `${phoneEntryId}-share` : undefined} onClick={() => openPhoneSettings('frontdoor')}>{tr('phoneShare')}</button>
             <button class="soft" data-phone-settings onClick={() => openPhoneSettings('body')}>{tr('uiProfileAndSettings')}</button>
             <button class="soft" data-phone-devices onClick={() => openPhoneSettings('devices')}>{tr('phoneAddDevice')}</button>
             <Show when={approvalsWaiting() > 0}><button class="soft" onClick={() => openPhoneSettings('node')}>{tr('uiApprovalsWaiting')} ({approvalsWaiting()})</button></Show>

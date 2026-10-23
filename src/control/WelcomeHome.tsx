@@ -1,14 +1,15 @@
 import { createUniqueId } from 'solid-js';
 import type { NodeOverview } from './types';
+import { t } from '../i18n';
 
 /** Null means the entry is ready; shared by desktop welcome and phone entries. */
 export const shareDisabledReason = (overview: NodeOverview | null): string | null => !overview
-  ? 'Waiting for your node’s capabilities.'
-  : !overview.capabilities?.includes('front_door_v1') ? 'Profile cards are not available on this node yet.' : null;
+  ? t('entryWaitingCapabilities')
+  : !overview.capabilities?.includes('front_door_v1') ? t('entryShareUnavailable') : null;
 export const fundingDisabledReason = (overview: NodeOverview | null, walletReady: boolean, moneyBlocked: boolean): string | null => moneyBlocked
-  ? 'Your node’s wallet is not ready yet.'
-  : !overview || !walletReady ? 'Waiting for your node’s wallet.'
-  : !overview.lightning_available ? 'Receiving sats is not available on this node yet.' : null;
+  ? t('entryWalletNotReady')
+  : !overview || !walletReady ? t('entryWaitingWallet')
+  : !overview.lightning_available ? t('entryLightningUnavailable') : null;
 
 /** Navigation only: no admission, payment, publication or contact creation. */
 export function WelcomeHome(props: {

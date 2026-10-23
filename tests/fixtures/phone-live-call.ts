@@ -8,6 +8,8 @@ export function phoneLiveCall(factory: typeof createCallEngine, deps: CallDeps) 
     onconnectionstatechange: (() => void) | null = null;
     ontrack: ((event: { streams: MediaStream[] }) => void) | null = null;
     addTrack() { return { replaceTrack: async () => {} }; }
+    async createAnswer() { return { type: 'answer', sdp: 'v=0 fixture answer' }; }
+    async setRemoteDescription(_value: unknown) {}
     async createOffer() { return { type: 'offer', sdp: 'v=0 fixture' }; }
     async setLocalDescription(value: unknown) { this.localDescription = value; }
     async getStats() { return new Map(); }
@@ -28,6 +30,11 @@ export function phoneLiveCall(factory: typeof createCallEngine, deps: CallDeps) 
   });
   (window as any).phoneCall = {
     engine, sessions,
+    ring: (peer: string) => engine.receive({
+      id: 'fixture-incoming', sender: peer, recipient: '0'.repeat(66), kind: 400,
+      plaintext: JSON.stringify({ v: 1, call_id: 'c'.repeat(32), media: 'audio', sdp: 'v=0 fixture offer' }),
+      timestamp: Date.now(), payment_amount_msat: 1000,
+    }, '0'.repeat(66)),
     start: async (peer: string) => {
       await engine.place(peer, 'audio', { offer_msat: 1000, offer_max_routing_fee_msat: 0,
         signal_msat: 1000, signal_max_routing_fee_msat: 0, call_total_msat: 3000 });

@@ -10,7 +10,8 @@ Calls appears only after a history read or an observed call. Startup performs
 one sequential has-any-call search, stopping at the first matching contact.
 Results and in-flight reads are cached for the mounted shell; opening Calls
 lazily checks the remaining contacts. Each contact probe reads at most three pages, including on first launch with
-no calls. Calls beyond that window do not make the tab appear on cold launch;
+no calls. By design, a contact whose only calls are older than those three history pages
+does not make Calls appear on a cold launch;
 any calls observed in later thread reads or live events update the cache. Ordinary refreshes
 reuse the cache; live call events replace negative results immediately. After
 an actual websocket gap, negative results check only pages newer than their
@@ -38,7 +39,11 @@ without unmounting its media; the existing call engine owns the Live-only iOS
 audio session until teardown. The On-call pill restores the call and focuses its
 panel. Edge Back minimizes it without hanging up; selecting Chats also returns
 to chat content. Covered chat controls are inert. Money/approval surfaces take
-precedence, including approvals that arrive after navigation.
+precedence, including approvals that arrive after navigation. Incoming rings
+are the exception: Accept / Decline remains visible above an open Pay or file
+composer. The composer stays mounted and inert while ringing; answering or
+declining returns to the same pending draft. No draft payment or file is sent
+automatically. Call signaling keeps its existing explicit Accept / Decline cost.
 
 The tab bar has no overlay z-index. First-spend and owner-approval dialogs retain
 the native top layer; starter retains its full-screen layer above the tabs.
