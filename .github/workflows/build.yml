@@ -295,7 +295,12 @@ jobs:
   starter-balance:
     name: Starter balance enabled (build + tests)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    # CI-DIET commit B: requires Atlas's OK before merge (20 Oct main-build ruling).
+    # Only omit the post-merge main-push rerun. PR/full-ci, tags and merge groups
+    # retain coverage. Revert this commit to restore every-main-push execution.
+    if: >-
+      ${{ !cancelled() && !(github.event_name == 'push' && github.ref == 'refs/heads/main') &&
+          (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
