@@ -109,6 +109,7 @@
     "allow-voice-note-fetch",
     "allow-file-fetch",
     "allow-file-save",
+    "allow-call-audio-session",
     "allow-call-quote",
     "allow-call-signal",
     "allow-porch-quote",

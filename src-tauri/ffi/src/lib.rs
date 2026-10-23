@@ -24,3 +24,6 @@ pub fn effective_uid() -> u32 {
 
 #[cfg(target_os = "ios")]
 pub mod phone_recovery;
+
+#[cfg(target_os = "ios")]
+pub mod call_audio;

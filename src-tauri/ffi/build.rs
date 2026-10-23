@@ -28,6 +28,7 @@ fn build_device_key_swift() {
     println!("cargo:rerun-if-changed=../native/home_metadata.swift");
     println!("cargo:rerun-if-changed=../native/pairing_link.swift");
     println!("cargo:rerun-if-changed=../native/phone_recovery.swift");
+    println!("cargo:rerun-if-changed=../native/call_audio.swift");
     let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
         Ok("aarch64") => "arm64",
         Ok("x86_64") => "x86_64",
@@ -65,7 +66,7 @@ fn build_device_key_swift() {
 
     let lib = out_dir.join("libbitsov_device_key.a");
     let mut compiler = Command::new(&swiftc);
-    if ios { compiler.args(["../native/client_keychain.swift", "../native/pairing_link.swift", "../native/home_metadata.swift", "../native/phone_recovery.swift"]); }
+    if ios { compiler.args(["../native/client_keychain.swift", "../native/pairing_link.swift", "../native/home_metadata.swift", "../native/phone_recovery.swift", "../native/call_audio.swift"]); }
     let status = compiler
         .args([
             "-emit-library",
@@ -95,7 +96,10 @@ fn build_device_key_swift() {
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=bitsov_device_key");
-    if ios { println!("cargo:rustc-link-lib=framework=UIKit"); }
+    if ios {
+        println!("cargo:rustc-link-lib=framework=UIKit");
+        println!("cargo:rustc-link-lib=framework=AVFAudio");
+    }
     for framework in ["CryptoKit", "LocalAuthentication", "Security", "Foundation"] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
