@@ -46,7 +46,7 @@ it('keeps the sweep contrast, token, and focus fixes', () => {
   expect(source).toContain('.rail .track-link { width: max-content; }');
   expect(source).toContain("html[data-theme='light'] .target-badge.honest { color: #6b4c00; }");
   expect(source).toContain("html[data-theme='light'] .contact-pill.ok");
-  expect(source).toContain('--t-hero: 64px');
+  // The actual desktop hero size is checked in dynamic-type.spec.ts.
   expect(line(source, '.wallet-total')).toContain('font-size: var(--t-hero)');
   expect(readFileSync('index.html', 'utf8')).toContain('rel="icon"');
   expect(readFileSync('src/appCopy.ts', 'utf8')).toContain('1 sat = 1\\u202f000');

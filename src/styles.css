@@ -65,27 +65,27 @@
   --font-display: 'Instrument Serif', 'New York', 'Iowan Old Style', Georgia, serif;
   --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-  --t-xs: 11.5px;
-  --t-sm: 12.5px;
-  --t-md: 14px;
-  --t-lg: 15.5px;
-  --t-xl: 18px;
-  --t-2xl: 24px;
-  --t-3xl: 32px;
-  --t-display: 40px;
-  --t-hero: 64px;
+  --t-xs: 0.71875rem;
+  --t-sm: 0.78125rem;
+  --t-md: 0.875rem;
+  --t-lg: 0.96875rem;
+  --t-xl: 1.125rem;
+  --t-2xl: 1.5rem;
+  --t-3xl: 2rem;
+  --t-display: 2.5rem;
+  --t-hero: 4rem;
   --lh-tight: 1.2;
   --lh-body: 1.55;
 
   /* space — 4px base */
-  --s-1: 4px;
-  --s-2: 8px;
-  --s-3: 12px;
-  --s-4: 16px;
-  --s-5: 20px;
-  --s-6: 24px;
-  --s-8: 32px;
-  --s-10: 40px;
+  --s-1: 0.25rem;
+  --s-2: 0.5rem;
+  --s-3: 0.75rem;
+  --s-4: 1rem;
+  --s-5: 1.25rem;
+  --s-6: 1.5rem;
+  --s-8: 2rem;
+  --s-10: 2.5rem;
 
   /* radius */
   --r-chip: 999px;
@@ -145,7 +145,7 @@ html[data-theme='light'] {
     scroll-behavior: auto !important;
   }
   .msg.fresh .bubble,
-  .msg.fresh .stamp .sats,
+  .msg.fresh .stamp :is(.sats, .money-text),
   .dot.live,
   .spinner,
   .touchid-badge-pulse,
@@ -174,6 +174,7 @@ p { margin: 0; }
 code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
 
 /* sats: tabular figures, never wrapped mid-number; ids: mono */
+.money-text { font-family: var(--font-sans); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sats { font-family: var(--font-sans); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sats .unit { color: var(--muted); margin-left: 0.3em; font-size: 0.85em; }
 .id { font-family: var(--font-mono); font-size: var(--t-sm); color: var(--muted); letter-spacing: 0.02em; }
@@ -297,7 +298,7 @@ label.field input {
 .msg.out .bubble a, .msg.out .bubble .voice-play { color: var(--bubble-out-ink); }
 .msg.fresh .bubble { animation: msg-send var(--d-mid) var(--ease-out); }
 /* Sending → settled: the paid amount lands with a brief ember wash (new messages only). */
-.msg.fresh .stamp .sats { animation: settle var(--d-slow) var(--ease) both; border-radius: 4px; padding: 0 3px; margin: 0 -3px; }
+.msg.fresh .stamp :is(.sats, .money-text) { animation: settle var(--d-slow) var(--ease) both; border-radius: 4px; padding: 0 3px; margin: 0 -3px; }
 @keyframes settle { 0% { background: var(--money-bg); box-shadow: 0 0 0 3px var(--money-bg); } 100% { background: transparent; box-shadow: 0 0 0 3px transparent; } }
 @keyframes msg-send {
   0% { opacity: 0; transform: translateY(10px) scale(0.97); }
@@ -305,7 +306,7 @@ label.field input {
 }
 @keyframes arrive { from { opacity: 0; transform: translateY(6px); } }
 .stamp { display: flex; align-items: center; gap: var(--s-2); font-size: var(--t-xs); color: var(--faint); margin-top: 2px; font-variant-numeric: tabular-nums; }
-.stamp .sats { color: var(--accent); }
+.stamp :is(.sats, .money-text) { color: var(--accent); }
 .stamp .bolt { width: 9px; height: 12px; fill: var(--accent); }
 .artifact { border: 1px solid var(--ember-line); background: var(--ember); border-radius: var(--r-panel); padding: var(--s-3) var(--s-4); display: flex; flex-direction: column; gap: var(--s-1); }
 .artifact .kind { font-size: var(--t-xs); color: var(--accent); }
@@ -1345,7 +1346,7 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .msg.unsent .bubble { opacity: 0.72; border: 1px dashed var(--unknown-ink); background: transparent; }
 .msg.unsent .unsent-actions { display: flex; gap: var(--s-3, 12px); justify-content: flex-end; }
 .artifact.failed .failed-text { margin: 4px 0 0; padding-left: 8px; border-left: 2px solid var(--unknown-ink); white-space: pre-wrap; overflow-wrap: anywhere; }
-.msg.sending .stamp .sats { color: var(--muted); }
+.msg.sending .stamp :is(.sats, .money-text) { color: var(--muted); }
 
 /* Device pairing shares Ember surfaces and the existing word/QR primitives. */
 .add-device { min-width: 0; }
@@ -1682,3 +1683,108 @@ html[data-platform='ios'][data-keyboard-open='true'] :is(.first-spend-starts-now
 }
 html[data-platform='ios'][data-keyboard-open='true'] .first-spend-starts-now { height: 3.1em; }
 html[data-platform='ios'][data-keyboard-open='true'] .first-spend-may-start-now { height: 6.2em; }
+
+
+/* U2b: WKWebView resolves the system body font to 17px at Large and 53px
+   at AX5. Only iOS opts in; the 16px rem basis elsewhere preserves the UI.
+   Reading text grows up to 200%. Money/controls have smaller explicit caps;
+   wrapping and scroll regions, not ellipses, preserve the complete terms. */
+html[data-platform='ios'] {
+  font: -apple-system-body;
+  -webkit-text-size-adjust: 100%;
+  --t-xs: clamp(15px, .882353rem, 30px);
+  --t-sm: clamp(16px, .941177rem, 32px);
+  --t-md: clamp(17px, 1rem, 34px);
+  --t-lg: clamp(18px, 1.058824rem, 36px);
+  --t-xl: clamp(20px, 1.176471rem, 40px);
+  --t-2xl: clamp(24px, 1.411765rem, 48px);
+  --t-3xl: clamp(32px, 1.882353rem, 64px);
+  --t-display: clamp(40px, 2.352941rem, 80px);
+  --t-hero: clamp(64px, 3.764706rem, 80px);
+  --t-money: clamp(17px, 1rem, 22px);
+  --t-control: clamp(17px, 1rem, 22px);
+  /* Spacing grows by at most 50%, leaving usable width on a 393px phone. */
+  --s-1: min(.235294rem, 6px);
+  --s-2: min(.470588rem, 12px);
+  --s-3: min(.705882rem, 18px);
+  --s-4: min(.941176rem, 24px);
+  --s-5: min(1.176471rem, 30px);
+  --s-6: min(1.411765rem, 36px);
+  --s-8: min(1.882353rem, 48px);
+  --s-10: min(2.352941rem, 60px);
+}
+html[data-platform='ios'] :is(button, summary, input, textarea, select) {
+  font-size: var(--t-control);
+}
+html[data-platform='ios'] button {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  height: auto;
+}
+html[data-platform='ios'] :is(.sats, .money-text, .wallet-row-amount, .split-amount, .wallet-totals, .owner-approval-terms) {
+  font-size: var(--t-money);
+}
+html[data-platform='ios'] .sats { white-space: nowrap; }
+html[data-platform='ios'] :is(.first-spend-sheet, .owner-approval-sheet, .approval) {
+  --t-xs: clamp(15px, .882353rem, 20px);
+  --t-sm: clamp(16px, .941177rem, 20px);
+  --t-md: clamp(17px, 1rem, 22px);
+  --t-lg: clamp(18px, 1.058824rem, 24px);
+  font-size: var(--t-md);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+html[data-platform='ios'] :is(.first-spend-sheet, .owner-approval-sheet) > * { flex-shrink: 0; }
+html[data-platform='ios'] :is(.first-spend-sheet, .owner-approval-sheet) > button { min-height: 44px; }
+html[data-platform='ios'] .first-spend-options summary { min-height: 44px; }
+html[data-platform='ios'] .first-spend-options input { font-size: var(--t-control); }
+html[data-platform='ios'][data-keyboard-open='true'] .first-spend-keyboard-summary {
+  font-size: clamp(15px, .882353rem, 20px);
+  gap: var(--s-1); padding-block: var(--s-2);
+}
+/* The pinned quote owns its height; the rest of a long sheet remains scrollable. */
+html[data-platform='ios'] :is(.target-radio-indicator, .touchid-check, .approvals-badge) {
+  font-size: clamp(15px, .882353rem, 20px);
+  width: auto; height: auto; min-width: 1.4em; min-height: 1.4em; line-height: 1.4;
+}
+html[data-platform='ios'] :is(.wallet-top, .wallet-body > *, .context-head) { flex-shrink: 0; }
+html[data-platform='ios'] :is(.wallet-actions, .wallet-top, .wallet-tabs, .wallet-row, .avatar-menu-item) { flex-wrap: wrap; }
+html[data-platform='ios'] .wallet-total { font-size: clamp(40px, 2.352941rem, 48px); }
+html[data-platform='ios'] .wallet-split { grid-template-columns: 1fr; }
+html[data-platform='ios'] :is(.wallet-split .split-name, .wallet-row .what, .owner-sheet-terms) { overflow-wrap: anywhere; }
+
+html[data-platform='ios'] .money-text { white-space: normal; overflow-wrap: anywhere; }
+html[data-platform='ios'] .organ-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; }
+html[data-platform='ios'] .organ-name { font-size: var(--t-control); }
+html[data-platform='ios'] .organ-summary {
+  grid-column: 1 / -1; grid-row: 2; margin-left: 0;
+  white-space: normal; overflow: visible; overflow-wrap: anywhere;
+}
+html[data-platform='ios'] .sample-tag { font-size: clamp(15px, .882353rem, 20px); }
+html[data-platform='ios'][data-keyboard-open='true'] .first-spend-reason-slot { height: min(3rem, 48px); }
+html[data-platform='ios'] .first-spend-grabber { width: min(4rem, 64px); height: min(1.25rem, 20px); }
+html[data-platform='ios'] .first-spend-grabber::before { width: min(2.5rem, 40px); height: min(.25rem, 4px); }
+html[data-platform='ios'][data-keyboard-open='true'] .first-spend-keyboard-summary { box-shadow: 0 -12px 0 var(--surface); }
+
+/* Fit even a maximum safe integer balance without breaking its digits. The
+   character budget only sizes display text; it never formats or rounds money. */
+html[data-platform='ios'] .wallet-hero { width: 100%; container-type: inline-size; }
+html[data-platform='ios'] .wallet-total {
+  white-space: nowrap;
+  font-size: min(2.352941rem, 48px, calc(100cqi / (var(--wallet-amount-chars) * .62)));
+}
+html[data-platform='ios'] .wallet-total .unit { font-size: clamp(15px, .5em, 22px); }
+html[data-platform='ios'] :is(.send-price, .stamp) { font-size: clamp(15px, .882353rem, 22px); }
+html[data-platform='ios'] [data-send-disabled-reason] { font-size: clamp(16px, .941177rem, 20px); }
+html[data-platform='ios'] .avatar-mark {
+  font-size: clamp(15px, .882353rem, 20px); white-space: nowrap;
+  width: max(28px, 1.6em); height: max(28px, 1.6em);
+}
+@media (max-width: 680px) {
+  html[data-platform='ios'] .rail {
+    --t-xs: clamp(15px, .882353rem, 20px);
+    --t-sm: clamp(16px, .941177rem, 20px);
+    --t-md: clamp(17px, 1rem, 22px);
+    --t-2xl: clamp(24px, 1.411765rem, 30px);
+  }
+}

@@ -1,0 +1,426 @@
+{
+  "scene": "first-spend",
+  "lang": "en",
+  "generatedAt": 1792735473812,
+  "ready": true,
+  "rootFont": "53px",
+  "bodyFont": "34px",
+  "space": "18px",
+  "viewport": {
+    "width": 393,
+    "height": 482,
+    "top": 370,
+    "scale": 1
+  },
+  "keyboard": "true",
+  "ownerSheetMounted": false,
+  "minimums": [
+    {
+      "selector": ".target-radio-indicator",
+      "font": "20px"
+    },
+    {
+      "selector": ".touchid-check",
+      "font": "20px"
+    },
+    {
+      "selector": ".approvals-badge",
+      "font": "20px"
+    }
+  ],
+  "elements": [
+    {
+      "tag": "DIV",
+      "class": "first-spend-keyboard-summary money",
+      "text": "Allow 1\u202f250 sats a dayEntry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
+      "rect": {
+        "x": 25,
+        "y": 78,
+        "width": 343,
+        "height": 139,
+        "top": 78,
+        "right": 368,
+        "bottom": 217,
+        "left": 25
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        138
+      ],
+      "scroll": [
+        343,
+        138
+      ],
+      "failures": []
+    },
+    {
+      "tag": "STRONG",
+      "class": "",
+      "text": "Allow 1\u202f250 sats a day",
+      "rect": {
+        "x": 25,
+        "y": 90,
+        "width": 343,
+        "height": 27,
+        "top": 90,
+        "right": 368,
+        "bottom": 117,
+        "left": 25
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        27
+      ],
+      "scroll": [
+        343,
+        27
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "",
+      "text": "Entry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
+      "rect": {
+        "x": 25,
+        "y": 123,
+        "width": 343,
+        "height": 81,
+        "top": 123,
+        "right": 368,
+        "bottom": 204,
+        "left": 25
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        81
+      ],
+      "scroll": [
+        343,
+        81
+      ],
+      "failures": []
+    },
+    {
+      "tag": "H2",
+      "class": "",
+      "text": "Let messages spend up to 1\u202f250 sats a day?",
+      "rect": {
+        "x": 25,
+        "y": -297,
+        "width": 343,
+        "height": 93.59375,
+        "top": -297,
+        "right": 368,
+        "bottom": -203.40625,
+        "left": 25
+      },
+      "font": "24px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        94
+      ],
+      "scroll": [
+        343,
+        94
+      ],
+      "failures": []
+    },
+    {
+      "tag": "P",
+      "class": "",
+      "text": "Approve at your box",
+      "rect": {
+        "x": 25,
+        "y": -185.40625,
+        "width": 343,
+        "height": 34.09375,
+        "top": -185.40625,
+        "right": 368,
+        "bottom": -151.3125,
+        "left": 25
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        34
+      ],
+      "scroll": [
+        343,
+        34
+      ],
+      "failures": []
+    },
+    {
+      "tag": "P",
+      "class": "hint",
+      "text": "Allow starts owner approval. It grants no permission by itself.",
+      "rect": {
+        "x": 25,
+        "y": -133.3125,
+        "width": 343,
+        "height": 62,
+        "top": -133.3125,
+        "right": 368,
+        "bottom": -71.3125,
+        "left": 25
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        62
+      ],
+      "scroll": [
+        343,
+        62
+      ],
+      "failures": []
+    },
+    {
+      "tag": "P",
+      "class": "first-spend-cost money",
+      "text": "Entry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
+      "rect": {
+        "x": 25,
+        "y": -53.3125,
+        "width": 343,
+        "height": 102.28125,
+        "top": -53.3125,
+        "right": 368,
+        "bottom": 48.96875,
+        "left": 25
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        102
+      ],
+      "scroll": [
+        343,
+        102
+      ],
+      "failures": []
+    },
+    {
+      "tag": "P",
+      "class": "hint",
+      "text": "App budget presets. Maximum: 100\u202f000 sats a day.",
+      "rect": {
+        "x": 25,
+        "y": 110.96875,
+        "width": 343,
+        "height": 62,
+        "top": 110.96875,
+        "right": 368,
+        "bottom": 172.96875,
+        "left": 25
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        62
+      ],
+      "scroll": [
+        343,
+        62
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "chip",
+      "text": "500 sats a day",
+      "rect": {
+        "x": 25,
+        "y": 190.96875,
+        "width": 164.328125,
+        "height": 49,
+        "top": 190.96875,
+        "right": 189.328125,
+        "bottom": 239.96875,
+        "left": 25
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        162,
+        47
+      ],
+      "scroll": [
+        162,
+        47
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "chip",
+      "text": "2\u202f000 sats a day",
+      "rect": {
+        "x": 25,
+        "y": 251.96875,
+        "width": 180.90625,
+        "height": 49,
+        "top": 251.96875,
+        "right": 205.90625,
+        "bottom": 300.96875,
+        "left": 25
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        179,
+        47
+      ],
+      "scroll": [
+        179,
+        47
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "chip",
+      "text": "10\u202f000 sats a day",
+      "rect": {
+        "x": 25,
+        "y": 312.96875,
+        "width": 189.46875,
+        "height": 49,
+        "top": 312.96875,
+        "right": 214.46875,
+        "bottom": 361.96875,
+        "left": 25
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        187,
+        47
+      ],
+      "scroll": [
+        187,
+        47
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "chip",
+      "text": "Custom",
+      "rect": {
+        "x": 226.46875,
+        "y": 312.96875,
+        "width": 98.859375,
+        "height": 49,
+        "top": 312.96875,
+        "right": 325.328125,
+        "bottom": 361.96875,
+        "left": 226.46875
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        97,
+        47
+      ],
+      "scroll": [
+        97,
+        47
+      ],
+      "failures": []
+    },
+    {
+      "tag": "INPUT",
+      "class": "",
+      "text": "",
+      "rect": {
+        "x": 25,
+        "y": 414.0625,
+        "width": 343,
+        "height": 56.09375,
+        "top": 414.0625,
+        "right": 368,
+        "bottom": 470.15625,
+        "left": 25
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        341,
+        54
+      ],
+      "scroll": [
+        341,
+        54
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "primary money",
+      "text": "Allow 1\u202f250 sats a day",
+      "rect": {
+        "x": 25,
+        "y": 554.15625,
+        "width": 343,
+        "height": 52.09375,
+        "top": 554.15625,
+        "right": 368,
+        "bottom": 606.25,
+        "left": 25
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        52
+      ],
+      "scroll": [
+        343,
+        52
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "link",
+      "text": "Not now",
+      "rect": {
+        "x": 25,
+        "y": 624.25,
+        "width": 343,
+        "height": 46.09375,
+        "top": 624.25,
+        "right": 368,
+        "bottom": 670.34375,
+        "left": 25
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        343,
+        46
+      ],
+      "scroll": [
+        343,
+        46
+      ],
+      "failures": []
+    }
+  ],
+  "failures": [],
+  "contentSize": "accessibility-extra-extra-extra-large",
+  "device": "71E314A6-5C92-4507-994B-7F7E67DE9495"
+}

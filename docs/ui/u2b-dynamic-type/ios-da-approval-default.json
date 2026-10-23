@@ -1,0 +1,114 @@
+{
+  "scene": "approval",
+  "lang": "da",
+  "generatedAt": 1792735447408,
+  "ready": true,
+  "rootFont": "17px",
+  "bodyFont": "17px",
+  "space": "11.999994px",
+  "viewport": {
+    "width": 393,
+    "height": 852,
+    "top": 0,
+    "scale": 1
+  },
+  "keyboard": "false",
+  "ownerSheetMounted": true,
+  "minimums": [
+    {
+      "selector": ".target-radio-indicator",
+      "font": "15.000001px"
+    },
+    {
+      "selector": ".touchid-check",
+      "font": "15.000001px"
+    },
+    {
+      "selector": ".approvals-badge",
+      "font": "15.000001px"
+    }
+  ],
+  "elements": [
+    {
+      "tag": "P",
+      "class": "owner-sheet-terms",
+      "text": "Let this app spend \u00b7 Budget: up to 2\u202f000 sats \u00b7 Each payment: up to 10 sats \u00b7 For: 10 min \u00b7 To: any contact, within the budget \u00b7 Requested by app cdcdcd\u2026cdcdcd",
+      "rect": {
+        "x": 36.984375,
+        "y": 252.390625,
+        "width": 319.03125,
+        "height": 140.234375,
+        "top": 252.390625,
+        "right": 356.015625,
+        "bottom": 392.625,
+        "left": 36.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        319,
+        140
+      ],
+      "scroll": [
+        319,
+        140
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "primary money",
+      "text": "Godkend med Touch ID",
+      "rect": {
+        "x": 36.984375,
+        "y": 534.84375,
+        "width": 319.03125,
+        "height": 44.34375,
+        "top": 534.84375,
+        "right": 356.015625,
+        "bottom": 579.1875,
+        "left": 36.984375
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        319,
+        44
+      ],
+      "scroll": [
+        319,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "soft",
+      "text": "Ikke nu",
+      "rect": {
+        "x": 36.984375,
+        "y": 591.171875,
+        "width": 319.03125,
+        "height": 44,
+        "top": 591.171875,
+        "right": 356.015625,
+        "bottom": 635.171875,
+        "left": 36.984375
+      },
+      "font": "16.00001px",
+      "whiteSpace": "normal",
+      "client": [
+        317,
+        42
+      ],
+      "scroll": [
+        317,
+        42
+      ],
+      "failures": []
+    }
+  ],
+  "failures": [],
+  "contentSize": "large",
+  "device": "71E314A6-5C92-4507-994B-7F7E67DE9495"
+}

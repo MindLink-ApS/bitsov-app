@@ -1,0 +1,114 @@
+{
+  "scene": "approval",
+  "lang": "en",
+  "generatedAt": 1792735483631,
+  "ready": true,
+  "rootFont": "53px",
+  "bodyFont": "34px",
+  "space": "18px",
+  "viewport": {
+    "width": 393,
+    "height": 852,
+    "top": 0,
+    "scale": 1
+  },
+  "keyboard": "false",
+  "ownerSheetMounted": true,
+  "minimums": [
+    {
+      "selector": ".target-radio-indicator",
+      "font": "20px"
+    },
+    {
+      "selector": ".touchid-check",
+      "font": "20px"
+    },
+    {
+      "selector": ".approvals-badge",
+      "font": "20px"
+    }
+  ],
+  "elements": [
+    {
+      "tag": "P",
+      "class": "owner-sheet-terms",
+      "text": "Let this app spend \u00b7 Budget: up to 2\u202f000 sats \u00b7 Each payment: up to 10 sats \u00b7 For: 10 min \u00b7 To: any contact, within the budget \u00b7 Requested by app cdcdcd\u2026cdcdcd",
+      "rect": {
+        "x": 55,
+        "y": 219.1875,
+        "width": 283,
+        "height": 254.078125,
+        "top": 219.1875,
+        "right": 338,
+        "bottom": 473.265625,
+        "left": 55
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        283,
+        254
+      ],
+      "scroll": [
+        283,
+        254
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "primary money",
+      "text": "Approve with Touch ID",
+      "rect": {
+        "x": 55,
+        "y": 583.453125,
+        "width": 283,
+        "height": 52.09375,
+        "top": 583.453125,
+        "right": 338,
+        "bottom": 635.546875,
+        "left": 55
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        283,
+        52
+      ],
+      "scroll": [
+        283,
+        52
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "soft",
+      "text": "Not now",
+      "rect": {
+        "x": 55,
+        "y": 653.546875,
+        "width": 283,
+        "height": 47,
+        "top": 653.546875,
+        "right": 338,
+        "bottom": 700.546875,
+        "left": 55
+      },
+      "font": "20px",
+      "whiteSpace": "normal",
+      "client": [
+        281,
+        45
+      ],
+      "scroll": [
+        281,
+        45
+      ],
+      "failures": []
+    }
+  ],
+  "failures": [],
+  "contentSize": "accessibility-extra-extra-extra-large",
+  "device": "71E314A6-5C92-4507-994B-7F7E67DE9495"
+}

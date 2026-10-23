@@ -3088,7 +3088,7 @@ function MessageView(props: {
             title={props.out ? paidLabel() : tr('extraToYou', fmtAmount(amount()))}
           >
             <Bolt />
-            <span class="sats">{props.out ? paidLabel() : fmtAmount(amount(), true)}</span>
+            <span class={props.out ? "money-text" : "sats"}>{props.out ? paidLabel() : fmtAmount(amount(), true)}</span>
           </span>
           <Show when={props.out && props.allowance?.readmission_msat}>
             <span data-readmission-paid>{tr('extraInclAdmissionAgain')} {sats(props.allowance!.readmission_msat!)} {satUnit(props.allowance!.readmission_msat!)}</span>
