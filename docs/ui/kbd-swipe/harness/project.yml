@@ -1,0 +1,20 @@
+name: KeyboardEvidence
+options:
+  deploymentTarget:
+    iOS: '17.0'
+targets:
+  KeyboardEvidence:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [Tests]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tech.mindlink.keyboardevidence
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: NO
+        SWIFT_VERSION: 5.0
+        PRODUCT_NAME: KeyboardEvidence
+        ONLY_ACTIVE_ARCH: YES
+        ARCHS: arm64
+    scheme:
+      testTargets: [KeyboardEvidence]

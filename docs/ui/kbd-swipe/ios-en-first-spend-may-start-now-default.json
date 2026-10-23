@@ -1,0 +1,837 @@
+{
+  "viewport": {
+    "height": 482,
+    "top": 370,
+    "scale": 1,
+    "inner": 482
+  },
+  "keyboard": "true",
+  "typing": [
+    {
+      "viewportHeight": 482,
+      "allowDisabled": true,
+      "daily": "Allow payments",
+      "cost": "Entry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
+      "value": "",
+      "scrollTop": 366,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.34375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.34375,
+          "right": 376,
+          "bottom": 298.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.140625,
+          "width": 359,
+          "height": 44,
+          "top": 370.140625,
+          "right": 376,
+          "bottom": 414.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.140625,
+          "width": 359,
+          "height": 44,
+          "top": 426.140625,
+          "right": 376,
+          "bottom": 470.140625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Allow 1 sat a day",
+      "cost": "Entry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
+      "value": "1",
+      "scrollTop": 366,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.34375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.34375,
+          "right": 376,
+          "bottom": 298.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.140625,
+          "width": 359,
+          "height": 44,
+          "top": 370.140625,
+          "right": 376,
+          "bottom": 414.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.140625,
+          "width": 359,
+          "height": 44,
+          "top": 426.140625,
+          "right": 376,
+          "bottom": 470.140625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Allow 12 sats a day",
+      "cost": "Entry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
+      "value": "12",
+      "scrollTop": 366,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.34375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.34375,
+          "right": 376,
+          "bottom": 298.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.140625,
+          "width": 359,
+          "height": 44,
+          "top": 370.140625,
+          "right": 376,
+          "bottom": 414.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.140625,
+          "width": 359,
+          "height": 44,
+          "top": 426.140625,
+          "right": 376,
+          "bottom": 470.140625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Allow 125 sats a day",
+      "cost": "Entry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
+      "value": "125",
+      "scrollTop": 366,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.34375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.34375,
+          "right": 376,
+          "bottom": 298.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.140625,
+          "width": 359,
+          "height": 44,
+          "top": 370.140625,
+          "right": 376,
+          "bottom": 414.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.140625,
+          "width": 359,
+          "height": 44,
+          "top": 426.140625,
+          "right": 376,
+          "bottom": 470.140625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Allow 1\u202f250 sats a day",
+      "cost": "Entry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
+      "value": "1250",
+      "scrollTop": 366,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.34375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.34375,
+          "right": 376,
+          "bottom": 298.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.140625,
+          "width": 359,
+          "height": 44,
+          "top": 370.140625,
+          "right": 376,
+          "bottom": 414.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.140625,
+          "width": 359,
+          "height": 44,
+          "top": 426.140625,
+          "right": 376,
+          "bottom": 470.140625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Allow 1\u202f250 sats a day",
+      "cost": "Entry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
+      "value": "1250.",
+      "scrollTop": 366,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.34375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.34375,
+          "right": 376,
+          "bottom": 298.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.140625,
+          "width": 359,
+          "height": 44,
+          "top": 370.140625,
+          "right": 376,
+          "bottom": 414.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.140625,
+          "width": 359,
+          "height": 44,
+          "top": 426.140625,
+          "right": 376,
+          "bottom": 470.140625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Allow 1\u202f250\u202f500 msat a day",
+      "cost": "Entry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
+      "value": "1250.5",
+      "scrollTop": 366,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.34375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.34375,
+          "right": 376,
+          "bottom": 298.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.140625,
+          "width": 359,
+          "height": 44,
+          "top": 370.140625,
+          "right": 376,
+          "bottom": 414.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.140625,
+          "width": 359,
+          "height": 44,
+          "top": 426.140625,
+          "right": 376,
+          "bottom": 470.140625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Allow 1\u202f250 sats a day",
+      "cost": "Entry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
+      "value": "1250.",
+      "scrollTop": 366,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.34375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.34375,
+          "right": 376,
+          "bottom": 298.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.140625,
+          "width": 359,
+          "height": 44,
+          "top": 370.140625,
+          "right": 376,
+          "bottom": 414.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.140625,
+          "width": 359,
+          "height": 44,
+          "top": 426.140625,
+          "right": 376,
+          "bottom": 470.140625,
+          "left": 17
+        }
+      ]
+    },
+    {
+      "viewportHeight": 482,
+      "allowDisabled": false,
+      "daily": "Allow 1\u202f250 sats a day",
+      "cost": "Entry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
+      "value": "1250",
+      "scrollTop": 366,
+      "elements": [
+        {
+          "selector": "[data-first-spend-keyboard-summary]",
+          "x": 17,
+          "y": 72,
+          "width": 359,
+          "height": 77.671875,
+          "top": 72,
+          "right": 376,
+          "bottom": 149.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-daily]",
+          "x": 17,
+          "y": 80,
+          "width": 359,
+          "height": 18.890625,
+          "top": 80,
+          "right": 376,
+          "bottom": 98.890625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-keyboard-cost]",
+          "x": 17,
+          "y": 102.890625,
+          "width": 359,
+          "height": 37.78125,
+          "top": 102.890625,
+          "right": 376,
+          "bottom": 140.671875,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-amount]",
+          "x": 17,
+          "y": 251.34375,
+          "width": 359,
+          "height": 46.796875,
+          "top": 251.34375,
+          "right": 376,
+          "bottom": 298.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-allow]",
+          "x": 17,
+          "y": 370.140625,
+          "width": 359,
+          "height": 44,
+          "top": 370.140625,
+          "right": 376,
+          "bottom": 414.140625,
+          "left": 17
+        },
+        {
+          "selector": "[data-first-spend-cancel]",
+          "x": 17,
+          "y": 426.140625,
+          "width": 359,
+          "height": 44,
+          "top": 426.140625,
+          "right": 376,
+          "bottom": 470.140625,
+          "left": 17
+        }
+      ]
+    }
+  ],
+  "focused": "INPUT",
+  "elements": [
+    {
+      "tag": "DIV",
+      "cls": "",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 393,
+        "height": 482,
+        "top": 0,
+        "right": 393,
+        "bottom": 482,
+        "left": 0
+      },
+      "client": 482,
+      "scroll": 482,
+      "scrollTop": 0
+    },
+    {
+      "tag": "DIV",
+      "cls": "first-spend-sheet",
+      "rect": {
+        "x": 0,
+        "y": 59,
+        "width": 393,
+        "height": 423,
+        "top": 59,
+        "right": 393,
+        "bottom": 482,
+        "left": 0
+      },
+      "client": 421,
+      "scroll": 792,
+      "scrollTop": 366
+    },
+    {
+      "tag": "DIV",
+      "cls": "first-spend-keyboard-summary money",
+      "text": "Allow 1\u202f250 sats a dayEntry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
+      "rect": {
+        "x": 17,
+        "y": 72,
+        "width": 359,
+        "height": 77.671875,
+        "top": 72,
+        "right": 376,
+        "bottom": 149.671875,
+        "left": 17
+      },
+      "client": 77,
+      "scroll": 77,
+      "scrollTop": 0
+    },
+    {
+      "tag": "STRONG",
+      "cls": "",
+      "text": "Allow 1\u202f250 sats a day",
+      "rect": {
+        "x": 17,
+        "y": 80,
+        "width": 359,
+        "height": 18.890625,
+        "top": 80,
+        "right": 376,
+        "bottom": 98.890625,
+        "left": 17
+      },
+      "client": 19,
+      "scroll": 19,
+      "scrollTop": 0
+    },
+    {
+      "tag": "SPAN",
+      "cls": "",
+      "text": "Entry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
+      "rect": {
+        "x": 17,
+        "y": 102.890625,
+        "width": 359,
+        "height": 37.78125,
+        "top": 102.890625,
+        "right": 376,
+        "bottom": 140.671875,
+        "left": 17
+      },
+      "client": 38,
+      "scroll": 38,
+      "scrollTop": 0
+    },
+    {
+      "tag": "INPUT",
+      "cls": "",
+      "rect": {
+        "x": 17,
+        "y": 251.34375,
+        "width": 359,
+        "height": 46.796875,
+        "top": 251.34375,
+        "right": 376,
+        "bottom": 298.140625,
+        "left": 17
+      },
+      "client": 45,
+      "scroll": 45,
+      "scrollTop": 0
+    },
+    {
+      "tag": "BUTTON",
+      "cls": "primary money",
+      "rect": {
+        "x": 17,
+        "y": 370.140625,
+        "width": 359,
+        "height": 44,
+        "top": 370.140625,
+        "right": 376,
+        "bottom": 414.140625,
+        "left": 17
+      },
+      "client": 44,
+      "scroll": 44,
+      "scrollTop": 0
+    },
+    {
+      "tag": "BUTTON",
+      "cls": "link",
+      "rect": {
+        "x": 17,
+        "y": 426.140625,
+        "width": 359,
+        "height": 44,
+        "top": 426.140625,
+        "right": 376,
+        "bottom": 470.140625,
+        "left": 17
+      },
+      "client": 44,
+      "scroll": 44,
+      "scrollTop": 0
+    }
+  ]
+}
