@@ -91,11 +91,11 @@ fn changed_and_self_guards_precede_signing_and_preserve_exact_bytes() {
 #[test]
 fn prompt_matches_renderer_approval_reason() {
     assert_eq!(checked_approval(&view(), "owner", view()["approval_message"].as_str().unwrap()).unwrap(),
-        "Let this app spend · Budget: up to 1\u{202f}234\u{202f}567 msat · Each payment: up to 1 sat · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
+        "Let this app spend · Budget: up to 1\u{2009}234\u{2009}567 msat · Each payment: up to 1 sat · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
     let mut v = view();
     v["request"] = json!({"kind":"first_contact","terms":{"recipient":"AB12-CD34","max_total_msat":1,"budget_msat":1000000}});
     assert_eq!(checked_approval(&v, "owner", v["approval_message"].as_str().unwrap()).unwrap(),
-        "Let this app message someone new · To: ab12cd34 · First message: up to 1 msat · Contact budget: up to 1\u{202f}000 sats · Requested by app abcdef…123456");
+        "Let this app message someone new · To: ab12cd34 · First message: up to 1 msat · Contact budget: up to 1\u{2009}000 sats · Requested by app abcdef…123456");
 }
 
 #[test]
@@ -139,7 +139,7 @@ async fn existing_device_signer_returns_der_hex_verifiable_with_p256_sha256() {
     let v = view();
     let message = v["approval_message"].as_str().unwrap();
     let signature = sign_checked(&v, "owner", message, |exact, reason| {
-        assert_eq!(reason, "Let this app spend · Budget: up to 1\u{202f}234\u{202f}567 msat · Each payment: up to 1 sat · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
+        assert_eq!(reason, "Let this app spend · Budget: up to 1\u{2009}234\u{2009}567 msat · Each payment: up to 1 sat · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
         device_sign(blob, exact, reason)
     }).await.unwrap();
     assert!(signature
@@ -426,7 +426,7 @@ async fn breaker_approval_signs_exact_message_and_reads_top_level_snapshot() {
     let message = v["approval_message"].as_str().unwrap();
     let signature = sign_checked(&v, "owner", message, |exact, reason| {
         assert_eq!(exact.as_bytes(), message.as_bytes());
-        assert_eq!(reason, "Reset this app’s paused spending · Tripped: paused after failed payments, too many payments this minute, +3 more · Budget: up to 10 sats, 8\u{202f}766 msat left · Each payment: up to 1 sat · Grant ends: 2033-05-18 03:33:20 UTC · Device resets in the last day: 2 of 3 · Requested by app abcdef…123456");
+        assert_eq!(reason, "Reset this app’s paused spending · Tripped: paused after failed payments, too many payments this minute, +3 more · Budget: up to 10 sats, 8\u{2009}766 msat left · Each payment: up to 1 sat · Grant ends: 2033-05-18 03:33:20 UTC · Device resets in the last day: 2 of 3 · Requested by app abcdef…123456");
         std::future::ready(Ok("signature".into()))
     }).await.unwrap();
     assert_eq!(signature, "signature");

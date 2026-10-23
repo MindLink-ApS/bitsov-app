@@ -34,6 +34,7 @@ export const appEn = {
 
   "ownerApprovalNotification": "An app is asking for your approval",
   "ownerApprovalTitle": "Approval requested",
+  "ownerApprovalRequesterShort": "Requested by app {0}",
   "ownerApprovalQueue": "1 of {0}",
   "ownerApprovalApprove": "Approve with Touch ID",
   "ownerApprovalApproving": "Waiting for Touch ID…",
@@ -230,7 +231,7 @@ export const appEn = {
   "uiTheme": "Theme",
   "uiAmounts": "Amounts",
   "uiDenomination": "Denomination",
-  "uiBalancesAndCostsUseThisUnitEverywhereYour": "Balances and costs use this unit everywhere. Your node still counts each payment in millisatoshis (1 sat = 1\u202f000).",
+  "uiBalancesAndCostsUseThisUnitEverywhereYour": "Balances and costs use this unit everywhere. Your node still counts each payment in millisatoshis (1 sat = 1\u2009000).",
   "uiNew": "{0} new",
   "uiTracks": "Tracks",
   "uiOpenNodeSettings": "{0} · open node settings",
@@ -870,6 +871,7 @@ export const appDa: Record<keyof typeof appEn, string> = {
 
   "ownerApprovalNotification": "En app beder om din godkendelse",
   "ownerApprovalTitle": "Anmodning om godkendelse",
+  "ownerApprovalRequesterShort": "Anmodet af app {0}",
   "ownerApprovalQueue": "1 af {0}",
   "ownerApprovalApprove": "Godkend med Touch ID",
   "ownerApprovalApproving": "Venter på Touch ID…",
@@ -1066,7 +1068,7 @@ export const appDa: Record<keyof typeof appEn, string> = {
   "uiTheme": "Tema",
   "uiAmounts": "Beløb",
   "uiDenomination": "Enhed",
-  "uiBalancesAndCostsUseThisUnitEverywhereYour": "Saldi og omkostninger bruger denne enhed overalt. Din node tæller stadig hver betaling i millisatoshis (1 sat = 1\u202f000).",
+  "uiBalancesAndCostsUseThisUnitEverywhereYour": "Saldi og omkostninger bruger denne enhed overalt. Din node tæller stadig hver betaling i millisatoshis (1 sat = 1\u2009000).",
   "uiNew": "{0} nye",
   "uiTracks": "Samtaler",
   "uiOpenNodeSettings": "{0} · åbn nodeindstillinger",

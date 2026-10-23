@@ -39,7 +39,7 @@ describe('denomination formatting', () => {
     expect(sats(1500)).toBe('1.5');
     expect(sats(999)).toBe('0.999');
     expect(sats(12_345)).toBe('12.345');
-    expect(sats(99_999_999_500)).toBe('99\u202f999\u202f999.5');
+    expect(sats(99_999_999_500)).toBe('99\u2009999\u2009999.5');
   });
 });
 

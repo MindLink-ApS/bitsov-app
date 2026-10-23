@@ -5,8 +5,8 @@ import { t, language } from '../i18n';
 
 import { denom } from './prefs';
 
-/** Use narrow no-break spaces so a number cannot wrap between digit groups. */
-const groupDigits = (value: string) => value.replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f');
+/** Display-only thin spaces keep digit groups distinct even in bold amounts. */
+export const groupDigits = (value: string) => value.replace(/\B(?=(\d{3})+(?!\d))/g, '\u2009');
 // Display only: Danish decimal commas are refused by the input parser, never
 // mistaken for thousands. Editable amounts retain amountText()'s exact syntax.
 const satsDecimal = () => language() === 'da' ? ',' : '.';

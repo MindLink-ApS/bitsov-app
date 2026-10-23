@@ -6,8 +6,8 @@ import { setDenom } from '../src/control/prefs';
 
 afterEach(() => { vi.restoreAllMocks(); setDenom('sats'); setLanguagePref('en'); });
 it.each([
-  ['da-DK', '188\u202f800 sats', '21,187 sats', '0,011 sats', '1,019 sats'],
-  ['en-US', '188\u202f800 sats', '21.187 sats', '0.011 sats', '1.019 sats'],
+  ['da-DK', '188\u2009800 sats', '21,187 sats', '0,011 sats', '1,019 sats'],
+  ['en-US', '188\u2009800 sats', '21.187 sats', '0.011 sats', '1.019 sats'],
 ])('formats exact amounts in the chosen denomination in %s', (locale, whole, call, tiny, price) => {
   vi.spyOn(navigator, 'language', 'get').mockReturnValue(locale);
   setLanguagePref('system');
@@ -27,9 +27,9 @@ it.each(['en', 'da'] as const)('uses the selected %s decimal for every sats disp
   setLanguagePref(locale);
   const decimal = locale === 'da' ? ',' : '.';
   expect(amount(1234)).toBe(`1${decimal}234 sats`);
-  expect(amount(-1234567890123)).toBe(`-1\u202f234\u202f567\u202f890${decimal}123 sats`);
-  expect(amount(Number.MAX_SAFE_INTEGER)).toBe(`9\u202f007\u202f199\u202f254\u202f740${decimal}991 sats`);
-  expect(satsWhole(1234.567)).toBe(`1\u202f234${decimal}567`);
+  expect(amount(-1234567890123)).toBe(`-1\u2009234\u2009567\u2009890${decimal}123 sats`);
+  expect(amount(Number.MAX_SAFE_INTEGER)).toBe(`9\u2009007\u2009199\u2009254\u2009740${decimal}991 sats`);
+  expect(satsWhole(1234.567)).toBe(`1\u2009234${decimal}567`);
   expect(sats(1234.5)).toBe(`1${decimal}234`);
 });
 
@@ -53,18 +53,18 @@ it.each(['en', 'da'] as const)('pastes %s display amounts exactly or refuses the
 });
 
 it('groups signed large values without losing msat precision', () => {
-  expect(amount(1250000)).toBe('1\u202f250 sats');
-  expect(amount(-1234567890123)).toBe('-1\u202f234\u202f567\u202f890.123 sats');
-  expect(satsWhole(1234567)).toBe('1\u202f234\u202f567');
-  expect(amount(Number.MAX_SAFE_INTEGER)).toBe('9\u202f007\u202f199\u202f254\u202f740.991 sats');
+  expect(amount(1250000)).toBe('1\u2009250 sats');
+  expect(amount(-1234567890123)).toBe('-1\u2009234\u2009567\u2009890.123 sats');
+  expect(satsWhole(1234567)).toBe('1\u2009234\u2009567');
+  expect(amount(Number.MAX_SAFE_INTEGER)).toBe('9\u2009007\u2009199\u2009254\u2009740.991 sats');
   setDenom('btc');
-  expect(amount(1234567890123000)).toBe('12\u202f345.67890123 BTC');
+  expect(amount(1234567890123000)).toBe('12\u2009345.67890123 BTC');
 });
 
-it.each(['en', 'da'] as const)('keeps digit groups together in %s running text and copy-pastes exactly', locale => {
+it.each(['en', 'da'] as const)('uses readable digit groups in %s running text and copy-pastes exactly', locale => {
   setLanguagePref(locale);
-  expect(t('uiSentTo', amount(1250000), 'Maya')).toContain('1\u202f250 sats');
-  expect(t('uiBalancesAndCostsUseThisUnitEverywhereYour')).toContain('1 sat = 1\u202f000');
+  expect(t('uiSentTo', amount(1250000), 'Maya')).toContain('1\u2009250 sats');
+  expect(t('uiBalancesAndCostsUseThisUnitEverywhereYour')).toContain('1 sat = 1\u2009000');
   expect(parseAmount(sats(1250000), 'sats')).toBe(1250000);
   expect(amountText(1250000, 'sats')).toBe('1250');
 });

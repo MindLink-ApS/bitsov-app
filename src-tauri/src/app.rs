@@ -855,6 +855,10 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
             status.as_ref().is_ok_and(|status| !status.success()) && refused.load(Ordering::SeqCst),
             status.as_ref().is_ok_and(|status| !status.success()) && price_refused.load(Ordering::SeqCst),
         );
+        #[cfg(all(test, unix))]
+        if let Some(done) = handle.try_state::<post_rc7_tests::SupervisorExit>() {
+            done.0.notify_one();
+        }
         eprintln!("[node] terminated: {status:?}");
     });
     Ok(())

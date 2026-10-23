@@ -56,11 +56,11 @@ it.each([
   [{ state: 'refused', detail: 'auto_retry_exhausted' }, 'Request failed'],
 ])('renders node state %j without promising funds', async (over, words) => {
   mount({ ...pending, ...over } as StarterStatus); await flush();
-  expect(host.textContent).toContain(words); expect(host.textContent).not.toContain('Ready'); expect(host.textContent).not.toContain('10\u202f000');
+  expect(host.textContent).toContain(words); expect(host.textContent).not.toContain('Ready'); expect(host.textContent).not.toContain('10\u2009000');
 });
 it('shows confirmed ready as historical receipt with space-grouped amount', async () => {
   mount({ ...pending, state: 'ready', verified: true, push_sats: 10000 }); await flush();
-  expect(host.textContent).toContain('Ready'); expect(host.textContent).toContain('10\u202f000 sats');
+  expect(host.textContent).toContain('Ready'); expect(host.textContent).toContain('10\u2009000 sats');
   expect(host.textContent).toContain('Check your wallet for what is spendable now.'); expect(host.querySelectorAll('button')).toHaveLength(0);
 });
 it('shows node-scheduled retry countdown, with no new-request action', async () => {
@@ -100,7 +100,7 @@ it('renders Danish states and free funding copy through the copy table', async (
   setLanguagePref('da'); mount(empty); await flush();
   expect(host.textContent).toContain('Få din startsaldo'); expect(host.textContent).toContain('Gratis. Hubben finansierer din startsaldo.');
   dispose!(); mount({ ...pending, state: 'opening' }); await flush(); expect(host.textContent).toContain('Kanalen åbnes');
-  dispose!(); mount({ ...pending, state: 'ready', verified: true, push_sats: 10000 }); await flush(); expect(host.textContent).toContain('Klar'); expect(host.textContent).toContain('10\u202f000 sats');
+  dispose!(); mount({ ...pending, state: 'ready', verified: true, push_sats: 10000 }); await flush(); expect(host.textContent).toContain('Klar'); expect(host.textContent).toContain('10\u2009000 sats');
 });
 it.each([
   [{ state: 'requested' }, 'Anmodning sendt'],
@@ -139,7 +139,7 @@ it('never interprets a missing route as not_requested', async () => {
 });
 it('does not show an absent alias or a spendable amount while waiting for confirmation', async () => {
   mount({ ...pending, state: 'ready', verified: false, push_sats: 10000 }); await flush();
-  expect(host.querySelector('[data-starter-hub]')).toBeNull(); expect(host.textContent).not.toContain('10\u202f000');
+  expect(host.querySelector('[data-starter-hub]')).toBeNull(); expect(host.textContent).not.toContain('10\u2009000');
   expect(Object.values(localStorage)).toContain(ID);
 });
 it('offers an explicit fresh request only after terminal refusal, never replaying its refused UUID', async () => {

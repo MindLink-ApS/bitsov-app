@@ -1,6 +1,13 @@
 use super::*;
 use std::io::{BufRead, Read, Write};
 
+// Registered only by tests that need the real supervisor to finish draining
+// output and recording exit. Notify retains a permit if the child exits before
+// the test starts awaiting it; no wall-clock deadline races suite load.
+#[cfg(unix)]
+#[derive(Default)]
+pub(super) struct SupervisorExit(pub tokio::sync::Notify);
+
 // Scripted node responses on a private loopback port; never a user's node.
 fn responses(
     replies: Vec<(&'static str, u16, serde_json::Value)>,
@@ -275,6 +282,7 @@ exit 1
     *state.dev_sidecar.lock().unwrap() = Some(program);
     let app = tauri::test::mock_builder()
         .manage(state)
+        .manage(SupervisorExit::default())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap();
     let state = app.state::<NodeState>();
@@ -282,13 +290,8 @@ exit 1
         .build()
         .unwrap();
     spawn_node(app.handle(), &config).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !state.sidecar_terminated.load(Ordering::SeqCst) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    app.state::<SupervisorExit>().0.notified().await;
+    assert!(state.sidecar_terminated.load(Ordering::SeqCst));
     // The waiter has seen stderr, but consent is unavailable until the
     // original startup wait returns failure (no competing authentication).
     assert_eq!(
@@ -379,14 +382,12 @@ async fn price_floor_refusal_is_only_offered_after_failed_stderr_exit() {
         *state.config.lock().unwrap() = Some(config.clone());
         *state.dev_sidecar.lock().unwrap() = Some(program);
         let app = tauri::test::mock_builder().manage(state)
+            .manage(SupervisorExit::default())
             .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
         let state = app.state::<NodeState>();
         spawn_node(app.handle(), &config).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !state.sidecar_terminated.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }).await.unwrap();
+        app.state::<SupervisorExit>().0.notified().await;
+        assert!(state.sidecar_terminated.load(Ordering::SeqCst));
         assert_eq!(serde_json::to_value(state.status_snapshot().initialization_repair).unwrap(), "none");
         assert!(wait_for_health(&state).await.is_err());
         assert_eq!(serde_json::to_value(state.status_snapshot().initialization_repair).unwrap(),

@@ -115,3 +115,77 @@ Independent review found no material correctness issues.
   rerun passed using M1a's documented four-thread supervisor workaround.
 
 No installed-app smoke test or `cargo fmt` was run for this merge.
+
+## Main re-cut follow-up (2026-10-22)
+
+On the M1b re-cut at `77e87cc`, based on main `e9e602b` after #317's
+squash merge, the full default-thread library run reproduced 1,091 passes
+and one failure:
+`app::post_rc7_tests::supervised_refusal_waits_for_consent_then_repairs_and_starts_normally`.
+It hit `Elapsed(())` at the five-second termination polling deadline.
+The supervisor test file and the `spawn_node` implementation were byte-identical
+between main and the original M1b commit: this was the previously documented
+timing flake, not a notification regression.
+
+The two affected supervisor tests now register a per-app `Notify` and await
+completion after the real waiter drains output and records exit, then assert
+the termination state. `notify_one` retains an early completion permit. The
+signal hook is compiled only for tests; no production behavior, sleeps, or
+thread-count settings changed. The sibling price-floor test uses the same
+handshake because it had the same polling deadline and documented failure.
+
+Atlas P3: the sheet now shows one short requester fingerprint line immediately
+under the title, using English/Danish copy. The signed terms remain verbatim
+and appear once. A regression test in both languages failed before the fix
+and now checks the line, its position, and nonduplicated budget terms.
+
+The first repetition sequence passed seven full runs, then low-battery
+hibernation interrupted run 8 (system power log: 13:56:35–19:21:43).
+Four existing `app::control_act_tests` failed with `spend_expired` after wake:
+`nothing_paid_resend_reuses_the_same_operation_id`,
+`nodes_without_operations_and_rooms_never_get_an_operation_id`,
+`operation_error_context_refreshes_after_waiting_for_money_lock`, and
+`ledger_success_and_paid_undelivered_are_retained`. Both supervisor tests
+passed in that run. All four affected tests passed immediately after wake
+without code changes. The consecutive-run count was restarted from zero;
+the interrupted sequence is not included in the final verification count.
+
+The next sequence passed 19 full runs, then exposed a separate pre-existing
+fixture flake in
+`app::control_act_tests::second_device_poll_skips_bad_entries_and_keeps_valid_comparisons`.
+Its fixture globally replaced `1300` with the expiry timestamp after inserting
+a random approver key, corrupting identifiers containing those digits. A
+deterministic identifier-collision regression failed against that fixture.
+The test-only builder now substitutes only expiry fields; no production
+validation changed. This regression adds one library test, bringing the app
+count to 1,093. Verification was restarted again on the final patch.
+
+The #318 amount-spacing P3 is applied through the shared renderer digit-group
+formatter: display amounts now use U+2009 thin spaces, including approval
+summaries, and the native grouped formatter uses the same separator. Display
+fixtures and assertions were updated; the shared fixture request views and
+`approval_message` bytes are identical to `77e87cc`. Existing host/renderer parity
+and signing tests cover the display/signature boundary. The input parser still
+accepts both the old U+202F and new U+2009 grouping. `Shell.tsx` already has no
+unused `appPlatform` import, so that P3 required no change.
+
+Final follow-up checks: `npx tsc --noEmit` passed; `npx vitest run`
+passed all 2,141 tests in 114 files (with Solid disposal warnings).
+`TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --test '*' --no-fail-fast`
+passed 88 integration tests across 16 targets. The initial sandboxed library
+attempt could not bind loopback fixture servers (`Operation not permitted`;
+620 passed, 473 failed), so it is excluded from the repetition evidence;
+the requested runs use permissions that allow those local test servers.
+
+The resumed verification completed three more full `cargo test --lib` runs
+with `TAURI_CONFIG='{"bundle":{"externalBin":[]}}'` and default test threads:
+1,093 app tests passed in each, with zero failures or ignored app tests.
+Each invocation also passed 12 workspace library tests with one existing
+ignored test. Both supervisor handshake tests passed in all three runs.
+Together with the 15 consecutive successful runs reported by the preceding
+session, this gives 18 successful full default-thread runs of the deterministic
+supervisor fix. The earlier interrupted/fixture-failure sequences and the
+sandbox-blocked attempt above are excluded. Run 16 used the carried-over patch;
+runs 17 and 18 also include the U+2009 native display changes. The supervisor
+handshake and identifier-collision fixture fix were unchanged throughout.
+No `cargo fmt` or installed-app smoke test was run in this follow-up.

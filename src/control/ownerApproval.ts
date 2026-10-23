@@ -1,4 +1,5 @@
 import { t } from '../i18n';
+import { groupDigits } from './format';
 /**
  * Owner approval from an enrolled owner device (node owner-approval-v1,
  * capability `owner_device_approval_v1`, node #303). Renderer contract only:
@@ -131,7 +132,7 @@ export type ApprovalErrorCode = (typeof APPROVAL_ERROR_CODES)[number];
 // ---- pure helpers the screens share (and the host uses for the Touch ID reason) ----
 
 // Display only: never build or rewrite the node's signed approval_message.
-// Match owner_approval.rs exactly in every app language: U+202F grouping,
+// Match owner_approval.rs exactly in every app language: U+2009 grouping,
 // whole sats or integer msat, never ambiguous decimal sats.
 const sats = (msat: number) => {
   // Tauri passes JSON numbers, not decimal strings. Beyond 2^53 - 1 the
@@ -139,7 +140,7 @@ const sats = (msat: number) => {
   // The host prompt still formats the exact u64; signed bytes are untouched.
   if (!Number.isSafeInteger(msat ?? 0)) return 'amount too large';
   const fractional = msat % 1000 !== 0;
-  const value = (fractional ? msat : msat / 1000).toString().replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f');
+  const value = groupDigits((fractional ? msat : msat / 1000).toString());
   return `${value} ${fractional ? 'msat' : msat === 1000 ? 'sat' : 'sats'}`;
 };
 const span = (secs: number) =>

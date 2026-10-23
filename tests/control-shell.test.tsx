@@ -1302,7 +1302,7 @@ describe('control center shell', () => {
 
     // Wallet: the one combined balance, never split into invented figures.
     click('[data-tab="wallet"]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-balance]')?.textContent).toContain('52\u202f500'));
+    await vi.waitFor(() => expect(mount.querySelector('[data-balance]')?.textContent).toContain('52\u2009500'));
     expect(mount.querySelector('[data-panel="wallet"]')?.textContent).toContain('one figure');
 
     // Only reads and the spend-window status were used; nothing that spends or edits.

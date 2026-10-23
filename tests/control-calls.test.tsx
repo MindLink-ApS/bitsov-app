@@ -2406,7 +2406,7 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     ring('audio');
     await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(/owner.*approve/i));
-    expect(text('[data-call-ended]')).toContain('21\u202f205 sats');
+    expect(text('[data-call-ended]')).toContain('21\u2009205 sats');
     expect(text('[data-call-ended]')).toContain('500 sats');
     expect(capture).not.toHaveBeenCalled();
     expect(FakePc.made).toHaveLength(0);
