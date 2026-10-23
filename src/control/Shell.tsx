@@ -6535,21 +6535,23 @@ function Reconcile(props: { actions: Actions; hasPending?: boolean; onChecked?: 
   const reconcile = async () => {
     if (checking()) return;
     setChecking(true);
-    const revision = props.actions.pendingRevision();
-    const outcome = await props.actions.reconcile();
-    if (revision !== props.actions.pendingRevision()) { setChecking(false); return; }
-    setResult(outcome.ok ? outcome.value : outcome.error.message);
-    setUndelivered(!outcome.ok && outcome.error.code === 'undelivered_pending' ? outcome.error.pending_id ?? null : null);
-    setChecking(false);
-    if (outcome.ok) props.onChecked?.(outcome.value);
+    try {
+      const revision = props.actions.pendingRevision();
+      const outcome = await props.actions.reconcile();
+      if (revision !== props.actions.pendingRevision()) return;
+      setResult(outcome.ok ? outcome.value : outcome.error.message);
+      setUndelivered(!outcome.ok && outcome.error.code === 'undelivered_pending' ? outcome.error.pending_id ?? null : null);
+      if (outcome.ok) props.onChecked?.(outcome.value);
+    } finally { setChecking(false); }
   };
   const stop = async () => {
     if (checking()) return;
     setChecking(true);
-    const outcome = await props.actions.stopRetrying(null, undelivered());
-    setResult(outcome.ok ? outcome.value : outcome.error.message);
-    setUndelivered(null);
-    setChecking(false);
+    try {
+      const outcome = await props.actions.stopRetrying(null, undelivered());
+      setResult(outcome.ok ? outcome.value : outcome.error.message);
+      setUndelivered(null);
+    } finally { setChecking(false); }
   };
   return (
     <>

@@ -87,6 +87,7 @@ export function ConnectionCard(props: {
   copy?: (text: string) => Promise<void>;
 }) {
   const [localChecking, setChecking] = createSignal(false);
+  // A parent reporting idle must not hide the card's own in-flight check.
   const checking = () => props.checking || localChecking();
   usePairingActivity(checking);
   const [copied, setCopied] = createSignal<'yes' | 'no' | null>(null);

@@ -1,12 +1,12 @@
 import { render } from 'solid-js/web';
 import { afterEach, expect, it, vi } from 'vitest';
-import { PairingActivityProvider, usePairingBlocked } from '../src/pairingActivity';
+import { usePairingBlocked } from '../src/pairingActivity';
 import { ControlCenter } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID } from '../src/control/sample';
 
-// Give the real wallet an independent activity scope. The shell's own guard
-// considers any open wallet busy on this base, which would mask a missing
-// registration inside Reconcile. No wallet or action behavior is stubbed.
+// Observe the shell's real wallet scope, independently of its app-wide action
+// guard. No extra provider, wallet or action behavior is stubbed: a missing
+// Reconcile registration or misplaced wallet provider must fail these tests.
 vi.mock('../src/control/WalletPage', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/control/WalletPage')>();
   const Busy = () => {
@@ -14,7 +14,7 @@ vi.mock('../src/control/WalletPage', async importOriginal => {
     return <output data-wallet-busy={String(blocked())} />;
   };
   return { ...actual, WalletPage: (props: Parameters<typeof actual.WalletPage>[0]) =>
-    <PairingActivityProvider><Busy /><actual.WalletPage {...props} /></PairingActivityProvider> };
+    <><Busy /><actual.WalletPage {...props} /></> };
 });
 
 let dispose: (() => void) | undefined;
