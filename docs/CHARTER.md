@@ -90,7 +90,7 @@ fork or vendor protocol logic. "Must remain optional" per `PUBLIC_REPO_DECISION.
 | Tier | When | Sovereignty | Note |
 |---|---|---|---|
 | **T-SELF** | **now** | full | desktop bundles + runs the user's own node; keys+plaintext local. Shippable today. |
-| **T-PAIRED** | M6 | full (user-custodied) | phone/laptop = remote face of your home node via device attestation; mnemonic never leaves primary device. Needs pairing (unbuilt) + transport confidentiality (G2). |
+| **T-PAIRED** | paired companion | full (user-custodied) | phone/laptop = remote face of your home node via device attestation; mnemonic never leaves primary device. Needs pairing (unbuilt) + transport confidentiality (G2). |
 | **T-HOSTED** | M10 | **reachability convenience, NOT custody** | "MindLink-hosted" means **only** a **ciphertext relay** (keys, funds and the node stay on the user's device; the relay holds ciphertext — disclose what a relay operator can see) or **NaaS** (the user's seed on a box the user controls). **Never a key-holding hosted node**; never "MindLink funds/opens your channels". Matches the genome charter line. |
 | **T-PHONE-NATIVE** | M8 | reduced-sovereign | "node in your pocket," reachable via relay+push. **BLOCKED on #216 relay (B1)** — never claim before it's live. |
 
@@ -108,20 +108,33 @@ E2EE-encrypts and Lightning-pays per message) → `ws` (live receive, own-node p
 **Gates G1–G6 (§9) are pass/fail conditions, NOT build steps.** Ordered by dependency; a
 phase does not start until its entry gate passes. M-numbers are stable IDs (not order).
 
+### Milestone glossary
+
+| ID | Meaning |
+|---|---|
+| **M4** | Sending a paid message from the Mac app to a contact works end to end |
+| **M5** | iPhone enrolled as a second owner device |
+| **M6** | Signet end-to-end test of message, call and pay between two people on their own nodes |
+
+Calls / VoIP are a later milestone, not M4. M0–M3 and M7–M11 keep the names in the phase table. M4–M6 state the outcome. A `not set` cell has no dependency, gate, or repo recorded yet.
+
 | Phase | # | Milestone | Repo | Depends | Entry gate |
 |---|---|---|---|---|---|
 | **1 · Desktop MVP (ship now · T-SELF)** | M0 | App shell + node embed/supervise; `/auth/local` | bitsov-app | — | **G1** |
 | 1 | M1 | First-run fund flow (mnemonic, funding QR, balance) — keys hidden | bitsov-app | M0 | — |
 | 1 | M2 | Conversation MVP: rooms + threaded chat + long-form; transparent E2EE; payment-gated send behind one "sending" state | bitsov-app | M1 | — |
 | 1 | M3 | Files + calendar/scheduling inline in rooms | bitsov-app | M2 | — |
-| **2 · Mobile prerequisites (protocol)** | M5 | Device pairing core (device_attestation L1/L2/L3, DeviceWhitelist, pair routes) | BitSov-bitsov | M1 | **G2** |
-| **3 · Mobile** | M6 | Mobile paired companion (iOS+Android as paired thin client) | bitsov-app | M5 | G2 |
+| **Mac paid message** | M4 | Sending a paid message from the Mac app to a contact works end to end | bitsov-app | not set | not set |
+| **Second owner device** | M5 | iPhone enrolled as a second owner device | bitsov-app | not set | not set |
+| **Signet two-person test** | M6 | Signet end-to-end test of message, call and pay between two people on their own nodes | not set | not set | not set |
+| **2 · Mobile prerequisites (protocol)** | — | Device pairing core (device_attestation L1/L2/L3, DeviceWhitelist, pair routes) | BitSov-bitsov | M1 | **G2** |
+| **3 · Mobile** | — | Mobile paired companion (iOS+Android as paired thin client) | bitsov-app | device pairing core | G2 |
 | **4 · Reachability & scale** | M7 | Ciphertext relay live (#216): SEAM-B dispatch 600–604 + SEAM-C store, push-wake | BitSov-bitsov | M2 | — |
 | 4 | M8 | Phone-native thin node (relay+push) — the honest "node in your pocket" | bitsov-app | M7 | — |
 | 4 | M9 | Multi-party meet (MLS 960–962 + relay/SFU fan-out) | bitsov-app | M7 | — |
-| **gated track** | M4 | 1:1 VoIP, directly-reachable peers only (kinds 400–403 → WebRTC) — **do NOT market as calling** | bitsov-app | M2 | **G3** |
+| **gated track** | later | 1:1 VoIP, directly-reachable peers only (kinds 400–403 → WebRTC) — **do NOT market as calling** | bitsov-app | M2 | **G3** |
 | gated track | M10 | Hosted convenience tier (ciphertext relay or NaaS only — no key-holding hosted node; disclose relay-operator visibility) | Website/services | M7 | — |
-| later gated track | M11 | AI as its own peer/`node_id`, invoked inline only; follows v1 assistants as clients of the user's own node | BitSov-bitsov | M6 + v1 own-node assistant track | **G4** |
+| later gated track | M11 | AI as its own peer/`node_id`, invoked inline only; follows v1 assistants as clients of the user's own node | BitSov-bitsov | mobile paired companion + v1 own-node assistant track | **G4** |
 
 ## 7. Blockers
 - **B1 [critical]** — Ciphertext relay #216 not live (`relay.rs` is R3 SEAM-A engine only, dead_code, default-off). Gates phone-native reachability, offline store-and-forward, push-wake. *The* gating blocker for the phone vision.
@@ -148,7 +161,7 @@ remote transport confidentiality (G2) · `/auth/local` hardening (G6).
 ## 9. Charter gates (from the adversarial audit — MUST hold; enforced by `CODEX_APP_AUTHORITY.md`)
 - **G1 — API-consumer boundary.** App consumes the public node API over loopback; **no forked/vendored protocol logic, no in-process crate linking.** Decide + document before CS-1.
 - **G2 — Remote transport confidentiality.** Build TLS/Noise channel confidentiality **and** per-device delegated auth **before any paired/mobile/hosted client touches a non-loopback node.** `/ws` carries decrypted plaintext and `/auth/local` has no TLS — signing is auth, not encryption. Non-negotiable for zero-plaintext.
-- **G3 — Don't market calls.** VoIP (M4/CS-7) is directly-reachable only; **remove "call/meet" from launch copy** until NAT traversal (relay) lands or the direct-only scope is stated plainly.
+- **G3 — Don't market calls.** VoIP (CS-7) is a later milestone, directly-reachable only; **remove "call/meet" from launch copy** until NAT traversal (relay) lands or the direct-only scope is stated plainly.
 - **G4 — Bounded v1 assistants.** Named assistants run only on user invocation or while
   the app is open; **no unattended agent runtime**. User-facing copy says **"assistant",
   not "agent"**. AI-as-a-client of the user's own node comes first; own-peer/`node_id` AI

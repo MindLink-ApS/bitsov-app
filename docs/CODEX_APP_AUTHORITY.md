@@ -80,7 +80,8 @@ charter, the build is wrong.
 
 ## D. Sequencing rules (do not let order break the charter)
 - No mobile/paired client work merges before **G2 (transport confidentiality) + device pairing
-  (M5/CS-8)** land — pairing is auth, transport is confidentiality; **both** required.
+  (CS-8)** land — pairing is auth, transport is confidentiality; **both** required.
+  The charter glossary names M5 as: iPhone enrolled as a second owner device.
 - No "phone-native / node in your pocket" code or copy before **relay #216 (M7)** is live.
 - No multi-party meet before **group-crypto (MLS 960–962)** is verified production-ready.
 - Follow [AI assistants](AI-ASSISTANTS.md): own-node client assistants first; separate
