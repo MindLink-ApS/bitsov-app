@@ -59,6 +59,7 @@ jobs:
       # and this expression is already true.
       code: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci') || steps.filter.outputs.code == 'true' }}
       android: ${{ steps.filter.outputs.android }}
+      sidecar: ${{ steps.filter.outputs.sidecar }}
     steps:
       # pull_request only. paths-filter reads the PR file list from the API.
       # On push and merge_group it needs a checkout, which this job does not
@@ -89,6 +90,10 @@ jobs:
             # src-tauri/** includes the generated Android project.
             android:
               - '{src-tauri/**,scripts/check-android-release.py,.github/workflows/build.yml}'
+            # Includes bootstrap/config sources, lockfiles, release pins, smoke
+            # scripts and CI plumbing. A failed classifier still runs Sidecar.
+            sidecar:
+              - '{src-tauri/**,scripts/fetch-node-sidecar*,scripts/*sidecar*,scripts/test-fetch-verify.sh,scripts/cs[12]*,scripts/ci/**,.github/actions/**,.github/workflows/build.yml}'
 
   android-check:
     name: Android Rust (aarch64 cargo check)
@@ -176,10 +181,7 @@ jobs:
 
       # Free runner disk (toolchains this job never uses) so the link step has room.
       - name: Free disk space
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          df -h /
+        run: bash scripts/ci/free-disk-space.sh
 
       # Unit test of THIS repo's fail-closed signature predicate (scripts/fetch-node-sidecar.sh
       # verify_release_signature): local throwaway keys, no network, no release dependency.
@@ -189,6 +191,14 @@ jobs:
         run: |
           bash scripts/test-fetch-verify.sh
           python3 scripts/test-verify-sidecars.py
+
+      # Static renderer/host security checks must run on every code PR even
+      # when the network-dependent Sidecar job is outside its path filter.
+      - name: CS-2 smoke — host bindings and renderer security
+        run: bash scripts/cs2-local-smoke.sh
+
+      - name: Cached apt archive verification tests
+        run: python3 scripts/ci/test-verify-apt-cache.py
 
       - uses: actions/setup-node@v4
         with:
@@ -203,10 +213,8 @@ jobs:
       # Tauri v2 Linux prerequisites. `cargo check` still runs the gtk/webkit -sys build
       # scripts, which resolve these via pkg-config.
       - name: Tauri Linux prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
-            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+        timeout-minutes: 5
+        uses: ./.github/actions/tauri-prerequisites
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -287,7 +295,12 @@ jobs:
   starter-balance:
     name: Starter balance enabled (build + tests)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    # CI-DIET B (Atlas approved): PR/full-ci, tags and merge groups retain
+    # coverage; starter-balance-nightly.yml checks main nightly when changed.
+    # Revert B and its nightly follow-up together to restore every-main-push runs.
+    if: >-
+      ${{ !cancelled() && !(github.event_name == 'push' && github.ref == 'refs/heads/main') &&
+          (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -307,12 +320,11 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
           npx vitest run
-      - name: Free disk space and install Tauri Linux prerequisites
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
-            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Free disk space if needed
+        run: bash scripts/ci/free-disk-space.sh
+      - name: Tauri Linux prerequisites
+        timeout-minutes: 5
+        uses: ./.github/actions/tauri-prerequisites
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -336,12 +348,17 @@ jobs:
   # proves the identity is durable across a restart.
   #
   # It used to compile the same crate in parallel with `build` (its own actions/cache
-  # key). It now waits for that job and restores the same rust-cache. Docs-only pulls
-  # skip it with the build. The job name is unchanged.
+  # key). It now waits for that job and restores the same rust-cache. PRs run it
+  # for sidecar paths or full-ci; pushes/tags and merge groups keep their coverage.
+  # The job name is unchanged.
   sidecar:
     name: Sidecar (fetch + verify, config drift, CS-1 smoke) — not a merge gate
     needs: [changes, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success' &&
+          (github.event_name != 'pull_request' ||
+           contains(github.event.pull_request.labels.*.name, 'full-ci') ||
+           needs.changes.result != 'success' || needs.changes.outputs.sidecar == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -364,16 +381,11 @@ jobs:
 
       # The drift guard links the same large Tauri test binary as the Build job.
       - name: Free disk space before restoring the Rust cache
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          df -h /
+        run: bash scripts/ci/free-disk-space.sh
 
       - name: Tauri Linux prerequisites for the config drift guard
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
-            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+        timeout-minutes: 5
+        uses: ./.github/actions/tauri-prerequisites
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -406,7 +418,7 @@ jobs:
             echo "::warning::sccache unavailable; compiling without a cache"
           fi
 
-      # Runs on code changes, including edits to fetch-node-sidecar.sh's TAG.
+      # Runs on sidecar changes, including edits to fetch-node-sidecar.sh's TAG.
       # Explicit discovery makes a missing verified binary FAIL rather than SKIP.
       # rc19.2 supplies both init and the two-phase owner API.
       - name: Bootstrap config matches the pinned node's full-tier init

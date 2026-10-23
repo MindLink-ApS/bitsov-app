@@ -1,12 +1,28 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
+
+async function openPreview(page: Page, url: string) {
+  await page.goto(url);
+  // These tests measure settled layout. Offscreen probe animations can remain
+  // pending in WebKit even with reduced motion, so disable motion explicitly.
+  await page.addStyleTag({ content: '*, *::before, *::after { animation: none !important; transition: none !important; }' });
+  const scene = new URL(url, 'http://fixture').searchParams.get('scene')!;
+  const ready: Record<string, string> = {
+    chat: '[data-composer]', wallet: '[data-balance-total]',
+    'first-spend': '[data-first-spend-amount]',
+    settings: '[data-settings][aria-hidden="false"]', approval: '[data-owner-approval-sheet]',
+  };
+  // The native preview opens scenes asynchronously. Wait for the actual scene,
+  // and fonts, not a fixed delay that races a cold CI server.
+  await expect(page.locator(ready[scene])).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
+}
 
 // 53px is the system root measured at AX5 in the native WKWebView JSON.
 // This emulates that root for fast regressions; capture.py applies the OS setting.
 for (const lang of ['en', 'da']) for (const scene of ['chat', 'wallet', 'first-spend', 'settings', 'approval']) {
   test(`AX5 money and approval text is complete: ${lang} ${scene}`, async ({ page }) => {
-    await page.goto(`/docs/ui/u2b-dynamic-type/harness/preview.html?lang=${lang}&scene=${scene}`);
+    await openPreview(page, `/docs/ui/u2b-dynamic-type/harness/preview.html?lang=${lang}&scene=${scene}`);
     await page.addStyleTag({content: 'html[data-platform="ios"] { font-size: 53px; }'});
-    await page.waitForTimeout(1000);
     const result = await page.evaluate(() => (window as any).dynamicTypeGeometry());
     expect(result.elements.length).toBeGreaterThan(0);
     expect(result.failures).toEqual([]);
@@ -32,7 +48,7 @@ for (const lang of ['en', 'da']) for (const scene of ['chat', 'wallet', 'first-s
   });
 }
 for (const platform of ['desktop', 'android']) test(`${platform} retains the original type and spacing`, async ({ page }) => {
-  await page.goto(`/docs/ui/u2b-dynamic-type/harness/preview.html?scene=chat&platform=${platform}`);
+  await openPreview(page, `/docs/ui/u2b-dynamic-type/harness/preview.html?scene=chat&platform=${platform}`);
   const sizes = await page.evaluate(() => {
     const probe = document.createElement('span'); probe.style.cssText = 'font-size:var(--t-xs);padding:var(--s-2)'; document.body.append(probe);
     const hero = document.createElement('span'); hero.className = 'wallet-total'; document.body.append(hero);
@@ -42,7 +58,7 @@ for (const platform of ['desktop', 'android']) test(`${platform} retains the ori
 });
 
 for (const lang of ['en', 'da']) test(`AX5 maximum safe wallet amount fits: ${lang}`, async ({ page }) => {
-  await page.goto(`/docs/ui/u2b-dynamic-type/harness/preview.html?scene=wallet&lang=${lang}&large-balance=1`);
+  await openPreview(page, `/docs/ui/u2b-dynamic-type/harness/preview.html?scene=wallet&lang=${lang}&large-balance=1`);
   await page.addStyleTag({content: 'html[data-platform="ios"] { font-size: 53px; }'});
   await page.locator('[data-balance-total="9007199254740991"]').waitFor();
   const result = await page.evaluate(() => (window as any).dynamicTypeGeometry());
@@ -50,13 +66,13 @@ for (const lang of ['en', 'da']) test(`AX5 maximum safe wallet amount fits: ${la
 });
 
 for (const lang of ['en', 'da']) test(`iOS default wallet keeps its 64px headline: ${lang}`, async ({ page }) => {
-  await page.goto(`/docs/ui/u2b-dynamic-type/harness/preview.html?scene=wallet&lang=${lang}`);
+  await openPreview(page, `/docs/ui/u2b-dynamic-type/harness/preview.html?scene=wallet&lang=${lang}`);
   await page.addStyleTag({ content: 'html[data-platform="ios"] { font-size: 17px; }' });
   await expect(page.locator('.wallet-total')).toHaveCSS('font-size', '64px');
 });
 
 for (const lang of ['en', 'da']) test(`AX5 connection status is fully visible: ${lang}`, async ({ page }) => {
-  await page.goto(`/docs/ui/u2b-dynamic-type/harness/preview.html?scene=chat&lang=${lang}`);
+  await openPreview(page, `/docs/ui/u2b-dynamic-type/harness/preview.html?scene=chat&lang=${lang}`);
   await page.addStyleTag({ content: 'html[data-platform="ios"] { font-size: 53px; }' });
   const pill = page.locator('.node-pill .what');
   await expect(pill).toBeVisible();
@@ -73,7 +89,7 @@ for (const lang of ['en', 'da']) test(`AX5 connection status is fully visible: $
 });
 
 test('AX5 receipt preserves digit runs in a narrow flex row', async ({ page }) => {
-  await page.goto('/docs/ui/u2b-dynamic-type/harness/preview.html?scene=chat');
+  await openPreview(page, '/docs/ui/u2b-dynamic-type/harness/preview.html?scene=chat');
   await page.addStyleTag({ content: 'html[data-platform="ios"] { font-size: 53px; }' });
   const lines = await page.evaluate(() => {
     const row = document.createElement('div');
@@ -92,7 +108,7 @@ test('AX5 receipt preserves digit runs in a narrow flex row', async ({ page }) =
 });
 
 for (const lang of ['en', 'da']) for (const rootSize of [17, 53]) for (const fallback of [false, true]) test(`keyboard actions stay still while Allow enables: ${lang} ${rootSize}px fallback=${fallback}`, async ({ page }) => {
-  await page.goto(`/docs/ui/u2b-dynamic-type/harness/preview.html?scene=first-spend&lang=${lang}`);
+  await openPreview(page, `/docs/ui/u2b-dynamic-type/harness/preview.html?scene=first-spend&lang=${lang}`);
   await page.addStyleTag({ content: `html[data-platform="ios"] { font-size: ${rootSize}px; }` });
   if (fallback) {
     // Activate the shipped legacy rules on modern WebKit. This verifies their
