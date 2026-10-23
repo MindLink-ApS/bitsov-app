@@ -1501,7 +1501,7 @@ export function ControlCenter(props: Props) {
         setErrors('spend', undefined);
         if (noEnvelopeFor() === peer) setNoEnvelopeFor(null);
       } else {
-        setErrors('spend', r.error.message);
+        setErrors('spend', r.error.code === 'device_unsupported' ? tr('relationApprovalRemoteUnsupported') : r.error.message);
         if (r.error.code === 'device_invalid') void loadDevice();
       }
       // The read started next is the first one after this approval returned.
@@ -6414,7 +6414,7 @@ function Composer(props: {
               door={doorQuote()}
               firstPick={firstPick()}
               onFirstPick={setFirstPick}
-              error={props.budgetError}
+              error={props.spendError ?? props.budgetError}
               now={props.now}
               actions={props.actions}
               hasPending={props.hasPending}

@@ -7675,10 +7675,16 @@ async fn do_relation_approve(
     let body = serde_json::json!({"intent": intent, "signature": signature});
     let (status, text) = call_api(state, reqwest::Method::POST, "/pair/relation-intent", Some(body)).await.map_err(ActionError::node)?;
     if !status.is_success() {
-        if let Some(reason) = device::node_off_reason(&text) {
-            return Err(device::node_off_error(reason));
-        }
-        return Err(ActionError::node(api_error("/pair/relation-intent", status, &text)));
+        let error = if matches!(status, reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED) {
+            ActionError::new("device_unsupported", "Your node can't take Touch ID approvals over remote access yet. Nothing was approved.")
+        } else if let Some(reason) = device::node_off_reason(&text) {
+            device::node_off_error(reason)
+        } else {
+            ActionError::node(api_error("/pair/relation-intent", status, &text))
+        };
+        // Never log the response body or the signed request.
+        eprintln!("path=/pair/relation-intent status={} code={}", status.as_u16(), error.code);
+        return Err(error);
     }
     // This approval's ID comes only from its response, never from the later
     // grant read (another device may already have replaced the envelope).
@@ -17270,6 +17276,33 @@ mod control_act_tests {
         assert_eq!(err.code, "device_approvals_off");
         assert!(err.message.contains("type its recovery-phrase password"), "{}", err.message);
         assert!(dn.intents.lock().unwrap().is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn relation_approve_missing_remote_route_is_device_unsupported() {
+        for status in [404, 405] {
+            let (dn, device_routes) = device_node();
+            let routes: Routes = Arc::new(move |m, path, body| {
+                if m == "POST" && path == "/pair/relation-intent" {
+                    return (status, "route unavailable".into());
+                }
+                device_routes(m, path, body)
+            });
+            let (node, _dir, _g1) = g1_node_with(&["read", "receive"], Some(routes));
+            let s = &node.state;
+            *s.device_policy.lock().unwrap() = device_key::Policy::NoPromptForTests;
+            do_device_key_register(s).await.unwrap();
+            dn.registered.store(true, Ordering::SeqCst);
+            do_device_key_status(s).await.unwrap();
+
+            let err = do_relation_approve(s, A, None, Some(7000)).await.unwrap_err();
+            assert_eq!(err.code, "device_unsupported", "HTTP {status}");
+            assert_eq!(err.message, "Your node can't take Touch ID approvals over remote access yet. Nothing was approved.");
+            assert!(node.posts().iter().any(|(p, _)| p == "/pair/relation-intent"));
+            assert!(dn.intents.lock().unwrap().is_empty());
+            assert_eq!(serde_json::to_value(s.spend.lock().unwrap().view(now_ms())).unwrap()["state"], "locked");
+        }
     }
 
     /// Codex app#90: a status poll of request aa01 is still waiting on the node

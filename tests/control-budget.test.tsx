@@ -456,6 +456,31 @@ describe('invisible payments in the composer and the context panel', () => {
     expect($('[data-budget="ok"]')).toBeNull();
   });
 
+  it.each([
+    ['en', 'device_unsupported', "Your node can't take Touch ID approvals over remote access yet. Nothing was approved."],
+    ['da', 'device_unsupported', 'Din node kan endnu ikke modtage Touch ID-godkendelser via fjernadgang. Intet blev godkendt.'],
+    ['en', 'device_cancelled', 'Touch ID was cancelled.'],
+    ['en', 'node', 'The node could not be reached.'],
+  ] as const)('shows a %s %s approval failure in budget mode and keeps the draft', async (lang, code, expected) => {
+    const host = stubHost(budgetView({
+      node_grant: { budget_msat: 200_000, remaining_msat: 200_000, per_call_max_msat: 200_000, expires_at_ms: Date.now() + DAY, envelopes: {} },
+    }), {
+      pairing_status: () => ({ ...paired, remote: true, trust_acknowledged_node_id: OWN }),
+      device_key_status: () => ({ available: true, state: 'registered', fingerprint: 'fixture', owner_action: null, expires_at_ms: null }),
+      relation_approve: () => { throw { code, message: code === 'device_unsupported' ? "Your node can't take Touch ID approvals over remote access yet. Nothing was approved." : expected }; },
+    });
+    await openShell();
+    setLanguagePref(lang);
+    type('[data-composer] textarea', 'hello Maya');
+    await waitFor(() => expect(text('[data-send]')).toBe(lang === 'da' ? 'Godkend med Touch ID' : 'Approve with Touch ID'));
+    expect($('[data-budget]')).not.toBeNull();
+    sendOnly();
+    await waitFor(() => expect(text('[data-budget-error][role="alert"]')).toBe(expected));
+    expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Maya');
+    expect(host.used('message_send')).toHaveLength(0);
+    expect(host.used('relation_approve')).toHaveLength(1);
+  });
+
   it('uses restored auto-pay for a registered device without opening manual payments', async () => {
     stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }], {
       node_grant: { budget_msat: 5_000_000, remaining_msat: 4_995_000, per_call_max_msat: 50_000, expires_at_ms: Date.now() + DAY, envelopes: { [MAYA]: Date.now() + DAY } },
