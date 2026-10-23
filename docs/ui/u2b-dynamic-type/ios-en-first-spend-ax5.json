@@ -1,7 +1,7 @@
 {
   "scene": "first-spend",
   "lang": "en",
-  "generatedAt": 1792735473812,
+  "generatedAt": 1792739664804,
   "ready": true,
   "rootFont": "53px",
   "bodyFont": "34px",
@@ -113,12 +113,12 @@
       "text": "Let messages spend up to 1\u202f250 sats a day?",
       "rect": {
         "x": 25,
-        "y": -297,
+        "y": -469,
         "width": 343,
         "height": 93.59375,
-        "top": -297,
+        "top": -469,
         "right": 368,
-        "bottom": -203.40625,
+        "bottom": -375.40625,
         "left": 25
       },
       "font": "24px",
@@ -139,12 +139,12 @@
       "text": "Approve at your box",
       "rect": {
         "x": 25,
-        "y": -185.40625,
+        "y": -357.40625,
         "width": 343,
         "height": 34.09375,
-        "top": -185.40625,
+        "top": -357.40625,
         "right": 368,
-        "bottom": -151.3125,
+        "bottom": -323.3125,
         "left": 25
       },
       "font": "22px",
@@ -165,12 +165,12 @@
       "text": "Allow starts owner approval. It grants no permission by itself.",
       "rect": {
         "x": 25,
-        "y": -133.3125,
+        "y": -305.3125,
         "width": 343,
         "height": 62,
-        "top": -133.3125,
+        "top": -305.3125,
         "right": 368,
-        "bottom": -71.3125,
+        "bottom": -243.3125,
         "left": 25
       },
       "font": "20px",
@@ -191,12 +191,12 @@
       "text": "Entry fee: 1 sat \u00b7 message: 2 sats \u00b7 routing fee at most: 5 sats \u00b7 total at most: 8 sats",
       "rect": {
         "x": 25,
-        "y": -53.3125,
+        "y": -225.3125,
         "width": 343,
         "height": 102.28125,
-        "top": -53.3125,
+        "top": -225.3125,
         "right": 368,
-        "bottom": 48.96875,
+        "bottom": -123.03125,
         "left": 25
       },
       "font": "22px",
@@ -217,12 +217,12 @@
       "text": "App budget presets. Maximum: 100\u202f000 sats a day.",
       "rect": {
         "x": 25,
-        "y": 110.96875,
+        "y": -61.03125,
         "width": 343,
         "height": 62,
-        "top": 110.96875,
+        "top": -61.03125,
         "right": 368,
-        "bottom": 172.96875,
+        "bottom": 0.96875,
         "left": 25
       },
       "font": "20px",
@@ -243,12 +243,12 @@
       "text": "500 sats a day",
       "rect": {
         "x": 25,
-        "y": 190.96875,
+        "y": 18.96875,
         "width": 164.328125,
         "height": 49,
-        "top": 190.96875,
+        "top": 18.96875,
         "right": 189.328125,
-        "bottom": 239.96875,
+        "bottom": 67.96875,
         "left": 25
       },
       "font": "20px",
@@ -269,12 +269,12 @@
       "text": "2\u202f000 sats a day",
       "rect": {
         "x": 25,
-        "y": 251.96875,
+        "y": 79.96875,
         "width": 180.90625,
         "height": 49,
-        "top": 251.96875,
+        "top": 79.96875,
         "right": 205.90625,
-        "bottom": 300.96875,
+        "bottom": 128.96875,
         "left": 25
       },
       "font": "20px",
@@ -295,12 +295,12 @@
       "text": "10\u202f000 sats a day",
       "rect": {
         "x": 25,
-        "y": 312.96875,
+        "y": 140.96875,
         "width": 189.46875,
         "height": 49,
-        "top": 312.96875,
+        "top": 140.96875,
         "right": 214.46875,
-        "bottom": 361.96875,
+        "bottom": 189.96875,
         "left": 25
       },
       "font": "20px",
@@ -321,12 +321,12 @@
       "text": "Custom",
       "rect": {
         "x": 226.46875,
-        "y": 312.96875,
+        "y": 140.96875,
         "width": 98.859375,
         "height": 49,
-        "top": 312.96875,
+        "top": 140.96875,
         "right": 325.328125,
-        "bottom": 361.96875,
+        "bottom": 189.96875,
         "left": 226.46875
       },
       "font": "20px",
@@ -347,12 +347,12 @@
       "text": "",
       "rect": {
         "x": 25,
-        "y": 414.0625,
+        "y": 242.0625,
         "width": 343,
         "height": 56.09375,
-        "top": 414.0625,
+        "top": 242.0625,
         "right": 368,
-        "bottom": 470.15625,
+        "bottom": 298.15625,
         "left": 25
       },
       "font": "22px",
@@ -373,23 +373,23 @@
       "text": "Allow 1\u202f250 sats a day",
       "rect": {
         "x": 25,
-        "y": 554.15625,
+        "y": 382.15625,
         "width": 343,
-        "height": 52.09375,
-        "top": 554.15625,
+        "height": 88.1875,
+        "top": 382.15625,
         "right": 368,
-        "bottom": 606.25,
+        "bottom": 470.34375,
         "left": 25
       },
       "font": "22px",
       "whiteSpace": "normal",
       "client": [
-        343,
-        52
+        341,
+        86
       ],
       "scroll": [
-        343,
-        52
+        341,
+        86
       ],
       "failures": []
     },
@@ -399,12 +399,12 @@
       "text": "Not now",
       "rect": {
         "x": 25,
-        "y": 624.25,
+        "y": 488.34375,
         "width": 343,
         "height": 46.09375,
-        "top": 624.25,
+        "top": 488.34375,
         "right": 368,
-        "bottom": 670.34375,
+        "bottom": 534.4375,
         "left": 25
       },
       "font": "22px",

@@ -34,6 +34,32 @@ for (const lang of ['en', 'da']) {
     });
     expect(top).toBe(true);
   });
+  test(`${lang}: AX5 Allow stays visible while the keyboard hides phone tabs`, async ({ page }) => {
+    await page.goto(`${preview}?scene=first-spend&lang=${lang}`);
+    const tabs = page.locator('[data-phone-tabs]');
+    await expect(tabs).toBeVisible();
+    await expect(page.locator('[data-first-spend-sheet]')).toBeVisible();
+    await page.addStyleTag({ content: 'html[data-platform="ios"] { font-size: 53px; }' });
+    await page.locator('.first-spend-options summary').click();
+    await page.locator('[data-first-spend-custom]').click();
+    await page.evaluate(() => {
+      Object.defineProperty(window.visualViewport!, 'height', { configurable: true, value: 482 });
+      window.visualViewport!.dispatchEvent(new Event('resize'));
+    });
+    await page.locator('[data-first-spend-amount]').fill('1250.5');
+    await expect(tabs).toBeHidden();
+    await expect(page.locator('[data-first-spend-allow]')).toBeEnabled();
+    await expect.poll(async () => page.locator('[data-first-spend-allow]').evaluate(el => {
+      const r = el.getBoundingClientRect();
+      return r.height > 0 && r.top >= 0 && r.bottom <= visualViewport!.height;
+    })).toBe(true);
+    await expect(page.locator('[data-first-spend-keyboard-daily]')).toContainText('1\u202f250\u202f500 msat');
+    await page.evaluate(() => {
+      delete (window.visualViewport as any).height;
+      window.visualViewport!.dispatchEvent(new Event('resize'));
+    });
+    await expect(tabs).toBeVisible();
+  });
 }
 test('AX5-equivalent text keeps phone labels inside the viewport', async ({ page }) => {
   for (const scene of ['list', 'chat', 'wallet', 'you', 'first-spend']) {

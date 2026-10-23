@@ -1,7 +1,7 @@
 {
   "scene": "first-spend",
   "lang": "en",
-  "generatedAt": 1792735394808,
+  "generatedAt": 1792739632236,
   "ready": true,
   "rootFont": "17px",
   "bodyFont": "17px",
@@ -375,20 +375,20 @@
         "x": 16.984375,
         "y": 368.609375,
         "width": 359.03125,
-        "height": 44.34375,
+        "height": 46.34375,
         "top": 368.609375,
         "right": 376.015625,
-        "bottom": 412.953125,
+        "bottom": 414.953125,
         "left": 16.984375
       },
       "font": "17px",
       "whiteSpace": "normal",
       "client": [
-        359,
+        357,
         44
       ],
       "scroll": [
-        359,
+        357,
         44
       ],
       "failures": []
@@ -399,12 +399,12 @@
       "text": "Not now",
       "rect": {
         "x": 16.984375,
-        "y": 424.9375,
+        "y": 426.9375,
         "width": 359.03125,
         "height": 44,
-        "top": 424.9375,
+        "top": 426.9375,
         "right": 376.015625,
-        "bottom": 468.9375,
+        "bottom": 470.9375,
         "left": 16.984375
       },
       "font": "17px",

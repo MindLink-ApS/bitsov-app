@@ -1,7 +1,7 @@
 {
   "scene": "first-spend",
   "lang": "da",
-  "generatedAt": 1792735437109,
+  "generatedAt": 1792739648387,
   "ready": true,
   "rootFont": "17px",
   "bodyFont": "17px",
@@ -375,20 +375,20 @@
         "x": 16.984375,
         "y": 367.9375,
         "width": 359.03125,
-        "height": 44.34375,
+        "height": 46.34375,
         "top": 367.9375,
         "right": 376.015625,
-        "bottom": 412.28125,
+        "bottom": 414.28125,
         "left": 16.984375
       },
       "font": "17px",
       "whiteSpace": "normal",
       "client": [
-        359,
+        357,
         44
       ],
       "scroll": [
-        359,
+        357,
         44
       ],
       "failures": []
@@ -399,12 +399,12 @@
       "text": "Ikke nu",
       "rect": {
         "x": 16.984375,
-        "y": 424.265625,
+        "y": 426.265625,
         "width": 359.03125,
         "height": 44,
-        "top": 424.265625,
+        "top": 426.265625,
         "right": 376.015625,
-        "bottom": 468.265625,
+        "bottom": 470.265625,
         "left": 16.984375
       },
       "font": "17px",
