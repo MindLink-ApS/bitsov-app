@@ -1858,12 +1858,28 @@ async fn refresh_paired(state: &NodeState) -> Result<(), String> {
         (*generation, session, ctx)
     };
     let mut session = session;
-    pairing::refresh(&mut session, &ctx.client, &ctx.key)
-        .await.map_err(|e| e.to_string())?;
+    let remote = state.remote_mode.load(Ordering::SeqCst);
+    let result = if remote {
+        pairing::refresh_remote(&mut session, &ctx.client, &ctx.key).await
+    } else {
+        pairing::refresh(&mut session, &ctx.client, &ctx.key).await
+    };
     // A buffered old-node reply cannot restore credentials after replacement
     // or Forget. Keep this guard through publication so invalidation is atomic.
     let current = state.remote_connect_generation.borrow();
     if *current != generation { return Err("the remote connection changed".into()); }
+    if let Err(error) = result {
+        let message = error.to_string();
+        if !remote && matches!(error, PairError::Refused { step: "/pair/challenge", status: 401, .. }) {
+            // A hard refusal must stop proactive refresh on every later API call.
+            *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
+            *state.token.lock().unwrap() = None;
+            *state.ready.lock().unwrap() = false;
+            *state.pairing_view.lock().unwrap() = PairingView::from_outcome(&Err(error));
+            set_error(state, message.clone());
+        }
+        return Err(message);
+    }
     check_first_run_session(state, &session)?;
     *state.token.lock().unwrap() = Some(session.token.clone());
     *state.auth.lock().unwrap() = AuthMode::Paired(session);
@@ -10203,6 +10219,61 @@ mod pairing_wiring_tests {
         assert!(f.state.token.lock().unwrap().is_none());
         assert!(matches!(*f.state.auth.lock().unwrap(), AuthMode::Unauthenticated));
         assert_eq!(f.node.calls("/api/v1/auth/local"), 0);
+    }
+
+    #[tokio::test]
+    async fn remote_refresh_keeps_noise_challenge_free_of_local_authorization() {
+        let f = fixture(PairRoutes::Live);
+        authenticate(&f.state, f.data_dir.path()).await.unwrap();
+        let server = Server::start_with_challenge_check(f.node.clone(), PrintedCodes::default(),
+            Arc::new(|_, header| {
+                assert!(header.is_none(), "Noise refresh must not send local proof");
+                true
+            }));
+        let ctx = f.state.pairing.lock().unwrap().clone().unwrap();
+        *f.state.pairing.lock().unwrap() = Some(Arc::new(PairingCtx {
+            client: PairingClient::new(f.state.http.clone(), server.api_base()),
+            key: ctx.key.clone(), store: ctx.store.clone(), data_dir: ctx.data_dir.clone(),
+        }));
+        f.state.remote_mode.store(true, Ordering::SeqCst);
+        refresh_paired(&f.state).await.expect("remote refresh");
+        assert_eq!(f.node.tokens_issued(), 2);
+    }
+
+    #[tokio::test]
+    async fn local_challenge_401_stops_automatic_refresh_and_surfaces_refusal() {
+        use std::sync::atomic::AtomicUsize;
+        let data_dir = tempfile::tempdir().unwrap();
+        let node = mock(data_dir.path(), PairRoutes::Live, now_unix());
+        let codes = PrintedCodes::default();
+        let refuse = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (reject, count) = (refuse.clone(), attempts.clone());
+        let server = Server::start_with_challenge_check(node.clone(), codes.clone(), Arc::new(move |_, _| {
+            count.fetch_add(1, Ordering::SeqCst);
+            !reject.load(Ordering::SeqCst)
+        }));
+        let mut state = NodeState::for_api(server.api_base());
+        state.printed_codes = codes;
+        authenticate(&state, data_dir.path()).await.unwrap();
+        *state.ready.lock().unwrap() = true;
+        if let AuthMode::Paired(session) = &mut *state.auth.lock().unwrap() {
+            session.expires_at = now_unix() + 30;
+        }
+        refuse.store(true, Ordering::SeqCst);
+        for _ in 0..5 {
+            ensure_fresh_token(&state).await;
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "one ceremony + one refused refresh");
+        assert!(matches!(*state.auth.lock().unwrap(), AuthMode::Unauthenticated));
+        assert!(state.token.lock().unwrap().is_none());
+        assert!(!*state.ready.lock().unwrap());
+        let view = state.pairing_snapshot();
+        assert_eq!(view.state, "failed");
+        assert!(view.reason.unwrap().contains("401"));
+        assert!(reauthenticate(&state).await.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(node.calls("/api/v1/auth/local"), 0);
     }
 
     #[tokio::test]

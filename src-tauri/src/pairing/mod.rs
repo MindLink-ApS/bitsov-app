@@ -292,7 +292,7 @@ pub async fn establish(
     codes: &PrintedCodes,
 ) -> Result<Established, PairError> {
     if let Some(record) = load_record(store, key)? {
-        let issued = client.token(key, &record.client_id).await?;
+        let issued = client.token(key, &record.client_id, true).await?;
         return Ok(Established::Paired {
             session: PairedSession {
                 client_id: record.client_id,
@@ -330,7 +330,7 @@ pub async fn establish(
             scopes: confirmed.scopes,
         },
     )?;
-    let issued = client.token(key, &confirmed.client_id).await?;
+    let issued = client.token(key, &confirmed.client_id, true).await?;
     Ok(Established::Paired {
         session: PairedSession {
             client_id: confirmed.client_id,
@@ -361,7 +361,7 @@ pub async fn establish_remote(
         )
     })?;
     let issued = crate::connection_retry::while_connecting(
-        || client.token(key, &record.client_id),
+        || client.token(key, &record.client_id, false),
         |error| matches!(error, PairError::Transport { .. }),
         || PairError::Transport { step: "/pair/challenge", detail: "timed out connecting to your node after 30 seconds".into() },
     ).await?;
@@ -382,7 +382,25 @@ pub async fn refresh(
     client: &PairingClient,
     key: &ClientKey,
 ) -> Result<(), PairError> {
-    let issued = client.token(key, &session.client_id).await?;
+    refresh_with_mode(session, client, key, true).await
+}
+
+/// Refresh through the Noise-authenticated transport, without a local proof.
+pub(crate) async fn refresh_remote(
+    session: &mut PairedSession,
+    client: &PairingClient,
+    key: &ClientKey,
+) -> Result<(), PairError> {
+    refresh_with_mode(session, client, key, false).await
+}
+
+async fn refresh_with_mode(
+    session: &mut PairedSession,
+    client: &PairingClient,
+    key: &ClientKey,
+    local: bool,
+) -> Result<(), PairError> {
+    let issued = client.token(key, &session.client_id, local).await?;
     session.token = issued.token;
     session.expires_at = issued.expires_at;
     session.scopes = issued.scopes;
