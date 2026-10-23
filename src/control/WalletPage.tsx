@@ -204,7 +204,8 @@ export function WalletPage(props: {
           <Show when={split()} fallback={<Show when={!props.walletError} fallback={<SoftError message={props.walletError!} data="wallet-read" onReconnect={props.onReconnect ?? props.onRefresh} />}><DelayedSpinner /></Show>}>
             {(s) => (
               <>
-                <span class="wallet-total" data-balance-total={s().total}>
+                <span class="wallet-total" data-balance-total={s().total}
+                  style={{ '--wallet-amount-chars': String(sats(s().total).length + satUnit(s().total).length + 1) }}>
                   {sats(s().total)}<span class="unit">{satUnit(s().total)}</span>
                 </span>
                 <CustodyBadgeView mode={props.custody} />

@@ -1,0 +1,192 @@
+{
+  "scene": "chat",
+  "lang": "en",
+  "generatedAt": 1792735579212,
+  "ready": true,
+  "rootFont": "53px",
+  "bodyFont": "34px",
+  "space": "12px",
+  "viewport": {
+    "width": 393,
+    "height": 852,
+    "top": 0,
+    "scale": 1
+  },
+  "keyboard": "false",
+  "ownerSheetMounted": false,
+  "minimums": [
+    {
+      "selector": ".target-radio-indicator",
+      "font": "20px"
+    },
+    {
+      "selector": ".touchid-check",
+      "font": "20px"
+    },
+    {
+      "selector": ".approvals-badge",
+      "font": "20px"
+    }
+  ],
+  "elements": [
+    {
+      "tag": "SPAN",
+      "class": "sats",
+      "text": "2 sats",
+      "rect": {
+        "x": 33,
+        "y": -683.609375,
+        "width": 62.734375,
+        "height": 28,
+        "top": -683.609375,
+        "right": 95.734375,
+        "bottom": -655.609375,
+        "left": 33
+      },
+      "font": "22px",
+      "whiteSpace": "nowrap",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "money-text",
+      "text": "paid 1 sat \u00b7 network fee not reported",
+      "rect": {
+        "x": 51.609375,
+        "y": -337.078125,
+        "width": 292.1533203125,
+        "height": 62.09375,
+        "top": -337.078125,
+        "right": 343.7626953125,
+        "bottom": -274.984375,
+        "left": 51.609375
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "sats",
+      "text": "2 sats",
+      "rect": {
+        "x": 33,
+        "y": 89.640625,
+        "width": 62.734375,
+        "height": 28,
+        "top": 89.640625,
+        "right": 95.734375,
+        "bottom": 117.640625,
+        "left": 33
+      },
+      "font": "22px",
+      "whiteSpace": "nowrap",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "money-text",
+      "text": "paid 1 sat \u00b7 network fee not reported",
+      "rect": {
+        "x": 51.609375,
+        "y": 330.796875,
+        "width": 292.1533203125,
+        "height": 62.09375,
+        "top": 330.796875,
+        "right": 343.7626953125,
+        "bottom": 392.890625,
+        "left": 51.609375
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "primary soft send-btn money",
+      "text": "Send",
+      "rect": {
+        "x": 283.75,
+        "y": 565.40625,
+        "width": 78.25,
+        "height": 44,
+        "top": 565.40625,
+        "right": 362,
+        "bottom": 609.40625,
+        "left": 283.75
+      },
+      "font": "22px",
+      "whiteSpace": "nowrap",
+      "client": [
+        78,
+        44
+      ],
+      "scroll": [
+        78,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "",
+      "text": "up to 7 sats \u00b7 includes max routing fee",
+      "rect": {
+        "x": 88.79217529296875,
+        "y": 671.8046875,
+        "width": 280.20782470703125,
+        "height": 58.796875,
+        "top": 671.8046875,
+        "right": 369,
+        "bottom": 730.6015625,
+        "left": 88.79217529296875
+      },
+      "font": "22px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    }
+  ],
+  "failures": [],
+  "contentSize": "accessibility-extra-extra-extra-large",
+  "device": "71E314A6-5C92-4507-994B-7F7E67DE9495"
+}

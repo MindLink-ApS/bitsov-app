@@ -1,0 +1,88 @@
+{
+  "scene": "settings",
+  "lang": "en",
+  "generatedAt": 1792735400109,
+  "ready": true,
+  "rootFont": "17px",
+  "bodyFont": "17px",
+  "space": "7.999996px",
+  "viewport": {
+    "width": 393,
+    "height": 852,
+    "top": 0,
+    "scale": 1
+  },
+  "keyboard": "false",
+  "ownerSheetMounted": false,
+  "minimums": [
+    {
+      "selector": ".target-radio-indicator",
+      "font": "15.000001px"
+    },
+    {
+      "selector": ".touchid-check",
+      "font": "15.000001px"
+    },
+    {
+      "selector": ".approvals-badge",
+      "font": "15.000001px"
+    }
+  ],
+  "elements": [
+    {
+      "tag": "SPAN",
+      "class": "sats",
+      "text": "0 sats / 0 sats \u00b7 1 h",
+      "rect": {
+        "x": 32.96875,
+        "y": 198.28125,
+        "width": 152.31103515625,
+        "height": 22,
+        "top": 198.28125,
+        "right": 185.27978515625,
+        "bottom": 220.28125,
+        "left": 32.96875
+      },
+      "font": "17px",
+      "whiteSpace": "nowrap",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "sats",
+      "text": "none",
+      "rect": {
+        "x": 32.96875,
+        "y": 403.640625,
+        "width": 40.1923828125,
+        "height": 22,
+        "top": 403.640625,
+        "right": 73.1611328125,
+        "bottom": 425.640625,
+        "left": 32.96875
+      },
+      "font": "17px",
+      "whiteSpace": "nowrap",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    }
+  ],
+  "failures": [],
+  "contentSize": "large",
+  "device": "71E314A6-5C92-4507-994B-7F7E67DE9495"
+}

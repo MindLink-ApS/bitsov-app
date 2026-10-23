@@ -9,10 +9,14 @@ const style = document.createElement('style');
 style.textContent = css.replace(/env\(safe-area-inset-(top|right|bottom|left)(?:,\s*0px)?\)/g,
   (_, edge: string) => ({ top: '59px', right: '47px', bottom: '34px', left: '47px' })[edge]!);
 document.head.append(style);
-afterEach(() => { delete document.documentElement.dataset.platform; document.body.innerHTML = ''; });
+afterEach(() => { delete document.documentElement.dataset.platform; document.body.innerHTML = ''; document.documentElement.style.removeProperty('--s-4'); document.documentElement.style.removeProperty('--s-3'); });
 
 it.each(['ios', 'android'])('applies device inset variables to %s surfaces', platform => {
   document.documentElement.dataset.platform = platform;
+  // Happy DOM cannot resolve min(rem, px); this test isolates inset ownership.
+  // Native and WebKit Dynamic Type tests exercise the real spacing tokens.
+  document.documentElement.style.setProperty('--s-4', '16px');
+  document.documentElement.style.setProperty('--s-3', '12px');
   document.body.innerHTML = '<main class="cc"><footer class="composer"></footer></main><section class="wallet-page"></section>';
   const root = getComputedStyle(document.documentElement);
   expect(root.getPropertyValue('--safe-area-top').trim()).toBe('59px');

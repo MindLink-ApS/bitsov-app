@@ -14,7 +14,14 @@ function revealInput(input: HTMLElement) {
     if (!/(auto|scroll)/.test(getComputedStyle(parent).overflowY) || parent.scrollHeight <= parent.clientHeight) continue;
     const field = input.getBoundingClientRect();
     const box = parent.getBoundingClientRect();
-    const top = box.top + 12;
+    // A Dynamic Type quote can consume much of the keyboard viewport.
+    // Reserve its actual sticky height before deciding whether actions fit.
+    const stickyBottom = Array.from(parent.children).reduce((bottom, child) => {
+      const style = getComputedStyle(child);
+      return style.position === 'sticky' && style.top !== 'auto'
+        ? Math.max(bottom, child.getBoundingClientRect().bottom) : bottom;
+    }, box.top);
+    const top = stickyBottom + 12;
     const bottom = box.bottom - 12;
     // Keep the following primary (and sheet Cancel) alongside the field when
     // they fit. Longer forms remain scrollable; never hide the field to do this.

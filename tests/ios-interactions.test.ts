@@ -115,3 +115,25 @@ it('keeps a nearby primary reachable with its input when both fit the scroll reg
   expect(form.scrollTop).toBe(216);
   stop();
 });
+
+it('keeps an amount input below the enlarged sticky quote when actions no longer fit', () => {
+  vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(852);
+  vi.stubGlobal('visualViewport', Object.assign(new EventTarget(), { height: 456, offsetTop: 0, scale: 1 }));
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => { callback(0); return 1; });
+  document.body.innerHTML = '<div class="first-spend-sheet" style="overflow-y:auto"><div style="position:sticky;top:0">Exact cost</div><input><button class="primary">Allow</button></div>';
+  const sheet = document.querySelector<HTMLElement>('.first-spend-sheet')!;
+  const quote = sheet.firstElementChild!;
+  const input = document.querySelector('input')!;
+  const button = document.querySelector('button')!;
+  Object.defineProperty(sheet, 'scrollHeight', { value: 1000 });
+  Object.defineProperty(sheet, 'clientHeight', { value: 350 });
+  sheet.scrollTop = 200;
+  vi.spyOn(sheet, 'getBoundingClientRect').mockReturnValue({ top: 60, bottom: 410 } as DOMRect);
+  vi.spyOn(quote, 'getBoundingClientRect').mockReturnValue({ top: 78, bottom: 238, height: 160 } as DOMRect);
+  vi.spyOn(input, 'getBoundingClientRect').mockReturnValue({ top: 180, bottom: 224, height: 44 } as DOMRect);
+  vi.spyOn(button, 'getBoundingClientRect').mockReturnValue({ top: 340, bottom: 384, height: 44 } as DOMRect);
+  const stop = installKeyboardViewport(); input.focus();
+  // 70px down reveals the field below the quote; fitting the action would hide it.
+  expect(sheet.scrollTop).toBe(130);
+  stop();
+});

@@ -1,0 +1,192 @@
+{
+  "scene": "chat",
+  "lang": "da",
+  "generatedAt": 1792735568746,
+  "ready": true,
+  "rootFont": "17px",
+  "bodyFont": "17px",
+  "space": "7.999996px",
+  "viewport": {
+    "width": 393,
+    "height": 852,
+    "top": 0,
+    "scale": 1
+  },
+  "keyboard": "false",
+  "ownerSheetMounted": false,
+  "minimums": [
+    {
+      "selector": ".target-radio-indicator",
+      "font": "15.000001px"
+    },
+    {
+      "selector": ".touchid-check",
+      "font": "15.000001px"
+    },
+    {
+      "selector": ".approvals-badge",
+      "font": "15.000001px"
+    }
+  ],
+  "elements": [
+    {
+      "tag": "SPAN",
+      "class": "sats",
+      "text": "2 sats",
+      "rect": {
+        "x": 24.984375,
+        "y": 94,
+        "width": 48.4765625,
+        "height": 22,
+        "top": 94,
+        "right": 73.4609375,
+        "bottom": 116,
+        "left": 24.984375
+      },
+      "font": "17px",
+      "whiteSpace": "nowrap",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "money-text",
+      "text": "betalt 1 sat \u00b7 netv\u00e6rksgebyr ikke oplyst",
+      "rect": {
+        "x": 60.71875,
+        "y": 214.015625,
+        "width": 316.28466796875,
+        "height": 22,
+        "top": 214.015625,
+        "right": 377.00341796875,
+        "bottom": 236.015625,
+        "left": 60.71875
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "sats",
+      "text": "2 sats",
+      "rect": {
+        "x": 24.984375,
+        "y": 365.265625,
+        "width": 48.4765625,
+        "height": 22,
+        "top": 365.265625,
+        "right": 73.4609375,
+        "bottom": 387.265625,
+        "left": 24.984375
+      },
+      "font": "17px",
+      "whiteSpace": "nowrap",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "money-text",
+      "text": "betalt 1 sat \u00b7 netv\u00e6rksgebyr ikke oplyst",
+      "rect": {
+        "x": 60.71875,
+        "y": 485.28125,
+        "width": 316.28466796875,
+        "height": 22,
+        "top": 485.28125,
+        "right": 377.00341796875,
+        "bottom": 507.28125,
+        "left": 60.71875
+      },
+      "font": "17px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    },
+    {
+      "tag": "BUTTON",
+      "class": "primary soft send-btn money",
+      "text": "Send",
+      "rect": {
+        "x": 304.09375,
+        "y": 634.28125,
+        "width": 65.921875,
+        "height": 44,
+        "top": 634.28125,
+        "right": 370.015625,
+        "bottom": 678.28125,
+        "left": 304.09375
+      },
+      "font": "17px",
+      "whiteSpace": "nowrap",
+      "client": [
+        66,
+        44
+      ],
+      "scroll": [
+        66,
+        44
+      ],
+      "failures": []
+    },
+    {
+      "tag": "SPAN",
+      "class": "",
+      "text": "h\u00f8jst 7 sats \u00b7 inklusive maksimalt routinggebyr",
+      "rect": {
+        "x": 45.557586669921875,
+        "y": 726.046875,
+        "width": 331.4580383300781,
+        "height": 19,
+        "top": 726.046875,
+        "right": 377.015625,
+        "bottom": 745.046875,
+        "left": 45.557586669921875
+      },
+      "font": "15.000001px",
+      "whiteSpace": "normal",
+      "client": [
+        0,
+        0
+      ],
+      "scroll": [
+        0,
+        0
+      ],
+      "failures": []
+    }
+  ],
+  "failures": [],
+  "contentSize": "large",
+  "device": "71E314A6-5C92-4507-994B-7F7E67DE9495"
+}

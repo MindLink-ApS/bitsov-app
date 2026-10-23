@@ -272,7 +272,7 @@ export function Onboarding(props: {
             <div class="target-info">
               <div class="target-head">
                 <strong>This Mac</strong>
-                <div class="row" style={{ width: 'auto', gap: '8px' }}>
+                <div class="row" style={{ width: 'auto', gap: 'var(--s-2)' }}>
                   <span class="target-badge ok">Keys on this Mac</span>
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
@@ -317,7 +317,7 @@ export function Onboarding(props: {
             <div class="target-info">
               <div class="target-head">
                 <strong>{phone() ? 'Your node' : 'Your computer at home'}</strong>
-                <div class="row" style={{ width: 'auto', gap: '8px' }}>
+                <div class="row" style={{ width: 'auto', gap: 'var(--s-2)' }}>
                   <Show when={hostedBy()} fallback={<span class="target-badge">Pairing link</span>}>
                     {(label) => (
                       <span class="target-badge hosted-by" data-hosted-by title={`Hosted by ${label()}`}>
@@ -355,7 +355,7 @@ export function Onboarding(props: {
             <div class="target-info">
               <div class="target-head">
                 <strong>Test node someone else runs (internal)</strong>
-                <div class="row" style={{ width: 'auto', gap: '8px' }}>
+                <div class="row" style={{ width: 'auto', gap: 'var(--s-2)' }}>
                   <span class="target-badge">Pairing link</span>
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>

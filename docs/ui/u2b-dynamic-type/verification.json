@@ -1,0 +1,157 @@
+{
+  "base": "fe18e66",
+  "captures": [
+    {
+      "capture": "ios-da-approval-ax5",
+      "root": "53px",
+      "body": "34px",
+      "elements": 3,
+      "failures": 0
+    },
+    {
+      "capture": "ios-da-approval-default",
+      "root": "17px",
+      "body": "17px",
+      "elements": 3,
+      "failures": 0
+    },
+    {
+      "capture": "ios-da-chat-ax5",
+      "root": "53px",
+      "body": "34px",
+      "elements": 6,
+      "failures": 0
+    },
+    {
+      "capture": "ios-da-chat-default",
+      "root": "17px",
+      "body": "17px",
+      "elements": 6,
+      "failures": 0
+    },
+    {
+      "capture": "ios-da-first-spend-ax5",
+      "root": "53px",
+      "body": "34px",
+      "elements": 15,
+      "failures": 0
+    },
+    {
+      "capture": "ios-da-first-spend-default",
+      "root": "17px",
+      "body": "17px",
+      "elements": 15,
+      "failures": 0
+    },
+    {
+      "capture": "ios-da-settings-ax5",
+      "root": "53px",
+      "body": "34px",
+      "elements": 2,
+      "failures": 0
+    },
+    {
+      "capture": "ios-da-settings-default",
+      "root": "17px",
+      "body": "17px",
+      "elements": 2,
+      "failures": 0
+    },
+    {
+      "capture": "ios-da-wallet-ax5",
+      "root": "53px",
+      "body": "34px",
+      "elements": 26,
+      "failures": 0
+    },
+    {
+      "capture": "ios-da-wallet-default",
+      "root": "17px",
+      "body": "17px",
+      "elements": 26,
+      "failures": 0
+    },
+    {
+      "capture": "ios-en-approval-ax5",
+      "root": "53px",
+      "body": "34px",
+      "elements": 3,
+      "failures": 0
+    },
+    {
+      "capture": "ios-en-approval-default",
+      "root": "17px",
+      "body": "17px",
+      "elements": 3,
+      "failures": 0
+    },
+    {
+      "capture": "ios-en-chat-ax5",
+      "root": "53px",
+      "body": "34px",
+      "elements": 6,
+      "failures": 0
+    },
+    {
+      "capture": "ios-en-chat-default",
+      "root": "17px",
+      "body": "17px",
+      "elements": 6,
+      "failures": 0
+    },
+    {
+      "capture": "ios-en-first-spend-ax5",
+      "root": "53px",
+      "body": "34px",
+      "elements": 15,
+      "failures": 0
+    },
+    {
+      "capture": "ios-en-first-spend-default",
+      "root": "17px",
+      "body": "17px",
+      "elements": 15,
+      "failures": 0
+    },
+    {
+      "capture": "ios-en-settings-ax5",
+      "root": "53px",
+      "body": "34px",
+      "elements": 2,
+      "failures": 0
+    },
+    {
+      "capture": "ios-en-settings-default",
+      "root": "17px",
+      "body": "17px",
+      "elements": 2,
+      "failures": 0
+    },
+    {
+      "capture": "ios-en-wallet-ax5",
+      "root": "53px",
+      "body": "34px",
+      "elements": 26,
+      "failures": 0
+    },
+    {
+      "capture": "ios-en-wallet-default",
+      "root": "17px",
+      "body": "17px",
+      "elements": 26,
+      "failures": 0
+    }
+  ],
+  "tsc": "passed",
+  "vitest": {
+    "files": 120,
+    "tests": 2202,
+    "failed": 0
+  },
+  "webkit": {
+    "tests": 14,
+    "failed": 0
+  },
+  "build": "passed",
+  "authority": "passed"
+}

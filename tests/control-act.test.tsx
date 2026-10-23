@@ -540,7 +540,7 @@ describe('acting from the track', () => {
 
     await vi.waitFor(() => expect(host.used('message_send')).toHaveLength(1));
     expect(host.used('message_send')[0].args).toEqual({ recipient: A, is_room: false, plaintext: 'gm Maya', max_msat: 2000, max_recipient_msat: null, first_contact_msat: null });
-    await vi.waitFor(() => expect(text('[data-message="sent-1"] .stamp .sats')).toBe('paid 2 sats · network fee not reported'));
+    await vi.waitFor(() => expect(text('[data-message="sent-1"] .stamp .money-text')).toBe('paid 2 sats · network fee not reported'));
     expect(text('[data-message="sent-1"] .stamp')).not.toContain('ceiling');
     expect(text('[data-message="sent-1"] [data-delivery]').trim()).toBe('Sent');
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');

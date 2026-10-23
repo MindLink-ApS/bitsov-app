@@ -1,0 +1,5 @@
+ios-en-chat-default root 16px body 14px failures 0
+ios-da-chat-default root 16px body 14px failures 0
+ios-en-chat-ax5 root 16px body 14px failures 0
+ios-da-chat-ax5 root 16px body 14px failures 0
+Expected failure: minimum fonts remained 11px / 10px / 11px; root/body did not respond to AX5.
