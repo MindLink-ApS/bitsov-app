@@ -3,6 +3,7 @@ name: WebKit
 # Atlas should make "WebKit (safe areas + type + keyboard)" required on main.
 # No workflow path filters: even non-UI PRs receive a successful check.
 # Use full-ci to force tests for changes outside the UI paths below.
+# Gate regression scenarios: python3 scripts/test-webkit-gate.py
 on:
   pull_request:
     branches: [main]
@@ -14,13 +15,18 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   webkit:
-    name: WebKit (safe areas + type + keyboard)
+    # A skipped unrelated-label job must not replace the required check result.
+    name: >-
+      ${{ github.event_name == 'pull_request' && github.event.action == 'labeled' &&
+          github.event.label.name != 'full-ci' && 'WebKit (ignored label)' ||
+          'WebKit (safe areas + type + keyboard)' }}
+    if: github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'full-ci'
+    # Job scope keeps unrelated label events from cancelling active WebKit jobs.
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -39,14 +45,26 @@ jobs:
         shell: bash
         run: |
           # Only an explicit false skips tests; missing output or errors run them.
+          # Git treats an empty side of A...B as HEAD, so reject missing SHAs.
+          if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
+            echo "::warning::Missing base or head SHA; running WebKit."
+            exit 0
+          fi
           # Compare from the merge base, and include both sides of renames.
           if ! git diff --no-renames --name-only -z "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/webkit-changed-files"; then
             echo "::warning::Unable to detect changed files; running WebKit."
             exit 0
           fi
+          # playwright.webkit.config.ts runs tests/a11y via the Vite dev server.
+          # Specs load tests/fixtures, the docs/ui u2b harness, index.html and
+          # assistant.html; those pages import src. Include future HTML entries
+          # and Vite/TypeScript config variants (also in nested directories).
           while IFS= read -r -d '' path; do
             case "$path" in
-              src/*|index.html|public/*|tests/*webkit*|playwright*.config.ts|package*.json|.github/workflows/webkit.yml)
+              src/*|public/*|tests/a11y/*|tests/fixtures/*|docs/ui/*|\
+              *.html|playwright*.config.*|vite*.config.*|*/vite*.config.*|\
+              tsconfig*.json|*/tsconfig*.json|package*.json|\
+              .github/workflows/webkit.yml|scripts/test-webkit-gate.py)
                 echo "UI changes detected; running WebKit."
                 exit 0
                 ;;
