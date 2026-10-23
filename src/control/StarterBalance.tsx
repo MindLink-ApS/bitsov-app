@@ -1,3 +1,4 @@
+import { usePairingActivity } from '../pairingActivity';
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { t } from '../i18n';
 import { amount } from './format';
@@ -27,6 +28,7 @@ function StarterStep(props: { nodeId: string; api: StarterApi } & Navigation) {
   const key = `bitsov.starter-request.${props.nodeId}`;
   const [status, setStatus] = createSignal<StarterStatus | null>(null);
   const [busy, setBusy] = createSignal(false);
+  usePairingActivity(busy);
   const [error, setError] = createSignal<'read' | 'request' | 'storage' | null>(null);
   const [now, setNow] = createSignal(Date.now());
   let alive = true;

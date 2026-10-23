@@ -984,8 +984,8 @@ describe('acting from the track', () => {
     });
 
     it.each([
-      ['sats', '0.999', 'Between 1 sat and 100\u2009000\u2009000 sats.'],
-      ['sats', '100000000.001', 'Between 1 sat and 100\u2009000\u2009000 sats.'],
+      ['sats', '0.999', 'Between 1 sat and 100\u202f000\u202f000 sats.'],
+      ['sats', '100000000.001', 'Between 1 sat and 100\u202f000\u202f000 sats.'],
       ['btc', '1.00000000001', 'Between 0.00000001 BTC and 1 BTC.'],
       ['btc', '0.000000009', 'Between 0.00000001 BTC and 1 BTC.'],
     ] as const)('refuses %s %s outside the host bounds before review', async (unit, typed, message) => {

@@ -1,3 +1,4 @@
+import { usePairingActivity } from '../pairingActivity';
 import { For, Show, createMemo, createSignal } from 'solid-js';
 import { copyPlainText } from '../assistant/copy';
 import { qrSvg } from '../qr';
@@ -331,6 +332,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
   const [avatar, setAvatar] = createSignal<PreparedAvatar | null>(null);
   const [media, setMedia] = createSignal<PreparedMedia[]>([]);
   const [saving, setSaving] = createSignal(false);
+  usePairingActivity(saving);
   const [sizeNote, setSizeNote] = createSignal<string | null>(null);
 
   const load = () => {

@@ -56,7 +56,7 @@ describe('wallet: balance and channels in plain words', () => {
     })).toMatchObject({ pending, onchainTotal: 130_000_000, onchain: 90_000_000, reserved: 25_000_000 });
   });
   it('an open channel says what can be sent and received; an offline one says funds stay yours', () => {
-    expect(channelWords(channel())).toMatchObject({ state: 'open', line: 'You can send up to 300\u2009000 sats and receive up to 190\u2009000 sats through it.' });
+    expect(channelWords(channel())).toMatchObject({ state: 'open', line: 'You can send up to 300\u202f000 sats and receive up to 190\u202f000 sats through it.' });
     expect(channelWords(channel({ active: false })).line).toMatch(/offline, or the channel is still opening or closing\. What you hold in it stays yours/);
   });
 });
@@ -237,7 +237,7 @@ describe('the Wallet page', () => {
     await openWallet();
     expect(text('[data-avatar-balance]')).toBe('');
     await vi.waitFor(() => expect($('[data-balance-total]')?.getAttribute('data-balance-total')).toBe('480000000'));
-    expect(text('[data-balance-total]')).toBe('480\u2009000sats');
+    expect(text('[data-balance-total]')).toBe('480\u202f000sats');
     for (const category of ['spendable', 'reserved', 'closing']) {
       expect(text(`[data-balance-${category}] .split-amount`)).toBe('Unknown');
     }
@@ -286,7 +286,7 @@ describe('the Wallet page', () => {
     // Even the inactive channel might instead be opening or temporarily offline.
     stubHost({ payments_overview: () => ({ ...WALLET, balance_msat: 505_000_000 }) });
     await openWallet();
-    await vi.waitFor(() => expect(text('[data-balance-total]')).toBe('505\u2009000sats'));
+    await vi.waitFor(() => expect(text('[data-balance-total]')).toBe('505\u202f000sats'));
     expect(text('[data-balance-spendable] .split-amount')).toBe('Unknown');
     expect(text('[data-balance-reserved] .split-amount')).toBe('Unknown');
     expect(text('[data-balance-closing] .split-amount')).toBe('Unknown');
@@ -299,8 +299,8 @@ describe('the Wallet page', () => {
     [{ onchain_total_sats: 190804, onchain_spendable_sats: 2004 }, 'Pending on-chain: Unknown'],
     [{ onchain_total_sats: 130_000, onchain_spendable_sats: 90_000, anchor_reserve_sats: 25_000 }, 'Pending on-chain: Unknown'],
     [{ onchain_total_sats: 130_000, onchain_spendable_sats: 90_000, anchor_reserve_sats: 25_000, onchain_pending_sats: null }, 'Pending on-chain: Unknown'],
-    [{ onchain_total_sats: 130_000, onchain_spendable_sats: 90_000, anchor_reserve_sats: 25_000, onchain_pending_sats: 15_000 }, '15\u2009000 sats pending'],
-    [{ onchain_pending_sats: 188800 }, '188\u2009800 sats pending'],
+    [{ onchain_total_sats: 130_000, onchain_spendable_sats: 90_000, anchor_reserve_sats: 25_000, onchain_pending_sats: 15_000 }, '15\u202f000 sats pending'],
+    [{ onchain_pending_sats: 188800 }, '188\u202f800 sats pending'],
     [{ onchain_pending_sats: 0, onchain_total_sats: 190804, onchain_spendable_sats: 2004 }, '0 sats pending'],
     [{ onchain_total_sats: 190804 }, 'Pending on-chain: Unknown'],
     [{ onchain_spendable_sats: 2004 }, 'Pending on-chain: Unknown'],
@@ -309,7 +309,7 @@ describe('the Wallet page', () => {
   ])('keeps pending funds separate from the headline: %j', async (fields, pending) => {
     stubHost({ payments_overview: () => ({ ...WALLET, balance_msat: 2004000, ...fields }) });
     await openWallet();
-    await vi.waitFor(() => expect(text('[data-balance-total]')).toBe('2\u2009004sats'));
+    await vi.waitFor(() => expect(text('[data-balance-total]')).toBe('2\u202f004sats'));
     expect(text('[data-balance-pending]')).toBe(pending);
     if ('onchain_pending_sats' in fields) expect(text('[data-wallet-basis]')).not.toContain('one total');
     expect($('[data-balance-pending]')?.closest('[data-wallet-balance]')).not.toBeNull();
@@ -339,24 +339,24 @@ describe('the Wallet page', () => {
       closing_sats: 80_000, contested_sats: 7_000,
     }) });
     await openWallet();
-    await vi.waitFor(() => expect(text('[data-balance-lightning] .split-amount')).toBe('210\u2009000 sats'));
-    expect(text('[data-balance-onchain] .split-amount')).toBe('90\u2009000 sats');
+    await vi.waitFor(() => expect(text('[data-balance-lightning] .split-amount')).toBe('210\u202f000 sats'));
+    expect(text('[data-balance-onchain] .split-amount')).toBe('90\u202f000 sats');
     expect(text('[data-balance-onchain-total] .split-name')).toBe('On-chain total');
-    expect(text('[data-balance-onchain-total] .split-amount')).toBe('130\u2009000 sats');
-    expect(text('[data-balance-reserved] .split-amount')).toBe('25\u2009000 sats');
+    expect(text('[data-balance-onchain-total] .split-amount')).toBe('130\u202f000 sats');
+    expect(text('[data-balance-reserved] .split-amount')).toBe('25\u202f000 sats');
     expect(text('[data-balance-pending]')).toBe('Pending on-chain: Unknown');
     expect($('[data-balance-pending]')?.getAttribute('data-balance-pending')).toBe('unknown');
-    expect(text('[data-balance-closing] .split-amount')).toBe('80\u2009000 sats');
-    expect(text('[data-balance-contested] .split-amount')).toBe('7\u2009000 sats');
+    expect(text('[data-balance-closing] .split-amount')).toBe('80\u202f000 sats');
+    expect(text('[data-balance-contested] .split-amount')).toBe('7\u202f000 sats');
     expect(text('[data-balance-lightning]')).toMatch(/outbound capacity.*not.*guarantee.*routing fees.*per-HTLC limits.*remote liquidity/i);
     expect(text('[data-balance-contested]')).toMatch(/conditional.*not guaranteed/i);
     expect(text('[data-wallet-basis]')).toMatch(/overlap.*do not add up/i);
     expect(text('[data-wallet-basis]')).toMatch(/closing.*before sweep fees.*already.*on-chain/i);
     expect(text('[data-balance-reserved]')).toMatch(/included in.*on-chain total/i);
     expect(text('[data-wallet-balance]')).toContain('Node-reported total');
-    expect(text('[data-balance-total]')).toBe('480\u2009000sats');
+    expect(text('[data-balance-total]')).toBe('480\u202f000sats');
     // These deliberately non-reconciling amounts must never become a second total.
-    expect(text('[data-wallet-balance]')).not.toMatch(/387\u2009000|412\u2009000|452\u2009000/);
+    expect(text('[data-wallet-balance]')).not.toMatch(/387\u202f000|412\u202f000|452\u202f000/);
     expect(mount.querySelectorAll('.wallet-hero .split-amount')).toHaveLength(6);
     expect(moneyCalls(host)).toHaveLength(0);
   });
@@ -372,7 +372,7 @@ describe('the Wallet page', () => {
       expect(text(`[data-balance-${category}] .split-amount`)).toBe('0 sats');
     }
     expect($('[data-balance-contested]')).toBeNull();
-    expect(text('[data-balance-total]')).toBe('480\u2009000sats');
+    expect(text('[data-balance-total]')).toBe('480\u202f000sats');
   });
 
   it.each([
@@ -403,7 +403,7 @@ describe('the Wallet page', () => {
       anchor_reserve_sats: missing, closing_sats: missing, contested_sats: missing,
     }) });
     await openWallet();
-    await vi.waitFor(() => expect(text('[data-balance-total]')).toBe('480\u2009000sats'));
+    await vi.waitFor(() => expect(text('[data-balance-total]')).toBe('480\u202f000sats'));
     expect([...mount.querySelectorAll('.wallet-hero .split-name')].map((el) => el.textContent))
       .toEqual(['Spendable', 'Reserved (channel fee reserve)', 'Closing/locked']);
     expect([...mount.querySelectorAll('.wallet-hero .split-amount')].map((el) => el.textContent))
@@ -462,10 +462,10 @@ describe('the Wallet page', () => {
     stubHost();
     await openWallet('channels');
     await vi.waitFor(() => expect($('[data-channel="c1"]')).not.toBeNull());
-    expect(text('[data-channels-summary]')).toMatch(/1 of 2 open.*You can send 300\u2009000 sats.*receive 190\u2009000 sats/);
+    expect(text('[data-channels-summary]')).toMatch(/1 of 2 open.*You can send 300\u202f000 sats.*receive 190\u202f000 sats/);
     expect($('[data-channel="c1"]')!.getAttribute('data-channel-state')).toBe('open');
     expect($('[data-channel="c1"] [data-channel-capacity]')!.getAttribute('data-channel-capacity')).toBe('500000000');
-    expect(text('[data-channel="c1"] [data-channel-words]')).toMatch(/send up to 300\u2009000 sats and receive up to 190\u2009000 sats/);
+    expect(text('[data-channel="c1"] [data-channel-words]')).toMatch(/send up to 300\u202f000 sats and receive up to 190\u202f000 sats/);
     expect(text('[data-channel="c2"] [data-channel-pill]')).toBe('Not usable now');
     expect(text('[data-channel="c2"] [data-channel-words]')).toMatch(/stays yours/);
   });
@@ -498,13 +498,13 @@ describe('the Wallet page', () => {
     paid = true;
     await vi.waitFor(() => expect(text('[data-receive-state]')).toBe(locale === 'da' ? 'Modtaget' : 'Received'), { timeout: 6000 });
     expect($('[data-receive-state]')!.classList.contains('ok')).toBe(true);
-    expect(text('[data-wallet-settled]')).toContain('2\u2009500 sats');
+    expect(text('[data-wallet-settled]')).toContain('2\u202f500 sats');
     expect($('[data-receive-invoice] [data-wallet-qr]')).toBeNull();
     expect(host.used('invoice_status').every((c) => c.args!.bolt11 === 'lntb25u1walletreceive')).toBe(true);
     expect(moneyCalls(host)).toHaveLength(0);
     click('[data-wallet-tab="activity"]');
     await vi.waitFor(() => expect($('[data-activity="invoice"]')).not.toBeNull());
-    expect(text('[data-activity="invoice"]')).toMatch(locale === 'da' ? /Faktura · lunch.*Modtaget.*\+2\u2009500 sats/ : /Invoice · lunch.*Received.*\+2\u2009500 sats/);
+    expect(text('[data-activity="invoice"]')).toMatch(locale === 'da' ? /Faktura · lunch.*Modtaget.*\+2\u202f500 sats/ : /Invoice · lunch.*Received.*\+2\u202f500 sats/);
   }, 10_000);
 
   it.each([1500, null])('Receive shows only the node-reported settled amount: %s', async reported => {

@@ -14,11 +14,11 @@
     },
     {
       "msat": 1000000,
-      "text": "1 000 sats"
+      "text": "1 000 sats"
     },
     {
       "msat": 1234567000,
-      "text": "1 234 567 sats"
+      "text": "1 234 567 sats"
     },
     {
       "msat": 1,
@@ -34,23 +34,23 @@
     },
     {
       "msat": 1234,
-      "text": "1 234 msat"
+      "text": "1 234 msat"
     },
     {
       "msat": 1000001,
-      "text": "1 000 001 msat"
+      "text": "1 000 001 msat"
     },
     {
       "msat": 1234567890,
-      "text": "1 234 567 890 msat"
+      "text": "1 234 567 890 msat"
     },
     {
       "msat": 9007199254740991,
-      "text": "9 007 199 254 740 991 msat"
+      "text": "9 007 199 254 740 991 msat"
     },
     {
       "msat": 18446744073709551615,
-      "text": "18 446 744 073 709 551 615 msat",
+      "text": "18 446 744 073 709 551 615 msat",
       "renderer_text": "amount too large"
     }
   ],
@@ -79,12 +79,12 @@
       },
       "lines": [
         "Let this app spend",
-        "Budget: up to 1 234 567 sats",
-        "Each payment: up to 1 000 001 msat",
+        "Budget: up to 1 234 567 sats",
+        "Each payment: up to 1 000 001 msat",
         "For: 1 h",
         "To: any contact, within the budget"
       ],
-      "reason": "Let this app spend · Budget: up to 1 234 567 sats · Each payment: up to 1 000 001 msat · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456"
+      "reason": "Let this app spend · Budget: up to 1 234 567 sats · Each payment: up to 1 000 001 msat · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456"
     },
     {
       "view": {
@@ -111,10 +111,10 @@
       "lines": [
         "Let this app message someone new",
         "To: ab12cd34",
-        "First message: up to 1 234 msat",
-        "Contact budget: up to 1 000 sats"
+        "First message: up to 1 234 msat",
+        "Contact budget: up to 1 000 sats"
       ],
-      "reason": "Let this app message someone new · To: ab12cd34 · First message: up to 1 234 msat · Contact budget: up to 1 000 sats · Requested by app abcdef…123456"
+      "reason": "Let this app message someone new · To: ab12cd34 · First message: up to 1 234 msat · Contact budget: up to 1 000 sats · Requested by app abcdef…123456"
     },
     {
       "view": {
@@ -162,12 +162,12 @@
       "lines": [
         "Reset this app’s paused spending",
         "Tripped: paused after failed payments",
-        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
+        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
         "Each payment: up to 999 sats",
         "Grant ends: 2030-03-17 17:46:40 UTC",
         "Device resets in the last day: 1 of 3"
       ],
-      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
     },
     {
       "view": {
@@ -218,12 +218,12 @@
       "lines": [
         "Reset this app’s paused spending",
         "Tripped: paused after failed payments, too many payments this minute, too many payments this hour, spending too fast",
-        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
+        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
         "Each payment: up to 999 sats",
         "Grant ends: 2030-03-17 17:46:40 UTC",
         "Device resets in the last day: 1 of 3"
       ],
-      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments, +3 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments, +3 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
     },
     {
       "view": {
@@ -430,12 +430,12 @@
       "lines": [
         "Reset this app’s paused spending",
         "Tripped: paused after failed payments",
-        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
+        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
         "Each payment: up to 999 sats",
         "Grant ends: 9999-12-31 23:59:59 UTC",
         "Device resets in the last day: 1 of 3"
       ],
-      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 9999-12-31 23:59:59 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 9999-12-31 23:59:59 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
     },
     {
       "view": {
@@ -483,12 +483,12 @@
       "lines": [
         "Reset this app’s paused spending",
         "Tripped: paused after failed payments",
-        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
+        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
         "Each payment: up to 999 sats",
         "Grant ends: +10000-01-01 00:00:00 UTC",
         "Device resets in the last day: 1 of 3"
       ],
-      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: +10000-01-01 00:00:00 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: +10000-01-01 00:00:00 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
     },
     {
       "view": {
@@ -536,12 +536,12 @@
       "lines": [
         "Reset this app’s paused spending",
         "Tripped: paused after failed payments",
-        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
+        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
         "Each payment: up to 999 sats",
         "Grant ends: +100000-01-01 00:00:00 UTC",
         "Device resets in the last day: 1 of 3"
       ],
-      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: +100000-01-01 00:00:00 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: +100000-01-01 00:00:00 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
     },
     {
       "view": {
@@ -589,18 +589,18 @@
       "lines": [
         "Reset this app’s paused spending",
         "Tripped: paused after failed payments",
-        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
+        "Budget: up to 1 234 567 sats, 1 000 001 msat left",
         "Each payment: up to 999 sats",
         "Grant ends: -0001-01-01 00:00:00 UTC",
         "Device resets in the last day: 1 of 3"
       ],
-      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: -0001-01-01 00:00:00 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: -0001-01-01 00:00:00 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
     }
   ],
   "prompt_cases": [
     {
       "raw_utf16_length": 299,
-      "reason": "Reset this app’s paused spending · Tripped: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
+      "reason": "Reset this app’s paused spending · Tripped: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
       "name": "299 UTF-16 units",
       "tripped": [
         "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
@@ -609,7 +609,7 @@
     },
     {
       "raw_utf16_length": 300,
-      "reason": "Reset this app’s paused spending · Tripped: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
+      "reason": "Reset this app’s paused spending · Tripped: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
       "name": "300 UTF-16 units",
       "tripped": [
         "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
@@ -618,7 +618,7 @@
     },
     {
       "raw_utf16_length": 301,
-      "reason": "Reset this app’s paused spending · Tripped: +1 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
+      "reason": "Reset this app’s paused spending · Tripped: +1 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
       "name": "301 UTF-16 units",
       "tripped": [
         "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
@@ -627,7 +627,7 @@
     },
     {
       "raw_utf16_length": null,
-      "reason": "Reset this app’s paused spending · Tripped: +1 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
+      "reason": "Reset this app’s paused spending · Tripped: +1 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
       "name": "oversized raw Unicode code",
       "tripped": [
         "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
@@ -767,7 +767,7 @@
         "rate_limit_minute"
       ],
       "raw_utf16_length": null,
-      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments, +127 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
+      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments, +127 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
       "snapshot": {}
     },
     {
@@ -779,7 +779,7 @@
         "another_unknown"
       ],
       "raw_utf16_length": null,
-      "reason": "Reset this app’s paused spending · Tripped: future_trip, 😀future_trip, +2 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
+      "reason": "Reset this app’s paused spending · Tripped: future_trip, 😀future_trip, +2 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
       "snapshot": {}
     },
     {
@@ -788,14 +788,14 @@
         "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
       ],
       "raw_utf16_length": 1238,
-      "reason": "Reset this app’s paused spending · Tripped: +1 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
+      "reason": "Reset this app’s paused spending · Tripped: +1 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
       "snapshot": {}
     },
     {
       "name": "empty trip list",
       "tripped": [],
       "raw_utf16_length": 245,
-      "reason": "Reset this app’s paused spending · Tripped: nothing · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
+      "reason": "Reset this app’s paused spending · Tripped: nothing · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
       "snapshot": {}
     },
     {
@@ -804,7 +804,7 @@
         "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀"
       ],
       "raw_utf16_length": 300,
-      "reason": "Reset this app’s paused spending · Tripped: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀 · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
+      "reason": "Reset this app’s paused spending · Tripped: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀 · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
       "snapshot": {}
     },
     {
@@ -813,7 +813,7 @@
         "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀"
       ],
       "raw_utf16_length": 301,
-      "reason": "Reset this app’s paused spending · Tripped: +1 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
+      "reason": "Reset this app’s paused spending · Tripped: +1 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456",
       "snapshot": {}
     },
     {
@@ -829,7 +829,7 @@
         "resets_last_day": 9007199254740991
       },
       "raw_utf16_length": null,
-      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments, +1 more · Budget: up to 9 007 199 254 740 991 msat, 9 007 199 254 740 991 msat left · Each payment: up to 9 007 199 254 740 991 msat · Grant ends: 2030-03-17 17:46:40 UTC · Requested by app abcdef…123456"
+      "reason": "Reset this app’s paused spending · Tripped: paused after failed payments, +1 more · Budget: up to 9 007 199 254 740 991 msat, 9 007 199 254 740 991 msat left · Each payment: up to 9 007 199 254 740 991 msat · Grant ends: 2030-03-17 17:46:40 UTC · Requested by app abcdef…123456"
     },
     {
       "name": "unknown codes matching JavaScript object properties stay raw",
@@ -840,7 +840,7 @@
       ],
       "snapshot": {},
       "raw_utf16_length": null,
-      "reason": "Reset this app’s paused spending · Tripped: toString, constructor, __proto__ · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+      "reason": "Reset this app’s paused spending · Tripped: toString, constructor, __proto__ · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
     },
     {
       "tripped": [
@@ -849,7 +849,7 @@
       ],
       "snapshot": {},
       "raw_utf16_length": null,
-      "reason": "Reset this app’s paused spending · Tripped: +2 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
+      "reason": "Reset this app’s paused spending · Tripped: +2 more · Budget: up to 1 234 567 sats, 1 000 001 msat left · Each payment: up to 999 sats · Grant ends: 2030-03-17 17:46:40 UTC · Device resets in the last day: 1 of 3 · Requested by app abcdef…123456"
     }
   ]
 }

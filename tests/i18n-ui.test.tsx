@@ -58,9 +58,9 @@ it.each(['en', 'da'] as const)('preserves pay review values, recipient and one e
   await vi.waitFor(() => expect(find('[data-send]').textContent).toContain(locale === 'da' ? 'Betal' : 'Pay'));
   find('[data-composer]').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   await vi.waitFor(() => expect(find('[data-pay-review]')).not.toBeNull());
-  expect(find('[data-review-amount]').textContent).toBe('1\u2009250 sats');
+  expect(find('[data-review-amount]').textContent).toBe('1\u202f250 sats');
   expect(find('[data-review-fee]').textContent).toBe(locale === 'da' ? 'højst 10 sats' : 'up to 10 sats');
-  expect(find('[data-review-total]').textContent).toBe('1\u2009260 sats');
+  expect(find('[data-review-total]').textContent).toBe('1\u202f260 sats');
   expect(find('[data-payee]').getAttribute('title')).toBe(payee);
   expect(find('[data-payee]').textContent).toContain(locale === 'da' ? 'ikke bekræftet som Maya' : 'not verified as Maya');
   expect(find('[data-pay-confirm]').textContent?.trim()).toBe(locale === 'da' ? 'Bekræft og betal' : 'Confirm and pay');

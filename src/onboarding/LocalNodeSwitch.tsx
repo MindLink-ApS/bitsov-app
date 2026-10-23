@@ -1,9 +1,11 @@
+import { usePairingActivity } from '../pairingActivity';
 import { createEffect, createSignal, on, Show } from 'solid-js';
 import { SoftError } from '../control/SoftError';
 
 /** Only changes the next startup; the live connection and trust stay remote. */
 export function LocalNodeSwitch(props: { onForget: () => Promise<void>; disabled?: boolean; remoteRevision?: number }) {
   const [busy, setBusy] = createSignal(false);
+  usePairingActivity(busy);
   const [forgotten, setForgotten] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   createEffect(on(() => props.remoteRevision, () => {

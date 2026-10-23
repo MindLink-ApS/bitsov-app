@@ -38,13 +38,13 @@ describe.each(['en', 'da'] as const)('owner approval sheet (%s)', lang => {
       ? 'Requested by app cdcdcd…cdcdcd'
       : 'Anmodet af app cdcdcd…cdcdcd');
     expect(requester.nextElementSibling).toBe($('[data-owner-sheet-terms]'));
-    expect(sheet.textContent!.match(/Budget: up to 2\u2009000 sats/g)).toHaveLength(1);
+    expect(sheet.textContent!.match(/Budget: up to 2\u202f000 sats/g)).toHaveLength(1);
   });
   it('opens on arrival with exact biometric terms, requester, one primary and queue count', async () => {
     setLanguagePref(lang); const s = setup();
     s.setApprovals([request(), request('b')]); await tick();
     expect(mount.querySelectorAll('[data-owner-approval-sheet]')).toHaveLength(1);
-    expect($('[data-owner-approval-sheet]').textContent).toContain('Budget: up to 2\u2009000 sats');
+    expect($('[data-owner-approval-sheet]').textContent).toContain('Budget: up to 2\u202f000 sats');
     expect($('[data-owner-approval-sheet]').textContent).toContain('cdcdcd…cdcdcd');
     expect($('[data-owner-approval-queue]').textContent).toBe(lang === 'en' ? '1 of 2' : '1 af 2');
     expect($('[data-owner-approval-sheet] .primary').textContent).toBe(lang === 'en' ? 'Approve with Touch ID' : 'Godkend med Touch ID');

@@ -24,7 +24,7 @@ beforeEach(() => {
   native.requestPermission.mockResolvedValue('granted');
   native.onAction.mockImplementation(async cb => { click = cb; return { unregister: native.unregister }; });
 });
-afterEach(() => { dispose?.(); vi.restoreAllMocks(); setLanguagePref('en'); });
+afterEach(() => { dispose?.(); vi.unstubAllEnvs(); vi.restoreAllMocks(); setLanguagePref('en'); });
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
 function setup() {
   const review = vi.fn();
@@ -190,4 +190,64 @@ it('can open the original notification after a transient list-read failure recov
   click({ actionId: 'tap', notification: { id } }); await flush();
   expect(n.review).toHaveBeenCalledWith('a');
   expect(native.sendNotification).toHaveBeenCalledOnce();
+});
+
+it.each(['wallet', 'settings', 'starter', 'idle-wallet', 'idle-settings'] as const)('respects %s activity on notification review and presents the selected request when safe', async panel => {
+  const { ControlCenter } = await import('../src/control/Shell');
+  const { sampleSource, SAMPLE_OWN_ID } = await import('../src/control/sample');
+  native.isTauri.mockReturnValue(true);
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Macintosh');
+  const source = sampleSource();
+  vi.stubEnv('VITE_STARTER_BALANCE', '1');
+  const overview = await source.nodeOverview();
+  source.nodeOverview = async () => ({ ...overview, network: 'signet', capabilities: ['owner_device_approval_v1', 'starter_channel_request_v1'] });
+  source.deviceKeys = async () => ({ device_approvals: 'enabled', owner_device_count: 1, device_keys: [] });
+  source.approvalsPending = async () => [{ op_id: 'selected-request', node: 'n', client_id: 'phone', client_pubkey: 'cd'.repeat(32), epoch: 4, grant_op: null,
+    request: { kind: 'spend_grant', terms: { budget_msat: 2000000, per_call_max_msat: 1000, window_secs: 600 } },
+    nonce: '11'.repeat(16), expires_at: Date.now() / 1000 + 300, approval_message: 'signed bytes', status: 'pending', owner_action: null }];
+  const register = source.deviceKeyRegister;
+  source.deviceKeyRegister = () => new Promise(resolve => { finish = () => { void register().then(resolve); }; });
+  const invoiceCreate = source.invoiceCreate;
+  let finish!: () => void;
+  source.starterCurrent = async () => ({ state: 'not_requested', hub_configured: true });
+  source.starterRequest = id => new Promise(resolve => { finish = () => resolve({ state: 'requested', hub_configured: true, request_id: id }); });
+  source.invoiceCreate = (amount, note) => new Promise(resolve => { finish = () => { void invoiceCreate(amount, note).then(resolve); }; });
+  const mount = document.createElement('div'); document.body.append(mount);
+  const unmount = render(() => <ControlCenter source={source} active ready remote error={null} ownId={SAMPLE_OWN_ID} firstRun={null} />, mount);
+  dispose = () => { unmount(); mount.remove(); };
+  const press = (selector: string) => mount.querySelector<HTMLButtonElement>(selector)!.click();
+  await vi.waitFor(() => expect(native.sendNotification).toHaveBeenCalledOnce());
+  press('[data-owner-sheet-dismiss]');
+  if (panel === 'idle-wallet' || panel === 'idle-settings') {
+    press('[data-tab="wallet"]');
+    if (panel === 'idle-wallet') press('[data-open-wallet-page]');
+    await flush();
+    click({ actionId: 'tap', notification: { id: native.sendNotification.mock.calls[0][0].id } }); await flush();
+    await vi.waitFor(() => expect(mount.querySelector('[data-owner-approval-sheet="selected-request"]')).not.toBeNull());
+    expect(mount.querySelector('[data-wallet-page]')).toBeNull();
+    expect(mount.querySelector('[data-settings]')!.getAttribute('aria-hidden')).toBe('true');
+    return;
+  }
+  if (panel === 'wallet') {
+    press('[data-tab="wallet"]'); press('[data-open-wallet-page]'); press('[data-wallet-tab="receive"]');
+    const input = mount.querySelector<HTMLInputElement>('[data-receive-amount]')!;
+    input.value = '1250'; input.dispatchEvent(new Event('input', { bubbles: true }));
+    press('[data-receive-create]'); await flush();
+    expect(mount.querySelector<HTMLButtonElement>('[data-receive-create]')!.disabled).toBe(true);
+  } else if (panel === 'starter') {
+    press('[data-tab="wallet"]'); press('[data-open-wallet-page]'); await flush();
+    press('[data-starter-entry]'); await flush(); press('[data-starter-balance] button.primary'); await flush();
+    expect(mount.querySelector<HTMLButtonElement>('[data-starter-balance] button.primary')!.disabled).toBe(true);
+  } else {
+    press('[data-tab="devices"]'); await flush(); press('[data-device-register]'); await flush();
+    expect(mount.querySelector<HTMLButtonElement>('[data-device-register]')!.disabled).toBe(true);
+  }
+  click({ actionId: 'tap', notification: { id: native.sendNotification.mock.calls[0][0].id } }); await flush();
+  expect(mount.querySelector(panel !== 'settings' ? '[data-wallet-page]' : '[data-settings][aria-hidden="false"]')).not.toBeNull();
+  expect(mount.querySelector('[data-owner-approval-sheet]')).toBeNull();
+  finish(); await flush();
+  if (panel === 'wallet') expect(mount.querySelector('[data-receive-invoice]')).not.toBeNull();
+  if (panel === 'starter') press('[data-wallet-close]');
+  press(panel !== 'settings' ? '[data-wallet-close]' : '[data-settings-close]'); await flush();
+  await vi.waitFor(() => expect(mount.querySelector('[data-owner-approval-sheet="selected-request"]')).not.toBeNull());
 });

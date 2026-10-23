@@ -1,3 +1,4 @@
+import { usePairingActivity } from '../pairingActivity';
 import { createSignal, onCleanup, Show } from 'solid-js';
 import { Onboarding } from './Onboarding';
 import { INITIAL_PAIRING } from './pairing';
@@ -17,6 +18,7 @@ export function PairAnotherNode(props: {
 }) {
   const [open, setOpen] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
+  usePairingActivity(busy);
   const [saved, setSaved] = createSignal<RemoteImportView | null>(null);
   const [pending, setPending] = createSignal<{ view: RemotePreviewView; answer: (ok: boolean) => void } | null>(null);
   const answer = (ok: boolean) => {

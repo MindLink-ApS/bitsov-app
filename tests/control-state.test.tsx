@@ -33,7 +33,7 @@ describe('sats display', () => {
     expect(sats(1000)).toBe('1');
     expect(sats(4242)).toBe('4.242');
     expect(sats(1500)).toBe('1.5');
-    expect(sats(482_500_000)).toBe('482\u2009500');
+    expect(sats(482_500_000)).toBe('482\u202f500');
     expect(satUnit(1000)).toBe('sat');
     expect(satUnit(2000)).toBe('sats');
     expect(satUnit(1500)).toBe('sats');

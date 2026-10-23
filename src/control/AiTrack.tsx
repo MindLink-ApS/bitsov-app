@@ -906,7 +906,7 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
                 <dt>Waiting to deliver</dt>
                 <dd class="sats">{value(h().pending_deliveries) ?? 'unavailable'}</dd>
                 <dt>Block height</dt>
-                <dd class="sats">{value(h().block_height) === null ? 'unavailable' : satsWhole(value(h().block_height)!)}</dd>
+                <dd class="sats">{value(h().block_height) === null ? 'unavailable' : satsWhole(value(h().block_height)!, true)}</dd>
                 <dt>Lightning</dt>
                 <dd>{h().lightning_backend}{h().lightning_payment_capable ? ', can pay' : ', cannot pay'}</dd>
                 <dt>Uptime</dt>
@@ -929,7 +929,7 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
                 {(b) => (
                   <>
                     <span class="sats big" data-ai-balance>
-                      {value(b().wallet_balance) === null ? fig(b().wallet_balance) : amount(value(b().wallet_balance)!)}
+                      {value(b().wallet_balance) === null ? fig(b().wallet_balance) : amount(value(b().wallet_balance)!, true)}
                     </span>
                     <dl class="facts">
                       <dt>Lightning, yours</dt>
@@ -984,10 +984,10 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
               </div>
               <div class="row ai-totals">
                 <span>
-                  <span class="label">Spent</span> <span class="sats">{value(r().sent_total) === null ? fig(r().sent_total) : amount(value(r().sent_total)!)}</span>
+                  <span class="label">Spent</span> <span class="sats">{value(r().sent_total) === null ? fig(r().sent_total) : amount(value(r().sent_total)!, true)}</span>
                 </span>
                 <span>
-                  <span class="label">Received</span> <span class="sats">{value(r().received_total) === null ? fig(r().received_total) : amount(value(r().received_total)!)}</span>
+                  <span class="label">Received</span> <span class="sats">{value(r().received_total) === null ? fig(r().received_total) : amount(value(r().received_total)!, true)}</span>
                 </span>
               </div>
               <ul class="ai-payments">
@@ -1036,7 +1036,7 @@ function ProposalCard(props: { p: Proposal; onPrefill: (p: Proposal) => void }) 
       </Show>
       <Show when={props.p.kind !== 'message'}>
         <span class="sats big">
-          {amount((props.p as { sats: number }).sats * 1000)}
+          {amount((props.p as { sats: number }).sats * 1000, true)}
         </span>
       </Show>
       <span class="hint">

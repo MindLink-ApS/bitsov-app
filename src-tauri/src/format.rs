@@ -7,7 +7,7 @@ pub fn amount(msat: u64) -> String {
     else { format!("{msat} msat") }
 }
 
-/// Native approval prompts use the same locale-independent U+2009 grouping
+/// Native approval prompts use the same locale-independent U+202F grouping
 /// as the renderer, retaining integer msat for every fractional sat amount.
 pub fn grouped_amount(msat: u64) -> String {
     let text = amount(msat);
@@ -15,7 +15,7 @@ pub fn grouped_amount(msat: u64) -> String {
     let mut grouped = String::new();
     for (i, c) in digits.chars().enumerate() {
         if i > 0 && (digits.len() - i) % 3 == 0 {
-            grouped.push('\u{2009}');
+            grouped.push('\u{202f}');
         }
         grouped.push(c);
     }

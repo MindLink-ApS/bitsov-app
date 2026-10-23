@@ -160,14 +160,20 @@ The test-only builder now substitutes only expiry fields; no production
 validation changed. This regression adds one library test, bringing the app
 count to 1,093. Verification was restarted again on the final patch.
 
-The #318 amount-spacing P3 is applied through the shared renderer digit-group
-formatter: display amounts now use U+2009 thin spaces, including approval
-summaries, and the native grouped formatter uses the same separator. Display
-fixtures and assertions were updated; the shared fixture request views and
-`approval_message` bytes are identical to `77e87cc`. Existing host/renderer parity
-and signing tests cover the display/signature boundary. The input parser still
-accepts both the old U+202F and new U+2009 grouping. `Shell.tsx` already has no
-unused `appPlatform` import, so that P3 required no change.
+The #318 amount-spacing change is limited to display-only `groupDigits`
+formatting explicitly opted into by `.sats` containers (`white-space: nowrap`).
+General amount text, approval summaries, and native Touch ID prompts retain
+U+202F narrow no-break grouping. The shared approval fixture is byte-identical
+to main; Rust and TypeScript tests assert the prompt bytes, including the
+native contact-intent path. The input parser accepts both U+202F and U+2009.
+A rendered-text regression checks that U+2009 amounts are inside nowrap
+containers across English/Danish shell panels and both denominations.
+
+Notification review preserves busy Settings and Wallet panels. Their activity
+scopes cover money actions, device setup, starter requests, profile publishing,
+and node switching, and still propagate to the app-wide pairing guard. The
+clicked request remains selected and opens when the panel is closed; idle
+panels can close immediately. Regression tests cover busy and idle navigation.
 
 Final follow-up checks: `npx tsc --noEmit` passed; `npx vitest run`
 passed all 2,141 tests in 114 files (with Solid disposal warnings).
@@ -189,3 +195,17 @@ sandbox-blocked attempt above are excluded. Run 16 used the carried-over patch;
 runs 17 and 18 also include the U+2009 native display changes. The supervisor
 handshake and identifier-collision fixture fix were unchanged throughout.
 No `cargo fmt` or installed-app smoke test was run in this follow-up.
+
+## PR #320 fix round
+
+- Restored main's U+202F consent formatting and unchanged shared fixture.
+- `npx tsc --noEmit`: passed.
+- `npx vitest run`: 119 files, 2,182 tests passed. The subsequent notification
+  regression run also passed the two added idle-panel cases (26 tests across
+  notification and activity-scope suites). Existing Solid root warnings remain.
+- `TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --lib`: 1,093 app
+  tests and 12 FFI tests passed; one Touch ID enrollment test ignored.
+- `TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --test '*' --no-fail-fast`:
+  all 88 integration tests passed. Rust tests used unrestricted local sockets;
+  the first sandboxed attempt could not bind test listeners.
+- No `cargo fmt` or installed-app notification smoke test was run.

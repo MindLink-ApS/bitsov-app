@@ -138,7 +138,7 @@ function OwnerApprovalSheet(props: Props & { view: ApprovalView; count: number; 
       <Show when={!outcome()?.ok && props.count > 1}><p class="hint" data-owner-approval-queue>{t('ownerApprovalQueue', props.count)}</p></Show>
       <h2 id={title}>{t('ownerApprovalTitle')}</h2>
       <p class="hint">{t('ownerApprovalRequesterShort', shortKey(props.view.client_pubkey))}</p>
-      {/* The host reason is intentionally verbatim, including its language and U+2009 amounts. */}
+      {/* The host reason is intentionally verbatim, including its language and U+202F amounts. */}
       <p class="owner-sheet-terms" data-owner-sheet-terms>{approvalReason(props.view)}</p>
       <Show when={language() === 'da'}><p class="hint">{t('ownerApprovalTermsLanguage')}</p></Show>
       <details class="quiet-detail"><summary>{t('ownerApprovalSignedMessage')}</summary>
