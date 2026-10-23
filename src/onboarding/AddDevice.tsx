@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 import { isMobilePlatform } from '../platform';
 import { createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js';
 import { qrSvg } from '../qr';
@@ -13,7 +14,7 @@ export type JoinView = {state:'idle'|'done'; second_device?:boolean} | {state:'w
 function errorText(error: unknown): string {
   if (typeof error === 'string') return error;
   if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') return error.message;
-  return 'Could not reach your node. Check the connection and try again.';
+  return t('obNodeUnreachable');
 }
 
 /**
@@ -52,18 +53,18 @@ export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobil
   });
   onCleanup(() => { alive = false; });
   return <section class="panel add-device" data-add-device>
-    <h2>Devices</h2>
+    <h2>{t('obDevices')}</h2>
     <Switch>
-      <Match when={!view() && !error()}><p role="status">Checking…</p></Match>
+      <Match when={!view() && !error()}><p role="status">{t('obChecking')}</p></Match>
       <Match when={view()?.state === 'unsupported'}>
-        <Show when={props.local} fallback={<p data-add-device-unsupported="node">Your node does not offer adding devices yet. A newer version of your node adds it.</p>}>
-          <p data-add-device-unsupported="local">This Mac runs its own node, and only this Mac can use it. To use BitSov on your phone as well, run your node on a computer or server that stays on (or one someone runs for you), and connect this Mac and your phone to it.</p>
+        <Show when={props.local} fallback={<p data-add-device-unsupported="node">{t('obDevicesUnsupported')}</p>}>
+          <p data-add-device-unsupported="local">{t('obLocalDevicesOnly')}</p>
         </Show>
       </Match>
       <Match when={view()?.state === 'ready'}>
-        <Show when={(view() as {owner:boolean}).owner} fallback={<p>Use an enrolled owner device to add another device. An ordinary pairing cannot approve it.</p>}>
-          <p>Add another device to your home node. Keep this owner device available while you compare the words.</p>
-          <button class="primary" disabled={busy()} onClick={() => void run({action:'mint'})}>{busy() ? 'Creating ticket…' : 'Add a device'}</button>
+        <Show when={(view() as {owner:boolean}).owner} fallback={<p>{t('obUseOwnerDevice')}</p>}>
+          <p>{t('obAddDeviceHint')}</p>
+          <button class="primary" disabled={busy()} onClick={() => void run({action:'mint'})}>{busy() ? t('obCreatingTicket') : t('obAddDevice')}</button>
         </Show>
       </Match>
       <Match when={ticket()}><>
@@ -72,34 +73,34 @@ export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobil
         <PairSteps secondDevice={ticket()!.second_device} current={ticket()!.pending.length > 0 ? 2 : ticket()!.uri && ticket()!.expires_at > now() ? 0 : null} />
         <Show when={ticket()!.pending.length === 0}>
           <Show when={ticket()!.uri && ticket()!.expires_at > now()} fallback={<p role="status">{ticket()!.expires_at <= now()
-            ? 'This ticket expired. If it was already scanned, finish enrollment on the new device. Otherwise close this ticket and create a new one.'
-            : 'This ticket was used. Check whether the new device was added or its request ended. Close this ticket before starting again.'}</p>}>
-            <p data-ticket-where>On the new device, open BitSov and choose to connect to your node (on a computer: open “Advanced: use a node you already run at home”), then scan or paste this ticket. It works once and expires in five minutes.</p>
-            <Show when={!ticket()!.second_device}><p class="hint" data-ticket-claim-warning>The new device then asks for your node’s 18-character claim code. Have it ready: it is shown at your node’s owner console with <code>konsensus claim-code --show</code>, and a BitSov box also has it on its sticker.</p></Show>
-            <Show when={qr()} fallback={<p class="hint">This ticket is too large for a QR code. Copy and paste the pairing ticket below on the new device.</p>}>{q => <svg class="qr" viewBox={`0 0 ${q().extent} ${q().extent}`} shape-rendering="crispEdges" role="img" aria-label="Add a device pairing ticket">
+            ? t('obTicketExpired')
+            : t('obTicketUsed')}</p>}>
+            <p data-ticket-where>{t('obTicketWhere')}</p>
+            <Show when={!ticket()!.second_device}><p class="hint" data-ticket-claim-warning>{t('obClaimWarningBefore')}{' '}<code>konsensus claim-code --show</code>{t('obClaimStickerAfter')}</p></Show>
+            <Show when={qr()} fallback={<p class="hint">{t('obTicketTooLarge')}</p>}>{q => <svg class="qr" viewBox={`0 0 ${q().extent} ${q().extent}`} shape-rendering="crispEdges" role="img" aria-label={t('obTicketQr')}>
               <rect width={q().extent} height={q().extent} fill="#fff" /><path d={q().path} fill="#000" />
             </svg>}</Show>
-            <label class="ticket-label">Pairing ticket<textarea readOnly value={ticket()!.uri} aria-label="Pairing ticket" spellcheck={false} /></label>
-            <p role="status">Waiting for the new device…</p>
+            <label class="ticket-label">{t('obPairingTicket')}<textarea readOnly value={ticket()!.uri} aria-label={t('obPairingTicket')} spellcheck={false} /></label>
+            <p role="status">{t('obWaitingDevice')}</p>
           </Show>
         </Show>
         <For each={ticket()!.pending}>{p => <div class="device-comparison">
-          <h3>Compare with <bdi>{p.name || 'the new device'}</bdi></h3>
-          <p>Place both devices next to each other. All four words must match in this order.</p>
+          <h3>{t('obCompareWith')}{' '}<bdi>{p.name || t('obNewDevice')}</bdi></h3>
+          <p>{t('obCompareOrder')}</p>
           <PairWords words={p.words} />
           <div class="form-actions">
-            <button class="primary" disabled={busy() || p.expires_at <= now() || p.can_approve === false || !!error()} onClick={() => void run({action:'approve',op_id:p.op_id})}>Approve with {(props.mobile ?? isMobilePlatform()) ? 'biometrics' : 'Touch ID'}</button>
-            <button class="quiet" disabled={busy()} onClick={() => void run(ticket()!.second_device ? {action:'reject',op_id:p.op_id} : {action:'cancel'})}>Words differ</button>
+            <button class="primary" disabled={busy() || p.expires_at <= now() || p.can_approve === false || !!error()} onClick={() => void run({action:'approve',op_id:p.op_id})}>{t('obApproveWith')}{' '}{(props.mobile ?? isMobilePlatform()) ? t('obBiometrics') : 'Touch ID'}</button>
+            <button class="quiet" disabled={busy()} onClick={() => void run(ticket()!.second_device ? {action:'reject',op_id:p.op_id} : {action:'cancel'})}>{t('obWordsDiffer')}</button>
           </div>
-          <Show when={p.can_approve === false}><p class="hint">Approve on the device that showed the QR.</p></Show>
-          <Show when={!ticket()!.second_device}><p class="hint">If they differ, cancel on the new device too. Do not approve.</p></Show>
+          <Show when={p.can_approve === false}><p class="hint">{t('obApproveQrDevice')}</p></Show>
+          <Show when={!ticket()!.second_device}><p class="hint">{t('obCancelBothDevices')}</p></Show>
         </div>}</For>
-        <button class="quiet" disabled={busy()} onClick={() => void run({action:'cancel'})}>Close ticket</button>
+        <button class="quiet" disabled={busy()} onClick={() => void run({action:'cancel'})}>{t('obCloseTicket')}</button>
       </></Match>
-      <Match when={view()?.state === 'rejected'}><p role="status">Stopped. Nothing was added.</p></Match>
-      <Match when={view()?.state === 'done'}><PairSteps secondDevice={secondDevice()} current={3} /><p class="ok-note" role="status">Device added. Keep another owner device available. Enrollment does not transfer your node’s unlock password.</p></Match>
+      <Match when={view()?.state === 'rejected'}><p role="status">{t('obNothingAdded')}</p></Match>
+      <Match when={view()?.state === 'done'}><PairSteps secondDevice={secondDevice()} current={3} /><p class="ok-note" role="status">{t('obDeviceAddedKeepOwner')}</p></Match>
     </Switch>
-    <Show when={error()}><p class="err-note" role="alert">{error()}</p><button disabled={busy()} onClick={() => void run({action:ticket() ? 'poll' : 'status'})}>Try again</button></Show>
+    <Show when={error()}><p class="err-note" role="alert">{error()}</p><button disabled={busy()} onClick={() => void run({action:ticket() ? 'poll' : 'status'})}>{t('obTryAgain')}</button></Show>
   </section>;
 }
 
@@ -126,31 +127,31 @@ export function JoinDevice(props:{api:(input:JoinInput)=>Promise<JoinView>; mobi
   });
   onCleanup(() => { alive = false; if(claim) claim.value = ''; });
   return <section class="panel add-device" data-join-device>
-    <h2>Add this device</h2>
+    <h2>{t('obAddThisDevice')}</h2>
     <Switch>
-      <Match when={!view() && !error()}><p role="status">Checking…</p></Match>
+      <Match when={!view() && !error()}><p role="status">{t('obChecking')}</p></Match>
       <Match when={view()?.state === 'idle'}>
         <Show when={(view() as {second_device?:boolean}).second_device} fallback={<>
         {/* New device: the ticket was scanned or pasted to get here; next the claim code. */}
         <PairSteps secondDevice={secondDevice()} current={1} />
-        <p>After scanning or pasting the ticket, enter your node’s 18-character claim code: it is shown at your node’s owner console with <code>konsensus claim-code --show</code>, and a BitSov box also has it on its sticker. A phone can be your first owner device. For later devices, compare the words and approve from an enrolled owner device.</p>
+        <p>{t('obClaimEntryBefore')}{' '}<code>konsensus claim-code --show</code>{t('obClaimEntryAfter')}</p>
         <form onSubmit={event => { event.preventDefault(); const value = claim.value; claim.value = ''; void run({action:'start',claim_code:value}); }}>
-          <label>Claim code<input ref={claim} name="claim_code" type="password" autocomplete="off" spellcheck={false} required disabled={busy()} /></label>
-          <button class="primary" disabled={busy()}>{busy() ? 'Preparing comparison…' : 'Show comparison words'}</button>
+          <label>{t('obClaimCode')}<input ref={claim} name="claim_code" type="password" autocomplete="off" spellcheck={false} required disabled={busy()} /></label>
+          <button class="primary" disabled={busy()}>{busy() ? t('obPreparingComparison') : t('obShowComparison')}</button>
         </form>
         </>}>
-          <p>Keep your owner device nearby. Compare all four words there and approve with its biometrics.</p>
-          <button class="primary" disabled={busy()} onClick={() => void run({action:'start_second'})}>{busy() ? 'Preparing comparison…' : 'Show comparison words'}</button>
+          <p>{t('obKeepOwnerNearby')}</p>
+          <button class="primary" disabled={busy()} onClick={() => void run({action:'start_second'})}>{busy() ? t('obPreparingComparison') : t('obShowComparison')}</button>
         </Show>
       </Match>
       <Match when={waiting()}>{v => <>
         <PairSteps secondDevice={secondDevice()} current={2} />
         <PairWords words={v().words} />
-        <p role="status"><Show when={secondDevice()} fallback={<>Compare these words with your node’s owner console and approve there, or compare with an enrolled owner device and approve there with {(props.mobile ?? isMobilePlatform()) ? 'biometrics' : 'Touch ID'}.</>}>Approve on your other device. Compare all four words there and approve with its biometrics.</Show></p>
-        <button class="quiet" disabled={busy()} onClick={() => void run({action:'cancel'})}>Words differ · Cancel</button>
+        <p role="status"><Show when={secondDevice()} fallback={<>{t('obCompareConsoleBefore')}{' '}{(props.mobile ?? isMobilePlatform()) ? t('obBiometrics') : 'Touch ID'}.</>}>{t('obApproveOtherDevice')}</Show></p>
+        <button class="quiet" disabled={busy()} onClick={() => void run({action:'cancel'})}>{t('obWordsDifferCancel')}</button>
       </>}</Match>
-      <Match when={view()?.state === 'done'}><PairSteps secondDevice={secondDevice()} current={3} /><p class="ok-note" role="status">Device added. Your node’s unlock password was not transferred. Keep access to your node’s owner console.</p></Match>
+      <Match when={view()?.state === 'done'}><PairSteps secondDevice={secondDevice()} current={3} /><p class="ok-note" role="status">{t('obDeviceAddedNoPassword')}</p></Match>
     </Switch>
-    <Show when={error()}><p class="err-note" role="alert">{error()}</p><button disabled={busy()} onClick={() => void run({action:'status'})}>Check again</button><Show when={!waiting()}><button disabled={busy()} onClick={() => void run({action:'cancel'})}>Cancel pending setup</button></Show></Show>
+    <Show when={error()}><p class="err-note" role="alert">{error()}</p><button disabled={busy()} onClick={() => void run({action:'status'})}>{t('obCheckAgain')}</button><Show when={!waiting()}><button disabled={busy()} onClick={() => void run({action:'cancel'})}>{t('obCancelPendingSetup')}</button></Show></Show>
   </section>;
 }

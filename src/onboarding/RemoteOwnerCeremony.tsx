@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 import { deviceWord } from '../platform';
 import { BoxIllustration } from './BoxIllustration';
 import { PairWords } from './PairWords';
@@ -48,7 +49,7 @@ export function RemoteOwnerCeremony(props: {
     clearTimeout(expiry);
     expiry = setTimeout(() => {
       clear(); clearTimeout(poll); setStep('uncertain');
-      setError('Setup expired. Cancel this attempt and open a new link from the box page.');
+      setError(t('obRemoteSetupExpired'));
     }, Math.max(0, Math.min(15 * 60 * 1000, at * 1000 - Date.now())));
   }
   async function run(input: SetupInput) {
@@ -73,7 +74,7 @@ export function RemoteOwnerCeremony(props: {
           setIndices(reply.backup_check); setStep('phrase'); expire(reply.expires_at); break;
         case 'backup_check':
           clear(); setIndices(reply.backup_check); setStep('backup');
-          setError('The backup words did not match. Check your written backup and enter them again.'); break;
+          setError(t('obBackupMismatch')); break;
         case 'waiting_for_box_approval':
         case 'starting':
           if (reply.state === 'starting') { clearTimeout(expiry); approvalPollDelay = 2000; }
@@ -97,56 +98,56 @@ export function RemoteOwnerCeremony(props: {
     const backup_words = [...root.querySelectorAll<HTMLInputElement>('[data-backup]')].map(i => i.value.trim().toLowerCase());
     void run({ action: 'finalize', backup_words });
   };
-  return <section ref={root} class="panel" aria-label="Set up your BitSov box" data-remote-owner>
+  return <section ref={root} class="panel" aria-label={t('obSetupBox')} data-remote-owner>
     <BoxIllustration />
-    <h2>Set up your BitSov box</h2>
+    <h2>{t('obSetupBox')}</h2>
     <Show when={props.phone && step() === 'start'}>
       {/* No password form here: the phone host cannot set up a box, and it has no Touch ID. */}
-      <p data-remote-owner-phone>Setting up a new box needs BitSov on your Mac for now. Finish setup there, then add this {deviceWord() === 'iPad' ? 'iPad' : 'phone'} from the Mac: Settings → Devices → Add a device.</p>
+      <p data-remote-owner-phone>{t('obBoxNeedsMac', deviceWord() === 'iPad' ? 'iPad' : t('obPhone'))}</p>
     </Show>
     <Show when={!props.phone && step() === 'start'}>
-      <p>Choose a password once. This Mac will keep it protected by Touch ID so you can unlock your box after a restart.</p>
-      <label for="box-password">Box password</label>
+      <p>{t('obChooseBoxPassword')}</p>
+      <label for="box-password">{t('obBoxPassword')}</label>
       <input id="box-password" type="password" autocomplete="new-password" disabled={busy()} />
-      <label for="box-claim">Physical claim code</label>
+      <label for="box-claim">{t('obPhysicalClaim')}</label>
       <input id="box-claim" type="password" autocomplete="off" spellcheck={false} disabled={busy()} />
-      <p>Use the code from the box sticker or trusted local console. Do not use a code supplied by the box page.</p>
+      <p>{t('obTrustedClaim')}</p>
       <button disabled={busy()} onClick={() => void run({ action: 'create',
         password: root.querySelector<HTMLInputElement>('#box-password')!.value,
         claim_code: root.querySelector<HTMLInputElement>('#box-claim')!.value,
-      })}>Set up this box</button>
+      })}>{t('obSetupThisBox')}</button>
     </Show>
     <Show when={step() === 'compare'}>
       <PairWords words={sas()} />
-      <h3>Do these match the box page?</h3>
-      <p>Compare all four words, then tap Approve on the box page. These are comparison words, not your recovery phrase.</p>
-      <button disabled={busy()} onClick={() => void run({ action: 'match' })}>Match (Touch ID)</button>
-      <button class="quiet" disabled={busy()} onClick={cancel}>Words differ</button>
+      <h3>{t('obMatchBoxPage')}</h3>
+      <p>{t('obCompareBoxWords')}</p>
+      <button disabled={busy()} onClick={() => void run({ action: 'match' })}>{t('obMatchTouchId')}</button>
+      <button class="quiet" disabled={busy()} onClick={cancel}>{t('obWordsDiffer')}</button>
     </Show>
     <Show when={step() === 'phrase'}>
-      <h3>Write down your recovery phrase</h3>
-      <p>Keep it private and offline. This is its only display.</p>
+      <h3>{t('obWriteRecovery')}</h3>
+      <p>{t('obKeepRecoveryPrivate')}</p>
       <p class="recovery-phrase" style={{ 'user-select': 'none', 'overflow-wrap': 'anywhere' }}>{phrase()}</p>
-      <button disabled={busy()} onClick={() => { setPhrase(''); setStep('backup'); }}>I wrote it down</button>
+      <button disabled={busy()} onClick={() => { setPhrase(''); setStep('backup'); }}>{t('obWroteItDown')}</button>
     </Show>
     <Show when={step() === 'backup'}>
-      <p>Enter these three words from your written backup.</p>
+      <p>{t('obEnterThree')}</p>
       <For each={indices()}>{(index, i) => <div>
-        <label for={`remote-backup-${i()}`}>Word {index + 1}</label>
+        <label for={`remote-backup-${i()}`}>{t('obBackupWord', index + 1)}</label>
         <input id={`remote-backup-${i()}`} data-backup type="password" autocomplete="off" autocapitalize="none" spellcheck={false} disabled={busy()} />
       </div>}</For>
-      <button disabled={busy()} onClick={submit}>Confirm backup</button>
+      <button disabled={busy()} onClick={submit}>{t('obConfirmBackup')}</button>
     </Show>
-    <Show when={step() === 'waiting_for_box_approval'}><p role="status">Waiting for box approval. Tap Approve on the box page after comparing the four words.</p></Show>
-    <Show when={step() === 'starting'}><p role="status">Starting your box… Keep this app open while the box restarts.</p></Show>
-    <Show when={step() === 'done'}><p>Your box is ready.</p></Show>
-    <Show when={step() === 'words_differ'}><p role="alert">Words differ — setup cancelled. Check the physical claim code and open a fresh setup link from the box page.</p></Show>
+    <Show when={step() === 'waiting_for_box_approval'}><p role="status">{t('obWaitingBoxApproval')}</p></Show>
+    <Show when={step() === 'starting'}><p role="status">{t('obStartingBox')}</p></Show>
+    <Show when={step() === 'done'}><p>{t('obBoxReady')}</p></Show>
+    <Show when={step() === 'words_differ'}><p role="alert">{t('obDifferentWordsCancelled')}</p></Show>
     <Show when={step() === 'uncertain'}>
-      <p>Setup is not confirmed. Check the box page before continuing.</p>
-      <button disabled={busy()} onClick={() => void run({ action: 'poll' })}>Check box and continue</button>
+      <p>{t('obBoxSetupUncertain')}</p>
+      <button disabled={busy()} onClick={() => void run({ action: 'poll' })}>{t('obCheckBoxContinue')}</button>
     </Show>
     <Show when={!['start','compare','done','words_differ','starting'].includes(step())}>
-      <button class="quiet" disabled={busy()} onClick={cancel}>Cancel setup</button>
+      <button class="quiet" disabled={busy()} onClick={cancel}>{t('obCancelSetup')}</button>
     </Show>
     <Show when={error()}><p role="alert">{error()}</p></Show>
   </section>;

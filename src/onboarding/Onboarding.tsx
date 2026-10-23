@@ -1,3 +1,4 @@
+import { t, type CopyKey } from '../i18n';
 import { deviceWord, isMobilePlatform } from '../platform';
 import type { JoinInput, JoinView } from './AddDevice';
 import { BoxIllustration } from './BoxIllustration';
@@ -6,7 +7,7 @@ import { DeviceApprovals } from './DeviceApprovals';
 import { SoftError } from '../control/SoftError';
 import { createEffect, createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
 import { Dynamic } from 'solid-js/web';
-import { connectionErrorDetail, firstRunGuidance, normalizePairingLink, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
+import { connectionErrorDetail, normalizePairingLink, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
 import { usePairingActivity } from '../pairingActivity';
@@ -16,19 +17,19 @@ import { usePairingActivity } from '../pairingActivity';
 // pairing — in the sidecar deployment this app reads the node's stdout by construction.
 
 const STATUS_TEXT = {
-  todo: '',
-  active: 'now',
-  done: 'done',
-  failed: 'failed',
-  skipped: 'not available on this node',
-  blocked: 'not available here',
-} as const;
+  todo: null,
+  active: 'obNow',
+  done: 'obDone',
+  failed: 'obFailed',
+  skipped: 'obUnavailableNode',
+  blocked: 'obUnavailableHere',
+} satisfies Record<string, CopyKey | null>;
 
 export type NodeTarget = 'local' | 'network' | 'cloud';
 
 /** Three stages the owner sees; the four host steps map onto them. */
 export type Stage = 'node' | 'identity' | 'fund';
-const STEP_LABEL = { node: 'Your node', pair: 'Pair this app', identity: 'Your identity', fund: 'Add sats' } as const;
+const STEP_LABEL = { node: 'obYourNode', pair: 'obPairApp', identity: 'obYourIdentity', fund: 'obAddSats' } as const;
 
 export function onboardingStage(steps: { id: string; status: string }[]): Stage {
   const by = (id: string) => steps.find((s) => s.id === id)?.status;
@@ -76,7 +77,7 @@ export function Onboarding(props: {
   // On a phone the only target is your node (there is no "This Mac").
   const phone = () => props.phone ?? props.mobile ?? isMobilePlatform();
   const mobileBiometrics = () => props.mobile ?? isMobilePlatform();
-  const device = () => deviceWord() === 'iPad' ? 'iPad' : 'phone';
+  const device = () => deviceWord() === 'iPad' ? 'iPad' : t('obPhone');
   const [internalTarget, setInternalTarget] = createSignal<NodeTarget>(phone() ? 'network' : 'local');
   const target = () => props.selectedTarget ?? internalTarget();
   const setTarget = (t: NodeTarget) => {
@@ -134,7 +135,7 @@ export function Onboarding(props: {
       setPreviewing(true);
       try {
         const link = normalizePairingLink(remoteLink());
-        if (!props.onPreviewRemote) throw new Error('Pairing preview is unavailable. Nothing was saved.');
+        if (!props.onPreviewRemote) throw new Error(t('obPreviewUnavailable'));
         const view = await props.onPreviewRemote(link);
         // Keep the normalized, parsed ticket as the sole confirmation authority.
         setRemoteLink(link);
@@ -159,7 +160,7 @@ export function Onboarding(props: {
     // inbox receipts are take-once, so a retry must not depend on another tap.
     setImporting(true);
     try {
-      if (!props.onImportRemote) throw new Error('Remote access import is unavailable.');
+      if (!props.onImportRemote) throw new Error(t('obImportUnavailable'));
       const result = await props.onImportRemote(reviewed.link);
       setRemoteLink('');
       setPreview(null);
@@ -182,7 +183,7 @@ export function Onboarding(props: {
     try { prefill(await props.onScanRemote()); }
     catch {
       // Native errors may contain scanner input. Never display or log them.
-      setImportError('Scanning did not complete. Allow camera access to scan a pairing QR code, or paste the link instead.');
+      setImportError(t('obScanFailed'));
     } finally { setScanning(false); }
   };
 
@@ -201,22 +202,22 @@ export function Onboarding(props: {
   };
 
   return (
-    <section class="onboarding" aria-label={props.formOnly ? 'Pair another node' : 'First-run setup'} data-stage={stage()}>
+    <section class="onboarding" aria-label={props.formOnly ? t('obPairAnother') : t('obFirstRun')} data-stage={stage()}>
       <Show when={!props.formOnly}>
-      <ol class="steps stepper" aria-label="Setup progress">
+      <ol class="steps stepper" aria-label={t('obSetupProgress')}>
         <For each={steps()}>
           {(step) => (
             <li class={`step ${step.status}`} classList={{ joined: step.id === 'pair' && !phone() }} data-step={step.id} data-status={step.status}>
               <span class="pip" aria-hidden="true" />
               {/* Node and pair read as one stage: two pips, one label after both. */}
               <span class="step-label" classList={{ 'sr-only': step.id === 'node' }}>
-                <Show when={step.id === 'pair'}><span class="sr-only">{STEP_LABEL.pair}: </span></Show>
-                {step.id === 'pair' ? STEP_LABEL.node : step.id === 'node' ? 'Start node' : STEP_LABEL[step.id]}
-                <Show when={step.id === 'fund'}><span class="step-optional"> (optional)</span></Show>
+                <Show when={step.id === 'pair'}><span class="sr-only">{t(STEP_LABEL.pair)}: </span></Show>
+                {t(step.id === 'pair' ? STEP_LABEL.node : step.id === 'node' ? 'obStartNode' : STEP_LABEL[step.id])}
+                <Show when={step.id === 'fund'}><span class="step-optional"> {t('obOptional')}</span></Show>
               </span>
               <Show when={STATUS_TEXT[step.status]}>
                 {/* Progress pips say now/done; waiting and failure are said in words. */}
-                <span class="step-status" classList={{ 'sr-only': !['failed', 'blocked', 'skipped'].includes(step.status) }}>{STATUS_TEXT[step.status]}</span>
+                <span class="step-status" classList={{ 'sr-only': !['failed', 'blocked', 'skipped'].includes(step.status) }}>{t(STATUS_TEXT[step.status]!)}</span>
               </Show>
             </li>
           )}
@@ -228,29 +229,29 @@ export function Onboarding(props: {
         fallback={
           <header class="ob-head" data-ob-head="trust">
             {/* Named like its step: the stepper above says "Your identity". */}
-            <h1>Your identity</h1>
+            <h1>{t('obYourIdentity')}</h1>
             <Show
               when={!props.pairing().bootstrap}
-              fallback={<Show when={props.status().local_owner && !props.pairing().remote} fallback={<p class="lede">Your node has no identity yet. {props.pairing().remote ? "Restore it at your node before adding sats." : "Restore your existing identity on this Mac before adding sats."} Creating a new identity from this screen is not available yet.</p>}><p class="lede">Create your identity below, write down its recovery phrase, and confirm this Mac with Touch ID before adding sats.</p></Show>}
+              fallback={<Show when={props.status().local_owner && !props.pairing().remote} fallback={<p class="lede">{t('obNoIdentity')}{' '}{props.pairing().remote ? t('obRestoreAtNode') : t('obRestoreOnMac')} {t('obCreateNotAvailable')}</p>}><p class="lede">{t('obCreateIdentityBelow')}</p></Show>}
             >
-              <p class="lede">Read how your node is trusted. If you already have a BitSov identity, restore it now, before any sats arrive.</p>
+              <p class="lede">{t('obReadTrust')}</p>
             </Show>
           </header>
         }
       >
         <header class="ob-head" data-ob-head="node">
           <Show when={target() !== 'local'}><BoxIllustration /></Show>
-          <h1>{phone() ? `Connect this ${device()} to your node` : 'Where should your node run?'}</h1>
+          <h1>{phone() ? t('obConnectDevice', device()) : t('obWhereNode')}</h1>
           <p class="lede">{phone()
-            ? `Every message you send is a small bitcoin payment to the person you are writing to. Your node makes those payments; this ${device()} connects to it.`
-            : 'Every message you send is a small bitcoin payment to the person you are writing to. Your node makes those payments, so it needs a home first.'}</p>
+            ? t('obDevicePayments', device())
+            : t('obPaymentsNeedHome')}</p>
         </header>
       </Show>
 
       {/* Node location: this Mac first; compact once the node is up */}
       <div class="node-target-section" classList={{ compact: stage() !== 'node' }}>
-        <h2 class="node-target-title" classList={{ 'sr-only': stage() === 'node' }}>Where your node runs</h2>
-        <div class="node-target-grid" role="radiogroup" aria-label="Choose node location">
+        <h2 class="node-target-title" classList={{ 'sr-only': stage() === 'node' }}>{t('obNodeLocation')}</h2>
+        <div class="node-target-grid" role="radiogroup" aria-label={t('obChooseLocation')}>
           {/* Option 1: This computer (local node). A phone has no node of its own to run. */}
           <Show when={!phone()}>
           <button
@@ -271,14 +272,14 @@ export function Onboarding(props: {
             </div>
             <div class="target-info">
               <div class="target-head">
-                <strong>This Mac</strong>
+                <strong>{t('obThisMac')}</strong>
                 <div class="row" style={{ width: 'auto', gap: 'var(--s-2)' }}>
-                  <span class="target-badge ok">Keys on this Mac</span>
+                  <span class="target-badge ok">{t('obKeysOnMac')}</span>
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>BitSov runs your node on this Mac. Your keys stay here. To receive messages and payments, this Mac must stay awake and BitSov must stay open.</p>
-              <p class="hint" data-local-only>Only this Mac can use it. To use BitSov on your phone too, choose a node you run on a computer or server that stays on.</p>
+              <p>{t('obMacNodeHint')}</p>
+              <p class="hint" data-local-only>{t('obMacOnlyHint')}</p>
             </div>
           </button>
           </Show>
@@ -286,8 +287,8 @@ export function Onboarding(props: {
           {/* Joining from another owner device is a first-run path of its own: not hidden behind Advanced. */}
           <Show when={!phone() && stage() === 'node' && target() === 'local'}>
             <p class="hint" data-join-from-device>
-              Joining from another device?{' '}
-              <button type="button" class="link" data-join-open onClick={() => setTarget('network')}>Scan or paste its ticket</button>
+              {t('obJoiningAnotherDevice')}{' '}
+              <button type="button" class="link" data-join-open onClick={() => setTarget('network')}>{t('obScanPasteTicket')}</button>
             </p>
           </Show>
           {/* Once the node is up the choice is compact: both locations show as pills, no fold. */}
@@ -295,7 +296,7 @@ export function Onboarding(props: {
               <summary> makes WebKit add its own OS-language label ("Flere oplysninger"
               on a Danish phone) and lets the only choice be collapsed. */}
           <Dynamic component={phone() ? 'div' : 'details'} class="node-target-advanced" open={phone() ? undefined : target() !== 'local' || stage() !== 'node'}>
-            <Show when={!phone()}><summary>Advanced: use a node you already run at home</summary></Show>
+            <Show when={!phone()}><summary>{t('obAdvancedHomeNode')}</summary></Show>
           {/* A home node uses a remote pairing link. */}
           <button
             type="button"
@@ -316,12 +317,12 @@ export function Onboarding(props: {
             </div>
             <div class="target-info">
               <div class="target-head">
-                <strong>{phone() ? 'Your node' : 'Your computer at home'}</strong>
+                <strong>{phone() ? t('obYourNode') : t('obComputerAtHome')}</strong>
                 <div class="row" style={{ width: 'auto', gap: 'var(--s-2)' }}>
-                  <Show when={hostedBy()} fallback={<span class="target-badge">Pairing link</span>}>
+                  <Show when={hostedBy()} fallback={<span class="target-badge">{t('obPairingLink')}</span>}>
                     {(label) => (
-                      <span class="target-badge hosted-by" data-hosted-by title={`Hosted by ${label()}`}>
-                        Hosted by <bdi>{label()}</bdi>
+                      <span class="target-badge hosted-by" data-hosted-by title={t('obHostedByName', label())}>
+                        {t('obHostedBy')}{' '}<bdi>{label()}</bdi>
                       </span>
                     )}
                   </Show>
@@ -329,8 +330,8 @@ export function Onboarding(props: {
                 </div>
               </div>
               <p>{phone()
-                ? `A computer or server that stays on runs your node; its keys live there. ${props.onScanRemote ? 'Scan or paste' : 'Paste'} its pairing link to connect this ${device()}.`
-                : 'A computer you keep running at home can receive while this Mac is off. Its keys live on that computer. Paste its pairing link; it is saved for the next start.'}</p>
+                ? t('obHomeNodeConnect', props.onScanRemote ? t('obScanOrPaste') : t('obPaste'), device())
+                : t('obHomeComputerHint')}</p>
             </div>
           </button>
 
@@ -354,24 +355,24 @@ export function Onboarding(props: {
             </div>
             <div class="target-info">
               <div class="target-head">
-                <strong>Test node someone else runs (internal)</strong>
+                <strong>{t('obInternalTestNode')}</strong>
                 <div class="row" style={{ width: 'auto', gap: 'var(--s-2)' }}>
-                  <span class="target-badge">Pairing link</span>
+                  <span class="target-badge">{t('obPairingLink')}</span>
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
-              <p>Not your keys. Whoever runs this machine can spend its bitcoin and read its messages. For internal testing only.</p>
+              <p>{t('obTestNodeWarning')}</p>
             </div>
           </button>
           </Show>
         </div>
         <p class="hint connect-line">
-          {props.pairing().remote ? 'This app connects to your remote node.' : phone() ? `This ${device()} is not connected to a node yet.` : 'This app connects to the node on this Mac.'}
-          <Show when={!props.pairing().remote && target() !== 'local'}> {phone() ? `This ${device()} connects as soon as you save a pairing link.` : 'A saved pairing link takes effect at the next start.'}</Show>
+          {props.pairing().remote ? t('obConnectsRemote') : phone() ? t('obDeviceNotConnected', device()) : t('obConnectsMac')}
+          <Show when={!props.pairing().remote && target() !== 'local'}> {phone() ? t('obDeviceConnectsOnSave', device()) : t('obLinkNextStart')}</Show>
           <Show when={isEnrolled()}>
             {mobileBiometrics()
-              ? ` Biometrics on this ${device()} can approve a contact or budget.`
-              : ' Touch ID on this Mac can approve a contact or budget.'}
+              ? t('obDeviceApproves', device())
+              : t('obTouchIdContactBudget')}
           </Show>
         </p>
       </div>
@@ -395,22 +396,20 @@ export function Onboarding(props: {
                 </svg>
               </div>
               <div>
-                <h2>{props.pairing().remote ? 'Connecting to your node…' : 'Pairing this app with your node…'}</h2>
-                <p>Establishing an authenticated pairing between this app and your node.</p>
+                <h2>{props.pairing().remote ? t('obConnectingNode') : t('obPairingNode')}</h2>
+                <p>{t('obEstablishingPairing')}</p>
                 <Show when={isEnrolled()}>
                   <p class="hint">
                     {mobileBiometrics()
-                      ? `Biometric approvals are already set up on this ${device()}; pairing does not create that key.`
-                      : 'Touch ID approvals are already set up on this Mac; pairing does not create that key.'}
+                      ? t('obBiometricsAlreadySetup', device())
+                      : t('obTouchIdAlreadySetup')}
                   </p>
                 </Show>
               </div>
             </div>
-            <Show when={!props.pairing().remote} fallback={<p class="hint">Waiting for the encrypted connection to your node.</p>}>
+            <Show when={!props.pairing().remote} fallback={<p class="hint">{t('obWaitingEncrypted')}</p>}>
               <p class="hint">
-                The app proves it can read your node’s data folder by signing a one-time
-                challenge the node wrote there.
-              </p>
+                {t('obFileChallenge')}</p>
             </Show>
           </div>
         </Match>
@@ -431,77 +430,69 @@ export function Onboarding(props: {
                 </div>
               }><BoxIllustration paired /></Show>
               <div class="touchid-text">
-                <h2>{props.pairing().remote ? 'Paired with your box' : 'This app is paired'}</h2>
+                <h2>{props.pairing().remote ? t('obPairedBox') : t('obAppIsPaired')}</h2>
                 <Show
                   when={isEnrolled()}
-                  fallback={<span class="touchid-status-pill" data-device-badge="none">{props.status().local_owner && !props.pairing().bootstrap ? "Owner device not enrolled" : "App paired"}</span>}
+                  fallback={<span class="touchid-status-pill" data-device-badge="none">{props.status().local_owner && !props.pairing().bootstrap ? t('obOwnerNotEnrolled') : t('obAppPaired')}</span>}
                 >
                   <span class="touchid-status-pill" data-device-badge="registered">
                     {mobileBiometrics()
-                      ? 'Biometric approvals enabled'
-                      : 'Touch ID Enrolled · Secure Enclave'}
+                      ? t('obBiometricsEnabled')
+                      : t('obTouchIdEnrolled')}
                   </span>
                 </Show>
                 <p class="hint" style={{ margin: '4px 0 0' }} data-pairing-plain>
-                  {props.pairing().remote ? 'This app reaches your box over an encrypted connection.' : 'This app talks only to the node on this Mac.'}
+                  {props.pairing().remote ? t('obEncryptedBox') : t('obOnlyMacNode')}
                 </p>
               </div>
             </div>
 
             {/* What this app may do stays in view (not behind the details). */}
             <p class="pairing-access">
-              Access: <strong>{scopeList(props.pairing().scopes)}</strong>
+              {t('obAccess')}{' '}<strong>{scopeList(props.pairing().scopes)}</strong>
             </p>
 
 
             <Show when={props.pairing().bootstrap}>
               <p class="hint" data-identity-free>
-                Your node is identity-free (fresh install). {props.status().local_owner && !props.pairing().remote ? "Create your identity with the owner setup below." : props.pairing().remote ? "Set up your box with the owner setup below." : "You can restore an existing identity on this Mac."} Nothing has been created yet.
-              </p>
+                {t('obFreshIdentity')}{' '}{props.status().local_owner && !props.pairing().remote ? t('obCreateOwnerBelow') : props.pairing().remote ? t('obSetupBoxBelow') : t('obCanRestoreMac')} {t('obNothingCreated')}</p>
             </Show>
 
             {/* Progressive disclosure: technical codes & tripwires kept under summary */}
             <details class="pairing-details">
-              <summary>Pairing verification & security details</summary>
+              <summary>{t('obPairingDetails')}</summary>
               <div class="pairing-details-body">
                 <Show
                   when={props.pairing().remote}
                   fallback={
                     <Show
                       when={isEnrolled()}
-                      fallback={<p class="hint" style={{ margin: '4px 0 0' }}>Loopback authenticated. Ordinary pairing is file-backed on this Mac.</p>}
+                      fallback={<p class="hint" style={{ margin: '4px 0 0' }}>{t('obLoopbackFile')}</p>}
                     >
                       <p class="hint" style={{ margin: '4px 0 0' }}>
-                        Loopback authenticated. Touch ID on this Mac can approve a contact or budget; it does not sign every payment.
-                      </p>
+                        {t('obLoopbackTouchId')}</p>
                     </Show>
                   }
                 >
                   <p class="hint" style={{ margin: '4px 0 0' }}>
-                    This app is paired with a remote node over a pinned encrypted connection;
-                    the local proxy only accepts this app’s credential.
-                  </p>
+                    {t('obPinnedConnection')}</p>
                 </Show>
                 <Show when={props.pairing().short_code}>
                   <p class="short-code" data-short-code>
-                    Pairing code <code>{props.pairing().short_code}</code>
+                    {t('obPairingCode')}{' '}<code>{props.pairing().short_code}</code>
                     <Show
                       when={props.pairing().code_from_node}
-                      fallback={<span> — derived from the challenge; compare it with what your node printed.</span>}
+                      fallback={<span> {t('obCodeDerived')}</span>}
                     >
-                      <span> — matches what your node printed.</span>
+                      <span> {t('obCodeMatches')}</span>
                     </Show>
                   </p>
                   <p class="hint">
-                    The code is a tripwire: a mismatch means something is wrong. It is not what
-                    keeps other programs out — this app reads your node’s output itself.
-                  </p>
+                    {t('obCodeTripwire')}</p>
                 </Show>
                 <p class="hint">
-                  A packaged app like this one cannot spend and cannot replace a live identity. To
-                  spend, run the node yourself and grant it with the owner CLI on that machine.
-                </p>
-                <p class="hint">Less exposure, not solved local security.</p>
+                  {t('obPackagedAppLimits')}</p>
+                <p class="hint">{t('obLocalSecurityLimit')}</p>
               </div>
             </details>
           </div>
@@ -509,18 +500,16 @@ export function Onboarding(props: {
 
         <Match when={props.pairing().state === 'failed'}>
           <div class="panel pairing error" data-pairing="failed">
-            <h2>Pairing failed</h2>
-            <SoftError message={props.pairing().reason ?? 'Pairing failed.'} summary="We could not pair this app with your node." detailNote="The app did not fall back to the older unpaired login. Check that your node is the one this app started, then reconnect." onReconnect={props.onRetry} />
+            <h2>{t('obPairingFailedTitle')}</h2>
+            <SoftError message={props.pairing().reason ?? t('obPairingFailed')} summary={t('obCouldNotPair')} detailNote={t('obNoFallback')} onReconnect={props.onRetry} />
           </div>
         </Match>
 
         <Match when={props.pairing().state === 'fallback'}>
           <div class="panel pairing" data-pairing="fallback">
-            <h2>Pairing not available on this node</h2>
+            <h2>{t('obPairingUnavailable')}</h2>
             <p class="hint">
-              This older node has no pairing routes, so this app signs in with the
-              local loopback token (/auth/local). Upgrade the node to use pairing.
-            </p>
+              {t('obOlderNode')}</p>
           </div>
         </Match>
       </Switch>
@@ -541,11 +530,11 @@ export function Onboarding(props: {
 
       <Show when={target() !== 'local'}>
       <form class="panel pairing remote-form" data-remote-access onSubmit={importRemote}>
-        <h2>{props.onScanRemote ? 'Scan or paste the pairing link' : 'Paste the pairing link'}</h2>
-        <p class="hint">To join from another owner device, open Settings → Devices → Add a device there, then scan or paste its ticket here.</p>
-        <p class="hint">After a power cut, open the app once. Your password is never stored on the box.</p>
+        <h2>{props.onScanRemote ? t('obScanPasteLink') : t('obPasteLink')}</h2>
+        <p class="hint">{t('obJoinFromOwner')}</p>
+        <p class="hint">{t('obAfterPowerCut')}</p>
         <Show when={props.onScanRemote}>
-          <p class="hint">BitSov uses the camera to read your node’s pairing QR code. You can paste instead. Nothing is saved until you choose Use remote node.</p>
+          <p class="hint">{t('obCameraPurpose')}</p>
           <button
             type="button"
             class="quiet"
@@ -553,10 +542,10 @@ export function Onboarding(props: {
             disabled={busy()}
             onClick={() => void scanRemote()}
           >
-            {scanning() ? 'Scanning…' : 'Scan pairing QR'}
+            {scanning() ? t('obScanning') : t('obScanQr')}
           </button>
         </Show>
-        <label for={props.pairingInputId ?? 'remote-pairing-link'}>Pairing link</label>
+        <label for={props.pairingInputId ?? 'remote-pairing-link'}>{t('obPairingLink')}</label>
         <input
           id={props.pairingInputId ?? 'remote-pairing-link'}
           type="password"
@@ -572,34 +561,34 @@ export function Onboarding(props: {
         <Show when={preview()}>{review => (
           <div class="panel" data-pairing-preview role="status">
             <Show when={phone() && review().view.first_run} fallback={<>
-            <p>Pair with endpoint: <bdi>{review().view.endpoint}</bdi></p>
-            <p>Node ID fingerprint: <bdi>{review().view.node_id_fingerprint}</bdi></p>
-            <Show when={review().view.hosted_by}>{label => <p>Hosted by <bdi>{label()}</bdi></p>}</Show>
-            <p>Compare these details with your node before confirming.</p>
+            <p>{t('obPairEndpoint')}{' '}<bdi>{review().view.endpoint}</bdi></p>
+            <p>{t('obNodeFingerprint')}{' '}<bdi>{review().view.node_id_fingerprint}</bdi></p>
+            <Show when={review().view.hosted_by}>{label => <p>{t('obHostedBy')}{' '}<bdi>{label()}</bdi></p>}</Show>
+            <p>{t('obCompareDetails')}</p>
             </>}>
-              <p role="status">{firstRunGuidance(device() === 'iPad' ? 'iPad' : 'phone')}</p>
+              <p role="status">{t('obFirstRunDevice', device())}</p>
             </Show>
           </div>
         )}</Show>
         <div class="form-actions">
           <Show when={!(phone() && preview()?.view.first_run)}>
           <button type="submit" class="primary" disabled={busy()}>
-            {importing() ? 'Saving…' : previewing() ? 'Checking ticket…' : preview() ? 'Use remote node' : 'Review pairing ticket'}
+            {importing() ? t('obSaving') : previewing() ? t('obCheckingTicket') : preview() ? t('obUseRemote') : t('obReviewTicket')}
           </button>
           </Show>
           <Show when={remoteLink() || preview() || importResult()}>
-            <button type="button" class="quiet" data-cancel-pairing-review disabled={busy()} onClick={() => editLink('')}>Close ticket review</button>
+            <button type="button" class="quiet" data-cancel-pairing-review disabled={busy()} onClick={() => editLink('')}>{t('obCloseReview')}</button>
           </Show>
         </div>
-        <p class="hint">{phone() ? `The link is verified and saved, then this ${device()} connects to your node.` : 'The link is verified and stored for the next app start.'}</p>
+        <p class="hint">{phone() ? t('obLinkSavedConnect', device()) : t('obLinkStored')}</p>
         <Show when={importResult()}>
           {(result) => (
             <p class="ok-note" data-import-result>
-              Remote node {result().endpoint}
+              {t('obRemoteNode')}{' '}{result().endpoint}
               <Show when={result().hosted_by}>
-                {(label) => <> (hosted by <bdi data-hosted-by>{label()}</bdi>)</>}
+                {(label) => <> {t('obHostedByParenthesis')}{' '}<bdi data-hosted-by>{label()}</bdi>)</>}
               </Show>
-              {' '}saved. Node ID fingerprint: {result().node_id_fingerprint}. {result().restart_required ? 'Restart BitSov to connect.' : 'Connecting to your node…'}
+              {' '}{t('obSavedFingerprint')}{' '}{result().node_id_fingerprint}. {result().restart_required ? t('obRestartConnect') : t('obConnectingNode')}
             </p>
           )}
         </Show>

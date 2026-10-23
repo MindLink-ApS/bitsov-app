@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 import { usePairingActivity } from '../pairingActivity';
 import { createEffect, createSignal, Show } from 'solid-js';
 import { setUnlockRemembered, unlockRemembered } from './unlockMemory';
@@ -8,6 +9,8 @@ import { appPlatform, deviceWords, isMobilePlatform, type AppPlatform } from '..
 const platformFor = (props: { platform?: AppPlatform; mobile?: boolean }) =>
   props.platform ?? (isMobilePlatform() ? appPlatform() : props.mobile ? 'android' : 'desktop');
 const wordsFor = (props: { platform?: AppPlatform; mobile?: boolean }) => deviceWords(platformFor(props));
+const deviceLabel = (props: { platform?: AppPlatform; mobile?: boolean }) => wordsFor(props).device === 'phone' ? t('obPhone') : wordsFor(props).device;
+const biometricLabel = (props: { platform?: AppPlatform; mobile?: boolean }) => isMobilePlatform(platformFor(props)) ? t('obBiometrics') : 'Touch ID';
 
 export function LockedNode(props: {
   onUnlock: () => Promise<void>;
@@ -54,7 +57,7 @@ export function LockedNode(props: {
       setUnlockRemembered(true);
     }
     catch (e) {
-      setError(typeof e === 'string' ? e : `Unlock did not complete. Try again when ${wordsFor(props).available} available.`);
+      setError(typeof e === 'string' ? e : t('obUnlockFailed', isMobilePlatform(platformFor(props)) ? t('obBiometricsAre') : t('obTouchIdIs')));
       if (canType()) setTyping(true);
     }
     finally { setBusy(false); }
@@ -65,38 +68,38 @@ export function LockedNode(props: {
     // Read once and clear: the password stays in this component only for the call.
     const value = password();
     setPassword('');
-    if (!value) { setError('Type the password you chose for your home node.'); return; }
+    if (!value) { setError(t('obTypeNodePassword')); return; }
     setBusy(true); setError(null);
     try { await props.onUnlockWithPassword(value); }
-    catch (e) { setError(typeof e === 'string' ? e : 'Unlock did not complete. Check the password and try again.'); }
+    catch (e) { setError(typeof e === 'string' ? e : t('obUnlockPasswordFailed')); }
     finally { setBusy(false); }
   };
   return <div class="locked-node">
     <section class="panel" data-node-locked data-unlock-state={props.state || 'ready'} aria-live="polite">
-      <span class="target-badge honest" data-locked-badge>Node locked</span>
-      <h2>Locked after a restart. Unlock to receive.</h2>
+      <span class="target-badge honest" data-locked-badge>{t('obNodeLocked')}</span>
+      <h2>{t('obLockedAfterRestart')}</h2>
       <Show when={props.state === 'pending-approval' && props.pending}>
         {(pending) => <PendingApproval pending={pending()} mobile={props.mobile} platform={props.platform} onCancel={props.onCancel} />}
       </Show>
       <Show when={props.state === 'not-enrolled'}>
-        <p>This {wordsFor(props).device} is not an approved owner device yet.</p>
-        <p>Unlock the node first using another approved owner device, or at the box. For the first owner device, stop the locked service, start the node with <code>konsensus start --config &lt;path&gt; --owner-control</code>, and type its password at the box’s terminal.</p>
-        <p>Once the node is unlocked, open Settings → {isMobilePlatform(platformFor(props)) ? 'Set up biometric approvals' : 'Set up Touch ID approvals'}. Compare the fingerprint and finish approval at the box, then restart the remote-unlock service.</p>
-        <button disabled>{isMobilePlatform(platformFor(props)) ? 'Set up biometric approvals' : 'Set up Touch ID approvals'}</button>
-        <p class="hint">Setup becomes available in Settings when the node is unlocked.</p>
+        <p>{t('obNotOwnerYet', deviceLabel(props))}</p>
+        <p>{t('obUnlockAtBoxBefore')}{' '}<code>konsensus start --config &lt;path&gt; --owner-control</code>{t('obUnlockAtBoxAfter')}</p>
+        <p>{t('obOnceUnlockedSettings')}{' '}{isMobilePlatform(platformFor(props)) ? t('obSetupBiometrics') : t('obSetupTouchId')}{t('obFinishAtBox')}</p>
+        <button disabled>{isMobilePlatform(platformFor(props)) ? t('obSetupBiometrics') : t('obSetupTouchId')}</button>
+        <p class="hint">{t('obSetupWhenUnlocked')}</p>
       </Show>
       <Show when={props.state !== 'not-enrolled' && props.state !== 'pending-approval'}>
-      <p>Your node restarted (for example after a power cut). It cannot read your keys until you unlock it from this device. {typedFirst() ? 'Type the password you chose for your node - it takes a few seconds.' : 'Tap Unlock - it takes a few seconds.'}</p>
+      <p>{t('obNodeRestarted')}{' '}{typedFirst() ? t('obTypePasswordSeconds') : t('obTapUnlockSeconds')}</p>
       <Show when={!typedFirst()}>
-        <button disabled={busy()} onClick={() => void unlock()}>{busy() ? 'Unlocking…' : wordsFor(props).unlockButton}</button>
+        <button disabled={busy()} onClick={() => void unlock()}>{busy() ? t('obUnlocking') : isMobilePlatform(platformFor(props)) ? t('obUnlockBiometrics') : t('obUnlockTouchId')}</button>
       </Show>
       <Show when={canType()}>
         <Show
           when={typing()}
-          fallback={<button class="link" data-unlock-type-open disabled={busy()} onClick={() => { setError(null); setTyping(true); }}>Type your node password instead</button>}
+          fallback={<button class="link" data-unlock-type-open disabled={busy()} onClick={() => { setError(null); setTyping(true); }}>{t('obTypePasswordInstead')}</button>}
         >
           <form class="panel" data-unlock-typed onSubmit={(event) => void unlockTyped(event)}>
-            <label for="node-unlock-password">Node password</label>
+            <label for="node-unlock-password">{t('obNodePassword')}</label>
             <input
               id="node-unlock-password"
               type="password"
@@ -108,25 +111,25 @@ export function LockedNode(props: {
               value={password()}
               onInput={(e) => setPassword(e.currentTarget.value)}
             />
-            <p class="hint">Your node checks it. This {wordsFor(props).device} keeps it only in memory, unless you then choose to remember it here behind {wordsFor(props).biometric}.</p>
+            <p class="hint">{t('obPasswordMemory', deviceLabel(props), biometricLabel(props))}</p>
             <div class="row">
-              <button type="submit" class="primary" disabled={busy()}>{busy() ? 'Unlocking…' : 'Unlock with password'}</button>
-              <button type="button" class="link" disabled={busy()} onClick={() => { setPassword(''); setTyping(false); setError(null); }}>Cancel</button>
+              <button type="submit" class="primary" disabled={busy()}>{busy() ? t('obUnlocking') : t('obUnlockPassword')}</button>
+              <button type="button" class="link" disabled={busy()} onClick={() => { setPassword(''); setTyping(false); setError(null); }}>{t('obCancel')}</button>
             </div>
           </form>
         </Show>
       </Show>
       <Show when={typedFirst()}>
         <p class="hint unlock-saved" data-unlock-saved-path>
-          Chose Remember on this {wordsFor(props).device} before?{' '}
-          <button type="button" class="link" disabled={busy()} onClick={() => void unlock()}>{busy() ? 'Unlocking…' : wordsFor(props).unlockButton}</button>
+          {t('obRememberedBefore', deviceLabel(props))}{' '}
+          <button type="button" class="link" disabled={busy()} onClick={() => void unlock()}>{busy() ? t('obUnlocking') : isMobilePlatform(platformFor(props)) ? t('obUnlockBiometrics') : t('obUnlockTouchId')}</button>
         </p>
       </Show>
       </Show>
       <Show when={error() && props.attemptsLeft != null}>
-        <p data-unlock-attempts>{props.attemptsLeft} attempts left in the node’s process-wide unlock budget.</p>
+        <p data-unlock-attempts>{t('obAttemptsLeft', props.attemptsLeft!)}</p>
       </Show>
-      <p class="hint">While locked, payments to you fail and open channels are not watched. Unlock within a day.</p>
+      <p class="hint">{t('obLockedPaymentsFail')}</p>
       <Show when={error() || props.hostError}><p role="alert">{error() || props.hostError}</p></Show>
     </section>
     <HubTrustInfo level={2} initiallyOpen={!lockedHubTrustHidden()} onHide={hideLockedHubTrust} />
@@ -169,15 +172,15 @@ export function RememberUnlock(props: {
       if (remember) { setUnlockRemembered(true); setSaved(true); }
       else props.onDone();
     } catch (e) {
-      setError(typeof e === 'string' ? e : 'The password was not saved.');
+      setError(typeof e === 'string' ? e : t('obPasswordNotSaved'));
     } finally { setBusy(false); }
   };
   return <section class="panel" data-remember-unlock aria-live="polite">
     <Show
       when={!saved()}
       fallback={<>
-        <p data-remember-saved>Saved on this {wordsFor(props).device}. Next time, unlock with {wordsFor(props).biometric}.</p>
-        <button class="link" onClick={() => props.onDone()}>Close</button>
+        <p data-remember-saved>{t('obPasswordSaved', deviceLabel(props), biometricLabel(props))}</p>
+        <button class="link" onClick={() => props.onDone()}>{t('obClose')}</button>
       </>}
     >
       <h2>Unlocked. Remember the password on this {wordsFor(props).device}?</h2>
@@ -185,7 +188,7 @@ export function RememberUnlock(props: {
       <p class="hint">If the {platformFor(props) === 'android' ? 'enrolled biometrics' : platformFor(props) === 'ios' ? 'faces or fingerprints' : 'fingerprints'} on this {wordsFor(props).device} change, the saved copy stops opening. Type the password once more and choose Remember to replace it.</p>
       <p class="hint">If your device’s approval key also stops working, another approved owner device or the box must unlock the node first. Then set up {isMobilePlatform(platformFor(props)) ? 'biometric' : 'Touch ID'} approvals again before unlocking from this device.</p>
       <div class="row">
-        <button class="primary" data-remember-yes disabled={busy()} onClick={() => void choose(true)}>{busy() ? 'Saving…' : REMEMBER_BUTTON[wordsFor(props).device]}</button>
+        <button class="primary" data-remember-yes disabled={busy()} onClick={() => void choose(true)}>{busy() ? t('obSaving') : REMEMBER_BUTTON[wordsFor(props).device]}</button>
         <button class="link" data-remember-no disabled={busy()} onClick={() => void choose(false)}>Not now</button>
       </div>
       <Show when={error()}><p role="alert">{error()}</p></Show>
@@ -208,16 +211,16 @@ export function PendingApproval(props: {
     if (busy() || !props.onCancel) return;
     setBusy(true); setError(null);
     try { await props.onCancel(); }
-    catch { setError('Could not cancel the request. Unlock the node first, then try again.'); }
+    catch { setError(t('obCancelRequestFailed')); }
     finally { setBusy(false); }
   };
   return <div class="approval" data-device="pending" data-pending-approval>
-    <p>Compare this {wordsFor(props).device}’s fingerprint: <code data-device-fingerprint>{props.pending.fingerprint}</code></p>
-    <p><strong>At the box</strong>: while the node is unlocked and running with <code>--owner-control</code>, run:</p>
+    <p>{t('obCompareFingerprint', deviceLabel(props))} <code data-device-fingerprint>{props.pending.fingerprint}</code></p>
+    <p><strong>{t('obAtBox')}</strong>{t('obAtBoxBeforeCommand')}{' '}<code>--owner-control</code>{t('obRunCommand')}</p>
     <code class="address" data-device-owner-action>{props.pending.owner_action}</code>
-    <p>Check that the fingerprint matches, then type the short code shown by the node’s terminal. This command cannot approve a device while the node is locked or running in local-owner mode.</p>
-    <p><strong>From another owner device</strong>: while the node is unlocked in local-owner mode, use an already approved owner device that supports approving another device. Compare this fingerprint before approving. This app version cannot perform that approval yet.</p>
-    <button type="button" class="link" data-device-cancel disabled={busy() || !props.onCancel} onClick={() => void cancel()}>Cancel</button>
+    <p>{t('obFingerprintCheck')}</p>
+    <p><strong>{t('obAnotherOwnerDevice')}</strong>{t('obAnotherOwnerInstructions')}</p>
+    <button type="button" class="link" data-device-cancel disabled={busy() || !props.onCancel} onClick={() => void cancel()}>{t('obCancel')}</button>
     <Show when={error()}><p role="alert">{error()}</p></Show>
   </div>;
 }
