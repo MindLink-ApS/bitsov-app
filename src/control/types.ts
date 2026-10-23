@@ -438,7 +438,7 @@ export type ActionError = {
     // rate_limited (minute/hour) and velocity recover with time on their own.
     | 'grant_paused' | 'grant_failures_pending' | 'grant_rate_limited' | 'grant_velocity'
     // This Mac's Touch ID approvals (device key).
-    | 'device_not_registered' | 'device_biometry' | 'device_cancelled' | 'device_unavailable' | 'device_invalid' | 'device_key' | 'device_unsupported'
+    | 'device_not_registered' | 'device_biometry' | 'device_cancelled' | 'device_unavailable' | 'device_invalid' | 'device_key' | 'device_unsupported' | 'device_remote_unsupported'
     | 'room_unreachable'
     // Paid, not delivered (node 502 `payment_settled_send_incomplete`), and its retry.
     | 'payment_settled_undelivered' | 'retry_unavailable' | 'retry_needs_admission' | 'undelivered_pending'

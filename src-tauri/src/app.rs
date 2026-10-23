@@ -7675,8 +7675,12 @@ async fn do_relation_approve(
     let body = serde_json::json!({"intent": intent, "signature": signature});
     let (status, text) = call_api(state, reqwest::Method::POST, "/pair/relation-intent", Some(body)).await.map_err(ActionError::node)?;
     if !status.is_success() {
-        let error = if matches!(status, reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED) {
-            ActionError::new("device_unsupported", "Your node can't take Touch ID approvals over remote access yet. Nothing was approved.")
+        // A semantic refusal can also be a 404 (for example a revoked client).
+        // Only a route miss, without the node's error code, means unsupported.
+        let has_code = serde_json::from_str::<serde_json::Value>(&text).ok()
+            .is_some_and(|reply| reply.get("code").is_some_and(|code| !code.is_null()));
+        let error = if matches!(status, reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED) && !has_code {
+            ActionError::new("device_remote_unsupported", "Your node can't take device approvals over remote access yet. Nothing was approved. Update your node, or approve at the node.")
         } else if let Some(reason) = device::node_off_reason(&text) {
             device::node_off_error(reason)
         } else {
@@ -17280,12 +17284,18 @@ mod control_act_tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn relation_approve_missing_remote_route_is_device_unsupported() {
-        for status in [404, 405] {
+    async fn relation_approve_route_failures_preserve_reason_and_write_no_authority() {
+        for (status, response, expected_code, expected_message) in [
+            (404, "", "device_remote_unsupported", "Your node can't take device approvals over remote access yet. Nothing was approved. Update your node, or approve at the node."),
+            (405, "route unavailable", "device_remote_unsupported", "Your node can't take device approvals over remote access yet. Nothing was approved. Update your node, or approve at the node."),
+            (404, r#"{"code":"not_found","error":"UnknownClient"}"#, "node", "/pair/relation-intent failed (404): UnknownClient"),
+            (404, r#"{"code":"not_found","error":"UnknownOperation"}"#, "node", "/pair/relation-intent failed (404): UnknownOperation"),
+            (405, r#"{"code":"semantic_refusal","error":"Operation refused"}"#, "node", "/pair/relation-intent failed (405): Operation refused"),
+        ] {
             let (dn, device_routes) = device_node();
             let routes: Routes = Arc::new(move |m, path, body| {
                 if m == "POST" && path == "/pair/relation-intent" {
-                    return (status, "route unavailable".into());
+                    return (status, response.into());
                 }
                 device_routes(m, path, body)
             });
@@ -17297,8 +17307,13 @@ mod control_act_tests {
             do_device_key_status(s).await.unwrap();
 
             let err = do_relation_approve(s, A, None, Some(7000)).await.unwrap_err();
-            assert_eq!(err.code, "device_unsupported", "HTTP {status}");
-            assert_eq!(err.message, "Your node can't take Touch ID approvals over remote access yet. Nothing was approved.");
+            assert_eq!(err.code, expected_code, "HTTP {status}: {response}");
+            assert_eq!(err.message, expected_message);
+            assert!(s.node_grant.lock().unwrap().is_none(), "no grant may be installed");
+            let (store_dir, node_id) = budget_dir(s).unwrap();
+            assert!(!budget::book_path(&store_dir, &node_id).exists(), "no budget file may be written");
+            assert!(!device::approvals_path(&store_dir, &node_id).exists(), "no approval file may be written");
+            assert!(!store_dir.exists(), "no grant or budget files may be created in the spend store");
             assert!(node.posts().iter().any(|(p, _)| p == "/pair/relation-intent"));
             assert!(dn.intents.lock().unwrap().is_empty());
             assert_eq!(serde_json::to_value(s.spend.lock().unwrap().view(now_ms())).unwrap()["state"], "locked");
