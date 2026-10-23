@@ -24,13 +24,17 @@ function revealInput(input: HTMLElement) {
     const top = stickyBottom + 12;
     const bottom = box.bottom - 12;
     // Keep the following primary (and sheet Cancel) alongside the field when
-    // they fit. Longer forms remain scrollable; never hide the field to do this.
+    // they fit; otherwise prioritize the primary alone. Longer forms remain
+    // scrollable; never hide the field to do this.
     const scope = input.closest('form, .first-spend-sheet, .composer-panel');
     const actions = Array.from(scope?.querySelectorAll<HTMLElement>('button[type="submit"], button.primary, [data-first-spend-cancel]') ?? [])
       .filter(el => parent!.contains(el) && (input.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)
         && el.getBoundingClientRect().height > 0);
     const actionBottom = actions[actions.length - 1]?.getBoundingClientRect().bottom ?? field.bottom;
-    const revealBottom = actionBottom - field.top <= bottom - top ? Math.max(field.bottom, actionBottom) : field.bottom;
+    const primaryBottom = actions.find(el => el.matches('button[type="submit"], button.primary'))?.getBoundingClientRect().bottom ?? field.bottom;
+    const fittingBottom = [actionBottom, primaryBottom, field.bottom]
+      .find(end => Math.max(field.bottom, end) - field.top <= bottom - top) ?? field.bottom;
+    const revealBottom = Math.max(field.bottom, fittingBottom);
     if (revealBottom > bottom) parent.scrollTop += revealBottom - bottom;
     else if (field.top < top) parent.scrollTop -= top - field.top;
   }

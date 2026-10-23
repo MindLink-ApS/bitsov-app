@@ -12,12 +12,18 @@ for size in ['default']:
    sim('terminate',node,'tech.mindlink.keyboardpreview',check=False)
    mode = scene.removeprefix('first-spend-') if scene.startswith('first-spend-') else None
    args = ['--first-spend', '--'+mode] if mode else ['--'+scene]
+   data=sim('get_app_container',node,'tech.mindlink.keyboardpreview','data').stdout.strip()
+   pathlib.Path(data,'Documents/geometry.json').unlink(missing_ok=True)
+   started=time.time()*1000
    sim('launch',node,'tech.mindlink.keyboardpreview',*args,*(['--da'] if lang=='da' else []))
    with open('.cache/kbd/'+name+'.log','w') as log:
     result=subprocess.run(['xcodebuild','test-without-building','-only-testing:KeyboardEvidence/KeyboardEvidence/testKeyboard','-project','.cache/kbd/KeyboardEvidence.xcodeproj','-scheme','KeyboardEvidence','-destination','platform=iOS Simulator,id='+node,'-derivedDataPath','.cache/kbd/build','CODE_SIGNING_ALLOWED=NO'],stdout=log,stderr=subprocess.STDOUT)
    if result.returncode: raise RuntimeError(name+' native keyboard test failed')
    data=sim('get_app_container',node,'tech.mindlink.keyboardpreview','data').stdout.strip()
    geometry=json.loads(pathlib.Path(data,'Documents/geometry.json').read_text())
+   assert geometry['generatedAt'] > started, (name, 'stale geometry')
+   assert geometry['rootFont'] == '17px' and geometry['bodyFont'] == '17px', (name, 'incorrect default sizes')
+   geometry['contentSize'] = sim('ui',node,'content_size').stdout.strip()
    assert geometry['keyboard']=='true', (name,geometry['viewport'])
    assert geometry['viewport']['scale']==1
    if scene.startswith('first-spend'):

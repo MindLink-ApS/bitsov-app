@@ -4,7 +4,7 @@ The production root uses `font: -apple-system-body` only for `data-platform=ios`
 Type and spacing tokens use rem. The 16px browser root preserves the existing
 macOS/Android default sizes; WebKit regression checks cover those defaults.
 Inter remains the body face. No money wording, amount formatting, approval
-payload, signing, or native/Rust code changed.
+payload, signing, or production native/Rust code changed.
 
 ## Scaling policy
 
@@ -13,16 +13,26 @@ payload, signing, or native/Rust code changed.
 - Money and controls cap at 22px; approval-sheet headings cap at 24px and the
   pinned first-spend quote caps at 20px. Long sentences wrap, while `.sats`
   amount spans remain unbroken. The outgoing receipt sentence has its own
-  wrapping class because it contains fee words as well as an amount.
-- The wallet headline caps at 48px and additionally fits its container using
-  the displayed character count. Tests cover `Number.MAX_SAFE_INTEGER` msat
+  wrapping class because it contains fee words as well as an amount;
+  `break-word` preserves digit runs when flex items calculate their minimum width.
+  The top-rail connection status wraps within a bounded pill instead of ellipsizing;
+  its 20px cap keeps ordinary en/da words intact.
+- The wallet headline restores the 64px default and scales up to the 80px
+  hero cap, additionally fitting its container using the displayed amount
+  character count. The smaller unit has a separate width allowance. Tests cover `Number.MAX_SAFE_INTEGER` msat
   in English and Danish without changing or rounding that amount.
 - Spacing grows to 150%. The location-radio check, approvals count and Touch ID
   check glyph grow from at least 15px to 20px; their boxes grow with them.
 - Long sheets and the wallet remain vertically scrollable. The keyboard
   controller measures the actual bottom of a sticky quote, including its
   position inside the sheet padding, before revealing the focused input.
-  It does not scroll on each keystroke.
+  If both actions do not fit, it reveals Allow alone with the input. It does
+  not scroll on each keystroke. Allow reserves the same border when enabled
+  and disabled, keeping the following Not now button stationary. A narrow
+  sheet (at most 20em of its own type size) reserves two label lines on Allow
+  while editing so the Danish fractional-msat label does not shift Not now.
+  Older iOS without container queries reserves both lines at every size and
+  trades some scrollable validation space for the extra button height.
 
 ## Native evidence
 
@@ -65,7 +75,9 @@ while capturing to prevent a hot reload between the JSON and screenshot.
 
 The automated native check rejects horizontal overflow, viewport/ancestor
 horizontal clipping, hidden vertical overflow, text extending outside its
-element, and an amount input covered by the sticky quote or keyboard. Vertical
+element, a line break within a money digit run, an amount input covered by the
+sticky quote or keyboard, and Allow outside the visible keyboard viewport.
+The connection status text is included in the clipping checks. Vertical
 scrolling content is allowed: a long wallet or sheet need not fit in one image.
 This is targeted money/approval geometry coverage, not an exhaustive audit of
 every screen or every possible transaction value.
@@ -106,3 +118,37 @@ padded sticky-quote scroll regression runs in Vitest.
   the padded sticky boundary, long-number sizing and screenshot freshness.
 - Rust was not touched; the conditional Rust test was not required. `cargo fmt`
   was never run. No prohibited transaction/approval/call button was pressed.
+
+## U2b follow-ups — 23 October 2026
+
+The regression checks first reproduced the AX5 primary-button fallback failure,
+the 40px default wallet headline, clipped status text, and a digit run breaking
+inside a flex receipt. The refreshed #318 native typing check also caught a 2px
+Not now movement when Allow lost its disabled border; the enabled border now
+reserves the same space. WebKit additionally reproduced a second-line Danish
+fractional-msat label moving Not now at AX5; the narrow-sheet reservation fixes it.
+
+The default first-spend assertion still requires both actions inside the visible
+height. At AX5 it requires Allow inside that height, even when Not now cannot fit.
+Typing whole/fractional amounts and deleting back must leave the actions and sheet
+scroll position unchanged. No amount formatting, money wording, or signed bytes
+were changed.
+
+Follow-up validation:
+
+- `npx tsc --noEmit`: passed.
+- `npx vitest run`: **120 files, 2,204 tests passed**; existing Solid disposal warnings.
+  A repeat during native capture hit the 5s timeout in
+  `i18n-source.test.ts` (hardcoded-copy guard); its isolated rerun passed in 811ms.
+  Final `npx vitest run --maxWorkers=2`: **120 files, 2,204 tests passed**.
+- `npx playwright test -c playwright.dynamic-type.config.ts`: **27 passed**.
+  This includes the shipped legacy fallback rules activated on modern WebKit;
+  it is not an older-iOS runtime test.
+- Native default/AX5 matrix: **20 refreshed captures**, zero targeted geometry
+  failures. Both AX5 languages keep Allow inside the software keyboard viewport.
+- #318 first-spend: **six refreshed captures** at 17px root / 17px body, en/da
+  across standard, starts-now and may-start-now variants. All nine typing samples
+  per capture keep both actions visible and their positions and scrollTop fixed.
+- Independent read-only review approved after adding the older-iOS fallback.
+- No Rust changes, `cargo fmt`, prohibited button presses, money wording changes,
+  or signed-byte changes.

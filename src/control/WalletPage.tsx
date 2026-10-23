@@ -205,7 +205,7 @@ export function WalletPage(props: {
             {(s) => (
               <>
                 <span class="wallet-total" data-balance-total={s().total}
-                  style={{ '--wallet-amount-chars': String(sats(s().total).length + satUnit(s().total).length + 1) }}>
+                  style={{ '--wallet-amount-chars': String(sats(s().total).length), '--wallet-unit-chars': String(satUnit(s().total).length) }}>
                   {sats(s().total)}<span class="unit">{satUnit(s().total)}</span>
                 </span>
                 <CustodyBadgeView mode={props.custody} />

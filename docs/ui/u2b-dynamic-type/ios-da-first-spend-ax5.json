@@ -1,7 +1,7 @@
 {
   "scene": "first-spend",
   "lang": "da",
-  "generatedAt": 1792735512728,
+  "generatedAt": 1792739680994,
   "ready": true,
   "rootFont": "53px",
   "bodyFont": "34px",
@@ -113,12 +113,12 @@
       "text": "M\u00e5 beskeder bruge op til 1\u202f250 sats om dagen?",
       "rect": {
         "x": 25,
-        "y": -389.34375,
+        "y": -561.34375,
         "width": 343,
         "height": 93.59375,
-        "top": -389.34375,
+        "top": -561.34375,
         "right": 368,
-        "bottom": -295.75,
+        "bottom": -467.75,
         "left": 25
       },
       "font": "24px",
@@ -139,12 +139,12 @@
       "text": "Godkend p\u00e5 din boks",
       "rect": {
         "x": 25,
-        "y": -277.75,
+        "y": -449.75,
         "width": 343,
         "height": 34.09375,
-        "top": -277.75,
+        "top": -449.75,
         "right": 368,
-        "bottom": -243.65625,
+        "bottom": -415.65625,
         "left": 25
       },
       "font": "22px",
@@ -165,12 +165,12 @@
       "text": "Tillad starter ejerens godkendelse. Det giver ikke i sig selv nogen tilladelse.",
       "rect": {
         "x": 25,
-        "y": -225.65625,
+        "y": -397.65625,
         "width": 343,
         "height": 93,
-        "top": -225.65625,
+        "top": -397.65625,
         "right": 368,
-        "bottom": -132.65625,
+        "bottom": -304.65625,
         "left": 25
       },
       "font": "20px",
@@ -191,12 +191,12 @@
       "text": "Adgangsgebyr: 1 sat \u00b7 besked: 2 sats \u00b7 routinggebyr h\u00f8jst: 5 sats \u00b7 samlet h\u00f8jst: 8 sats",
       "rect": {
         "x": 25,
-        "y": -114.65625,
+        "y": -286.65625,
         "width": 343,
         "height": 102.28125,
-        "top": -114.65625,
+        "top": -286.65625,
         "right": 368,
-        "bottom": -12.375,
+        "bottom": -184.375,
         "left": 25
       },
       "font": "22px",
@@ -217,12 +217,12 @@
       "text": "Appens budgetforudindstillinger. H\u00f8jst 100\u202f000 sats om dagen.",
       "rect": {
         "x": 25,
-        "y": 49.625,
+        "y": -122.375,
         "width": 343,
         "height": 62,
-        "top": 49.625,
+        "top": -122.375,
         "right": 368,
-        "bottom": 111.625,
+        "bottom": -60.375,
         "left": 25
       },
       "font": "20px",
@@ -243,12 +243,12 @@
       "text": "500 sats om dagen",
       "rect": {
         "x": 25,
-        "y": 129.625,
+        "y": -42.375,
         "width": 207.40625,
         "height": 49,
-        "top": 129.625,
+        "top": -42.375,
         "right": 232.40625,
-        "bottom": 178.625,
+        "bottom": 6.625,
         "left": 25
       },
       "font": "20px",
@@ -269,12 +269,12 @@
       "text": "2\u202f000 sats om dagen",
       "rect": {
         "x": 25,
-        "y": 190.625,
+        "y": 18.625,
         "width": 223.984375,
         "height": 49,
-        "top": 190.625,
+        "top": 18.625,
         "right": 248.984375,
-        "bottom": 239.625,
+        "bottom": 67.625,
         "left": 25
       },
       "font": "20px",
@@ -295,12 +295,12 @@
       "text": "10\u202f000 sats om dagen",
       "rect": {
         "x": 25,
-        "y": 251.625,
+        "y": 79.625,
         "width": 232.546875,
         "height": 49,
-        "top": 251.625,
+        "top": 79.625,
         "right": 257.546875,
-        "bottom": 300.625,
+        "bottom": 128.625,
         "left": 25
       },
       "font": "20px",
@@ -321,12 +321,12 @@
       "text": "Tilpasset",
       "rect": {
         "x": 25,
-        "y": 312.625,
+        "y": 140.625,
         "width": 111.59375,
         "height": 49,
-        "top": 312.625,
+        "top": 140.625,
         "right": 136.59375,
-        "bottom": 361.625,
+        "bottom": 189.625,
         "left": 25
       },
       "font": "20px",
@@ -347,12 +347,12 @@
       "text": "",
       "rect": {
         "x": 25,
-        "y": 413.71875,
+        "y": 241.71875,
         "width": 343,
         "height": 56.09375,
-        "top": 413.71875,
+        "top": 241.71875,
         "right": 368,
-        "bottom": 469.8125,
+        "bottom": 297.8125,
         "left": 25
       },
       "font": "22px",
@@ -373,23 +373,23 @@
       "text": "Tillad 1\u202f250 sats om dagen",
       "rect": {
         "x": 25,
-        "y": 553.8125,
+        "y": 381.8125,
         "width": 343,
-        "height": 52.09375,
-        "top": 553.8125,
+        "height": 88.1875,
+        "top": 381.8125,
         "right": 368,
-        "bottom": 605.90625,
+        "bottom": 470,
         "left": 25
       },
       "font": "22px",
       "whiteSpace": "normal",
       "client": [
-        343,
-        52
+        341,
+        86
       ],
       "scroll": [
-        343,
-        52
+        341,
+        86
       ],
       "failures": []
     },
@@ -399,12 +399,12 @@
       "text": "Ikke nu",
       "rect": {
         "x": 25,
-        "y": 623.90625,
+        "y": 488,
         "width": 343,
         "height": 46.09375,
-        "top": 623.90625,
+        "top": 488,
         "right": 368,
-        "bottom": 670,
+        "bottom": 534.09375,
         "left": 25
       },
       "font": "22px",

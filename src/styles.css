@@ -1749,11 +1749,10 @@ html[data-platform='ios'] :is(.target-radio-indicator, .touchid-check, .approval
 }
 html[data-platform='ios'] :is(.wallet-top, .wallet-body > *, .context-head) { flex-shrink: 0; }
 html[data-platform='ios'] :is(.wallet-actions, .wallet-top, .wallet-tabs, .wallet-row, .avatar-menu-item) { flex-wrap: wrap; }
-html[data-platform='ios'] .wallet-total { font-size: clamp(40px, 2.352941rem, 48px); }
 html[data-platform='ios'] .wallet-split { grid-template-columns: 1fr; }
 html[data-platform='ios'] :is(.wallet-split .split-name, .wallet-row .what, .owner-sheet-terms) { overflow-wrap: anywhere; }
 
-html[data-platform='ios'] .money-text { white-space: normal; overflow-wrap: anywhere; }
+html[data-platform='ios'] .money-text { white-space: normal; overflow-wrap: break-word; }
 html[data-platform='ios'] .organ-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; }
 html[data-platform='ios'] .organ-name { font-size: var(--t-control); }
 html[data-platform='ios'] .organ-summary {
@@ -1766,12 +1765,13 @@ html[data-platform='ios'] .first-spend-grabber { width: min(4rem, 64px); height:
 html[data-platform='ios'] .first-spend-grabber::before { width: min(2.5rem, 40px); height: min(.25rem, 4px); }
 html[data-platform='ios'][data-keyboard-open='true'] .first-spend-keyboard-summary { box-shadow: 0 -12px 0 var(--surface); }
 
-/* Fit even a maximum safe integer balance without breaking its digits. The
-   character budget only sizes display text; it never formats or rounds money. */
+/* Fit even a maximum safe integer balance without breaking its digits. Reserve
+   the unit at its 22px cap plus its 8px margin; size only the amount against
+   the remaining width. This never formats or rounds money. */
 html[data-platform='ios'] .wallet-hero { width: 100%; container-type: inline-size; }
 html[data-platform='ios'] .wallet-total {
   white-space: nowrap;
-  font-size: min(2.352941rem, 48px, calc(100cqi / (var(--wallet-amount-chars) * .62)));
+  font-size: min(var(--t-hero), calc((100cqi - 8px - var(--wallet-unit-chars) * 22px * .62) / (var(--wallet-amount-chars) * .62)));
 }
 html[data-platform='ios'] .wallet-total .unit { font-size: clamp(15px, .5em, 22px); }
 html[data-platform='ios'] :is(.send-price, .stamp) { font-size: clamp(15px, .882353rem, 22px); }
@@ -1786,5 +1786,39 @@ html[data-platform='ios'] .avatar-mark {
     --t-sm: clamp(16px, .941177rem, 20px);
     --t-md: clamp(17px, 1rem, 22px);
     --t-2xl: clamp(24px, 1.411765rem, 30px);
+  }
+}
+
+/* Reserve the disabled border while Allow enables; adjacent controls stay still. */
+html[data-platform='ios'] .first-spend-sheet button.primary:not(:disabled) { border: 1px solid transparent; }
+
+/* The top-rail connection status remains complete at accessibility sizes. */
+@media (max-width: 680px) {
+  html[data-platform='ios'] .node-pill { max-width: 180px; }
+}
+html[data-platform='ios'] .node-pill .what {
+  font-size: clamp(17px, 1rem, 20px);
+  white-space: normal; overflow: visible; overflow-wrap: break-word; text-overflow: clip;
+}
+
+/* At larger type (or narrower phones), reserve the two lines needed by the
+   longer fractional-msat authorization so typing cannot move Not now. */
+html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-size; }
+@container first-spend (max-width: 20em) {
+  html[data-platform='ios'][data-keyboard-open='true'] [data-first-spend-allow] {
+    line-height: 1.55;
+    min-height: calc(3.1em + 20px); /* two text lines, 9px padding and 1px border per side */
+  }
+}
+
+/* iOS 15 lacks container queries. Reserve both lines there at every size,
+   trading some scrollable validation space for stationary, reachable actions. */
+@supports not (container-type: inline-size) {
+  html[data-platform='ios'][data-keyboard-open='true'] [data-first-spend-allow] {
+    line-height: 1.55;
+    min-height: calc(3.1em + 20px);
+  }
+  html[data-platform='ios'][data-keyboard-open='true'] .first-spend-reason-slot {
+    height: min(1.411765rem, 32px);
   }
 }
