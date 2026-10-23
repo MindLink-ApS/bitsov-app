@@ -229,6 +229,8 @@ export type CallDeps = {
   peerConnection: (config: RTCConfiguration) => RTCPeerConnection;
   now: () => number;
   onView: (v: CallView) => void;
+  /** iOS only: local session policy, never a signal or payment. */
+  audioSession?: (live: boolean) => Promise<void>;
   onStreams: (local: MediaStream | null, remote: MediaStream | null) => void;
   newCallId?: () => string;
   /** Read at each call: the owner's STUN setting, `[]` (host only) by default. */
@@ -325,8 +327,32 @@ export function createCallEngine(deps: CallDeps) {
   // Serialises user actions: a double click never pays twice.
   let busy = false;
 
+  let audioLive = false;
+  let audioQueue = Promise.resolve();
+  let backgrounded = false;
+  let videoGeneration = 0;
+  const updateAudio = (live: boolean) => {
+    if (!deps.audioSession || live === audioLive) return;
+    audioLive = live;
+    const callId = view.callId;
+    // Preserve stop/start ordering if a native activation is still in flight.
+    audioQueue = audioQueue.then(async () => {
+      if (live && (!audioLive || view.callId !== callId)) return;
+      await deps.audioSession!(live);
+    }).catch(() => {
+      if (view.callId === callId && live === audioLive) {
+        // A local policy failure must not trigger a paid hangup or ICE restart.
+        view = { ...view, error: live
+          ? 'Could not update background audio. Keep the app open during this call.'
+          : 'Could not release call audio. Close the app if the microphone remains active.' };
+        deps.onView(view);
+      }
+    });
+  };
+
   const set = (patch: Partial<CallView>) => {
     view = { ...view, ...patch, state: callState(patch.phase ?? view.phase) };
+    updateAudio(view.phase === 'live');
     deps.onView(view);
   };
   const active = () => view.phase !== 'idle' && view.phase !== 'ended';
@@ -373,6 +399,7 @@ export function createCallEngine(deps: CallDeps) {
     remote = null;
     offerSdp = null;
     deps.onStreams(null, null);
+    updateAudio(false);
   };
   /** Ask the host to end each admission once; the worst answer is what the card says. */
   const closeAdmissions = async (ids: string[], callId: string | null) => {
@@ -510,8 +537,18 @@ export function createCallEngine(deps: CallDeps) {
     reconcileConnection(conn);
   };
 
+  const pauseVideo = () => {
+    const stream = local;
+    if (!stream || view.media !== 'video') return;
+    stream.getVideoTracks().forEach((track) => { track.stop(); stream.removeTrack(track); });
+    set({ camera: false });
+    void videoSender?.replaceTrack(null).catch(() => { /* Capture is already off. */ });
+    deps.onStreams(local, remote);
+  };
+
   const open = async (media: CallMedia) => {
     const generation = mediaGeneration;
+    const videoRequest = videoGeneration;
     const stream = await acquireMedia({ audio: true, video: media === 'video' });
     if (generation !== mediaGeneration) {
       stream.getTracks().forEach((t) => t.stop());
@@ -524,6 +561,7 @@ export function createCallEngine(deps: CallDeps) {
       const sender = conn.addTrack(t, stream);
       if (t.kind === 'video') videoSender = sender ?? null;
     });
+    if (backgrounded || videoRequest !== videoGeneration) pauseVideo();
     conn.ontrack = (e) => {
       if (pc !== conn) return;
       remote = e.streams[0] ?? new MediaStream([e.track]);
@@ -949,6 +987,14 @@ export function createCallEngine(deps: CallDeps) {
       if (view.callId === callId && view.close?.status === 'closed') set({ close: { status: 'closed', message: 'The earlier call is ended. You can call them again.' } });
     },
 
+    /** iOS visibility only: stop video capture, retain audio and transport.
+     * Foregrounding never captures again without the owner's camera action. */
+    setBackgrounded: (hidden: boolean) => {
+      if (hidden && !backgrounded) videoGeneration++;
+      backgrounded = hidden;
+      if (hidden) pauseVideo();
+    },
+
     toggleMute: () => {
       if (!local) return;
       const muted = !view.muted;
@@ -963,8 +1009,9 @@ export function createCallEngine(deps: CallDeps) {
     toggleCamera: async () => {
       const stream = local;
       const sender = videoSender;
-      if (!stream || !sender || view.media !== 'video' || cameraBusy) return;
+      if (!stream || !sender || view.media !== 'video' || cameraBusy || backgrounded) return;
       cameraBusy = true;
+      const videoRequest = videoGeneration;
       let track: MediaStreamTrack | undefined;
       try {
         if (view.camera) {
@@ -975,12 +1022,18 @@ export function createCallEngine(deps: CallDeps) {
           const fresh = await acquireMedia({ video: true });
           track = fresh.getVideoTracks()[0];
           fresh.getTracks().forEach((t) => { if (t !== track) t.stop(); });
-          if (local !== stream) { track?.stop(); return; }
+          if (local !== stream || backgrounded || videoRequest !== videoGeneration) { track?.stop(); return; }
           if (!track) throw new DOMException('No camera', 'NotFoundError');
           // Own the track before replaceTrack awaits, so hangup can stop it.
           stream.addTrack(track);
           await sender.replaceTrack(track);
           if (local !== stream) return;
+          if (backgrounded || videoRequest !== videoGeneration) {
+            // A hide/show interval invalidates this action even after return.
+            // pauseVideo already stopped/removed its track; detach a late sender.
+            await sender.replaceTrack(null);
+            return;
+          }
           set({ camera: true, error: null });
         }
         if (local === stream) deps.onStreams(local, remote);

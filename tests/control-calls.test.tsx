@@ -3129,3 +3129,172 @@ describe('calls in the shell', () => {
     expect($('[data-stun-own-hint]')).toBeNull();
   });
 });
+
+describe('iOS Live call audio and background video', () => {
+  const flushAudio = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+
+  it.each(['hangup', 'closed', 'endLocal'] as const)('owns audio only while Live, releases on %s', async (ending) => {
+    const audioSession = vi.fn(async (_live: boolean) => {});
+    const { e } = engine({ audioSession });
+    expect(audioSession).not.toHaveBeenCalled();
+    await e.place(A, 'audio', QUOTE);
+    expect(audioSession).not.toHaveBeenCalled();
+    const pc = FakePc.made[FakePc.made.length - 1];
+    pc.connect();
+    await flushAudio();
+    expect(audioSession.mock.calls).toEqual([[true]]);
+    pc.connect();
+    if (ending === 'closed') pc.state('closed');
+    else await e[ending]();
+    await flushAudio();
+    expect(audioSession.mock.calls).toEqual([[true], [false]]);
+  });
+
+  it('serializes a pending activation before end and never revives the call', async () => {
+    let finish!: () => void;
+    const audioSession = vi.fn((live: boolean) => live ? new Promise<void>(resolve => { finish = resolve; }) : Promise.resolve());
+    const { e } = engine({ audioSession });
+    await e.place(A, 'audio', QUOTE);
+    FakePc.made[FakePc.made.length - 1].connect();
+    await flushAudio();
+    e.endLocal();
+    finish();
+    await flushAudio();
+    expect(audioSession.mock.calls).toEqual([[true], [false]]);
+    expect(e.view().phase).toBe('ended');
+  });
+
+  it('reports activation failure without sending or paying anything else', async () => {
+    const audioSession = vi.fn(async () => { throw new Error('Audio unavailable'); });
+    const { e, sent } = engine({ audioSession });
+    await e.place(A, 'audio', QUOTE);
+    FakePc.made[FakePc.made.length - 1].connect();
+    await flushAudio();
+    expect(e.view()).toMatchObject({ phase: 'live', error: expect.stringMatching(/background audio/i) });
+    expect(sent.map(s => s.kind)).toEqual([400]);
+    e.endLocal();
+    await flushAudio();
+  });
+
+  it('releases during reconnecting and reacquires only when Live again', async () => {
+    const audioSession = vi.fn(async (_live: boolean) => {});
+    const { e } = engine({ audioSession });
+    await e.place(A, 'audio', QUOTE);
+    const pc = FakePc.made[FakePc.made.length - 1];
+    pc.connect();
+    await flushAudio();
+    pc.state('disconnected');
+    await flushAudio();
+    expect(audioSession.mock.calls).toEqual([[true], [false]]);
+    pc.connect();
+    await flushAudio();
+    expect(audioSession.mock.calls).toEqual([[true], [false], [true]]);
+    e.endLocal();
+    await flushAudio();
+  });
+
+  it('stops background video, preserves audio and does not send or restart camera on return', async () => {
+    const local = stream(true);
+    const mic = local.getAudioTracks()[0];
+    const camera = local.getVideoTracks()[0];
+    const { e, sent } = engine({ getUserMedia: async () => local });
+    await e.place(A, 'video', QUOTE);
+    const pc = FakePc.made[FakePc.made.length - 1];
+    pc.connect();
+    e.setBackgrounded(true);
+    await flushAudio();
+    expect(camera.stop).toHaveBeenCalledOnce();
+    expect(mic.stop).not.toHaveBeenCalled();
+    expect(mic.enabled).toBe(true);
+    expect(pc.senders.find(s => s.replaced.length)?.track).toBeNull();
+    expect(e.view()).toMatchObject({ phase: 'live', camera: false });
+    e.setBackgrounded(false);
+    expect(e.view().camera).toBe(false);
+    expect(sent.map(s => s.kind)).toEqual([400]);
+    e.endLocal();
+  });
+
+  it('discards a camera acquisition that completes after backgrounding', async () => {
+    const local = stream(true);
+    const fresh = stream(true, false);
+    let finish!: (s: MediaStream) => void;
+    const getUserMedia = vi.fn().mockResolvedValueOnce(local).mockImplementationOnce(() => new Promise<MediaStream>(resolve => { finish = resolve; }));
+    const { e } = engine({ getUserMedia });
+    await e.place(A, 'video', QUOTE);
+    FakePc.made[FakePc.made.length - 1].connect();
+    await e.toggleCamera();
+    const enabling = e.toggleCamera();
+    await flushAudio();
+    e.setBackgrounded(true);
+    finish(fresh);
+    await enabling;
+    expect(fresh.getVideoTracks()[0].stop).toHaveBeenCalledOnce();
+    expect(e.view().camera).toBe(false);
+    e.endLocal();
+  });
+});
+
+describe('iOS camera requests invalidated by a background interval', () => {
+  it('does not accept a pre-background camera request after returning', async () => {
+    const local = stream(true);
+    const fresh = stream(true, false);
+    let finish!: (s: MediaStream) => void;
+    const getUserMedia = vi.fn().mockResolvedValueOnce(local).mockImplementationOnce(() => new Promise<MediaStream>(resolve => { finish = resolve; }));
+    const { e } = engine({ getUserMedia });
+    await e.place(A, 'video', QUOTE);
+    FakePc.made[FakePc.made.length - 1].connect();
+    await e.toggleCamera();
+    const enabling = e.toggleCamera();
+    await Promise.resolve();
+    e.setBackgrounded(true);
+    e.setBackgrounded(false);
+    finish(fresh);
+    await enabling;
+    expect(fresh.getVideoTracks()[0].stop).toHaveBeenCalledOnce();
+    expect(e.view().camera).toBe(false);
+    e.endLocal();
+  });
+
+  it('does not mark a stopped track as camera-on after a pending replacement and hide/show', async () => {
+    const local = stream(true);
+    const fresh = stream(true, false);
+    const { e } = engine({ getUserMedia: vi.fn().mockResolvedValueOnce(local).mockResolvedValueOnce(fresh) });
+    await e.place(A, 'video', QUOTE);
+    const pc = FakePc.made[FakePc.made.length - 1];
+    pc.connect();
+    await e.toggleCamera();
+    let finish!: () => void;
+    const sender = pc.senders.find(s => s.replaced.length)!;
+    sender.replaceTrack = async (track) => {
+      if (track) await new Promise<void>(resolve => { finish = resolve; });
+      sender.track = track;
+    };
+    const enabling = e.toggleCamera();
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    e.setBackgrounded(true);
+    e.setBackgrounded(false);
+    finish();
+    await enabling;
+    expect(e.view().camera).toBe(false);
+    expect(sender.track).toBeNull();
+    e.endLocal();
+  });
+});
+
+it('keeps initial video capture off if it resolves after background and return', async () => {
+  const local = stream(true);
+  const camera = local.getVideoTracks()[0];
+  let finish!: (s: MediaStream) => void;
+  const { e } = engine({ getUserMedia: () => new Promise<MediaStream>(resolve => { finish = resolve; }) });
+  const placing = e.place(A, 'video', QUOTE);
+  await Promise.resolve();
+  e.setBackgrounded(true);
+  e.setBackgrounded(false);
+  finish(local);
+  await placing;
+  expect(camera.stop).toHaveBeenCalledOnce();
+  expect(e.view().camera).toBe(false);
+  // The sender survives so an explicit later camera action can replace it.
+  expect(FakePc.made[FakePc.made.length - 1].senders).toHaveLength(2);
+  e.endLocal();
+});
