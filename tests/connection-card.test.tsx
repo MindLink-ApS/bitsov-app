@@ -1,3 +1,5 @@
+import { createSignal, Show } from 'solid-js';
+import { PairingActivityProvider, usePairingBlocked } from '../src/pairingActivity';
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConnectionCard, connectionSummary, nextLastCall, type NodeAnswer } from '../src/control/ConnectionCard';
@@ -94,4 +96,31 @@ describe('the connection card', () => {
     const placed = nextLastCall(refused, { ...IDLE, phase: 'calling', peer, callId: 'f'.repeat(32), outgoing: true });
     expect(placed).toEqual({ id: 'f'.repeat(32), connected: false, route: null });
   });
+});
+
+it.each(['resolve', 'reject', 'unmount'] as const)('blocks interruptions during a local connection check and releases on %s', async end => {
+  let resolve!: () => void, reject!: () => void;
+  const onCheck = () => new Promise<void>((yes, no) => { resolve = yes; reject = () => no(new Error('offline')); });
+  const [visible, setVisible] = createSignal(true);
+  let blocked!: () => boolean;
+  const Observe = () => { blocked = usePairingBlocked(); return null; };
+  dispose = render(() => <PairingActivityProvider><Observe /><Show when={visible()}><ConnectionCard {...base} onCheck={onCheck} checking={false} /></Show></PairingActivityProvider>, document.body);
+  expect(blocked()).toBe(false);
+  document.querySelector<HTMLButtonElement>('[data-connection-check]')!.click();
+  expect(blocked()).toBe(true);
+  if (end === 'unmount') setVisible(false);
+  else if (end === 'reject') reject();
+  else resolve();
+  await flush();
+  expect(blocked()).toBe(false);
+  if (end === 'unmount') { resolve(); await flush(); expect(blocked()).toBe(false); }
+});
+it('registers an externally held connection check as busy', () => {
+  const [checking, setChecking] = createSignal(true);
+  let blocked!: () => boolean;
+  const Observe = () => { blocked = usePairingBlocked(); return null; };
+  dispose = render(() => <PairingActivityProvider><Observe /><ConnectionCard {...base} checking={checking()} /></PairingActivityProvider>, document.body);
+  expect(blocked()).toBe(true);
+  setChecking(false);
+  expect(blocked()).toBe(false);
 });

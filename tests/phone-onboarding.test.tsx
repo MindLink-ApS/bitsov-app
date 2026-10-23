@@ -2,6 +2,7 @@ import { render } from 'solid-js/web';
 import { createSignal } from 'solid-js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { PhoneOnboarding, type PhoneOnboardingProps } from '../src/onboarding/PhoneOnboarding';
+import { PhoneTrust } from '../src/onboarding/PhoneTrust';
 import { INITIAL_PAIRING, type ConnectionError, type NodeStatus } from '../src/onboarding/pairing';
 
 let dispose: (() => void) | undefined;
@@ -353,4 +354,73 @@ it('shows connecting progress without a dummy primary action', async () => {
   await tick();
   expect(document.querySelectorAll('button.primary')).toHaveLength(0);
   expect(document.querySelector('[role="status"]')?.textContent).toBe('Please wait…');
+});
+
+it('focuses each changed error once, including recovery-only changes, without a live duplicate', async () => {
+  const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
+  mount({ status });
+  await tick();
+  const heading = document.querySelector('h1')!;
+  const announcements: string[] = [];
+  heading.addEventListener('focus', () => announcements.push(`${heading.textContent} ${document.getElementById(heading.getAttribute('aria-describedby')!)?.textContent}`));
+  const change = async (kind: ConnectionError['kind'], detail = '') => {
+    setStatus({ ready: false, node_id: null, error: null, connection_error: { kind, detail } });
+    await tick();
+  };
+  const options = document.querySelector('summary')!;
+  options.focus();
+  await change('unreachable');
+  expect(document.activeElement).toBe(heading);
+  expect(announcements).toHaveLength(1);
+  expect(announcements[0]).toContain("Can't reach your box");
+  options.focus();
+  await change('expired');
+  expect(document.activeElement).toBe(heading);
+  expect(announcements).toHaveLength(2);
+  expect(announcements[1]).toContain('This QR has expired');
+  // Same heading, different recovery instruction; refocus even if already on it.
+  await change('clock');
+  expect(document.activeElement).toBe(heading);
+  expect(announcements).toHaveLength(3);
+  expect(announcements[2]).not.toBe(announcements[1]);
+  options.focus();
+  await change('clock');
+  expect(announcements).toHaveLength(3);
+  expect(document.activeElement).toBe(options);
+  await change('clock', 'Updated diagnostic');
+  expect(document.activeElement).toBe(heading);
+  expect(announcements).toHaveLength(4);
+  expect(document.querySelector('[data-phone-face] [role="alert"], [data-phone-face] [role="status"], [data-phone-face][aria-live], [data-phone-face] [aria-live]')).toBeNull();
+});
+it('announces an error present at mount only once', async () => {
+  const focused = vi.fn((event: FocusEvent) => { if ((event.target as Element).tagName === 'H1') announcements++; });
+  let announcements = 0;
+  document.addEventListener('focusin', focused);
+  try {
+    mount({ status: () => ({ ready: false, node_id: null, error: null, connection_error: { kind: 'expired', detail: '' } }) });
+    await tick();
+    expect(announcements).toBe(1);
+  } finally { document.removeEventListener('focusin', focused); }
+});
+it('moves focus from a disappearing action to the new step and its current description', async () => {
+  mount({ preview: async () => ({ second_device: false, endpoint: 'box', node_id_fingerprint: 'ABCD' }) });
+  await tick();
+  const scan = button("Scan your box’s QR");
+  scan.focus(); scan.click(); await tick();
+  expect(scan.isConnected).toBe(false);
+  const heading = document.querySelector('h1')!;
+  expect(document.activeElement).toBe(heading);
+  expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('fingerprint');
+  expect(heading.tabIndex).toBe(-1);
+  expect(document.getElementById(heading.getAttribute('aria-describedby')!)?.textContent).toBe(document.querySelector('.phone-line')?.textContent);
+  expect(document.querySelector('.phone-line')?.textContent).not.toBe('Other device → Add a device.');
+});
+it.each(['en', 'da'])('focuses the PhoneTrust heading with its deposit disclosure in %s', async locale => {
+  dispose = render(() => <PhoneTrust locale={locale} onContinue={async () => {}} />, document.body);
+  await tick();
+  const heading = document.querySelector('h1')!;
+  expect(document.activeElement).toBe(heading);
+  expect(heading.tabIndex).toBe(-1);
+  expect(document.getElementById(heading.getAttribute('aria-describedby')!)?.textContent).toBe(locale === 'en' ? 'The host can spend your deposits.' : 'Værten kan bruge dine indskud.');
+  expect(heading.closest('[aria-live], [role="alert"], [role="status"]')).toBeNull();
 });

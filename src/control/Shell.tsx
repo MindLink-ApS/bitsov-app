@@ -6511,6 +6511,7 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
 function Reconcile(props: { actions: Actions; hasPending?: boolean; onChecked?: (text: string) => void }) {
   const [result, setResult] = createSignal<string | null>(null);
   const [checking, setChecking] = createSignal(false);
+  usePairingActivity(checking);
   // Paid, not delivered: the owner may stop retrying (it dispatches nothing).
   // The record the check showed: Stop retrying names it, never whatever is pending later.
   const [undelivered, setUndelivered] = createSignal<string | null>(null);
