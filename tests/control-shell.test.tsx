@@ -1,3 +1,4 @@
+import { waitFor } from './helpers/fake-clock';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
@@ -108,6 +109,7 @@ describe('control center shell', () => {
   let mount: HTMLElement;
 
   beforeEach(() => {
+    vi.useFakeTimers();
     setShowLegacyRoomsUi(true);
   });
 
@@ -129,9 +131,9 @@ describe('control center shell', () => {
 
   async function openChat() {
     start();
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
+    await waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-message="m1"]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-message="m1"]')).not.toBeNull());
   }
 
   it.each([false, true])('animates new ids once, keeping rows through echoes, refreshes and navigation (reduced motion: %s)', async (reduced) => {
@@ -142,7 +144,7 @@ describe('control center shell', () => {
     expect(history.classList.contains('fresh')).toBe(false);
     const message = { id: 'new', kind: 0, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: 'just arrived', payment_amount_msat: 2000 };
     emitLive({ type: 'message', room_id: null, message });
-    await vi.waitFor(() => expect(mount.querySelector('[data-message="new"]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-message="new"]')).not.toBeNull());
     const row = mount.querySelector('[data-message="new"]')!;
     expect(row.classList.contains('fresh')).toBe(!reduced);
     row.querySelector('.bubble')!.dispatchEvent(new Event('animationend', { bubbles: true }));
@@ -155,7 +157,7 @@ describe('control center shell', () => {
     expect(history.classList.contains('fresh')).toBe(false);
     click(`[data-track="peer:${B}"]`);
     click(`[data-track="peer:${A}"]`);
-    await vi.waitFor(() => expect(mount.querySelector('[data-message="new"]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-message="new"]')).not.toBeNull());
     expect(mount.querySelector('[data-message="new"]')!.classList.contains('fresh')).toBe(false);
   });
 
@@ -220,7 +222,7 @@ describe('control center shell', () => {
   it('keeps first run in the centre track and reads nothing before the trust gate', async () => {
     const { calls } = stubHost();
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate="g6-local-trust"]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate="g6-local-trust"]')).not.toBeNull());
     expect(mount.querySelector('[data-first-run]')).not.toBeNull();
     expect(mount.querySelector('.rail')).not.toBeNull();
     expect(mount.querySelector('[data-panel="wallet"]')).toBeNull();
@@ -235,29 +237,29 @@ describe('control center shell', () => {
         pending: { op_id: 'op', expires_at_ms: Date.now() + 900_000, owner_action: 'grant op', owner_can_grant: true } };
     } });
     start();
-    await vi.waitFor(() => expect(mount.textContent).toContain('I understand'));
+    await waitFor(() => expect(mount.textContent).toContain('I understand'));
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-spend-ask-again]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-spend-ask-again]')).not.toBeNull());
     click('[data-spend-ask-again]');
-    await vi.waitFor(() => expect(mount.textContent).toContain('/pair/elevation-request failed (404)'));
-    await new Promise((resolve) => setTimeout(resolve, 3200));
+    await waitFor(() => expect(mount.textContent).toContain('/pair/elevation-request failed (404)'));
+    await vi.advanceTimersByTimeAsync(3200);
     expect(mount.textContent).toContain('/pair/elevation-request failed (404)');
     reject = false;
     click('[data-spend-ask-again]');
-    await vi.waitFor(() => expect(mount.textContent).not.toContain('/pair/elevation-request failed (404)'));
+    await waitFor(() => expect(mount.textContent).not.toContain('/pair/elevation-request failed (404)'));
   });
 
   it('relaunches into the real shell with rc8 rooms after accepting trust for this node', async () => {
     stubHost({ node_overview: () => ({ node_id: OWN, capabilities: ['room_binding_v1'], money_ready: true }) });
     start();
-    await vi.waitFor(() => expect(mount.textContent).toContain('I understand'));
+    await waitFor(() => expect(mount.textContent).toContain('I understand'));
     expect(mount.querySelector('.rail')?.textContent).not.toContain('does not support rooms');
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-first-run]')).toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-first-run]')).toBeNull());
     dispose?.(); mount.remove();
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-first-run]')).toBeNull());
-    await vi.waitFor(() => expect(mount.querySelector('.rail')?.textContent).toContain('New room'));
+    await waitFor(() => expect(mount.querySelector('[data-first-run]')).toBeNull());
+    await waitFor(() => expect(mount.querySelector('.rail')?.textContent).toContain('New room'));
     expect(mount.querySelector('.rail')?.textContent).not.toContain('Available after setup');
   });
 
@@ -265,15 +267,15 @@ describe('control center shell', () => {
     let failed = false;
     stubHost({ node_status: () => { if (failed) throw new Error('temporarily unavailable'); return { ready: true, node_id: OWN, error: null }; } });
     start();
-    await vi.waitFor(() => expect(mount.textContent).toContain('I understand'));
+    await waitFor(() => expect(mount.textContent).toContain('I understand'));
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-first-run]')).toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-first-run]')).toBeNull());
     const shell = mount.querySelector('.cc');
     failed = true;
-    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await vi.advanceTimersByTimeAsync(1600);
     expect(mount.querySelector('.cc')).toBe(shell);
     failed = false;
-    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await vi.advanceTimersByTimeAsync(1600);
     expect(mount.querySelector('.cc')).toBe(shell);
     expect(mount.querySelector('[data-first-run]')).toBeNull();
   });
@@ -288,17 +290,17 @@ describe('control center shell', () => {
       }),
     });
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
 
-    await vi.waitFor(() => expect(mount.querySelector('[data-spend-lapse="lost"]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-spend-lapse="lost"]')).not.toBeNull());
     expect(mount.querySelector('[data-spend-lapse]')?.textContent).toContain('restarted');
     expect(calls.some((c) => c.cmd === 'spend_request')).toBe(false);
 
     // A double click asks once.
     click('[data-spend-ask-again]');
     click('[data-spend-ask-again]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-approval="pending"] [data-owner-action]')?.textContent).toBe(cmd));
+    await waitFor(() => expect(mount.querySelector('[data-approval="pending"] [data-owner-action]')?.textContent).toBe(cmd));
     expect(mount.querySelector('[data-approval="pending"]')?.textContent).toContain('short code');
     expect(calls.filter((c) => c.cmd === 'spend_request')).toHaveLength(1);
   });
@@ -313,28 +315,28 @@ describe('control center shell', () => {
       },
     });
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-    await vi.waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-profile]')?.disabled).toBe(false));
+    await waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-profile]')?.disabled).toBe(false));
     click('[data-profile]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-open-settings]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-open-settings]')).not.toBeNull());
     click('[data-open-settings]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-tab="node"]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-tab="node"]')).not.toBeNull());
     click('[data-tab="node"]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-connection-check]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-connection-check]')).not.toBeNull());
     hold = true;
     click('[data-connection-check]');
-    await vi.waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-connection-check]')!.disabled).toBe(true));
+    await waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-connection-check]')!.disabled).toBe(true));
     // Node → General → Node: a fresh card, the same check still out.
     click('[data-tab="general"]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-connection-card]')).toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-connection-card]')).toBeNull());
     click('[data-tab="node"]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-connection-check]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-connection-check]')).not.toBeNull());
     expect(mount.querySelector<HTMLButtonElement>('[data-connection-check]')!.disabled).toBe(true);
     expect(mount.querySelector('[data-connection-check]')!.textContent).toBe('Checking…');
     hold = false;
     waiting.splice(0).forEach((go) => go());
-    await vi.waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-connection-check]')!.disabled).toBe(false));
+    await waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-connection-check]')!.disabled).toBe(false));
     expect(host.calls.length).toBeGreaterThan(0);
   });
 
@@ -353,19 +355,19 @@ describe('control center shell', () => {
     let copied = '';
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (t: string) => { copied = t; } } });
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-    await vi.waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-profile]')?.disabled).toBe(false));
+    await waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-profile]')?.disabled).toBe(false));
     click('[data-profile]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-open-settings]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-open-settings]')).not.toBeNull());
     click('[data-open-settings]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-tab="node"]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-tab="node"]')).not.toBeNull());
     click('[data-tab="node"]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-connection-card]')).not.toBeNull());
-    await vi.waitFor(() => expect(mount.querySelector('[data-connection-line="2"]')!.textContent).toMatch(/^Last status check: .+ · \d+ ms \(this app ↔ its host\)$/));
+    await waitFor(() => expect(mount.querySelector('[data-connection-card]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-connection-line="2"]')!.textContent).toMatch(/^Last status check: .+ · \d+ ms \(this app ↔ its host\)$/));
     expect(mount.querySelector('[data-connection-line="3"]')!.textContent).toBe('Calls · STUN: your node');
     click('[data-connection-copy]');
-    await vi.waitFor(() => expect(copied).toContain('BitSov connection'));
+    await waitFor(() => expect(copied).toContain('BitSov connection'));
     for (const secret of [OWN, A, B, TICKET, 'SECRETTICKET', TOKEN, '203.0.113.7', '127.0.0.1', '9735', '9736', 'mynode.example.org', '3478', 'abcdefghijklmnop', '.onion']) {
       expect(copied).not.toContain(secret);
     }
@@ -397,10 +399,10 @@ describe('control center shell', () => {
       ],
     });
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
 
-    await vi.waitFor(() => expect(mount.querySelector('[data-touch-approval]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-touch-approval]')).not.toBeNull());
     const box = mount.querySelector('[data-touch-approval]')!.textContent!;
     expect(box).toContain('200 sats a day');
     expect(box).toContain('at most 2 sats per message');
@@ -412,13 +414,13 @@ describe('control center shell', () => {
     const line = mount.querySelector('[data-touch-approval]')!;
     const bar = mount.querySelector('[data-composer-bar]')!;
     expect(line.compareDocumentPosition(bar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     expect(calls.some((c) => c.cmd === 'relation_approve' || c.cmd === 'spend_request')).toBe(false);
 
     // Send in the composer is the Touch ID tap; the line above it only states the terms.
     expect(mount.querySelector('[data-touch-approval] button')).toBeNull();
     click('[data-send]');
-    await vi.waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    await waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
     const args = calls.find((c) => c.cmd === 'relation_approve')!.args!;
     expect(args).toMatchObject({ peer: A, budget_msat: null, per_act_max_msat: 2000 });
     // No name of any kind goes to the host: the petname stays on this Mac.
@@ -447,17 +449,17 @@ describe('control center shell', () => {
       },
     });
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
 
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     expect(mount.querySelector('[data-touch-approval]')).not.toBeNull();
     click('[data-send]');
-    await vi.waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    await waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
     expect(calls.find((c) => c.cmd === 'relation_approve')!.args).toMatchObject({ peer: A });
     expect(calls.some((c) => c.cmd === 'message_send')).toBe(false);
     // With the envelope in place, Send is back.
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toMatch(/^Send/));
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toMatch(/^Send/));
     expect(mount.querySelector('[data-touch-approval]')).toBeNull();
   });
 
@@ -478,20 +480,20 @@ describe('control center shell', () => {
       message_send: (args) => ({ message_id: 'sent-t', recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() }),
     });
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     const area = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
     area.value = 'hello Maya';
     area.dispatchEvent(new Event('input', { bubbles: true }));
     // The label promises only the approval.
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     click('[data-send]');
-    await vi.waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
-    await vi.waitFor(() => expect(mount.querySelector('[data-composer-note]')?.textContent).toBe('Approved. Press Send to send it.'));
+    await waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    await waitFor(() => expect(mount.querySelector('[data-composer-note]')?.textContent).toBe('Approved. Press Send to send it.'));
     expect(mount.querySelector('[data-sending]')).toBeNull();
     expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Maya');
-    await new Promise((r) => setTimeout(r, 300));
+    await vi.advanceTimersByTimeAsync(300);
     expect(calls.some((c) => c.cmd === 'message_send')).toBe(false);
   });
 
@@ -512,18 +514,18 @@ describe('control center shell', () => {
       message_send: (args) => ({ message_id: 'sent-t', recipient: args!.recipient, is_room: false, delivered: true, amount_msat: 2000, sent_at_ms: Date.now() }),
     });
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     const area = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
     area.value = 'hello Maya';
     area.dispatchEvent(new Event('input', { bubbles: true }));
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     click('[data-send]');
-    await vi.waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    await waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
     // B's envelope (another approval) shows up on a later read.
     envelopes = { [A]: Date.now() + 86_400_000 };
-    await new Promise((r) => setTimeout(r, 4000));
+    await vi.advanceTimersByTimeAsync(4000);
     expect(calls.some((c) => c.cmd === 'message_send')).toBe(false);
     expect(mount.querySelector('[data-sending]')).toBeNull();
   }, 20_000);
@@ -590,14 +592,14 @@ describe('control center shell', () => {
   const DAY = 86_400_000;
   async function pressTouch(text = 'hello Maya') {
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     const area = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
     area.value = text;
     area.dispatchEvent(new Event('input', { bubbles: true }));
     // The label promises only the approval; the message waits in its bubble.
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     click('[data-send]');
   }
   const unsentReason = () => mount.querySelector('[data-unsent-reason]')?.textContent ?? '';
@@ -607,10 +609,10 @@ describe('control center shell', () => {
       approve: () => { st.ids = { [A]: 'env-1', [B]: 'env-b' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
     const host = touchHost(st);
     await pressTouch();
-    await vi.waitFor(() => expect(host.calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
-    await vi.waitFor(() => expect(host.sent).toEqual(['hello Maya']));
+    await waitFor(() => expect(host.calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    await waitFor(() => expect(host.sent).toEqual(['hello Maya']));
     expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
-    await new Promise((r) => setTimeout(r, 3500));
+    await vi.advanceTimersByTimeAsync(3500);
     expect(host.sent).toEqual(['hello Maya']);
   }, 15_000);
 
@@ -621,10 +623,10 @@ describe('control center shell', () => {
     const st = { ids, envelopes: {} as Record<string, number>, approve: () => { st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
     const host = touchHost(st);
     await pressTouch();
-    await vi.waitFor(() => expect(mount.querySelector('[data-composer-note]')?.textContent).toBe('Approved. Press Send to send it.'));
+    await waitFor(() => expect(mount.querySelector('[data-composer-note]')?.textContent).toBe('Approved. Press Send to send it.'));
     expect(mount.querySelector('[data-sending]')).toBeNull();
     expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Maya');
-    await new Promise((r) => setTimeout(r, 300));
+    await vi.advanceTimersByTimeAsync(300);
     expect(host.sent).toEqual([]);
   });
 
@@ -633,10 +635,10 @@ describe('control center shell', () => {
       approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: null }; } };
     const host = touchHost(st);
     await pressTouch();
-    await vi.waitFor(() => expect(mount.querySelector('[data-composer-note]')?.textContent).toBe('Approved. Press Send to send it.'));
+    await waitFor(() => expect(mount.querySelector('[data-composer-note]')?.textContent).toBe('Approved. Press Send to send it.'));
     expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Maya');
     expect(mount.querySelector('[data-sending]')).toBeNull();
-    await new Promise((r) => setTimeout(r, 300));
+    await vi.advanceTimersByTimeAsync(300);
     expect(host.sent).toEqual([]);
   });
 
@@ -650,9 +652,9 @@ describe('control center shell', () => {
       approve: () => { st.ids = after; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
     const host = touchHost(st);
     await pressTouch();
-    await vi.waitFor(() => expect(unsentReason()).toContain('It needs Touch ID again. Press Send to ask.'));
+    await waitFor(() => expect(unsentReason()).toContain('It needs Touch ID again. Press Send to ask.'));
     expect(mount.querySelector('[data-sending]')).toBeNull();
-    await new Promise((r) => setTimeout(r, 300));
+    await vi.advanceTimersByTimeAsync(300);
     expect(host.sent).toEqual([]);
   });
 
@@ -662,7 +664,7 @@ describe('control center shell', () => {
       approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
     const host = touchHost(st);
     await pressTouch();
-    await vi.waitFor(() => expect(host.sent).toEqual(['hello Maya']));
+    await waitFor(() => expect(host.sent).toEqual(['hello Maya']));
     expect(unsentReason()).toBe('');
   });
 
@@ -677,10 +679,10 @@ describe('control center shell', () => {
       approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
     const host = touchHost(st);
     await pressTouch();
-    if (sends) await vi.waitFor(() => expect(host.sent).toEqual(['hello Maya']));
+    if (sends) await waitFor(() => expect(host.sent).toEqual(['hello Maya']));
     else {
-      await vi.waitFor(() => expect(unsentReason()).toContain('It needs Touch ID again. Press Send to ask.'));
-      await new Promise((r) => setTimeout(r, 300));
+      await waitFor(() => expect(unsentReason()).toContain('It needs Touch ID again. Press Send to ask.'));
+      await vi.advanceTimersByTimeAsync(300);
       expect(host.sent).toEqual([]);
     }
   });
@@ -690,7 +692,7 @@ describe('control center shell', () => {
       approve: () => { throw { code: 'device_cancelled', message: 'Touch ID was cancelled.' }; } };
     const host = touchHost(st);
     await pressTouch();
-    await vi.waitFor(() => expect(unsentReason()).toContain('It was not approved.'));
+    await waitFor(() => expect(unsentReason()).toContain('It was not approved.'));
     expect(mount.querySelector('[data-sending]')).toBeNull();
     expect(host.sent).toEqual([]);
   });
@@ -701,15 +703,15 @@ describe('control center shell', () => {
       approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
     const host = touchHost(st);
     await pressTouch();
-    await vi.waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
-    await new Promise((r) => setTimeout(r, 500));
+    await waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
+    await vi.advanceTimersByTimeAsync(500);
     expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull();
     // A partial read omits A; then A's env-1 is back and the window opens.
     st.ids = {};
-    await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'), { timeout: 8000 });
+    await waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'), { timeout: 8000 });
     st.ids = { [A]: 'env-1' };
     st.spendOpen = true;
-    await new Promise((r) => setTimeout(r, 4000));
+    await vi.advanceTimersByTimeAsync(4000);
     expect(host.sent).toEqual([]);
   }, 20_000);
 
@@ -718,9 +720,9 @@ describe('control center shell', () => {
       approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
     const host = touchHost(st);
     await pressTouch();
-    await vi.waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
     st.device = 'none';
-    await vi.waitFor(() => expect(unsentReason()).toContain('Touch ID approvals on this Mac stopped before it went through.'), { timeout: 20_000 });
+    await waitFor(() => expect(unsentReason()).toContain('Touch ID approvals on this Mac stopped before it went through.'), { timeout: 20_000 });
     expect(host.sent).toEqual([]);
   }, 30_000);
 
@@ -729,12 +731,12 @@ describe('control center shell', () => {
       approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
     const host = touchHost(st);
     await pressTouch();
-    await vi.waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
     click(`[data-track="peer:${B}"]`);
     st.spendOpen = true;
     click(`[data-track="peer:${A}"]`);
-    await vi.waitFor(() => expect(unsentReason()).toContain('You left this chat before it was approved.'));
-    await new Promise((r) => setTimeout(r, 3500));
+    await waitFor(() => expect(unsentReason()).toContain('You left this chat before it was approved.'));
+    await vi.advanceTimersByTimeAsync(3500);
     expect(host.sent).toEqual([]);
   }, 15_000);
 
@@ -747,31 +749,31 @@ describe('control center shell', () => {
     };
     const host = touchHost(st);
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
     // Send 1 goes under A's live envelope env-0 and stays in flight.
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toMatch(/^Send/));
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toMatch(/^Send/));
     const area = () => mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
     area().value = 'one';
     area().dispatchEvent(new Event('input', { bubbles: true }));
     click('[data-send]');
-    await vi.waitFor(() => expect(host.sent).toEqual(['one']));
+    await waitFor(() => expect(host.sent).toEqual(['one']));
     // env-0 ends: the next message is a Touch ID approve & send.
     st.envelopes = { [A]: Date.now() - 1000 };
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'), { timeout: 8000 });
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'), { timeout: 8000 });
     area().value = 'two';
     area().dispatchEvent(new Event('input', { bubbles: true }));
     click('[data-send]');
-    await vi.waitFor(() => expect(host.calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    await waitFor(() => expect(host.calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
     // Approved and handed to the queue: its bubble is a plain "Sending", behind send 1.
-    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
+    await waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
     click(`[data-track="peer:${B}"]`);
     st.sendGate = null;
     release();
-    await new Promise((r) => setTimeout(r, 500));
+    await vi.advanceTimersByTimeAsync(500);
     expect(host.sent).toEqual(['one']);
     click(`[data-track="peer:${A}"]`);
-    await vi.waitFor(() => expect(unsentReason()).toContain('You left this chat before it was sent.'));
+    await waitFor(() => expect(unsentReason()).toContain('You left this chat before it was sent.'));
   }, 20_000);
 
   /**
@@ -789,22 +791,22 @@ describe('control center shell', () => {
     };
     const host = touchHost(st);
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toMatch(/^Send/));
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toMatch(/^Send/));
     const area = () => mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
     area().value = 'one';
     area().dispatchEvent(new Event('input', { bubbles: true }));
     click('[data-send]');
-    await vi.waitFor(() => expect(host.sent).toEqual(['one']));
+    await waitFor(() => expect(host.sent).toEqual(['one']));
     st.envelopes = { [A]: Date.now() - 1000 };
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'), { timeout: 8000 });
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'), { timeout: 8000 });
     area().value = 'two';
     area().dispatchEvent(new Event('input', { bubbles: true }));
     click('[data-send]');
-    await vi.waitFor(() => expect(host.calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
-    await vi.waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
-    const go = async () => { st.sendGate = null; release(); await new Promise((r) => setTimeout(r, 500)); };
+    await waitFor(() => expect(host.calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    await waitFor(() => expect(mount.querySelectorAll('[data-sending=""]').length).toBe(2));
+    const go = async () => { st.sendGate = null; release(); await vi.advanceTimersByTimeAsync(500); };
     return { st, host, go };
   }
   const budgetReads = (host: ReturnType<typeof touchHost>) => host.calls.filter((c) => c.cmd === 'budget_status').length;
@@ -813,26 +815,26 @@ describe('control center shell', () => {
     const { st, host, go } = await twoHandedBehindOne();
     st.budgetFail = true;
     const reads = budgetReads(host);
-    await vi.waitFor(() => expect(budgetReads(host)).toBeGreaterThan(reads), { timeout: 6000 });
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => expect(budgetReads(host)).toBeGreaterThan(reads), { timeout: 6000 });
+    await vi.advanceTimersByTimeAsync(100);
     await go();
     expect(host.sent).toEqual(['one']);
-    await vi.waitFor(() => expect(unsentReason()).toContain('It needs Touch ID again. Press Send to ask.'));
+    await waitFor(() => expect(unsentReason()).toContain('It needs Touch ID again. Press Send to ask.'));
   }, 30_000);
 
   it('Codex cxr-touch-1 r2 #2: its envelope removed and then the same one restored while queued: cancelled for good', async () => {
     const { st, host, go } = await twoHandedBehindOne();
     st.ids = {};
     let reads = budgetReads(host);
-    await vi.waitFor(() => expect(budgetReads(host)).toBeGreaterThan(reads), { timeout: 6000 });
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => expect(budgetReads(host)).toBeGreaterThan(reads), { timeout: 6000 });
+    await vi.advanceTimersByTimeAsync(100);
     st.ids = { [A]: 'env-1' };
     reads = budgetReads(host);
-    await vi.waitFor(() => expect(budgetReads(host)).toBeGreaterThan(reads), { timeout: 6000 });
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => expect(budgetReads(host)).toBeGreaterThan(reads), { timeout: 6000 });
+    await vi.advanceTimersByTimeAsync(100);
     await go();
     expect(host.sent).toEqual(['one']);
-    await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'));
+    await waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'));
   }, 30_000);
 
   it('Codex cxr-touch-1 r2 #3: Touch ID approvals off and on again on this Mac while queued: cancelled for good', async () => {
@@ -840,15 +842,15 @@ describe('control center shell', () => {
     const deviceReads = () => host.calls.filter((c) => c.cmd === 'device_key_status').length;
     st.device = 'none';
     let reads = deviceReads();
-    await vi.waitFor(() => expect(deviceReads()).toBeGreaterThan(reads), { timeout: 20_000 });
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => expect(deviceReads()).toBeGreaterThan(reads), { timeout: 20_000 });
+    await vi.advanceTimersByTimeAsync(100);
     st.device = 'registered';
     reads = deviceReads();
-    await vi.waitFor(() => expect(deviceReads()).toBeGreaterThan(reads), { timeout: 20_000 });
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => expect(deviceReads()).toBeGreaterThan(reads), { timeout: 20_000 });
+    await vi.advanceTimersByTimeAsync(100);
     await go();
     expect(host.sent).toEqual(['one']);
-    await vi.waitFor(() => expect(unsentReason()).toContain('Touch ID approvals on this Mac stopped before it went through.'));
+    await waitFor(() => expect(unsentReason()).toContain('Touch ID approvals on this Mac stopped before it went through.'));
   }, 60_000);
 
   it('Codex cxr-touch-1 r2: through the budget path (autopay open), leaving the chat before its turn never sends it', async () => {
@@ -857,13 +859,13 @@ describe('control center shell', () => {
     await go();
     expect(host.sent).toEqual(['one']);
     click(`[data-track="peer:${A}"]`);
-    await vi.waitFor(() => expect(unsentReason()).toContain('You left this chat before it was sent.'));
+    await waitFor(() => expect(unsentReason()).toContain('You left this chat before it was sent.'));
   }, 30_000);
 
   it('Codex cxr-touch-1 r2: through the budget path, with nothing revoked, it sends once after the send ahead', async () => {
     const { host, go } = await twoHandedBehindOne({ budgetPath: true });
     await go();
-    await vi.waitFor(() => expect(host.sent).toEqual(['one', 'two']));
+    await waitFor(() => expect(host.sent).toEqual(['one', 'two']));
   }, 30_000);
 
   it('Codex cxr-touch-1 r4: approvals on this Mac stop and come back while the Touch ID answer is still out: never sent', async () => {
@@ -875,20 +877,20 @@ describe('control center shell', () => {
     };
     const host = touchHost(st);
     await pressTouch();
-    await vi.waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
     const deviceReads = () => host.calls.filter((c) => c.cmd === 'device_key_status').length;
     st.device = 'none';
     let reads = deviceReads();
-    await vi.waitFor(() => expect(deviceReads()).toBeGreaterThan(reads), { timeout: 20_000 });
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => expect(deviceReads()).toBeGreaterThan(reads), { timeout: 20_000 });
+    await vi.advanceTimersByTimeAsync(100);
     st.device = 'registered';
     reads = deviceReads();
-    await vi.waitFor(() => expect(deviceReads()).toBeGreaterThan(reads), { timeout: 20_000 });
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => expect(deviceReads()).toBeGreaterThan(reads), { timeout: 20_000 });
+    await vi.advanceTimersByTimeAsync(100);
     // The delayed Touch ID answer arrives now, with a valid envelope: it must not bind again.
     st.approveGate = null;
     answer();
-    await new Promise((r) => setTimeout(r, 3500));
+    await vi.advanceTimersByTimeAsync(3500);
     expect(host.sent).toEqual([]);
     expect(unsentReason()).toContain('Touch ID approvals on this Mac stopped before it went through.');
     expect(mount.querySelector('[data-sending]')).toBeNull();
@@ -899,12 +901,12 @@ describe('control center shell', () => {
       approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; st.grantUntil = Date.now() + 1500; return { envelope_id: 'env-1' }; } };
     const host = touchHost(st);
     await pressTouch();
-    await vi.waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
-    await new Promise((r) => setTimeout(r, 2000));
+    await waitFor(() => expect(mount.querySelector('[data-sending="waiting"]')).not.toBeNull());
+    await vi.advanceTimersByTimeAsync(2000);
     // The grant read now shows an expired grant; spending opens anyway.
     st.spendOpen = true;
-    await vi.waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'), { timeout: 10_000 });
-    await new Promise((r) => setTimeout(r, 3500));
+    await waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'), { timeout: 10_000 });
+    await vi.advanceTimersByTimeAsync(3500);
     expect(host.sent).toEqual([]);
   }, 25_000);
 
@@ -913,8 +915,8 @@ describe('control center shell', () => {
       approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; st.grantUntil = Date.now() - 1; return { envelope_id: 'env-1' }; } };
     const host = touchHost(st);
     await pressTouch();
-    await vi.waitFor(() => expect(unsentReason()).toContain('It needs Touch ID again. Press Send to ask.'));
-    await new Promise((r) => setTimeout(r, 300));
+    await waitFor(() => expect(unsentReason()).toContain('It needs Touch ID again. Press Send to ask.'));
+    await vi.advanceTimersByTimeAsync(300);
     expect(host.sent).toEqual([]);
   });
 
@@ -934,16 +936,16 @@ describe('control center shell', () => {
       relation_approve: () => { throw { code: 'device_cancelled', message: 'Touch ID was cancelled.' }; },
     });
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     const area = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
     area.value = 'hello Maya';
     area.dispatchEvent(new Event('input', { bubbles: true }));
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     click('[data-send]');
-    await vi.waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
+    await vi.advanceTimersByTimeAsync(100);
     expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('hello Maya');
     expect(mount.querySelector('[data-unsent]')).toBeNull();
     expect(mount.querySelector('[data-sending]')).toBeNull();
@@ -957,13 +959,13 @@ describe('control center shell', () => {
         off_reason: 'seed_not_encrypted', off_message: msg }),
     });
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
 
     // The spend bar only points to Settings → Node, where the reason is spelled out.
-    await vi.waitFor(() => expect(mount.querySelector('[data-device-settings-hint="off"]')?.textContent).toContain('Touch ID approvals are off.'));
+    await waitFor(() => expect(mount.querySelector('[data-device-settings-hint="off"]')?.textContent).toContain('Touch ID approvals are off.'));
     click('[data-device-settings-link]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-panel="node"] [data-device-off="seed_not_encrypted"]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-panel="node"] [data-device-off="seed_not_encrypted"]')).not.toBeNull());
     expect(mount.querySelector('[data-device-off]')?.textContent).toContain('Encrypt your recovery phrase to enable Touch ID approvals');
     expect(mount.querySelector('[data-device-register]')).toBeNull();
     expect(mount.querySelector('[data-touch-approval]')).toBeNull();
@@ -972,9 +974,9 @@ describe('control center shell', () => {
   it.each(['none', 'pending', 'lapsed'])('hides at-node device setup on a local node (%s)', async (state) => {
     stubHost({ device_key_status: () => ({ available: true, state, fingerprint: '3F9A', owner_action: 'konsensus device approve --op dd01', expires_at_ms: Date.now() + 600_000 }) });
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate]')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent?.includes('I understand'))!.click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-spend]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-spend]')).not.toBeNull());
     expect(mount.querySelector('[data-device-owner-action]')).toBeNull();
     expect(mount.querySelector('[data-device-register]')).toBeNull();
     expect(mount.textContent).not.toContain('Approve this Mac once at your node');
@@ -997,30 +999,30 @@ describe('control center shell', () => {
         owner_approval_approve: (args) => ({ ...pendingView(String(args!.opId)), status: 'consumed' }),
       });
       start();
-      await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
       [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-      await vi.waitFor(() => expect(mount.querySelector('[data-profile]')).not.toBeNull());
-      await new Promise((r) => setTimeout(r, 200));
+      await waitFor(() => expect(mount.querySelector('[data-profile]')).not.toBeNull());
+      await vi.advanceTimersByTimeAsync(200);
       return host;
     }
 
     it('opens on arrival, defers without granting, and reopens from the list with the exact approval bytes', async () => {
       const { calls } = await open({});
-      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approval-queue]')?.textContent).toBe('1 of 2'));
+      await waitFor(() => expect(mount.querySelector('[data-owner-approval-queue]')?.textContent).toBe('1 of 2'));
       expect(mount.querySelectorAll('[data-owner-approval-sheet]')).toHaveLength(1);
       click('[data-owner-sheet-dismiss]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approval-sheet]')?.getAttribute('data-owner-approval-sheet')).toBe('op-b'));
+      await waitFor(() => expect(mount.querySelector('[data-owner-approval-sheet]')?.getAttribute('data-owner-approval-sheet')).toBe('op-b'));
       click('[data-owner-sheet-dismiss]');
       expect(calls.some(c => c.cmd === 'owner_approval_approve')).toBe(false);
-      await vi.waitFor(() => expect(mount.querySelector('[data-approvals-badge]')?.textContent).toBe('2'));
+      await waitFor(() => expect(mount.querySelector('[data-approvals-badge]')?.textContent).toBe('2'));
       click('[data-profile]');
       click('[data-open-approvals]');
-      await vi.waitFor(() => expect(mount.querySelectorAll('[data-owner-approval]')).toHaveLength(2));
+      await waitFor(() => expect(mount.querySelectorAll('[data-owner-approval]')).toHaveLength(2));
       click('[data-owner-approval="op-a"] [data-approval-review]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approval-sheet]')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-owner-approval-sheet]')).not.toBeNull());
       expect(mount.querySelector('[data-settings-open="true"]')).toBeNull();
       click('[data-owner-sheet-approve]');
-      await vi.waitFor(() => expect(calls.some((c) => c.cmd === 'owner_approval_approve')).toBe(true));
+      await waitFor(() => expect(calls.some((c) => c.cmd === 'owner_approval_approve')).toBe(true));
       const call = calls.find((c) => c.cmd === 'owner_approval_approve')!;
       expect(call.args).toEqual({ opId: 'op-a', approvalMessage: 'bitsov-approval-v1\nop=op-a' });
     });
@@ -1035,16 +1037,16 @@ describe('control center shell', () => {
       });
       void host;
       start();
-      await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
       [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-      await vi.waitFor(() => expect(mount.querySelector('[data-approvals-badge]')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-approvals-badge]')).not.toBeNull());
       fail = true;
-      await vi.waitFor(() => expect(mount.querySelector('[data-owner-sheet-status]')?.textContent).toContain('Your node refused'), { timeout: 15_000 });
+      await waitFor(() => expect(mount.querySelector('[data-owner-sheet-status]')?.textContent).toContain('Your node refused'), { timeout: 15_000 });
       expect(mount.querySelector('[data-owner-approval-sheet]')).toBeNull();
       click('[data-profile]');
       click('[data-open-settings]');
       click('[data-tab="node"]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approvals-error]')?.textContent).toContain('Your node refused'), { timeout: 15_000 });
+      await waitFor(() => expect(mount.querySelector('[data-owner-approvals-error]')?.textContent).toContain('Your node refused'), { timeout: 15_000 });
       expect(mount.querySelector('[data-approval-approve]')).toBeNull();
       expect(mount.querySelector('[data-owner-approvals-empty]')).toBeNull();
       expect(mount.querySelector('[data-approvals-badge]')).toBeNull();
@@ -1057,16 +1059,16 @@ describe('control center shell', () => {
         owner_device_keys: () => { throw { code: 'node', message: 'connection lost' }; },
       });
       start();
-      await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
       [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-      await vi.waitFor(() => expect(mount.querySelector('[data-profile]')).not.toBeNull());
-      await vi.waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-profile]')!.disabled).toBe(false));
+      await waitFor(() => expect(mount.querySelector('[data-profile]')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-profile]')!.disabled).toBe(false));
       click('[data-profile]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-open-settings]')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-open-settings]')).not.toBeNull());
       click('[data-open-settings]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-tab="node"]')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-tab="node"]')).not.toBeNull());
       click('[data-tab="node"]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approvals-error]')?.textContent).toContain('Couldn’t read your node’s approvals list'));
+      await waitFor(() => expect(mount.querySelector('[data-owner-approvals-error]')?.textContent).toContain('Couldn’t read your node’s approvals list'));
       expect(mount.querySelector('[data-owner-approvals-error]')!.textContent).not.toContain('Nothing was approved');
       expect(mount.querySelector('[data-approval-approve]')).toBeNull();
     });
@@ -1081,23 +1083,23 @@ describe('control center shell', () => {
         owner_approval_approve: () => new Promise((r) => { finish = r; }),
       });
       start();
-      await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
       [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-      await vi.waitFor(() => expect(mount.querySelector('[data-approvals-badge]')).not.toBeNull());
-      await vi.waitFor(() => expect(mount.querySelector('[data-owner-sheet-approve]')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-approvals-badge]')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-owner-sheet-approve]')).not.toBeNull());
       click('[data-owner-sheet-approve]');
       click('[data-owner-sheet-dismiss]');
       click('[data-profile]');
       click('[data-open-approvals]');
-      await vi.waitFor(() => expect(host.calls.filter((c) => c.cmd === 'owner_approval_approve')).toHaveLength(1));
+      await waitFor(() => expect(host.calls.filter((c) => c.cmd === 'owner_approval_approve')).toHaveLength(1));
       click('[data-tab="body"]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approvals]')).toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-owner-approvals]')).toBeNull());
       click('[data-tab="node"]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-approval-busy]')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-approval-busy]')).not.toBeNull());
       expect(mount.querySelector<HTMLButtonElement>('[data-approval-approve]')!.disabled).toBe(true);
       mount.querySelector<HTMLButtonElement>('[data-approval-approve]')!.click();
       finish({ ...pendingView('op-a'), status: 'consumed' });
-      await vi.waitFor(() => expect(mount.querySelector('[data-approval-result="ok"]')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-approval-result="ok"]')).not.toBeNull());
       expect(host.calls.filter((c) => c.cmd === 'owner_approval_approve')).toHaveLength(1);
     });
 
@@ -1110,25 +1112,25 @@ describe('control center shell', () => {
         owner_approval_approve: () => { throw { code: 'approval_budget_exceeded', message: 'over', remaining_msat: 2000 }; },
       });
       start();
-      await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
       [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-      await vi.waitFor(() => expect(mount.querySelector('[data-approvals-badge]')).not.toBeNull());
-      await vi.waitFor(() => expect(mount.querySelector('[data-owner-sheet-approve]')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-approvals-badge]')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-owner-sheet-approve]')).not.toBeNull());
       click('[data-owner-sheet-approve]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approval-sheet] [role="alert"]')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-owner-approval-sheet] [role="alert"]')).not.toBeNull());
       click('[data-owner-sheet-dismiss]');
       click('[data-profile]');
       click('[data-open-approvals]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-approval-result="refused"]')?.textContent).toContain('(2 sats left)'));
+      await waitFor(() => expect(mount.querySelector('[data-approval-result="refused"]')?.textContent).toContain('(2 sats left)'));
       click('[data-tab="body"]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-owner-approvals]')).toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-owner-approvals]')).toBeNull());
       click('[data-tab="node"]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-approval-result="refused"]')?.textContent).toContain('(2 sats left)'));
+      await waitFor(() => expect(mount.querySelector('[data-approval-result="refused"]')?.textContent).toContain('(2 sats left)'));
     });
 
     it.each(['read_only_pairing', 'ai_pairing', 'seed_password_not_typed'])('a pairing the node does not let approve (%s) sees no list, badge or Approve', async (reason) => {
       const { calls } = await open({ approvals: reason });
-      await vi.waitFor(() => expect(calls.some((c) => c.cmd === 'owner_device_keys')).toBe(true));
+      await waitFor(() => expect(calls.some((c) => c.cmd === 'owner_device_keys')).toBe(true));
       expect(calls.some((c) => c.cmd === 'owner_approvals_pending')).toBe(false);
       expect(mount.querySelector('[data-approvals-badge]')).toBeNull();
       click('[data-profile]');
@@ -1160,9 +1162,9 @@ describe('control center shell', () => {
           lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities }) } : {}),
       });
       start();
-      await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
       [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
-      await vi.waitFor(() => expect(mount.querySelector('[data-owner-action]')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-owner-action]')).not.toBeNull());
       return host;
     }
 
@@ -1183,25 +1185,25 @@ describe('control center shell', () => {
       const area = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
       area.value = 'kept draft'; area.dispatchEvent(new Event('input', { bubbles: true }));
       click('[data-touch-id-setup]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-panel="node"]')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-panel="node"]')).not.toBeNull());
       expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('kept draft');
       expect(calls.some((c) => c.cmd === 'message_send' || c.cmd === 'device_key_register')).toBe(false);
       click('[data-spend-cancel-visible]');
-      await vi.waitFor(() => expect(calls.some((c) => c.cmd === 'spend_cancel')).toBe(true));
+      await waitFor(() => expect(calls.some((c) => c.cmd === 'spend_cancel')).toBe(true));
     });
 
     it('on the invite page the offer says what is true for invites, not "press Send"', async () => {
       await open(true, none);
       click('[data-track="new"]');
       // The invite page has several actions (invites, starter bitcoin): the neutral line is true for all.
-      await vi.waitFor(() => expect(mount.querySelector('[data-touch-id-stays-text="spend"]')?.textContent).toContain('Nothing is paid until you press it again after approval'));
+      await waitFor(() => expect(mount.querySelector('[data-touch-id-stays-text="spend"]')?.textContent).toContain('Nothing is paid until you press it again after approval'));
       expect(mount.querySelector('[data-touch-id-stays-text="spend"]')!.textContent).not.toMatch(/press Send|Create invite/);
     });
 
     it('in Pay mode the composer does not promise "press Send": the neutral line shows', async () => {
       await open(true, none);
       click('[data-composer-mode="pay"]');
-      await vi.waitFor(() => expect(mount.querySelector('[data-touch-id-stays-text="spend"]')?.textContent).toContain('Nothing is paid until you press it again after approval'));
+      await waitFor(() => expect(mount.querySelector('[data-touch-id-stays-text="spend"]')?.textContent).toContain('Nothing is paid until you press it again after approval'));
       expect(mount.querySelector('[data-touch-id-stays-text="spend"]')!.textContent).not.toMatch(/press Send/);
     });
 
@@ -1212,7 +1214,7 @@ describe('control center shell', () => {
       expect(today).not.toContain('without a command at the node');
       dispose?.(); mount?.remove(); vi.unstubAllGlobals();
       await open(true, none, ['owner_device_approval_v1']);
-      await vi.waitFor(() => expect(mount.querySelector('[data-touch-id-first]')!.textContent).toContain('one Touch ID tap approves a contact here, without a command at the node'));
+      await waitFor(() => expect(mount.querySelector('[data-touch-id-first]')!.textContent).toContain('one Touch ID tap approves a contact here, without a command at the node'));
     });
 
     it('a lapsed setup says "again", not "one time"', async () => {
@@ -1251,58 +1253,58 @@ describe('control center shell', () => {
       spend_cancel: () => ({ state: 'locked', lapse: null, basis: null, open_until_ms: null, pending: null, window_ms: 600_000 }),
     });
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
 
     // The spend bar says it is waiting and links to Settings → Node, where the owner step lives.
-    await vi.waitFor(() => expect(mount.querySelector('[data-device-settings-hint="pending"]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-device-settings-hint="pending"]')).not.toBeNull());
     expect(mount.querySelector('[data-spend] [data-device-owner-action]')).toBeNull();
     click('[data-device-settings-link]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-panel="node"] [data-device-owner-action]')?.textContent).toBe(cmd));
+    await waitFor(() => expect(mount.querySelector('[data-panel="node"] [data-device-owner-action]')?.textContent).toBe(cmd));
     expect(mount.querySelector('[data-device-fingerprint]')?.textContent).toBe('3F9A-12C4');
     click('[data-device-cancel]');
-    await vi.waitFor(() => expect(calls.some((c) => c.cmd === 'device_key_cancel')).toBe(true));
+    await waitFor(() => expect(calls.some((c) => c.cmd === 'device_key_cancel')).toBe(true));
 
-    await vi.waitFor(() => expect(mount.querySelector('[data-spend-cancel]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-spend-cancel]')).not.toBeNull());
     click('[data-spend-cancel]');
-    await vi.waitFor(() => expect(calls.some((c) => c.cmd === 'spend_cancel')).toBe(true));
+    await waitFor(() => expect(calls.some((c) => c.cmd === 'spend_cancel')).toBe(true));
   });
 
   it('opens the shell after the gate: tracks, live stream, cost before send, nothing spent unasked', async () => {
     const { calls, emitLive } = stubHost();
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
 
     // Rail lists the node's peers and rooms; the first connected peer opens.
-    await vi.waitFor(() => expect(mount.querySelector(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
+    await waitFor(() => expect(mount.querySelector(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
     expect(mount.querySelector(`[data-track="room:${ROOM}"]`)?.textContent).toContain('Mexico build');
-    await vi.waitFor(() => expect(mount.querySelector('[data-stream]')?.textContent).toContain('hello from Maya'));
+    await waitFor(() => expect(mount.querySelector('[data-stream]')?.textContent).toContain('hello from Maya'));
 
     // The composer shows Maya's advertised price before anything can be sent.
-    await vi.waitFor(() => expect(mount.querySelector('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
+    await waitFor(() => expect(mount.querySelector('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
     expect(mount.querySelector('[data-cost]')?.textContent).toContain('Maya’s price');
     // Until the owner approves, the one action on screen is the approval itself.
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Send'));
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Send'));
     expect(mount.querySelector('[data-spend="locked"]')?.textContent).toContain('never saved');
 
     // A live message for the open track lands in the stream; one for another peer counts unread.
     emitLive({ type: 'link', state: 'open', detail: null });
     emitLive({ type: 'message', room_id: null, message: { id: 'm2', kind: 0, sender: A, recipient: OWN, timestamp: 1_725_000_100_000, plaintext: 'live one', payment_amount_msat: 2000 } });
     emitLive({ type: 'message', room_id: null, message: { id: 'm3', kind: 0, sender: B, recipient: OWN, timestamp: 1_725_000_200_000, plaintext: 'from B', payment_amount_msat: 1000 } });
-    await vi.waitFor(() => expect(mount.querySelector('[data-stream]')?.textContent).toContain('live one'));
-    await vi.waitFor(() => expect(mount.querySelector(`[data-track="peer:${B}"] .badge`)?.textContent).toBe('1'));
+    await waitFor(() => expect(mount.querySelector('[data-stream]')?.textContent).toContain('live one'));
+    await waitFor(() => expect(mount.querySelector(`[data-track="peer:${B}"] .badge`)?.textContent).toBe('1'));
     expect(mount.querySelector('[data-stream]')?.textContent).not.toContain('from B');
 
     // A room costs each member's own price, summed; an unconnected member blocks the send.
     click(`[data-track="room:${ROOM}"]`);
-    await vi.waitFor(() => expect(mount.querySelector('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('3000'));
+    await waitFor(() => expect(mount.querySelector('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('3000'));
     expect(mount.querySelector('[data-cost]')?.textContent).toContain('2 members, each paid their own price; 1 estimated from yours');
     expect(mount.querySelector('[data-room-blocked]')?.textContent).toContain('Not every member is a connected peer');
 
     // Wallet: the one combined balance, never split into invented figures.
     click('[data-tab="wallet"]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-balance]')?.textContent).toContain('52\u2009500'));
+    await waitFor(() => expect(mount.querySelector('[data-balance]')?.textContent).toContain('52\u2009500'));
     expect(mount.querySelector('[data-panel="wallet"]')?.textContent).toContain('one figure');
 
     // Only reads and the spend-window status were used; nothing that spends or edits.
@@ -1323,7 +1325,7 @@ describe('control center shell', () => {
     // not tear down and re-register the live listener (it once did, every poll).
     const polls = () => calls.filter((c) => c.cmd === 'node_status').length;
     const seen = polls();
-    await vi.waitFor(() => expect(polls()).toBeGreaterThanOrEqual(seen + 2), { timeout: 4000 });
+    await waitFor(() => expect(polls()).toBeGreaterThanOrEqual(seen + 2), { timeout: 4000 });
     expect(calls.filter((c) => c.cmd === 'plugin:event|listen')).toHaveLength(1);
     expect(calls.filter((c) => c.cmd === 'plugin:event|unlisten')).toHaveLength(0);
   }, 10_000);
@@ -1332,35 +1334,35 @@ describe('control center shell', () => {
     const { calls, host } = stubHost();
     host.link = 'open';
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
 
     // No link event is pushed by the test: the state comes only from the replay
     // the shell asks for after subscribing.
-    await vi.waitFor(() => expect(mount.querySelector('.node-pill .what')?.textContent).toBe('Connected to your node'));
+    await waitFor(() => expect(mount.querySelector('.node-pill .what')?.textContent).toBe('Connected to your node'));
     expect(mount.querySelector('[data-pill]')?.getAttribute('data-pill')).toBe('ok');
     const listenAt = calls.findIndex((c) => c.cmd === 'plugin:event|listen');
     const replayAt = calls.findIndex((c) => c.cmd === 'live_link');
     expect(listenAt).toBeGreaterThanOrEqual(0);
     expect(replayAt).toBeGreaterThan(listenAt);
     click('[data-tab="node"]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-link]')?.getAttribute('data-link')).toBe('open'));
+    await waitFor(() => expect(mount.querySelector('[data-link]')?.getAttribute('data-link')).toBe('open'));
   });
 
   it('runs on sample data with no host at all', async () => {
     start();
-    await vi.waitFor(() => expect(mount.querySelector('[data-sample]')).not.toBeNull());
-    await vi.waitFor(() => expect(mount.querySelector('[data-stream]')?.textContent).toContain('Morning.'));
+    await waitFor(() => expect(mount.querySelector('[data-sample]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-stream]')?.textContent).toContain('Morning.'));
     expect(mount.querySelector('[data-mode="sample"]')).not.toBeNull();
     // The first Send opens the budget sheet.
-    await vi.waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Send'));
+    await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Send'));
     click('[data-track="new"]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-new-track]')?.textContent).toContain('Share your node id'));
+    await waitFor(() => expect(mount.querySelector('[data-new-track]')?.textContent).toContain('Share your node id'));
     expect(mount.querySelector('[data-new-track]')?.textContent).toContain('Browse');
     expect(mount.querySelector('[data-intro-mine]')).toBeNull();
     expect(mount.querySelector('[data-intro-open]')).toBeNull();
     click('[data-track="ai"]');
-    await vi.waitFor(() => expect(mount.querySelector('[data-ai-track]')?.textContent).toContain('Ask about your own node'));
+    await waitFor(() => expect(mount.querySelector('[data-ai-track]')?.textContent).toContain('Ask about your own node'));
     expect(mount.querySelector('[data-ai-policy]')?.textContent).toContain('Nothing leaves this computer');
   });
 });
