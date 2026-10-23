@@ -411,8 +411,73 @@ async fn local_challenge_header_verifies_for_ceremony_reuse_and_refresh() {
 }
 
 #[tokio::test]
+async fn concurrent_local_tokens_use_unique_challenge_proofs() {
+    assert_unique_local_challenges(true).await;
+}
+
+#[tokio::test]
+async fn sequential_local_tokens_in_one_second_use_unique_challenge_proofs() {
+    assert_unique_local_challenges(false).await;
+}
+
+async fn assert_unique_local_challenges(concurrent: bool) {
+    use std::sync::{Arc, Mutex};
+    let node_dir = tempfile::tempdir().unwrap();
+    let app_dir = tempfile::tempdir().unwrap();
+    let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let public = key.public_hex().to_owned();
+    let node = mock(node_dir.path(), PairRoutes::Live, now());
+    let codes = PrintedCodes::default();
+    let proofs = Arc::new(Mutex::new(Vec::<(i64, String)>::new()));
+    let seen = proofs.clone();
+    let checked_node = node.clone();
+    let server = Server::start_with_challenge_check(node.clone(), codes.clone(), Arc::new(move |target, header| {
+        if !verifies_challenge(target, header, &public, now()) { return false; }
+        let header = header.unwrap();
+        let (ts, sig) = header.strip_prefix("PairChallenge ").unwrap().split_once(':').unwrap();
+        let proof = (ts.parse::<i64>().unwrap(), sig.to_owned());
+        let mut seen = seen.lock().unwrap();
+        // One-shot replay memo, plus one outstanding exchange per client.
+        if seen.contains(&proof) || checked_node.tokens_issued() != seen.len() { return false; }
+        seen.push(proof);
+        true
+    }));
+    let first = client(&server, node_dir.path());
+    pairing::establish(&first, &key, app_dir.path(), NAME, &codes).await.unwrap();
+    let cloned = first.clone();
+    drop(first);
+    // Independently constructed clients must share the same timestamp history.
+    let rebuilt = client(&server, node_dir.path());
+    let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    tokio::time::sleep(Duration::from_secs(1) - Duration::from_nanos(elapsed.subsec_nanos() as u64)
+        + Duration::from_millis(10)).await;
+    let second = now();
+    let a = pairing::establish(&cloned, &key, app_dir.path(), NAME, &codes);
+    let b = pairing::establish(&rebuilt, &key, app_dir.path(), NAME, &codes);
+    let (a, b) = if concurrent {
+        tokio::join!(a, b)
+    } else {
+        let a = a.await;
+        assert_eq!(now(), second, "both sequential calls start in the same second");
+        (a, b.await)
+    };
+    for result in [a, b] {
+        let Established::Paired { session, ceremony } = result.expect("unique proof accepted") else { panic!("fallback") };
+        assert!(ceremony.is_none());
+        assert_eq!(identity_status(&server, &session.token).await, 200);
+    }
+    let seen = proofs.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    assert_ne!(seen[1].0, seen[2].0, "distinct Unix seconds");
+    assert_ne!(seen[1].1, seen[2].1, "distinct signatures and therefore headers");
+    assert_eq!(node.tokens_issued(), 3);
+    assert_eq!(node.calls("/api/v1/pair/request"), 1);
+    assert_eq!(node.calls("/api/v1/auth/local"), 0);
+}
+
+#[tokio::test]
 async fn challenge_401_is_a_clear_refusal_without_retry_token_or_fallback() {
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
     let node_dir = tempfile::tempdir().unwrap();
     let app_dir = tempfile::tempdir().unwrap();
     let key = ClientKey::load_or_create(app_dir.path()).unwrap();
@@ -420,8 +485,11 @@ async fn challenge_401_is_a_clear_refusal_without_retry_token_or_fallback() {
     let codes = PrintedCodes::default();
     let attempts = Arc::new(AtomicUsize::new(0));
     let count = attempts.clone();
-    let server = Server::start_with_challenge_check(node.clone(), codes.clone(), Arc::new(move |_, _| {
+    let proofs = Arc::new(Mutex::new(Vec::new()));
+    let seen = proofs.clone();
+    let server = Server::start_with_challenge_check(node.clone(), codes.clone(), Arc::new(move |_, header| {
         count.fetch_add(1, Ordering::SeqCst);
+        seen.lock().unwrap().push(header.unwrap().to_owned());
         false
     }));
     let error = pairing::establish(&client(&server, node_dir.path()), &key, app_dir.path(), NAME, &codes)
@@ -433,6 +501,17 @@ async fn challenge_401_is_a_clear_refusal_without_retry_token_or_fallback() {
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
     assert_eq!(node.calls("/api/v1/pair/token"), 0);
     assert_eq!(node.calls("/api/v1/auth/local"), 0);
+    let record = std::fs::read(app_dir.path().join(pairing::RECORD_FILE)).unwrap();
+    let error = pairing::establish(&client(&server, node_dir.path()), &key, app_dir.path(), NAME, &codes)
+        .await.expect_err("stored pairing is retained after a 401");
+    assert!(matches!(error, PairError::Refused { step: "/pair/challenge", status: 401, .. }));
+    assert_eq!(std::fs::read(app_dir.path().join(pairing::RECORD_FILE)).unwrap(), record);
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    let proofs = proofs.lock().unwrap();
+    assert_ne!(proofs[0], proofs[1], "a failed exchange still consumes its timestamp");
+    assert_eq!(node.calls("/api/v1/pair/request"), 1);
+    assert_eq!(node.calls("/api/v1/pair/token"), 0);
+    assert_eq!(node.calls("/api/v1/auth/local"), 0);
 }
 
 #[tokio::test]
@@ -441,15 +520,16 @@ async fn old_node_ignores_local_header_and_remote_challenge_stays_unchanged() {
     let node_dir = tempfile::tempdir().unwrap();
     let app_dir = tempfile::tempdir().unwrap();
     let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let public = key.public_hex().to_owned();
     let node = mock(node_dir.path(), PairRoutes::Live, now());
     let codes = PrintedCodes::default();
     let remote = Arc::new(AtomicBool::new(false));
     let mode = remote.clone();
-    let server = Server::start_with_challenge_check(node.clone(), codes.clone(), Arc::new(move |_, header| {
+    let server = Server::start_with_challenge_check(node.clone(), codes.clone(), Arc::new(move |target, header| {
         if mode.load(Ordering::SeqCst) {
             assert!(header.is_none(), "remote challenge must not gain local credentials");
         } else {
-            assert!(header.is_some_and(|v| v.starts_with("PairChallenge ")));
+            assert!(verifies_challenge(target, header, &public, now()), "unchanged Unix-seconds wire proof");
         }
         // The old mock node ignores the header; no verification is required.
         true

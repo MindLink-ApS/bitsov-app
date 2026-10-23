@@ -4,7 +4,9 @@
 //! The node declares `deny_unknown_fields` on every body, so each body carries
 //! exactly the documented fields.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -169,13 +171,37 @@ impl PairingClient {
         struct Challenge {
             challenge: String,
         }
+        // Share across clones and reconstructed clients. Retain timestamps for
+        // the process lifetime, even after an exchange fails or is cancelled.
+        // The per-node/client guard stays held through POST /pair/token.
+        type History = HashMap<(String, String), Arc<tokio::sync::Mutex<Option<u64>>>>;
+        static HISTORY: OnceLock<tokio::sync::Mutex<History>> = OnceLock::new();
+        let mut local_exchange = if local {
+            let state = {
+                let mut history = HISTORY.get_or_init(Default::default).lock().await;
+                history.entry((self.base.clone(), client_id.to_owned())).or_default().clone()
+            };
+            Some(state.lock_owned().await)
+        } else {
+            None
+        };
         let mut request = self.http.get(self.url(CHALLENGE)).query(&[("client_id", client_id)]);
-        if local {
+        if let Some(last) = local_exchange.as_mut() {
             // PR #379: Unix seconds, +/-30 s, Ed25519 over this exact UTF-8
             // domain + client id + timestamp. Reuse the paired client key.
-            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)
-                .map_err(|_| PairError::Local("the device clock is before the Unix epoch".into()))?
-                .as_secs();
+            let timestamp = loop {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH)
+                    .map_err(|_| PairError::Local("the device clock is before the Unix epoch".into()))?;
+                let timestamp = now.as_secs();
+                if last.is_none_or(|previous| timestamp > previous) {
+                    **last = Some(timestamp);
+                    break timestamp;
+                }
+                // Wait locally, without sending or retrying a request. Recheck
+                // the wall clock after waking, including after a clock rollback.
+                tokio::time::sleep(Duration::from_secs(1)
+                    - Duration::from_nanos(now.subsec_nanos() as u64)).await;
+            };
             let message = format!("bitsov-pair-challenge-v1:{client_id}:{timestamp}");
             let mut authorization = reqwest::header::HeaderValue::from_str(
                 &format!("PairChallenge {timestamp}:{}", key.sign_hex(message.as_bytes())),
