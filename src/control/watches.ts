@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 import type { AssistantId } from './assistants';
 export type WatchRule = 'locked' | 'offline' | 'channels' | 'money_ready' | 'balance_drop' | 'payment_failed' | 'unread';
 export type WatchNotice = { at: number; rule: WatchRule; text: string };
@@ -7,10 +8,10 @@ export type WatchSample = { locked?: boolean; offline?: boolean; money_ready?: b
   balance_msat?: number; payment_failures?: number; unread?: number };
 export type WatchSamples = Partial<Record<AssistantId, WatchSample>>;
 export const WATCHES: Record<AssistantId, { rule: WatchRule; label: string }[]> = {
-  node: [{ rule: 'locked', label: 'Locked for more than 5 minutes' }, { rule: 'offline', label: 'Offline for more than 5 minutes' },
-    { rule: 'channels', label: 'Channel count changed' }, { rule: 'money_ready', label: 'Money not ready' }],
-  wallet: [{ rule: 'balance_drop', label: 'Balance dropped by more than 1,000 sats' }, { rule: 'payment_failed', label: 'Payment failed' }],
-  inbox: [{ rule: 'unread', label: 'Unread count rose' }],
+  node: [{ rule: 'locked', get label() { return tr('caLockedForMoreThan5Minutes'); } }, { rule: 'offline', get label() { return tr('caOfflineForMoreThan5Minutes'); } },
+    { rule: 'channels', get label() { return tr('caChannelCountChanged'); } }, { rule: 'money_ready', get label() { return tr('caMoneyNotReady'); } }],
+  wallet: [{ rule: 'balance_drop', get label() { return tr('caBalanceDroppedByMoreThan1000Sats'); } }, { rule: 'payment_failed', get label() { return tr('caPaymentFailed'); } }],
+  inbox: [{ rule: 'unread', get label() { return tr('caUnreadCountRose'); } }],
 };
 /** Counts/status only, from existing reads. No bodies, labels, IDs, or action objects. */
 export function watchSamples(input: { ready: boolean; locked: boolean; overview: { money_ready?: boolean | null } | null;

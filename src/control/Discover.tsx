@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 import { usePairingActivity } from '../pairingActivity';
 import { For, Show, createMemo, createSignal } from 'solid-js';
 import { copyPlainText } from '../assistant/copy';
@@ -54,8 +55,7 @@ function FrontDoorShareQr(props: { link: string; label: string }) {
       when={qr()}
       fallback={
         <p class="hint" data-fd-qr-skip>
-          This link is too long for a QR — copy it instead.
-        </p>
+          {tr('caThisLinkIsTooLongForAQRCopy')}</p>
       }
     >
       {(q) => (
@@ -136,18 +136,13 @@ export function DiscoverPanel(props: Props) {
 
   return (
     <div class="panel discover" data-panel="discover">
-      <h2>Browse</h2>
+      <h2>{tr('uiBrowse')}</h2>
       <p class="hint">
-        Paste a profile link (or hold up its QR for someone else to paste). Reading is free and local.
-        This app does not scan profile QR codes with the camera. Knocking uses first contact — you pay their admission
-        price once.
-      </p>
+        {tr('caPasteAProfileLinkOrHoldUpItsQR')}</p>
       <p class="hint" data-browse-porch-hint>
-        To read a contact’s pages, or fetch their card from their node, open Porch. Each read is paid
-        once, after you confirm it.
-      </p>
+        {tr('caToReadAContactSPagesOrFetchTheir')}</p>
       <label class="field">
-        <span>Profile link</span>
+        <span>{tr('caProfileLink')}</span>
         <textarea
           data-discover-paste
           rows={3}
@@ -162,8 +157,7 @@ export function DiscoverPanel(props: Props) {
       </label>
       <div class="row">
         <button type="button" data-discover-read onClick={read} disabled={!pasted().trim()}>
-          Read card
-        </button>
+          {tr('caReadCard')}</button>
       </div>
       <Show when={err()}>
         {(e) => <SoftError message={e()} data="discover-error" />}
@@ -182,7 +176,7 @@ export function DiscoverPanel(props: Props) {
                   checked={localConsent()}
                   onChange={(e) => setLocalConsent(e.currentTarget.checked)}
                 />
-                <span>Allow dialing the local address {c().endpoint}</span>
+                <span>{tr('caAllowDialingTheLocalAddress')}{' '}{c().endpoint}</span>
               </label>
             </Show>
             <button
@@ -192,15 +186,13 @@ export function DiscoverPanel(props: Props) {
               disabled={opening() || (c().reach === 'local' && !localConsent())}
               onClick={() => void knock()}
             >
-              Knock
-            </button>
+              {tr('caKnock')}</button>
           </>
         )}
       </Show>
       <Show when={card() && !live()}>
         <p class="hint" data-discover-stale>
-          This card expired. You can still read it, but Knock needs a fresh one.
-        </p>
+          {tr('caThisCardExpiredYouCanStillReadItBut')}</p>
       </Show>
     </div>
   );
@@ -238,28 +230,27 @@ export function FrontDoorCardView(props: { card: FrontDoor; now: number; shareQr
         <div>
           <h3 data-fd-name>{c().profile.display_name}</h3>
           <p class="hint" data-fd-claimed>
-            Self-claimed name on their profile card — a suggestion only, not a verified identity.
-          </p>
+            {tr('caSelfClaimedNameOnTheirProfileCardASuggestion')}</p>
           <p class="hint" data-fd-tagline>
-            {c().profile.tagline || c().profile.kind}
+            {c().profile.tagline || tr(c().profile.kind === 'company' ? 'caCompanyKind' : 'caPersonKind')}
           </p>
           <p class="meta">
-            {c().verified ? 'verified' : 'unverified'}
-            {c().fresh ? '' : ' · expired'}
+            {c().verified ? tr('caVerified') : tr('caUnverified')}
+            {c().fresh ? '' : tr('caExpired')}
             {' · '}
-            signed {daysAgo() === 0 ? 'today' : `${daysAgo()}d ago`}
+            {tr('caSigned')}{' '}{daysAgo() === 0 ? tr('caToday') : tr('caDAgo', daysAgo())}
           </p>
         </div>
       </header>
       <Show when={props.shareQr && c().link}>
-        <FrontDoorShareQr link={c().link} label="Profile link as a QR code" />
+        <FrontDoorShareQr link={c().link} label={tr('caProfileLinkAsAQRCode')} />
       </Show>
       <Show when={c().profile.about}>
         <p data-fd-about>{c().profile.about}</p>
       </Show>
       <Show when={c().cv}>
         <p class="hint" data-fd-cv>
-          CV on porch · {c().cv!.path}
+          {tr('caCVOnPorch')}{' '}{c().cv!.path}
         </p>
       </Show>
       <Show when={c().media.length > 0}>
@@ -299,8 +290,7 @@ export function FrontDoorCardView(props: { card: FrontDoor; now: number; shareQr
                   data-fd-link-copy
                   onClick={() => copyUrl(l.url)}
                 >
-                  Copy
-                </button>
+                  {tr('caCopy')}</button>
               </li>
             )}
           </For>
@@ -308,11 +298,11 @@ export function FrontDoorCardView(props: { card: FrontDoor; now: number; shareQr
       </Show>
       <dl class="prices">
         <div>
-          <dt>Knock (from card)</dt>
+          <dt>{tr('caKnockFromCard')}</dt>
           <dd data-fd-knock-price>{fmtAmount(c().prices.admission_msat)}</dd>
         </div>
         <div>
-          <dt>Message (from card)</dt>
+          <dt>{tr('caMessageFromCard')}</dt>
           <dd>{fmtAmount(c().prices.message_msat)}</dd>
         </div>
       </dl>
@@ -367,7 +357,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
 
   const estimateParts = () => {
     const links =
-      website().trim().length > 0 ? [{ label: 'Website', url: website().trim() }] : [];
+      website().trim().length > 0 ? [{ label: tr('caWebsite'), url: website().trim() }] : [];
     return {
       display_name: name().trim() || 'x',
       tagline: tagline(),
@@ -395,10 +385,10 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
       setAvatar(prepared);
       if (fit.dropped > 0) {
         setSizeNote(
-          `Dropped ${fit.dropped} older thumbnail${fit.dropped === 1 ? '' : 's'} so the card stays under ${CARD_PUBLISH_BUDGET} bytes.`,
+          tr(fit.dropped === 1 ? 'caThumbnailOne' : 'caThumbnailMany', fit.dropped, CARD_PUBLISH_BUDGET),
         );
       }
-      if (fit.bytes > CARD_PUBLISH_BUDGET) setErr(CARD_TOO_LARGE);
+      if (fit.bytes > CARD_PUBLISH_BUDGET) setErr(CARD_TOO_LARGE());
     } catch (e) {
       setErr(asActionError(e).message);
     }
@@ -419,10 +409,10 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
       setMedia(fit.media);
       if (fit.dropped > 0) {
         setSizeNote(
-          `Dropped ${fit.dropped} older thumbnail${fit.dropped === 1 ? '' : 's'} so the card stays under ${CARD_PUBLISH_BUDGET} bytes.`,
+          tr(fit.dropped === 1 ? 'caThumbnailOne' : 'caThumbnailMany', fit.dropped, CARD_PUBLISH_BUDGET),
         );
       }
-      if (fit.bytes > CARD_PUBLISH_BUDGET) setErr(CARD_TOO_LARGE);
+      if (fit.bytes > CARD_PUBLISH_BUDGET) setErr(CARD_TOO_LARGE());
     } catch (e) {
       setErr(asActionError(e).message);
     }
@@ -433,7 +423,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
     const now = Math.floor(props.now / 1000);
     const links =
       website().trim().length > 0
-        ? [{ label: 'Website', url: website().trim() }]
+        ? [{ label: tr('caWebsite'), url: website().trim() }]
         : [];
     const av = avatar();
     return {
@@ -482,7 +472,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
   const publish = async () => {
     if (!name().trim() || saving()) return;
     if (overBudget()) {
-      setErr(CARD_TOO_LARGE);
+      setErr(CARD_TOO_LARGE());
       return;
     }
     setSaving(true);
@@ -502,7 +492,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
           : undefined,
         media: media(),
         links: website().trim()
-          ? [{ label: 'Website', url: website().trim() }]
+          ? [{ label: tr('caWebsite'), url: website().trim() }]
           : [],
       };
       if (cvText().trim()) {
@@ -513,7 +503,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
           cv: fields.cv,
         });
         if (afterCv > CARD_PUBLISH_BUDGET) {
-          setErr(CARD_TOO_LARGE);
+          setErr(CARD_TOO_LARGE());
           return;
         }
       }
@@ -532,19 +522,17 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
     try {
       await navigator.clipboard.writeText(link);
     } catch {
-      setErr('Select and copy the link above.');
+      setErr(tr('caSelectAndCopyTheLinkAbove'));
     }
   };
 
   return (
     <div class="panel" data-panel="front-door">
-      <h2>My profile</h2>
+      <h2>{tr('caMyProfile')}</h2>
       <p class="hint">
-        A signed card anyone may carry. Reading it costs nothing. Knocking still pays your admission
-        price. Media is hashed locally; large images stay off the card.
-      </p>
+        {tr('caASignedCardAnyoneMayCarryReadingItCosts')}</p>
       <label class="field">
-        <span>Display name</span>
+        <span>{tr('caDisplayName')}</span>
         <input
           data-fd-edit-name
           value={name()}
@@ -553,7 +541,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
         />
       </label>
       <label class="field">
-        <span>Tagline</span>
+        <span>{tr('caTagline')}</span>
         <input
           data-fd-edit-tagline
           value={tagline()}
@@ -562,7 +550,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
         />
       </label>
       <label class="field">
-        <span>About</span>
+        <span>{tr('caAbout')}</span>
         <textarea
           data-fd-edit-about
           rows={3}
@@ -572,7 +560,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
         />
       </label>
       <label class="field">
-        <span>CV text (hashed on the card; porch later)</span>
+        <span>{tr('caCVTextHashedOnTheCardPorchLater')}</span>
         <textarea
           data-fd-edit-cv
           rows={4}
@@ -582,7 +570,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
         />
       </label>
       <label class="field">
-        <span>Website (shown as text; never opened)</span>
+        <span>{tr('caWebsiteShownAsTextNeverOpened')}</span>
         <input
           data-fd-edit-website
           type="text"
@@ -595,7 +583,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
       {/* The native file control is hidden: WebKit draws "Choose File / No file chosen"
           in the OS language (Danish on a Danish Mac), next to English copy. */}
       <label class="field file-pick">
-        <span>Avatar</span>
+        <span>{tr('caAvatar')}</span>
         <input
           class="sr-only"
           data-fd-edit-avatar
@@ -604,12 +592,12 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
           onChange={(e) => void onAvatar(e.currentTarget.files?.[0] ?? null)}
         />
         <span class="file-pick-row" aria-hidden="true">
-          <span class="file-pick-btn">Choose image</span>
-          <span class="hint" data-fd-avatar-state>{avatar() ? 'Image chosen' : 'No image chosen'}</span>
+          <span class="file-pick-btn">{tr('caChooseImage')}</span>
+          <span class="hint" data-fd-avatar-state>{avatar() ? tr('caImageChosen') : tr('caNoImageChosen')}</span>
         </span>
       </label>
       <label class="field file-pick">
-        <span>Media (up to {MAX_MEDIA_ITEMS}, by hash)</span>
+        <span>{tr('caMediaUpTo')}{' '}{MAX_MEDIA_ITEMS}{tr('caByHash')}</span>
         <input
           class="sr-only"
           data-fd-edit-media
@@ -619,19 +607,18 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
           onChange={(e) => void onMedia(e.currentTarget.files)}
         />
         <span class="file-pick-row" aria-hidden="true">
-          <span class="file-pick-btn">Choose images</span>
-          <Show when={media().length === 0}><span class="hint">No images chosen</span></Show>
+          <span class="file-pick-btn">{tr('caChooseImages')}</span>
+          <Show when={media().length === 0}><span class="hint">{tr('caNoImagesChosen')}</span></Show>
         </span>
         <Show when={media().length > 0}>
           <p class="hint" data-fd-media-count>
-            {media().length} item{media().length === 1 ? '' : 's'} ready
-          </p>
+            {media().length}{' '}{tr(media().length === 1 ? 'caItemOne' : 'caItemMany')}{' '}{tr('caReady')}</p>
         </Show>
       </label>
       <p class="hint" data-fd-card-bytes data-over={overBudget() ? 'true' : 'false'}>
-        Card size ≈ {cardBytes().toLocaleString()} / {CARD_PUBLISH_BUDGET.toLocaleString()} bytes
-        {' '}(node max {MAX_CARD_BYTES.toLocaleString()})
-        {overBudget() ? ' — too large to publish' : ''}
+        {tr('caCardSize')}{' '}{cardBytes().toLocaleString()} / {CARD_PUBLISH_BUDGET.toLocaleString()} bytes
+        {' '}{tr('caNodeMax')}{' '}{MAX_CARD_BYTES.toLocaleString()})
+        {overBudget() ? tr('caTooLargeToPublish') : ''}
       </p>
       <Show when={sizeNote()}>
         <p class="hint" data-fd-size-note>
@@ -646,12 +633,11 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
           disabled={!name().trim() || saving() || overBudget()}
           onClick={() => void publish()}
         >
-          {mine() ? 'Update' : 'Publish'}
+          {mine() ? tr('caUpdate') : tr('caPublish')}
         </button>
         <Show when={mine()?.link}>
           <button type="button" class="link" data-fd-copy onClick={() => void copyLink()}>
-            Copy link
-          </button>
+            {tr('caCopyLink')}</button>
         </Show>
       </div>
       <Show when={!ownerAsk() ? err() : null}>
@@ -671,10 +657,10 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
         {(c) => (
           <>
             <p class="hint" data-fd-seq>
-              seq {c().seq} · expires {new Date(c().expires_at * 1000).toLocaleDateString()}
+              {tr('caSeq')}{' '}{c().seq}{' '}{tr('caExpires')}{' '}{new Date(c().expires_at * 1000).toLocaleDateString()}
             </p>
-            <p class="hint">Hold this QR up for someone to scan with their phone, or copy the link.</p>
-            <FrontDoorShareQr link={c().link} label="Your profile link as a QR code" />
+            <p class="hint">{tr('caHoldThisQRUpForSomeoneToScanWith')}</p>
+            <FrontDoorShareQr link={c().link} label={tr('caYourProfileLinkAsAQRCode')} />
             <code class="mono" data-fd-link>
               {c().link}
             </code>
@@ -684,8 +670,8 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
       <Show when={preview()}>
         {(p) => (
           <div class="fd-preview" data-fd-preview>
-            <h3>Preview</h3>
-            <p class="hint">How others will see this card after you publish.</p>
+            <h3>{tr('caPreview')}</h3>
+            <p class="hint">{tr('caHowOthersWillSeeThisCardAfterYouPublish')}</p>
             <FrontDoorCardView card={p()} now={props.now} />
           </div>
         )}

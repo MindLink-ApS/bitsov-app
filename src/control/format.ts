@@ -74,9 +74,9 @@ export function uptime(secs: number): string {
   const d = Math.floor(secs / 86400);
   const h = Math.floor((secs % 86400) / 3600);
   const m = Math.floor((secs % 3600) / 60);
-  if (d > 0) return `${d}d ${h}h`;
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
+  if (d > 0) return t('caUptimeDays', d, h);
+  if (h > 0) return t('caUptimeHours', h, m);
+  return t('caUptimeMinutes', m);
 }
 
 export function clock(ms: number): string {

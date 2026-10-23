@@ -1,3 +1,4 @@
+import { t as tr, displayDeviceWord } from '../i18n';
 import { WATCHES, type WatchNotice, type WatchRule, type WatchUpdate } from './watches';
 import { ASSISTANTS, modelProposalText, type ModelProposal, type LocalTurn, type AssistantId, type AssistantThread } from './assistants';
 import { SoftError } from './SoftError';
@@ -38,7 +39,7 @@ import { deviceWord } from '../platform';
 
 /** The host names its local provider "On this computer"; a phone build says "On this phone". */
 const providerLabel = (p: { kind: string; label: string }) =>
-  p.kind === 'local' && p.label === 'On this computer' ? `On this ${deviceWord()}` : p.label;
+  p.kind === 'local' && p.label === 'On this computer' ? tr('caOnThis', displayDeviceWord()) : p.label;
 import type { Source } from './source';
 import { asActionError, peerName } from './state';
 import type {
@@ -111,7 +112,7 @@ export function AiTrack(props: {
   const [portDraft, setPortDraft] = createSignal('');
   let stream: HTMLDivElement | undefined;
   const assistant = props.assistant ? ASSISTANTS[props.assistant] : null;
-  const suggestions = assistant?.suggestions ?? SUGGESTIONS;
+  const suggestions = () => assistant?.suggestions ?? SUGGESTIONS();
   const [threadReady, setThreadReady] = createSignal(!assistant);
   const [threadBusy, setThreadBusy] = createSignal(!!assistant);
   const [threadError, setThreadError] = createSignal<string | null>(null);
@@ -159,14 +160,14 @@ export function AiTrack(props: {
     if (!t || t.saved || ['reading', 'preview', 'sending'].includes(t.state)) return;
     const answer = t.modelTurn?.output.kind === 'proposal' ? modelProposalText(t.modelTurn.output.proposal) : t.remote?.text ?? (t.answer
       ? [t.answer.text, ...t.answer.cards.map(c => cardText(c, nameOf))].join('\n')
-      : t.noRead ? noReadText(t.noRead) : t.error ?? 'Nothing was sent.');
+      : t.noRead ? noReadText(t.noRead) : t.error ?? tr('caNothingWasSent'));
     setThreadBusy(true);
     try {
       const thread = await props.source.aiThread(props.assistant, { action: 'append', revision,
         turn: { at: t.at, question: t.question.slice(0, 500), answer: Array.from(answer).slice(0, 16_000).join('') } });
       revision = thread.revision;
     } catch (e) {
-      setThreadError(`This answer was not saved. ${asActionError(e).message}`);
+      setThreadError(tr('caThisAnswerWasNotSaved', asActionError(e).message));
       setThreadReady(false);
     } finally { setThreadBusy(false); }
   };
@@ -331,7 +332,7 @@ export function AiTrack(props: {
         try {
           const result = await props.source.aiLocalTurn(props.assistant, question, draftText());
           update(id, { state: 'answered', modelTurn: result, answer: {
-            text: result.output.kind === 'answer' ? result.output.text : 'Draft only — nothing was sent or changed.',
+            text: result.output.kind === 'answer' ? result.output.text : tr('caDraftOnlyNothingWasSentOrChanged'),
             cards: result.reads.flatMap(read => read.state === 'live'
               ? answerFrom(read, { kind: 'read', topic: read.topic, sinceMs: null, window: null }, nameOf).cards : []),
           } });
@@ -339,7 +340,7 @@ export function AiTrack(props: {
         return scroll();
       }
       if (assistant && (intent.kind === 'act' || intent.kind === 'no-peer')) {
-        update(id, { state: 'answered', answer: { text: 'This assistant is read-only. It cannot send, spend or prepare drafts.', cards: [] } });
+        update(id, { state: 'answered', answer: { text: tr('caThisAssistantIsReadOnlyItCannotSendSpend'), cards: [] } });
         return scroll();
       }
       if (intent.kind === 'act') {
@@ -348,7 +349,7 @@ export function AiTrack(props: {
         return scroll();
       }
       if (intent.kind === 'no-peer' || intent.kind === 'unknown') {
-        const text = assistant ? `${assistant.role} This assistant is read-only. Try one of the suggestions.`
+        const text = assistant ? tr('caThisAssistantIsReadOnlyTryOneOfThe', assistant.role)
           : intent.kind === 'unknown' ? unknownText() : noPeerText(intent.what);
         update(id, { state: 'answered', provider: 'local', answer: { text, cards: [] } });
         return scroll();
@@ -401,19 +402,19 @@ export function AiTrack(props: {
 
   return (
     <>
-      {props.head(assistant ? `${assistant.name} assistant` : 'Ask your node', sub())}
+      {props.head(assistant ? tr('caAssistant', assistant.name) : tr('uiAskYourNode'), sub())}
       <Show when={assistant}>
         <div class="ai-providers-bar" data-assistant-ready={threadReady() ? '' : undefined}>
           {/* Threads are sealed by the Mac host only (ai/threads/storage.rs); a phone does not claim it. */}
-          <p data-assistant-role>{assistant!.role}{deviceWord() === 'computer' ? ' Questions and answers stay sealed on this Mac. Keeps the latest 100 turns.' : ''}</p>
+          <p data-assistant-role>{assistant!.role}{deviceWord() === 'computer' ? tr('caQuestionsAndAnswersStaySealedOnThisMacKeeps') : ''}</p>
           <button type="button" class="soft" data-assistant-forget
             disabled={threadBusy() || session.turns.some(t => t.state === 'reading' || t.state === 'sending')}
-            onClick={() => void forget()}>Forget</button>
+            onClick={() => void forget()}>{tr('caForget')}</button>
         </div>
         <Show when={threadError()}><p role="alert" data-assistant-error>{threadError()}</p></Show>
         <details class="ai-providers-bar ai-watches" data-assistant-watches>
-          <summary>Watches · while this app is open</summary>
-          <p>Local rules use existing status and counts. No model, extra network reads, drafts or actions. Keeps the latest 100 notices.</p>
+          <summary>{tr('caWatchesWhileThisAppIsOpen')}</summary>
+          <p>{tr('caLocalRulesUseExistingStatusAndCountsNoModel')}</p>
           <For each={WATCHES[props.assistant!]}>{watch => <label style={{ display: 'block' }}>
             <input type="checkbox" data-watch={watch.rule} checked={!disabledWatches().includes(watch.rule)}
               disabled={threadBusy() || !threadReady()} onChange={e => {
@@ -425,16 +426,16 @@ export function AiTrack(props: {
         </details>
         <Show when={props.watchError}><p role="status">{props.watchError}</p></Show>
         <Show when={watchNotices().length}>
-          <section class="ai-providers-bar ai-watch-notices" aria-label="Watch notices">
+          <section class="ai-providers-bar ai-watch-notices" aria-label={tr('caWatchNotices')}>
             <For each={watchNotices()}>{notice => <p data-watch-notice>
-              <span class="ai-source">Watch · {new Date(notice.at).toLocaleString()} · saved observation</span><br />
+              <span class="ai-source">{tr('caWatch')}{' '}{new Date(notice.at).toLocaleString()}{' '}{tr('caSavedObservation')}</span><br />
               {notice.text}
             </p>}</For>
           </section>
         </Show>
       </Show>
       <div class="ai-providers-bar">
-        <div class="ai-providers" role="radiogroup" aria-label="Who answers" data-ai-providers>
+        <div class="ai-providers" role="radiogroup" aria-label={tr('caWhoAnswers')} data-ai-providers>
           <For each={session.providers ?? []}>
             {(p) => (
               <button
@@ -445,12 +446,12 @@ export function AiTrack(props: {
                 aria-checked={session.provider === p.kind}
                 disabled={!p.enabled || locked() || (!!assistant && p.kind !== 'local')}
                 title={
-                  (assistant && p.kind !== 'local' ? 'Remote models are off for named assistants.' : p.note) ??
+                  (assistant && p.kind !== 'local' ? tr('caRemoteModelsAreOffForNamedAssistants') : p.note) ??
                   (locked() && session.provider !== p.kind
-                    ? 'Send or don’t send the preview first'
+                    ? tr('caSendOrDonTSendThePreviewFirst')
                     : p.host
-                      ? `${p.model ?? ''} at ${p.host}`
-                      : `Nothing leaves this ${deviceWord()}`)
+                      ? tr('caAtExtra46', p.model ?? '', p.host)
+                      : tr('caNothingLeavesThis', displayDeviceWord()))
                 }
                 data-provider={p.kind}
                 data-tier={endpointBadge(p).tier}
@@ -461,10 +462,10 @@ export function AiTrack(props: {
                   {p.kind === 'local'
                     ? p.model
                       ? p.model
-                      : 'nothing leaves'
+                      : tr('caNothingLeaves')
                     : p.enabled && !assistant
                       ? p.host
-                      : 'off'}
+                      : tr('caOff')}
                 </span>
               </button>
             )}
@@ -479,10 +480,10 @@ export function AiTrack(props: {
               <span class="ai-own-icon" aria-hidden="true">⚙</span>
               <span class="ai-own-title">
                 {localStatus()?.running
-                  ? `Local model server active (${localStatus()!.kind === 'ollama' ? 'Ollama' : 'Server'} :${localStatus()!.port})`
-                  : 'Local server options (Ollama / llama.cpp)'}
+                  ? tr('caLocalModelServerActive', localStatus()!.kind === 'ollama' ? 'Ollama' : tr('caServer'), String(localStatus()!.port))
+                  : tr('caLocalServerOptionsOllamaLlamaCpp')}
               </span>
-              <span class="ai-own-toggle-hint">Configure ▾</span>
+              <span class="ai-own-toggle-hint">{tr('caConfigure')}</span>
             </summary>
             <div class="ai-own" data-ai-own>
               <Show
@@ -490,18 +491,17 @@ export function AiTrack(props: {
                 fallback={
                   <p class="hint" data-ai-own-howto>
                     {localStatus()?.howto ??
-                      `Looking for a local model server on this ${deviceWord()}…`}
+                      tr('caLookingForALocalModelServerOnThis', displayDeviceWord())}
                   </p>
                 }
               >
                 <p class="hint" data-ai-own-found>
-                  Found{' '}
-                  {localStatus()!.kind === 'ollama' ? 'Ollama' : 'a local model server'} on 127.0.0.1:
-                  {localStatus()!.port}. Nobody is paid; nothing leaves this {deviceWord()}.
+                  {tr('caFound')}{' '}
+                  {localStatus()!.kind === 'ollama' ? 'Ollama' : tr('caALocalModelServer')}{' '}{tr('caOn127001')}{localStatus()!.port}{tr('caNobodyIsPaidNothingLeavesThis')}{' '}{displayDeviceWord()}.
                 </p>
                 <div class="ai-own-row">
                   <label class="ai-own-port">
-                    <span>Port</span>
+                    <span>{tr('caPort')}</span>
                     <input
                       type="text"
                       inputMode="numeric"
@@ -513,7 +513,7 @@ export function AiTrack(props: {
                         if (Number.isFinite(port) && port > 0) void refreshLocal(port);
                       }}
                       data-ai-own-port
-                      aria-label="Local model server port"
+                      aria-label={tr('caLocalModelServerPort')}
                     />
                   </label>
                   <button
@@ -526,8 +526,7 @@ export function AiTrack(props: {
                     }}
                     data-ai-own-refresh
                   >
-                    Refresh
-                  </button>
+                    {tr('uiRefresh')}</button>
                   <Show when={provider()?.model}>
                     <button
                       type="button"
@@ -536,11 +535,10 @@ export function AiTrack(props: {
                       onClick={() => void clearModel()}
                       data-ai-own-clear
                     >
-                      Use rules only
-                    </button>
+                      {tr('caUseRulesOnly')}</button>
                   </Show>
                 </div>
-                <div class="ai-own-models" role={(localStatus()?.models.length ?? 0) > 0 ? 'listbox' : 'group'} aria-label="Local models" data-ai-own-models>
+                <div class="ai-own-models" role={(localStatus()?.models.length ?? 0) > 0 ? 'listbox' : 'group'} aria-label={tr('caLocalModels')} data-ai-own-models>
                   <For each={localStatus()?.models ?? []}>
                     {(name) => (
                       <button
@@ -575,12 +573,12 @@ export function AiTrack(props: {
                   <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
                 </svg>
               </div>
-              <h2>Ask about your own node</h2>
+              <h2>{tr('caAskAboutYourOwnNode')}</h2>
               <p class="hint">
-                {assistant ? `Ask about the topics in this assistant’s role. Rules answer here. With a local model selected, Ask lets it read up to three topics on this ${deviceWord()} and return an answer or a display-only draft.` : `This app reads your node through a closed list of read-only routes and answers here. Your node never talks to a model. If you turn on a remote model, each question shows exactly what would leave this ${deviceWord()}, and nothing is sent until you press Send.`}
+                {assistant ? tr('caAskAboutTheTopicsInThisAssistantSRole', displayDeviceWord()) : tr('caThisAppReadsYourNodeThroughAClosedList', displayDeviceWord())}
               </p>
-              <div class="ai-hero-suggestions" aria-label="Suggestions">
-                <For each={suggestions}>
+              <div class="ai-hero-suggestions" aria-label={tr('caSuggestions')}>
+                <For each={suggestions()}>
                   {(s) => (
                     <button type="button" class="ai-hero-card" disabled={busy()} onClick={() => void ask(s)} data-suggestion>
                       <span class="ai-hero-card-arrow" aria-hidden="true">↳</span>
@@ -626,8 +624,8 @@ export function AiTrack(props: {
         }}
       >
         <Show when={session.turns.length > 0}>
-          <div class="ai-suggest" aria-label="Suggestions">
-            <For each={suggestions}>
+          <div class="ai-suggest" aria-label={tr('caSuggestions')}>
+            <For each={suggestions()}>
               {(s) => (
                 <button type="button" class="chip" disabled={busy()} onClick={() => void ask(s)} data-suggestion>
                   {s}
@@ -644,7 +642,7 @@ export function AiTrack(props: {
         >
           <div class="ai-extras-card">
             <div class="ai-extras-head">
-              <span class="ai-extras-title">Draft note attachment</span>
+              <span class="ai-extras-title">{tr('caDraftNoteAttachment')}</span>
               <button
                 type="button"
                 class="ai-extras-close"
@@ -652,8 +650,8 @@ export function AiTrack(props: {
                   setShowExtras(false);
                   if (draftText()) setDraftText('');
                 }}
-                title="Clear and close"
-                aria-label="Close draft field"
+                title={tr('caClearAndClose')}
+                aria-label={tr('caCloseDraftField')}
               >
                 ✕
               </button>
@@ -661,13 +659,13 @@ export function AiTrack(props: {
             <label class="ai-draft-field">
               <textarea
                 rows={2}
-                placeholder="Message or invoice note — copied exactly into the draft"
+                placeholder={tr('caMessageOrInvoiceNoteCopiedExactlyIntoTheDraft')}
                 value={draftText()}
                 onInput={(e) => setDraftText(e.currentTarget.value)}
                 disabled={busy()}
                 data-ai-draft-text
               />
-              <span class="hint">For messages and invoice notes. Leave blank to write in the composer.</span>
+              <span class="hint">{tr('caForMessagesAndInvoiceNotesLeaveBlankToWrite')}</span>
             </label>
           </div>
         </div>
@@ -679,8 +677,8 @@ export function AiTrack(props: {
             class="attach soft ai-plus-btn"
             classList={{ active: showExtras() || Boolean(draftText()) }}
             onClick={() => setShowExtras((v) => !v)}
-            title="Attach message draft note or options"
-            aria-label="Composer options"
+            title={tr('caAttachMessageDraftNoteOrOptions')}
+            aria-label={tr('caComposerOptions')}
             aria-expanded={showExtras()}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -690,7 +688,7 @@ export function AiTrack(props: {
           </button></Show>
           <textarea
             rows={1}
-            placeholder="Ask your node…"
+            placeholder={tr('caAskYourNode')}
             value={draft()}
             onInput={(e) => {
               setDraft(e.currentTarget.value);
@@ -703,7 +701,7 @@ export function AiTrack(props: {
                 void ask(draft());
               }
             }}
-            aria-label="Ask your node"
+            aria-label={tr('uiAskYourNode')}
             data-ai-input
           />
           <button
@@ -712,19 +710,19 @@ export function AiTrack(props: {
             classList={{ 'is-preview': needsDisclose() }}
             disabled={busy() || !draft().trim()}
             data-ai-ask
-            title={needsDisclose() ? 'Preview what will be sent' : 'Ask your node'}
-            aria-label={needsDisclose() ? 'Preview' : 'Ask'}
+            title={needsDisclose() ? tr('caPreviewWhatWillBeSent') : tr('uiAskYourNode')}
+            aria-label={needsDisclose() ? tr('caPreview') : tr('caAsk')}
           >
             <Show when={needsDisclose()} fallback={
               <>
-                <span class="sr-only">Ask</span>
+                <span class="sr-only">{tr('caAsk')}</span>
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <line x1="12" y1="19" x2="12" y2="5" />
                   <polyline points="5 12 12 5 19 12" />
                 </svg>
               </>
             }>
-              <span>Preview</span>
+              <span>{tr('caPreview')}</span>
             </Show>
           </button>
         </div>
@@ -734,13 +732,13 @@ export function AiTrack(props: {
           <span>
             {assistant
               ? ownModel()
-                ? `Read-only assistant. Up to three reads per question; drafts are display-only. Nothing is sent or spent. The model stays on this ${deviceWord()}.`
-                : `Read-only assistant. No payments, messages or drafts. Rules stay on this ${deviceWord()}.`
+                ? tr('caReadOnlyAssistantUpToThreeReadsPerQuestion', displayDeviceWord())
+                : tr('caReadOnlyAssistantNoPaymentsMessagesOrDraftsRules', displayDeviceWord())
               : remote()
-              ? `Each question shows the exact request for ${provider()?.label ?? 'the remote model'} first. Nothing is approved ahead of time.`
+              ? tr('caEachQuestionShowsTheExactRequestForFirstNothing', provider()?.label ?? tr('caTheRemoteModel'))
               : ownModel()
-                ? `Each question shows the exact request for ${provider()?.model} on this ${deviceWord()} first. Nobody is paid; the preview never leaves this ${deviceWord()}.`
-                : `Nothing leaves this ${deviceWord()}. The AI never spends: it can only prepare a draft for you to send.`}
+                ? tr('caEachQuestionShowsTheExactRequestForOnThis', String(provider()?.model), displayDeviceWord(), displayDeviceWord())
+                : tr('caNothingLeavesThisTheAINeverSpendsItCan', displayDeviceWord())}
           </span>
         </p>
       </form>
@@ -765,14 +763,14 @@ function TurnView(props: {
           <div class="bubble ai-thinking">
             <DelayedSpinner small />{' '}
             {t().provider === 'local' && !t().disclosure && !t().topic
-              ? 'Reading your node…'
-              : 'Preparing the preview. Nothing is sent…'}
+              ? tr('caReadingYourNode')
+              : tr('caPreparingThePreviewNothingIsSent')}
           </div>
         </div>
       </Match>
       <Match when={t().state === 'error'}>
         <div class="ai-answer" data-ai-answer="error">
-          <SoftError class="bubble soft-error" message={t().error ?? 'The answer is unavailable.'} />
+          <SoftError class="bubble soft-error" message={t().error ?? tr('caTheAnswerIsUnavailable')} />
         </div>
       </Match>
       <Match when={t().state === 'no-read'}>
@@ -789,10 +787,10 @@ function TurnView(props: {
               <Show when={turn().output.kind === 'proposal' && (turn().output as Extract<LocalTurn['output'], { kind: 'proposal' }>).proposal}>
                 {(p) => <ModelProposalCard p={p()} />}
               </Show>
-              <p class="ai-source" data-ai-model-warning>Your node did not check this model answer. Drafts are never executed.</p>
+              <p class="ai-source" data-ai-model-warning>{tr('caYourNodeDidNotCheckThisModelAnswerDrafts')}</p>
               <For each={turn().reads}>{read => read.state === 'live'
                 ? <SourceStamp routes={read.routes} line={sourceLine(read.freshness, t().at, props.now)} />
-                : <p class="ai-source">{read.topic}: {noReadText(read.reason)}</p>}</For>
+                : <p class="ai-source">{tr(({ balance: 'caTopicBalance', channels: 'caTopicChannels', node: 'caTopicNode', inbox: 'caTopicInbox', prices: 'caTopicPrices', payments: 'caTopicPayments' } as const)[read.topic])}: {noReadText(read.reason)}</p>}</For>
             </>}
           </Show>
           <Show when={t().proposal}>{(p) => <ProposalCard p={p()} onPrefill={props.onPrefill} />}</Show>
@@ -800,7 +798,7 @@ function TurnView(props: {
             {(s) => <SourceStamp routes={s().routes} line={sourceLine(s().freshness, s().receivedAt, props.now)} />}
           </Show>
           <Show when={!t().source && !t().proposal && !t().modelTurn}>
-            <p class="ai-source" data-ai-source="none">{t().saved ? 'Saved answer — historical, not a fresh node read. Model answers are not checked by your node.' : 'Nothing was read from your node for this.'}</p>
+            <p class="ai-source" data-ai-source="none">{t().saved ? tr('caSavedAnswerHistoricalNotAFreshNodeReadModel') : tr('caNothingWasReadFromYourNodeForThis')}</p>
           </Show>
         </div>
       </Match>
@@ -823,22 +821,16 @@ function TurnView(props: {
               when={r().provider === 'local'}
               fallback={
                 <p class="ai-source" data-ai-source="remote">
-                  <span class="ai-from">{r().label}</span> · {r().model} at <span class="id">{r().host}</span> · from what you
-                  shared ({PRESETS.find((p) => p.id === t().disclosure?.preset)?.label.toLowerCase()},{' '}
-                  {r().sent_bytes > 0 ? `${satsWhole(r().sent_bytes)} bytes` : 'sample, nothing sent'}). Your node did not
-                  check this answer.
-                </p>
+                  <span class="ai-from">{r().label}</span> · {r().model}{' '}{tr('caAt')}{' '}<span class="id">{r().host}</span>{' '}{tr('caFromWhatYouShared')}{PRESETS.find((p) => p.id === t().disclosure?.preset)?.label.toLowerCase()},{' '}
+                  {r().sent_bytes > 0 ? `${satsWhole(r().sent_bytes)} bytes` : tr('caSampleNothingSent')}{tr('caYourNodeDidNotCheckThisAnswer')}</p>
               }
             >
               <p class="ai-source" data-ai-source="own">
-                <span class="ai-from">Own</span> · On this {deviceWord()} · {r().model} · Nobody is paid · from what you shared
-                ({PRESETS.find((p) => p.id === t().disclosure?.preset)?.label.toLowerCase()},{' '}
-                {r().sent_bytes > 0 ? `${satsWhole(r().sent_bytes)} bytes` : 'sample'}). Your node did not check this
-                answer.
-              </p>
+                <span class="ai-from">{tr('caOwn')}</span>{' '}{tr('caOnThis74')}{' '}{displayDeviceWord()} · {r().model}{' '}{tr('caNobodyIsPaidFromWhatYouShared')}{PRESETS.find((p) => p.id === t().disclosure?.preset)?.label.toLowerCase()},{' '}
+                {r().sent_bytes > 0 ? `${satsWhole(r().sent_bytes)} bytes` : tr('caSampleExtra60')}{tr('caYourNodeDidNotCheckThisAnswer')}</p>
             </Show>
             <details class="ai-sent" data-ai-sent>
-              <summary>{r().sent_bytes > 0 ? 'What was sent' : 'What would have been sent'}</summary>
+              <summary>{r().sent_bytes > 0 ? tr('caWhatWasSent') : tr('caWhatWouldHaveBeenSent')}</summary>
               <pre class="ai-payload">{t().disclosure?.body}</pre>
             </details>
           </div>
@@ -851,7 +843,7 @@ function TurnView(props: {
 function SourceStamp(props: { routes: string[]; line: ReturnType<typeof sourceLine> }) {
   return (
     <p class="ai-source" data-ai-source="node" data-freshness={props.line.state}>
-      <span class="ai-from">From your node</span>, through the app’s read broker · <span class="id">{props.routes.join(' · ')}</span>
+      <span class="ai-from">{tr('caFromYourNode')}</span>{tr('caThroughTheAppSReadBroker')}{' '}<span class="id">{props.routes.join(' · ')}</span>
       <br />
       <span classList={{ stale: props.line.state === 'stale' }} class="ai-fresh" data-ai-fresh>
         {props.line.text}
@@ -874,12 +866,12 @@ function CopyButton(props: { text: () => string }) {
         });
       }}
     >
-      {done() === 'copied' ? 'Copied' : done() === 'failed' ? 'Copy failed' : 'Copy'}
+      {done() === 'copied' ? tr('extraCopied') : done() === 'failed' ? tr('caCopyFailed') : tr('caCopy')}
     </button>
   );
 }
 
-const fig = (a: Amount | undefined) => (value(a) === null ? 'unavailable' : amount(value(a)!));
+const fig = (a: Amount | undefined) => (value(a) === null ? tr('caUnavailableExtra63') : amount(value(a)!));
 
 function CardView(props: { card: Card; nameOf: (id: string) => string; now: number }) {
   const text = () => cardText(props.card, props.nameOf);
@@ -891,26 +883,26 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
           return (
             <div class="artifact ai-card" data-ai-card="node">
               <div class="row card-head">
-                <span class="kind">Node</span>
+                <span class="kind">{tr('uiNode')}</span>
                 <CopyButton text={text} />
               </div>
               <div class="row" style={{ gap: 'var(--s-2)' }}>
                 <span class={`dot ${h().liveness === 'ok' ? 'ok' : 'warn'}`} />
-                <strong>{h().liveness === 'ok' ? 'Healthy' : 'Not healthy'}</strong>
+                <strong>{h().liveness === 'ok' ? tr('caHealthy') : tr('caNotHealthy')}</strong>
               </div>
               <dl class="facts">
-                <dt>Peers connected</dt>
-                <dd class="sats">{value(h().connected_peers) ?? 'unavailable'}</dd>
-                <dt>Encrypted sessions</dt>
-                <dd class="sats">{value(h().e2ee_sessions) ?? 'unavailable'}</dd>
-                <dt>Waiting to deliver</dt>
-                <dd class="sats">{value(h().pending_deliveries) ?? 'unavailable'}</dd>
-                <dt>Block height</dt>
-                <dd class="sats">{value(h().block_height) === null ? 'unavailable' : satsWhole(value(h().block_height)!, true)}</dd>
-                <dt>Lightning</dt>
-                <dd>{h().lightning_backend}{h().lightning_payment_capable ? ', can pay' : ', cannot pay'}</dd>
-                <dt>Uptime</dt>
-                <dd class="sats">{value(h().uptime) === null ? 'unavailable' : uptime(value(h().uptime)!)}</dd>
+                <dt>{tr('caPeersConnected')}</dt>
+                <dd class="sats">{value(h().connected_peers) ?? tr('caUnavailableExtra63')}</dd>
+                <dt>{tr('caEncryptedSessions')}</dt>
+                <dd class="sats">{value(h().e2ee_sessions) ?? tr('caUnavailableExtra63')}</dd>
+                <dt>{tr('caWaitingToDeliver')}</dt>
+                <dd class="sats">{value(h().pending_deliveries) ?? tr('caUnavailableExtra63')}</dd>
+                <dt>{tr('caBlockHeight')}</dt>
+                <dd class="sats">{value(h().block_height) === null ? tr('caUnavailableExtra63') : satsWhole(value(h().block_height)!, true)}</dd>
+                <dt>{tr('receiveLightning')}</dt>
+                <dd>{h().lightning_backend}{h().lightning_payment_capable ? tr('caCanPay') : tr('caCannotPay')}</dd>
+                <dt>{tr('caUptime')}</dt>
+                <dd class="sats">{value(h().uptime) === null ? tr('caUnavailableExtra63') : uptime(value(h().uptime)!)}</dd>
               </dl>
             </div>
           );
@@ -922,7 +914,7 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
           return (
             <div class="artifact ai-card" data-ai-card="balance">
               <div class="row card-head">
-                <span class="kind">{card().balance ? 'Balance' : 'Channels'}</span>
+                <span class="kind">{card().balance ? tr('caBalance') : tr('uiChannels')}</span>
                 <CopyButton text={text} />
               </div>
               <Show when={card().balance}>
@@ -932,11 +924,11 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
                       {value(b().wallet_balance) === null ? fig(b().wallet_balance) : amount(value(b().wallet_balance)!, true)}
                     </span>
                     <dl class="facts">
-                      <dt>Lightning, yours</dt>
+                      <dt>{tr('caLightningYours')}</dt>
                       <dd class="sats">{fig(b().channel_local_balance)}</dd>
-                      <dt>Lightning, theirs</dt>
+                      <dt>{tr('caLightningTheirs')}</dt>
                       <dd class="sats">{fig(b().channel_remote_balance)}</dd>
-                      <dt>Channel capacity</dt>
+                      <dt>{tr('caChannelCapacity')}</dt>
                       <dd class="sats">{fig(b().channel_capacity)}</dd>
                     </dl>
                   </>
@@ -951,15 +943,15 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
                       return (
                         <div class="channel">
                           <div class="row">
-                            <span>{x.active ? 'active' : 'inactive'}</span>
-                            <span class="sats">{fig(x.capacity)} capacity</span>
+                            <span>{x.active ? tr('caActive') : tr('caInactive')}</span>
+                            <span class="sats">{fig(x.capacity)}{' '}{tr('caCapacity')}</span>
                           </div>
                           <div class="liquidity">
                             <div style={{ width: `${cap > 0 ? (mine / cap) * 100 : 0}%`, opacity: x.active ? 1 : 0.4 }} />
                           </div>
                           <div class="row">
-                            <span class="sats">{fig(x.local_balance)} yours</span>
-                            <span class="sats">{fig(x.remote_balance)} theirs</span>
+                            <span class="sats">{fig(x.local_balance)}{' '}{tr('caYours')}</span>
+                            <span class="sats">{fig(x.remote_balance)}{' '}{tr('caTheirs')}</span>
                           </div>
                         </div>
                       );
@@ -979,23 +971,23 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
           return (
             <div class="artifact ai-card" data-ai-card="payments">
               <div class="row card-head">
-                <span class="kind">Paid messages · {card().window}</span>
+                <span class="kind">{tr('caPaidMessages')}{' '}{card().window}</span>
                 <CopyButton text={text} />
               </div>
               <div class="row ai-totals">
                 <span>
-                  <span class="label">Spent</span> <span class="sats">{value(r().sent_total) === null ? fig(r().sent_total) : amount(value(r().sent_total)!, true)}</span>
+                  <span class="label">{tr('caSpent')}</span> <span class="sats">{value(r().sent_total) === null ? fig(r().sent_total) : amount(value(r().sent_total)!, true)}</span>
                 </span>
                 <span>
-                  <span class="label">Received</span> <span class="sats">{value(r().received_total) === null ? fig(r().received_total) : amount(value(r().received_total)!, true)}</span>
+                  <span class="label">{tr('extraReceived')}</span> <span class="sats">{value(r().received_total) === null ? fig(r().received_total) : amount(value(r().received_total)!, true)}</span>
                 </span>
               </div>
               <ul class="ai-payments">
                 <For each={shown()}>
                   {(e) => (
                     <li data-direction={e.direction}>
-                      <span class="dir" aria-label={e.direction}>{e.direction === 'sent' ? '↑' : '↓'}</span>
-                      <span class="who">{e.peer.state === 'value' ? props.nameOf(e.peer.value) : 'withheld'}</span>
+                      <span class="dir" aria-label={e.direction === 'sent' ? tr('caDirectionSent') : tr('caDirectionReceived')}>{e.direction === 'sent' ? '↑' : '↓'}</span>
+                      <span class="who">{e.peer.state === 'value' ? props.nameOf(e.peer.value) : tr('caWithheld')}</span>
                       <span class="when">{day(e.at_ms)} {clock(e.at_ms)}</span>
                       <span class="sats">
                         {e.direction === 'sent' ? '−' : '+'}
@@ -1006,7 +998,7 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
                 </For>
               </ul>
               <Show when={r().entries.length > shown().length}>
-                <span class="hint">and {r().entries.length - shown().length} more (Copy includes them)</span>
+                <span class="hint">{tr('caAnd')}{' '}{r().entries.length - shown().length}{' '}{tr('caMoreCopyIncludesThem')}</span>
               </Show>
             </div>
           );
@@ -1018,18 +1010,18 @@ function CardView(props: { card: Card; nameOf: (id: string) => string; now: numb
 
 function ModelProposalCard(props: { p: ModelProposal }) {
   return <div class="artifact ai-card proposal" data-model-proposal={props.p.kind}>
-    <span class="kind">Draft · display only</span>
+    <span class="kind">{tr('caDraftDisplayOnly')}</span>
     <div class="bubble quote">{modelProposalText(props.p)}</div>
-    <span class="hint">Review this draft. To send anything, open the contact’s composer yourself.</span>
+    <span class="hint">{tr('caReviewThisDraftToSendAnythingOpenTheContact')}</span>
   </div>;
 }
 
 function ProposalCard(props: { p: Proposal; onPrefill: (p: Proposal) => void }) {
   const title = () =>
-    ({ message: `Message to ${props.p.name}`, pay: `Payment to ${props.p.name}`, request: `Invoice for ${props.p.name}` })[props.p.kind];
+    ({ message: tr('caMessageTo', props.p.name), pay: tr('caPaymentTo', props.p.name), request: tr('caInvoiceFor', props.p.name) })[props.p.kind];
   return (
     <div class="artifact ai-card proposal" data-ai-card="proposal" data-proposal={props.p.kind}>
-      <span class="kind">Draft · you send it</span>
+      <span class="kind">{tr('caDraftYouSendIt')}</span>
       <strong>{title()}</strong>
       <Show when={props.p.kind === 'message' && (props.p as Extract<Proposal, { kind: 'message' }>).draft_text}>
         {(text) => <div class="bubble quote">{text()}</div>}
@@ -1041,12 +1033,11 @@ function ProposalCard(props: { p: Proposal; onPrefill: (p: Proposal) => void }) 
       </Show>
       <span class="hint">
         {props.p.kind === 'request'
-          ? 'Opens the Request tab with this amount filled in.'
-          : 'Opens the composer with this filled in. The cost is shown there, and spending needs your approval.'}
+          ? tr('caOpensTheRequestTabWithThisAmountFilledIn')
+          : tr('caOpensTheComposerWithThisFilledInTheCost')}
       </span>
       <button type="button" class="primary" data-ai-prefill onClick={() => props.onPrefill(props.p)}>
-        Open in {props.p.name}’s composer
-      </button>
+        {tr('caOpenComposerFor', props.p.name)}</button>
     </div>
   );
 }
@@ -1072,18 +1063,17 @@ function DisclosureCard(props: {
   return (
     <div class="artifact ai-card disclosure" data-ai-card="disclosure" data-state={props.state} data-preset={props.d.preset}>
       <div class="row card-head">
-        <span class="kind">{props.state === 'not-sent' ? 'Not sent' : `Nothing has left this ${deviceWord()} yet`}</span>
+        <span class="kind">{props.state === 'not-sent' ? tr('caNotSent') : tr('caNothingHasLeftThisYet', displayDeviceWord())}</span>
       </div>
       <Show
         when={props.state !== 'not-sent'}
-        fallback={<p class="hint">This preview was canceled. Nothing left this {deviceWord()}.</p>}
+        fallback={<p class="hint">{tr('caThisPreviewWasCanceledNothingLeftThis')}{' '}{displayDeviceWord()}.</p>}
       >
         <p>
-          This is exactly what would go to <strong>{props.d.label}</strong> ({props.d.model}) at{' '}
-          <span class="id">{props.d.host}</span>: {satsWhole(props.d.bytes)} bytes, once.
-          <Show when={props.d.key_env}> Its key is added from {props.d.key_env} on this {deviceWord()} and is not shown.</Show>
+          {tr('caThisIsExactlyWhatWouldGoTo')}{' '}<strong>{props.d.label}</strong> ({props.d.model}{tr('caAt122')}{' '}
+          <span class="id">{props.d.host}</span>: {satsWhole(props.d.bytes)}{' '}{tr('caBytesOnce')}<Show when={props.d.key_env}>{' '}{tr('caItsKeyIsAddedFrom')}{' '}{props.d.key_env}{' '}{tr('caOnThis125')}{' '}{displayDeviceWord()}{' '}{tr('caAndIsNotShown')}</Show>
         </p>
-        <div class="modes small" role="radiogroup" aria-label="What to share" data-ai-presets>
+        <div class="modes small" role="radiogroup" aria-label={tr('caWhatToShare')} data-ai-presets>
           <For each={PRESETS}>
             {(p) => (
               <button
@@ -1101,32 +1091,27 @@ function DisclosureCard(props: {
           </For>
         </div>
         <p class="hint">{PRESETS.find((p) => p.id === props.d.preset)?.detail}</p>
-        <div class="modes small" role="tablist" aria-label="Preview view">
+        <div class="modes small" role="tablist" aria-label={tr('caPreviewView')}>
           <button type="button" role="tab" aria-selected={view() === 'shared'} data-ai-view="shared" onClick={() => setView('shared')}>
-            What you share
-          </button>
+            {tr('caWhatYouShare')}</button>
           <button type="button" role="tab" aria-selected={view() === 'exact'} data-ai-view="exact" onClick={() => setView('exact')}>
-            Exact bytes
-          </button>
+            {tr('caExactBytes')}</button>
         </div>
         <pre class="ai-payload" data-ai-payload data-view={view()} tabindex="0">
           {view() === 'shared' ? shared() ?? props.d.body : props.d.body}
         </pre>
         <Show when={view() === 'shared'}>
           <p class="hint">
-            This is the question and data part, character for character. The rest is the model name and the fixed
-            instructions in Exact bytes.
-          </p>
+            {tr('caThisIsTheQuestionAndDataPartCharacterFor')}</p>
         </Show>
         <div class="row" style={{ 'justify-content': 'flex-end' }}>
           <button type="button" class="quiet" data-ai-dont-send disabled={props.state === 'sending'} onClick={() => props.onDontSend()}>
-            Don’t send
-          </button>
+            {tr('caDonTSend')}</button>
           <button type="button" class="primary" data-ai-send disabled={props.state === 'sending'} onClick={() => props.onSend()}>
-            {props.state === 'sending' ? 'Sending…' : `Send to ${props.d.label}`}
+            {props.state === 'sending' ? tr('caSending') : tr('caSendTo', props.d.label)}
           </button>
         </div>
-        <p class="hint">This approval covers this one request only. The preview lapses in {Math.round(props.d.expires_in_ms / 60_000)} min.</p>
+        <p class="hint">{tr('caThisApprovalCoversThisOneRequestOnlyThePreview')}{' '}{Math.round(props.d.expires_in_ms / 60_000)}{' '}{tr('caMin')}</p>
       </Show>
     </div>
   );

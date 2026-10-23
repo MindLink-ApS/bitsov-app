@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 /**
  * Rooms MVP UI (room.ts): the "New room" picker and a room's thread.
  *
@@ -23,9 +24,9 @@ export type RoomContact = { id: string; name: string } & MemberInfo;
 /** Why a contact cannot be picked, or `null` when they can. */
 function unpickable(c: RoomContact, nodeRooms: boolean): string | null {
   if (!nodeRooms) return null;
-  if (!c.connected) return 'not connected';
-  if (!c.rooms) return 'needs update';
-  if (!c.session) return 'message them once first';
+  if (!c.connected) return tr('caNotConnected');
+  if (!c.rooms) return tr('caNeedsUpdate');
+  if (!c.session) return tr('caMessageThemOnceFirst');
   return null;
 }
 
@@ -42,10 +43,10 @@ export function NewRoomPanel(props: {
     setPicks((p) => (p.includes(id) ? p.filter((x) => x !== id) : p.length < MAX_MEMBERS - 1 ? [...p, id] : p));
   const ok = (c: RoomContact) => props.nodeRooms && unpickable(c, true) === null;
   return (
-    <aside class="call-panel meeting-panel room-panel" data-room-panel="new" role="dialog" aria-label="New room">
-      <header><strong>New room</strong><span class="who">you and up to {MAX_MEMBERS - 1} contacts</span></header>
+    <aside class="call-panel meeting-panel room-panel" data-room-panel="new" role="dialog" aria-label={tr('caNewRoom')}>
+      <header><strong>{tr('caNewRoom')}</strong><span class="who">{tr('caYouAndUpTo')}{' '}{MAX_MEMBERS - 1}{' '}{tr('caContacts')}</span></header>
       <ul class="meeting-legs">
-        <For each={props.contacts} fallback={<li class="hint">No contacts yet.</li>}>
+        <For each={props.contacts} fallback={<li class="hint">{tr('caNoContactsYet')}</li>}>
           {(c) => (
             <li>
               <label>
@@ -61,16 +62,13 @@ export function NewRoomPanel(props: {
           )}
         </For>
       </ul>
-      <Show when={!props.nodeRooms}><p class="hint" data-room-node-update>Your node needs an update before it can hold rooms.</p></Show>
+      <Show when={!props.nodeRooms}><p class="hint" data-room-node-update>{tr('caYourNodeNeedsAnUpdateBeforeItCanHold')}</p></Show>
       <p class="hint" data-room-note>
-        Creating a room is free and sends nothing. Each message you send in it pays each member their own price, separately.
-        Members who are not each other’s contacts will not see each other’s messages.
-      </p>
+        {tr('caCreatingARoomIsFreeAndSendsNothingEach')}</p>
       <div class="call-actions">
         <button type="button" class="primary soft" data-room-create disabled={!props.nodeRooms || picks().length === 0} onClick={() => props.onCreate(picks())}>
-          Create room
-        </button>
-        <button type="button" class="soft" data-room-cancel onClick={() => props.onCancel()}>Cancel</button>
+          {tr('caCreateRoom')}</button>
+        <button type="button" class="soft" data-room-cancel onClick={() => props.onCancel()}>{tr('cancel')}</button>
       </div>
     </aside>
   );

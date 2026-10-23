@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 import { t } from '../i18n';
 import { deviceWord, isMobilePlatform } from '../platform';
 import { createEffect, createSignal, For, onCleanup, Show } from 'solid-js';
@@ -62,8 +63,8 @@ export function OwnerApprovals(props: OwnerApprovalsProps) {
   const memory = props.memory ?? approvalMemory();
   const { hidden, setHidden, kept, setKept, said, busy } = memory;
   const mobile = () => props.mobile ?? isMobilePlatform();
-  const device = () => mobile() ? (deviceWord() === 'iPad' ? 'iPad' : 'phone') : 'Mac';
-  const tap = () => (mobile() ? 'biometrics' : 'Touch ID');
+  const device = () => mobile() ? (deviceWord() === 'iPad' ? 'iPad' : tr('phone')) : 'Mac';
+  const tap = () => (mobile() ? tr('biometrics') : 'Touch ID');
   const live = (v: ApprovalView) => v.status === 'pending' && secondsLeft(v, props.now) > 0;
   /** Approve is offered only while the node still lists it as waiting. */
   const waiting = (opId: string) => props.approvals.some((v) => v.op_id === opId && live(v));
@@ -206,7 +207,7 @@ export function OwnerApprovalWait(props: {
         // unreachable): the other device may already have approved it. Only a
         // successful read's own status counts. Keep checking; Cancel stops.
         if (Date.now() / 1000 > v.expires_at + WAIT_GRACE_SECS) { setGaveUp(true); return; }
-        setError('Couldn’t check whether it was approved. Still checking; if it was approved, this goes on by itself.');
+        setError(tr('caCouldnTCheckWhetherItWasApprovedStillChecking'));
         setView({ ...v }); // keep polling
       }
     }, props.pollMs ?? 2000);
@@ -216,37 +217,35 @@ export function OwnerApprovalWait(props: {
   return (
     <div class="approval owner-approval-wait" data-owner-approval-wait={gaveUp() ? 'unconfirmed' : view().status}>
       <Show when={gaveUp()}>
-        <p class="err-note" role="alert" data-approval-wait-unconfirmed>Couldn’t confirm whether it was approved. Ask again if needed.</p>
+        <p class="err-note" role="alert" data-approval-wait-unconfirmed>{tr('caCouldnTConfirmWhetherItWasApprovedAskAgain')}</p>
         <div class="form-actions">
-          <button type="button" class="soft" data-approval-wait-dismiss onClick={() => props.onStop()}>Dismiss</button>
+          <button type="button" class="soft" data-approval-wait-dismiss onClick={() => props.onStop()}>{tr('ownerApprovalDismiss')}</button>
         </div>
       </Show>
       <Show when={!gaveUp() && view().status === 'pending'} fallback={<Show when={!gaveUp()}>{
         <Show when={view().status === 'consumed'} fallback={<>
-          <p class="err-note" role="alert" data-approval-wait-expired>{error() ?? 'This request expired. Nothing was approved.'}</p>
+          <p class="err-note" role="alert" data-approval-wait-expired>{error() ?? tr('caThisRequestExpiredNothingWasApproved')}</p>
           {/* A terminal state is never a dead end: dismissing frees Send (and the offer to ask again). */}
           <div class="form-actions">
-            <button type="button" class="soft" data-approval-wait-dismiss onClick={() => props.onStop()}>Dismiss</button>
+            <button type="button" class="soft" data-approval-wait-dismiss onClick={() => props.onStop()}>{tr('ownerApprovalDismiss')}</button>
           </div>
         </>}>
-          <p class="ok-note" role="status" data-approval-wait-approved>Approved on your other device.</p>
+          <p class="ok-note" role="status" data-approval-wait-approved>{tr('caApprovedOnYourOtherDevice')}</p>
         </Show>
       }</Show>}>
         <p>
-          <strong>Waiting for your approval on your other owner device.</strong> Open BitSov there and approve it;
-          this device cannot approve its own request.
-        </p>
+          <strong>{tr('caWaitingForYourApprovalOnYourOtherOwnerDevice')}</strong>{' '}{tr('caOpenBitSovThereAndApproveItThisDeviceCannot')}</p>
         <ul class="owner-approval-terms" role="list"><For each={termLines(view())}>{(line, i) => <li classList={{ lead: i() === 0 }}>{line}</li>}</For></ul>
         <Show when={props.after}><p data-approval-wait-after>{props.after}</p></Show>
-        <p class="hint" data-approval-wait-expires>Expires in {clock(left())}. Cancel only stops waiting here; the request expires by itself.</p>
+        <p class="hint" data-approval-wait-expires>{tr('caExpiresIn')}{' '}{clock(left())}{tr('caCancelOnlyStopsWaitingHereTheRequestExpiresBy')}</p>
         <Show when={error()}><p class="err-note" role="alert">{error()}</p></Show>
         <div class="form-actions">
-          <button type="button" class="soft" data-approval-wait-cancel onClick={() => props.onStop()}>Cancel</button>
+          <button type="button" class="soft" data-approval-wait-cancel onClick={() => props.onStop()}>{tr('cancel')}</button>
         </div>
       </Show>
       <Show when={props.fallback}>
         <details class="other-ways" data-other-ways>
-          <summary>Other ways</summary>
+          <summary>{tr('uiOtherWays')}</summary>
           <code class="address" data-owner-action>{props.fallback}</code>
         </details>
       </Show>
@@ -291,14 +290,14 @@ export function BreakerCard(props: {
   return (
     <div class="approval breaker-card" data-breaker={props.reason}>
       <Show when={props.reason === 'grant_paused'}>
-        <p><strong>Spending is paused after failed payments.</strong> Nothing more is paid until it is reset.</p>
+        <p><strong>{tr('caSpendingIsPausedAfterFailedPayments')}</strong>{' '}{tr('caNothingMoreIsPaidUntilItIsReset')}</p>
         <Show when={done()} fallback={
           <Show when={wait()} fallback={
-            <Show when={props.offerReset} fallback={<p class="hint" data-breaker-at-node>Your node’s owner can reset it at the node.</p>}>
-              <p class="hint">Rate and speed limits clear by themselves; only this pause needs a reset.</p>
+            <Show when={props.offerReset} fallback={<p class="hint" data-breaker-at-node>{tr('caYourNodeSOwnerCanResetItAtThe')}</p>}>
+              <p class="hint">{tr('caRateAndSpeedLimitsClearByThemselvesOnlyThis')}</p>
               <div class="form-actions">
                 <button type="button" class="primary soft" data-breaker-reset disabled={asking()} onClick={() => void ask()}>
-                  {asking() ? 'Asking…' : 'Ask your other device to reset'}
+                  {asking() ? tr('caAsking') : tr('caAskYourOtherDeviceToReset')}
                 </button>
               </div>
             </Show>
@@ -307,17 +306,17 @@ export function BreakerCard(props: {
               onStop={() => setWait(null)} onApproved={() => { setWait(null); setDone(true); props.onReset(); }} />}
           </Show>
         }>
-          <p class="ok-note" role="status" data-breaker-reset-done>Reset on your other device. Nothing was sent; press Send again when you are ready.</p>
+          <p class="ok-note" role="status" data-breaker-reset-done>{tr('caResetOnYourOtherDeviceNothingWasSentPress')}</p>
         </Show>
       </Show>
       <Show when={props.reason === 'grant_rate_limited'}>
-        <p data-breaker-recovers>Too many payments for now. This clears by itself shortly; there is nothing to approve.</p>
+        <p data-breaker-recovers>{tr('caTooManyPaymentsForNowThisClearsByItself')}</p>
       </Show>
       <Show when={props.reason === 'grant_velocity'}>
-        <p data-breaker-recovers>Spending is going faster than this app’s limit allows. It clears by itself shortly; there is nothing to approve.</p>
+        <p data-breaker-recovers>{tr('caSpendingIsGoingFasterThanThisAppSLimit')}</p>
       </Show>
       <Show when={props.reason === 'grant_failures_pending'}>
-        <p data-breaker-pending>Waiting for unresolved payments to settle before more spending. A reset would not settle them; there is nothing to approve.</p>
+        <p data-breaker-pending>{tr('caWaitingForUnresolvedPaymentsToSettleBeforeMoreSpending')}</p>
       </Show>
       <Show when={error()}><p class="err-note" role="alert">{error()}</p></Show>
     </div>

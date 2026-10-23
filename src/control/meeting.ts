@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 /**
  * Mesh meetings of up to 4 (regtest prototype). A meeting is nothing but a set
  * of ordinary 1:1 calls ("legs") that share a meeting id and a fixed roster
@@ -99,8 +100,8 @@ export function declineCost(view: MeetingView, quotes: Record<string, CallQuote 
 /** Shown quotes, by lowercase node id. */
 export type ShownQuotes = Record<string, CallQuote | null>;
 
-const NEEDS_UPDATE = 'Their node needs an update for meetings. Nothing was paid.';
-const RAISED = 'Their call price went up since it was shown. Nothing was paid; start again to see the new price.';
+const NEEDS_UPDATE = () => tr('caTheirNodeNeedsAnUpdateForMeetingsNothingWas');
+const RAISED = () => tr('caTheirCallPriceWentUpSinceItWasShown');
 
 /**
  * One leg as the owner sees it. `waiting`: not rung yet (ours to place once we
@@ -284,7 +285,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
     const stream = await deps.getUserMedia({ audio: true, video: view.media === 'video' });
     if (e !== epoch || !active()) {
       stopAll(stream);
-      throw new Error('the meeting ended');
+      throw new Error(tr('caTheMeetingEnded'));
     }
     if (local) {
       stopAll(stream);
@@ -326,13 +327,13 @@ export function createMeetingEngine(deps: MeetingDeps) {
         if (l.drop === undefined) {
           l.drop = setTimeout(() => {
             if (l.pc === conn) {
-              closeLeg(l, 'ended', 'The connection was lost.');
+              closeLeg(l, 'ended', tr('caTheConnectionWasLost'));
               settle();
             }
           }, DISCONNECT_GRACE_MS);
         }
       } else if (state === 'failed' || state === 'closed') {
-        closeLeg(l, 'ended', 'The direct connection failed.');
+        closeLeg(l, 'ended', tr('caTheDirectConnectionFailed'));
         settle();
       }
     };
@@ -351,7 +352,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
     clearTimeout(l.timer);
     l.timer = setTimeout(() => {
       if (l.pc === conn && l.state === 'connecting') {
-        closeLeg(l, 'ended', 'The call could not connect.');
+        closeLeg(l, 'ended', tr('caTheCallCouldNotConnect'));
         settle();
       }
     }, CONNECT_TIMEOUT_MS);
@@ -412,7 +413,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
   const placeLeg = (l: Leg, e: number) => serial(async () => {
     if (e !== epoch || l.state !== 'waiting') return;
     if (!deps.canMeet(l.peer)) {
-      closeLeg(l, 'nolink', NEEDS_UPDATE);
+      closeLeg(l, 'nolink', NEEDS_UPDATE());
       settle();
       return;
     }
@@ -422,13 +423,13 @@ export function createMeetingEngine(deps: MeetingDeps) {
     const q = await deps.quote(l.peer);
     if (e !== epoch || l.state !== 'placing') return;
     if (!q.ok || q.value.offer_msat === null) {
-      closeLeg(l, 'nolink', q.ok ? 'Their node does not take calls. Nothing was paid.' : q.error.message);
+      closeLeg(l, 'nolink', q.ok ? tr('caTheirNodeDoesNotTakeCallsNothingWasPaid') : q.error.message);
       settle();
       return;
     }
     const bound = boundQuote(shown[l.peer], q.value, true);
     if (!bound) {
-      closeLeg(l, 'nolink', RAISED);
+      closeLeg(l, 'nolink', RAISED());
       settle();
       return;
     }
@@ -442,7 +443,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
       await gathered(conn, GATHER_MS);
     } catch {
       if (e !== epoch) return;
-      closeLeg(l, 'nolink', 'Microphone not available. Nothing was paid.');
+      closeLeg(l, 'nolink', tr('caMicrophoneNotAvailableNothingWasPaid'));
       settle();
       return;
     }
@@ -464,7 +465,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
     publish();
     l.timer = setTimeout(() => {
       if (l.state === 'ringing') {
-        closeLeg(l, 'ended', 'No answer.');
+        closeLeg(l, 'ended', tr('caNoAnswer'));
         settle();
       }
     }, RING_MS);
@@ -485,7 +486,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
     }
     const bound = boundQuote(shown[l.peer], q.value, false);
     if (!bound) {
-      closeLeg(l, 'nolink', RAISED);
+      closeLeg(l, 'nolink', RAISED());
       settle();
       return;
     }
@@ -500,7 +501,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
       await gathered(conn, GATHER_MS);
     } catch {
       if (e !== epoch) return;
-      closeLeg(l, 'nolink', 'Microphone not available. Nothing was paid.');
+      closeLeg(l, 'nolink', tr('caMicrophoneNotAvailableNothingWasPaid'));
       settle();
       return;
     }
@@ -534,7 +535,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
       const invitees = [...new Set(peers.map((p) => p.toLowerCase()))].filter((p) => p !== own);
       const roster = [own, ...invitees];
       if (!validRoster(roster)) {
-        view = { ...MEETING_IDLE, phase: 'ended', error: 'A meeting is you and 1 to 3 contacts. Nothing was paid.' };
+        view = { ...MEETING_IDLE, phase: 'ended', error: tr('caAMeetingIsYouAnd1To3Contacts') };
         publish();
         return;
       }
@@ -568,7 +569,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
           // their own invite stops ringing within this window.
           l.timer = setTimeout(() => {
             if (l.state === 'waiting') {
-              closeLeg(l, 'nolink', 'They did not join.');
+              closeLeg(l, 'nolink', tr('caTheyDidNotJoin'));
               settle();
             }
           }, RING_MS);
@@ -593,7 +594,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
       // Reservations whose leg has not started: a rejection ends the loop
       // (as before), and the outer finally releases what never started.
       const unstarted = new Map(owed);
-      finish('Declined');
+      finish(tr('callDeclined'));
       try {
         for (const l of ringing) {
           await serial(async () => {
@@ -695,7 +696,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
       try {
         fresh = await deps.getUserMedia({ video: true });
       } catch {
-        view = { ...view, error: 'Camera not available.' };
+        view = { ...view, error: tr('caCameraNotAvailable') };
         publish();
         return;
       }
@@ -728,7 +729,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
           if (deps.busy?.()) return;
           start(mt.id, mt.roster, s.media!, false);
           // Not joined in time: it ends here, nothing paid.
-          inviteTimer = setTimeout(() => { if (view.phase === 'invited') finish('No answer'); }, RING_MS);
+          inviteTimer = setTimeout(() => { if (view.phase === 'invited') finish(tr('callNoAnswer')); }, RING_MS);
         } else if (view.id !== mt.id || view.roster.join() !== mt.roster.join()) {
           return;
         }
@@ -741,7 +742,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
         l.offerSdp = s.sdp!;
         l.timer = setTimeout(() => {
           if (l.state === 'incoming') {
-            closeLeg(l, 'ended', 'No answer.');
+            closeLeg(l, 'ended', tr('caNoAnswer'));
             settle();
           }
         }, RING_MS);
@@ -763,7 +764,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
           try {
             await conn.setRemoteDescription({ type: 'answer', sdp: s.sdp! });
           } catch {
-            closeLeg(l, 'ended', 'Their answer could not be used.');
+            closeLeg(l, 'ended', tr('caTheirAnswerCouldNotBeUsed'));
             settle();
           }
           return;
@@ -773,7 +774,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
           return;
         default:
           if (!terminal(l)) {
-            closeLeg(l, 'ended', s.reason === 'declined' ? 'Declined.' : null);
+            closeLeg(l, 'ended', s.reason === 'declined' ? tr('caDeclined') : null);
             settle();
           }
       }

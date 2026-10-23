@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 import { ROOM_CAPABILITY } from './room';
 import { WATCHES } from './watches';
 import { ASSISTANTS, type AssistantId, type AssistantThread } from './assistants';
@@ -101,8 +102,8 @@ function sampleFrontDoor(
     profile: {
       kind: 'person',
       display_name: name,
-      tagline: 'Sample doorstep',
-      about: 'A sample front-door card for Discover.',
+      tagline: tr('caSampleDoorstep'),
+      about: tr('caASampleFrontDoorCardForDiscover'),
       avatar: opts?.avatar,
     },
     media: opts?.media ?? [],
@@ -118,13 +119,13 @@ function sampleFrontDoor(
 /** The sample porch: Maya's node answers reads (`porch_read_v1`). */
 const PORCH_READ_MSAT = 1000;
 const SAMPLE_PORCH_PAGES: Record<string, string> = {
-  '/index.md': '# Maya\n\nBuilding a **sovereign** mesh, one paid hop at a time.\n\n## Now\n\n- Pilot node in Lisbon\n- Writing `notes.txt` weekly\n\n> Every act paid, recipient-bound.\n\n<script>alert(1)</script> stays text. [Site](https://example.invalid) is never opened.',
-  '/notes.txt': 'Plain notes.\nLine two.',
+  get '/index.md'() { return tr('caMayaBuildingASovereignMeshOnePaidHopAt'); },
+  get '/notes.txt'() { return tr('caPlainNotesLineTwo'); },
 };
 function samplePorchCard(nodeId: string): FrontDoor {
   return {
     ...sampleFrontDoor(nodeId, '34.90.12.8:9735', 'public', 'Maya'),
-    site: { index_path: 'index.md', page_count: 2, titles: ['Maya', 'Notes'] },
+    site: { index_path: 'index.md', page_count: 2, titles: ['Maya', tr('caNotes')] },
     cv: { path: 'cv.md', hash: 'ab'.repeat(32), size: 120 },
   };
 }
@@ -156,7 +157,7 @@ export const SAMPLE_PEERS: Peer[] = [
 export const SAMPLE_ROOM_ID = '0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b';
 export const SAMPLE_OPEN_ROOM_ID = '7d2c9e10-4b6a-4f3e-9c21-5e8f0a1b2c3d';
 export const SAMPLE_ROOMS: Room[] = [
-  { id: SAMPLE_OPEN_ROOM_ID, name: 'Open circle', created_by: SAMPLE_OWN_ID, created_at: '2026-09-25T18:00:00Z' },
+  { id: SAMPLE_OPEN_ROOM_ID, get name() { return tr('caOpenCircle'); }, created_by: SAMPLE_OWN_ID, created_at: '2026-09-25T18:00:00Z' },
 ];
 const ROOM_MEMBERS: Record<string, string[]> = {
   [SAMPLE_ROOM_ID]: [SAMPLE_OWN_ID, hex('a'), hex('b')],
@@ -166,40 +167,40 @@ const ROOM_MEMBERS: Record<string, string[]> = {
 
 const T0 = Date.UTC(2026, 8, 27, 8, 12);
 let seq = 0;
-const msg = (from: string, to: string, minutes: number, text: string, msat = 1000): Message => ({
+const msg = (from: string, to: string, minutes: number, text: string | (() => string), msat = 1000): Message => ({
   id: `sample-${(seq++).toString(16).padStart(4, '0')}`,
   kind: 0,
   sender: from,
   recipient: to,
   timestamp: T0 + minutes * 60_000,
-  plaintext: text,
+  get plaintext() { return typeof text === 'function' ? text() : text; },
   payment_amount_msat: msat,
 });
 
 const THREADS: Record<string, Message[]> = {
   [hex('a')]: [
-    msg(hex('a'), SAMPLE_OWN_ID, 0, 'Morning. My node came back up on the new VM.', 2000),
-    msg(SAMPLE_OWN_ID, hex('a'), 3, 'Seeing you connected. Channel looks healthy from here.'),
-    msg(hex('a'), SAMPLE_OWN_ID, 5, 'Raised my price to 2 sats a message. The spam test last night was loud.', 2000),
-    msg(SAMPLE_OWN_ID, hex('a'), 9, 'Fair. Two sats is still nothing for real conversation.'),
+    msg(hex('a'), SAMPLE_OWN_ID, 0, () => tr('caMorningMyNodeCameBackUpOnTheNew'), 2000),
+    msg(SAMPLE_OWN_ID, hex('a'), 3, () => tr('caSeeingYouConnectedChannelLooksHealthyFromHere')),
+    msg(hex('a'), SAMPLE_OWN_ID, 5, () => tr('caRaisedMyPriceTo2SatsAMessageThe'), 2000),
+    msg(SAMPLE_OWN_ID, hex('a'), 9, () => tr('caFairTwoSatsIsStillNothingForRealConversation')),
   ],
   [hex('b')]: [
-    msg(hex('b'), SAMPLE_OWN_ID, 20, 'Can you check if my paid-open reached you?'),
-    msg(SAMPLE_OWN_ID, hex('b'), 22, 'Got it, settled. First contact admitted.'),
+    msg(hex('b'), SAMPLE_OWN_ID, 20, () => tr('caCanYouCheckIfMyPaidOpenReachedYou')),
+    msg(SAMPLE_OWN_ID, hex('b'), 22, () => tr('caGotItSettledFirstContactAdmitted')),
   ],
   [SAMPLE_ROOM_ID]: [
-    msg(hex('a'), SAMPLE_ROOM_ID, 30, 'Room is set for the Mexico demo. Two nodes here, one at home.', 2000),
-    msg(hex('b'), SAMPLE_ROOM_ID, 34, 'Josh here. My VM is on rc7 as well.'),
-    msg(SAMPLE_OWN_ID, SAMPLE_ROOM_ID, 41, 'Great. Every message in here pays each of you separately.'),
+    msg(hex('a'), SAMPLE_ROOM_ID, 30, () => tr('caRoomIsSetForTheMexicoDemoTwoNodes'), 2000),
+    msg(hex('b'), SAMPLE_ROOM_ID, 34, () => tr('caJoshHereMyVMIsOnRc7AsWell')),
+    msg(SAMPLE_OWN_ID, SAMPLE_ROOM_ID, 41, () => tr('caGreatEveryMessageInHerePaysEachOfYou')),
   ],
 };
 
-const LIVE_LINES: [string, string][] = [
-  [hex('a'), 'Block 860,124 just landed. Fees are calm.'],
+const LIVE_LINES = (): [string, string][] => [
+  [hex('a'), tr('caBlock860124JustLandedFeesAreCalm')],
   // Not a contact: a stranger who paid the door price. Admitted, never added to peers.
-  [hex('e'), 'Hi, saw your talk in Mexico. Paid your door to say thanks.'],
-  [hex('b'), 'Heading out, my node stays up.'],
-  [hex('a'), 'Did the channel rebalance go through on your side?'],
+  [hex('e'), tr('caHiSawYourTalkInMexicoPaidYourDoor')],
+  [hex('b'), tr('caHeadingOutMyNodeStaysUp')],
+  [hex('a'), tr('caDidTheChannelRebalanceGoThroughOnYourSide')],
 ];
 
 // ---- organism v2 sample (genome N1 / N2), only with `?sample&organism=v2` -----
@@ -207,7 +208,7 @@ const LIVE_LINES: [string, string][] = [
 // opened (Dana) and the stranger who paid the door, which the v1 sums cannot see.
 
 export const SAMPLE_STRANGER = hex('e');
-const STRANGER_LINE = msg(SAMPLE_STRANGER, SAMPLE_OWN_ID, 0, 'Hi, saw your talk in Mexico. Paid your door to say thanks.', 1000);
+const STRANGER_LINE = msg(SAMPLE_STRANGER, SAMPLE_OWN_ID, 0, () => tr('caHiSawYourTalkInMexicoPaidYourDoor'), 1000);
 /** Sent (by their clock) a few seconds before the node admitted it, 44 min ago. */
 const strangerThread = (): Message[] => [{ ...STRANGER_LINE, timestamp: Date.now() - 44 * 60_000 - 3_000 }];
 
@@ -492,9 +493,9 @@ export function sampleRead(topic: AiTopic, sinceMs: number | null): TopicRead {
 }
 
 export const SAMPLE_PROVIDERS: ProviderView[] = [
-  { kind: 'local', label: 'On this computer', enabled: true, host: null, model: null, note: null, pays: { to: null, rail: 'none' }, data_leaves: null },
-  { kind: 'shared', label: 'Shared open model (sample)', enabled: true, host: 'models.sample.invalid', model: 'open-8b-sample', note: null, pays: { to: 'models.sample.invalid', rail: 'fiat' }, data_leaves: 'counts' },
-  { kind: 'frontier', label: 'Frontier model', enabled: false, host: null, model: null, note: 'Off. Not set up on this computer.', pays: { to: null, rail: 'none' }, data_leaves: null },
+  { kind: 'local', get label() { return tr('caOnThisComputer'); }, enabled: true, host: null, model: null, note: null, pays: { to: null, rail: 'none' }, data_leaves: null },
+  { kind: 'shared', get label() { return tr('caSharedOpenModelSample'); }, enabled: true, host: 'models.sample.invalid', model: 'open-8b-sample', note: null, pays: { to: 'models.sample.invalid', rail: 'fiat' }, data_leaves: 'counts' },
+  { kind: 'frontier', get label() { return tr('caFrontierModel'); }, enabled: false, host: null, model: null, get note() { return tr('caOffNotSetUpOnThisComputer'); }, pays: { to: null, rail: 'none' }, data_leaves: null },
 ];
 
 /** Sample Own-tier status: no server running; how-to only (no URL scheme — G2). */
@@ -505,8 +506,7 @@ export const SAMPLE_LOCAL_STATUS: LocalStatus = {
   models: [],
   selected: null,
   selected_port: null,
-  howto:
-    'Start Ollama (`ollama serve`) or a llama.cpp server on this computer (listening on 127.0.0.1, usually port 11434 or 8080). Then pick a model here. BitSov does not download or install models; nothing leaves this computer.',
+  get howto() { return tr('caStartOllamaOllamaServeOrALlamaCppServer'); },
 };
 
 const looksLikeId = (text: string) => text.length >= 16 && /^[0-9a-f]+$/i.test(text);
@@ -557,17 +557,17 @@ const SAMPLE_SYSTEM =
   "You answer a person's question about their own BitSov node, using only the JSON they send. Amounts are millisatoshis unless a field says sats. \"withheld\" and \"rounded\" mean the person chose not to share the exact value: do not guess it. If the data does not answer the question, say so in one sentence. Do not ask for more data, keys or passwords. Do not tell them to send or pay anything; the app does that only when they ask it to. Answer in at most four short sentences.";
 
 function sampleRemoteText(topic: AiTopic, preset: Preset): string {
-  const shared = { counts: 'the counts you shared', rounded: 'the rounded figures you shared', exact: 'the figures you shared' }[preset];
-  const lead = `Sample reply: nothing left this computer. From ${shared}: `;
+  const shared = { counts: tr('caTheCountsYouShared'), rounded: tr('caTheRoundedFiguresYouShared'), exact: tr('caTheFiguresYouShared') }[preset];
+  const lead = tr('caSampleReplyNothingLeftThisComputerFrom', shared);
   switch (topic) {
     case 'payments':
       return lead + (preset === 'counts'
-        ? '5 paid messages went out and 3 came in over the last 7 days. The amounts were withheld, so I cannot say what they cost.'
-        : 'you spent about 8 sats on 5 paid messages this week and took in about 5. That is a very light week.');
+        ? tr('ca5PaidMessagesWentOutAnd3CameIn')
+        : tr('caYouSpentAbout8SatsOn5PaidMessages'));
     case 'balance':
-      return lead + (preset === 'counts' ? 'your balance was withheld, so I cannot say how much you hold.' : 'your node holds about 480,000 sats, most of it in Lightning channels.');
+      return lead + (preset === 'counts' ? tr('caYourBalanceWasWithheldSoICannotSayHow') : tr('caYourNodeHoldsAbout480000SatsMostOf'));
     default:
-      return lead + 'the data answers only part of your question.';
+      return lead + tr('caTheDataAnswersOnlyPartOfYourQuestion');
   }
 }
 
@@ -593,7 +593,7 @@ const sampleBolt11 = (msat: number) =>
 export function samplePeers(count: number): Peer[] {
   const extra = Array.from({ length: Math.max(0, Math.min(64, count) - SAMPLE_PEERS.length) }, (_, i): Peer => {
     const n = (16 + i).toString(16).padStart(2, '0');
-    return { node_id: n.repeat(32), addr: `34.90.40.${10 + i}:9735`, label: `Contact ${SAMPLE_PEERS.length + i + 1}`, connected: true, fingerprint: n.repeat(4) };
+    return { node_id: n.repeat(32), addr: `34.90.40.${10 + i}:9735`, label: tr('uiContact', SAMPLE_PEERS.length + i + 1), connected: true, fingerprint: n.repeat(4) };
   });
   return [...SAMPLE_PEERS, ...extra];
 }
@@ -655,8 +655,8 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     settleSpend();
     if (spend.state === 'open') return Promise.resolve();
     return spend.state === 'expired'
-      ? refuse('spend_expired', 'Your spending approval has expired. Approve again to send.')
-      : refuse('spend_locked', 'Sending spends from your node. Approve spending first.');
+      ? refuse('spend_expired', tr('caYourSpendingApprovalHasExpiredApproveAgainToSend'))
+      : refuse('spend_locked', tr('caSendingSpendsFromYourNodeApproveSpendingFirst'));
   };
   const peerPrice = (id: string) => {
     if (raised[id] !== undefined) return raised[id];
@@ -765,22 +765,22 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
   const planSend = (target: string, room: boolean, max: number, first: number | undefined, manual = false): Promise<number | null> => {
     settleAutopay();
     settleSpend();
-    if (book.paused) return refuse('budget_paused', 'Payments are paused. Resume them to send.');
-    const who = room ? 'this room' : 'this contact';
+    if (book.paused) return refuse('budget_paused', tr('caPaymentsArePausedResumeThemToSend'));
+    const who = room ? tr('uiThisRoom') : tr('caThisContact');
     const limit = book.limits.get(key(target, room));
     if (limit !== undefined && spentOn(target, room) + max > limit) {
-      return refuse('budget_exhausted', `You have used ${fmtAmount(spentOn(target, room))} of ${fmtAmount(limit)} for ${who} in the last 24 hours, and this costs ${fmtAmount(max)}. Raise the budget to send.`);
+      return refuse('budget_exhausted', tr('caYouHaveUsedOfForInTheLast24', fmtAmount(spentOn(target, room)), fmtAmount(limit), who, fmtAmount(max)));
     }
     const ceiling = Math.min(!manual && autopay ? autopay.ceiling : book.ceiling, book.ceiling);
     if (spentAll() + max > ceiling) {
-      return refuse('ceiling_exhausted', `You have used ${fmtAmount(spentAll())} of your ${fmtAmount(ceiling)} app all-in payment limit (rolling 24 hours), and this costs ${fmtAmount(max)}. Raise the limit to send.`);
+      return refuse('ceiling_exhausted', tr('caYouHaveUsedOfYourAppAllInPayment', fmtAmount(spentAll()), fmtAmount(ceiling), fmtAmount(max)));
     }
     if (autopay && !manual) {
       let confirm: number | null = null;
       if (limit === undefined) {
-        if (first === undefined) return refuse('first_contact', `Your first paid message to ${who} needs your OK once. Nothing was sent.`);
+        if (first === undefined) return refuse('first_contact', tr('caYourFirstPaidMessageToNeedsYourOKOnce', who));
         confirm = Math.min(first, book.ceiling);
-        if (confirm < max) return refuse('invalid', `A budget of ${fmtAmount(confirm)} does not cover this message.`);
+        if (confirm < max) return refuse('invalid', tr('caABudgetOfDoesNotCoverThisMessage', fmtAmount(confirm)));
       }
       return Promise.resolve(confirm);
     }
@@ -793,22 +793,22 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
   return {
     mode: 'sample',
     nodeStatus: () => ok(status),
-    nodeUnlock: () => Promise.reject('Unlock is not available with sample data.'),
-    nodeUnlockPassword: () => Promise.reject('Unlock is not available with sample data.'),
-    nodeUnlockRemember: () => Promise.reject('Unlock is not available with sample data.'),
+    nodeUnlock: () => Promise.reject(tr('caUnlockIsNotAvailableWithSampleData')),
+    nodeUnlockPassword: () => Promise.reject(tr('caUnlockIsNotAvailableWithSampleData')),
+    nodeUnlockRemember: () => Promise.reject(tr('caUnlockIsNotAvailableWithSampleData')),
     pairingStatus: () => ok(pairing),
     trustAcknowledge: () => ok(true),
     pairingRetry: () => ok(pairing),
-    remoteAccessForget: () => Promise.reject('Remote access is not available with sample data.'),
-    remoteAccessPreview: () => Promise.reject('Remote access is not available with sample data.'),
-    remoteAccessImport: () => Promise.reject('Remote access is not available with sample data.'),
-    remoteAccessReplace: () => Promise.reject('Remote access is not available with sample data.'),
+    remoteAccessForget: () => Promise.reject(tr('caRemoteAccessIsNotAvailableWithSampleData')),
+    remoteAccessPreview: () => Promise.reject(tr('caRemoteAccessIsNotAvailableWithSampleData')),
+    remoteAccessImport: () => Promise.reject(tr('caRemoteAccessIsNotAvailableWithSampleData')),
+    remoteAccessReplace: () => Promise.reject(tr('caRemoteAccessIsNotAvailableWithSampleData')),
     nodeRepairInitialized: async () => {},
     nodeRepairPriceFloor: async () => {},
-    identityRestore: () => Promise.reject('Restore is not available with sample data.'),
+    identityRestore: () => Promise.reject(tr('caRestoreIsNotAvailableWithSampleData')),
     fundState: () => {
       if (fund && !fund.funded && ++polls >= 3) {
-        fund = { ...fund, current_step: 'funding-seen', funded: true, funding_amount_sats_received: fund.funding_amount_sats_required ?? 0, funding_evidence: 'sample: no transaction' };
+        fund = { ...fund, current_step: 'funding-seen', funded: true, funding_amount_sats_received: fund.funding_amount_sats_required ?? 0, funding_evidence: tr('caSampleNoTransaction') };
       }
       return ok(fund);
     },
@@ -836,7 +836,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
         capabilities: [...(v2 ? ['energy_v1', 'membrane_v1', 'porch_read_v1'] : []), ...(opts.rooms ? [ROOM_CAPABILITY] : [])],
         read_at: Date.now(),
       }),
-    energy: (span) => (v2 ? ok(sampleEnergy(span, Date.now())) : Promise.reject('not found: this node has no energy read (N1)')),
+    energy: (span) => (v2 ? ok(sampleEnergy(span, Date.now())) : Promise.reject(tr('caNotFoundThisNodeHasNoEnergyReadN1'))),
     membrane: (limit) =>
       v2
         ? ok({
@@ -850,7 +850,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
             events: knocks.slice(0, limit ?? 50),
             read_at: Date.now(),
           } satisfies MembraneRead)
-        : Promise.reject('not found: this node has no membrane read (N2)'),
+        : Promise.reject(tr('caNotFoundThisNodeHasNoMembraneReadN2')),
     // `?sample&peers=0`: a node with no contacts yet (shows Welcome home).
     peers: () => ok(opts.noPeers ? [] : opts.peerCount ? samplePeers(opts.peerCount) : SAMPLE_PEERS),
     rooms: () => ok(SAMPLE_ROOMS),
@@ -873,12 +873,12 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     introductionRead: (text) =>
       text.trim() === SAMPLE_INTRO_LINK
         ? ok(sampleIntroduction(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 2000))
-        : Promise.reject('That is not an introduction.'),
+        : Promise.reject(tr('caThatIsNotAnIntroduction')),
     introductionOpen: (text, _allowLocal) =>
       text.trim() === SAMPLE_INTRO_LINK
         ? ok(sampleIntroduction(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 2000))
-        : Promise.reject('That is not an introduction.'),
-    frontDoorMine: () => ok(sampleFrontDoor(SAMPLE_OWN_ID, 'node.example.org:9735', 'public', 'You')),
+        : Promise.reject(tr('caThatIsNotAnIntroduction')),
+    frontDoorMine: () => ok(sampleFrontDoor(SAMPLE_OWN_ID, 'node.example.org:9735', 'public', tr('uiYou'))),
     frontDoorRead: (text) => {
       const t = text.trim();
       if (t === SAMPLE_FRONT_DOOR_LINK) {
@@ -913,7 +913,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
                 title: 'x',
               },
             ],
-            links: [{ label: 'Website', url: 'https://example.invalid/path' }],
+            links: [{ label: tr('caWebsite'), url: 'https://example.invalid/path' }],
           }),
         );
       }
@@ -924,12 +924,12 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
           }),
         );
       }
-      return Promise.reject('That is not a front-door card.');
+      return Promise.reject(tr('caThatIsNotAFrontDoorCard'));
     },
     frontDoorOpen: (text, allowLocal) => {
       const t = text.trim();
       if (t === SAMPLE_EXPIRED_FRONT_DOOR_LINK) {
-        return Promise.reject('This front door has expired. Ask for a fresh one.');
+        return Promise.reject(tr('caThisFrontDoorHasExpiredAskForAFresh'));
       }
       if (t === SAMPLE_DISALLOWED_FRONT_DOOR_LINK) {
         return Promise.reject(
@@ -938,7 +938,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       }
       if (t === SAMPLE_FRONT_DOOR_LINK) {
         if (!allowLocal) {
-          return Promise.reject('This front door points to a local network address. Allow it on the card first.');
+          return Promise.reject(tr('caThisFrontDoorPointsToALocalNetworkAddress'));
         }
         return ok(sampleFrontDoor(SAMPLE_STRANGER_ID, '192.168.1.20:9735', 'local', 'Ada'));
       }
@@ -949,25 +949,25 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
           }),
         );
       }
-      return Promise.reject('That is not a front-door card.');
+      return Promise.reject(tr('caThatIsNotAFrontDoorCard'));
     },
     porchQuote: (peer, path) => {
       if (!SAMPLE_PEERS.some((p) => p.porch && p.node_id === peer.toLowerCase())) {
-        return refuse('porch_unsupported', 'Their node does not offer porch reads (it does not advertise porch_quote_v1 or legacy porch_read_v1). Nothing was paid.');
+        return refuse('porch_unsupported', tr('caTheirNodeDoesNotOfferPorchReadsItDoes'));
       }
       if (path !== '/front-door.json' && !SAMPLE_PORCH_PAGES[path]) {
-        return refuse('porch_not_found', 'Not found or empty: their node has no content at this path. Nothing was paid.');
+        return refuse('porch_not_found', tr('caNotFoundOrEmptyTheirNodeHasNoContent'));
       }
       return ok({ principal_msat: PORCH_READ_MSAT, max_routing_fee_msat: routingFee(PORCH_READ_MSAT), total_msat: allIn(PORCH_READ_MSAT) });
     },
     porchRead: async (peer, path, maxMsat) => {
       const target = peer.toLowerCase();
       if (!SAMPLE_PEERS.some((p) => p.porch && p.node_id === target)) {
-        return refuse('porch_unsupported', 'Their node does not offer porch reads (it does not advertise porch_quote_v1 or legacy porch_read_v1). Nothing was paid.');
+        return refuse('porch_unsupported', tr('caTheirNodeDoesNotOfferPorchReadsItDoes'));
       }
-      if (allIn(PORCH_READ_MSAT) > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling.');
+      if (allIn(PORCH_READ_MSAT) > maxMsat) return refuse('price_changed', tr('caPriceAboveConfirmedCeiling'));
       if (await planSend(target, false, maxMsat, undefined) !== null) {
-        return refuse('porch_needs_contact', 'Porch reads go to contacts you have already paid. Knock or send them a message first. Nothing was paid.');
+        return refuse('porch_needs_contact', tr('caPorchReadsGoToContactsYouHaveAlreadyPaid'));
       }
       book.ledger.push({ at: Date.now(), target, room: false, msat: maxMsat });
       const paid = { amount_msat: PORCH_READ_MSAT, total_msat: maxMsat, message_id: nextId('porch') };
@@ -1018,24 +1018,24 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     sponsorCandidate: (request) =>
       request.trim().startsWith('bitsov://sponsor-request#')
         ? ok({ intro_id: 'ab'.repeat(16), newcomer: SAMPLE_STRANGER_ID, payment_hash: 'cd'.repeat(32), gift_msat: 20_000_000, fee_max_msat: 100_000, code: '482913', expires_at: Math.floor(Date.now() / 1000) + 540 })
-        : Promise.reject('That is not a starter-bitcoin request (bitsov://sponsor-request#…).'),
+        : Promise.reject(tr('caThatIsNotAStarterBitcoinRequestBitsovSponsor')),
     sponsorOwnerApproval: (_candidate, code) =>
       code === '482913'
         ? ok({ owner_command: '# Sample only: no real gift request or owner command.' })
-        : Promise.reject({ code: 'sponsor_code_mismatch', message: 'The code does not match this request. Nothing was paid.' }),
+        : Promise.reject({ code: 'sponsor_code_mismatch', message: tr('caTheCodeDoesNotMatchThisRequestNothingWas') }),
     sponsorReconcile: () => ok(undefined),
     sponsorCancel: () => ok(undefined),
     sponsorRequest: (text) =>
       text.includes('SAMPLEOFFER')
         ? ok<FundingAsk>({ request: 'bitsov://sponsor-request#SAMPLE', code: '482913', sponsor: SAMPLE_STRANGER_ID, amount_msat: 20_000_000, payment_hash: 'ef'.repeat(32), expires_at: Math.floor(Date.now() / 1000) + 540 })
-        : Promise.reject('This introduction offers no starter bitcoin.'),
+        : Promise.reject(tr('caThisIntroductionOffersNoStarterBitcoin')),
     sponsorRequestStatus: (hash) => ok({ payment_hash: hash, state: 'received' as const, amount_msat: 20_000_000 }),
     firstContactRequest: async () => null,
-    firstContactStatus: async () => { throw new Error('Sample data has no independent owner request.'); },
+    firstContactStatus: async () => { throw new Error(tr('caSampleDataHasNoIndependentOwnerRequest')); },
     firstContactCancel: async () => {},
     wallet: () => ok(WALLET),
     starterCurrent: () => ok({ state: 'not_requested', hub_configured: false }),
-    starterRequest: () => Promise.reject(new Error('Starter requests need a paired signet node.')),
+    starterRequest: () => Promise.reject(new Error(tr('caStarterRequestsNeedAPairedSignetNode'))),
     spendStatus: () => {
       settleSpend();
       if (spend.state === 'pending' && ++spendPolls >= GRANT_AFTER_POLLS) {
@@ -1054,7 +1054,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     },
     spendRequest: () => {
       settleSpend();
-      if (book.paused) return refuse('budget_paused', 'Payments are paused. Resume them first.');
+      if (book.paused) return refuse('budget_paused', tr('caPaymentsArePausedResumeThemFirst'));
       if (spend.state !== 'open' && spend.state !== 'pending') {
         wants.budget = null;
         requestElevation();
@@ -1070,10 +1070,10 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     },
     addDevice: () => ok({state:'unsupported'} as const),
     // Sample data has no owner devices: owner approval is not offered (the capability is absent too).
-    approvalRequest: () => refuse('approval_off', 'Approvals from your devices are not available in sample data.'),
-    approvalStatus: () => refuse('approval_unknown', 'No such request in sample data.'),
+    approvalRequest: () => refuse('approval_off', tr('caApprovalsFromYourDevicesAreNotAvailableInSample')),
+    approvalStatus: () => refuse('approval_unknown', tr('caNoSuchRequestInSampleData')),
     approvalsPending: () => ok([]),
-    approvalApprove: () => refuse('approval_off', 'Approvals from your devices are not available in sample data.'),
+    approvalApprove: () => refuse('approval_off', tr('caApprovalsFromYourDevicesAreNotAvailableInSample')),
     deviceKeys: () => ok({ device_approvals: 'unavailable', owner_device_count: 0, device_keys: [] }),
     joinDevice: () => ok({state:'idle'} as const),
     deviceKeyStatus: () => {
@@ -1098,8 +1098,8 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       return ok(device);
     },
     relationApprove: () => {
-      if (device.state !== 'registered') return refuse('device_not_registered', 'Set up Touch ID approvals first.');
-      if (book.paused) return refuse('budget_paused', 'Payments are paused. Resume them first.');
+      if (device.state !== 'registered') return refuse('device_not_registered', tr('caSetUpTouchIDApprovalsFirst'));
+      if (book.paused) return refuse('budget_paused', tr('caPaymentsArePausedResumeThemFirst'));
       openWindow();
       return ok(spend);
     },
@@ -1111,8 +1111,8 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     },
     budgetStatus: () => ok(budgetView()),
     budgetApprove: (ceilingMsat, preset) => {
-      if (book.paused) return refuse('budget_paused', 'Payments are paused. Resume them first.');
-      if (ceilingMsat < 1000 || ceilingMsat > MAX_DAILY_MSAT) return refuse('invalid', 'A daily total is between 1 and 100,000 sats.');
+      if (book.paused) return refuse('budget_paused', tr('caPaymentsArePausedResumeThemFirst'));
+      if (ceilingMsat < 1000 || ceilingMsat > MAX_DAILY_MSAT) return refuse('invalid', tr('caADailyTotalIsBetween1And100000'));
       book.preset = preset;
       book.ceiling = ceilingMsat;
       for (const [k, v] of book.limits) book.limits.set(k, Math.min(v, ceilingMsat));
@@ -1130,7 +1130,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     budgetSet: (target, room, limitMsat) => {
       const k = key(target.toLowerCase(), room);
       if (limitMsat === 0) book.limits.delete(k);
-      else if (limitMsat > book.ceiling) return refuse('invalid', `That is above your approved daily total of ${fmtAmount(book.ceiling)}. Raise the total first.`);
+      else if (limitMsat > book.ceiling) return refuse('invalid', tr('caThatIsAboveYourApprovedDailyTotalOfRaise', fmtAmount(book.ceiling)));
       else book.limits.set(k, limitMsat);
       return ok(budgetView());
     },
@@ -1149,13 +1149,13 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       wants.budget = book.ceiling;
       return ok(budgetView());
     },
-    spendReconcile: () => ok('No pending spend.'),
+    spendReconcile: () => ok(tr('caNoPendingSpend')),
     opList: () => ok({ operations: [], skipped: 0, has_more: false }),
-    opEndCall: () => refuse('call_not_found', 'Sample data places no calls.'),
+    opEndCall: () => refuse('call_not_found', tr('caSampleDataPlacesNoCalls')),
     opRepairCallIndex: () => ok(null),
     // The sample never leaves a payment settled but undelivered.
-    retry: () => refuse('retry_unavailable', 'Nothing to retry.'),
-    dismissUndelivered: () => refuse('retry_unavailable', 'Nothing is waiting for delivery.'),
+    retry: () => refuse('retry_unavailable', tr('caNothingToRetry')),
+    dismissUndelivered: () => refuse('retry_unavailable', tr('caNothingIsWaitingForDelivery')),
     send: async (recipient, isRoom, plaintext, maxMsat, _caps, firstContactMsat) => {
       const to = recipient.toLowerCase();
       const confirm = await planSend(to, isRoom, maxMsat, firstContactMsat);
@@ -1164,7 +1164,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       if (isRoom) {
         const q = roomQuote(to);
         if (q.unreachable.length > 0) {
-          return refuse('room_unreachable', `${q.unreachable.length} member is not a connected peer, so the node would skip them without telling you. Rooms send only when every member is connected.`);
+          return refuse('room_unreachable', tr('caMemberIsNotAConnectedPeerSoTheNode', q.unreachable.length));
         }
         fee = q.max_routing_fee_msat ?? 0;
         amount = q.total_msat - fee;
@@ -1178,9 +1178,9 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       }
       if (v2 && !isRoom && to === hex('a') && raised[to] === undefined) {
         raised[to] = 3000;
-        return refuse('price_changed', `Maya’s price rose to 3 sats, above your ${fmtAmount(maxMsat)} cap. Nothing was dispatched; refresh the quote.`);
+        return refuse('price_changed', tr('caMayaSPriceRoseTo3SatsAboveYour', fmtAmount(maxMsat)));
       }
-      if (amount + fee > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling. Nothing dispatched.');
+      if (amount + fee > maxMsat) return refuse('price_changed', tr('caPriceAboveConfirmedCeilingNothingDispatched'));
       if (confirm !== null) book.limits.set(key(to, isRoom), confirm);
       book.ledger.push({ at: Date.now(), target: to, room: isRoom, msat: amount + fee });
       const id = nextId('sent');
@@ -1194,14 +1194,14 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     },
     roomQuote: (id) => ok(roomQuote(id.toLowerCase())),
     invoiceCreate: (amountMsat, note) => {
-      if (amountMsat < 1000) return refuse('invalid', 'the amount must be between 1 sat and 1 BTC');
+      if (amountMsat < 1000) return refuse('invalid', tr('caTheAmountMustBeBetween1SatAnd1'));
       const bolt11 = sampleBolt11(amountMsat);
       issued.set(bolt11, 0);
       return ok({ bolt11, amount_msat: amountMsat, note: note.trim() || null, expires_at_ms: Date.now() + 3600_000 });
     },
     invoiceAmount: (bolt11) => {
       const msat = sampleInvoiceMsat(bolt11);
-      if (msat === null) return refuse('invalid', 'This invoice names no amount. The app pays only invoices whose cost it can show first.');
+      if (msat === null) return refuse('invalid', tr('caThisInvoiceNamesNoAmountTheAppPaysOnly'));
       // Sample invoices are not signed: a fixed sample payee stands in for the host's decode.
       const canonical = bolt11.trim().toLowerCase().replace(/^lightning:/, '');
       return ok({
@@ -1225,9 +1225,9 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     },
     pay: async (bolt11, amountMsat, maxMsat) => {
       await gate();
-      if (allIn(amountMsat) > maxMsat) return refuse('price_changed', 'Amount above confirmed ceiling.');
+      if (allIn(amountMsat) > maxMsat) return refuse('price_changed', tr('caAmountAboveConfirmedCeiling'));
       if (sampleInvoiceMsat(bolt11) !== amountMsat) {
-        return refuse('invalid', 'The invoice amount does not match the cost you confirmed. Nothing was paid.');
+        return refuse('invalid', tr('caTheInvoiceAmountDoesNotMatchTheCostYou'));
       }
       await planSend('app:invoice-payments', false, maxMsat, undefined, true);
       book.ledger.push({ at: Date.now(), target: 'app:invoice-payments', room: false, msat: allIn(amountMsat) });
@@ -1235,7 +1235,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     },
     keysend: async (_dest, amountMsat, _memo, maxMsat) => {
       await gate();
-      if (allIn(amountMsat) > maxMsat) return refuse('price_changed', 'Amount above confirmed ceiling.');
+      if (allIn(amountMsat) > maxMsat) return refuse('price_changed', tr('caAmountAboveConfirmedCeiling'));
       await planSend('app:keysend-payments', false, maxMsat, undefined, true);
       book.ledger.push({ at: Date.now(), target: 'app:keysend-payments', room: false, msat: allIn(amountMsat) });
       return { method: 'keysend', amount_msat: amountMsat, max_routing_fee_msat: routingFee(amountMsat), status: 'settled', paid_at_ms: Date.now() };
@@ -1250,7 +1250,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     },
     filePrice: () => ok({ principal_msat: FILE_PRICE_MSAT, max_routing_fee_msat: 5000, total_msat: FILE_PRICE_MSAT + 5000 }),
     fileSend: async (recipient, filename, mime, dataB64, maxMsat, firstContactMsat) => {
-      if (allIn(FILE_PRICE_MSAT) > maxMsat) return refuse('price_changed', 'Price above confirmed ceiling.');
+      if (allIn(FILE_PRICE_MSAT) > maxMsat) return refuse('price_changed', tr('caPriceAboveConfirmedCeiling'));
       const target = recipient.toLowerCase();
       // Same budget / window route as messages (not forced-manual like invoice pay).
       const confirm = await planSend(target, false, maxMsat, firstContactMsat);
@@ -1267,7 +1267,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     },
     callQuote: () => ok({ offer_msat: 10_000, offer_max_routing_fee_msat: 5000, signal_msat: 1000, signal_max_routing_fee_msat: 5000, call_total_msat: 21_000 }),
     closeCallAdmission: async () => {},
-    callSignal: () => refuse('invalid', 'Calls need a real node. Sample data cannot ring anyone.'),
+    callSignal: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
     voiceNote: async (messageId) => {
       const note = voiceNotes.get(messageId);
       return note ? note : refuse('invalid', 'voice note not stored on this node');
@@ -1286,18 +1286,18 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       const result: FileSaveResult = { saved: true, filename: file.filename, mime_type: file.mime_type, size_bytes: file.size_bytes };
       return result;
     },
-    aiLocalTurn: async () => { throw new Error('Choose a running local model in the desktop app.'); },
+    aiLocalTurn: async () => { throw new Error(tr('caChooseARunningLocalModelInTheDesktopApp')); },
     aiWatchPoll: async () => null,
     aiThread: async (assistant, request) => {
       const current = assistantThreads[assistant] ??= { revision: '0', turns: [] };
       if (request.action === 'forget') { current.turns = []; current.notices = []; }
       if (request.action === 'set_watch') {
-        if (!WATCHES[assistant].some(w => w.rule === request.rule)) throw new Error('That watch belongs to another assistant.');
+        if (!WATCHES[assistant].some(w => w.rule === request.rule)) throw new Error(tr('caThatWatchBelongsToAnotherAssistant'));
         current.disabled_watches = (current.disabled_watches ?? []).filter(r => r !== request.rule);
         if (!request.enabled) current.disabled_watches.push(request.rule);
       }
       if (request.action === 'append') {
-        if (request.revision !== current.revision) throw new Error('This thread was changed or forgotten.');
+        if (request.revision !== current.revision) throw new Error(tr('caThisThreadWasChangedOrForgotten'));
         current.turns.push(request.turn);
         current.turns = current.turns.slice(-100);
       }
@@ -1305,17 +1305,17 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       return structuredClone(current);
     },
     aiRead: async (topic, sinceMs, assistant) => {
-      if (assistant && !ASSISTANTS[assistant].topics.includes(topic)) throw new Error('This assistant cannot read that topic.');
+      if (assistant && !ASSISTANTS[assistant].topics.includes(topic)) throw new Error(tr('caThisAssistantCannotReadThatTopic'));
       await new Promise((r) => setTimeout(r, 350));
       return sampleRead(topic, sinceMs);
     },
     aiProviders: () => ok(SAMPLE_PROVIDERS),
     aiDisclose: async (provider, topic, sinceMs, preset, question, assistant) => {
-      if (assistant && (provider !== 'local' || !ASSISTANTS[assistant].topics.includes(topic))) throw new Error('This assistant cannot use that model or topic.');
+      if (assistant && (provider !== 'local' || !ASSISTANTS[assistant].topics.includes(topic))) throw new Error(tr('caThisAssistantCannotUseThatModelOrTopic'));
       const remote = SAMPLE_PROVIDERS.find((p) => p.kind === provider && p.enabled && p.host);
-      if (!remote) return refuse('invalid', 'That model is off on this computer. Nothing was prepared.');
+      if (!remote) return refuse('invalid', tr('caThatModelIsOffOnThisComputerNothingWas'));
       const read = sampleRead(topic, sinceMs);
-      if (read.state !== 'live') return refuse('node', 'Your node could not be read, so nothing was prepared.');
+      if (read.state !== 'live') return refuse('node', tr('caYourNodeCouldNotBeReadSoNothingWas'));
       const user = {
         question: question.trim().slice(0, 500),
         topic,
@@ -1335,7 +1335,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     aiSend: async (id) => {
       const held = disclosures.get(id);
       disclosures.delete(id);
-      if (!held) return refuse('invalid', 'That preview expired or was already used. Nothing was sent.');
+      if (!held) return refuse('invalid', tr('caThatPreviewExpiredOrWasAlreadyUsedNothingWas'));
       await new Promise((r) => setTimeout(r, 600));
       const remote = SAMPLE_PROVIDERS[1];
       return { provider: remote.kind, label: remote.label, host: remote.host!, model: remote.model!, text: sampleRemoteText(held.topic, held.preset), sent_bytes: 0 } satisfies RemoteAnswer;
@@ -1353,7 +1353,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       live = handler;
       let i = 0;
       const emit = () => {
-        const [from, text] = LIVE_LINES[i++ % LIVE_LINES.length];
+        const [from, text] = LIVE_LINES()[i++ % LIVE_LINES().length];
         if (v2) {
           // The node reports its gate decision first, then delivers the message.
           const admitted: MembraneEvent = {

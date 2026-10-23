@@ -312,8 +312,8 @@ describe('assistant window', () => {
   it('with no rows shows one clear empty state and no question controls', () => {
     const root = show({ rows: [], source: { kind: 'mock', reason: 'unknown' }, freshness: null });
     expect(root.querySelector('[data-testid="ask-question"]')).toBeNull();
-    expect($(root, 'model-output').textContent).toBe(NO_ROWS_TEXT);
-    expect(NO_ROWS_TEXT).toMatch(/close this window and open the assistant again/i);
+    expect($(root, 'model-output').textContent).toBe(NO_ROWS_TEXT());
+    expect(NO_ROWS_TEXT()).toMatch(/close this window and open the assistant again/i);
   });
 
   it('adds no new way to reach the host: no invoke, no network', async () => {

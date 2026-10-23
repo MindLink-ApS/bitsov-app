@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 import { ROWS_GLOBAL, readRows, type SitRow } from './rows';
 
 /** Globals set by the host's init script (src-tauri assistant_source.rs). */
@@ -161,28 +162,28 @@ function ageText(ageMs: number): string {
   const seconds = Math.floor(ageMs / 1000);
   if (seconds < 60) return `${seconds} s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)} min`;
-  return `${Math.floor(seconds / 3600)} h`;
+  return tr('caHExtra625', Math.floor(seconds / 3600));
 }
 
 /** Freshness line for the label. Closed set of strings plus a number. */
 export function freshnessText(summary: FreshnessSummary): string {
-  let text = 'Freshness unknown.';
+  let text = tr('caFreshnessUnknown1383');
   if (summary.state === 'stale' && summary.ageMs === null) {
-    text = 'Stale: data age unknown. Reopen to refresh.';
+    text = tr('caStaleDataAgeUnknownReopenToRefresh');
   } else if (summary.state !== 'unknown' && summary.ageMs !== null) {
     const age = ageText(summary.ageMs);
     text = summary.state === 'stale'
-      ? `Stale: updated ${age} ago. Reopen to refresh.`
-      : `Updated ${age} ago.`;
+      ? tr('caStaleUpdatedAgoReopenToRefresh', age)
+      : tr('caUpdatedAgo', age);
   }
-  return summary.clockSkew ? `${text} Node clock is ahead of this computer.` : text;
+  return summary.clockSkew ? tr('caNodeClockIsAheadOfThisComputer', text) : text;
 }
 
 const REASON_TEXT: Record<MockReason, string> = {
-  not_paired: 'Not paired with a node.',
-  node_unreachable: 'Node unreachable.',
-  rc7_fallback: 'Your node version has no pairing.',
-  unknown: 'Source unknown.',
+  get not_paired() { return tr('caNotPairedWithANode'); },
+  get node_unreachable() { return tr('caNodeUnreachable'); },
+  get rc7_fallback() { return tr('caYourNodeVersionHasNoPairing'); },
+  get unknown() { return tr('caSourceUnknown'); },
 };
 
 /** Why the rows are mock, in one plain sentence. */
@@ -193,7 +194,7 @@ export function mockReasonText(reason: MockReason): string {
 /** Headline and detail for the label above the rows. */
 export function sourceText(source: Source): { title: string; detail: string } {
   if (source.kind === 'live') {
-    return { title: 'From your node', detail: 'Read-only, from your paired node.' };
+    return { title: tr('caFromYourNode'), detail: tr('caReadOnlyFromYourPairedNode') };
   }
-  return { title: 'Sample data', detail: `Not your node. ${REASON_TEXT[source.reason]}` };
+  return { title: tr('caSampleData'), detail: tr('caNotYourNode', REASON_TEXT[source.reason]) };
 }

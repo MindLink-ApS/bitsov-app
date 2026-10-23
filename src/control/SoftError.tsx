@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 import { createSignal, Show } from 'solid-js';
 import { softenError } from './userFacing';
 
@@ -36,12 +37,12 @@ export function SoftError(props: {
       </p>
       <Show when={props.onReconnect && !soft().money}>
         {/* The way forward is a real button, not a quiet link. */}
-        <button type="button" class="soft" data-soft-reconnect disabled={reconnecting()} onClick={() => void reconnect()}>{reconnecting() ? 'Reconnecting…' : 'Reconnect'}</button>
+        <button type="button" class="soft" data-soft-reconnect disabled={reconnecting()} onClick={() => void reconnect()}>{reconnecting() ? tr('callReconnecting') : tr('caReconnect')}</button>
       </Show>
       <Show when={detail()}>
         {(d) => (
           <details class="quiet-detail" data-soft-detail>
-            <summary>Details</summary>
+            <summary>{tr('uiDetails')}</summary>
             <p class="hint">{d()}</p>
             <Show when={props.detailNote}><p class="hint">{props.detailNote}</p></Show>
           </details>

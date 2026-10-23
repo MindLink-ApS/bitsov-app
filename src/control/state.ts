@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 import { t, possessive } from '../i18n';
 import { MONEY_NOT_READY, readinessLine } from './readiness';
 import { feeCeiling } from './format';
@@ -305,7 +306,7 @@ export function budgetStand(view: BudgetView | null, target: string, room: boole
 export function messagesWorth(budgetMsat: number, priceMsat: number | null): string | null {
   if (!priceMsat || priceMsat <= 0) return null;
   const n = Math.floor(budgetMsat / priceMsat);
-  return `${n} message${n === 1 ? '' : 's'}`;
+  return tr(n === 1 ? 'caMessageOne' : 'caMessageMany', n);
 }
 
 export type Deliveries = Record<string, Delivery>;
@@ -316,7 +317,7 @@ export type Deliveries = Record<string, Delivery>;
  */
 export const deliveryFromReceipt = (r: { delivered: boolean; accepted?: boolean; state?: string }): Delivery =>
   r.accepted || r.state === 'acked' ? { status: 'accepted', reason: null }
-    : r.state === 'failed_paid' ? { status: 'rejected', reason: 'refused after payment; do not send it again' }
+    : r.state === 'failed_paid' ? { status: 'rejected', reason: tr('caRefusedAfterPaymentDoNotSendItAgain') }
     : r.delivered ? { status: 'sent', reason: null } : { status: 'queued', reason: null };
 
 /** Fold a `/ws` delivery event in. The recipient's node decides; its reason is shown as sent. */
@@ -324,7 +325,7 @@ export function applyDelivery(deliveries: Deliveries, event: LiveEvent): Deliver
   if (event.type !== 'delivery') return deliveries;
   const status = event.status === 'delivered' ? 'delivered' : event.status === 'rejected' ? 'rejected' : null;
   if (!status) return deliveries;
-  return { ...deliveries, [event.message_id]: { status, reason: status === 'rejected' ? event.reason ?? 'no reason given' : null } };
+  return { ...deliveries, [event.message_id]: { status, reason: status === 'rejected' ? event.reason ?? tr('caNoReasonGiven') : null } };
 }
 
 /** The message a send just produced, shown until `/ws` echoes the real one. */
@@ -404,8 +405,8 @@ export function spendLine(view: SpendView | null, nowMs: number): { open: boolea
 export const STALE_AFTER_MS = 60_000;
 
 export function freshness(readAt: number | null, nowMs: number): { label: string; stale: boolean } {
-  if (readAt === null) return { label: 'Not read yet', stale: true };
-  return { label: `Read ${ago(readAt, nowMs)}`, stale: nowMs - readAt > STALE_AFTER_MS };
+  if (readAt === null) return { label: tr('caNotReadYet'), stale: true };
+  return { label: tr('extraRead', ago(readAt, nowMs)), stale: nowMs - readAt > STALE_AFTER_MS };
 }
 
 export type Pill = { tone: 'ok' | 'warn' | 'err' | 'idle'; text: string; live: boolean };

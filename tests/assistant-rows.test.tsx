@@ -92,7 +92,7 @@ describe('sealed assistant rows', () => {
   it('is never blank when no rows were handed over', async () => {
     const root = await mountPage();
     expect(root.querySelectorAll('[data-testid="sit-row"]')).toHaveLength(0);
-    expect(root.querySelector('[data-testid="model-output"]')?.textContent).toBe(NO_ROWS_TEXT);
+    expect(root.querySelector('[data-testid="model-output"]')?.textContent).toBe(NO_ROWS_TEXT());
     expect(network).toEqual([]);
   });
 

@@ -1,12 +1,15 @@
 /** Dependency-free copy lookup; Solid's existing signals keep rendered copy reactive. */
+import { deviceWord } from './platform';
 import { createSignal } from 'solid-js';
 import { onboardingEn, onboardingDa } from './onboarding/onboardingCopy';
 import { phoneCopy } from './onboarding/phoneCopy';
+import { assistantQuestionsEn, assistantQuestionsDa } from './assistantQuestionsCopy';
+import { controlDa, controlEn } from './controlCopy';
 import { appDa, appEn } from './appCopy';
 
 export const copy = {
-  en: { ...phoneCopy.en, ...appEn, ...onboardingEn },
-  da: { ...phoneCopy.da, ...appDa, ...onboardingDa },
+  en: { ...phoneCopy.en, ...appEn, ...controlEn, ...assistantQuestionsEn, ...onboardingEn },
+  da: { ...phoneCopy.da, ...appDa, ...controlDa, ...assistantQuestionsDa, ...onboardingDa },
 };
 export type Language = keyof typeof copy;
 export type LanguagePref = Language | 'system';
@@ -53,3 +56,6 @@ export function t(key: CopyKey, ...values: (string | number)[]): string {
 export function possessive(name: string): string {
   return language() === 'da' ? `${name}${/[sxz]$/i.test(name) ? '’' : 's'}` : `${name}’s`;
 }
+
+/** Device noun for translated display copy; platform identifiers stay unchanged. */
+export const displayDeviceWord = () => deviceWord() === 'phone' ? t('phone') : deviceWord();

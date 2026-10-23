@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 import { createSignal, Show } from 'solid-js';
 import { Dynamic } from 'solid-js/web';
 import { BoxIllustration } from '../onboarding/BoxIllustration';
@@ -21,22 +22,22 @@ export function OfflineNode(props: {
     catch { setFailed(true); }
     finally { setBusy(false); }
   };
-  return <section class="node-offline" data-node-offline aria-label="Node offline">
+  return <section class="node-offline" data-node-offline aria-label={tr('caNodeOffline')}>
     <BoxIllustration offline />
-    <Dynamic component={props.level === 1 ? 'h1' : 'h2'} data-offline-title>Your node is offline</Dynamic>
-    <p>We can’t reach it right now. BitSov keeps trying. New messages can’t be sent until your node is back; ones already sent may still complete.</p>
-    <p class="hint">Last seen: <Show when={props.lastSeen != null} fallback="unknown">
+    <Dynamic component={props.level === 1 ? 'h1' : 'h2'} data-offline-title>{tr('caYourNodeIsOffline')}</Dynamic>
+    <p>{tr('caWeCanTReachItRightNowBitSovKeeps')}</p>
+    <p class="hint">{tr('caLastSeen')}{' '}<Show when={props.lastSeen != null} fallback={tr('caUnknownLower')}>
       <time dateTime={new Date(props.lastSeen!).toISOString()}>{new Date(props.lastSeen!).toLocaleString()}</time>
     </Show></p>
     <ul>
-      <li>{props.remote ? 'Check that the computer or server running your node is on and connected to the network.' : 'Check that your node is running on this computer.'}</li>
-      <li>Check this device’s network connection.</li>
-      <li>After a restart, give your node a moment to reconnect.</li>
+      <li>{props.remote ? tr('caCheckThatTheComputerOrServerRunningYourNode') : tr('caCheckThatYourNodeIsRunningOnThisComputer')}</li>
+      <li>{tr('caCheckThisDeviceSNetworkConnection')}</li>
+      <li>{tr('caAfterARestartGiveYourNodeAMomentTo')}</li>
     </ul>
     <Show when={props.retryAfterSecs}>
-      <p class="hint" data-remote-retry>Remote connection unavailable · waiting {props.retryAfterSecs} s before retrying.</p>
+      <p class="hint" data-remote-retry>{tr('caRemoteConnectionUnavailableWaiting')}{' '}{props.retryAfterSecs}{' '}{tr('caSBeforeRetrying')}</p>
     </Show>
-    <Show when={failed()}><p role="status">Still unavailable. Check the connection and try again.</p></Show>
-    <button type="button" class="primary" disabled={busy()} onClick={() => void retry()}>{busy() ? 'Retrying…' : 'Retry now'}</button>
+    <Show when={failed()}><p role="status">{tr('caStillUnavailableCheckTheConnectionAndTryAgain')}</p></Show>
+    <button type="button" class="primary" disabled={busy()} onClick={() => void retry()}>{busy() ? tr('caRetrying') : tr('caRetryNow')}</button>
   </section>;
 }

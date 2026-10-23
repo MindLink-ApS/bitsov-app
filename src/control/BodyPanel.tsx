@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 import { createEffect, createSignal, For, type JSX, Match, on, onCleanup, Show, Switch, untrack } from 'solid-js';
 import { ago, amount, clock, sats, satsWhole, satUnit, shortId } from './format';
 import {
@@ -41,35 +42,35 @@ function usePulse(value: () => unknown, startHot = false) {
 type InfoCard = { head: string; body: string };
 const INFO: Record<string, { title: string; cards: InfoCard[] }> = {
   metabolism: {
-    title: 'Metabolism',
+    get title() { return tr('caMetabolism'); },
     cards: [
-      { head: 'What it is', body: 'The sats moving in and out of your node: what you were paid and what you spent.' },
-      { head: 'What you see', body: 'A plus for sats that came in, a minus for sats that went out, and when the node last confirmed the figures.' },
-      { head: 'Why it matters', body: 'It is the quick way to check that money is only moving when you meant it to.' },
+      { get head() { return tr('caWhatItIs'); }, get body() { return tr('caTheSatsMovingInAndOutOfYourNode'); } },
+      { get head() { return tr('caWhatYouSee'); }, get body() { return tr('caAPlusForSatsThatCameInAMinus'); } },
+      { get head() { return tr('caWhyItMatters'); }, get body() { return tr('caItIsTheQuickWayToCheckThatMoney'); } },
     ],
   },
   membrane: {
-    title: 'Membrane',
+    get title() { return tr('caMembrane'); },
     cards: [
-      { head: 'What it is', body: 'The gate at the edge of your node. Everything from other people is checked here before it reaches you.' },
-      { head: 'What you see', body: 'Who was let in, who was let back in, and who was turned away, with the reason.' },
-      { head: 'Why it matters', body: 'A refusal means nothing got through and nothing was paid for it.' },
+      { get head() { return tr('caWhatItIs'); }, get body() { return tr('caTheGateAtTheEdgeOfYourNodeEverything'); } },
+      { get head() { return tr('caWhatYouSee'); }, get body() { return tr('caWhoWasLetInWhoWasLetBackIn'); } },
+      { get head() { return tr('caWhyItMatters'); }, get body() { return tr('caARefusalMeansNothingGotThroughAndNothingWas'); } },
     ],
   },
   setpoints: {
-    title: 'Set points',
+    get title() { return tr('caSetPoints'); },
     cards: [
-      { head: 'What it is', body: 'Spending limits you choose. Each one is a level the app tries to stay under.' },
-      { head: 'What you see', body: 'How much was spent against each limit over the last 24 hours, and how long until the approval ends.' },
-      { head: 'Why it matters', body: 'When a limit is reached, spending pauses until you raise it or older payments age out. You can lower a limit any time.' },
+      { get head() { return tr('caWhatItIs'); }, get body() { return tr('caSpendingLimitsYouChooseEachOneIsALevel'); } },
+      { get head() { return tr('caWhatYouSee'); }, get body() { return tr('caHowMuchWasSpentAgainstEachLimitOverThe'); } },
+      { get head() { return tr('caWhyItMatters'); }, get body() { return tr('caWhenALimitIsReachedSpendingPausesUntilYou'); } },
     ],
   },
   immune: {
-    title: 'Immune memory',
+    get title() { return tr('caImmuneMemory'); },
     cards: [
-      { head: 'What it is', body: 'A place to keep evidence of past problems, such as a sender that misbehaved.' },
-      { head: 'What you see', body: 'For now: not built. Nothing is stored here yet.' },
-      { head: 'Why it matters', body: 'Once it exists, your node can remember bad experiences instead of relearning them each time.' },
+      { get head() { return tr('caWhatItIs'); }, get body() { return tr('caAPlaceToKeepEvidenceOfPastProblemsSuch'); } },
+      { get head() { return tr('caWhatYouSee'); }, get body() { return tr('caForNowNotBuiltNothingIsStoredHereYet'); } },
+      { get head() { return tr('caWhyItMatters'); }, get body() { return tr('caOnceItExistsYourNodeCanRememberBadExperiences'); } },
     ],
   },
 };
@@ -82,8 +83,8 @@ function InfoButton(props: { id: string }) {
         type="button"
         class="info-btn"
         data-info={props.id}
-        aria-label={`What is ${INFO[props.id].title}?`}
-        title={`What is ${INFO[props.id].title}?`}
+        aria-label={tr('caWhatIs', INFO[props.id].title)}
+        title={tr('caWhatIs', INFO[props.id].title)}
         onClick={() => setInfoKey(props.id)}
       >
         ⓘ
@@ -116,7 +117,7 @@ function InfoModal() {
                 </div>
               )}
             </For>
-            <button type="button" class="primary soft" data-info-close onClick={() => setInfoKey(null)}>Got it</button>
+            <button type="button" class="primary soft" data-info-close onClick={() => setInfoKey(null)}>{tr('caGotIt')}</button>
           </div>
         </div>
       )}
@@ -175,8 +176,8 @@ export function Organism(props: OrganismProps) {
       <MetabolismOrgan {...props} fresh={liveFresh()} />
       <MembraneOrgan {...props} fresh={liveFresh()} />
       <SetpointsOrgan {...props} />
-      <Organ id="immune" title="Immune memory" summary={<span>not built</span>} fresh={{ label: 'Not built', stale: false }} sample={props.sample} source="No evidence store in the node yet (N3).">
-        <p class="organ-line" data-immune>Evidence keeping: not built.</p>
+      <Organ id="immune" title={tr('caImmuneMemory')} summary={<span>{tr('caNotBuilt')}</span>} fresh={{ label: tr('caNotBuilt170'), stale: false }} sample={props.sample} source={tr('caEvidenceNotYet')}>
+        <p class="organ-line" data-immune>{tr('caEvidenceKeepingNotBuilt')}</p>
       </Organ>
       <NucleusOrgan {...props} />
       <InfoModal />
@@ -203,7 +204,7 @@ function Organ(props: {
           <span class="organ-name">{props.title}</span>
           <span class="organ-summary">{props.summary}</span>
           <Show when={props.sample}>
-            <span class="sample-tag" data-sample-tag>Sample</span>
+            <span class="sample-tag" data-sample-tag>{tr('caSample')}</span>
           </Show>
           <span class="organ-fresh" classList={{ stale: props.fresh.stale }} data-organ-fresh>{props.fresh.label}</span>
           <span class="organ-chev" aria-hidden="true">›</span>
@@ -237,40 +238,38 @@ function MetabolismOrgan(props: OrganismProps & { fresh: { label: string; stale:
   return (
     <Organ
       id="metabolism"
-      title="Metabolism"
+      title={tr('caMetabolism')}
       hot={hot()}
-      summary={<span class="sats">{plus(m().hour.in_msat)} / {minus(m().hour.out_msat)} · 1 h</span>}
+      summary={<span class="sats">{plus(m().hour.in_msat)} / {minus(m().hour.out_msat)}{' '}{tr('ca1H')}</span>}
       fresh={fresh()}
       sample={props.sample}
       source={
         m().source === 'node' ? (
           <>
-            Node-wide, from your node’s own record of paid messages (N1). Local only; no one else’s traffic.
-            <Show when={m().truncated}> More than the node reads at once: totals are a floor.</Show>
+            {tr('caNodeWideFromYourNodeSOwnRecordOf')}<Show when={m().truncated}>{' '}{tr('caMoreThanTheNodeReadsAtOnceTotalsAre')}</Show>
           </>
         ) : (
           <>
-            Paid messages in {m().tracks_read} {m().tracks_read === 1 ? 'track' : 'tracks'} read here + live feed. Node-wide totals and hourly bars need N1.
-          </>
+            {tr('caPaidMessagesIn')}{' '}{m().tracks_read} {m().tracks_read === 1 ? tr('caTrackExtra80') : tr('caTracks')}{' '}{tr('caReadHereLiveFeedNodeWideTotalsAndHourly')}</>
         )
       }
     >
-      <table class="energy" aria-label="Sats in and out">
+      <table class="energy" aria-label={tr('caSatsInAndOut')}>
         <thead>
           <tr>
-            <th scope="col"><span class="sr-only">Direction</span></th>
-            <th scope="col" class="col">1 h</th>
-            <th scope="col" class="col">24 h</th>
+            <th scope="col"><span class="sr-only">{tr('extraDirection')}</span></th>
+            <th scope="col" class="col">{tr('ca1H181')}</th>
+            <th scope="col" class="col">{tr('ca24H')}</th>
           </tr>
         </thead>
         <tbody>
           <tr>
-            <th scope="row" class="dir">in</th>
+            <th scope="row" class="dir">{tr('caIn')}</th>
             <td class="sats energy-fig" data-energy="in-1h">{plus(m().hour.in_msat)}</td>
             <td class="sats energy-fig" data-energy="in-24h">{plus(m().day.in_msat)}</td>
           </tr>
           <tr>
-            <th scope="row" class="dir">out</th>
+            <th scope="row" class="dir">{tr('caOut')}</th>
             <td class="sats energy-fig" data-energy="out-1h">{minus(m().hour.out_msat)}</td>
             <td class="sats energy-fig" data-energy="out-24h">{minus(m().day.out_msat)}</td>
           </tr>
@@ -278,7 +277,7 @@ function MetabolismOrgan(props: OrganismProps & { fresh: { label: string; stale:
       </table>
       <Show when={m().bars}>{(b) => <Bars bars={b()} now={props.now} />}</Show>
       <Show when={idle(m().hour)}>
-        <p class="organ-line" data-energy-idle>No energy crossed in the last hour.</p>
+        <p class="organ-line" data-energy-idle>{tr('caNoEnergyCrossedInTheLastHour')}</p>
       </Show>
       <For each={m().rows.slice(0, 4)}>{(row) => <EnergyLine row={row} name={props.nameOfTrack(row.key)} />}</For>
     </Organ>
@@ -299,7 +298,7 @@ function Bars(props: { bars: NonNullable<Metabolism['bars']>; now: number }) {
   const max = () => Math.max(1, ...props.bars.buckets.map((b) => b.in_msat + b.out_msat));
   const h = (msat: number) => `${Math.max(8, Math.round((msat / max()) * 100))}%`;
   return (
-    <div class="bars" role="img" aria-label={`Sats per hour, last 24 hours; ${props.bars.buckets.length} of 24 hours had paid messages`} data-energy-bars>
+    <div class="bars" role="img" aria-label={tr('caSatsPerHourLast24HoursOf24Hours', props.bars.buckets.length)} data-energy-bars>
       <For each={slots()}>
         {(b) =>
           b ? (
@@ -329,7 +328,7 @@ function EnergyLine(props: { row: EnergyRow; name: string }) {
 
 // ---- membrane -----------------------------------------------------------------
 
-const KIND_TEXT: Record<RefusalKind, string> = { door: 'their door', price: 'price', setpoint: 'your setpoint', inbound: 'at your door' };
+const KIND_TEXT: Record<RefusalKind, string> = { get door() { return tr('caTheirDoor'); }, get price() { return tr('caPrice'); }, get setpoint() { return tr('caYourSetpoint'); }, get inbound() { return tr('caAtYourDoor'); } };
 
 function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: boolean } }) {
   const s = () => membraneSummary(props.membrane);
@@ -351,48 +350,45 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
   const ringRead = () => !props.nodeMembrane || (props.membraneReadAt ?? null) !== null;
   const ringCurrent = () => ringRead() && !(props.nodeMembrane && props.membraneError);
   const fresh = () => {
-    if (props.nodeMembrane && props.membraneError) return { label: 'Reading unavailable', stale: true };
-    if (!ringRead()) return { label: 'Not read yet', stale: true };
+    if (props.nodeMembrane && props.membraneError) return { label: tr('caReadingUnavailable'), stale: true };
+    if (!ringRead()) return { label: tr('caNotReadYet'), stale: true };
     return props.fresh;
   };
   const doorFresh = () => {
     if (!props.door) return null;
     const f = freshness(props.door.read_at, props.now);
-    return props.doorError ? { label: `could not re-read · last ${ago(props.door.read_at, props.now)}`, stale: true } : f;
+    return props.doorError ? { label: tr('caCouldNotReReadLast', ago(props.door.read_at, props.now)), stale: true } : f;
   };
   const refusedNote = () => {
     const parts = [];
     if (props.nodeMembrane) {
-      parts.push(!ringRead() ? 'at your door: not read yet' : s().refused_by.inbound > 0 ? `at your door: ${inboundBy()}` : ringCurrent() ? 'at your door: none' : 'at your door: last reading had none');
+      parts.push(!ringRead() ? tr('caAtYourDoorNotReadYet') : s().refused_by.inbound > 0 ? tr('caAtYourDoor194', inboundBy()) : ringCurrent() ? tr('caAtYourDoorNone') : tr('caAtYourDoorLastReadingHadNone'));
     }
-    if (outboundBy()) parts.push(`outbound: ${outboundBy()}`);
-    return parts.join(' · ') || 'outbound';
+    if (outboundBy()) parts.push(tr('caOutbound', outboundBy()));
+    return parts.join(' · ') || tr('caOutboundExtra86');
   };
   return (
     <Organ
       id="membrane"
-      title="Membrane"
-      summary={<span>{ringRead() ? `${s().admitted} in · ${s().refused} refused` : 'Gate history not read yet'}</span>}
+      title={tr('caMembrane')}
+      summary={<span>{ringRead() ? tr('caInRefused', s().admitted, s().refused) : tr('caGateHistoryNotReadYet')}</span>}
       fresh={fresh()}
       sample={props.sample}
       source={
         props.nodeMembrane ? (
           <>
-            Your node’s own gate decisions (N2), from its memory ring, plus your sends from this app. A refused sender is named only when the node verified its signature. Memory only, never saved.
-          </>
+            {tr('caYourNodeSOwnGateDecisionsN2FromIts')}</>
         ) : (
           <>
-            Since {clock(props.openedAt)}: what your node admitted and your sends that did not cross. Memory only, never saved.
-          </>
+            {tr('caSince')}{' '}{clock(props.openedAt)}{tr('caWhatYourNodeAdmittedAndYourSendsThatDid')}</>
         )
       }
     >
       <p class="organ-line door" data-door>
-        <Show when={props.door} fallback={props.doorError ? <span data-door-fresh="stale">Door price could not be read.</span> : 'Door price not read yet.'}>
+        <Show when={props.door} fallback={props.doorError ? <span data-door-fresh="stale">{tr('caDoorPriceCouldNotBeRead')}</span> : tr('caDoorPriceNotReadYet')}>
           {(d) => (
             <>
-              Door open at <span class="sats">{sats(d().msat, true)}</span> {satUnit(d().msat)} a message
-              <span class="organ-note"> · your price</span>
+              {tr('caDoorOpenAt')}{' '}<span class="sats">{sats(d().msat, true)}</span> {satUnit(d().msat)}{' '}{tr('caAMessage')}<span class="organ-note">{' '}{tr('caYourPrice')}</span>
               <span class="organ-note" classList={{ stale: doorFresh()!.stale }} data-door-fresh={doorFresh()!.stale ? 'stale' : 'fresh'}>
                 {' '}· {doorFresh()!.label}
               </span>
@@ -401,39 +397,38 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
         </Show>
       </p>
       <div class="organ-row" data-membrane-admitted>
-        <span class="who"><span class="dot ok" /> admitted</span>
+        <span class="who"><span class="dot ok" />{' '}{tr('caAdmitted')}</span>
         <span class="sats">{ringRead() ? s().admitted : '—'}</span>
         <span class="organ-note">
-          <Show when={ringRead()} fallback="Not read yet">
-            {amount(s().admitted_msat)} settled<Show when={s().first_contacts > 0}> · {s().first_contacts} first contact</Show>
+          <Show when={ringRead()} fallback={tr('caNotReadYet')}>
+            {amount(s().admitted_msat)}{' '}{tr('caSettled')}<Show when={s().first_contacts > 0}> · {s().first_contacts}{' '}{tr('caFirstContact')}</Show>
           </Show>
         </span>
       </div>
       <Show when={s().readmitted > 0}>
         <div class="organ-row" data-membrane-readmitted>
-          <span class="who"><span class="dot ok" /> admitted again</span>
+          <span class="who"><span class="dot ok" />{' '}{tr('caAdmittedAgain')}</span>
           <span class="sats">{s().readmitted}</span>
           <span class="organ-note">
-            {amount(s().readmitted_msat)} paid after a reconnect, from their own quote
-          </span>
+            {amount(s().readmitted_msat)}{' '}{tr('caPaidAfterAReconnectFromTheirOwnQuote')}</span>
         </div>
       </Show>
       <div class="organ-row" data-membrane-refused>
-        <span class="who"><span class="dot err" /> refused</span>
+        <span class="who"><span class="dot err" />{' '}{tr('caRefused')}</span>
         <span class="sats">{ringRead() ? s().refused : '—'}</span>
         <span class="organ-note" data-membrane-refused-by>{refusedNote()}</span>
       </div>
       <Show
         when={props.membrane.length > 0}
         fallback={<p class="organ-line" data-membrane-quiet>{ringCurrent()
-          ? `${props.prePaymentRefusals ? 'No message-gate events' : 'No knocks'} since ${clock(props.openedAt)}.`
-          : props.membraneError ? 'Gate history unavailable.' : 'Gate history not read yet.'}</p>}
+          ? tr('caSinceExtra90', props.prePaymentRefusals ? tr('caNoMessageGateEvents') : tr('caNoKnocks'), clock(props.openedAt))
+          : props.membraneError ? tr('caGateHistoryUnavailable') : tr('caGateHistoryNotReadYet216')}</p>}
       >
         <For each={props.membrane.slice(0, 3)}>{(e) => <MembraneLine e={e} hot={e.seq > baseline} nameOf={props.nameOf} nameOfTrack={props.nameOfTrack} />}</For>
       </Show>
       <RefusalCounts counts={props.prePaymentRefusals} readAt={props.membraneReadAt} error={props.membraneError} now={props.now} down={props.down} />
       <Show when={!props.nodeMembrane}>
-        <p class="organ-line muted" data-membrane-n2>Inbound refusals are not visible yet (node N2).</p>
+        <p class="organ-line muted" data-membrane-n2>{tr('caInboundRefusalsAreNotVisibleYetNodeN2')}</p>
       </Show>
     </Organ>
   );
@@ -450,9 +445,9 @@ function MembraneLine(props: { e: MembraneEntry; hot: boolean; nameOf: (id: stri
             const a = () => e() as Extract<MembraneEntry, { verdict: 'admitted' }>;
             return (
               <span>
-                <span class="ok-word">admitted</span> {a().first_contact ? shortId(a().sender) : props.nameOf(a().sender)}
-                <Show when={a().paid_msat}> · paid <span class="sats">{sats(a().paid_msat!, true)}</span> {satUnit(a().paid_msat!)}</Show>
-                <Show when={a().first_contact}> · first contact, not added</Show>
+                <span class="ok-word">{tr('caAdmitted')}</span> {a().first_contact ? shortId(a().sender) : props.nameOf(a().sender)}
+                <Show when={a().paid_msat}>{' '}{tr('caPaid')}{' '}<span class="sats">{sats(a().paid_msat!, true)}</span> {satUnit(a().paid_msat!)}</Show>
+                <Show when={a().first_contact}>{' '}{tr('caFirstContactNotAdded')}</Show>
               </span>
             );
           }}
@@ -462,9 +457,9 @@ function MembraneLine(props: { e: MembraneEntry; hot: boolean; nameOf: (id: stri
             const a = () => e() as Extract<MembraneEntry, { verdict: 'readmitted' }>;
             return (
               <span data-membrane-readmission>
-                <span class="ok-word">paid again</span> {props.nameOf(a().counterparty)} · {gateWords('readmission')}
+                <span class="ok-word">{tr('caPaidAgain')}</span> {props.nameOf(a().counterparty)} · {gateWords('readmission')}
                 <Show when={a().paid_msat}> · <span class="sats">{sats(a().paid_msat!, true)}</span> {satUnit(a().paid_msat!)}</Show>
-                <Show when={a().cap_msat}> · within their budget of <span class="sats">{sats(a().cap_msat!, true)}</span> {satUnit(a().cap_msat!)}</Show>
+                <Show when={a().cap_msat}>{' '}{tr('caWithinTheirBudgetOf')}{' '}<span class="sats">{sats(a().cap_msat!, true)}</span> {satUnit(a().cap_msat!)}</Show>
               </span>
             );
           }}
@@ -477,14 +472,14 @@ function MembraneLine(props: { e: MembraneEntry; hot: boolean; nameOf: (id: stri
                 when={r().kind === 'inbound'}
                 fallback={
                   <span title={r().detail}>
-                    <span class="err-word">refused</span> {r().track ? props.nameOfTrack(r().track!) : 'send'} · {KIND_TEXT[r().kind]}
+                    <span class="err-word">{tr('caRefused')}</span> {r().track ? props.nameOfTrack(r().track!) : tr('caSend')} · {KIND_TEXT[r().kind]}
                     <span class="detail">{r().detail}</span>
                   </span>
                 }
               >
                 <span title={r().detail} data-membrane-inbound={r().code}>
-                  <span class="err-word">refused</span> {r().sender ? props.nameOf(r().sender!) : 'unsigned'} · {gateWords(r().code)}
-                  <Show when={r().required_msat}> · needed <span class="sats">{sats(r().required_msat!, true)}</span> {satUnit(r().required_msat!)}</Show>
+                  <span class="err-word">{tr('caRefused')}</span> {r().sender ? props.nameOf(r().sender!) : tr('caUnsigned')} · {gateWords(r().code)}
+                  <Show when={r().required_msat}>{' '}{tr('caNeeded')}{' '}<span class="sats">{sats(r().required_msat!, true)}</span> {satUnit(r().required_msat!)}</Show>
                 </span>
               </Show>
             );
@@ -513,70 +508,67 @@ function SetpointsOrgan(props: OrganismProps) {
   const hot = usePulse(() => spent());
   const summary = () => {
     const x = h();
-    if (x.state === 'holding') return `${amount(x.spent_msat)}/${amount(x.ceiling_msat)} · ${hoursLeft(x.until_ms, props.now)} h`;
-    if (x.state === 'paused') return 'paused';
-    if (x.state === 'waiting') return 'waiting for you';
-    if (x.state === 'none') return 'none';
+    if (x.state === 'holding') return tr('caHExtra94', amount(x.spent_msat), amount(x.ceiling_msat), hoursLeft(x.until_ms, props.now));
+    if (x.state === 'paused') return tr('caPaused');
+    if (x.state === 'waiting') return tr('caWaitingForYou');
+    if (x.state === 'none') return tr('caNone');
     return '…';
   };
   return (
     <Organ
       id="setpoints"
-      title="Setpoints"
+      title={tr('caSetpoints')}
       hot={hot()}
       summary={<span class="sats">{summary()}</span>}
       fresh={fresh()}
       sample={props.sample}
-      source="App all-in payment limits over a rolling 24 hours. Any finite node grant applies separately. See Budget for exclusions."
+      source={tr('caAppBudgetSource')}
     >
       <Switch>
         <Match when={h().state === 'unknown'}>
-          <p class="organ-line">Reading budgets…</p>
+          <p class="organ-line">{tr('caReadingBudgets')}</p>
         </Match>
         <Match when={h().state === 'none' && (h() as Extract<Homeostasis, { state: 'none' }>)}>
           {(x) => (
             <>
               <p class="organ-line" data-setpoint-none>
-                <Show when={x().expired}>Your daily approval ended. </Show>Automatic payment is off. Manual messages and files still count against the saved app limit.
-              </p>
+                <Show when={x().expired}>{tr('uiYourDailyApprovalEnded')}{' '}</Show>{tr('caAutomaticPaymentIsOffManualMessagesAndFilesStill')}</p>
               <Show when={x().rows.length > 0}>
-                <p class="organ-note">{x().rows.length} saved {x().rows.length === 1 ? 'budget' : 'budgets'} still limit manual messages and files; approve automatic messages from a conversation.</p>
+                <p class="organ-note">{x().rows.length}{' '}{tr('caSaved')}{' '}{x().rows.length === 1 ? tr('caBudget') : tr('caBudgets')}{' '}{tr('caStillLimitManualMessagesAndFilesApproveAutomaticMessages')}</p>
               </Show>
             </>
           )}
         </Match>
         <Match when={h().state === 'paused'}>
           <p class="organ-line" data-setpoint-paused>
-            Paused. New app payments are blocked; in-flight payments, owner commands and background workers can still spend.{' '}
-            <button type="button" class="link" disabled={props.resumeBlocked} onClick={() => props.onResume()}>Resume</button>
+            {tr('caPausedNewAppPaymentsAreBlockedInFlightPayments')}{' '}
+            <button type="button" class="link" disabled={props.resumeBlocked} onClick={() => props.onResume()}>{tr('caResume')}</button>
           </p>
         </Match>
         <Match when={h().state === 'waiting'}>
-          <p class="organ-line" data-setpoint-waiting>Waiting for your approval at the node.</p>
+          <p class="organ-line" data-setpoint-waiting>{tr('caWaitingForYourApprovalAtTheNode')}</p>
         </Match>
         <Match when={h().state === 'holding' && (h() as Extract<Homeostasis, { state: 'holding' }>)}>
           {(x) => (
             <>
-              <SetpointBar label="app all-in · 24 h" spent={x().spent_msat} limit={x().ceiling_msat} note={`${hoursLeft(x().until_ms, props.now)} h left`} data="ceiling" />
+              <SetpointBar label={tr('caAppAllIn24H')} spent={x().spent_msat} limit={x().ceiling_msat} note={tr('caHLeft', hoursLeft(x().until_ms, props.now))} data="ceiling" />
               <Show when={x().grant}>
                 {(g) => (
                   <p class="organ-line" data-setpoint-grant>
-                    Finite node grant: <span class="sats">{amount(g().remaining_msat, true)}</span> of {amount(g().budget_msat)} left, {hoursLeft(g().expires_at_ms, props.now)} h
-                  </p>
+                    {tr('caFiniteNodeGrant')}{' '}<span class="sats">{amount(g().remaining_msat, true)}</span>{' '}{tr('uiOf')}{' '}{amount(g().budget_msat)}{' '}{tr('caLeft')}{' '}{hoursLeft(g().expires_at_ms, props.now)}{' '}{tr('caH')}</p>
                 )}
               </Show>
               <For each={x().rows.slice(0, 3)}>
-                {(r) => <SetpointBar label={props.nameOfTrack(`${r.room ? 'room' : 'peer'}:${r.target}`)} spent={r.spent_msat} limit={r.limit_msat} note="today" data={r.target} />}
+                {(r) => <SetpointBar label={props.nameOfTrack(`${r.room ? 'room' : 'peer'}:${r.target}`)} spent={r.spent_msat} limit={r.limit_msat} note={tr('caTodayNote')} data={r.target} />}
               </For>
               <For each={x().reached.slice(0, 2)}>
                 {(r: Setpoint) => (
                   <p class="organ-line" data-setpoint-reached={r.target}>
-                    Resting: {props.nameOfTrack(`${r.room ? 'room' : 'peer'}:${r.target}`)} setpoint reached ({amount(r.spent_msat)}/{amount(r.limit_msat)} today). Frees as older payments pass 24 h.
-                  </p>
+                    {tr('caResting')}{' '}{props.nameOfTrack(`${r.room ? 'room' : 'peer'}:${r.target}`)}{' '}{tr('caSetpointReached')}{amount(r.spent_msat)}/{amount(r.limit_msat)}{' '}{tr('caTodayFreesAsOlderPaymentsPass24H')}</p>
                 )}
               </For>
               <Show when={x().unsettled_msat > 0}>
-                <p class="organ-note">Includes {amount(x().unsettled_msat)} whose outcome is not known yet.</p>
+                <p class="organ-note">{tr('caIncludes')}{' '}{amount(x().unsettled_msat)}{' '}{tr('caWhoseOutcomeIsNotKnownYet')}</p>
               </Show>
             </>
           )}
@@ -584,9 +576,9 @@ function SetpointsOrgan(props: OrganismProps) {
       </Switch>
       <Show when={h().state === 'holding' || h().state === 'none'}>
         <p class="organ-actions">
-          <button type="button" class="link" data-setpoint-lower onClick={() => props.onSetpoints()}>Lower a setpoint</button>
+          <button type="button" class="link" data-setpoint-lower onClick={() => props.onSetpoints()}>{tr('caLowerASetpoint')}</button>
           <Show when={h().state === 'holding'}>
-            <button type="button" class="link" data-setpoint-pause onClick={() => props.onPauseAll()}>Pause app payments</button>
+            <button type="button" class="link" data-setpoint-pause onClick={() => props.onPauseAll()}>{tr('uiPauseAppPayments')}</button>
           </Show>
         </p>
       </Show>
@@ -617,22 +609,22 @@ function NucleusOrgan(props: OrganismProps) {
   return (
     <Organ
       id="nucleus"
-      title="Nucleus"
+      title={tr('caNucleus')}
       summary={<span class="id">{n().node_id ? shortId(n().node_id!) : '…'}</span>}
       fresh={fresh()}
       sample={props.sample}
-      source="Identity and /status. Block height is a clock only; nothing goes on chain."
+      source={tr('caIdentitySource')}
     >
       <p class="organ-line">
-        <span class="id" title={n().node_id ?? undefined} data-nucleus-id>{n().node_id ? shortId(n().node_id!) : 'identity not read yet'}</span>
+        <span class="id" title={n().node_id ?? undefined} data-nucleus-id>{n().node_id ? shortId(n().node_id!) : tr('caIdentityNotReadYet')}</span>
       </p>
       <p class="organ-line" data-nucleus-chain>
-        <Show when={n().block_height !== null} fallback="Block height unknown">
-          block <span class="sats">{satsWhole(n().block_height!, true)}</span>
+        <Show when={n().block_height !== null} fallback={tr('caBlockHeightUnknown')}>
+          {tr('caBlock')}{' '}<span class="sats">{satsWhole(n().block_height!, true)}</span>
         </Show>
-        <span class="organ-note"> · {n().chain_backend ?? 'chain source unknown'}</span>
+        <span class="organ-note"> · {n().chain_backend ?? tr('caChainSourceUnknown')}</span>
       </p>
-      <p class="organ-line warn-line" data-nucleus-backup>Recovery words not verified in this app.</p>
+      <p class="organ-line warn-line" data-nucleus-backup>{tr('caRecoveryWordsNotVerifiedInThisApp')}</p>
     </Organ>
   );
 }

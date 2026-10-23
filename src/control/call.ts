@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 /**
  * 1:1 calls (regtest prototype). Media runs peer to peer over WebRTC in this
  * webview and never touches the node. By default no ICE server is contacted:
@@ -29,24 +30,24 @@ export const SIGNAL_TIMEOUT_MS = 30_000;
 export const GATHER_MS = 3_000;
 /** A permission prompt may never settle; release the call after this wait. */
 export const MEDIA_TIMEOUT_MS = 15_000;
-const MEDIA_ERROR = 'Camera/microphone not available — check System Settings → Privacy';
+const MEDIA_ERROR = () => tr('caCameraMicrophoneNotAvailableCheckSystemSettingsPrivacy');
 /** The webview exposes no navigator.mediaDevices at all (e.g. a build without media access). */
 export const NO_MEDIA_DEVICES = 'MediaDevicesUnavailable';
 
 /** Where this platform's owner allows the microphone and camera. */
 const permissionPlace = (platform: AppPlatform) =>
-  platform === 'ios' ? 'Settings → BitSov' : platform === 'android' ? 'Settings → Apps → BitSov → Permissions' : 'System Settings → Privacy & Security';
+  platform === 'ios' ? tr('caSettingsBitSov') : platform === 'android' ? tr('caSettingsAppsBitSovPermissions') : tr('caSystemSettingsPrivacySecurity');
 
 export function mediaError(error: unknown, media: CallMedia, platform: AppPlatform = appPlatform()): string {
   const name = error && typeof error === 'object' && 'name' in error ? error.name : '';
-  const devices = media === 'video' ? 'microphone or camera' : 'microphone';
-  if (name === NO_MEDIA_DEVICES) return media === 'video' ? 'This build cannot use the microphone or camera yet' : 'This build cannot use the microphone yet';
+  const devices = media === 'video' ? tr('caMicrophoneOrCamera') : tr('caMicrophone');
+  if (name === NO_MEDIA_DEVICES) return media === 'video' ? tr('caThisBuildCannotUseTheMicrophoneOrCameraYet') : tr('caThisBuildCannotUseTheMicrophoneYet');
   if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
-    return `Permission to use the ${devices} was denied — allow access in ${permissionPlace(platform)}`;
+    return tr('caPermissionToUseTheWasDeniedAllowAccessIn', devices, permissionPlace(platform));
   }
-  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return `No ${devices} was found — connect a device and try again`;
-  if (name === 'NotReadableError' || name === 'TrackStartError') return `The ${devices} is unavailable or in use — close other apps and try again`;
-  return platform === 'desktop' ? MEDIA_ERROR : `Camera/microphone not available — check ${permissionPlace(platform)}`;
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return tr('caNoWasFoundConnectADeviceAndTryAgain', devices);
+  if (name === 'NotReadableError' || name === 'TrackStartError') return tr('caTheIsUnavailableOrInUseCloseOtherApps', devices);
+  return platform === 'desktop' ? MEDIA_ERROR() : tr('caCameraMicrophoneNotAvailableCheck', permissionPlace(platform));
 }
 
 /** How long a dropped connection may take to come back before the call ends. */
@@ -184,18 +185,18 @@ export type CallView = {
 /** `closed`: the host ended it (or nothing was owed); `unknown`: check pending result; `refused`: still open. */
 export type CallClose = { status: 'closing' | 'closed' | 'unknown' | 'refused'; message: string | null };
 
-const CLOSE_UNKNOWN = 'Ending the call: the result is not known yet. Check pending result before calling them again.';
+const CLOSE_UNKNOWN = () => tr('caEndingTheCallTheResultIsNotKnownYet');
 /** What one `op_end_call` answer means for the owner. A failed read never says "ended". */
 export function closeOutcome(r: Outcome<OpView>): CallClose {
   if (r.ok) return r.value.state === 'dispatching' || r.value.state === 'unknown'
-    ? { status: 'unknown', message: CLOSE_UNKNOWN } : { status: 'closed', message: null };
+    ? { status: 'unknown', message: CLOSE_UNKNOWN() } : { status: 'closed', message: null };
   switch (r.error.code) {
     // Nothing of this call is recorded at the host: nothing is open.
     case 'call_not_found': return { status: 'closed', message: null };
-    case 'spend_unknown': case 'payment_unknown': return { status: 'unknown', message: CLOSE_UNKNOWN };
+    case 'spend_unknown': case 'payment_unknown': return { status: 'unknown', message: CLOSE_UNKNOWN() };
     case 'price_changed': case 'price_cap_exceeded':
-      return { status: 'refused', message: 'Couldn’t end the call: their node now asks more to end it than this call allowed. Nothing was paid. Calling them again waits until it is ended.' };
-    default: return { status: 'refused', message: `Couldn’t end the call: ${r.error.message}` };
+      return { status: 'refused', message: tr('caCouldnTEndTheCallTheirNodeNowAsks') };
+    default: return { status: 'refused', message: tr('caCouldnTEndTheCall', r.error.message) };
   }
 }
 const CLOSE_RANK = { closed: 0, closing: 1, refused: 2, unknown: 3 } as const;
@@ -343,8 +344,8 @@ export function createCallEngine(deps: CallDeps) {
       if (view.callId === callId && live === audioLive) {
         // A local policy failure must not trigger a paid hangup or ICE restart.
         view = { ...view, error: live
-          ? 'Could not update background audio. Keep the app open during this call.'
-          : 'Could not release call audio. Close the app if the microphone remains active.' };
+          ? tr('caCouldNotUpdateBackgroundAudioKeepTheAppOpen')
+          : tr('caCouldNotReleaseCallAudioCloseTheAppIf') };
         deps.onView(view);
       }
     });
@@ -474,7 +475,7 @@ export function createCallEngine(deps: CallDeps) {
       clearTimeout(timer);
       captures.delete(cancel);
     };
-    const cancel = () => { finish(); reject(new Error(MEDIA_ERROR)); };
+    const cancel = () => { finish(); reject(new Error(MEDIA_ERROR())); };
     const timer = setTimeout(cancel, MEDIA_TIMEOUT_MS);
     captures.add(cancel);
     // getUserMedia cannot be aborted. Stop any stream delivered after timeout/cancel.
@@ -555,7 +556,7 @@ export function createCallEngine(deps: CallDeps) {
     const stream = await acquireMedia({ audio: true, video: media === 'video' });
     if (generation !== mediaGeneration) {
       stream.getTracks().forEach((t) => t.stop());
-      throw new Error(MEDIA_ERROR);
+      throw new Error(MEDIA_ERROR());
     }
     local = stream;
     const conn = deps.peerConnection({ iceServers: deps.iceServers?.() ?? [] });
@@ -581,7 +582,7 @@ export function createCallEngine(deps: CallDeps) {
           restartTimer = setTimeout(() => { restartTimer = undefined; void restart(conn); }, RESTART_DELAY_MS);
         }
       } else if (state === 'closed') {
-        end('failed', 'The direct connection closed.');
+        end('failed', tr('caTheDirectConnectionClosed'));
       }
     };
     conn.onconnectionstatechange = () => connectionChanged(conn.connectionState);
@@ -618,7 +619,7 @@ export function createCallEngine(deps: CallDeps) {
     const timeout = new Promise<Outcome<CallReceipt>>((resolve) => {
       timer = setTimeout(() => resolve({ ok: false, error: {
         code: 'spend_unknown',
-        message: 'The node did not answer in time. The payment outcome is unknown; check the pending result before trying again.',
+        message: tr('caTheNodeDidNotAnswerInTimeThePayment'),
       } }), SIGNAL_TIMEOUT_MS);
     });
     // The tally only: what reached this call's paid / unknown totals. A signal
@@ -683,7 +684,7 @@ export function createCallEngine(deps: CallDeps) {
       healedRefusal = null;
     }
     if (dropTimer === undefined) dropTimer = setTimeout(() => {
-      if (pc === conn && !reconcileConnection(conn)) end('failed', view.error ?? 'The connection was lost. Check that both apps have a reachable STUN server in Settings; some networks cannot connect without a relay.');
+      if (pc === conn && !reconcileConnection(conn)) end('failed', view.error ?? tr('caTheConnectionWasLostCheckThatBothAppsHave'));
     }, RECONNECT_GRACE_MS);
   };
 
@@ -697,7 +698,7 @@ export function createCallEngine(deps: CallDeps) {
     set({ recoveryUsed: true });
     try {
       if (deps.authorize && !await deps.authorize()) {
-        recoveryRefused(conn, 'Call recovery needs spending approval.');
+        recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
         return;
       }
       if (pc !== conn) return;
@@ -709,11 +710,11 @@ export function createCallEngine(deps: CallDeps) {
       if (q.offer_msat === null) { reconcileConnection(conn); return; }
       const grant = deps.grant?.();
       if (grant && q.call_total_msat !== null && (q.call_total_msat > grant.remaining_msat || q.call_total_msat > grant.per_call_max_msat)) {
-        recoveryRefused(conn, 'The remaining node grant cannot cover call recovery. Ask the owner to increase the budget.');
+        recoveryRefused(conn, tr('caTheRemainingNodeGrantCannotCoverCallRecoveryAsk'));
         return;
       }
       const id = (deps.newCallId ?? newCallId)();
-      if (admissions.has(id)) throw new Error('Could not allocate a fresh call id for recovery.');
+      if (admissions.has(id)) throw new Error(tr('caCouldNotAllocateAFreshCallIdForRecovery'));
       conn.restartIce?.();
       const offer = await conn.createOffer({ iceRestart: true });
       if (pc !== conn) return;
@@ -737,7 +738,7 @@ export function createCallEngine(deps: CallDeps) {
       }
     } catch (error) {
       if (pc === conn) restartAnswerPending = false;
-      recoveryRefused(conn, `Call recovery failed: ${asActionError(error).message}`);
+      recoveryRefused(conn, tr('caCallRecoveryFailed', asActionError(error).message));
     } finally {
       if (pc === conn) pendingRestartId = null;
     }
@@ -752,7 +753,7 @@ export function createCallEngine(deps: CallDeps) {
     set({ recoveryUsed: true });
     try {
       if (deps.authorize && !await deps.authorize()) {
-        recoveryRefused(conn, 'Call recovery needs spending approval.');
+        recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
         return;
       }
       if (pc !== conn) return;
@@ -769,7 +770,7 @@ export function createCallEngine(deps: CallDeps) {
       const r = await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(quote));
       if (!r.ok) recoveryRefused(conn, r.error.message);
     } catch (error) {
-      recoveryRefused(conn, `Call recovery failed: ${asActionError(error).message}`);
+      recoveryRefused(conn, tr('caCallRecoveryFailed', asActionError(error).message));
     }
   };
 
@@ -777,7 +778,7 @@ export function createCallEngine(deps: CallDeps) {
   const awaitConnect = (callId: string) => {
     clearTimeout(ringTimer);
     ringTimer = setTimeout(() => {
-      if (view.callId === callId && view.phase === 'connecting') end('failed', 'The call could not connect.');
+      if (view.callId === callId && view.phase === 'connecting') end('failed', tr('caTheCallCouldNotConnect'));
     }, CONNECT_TIMEOUT_MS);
   };
 
@@ -803,13 +804,13 @@ export function createCallEngine(deps: CallDeps) {
       const generation = mediaGeneration;
       if (active() || deps.busy?.()) return;
       if (q.offer_msat === null || q.call_total_msat === null) {
-        set({ ...IDLE, phase: 'ended', peer, error: 'Their node does not take calls yet. Nothing was paid.' });
+        set({ ...IDLE, phase: 'ended', peer, error: tr('caTheirNodeDoesNotTakeCallsYetNothingWas') });
         return;
       }
       const grant = deps.grant?.();
       if (grant && (q.call_total_msat > grant.per_call_max_msat || q.call_total_msat > grant.remaining_msat)) {
         set({ ...IDLE, phase: 'ended', peer, error:
-          `This call needs up to ${amount(q.call_total_msat)}. Your node grant allows ${amount(grant.per_call_max_msat)} per call and has ${amount(grant.remaining_msat)} remaining. The owner would need to approve at least ${amount(q.call_total_msat)} per call and enough remaining budget for that ceiling. Nothing was sent or paid.` });
+          tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat), amount(grant.per_call_max_msat), amount(grant.remaining_msat), amount(q.call_total_msat)) });
         return;
       }
       if (deps.authorize && !await deps.authorize()) return;
@@ -830,7 +831,7 @@ export function createCallEngine(deps: CallDeps) {
         await gathered(conn, GATHER_MS);
       } catch (error) {
         if (cancelled === callId || view.callId !== callId || !active()) return;
-        end(null, `${mediaError(error, view.media)}. Nothing was paid.`);
+        end(null, tr('caNothingWasPaid', mediaError(error, view.media)));
         return;
       }
       // Cancelled before the offer went out: nothing is paid.
@@ -843,13 +844,13 @@ export function createCallEngine(deps: CallDeps) {
       if (!r.ok && r.error.code === 'call_needs_node_upgrade') {
         // Refused before dispatch (proven unpaid): no admission exists, nothing to end at the host.
         own = own.filter((id) => id !== callId);
-        end(null, 'Your node needs an update before paid calls work. Nothing was paid.');
+        end(null, tr('caYourNodeNeedsAnUpdateBeforePaidCallsWork'));
         return;
       }
       if (!r.ok && r.error.code === 'call_admission_open') {
         // Refused before paying: an earlier call to them is still open at the host. Say so; never a silent block.
         own = own.filter((id) => id !== callId);
-        end(null, 'An earlier call to them is still being ended at your node. Nothing was paid for this one.');
+        end(null, tr('caAnEarlierCallToThemIsStillBeingEnded'));
         set({ stuck: { opId: r.error.operation_id ?? null } });
         return;
       }
@@ -885,7 +886,7 @@ export function createCallEngine(deps: CallDeps) {
         await gathered(conn, GATHER_MS);
       } catch (error) {
         if (view.callId !== callId || !active()) return;
-        end(null, `${mediaError(error, view.media)}. Nothing was paid.`);
+        end(null, tr('caNothingWasPaid', mediaError(error, view.media)));
         return;
       }
       if (view.callId !== callId || !active()) return;
@@ -982,12 +983,12 @@ export function createCallEngine(deps: CallDeps) {
       try { earlier = await deps.stuckCall(peer, stuck.opId); } catch { earlier = null; }
       if (view.callId !== callId) return;
       if (!earlier) {
-        set({ close: { status: 'refused', message: 'Couldn’t find the earlier call to end. Check pending result.' } });
+        set({ close: { status: 'refused', message: tr('caCouldnTFindTheEarlierCallToEndCheck') } });
         return;
       }
       closing.delete(earlier);
       await closeAdmissions([earlier], callId);
-      if (view.callId === callId && view.close?.status === 'closed') set({ close: { status: 'closed', message: 'The earlier call is ended. You can call them again.' } });
+      if (view.callId === callId && view.close?.status === 'closed') set({ close: { status: 'closed', message: tr('caTheEarlierCallIsEndedYouCanCallThem') } });
     },
 
     /** iOS visibility only: stop video capture, retain audio and transport.
@@ -1026,7 +1027,7 @@ export function createCallEngine(deps: CallDeps) {
           track = fresh.getVideoTracks()[0];
           fresh.getTracks().forEach((t) => { if (t !== track) t.stop(); });
           if (local !== stream || backgrounded || videoRequest !== videoGeneration) { track?.stop(); return; }
-          if (!track) throw new DOMException('No camera', 'NotFoundError');
+          if (!track) throw new DOMException(tr('caNoCamera'), 'NotFoundError');
           // Own the track before replaceTrack awaits, so hangup can stop it.
           stream.addTrack(track);
           await sender.replaceTrack(track);
@@ -1095,7 +1096,7 @@ export function createCallEngine(deps: CallDeps) {
             }
           } catch {
             // Not a connectivity failure (no relay would help): no 'failed' reason, only the words.
-            if (pc === conn) end(null, 'Their answer could not be used.');
+            if (pc === conn) end(null, tr('caTheirAnswerCouldNotBeUsed'));
           }
           return;
         }

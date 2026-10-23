@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 import { createEffect, type JSX } from 'solid-js';
 import { copyPlainText } from './copy';
 
@@ -22,8 +23,7 @@ export function AssistantSurface(props: { text: string }): JSX.Element {
           void copyPlainText(props.text).catch(() => {});
         }}
       >
-        Copy
-      </button>
+        {tr('caCopy')}</button>
     </section>
   );
 }

@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 /**
  * Local prep for front-door avatar / media: resize in-canvas, never fetch remote
  * URLs. Hashes are blake3 from the host. Card stays ≤16 KiB — media by hash,
@@ -60,7 +61,7 @@ function readFile(file: File): Promise<ArrayBuffer> {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
     r.onload = () => resolve(r.result as ArrayBuffer);
-    r.onerror = () => reject(new Error('Could not read that image.'));
+    r.onerror = () => reject(new Error(tr('caCouldNotReadThatImage')));
     r.readAsArrayBuffer(file);
   });
 }
@@ -69,7 +70,7 @@ function loadImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error('That file is not a usable image.'));
+    img.onerror = () => reject(new Error(tr('caThatFileIsNotAUsableImage')));
     img.src = url;
   });
 }
@@ -87,10 +88,10 @@ export async function resizeToJpeg(file: File, edge: number, quality = 0.85): Pr
     canvas.width = w;
     canvas.height = h;
     const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('Canvas is not available.');
+    if (!ctx) throw new Error(tr('caCanvasIsNotAvailable'));
     ctx.drawImage(img, 0, 0, w, h);
     const blob: Blob = await new Promise((resolve, reject) => {
-      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not encode image.'))), 'image/jpeg', quality);
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error(tr('caCouldNotEncodeImage')))), 'image/jpeg', quality);
     });
     return new Uint8Array(await blob.arrayBuffer());
   } finally {
@@ -238,5 +239,4 @@ export function dropOldestThumbsToFit(
   return { media, dropped, bytes };
 }
 
-export const CARD_TOO_LARGE =
-  `This front door is over ${CARD_PUBLISH_BUDGET} bytes once serialized (node max ${MAX_CARD_BYTES}). Remove media or shorten the text, then try again.`;
+export const CARD_TOO_LARGE = () => tr('caThisFrontDoorIsOverBytesOnceSerializedNode', CARD_PUBLISH_BUDGET, MAX_CARD_BYTES);

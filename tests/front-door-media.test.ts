@@ -115,8 +115,8 @@ describe('frontDoorMedia prep', () => {
     expect(fit.bytes).toBeLessThanOrEqual(CARD_PUBLISH_BUDGET);
     expect(fit.bytes).toBeLessThanOrEqual(MAX_CARD_BYTES);
     expect(fit.media[0]!.thumb_b64).toBeUndefined();
-    expect(CARD_TOO_LARGE).toMatch(/15360|15/);
-    expect(CARD_TOO_LARGE).toMatch(/16384|16/);
+    expect(CARD_TOO_LARGE()).toMatch(/15360|15/);
+    expect(CARD_TOO_LARGE()).toMatch(/16384|16/);
   });
 
   it('CARD_PUBLISH_BUDGET leaves headroom under node max', () => {

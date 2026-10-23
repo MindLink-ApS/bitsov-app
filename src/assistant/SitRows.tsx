@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 import { For, type JSX } from 'solid-js';
 import { copyPlainText } from './copy';
 import { rowsText, type SitRow } from './rows';
@@ -19,7 +20,7 @@ export function SitRows(props: { rows: SitRow[] }): JSX.Element {
                 class="sit-answer"
                 classList={{ 'sit-unavailable': row.answer === 'Unavailable' }}
               >
-                {row.answer}
+                {row.answer === 'Unavailable' ? tr('caUnavailable487') : row.answer}
               </span>
             </li>
           )}
@@ -32,8 +33,7 @@ export function SitRows(props: { rows: SitRow[] }): JSX.Element {
           void copyPlainText(rowsText(props.rows)).catch(() => {});
         }}
       >
-        Copy
-      </button>
+        {tr('caCopy')}</button>
     </section>
   );
 }

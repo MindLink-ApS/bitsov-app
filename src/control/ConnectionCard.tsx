@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 import { createSignal, Show } from 'solid-js';
 import { usePairingActivity } from '../pairingActivity';
 import type { LinkState } from './types';
@@ -31,13 +32,13 @@ export function nextLastCall(prev: TrackedCall | null, v: CallView): TrackedCall
 }
 
 const STUN_TEXT: Record<StunSource, string> = {
-  node: 'your node',
-  custom: 'a server you chose',
-  off: 'off (direct connections only)',
-  none: 'none (your node does not offer one)',
-  checking: 'checking…',
+  get node() { return tr('caYourNode'); },
+  get custom() { return tr('caAServerYouChose'); },
+  get off() { return tr('caOffDirectConnectionsOnly'); },
+  get none() { return tr('caNoneYourNodeDoesNotOfferOne'); },
+  get checking() { return tr('caCheckingExtra108'); },
 };
-const LINK_TEXT: Record<LinkState, string> = { open: 'Live', connecting: 'Connecting', closed: 'Reconnecting' };
+const LINK_TEXT: Record<LinkState, string> = { get open() { return tr('callLive'); }, get connecting() { return tr('callConnecting'); }, get closed() { return tr('caReconnecting'); } };
 const clock = (ms: number) => new Date(ms).toLocaleTimeString();
 
 /**
@@ -47,27 +48,27 @@ const clock = (ms: number) => new Date(ms).toLocaleTimeString();
  * runs one status read; "Copy details" copies the same facts as text.
  */
 export function connectionSummary(props: { remote: boolean; link: LinkState | null; live: boolean; locked?: boolean; answer: NodeAnswer | null; stun: StunSource; lastCall: LastCall | null }): string[] {
-  const reach = props.remote ? 'over the network (a node you run elsewhere)' : 'on this Mac';
+  const reach = props.remote ? tr('caOverTheNetworkANodeYouRunElsewhere') : tr('caOnThisMac');
   const check = props.locked
-    ? 'your node is locked'
+    ? tr('caYourNodeIsLocked')
     : props.answer
       ? props.live
-        ? `${clock(props.answer.at)} · ${props.answer.ms} ms (this app ↔ its host)`
-        : `your node not answering since ${clock(props.answer.at)}`
-      : props.live ? 'not measured yet' : 'no answer yet';
+        ? tr('caMsThisAppItsHost', clock(props.answer.at), props.answer.ms)
+        : tr('caYourNodeNotAnsweringSince', clock(props.answer.at))
+      : props.live ? tr('caNotMeasuredYet') : tr('caNoAnswerYet');
   // Connected is what the call did; the route is only what the stats could name (they may never have been read).
   const call = !props.lastCall
-    ? 'no call yet'
+    ? tr('caNoCallYet')
     : props.lastCall.route
-      ? `${props.lastCall.route.local} (this device) / ${props.lastCall.route.remote} (theirs)`
-      : props.lastCall.connected ? 'connected, route unavailable' : 'no route (it didn’t connect)';
+      ? tr('caThisDeviceTheirs', props.lastCall.route.local === 'unknown' ? tr('caUnknownLower') : props.lastCall.route.local, props.lastCall.route.remote === 'unknown' ? tr('caUnknownLower') : props.lastCall.route.remote)
+      : props.lastCall.connected ? tr('caConnectedRouteUnavailable') : tr('caNoRouteItDidnTConnect');
   return [
-    `How this device reaches your node: ${reach}`,
-    `Live updates: ${props.link ? LINK_TEXT[props.link] : 'Waiting'}`,
-    `Last status check: ${check}`,
-    `Calls · STUN: ${STUN_TEXT[props.stun]}`,
-    'Calls · relay (TURN): none yet',
-    `Last call: ${call}`,
+    tr('caHowThisDeviceReachesYourNode', reach),
+    tr('caLiveUpdates', props.link ? LINK_TEXT[props.link] : tr('caWaiting')),
+    tr('caLastStatusCheck', check),
+    tr('caCallsSTUN', STUN_TEXT[props.stun]),
+    tr('caCallsRelayTURNNoneYet'),
+    tr('caLastCall', call),
   ];
 }
 
@@ -99,20 +100,20 @@ export function ConnectionCard(props: {
   };
   const copy = async () => {
     const write = props.copy ?? ((text: string) => navigator.clipboard.writeText(text));
-    try { await write(['BitSov connection', ...lines()].join('\n')); setCopied('yes'); } catch { setCopied('no'); }
+    try { await write([tr('caBitSovConnection'), ...lines()].join('\n')); setCopied('yes'); } catch { setCopied('no'); }
   };
   return (
-    <section class="connection-card" data-connection-card aria-label="Connection">
-      <h3>Connection</h3>
+    <section class="connection-card" data-connection-card aria-label={tr('caConnection')}>
+      <h3>{tr('caConnection')}</h3>
       <ul class="facts-list">
         {lines().map((line, i) => <li data-connection-line={i}>{line}</li>)}
       </ul>
       <div class="row" style={{ gap: 'var(--s-2)' }}>
         <Show when={props.onCheck}>
-          <button type="button" class="soft small" data-connection-check disabled={checking()} onClick={() => void check()}>{checking() ? 'Checking…' : 'Check now'}</button>
+          <button type="button" class="soft small" data-connection-check disabled={checking()} onClick={() => void check()}>{checking() ? tr('caChecking') : tr('caCheckNow')}</button>
         </Show>
-        <button type="button" class="link" data-connection-copy onClick={() => void copy()}>Copy details</button>
-        <Show when={copied()}>{(c) => <span class="hint" role="status" data-connection-copied>{c() === 'yes' ? 'Copied.' : 'Could not copy.'}</span>}</Show>
+        <button type="button" class="link" data-connection-copy onClick={() => void copy()}>{tr('caCopyDetails')}</button>
+        <Show when={copied()}>{(c) => <span class="hint" role="status" data-connection-copied>{c() === 'yes' ? tr('caCopied') : tr('caCouldNotCopy')}</span>}</Show>
       </div>
     </section>
   );

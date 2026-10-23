@@ -1,3 +1,4 @@
+import { t as tr } from '../i18n';
 // The organism view (O1): the node's physiology as pure functions over real
 // readings. Nothing here is simulated. Every figure is a sum or a count of
 // loaded tracks, `/ws` events, host refusals, the B2 budget view and `/status`,
@@ -223,7 +224,7 @@ export function membraneLive(
       verdict: 'refused',
       kind: 'door',
       code: 'rejected',
-      detail: event.reason ?? 'no reason given',
+      detail: event.reason ?? tr('caNoReasonGiven'),
       track: trackOfMessage(ctx.threads, event.message_id),
     });
   }
@@ -232,27 +233,27 @@ export function membraneLive(
 
 /** Plain words for the node's gate codes (N2). Unknown codes are shown as given. */
 export const GATE_WORDS: Record<string, string> = {
-  settled: 'settled',
-  unpaid: 'unpaid',
-  insufficient_payment: 'paid too little',
-  not_settled: 'payment not settled',
-  settlement_mismatch: 'payment did not match',
-  settlement_unavailable: 'could not check payment',
-  proof_reused: 'payment already used',
-  replay: 'replay',
-  stale: 'stale',
-  bad_signature: 'bad signature',
-  invalid_envelope: 'malformed',
-  invite_only: 'invite only',
-  not_priceable: 'no price for this kind',
-  node_error: 'node could not decide',
+  get settled() { return tr('caSettled'); },
+  get unpaid() { return tr('caUnpaid'); },
+  get insufficient_payment() { return tr('caPaidTooLittle'); },
+  get not_settled() { return tr('caPaymentNotSettled'); },
+  get settlement_mismatch() { return tr('caPaymentDidNotMatch'); },
+  get settlement_unavailable() { return tr('caCouldNotCheckPayment'); },
+  get proof_reused() { return tr('caPaymentAlreadyUsed'); },
+  get replay() { return tr('caReplay'); },
+  get stale() { return tr('caStale'); },
+  get bad_signature() { return tr('caBadSignature'); },
+  get invalid_envelope() { return tr('caMalformed'); },
+  get invite_only() { return tr('caInviteOnly'); },
+  get not_priceable() { return tr('caNoPriceForThisKind'); },
+  get node_error() { return tr('caNodeCouldNotDecide'); },
   // A reconnect starts every connection unpaid (genome #86): the peer asked
   // for a paid invoice first and was told to pay its way in again.
-  admission_required: 'asked to pay admission again',
+  get admission_required() { return tr('caAskedToPayAdmissionAgain'); },
   // The node's quote window: a second admission quote came too soon.
-  admission_rate_limited: 'asked again too soon',
+  get admission_rate_limited() { return tr('caAskedAgainTooSoon'); },
   // Outbound: we paid a contact's admission again after a reconnect.
-  readmission: 'admitted again after a reconnect',
+  get readmission() { return tr('caAdmittedAgainAfterAReconnect'); },
 };
 
 export const gateWords = (code: string) => GATE_WORDS[code] ?? code.replace(/_/g, ' ');
@@ -300,7 +301,7 @@ export function membraneNode(log: MembraneEntry[], event: MembraneEvent, ctx: { 
     });
   }
   if (event.verdict !== 'refused') return log;
-  const need = event.required_msat !== null ? `needed ${event.required_msat} msat` : '';
+  const need = event.required_msat !== null ? tr('caNeededMsat', event.required_msat) : '';
   return keep(log, {
     seq: ++membraneSeq,
     at: event.at,
@@ -479,7 +480,7 @@ export type Feed = { live: boolean; label: string; stale: boolean };
  * they keep their last reading and say how old it is; they are never zeroed.
  */
 export function feedState(link: 'connecting' | 'open' | 'closed' | null, lastAt: number | null, nowMs: number, ago: (t: number, n: number) => string): Feed {
-  if (link === 'open') return { live: true, label: 'Live', stale: false };
-  if (lastAt === null) return { live: false, label: 'Feed down, no reading yet', stale: true };
-  return { live: false, label: `Feed down · last reading ${ago(lastAt, nowMs)}`, stale: true };
+  if (link === 'open') return { live: true, label: tr('callLive'), stale: false };
+  if (lastAt === null) return { live: false, label: tr('caFeedDownNoReadingYet'), stale: true };
+  return { live: false, label: tr('caFeedDownLastReading', ago(lastAt, nowMs)), stale: true };
 }
