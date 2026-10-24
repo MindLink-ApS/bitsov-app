@@ -11,7 +11,7 @@ let mount: HTMLDivElement;
 afterEach(() => { dispose?.(); mount?.remove(); setLanguagePref('en'); });
 const text = (el: Element | null) => el?.textContent?.replace(/\s+/g, ' ') ?? '';
 const button = (selector: string) => mount.querySelector<HTMLButtonElement>(selector)!;
-function setup(options: { presets?: BudgetPreset[]; reason?: string; max?: number; cost?: string; grant?: NodeGrantSummary; initialPreset?: PresetId } = {}) {
+function setup(options: { presets?: BudgetPreset[]; reason?: string; max?: number; cost?: string; grant?: NodeGrantSummary; initialPreset?: PresetId; onSetupApprovals?: () => void } = {}) {
   const allow = vi.fn();
   const cancel = vi.fn();
   const [reason, setReason] = createSignal(options.reason ?? null);
@@ -19,7 +19,7 @@ function setup(options: { presets?: BudgetPreset[]; reason?: string; max?: numbe
   dispose = render(() => <FirstSpendSheet presets={options.presets ?? SAMPLE_PRESETS}
     initialPreset={options.initialPreset ?? "careful"} grant={options.grant} startsNow={!!options.grant} maxDailyMsat={options.max ?? 100_000_000}
     costLine={options.cost ?? 'Entry fee: 1 sat · message: 2 sats · routing fee at most: 5 sats · total at most: 8 sats'}
-    blockedReason={reason()} onAllow={allow} onCancel={cancel} onPreset={() => {}} />, mount);
+    onSetupApprovals={options.onSetupApprovals} blockedReason={reason()} onAllow={allow} onCancel={cancel} onPreset={() => {}} />, mount);
   return { allow, cancel, setReason };
 }
 
@@ -189,4 +189,17 @@ it('traps focus, dismisses by swipe, and restores focus to the opener without al
   expect(cancel).toHaveBeenCalledOnce(); expect(allow).not.toHaveBeenCalled();
   dispose?.(); dispose = undefined;
   await Promise.resolve(); expect(document.activeElement).toBe(opener); opener.remove();
+});
+
+it.each(['en', 'da'] as const)('keeps a visible setup action in the %s approval sheet without approving money', lang => {
+  setLanguagePref(lang);
+  const setupApprovals = vi.fn();
+  const { allow } = setup({ onSetupApprovals: setupApprovals });
+  const setupButton = button('[data-approval-setup]');
+  expect(setupButton).not.toBeNull();
+  expect(setupButton.closest('details')).toBeNull();
+  expect(setupButton.textContent).toBe(lang === 'en' ? 'Set up Touch ID approvals' : 'Opsæt Touch ID-godkendelser');
+  setupButton.click();
+  expect(setupApprovals).toHaveBeenCalledOnce();
+  expect(allow).not.toHaveBeenCalled();
 });

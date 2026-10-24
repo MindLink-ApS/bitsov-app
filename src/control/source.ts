@@ -113,6 +113,8 @@ export interface Source {
   rooms(): Promise<Room[]>;
   roomMembers(roomId: string): Promise<string[]>;
   messages(peer: string, before?: number): Promise<Message[]>;
+  /** Read-only delivery evidence for a successful compose operation. */
+  messageDelivery(operationId: string, messageId: string): Promise<LiveEvent | null>;
   /** `GET /messages?room=`: a bound room's thread, both directions, oldest first; pages count whole messages. */
   roomThread(room: string, before?: number, limit?: number): Promise<Message[]>;
   priceQuote(peer?: string): Promise<PriceQuote>;
@@ -315,6 +317,7 @@ export const hostSource: Source = {
   rooms: () => invoke<Room[]>('rooms_list'),
   roomMembers: (roomId) => invoke<string[]>('room_members', { room_id: roomId }),
   messages: (peer, before) => invoke<Message[]>('messages_list', { peer, before: before ?? null }),
+  messageDelivery: (operationId, messageId) => invoke<LiveEvent | null>('message_delivery', { operation_id: operationId, message_id: messageId }),
   roomThread: (room, before, limit) => invoke<Message[]>('room_thread', { room, before: before ?? null, limit: limit ?? null }),
   priceQuote: (peer) => invoke<PriceQuote>('price_quote', { peer: peer ?? null }),
   firstContactQuote: (peer) => invoke<FirstContactQuote>('first_contact_quote', { peer }),

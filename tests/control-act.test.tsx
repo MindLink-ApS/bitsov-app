@@ -601,6 +601,8 @@ describe('acting from the track', () => {
     stubHost();
     await openShell();
     expect(text('[data-cost]')).toContain('First-contact admission must fit this ceiling');
+    expect(text('[data-send-price]')).toBe('');
+    type('[data-composer] textarea', 'hello');
     expect(text('[data-send-price]')).toBe('up to 2 sats · includes max routing fee');
   });
 
@@ -1148,6 +1150,7 @@ describe('acting from the track', () => {
     });
     await openShell();
     await waitFor(() => expect(text('[data-send]')).toBe('Send'));
+    type('[data-composer] textarea', 'hello');
     host.spend.v = view('unavailable', { pending: { op_id: 'cd', expires_at_ms: Date.now() + 900_000, owner_action: 'unavailable in this deployment: no owner control socket', owner_can_grant: false } });
     submit();
     await waitFor(() => expect(text('[data-approval="unavailable"]')).toContain('Receiving still works'));

@@ -514,6 +514,14 @@ export function Onboarding(props: {
         </Match>
       </Switch>
 
+      <Show when={approvalsSkipped() && props.pairing().state === 'paired' && !isEnrolled()}>
+        <p class="hint" data-device-approvals-deferred>
+          {t('approvalSetupReason')}{' '}
+          <button type="button" class="link" data-device-approvals-later onClick={() => setApprovalsSkipped(false)}>
+            {t(mobileBiometrics() ? 'obSetupBiometrics' : 'obSetupTouchId')}
+          </button>
+        </p>
+      </Show>
       {/* Touch ID approvals belong to setup, right after pairing (they used to live only in + New). */}
       <Show when={props.onRegisterDevice && props.onCancelDevice && props.pairing().state === 'paired' && stage() !== 'node' && !approvalsSkipped()}>
         <DeviceApprovals

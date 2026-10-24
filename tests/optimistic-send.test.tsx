@@ -55,7 +55,7 @@ describe('optimistic send', () => {
     pending[0].settle(receipt('m1', A));
     await vi.waitFor(() => expect(sending()).toHaveLength(0));
     expect([...mount.querySelectorAll('.msg.out')].some((m) => m.textContent?.includes('hello now'))).toBe(true);
-    await vi.waitFor(() => expect($('[data-send-price]')?.textContent).toBe('paid 2.25 sats'));
+    await vi.waitFor(() => expect($('[data-send-price]')?.textContent).toBe(''));
   });
 
   it('gives the text back when nothing was paid', async () => {
