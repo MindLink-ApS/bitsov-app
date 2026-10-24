@@ -118,7 +118,7 @@ it.each(['not-now', 'Escape', 'scrim', 'cancel', 'close'])('a notification click
 it('quietly falls back on denied permission without asking repeatedly', async () => {
   native.isPermissionGranted.mockResolvedValue(false); native.requestPermission.mockResolvedValue('denied');
   const n = setup(); n.update(['a', 'b']); await flush(); n.update(['a', 'b', 'c']); await flush();
-  expect(native.requestPermission).toHaveBeenCalledOnce();
+  expect(native.requestPermission).not.toHaveBeenCalled();
   expect(native.sendNotification).not.toHaveBeenCalled();
 });
 it('rechecks focus after the permission await', async () => {
@@ -174,7 +174,7 @@ it.each(['en', 'da'] as const)('keeps the real %s M1a sheet usable when notifica
   dispose = () => { unmount(); mount.remove(); };
   await flush(); expect(native.requestPermission).not.toHaveBeenCalled();
   setApprovals([request]); await flush();
-  expect(native.requestPermission).toHaveBeenCalledOnce();
+  expect(native.requestPermission).not.toHaveBeenCalled();
   expect(native.sendNotification).not.toHaveBeenCalled();
   expect(mount.querySelector('[data-owner-approval-sheet="a"]')).not.toBeNull();
   expect(mount.querySelector('[data-owner-sheet-approve]')?.textContent).toBe(lang === 'en' ? 'Approve with Touch ID' : 'Godkend med Touch ID');

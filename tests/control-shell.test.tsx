@@ -2,6 +2,7 @@ import { waitFor } from './helpers/fake-clock';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
+import { setLanguagePref } from '../src/i18n';
 import type { PairingView } from '../src/onboarding/pairing';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import { setShowLegacyRoomsUi } from '../src/control/Shell';
@@ -120,6 +121,7 @@ describe('control center shell', () => {
     mount?.remove();
     vi.unstubAllGlobals();
     vi.useRealTimers();
+    setLanguagePref('en');
   });
 
   const start = () => {
@@ -418,7 +420,9 @@ describe('control center shell', () => {
     expect(calls.some((c) => c.cmd === 'relation_approve' || c.cmd === 'spend_request')).toBe(false);
 
     // Send in the composer is the Touch ID tap; the line above it only states the terms.
-    expect(mount.querySelector('[data-touch-approval] button')).toBeNull();
+    expect(mount.querySelector('[data-touch-approval] button')?.getAttribute('aria-expanded')).toBe('false');
+    const draft = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
+    draft.value = 'hello'; draft.dispatchEvent(new Event('input', { bubbles: true }));
     click('[data-send]');
     await waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
     const args = calls.find((c) => c.cmd === 'relation_approve')!.args!;
@@ -454,6 +458,8 @@ describe('control center shell', () => {
 
     await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     expect(mount.querySelector('[data-touch-approval]')).not.toBeNull();
+    const draft = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
+    draft.value = 'hello'; draft.dispatchEvent(new Event('input', { bubbles: true }));
     click('[data-send]');
     await waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
     expect(calls.find((c) => c.cmd === 'relation_approve')!.args).toMatchObject({ peer: A });
@@ -604,8 +610,8 @@ describe('control center shell', () => {
   }
   const unsentReason = () => mount.querySelector('[data-unsent-reason]')?.textContent ?? '';
 
-  it('Touch ID approve & send: sends once, after a fresh read names the envelope its own call returned', async () => {
-    const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>,
+  it.each([false, true])('Touch ID approve & send: receipt replaces sending (budget path %s)', async budgetPath => {
+    const st = { budgetPath, ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>,
       approve: () => { st.ids = { [A]: 'env-1', [B]: 'env-b' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
     const host = touchHost(st);
     await pressTouch();
@@ -614,7 +620,32 @@ describe('control center shell', () => {
     expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
     await vi.advanceTimersByTimeAsync(3500);
     expect(host.sent).toEqual(['hello Maya']);
+    expect(mount.querySelector('[data-sending]')).toBeNull();
+    expect(mount.querySelector('[data-delivery="sent"]')?.textContent).toBe('Sent');
   }, 15_000);
+
+  it.each(['en', 'da'] as const)('a delivery before the compose reply is preserved when the matching %s send settles', async lang => {
+    let finish!: () => void;
+    const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>,
+      sendGate: new Promise<void>(resolve => { finish = resolve; }),
+      approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; return { envelope_id: 'env-1' }; } };
+    const host = touchHost(st);
+    await pressTouch();
+    await waitFor(() => expect(host.sent).toEqual(['hello Maya']));
+    setLanguagePref(lang);
+    expect(mount.querySelector('[data-sending]')).not.toBeNull();
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'sent-1', kind: 0, sender: OWN, recipient: A,
+      timestamp: Date.now(), plaintext: 'hello Maya', payment_amount_msat: 2000 } });
+    host.emitLive({ type: 'delivery', message_id: 'sent-1', status: 'delivered', reason: null });
+    // Same-text echoes can belong to another device. The receipt establishes ownership.
+    expect(mount.querySelector('[data-sending]')).not.toBeNull();
+    expect(mount.querySelector('[data-sending-cap]')?.textContent).toContain('2');
+    finish();
+    await vi.advanceTimersByTimeAsync(3500);
+    expect(mount.querySelector('[data-sending]')).toBeNull();
+    expect(mount.querySelector('[data-message="sent-1"] [data-delivery="delivered"]')?.getAttribute('aria-label')).toBe(lang === 'en' ? 'Delivered' : 'Leveret');
+    expect(mount.querySelectorAll('[data-message="sent-1"]')).toHaveLength(1);
+  });
 
   it.each([
     ['no capability (null map)', null],
@@ -965,7 +996,7 @@ describe('control center shell', () => {
     // The spend bar only points to Settings → Node, where the reason is spelled out.
     await waitFor(() => expect(mount.querySelector('[data-device-settings-hint="off"]')?.textContent).toContain('Touch ID approvals are off.'));
     click('[data-device-settings-link]');
-    await waitFor(() => expect(mount.querySelector('[data-panel="node"] [data-device-off="seed_not_encrypted"]')).not.toBeNull());
+    await waitFor(() => expect(mount.querySelector('[data-device-off="seed_not_encrypted"]')).not.toBeNull());
     expect(mount.querySelector('[data-device-off]')?.textContent).toContain('Encrypt your recovery phrase to enable Touch ID approvals');
     expect(mount.querySelector('[data-device-register]')).toBeNull();
     expect(mount.querySelector('[data-touch-approval]')).toBeNull();
@@ -1185,7 +1216,8 @@ describe('control center shell', () => {
       const area = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
       area.value = 'kept draft'; area.dispatchEvent(new Event('input', { bubbles: true }));
       click('[data-touch-id-setup]');
-      await waitFor(() => expect(mount.querySelector('[data-panel="node"]')).not.toBeNull());
+      await waitFor(() => expect(mount.querySelector('[data-tab="devices"]')?.getAttribute('aria-selected')).toBe('true'));
+      expect(mount.querySelector('[data-device-register]')).not.toBeNull();
       expect(mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('kept draft');
       expect(calls.some((c) => c.cmd === 'message_send' || c.cmd === 'device_key_register')).toBe(false);
       click('[data-spend-cancel-visible]');
@@ -1260,7 +1292,7 @@ describe('control center shell', () => {
     await waitFor(() => expect(mount.querySelector('[data-device-settings-hint="pending"]')).not.toBeNull());
     expect(mount.querySelector('[data-spend] [data-device-owner-action]')).toBeNull();
     click('[data-device-settings-link]');
-    await waitFor(() => expect(mount.querySelector('[data-panel="node"] [data-device-owner-action]')?.textContent).toBe(cmd));
+    await waitFor(() => expect(mount.querySelector('[data-device-owner-action]')?.textContent).toBe(cmd));
     expect(mount.querySelector('[data-device-fingerprint]')?.textContent).toBe('3F9A-12C4');
     click('[data-device-cancel]');
     await waitFor(() => expect(calls.some((c) => c.cmd === 'device_key_cancel')).toBe(true));

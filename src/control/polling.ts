@@ -4,7 +4,7 @@ import type { Source } from './source';
 // Only reads used by background refreshes. Money actions retain their original
 // dispatch path and are never queued, coalesced or automatically retried here.
 const reads = new Set<keyof Source>([
-  'nodeOverview', 'peers', 'rooms', 'roomMembers', 'messages', 'roomThread',
+  'messageDelivery', 'nodeOverview', 'peers', 'rooms', 'roomMembers', 'messages', 'roomThread',
   'wallet', 'priceQuote', 'spendStatus', 'budgetStatus', 'deviceKeyStatus',
   'energy', 'membrane', 'fundState', 'invoiceStatus', 'filePrice', 'roomQuote', 'callQuote',
 ]);

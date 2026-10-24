@@ -1,5 +1,5 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { isPermissionGranted, onAction, registerActionTypes, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
+import { isPermissionGranted, onAction, registerActionTypes, sendNotification } from '@tauri-apps/plugin-notification';
 import { t } from '../i18n';
 import { safeApprovalText } from './ownerApproval';
 
@@ -11,7 +11,6 @@ export function createApprovalNotifications(review: (id: string) => void) {
   const requests = new Map<number, string>();
   let pending = new Set<string>();
   let disposed = false;
-  let asked = false;
   let queue = Promise.resolve();
   const live = (id: string) => !disposed && pending.has(id);
   const ready = window.label === 'main' ? onAction(event => {
@@ -30,11 +29,8 @@ export function createApprovalNotifications(review: (id: string) => void) {
     try {
       if (!live(id) || await focusedOnArrival) return;
       if (!await ready || !live(id)) return;
-      let permitted = await isPermissionGranted();
-      if (!permitted && !asked) {
-        asked = true;
-        permitted = await requestPermission() === 'granted';
-      }
+      // Permission is requested only by the visible notification settings explanation.
+      const permitted = await isPermissionGranted();
       if (!permitted || !live(id)) return;
       // The locked macOS backend only waits for body clicks when an action exists.
       await registerActionTypes([{ id: 'bitsov-owner-approval', actions: [{ id: 'review', title: safeApprovalText(t('ownerApprovalReview')) }] }]);

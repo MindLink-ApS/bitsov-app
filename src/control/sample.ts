@@ -1036,6 +1036,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     wallet: () => ok(WALLET),
     starterCurrent: () => ok({ state: 'not_requested', hub_configured: false }),
     starterRequest: () => Promise.reject(new Error(tr('caStarterRequestsNeedAPairedSignetNode'))),
+    messageDelivery: async () => null,
     spendStatus: () => {
       settleSpend();
       if (spend.state === 'pending' && ++spendPolls >= GRANT_AFTER_POLLS) {
