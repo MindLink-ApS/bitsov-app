@@ -407,10 +407,13 @@ export function ControlCenter(props: Props) {
     let newest = cutoff ?? -Infinity;
     const read = (async () => {
       let before: number | undefined;
+      let pages = 0;
       while (phoneShell() && live()) {
         const page = await source.messages(id, before);
+        pages += 1;
         if (before === undefined) newest = Math.max(newest, ...page.map(m => m.timestamp));
         if (page.some(m => isCallKind(m.kind))) return true;
+        if (pages >= 3) return false;
         const oldest = Math.min(...page.map(m => m.timestamp));
         if (!page.length || !Number.isFinite(oldest) || (cutoff !== undefined && oldest <= cutoff) || (before !== undefined && oldest >= before)) return false;
         before = oldest;
@@ -1908,6 +1911,18 @@ export function ControlCenter(props: Props) {
     void loadWallet();
   };
 
+  const phoneShareReasonId = createUniqueId();
+  const phoneAddSatsReasonId = createUniqueId();
+  const phoneWalletReady = () => wallet() !== null && !errors.wallet;
+  const phoneCanShare = () => overview()?.capabilities?.includes('front_door_v1') === true;
+  const phoneShareReason = () => !overview() ? tr('caWaitingForYourNodeSCapabilities')
+    : !phoneCanShare() ? tr('caProfileCardsAreNotAvailableOnThisNodeYet')
+    : tr('caOpenYourProfileToCreateOrShareYourCard');
+  const phoneCanFund = () => !!overview()?.lightning_available && phoneWalletReady() && !moneyBlocked();
+  const phoneFundReason = () => moneyBlocked() ? tr('caYourNodeSWalletIsNotReadyYet')
+    : !overview() || !phoneWalletReady() ? tr('caWaitingForYourNodeSWallet')
+    : !overview()!.lightning_available ? tr('caReceivingSatsIsNotAvailableOnThisNodeYet')
+    : tr('caOpenYourWalletToReceiveBitcoin');
   const openPhoneSettings = (page: ReturnType<typeof tab>) => { if (phoneGuard.check() || walletBusy()) return; setTab(page); setContextOpen(true); };
   const selectPhoneTab = (next: PhoneTab) => {
     if (phoneGuard.check() || walletBusy() || pairingBlockingActions() > 0) return;
@@ -2203,7 +2218,9 @@ export function ControlCenter(props: Props) {
         <Show when={phoneTab() === 'you'}>
           <section class="phone-page" data-phone-you inert={contextOpen()} aria-label={tr('uiYou')}>
             <h1>{tr('uiYou')}</h1>
-            <button class="primary" data-phone-share onClick={() => openPhoneSettings('frontdoor')}>{tr('phoneShare')}</button>
+            <p class="hint" id={phoneShareReasonId}>{phoneShareReason()}</p>
+            <button class="primary" data-phone-share disabled={!phoneCanShare()} aria-describedby={phoneShareReasonId}
+              onClick={() => openPhoneSettings('frontdoor')}>{tr('phoneShare')}</button>
             <button class="soft" data-phone-settings onClick={() => openPhoneSettings('body')}>{tr('uiProfileAndSettings')}</button>
             <button class="soft" data-phone-devices onClick={() => openPhoneSettings('devices')}>{tr('phoneAddDevice')}</button>
             <Show when={approvalsWaiting() > 0}><button class="soft" onClick={() => openPhoneSettings('node')}>{tr('uiApprovalsWaiting')} ({approvalsWaiting()})</button></Show>
@@ -2423,6 +2440,7 @@ export function ControlCenter(props: Props) {
             onTab={setWalletTab}
             onClose={closeWallet}
             embedded={phoneShell()}
+            phoneAddSatsHint={phoneShell() ? { id: phoneAddSatsReasonId, reason: phoneFundReason(), disabled: !phoneCanFund() } : undefined}
             wallet={wallet()}
             starter={{ nodeId: ownId(), network: overview()?.network, capabilities: overview()?.capabilities,
               api: { current: () => source.starterCurrent(ownId()), request: id => source.starterRequest(ownId(), id) } }}

@@ -1807,6 +1807,9 @@ html:is([data-platform='ios'], [data-platform='android']) .cc[data-phone-shell='
 }
 .cc[data-phone-shell='true'] [hidden] { display: none !important; }
 .phone-status { grid-area: status; max-height: 45vh; overflow-y: auto; min-width: 0; padding: var(--s-2) var(--s-4); border-bottom: 1px solid var(--line); background: var(--sunk); }
+@media (orientation: landscape) {
+  .phone-status { max-height: 30vh; }
+}
 .phone-status .node-pill { margin: 0; max-width: 100%; white-space: normal; }
 .phone-status .node-pill .what { white-space: normal; overflow-wrap: anywhere; }
 .phone-status .money-notice { margin: var(--s-1) 0 0; padding: 0; }

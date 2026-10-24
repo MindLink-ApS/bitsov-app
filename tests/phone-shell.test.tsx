@@ -14,17 +14,40 @@ const click = async (selector: string) => {
   expect(button, selector).not.toBeNull(); button!.click(); await tick();
 };
 const visible = (selector: string) => [...document.querySelectorAll(selector)].filter(el => !el.closest('[hidden], [inert], [aria-hidden="true"]'));
-afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.restoreAllMocks(); vi.unstubAllGlobals(); setLanguagePref('en'); });
+afterEach(() => { dispose?.(); document.body.innerHTML = ''; FakePc.made = []; vi.restoreAllMocks(); vi.unstubAllGlobals(); setLanguagePref('en'); });
+class FakePc {
+  static made: FakePc[] = [];
+  iceGatheringState = 'complete';
+  connectionState = 'new';
+  iceConnectionState = 'new';
+  onconnectionstatechange: (() => void) | null = null;
+  oniceconnectionstatechange: (() => void) | null = null;
+  localDescription: { type: string; sdp: string } | null = null;
+  async createOffer() { return { type: 'offer', sdp: 'v=0 offer' }; }
+  async createAnswer() { return { type: 'answer', sdp: 'v=0 answer' }; }
+  async setLocalDescription(d: { type: string; sdp: string }) { this.localDescription = d; }
+  async setRemoteDescription() {}
+  async addIceCandidate() {}
+  addTrack() { return { replaceTrack: async () => {} }; }
+  addEventListener() {}
+  removeEventListener() {}
+  close() {}
+  connect() { this.connectionState = 'connected'; this.onconnectionstatechange?.(); }
+  constructor() { FakePc.made.push(this); }
+}
+
 async function mount({ platform = 'iPhone', narrow = true, history = false, oldHistory = false, live = true, offline = false, repair = false, peersError = false } = {}) {
   vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(platform);
   vi.stubGlobal('__TAURI_INTERNALS__', {});
+  vi.stubGlobal('RTCPeerConnection', FakePc);
+  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => ({ getTracks: () => [], getAudioTracks: () => [], getVideoTracks: () => [] }) } });
   vi.spyOn(window, 'matchMedia').mockImplementation(query => ({ matches: narrow, media: query, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList);
   vi.spyOn(Element.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList);
-  const source = sampleSource();
+  const source = sampleSource({ firstLiveMs: 1e9 });
   let emit: (event: LiveEvent) => void = () => {};
   source.onLive = async handler => { emit = handler; return () => {}; };
   const overview = source.nodeOverview;
-  source.nodeOverview = async () => { const value = await overview(); return { ...value, capabilities: [...(value.capabilities ?? []), 'room_binding_v1', 'starter_channel_request_v1'], network: 'signet' }; };
+  source.nodeOverview = async () => { const value = await overview(); return { ...value, capabilities: [...(value.capabilities ?? []), 'front_door_v1', 'room_binding_v1', 'starter_channel_request_v1'], network: 'signet' }; };
   const [connected, setConnected] = createSignal(live);
   const reconnect = vi.fn();
   if (peersError) source.peers = async () => { throw new Error('Contacts unavailable'); };
@@ -47,6 +70,41 @@ it.each(['iPhone', 'Android'])('starts %s on Chats, pushes a conversation and re
   expect(visible('[data-phone-list]')).toHaveLength(1);
   expect(visible('[data-composer]')).toHaveLength(0);
 });
+it('returns to the live call from Wallet when the on-call pill is tapped', async () => {
+  const receipt = { message_id: 'm1', kind: 401, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: 0 };
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone');
+  vi.stubGlobal('__TAURI_INTERNALS__', {});
+  vi.stubGlobal('RTCPeerConnection', FakePc);
+  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => ({ getTracks: () => [], getAudioTracks: () => [], getVideoTracks: () => [] }) } });
+  vi.spyOn(window, 'matchMedia').mockImplementation(query => ({ matches: true, media: query, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList);
+  vi.spyOn(Element.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList);
+  const source = sampleSource();
+  const pairing = await source.pairingStatus();
+  source.pairingStatus = async () => ({ ...pairing, scopes: [...pairing.scopes, 'spend'] });
+  source.spendStatus = async () => ({ state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 });
+  const signal = vi.spyOn(source, 'callSignal').mockResolvedValue(receipt);
+  let emit: (event: LiveEvent) => void = () => {};
+  source.onLive = async handler => { emit = handler; return () => {}; };
+  dispose = render(() => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={null} />, document.body);
+  await tick();
+  const peer = (await source.peers())[0].node_id;
+  await click('[data-phone-list] [data-track^="peer:"]');
+  emit({ type: 'message', room_id: null, message: {
+    id: 'phone-pill-offer', kind: 400, sender: peer, recipient: SAMPLE_OWN_ID,
+    timestamp: Date.now(), payment_amount_msat: 10_000,
+    plaintext: JSON.stringify({ v: 1, call_id: '0123456789abcdef0123456789abcdef', media: 'audio', sdp: 'v=0 offer' }),
+  } });
+  await vi.waitFor(() => expect(document.querySelector('[data-call-panel="incoming"]')).not.toBeNull());
+  await click('[data-call-accept]');
+  await vi.waitFor(() => expect(signal).toHaveBeenCalled());
+  await vi.waitFor(() => expect(document.querySelector('[data-on-call], [data-call-panel="connecting"], [data-call-panel="live"]')).not.toBeNull());
+  expect(document.querySelector('[data-phone-status]')?.hasAttribute('inert')).toBe(false);
+  await click('[data-phone-tab="wallet"]');
+  expect(visible('[data-wallet-page]')).toHaveLength(1);
+  await click('[data-on-call]');
+  expect(visible('[data-composer]')).toHaveLength(1);
+});
+
 it('routes Wallet and You, retaining funding, sharing, settings, devices and every rail destination', async () => {
   await mount();
   for (const selector of ['[data-track="discover"]', '[data-track="porch"]', '[data-assistants]', '[data-room-new]', '[data-track="new"]']) expect(visible(selector).length, selector).toBeGreaterThan(0);

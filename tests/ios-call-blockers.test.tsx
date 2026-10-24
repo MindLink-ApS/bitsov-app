@@ -38,6 +38,49 @@ it('blocks Back for an incoming call delivered by the real source event path wit
   expect(signal).not.toHaveBeenCalled();
 });
 
+it('keeps phone tabs and the status header usable during an active call but still blocks edge Back', async () => {
+  const source = sampleSource();
+  let emit: Parameters<Source['onLive']>[0] | undefined;
+  const listen = source.onLive;
+  source.onLive = handler => { emit = handler; return listen(handler); };
+  const peer = (await source.peers())[0].node_id;
+  await mount(source);
+  await vi.waitFor(() => expect(emit).toBeDefined());
+  emit!({ type: 'message', room_id: null, message: {
+    id: 'ios-incoming-offer-tabs', kind: 400, sender: peer, recipient: SAMPLE_OWN_ID,
+    timestamp: Date.now(), payment_amount_msat: 10_000,
+    plaintext: JSON.stringify({ v: 1, call_id: '0123456789abcdef0123456789abcdef', media: 'audio', sdp: 'v=0 offer' }),
+  } });
+  await vi.waitFor(() => expect(document.querySelector('.cc')?.getAttribute('data-swipe-call')).toBe('true'));
+  expect(visibleBackDestination()).toBeNull();
+  expect(document.querySelector('[data-phone-tabs]')?.hasAttribute('inert')).toBe(false);
+  expect(document.querySelector('[data-phone-status]')?.hasAttribute('inert')).toBe(false);
+  document.querySelector<HTMLButtonElement>('[data-phone-tab="wallet"]')!.click();
+  await vi.waitFor(() => expect(document.querySelector('[data-wallet-page]')).not.toBeNull());
+});
+
+it.each(['data-swipe-money', 'data-approval'])('still blocks phone tabs mid-call when %s is visible', async (attribute) => {
+  const source = sampleSource();
+  let emit: Parameters<Source['onLive']>[0] | undefined;
+  const listen = source.onLive;
+  source.onLive = handler => { emit = handler; return listen(handler); };
+  const peer = (await source.peers())[0].node_id;
+  await mount(source);
+  await vi.waitFor(() => expect(emit).toBeDefined());
+  emit!({ type: 'message', room_id: null, message: {
+    id: 'ios-incoming-offer-blocked', kind: 400, sender: peer, recipient: SAMPLE_OWN_ID,
+    timestamp: Date.now(), payment_amount_msat: 10_000,
+    plaintext: JSON.stringify({ v: 1, call_id: 'fedcba9876543210fedcba9876543210', media: 'audio', sdp: 'v=0 offer' }),
+  } });
+  await vi.waitFor(() => expect(document.querySelector('.cc')?.getAttribute('data-swipe-call')).toBe('true'));
+  const sheet = document.createElement('div');
+  sheet.setAttribute(attribute, attribute === 'data-approval' ? 'pending' : 'true');
+  document.body.append(sheet);
+  await vi.waitFor(() => expect(document.querySelector('[data-phone-tabs]')?.hasAttribute('inert')).toBe(true));
+  document.querySelector<HTMLButtonElement>('[data-phone-tab="you"]')!.click();
+  expect(document.querySelector('[data-phone-you]')).toBeNull();
+});
+
 it('blocks Back for a pending spending approval loaded from the node on startup', async () => {
   const source = sampleSource();
   source.spendStatus = async () => ({ state: 'pending', basis: null, open_until_ms: null, window_ms: 600_000,
