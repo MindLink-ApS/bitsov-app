@@ -1917,10 +1917,22 @@ html:is([data-platform='ios'], [data-platform='android']):not([data-keyboard-ope
 /* Offline and unresolved-call repair render in the status row. 45vh hid
    Retry, and .call-repairs added a second 35vh scroller inside it. Leave
    one row of the list (72px) and the tab bar on screen; scroll only the
-   leftover at large type. */
+   leftover at large type. The cap uses the keyboard-visible height: on iOS
+   100dvh stays the full layout viewport while the shell shrinks to
+   --visible-height, and this pane would otherwise take the whole grid. */
 .phone-status .call-repairs { max-height: none; overflow: visible; }
 .phone-status:has([data-node-offline], [data-call-repairs]) {
-  max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 44px - var(--s-1) - max(var(--s-1), env(safe-area-inset-bottom, 0px)) - 72px);
+  max-height: calc(var(--visible-height, 100dvh) - env(safe-area-inset-top, 0px) - 44px - var(--s-1) - max(var(--s-1), env(safe-area-inset-bottom, 0px)) - 72px);
+}
+/* Composer focused: the tab bar is hidden and the shell is only the visible
+   height. Keep Back (44px), the thread header (56px), one message (48px)
+   and the wrapped phone composer (172px: 16px padding, 108px signal bar,
+   4px gap, 44px price row). The shell's own padding is --safe-area-*,
+   which iOS sets to 0 on the bottom while the keyboard is up. A short
+   landscape viewport clamps the pane instead of covering the field.
+   Large type still scrolls this row. */
+html[data-keyboard-open='true'] .phone-status:has([data-node-offline], [data-call-repairs]) {
+  max-height: max(0px, calc(var(--visible-height, 100dvh) - var(--safe-area-top, env(safe-area-inset-top, 0px)) - var(--safe-area-bottom, env(safe-area-inset-bottom, 0px)) - 44px - 56px - 48px - 172px));
 }
 .phone-status .node-offline { padding: var(--s-3) 0; gap: var(--s-2); }
 .phone-status .node-offline .box-illustration { width: 72px; }
