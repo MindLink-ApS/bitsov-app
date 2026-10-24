@@ -1179,7 +1179,7 @@ describe('call engine', () => {
     expect(last()).toMatchObject({ phase: 'ended', reason: 'declined' });
   });
 
-  it('ignores its own echo, other calls, junk, and a second caller while busy', async () => {
+  it('keeps its current caller when echoes, other hangups, junk and a second caller arrive', async () => {
     const { e, last } = engine();
     await e.receive(msg(400, { media: 'audio', sdp: 'x' }, OWN), OWN);
     expect(last()).toBeUndefined();
@@ -1915,6 +1915,7 @@ describe('calls in the shell', () => {
     mount?.remove();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
   const $ = <T extends Element = HTMLElement>(sel: string) => mount.querySelector<T>(sel);
   // Call and Video call ask first; Ring places the call.
@@ -2585,6 +2586,148 @@ describe('calls in the shell', () => {
     else expect(note?.textContent).toMatch(/calls may not connect across networks/i);
     expect(mount.querySelectorAll('[data-call-network-note]').length).toBe(stun ? 0 : 1);
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
+  });
+
+  it.each(['answer', 'decline', 'timeout', 'cancel'] as const)('loops the bundled ring and stops on %s', async outcome => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
+    const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    const host = stubHost({ messages_list: () => [] });
+    await openShell();
+    if (outcome === 'timeout') vi.useFakeTimers();
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { media: 'audio', sdp: 'offer' }) });
+    await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
+    const audio = play.mock.contexts.find(a => a instanceof HTMLAudioElement && a.loop) as HTMLAudioElement;
+    expect(audio).toBeDefined();
+    expect(audio.src).toMatch(/incoming-ring\.wav/);
+    expect($('[data-incoming-announcement]')?.textContent).toContain('Maya');
+    if (outcome === 'answer') $<HTMLButtonElement>('[data-call-accept]')!.click();
+    if (outcome === 'decline') $<HTMLButtonElement>('[data-call-decline]')!.click();
+    if (outcome === 'cancel') host.emitLive({ type: 'message', room_id: null, message: msg(403, { reason: 'hangup' }) });
+    if (outcome === 'timeout') {
+      await vi.advanceTimersByTimeAsync(RING_MS + 1);
+      vi.useRealTimers();
+    }
+    await vi.waitFor(() => expect(pause.mock.contexts).toContain(audio));
+    expect(audio.currentTime).toBe(0);
+    if (outcome === 'timeout' || outcome === 'cancel') expect($('[data-missed-call]')).not.toBeNull();
+    else expect($('[data-missed-call]')).toBeNull();
+  });
+
+  it('keeps a second priced card visible with a soft tone and working decline while the first call stays live', async () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
+    const host = payHost(); await liveCall();
+    const pc = FakePc.made[0];
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'offer' }) });
+    await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-panel="incoming"]')).not.toBeNull());
+    const accept = $<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!;
+    expect(accept.disabled).toBe(true);
+    await vi.waitFor(() => expect(accept.textContent).toContain('6 sats'));
+    const audio = play.mock.contexts.find(a => a instanceof HTMLAudioElement && a.src.includes('incoming-ring')) as HTMLAudioElement;
+    expect(audio.loop).toBe(false); expect(audio.volume).toBeLessThan(0.5);
+    $<HTMLButtonElement>('[data-waiting-calls] [data-call-decline]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal').some(c => c.args?.kind === 403 && String(c.args.plaintext).includes('f'.repeat(32)))).toBe(true));
+    expect($('[data-call-panel="live"]')).not.toBeNull(); expect(pc.closed).toBe(false);
+    expect($('[data-missed-call]')).toBeNull();
+  });
+
+  it('allows answering the waiting caller after the first call ends, with the same quoted price', async () => {
+    const host = payHost(); await liveCall();
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'second-offer' }) });
+    await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-accept]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-panel="live"] [data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!.disabled).toBe(false));
+    await vi.waitFor(() => expect(text('[data-waiting-calls] [data-call-accept]')).toContain('6 sats'));
+    $<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal').some(c => c.args?.kind === 401 && String(c.args.plaintext).includes('f'.repeat(32)))).toBe(true));
+    expect($('[data-waiting-calls] [data-call-panel]')).toBeNull();
+    expect($('[data-missed-call]')).toBeNull();
+    expect(FakePc.made[1].remote?.sdp).toBe('second-offer');
+    FakePc.made[1].connect();
+    expect($('[data-call-panel="live"]')).not.toBeNull();
+  });
+
+  it('marks a missed call read when its open thread regains focus', async () => {
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    const host = stubHost({ messages_list: () => [] }); await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { media: 'audio', sdp: 'offer' }) });
+    host.emitLive({ type: 'message', room_id: null, message: msg(403, { reason: 'hangup' }) });
+    await vi.waitFor(() => expect($(`[data-track="peer:${A}"] .badge`)?.textContent).toBe('1'));
+    window.dispatchEvent(new Event('focus'));
+    expect($(`[data-track="peer:${A}"] .badge`)).toBeNull();
+    expect($('[data-missed-call]')).not.toBeNull();
+  });
+
+  it.each(['cancel', 'timeout'] as const)('keeps a missed waiting call visible after %s without ending the live call', async outcome => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
+    const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    const host = payHost(); await liveCall();
+    if (outcome === 'timeout') vi.useFakeTimers();
+    const id = 'f'.repeat(32);
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { call_id: id, media: 'audio', sdp: 'second' }) });
+    await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-panel="incoming"]')).not.toBeNull());
+    const tone = play.mock.contexts.find(a => a instanceof HTMLAudioElement && a.src.includes('incoming-ring'));
+    if (outcome === 'timeout') { await vi.advanceTimersByTimeAsync(RING_MS + 1); vi.useRealTimers(); }
+    else host.emitLive({ type: 'message', room_id: null, message: msg(403, { call_id: id, reason: 'hangup' }) });
+    expect(pause.mock.contexts).toContain(tone);
+    expect($('[data-waiting-calls] [data-call-panel="ended"]')).not.toBeNull();
+    expect($('[data-missed-call]')).not.toBeNull();
+    expect($('[data-call-panel="live"]')).not.toBeNull();
+    expect(FakePc.made[0].closed).toBe(false);
+  });
+
+  it('keeps alert lifetimes separate when two callers use the same call id, and stops on unmount', async () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
+    const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    const host = stubHost(); await openShell();
+    const offer = msg(400, { media: 'audio', sdp: 'first' });
+    host.emitLive({ type: 'message', room_id: null, message: offer });
+    host.emitLive({ type: 'message', room_id: null, message: offer });
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { media: 'audio', sdp: 'second' }, 'b'.repeat(64)) });
+    const tones = play.mock.contexts.filter(a => a instanceof HTMLAudioElement && a.src.includes('incoming-ring')) as HTMLAudioElement[];
+    expect(tones).toHaveLength(2);
+    expect(tones.map(a => a.loop)).toEqual([true, false]);
+    host.emitLive({ type: 'message', room_id: null, message: msg(403, { reason: 'hangup' }) });
+    expect(pause.mock.contexts).toContain(tones[0]);
+    expect(pause.mock.contexts).not.toContain(tones[1]);
+    expect($('[data-waiting-calls] [data-call-panel="incoming"]')).not.toBeNull();
+    dispose?.(); dispose = undefined;
+    expect(pause.mock.contexts).toContain(tones[1]);
+  });
+
+  it('restores a missed call in its contact thread after reopening the app', async () => {
+    const host = stubHost({ messages_list: () => [] }); await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { media: 'video', sdp: 'offer' }) });
+    host.emitLive({ type: 'message', room_id: null, message: msg(403, { reason: 'hangup' }) });
+    expect($('[data-missed-call]')).not.toBeNull();
+    dispose?.(); dispose = undefined; mount.remove();
+    stubHost({ messages_list: () => [] }); await openShell();
+    expect($('[data-missed-call]')).not.toBeNull();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-back]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-back]')!.click();
+    expect($('[data-missed-call] [data-call-confirm="video"]')).not.toBeNull();
+    $<HTMLButtonElement>('[data-missed-call] [data-call-confirm-cancel]')!.click();
+    expect(document.activeElement).toBe($('[data-call-back]'));
+  });
+
+  it('keeps cancelled calls in the contact thread with time, unread badge and a priced call-back confirmation', async () => {
+    const host = stubHost({ messages_list: () => [] }); await openShell();
+    $<HTMLButtonElement>('[data-track="discover"]')!.click();
+    const offer = msg(400, { media: 'audio', sdp: 'offer' });
+    host.emitLive({ type: 'message', room_id: null, message: offer });
+    host.emitLive({ type: 'message', room_id: null, message: msg(403, { reason: 'hangup' }) });
+    await vi.waitFor(() => expect($(`[data-track="peer:${A}"] .badge`)?.textContent).toBe('1'));
+    $<HTMLButtonElement>(`[data-track="peer:${A}"]`)!.click();
+    await vi.waitFor(() => expect($('[data-missed-call]')).not.toBeNull());
+    expect(text('[data-missed-call]')).toContain('Missed call');
+    expect($('[data-missed-call] time')?.getAttribute('datetime')).toBeTruthy();
+    expect($(`[data-track="peer:${A}"] .badge`)).toBeNull();
+    host.emitLive({ type: 'message', room_id: null, message: offer });
+    expect(mount.querySelectorAll('[data-missed-call]')).toHaveLength(1);
+    expect($('[data-call-panel="incoming"]')).toBeNull();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-back]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-back]')!.click();
+    await vi.waitFor(() => expect($('[data-missed-call] [data-call-confirm]')).not.toBeNull());
+    expect(host.used('call_signal')).toHaveLength(0);
   });
 
   it('rings on a live offer with the answer price, and never adds call signals to the thread', async () => {
