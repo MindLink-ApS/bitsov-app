@@ -1,9 +1,17 @@
 import { afterEach, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { render } from 'solid-js/web';
 import { ControlCenter } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID } from '../src/control/sample';
 import type { Source } from '../src/control/source';
 import { visibleBackDestination } from '../src/ios/edgeBack';
+
+const css = readFileSync(join(__dirname, '../src/styles.css'), 'utf8');
+const style = document.createElement('style');
+style.textContent = css.replace(/env\(safe-area-inset-(top|right|bottom|left)(?:,\s*0px)?\)/g,
+  (_, edge: string) => ({ top: '59px', right: '47px', bottom: '34px', left: '47px' })[edge]!);
+document.head.append(style);
 
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -79,6 +87,19 @@ it.each(['data-swipe-money', 'data-approval'])('still blocks phone tabs mid-call
   await vi.waitFor(() => expect(document.querySelector('[data-phone-tabs]')?.hasAttribute('inert')).toBe(true));
   document.querySelector<HTMLButtonElement>('[data-phone-tab="you"]')!.click();
   expect(document.querySelector('[data-phone-you]')).toBeNull();
+});
+
+it('lifts the call panel above the phone tab bar on iOS', () => {
+  document.documentElement.dataset.platform = 'ios';
+  document.documentElement.style.setProperty('--s-1', '4px');
+  document.documentElement.style.setProperty('--s-6', '24px');
+  document.body.innerHTML = '<main class="cc" data-phone-shell="true"></main><aside class="call-panel" data-call-panel="incoming"></aside>';
+  const root = getComputedStyle(document.documentElement);
+  const panel = getComputedStyle(document.querySelector('.call-panel')!);
+  const tabBar = root.getPropertyValue('--phone-tab-bar-h').trim();
+  expect(tabBar).toBe('calc(4px + 44px + max(4px, 34px))');
+  expect(panel.bottom).toContain('max(24px, 34px)');
+  expect(panel.bottom).toContain(tabBar);
 });
 
 it('blocks Back for a pending spending approval loaded from the node on startup', async () => {

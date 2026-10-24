@@ -105,6 +105,27 @@ it('returns to the live call from Wallet when the on-call pill is tapped', async
   expect(visible('[data-composer]')).toHaveLength(1);
 });
 
+it('shows disabled hints for Share and Add sats when the node cannot offer them yet', async () => {
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone');
+  vi.stubGlobal('__TAURI_INTERNALS__', {});
+  vi.spyOn(window, 'matchMedia').mockImplementation(query => ({ matches: true, media: query, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList);
+  vi.spyOn(Element.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList);
+  const source = sampleSource({ firstLiveMs: 1e9 });
+  const overview = source.nodeOverview;
+  source.nodeOverview = async () => {
+    const value = await overview();
+    return { ...value, capabilities: (value.capabilities ?? []).filter(c => c !== 'front_door_v1'), money_ready: false };
+  };
+  dispose = render(() => <ControlCenter source={source} active ready live error={null} ownId={SAMPLE_OWN_ID} firstRun={null} />, document.body);
+  await tick();
+  await click('[data-phone-tab="you"]');
+  expect(document.querySelector('[data-phone-share]')?.hasAttribute('disabled')).toBe(true);
+  expect(document.querySelector('[data-phone-you] .hint')?.textContent).toBe('Profile cards are not available on this node yet.');
+  await click('[data-phone-tab="wallet"]');
+  expect(document.querySelector('[data-phone-add-sats]')?.hasAttribute('disabled')).toBe(true);
+  expect(document.querySelector('[data-wallet-page] .hint')?.textContent).toBe('Your node’s wallet is not ready yet.');
+});
+
 it('routes Wallet and You, retaining funding, sharing, settings, devices and every rail destination', async () => {
   await mount();
   for (const selector of ['[data-track="discover"]', '[data-track="porch"]', '[data-assistants]', '[data-room-new]', '[data-track="new"]']) expect(visible(selector).length, selector).toBeGreaterThan(0);

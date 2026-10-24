@@ -57,3 +57,17 @@ it('still finds a call on the first page and shows the Calls tab', async () => {
   await vi.waitFor(() => expect(document.querySelector('[data-phone-tab="calls"]')).not.toBeNull());
   expect(vi.mocked(source.messages).mock.calls.filter(([id]) => id === peer).length).toBe(1);
 });
+
+it('still finds a call on the third history page and shows the Calls tab', async () => {
+  const peer = (await sampleSource().peers())[0].node_id;
+  const pages = new Map<string, number>();
+  const source = await mountMessages(async (id, before) => {
+    if (id !== peer) return [];
+    const page = pages.get(id) ?? 0;
+    pages.set(id, page + 1);
+    if (page < 2) return pageMessages(id, page);
+    return [{ id: 'deep-call', sender: peer, recipient: SAMPLE_OWN_ID, kind: 400, plaintext: '{}', timestamp: 1, payment_amount_msat: 1000 }];
+  });
+  await vi.waitFor(() => expect(document.querySelector('[data-phone-tab="calls"]')).not.toBeNull());
+  expect(vi.mocked(source.messages).mock.calls.filter(([id]) => id === peer).length).toBe(3);
+});
