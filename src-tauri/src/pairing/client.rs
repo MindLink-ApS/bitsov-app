@@ -4,7 +4,7 @@
 //! The node declares `deny_unknown_fields` on every body, so each body carries
 //! exactly the documented fields.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -20,6 +20,61 @@ const TOKEN_CHALLENGE_PREFIX: &str = "bitsov-pair-token-v1:";
 
 /// Challenge width (`CHALLENGE_LEN`).
 const CHALLENGE_LEN: usize = 32;
+
+/// Do not send the same `(client, node, timestamp)` twice within this window.
+/// The node's pairing challenge accepts timestamps within ±30 s; 61 s keeps
+/// replay safety while allowing a clock rollback to pick `now` immediately.
+const TIMESTAMP_REUSE_WINDOW_SECS: u64 = 61;
+
+/// Timestamps already sent on the local exchange path for one client+node pair.
+#[derive(Default)]
+struct RecentLocalTimestamps {
+    sent: HashSet<u64>,
+}
+
+impl RecentLocalTimestamps {
+    fn prune(&mut self, now_secs: u64) {
+        let cutoff = now_secs.saturating_sub(TIMESTAMP_REUSE_WINDOW_SECS);
+        self.sent.retain(|t| *t > cutoff);
+    }
+
+    /// Returns `Some(timestamp)` when `now_secs` is free to use; `None` when it
+    /// was already sent inside the reuse window (caller should wait and retry).
+    fn try_acquire(&mut self, now_secs: u64) -> Option<u64> {
+        self.prune(now_secs);
+        if self.sent.contains(&now_secs) {
+            return None;
+        }
+        self.sent.insert(now_secs);
+        Some(now_secs)
+    }
+
+    /// Same collision rules as the async local-exchange loop, with an injectable
+    /// clock (`FnMut() -> Duration`). The closure is invoked again after each
+    /// collision (production sleeps; unit tests advance simulated time).
+    #[cfg(test)]
+    fn next_timestamp_with_clock<C>(&mut self, mut clock: C) -> u64
+    where
+        C: FnMut() -> Duration,
+    {
+        loop {
+            let now = clock();
+            if let Some(timestamp) = self.try_acquire(now.as_secs()) {
+                return timestamp;
+            }
+        }
+    }
+}
+
+fn duration_since_epoch(clock: SystemTime) -> Result<Duration, PairError> {
+    clock
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| PairError::Local("the device clock is before the Unix epoch".into()))
+}
+
+fn sleep_until_next_second(now: Duration) -> Duration {
+    Duration::from_secs(1) - Duration::from_nanos(now.subsec_nanos() as u64)
+}
 
 /// Loopback client for the pairing routes.
 #[derive(Clone)]
@@ -174,33 +229,32 @@ impl PairingClient {
         // Share across clones and reconstructed clients. Retain timestamps for
         // the process lifetime, even after an exchange fails or is cancelled.
         // The per-node/client guard stays held through POST /pair/token.
-        type History = HashMap<(String, String), Arc<tokio::sync::Mutex<Option<u64>>>>;
+        type History = HashMap<(String, String), Arc<tokio::sync::Mutex<RecentLocalTimestamps>>>;
         static HISTORY: OnceLock<tokio::sync::Mutex<History>> = OnceLock::new();
         let mut local_exchange = if local {
             let state = {
                 let mut history = HISTORY.get_or_init(Default::default).lock().await;
-                history.entry((self.base.clone(), client_id.to_owned())).or_default().clone()
+                history
+                    .entry((self.base.clone(), client_id.to_owned()))
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(RecentLocalTimestamps::default())))
+                    .clone()
             };
             Some(state.lock_owned().await)
         } else {
             None
         };
         let mut request = self.http.get(self.url(CHALLENGE)).query(&[("client_id", client_id)]);
-        if let Some(last) = local_exchange.as_mut() {
+        if let Some(recent) = local_exchange.as_mut() {
             // PR #379: Unix seconds, +/-30 s, Ed25519 over this exact UTF-8
             // domain + client id + timestamp. Reuse the paired client key.
             let timestamp = loop {
-                let now = SystemTime::now().duration_since(UNIX_EPOCH)
-                    .map_err(|_| PairError::Local("the device clock is before the Unix epoch".into()))?;
-                let timestamp = now.as_secs();
-                if last.is_none_or(|previous| timestamp > previous) {
-                    **last = Some(timestamp);
+                let now = duration_since_epoch(SystemTime::now())?;
+                if let Some(timestamp) = recent.try_acquire(now.as_secs()) {
                     break timestamp;
                 }
                 // Wait locally, without sending or retrying a request. Recheck
                 // the wall clock after waking, including after a clock rollback.
-                tokio::time::sleep(Duration::from_secs(1)
-                    - Duration::from_nanos(now.subsec_nanos() as u64)).await;
+                tokio::time::sleep(sleep_until_next_second(now)).await;
             };
             let message = format!("bitsov-pair-challenge-v1:{client_id}:{timestamp}");
             let mut authorization = reqwest::header::HeaderValue::from_str(
@@ -292,6 +346,56 @@ fn decode<T: for<'de> Deserialize<'de>>(
         step,
         detail: e.to_string(),
     })
+}
+
+#[cfg(test)]
+mod local_timestamp_tests {
+    use super::*;
+
+    #[test]
+    fn clock_rollback_does_not_stall_refresh() {
+        let mut recent = RecentLocalTimestamps::default();
+        let advanced = 1_700_000_300u64;
+        assert_eq!(recent.try_acquire(advanced), Some(advanced));
+        // Clock jumps back 300 s; must not wait for a timestamp strictly after `advanced`.
+        let rolled_back = advanced - 300;
+        let mut simulated = rolled_back;
+        let timestamp = recent.next_timestamp_with_clock(|| {
+            let now = Duration::from_secs(simulated);
+            simulated += 1;
+            now
+        });
+        assert_eq!(timestamp, rolled_back);
+    }
+
+    #[test]
+    fn timestamp_never_reused_within_window() {
+        let mut recent = RecentLocalTimestamps::default();
+        let t = 1_700_000_000u64;
+        assert_eq!(recent.try_acquire(t), Some(t));
+        assert_eq!(recent.try_acquire(t), None);
+        assert_eq!(recent.try_acquire(t + 1), Some(t + 1));
+        assert_eq!(recent.try_acquire(t + 1), None);
+    }
+
+    #[test]
+    fn window_entries_are_pruned() {
+        let mut recent = RecentLocalTimestamps::default();
+        let t = 1_700_000_000u64;
+        assert_eq!(recent.try_acquire(t), Some(t));
+        assert_eq!(recent.try_acquire(t), None);
+        let after_window = t + TIMESTAMP_REUSE_WINDOW_SECS + 1;
+        assert_eq!(recent.try_acquire(after_window), Some(after_window));
+        assert_eq!(recent.try_acquire(t), Some(t));
+    }
+
+    #[test]
+    fn forward_clock_unchanged() {
+        let mut recent = RecentLocalTimestamps::default();
+        for secs in [1_700_000_000u64, 1_700_000_001, 1_700_000_002] {
+            assert_eq!(recent.try_acquire(secs), Some(secs));
+        }
+    }
 }
 
 #[cfg(test)]
