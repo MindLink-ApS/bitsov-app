@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { setLanguagePref } from '../src/i18n';
 import { render } from 'solid-js/web';
 import { DeviceApprovals } from '../src/onboarding/DeviceApprovals';
 import { Onboarding } from '../src/onboarding/Onboarding';
@@ -7,7 +8,7 @@ import type { NodeStatus, PairingView } from '../src/onboarding/pairing';
 
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
-afterEach(() => { dispose?.(); dispose = undefined; mount?.remove(); });
+afterEach(() => { dispose?.(); dispose = undefined; mount?.remove(); setLanguagePref('en'); });
 const view = (state: DeviceView['state'], over: Partial<DeviceView> = {}): DeviceView =>
   ({ available: true, state, fingerprint: state === 'pending' ? 'fp-abcd' : null, owner_action: state === 'pending' ? 'konsensus device approve fp-abcd' : null, expires_at_ms: null, ...over });
 const show = (jsx: () => unknown) => { mount = document.createElement('div'); document.body.appendChild(mount); dispose = render(jsx as never, mount); return mount; };
@@ -64,25 +65,36 @@ describe('onboarding offers Touch ID approvals right after pairing', () => {
     expect(el.querySelector('[data-device-approvals]')).toBeNull();
   });
 
+  it.each(['en', 'da'] as const)('Not now leaves a visible %s way back to setup', lang => {
+    setLanguagePref(lang);
+    const el = onboarding(paired, ready);
+    el.querySelector<HTMLButtonElement>('[data-device-approvals-skip]')!.click();
+    const later = el.querySelector<HTMLButtonElement>('[data-device-approvals-later]');
+    expect(later).not.toBeNull();
+    expect(later!.closest('details')).toBeNull();
+    later!.click();
+    expect(el.querySelector('[data-device-register]')).not.toBeNull();
+  });
+
   it('is not offered before the app is paired', () => {
     const el = onboarding(starting, { ready: false, node_id: null, error: null });
     expect(el.querySelector('[data-device-approvals]')).toBeNull();
   });
 });
 
-describe('Settings → Node holds Touch ID approvals', () => {
+describe('Settings → Devices holds Touch ID approvals', () => {
   afterEach(() => { try { localStorage.removeItem('bitsov.sample_device'); } catch { /* none */ } });
   it('offers setup there, and registering moves it to the owner approval step', async () => {
     const { ControlCenter } = await import('../src/control/Shell');
     const { sampleSource, SAMPLE_OWN_ID } = await import('../src/control/sample');
     const source = sampleSource({ firstLiveMs: 1e9 });
     show(() => <ControlCenter source={source} remote active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />);
-    await vi.waitFor(() => expect(mount.querySelector('[data-tab="node"]')).not.toBeNull());
-    (mount.querySelector('[data-tab="node"]') as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-panel="node"] [data-device-approvals]')).not.toBeNull());
+    await vi.waitFor(() => expect(mount.querySelector('[data-tab="devices"]')).not.toBeNull());
+    (mount.querySelector('[data-tab="devices"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-device-approvals]')).not.toBeNull());
     // The sample device starts unregistered.
-    mount.querySelector<HTMLButtonElement>('[data-panel="node"] [data-device-register]')!.click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-panel="node"] [data-device-fingerprint]')?.textContent).toBe('3F9A-12C4-77B0-E51D'));
+    mount.querySelector<HTMLButtonElement>('[data-device-register]')!.click();
+    await vi.waitFor(() => expect(mount.querySelector('[data-device-fingerprint]')?.textContent).toBe('3F9A-12C4-77B0-E51D'));
   });
 });
 

@@ -75,6 +75,9 @@ describe('the receipt decides which echo is whose (message_id, never text)', () 
     await vi.waitFor(() => expect(sending()).toHaveLength(2));
     // "ok" typed on the owner's phone arrives first: the first bubble takes it (a guess).
     emit(echo('phone-1', A, 'ok'));
+    emit({ type: 'delivery', message_id: 'phone-1', status: 'delivered', reason: null });
+    expect(sending()).toHaveLength(2);
+    expect($('[data-delivery="delivered"]')).toBeNull();
     // Our first send's own echo: the first bubble already has a leg to A, so the second takes it.
     emit(echo('a-1', A, 'ok'));
     await settleTick();

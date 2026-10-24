@@ -1,4 +1,5 @@
 import { createMemo, createSignal, createUniqueId, For, onCleanup, onMount, Show } from 'solid-js';
+import { isMobilePlatform } from '../platform';
 import { t } from '../i18n';
 import { clock, day, satsWhole } from './format';
 import { ambiguousThousands, parseAmount } from './amountInput';
@@ -26,6 +27,7 @@ export function FirstSpendSheet(props: {
   lapse?: SpendLapse | null;
   dailyExpired?: boolean;
   onRetry?: () => void;
+  onSetupApprovals?: () => void;
   costLine: string;
   blockedReason: string | null;
   onPreset: (id: PresetId) => void;
@@ -122,6 +124,12 @@ export function FirstSpendSheet(props: {
           </Show>
         }>
           <p class="first-spend-starts-now">{daily() === null ? t('firstSpendStartsNowUnavailable') : t('firstSpendStartsNow', daily()!)}</p>
+        </Show>
+        <Show when={props.onSetupApprovals}>
+          <p class="hint">{t('approvalSetupReason')}</p>
+          <button type="button" class="link" data-approval-setup onClick={() => props.onSetupApprovals?.()}>
+            {t(isMobilePlatform() ? 'obSetupBiometrics' : 'obSetupTouchId')}
+          </button>
         </Show>
         <Show when={props.grant}>{grant => (
           <p class="hint" data-first-spend-grant>

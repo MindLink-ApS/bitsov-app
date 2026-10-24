@@ -1,6 +1,21 @@
 /** First migrated app surfaces. Values are display copy, never protocol tokens.
  * {0}, {1}, … insert values verbatim (especially money and recipients). */
 export const appEn = {
+  "notificationGranted": "Allowed in BitSov. macOS controls delivery and sound; if alerts are missing, check System Settings → Notifications → BitSov.",
+  "notificationApp": "BitSov",
+  "notificationSomeone": "Someone",
+  "notificationMessage": "{0} sent you a message",
+  "notificationCall": "{0} is calling you",
+  "notificationTitle": "Message and call notifications",
+  "notificationReason": "Allow notifications to hear incoming paid messages and calls while BitSov is in the background, without showing message content. Notifications show the sender’s name.",
+  "notificationEnable": "Allow notifications",
+  "notificationDenied": "Notifications are off in System Settings → Notifications → BitSov. You can turn them on there.",
+  "notificationError": "Notifications could not be checked or sent. Check notification permissions in System Settings, then check again here.",
+  "notificationMute": "Mute message and call notifications",
+  "notificationCheck": "Check notification permission",
+
+  "approvalSetupReason": "Touch ID approvals are not set up on this device. Set them up here to approve in the app. Until then, your node’s owner must approve at the node.",
+  "approvalSettingsDevices": "Settings → Devices",
   "phoneChats": "Chats",
   "phoneCalls": "Calls",
   "phoneNavigation": "Main navigation",
@@ -846,6 +861,21 @@ export const appEn = {
 };
 
 export const appDa: Record<keyof typeof appEn, string> = {
+  "approvalSetupReason": "Touch ID-godkendelser er ikke indstillet på denne enhed. Indstil dem her for at godkende i appen. Indtil da skal din nodes ejer godkende på noden.",
+  "approvalSettingsDevices": "Indstillinger → Enheder",
+  "notificationGranted": "Tilladt i BitSov. macOS styrer visning og lyd. Hvis notifikationer mangler, skal du kontrollere Systemindstillinger → Notifikationer → BitSov.",
+  "notificationApp": "BitSov",
+  "notificationSomeone": "Nogen",
+  "notificationMessage": "{0} har sendt dig en besked",
+  "notificationCall": "{0} ringer til dig",
+  "notificationTitle": "Notifikationer om beskeder og opkald",
+  "notificationReason": "Tillad notifikationer for at høre indgående betalte beskeder og opkald, mens BitSov er i baggrunden, uden at vise beskedens indhold. Notifikationer viser afsenderens navn.",
+  "notificationEnable": "Tillad notifikationer",
+  "notificationDenied": "Notifikationer er slået fra i Systemindstillinger → Notifikationer → BitSov. Du kan slå dem til der.",
+  "notificationError": "Notifikationer kunne ikke kontrolleres eller sendes. Kontrollér tilladelserne i Systemindstillinger, og kontrollér igen her.",
+  "notificationMute": "Slå notifikationer om beskeder og opkald fra",
+  "notificationCheck": "Kontrollér notifikationstilladelse",
+
   "phoneChats": "Chats",
   "phoneCalls": "Opkald",
   "phoneNavigation": "Hovednavigation",

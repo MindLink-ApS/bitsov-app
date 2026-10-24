@@ -1,6 +1,7 @@
 import { createPhoneLayout, createPhoneNavigationGuard, PhoneTabs, type PhoneTab } from './PhoneShell';
 import { MediaView } from './CallMedia';
-import { invoke } from '@tauri-apps/api/core';
+import { createMessageNotifications, NotificationSettings } from './messageNotifications';
+import { isTauri, invoke } from '@tauri-apps/api/core';
 import { OwnerApprovalSheets } from './OwnerApprovalSheet';
 import { FirstSpendSheet, type FirstSpendChoice } from './FirstSpendSheet';
 import { createAmountDraft } from './amountDraft';
@@ -338,6 +339,9 @@ let artifactSeq = 0;
 type NewArtifact = Artifact extends infer A ? (A extends Artifact ? Omit<A, 'id' | 'at'> & { at?: number } : never) : never;
 
 export function ControlCenter(props: Props) {
+  const notifications = isTauri() && /Macintosh|Mac OS X/.test(navigator.userAgent) && !isMobilePlatform() ? createMessageNotifications() : null;
+  onMount(() => { void notifications?.checkPermission(); });
+  onCleanup(() => notifications?.dispose());
   const phoneLayout = createPhoneLayout();
   const phoneShell = () => props.active && phoneLayout();
   const phoneGuard = createPhoneNavigationGuard(phoneShell);
@@ -961,7 +965,14 @@ export function ControlCenter(props: Props) {
               noteCallHistory(other.toLowerCase());
               // Each engine takes only its own: meeting legs carry a roster.
               void calls.receive(event.message, ownId());
+              const beforeMeeting = meetingView();
+              // receive admits offers synchronously, before its first await. Snapshot this
+              // event's transition now so an ignored signal cannot claim a later invitation.
               void meetings.receive(event.message, ownId());
+              const invited = meetingView();
+              if (invited.phase === 'invited' && invited.id && (beforeMeeting.phase !== 'invited' || beforeMeeting.id !== invited.id)) {
+                notifications?.call(invited.id, nameOf(event.message.sender), () => meetingView().phase === 'invited' && meetingView().id === invited.id);
+              }
               return;
             }
             if (event.type === 'message' || event.type === 'delivery') {
@@ -970,6 +981,7 @@ export function ControlCenter(props: Props) {
               );
             }
             if (event.type === 'message') {
+              notifications?.message(event.message, ownId(), nameOf(event.message.sender));
               setEnergyAt(Date.now());
               energyAfterEvent();
             }
@@ -1365,7 +1377,10 @@ export function ControlCenter(props: Props) {
       : Promise.reject(Object.assign(new Error(tr('caNoMediaDevicesInThisWebview')), { name: NO_MEDIA_DEVICES })),
     peerConnection: (config) => new RTCPeerConnection(config),
     now: () => Date.now(),
-    onView: setCallView,
+    onView: view => {
+      setCallView(view);
+      if (view.phase === 'incoming' && view.callId && view.peer) notifications?.call(view.callId, nameOf(view.peer), () => callView().phase === 'incoming' && callView().callId === view.callId);
+    },
     onStreams: (local, remote) => setCallStreams({ local, remote }),
     // No STUN unless the owner set one: host candidates only.
     iceServers: () => stunServer(effectiveStun()),
@@ -1492,7 +1507,7 @@ export function ControlCenter(props: Props) {
     device,
     ownerDeviceApproval: () => overview()?.capabilities?.includes(OWNER_DEVICE_APPROVAL) === true,
     openNodeSettings: () => {
-      setTab('node');
+      setTab('devices');
       setContextOpen(true);
     },
     registerDevice: async () => {
@@ -1972,6 +1987,9 @@ export function ControlCenter(props: Props) {
             <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
               onEnded={() => { void loadBudget(); void loadWallet(); }} />
           </Show>
+          <Show when={notifications && props.active && !contextOpen() && walletTab() === null}>
+            <NotificationSettings notifications={notifications!} offer />
+          </Show>
           <Show when={moneyBlocked() && !phoneShell()}>
             <p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p>
           </Show>
@@ -2213,6 +2231,7 @@ export function ControlCenter(props: Props) {
         <Switch>
           <Match when={tab() === 'general'}>
             <SettingsDisplay own={ownStun()} />
+            <Show when={notifications}>{n => <NotificationSettings notifications={n()} />}</Show>
           </Match>
           <Match when={tab() === 'body'}>
             <Organism
@@ -6445,6 +6464,7 @@ function Composer(props: {
       </Show>
       <Show when={firstSpendOpen()}>
         <FirstSpendSheet
+          onSetupApprovals={touchIdOffer(props.actions) ? () => { setFirstSpendOpen(false); props.actions.openNodeSettings?.(); } : undefined}
           presets={budget()?.presets ?? []}
           initialPreset={presetChosen()?.id ?? null}
           maxDailyMsat={budget()?.max_daily_msat ?? 0}
@@ -6661,7 +6681,7 @@ function DeviceSetup(props: { device: DeviceView | null; now: number; actions: A
       <p class="hint" data-device-settings-hint={props.device?.state}>
         {note()}{' '}
         <button type="button" class="link" data-device-settings-link onClick={() => props.actions.openNodeSettings?.()}>
-          {tr('extraSettingsNode')}
+          {tr('approvalSettingsDevices')}
         </button>
       </p>
     </Show>
