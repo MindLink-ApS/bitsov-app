@@ -56,7 +56,13 @@ test('emoji picker and the body energy table are valid aria', async ({ page }) =
   // The table cells reset `font`; the figures keep their body size and tabular numerals.
   const fig = await page.locator('.settings-modal.open .energy .energy-fig').first().evaluate((el) => {
     const cs = getComputedStyle(el);
-    const md = getComputedStyle(document.documentElement).getPropertyValue('--t-md').trim();
+    const token = getComputedStyle(document.documentElement).getPropertyValue('--t-md').trim();
+    // Computed font-size is always px. The token has been a rem since Dynamic Type.
+    const probe = document.createElement('span');
+    probe.style.fontSize = token;
+    el.append(probe);
+    const md = getComputedStyle(probe).fontSize;
+    probe.remove();
     return { size: cs.fontSize, md, numeric: cs.fontVariantNumeric };
   });
   expect(fig.size).toBe(fig.md);

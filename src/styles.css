@@ -1872,3 +1872,66 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
     height: min(1.411765rem, 32px);
   }
 }
+
+/* Phone shell, sweep 4. The chat list reuses .rail-foot, so the horizontal
+   rail's sticky strip, hidden sample tag, and 44px "+" (the label is
+   font-size: 0) landed on the vertical Chats page. */
+.phone-chat-list .rail-foot {
+  position: static;
+  margin: 0;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+  z-index: auto;
+}
+.phone-chat-list .rail-foot .new-track {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  font-size: var(--t-md);
+  white-space: normal;
+}
+.phone-chat-list .rail-foot .new-track::before { content: none; }
+.phone-chat-list .rail-foot .mode-tag { display: inline; }
+
+/* The 180px cap is the top rail sharing one line. The phone status pill is
+   that row's only control; a narrow cap wrapped "Connected to your node". */
+.phone-status .node-pill { width: 100%; }
+html[data-platform='ios'] .phone-status .node-pill { width: 100%; max-width: 100%; }
+.phone-status .on-call-pill { white-space: normal; max-width: 100%; }
+
+/* Call and meeting cards are fixed to the viewport bottom. The tab bar is
+   the 44px control plus its own safe-area padding, so a card at s-6 sits
+   under Chats / Wallet / You. Hidden while the keyboard has already removed
+   the tabs. */
+html:is([data-platform='ios'], [data-platform='android']):not([data-keyboard-open='true']) .cc[data-phone-shell='true'] :is(.call-panel, .meeting-panel) {
+  bottom: calc(44px + var(--s-1) + max(var(--s-1), env(safe-area-inset-bottom, 0px)) + var(--s-3));
+}
+html:is([data-platform='ios'], [data-platform='android']):not([data-keyboard-open='true']) .cc[data-phone-shell='true'] :is(.meeting-panel, .call-panel[data-call-panel]) {
+  max-height: calc(100dvh - max(var(--s-4), env(safe-area-inset-top, 0px)) - 44px - var(--s-1) - max(var(--s-1), env(safe-area-inset-bottom, 0px)) - var(--s-3));
+}
+
+/* Offline and unresolved-call repair render in the status row. 45vh hid
+   Retry, and .call-repairs added a second 35vh scroller inside it. Leave
+   one row of the list (72px) and the tab bar on screen; scroll only the
+   leftover at large type. */
+.phone-status .call-repairs { max-height: none; overflow: visible; }
+.phone-status:has([data-node-offline], [data-call-repairs]) {
+  max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 44px - var(--s-1) - max(var(--s-1), env(safe-area-inset-bottom, 0px)) - 72px);
+}
+.phone-status .node-offline { padding: var(--s-3) 0; gap: var(--s-2); }
+.phone-status .node-offline .box-illustration { width: 72px; }
+.phone-status .node-offline button { width: 100%; }
+
+/* iOS already wraps these. Android phones and a narrow window did not, so
+   Activity/Channels/Receive/Send and the activity filters ran off the side. */
+@media (max-width: 480px) {
+  .wallet-top, .wallet-actions, .wallet-tabs, .wallet-filters .modes { flex-wrap: wrap; max-width: 100%; }
+}
+.cc[data-phone-shell='true'] :is(.wallet-top, .wallet-actions, .wallet-tabs, .wallet-filters .modes) {
+  flex-wrap: wrap;
+  max-width: 100%;
+}

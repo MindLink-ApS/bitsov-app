@@ -1,4 +1,16 @@
 import { test, expect } from '@playwright/test';
+
+// The phone shell mounts only for an iPhone or Android user agent
+// (see appPlatform). State it here so the spec does not depend on the
+// launcher remembering. The Chrome axe pass ignores this file; the starter
+// scene also needs VITE_STARTER_BALANCE=1 (playwright.phone-shell.config.ts).
+test.use({
+  userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+  viewport: { width: 393, height: 852 },
+  isMobile: true,
+  hasTouch: true,
+});
+
 const preview = '/docs/ui/u5-phone-shell/harness/preview.html';
 for (const lang of ['en', 'da']) {
   test(`${lang}: phone navigation, reachable entries and safe-area geometry`, async ({ page }) => {
@@ -115,7 +127,10 @@ test('landscape iPhone retains tabs and tapping Chats returns to its list', asyn
   await expect(page.locator('.rail')).toHaveCount(0);
   await page.locator('[data-phone-tab="chats"]').click();
   await expect(page.locator('[data-phone-list]')).toBeVisible();
-  await page.screenshot({ path: 'docs/ui/u5-phone-shell/webkit-landscape-list.png' });
+  // The committed landscape frame is a WebKit capture. Chrome would overwrite it.
+  if (test.info().project.use.browserName === 'webkit') {
+    await page.screenshot({ path: 'docs/ui/u5-phone-shell/webkit-landscape-list.png' });
+  }
 });
 test('pending node approval blocks both navigation paths, including attribute transitions', async ({ page }) => {
   await page.goto(`${preview}?scene=chat`);

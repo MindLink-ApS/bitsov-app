@@ -6,7 +6,11 @@ const port = 1421;
 
 export default defineConfig({
   testDir: 'tests/a11y',
-  testIgnore: 'inputs.spec.ts', // Dedicated WebKit run: playwright.inputs.config.ts.
+  testIgnore: [
+    'inputs.spec.ts', // Dedicated WebKit run: playwright.inputs.config.ts.
+    // iPhone user agent plus VITE_STARTER_BALANCE=1. Runner: playwright.phone-shell.config.ts.
+    'phone-shell.spec.ts',
+  ],
   timeout: 45_000,
   fullyParallel: false,
   retries: 0,
