@@ -25,6 +25,7 @@ import { approvalMemory, BreakerCard, breakerReason, OwnerApprovals, OwnerApprov
 import { OWNER_DEVICE_APPROVAL, OWNER_DEVICE_BREAKER_RESET, refusalText, type ApprovalRequest, type ApprovalView, type DeviceKeysView } from './ownerApproval';
 import { HubTrustInfo } from './HubTrust';
 import { pollingSource } from './polling';
+import { deliveryPoller } from './deliveryPoll';
 import { readSpendPreset, saveSpendPreset } from './prefs';
 import { WelcomeHome } from './WelcomeHome';
 import { DelayedSpinner } from './DelayedSpinner';
@@ -513,6 +514,7 @@ export function ControlCenter(props: Props) {
   let budgetRevision = 0;
   // Budget reads in start order; the stamp of the newest one applied (Touch ID approve & send freshness).
   let budgetReadSeq = 0;
+  let noEnvelopeAfterRead = 0;
   const [budgetReadApplied, setBudgetReadApplied] = createSignal(0);
   // The budget read in flight, and the read count when an action's own response last cleared the stamp.
   let budgetInFlight: { stamp: number; done: Promise<void> } | null = null;
@@ -804,6 +806,10 @@ export function ControlCenter(props: Props) {
       batch(() => {
         setBudget(b);
         setBudgetReadApplied(stamp);
+        const peer = noEnvelopeFor()?.toLowerCase();
+        const grant = b.node_grant;
+        if (peer && stamp > noEnvelopeAfterRead && grant && grant.expires_at_ms > Date.now() &&
+            (grant.envelopes?.[peer] ?? 0) > Date.now()) setNoEnvelopeFor(null);
       });
       setBudgetReadAt(Date.now());
       setBudgetConfirmed(true);
@@ -892,7 +898,17 @@ export function ControlCenter(props: Props) {
   let unlisten: (() => void) | undefined;
   // Bumped on every stop so a subscription that resolves late is closed at once.
   let generation = 0;
+  const deliveryChecks = deliveryPoller({
+    read: (operationId, messageId) => source.messageDelivery(operationId, messageId),
+    connected: () => link() === 'open',
+    active: live,
+    apply: event => {
+      const next = applyDelivery(deliveries, event);
+      if (next !== deliveries) setDeliveries(event.message_id, next[event.message_id]);
+    },
+  });
   const stop = () => {
+    deliveryChecks.stop();
     generation += 1;
     polling.stop();
     budgetRevision += 1;
@@ -945,6 +961,7 @@ export function ControlCenter(props: Props) {
             if (event.type === 'link') {
               if (mine !== generation) return;
               if (event.state === 'open' && link() !== null && link() !== 'open') reconcileCallHistory();
+              if (event.state === 'open' && link() !== 'open') deliveryChecks.catchUp();
               setLink(event.state);
               if (event.state !== 'open') { budgetRevision += 1; setBudgetConfirmed(false); }
               else if (live()) void loadSpend().then(() => { if (mine === generation && live()) return loadBudget(); });
@@ -986,6 +1003,7 @@ export function ControlCenter(props: Props) {
               energyAfterEvent();
             }
             if (event.type === 'delivery') {
+              if (event.status === 'delivered' || event.status === 'rejected') deliveryChecks.confirm(event.message_id);
               const next = applyDelivery(deliveries, event);
               if (next !== deliveries) setDeliveries(event.message_id, next[event.message_id]);
               return;
@@ -1283,6 +1301,8 @@ export function ControlCenter(props: Props) {
       ...(receipt.readmission_msat ? { readmission_msat: receipt.readmission_msat } : {}),
     });
     if (!deliveries[receipt.message_id]) setDeliveries(receipt.message_id, deliveryFromReceipt(receipt));
+    if (receipt.operation_id && ['sent', 'queued'].includes(deliveries[receipt.message_id]?.status))
+      deliveryChecks.watch(receipt.operation_id, receipt.message_id);
     const sent = sentMessage(receipt, ownId(), text);
     if (entrance) setThreads('fresh', receipt.message_id, true);
     setThreads('t', trackKey(t), (old) => mergeMessages(old ?? [], [sent]));
@@ -1529,6 +1549,7 @@ export function ControlCenter(props: Props) {
       const revision = contactApprovalRevision;
       const r = await act(() => source.relationApprove(peer, null, perActMsat));
       if (r.ok) {
+        setBudgetConfirmed(false);
         setSpend(r.value);
         if (noEnvelopeFor() === peer) setNoEnvelopeFor(null);
       } else {
@@ -1661,10 +1682,14 @@ export function ControlCenter(props: Props) {
       // Classified by error code only. An error's operation_id is a link: the
       // host reuses an id for a resend over a resumable record, and names its
       // pending fence's op, so an id never proves that nothing was dispatched.
+      // A refusal remains authoritative until a read started afterward proves
+      // this contact's envelope live (including approval on another device).
+      if (!r.ok && r.error.code === 'grant_no_envelope' && t.kind === 'peer') {
+        noEnvelopeAfterRead = budgetReadSeq;
+        setNoEnvelopeFor(t.id);
+      }
       // The tally moved, or a budget rule stopped the send: either way, re-read it.
       if (r.ok || isBudgetStop(r.error) || ['spend_unknown', 'payment_unknown', 'failed_paid', 'payment_settled_undelivered'].includes(r.error.code)) void loadBudget();
-      // Approved another contact with Touch ID, not this one: offer the tap here.
-      if (!r.ok && r.error.code === 'grant_no_envelope' && t.kind === 'peer') setNoEnvelopeFor(t.id);
       if (!r.ok && r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
         // Paid, not delivered: the draft moves here, with the only safe way to resend it.
         const undelivered = r.error.undelivered;
@@ -4857,18 +4882,32 @@ function Composer(props: {
   /** One contact, and this Mac approves with Touch ID. */
   const touchable = () => spends() && !room() && props.actions.device()?.state === 'registered';
   const budget = () => props.budget ?? null;
-  /** A Touch ID grant is open, but not for this contact. */
-  const lacksEnvelope = () => {
-    if (props.actions.noEnvelopeFor() === target()) return true;
-    const envelopes = budget()?.node_grant?.envelopes;
-    if (!envelopes) return false;
-    const until = envelopes[target()];
-    return !until || until <= Date.now();
+  /** The current node grant covers this contact and the displayed send ceiling. */
+  const liveGrantRemaining = (): number | null => {
+    const b = budget();
+    const g = b?.node_grant;
+    const peer = target().toLowerCase();
+    const now = Math.max(props.now, Date.now());
+    const cost = shown().msat;
+    if (props.budgetStale || !g || b?.paused || b?.waiting_for_owner || props.spend?.state === 'pending' ||
+        props.actions.noEnvelopeFor()?.toLowerCase() === peer || g.expires_at_ms <= now || cost === null ||
+        g.per_call_max_msat < cost || (g.envelopes && (g.envelopes[peer] ?? 0) <= now)) return null;
+    let remaining = Math.min(g.remaining_msat, g.recipient_left_msat_by_recipient?.[peer] ?? Infinity);
+    if (b.autopay.state === 'open') {
+      const used = b.accounted_msat ?? b.spent_msat + b.unsettled_msat;
+      const row = b.rows.find(row => row.target.toLowerCase() === peer && row.room === room());
+      remaining = Math.min(remaining, Math.max(0, Math.min(b.ceiling_msat, b.autopay.ceiling_msat ?? 0) - used));
+      if (row?.limit_msat != null)
+        remaining = Math.min(remaining, Math.max(0, row.limit_msat - (row.accounted_msat ?? row.spent_msat + (row.unsettled_msat ?? 0))));
+    }
+    return remaining >= cost ? remaining : null;
   };
-  /** The next tap here is Touch ID for this contact. */
+  /** The next tap here needs a new contact approval, not an already live grant. */
   const needsTouch = () =>
-    touchable() && !budget()?.paused && props.spend?.state !== 'pending' &&
-    (!(line().open || ((mode() === 'message' || mode() === 'file') && budget()?.autopay.state === 'open')) || lacksEnvelope());
+    touchable() && !budget()?.paused && props.spend?.state !== 'pending' && liveGrantRemaining() === null &&
+    (!(line().open || ((mode() === 'message' || mode() === 'file') && budget()?.autopay.state === 'open')) ||
+      props.actions.noEnvelopeFor()?.toLowerCase() === target().toLowerCase() ||
+      !!budget()?.node_grant?.envelopes && (budget()!.node_grant!.envelopes![target().toLowerCase()] ?? 0) <= Math.max(props.now, Date.now()));
   /**
    * Messages go through the budget unless the owner opened the ten-minute
    * window by hand with no budget approval, or the host has no budget to show.
@@ -4877,7 +4916,7 @@ function Composer(props: {
     const b = budget();
     // Messages and files share budget / window rules; pay & request stay manual.
     if ((mode() !== 'message' && mode() !== 'file') || !b) return false;
-    return b.paused || b.waiting_for_owner || b.autopay.state === 'open' || !line().open;
+    return b.paused || b.waiting_for_owner || b.autopay.state === 'open' || (!line().open && !(touchable() && liveGrantRemaining() !== null));
   };
   // A known contact the node would not re-admit from the budget after a
   // reconnect (its grant does not budget them yet): the door card, once more.
@@ -5013,6 +5052,7 @@ function Composer(props: {
       ? null
       : priceBreakdown(props.quote, messageShown().msat);
   const priceLine = () => {
+    if (!draft().trim()) return null;
     if (paidLine()) return paidLine();
     if (priceProblem()) return priceProblem();
     const cap = messageShown().msat;
@@ -5137,6 +5177,8 @@ function Composer(props: {
 
   /** The Send button's text, title and accessible name: what this press does. */
   const sendTitle = () => {
+    if (props.budgetStale) return tr('uiSend');
+    if (liveGrantRemaining() !== null) return tr('uiSend');
     if (!needsTouch() && !viaBudget() && spends() && !line().open && props.spend?.state !== 'pending' && props.spend?.state !== 'unavailable' && canContinue('grant')) {
       return tr('uiApproveSend');
     }
@@ -5613,6 +5655,7 @@ function Composer(props: {
       setNote(tr('uiAMessageIsAlreadyWaitingForApprovalIn'));
       return;
     }
+    if (!pressed && mode() === 'message' && !draft().trim()) return;
     if (props.moneyBlocked || (spends() && props.budgetStale) || busy() || contactWaiting()) return;
     if (mode() === 'message' && priceProblem()) { setNote(priceProblem()); return; }
     // An unknown payment result: the text stays in the box until it is checked.
@@ -5952,8 +5995,7 @@ function Composer(props: {
   createEffect(() => { if (props.moneyBlocked || props.budgetStale || !line().open) setReview(null); });
 
   const disabled = () =>
-    props.moneyBlocked || (spends() && !!props.budgetStale) || busy() || contactWaiting() || (mode() === 'message' && priceProblem() !== null) ||
-    // Touch ID approves the contact, not the draft: no draft needed yet.
+    (mode() === 'message' && !draft().trim()) || props.moneyBlocked || (spends() && !!props.budgetStale) || busy() || contactWaiting() || (mode() === 'message' && priceProblem() !== null) ||
     (needsTouch() ? false : viaBudget()
       ? ['waiting', 'contact_used', 'total_used', 'grant_limited', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok' || stand().kind === 'off') && !ready())
       : spends() && !line().open
@@ -5962,6 +6004,7 @@ function Composer(props: {
 
   const disabledReason = (): string | null => {
     if (!disabled()) return null;
+    if (mode() === 'message' && !draft().trim()) return tr('uiTypeAMessageFirst');
     if (props.moneyBlocked) return tr('firstSpendOffline');
     if (spends() && props.budgetStale) return tr('firstSpendChecking');
     if (busy()) return tr('firstSpendBusy');
@@ -6172,7 +6215,7 @@ function Composer(props: {
       </Switch>
 
       {/* Above the capsule: the terms read before Send, which is the Touch ID tap. */}
-      <Show when={needsTouch()}>
+      <Show when={needsTouch() && !props.budgetStale}>
         <TouchApproval peer={target()} name={props.name} priceMsat={shown().msat} actions={props.actions} />
       </Show>
       <div class="composer-main signal-bar" data-composer-bar>
@@ -6276,6 +6319,9 @@ function Composer(props: {
       </div>
       <Show when={disabledReason()}>
         <p id={sendReasonId} class="hint" data-send-disabled-reason>{disabledReason()}</p>
+      </Show>
+      <Show when={mode() === 'message' && liveGrantRemaining() !== null}>
+        <p class="hint" data-send-budget>{tr('sendBudgetRemaining', fmtAmount(liveGrantRemaining()!))}</p>
       </Show>
       <div class="composer-meta">
       <Show when={mode() === 'message'}>
@@ -6694,6 +6740,8 @@ function DeviceSetup(props: { device: DeviceView | null; now: number; actions: A
  * system dialog repeats them. Send in the composer is the tap.
  */
 export function TouchApproval(props: { peer: string; name: string; priceMsat: number | null; actions: Actions }) {
+  const [expanded, setExpanded] = createSignal(false);
+  const detailId = createUniqueId();
   const perAct = () => envelopePerAct(props.priceMsat);
   const mobile = isMobilePlatform();
   return (
@@ -6708,12 +6756,15 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
           <span data-touch-per-act>{fmtAmount(perAct())}</span> {tr('extraPerMessageFor24Hours')}
         </span>
       </p>
-      <details class="quiet-detail" data-touch-detail>
-        <summary>{tr('uiDetails')}</summary>
-        <p>
+      <div class="quiet-detail" data-touch-detail>
+        <button type="button" class="touch-detail-toggle" aria-expanded={expanded()} aria-controls={detailId}
+          onClick={() => setExpanded(value => !value)}>
+          <span aria-hidden="true">{expanded() ? '▾' : '▸'}</span> {tr('uiDetails')}
+        </button>
+        <p id={detailId} hidden={!expanded()}>
           {mobile ? tr('extraTheBiometricPrompt') : tr('uiTouchID')} {tr('extraShowsTheSameAmountsForNode')} {shortId(props.peer)}{tr('extraYourNodeChecksEveryPaymentAgainstThemNothing')}
         </p>
-      </details>
+      </div>
     </div>
   );
 }

@@ -3268,6 +3268,37 @@ async fn room_members(
     read_room_members(state.inner(), &room_id).await
 }
 
+/// Delivery evidence only. Unlike spend reconciliation, this GET never
+/// abandons, retries, changes a journal, or dispatches a payment.
+async fn read_message_delivery(state: &NodeState, operation_id: &str, message_id: &str) -> Result<Option<control::LiveEvent>, String> {
+    let id = control::room_id(operation_id).map_err(|_| "expected an operation UUID".to_string())?;
+    let message = control::node_id(message_id).map_err(|_| "expected a hex message ID".to_string())?;
+    let reply: act::SendReply = get_json(state, &format!("/messages/operations/{id}")).await?;
+    if reply.operation_id.as_deref() != Some(id.as_str()) || reply.message_id != message {
+        return Err("The node answered for a different message operation".into());
+    }
+    let status = if reply.accepted || reply.state.as_deref() == Some("acked") {
+        "delivered"
+    } else if reply.state.as_deref() == Some("failed_paid") {
+        "rejected"
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(control::LiveEvent::Delivery { message_id: message, status: status.into(), reason: None }))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn message_delivery(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    operation_id: String,
+    message_id: String,
+) -> Result<Option<control::LiveEvent>, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_message_delivery(state.inner(), &operation_id, &message_id).await
+}
+
 /// `GET /messages?peer=…` — one track's history, oldest first. `peer` is a node
 /// id or a room UUID; `before` pages back from a unix-ms cursor.
 #[tauri::command(rename_all = "snake_case")]
@@ -9156,6 +9187,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             rooms_list,
             room_members,
             messages_list,
+            message_delivery,
             room_thread,
             price_quote,
             first_contact_quote,
@@ -11384,6 +11416,38 @@ mod control_act_tests {
 
     fn gets(node: &Fake) -> Vec<String> {
         node.targets().into_iter().filter(|t| t.starts_with("GET /messages/operations/")).collect()
+    }
+
+    #[tokio::test]
+    async fn delivery_lookup_is_read_only_and_requires_matching_node_evidence() {
+        let id = "12345678-1234-4234-8234-123456789abc";
+        for status in ["sent", "paid", "acked", "failed_paid", "unknown"] {
+            let routes: Routes = Arc::new(move |method, path, _| {
+                assert_eq!(method, "GET");
+                assert_eq!(path, format!("/messages/operations/{id}"));
+                (200, serde_json::json!({"operation_id":id, "message_id":A, "state":status,
+                    "accepted":status == "acked", "delivered":true, "amount_msat":1000,
+                    "payment_hash":"never-forward-this"}).to_string())
+            });
+            let node = fake(AuthMode::Local, routes);
+            let event = read_message_delivery(&node.state, id, A).await.unwrap();
+            match status {
+                "acked" => assert!(matches!(event, Some(control::LiveEvent::Delivery { status, .. }) if status == "delivered")),
+                "failed_paid" => assert!(matches!(event, Some(control::LiveEvent::Delivery { status, .. }) if status == "rejected")),
+                _ => assert!(event.is_none(), "transport/payment success is not recipient delivery"),
+            }
+            assert_eq!(node.targets(), [format!("GET /messages/operations/{id}")]);
+        }
+        for (operation, message) in [("another-operation", A), (id, C)] {
+            let routes: Routes = Arc::new(move |_, _, _| (200, serde_json::json!({
+                "operation_id":operation, "message_id":message, "state":"acked", "accepted":true,
+                "delivered":true, "amount_msat":1000}).to_string()));
+            let node = fake(AuthMode::Local, routes);
+            assert!(read_message_delivery(&node.state, id, A).await.is_err());
+        }
+        let node = fake(AuthMode::Local, Arc::new(|_, _, _| panic!("invalid ID must not reach the node")));
+        assert!(read_message_delivery(&node.state, "../other?x", A).await.is_err());
+        assert!(read_message_delivery(&node.state, id, "invalid-message").await.is_err());
     }
 
     #[tokio::test]
@@ -19879,6 +19943,7 @@ mod assistant_acl_tests {
                 "rooms_list",
                 "room_members",
                 "messages_list",
+                "message_delivery",
                 "room_thread",
                 "price_quote",
                 "first_contact_quote",

@@ -420,7 +420,9 @@ describe('control center shell', () => {
     expect(calls.some((c) => c.cmd === 'relation_approve' || c.cmd === 'spend_request')).toBe(false);
 
     // Send in the composer is the Touch ID tap; the line above it only states the terms.
-    expect(mount.querySelector('[data-touch-approval] button')).toBeNull();
+    expect(mount.querySelector('[data-touch-approval] button')?.getAttribute('aria-expanded')).toBe('false');
+    const draft = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
+    draft.value = 'hello'; draft.dispatchEvent(new Event('input', { bubbles: true }));
     click('[data-send]');
     await waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
     const args = calls.find((c) => c.cmd === 'relation_approve')!.args!;
@@ -456,6 +458,8 @@ describe('control center shell', () => {
 
     await waitFor(() => expect(mount.querySelector('[data-send]')?.textContent).toBe('Approve with Touch ID'));
     expect(mount.querySelector('[data-touch-approval]')).not.toBeNull();
+    const draft = mount.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!;
+    draft.value = 'hello'; draft.dispatchEvent(new Event('input', { bubbles: true }));
     click('[data-send]');
     await waitFor(() => expect(calls.filter((c) => c.cmd === 'relation_approve')).toHaveLength(1));
     expect(calls.find((c) => c.cmd === 'relation_approve')!.args).toMatchObject({ peer: A });

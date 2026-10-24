@@ -48,6 +48,7 @@ fn main() {
             "rooms_list",
             "room_members",
             "messages_list",
+            "message_delivery",
             "room_thread",
             "price_quote",
             "first_contact_quote",
