@@ -193,7 +193,7 @@ function AppScreen() {
   const offline = () => !status().locked && (!!status().retry_after_secs ||
     (!status().ready && !!status().error && !softenError(status().error).money &&
       /connection[ _](refused|lost|closed)|ECONN|network[ _]error|failed to fetch|timed?[ _]out|unreachable|remote unavailable|remote handshake limit or endpoint unavailable|remote_handshake_unavailable/i.test(status().error!)));
-  const offlineScreen = (level: () => 1 | 2 = () => 2) => <Show when={offline()}><OfflineNode remote={pairing().remote} level={level()}
+  const offlineScreen = (level: () => 1 | 2 = () => 2, compact = false) => <Show when={offline()}><OfflineNode remote={pairing().remote} level={level()} compact={compact}
     lastSeen={!status().node_id || status().node_id === lastSeen()?.nodeId ? lastSeen()?.at : null}
     retryAfterSecs={status().retry_after_secs} onRetry={retryPairing} /></Show>;
   let timer: number | undefined;
@@ -488,7 +488,7 @@ function AppScreen() {
         remote={pairing().remote}
         phone={onPhone}
         hostedBy={pairing().hosted_by ?? null}
-        offline={offlineScreen()}
+        offline={compact => offlineScreen(undefined, compact)}
         retryAfterSecs={status().retry_after_secs}
         onReconnect={retryPairing}
         source={source()}

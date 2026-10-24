@@ -406,9 +406,20 @@ describe('app shell pairing wiring', () => {
         expect(mount.querySelector('[data-ob-head]')).toBeNull();
         expect(mount.textContent).not.toContain('Node stopped');
         if (remaining) {
+          const banner = mount.querySelector<HTMLButtonElement>('[data-offline-banner]');
+          expect(banner).not.toBeNull();
+          if (!mount.querySelector('[data-offline-sheet]')) {
+            expect(mount.querySelector('[data-node-offline]')).toBeNull();
+            banner!.click();
+          }
           expect(mount.textContent).toContain(`waiting ${remaining} s`);
-          expect(mount.querySelector('[data-node-offline] time')).not.toBeNull();
-        } else expect(mount.querySelector('[data-node-offline]')).toBeNull();
+          expect(mount.querySelector('dialog[open] [data-node-offline] time')).not.toBeNull();
+          expect(mount.querySelector('[data-composer-bar]')).toBe(composer);
+        } else {
+          expect(mount.querySelector('[data-node-offline]')).toBeNull();
+          expect(mount.querySelector('[data-offline-banner]')).toBeNull();
+          expect(mount.querySelector('[data-offline-sheet]')).toBeNull();
+        }
       }
       expect(onboardingMounted).toBe(false);
     } finally { observer.disconnect(); }

@@ -172,7 +172,8 @@ type Props = {
   /** The remote node's display label from its pairing link, if any. */
   hostedBy?: string | null;
   retryAfterSecs?: number | null;
-  offline?: JSX.Element;
+  /** Open conversations use a banner; recovery details open over the thread. */
+  offline?: (compact: boolean) => JSX.Element;
   onReconnect?: () => Promise<void>;
   source: Source;
   /** Setup completed for this trust boundary: keep the shell mounted. */
@@ -489,6 +490,8 @@ export function ControlCenter(props: Props) {
   });
   onCleanup(() => props.onWatchSamples?.(null));
   const [track, setTrack] = createSignal<TrackRef | null>(null);
+  const conversationOpen = () => ['peer', 'room', 'bound', 'ai', 'assistant'].includes(track()?.kind ?? '') &&
+    (!phoneShell() || phoneTab() === 'chats');
   const [quote, setQuote] = createSignal<PriceQuote | null>(null);
   const [quoteError, setQuoteError] = createSignal<string | undefined>();
   let quoteRead = 0;
@@ -1953,7 +1956,7 @@ export function ControlCenter(props: Props) {
             if (callView().peer) setTrack({ kind: 'peer', id: callView().peer!.toLowerCase() });
             queueMicrotask(() => callPanel?.focus());
           }} />
-          {props.offline}
+          <Show when={!conversationOpen()}>{props.offline?.(false)}</Show>
           <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
             onEnded={() => { void loadBudget(); void loadWallet(); }} />
           <Show when={moneyBlocked()}><p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p></Show>
@@ -2006,9 +2009,10 @@ export function ControlCenter(props: Props) {
 
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
         <section class="track" aria-label={tr('caTrack')} hidden={phoneShell() && (phoneTab() !== 'chats' || track() === null)} inert={walletTab() !== null || contextOpen()}>
+          <Show when={conversationOpen()}>{props.offline?.(true)}</Show>
           <Show when={track()}><button type="button" class="link ios-back" data-ios-back="thread" onClick={phoneBack}><Show when={phoneShell()}><span aria-hidden="true">‹ </span></Show>{tr('uiBack')}</button></Show>
           <Show when={!phoneShell()}>
-            {props.offline}
+            <Show when={!conversationOpen()}>{props.offline?.(false)}</Show>
             <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
               onEnded={() => { void loadBudget(); void loadWallet(); }} />
           </Show>

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { createSignal } from 'solid-js';
+import { createSignal, Show } from 'solid-js';
 import { OfflineNode } from '../src/control/OfflineNode';
 import { render } from 'solid-js/web';
 import { ControlCenter } from '../src/control/Shell';
@@ -14,7 +14,7 @@ const click = async (selector: string) => {
   expect(button, selector).not.toBeNull(); button!.click(); await tick();
 };
 const visible = (selector: string) => [...document.querySelectorAll(selector)].filter(el => !el.closest('[hidden], [inert], [aria-hidden="true"]'));
-afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.restoreAllMocks(); vi.unstubAllGlobals(); setLanguagePref('en'); });
+afterEach(() => { dispose?.(); document.body.innerHTML = ''; delete document.documentElement.dataset.keyboardOpen; vi.restoreAllMocks(); vi.unstubAllGlobals(); setLanguagePref('en'); });
 async function mount({ platform = 'iPhone', narrow = true, history = false, oldHistory = false, live = true, offline = false, repair = false, peersError = false } = {}) {
   vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(platform);
   vi.stubGlobal('__TAURI_INTERNALS__', {});
@@ -26,14 +26,15 @@ async function mount({ platform = 'iPhone', narrow = true, history = false, oldH
   const overview = source.nodeOverview;
   source.nodeOverview = async () => { const value = await overview(); return { ...value, capabilities: [...(value.capabilities ?? []), 'room_binding_v1', 'starter_channel_request_v1'], network: 'signet' }; };
   const [connected, setConnected] = createSignal(live);
+  const [disconnected, setDisconnected] = createSignal(offline);
   const reconnect = vi.fn();
   if (peersError) source.peers = async () => { throw new Error('Contacts unavailable'); };
   if (repair) source.opList = async () => ({ operations: [], skipped: 0, has_more: false, unresolved_calls: [{ index_id: 'c'.repeat(64), acknowledged: false, hangup_cap_msat: 5000 }] });
   const messages = source.messages;
   source.messages = vi.fn(async (id, before) => (history || (oldHistory && before !== undefined)) ? [{ id: 'past-call', sender: id, recipient: SAMPLE_OWN_ID, kind: 400, plaintext: '{}', timestamp: 1000, payment_amount_msat: 1000 }, ...await messages(id, before)] : (await messages(id, before)).filter(m => m.kind < 400 || m.kind > 403));
-  dispose = render(() => <ControlCenter source={source} active ready live={connected()} offline={offline ? <OfflineNode remote onRetry={reconnect} /> : undefined} onReconnect={reconnect} error={null} ownId={SAMPLE_OWN_ID} firstRun={null} />, document.body);
+  dispose = render(() => <ControlCenter source={source} active ready live={connected()} offline={compact => <Show when={disconnected()}><OfflineNode compact={compact} remote onRetry={reconnect} /></Show>} onReconnect={reconnect} error={null} ownId={SAMPLE_OWN_ID} firstRun={null} />, document.body);
   await tick();
-  return { emit, setConnected, source, reconnect };
+  return { emit, setConnected, setDisconnected, source, reconnect };
 }
 it.each(['iPhone', 'Android'])('starts %s on Chats, pushes a conversation and returns through the existing edge Back destination', async platform => {
   await mount({ platform });
@@ -142,6 +143,94 @@ it('shows offline Retry on the phone landing list', async () => {
   expect(visible('[data-node-offline] button')).toHaveLength(1);
   await click('[data-node-offline] button');
   expect(reconnect).toHaveBeenCalledOnce();
+});
+it.each(['iPhone', 'Android'])('keeps the %s composer mounted through disconnect and keyboard dismissal, with recovery in a sheet', async platform => {
+  const { setConnected, setDisconnected, reconnect } = await mount({ platform });
+  await click('[data-phone-list] [data-track^="peer:"]');
+  const composer = document.querySelector('[data-composer]')!;
+  const input = composer.querySelector('textarea')!;
+  input.value = 'Unsent draft';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.focus();
+  document.documentElement.dataset.keyboardOpen = 'true';
+  setConnected(false); setDisconnected(true); await tick();
+
+  for (const keyboardOpen of ['true', 'false']) {
+    document.documentElement.dataset.keyboardOpen = keyboardOpen;
+    await tick();
+    expect(visible('[data-composer]')).toEqual([composer]);
+    expect(input.value).toBe('Unsent draft');
+    expect(input.getAttribute('aria-label')).toMatch(/Message/);
+    expect(visible('[data-node-offline]')).toHaveLength(0);
+    expect(visible('.track [data-offline-banner]')).toHaveLength(1);
+  }
+  const banner = document.querySelector<HTMLButtonElement>('[data-offline-banner]')!;
+  expect(banner.textContent).toContain('Your node is offline');
+  expect(banner.textContent).toContain('Retry now');
+  expect(banner.getAttribute('aria-haspopup')).toBe('dialog');
+  banner.focus(); banner.click(); await tick();
+  const sheet = document.querySelector('dialog[open][data-offline-sheet]');
+  expect(sheet).not.toBeNull();
+  expect(sheet?.querySelector('[data-node-offline]')).not.toBeNull();
+  expect(document.querySelector('[data-composer]')).toBe(composer);
+  expect(visibleBackDestination()).toBeNull();
+  await click('[data-offline-sheet] [data-node-offline] button');
+  expect(reconnect).toHaveBeenCalledOnce();
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await tick();
+  expect(document.querySelector('[data-offline-sheet]')).toBeNull();
+  expect(document.activeElement).toBe(banner);
+  expect(visible('[data-composer]')).toEqual([composer]);
+  expect(input.value).toBe('Unsent draft');
+
+  await click('[data-phone-tab="wallet"]');
+  expect(visible('[data-phone-status] [data-node-offline]')).toHaveLength(1);
+  expect(visible('[data-offline-banner]')).toHaveLength(0);
+  await click('[data-phone-tab="chats"]');
+  expect(visible('[data-composer]')).toEqual([composer]);
+  expect(input.value).toBe('Unsent draft');
+  expect(visible('.track [data-offline-banner]')).toHaveLength(1);
+  await click('[data-ios-back="thread"]');
+  expect(visible('[data-phone-status] [data-node-offline]')).toHaveLength(1);
+  expect(visible('[data-offline-banner]')).toHaveLength(0);
+  await click('[data-phone-list] [data-track="discover"]');
+  expect(visible('[data-phone-status] [data-node-offline]')).toHaveLength(1);
+});
+
+it('removes the recovery sheet when the node reconnects without replacing the composer', async () => {
+  const { setConnected, setDisconnected } = await mount({ offline: true, live: false });
+  await click('[data-phone-list] [data-track^="peer:"]');
+  const composer = document.querySelector('[data-composer]');
+  await click('[data-offline-banner]');
+  expect(document.querySelector('dialog[open][data-offline-sheet]')).not.toBeNull();
+  setConnected(true); setDisconnected(false); await tick();
+  expect(document.querySelector('[data-offline-sheet]')).toBeNull();
+  expect(document.querySelector('[data-offline-banner]')).toBeNull();
+  expect(visible('[data-composer]')).toEqual([composer]);
+});
+it('keeps recovery usable and focus contained without native modal dialog support', async () => {
+  // Happy DOM exposes these methods through getters; model an older WebKit.
+  const dialogPrototype = HTMLDialogElement.prototype as unknown as { showModal: undefined; close: undefined };
+  vi.spyOn(dialogPrototype, 'showModal', 'get').mockReturnValue(undefined);
+  vi.spyOn(dialogPrototype, 'close', 'get').mockReturnValue(undefined);
+  await mount({ offline: true, live: false });
+  await click('[data-phone-list] [data-track^="peer:"]');
+  const composer = document.querySelector('[data-composer]');
+  await click('[data-offline-banner]');
+  const sheet = document.querySelector<HTMLElement>('[data-offline-sheet][role="dialog"][aria-modal="true"]')!;
+  expect(sheet).not.toBeNull();
+  const buttons = [...sheet.querySelectorAll<HTMLButtonElement>('button')];
+  expect(document.activeElement).toBe(buttons[0]);
+  buttons[buttons.length - 1].focus();
+  buttons[buttons.length - 1].dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+  expect(document.activeElement).toBe(buttons[0]);
+  document.querySelector<HTMLTextAreaElement>('[data-composer] textarea')!.focus();
+  expect(sheet.contains(document.activeElement)).toBe(true);
+  await click('[data-phone-tab="you"]');
+  expect(visible('[data-phone-you]')).toHaveLength(0);
+  buttons[0].click(); await tick();
+  expect(document.querySelector('[data-offline-sheet]')).toBeNull();
+  expect(visible('[data-composer]')).toEqual([composer]);
+  expect(document.activeElement).toBe(document.querySelector('[data-offline-banner]'));
 });
 it('shows unresolved call repair rows on the phone landing list', async () => {
   await mount({ repair: true });
