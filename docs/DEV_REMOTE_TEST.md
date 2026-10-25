@@ -1,5 +1,8 @@
 # Remote-only test Mac bundle (DEV ONLY)
 
+This beta supports signet test nodes only. Verify your node's network before
+pairing and use test coins only; this profile does not itself enforce signet.
+
 Use this profile to pair a test Mac with a remote node without downloading or
 bundling a local `konsensus` sidecar. For a node already running on this Mac's
 loopback interface, see [DEV_EXTERNAL_NODE.md](DEV_EXTERNAL_NODE.md).
@@ -9,7 +12,7 @@ loopback interface, see [DEV_EXTERNAL_NODE.md](DEV_EXTERNAL_NODE.md).
 On macOS, with the usual npm and Rust/Tauri build prerequisites installed:
 
 ```bash
-npm ci
+npm ci --ignore-scripts
 npm run tauri:build:remote-test
 ```
 
