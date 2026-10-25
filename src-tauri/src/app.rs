@@ -7428,8 +7428,8 @@ fn local_key_with(
     // Keep cleanup in the same critical section as the read, so registration
     // cannot publish a new record between observing absence and removing it.
     let _guard = state.device_lifecycle.lock().unwrap();
-    let Some(record) = device::load_record(store) else { return Ok(None); };
-    let blob = match device::read_private(&store.join(device::BLOB_FILE)) {
+    let record = device::load_record(store);
+    let blob = match device::read_blob(store) {
         Ok(Some(blob)) => blob,
         Ok(None) => {
             // Only a confirmed missing blob makes the record stale. Never
@@ -7437,10 +7437,21 @@ fn local_key_with(
             let _ = std::fs::remove_file(store.join(device::RECORD_FILE));
             return Ok(None);
         }
-        Err(_) => return Ok(None),
+        Err(error) => return Err(ActionError::new("device_key", format!("Could not access the protected device key: {error}"))),
     };
     match public_key(&blob) {
-        Ok(public) if hex::encode(public) == record.public_key => Ok(Some((blob, record))),
+        Ok(public) if record.as_ref().is_none_or(|record| hex::encode(public) == record.public_key) => {
+            let record = match record {
+                Some(record) => record,
+                None => {
+                    // Resume a key published before cancellation or a crash interrupted enrollment.
+                    let record = device::Record { public_key: hex::encode(public), ..Default::default() };
+                    device::save_record(store, &record)?;
+                    record
+                }
+            };
+            Ok(Some((blob, record)))
+        },
         Ok(_) | Err(device_key::DeviceKeyError::Invalid) => {
             device::forget(store);
             Ok(None)
@@ -9421,6 +9432,19 @@ mod device_sign_error_tests {
         assert!(!dir.path().join(device::BLOB_FILE).exists());
     }
 
+    #[test]
+    fn local_key_recovers_a_blob_published_before_its_public_record() {
+        let dir = tempfile::tempdir().unwrap();
+        device::save_blob(dir.path(), b"synthetic interrupted enrollment").unwrap();
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        let public = [4; device_key::PUBLIC_KEY_LEN];
+        let (blob, record) = local_key_with(&state, dir.path(), |_| Ok(public)).unwrap().unwrap();
+        assert_eq!(blob, b"synthetic interrupted enrollment");
+        assert_eq!(record.public_key, hex::encode(public));
+        assert!(!record.registered);
+        assert_eq!(device::load_record(dir.path()), Some(record));
+    }
+
     #[cfg(unix)]
     #[test]
     fn local_key_preserves_the_record_and_blob_on_a_private_file_read_error() {
@@ -9433,8 +9457,8 @@ mod device_sign_error_tests {
         let path = dir.path().join(device::BLOB_FILE);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(device::read_private(&path).is_err());
-        assert!(local_key_with(&NodeState::for_api("http://127.0.0.1:1/api/v1"), dir.path(), |_| panic!("unreadable blob must not reach the bridge"))
-            .unwrap().is_none());
+        assert_eq!(local_key_with(&NodeState::for_api("http://127.0.0.1:1/api/v1"), dir.path(), |_| panic!("unreadable blob must not reach the bridge"))
+            .unwrap_err().code, "device_key");
         assert_eq!(device::load_record(dir.path()), Some(record));
         assert_eq!(std::fs::read(path).unwrap(), blob);
     }

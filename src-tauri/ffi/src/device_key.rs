@@ -122,8 +122,8 @@ pub fn available() -> bool {
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub fn create(policy: Policy) -> Result<(Vec<u8>, [u8; PUBLIC_KEY_LEN]), DeviceKeyError> {
-    // iPhone production builds never accept a non-biometric signing key.
-    #[cfg(target_os = "ios")]
+    // Ordinary Apple builds never accept a non-biometric signing key.
+    #[cfg(not(all(target_os = "macos", feature = "native-test-keys", debug_assertions)))]
     if policy != Policy::Biometry { return Err(DeviceKeyError::Unavailable); }
     let mut blob = vec![0u8; BLOB_CAP];
     let mut blob_len = 0;
@@ -264,7 +264,7 @@ pub fn sign(_blob: &[u8], _message: &[u8], _reason: &str) -> Result<Vec<u8>, Dev
     Err(DeviceKeyError::Unavailable)
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, target_os = "macos", feature = "native-test-keys"))]
 mod tests {
     use super::*;
     use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_ASN1};

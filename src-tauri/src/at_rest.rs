@@ -1,7 +1,8 @@
 //! Hardware-wrapped storage for the secrets the app keeps on disk.
 //!
-//! macOS installs a Secure Enclave sealer when available; otherwise existing
-//! owner-only plaintext stores remain usable. Android installs an Android
+//! Apple pairing seeds live in user-presence-protected Keychain items.
+//! macOS installs a Secure Enclave sealer for other pairing secrets.
+//! Android installs an Android
 //! Keystore sealer at startup, before any pairing file is
 //! read, so the Ed25519 client seed and a pending one-time pairing code are
 //! written only as ciphertext under a non-exportable key. Public pins (node

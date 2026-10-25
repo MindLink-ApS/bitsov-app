@@ -59,7 +59,7 @@ public func bitsov_dk_biometry() -> Int32 {
 ///
 /// policy 1: `.privateKeyUsage` + `.biometryCurrentSet` (Touch ID on every
 ///           signature; the key dies if the enrolled fingers change).
-/// policy 0: `.privateKeyUsage` only. Signs without a prompt. Tests only.
+/// policy 0 is rejected except in an explicit debug-only hardware test build.
 ///
 /// Writes the device-bound blob to `out_blob` (length in `out_blob_len`) and the
 /// 65-byte X9.63 uncompressed public key to `out_pub`. Creation never prompts.
@@ -88,10 +88,10 @@ private func createKey(
     let flags: SecAccessControlCreateFlags
     switch policy {
     case 1: flags = [.privateKeyUsage, .biometryCurrentSet]
-    #if os(iOS) || BITSOV_IOS_TEST_POLICY
-    case 0: return errBadArgument
-    #else
+    #if BITSOV_TEST_DEVICE_KEYS && os(macOS)
     case 0: flags = [.privateKeyUsage]
+    #else
+    case 0: return errBadArgument
     #endif
     default: return errBadArgument
     }

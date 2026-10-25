@@ -43,7 +43,7 @@ async fn full_ceremony_pairs_read_receive_and_mints_a_paired_token() {
     let codes = PrintedCodes::default();
     let server = Server::start(node.clone(), codes.clone());
     let client = client(&server, node_dir.path());
-    let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let key = ClientKey::generate_ephemeral().unwrap();
 
     let outcome = pairing::establish(&client, &key, app_dir.path(), NAME, &codes)
         .await
@@ -80,7 +80,7 @@ async fn rc7_node_without_pair_routes_falls_back_to_auth_local() {
     let node = mock(node_dir.path(), PairRoutes::Absent, now());
     let codes = PrintedCodes::default();
     let server = Server::start(node.clone(), codes.clone());
-    let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let key = ClientKey::generate_ephemeral().unwrap();
 
     let outcome = pairing::establish(&client(&server, node_dir.path()), &key, app_dir.path(), NAME, &codes)
         .await
@@ -108,14 +108,14 @@ async fn assert_refused_without_fallback(
 
     if pre_pair {
         let other = tempfile::tempdir().unwrap();
-        let key = ClientKey::load_or_create(other.path()).unwrap();
+        let key = ClientKey::generate_ephemeral().unwrap();
         pairing::establish(&client, &key, other.path(), "other", &codes)
             .await
             .expect("first client pairs");
     }
 
     let app_dir = tempfile::tempdir().unwrap();
-    let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let key = ClientKey::generate_ephemeral().unwrap();
     let err = match pairing::establish(&client, &key, app_dir.path(), NAME, &codes).await {
         Ok(_) => panic!("a refusal must not become a session"),
         Err(e) => e,
@@ -166,7 +166,7 @@ async fn revoked_stored_pairing_is_a_failure_not_a_fallback() {
     let codes = PrintedCodes::default();
     let server = Server::start(node.clone(), codes.clone());
     let client = client(&server, node_dir.path());
-    let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let key = ClientKey::generate_ephemeral().unwrap();
     pairing::establish(&client, &key, app_dir.path(), NAME, &codes).await.unwrap();
 
     node.revoke_all();
@@ -185,7 +185,7 @@ async fn unreachable_node_is_a_failure_not_a_fallback() {
         .unwrap()
         .port();
     let app_dir = tempfile::tempdir().unwrap();
-    let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let key = ClientKey::generate_ephemeral().unwrap();
     let client = PairingClient::new(reqwest::Client::new(), format!("http://127.0.0.1:{port}/api/v1"));
     let err = pairing::establish(&client, &key, app_dir.path(), NAME, &PrintedCodes::default())
         .await
@@ -200,7 +200,7 @@ async fn short_code_mismatch_trips_and_does_not_pair() {
     let node = mock_with(node_dir.path(), PairRoutes::Live, now(), Box::new(support::LyingCodeCrypto));
     let codes = PrintedCodes::default();
     let server = Server::start(node.clone(), codes.clone());
-    let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let key = ClientKey::generate_ephemeral().unwrap();
     let err = pairing::establish(&client(&server, node_dir.path()), &key, app_dir.path(), NAME, &codes)
         .await
         .expect_err("tripwire");
@@ -217,7 +217,7 @@ async fn challenge_path_outside_the_node_data_dir_is_refused() {
     let node = mock(node_dir.path(), PairRoutes::Live, now());
     let codes = PrintedCodes::default();
     let server = Server::start(node.clone(), codes.clone());
-    let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let key = ClientKey::generate_ephemeral().unwrap();
     let err = pairing::establish(&client(&server, elsewhere.path()), &key, app_dir.path(), NAME, &codes)
         .await
         .expect_err("unexpected challenge location");
@@ -234,7 +234,7 @@ async fn paired_token_is_refreshed_before_it_expires() {
     let codes = PrintedCodes::default();
     let server = Server::start(node.clone(), codes.clone());
     let client = client(&server, node_dir.path());
-    let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let key = ClientKey::generate_ephemeral().unwrap();
     let Established::Paired { mut session, .. } =
         pairing::establish(&client, &key, app_dir.path(), NAME, &codes).await.unwrap()
     else {
@@ -263,6 +263,7 @@ async fn paired_token_is_refreshed_before_it_expires() {
     assert_eq!(node.calls("/api/v1/auth/local"), 0);
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[test]
 fn client_key_file_is_0600_in_a_0700_dir_and_is_reused() {
     let dir = tempfile::tempdir().unwrap();
@@ -281,7 +282,7 @@ fn client_key_file_is_0600_in_a_0700_dir_and_is_reused() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
 #[test]
 fn client_key_file_readable_by_others_is_refused() {
     use std::os::unix::fs::PermissionsExt;
@@ -302,7 +303,7 @@ async fn bootstrap_node_is_detected_and_grants_identity_during_first_run() {
     let server = Server::start(node.clone(), codes.clone());
     let client = client(&server, node_dir.path());
     assert_eq!(pairing::bootstrap_state(&client).await.unwrap().as_deref(), Some("bootstrap"));
-    let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let key = ClientKey::generate_ephemeral().unwrap();
     let Established::Paired { session, .. } =
         pairing::establish(&client, &key, app_dir.path(), NAME, &codes).await.unwrap()
     else {
@@ -377,7 +378,7 @@ async fn local_challenge_header_verifies_for_ceremony_reuse_and_refresh() {
     for routes in [PairRoutes::Live, PairRoutes::Bootstrap] {
         let node_dir = tempfile::tempdir().unwrap();
         let app_dir = tempfile::tempdir().unwrap();
-        let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+        let key = ClientKey::generate_ephemeral().unwrap();
         let public = key.public_hex().to_owned();
         let node = mock(node_dir.path(), routes, now());
         let codes = PrintedCodes::default();
@@ -424,7 +425,7 @@ async fn assert_unique_local_challenges(concurrent: bool) {
     use std::sync::{Arc, Mutex};
     let node_dir = tempfile::tempdir().unwrap();
     let app_dir = tempfile::tempdir().unwrap();
-    let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let key = ClientKey::generate_ephemeral().unwrap();
     let public = key.public_hex().to_owned();
     let node = mock(node_dir.path(), PairRoutes::Live, now());
     let codes = PrintedCodes::default();
@@ -480,7 +481,7 @@ async fn challenge_401_is_a_clear_refusal_without_retry_token_or_fallback() {
     use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
     let node_dir = tempfile::tempdir().unwrap();
     let app_dir = tempfile::tempdir().unwrap();
-    let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let key = ClientKey::generate_ephemeral().unwrap();
     let node = mock(node_dir.path(), PairRoutes::Live, now());
     let codes = PrintedCodes::default();
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -519,7 +520,7 @@ async fn old_node_ignores_local_header_and_remote_challenge_stays_unchanged() {
     use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
     let node_dir = tempfile::tempdir().unwrap();
     let app_dir = tempfile::tempdir().unwrap();
-    let key = ClientKey::load_or_create(app_dir.path()).unwrap();
+    let key = ClientKey::generate_ephemeral().unwrap();
     let public = key.public_hex().to_owned();
     let node = mock(node_dir.path(), PairRoutes::Live, now());
     let codes = PrintedCodes::default();

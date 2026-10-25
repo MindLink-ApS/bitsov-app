@@ -3,6 +3,7 @@ use std::{ffi::CString, path::Path};
 use zeroize::Zeroizing;
 
 unsafe extern "C" {
+    #[cfg(target_os = "ios")]
     fn bitsov_app_is_backgrounded() -> i32;
     fn bitsov_exclude_app_backup(path: *const std::ffi::c_char) -> i32;
     fn bitsov_client_key_read(path: *const std::ffi::c_char, output: *mut u8) -> i32;
@@ -63,8 +64,44 @@ pub fn delete(path: &Path) -> Result<(), String> {
 
 /// Capture launch lifecycle state without reading identity or Keychain data.
 /// Used on the setup thread to distinguish background launch from initial focus.
+#[cfg(target_os = "ios")]
 pub fn app_is_backgrounded() -> bool {
     // SAFETY: no pointers cross the boundary. Swift checks main-thread access
     // before querying UIKit and otherwise conservatively returns false.
     unsafe { bitsov_app_is_backgrounded() == 1 }
+}
+
+unsafe extern "C" {
+    fn bitsov_device_blob_read(path: *const std::ffi::c_char, output: *mut u8, capacity: usize, length: *mut usize) -> i32;
+    fn bitsov_device_blob_add(path: *const std::ffi::c_char, bytes: *const u8, length: usize) -> i32;
+    fn bitsov_device_blob_delete(path: *const std::ffi::c_char) -> i32;
+}
+
+pub fn read_blob(path: &Path) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+    let path = path_string(path)?;
+    let mut bytes = Zeroizing::new(vec![0; 4096]);
+    let mut length = 0;
+    // SAFETY: buffers remain live, Swift bounds all writes and retains no pointers.
+    match unsafe { bitsov_device_blob_read(path.as_ptr(), bytes.as_mut_ptr(), bytes.len(), &mut length) } {
+        0 if (1..=bytes.len()).contains(&length) => { bytes.truncate(length); Ok(Some(bytes)) }
+        -25300 => Ok(None),
+        status => Err(error(status)),
+    }
+}
+
+pub fn add_blob(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if bytes.is_empty() || bytes.len() > 4096 { return Err("invalid device key size".into()); }
+    let path = path_string(path)?;
+    // SAFETY: the path and bounded slice outlive the synchronous call.
+    match unsafe { bitsov_device_blob_add(path.as_ptr(), bytes.as_ptr(), bytes.len()) } {
+        0 => Ok(()), status => Err(error(status)),
+    }
+}
+
+pub fn delete_blob(path: &Path) -> Result<(), String> {
+    let path = path_string(path)?;
+    // SAFETY: Swift retains no pointer to this live path.
+    match unsafe { bitsov_device_blob_delete(path.as_ptr()) } {
+        0 => Ok(()), status => Err(error(status)),
+    }
 }

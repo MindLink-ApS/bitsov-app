@@ -73,6 +73,8 @@ tauri-plugin-barcode-scanner = "=2.5.0"
 
 [features]
 default = []
+# Headless hardware tests only; the native bridge rejects this in release builds.
+native-test-keys = ["bitsov-ffi/native-test-keys"]
 # Lets the host toolchain compile the pure-client cfg path before mobile SDKs
 # are installed. Tauri mobile targets select the same path through `cfg(mobile)`.
 mobile = ["bitsov-ffi/mobile", "dep:tauri-plugin-barcode-scanner"]

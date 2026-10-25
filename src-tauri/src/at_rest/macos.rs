@@ -1,6 +1,6 @@
 //! Device-bound pairing storage, independent of the migratable login Keychain.
 
-use super::{Sealer, CLIENT_SEED_PURPOSE};
+use super::Sealer;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -15,24 +15,13 @@ impl Sealer for MacSealer {
         bitsov_ffi::pairing_sealer::open(purpose, sealed)
     }
 
-    fn allows_plaintext_fallback(&self) -> bool {
-        true
-    }
+
 }
 
-/// Probe both directions before installing; unavailability must not abort setup.
-/// An existing sealed identity is still refused by the loader without a sealer.
+/// Install without prompting; each operation reports any storage failure.
+/// Pairing seeds use direct Keychain storage, including on Macs without an enclave.
 pub fn install_macos() {
-    let sealer = MacSealer;
-    let result = (|| {
-        let probe = b"BitSov protected storage availability";
-        let sealed = sealer.seal(CLIENT_SEED_PURPOSE, probe)?;
-        if sealer.open(CLIENT_SEED_PURPOSE, &sealed)?.as_slice() != probe {
-            return Err("Secure Enclave storage failed verification".to_string());
-        }
-        super::install(Arc::new(sealer))
-    })();
-    if let Err(error) = result {
-        eprintln!("[pairing] Secure Enclave sealing unavailable; keeping legacy plaintext storage where present: {error}");
+    if let Err(error) = super::install(Arc::new(MacSealer)) {
+        eprintln!("[pairing] protected storage unavailable: {error}");
     }
 }

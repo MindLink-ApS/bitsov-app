@@ -340,3 +340,18 @@ the optional Developer ID/notarization hooks.
 | Publishing | No release, tag, website download, or release metadata until a signed and notarized build exists. `/bitsov/app` stays a waitlist. |
 | PR #13 | `factory/mac-package-spike` stays open. A human decides whether to close it. |
 | Pin | `v0.3.0-rc19.2` (`04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`); fetch and verify signed checksums before packaging. |
+
+Set `BITSOV_MAC_PROVISION_PROFILE` to the Developer ID provisioning profile
+authorized for the app and its private Keychain group. Packaging validates its
+team, signing certificate, application identity, groups, distribution scope, and
+expiry, and embeds it before final signing.
+Signed packages derive their private Keychain access group from the signing team
+and bundle identifier. Pairing identities and device-key blobs require owner
+presence and stay on this device. The first read migrates older storage only
+after a protected readback succeeds; an authentication or migration error stops
+access. Ad-hoc builds without Keychain entitlements report an access error.
+
+Headless hardware tests can opt into `native-test-keys` in debug macOS builds.
+The feature is rejected for release and iOS builds; ordinary builds reject the
+prompt-free creation policy. Run the library tests with
+`cargo test --lib --features dev-node,local-owner-ceremony,native-test-keys`.
