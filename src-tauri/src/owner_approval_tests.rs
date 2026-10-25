@@ -131,7 +131,7 @@ async fn pending_and_approve_refuse_local_before_network_or_key_access() {
 
 // This is the existing production signer with a fresh, explicitly no-prompt
 // enclave test key. No Tauri runtime or webview is constructed.
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[tokio::test]
 async fn existing_device_signer_returns_der_hex_verifiable_with_p256_sha256() {
     use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_ASN1};
@@ -255,7 +255,7 @@ fn breaker_expiry_formats_calendar_boundaries_and_refuses_out_of_range() {
     assert_eq!(checked_approval(&v, "owner", &message).unwrap_err().code, "node");
 }
 
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[test]
 fn registered_key_refuses_a_record_id_that_does_not_match_its_public_key() {
     let dir = tempfile::tempdir().unwrap();

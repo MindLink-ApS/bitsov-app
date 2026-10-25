@@ -7354,17 +7354,79 @@ fn forget_invalid_signing_key(store: &std::path::Path, error: &ActionError) -> b
     true
 }
 
-/// Sign with the enclave off the async runtime: a Touch ID prompt blocks.
-async fn device_sign(blob: Vec<u8>, message: String, reason: String) -> Result<String, ActionError> {
-    tokio::task::spawn_blocking(move || device_key::sign(&blob, message.as_bytes(), &reason))
+#[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
+#[derive(Clone)]
+struct DeviceSigningKey {
+    directory: PathBuf,
+    public: [u8; device_key::PUBLIC_KEY_LEN],
+}
+#[cfg(not(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))))]
+type DeviceSigningKey = Vec<u8>;
+
+fn device_signing_key(store: &Path, record: &device::Record, blob: Vec<u8>) -> Result<DeviceSigningKey, ActionError> {
+    #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
+    {
+        let _ = blob;
+        let public = hex::decode(&record.public_key).ok().and_then(|v| v.try_into().ok())
+            .ok_or_else(|| ActionError::new("device_key", "Invalid device public key record."))?;
+        Ok(DeviceSigningKey { directory: store.to_path_buf(), public })
+    }
+    #[cfg(not(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))))]
+    { let _ = (store, record); Ok(blob) }
+}
+
+// Apple password storage has its own wrapping key and uses no device blob.
+fn password_device_blob(key: DeviceSigningKey) -> Vec<u8> {
+    #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
+    { let _ = key; Vec::new() }
+    #[cfg(not(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))))]
+    { key }
+}
+
+/// Protected storage reads and the enclave signature share one operation on
+/// the blocking pool. Polls hold only public metadata, never this context.
+async fn device_sign(blob: DeviceSigningKey, message: String, reason: String) -> Result<String, ActionError> {
+    tokio::task::spawn_blocking(move || {
+        #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
+        { sign_stored(&blob, message.as_bytes(), &reason) }
+        #[cfg(not(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))))]
+        { device_key::sign(&blob, message.as_bytes(), &reason).map_err(device_error) }
+    })
         .await
-        .map_err(|_| ActionError::new("device_key", if cfg!(target_os = "android") {
-            "The biometric request stopped unexpectedly."
-        } else {
-            "The Touch ID or Face ID request stopped unexpectedly."
-        }))?
+        .map_err(|_| ActionError::new("device_key", "The biometric request stopped unexpectedly."))?
         .map(hex::encode)
-        .map_err(device_error)
+}
+
+#[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
+fn sign_stored(key: &DeviceSigningKey, message: &[u8], reason: &str) -> Result<Vec<u8>, ActionError> {
+    sign_stored_with(key, message, reason, None)
+}
+
+#[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
+fn sign_stored_with(key: &DeviceSigningKey, message: &[u8], reason: &str, setup: Option<bool>) -> Result<Vec<u8>, ActionError> {
+    let context = bitsov_ffi::client_keychain::AuthenticationContext::new_for_operation(reason, setup == Some(true))
+        .map_err(|e| ActionError::new("device_key", e))?;
+    stored_signing_operation(&key.directory,
+        || crate::apple_key_material::read_for_signing(&key.directory, &context),
+        |blob| context.sign(blob, &key.public, message, reason, setup))
+}
+
+#[cfg(any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")), all(test, unix)))]
+fn stored_signing_operation(
+    directory: &Path,
+    read: impl FnOnce() -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, crate::apple_key_material::ReadError>,
+    sign: impl FnOnce(&[u8]) -> Result<Vec<u8>, device_key::DeviceKeyError>,
+) -> Result<Vec<u8>, ActionError> {
+    let result = (|| {
+        let blob = read().map_err(|error| match error {
+            crate::apple_key_material::ReadError::Cancelled => device_error(device_key::DeviceKeyError::Cancelled),
+            crate::apple_key_material::ReadError::Storage(message) => ActionError::new("device_key", message),
+        })?
+            .ok_or_else(|| device_error(device_key::DeviceKeyError::Invalid))?;
+        sign(&blob).map_err(device_error)
+    })();
+    if let Err(error) = &result { forget_invalid_signing_key(directory, error); }
+    result
 }
 
 /// The node identity and pairing a device signs into every message, as the
@@ -7416,10 +7478,32 @@ struct DeviceKeyReply {
 
 /// Read the local key only when its public key agrees with the registration.
 /// A bridge/transport failure is retryable, not evidence of invalidation.
-fn local_key(state: &NodeState, store: &Path) -> Result<Option<(Vec<u8>, device::Record)>, ActionError> {
-    local_key_with(state, store, device_key::public_key)
+fn local_key(state: &NodeState, store: &Path) -> Result<Option<(DeviceSigningKey, device::Record)>, ActionError> {
+    device::retry_forget(store)?;
+    #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
+    {
+        local_device_record(state, store)?.map(|record| {
+            device_signing_key(store, &record, Vec::new()).map(|key| (key, record))
+        }).transpose()
+    }
+    #[cfg(not(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))))]
+    { local_key_with(state, store, device_key::public_key) }
 }
 
+/// All status views use this prompt-free path, including the locked home view.
+fn local_device_record(state: &NodeState, store: &Path) -> Result<Option<device::Record>, ActionError> {
+    let _guard = state.device_lifecycle.lock().unwrap();
+    if !device::material_present(store).map_err(|e| ActionError::new("device_key", e.to_string()))? {
+        let _ = std::fs::remove_file(store.join(device::RECORD_FILE));
+        return Ok(None);
+    }
+    match device::load_record(store) {
+        Some(record) => Ok(Some(record)),
+        None => device::recover_record(store).map(Some),
+    }
+}
+
+#[cfg(not(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))))]
 fn local_key_with(
     state: &NodeState,
     store: &Path,
@@ -7428,8 +7512,8 @@ fn local_key_with(
     // Keep cleanup in the same critical section as the read, so registration
     // cannot publish a new record between observing absence and removing it.
     let _guard = state.device_lifecycle.lock().unwrap();
-    let Some(record) = device::load_record(store) else { return Ok(None); };
-    let blob = match device::read_private(&store.join(device::BLOB_FILE)) {
+    let record = device::load_record(store);
+    let blob = match device::read_blob(store) {
         Ok(Some(blob)) => blob,
         Ok(None) => {
             // Only a confirmed missing blob makes the record stale. Never
@@ -7437,10 +7521,21 @@ fn local_key_with(
             let _ = std::fs::remove_file(store.join(device::RECORD_FILE));
             return Ok(None);
         }
-        Err(_) => return Ok(None),
+        Err(error) => return Err(ActionError::new("device_key", format!("Could not access the protected device key: {error}"))),
     };
     match public_key(&blob) {
-        Ok(public) if hex::encode(public) == record.public_key => Ok(Some((blob, record))),
+        Ok(public) if record.as_ref().is_none_or(|record| hex::encode(public) == record.public_key) => {
+            let record = match record {
+                Some(record) => record,
+                None => {
+                    // Resume a key published before cancellation or a crash interrupted enrollment.
+                    let record = device::Record { public_key: hex::encode(public), ..Default::default() };
+                    device::save_record(store, &record)?;
+                    record
+                }
+            };
+            Ok(Some((blob, record)))
+        },
         Ok(_) | Err(device_key::DeviceKeyError::Invalid) => {
             device::forget(store);
             Ok(None)
@@ -7468,7 +7563,7 @@ async fn do_device_key_status(state: &NodeState) -> Result<device::DeviceView, A
 
 async fn do_device_key_status_local(state: &NodeState) -> Result<device::DeviceView, ActionError> {
     let store = device_store(state)?;
-    let Some((_, record)) = local_key(state, &store)? else { return Ok(device_view(state, None)) };
+    let Some(record) = local_device_record(state, &store)? else { return Ok(device_view(state, None)) };
     // What this poll found, applied only if the record is still the one polled.
     let before = record.clone();
     let mut updated = record;
@@ -7585,7 +7680,7 @@ async fn do_device_key_register(state: &NodeState) -> Result<device::DeviceView,
                 device::save_blob(&store, &blob)?;
                 device::save_record(&store, &record)?;
             }
-            (blob, record)
+            (device_signing_key(&store, &record, blob)?, record)
         }
     };
     let binding = device_binding(state).await?;
@@ -9380,6 +9475,28 @@ mod device_sign_error_tests {
     use super::*;
 
     #[test]
+    fn repeated_status_reads_use_only_metadata_even_when_protected_bytes_are_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = NodeState::for_identifier("tech.mindlink.bitsov");
+        let record = device::Record { public_key: "04".into(), registered: true, ..Default::default() };
+        device::save_record(dir.path(), &record).unwrap();
+        let marker = dir.path().join("device-key.keychain");
+        std::fs::write(&marker, b"public marker").unwrap();
+        let blob = dir.path().join(device::BLOB_FILE);
+        std::fs::write(&blob, b"not a readable enclave key").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&blob, std::fs::Permissions::from_mode(0)).unwrap();
+            std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0)).unwrap();
+        }
+        for _ in 0..20 {
+            assert_eq!(local_device_record(&state, dir.path()).unwrap(), Some(record.clone()));
+        }
+        assert_eq!(device::load_record(dir.path()), Some(record));
+        assert!(blob.exists() && marker.exists());
+    }
+
+    #[test]
     fn local_key_waits_for_registration_before_cleaning_a_missing_blob() {
         let state = Arc::new(NodeState::for_api("http://127.0.0.1:1/api/v1"));
         let dir = tempfile::tempdir().unwrap();
@@ -9421,6 +9538,19 @@ mod device_sign_error_tests {
         assert!(!dir.path().join(device::BLOB_FILE).exists());
     }
 
+    #[test]
+    fn local_key_recovers_a_blob_published_before_its_public_record() {
+        let dir = tempfile::tempdir().unwrap();
+        device::save_blob(dir.path(), b"synthetic interrupted enrollment").unwrap();
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        let public = [4; device_key::PUBLIC_KEY_LEN];
+        let (blob, record) = local_key_with(&state, dir.path(), |_| Ok(public)).unwrap().unwrap();
+        assert_eq!(blob, b"synthetic interrupted enrollment");
+        assert_eq!(record.public_key, hex::encode(public));
+        assert!(!record.registered);
+        assert_eq!(device::load_record(dir.path()), Some(record));
+    }
+
     #[cfg(unix)]
     #[test]
     fn local_key_preserves_the_record_and_blob_on_a_private_file_read_error() {
@@ -9433,8 +9563,8 @@ mod device_sign_error_tests {
         let path = dir.path().join(device::BLOB_FILE);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(device::read_private(&path).is_err());
-        assert!(local_key_with(&NodeState::for_api("http://127.0.0.1:1/api/v1"), dir.path(), |_| panic!("unreadable blob must not reach the bridge"))
-            .unwrap().is_none());
+        assert_eq!(local_key_with(&NodeState::for_api("http://127.0.0.1:1/api/v1"), dir.path(), |_| panic!("unreadable blob must not reach the bridge"))
+            .unwrap_err().code, "device_key");
         assert_eq!(device::load_record(dir.path()), Some(record));
         assert_eq!(std::fs::read(path).unwrap(), blob);
     }
@@ -9490,6 +9620,35 @@ mod device_sign_error_tests {
         assert!(forget_invalid_signing_key(dir.path(), &error));
         assert!(device::load_blob(dir.path()).is_none());
         assert!(device::load_record(dir.path()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelled_protected_read_and_signature_preserve_the_enrolled_identity() {
+        for during_read in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let blob = b"synthetic wrapped enclave key";
+            let record = device::Record { registered: true, key_id: Some("registered-key".into()), ..Default::default() };
+            device::save_blob(dir.path(), blob).unwrap();
+            device::save_record(dir.path(), &record).unwrap();
+            for name in ["device-key.keychain", "device-key.public"] {
+                std::fs::write(dir.path().join(name), b"public metadata").unwrap();
+            }
+            let error = stored_signing_operation(dir.path(), || {
+                if during_read { Err(crate::apple_key_material::ReadError::Cancelled) }
+                else { Ok(Some(zeroize::Zeroizing::new(blob.to_vec()))) }
+            }, |loaded| {
+                assert!(!during_read, "a cancelled read must never reach signing");
+                assert_eq!(loaded, blob);
+                Err(device_key::DeviceKeyError::Cancelled)
+            }).unwrap_err();
+            assert_eq!(error.code, "device_cancelled");
+            assert_eq!(device::load_blob(dir.path()).as_deref(), Some(blob.as_slice()));
+            assert_eq!(device::load_record(dir.path()), Some(record));
+            for name in ["device-key.keychain", "device-key.public"] {
+                assert_eq!(std::fs::read(dir.path().join(name)).unwrap(), b"public metadata");
+            }
+        }
     }
 }
 
@@ -17242,7 +17401,7 @@ mod control_act_tests {
 
     /// The node's side of device keys. Every signature is verified with
     /// `ring` against the exact bytes the node rebuilds, as the node does.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "native-test-keys"))]
     struct DeviceNode {
         registered: Arc<std::sync::atomic::AtomicBool>,
         intents: Arc<Mutex<Vec<serde_json::Value>>>,
@@ -17250,7 +17409,7 @@ mod control_act_tests {
         approvals: Arc<Mutex<&'static str>>,
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "native-test-keys"))]
     fn device_node() -> (DeviceNode, Routes) {
         use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_ASN1};
         let d = DeviceNode {
@@ -17309,7 +17468,7 @@ mod control_act_tests {
     }
 
     /// A relation grant as the node reports it: one envelope, for `peer`.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "native-test-keys"))]
     fn relation_grant(peer: &str, per_act_msat: u64) -> serde_json::Value {
         let now = now_unix();
         serde_json::json!({"op_id": "rel-1", "client_id": "c1", "granted_at": now, "expires_at": now + 86_400,
@@ -17318,7 +17477,7 @@ mod control_act_tests {
             "per_act_max_by_recipient": {peer: per_act_msat}, "recipient_expires_at": {peer: now + 86_400}})
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "native-test-keys"))]
     #[tokio::test]
     async fn a_node_with_a_plaintext_seed_turns_touch_id_off_before_any_prompt() {
         let (dn, first) = device_node();
@@ -17351,7 +17510,7 @@ mod control_act_tests {
         assert!(dn.intents.lock().unwrap().is_empty());
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "native-test-keys"))]
     #[tokio::test]
     async fn relation_approve_route_failures_preserve_reason_and_write_no_authority() {
         for (status, response, expected_code, expected_message) in [
@@ -17456,7 +17615,7 @@ mod control_act_tests {
         assert_eq!(device::load_record(&store), Some(aa02));
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "native-test-keys"))]
     #[tokio::test]
     async fn relation_envelope_identity_approval_passes_only_the_advertised_node_id() {
         for (advertised, identity) in [
@@ -17543,7 +17702,7 @@ mod control_act_tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "native-test-keys"))]
     #[tokio::test]
     async fn register_once_then_a_touch_id_envelope_opens_sending_to_that_contact_only() {
         let (dn, first) = device_node();
@@ -17587,7 +17746,7 @@ mod control_act_tests {
         assert_eq!(node.posts().len(), before);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "native-test-keys"))]
     #[tokio::test]
     async fn a_pending_registration_can_be_cancelled_and_a_revoked_key_is_noticed() {
         let (dn, first) = device_node();
@@ -17608,7 +17767,7 @@ mod control_act_tests {
     }
 
     /// `device_node` with `DELETE` answering `delete_status`.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "native-test-keys"))]
     fn device_node_deleting(delete_status: u16) -> (DeviceNode, Routes) {
         let (dn, inner) = device_node();
         let routes: Routes = Arc::new(move |m: &str, path: &str, b: &str| {
@@ -17620,7 +17779,7 @@ mod control_act_tests {
         (dn, routes)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "native-test-keys"))]
     #[tokio::test]
     async fn a_cancel_the_node_refused_is_reported_and_keeps_the_request() {
         let (_dn, first) = device_node_deleting(500);
@@ -17654,7 +17813,7 @@ mod control_act_tests {
         assert_eq!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Pending);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "native-test-keys"))]
     #[tokio::test]
     async fn a_touch_id_approval_opens_only_over_the_relation_grant_never_a_console_request() {
         let (dn, first) = device_node();
@@ -17672,9 +17831,9 @@ mod control_act_tests {
         assert!(node.posts().iter().all(|(p, _)| p != "/pair/elevation-request"), "{:?}", node.posts());
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "native-test-keys"))]
     #[tokio::test]
-    async fn a_record_without_its_key_is_not_registered_forever() {
+    async fn status_keeps_public_enrollment_until_an_explicit_operation_validates_the_key() {
         let (dn, first) = device_node();
         let (node, _dir, _g1) = g1_node_with(&["read", "receive"], Some(first));
         *node.state.device_policy.lock().unwrap() = device_key::Policy::NoPromptForTests;
@@ -17683,9 +17842,12 @@ mod control_act_tests {
         dn.registered.store(true, Ordering::SeqCst);
         assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::Registered);
         let store = device_store(s).unwrap();
-        // Another enclave key in place of this one: setup is offered again.
+        // Polling sees only public metadata; an explicit operation validates the key.
         let (other, _) = device_key::create(device_key::Policy::NoPromptForTests).unwrap();
         device::save_blob(&store, &other).unwrap();
+        assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::Registered);
+        assert!(device::load_record(&store).is_some());
+        assert!(do_relation_approve(s, A, None, Some(7000)).await.is_err());
         assert_eq!(do_device_key_status(s).await.unwrap().state, device::DeviceState::None);
         assert!(device::load_record(&store).is_none());
         // And a missing blob, likewise.

@@ -20,6 +20,8 @@ pub mod spend_journal;
 pub mod control;
 pub mod jarvis;
 pub mod at_rest;
+#[cfg(any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")), all(test, unix)))]
+mod apple_key_material;
 pub mod pairing;
 mod trust;
 mod profile;
@@ -50,4 +52,10 @@ mod pairing_link_ios;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     app::entry();
+}
+
+/// Headless packaging check; call before initializing the application runtime.
+#[cfg(all(not(test), target_os = "macos", not(feature = "mobile")))]
+pub fn mac_keychain_smoke_test() -> Result<&'static str, String> {
+    pairing::key::storage_smoke_test()
 }

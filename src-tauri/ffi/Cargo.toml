@@ -11,6 +11,8 @@ default = []
 # Forwarded by bitsov-app's host-toolchain mobile check. This keeps that check
 # independent of Xcode even though Cargo is targeting the macOS host.
 mobile = []
+# Opt-in for headless hardware tests; rejected by release builds.
+native-test-keys = []
 
 [dependencies]
 zeroize = "1"

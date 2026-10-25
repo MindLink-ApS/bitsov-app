@@ -447,7 +447,7 @@ pub async fn finalize(
                 device::save_blob(&store, &blob).map_err(|e| e.message)?;
                 device::save_record(&store, &record).map_err(|e| e.message)?;
             }
-            (blob, record)
+            (device_signing_key(&store, &record, blob).map_err(|e| e.message)?, record)
         }
     };
     let proof = device_sign(

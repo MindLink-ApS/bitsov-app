@@ -2,6 +2,19 @@
 @main
 struct PairingErrorTests {
     static func main() {
+        for error in [
+            NSError(domain: NSOSStatusErrorDomain, code: Int(errSecUserCanceled)),
+            NSError(domain: NSOSStatusErrorDomain, code: Int(errSecAuthFailed)),
+            NSError(domain: LAErrorDomain, code: LAError.userCancel.rawValue),
+            NSError(domain: LAErrorDomain, code: LAError.systemCancel.rawValue),
+            NSError(domain: LAErrorDomain, code: LAError.appCancel.rawValue),
+            NSError(domain: tkErrorDomain, code: tkCanceledByUser),
+        ] {
+            precondition(statusForSigningError(error) == errCancelled,
+                         "authentication refusal must remain cancellation: \(error)")
+            precondition(statusForKeyLoadingError(error) == errCancelled,
+                         "cancelled key restoration must never invalidate the key: \(error)")
+        }
         let temporary: [Error] = [
             NSError(domain: NSOSStatusErrorDomain, code: Int(errSecInteractionNotAllowed)),
             NSError(domain: NSOSStatusErrorDomain, code: Int(errSecNotAvailable)),

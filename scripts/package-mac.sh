@@ -45,6 +45,11 @@ DMG_DIR="src-tauri/target/release/bundle/dmg"
 # default independent of Tauri's APPLE_* environment variables.
 SIGNING_IDENTITY="${BITSOV_MAC_SIGNING_IDENTITY:--}"
 NOTARY_PROFILE="${BITSOV_MAC_NOTARY_PROFILE:-}"
+PROVISION_PROFILE="${BITSOV_MAC_PROVISION_PROFILE:-}"
+if [ "$SIGNING_IDENTITY" != - ] && [ ! -f "$PROVISION_PROFILE" ]; then
+  echo "A signed package requires BITSOV_MAC_PROVISION_PROFILE for private Keychain access." >&2
+  exit 2
+fi
 if [ -n "$NOTARY_PROFILE" ] && [ "$SIGNING_IDENTITY" = - ]; then
   echo "BITSOV_MAC_NOTARY_PROFILE requires a Developer ID signing identity." >&2
   exit 2
@@ -112,6 +117,24 @@ while IFS= read -r -d '' code; do
   fi
 done < <(find "$APP/Contents" -depth -print0)
 codesign "${APP_SIGN_ARGS[@]}" "$APP"
+
+if [ "$SIGNING_IDENTITY" != - ]; then
+  # Read the actual signing team, then seal a private Keychain access group.
+  # No team identifiers or machine-specific signing settings live in source.
+  TEAM_ID="$(codesign -dv --verbose=4 "$APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+  BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw -o - "$APP/Contents/Info.plist")"
+  KEYCHAIN_ENTITLEMENTS="src-tauri/target/mac-keychain-entitlements.plist"
+  PROFILE_PLIST="src-tauri/target/mac-provision-profile.plist"
+  security cms -D -i "$PROVISION_PROFILE" -o "$PROFILE_PLIST"
+  CERTIFICATE_PREFIX="src-tauri/target/mac-signing-certificate-"
+  rm -f "${CERTIFICATE_PREFIX}0"
+  codesign --display --extract-certificates "$CERTIFICATE_PREFIX" "$APP"
+  python3 scripts/mac-keychain-entitlements.py \
+    "${BITSOV_MAC_ENTITLEMENTS:-src-tauri/Entitlements.plist}" \
+    "$KEYCHAIN_ENTITLEMENTS" "$TEAM_ID" "$BUNDLE_ID" "$PROFILE_PLIST" "${CERTIFICATE_PREFIX}0"
+  cp "$PROVISION_PROFILE" "$APP/Contents/embedded.provisionprofile"
+  codesign "${SIGN_ARGS[@]}" --entitlements "$KEYCHAIN_ENTITLEMENTS" "$APP"
+fi
 
 verify_app() {
   # A linker signature on a standalone executable is not a bundle seal.

@@ -1,13 +1,14 @@
 //! The app-held Ed25519 client key.
 //!
-//! iOS stores the seed directly in the non-synchronizing, ThisDeviceOnly
-//! Keychain. Only a public identity marker remains in the pairing directory.
+//! Entitled Apple apps store the seed in the non-synchronizing, ThisDeviceOnly
+//! Keychain. Ad-hoc Macs keep the existing enclave-sealed file, without plaintext
+//! fallback. Only entitled apps migrate those files into the Keychain.
 //!
-//! macOS (Secure Enclave) and Android (Keystore) install an [`at_rest::Sealer`].
+//! Android (Keystore) installs an [`at_rest::Sealer`].
 //! A legacy [`KEY_FILE`] is sealed, read back and verified, then wiped and
 //! deleted. Once [`SEALED_KEY_FILE`] exists it is authoritative, even when
-//! the sealer is unavailable. macOS may retain the legacy `0600` hex file
-//! in its `0700` directory when sealing is unavailable before migration.
+//! the sealer is unavailable. Apple platforms migrate existing files into
+//! user-presence-protected Keychain items before returning the seed.
 
 use std::io::Write;
 use std::path::Path;
@@ -41,14 +42,24 @@ impl std::fmt::Debug for ClientKey {
 }
 
 impl ClientKey {
+    /// Generate a memory-only identity for a short-lived client session.
+    /// Persistent clients must use `load_or_create` and platform-protected storage.
+    pub fn generate_ephemeral() -> Result<Self, PairError> {
+        let mut seed = Zeroizing::new([0; 32]);
+        getrandom::getrandom(&mut seed[..]).map_err(|e| PairError::Local(format!("no randomness for the client key: {e}")))?;
+        Ok(Self::from_seed(*seed))
+    }
+
     /// Load the key from `dir`, generating it on first run.
     ///
     /// Refuses a key file readable or writable by group or others rather than
     /// silently tightening it: a loosened mode means something else touched it.
     pub fn load_or_create(dir: &Path) -> Result<Self, PairError> {
-        #[cfg(target_os = "ios")]
+        #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
         { return keychain::load_native(dir); }
-        #[cfg(not(target_os = "ios"))]
+        #[cfg(all(target_os = "macos", feature = "mobile", not(test)))]
+        { return Err(PairError::Local("client Keychain storage is unavailable in the host mobile check".into())); }
+        #[cfg(not(all(not(test), any(target_os = "ios", target_os = "macos"))))]
         match at_rest::installed() {
             Some(sealer) => Self::load_or_create_sealed(dir, sealer),
             None => Self::load_or_create_plain(dir),
@@ -582,6 +593,9 @@ mod tests {
     }
 }
 
-#[cfg(any(target_os = "ios", all(test, unix)))]
+#[cfg(any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")), all(test, unix)))]
 #[path = "key/keychain.rs"]
 mod keychain;
+
+#[cfg(all(not(test), target_os = "macos", not(feature = "mobile")))]
+pub(crate) fn storage_smoke_test() -> Result<&'static str, String> { keychain::smoke_test() }
