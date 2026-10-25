@@ -5,10 +5,11 @@ import { qrSvg } from '../qr';
 import { PairWords } from './PairWords';
 import { PairSteps } from './PairSteps';
 import { usePairingActivity } from '../pairingActivity';
+import { ClaimCodeSheet, type ClaimCodeView } from './ClaimCodeSheet';
 
-export type AddInput = {action:'status'|'mint'|'poll'|'cancel'} | {action:'approve'|'reject'; op_id:string};
+export type AddInput = {action:'status'|'mint'|'poll'|'cancel'|'claim_code'} | {action:'approve'|'reject'; op_id:string};
 export type PendingDevice = {op_id:string; name:string; words:string[]; expires_at:number; can_approve?:boolean};
-export type AddView = {state:'unsupported'} | {state:'ready'; owner:boolean; second_device?:boolean} | {state:'ticket'; second_device?:boolean; uri:string; expires_at:number; pending:PendingDevice[]} | {state:'done'|'rejected'};
+export type AddView = {state:'unsupported'; owner?:boolean} | {state:'ready'; owner:boolean; second_device?:boolean} | {state:'ticket'; second_device?:boolean; uri:string; expires_at:number; pending:PendingDevice[]} | {state:'done'|'rejected'} | {state:'claim_code'; claim:ClaimCodeView};
 export type JoinInput = {action:'status'|'poll'|'cancel'} | {action:'start'; claim_code:string} | {action:'start_second'};
 export type JoinView = {state:'idle'|'done'; second_device?:boolean} | {state:'waiting'; second_device?:boolean; words:string[]; expires_at:number};
 function errorText(error: unknown): string {
@@ -34,15 +35,17 @@ export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobil
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal('');
   const [secondDevice, setSecondDevice] = createSignal(false);
+  const [showCode, setShowCode] = createSignal(false);
   const [now, setNow] = createSignal(Date.now()/1000);
   let alive = true;
   const ticket = () => { const v = view(); return v?.state === 'ticket' ? v : undefined; };
+  const owner = () => { const v = view(); return v?.state === 'ticket' || ((v?.state === 'ready' || v?.state === 'unsupported') && v.owner); };
   const qr = createMemo(() => {
     const v = ticket();
     if (!v || !v.uri || v.expires_at <= now() || v.pending.length) return null;
     try { return qrSvg(v.uri); } catch { return null; }
   });
-  usePairingActivity(() => busy() || !!ticket());
+  usePairingActivity(() => busy() || !!ticket() || showCode());
   const run = async (input: AddInput) => {
     if (busy()) return;
     setBusy(true); setError('');
@@ -107,6 +110,14 @@ export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobil
       <Match when={view()?.state === 'rejected'}><p role="status">{t('obNothingAdded')}</p></Match>
       <Match when={view()?.state === 'done'}><PairSteps secondDevice={secondDevice()} current={3} /><p class="ok-note" role="status">{t('obDeviceAddedKeepOwner')}</p></Match>
     </Switch>
+    <Show when={owner()}>
+      <button type="button" class="quiet" disabled={busy()} onClick={() => setShowCode(true)}>{t('obShowClaimCode')}</button>
+    </Show>
+    <Show when={showCode()}><ClaimCodeSheet load={async () => {
+      const response = await props.api({action:'claim_code'});
+      if (response.state !== 'claim_code') throw new Error('Claim code unavailable');
+      return response.claim;
+    }} onClose={() => setShowCode(false)} /></Show>
     <Show when={error()}><p class="err-note" role="alert">{error()}</p><button disabled={busy()} onClick={() => void run({action:ticket() ? 'poll' : 'status'})}>{t('obTryAgain')}</button></Show>
   </section>;
 }
@@ -140,7 +151,6 @@ export function JoinDevice(props:{api:(input:JoinInput)=>Promise<JoinView>; mobi
       <Match when={view()?.state === 'idle'}>
         <Show when={(view() as {second_device?:boolean}).second_device} fallback={<>
         {/* New device: the ticket was scanned or pasted to get here; next the claim code. */}
-        {/* TODO(#346 A2): show the claim code in-app on an authenticated owner device once the node API supports it. */}
         <PairSteps secondDevice={secondDevice()} current={1} />
         <p>{t('obClaimEntry')}</p>
         <form onSubmit={event => { event.preventDefault(); const value = claim.value; claim.value = ''; void run({action:'start',claim_code:value}); }}>

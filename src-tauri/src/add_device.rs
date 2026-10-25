@@ -10,6 +10,8 @@ use bitsov_app::{
 use zeroize::Zeroizing;
 #[path = "add_device/second.rs"]
 mod second;
+#[path = "add_device/claim_code.rs"]
+mod claim_code;
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -20,11 +22,13 @@ pub enum Input {
     Approve { op_id: String },
     Reject { op_id: String },
     Cancel,
+    ClaimCode,
 }
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum View {
-    Unsupported,
+    Unsupported { owner: bool },
+    ClaimCode { claim: claim_code::View },
     Ready {
         owner: bool,
         second_device: bool,
@@ -154,6 +158,12 @@ async fn owner(state: &NodeState) -> Result<Owner, ActionError> {
     if !state.remote_mode.load(Ordering::SeqCst) {
         return Err(refusal(403));
     }
+    enrolled_owner(state).await
+}
+async fn enrolled_owner(state: &NodeState) -> Result<Owner, ActionError> {
+    if !matches!(*state.auth.lock().unwrap(), AuthMode::Paired(_)) {
+        return Err(refusal(403));
+    }
     let (blob, record) = local_key(state, &device_store(state)?)?
         .filter(|(_, r)| r.registered)
         .ok_or_else(|| refusal(403))?;
@@ -181,7 +191,7 @@ async fn owner(state: &NodeState) -> Result<Owner, ActionError> {
 }
 async fn ready(state: &NodeState) -> Result<View, ActionError> {
     if !supported(state).await? {
-        return Ok(View::Unsupported);
+        return Ok(View::Unsupported { owner: enrolled_owner(state).await.is_ok() });
     }
     Ok(View::Ready {
         second_device: false,
@@ -244,6 +254,14 @@ fn ticket_view(t: &Ticket) -> View {
 }
 pub async fn run(state: &NodeState, input: Input) -> Result<View, ActionError> {
     let _connection = state.remote_recovery.lock().await;
+    if matches!(input, Input::ClaimCode) {
+        return Ok(View::ClaimCode { claim: claim_code::read(state).await? });
+    }
+    // Ticket minting remains remote-only, but a directly connected enrolled
+    // owner can show the local claim code regardless of node capabilities.
+    if matches!(input, Input::Status) && !state.remote_mode.load(Ordering::SeqCst) {
+        return ready(state).await;
+    }
     let mut setup = state.add_device.lock().await;
     if setup.second.is_some() || node_offers(state, bitsov_app::second_device::CAPABILITY).await {
         return second::run(state, &mut setup, input).await;
@@ -409,7 +427,7 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, ActionError> {
             setup.ticket = None;
             Ok(View::Done)
         }
-        Input::Status | Input::Cancel | Input::Reject { .. } => unreachable!(),
+        Input::Status | Input::Cancel | Input::Reject { .. } | Input::ClaimCode => unreachable!(),
     }
 }
 

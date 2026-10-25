@@ -1,11 +1,21 @@
 /** First migrated app surfaces. Values are display copy, never protocol tokens.
  * {0}, {1}, … insert values verbatim (especially money and recipients). */
 export const appEn = {
-  obClaimWarning: "The new device will ask for your node’s 18-character claim code. Ask the node’s owner for it, or find it on your BitSov box’s sticker.",
-  obClaimEntry: "Enter your node’s 18-character claim code. Ask the node’s owner for it, or find it on your BitSov box’s sticker. A phone can be your first owner device. For later devices, compare the words and approve from an enrolled owner device.",
-  obClaimCodeInvalid: "Check the 18-character claim code with your node’s owner or on your BitSov box’s sticker, then try again.",
+  obClaimWarning: "The new device will ask for your node’s 18-character claim code. Choose Show the code for a new device here.",
+  obClaimEntry: "Open BitSov on your other device and choose Add a device → Show the code, then enter the 18-character claim code here.",
+  obClaimCodeInvalid: "Check the 18-character claim code on your other device, then try again.",
   obClaimMismatch: "The comparison could not be verified. Check the claim code with your node’s owner. Cancel the pending setup before trying again.",
   obDeviceSetupHelp: "Device setup could not finish. Ask your node’s owner for help, then try again.",
+  obShowClaimCode: "Show the code for a new device",
+  obCloseClaimCode: "Close",
+  obClaimExpires: "Expires in {0}",
+  obClaimClosed: "Restart your node to allow a new device to enter the code.",
+  obClaimClaimed: "Your node is already claimed and no new device is waiting for a code.",
+  obClaimUnavailable: "The claim code is unavailable on this node.",
+  obClaimExpired: "The code request expired; start again on the new device.",
+  obClaimOwnerLocal: "Open BitSov on the owner device connected directly to your node.",
+  obClaimRateLimited: "Wait a minute before showing the code again.",
+  obClaimLoadFailed: "The code could not be shown; check your node connection and try again.",
 
   obTicketWhere: "On the new device, open BitSov and choose “A home node (Pi/Umbrel)” on a computer, then scan or paste this ticket. It works once and expires in five minutes.",
   obMacOnlyHint: "Only this Mac can use this node. A phone can join a home node or a separately configured Mac that stays on.",
@@ -878,11 +888,21 @@ export const appEn = {
 };
 
 export const appDa: Record<keyof typeof appEn, string> = {
-  obClaimWarning: "Den nye enhed vil bede om din nodes ejerskabskode på 18 tegn. Bed nodens ejer om koden, eller find den på mærkaten på din BitSov-boks.",
-  obClaimEntry: "Indtast din nodes ejerskabskode på 18 tegn. Bed nodens ejer om koden, eller find den på mærkaten på din BitSov-boks. En telefon kan være din første ejerenhed. Når du tilføjer flere enheder, skal du sammenligne ordene og godkende fra en godkendt ejerenhed.",
-  obClaimCodeInvalid: "Kontrollér ejerskabskoden på 18 tegn med nodens ejer eller på mærkaten på din BitSov-boks, og prøv igen.",
+  obClaimWarning: "Den nye enhed vil bede om din nodes ejerskabskode på 18 tegn. Vælg Vis koden til en ny enhed her.",
+  obClaimEntry: "Åbn BitSov på din anden enhed, og vælg Tilføj en enhed → Vis koden, og indtast så ejerskabskoden på 18 tegn her.",
+  obClaimCodeInvalid: "Kontrollér ejerskabskoden på 18 tegn på din anden enhed, og prøv igen.",
   obClaimMismatch: "Sammenligningen kunne ikke bekræftes. Kontrollér ejerskabskoden med nodens ejer. Annullér den igangværende opsætning, før du prøver igen.",
   obDeviceSetupHelp: "Enheden kunne ikke sættes op. Bed nodens ejer om hjælp, og prøv igen.",
+  obShowClaimCode: "Vis koden til en ny enhed",
+  obCloseClaimCode: "Luk",
+  obClaimExpires: "Udløber om {0}",
+  obClaimClosed: "Genstart din node, så en ny enhed kan indtaste koden.",
+  obClaimClaimed: "Din node er allerede taget i brug, og ingen ny enhed venter på en kode.",
+  obClaimUnavailable: "Ejerskabskoden er ikke tilgængelig på denne node.",
+  obClaimExpired: "Kodeanmodningen er udløbet; start igen på den nye enhed.",
+  obClaimOwnerLocal: "Åbn BitSov på ejerenheden, der er forbundet direkte til din node.",
+  obClaimRateLimited: "Vent et minut, før du viser koden igen.",
+  obClaimLoadFailed: "Koden kunne ikke vises; kontrollér forbindelsen til din node, og prøv igen.",
 
   obTicketWhere: "Åbn BitSov på den nye enhed. På en computer vælger du “En hjemmenode (Pi/Umbrel)”. Scan eller indsæt så dette parringslink. Det kan bruges én gang og udløber efter fem minutter.",
   obMacOnlyHint: "Kun denne Mac kan bruge denne node. En telefon kan tilsluttes en hjemmenode eller en Mac, der er sat op særskilt som hjemmenode og bliver ved med at være tændt.",

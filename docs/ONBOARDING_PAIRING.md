@@ -217,8 +217,9 @@ On a fresh install, choose the home-node path and scan or paste that ticket.
 Review the node and choose **Use remote node**, then reopen the app as directed
 by the existing remote-pairing flow. The **Add this device** panel appears in
 the device-approvals onboarding step, and later under **Settings → Devices**
-(also in **Settings → Node**). Enter the physical claim code from the box
-sticker or trusted console. The ticket does not replace that code. Device-key
+(also in **Settings → Node**). Open BitSov on the other owner device and choose
+**Add a device → Show the code for a new device**. Enter that 18-character code
+on the new device. The ticket does not replace that code. Device-key
 creation and possession proofs use the existing hardware-backed approval path.
 Place the devices together, compare all four words in order, and approve on the
 existing owner device. If they differ, close the ticket and cancel enrollment
@@ -235,6 +236,28 @@ Once a reply contains an operation id, the app saves it before validating the
 remaining reply, so **Cancel pending setup** works even after validation fails.
 Local expiry checks allow 30 seconds of clock skew; the node still enforces its
 own deadlines.
+
+The code sheet makes one host request when opened. The host verifies the
+current pairing's enrolled owner key, then uses its existing bearer for
+`GET /api/v1/owner/claim-code` on the owner-local API. It never sends this
+request through the remote proxy or to a LAN address. The endpoint is
+`Cache-Control: no-store`; only `open` contains `code`, `expires_at` (Unix
+seconds), and `device_name`. The host validates the code and deadline and
+discards the device label. `closed`, `claimed`, and `unavailable` contain no
+code. The sheet shows groups of six characters and an expiry countdown. Its
+response stays in memory only and is cleared on expiry, dismissal, disposal,
+or arrival after dismissal. Node response bodies are never shown as errors
+or logged by this flow.
+
+TODO(#346 A2): finish the node/app handoff for terminal-free initial enrollment.
+The node only exposes a code while a claim-bound enrollment is already pending,
+but the current SAS v1 app starts enrollment after code entry. The node endpoint
+also deliberately rejects the remote tunnel, so an owner iPhone or a Mac paired
+through that tunnel needs a separately authorized owner-local access path.
+The app refuses that route before any proxy request; adding it to the remote
+router is not a workaround. First-owner setup without an existing owner device
+also remains outside this code-display slice. Ship a node release containing
+the endpoint before relying on it with the bundled node.
 
 Keep another owner device, including a Mac or another non-phone device.
 Enrollment does not transfer the node's unlock password. This flow uses two

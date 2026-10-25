@@ -44,7 +44,7 @@ pub(super) async fn run(state: &NodeState, setup: &mut Setup, input: Input) -> R
     }
     if !node_offers(state, protocol::CAPABILITY).await {
         setup.second = None;
-        return Ok(View::Unsupported);
+        return Ok(View::Unsupported { owner: false });
     }
     let owner = match owner(state).await {
         Ok(owner) => owner,
@@ -130,7 +130,7 @@ pub(super) async fn run(state: &NodeState, setup: &mut Setup, input: Input) -> R
             setup.second = None;
             Ok(if reject { View::Rejected } else { View::Done })
         }
-        Input::Cancel => unreachable!(),
+        Input::Cancel | Input::ClaimCode => unreachable!(),
     }
 }
 
