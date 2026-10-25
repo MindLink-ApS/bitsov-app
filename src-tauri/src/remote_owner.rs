@@ -19,6 +19,7 @@ pub enum Input {
         password: Zeroizing<String>,
         claim_code: Zeroizing<String>,
     },
+    ConfirmNetwork { confirmed: bool },
     Match {},
     Finalize {
         backup_words: [Zeroizing<String>; 3],
@@ -29,6 +30,7 @@ pub enum Input {
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum View {
+    NetworkConfirmation,
     Compare {
         words: [&'static str; 4],
         expires_at: i64,
@@ -98,14 +100,24 @@ struct Attempt {
     escrow: password_store::Escrow,
     deadline: Instant,
 }
+struct PendingNetwork {
+    connection: BootstrapConnection,
+    descriptor: remote_access::RemoteDescriptor,
+    ctx: Arc<PairingCtx>,
+    token: String,
+    password: Zeroizing<String>,
+    claim_code: Zeroizing<String>,
+    deadline: Instant,
+}
 #[derive(Default)]
 pub struct Setup {
+    pending_network: Option<PendingNetwork>,
     attempt: Option<Attempt>,
     completion: Option<Completion>,
 }
 impl Setup {
     pub fn is_active(&self) -> bool {
-        self.attempt.is_some()
+        self.pending_network.is_some() || self.attempt.is_some()
             || self
                 .completion
                 .as_ref()
@@ -134,6 +146,7 @@ fn safe_error(status: u16, bytes: &[u8]) -> String {
     }.into()
 }
 async fn token(state: &NodeState) -> Result<String, String> {
+    if let Some(error) = state.network_refusal.lock().unwrap().clone() { return Err(error); }
     ensure_fresh_token(state).await;
     state
         .token
@@ -186,6 +199,7 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
     let _recovery = state.remote_recovery.lock().await;
     let mut setup = state.remote_owner.lock().await;
     if !state.remote_mode.load(Ordering::SeqCst) {
+        setup.pending_network = None;
         if let Some(attempt) = setup.attempt.take() {
             *attempt.password.lock().unwrap() = None;
         }
@@ -198,7 +212,7 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
         };
     }
     let recover_lost = setup.attempt.as_ref().is_some_and(|a| a.finalize_uncertain)
-        || (setup.attempt.is_none() && matches!(input, Input::Poll {}));
+        || (setup.attempt.is_none() && setup.pending_network.is_none() && matches!(input, Input::Poll {}));
     if recover_lost {
         if !matches!(input, Input::Poll {}) {
             return Err("Setup may already be committed. Check the box and continue recovery.".into());
@@ -219,6 +233,7 @@ pub async fn run(state: &NodeState, input: Input) -> Result<View, String> {
     let result = run_pending(state, &mut setup, input).await;
     if result.is_err() && !setup.attempt.as_ref().is_some_and(|a| a.finalize_uncertain) {
         // A failed precommit step is an abort, even if the user never cancels.
+        setup.pending_network = None;
         if let Some(attempt) = setup.attempt.take() {
             *attempt.password.lock().unwrap() = None;
         }
@@ -232,7 +247,7 @@ async fn run_pending(state: &NodeState, setup: &mut Setup, input: Input) -> Resu
             password,
             claim_code,
         } => {
-            if setup.attempt.is_some() {
+            if setup.attempt.is_some() || setup.pending_network.is_some() {
                 return Err("A setup is already pending. Compare or cancel it first.".into());
             }
             let descriptor = state
@@ -253,110 +268,52 @@ async fn run_pending(state: &NodeState, setup: &mut Setup, input: Input) -> Resu
                 .map_err(|_| {
                     "The box restarted or setup is closed. Open a new link from the box page."
                 })?;
-            // Ask the pinned box before creating a device key, saving a password,
-            // or requesting an identity. Keep this check on the ceremony's Noise
-            // connection so an unrelated status endpoint cannot authorize it.
-            if !cfg!(feature = "developer-mainnet") {
-                let (status, bytes) = connection.request("GET", "/api/v1/status", b"", &token).await
-                    .map_err(|_| crate::beta::NETWORK_UNKNOWN.to_string())?;
-                if !(200..300).contains(&status) { return Err(crate::beta::NETWORK_UNKNOWN.into()); }
-                let status: serde_json::Value = serde_json::from_slice(&bytes)
-                    .map_err(|_| crate::beta::NETWORK_UNKNOWN.to_string())?;
-                crate::beta::network(status.get("network").and_then(|v| v.as_str()))?;
+            // Probe on the ceremony's pinned Noise connection before identity
+            // creation, device-key creation or protected password storage.
+            let reported = setup_network(state, &descriptor, &mut connection, &token).await?;
+            let pending = PendingNetwork { connection, descriptor, ctx, token, password, claim_code,
+                deadline: Instant::now() + Duration::from_secs(900) };
+            if !reported {
+                let deadline = pending.deadline;
+                setup.pending_network = Some(pending);
+                // Retained inputs expire even if the renderer disappears.
+                let slot = Arc::clone(&state.remote_owner);
+                tokio::spawn(async move {
+                    tokio::time::sleep_until(deadline.into()).await;
+                    let mut setup = slot.lock().await;
+                    if setup.pending_network.as_ref().is_some_and(|p| p.deadline == deadline) {
+                        setup.pending_network = None;
+                    }
+                });
+                return Ok(View::NetworkConfirmation);
             }
-            if password.is_empty() || password.len() > 4096 {
-                return Err("Choose a password of 1–4096 bytes for this box.".into());
+            begin_create(state, setup, pending).await
+        }
+        Input::ConfirmNetwork { confirmed } => {
+            let mut pending = setup.pending_network.take().ok_or(crate::beta::NETWORK_UNKNOWN)?;
+            if !confirmed || Instant::now() >= pending.deadline {
+                return Err(crate::beta::NETWORK_UNKNOWN.into());
             }
-            let claim = Zeroizing::new(sas::claim_commitment(&claim_code).map_err(str::to_owned)?);
-            drop(claim_code);
-            if !device_available(state) {
-                return Err("Enable Touch ID on this Mac before setting up the box.".into());
+            let current = state.remote_descriptor.lock().unwrap().clone().ok_or("Missing remote box.")?;
+            if current.bootstrap_box_key() != pending.descriptor.bootstrap_box_key()
+                || current.endpoint() != pending.descriptor.endpoint() {
+                return Err("The box changed during setup. Open its setup link again.".into());
             }
-            let (blob, record) = match local_key(state, &ctx.store).map_err(|e| e.message)? {
-                Some((_, record)) if record.registered => {
-                    return Err(
-                        "This pairing already has an enrolled device. Open a new setup link."
-                            .into(),
-                    )
-                }
-                Some(key) => key,
-                None => {
-                    let (blob, public) = tokio::task::spawn_blocking(|| {
-                        device_key::create(device_key::Policy::Biometry)
-                    })
-                    .await
-                    .map_err(|_| "Creating the Secure Enclave key stopped.")?
-                    .map_err(|_| "Could not create this Mac's Secure Enclave key.")?;
-                    let record = device::Record {
-                        public_key: hex::encode(public),
-                        ..Default::default()
-                    };
-                    let _guard = state.device_lifecycle.lock().unwrap();
-                    device::save_blob(&ctx.store, &blob).map_err(|e| e.message)?;
-                    device::save_record(&ctx.store, &record).map_err(|e| e.message)?;
-                    (blob, record)
-                }
-            };
-            let box_key = descriptor
-                .bootstrap_box_key()
-                .ok_or("This box is already initialized.")?
-                .to_owned();
-            let (password, saved) = tokio::task::spawn_blocking(move || {
-                let result = password_store::Escrow::save(box_key, password.as_bytes());
-                (password, result)
-            })
-            .await
-            .map_err(|_| "Saving the protected setup password stopped.")?;
-            let escrow = saved?;
-            let body = serde_json::to_vec(&serde_json::json!({"password_commitment":blake3::hash(password.as_bytes()).to_hex().to_string(),
-                "sas_version":1,"device":{"public_key":record.public_key,"name":NAME}})).unwrap();
-            let (pending, nonce, escrow) = accept_pending(
-                connection.request("POST", "/api/v1/identity/create-pending", &body, &token).await,
-                escrow,
-            )?;
-            let public: [u8; 65] = hex::decode(&record.public_key)
-                .ok()
-                .and_then(|b| b.try_into().ok())
-                .ok_or("Invalid local device key.")?;
-            let digest = sas::digest(&connection.binding, &public, &nonce, &claim);
-            let view = View::Compare {
-                words: sas::words(&digest),
-                expires_at: now_unix() + 900,
-            };
-            let deadline = Instant::now() + Duration::from_secs(900);
-            let id = pending.ceremony_id.clone();
-            let password = Arc::new(Mutex::new(Some(password)));
-            let expiry_password = Arc::clone(&password);
-            setup.attempt = Some(Attempt {
-                connection,
-                pending,
-                password,
-                digest,
-                blob,
-                record,
-                proof: None,
-                backup: None,
-                finalize_uncertain: false,
-                escrow,
-                deadline,
-            });
-            // Provisional escrow and memory secrets expire even if the webview disappears.
-            let state_slot = Arc::clone(&state.remote_owner);
-            tokio::spawn(async move {
-                tokio::time::sleep_until(deadline.into()).await;
-                *expiry_password.lock().unwrap() = None;
-                let mut setup = state_slot.lock().await;
-                if setup
-                    .attempt
-                    .as_ref()
-                    .is_some_and(|a| a.pending.ceremony_id == id)
-                {
-                    setup.attempt = None;
-                }
-            });
-            Ok(view)
+            if let Some(error) = state.network_refusal.lock().unwrap().clone() { return Err(error); }
+            // The box may have gained metadata while the owner read the dialog.
+            // An explicit report always takes precedence over this answer.
+            setup_network(state, &current, &mut pending.connection, &pending.token).await?;
+            // Local audit state records the owner's explicit answer and its box
+            // pin. It never supplies a default answer to a future confirmation.
+            let record = serde_json::to_vec(&serde_json::json!({"v":1,
+                "box_key":pending.descriptor.bootstrap_box_key(),
+                "owner_confirmed_signet":true, "confirmed_at":now_unix()})).unwrap();
+            device::write_private(&pending.ctx.store.join("setup-network.json"), &record)
+                .map_err(|_| "Could not save the network confirmation; setup is blocked.")?;
+            begin_create(state, setup, pending).await
         }
         Input::Cancel {} => {
+            if setup.pending_network.take().is_some() { return Ok(View::WordsDiffer); }
             // Dropping the password is unconditional, including network failure.
             let mut attempt = setup.attempt.take();
             if let Some(attempt) = attempt.as_mut() {
@@ -464,6 +421,134 @@ async fn run_pending(state: &NodeState, setup: &mut Setup, input: Input) -> Resu
             }
         }
     }
+}
+
+// A missing route or optional field is normal for rc19.2. Explicit unknown
+// values and failed/unreadable responses remain refusals, never confirmations.
+async fn setup_network(state: &NodeState, descriptor: &remote_access::RemoteDescriptor,
+    connection: &mut BootstrapConnection, token: &str,
+) -> Result<bool, String> {
+    if cfg!(feature = "developer-mainnet") { return Ok(true); }
+    let (status, bytes) = connection.request("GET", "/api/v1/status", b"", token).await
+        .map_err(|_| crate::beta::NETWORK_UNKNOWN.to_string())?;
+    let status = match status {
+        404 => serde_json::Value::Null,
+        200..=299 => serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|_| crate::beta::NETWORK_UNKNOWN.to_string())?,
+        _ => return Err(crate::beta::NETWORK_UNKNOWN.into()),
+    };
+    // Check both sources: a signet label must never hide a mainnet status.
+    // Direct bootstrap probes share the same sticky refusal as overview reads.
+    check_reported_network(state, &status)?;
+    if let Some(network) = descriptor.network() {
+        if let Err(error) = crate::beta::setup_network(network) {
+            if error == crate::beta::MAINNET_DISABLED { block_network(state, &error); }
+            return Err(error);
+        }
+    }
+    let reported = status.get("network").filter(|v| !v.is_null());
+    if let Some(network) = reported {
+        crate::beta::setup_network(network.as_str().ok_or(crate::beta::NETWORK_UNKNOWN)?)?;
+    }
+    Ok(descriptor.network().is_some() || reported.is_some())
+}
+
+async fn begin_create(state: &NodeState, setup: &mut Setup, pending: PendingNetwork) -> Result<View, String> {
+    let PendingNetwork { mut connection, descriptor, ctx, token, password, claim_code, deadline } = pending;
+    if Instant::now() >= deadline { return Err("Setup expired. Open a new setup link.".into()); }
+    if let Some(error) = state.network_refusal.lock().unwrap().clone() { return Err(error); }
+    if password.is_empty() || password.len() > 4096 {
+        return Err("Choose a password of 1–4096 bytes for this box.".into());
+    }
+    let claim = Zeroizing::new(sas::claim_commitment(&claim_code).map_err(str::to_owned)?);
+    drop(claim_code);
+    if !device_available(state) {
+        return Err("Enable Touch ID on this Mac before setting up the box.".into());
+    }
+    let (blob, record) = match local_key(state, &ctx.store).map_err(|e| e.message)? {
+        Some((_, record)) if record.registered => {
+            return Err(
+                "This pairing already has an enrolled device. Open a new setup link."
+                    .into(),
+            )
+        }
+        Some(key) => key,
+        None => {
+            let (blob, public) = tokio::task::spawn_blocking(|| {
+                device_key::create(device_key::Policy::Biometry)
+            })
+            .await
+            .map_err(|_| "Creating the Secure Enclave key stopped.")?
+            .map_err(|_| "Could not create this Mac's Secure Enclave key.")?;
+            let record = device::Record {
+                public_key: hex::encode(public),
+                ..Default::default()
+            };
+            let _guard = state.device_lifecycle.lock().unwrap();
+            device::save_blob(&ctx.store, &blob).map_err(|e| e.message)?;
+            device::save_record(&ctx.store, &record).map_err(|e| e.message)?;
+            (blob, record)
+        }
+    };
+    let box_key = descriptor
+        .bootstrap_box_key()
+        .ok_or("This box is already initialized.")?
+        .to_owned();
+    let (password, saved) = tokio::task::spawn_blocking(move || {
+        let result = password_store::Escrow::save(box_key, password.as_bytes());
+        (password, result)
+    })
+    .await
+    .map_err(|_| "Saving the protected setup password stopped.")?;
+    let escrow = saved?;
+    let body = serde_json::to_vec(&serde_json::json!({"password_commitment":blake3::hash(password.as_bytes()).to_hex().to_string(),
+        "sas_version":1,"device":{"public_key":record.public_key,"name":NAME}})).unwrap();
+    if let Some(error) = state.network_refusal.lock().unwrap().clone() { return Err(error); }
+    let (pending, nonce, escrow) = accept_pending(
+        connection.request("POST", "/api/v1/identity/create-pending", &body, &token).await,
+        escrow,
+    )?;
+    let public: [u8; 65] = hex::decode(&record.public_key)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or("Invalid local device key.")?;
+    let digest = sas::digest(&connection.binding, &public, &nonce, &claim);
+    let view = View::Compare {
+        words: sas::words(&digest),
+        expires_at: now_unix() + 900,
+    };
+    let deadline = Instant::now() + Duration::from_secs(900);
+    let id = pending.ceremony_id.clone();
+    let password = Arc::new(Mutex::new(Some(password)));
+    let expiry_password = Arc::clone(&password);
+    setup.attempt = Some(Attempt {
+        connection,
+        pending,
+        password,
+        digest,
+        blob,
+        record,
+        proof: None,
+        backup: None,
+        finalize_uncertain: false,
+        escrow,
+        deadline,
+    });
+    // Provisional escrow and memory secrets expire even if the webview disappears.
+    let state_slot = Arc::clone(&state.remote_owner);
+    tokio::spawn(async move {
+        tokio::time::sleep_until(deadline.into()).await;
+        *expiry_password.lock().unwrap() = None;
+        let mut setup = state_slot.lock().await;
+        if setup
+            .attempt
+            .as_ref()
+            .is_some_and(|a| a.pending.ceremony_id == id)
+        {
+            setup.attempt = None;
+        }
+    });
+    Ok(view)
 }
 
 // Called only after the box confirms cancellation. A recovered/restarted
@@ -921,6 +1006,14 @@ mod tests {
     // Exercise Create against a paired empty box, including its pinned Noise
     // transport. An empty password stops after the network gate, before Touch ID.
     async fn create_on_box(status: u16, body: &str) -> Result<View, String> {
+        create_on_box_with(status, body, None, None).await
+    }
+
+    async fn create_on_box_with(status: u16, body: &str, network: Option<&str>, confirm: Option<bool>) -> Result<View, String> {
+        create_on_box_later(status, body, network, confirm, None, false).await
+    }
+
+    async fn create_on_box_later(status: u16, body: &str, network: Option<&str>, confirm: Option<bool>, later: Option<&str>, observed_elsewhere: bool) -> Result<View, String> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         async fn read(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
             let len = stream.read_u32().await.unwrap() as usize;
@@ -951,9 +1044,10 @@ mod tests {
         let endpoint = listener.local_addr().unwrap().to_string();
         let secret = [9; 32];
         let public = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret));
-        let payload = serde_json::json!({"v":1,"endpoint":endpoint,
+        let mut payload = serde_json::json!({"v":1,"endpoint":endpoint,
             "box_transport_pubkey":hex::encode(public.as_bytes()), "node_id":"",
             "transport_pubkey":"", "transport_signature":""});
+        if let Some(network) = network { payload["network"] = network.into(); }
         let state = NodeState::for_api("http://localhost:1/api/v1");
         state.remote_mode.store(true, Ordering::SeqCst);
         let dir = tempfile::tempdir().unwrap();
@@ -968,7 +1062,10 @@ mod tests {
             store: store.clone(), data_dir: dir.path().to_path_buf(),
         }));
         *state.token.lock().unwrap() = Some("test-token".into());
+        let external_report = observed_elsewhere.then(|| serde_json::from_str::<serde_json::Value>(later.unwrap()).unwrap());
         let body = body.to_owned();
+        let later = later.map(str::to_owned);
+        let network_changed = later.is_some();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut noise = snow::Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse().unwrap())
@@ -987,21 +1084,43 @@ mod tests {
                 assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
                 return;
             }
-            let request = receive(&mut stream, &mut noise).await;
-            let request = std::str::from_utf8(&request).unwrap();
-            assert!(request.starts_with("GET /api/v1/status HTTP/1.1\r\n"));
-            assert!(request.contains("Authorization: Bearer test-token\r\n"));
-            let response = format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\n\r\n{body}", body.len());
-            send(&mut stream, &mut noise, response.as_bytes()).await;
+            for probe in 0..if confirm == Some(true) && !observed_elsewhere { 2 } else { 1 } {
+                let request = receive(&mut stream, &mut noise).await;
+                let request = std::str::from_utf8(&request).unwrap();
+                assert!(request.starts_with("GET /api/v1/status HTTP/1.1\r\n"));
+                assert!(request.contains("Authorization: Bearer test-token\r\n"));
+                let (status, body) = if probe == 1 { later.as_deref().map(|body| (200, body)).unwrap_or((status, body.as_str())) }
+                    else { (status, body.as_str()) };
+                let response = format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+                send(&mut stream, &mut noise, response.as_bytes()).await;
+            }
             // Refused networks must never reach create-pending.
             let mut byte = [0];
             assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
         });
         // Test the action dispatcher on every desktop platform; the outer run
         // entry point additionally enforces the production Mac-only ceremony.
-        let result = run_pending(&state, &mut Setup::default(), Input::Create {
+        let mut setup = Setup::default();
+        let mut result = run_pending(&state, &mut setup, Input::Create {
             password: Zeroizing::new(String::new()), claim_code: Zeroizing::new("physical".into()),
         }).await;
+        if let Some(confirmed) = confirm {
+            assert_eq!(serde_json::to_value(result.as_ref().ok().expect("confirmation step")).unwrap()["state"], "network_confirmation");
+            if let Some(report) = external_report { assert!(check_reported_network(&state, &report).is_err()); }
+            let input = serde_json::from_value(serde_json::json!({"action":"confirm_network", "confirmed":confirmed})).unwrap();
+            result = run_pending(&state, &mut setup, input).await;
+            if network_changed {
+                assert_eq!(state.network_refusal.lock().unwrap().as_deref(), Some(crate::beta::MAINNET_DISABLED));
+            }
+            let saved = std::fs::read(store.join("setup-network.json")).ok();
+            assert_eq!(saved.is_some(), confirmed && !network_changed);
+            if let Some(saved) = saved {
+                let saved: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+                assert_eq!(saved["owner_confirmed_signet"], true);
+                assert_eq!(saved["box_key"], hex::encode(public.as_bytes()));
+            }
+        }
+        drop(setup);
         tokio::time::timeout(Duration::from_secs(2), server).await.unwrap().unwrap();
         assert!(!store.join("device.json").exists());
         result
@@ -1023,13 +1142,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_refuses_unknown_absent_and_unavailable_box_networks() {
+    async fn create_refuses_unknown_and_unavailable_box_networks() {
         if cfg!(feature = "developer-mainnet") { return; }
-        for (status, body) in [(200, r#"{"network":"unknown"}"#), (200, "{}"),
-            (200, r#"{"network":null}"#), (200, "invalid"), (503, r#"{"network":"signet"}"#)] {
+        for (status, body) in [(200, r#"{"network":"unknown"}"#), (200, r#"{"network":7}"#),
+            (200, "invalid"), (503, r#"{"network":"signet"}"#)] {
             let error = create_on_box(status, body).await.err().unwrap();
             assert_eq!(error, crate::beta::NETWORK_UNKNOWN);
         }
+    }
+
+    #[tokio::test]
+    async fn unreported_network_requires_explicit_owner_confirmation() {
+        if cfg!(feature = "developer-mainnet") { return; }
+        for (status, body) in [(404, "{}"), (200, "{}"), (200, r#"{"network":null}"#)] {
+            let view = create_on_box(status, body).await.unwrap();
+            assert_eq!(serde_json::to_value(view).unwrap()["state"], "network_confirmation");
+            let error = create_on_box_with(status, body, None, Some(true)).await.err().unwrap();
+            assert_eq!(error, "Choose a password of 1–4096 bytes for this box.");
+            let error = create_on_box_with(status, body, None, Some(false)).await.err().unwrap();
+            assert_eq!(error, crate::beta::NETWORK_UNKNOWN);
+        }
+    }
+
+    #[tokio::test]
+    async fn confirmation_cannot_override_a_new_mainnet_report() {
+        if cfg!(feature = "developer-mainnet") { return; }
+        for observed_elsewhere in [false, true] {
+            let error = create_on_box_later(404, "{}", None, Some(true), Some(r#"{"network":"mainnet"}"#), observed_elsewhere)
+                .await.err().unwrap();
+            assert_eq!(error, crate::beta::MAINNET_DISABLED);
+        }
+    }
+
+    #[tokio::test]
+    async fn optional_descriptor_network_is_checked_when_bootstrap_has_no_status() {
+        if cfg!(feature = "developer-mainnet") { return; }
+        for (network, expected) in [("signet", "Choose a password of 1–4096 bytes for this box."),
+            ("mainnet", crate::beta::MAINNET_DISABLED), ("bitcoin", crate::beta::MAINNET_DISABLED),
+            ("unknown", crate::beta::NETWORK_UNKNOWN), ("testnet", crate::beta::NETWORK_UNKNOWN)] {
+            let error = create_on_box_with(404, "{}", Some(network), None).await.err().unwrap();
+            assert_eq!(error, expected);
+        }
+        let error = create_on_box_with(200, r#"{"network":"mainnet"}"#, Some("signet"), None).await.err().unwrap();
+        assert_eq!(error, crate::beta::MAINNET_DISABLED);
     }
 
     #[tokio::test]

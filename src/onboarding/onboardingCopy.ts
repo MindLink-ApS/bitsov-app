@@ -1,5 +1,8 @@
 /** Desktop onboarding and app-shell copy. Keep node-provided text verbatim. */
 export const onboardingEn = {
+  obBoxNetworkTitle: "Confirm this box’s network",
+  obBoxNetworkConfirmation: "This box runs BitSov on signet (test coins only). I confirm it is not using real money.",
+  obBoxNetworkConfirm: "I confirm",
   obNodeUnreachable: "Could not reach your node. Check the connection and try again.",
   obDevices: "Devices",
   obChecking: "Checking…",
@@ -309,6 +312,9 @@ export const onboardingEn = {
 } as const;
 
 export const onboardingDa: Record<keyof typeof onboardingEn, string> = {
+  obBoxNetworkTitle: "Bekræft boksens netværk",
+  obBoxNetworkConfirmation: "Denne boks kører BitSov på signet (kun testmønter). Jeg bekræfter, at den ikke bruger rigtige penge.",
+  obBoxNetworkConfirm: "Jeg bekræfter",
   obNodeUnreachable: "Kunne ikke få forbindelse til din node. Tjek forbindelsen, og prøv igen.",
   obDevices: "Enheder",
   obChecking: "Tjekker…",

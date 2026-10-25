@@ -23,17 +23,28 @@ Hostname-form listeners, including `localhost`, retain their configured ports
 and are mapped to IPv4 loopback without DNS resolution. Numeric IPv6 listeners
 use IPv6 loopback. Explicit remote-access listeners retain the node's parsing.
 
-Beta builds refuse mainnet before starting a local node or granting a remote
+Beta builds refuse mainnet before starting a local node or granting a live remote
 session. Retained mainnet installations are refused, never converted to signet.
-A remote peer must report its test network through authenticated `/status`.
-Home-box setup queries this endpoint over the same pinned Noise connection
-before creating an identity, allowing boxes that declare signet or dev regtest.
-Mainnet or an absent, unknown, or unavailable network is refused. Node rc19.2
-declares its network only in live status: its empty-box bootstrap router has no
-status route or network declaration. Remote first-run setup therefore requires
-a node update exposing its configured network during bootstrap; rc19.2 empty
-boxes remain refused in default beta builds rather than assuming a test network.
-Provisional enrollment without a network declaration is also refused.
+A live remote peer must report its test network through authenticated `/status`.
+Home-box setup accepts an optional `network` field in the bootstrap descriptor or
+on the pinned connection's status response. It allows signet and, in development
+builds, regtest. Mainnet and explicit unknown values are refused with a plain
+reason.
+
+Node rc19.2 has no bootstrap status route or network declaration. Its pinned,
+identity-free session can reach setup without granting live readiness. Before
+creating an identity, the app asks the owner to confirm that this box runs signet
+with test coins only and is not using real money. Only an explicit confirmation
+continues; cancellation, closing the dialog, or leaving setup refuses. The app
+records that answer with the box key in local setup state. The record never
+auto-confirms another attempt. Pending inputs stay in the host, expire after
+15 minutes, and are dropped on dismissal.
+
+Every live status read, including overview and money preflight, checks a reported
+network. A later mainnet report retires the session and closes money approvals;
+the owner's earlier confirmation cannot override it. A delayed successful check
+cannot clear that refusal; the owner must explicitly replace the connection.
+Provisional enrollment without a network declaration remains refused.
 Developers can deliberately compile with the Cargo feature
 `developer-mainnet` to lift the network restriction. Runtime environment variables
 and saved settings cannot lift it; the feature is absent from the default build.

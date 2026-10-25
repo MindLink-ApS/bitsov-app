@@ -1,8 +1,9 @@
 import { render } from 'solid-js/web';
 import { afterEach, expect, it, vi } from 'vitest';
+import { setLanguagePref } from '../src/i18n';
 import { RemoteOwnerCeremony, type SetupInput, type SetupView } from '../src/onboarding/RemoteOwnerCeremony';
 let dispose: (() => void) | undefined;
-afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.useRealTimers(); });
+afterEach(() => { setLanguagePref('en'); dispose?.(); document.body.innerHTML = ''; vi.useRealTimers(); });
 const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 function mount(api: (input: SetupInput) => Promise<SetupView>) {
   const root = document.createElement('div'); document.body.append(root);
@@ -150,4 +151,47 @@ it('clears comparison and offers cancellation when Match aborts the host attempt
   expect(root.textContent).not.toContain('Match (Touch ID)');
   click(root, 'Cancel setup'); await flush();
   expect(calls).toEqual(['create', 'match', 'cancel']);
+});
+
+it.each([
+  ['en', 'This box runs BitSov on signet (test coins only). I confirm it is not using real money.', 'I confirm'],
+  ['da', 'Denne boks kører BitSov på signet (kun testmønter). Jeg bekræfter, at den ikke bruger rigtige penge.', 'Jeg bekræfter'],
+] as const)('requires an explicit signet confirmation in %s', async (language, statement, confirm) => {
+  vi.useFakeTimers();
+  const calls: SetupInput[] = [];
+  const root = mount(async input => {
+    calls.push(structuredClone(input));
+    if (input.action === 'create') return { state: 'network_confirmation' } as SetupView;
+    return { state: 'compare', words: ['a','b','c','d'], expires_at: Date.now()/1000+600 };
+  });
+  await start(root);
+  setLanguagePref(language);
+  expect(root.querySelector('[role="dialog"]')?.textContent).toContain(statement);
+  expect(root.querySelector('#box-password')).toBeNull();
+  await vi.advanceTimersByTimeAsync(30000);
+  expect(calls.map(v => v.action)).toEqual(['create']);
+  click(root, confirm); await flush();
+  expect(calls[1]).toEqual({ action: 'confirm_network', confirmed: true });
+  expect(root.querySelector('[role="dialog"]')).toBeNull();
+  expect(root.querySelectorAll('[data-pair-word]')).toHaveLength(4);
+});
+
+it.each(['cancel', 'close', 'button', 'unmount'])('refuses an unreported network on dialog %s', async dismissal => {
+  const calls: SetupInput[] = [];
+  const root = mount(async input => {
+    calls.push(structuredClone(input));
+    if (input.action === 'create') return { state: 'network_confirmation' } as SetupView;
+    throw 'beta_network_unknown';
+  });
+  await start(root);
+  const dialog = root.querySelector('[role="dialog"]');
+  expect(dialog).not.toBeNull();
+  if (dismissal === 'unmount') { dispose?.(); dispose = undefined; }
+  else if (dismissal === 'button') click(root, 'Cancel setup');
+  else dialog!.dispatchEvent(new Event(dismissal, { cancelable: true }));
+  await flush();
+  expect(calls.some(v => v.action === 'confirm_network' && (v as { confirmed: boolean }).confirmed)).toBe(false);
+  expect(calls.map(v => v.action)).toEqual(['create', dismissal === 'unmount' ? 'cancel' : 'confirm_network']);
+  expect(root.querySelectorAll('[data-pair-word]')).toHaveLength(0);
+  if (dismissal !== 'unmount') expect(root.textContent).toContain('The node did not confirm its test network; setup is blocked.');
 });

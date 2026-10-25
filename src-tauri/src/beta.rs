@@ -15,6 +15,17 @@ fn check(network: Option<&str>, developer_mainnet: bool) -> Result<(), String> {
     }
 }
 
+/// Home-box setup accepts signet, plus regtest in development builds.
+pub fn setup_network(network: &str) -> Result<(), String> {
+    if cfg!(feature = "developer-mainnet") { return Ok(()); }
+    match network.trim().to_ascii_lowercase().as_str() {
+        "signet" => Ok(()),
+        "regtest" if cfg!(debug_assertions) => Ok(()),
+        "bitcoin" | "mainnet" => Err(MAINNET_DISABLED.into()),
+        _ => Err(NETWORK_UNKNOWN.into()),
+    }
+}
+
 pub fn status(status: &serde_json::Value) -> Result<(), String> {
     let backend = status.get("lightning_backend").and_then(|v| v.as_str());
     network(status.get("network").and_then(|v| v.as_str())

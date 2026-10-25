@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Allow home-box setup on nodes without bootstrap network metadata only after the owner explicitly confirms signet test coins. Save the confirmation locally, accept optional network declarations, and block money actions if a paired node later reports mainnet.
+
 - Beta upgrades refuse local nodes previously bootstrapped with `network = "bitcoin"`; the existing identity and funds are preserved, and deliberate mainnet use requires a `developer-mainnet` build.
 
 - Restore in-call Pay after a successful wallet/chat check, reject delayed checks of older payments, and explain failed receipts. Price owner call repairs with a host-enforced ceiling, keep unpriced repair checks payment-free, and refuse acknowledgement of verified foreign-identity records. Pin the call-slot proof guards with mutation regressions and make call timeout/refusal tests independent of preflight scheduling.

@@ -193,6 +193,9 @@ struct NodeState {
     /// The LDK network from that same configuration (`mainnet`, `regtest`, …).
     /// Display only: a chat invoice for another network is shown as text.
     configured_network: Mutex<Option<String>>,
+    /// A mainnet report retires money authority until an explicit connection
+    /// replacement. A delayed successful status cannot clear the refusal.
+    network_refusal: Mutex<Option<String>>,
     /// DEV ONLY (`dev_node`): an unverified node binary to run instead of the bundled
     /// sidecar. Always `None` in release builds.
     #[cfg(all(desktop, not(feature = "mobile")))]
@@ -410,6 +413,7 @@ impl NodeState {
         #[cfg(any(mobile, feature = "mobile"))]
         let (local_owner, owner_warning) = (false, None);
         let (unlock_state, pending_device) = home_unlock::locked_view(self);
+        let network_refusal = self.network_refusal.lock().unwrap().clone();
         Status {
             phone_setup: *self.phone_setup.lock().unwrap(),
             typed_unlock_supported: cfg!(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile")))),
@@ -423,9 +427,9 @@ impl NodeState {
             initialization_repair: *self.initialization_repair.lock().unwrap(),
             retry_after_secs,
             // A transport cooldown pauses reads; it does not revoke pairing.
-            ready: *self.ready.lock().unwrap(),
+            ready: *self.ready.lock().unwrap() && network_refusal.is_none(),
             node_id: self.node_id.lock().unwrap().clone(),
-            error: self.error.lock().unwrap().clone(),
+            error: network_refusal.or_else(|| self.error.lock().unwrap().clone()),
             connection_error: self.remote_retry.connection_error(),
         }
     }
@@ -501,6 +505,7 @@ impl NodeState {
             config: Mutex::new(None),
             room_routing_policy: Mutex::new(None),
             configured_network: Mutex::new(None),
+            network_refusal: Mutex::new(None),
             #[cfg(all(desktop, not(feature = "mobile")))]
             dev_sidecar: Mutex::new(None),
             external_node: Mutex::new(None),
@@ -1520,6 +1525,8 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
     // The signed descriptor pins identity; provisional tokens can only enroll.
     // No identity/status probe or normal authority is granted before approval.
     if add_device::is_second_join(state) {
+        let refusal = state.network_refusal.lock().unwrap();
+        if let Some(error) = refusal.as_ref() { return set_error(state, error.clone()); }
         *state.node_id.lock().unwrap() = state.expected_remote_node_id.lock().unwrap().clone();
         *state.ready.lock().unwrap() = true;
         *state.error.lock().unwrap() = None;
@@ -1556,12 +1563,16 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
                 *state.ready.lock().unwrap() = false;
                 return set_error(state, error);
             }
-            *state.home_unlock_state.lock().unwrap() = "ready";
-            *state.home_attempts_left.lock().unwrap() = None;
-            state.home_locked.store(false, Ordering::SeqCst);
-            *state.node_id.lock().unwrap() = Some(node_id.clone());
-            *state.error.lock().unwrap() = None;
-            *state.ready.lock().unwrap() = true;
+            {
+                let refusal = state.network_refusal.lock().unwrap();
+                if let Some(error) = refusal.as_ref() { return set_error(state, error.clone()); }
+                *state.home_unlock_state.lock().unwrap() = "ready";
+                *state.home_attempts_left.lock().unwrap() = None;
+                state.home_locked.store(false, Ordering::SeqCst);
+                *state.node_id.lock().unwrap() = Some(node_id.clone());
+                *state.error.lock().unwrap() = None;
+                *state.ready.lock().unwrap() = true;
+            }
             #[cfg(all(desktop, not(feature = "mobile")))]
             if state.owner.active.load(Ordering::SeqCst) {
                 let warning = match local_owner::verify_device(state).await {
@@ -1775,10 +1786,37 @@ fn check_first_run_session(state: &NodeState, session: &PairedSession) -> Result
     Ok(())
 }
 
+fn block_network(state: &NodeState, error: &str) {
+    let mut refusal = state.network_refusal.lock().unwrap();
+    if error == crate::beta::MAINNET_DISABLED { *refusal = Some(error.into()); }
+    let error = refusal.as_deref().unwrap_or(error);
+    *state.ready.lock().unwrap() = false;
+    *state.token.lock().unwrap() = None;
+    *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
+    drop_grant(state);
+    set_error(state, error);
+}
+
+/// Every status consumer refuses reported mainnet, including overview and
+/// money preflight. An absent or unrecognized live label stays unknown and
+/// never clears a previous refusal. Setup validates unknown labels separately.
+fn check_reported_network(state: &NodeState, status: &serde_json::Value) -> Result<(), String> {
+    if let Some(network) = status.get("network").and_then(|v| v.as_str()) {
+        if matches!(network.trim().to_ascii_lowercase().as_str(), "bitcoin" | "mainnet") {
+            if let Err(error) = crate::beta::network(Some(network)) {
+                block_network(state, &error);
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Inspect only the authenticated peer's status, before publishing its token.
 /// Older peers without a network declaration cannot establish beta authority.
 async fn check_remote_network(state: &NodeState, token: &str) -> Result<(), String> {
     if !state.remote_mode.load(Ordering::SeqCst) || cfg!(feature = "developer-mainnet") { return Ok(()); }
+    if let Some(error) = state.network_refusal.lock().unwrap().clone() { return Err(error); }
     let generation = *state.remote_connect_generation.borrow();
     let result = async {
         let response = state.http.get(format!("{}/status", state.api_base))
@@ -1790,13 +1828,34 @@ async fn check_remote_network(state: &NodeState, token: &str) -> Result<(), Stri
     }.await;
     let current = state.remote_connect_generation.borrow();
     if *current != generation { return Err("Remote node changed while checking its network.".into()); }
-    if let Err(error) = &result {
-        *state.ready.lock().unwrap() = false;
-        *state.token.lock().unwrap() = None;
-        *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
-        set_error(state, error.clone());
-    }
+    if let Err(error) = &result { block_network(state, error); }
+    if let Some(error) = state.network_refusal.lock().unwrap().clone() { return Err(error); }
     result
+}
+
+/// An authenticated empty-box session only reaches owner setup. Its bootstrap
+/// router may lack /status; network approval happens on the ceremony's pinned
+/// connection before identity creation. It never grants live readiness.
+async fn check_session_network(state: &NodeState, session: &PairedSession, bootstrap: Option<&str>) -> Result<(), String> {
+    let descriptor = state.remote_descriptor.lock().unwrap().clone();
+    let owner_setup = cfg!(all(desktop, not(feature = "mobile")))
+        && state.remote_mode.load(Ordering::SeqCst) && bootstrap == Some("bootstrap")
+        && descriptor.as_ref().is_some_and(|d| d.bootstrap_box_key().is_some() && !d.has_code())
+        && session.scopes.iter().any(|s| s == "identity")
+        && session.scopes.iter().all(|s| matches!(s.as_str(), "identity" | "read" | "receive"));
+    if owner_setup {
+        if let Some(error) = state.network_refusal.lock().unwrap().clone() { return Err(error); }
+        if let Some(network) = descriptor.as_ref().and_then(|d| d.network()) {
+            if let Err(error) = crate::beta::setup_network(network) {
+                block_network(state, &error);
+                return Err(error);
+            }
+        }
+        *state.ready.lock().unwrap() = false;
+        drop_grant(state);
+        return Ok(());
+    }
+    check_remote_network(state, &session.token).await
 }
 
 /// Pair with the node, reuse a stored pairing, or — only when `/pair/request`
@@ -1831,13 +1890,15 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
     match outcome {
         Ok(Established::Paired { session, .. }) => {
             check_first_run_session(state, &session)?;
-            check_remote_network(state, &session.token).await?;
-            *state.token.lock().unwrap() = Some(session.token.clone());
-            *state.auth.lock().unwrap() = AuthMode::Paired(session);
             let ctx = state.pairing.lock().unwrap().clone();
             if let Some(ctx) = ctx {
                 view.bootstrap = pairing::bootstrap_state(&ctx.client).await.ok().flatten();
             }
+            check_session_network(state, &session, view.bootstrap.as_deref()).await?;
+            let refusal = state.network_refusal.lock().unwrap();
+            if let Some(error) = refusal.as_ref() { return Err(error.clone()); }
+            *state.token.lock().unwrap() = Some(session.token.clone());
+            *state.auth.lock().unwrap() = AuthMode::Paired(session);
             *state.pairing_view.lock().unwrap() = view;
             Ok(())
         }
@@ -1901,7 +1962,10 @@ async fn refresh_paired(state: &NodeState) -> Result<(), String> {
     // A buffered old-node reply cannot restore credentials after replacement
     // or Forget. Keep this guard through publication so invalidation is atomic.
     if *state.remote_connect_generation.borrow() != generation { return Err("the remote connection changed".into()); }
-    if result.is_ok() { check_remote_network(state, &session.token).await?; }
+    if result.is_ok() {
+        let bootstrap = state.pairing_view.lock().unwrap().bootstrap.clone();
+        check_session_network(state, &session, bootstrap.as_deref()).await?;
+    }
     let current = state.remote_connect_generation.borrow();
     if *current != generation { return Err("the remote connection changed".into()); }
     if let Err(error) = result {
@@ -1917,8 +1981,12 @@ async fn refresh_paired(state: &NodeState) -> Result<(), String> {
         return Err(message);
     }
     check_first_run_session(state, &session)?;
-    *state.token.lock().unwrap() = Some(session.token.clone());
-    *state.auth.lock().unwrap() = AuthMode::Paired(session);
+    {
+        let refusal = state.network_refusal.lock().unwrap();
+        if let Some(error) = refusal.as_ref() { return Err(error.clone()); }
+        *state.token.lock().unwrap() = Some(session.token.clone());
+        *state.auth.lock().unwrap() = AuthMode::Paired(session);
+    }
     let node = state.node_id.lock().unwrap().clone();
     if let Some(node) = node { home_unlock::remember_binding(state, &node)?; }
     Ok(())
@@ -2007,9 +2075,12 @@ async fn call_api(
     if path == "/pair/first-contact-grant" {
         return Err("First-contact approval requires independent owner authority at the node. This app cannot issue it with its paired spend grant.".into());
     }
+    if let Some(error) = state.network_refusal.lock().unwrap().clone() { return Err(error); }
     ensure_fresh_token(state).await;
     let mut refreshed = false;
     loop {
+        if let Some(error) = state.network_refusal.lock().unwrap().clone() { return Err(error); }
+        let generation = *state.remote_connect_generation.borrow();
         let token = state
             .token
             .lock()
@@ -2040,6 +2111,11 @@ async fn call_api(
             .text()
             .await
             .map_err(|e| format!("{path} response read failed: {e}"))?;
+        if path == "/status" && status.is_success() {
+            let current = state.remote_connect_generation.borrow();
+            if *current != generation { return Err("Remote node changed while reading its network.".into()); }
+            if let Ok(value) = serde_json::from_str(&text) { check_reported_network(state, &value)?; }
+        }
         return Ok((status, text));
     }
 }
@@ -2707,6 +2783,7 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     *state.readmission_ask.lock().unwrap() = None;
     *state.owner_contact.lock().unwrap() = None;
     *state.front_door_ask.lock().unwrap() = None;
+    *state.network_refusal.lock().unwrap() = None;
     // Config fallbacks describe the old node; the remint cooldown also gates
     // paired auth. Neither its policy/network nor its cooldown transfers.
     *state.room_routing_policy.lock().unwrap() = None;
@@ -4514,6 +4591,7 @@ fn refuse_if_connection_waiting(state: &NodeState) -> Result<(), ActionError> {
 }
 
 fn check_auth(state: &NodeState, auth: Auth) -> Result<(), ActionError> {
+    if let Some(error) = state.network_refusal.lock().unwrap().clone() { return Err(ActionError::node(error)); }
     match auth {
         Auth::Window(g) => state.spend.lock().unwrap().check_generation(g, now_ms()),
         Auth::Budget(g) => state.autopay.lock().unwrap().check_generation(g, now_ms()),
@@ -10436,6 +10514,24 @@ mod pairing_wiring_tests {
     }
 
     #[tokio::test]
+    async fn pinned_empty_box_reaches_setup_without_live_network_metadata() {
+        let f = fixture(PairRoutes::Bootstrap);
+        authenticate(&f.state, f.data_dir.path()).await.unwrap();
+        let public = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from([9; 32]));
+        let path = f.data_dir.path().join(remote_access::REMOTE_CONFIG_DIR).join(remote_access::REMOTE_CONFIG_FILE);
+        device::write_private(&path, &serde_json::to_vec(&serde_json::json!({"v":1,
+            "endpoint":"box.local:9737", "node_id":"", "transport_pubkey":"", "transport_signature":"",
+            "box_transport_pubkey":hex::encode(public.as_bytes())})).unwrap()).unwrap();
+        *f.state.remote_descriptor.lock().unwrap() = remote_access::load_persisted(f.data_dir.path()).unwrap();
+        f.state.remote_mode.store(true, Ordering::SeqCst);
+        authenticate(&f.state, f.data_dir.path()).await.unwrap();
+        assert_eq!(f.state.pairing_snapshot().bootstrap.as_deref(), Some("bootstrap"));
+        assert!(!f.state.status_snapshot().ready);
+        assert!(f.state.token.lock().unwrap().is_some());
+        assert!(f.state.network_refusal.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn bootstrap_node_is_reported_and_not_marked_ready() {
         let f = fixture(PairRoutes::Bootstrap);
         authenticate(&f.state, f.data_dir.path()).await.unwrap();
@@ -11173,6 +11269,47 @@ mod control_act_tests {
         check_remote_network(&node.state, "tok.1").await.unwrap();
         assert!(node.state.status_snapshot().ready);
         assert!(node.state.token.lock().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn paired_mainnet_report_blocks_money_after_setup() {
+        if cfg!(feature = "developer-mainnet") { return; }
+        for overview in [true, false] {
+            let session = PairedSession {
+                client_id: "client".into(),
+                scopes: vec!["read".into(), "receive".into(), "spend".into()],
+                token: "tok.1".into(), expires_at: now_unix() + 600,
+            };
+            let node = fake(AuthMode::Paired(session), Arc::new(|_, path, _| {
+                assert_eq!(path, "/status");
+                (200, serde_json::json!({"status":"ok", "node_id":OWN, "network":"mainnet"}).to_string())
+            }));
+            let state = &node.state;
+            state.remote_mode.store(true, Ordering::SeqCst);
+            *state.ready.lock().unwrap() = true;
+            state.spend.lock().unwrap().arm(now_ms(), act::SpendBasis::AppLock);
+            let result = if overview { read_node_overview(state).await.map(|_| ()) }
+                else { get_json::<serde_json::Value>(state, "/status").await.map(|_| ()) };
+            assert_eq!(result.unwrap_err(), crate::beta::MAINNET_DISABLED);
+            assert_eq!(state.status_snapshot().error.as_deref(), Some(crate::beta::MAINNET_DISABLED));
+            set_error(state, "Connection unavailable.");
+            assert_eq!(state.status_snapshot().error.as_deref(), Some(crate::beta::MAINNET_DISABLED));
+            assert!(do_payment_pay(state, act::TEST_INVOICE_1000, 1000, 6000).await.is_err());
+            assert!(do_message_send(state, A, false, "test", 7000, None).await.is_err());
+            assert!(do_invoice_create(state, 1000, "test", 600).await.is_err());
+            assert!(node.posts().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_signet_auth_reply_cannot_clear_a_later_mainnet_refusal() {
+        if cfg!(feature = "developer-mainnet") { return; }
+        let node = fake(AuthMode::Local, Arc::new(|_, _, _| (200, r#"{"network":"signet"}"#.into())));
+        node.state.remote_mode.store(true, Ordering::SeqCst);
+        assert!(check_reported_network(&node.state, &serde_json::json!({"network":"mainnet"})).is_err());
+        assert_eq!(check_remote_network(&node.state, "tok.1").await.unwrap_err(), crate::beta::MAINNET_DISABLED);
+        assert!(call_api(&node.state, reqwest::Method::POST, "/payments/pay", None).await.is_err());
+        assert!(node.posts().is_empty());
     }
 
     /// A node that accepts every action, rc7-shaped.

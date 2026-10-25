@@ -62,6 +62,9 @@ pub const HOSTED_BY_MAX_CHARS: usize = 64;
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairingLinkV1 {
+    /// Optional network declaration from the box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
     pub v: u8,
     pub endpoint: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -112,6 +115,9 @@ impl fmt::Debug for PairingLinkV1 {
 /// proof construction; its `Debug` implementation never includes the code.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RemoteDescriptor {
+    /// Optional network declaration from the box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    network: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     enrollment_commitment: Option<[u8; 32]>,
     v: u8,
@@ -170,6 +176,8 @@ impl RemoteDescriptor {
         BoxPin::verify(&self.node_id, &self.endpoint, &pin.public_key, &pin.signature).map(Some)
     }
 
+    pub fn network(&self) -> Option<&str> { self.network.as_deref() }
+
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
@@ -207,6 +215,9 @@ impl RemoteDescriptor {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredDescriptor {
+    /// Optional network declaration from the box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    network: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     enrollment_commitment: Option<[u8; 32]>,
     v: u8,
@@ -638,6 +649,7 @@ pub fn verify_transport_proof(node_id: &str, transport_pubkey: &str, transport_s
 
 fn descriptor_from_stored(stored: StoredDescriptor, transport_pubkey_bytes: [u8; 32]) -> RemoteDescriptor {
     RemoteDescriptor {
+        network: stored.network,
         enrollment_commitment: stored.enrollment_commitment,
         v: stored.v, endpoint: stored.endpoint, endpoints: stored.endpoints,
         endpoints_signature: stored.endpoints_signature, bootstrap_routes: stored.bootstrap_routes,
@@ -742,6 +754,7 @@ fn validate_link(link: PairingLinkV1, now: i64) -> Result<RemoteDescriptor, Remo
         return Err(RemoteError::Expired((now - link.expires_at) as u64));
     }
     let descriptor = validate_descriptor(StoredDescriptor {
+        network: link.network,
         enrollment_commitment: None,
         bootstrap_routes: vec![],
         endpoints: link.endpoints,
@@ -833,6 +846,7 @@ fn stored_bytes(
         })
         .transpose()?;
     serde_json::to_vec(&StoredDescriptor {
+        network: descriptor.network.clone(),
         enrollment_commitment: descriptor.enrollment_commitment,
         bootstrap_routes: descriptor.bootstrap_routes.clone(),
         endpoints: descriptor.endpoints.clone(),
@@ -1947,6 +1961,7 @@ pub fn commit_bootstrap(app_dir: &Path, previous: &RemoteDescriptor,
         return Err(RemoteError::Invalid("finalize changed the bootstrap box pin".into()));
     }
     let descriptor = validate_descriptor(StoredDescriptor {
+        network: previous.network.clone(),
         enrollment_commitment: None,
         v: 1, endpoint: previous.endpoint.clone(), endpoints: vec![], endpoints_signature: None,
         bootstrap_routes: if previous.endpoints.is_empty() { previous.bootstrap_routes.clone() } else { previous.endpoints.clone() },
