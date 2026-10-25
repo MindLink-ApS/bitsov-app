@@ -1,0 +1,88 @@
+name: Android Preview
+
+# One ARM64 debug APK, no emulator, distribution signing, or repository secrets.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src-tauri/**'
+      - 'src/**'
+      - 'public/**'
+      - 'third_party/fonts/**'
+      - 'index.html'
+      - 'assistant.html'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig*.json'
+      - 'vite.config.*'
+      - '.github/workflows/android-preview.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  android-preview:
+    name: Android preview (debug APK; not a merge gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install frontend dependencies
+        run: npm ci --no-audit --no-fund
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Set up Android SDK and NDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          # Match compileSdk and the locally verified NDK. SDK Manager installs
+          # Google's packages; no separate third-party NDK installer is needed.
+          packages: 'platform-tools platforms;android-37.0 build-tools;36.0.0 ndk;27.2.12479018'
+          log-accepted-android-sdk-licenses: false
+      - name: Select the pinned NDK
+        run: echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
+        with:
+          workspaces: src-tauri
+          shared-key: tauri-preview-android-arm64
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+      # Tauri merges tauri.android.conf.json, excluding the desktop sidecar.
+      # Gradle uses its disposable debug key; no distribution key is configured.
+      - name: Build Android debug preview
+        run: npm run tauri -- android build --ci --debug --apk --target aarch64
+      - name: Name the preview APK
+        env:
+          PREVIEW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apks=(src-tauri/gen/android/app/build/outputs/apk/universal/debug/*.apk)
+          test "${#apks[@]}" -eq 1
+          mkdir -p "$RUNNER_TEMP/preview"
+          cp "${apks[0]}" "$RUNNER_TEMP/preview/BitSov-preview-android-arm64-$PREVIEW_SHA.apk"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bitsov-preview-android-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/preview/*-preview-*.apk
+          if-no-files-found: error
+          retention-days: 3

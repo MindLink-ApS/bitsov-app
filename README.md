@@ -62,6 +62,29 @@ fails to start in a debug build, the error screen offers "Explore with sample da
 node sidecar on loopback, posts to `/auth/local`, reads `/identity`, and prints
 `SMOKE: PASS node_id=<node_id>` when the identity path is working.
 
+## Preview builds
+
+**English:** The Windows Preview and Android Preview workflows provide an unsigned
+Windows x64 NSIS installer and an Android ARM64 debug APK. These are unsigned previews
+for testing, not supported releases: Windows has no code signature, and Android uses
+only a disposable debug key, not a distribution signature. Download `bitsov-preview-*`
+artifacts from the workflow run; both the artifact and the installer/APK filename
+contain `-preview-`. Artifacts expire after **3 days**. Builds run on pull requests
+to `main` that change the frontend, `src-tauri`, or the relevant build workflow,
+and can also be started with **Run workflow** (`workflow_dispatch`). They use no
+repository secrets and do not publish releases or run the app.
+
+**Dansk:** Workflowene Windows Preview og Android Preview leverer et usigneret
+NSIS-installationsprogram til Windows x64 og en debug-APK til Android ARM64. Det er
+usignerede forhåndsudgaver til test, ikke understøttede udgivelser: Windows har ingen
+kodesignatur, og Android bruger kun en midlertidig debugnøgle, ikke en
+distributionssignatur. Hent `bitsov-preview-*`-artefakter fra workflowkørslen; både
+artefaktnavnet og installationsprogrammets/APK-filens navn indeholder `-preview-`.
+Artefakter udløber efter **3 dage**. Byg køres ved pull requests til `main`, som
+ændrer frontend, `src-tauri` eller det relevante build-workflow, og kan også startes
+med **Run workflow** (`workflow_dispatch`). De bruger ingen repository-hemmeligheder
+og hverken publicerer udgivelser eller starter appen.
+
 ## Immutable constraints (inherited from the protocol charter)
 Payment IS the connection · zero plaintext at any layer (incl. remote transport) · the node
 is the identity anchor · honesty ceiling (no "replaces Slack/Zoom", no "surveillance-proof",
