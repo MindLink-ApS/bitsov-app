@@ -1,7 +1,7 @@
 import { createSignal, Show } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
+import { isPermissionGranted, requestPermission, onAction, registerActionTypes } from '@tauri-apps/plugin-notification';
 import { t } from '../i18n';
 import type { Message } from './types';
 
@@ -12,6 +12,7 @@ const MUTED = 'bitsov.notifications.muted';
 const read = (key: string) => { try { return localStorage.getItem(key) === 'true'; } catch { return false; } };
 const save = (key: string, value: boolean) => { try { localStorage.setItem(key, String(value)); } catch { /* Session state remains available. */ } };
 const notificationsMuted = () => read(MUTED);
+let nextCallNotification = 1_000_000;
 
 /** Only live arrivals enter here; history reads never produce alerts. */
 export function createMessageNotifications() {
@@ -23,6 +24,20 @@ export function createMessageNotifications() {
   let disposed = false;
   let requesting = false;
   const seen = new Set<string>();
+  const callActions = new Map<number, { current: () => boolean; open: () => void }>();
+  let listener: ReturnType<typeof onAction> | undefined;
+  const listenForCalls = () => listener ??= onAction(event => {
+    const call = callActions.get(event.notification?.id ?? -1);
+    if (!call || disposed || !call.current() || !['tap', 'open-call'].includes(event.actionId)) return;
+    void (async () => {
+      const window = getCurrentWindow();
+      await window.show();
+      await window.unminimize();
+      if (disposed || !call.current()) return;
+      await window.setFocus();
+      if (!disposed && call.current()) call.open();
+    })().catch(() => { if (!disposed) setPermission('error'); });
+  });
   const checkPermission = async () => {
     try {
       const granted = await isPermissionGranted();
@@ -44,7 +59,7 @@ export function createMessageNotifications() {
     catch { setPermission('error'); }
     finally { requesting = false; }
   };
-  const notify = async (id: string, body: string, current = () => true) => {
+  const notify = async (id: string, body: string, current = () => true, open?: () => void) => {
     if (disposed || seen.has(id)) return;
     seen.add(id);
     if (muted() || !enabled) return;
@@ -53,12 +68,19 @@ export function createMessageNotifications() {
       if (await window.isFocused() || disposed || muted()) return;
       // Arrival never prompts: the visible explanation owns the permission tap.
       if (!await isPermissionGranted()) return;
+      if (open) {
+        await listenForCalls();
+        await registerActionTypes([{ id: 'bitsov-incoming-call', actions: [{ id: 'open-call', title: t('incomingOpenCall') }] }]);
+      }
       const focused = await window.isFocused();
       if (disposed || muted() || focused || !current()) return;
       // The locked macOS backend maps this sentinel to the OS default sound.
       // The JS sendNotification wrapper discards its promise. Await the same plugin
       // command so native failures become visible in Settings instead of unhandled errors.
-      await invoke('plugin:notification|notify', { options: { title: t('notificationApp'), body, sound: 'NSUserNotificationDefaultSoundName' } });
+      const notificationId = open ? nextCallNotification++ : undefined;
+      if (open) callActions.set(notificationId!, { current, open });
+      await invoke('plugin:notification|notify', { options: { title: t('notificationApp'), body,
+        ...(open ? { id: notificationId, actionTypeId: 'bitsov-incoming-call' } : { sound: 'NSUserNotificationDefaultSoundName' }) } });
     } catch { if (!disposed) setPermission('error'); }
   };
   const name = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '').trim().slice(0, 80) || t('notificationSomeone');
@@ -70,8 +92,8 @@ export function createMessageNotifications() {
       if (message.sender.toLowerCase() === ownId.toLowerCase() || !((message.payment_amount_msat ?? 0) > 0) || ![0, 200].includes(message.kind)) return;
       void notify(`message:${message.id}`, t('notificationMessage', name(senderName)));
     },
-    call(id: string, callerName: string, current?: () => boolean) { void notify(`call:${id}`, t('notificationCall', name(callerName)), current); },
-    dispose() { disposed = true; seen.clear(); },
+    call(id: string, callerName: string, current?: () => boolean, open?: () => void) { void notify(`call:${id}`, t('notificationCall', name(callerName)), current, open); },
+    dispose() { disposed = true; seen.clear(); callActions.clear(); void listener?.then(l => l.unregister()).catch(() => {}); },
   };
 }
 export type MessageNotifications = ReturnType<typeof createMessageNotifications>;

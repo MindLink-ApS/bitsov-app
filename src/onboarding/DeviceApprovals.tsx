@@ -5,6 +5,7 @@ import { createSignal, Match, Show, Switch } from 'solid-js';
 import type { DeviceView } from '../control/types';
 import { PendingApproval } from './LockedNode';
 import { usePairingActivity } from '../pairingActivity';
+import { onboardingDiagnostic } from './pairing';
 
 /**
  * Touch ID (or phone biometric) approvals: one section with one action, used in
@@ -63,7 +64,7 @@ export function DeviceApprovals(props: {
           </Match>
           <Match when={state() === 'off'}>
             <p class="hint" data-device-off={props.device?.off_reason ?? 'off'}>
-              <strong>{mobile() ? t('obBiometricsOff') : t('obTouchIdOff')}</strong> {props.device?.off_message}
+              <strong>{mobile() ? t('obBiometricsOff') : t('obTouchIdOff')}</strong> {onboardingDiagnostic(props.device?.off_message ?? '', t('obApprovalOffHelp'))}
             </p>
           </Match>
           <Match when={state() === 'pending' && props.device}>
@@ -84,7 +85,7 @@ export function DeviceApprovals(props: {
             </div>
           </Match>
         </Switch>
-        <Show when={error()}><p class="err-note" role="alert">{error()}</p></Show>
+        <Show when={error()}><p class="err-note" role="alert">{onboardingDiagnostic(error()!, t('obDeviceSetupHelp'))}</p></Show>
       </section>
     </Show>
     </Show>

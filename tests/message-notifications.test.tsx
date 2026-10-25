@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import { createMessageNotifications, NotificationSettings } from '../src/control/messageNotifications';
 import { setLanguagePref } from '../src/i18n';
-const native = vi.hoisted(() => ({ isFocused: vi.fn(), isPermissionGranted: vi.fn(), requestPermission: vi.fn(), sendNotification: vi.fn() }));
+const native = vi.hoisted(() => ({ isFocused: vi.fn(), isPermissionGranted: vi.fn(), requestPermission: vi.fn(), sendNotification: vi.fn(), onAction: vi.fn(), registerActionTypes: vi.fn(), show: vi.fn(), unminimize: vi.fn(), setFocus: vi.fn() }));
 vi.mock('@tauri-apps/api/core', async original => {
   const api = await original<typeof import('@tauri-apps/api/core')>();
   return { ...api, invoke: (command: string, args: { options: unknown }) => command === 'plugin:notification|notify' ? native.sendNotification(args.options) : api.invoke(command, args) };
@@ -11,7 +11,7 @@ vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => native }));
 vi.mock('@tauri-apps/plugin-notification', () => native);
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
-beforeEach(() => { vi.resetAllMocks(); localStorage.setItem('bitsov.notifications.enabled', 'true'); localStorage.setItem('bitsov.notifications.asked', 'true'); native.isFocused.mockResolvedValue(false); native.isPermissionGranted.mockResolvedValue(true); native.requestPermission.mockResolvedValue('granted'); });
+beforeEach(() => { vi.resetAllMocks(); localStorage.setItem('bitsov.notifications.enabled', 'true'); localStorage.setItem('bitsov.notifications.asked', 'true'); native.isFocused.mockResolvedValue(false); native.isPermissionGranted.mockResolvedValue(true); native.requestPermission.mockResolvedValue('granted'); native.onAction.mockResolvedValue({ unregister: vi.fn() }); });
 afterEach(() => { dispose?.(); mount?.remove(); setLanguagePref('en'); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
 const message = { id: 'm', kind: 0, sender: 'peer', recipient: 'me', timestamp: 1, plaintext: 'SECRET content', payment_amount_msat: 2000 };
@@ -26,7 +26,7 @@ it.each(['en', 'da'] as const)('notifies once in %s with name only and the syste
 });
 it('notifies an incoming call once, independently of messages', async () => {
   const n = createMessageNotifications(); n.call('call-1', 'Maya'); n.call('call-1', 'Maya'); await flush();
-  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: 'Maya is calling you', sound: 'NSUserNotificationDefaultSoundName' }); n.dispose();
+  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: 'Maya is calling', sound: 'NSUserNotificationDefaultSoundName' }); n.dispose();
 });
 it('suppresses outgoing, unpaid and call-signal messages, focused arrivals, muted arrivals and replays', async () => {
   const n = createMessageNotifications();
@@ -84,7 +84,7 @@ it('wires live paid messages and validated incoming calls through the real shell
   live({ type: 'message', message: { ...incoming, id: 'offer', kind: 400, plaintext: JSON.stringify({ v: 1, call_id: 'a'.repeat(32), media: 'audio', sdp: 'private-sdp' }) }, room_id: null });
   await flush();
   expect(native.sendNotification).toHaveBeenCalledTimes(2);
-  expect(native.sendNotification.mock.calls[1][0].body).toMatch(/is calling you$/);
+  expect(native.sendNotification.mock.calls[1][0].body).toMatch(/is calling$/);
   expect(JSON.stringify(native.sendNotification.mock.calls)).not.toMatch(/SECRET|private-sdp/);
 });
 
@@ -131,7 +131,7 @@ it('attributes a meeting to its actual inviting peer even when an ignored signal
   live({ type: 'message', room_id: null, message: { ...message, id: 'meeting-offer', sender, recipient: SAMPLE_OWN_ID, kind: 400,
     plaintext: JSON.stringify({ v: 1, call_id: 'a'.repeat(32), media: 'audio', sdp: 'private-sdp', meeting: { id: 'b'.repeat(32), roster: ['a'.repeat(64), sender, SAMPLE_OWN_ID] } }) } });
   await flush();
-  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: 'Actual caller is calling you', sound: 'NSUserNotificationDefaultSoundName' });
+  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: 'Actual caller is calling', sound: 'NSUserNotificationDefaultSoundName' });
 });
 
 it.each(['denied', 'error'] as const)('recovers a %s permission request through Settings without asking the OS twice', async outcome => {
@@ -143,4 +143,53 @@ it.each(['denied', 'error'] as const)('recovers a %s permission request through 
   expect(n.permission()).toBe('granted');
   n.message(message, 'me', 'Maya'); await flush();
   expect(native.sendNotification).toHaveBeenCalledOnce(); expect(native.requestPermission).toHaveBeenCalledOnce(); n.dispose();
+});
+
+it.each(['en', 'da'] as const)('opens the incoming card from a background call banner in %s', async lang => {
+  setLanguagePref(lang);
+  const open = vi.fn();
+  const n = createMessageNotifications();
+  n.call('incoming', 'Maya', () => true, open); await flush();
+  const payload = native.sendNotification.mock.calls[0][0];
+  expect(payload.body).toBe(lang === 'da' ? 'Maya ringer' : 'Maya is calling');
+  expect(payload.actionTypeId).toBe('bitsov-incoming-call');
+  const action = native.onAction.mock.calls[0][0];
+  action({ actionId: 'tap', notification: { id: payload.id } }); await flush();
+  expect(native.show).toHaveBeenCalledOnce(); expect(native.unminimize).toHaveBeenCalledOnce();
+  expect(native.setFocus).toHaveBeenCalledOnce(); expect(open).toHaveBeenCalledOnce();
+  n.dispose();
+});
+it('never opens a stale call banner and does not alert a focused call', async () => {
+  const open = vi.fn(); let incoming = true;
+  const n = createMessageNotifications();
+  native.isFocused.mockResolvedValue(true); n.call('focused', 'Maya', () => incoming, open); await flush();
+  expect(native.sendNotification).not.toHaveBeenCalled();
+  native.isFocused.mockResolvedValue(false); n.call('background', 'Maya', () => incoming, open); await flush();
+  incoming = false;
+  native.onAction.mock.calls[0][0]({ actionId: 'tap', notification: { id: native.sendNotification.mock.calls[0][0].id } }); await flush();
+  expect(open).not.toHaveBeenCalled(); expect(native.show).not.toHaveBeenCalled(); n.dispose();
+});
+
+it('offers notification permission with a call, never on first launch or without a tap', async () => {
+  localStorage.clear();
+  native.isFocused.mockResolvedValue(true);
+  const { ControlCenter } = await import('../src/control/Shell');
+  const { sampleSource, SAMPLE_OWN_ID } = await import('../src/control/sample');
+  vi.stubGlobal('__TAURI_INTERNALS__', {}); vi.stubGlobal('isTauri', true);
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Macintosh');
+  const source = sampleSource({ firstLiveMs: 1e9 });
+  let live!: Parameters<typeof source.onLive>[0];
+  source.onLive = async callback => { live = callback; return () => {}; };
+  mount = document.createElement('div'); document.body.append(mount);
+  dispose = render(() => <ControlCenter source={source} remote active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={null} />, mount);
+  await vi.waitFor(() => expect(live).toBeTypeOf('function'));
+  expect(mount.querySelector('[data-notification-enable]')).toBeNull();
+  expect(native.requestPermission).not.toHaveBeenCalled();
+  live({ type: 'message', room_id: null, message: { ...message, id: 'offer', sender: 'a'.repeat(64), recipient: SAMPLE_OWN_ID, kind: 400,
+    plaintext: JSON.stringify({ v: 1, call_id: 'a'.repeat(32), media: 'audio', sdp: 'offer' }) } });
+  await flush();
+  expect(native.requestPermission).not.toHaveBeenCalled();
+  mount.querySelector<HTMLButtonElement>('[data-notification-enable]')!.click(); await flush();
+  expect(native.requestPermission).toHaveBeenCalledOnce();
+  expect(native.sendNotification).not.toHaveBeenCalled();
 });

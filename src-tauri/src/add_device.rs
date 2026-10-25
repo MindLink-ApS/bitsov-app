@@ -454,7 +454,7 @@ impl Joining {
 
 fn enrollment_refusal(status: u16, finalizing: bool) -> ActionError {
     let mut error = invalid(match status {
-        403 if finalizing => "The comparison could not be verified. Check the 18-character claim code shown at your node's owner console with `konsensus claim-code --show`, or on a BitSov box's sticker. Cancel the pending setup before trying again.",
+        403 if finalizing => "The comparison could not be verified. Check the 18-character claim code provided by your node's owner or printed on a BitSov box's sticker. Cancel the pending setup before trying again.",
         403 => "This pairing cannot enroll an owner device, or setup is closed. Use an enrolled owner device and check that the home node is unlocked.",
         404 | 405 => "This node does not support this enrollment request, or the request was lost. Cancel pending setup and reconnect.",
         409 | 410 => "The enrollment expired or the node restarted. Cancel pending setup and start again.",
@@ -842,13 +842,13 @@ mod tests {
     }
 
     #[test]
-    fn finalize_refusal_names_the_owner_console_and_box_sticker() {
+    fn finalize_refusal_names_the_owner_without_shell_instructions() {
         let error = enrollment_refusal(403, true);
         assert_eq!(serde_json::to_value(&error).unwrap()["kind"], "claim_mismatch");
         assert_eq!(serde_json::to_value(enrollment_refusal(429, false)).unwrap()["kind"], "busy");
         assert!(error.message.contains("18-character claim code"));
-        assert!(error.message.contains("your node's owner console"));
-        assert!(error.message.contains("konsensus claim-code --show"));
+        assert!(error.message.contains("node's owner"));
+        assert!(!error.message.contains("konsensus "));
         assert!(error.message.contains("BitSov box's sticker"));
         assert!(error.message.contains("Cancel the pending setup before trying again."));
     }

@@ -1,6 +1,6 @@
 name: WebKit
 
-# Atlas should make "WebKit (safe areas + type + keyboard)" required on main.
+# "WebKit (safe areas + type + keyboard)" is intended as a required check on main.
 # No workflow path filters: even non-UI PRs receive a successful check.
 # Use full-ci to force tests for changes outside the UI paths below.
 # Gate regression scenarios: python3 scripts/test-webkit-gate.py
@@ -81,7 +81,7 @@ jobs:
           cache: npm
       - name: Install locked frontend dependencies
         if: steps.changes.outputs.run != 'false'
-        run: npm ci --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Install WebKit and Linux dependencies
         if: steps.changes.outputs.run != 'false'
         run: npx playwright install --with-deps webkit
