@@ -60,7 +60,7 @@ const ERR_INVALID_BLOB: i32 = -3;
 const ERR_TRANSPORT: i32 = -6;
 const ERR_BIOMETRY_UNAVAILABLE: i32 = -7;
 
-fn status_error(code: i32) -> DeviceKeyError {
+pub(crate) fn status_error(code: i32) -> DeviceKeyError {
     match code {
         ERR_UNAVAILABLE => DeviceKeyError::Unavailable,
         ERR_CANCELLED => DeviceKeyError::Cancelled,
@@ -103,6 +103,7 @@ mod ffi {
             out_sig: *mut u8,
             sig_cap: usize,
             out_sig_len: *mut usize,
+            context: *mut std::ffi::c_void,
         ) -> i32;
     }
 }
@@ -204,6 +205,7 @@ pub fn sign_setup(blob: &[u8], message: &[u8], reason: &str, finish: bool) -> Re
             signature.as_mut_ptr(),
             SIG_CAP,
             &mut signature_len,
+            std::ptr::null_mut(),
         )
     };
     if status != OK {
@@ -265,6 +267,9 @@ pub fn sign(_blob: &[u8], _message: &[u8], _reason: &str) -> Result<Vec<u8>, Dev
 }
 
 #[cfg(all(test, target_os = "macos", feature = "native-test-keys"))]
+pub(crate) static SETUP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(all(test, target_os = "macos", feature = "native-test-keys"))]
 mod tests {
     use super::*;
     use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_ASN1};
@@ -294,6 +299,7 @@ mod tests {
 
     #[test]
     fn setup_authorization_is_one_use_and_bound_to_key_node_and_client() {
+        let _guard = SETUP_TEST_LOCK.lock().unwrap();
         let (blob, public) = create(Policy::NoPromptForTests).unwrap();
         let register = b"bitsov-device-register-v2\nnode:fp\nclient:client\npublic_key:04ab\nsas_digest:55";
         let unlock = b"bitsov-node-unlock-v1\nnode:fp\nclient:client\nepoch:0\nkey:key\nchallenge:nonce\nbox_transport:box";

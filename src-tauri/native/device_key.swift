@@ -164,7 +164,7 @@ public func bitsov_dk_sign(
     return autoreleasepool { signMessage(blob, blobLen, msg, msgLen, reason, outSig, sigCap, outSigLen) }
 }
 
-private func signMessage(
+func signMessage(
     _ blob: UnsafePointer<UInt8>?,
     _ blobLen: Int,
     _ msg: UnsafePointer<UInt8>?,
@@ -601,13 +601,34 @@ private struct SetupApproval {
 private let setupApprovalLock = NSLock()
 private var setupApproval: SetupApproval?
 
+// A setup first-unlock read must reuse the already approved context without UI.
+// The signing operation still consumes and validates the full key/node/client
+// binding and deadline below before authorizing any signature.
+func setupReadContext() -> LAContext {
+    setupApprovalLock.lock()
+    defer { setupApprovalLock.unlock() }
+    let context = setupApproval.flatMap {
+        ProcessInfo.processInfo.systemUptime < $0.deadline ? $0.context : nil
+    } ?? LAContext()
+    context.interactionNotAllowed = true
+    return context
+}
+
+func invalidateUnlessSetupContext(_ context: LAContext) {
+    setupApprovalLock.lock()
+    let retained = setupApproval?.context === context
+    setupApprovalLock.unlock()
+    if !retained { context.invalidate() }
+}
+
 @_cdecl("bitsov_dk_sign_setup")
 public func bitsov_dk_sign_setup(
     _ blob: UnsafePointer<UInt8>?, _ blobLen: Int,
     _ msg: UnsafePointer<UInt8>?, _ msgLen: Int,
     _ reason: UnsafePointer<CChar>?, _ finish: Int32,
     _ outSig: UnsafeMutablePointer<UInt8>?, _ sigCap: Int,
-    _ outSigLen: UnsafeMutablePointer<Int>?
+    _ outSigLen: UnsafeMutablePointer<Int>?,
+    _ handle: UnsafeMutableRawPointer? = nil
 ) -> Int32 {
     return autoreleasepool {
         guard let blob = blob, let msg = msg, blobLen > 0, msgLen > 0,
@@ -632,13 +653,21 @@ public func bitsov_dk_sign_setup(
                 prior.context.invalidate()
                 return errCancelled
             }
+            if let handle = handle {
+                guard Unmanaged<LAContext>.fromOpaque(handle).takeUnretainedValue() === prior.context else {
+                    prior.context.invalidate()
+                    return errCancelled
+                }
+            }
             context = prior.context
             // Reuse must never show another prompt. The owner can explicitly
             // unlock through the ordinary flow if this context became invalid.
             context.interactionNotAllowed = true
         } else {
             previous?.context.invalidate()
-            context = LAContext()
+            if let handle = handle {
+                context = Unmanaged<LAContext>.fromOpaque(handle).takeUnretainedValue()
+            } else { context = LAContext() }
         }
         let status = signMessage(blob, blobLen, msg, msgLen, reason, outSig, sigCap, outSigLen, context)
         if finish == 0 && status == okStatus {
@@ -650,3 +679,48 @@ public func bitsov_dk_sign_setup(
         return status
     }
 }
+
+#if os(macOS)
+// Invoked before Tauri initialization by the packaged executable. The payload
+// is a public smoke-test marker, never identity material. It deliberately has
+// no user-presence ACL so CI can verify the real Keychain without a prompt;
+// the behavioral policy tests cover the ACL on actual identity items.
+@_cdecl("bitsov_mac_keychain_smoke")
+public func bitsov_mac_keychain_smoke() -> Int32 {
+    let dp = bitsov_client_data_protection_available() == 1
+    let service = "tech.mindlink.bitsov.storage-smoke.v1"
+    let account = UUID().uuidString
+    let data = Data("BitSov non-secret storage smoke marker".utf8)
+    let context = LAContext()
+    context.interactionNotAllowed = true
+    defer { context.invalidate() }
+    let operation: (Bool, ([CFString: Any]) -> OSStatus) -> OSStatus = { adding, action in
+        itemQuery(service, account, dp, adding) { base in
+            var query = base
+            query[kSecAttrSynchronizable] = false
+            query[kSecUseAuthenticationContext] = context
+            return action(query)
+        }
+    }
+    let added = operation(true) { base in
+        var query = base
+        query[kSecValueData] = data
+        return SecItemAdd(query as CFDictionary, nil)
+    }
+    guard added == errSecSuccess else { return added }
+    let read = operation(false) { base in
+        var query = base
+        query[kSecReturnData] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess else { return status }
+        return result as? Data == data ? errSecSuccess : errSecDecode
+    }
+    let deleted = operation(false) { SecItemDelete($0 as CFDictionary) }
+    guard deleted == errSecSuccess else { return deleted }
+    guard read == errSecSuccess else { return read }
+    let absent = operation(false) { SecItemCopyMatching($0 as CFDictionary, nil) }
+    return absent == errSecItemNotFound ? errSecSuccess : (absent == errSecSuccess ? errSecInternalComponent : absent)
+}
+#endif

@@ -21,7 +21,26 @@ impl KeyStore for NativeStore<'_> {
 }
 #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
 pub(super) fn load_native(dir: &Path) -> Result<ClientKey, PairError> {
-    load_or_create_with_sealer(dir, &NativeStore(dir), at_rest::installed())
+    load_selected(dir, &NativeStore(dir), at_rest::installed(),
+        bitsov_ffi::client_keychain::data_protection_available())
+}
+
+// Backend selection is based on the running process's validated entitlement,
+// never on the result of an authenticated read or write.
+fn load_selected(dir: &Path, store: &dyn KeyStore, sealer: Option<&dyn Sealer>, entitled: bool) -> Result<ClientKey, PairError> {
+    if entitled { return load_or_create_with_sealer(dir, store, sealer); }
+    match std::fs::symlink_metadata(dir.join(MARKER)) {
+        Ok(_) => return Err(failure("this identity requires the original app's Keychain entitlement")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Err(_) => return Err(failure("cannot inspect client Keychain marker")),
+    }
+    struct Strict<'a>(&'a dyn Sealer);
+    impl Sealer for Strict<'_> {
+        fn seal(&self, purpose: &str, bytes: &[u8]) -> Result<Vec<u8>, String> { self.0.seal(purpose, bytes) }
+        fn open(&self, purpose: &str, bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> { self.0.open(purpose, bytes) }
+    }
+    let sealer = sealer.ok_or_else(|| failure("Secure Enclave storage is unavailable; try again"))?;
+    ClientKey::load_or_create_sealed(dir, &Strict(sealer))
 }
 
 fn failure(message: &str) -> PairError { PairError::Local(message.into()) }
@@ -169,6 +188,40 @@ mod tests {
             *item = Some(Zeroizing::new(if self.corrupt_write { [9; 32] } else { *seed }));
             Ok(())
         }
+    }
+    #[test]
+    fn unentitled_mac_creates_and_reloads_only_enclave_sealed_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let sealer = crate::at_rest::test_sealer::MemorySealer;
+        let unavailable = MemoryStore { read_error: true, write_error: true, ..Default::default() };
+        let first = load_selected(dir.path(), &unavailable, Some(&sealer), false).unwrap();
+        let again = load_selected(dir.path(), &unavailable, Some(&sealer), false).unwrap();
+        assert_eq!(first.public_hex(), again.public_hex());
+        assert!(dir.path().join(SEALED_KEY_FILE).is_file());
+        assert!(!dir.path().join(KEY_FILE).exists());
+        let store = MemoryStore::default();
+        let migrated = load_selected(dir.path(), &store, Some(&sealer), true).unwrap();
+        assert_eq!(first.public_hex(), migrated.public_hex());
+        assert!(!dir.path().join(SEALED_KEY_FILE).exists());
+        assert!(load_selected(dir.path(), &unavailable, Some(&sealer), false).is_err());
+    }
+    #[test]
+    fn unentitled_mac_never_falls_back_to_plaintext_or_replaces_a_sealed_identity() {
+        struct Failing;
+        impl Sealer for Failing {
+            fn seal(&self, _: &str, _: &[u8]) -> Result<Vec<u8>, String> { Err("unavailable".into()) }
+            fn open(&self, _: &str, _: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> { Err("unavailable".into()) }
+            fn allows_plaintext_fallback(&self) -> bool { true }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::default();
+        assert!(load_selected(dir.path(), &store, None, false).is_err());
+        assert!(load_selected(dir.path(), &store, Some(&Failing), false).is_err());
+        assert!(!dir.path().join(KEY_FILE).exists());
+        let sealer = crate::at_rest::test_sealer::MemorySealer;
+        let original = ClientKey::load_or_create_sealed(dir.path(), &sealer).unwrap();
+        assert!(load_selected(dir.path(), &store, Some(&Failing), false).is_err());
+        assert_eq!(load_selected(dir.path(), &store, Some(&sealer), false).unwrap().public_hex(), original.public_hex());
     }
     #[test]
     fn sealed_migration_preserves_identity_and_removes_old_envelope() {

@@ -349,7 +349,23 @@ Signed packages derive their private Keychain access group from the signing team
 and bundle identifier. Pairing identities and device-key blobs require owner
 presence and stay on this device. The first read migrates older storage only
 after a protected readback succeeds; an authentication or migration error stops
-access. Ad-hoc builds without Keychain entitlements report an access error.
+access. The running app checks its application-identifier entitlement before
+selecting storage. Ad-hoc builds keep the existing Secure-Enclave-sealed client
+identity and enclave-wrapped device-key file; no plaintext fallback is allowed.
+Only an entitled build migrates those files, retaining the same identity.
+Keep the signing team and bundle identifier stable across releases: changing
+either can make previously migrated Keychain identities inaccessible.
+
+The Mac package workflow invokes the built executable with
+`--keychain-smoke-test` before archiving. This exits before Tauri or any window
+starts. It reports the selected identity path and performs a real, prompt-free
+Keychain add/read/delete using a unique non-secret marker: data-protection
+Keychain for entitled apps, local login Keychain for ad-hoc apps. The marker has
+no authentication ACL; the native policy tests separately verify user presence
+on identity items. Every unexpected Security status fails the smoke test.
+Status polling uses only the public record and file metadata. Protected device
+material is read only for signing, on a blocking worker, with one authentication
+context shared by the read, migration readback, and enclave signature.
 
 Headless hardware tests can opt into `native-test-keys` in debug macOS builds.
 The feature is rejected for release and iOS builds; ordinary builds reject the

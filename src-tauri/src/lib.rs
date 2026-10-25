@@ -53,3 +53,9 @@ mod pairing_link_ios;
 pub fn run() {
     app::entry();
 }
+
+/// Headless packaging check; call before initializing the application runtime.
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+pub fn mac_keychain_smoke_test() -> Result<&'static str, String> {
+    bitsov_ffi::client_keychain::smoke_test()
+}

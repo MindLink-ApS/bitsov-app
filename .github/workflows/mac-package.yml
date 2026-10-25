@@ -2,7 +2,7 @@ name: Mac Package
 
 # Ad-hoc signed Apple Silicon BitSov.app (+ .dmg) as a short-lived CI artifact
 # (docs/MAC_PACKAGE.md). No secrets, Developer ID, notarization or release.
-# The built app is never opened or executed here.
+# The built executable runs only its headless storage smoke mode.
 #
 # NOT a merge gate: keep this job OUT of the required status checks. Like the
 # Build workflow's `sidecar` job it depends on network and on the genome's
@@ -110,6 +110,13 @@ jobs:
       # The offline bundle-checker unit tests run on Linux in Authority Check.
       - name: Package, sign ad-hoc and verify
         run: bash scripts/package-mac.sh --dmg --use-existing-sidecar
+
+      - name: Real Keychain smoke from the signed bundle (headless)
+        run: |
+          set -euo pipefail
+          app=src-tauri/target/release/bundle/macos/BitSov.app
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+          "$app/Contents/MacOS/$executable" --keychain-smoke-test
 
       - name: Zip the .app
         run: |

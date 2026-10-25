@@ -19,7 +19,7 @@ impl Sealer for MacSealer {
 }
 
 /// Install without prompting; each operation reports any storage failure.
-/// Pairing seeds use direct Keychain storage, including on Macs without an enclave.
+/// Entitled apps use the Keychain; ad-hoc apps keep enclave-sealed seeds.
 pub fn install_macos() {
     if let Err(error) = super::install(Arc::new(MacSealer)) {
         eprintln!("[pairing] protected storage unavailable: {error}");

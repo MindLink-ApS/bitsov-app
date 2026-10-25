@@ -1,7 +1,8 @@
 //! The app-held Ed25519 client key.
 //!
-//! Apple platforms store the seed directly in the non-synchronizing, ThisDeviceOnly
-//! Keychain. Only a public identity marker remains in the pairing directory.
+//! Entitled Apple apps store the seed in the non-synchronizing, ThisDeviceOnly
+//! Keychain. Ad-hoc Macs keep the existing enclave-sealed file, without plaintext
+//! fallback. Only entitled apps migrate those files into the Keychain.
 //!
 //! Android (Keystore) installs an [`at_rest::Sealer`].
 //! A legacy [`KEY_FILE`] is sealed, read back and verified, then wiped and

@@ -1,6 +1,7 @@
 //! Hardware-wrapped storage for the secrets the app keeps on disk.
 //!
-//! Apple pairing seeds live in user-presence-protected Keychain items.
+//! Entitled Apple apps keep pairing seeds in user-presence-protected Keychain
+//! items; ad-hoc Macs retain their enclave-sealed files.
 //! macOS installs a Secure Enclave sealer for other pairing secrets.
 //! Android installs an Android
 //! Keystore sealer at startup, before any pairing file is

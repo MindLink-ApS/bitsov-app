@@ -192,3 +192,44 @@ for _ in 0..<2 {
     precondition(output == [UInt8](repeating: 0, count: 32) && mismatchDeletes == 0)
 }
 print("PASS: mismatched migration readback stays closed across retries")
+
+// Entitlement selection is decided before any protected Keychain operation.
+precondition(!clientHasDataProtectionEntitlement { _ in nil })
+precondition(!clientHasDataProtectionEntitlement { name in
+    name == "keychain-access-groups" ? ["EXAMPLE123.org.example.app"] : nil
+})
+precondition(clientHasDataProtectionEntitlement { name in
+    name == "com.apple.application-identifier" ? "EXAMPLE123.org.example.app" : nil
+})
+
+let signingContext = LAContext()
+let signingStore = ClientKeychain(copy: { query, result in
+    let q = query as! [CFString: Any]
+    precondition(q[kSecUseAuthenticationContext] as? LAContext === signingContext)
+    result?.pointee = Data(fixture) as CFData
+    return errSecSuccess
+}, legacyService: nil)
+let (readStatus, readBytes) = signingStore.readData("profile/app-client", context: signingContext)
+precondition(readStatus == errSecSuccess && readBytes == Data(fixture))
+for failure in [errSecUserCanceled, errSecAuthFailed, errSecInteractionNotAllowed] {
+    var denied = signingStore
+    denied.copy = { _, _ in failure }
+    let (status, bytes) = denied.readData("profile/app-client", context: signingContext)
+    precondition(status == failure && bytes == nil)
+}
+print("PASS: entitlement selection and shared authentication context for protected reads")
+
+let publicMetadata = Data(repeating: 4, count: 65)
+let metadataStore = ClientKeychain(copy: { query, output in
+    let q = query as! [CFString: Any]
+    precondition(q[kSecReturnData] == nil && q[kSecValueData] == nil)
+    precondition(q[kSecReturnAttributes] as? Bool == true)
+    precondition((q[kSecUseAuthenticationContext] as? LAContext)?.interactionNotAllowed == true)
+    output?.pointee = [kSecAttrGeneric: publicMetadata] as CFDictionary
+    return errSecSuccess
+})
+for _ in 0..<20 {
+    let (status, publicKey) = metadataStore.metadata("profile/app-client")
+    precondition(status == errSecSuccess && publicKey == publicMetadata)
+}
+print("PASS: repeated metadata lookups request attributes only and forbid authentication UI")

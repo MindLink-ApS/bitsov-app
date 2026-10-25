@@ -38,10 +38,15 @@ fn publish(directory: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::File::open(directory).and_then(|f| f.sync_all()).map_err(|e| e.to_string())
 }
 
+#[cfg(test)]
 fn load(directory: &Path, store: &dyn Store) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    load_selected(directory, store, true)
+}
+
+fn load_selected(directory: &Path, store: &dyn Store, entitled: bool) -> Result<Option<Zeroizing<Vec<u8>>>> {
     use std::{io::Read, os::unix::fs::{MetadataExt, OpenOptionsExt}};
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let saved = store.read()?;
+    let saved = if entitled { store.read()? } else { None };
     if saved.is_none() && exists(&directory.join(MARKER))? {
         return Err("device Keychain identity is missing; restore access on the original device".into());
     }
@@ -67,6 +72,9 @@ fn load(directory: &Path, store: &dyn Store) -> Result<Option<Zeroizing<Vec<u8>>
         Some(bytes) => bytes,
         None => match &old {
             Some((_, bytes)) => {
+                // CryptoKit dataRepresentation is already enclave-wrapped. An
+                // unentitled Mac keeps this file and never probes the Keychain.
+                if !entitled { return Ok(Some(bytes.clone())); }
                 store.add(bytes)?;
                 let verified = store.read()?.ok_or("device Keychain write did not persist")?;
                 if verified.as_slice() != bytes.as_slice() { return Err("device Keychain verification failed".into()); }
@@ -104,35 +112,58 @@ fn load(directory: &Path, store: &dyn Store) -> Result<Option<Zeroizing<Vec<u8>>
 }
 
 #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
-struct Native<'a>(&'a Path);
+struct Native<'a>(&'a Path, &'a bitsov_ffi::client_keychain::AuthenticationContext);
 #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
 impl Store for Native<'_> {
-    fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>> { bitsov_ffi::client_keychain::read_blob(self.0) }
+    fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>> { bitsov_ffi::client_keychain::read_blob(self.0, self.1) }
     fn add(&self, bytes: &[u8]) -> Result<()> { bitsov_ffi::client_keychain::add_blob(self.0, bytes) }
 }
 
 #[cfg(not(test))]
-pub(crate) fn read(directory: &Path) -> Result<Option<Vec<u8>>> {
-    load(directory, &Native(directory)).map(|v| v.map(|b| b.to_vec()))
+pub(crate) fn read_for_signing(directory: &Path, context: &bitsov_ffi::client_keychain::AuthenticationContext) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    load_selected(directory, &Native(directory, context), bitsov_ffi::client_keychain::data_protection_available())
 }
 #[cfg(not(test))]
 pub(crate) fn save(directory: &Path, bytes: &[u8]) -> Result<()> {
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let store = Native(directory);
-    store.add(bytes)?;
-    let verified = store.read()?.ok_or("device Keychain write did not persist")?;
-    if verified.as_slice() != bytes { return Err("device Keychain verification failed".into()); }
+    // Public recovery metadata is durable before publishing protected material.
+    let public = bitsov_ffi::device_key::public_key(bytes).map_err(|e| e.to_string())?;
+    use std::io::Write;
+    let mut metadata = tempfile::NamedTempFile::new_in(directory).map_err(|e| e.to_string())?;
+    metadata.write_all(hex::encode(public).as_bytes()).and_then(|_| metadata.as_file().sync_all()).map_err(|e| e.to_string())?;
+    metadata.persist(directory.join("device-key.public")).map_err(|e| e.to_string())?;
+    std::fs::File::open(directory).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+    if !bitsov_ffi::client_keychain::data_protection_available() {
+        if exists(&directory.join(MARKER))? { return Err("this device key requires its original Keychain entitlement".into()); }
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new_in(directory).map_err(|e| e.to_string())?;
+        file.write_all(bytes).and_then(|_| file.as_file().sync_all()).map_err(|e| e.to_string())?;
+        file.persist_noclobber(directory.join(LEGACY)).map_err(|e| e.to_string())?;
+        return std::fs::File::open(directory).and_then(|f| f.sync_all()).map_err(|e| e.to_string());
+    }
+    // Creation writes without reading the protected item. The first actual
+    // signature reads it with the operation's authentication context.
+    if !exists(&directory.join(MARKER))? {
+        // A prior forget may have removed local metadata while a transient
+        // deletion failed. Retry exact deletion before publishing a new key.
+        if !exists(&directory.join("device-key.json"))? {
+            bitsov_ffi::client_keychain::delete_blob(directory)?;
+        }
+    }
+    bitsov_ffi::client_keychain::add_blob(directory, bytes)?;
     publish(directory, bytes)
 }
 #[cfg(not(test))]
 pub(crate) fn delete(directory: &Path) -> Result<()> {
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    bitsov_ffi::client_keychain::delete_blob(directory)?;
-    for name in [LEGACY, MARKER, TEMPORARY] {
+    let deletion = if bitsov_ffi::client_keychain::data_protection_available() {
+        bitsov_ffi::client_keychain::delete_blob(directory)
+    } else { Ok(()) };
+    for name in [LEGACY, MARKER, TEMPORARY, "device-key.public"] {
         let path = directory.join(name);
         if exists(&path)? { std::fs::remove_file(path).map_err(|e| e.to_string())?; }
     }
-    Ok(())
+    deletion
 }
 
 #[cfg(test)]
@@ -162,6 +193,21 @@ mod tests {
         let mut f = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600)
             .open(dir.join("device-key.blob")).unwrap();
         f.write_all(b"synthetic-device-blob").unwrap();
+    }
+    #[test]
+    fn unentitled_device_blob_stays_enclave_wrapped_on_disk_until_entitled_signing() {
+        let dir = tempfile::tempdir().unwrap();
+        legacy(dir.path());
+        let unavailable = Memory { read_error: true, write_error: true, ..Default::default() };
+        for _ in 0..2 {
+            assert_eq!(load_selected(dir.path(), &unavailable, false).unwrap().unwrap().as_slice(), b"synthetic-device-blob");
+            assert!(dir.path().join(LEGACY).is_file());
+            assert!(!dir.path().join(MARKER).exists());
+        }
+        let entitled = Memory::default();
+        assert_eq!(load_selected(dir.path(), &entitled, true).unwrap().unwrap().as_slice(), b"synthetic-device-blob");
+        assert!(!dir.path().join(LEGACY).exists());
+        assert!(load_selected(dir.path(), &unavailable, false).is_err());
     }
     #[test]
     fn migration_verifies_preserves_and_removes_legacy_material() {
