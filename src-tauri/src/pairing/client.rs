@@ -22,31 +22,46 @@ const TOKEN_CHALLENGE_PREFIX: &str = "bitsov-pair-token-v1:";
 const CHALLENGE_LEN: usize = 32;
 
 /// Do not send the same `(client, node, timestamp)` twice within this window.
-/// The node's pairing challenge accepts timestamps within ±30 s; 61 s keeps
-/// replay safety while allowing a clock rollback to pick `now` immediately.
+/// The node's pairing challenge accepts timestamps within ±30 s. Once it admits
+/// a proof, anything older than that proof by more than 61 s is outside the
+/// window and may be forgotten. Until admission, keep every reserved timestamp:
+/// a failed or cancelled exchange has not shown that the node clock moved.
 const TIMESTAMP_REUSE_WINDOW_SECS: u64 = 61;
 
-/// Timestamps already sent on the local exchange path for one client+node pair.
+/// Timestamps reserved on the local exchange path for one client+node pair.
+///
+/// Reservation happens before the request is sent. Forgetting an older proof
+/// at that moment is unsafe: the new exchange can fail or be cancelled, and a
+/// later clock rollback can make the older proof acceptable to the node again.
 #[derive(Default)]
 struct RecentLocalTimestamps {
     sent: HashSet<u64>,
 }
 
 impl RecentLocalTimestamps {
-    fn prune(&mut self, now_secs: u64) {
-        let cutoff = now_secs.saturating_sub(TIMESTAMP_REUSE_WINDOW_SECS);
+    /// Drop timestamps a node that just admitted `admitted_secs` can no longer
+    /// accept. Called only from [`Self::admit`].
+    fn prune_admitted(&mut self, admitted_secs: u64) {
+        let cutoff = admitted_secs.saturating_sub(TIMESTAMP_REUSE_WINDOW_SECS);
         self.sent.retain(|t| *t > cutoff);
     }
 
     /// Returns `Some(timestamp)` when `now_secs` is free to use; `None` when it
-    /// was already sent inside the reuse window (caller should wait and retry).
+    /// was already reserved (caller should wait and retry). Does not forget
+    /// older timestamps; only [`Self::admit`] does that.
     fn try_acquire(&mut self, now_secs: u64) -> Option<u64> {
-        self.prune(now_secs);
         if self.sent.contains(&now_secs) {
             return None;
         }
         self.sent.insert(now_secs);
         Some(now_secs)
+    }
+
+    /// The node accepted the proof for `timestamp`. That admission is what
+    /// establishes which older timestamps have expired.
+    fn admit(&mut self, timestamp: u64) {
+        self.prune_admitted(timestamp);
+        self.sent.insert(timestamp);
     }
 
     /// Same collision rules as the async local-exchange loop, with an injectable
@@ -228,7 +243,8 @@ impl PairingClient {
         }
         // Share across clones and reconstructed clients. Retain timestamps for
         // the process lifetime, even after an exchange fails or is cancelled.
-        // The per-node/client guard stays held through POST /pair/token.
+        // Prune only after the node admits a proof. The per-node/client guard
+        // stays held through POST /pair/token.
         type History = HashMap<(String, String), Arc<tokio::sync::Mutex<RecentLocalTimestamps>>>;
         static HISTORY: OnceLock<tokio::sync::Mutex<History>> = OnceLock::new();
         let mut local_exchange = if local {
@@ -244,6 +260,7 @@ impl PairingClient {
             None
         };
         let mut request = self.http.get(self.url(CHALLENGE)).query(&[("client_id", client_id)]);
+        let mut proof_timestamp = None;
         if let Some(recent) = local_exchange.as_mut() {
             // PR #379: Unix seconds, +/-30 s, Ed25519 over this exact UTF-8
             // domain + client id + timestamp. Reuse the paired client key.
@@ -256,6 +273,7 @@ impl PairingClient {
                 // the wall clock after waking, including after a clock rollback.
                 tokio::time::sleep(sleep_until_next_second(now)).await;
             };
+            proof_timestamp = Some(timestamp);
             let message = format!("bitsov-pair-challenge-v1:{client_id}:{timestamp}");
             let mut authorization = reqwest::header::HeaderValue::from_str(
                 &format!("PairChallenge {timestamp}:{}", key.sign_hex(message.as_bytes())),
@@ -266,6 +284,7 @@ impl PairingClient {
         let (status, text) = self.send(CHALLENGE, request).await?;
         if local && status == 401 {
             // Do not echo a response that could contain the authentication proof.
+            // Leave the reserved timestamp and every older proof in history.
             return Err(PairError::Refused {
                 step: CHALLENGE,
                 status,
@@ -273,6 +292,11 @@ impl PairingClient {
             });
         }
         let Challenge { challenge } = decode(CHALLENGE, status, &text)?;
+        if let Some(timestamp) = proof_timestamp {
+            if let Some(recent) = local_exchange.as_mut() {
+                recent.admit(timestamp);
+            }
+        }
         if !challenge.starts_with(TOKEN_CHALLENGE_PREFIX) {
             return Err(PairError::Malformed {
                 step: CHALLENGE,
@@ -383,10 +407,36 @@ mod local_timestamp_tests {
         let mut recent = RecentLocalTimestamps::default();
         let t = 1_700_000_000u64;
         assert_eq!(recent.try_acquire(t), Some(t));
+        recent.admit(t);
         assert_eq!(recent.try_acquire(t), None);
         let after_window = t + TIMESTAMP_REUSE_WINDOW_SECS + 1;
         assert_eq!(recent.try_acquire(after_window), Some(after_window));
+        recent.admit(after_window);
         assert_eq!(recent.try_acquire(t), Some(t));
+    }
+
+    /// Success at T, reserve T+62, then the exchange fails or is cancelled
+    /// before the node admits it. A rollback to T must not send T again.
+    #[test]
+    fn failed_or_cancelled_exchange_preserves_admitted_timestamp_across_rollback() {
+        let mut recent = RecentLocalTimestamps::default();
+        let t = 1_700_000_000u64;
+        assert_eq!(recent.try_acquire(t), Some(t));
+        recent.admit(t);
+
+        let later = t + 62;
+        assert_eq!(later, t + TIMESTAMP_REUSE_WINDOW_SECS + 1);
+        assert_eq!(recent.try_acquire(later), Some(later));
+        // No `admit(later)`: delivery never completed.
+
+        assert_eq!(recent.try_acquire(later), None, "the unfinished exchange still consumes T+62");
+        let mut simulated = t;
+        let timestamp = recent.next_timestamp_with_clock(|| {
+            let now = Duration::from_secs(simulated);
+            simulated += 1;
+            now
+        });
+        assert_eq!(timestamp, t + 1, "rollback to T must not replay the admitted proof");
     }
 
     #[test]
