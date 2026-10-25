@@ -159,7 +159,8 @@ it('localizes the room empty state, notices, composer and payment outcomes in Da
     onLeave={() => {}} onContext={() => {}} />, mount);
   expect($('[data-thread-empty] h2')?.textContent).toBe('Ingen beskeder her endnu');
   expect($('[data-thread-empty] .hint')?.textContent).toBe('En besked her betaler hvert medlem deres egen pris.');
-  expect($('[data-room-honesty]')?.textContent).toContain('ende-til-ende-krypteret');
+  expect($('[data-room-honesty]')?.textContent).toContain('krypteres fra din node til hvert medlems node');
+  expect($('[data-room-honesty]')?.textContent).toContain('Begge endenoder kan læse den');
   expect($('[data-room-earlier]')?.textContent).toBe('Vis tidligere beskeder');
   expect($('[data-room-blocked]')?.textContent).toBe('Betalinger er ikke klar endnu, så der kan ikke sendes fra dette rum.');
   expect($('[data-room-draft]')?.getAttribute('placeholder')).toBe('Besked til Ada');

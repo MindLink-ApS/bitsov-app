@@ -5,7 +5,7 @@ import { t as tr } from '../i18n';
 // and, when the node advertises them, its own energy read (N1, `energy_v1`) and
 // membrane events (N2, `membrane_v1`). An organ with no source says so instead
 // of showing a zero. Evidence (N3) is not readable yet; see
-// docs/O1_NODE_FOLLOWUPS.md and docs/CONTROL_CENTER_ORGANISM.md.
+// docs/CONTROL_CENTER_ORGANISM.md.
 
 import { isOutgoing, trackOf, trackKey, type Threads } from './state';
 import type { ActionError, BudgetView, DoorCard, EnergyBucket, EnergyRead, LiveEvent, MembraneEvent, Message, NodeOverview } from './types';

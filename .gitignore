@@ -2,6 +2,7 @@ node_modules/
 /test-results/
 /playwright-report/
 .cache/
+__pycache__/
 dist/
 target/
 src-tauri/target/

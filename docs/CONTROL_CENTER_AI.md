@@ -5,11 +5,9 @@ the `payments` tool in `src-tauri/src/jarvis/broker/`, and `src/control/ai.ts` +
 `src/control/AiTrack.tsx` (track). Bundled node: rc19.2 `04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`; retained rc7 compatibility routes, plus the #78
 `BitSov-Data-As-Of` / `BitSov-Data-Stale` headers when the node sends them.
 
-**v1 policy:** [AI assistants](AI-ASSISTANTS.md) records the owner's 2026-10-07 G4
-re-scope. This page describes the existing slice, not implementation of those new
-gates. Before any v1 paid AI path, including an API-key-billed call, the 55-sat
-all-in cap, separate paid-AI pairing/grant and node-grant payee allowlist must hold.
-The provider configuration and badges below do not establish that enforcement.
+This page describes the existing read broker and provider configuration. These
+do not establish a complete paid AI service or enforcement of paid-AI spending
+controls. The broker excludes message bodies from its model projections.
 
 ## The app is the broker
 
@@ -125,7 +123,7 @@ Payment and invoice drafts accept whole positive sats only (including correctly 
 |---|---|
 | G1 | Unchanged. |
 | G2 | Unchanged: node reads stay on loopback. The only non-loopback request is the owner-approved model call, which is TLS-only. |
-| G4 | This question-and-answer slice has no unattended runtime or AI peer/`node_id`; remote calls happen only per explicit send. The owner's v1 re-scope allows named assistants on invocation or while the app is open, with **"assistant", not "agent"** in user-facing copy. Own-peer AI stays later (M11). The [v1 rules](AI-ASSISTANTS.md) govern paid calls and per-conversation body access; this slice's broker still excludes bodies. |
+| G4 | This question-and-answer slice has no unattended runtime or AI peer/`node_id`; remote calls happen only per explicit send. The broker excludes message bodies. A complete paid AI service remains unshipped. |
 | Authority check | The existing static check is `scripts/authority-check.sh`; a pass does not establish the new G4 runtime, privacy or spending controls. |
 
 ## Screens (sample data, `docs/control-center/`)
