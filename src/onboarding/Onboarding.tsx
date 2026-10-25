@@ -1,4 +1,5 @@
 import { t, type CopyKey } from '../i18n';
+import { PrivacyPolicyLink } from '../PrivacyPolicyLink';
 import { deviceWord, isMobilePlatform } from '../platform';
 import type { JoinInput, JoinView } from './AddDevice';
 import { BoxIllustration } from './BoxIllustration';
@@ -605,6 +606,7 @@ export function Onboarding(props: {
         </Show>
       </form>
       </Show>
+      <PrivacyPolicyLink />
     </section>
   );
 }

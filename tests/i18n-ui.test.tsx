@@ -32,11 +32,15 @@ it('changes mounted settings, composer and wallet labels without a reload', asyn
   find('[data-profile]').click(); find('[data-open-settings]').click();
   expect(find('[data-tab="general"]').textContent).toBe('Generelt');
   find('[data-tab="general"]').click();
+  const privacy = find<HTMLAnchorElement>('[data-privacy-policy]');
+  expect(privacy?.textContent).toBe('Privatlivspolitik');
+  expect(privacy?.href).toBe('https://mindlink.tech/bitsov/privacy');
   const select = find<HTMLSelectElement>('[data-language-pref]');
   select.value = 'en'; select.dispatchEvent(new Event('change', { bubbles: true }));
   expect(document.documentElement.lang).toBe('en');
   expect(find('[data-tab="general"]').textContent).toBe('General');
   expect(find('[data-theme-option="light"]').textContent).toBe('Light');
+  expect(privacy?.textContent).toBe('Privacy policy');
   expect(find(unnamed).textContent).toContain('Unnamed contact');
   expect(find('[data-track="ai"] .name').textContent).toBe('Ask your node');
   expect(find('textarea').getAttribute('aria-label')).toBe('Message Maya');

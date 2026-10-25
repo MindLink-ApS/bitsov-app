@@ -1,4 +1,5 @@
 import { createPhoneLayout, createPhoneNavigationGuard, PhoneTabs, type PhoneTab } from './PhoneShell';
+import { PrivacyPolicyLink } from '../PrivacyPolicyLink';
 import { MediaView } from './CallMedia';
 import { createMessageNotifications, NotificationSettings } from './messageNotifications';
 import { isTauri, invoke } from '@tauri-apps/api/core';
@@ -2585,6 +2586,7 @@ function SettingsDisplay(props: { own: OwnStun | null }) {
       </div>
       <p class="hint">{tr('uiBalancesAndCostsUseThisUnitEverywhereYour')}</p>
       <CallSettings own={props.own} />
+      <PrivacyPolicyLink />
     </div>
   );
 }

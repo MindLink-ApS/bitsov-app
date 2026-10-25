@@ -43,6 +43,7 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 # Decode BOLT 11 invoices exactly as the node's payment path does (genome
 # dac01c8 locks lightning-invoice 0.34.1 via ldk-node 0.7.0). Keep in lockstep.
 lightning-invoice = "=0.34.1"
+tauri-plugin-opener = "2"
 
 # GATE G1 (docs/ARCHITECTURE_BOUNDARY.md): NO konsensus-* dependency here — the node
 # is a bundled BINARY (see tauri.conf.json `externalBin`), never a linked crate. A

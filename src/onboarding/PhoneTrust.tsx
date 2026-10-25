@@ -1,4 +1,5 @@
 import { language, systemLanguage } from '../i18n';
+import { PrivacyPolicyLink } from '../PrivacyPolicyLink';
 import { createSignal, createUniqueId, onMount, Show } from 'solid-js';
 import { usePairingActivity } from '../pairingActivity';
 import { PrimaryAction } from './PrimaryAction';
@@ -32,5 +33,6 @@ export function PhoneTrust(props: { onContinue: () => Promise<void>; locale?: st
         ? 'Nøglerne bliver i boksen. BitSov viser aldrig din gendannelsessætning og kopierer den aldrig.'
         : 'Your keys stay in the node. BitSov never shows you your recovery phrase and never copies it anywhere.'}</p>
     </details>
+    <PrivacyPolicyLink locale={props.locale} />
   </main>;
 }
