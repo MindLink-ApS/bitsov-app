@@ -72,9 +72,6 @@ const literalAllowlist: Record<string, readonly string[]> = {
     "Nøglerne bliver i boksen. BitSov viser aldrig din gendannelsessætning og kopierer den aldrig.",
     "Your keys stay in the node. BitSov never shows you your recovery phrase and never copies it anywhere.",
   ],
-  'src/onboarding/AddDevice.tsx': [
-    "konsensus claim-code --show",
-  ],
 };
 
 function hardcodedText(file: string, source: string): string[] {

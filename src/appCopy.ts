@@ -1,6 +1,17 @@
 /** First migrated app surfaces. Values are display copy, never protocol tokens.
  * {0}, {1}, … insert values verbatim (especially money and recipients). */
 export const appEn = {
+  obClaimWarning: "The new device will ask for your node’s 18-character claim code. Ask the node’s owner for it, or find it on your BitSov box’s sticker.",
+  obClaimEntry: "Enter your node’s 18-character claim code. Ask the node’s owner for it, or find it on your BitSov box’s sticker. A phone can be your first owner device. For later devices, compare the words and approve from an enrolled owner device.",
+  obClaimCodeInvalid: "Check the 18-character claim code with your node’s owner or on your BitSov box’s sticker, then try again.",
+  obClaimMismatch: "The comparison could not be verified. Check the claim code with your node’s owner. Cancel the pending setup before trying again.",
+  obDeviceSetupHelp: "Device setup could not finish. Ask your node’s owner for help, then try again.",
+
+  obTicketWhere: "On the new device, open BitSov and choose “A home node (Pi/Umbrel)” on a computer, then scan or paste this ticket. It works once and expires in five minutes.",
+  obMacOnlyHint: "Only this Mac can use this node. A phone can join a home node or a separately configured Mac that stays on.",
+  obComputerAtHome: "A home node (Pi/Umbrel)",
+  obHomeComputerHint: "Already have a Pi, Umbrel, or a Mac configured as a home node? Connect to it here. It must stay on for your Mac and phone to use it. Its keys stay on that computer.",
+
   "notificationGranted": "Allowed in BitSov. macOS controls delivery and sound; if alerts are missing, check System Settings → Notifications → BitSov.",
   "notificationApp": "BitSov",
   "notificationSomeone": "Someone",
@@ -862,6 +873,17 @@ export const appEn = {
 };
 
 export const appDa: Record<keyof typeof appEn, string> = {
+  obClaimWarning: "Den nye enhed vil bede om din nodes ejerskabskode på 18 tegn. Bed nodens ejer om koden, eller find den på mærkaten på din BitSov-boks.",
+  obClaimEntry: "Indtast din nodes ejerskabskode på 18 tegn. Bed nodens ejer om koden, eller find den på mærkaten på din BitSov-boks. En telefon kan være din første ejerenhed. Når du tilføjer flere enheder, skal du sammenligne ordene og godkende fra en godkendt ejerenhed.",
+  obClaimCodeInvalid: "Kontrollér ejerskabskoden på 18 tegn med nodens ejer eller på mærkaten på din BitSov-boks, og prøv igen.",
+  obClaimMismatch: "Sammenligningen kunne ikke bekræftes. Kontrollér ejerskabskoden med nodens ejer. Annullér den igangværende opsætning, før du prøver igen.",
+  obDeviceSetupHelp: "Enheden kunne ikke sættes op. Bed nodens ejer om hjælp, og prøv igen.",
+
+  obTicketWhere: "Åbn BitSov på den nye enhed. På en computer vælger du “En hjemmenode (Pi/Umbrel)”. Scan eller indsæt så dette parringslink. Det kan bruges én gang og udløber efter fem minutter.",
+  obMacOnlyHint: "Kun denne Mac kan bruge denne node. En telefon kan tilsluttes en hjemmenode eller en Mac, der er sat op særskilt som hjemmenode og bliver ved med at være tændt.",
+  obComputerAtHome: "En hjemmenode (Pi/Umbrel)",
+  obHomeComputerHint: "Har du allerede en Pi, Umbrel eller en Mac sat op som hjemmenode? Tilslut den her. Den skal være tændt, så din Mac og telefon kan bruge den. Nøglerne bliver på den computer.",
+
   "approvalSetupReason": "Touch ID-godkendelser er ikke indstillet på denne enhed. Indstil dem her for at godkende i appen. Indtil da skal din nodes ejer godkende på noden.",
   "approvalSettingsDevices": "Indstillinger → Enheder",
   "notificationGranted": "Tilladt i BitSov. macOS styrer visning og lyd. Hvis notifikationer mangler, skal du kontrollere Systemindstillinger → Notifikationer → BitSov.",
