@@ -114,8 +114,10 @@ download_verified_checksums() (
   echo "→ verifying GPG signature (pinned release key $KEY_FPR)"
   if ! gpg --batch --list-keys "$KEY_FPR" >/dev/null 2>&1; then
     echo "  pinned key not in the local keyring; importing RELEASE_KEY.asc from $REPO@main into a throwaway keyring"
-    export GNUPGHOME="$dir/gnupg"
-    mkdir -m 0700 "$GNUPGHOME" || return 1
+    # mktemp creates a private directory without a separate chmod operation,
+    # which `mkdir -m` cannot perform under Git Bash on Windows.
+    GNUPGHOME="$(mktemp -d "$dir/gnupg.XXXXXX")" || return 1
+    export GNUPGHOME
     gh api "repos/$REPO/contents/RELEASE_KEY.asc?ref=main" -H "Accept: application/vnd.github.raw" > "$dir/RELEASE_KEY.asc" \
       || { echo "  REFUSED: cannot obtain RELEASE_KEY.asc from $REPO@main" >&2; return 1; }
     gpg --batch --import "$dir/RELEASE_KEY.asc" >/dev/null 2>&1 \

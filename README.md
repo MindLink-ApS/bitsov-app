@@ -76,6 +76,29 @@ The default bundled-node package is a separate build path: it requires the
 pinned, signature-verified node sidecar. See [Mac packaging](docs/MAC_PACKAGE.md)
 and [the current node pin](docs/NODE_RC19_2_UPGRADE.md).
 
+## Preview builds
+
+**English:** The Windows Preview and Android Preview workflows provide an unsigned
+Windows x64 NSIS installer and an Android ARM64 debug APK. These are unsigned previews
+for testing, not supported releases: Windows has no code signature, and Android uses
+only a disposable debug key, not a distribution signature. Download `bitsov-preview-*`
+artifacts from the workflow run; both the artifact and the installer/APK filename
+contain `-preview-`. Artifacts expire after **3 days**. Builds run on pull requests
+to `main` that change the frontend, `src-tauri`, or the relevant build workflow,
+and can also be started with **Run workflow** (`workflow_dispatch`). They use no
+repository secrets and do not publish releases or run the app.
+
+**Dansk:** Workflowene Windows Preview og Android Preview leverer et usigneret
+NSIS-installationsprogram til Windows x64 og en debug-APK til Android ARM64. Det er
+usignerede forhåndsudgaver til test, ikke understøttede udgivelser: Windows har ingen
+kodesignatur, og Android bruger kun en midlertidig debugnøgle, ikke en
+distributionssignatur. Hent `bitsov-preview-*`-artefakter fra workflowkørslen; både
+artefaktnavnet og installationsprogrammets/APK-filens navn indeholder `-preview-`.
+Artefakter udløber efter **3 dage**. Byg køres ved pull requests til `main`, som
+ændrer frontend, `src-tauri` eller det relevante build-workflow, og kan også startes
+med **Run workflow** (`workflow_dispatch`). De bruger ingen repository-hemmeligheder
+og hverken publicerer udgivelser eller starter appen.
+
 ## Pair with your own signet node
 
 Run a compatible BitSov node configured for **signet**. Get its pairing

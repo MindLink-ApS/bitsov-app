@@ -271,10 +271,10 @@ bundle runs nightly (05:00 UTC, default branch), on `v*` tags, on
 `workflow_dispatch`, and on a pull request when `full-ci` is added. The
 label sticks: later pushes to that PR build again. Adding or removing any
 other label (for example `merge-ready`) does not start a build. There is no iOS simulator
-job; an iOS bundle would use these same triggers. Windows Compile uses the
-same schedule (2× Linux) to catch platform-gating regressions (app #132).
-Windows remains compile-only and is not a supported runtime or merge gate.
-Neither job is a required check.
+job; an iOS bundle would use these same triggers. The separate
+[Windows and Android previews](../README.md#preview-builds) use relevant
+pull requests and manual runs, with three-day artifacts. They remain
+unsupported previews. These packaging jobs are not required checks.
 
 - Runner: `macos-14` (arm64). Toolchain: Node 22 and stable Rust. Permissions:
   `contents: read` only. It uses `github.token` read-only for `gh release download`.

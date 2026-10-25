@@ -12,10 +12,10 @@ name: Build
 #   is the cheap check that always completes. This workflow does not use
 #   pull_request paths-ignore: a skipped workflow never reports, and a required
 #   `Build (tsc + vite + cargo check)` would stay pending.
-# - macOS / Windows bundles are not in this file. They run nightly, on `v*` tags,
-#   or when the `full-ci` label is added (mac-package.yml,
-#   windows-compile.yml). There is no iOS simulator job; `cargo check --features
-#   mobile` below is the Linux mobile compile and stays on every code PR.
+# - macOS bundles run nightly, on `v*` tags, or for `full-ci` (mac-package.yml).
+#   Windows and Android previews run on relevant PRs or workflow_dispatch
+#   (windows-compile.yml, android-preview.yml). There is no iOS simulator job;
+#   `cargo check --features mobile` below stays on every code PR.
 # - Android Rust gets one cached ARM64 cross-check on relevant PRs only. It uses
 #   the runner's NDK, without Gradle, an APK, or a target matrix.
 # - The sidecar job is not a merge gate. It waits for this job and reuses the same
@@ -24,7 +24,7 @@ on:
   pull_request:
     branches: [main]
     # No paths-ignore. No `labeled`: adding `merge-ready` must not rebuild.
-    # `full-ci` is read on the next synchronize (and on macOS/Windows immediately).
+    # `full-ci` is read on the next synchronize (and on macOS immediately).
   push:
     branches: [main]
     tags: ['v*']
