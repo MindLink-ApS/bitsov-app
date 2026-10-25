@@ -2568,15 +2568,12 @@ async fn pairing_link_take(
     Ok(None)
 }
 
-/// The main webview can open only the policy URL compiled from the shared config.
+/// The main webview can open only this fixed, host-owned policy URL.
 #[tauri::command]
 async fn privacy_policy_open(window: WebviewWindow<impl tauri::Runtime>) -> Result<(), String> {
     reject_sealed_window(&window)?;
     use tauri_plugin_opener::OpenerExt;
-    let policy: serde_json::Value = serde_json::from_str(include_str!("../../src/privacyPolicy.json"))
-        .map_err(|_| "Invalid privacy policy URL.".to_string())?;
-    let url = policy["url"].as_str().ok_or("Invalid privacy policy URL.")?;
-    window.app_handle().opener().open_url(url, None::<&str>)
+    window.app_handle().opener().open_url(crate::privacy_policy::URL, None::<&str>)
         .map_err(|_| "Could not open the privacy policy.".to_string())
 }
 

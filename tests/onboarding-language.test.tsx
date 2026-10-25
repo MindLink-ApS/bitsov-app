@@ -33,7 +33,7 @@ it('updates onboarding status labels when the language changes', () => {
   expect(root.querySelector('[data-step="node"]')?.textContent).toContain('now');
   const privacy = root.querySelector<HTMLAnchorElement>('[data-privacy-policy]');
   expect(privacy?.textContent).toBe('Privacy policy');
-  expect(privacy?.href).toBe('https://mindlink.tech/bitsov/privacy');
+  expect(privacy?.getAttribute('href')).toBe('#');
   setLanguagePref('da');
   expect(root.querySelector('[data-step="node"] .step-label')?.textContent).toBe('Start node');
   expect(root.querySelector('[data-step="node"] .step-status')?.textContent).toBe('nu');
@@ -51,6 +51,20 @@ it('localizes local ticket validation while preserving host errors', async () =>
   const message = 'Node rejected request {0}: device id å42';
   const locked = mount(() => <LockedNode onUnlock={async () => {}} hostError={message} />);
   expect(locked.querySelector('[role="alert"]')?.textContent).toBe(message);
+});
+
+it('opens the privacy policy through the host without supplying a destination', async () => {
+  const ipc = vi.fn().mockResolvedValue(undefined);
+  mockIPC(ipc);
+  const root = mount(() => <Onboarding status={() => ({ ready: false, node_id: null, error: null })}
+    pairing={() => INITIAL_PAIRING} trustAck={() => false} onRetry={() => {}} />);
+  const link = root.querySelector<HTMLAnchorElement>('[data-privacy-policy]')!;
+  const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+  link.dispatchEvent(click);
+  expect(click.defaultPrevented).toBe(true);
+  await vi.waitFor(() => expect(ipc).toHaveBeenCalledOnce());
+  expect(ipc).toHaveBeenCalledWith('privacy_policy_open', {});
+  expect(root.querySelector('[role="alert"]')).toBeNull();
 });
 
 it('keeps onboarding open and offers a localized retry when the native policy opener fails', async () => {

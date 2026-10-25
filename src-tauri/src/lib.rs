@@ -36,6 +36,7 @@ pub mod home_node;
 
 mod app;
 mod phone_recovery;
+mod privacy_policy;
 
 #[cfg(any(target_os = "android", test))]
 mod android_network;

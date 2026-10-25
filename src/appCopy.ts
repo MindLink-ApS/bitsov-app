@@ -2,7 +2,7 @@
  * {0}, {1}, … insert values verbatim (especially money and recipients). */
 export const appEn = {
   "privacyPolicy": "Privacy policy",
-  "privacyPolicyOpenFailed": "Could not open the privacy policy. Try again or open the link in your browser.",
+  "privacyPolicyOpenFailed": "Could not open the privacy policy. Try again.",
   "notificationGranted": "Allowed in BitSov. macOS controls delivery and sound; if alerts are missing, check System Settings → Notifications → BitSov.",
   "notificationApp": "BitSov",
   "notificationSomeone": "Someone",
@@ -869,7 +869,7 @@ export const appEn = {
 
 export const appDa: Record<keyof typeof appEn, string> = {
   "privacyPolicy": "Privatlivspolitik",
-  "privacyPolicyOpenFailed": "Kunne ikke åbne privatlivspolitikken. Prøv igen, eller åbn linket i din browser.",
+  "privacyPolicyOpenFailed": "Kunne ikke åbne privatlivspolitikken. Prøv igen.",
   "approvalSetupReason": "Touch ID-godkendelser er ikke indstillet på denne enhed. Indstil dem her for at godkende i appen. Indtil da skal din nodes ejer godkende på noden.",
   "approvalSettingsDevices": "Indstillinger → Enheder",
   "notificationGranted": "Tilladt i BitSov. macOS styrer visning og lyd. Hvis notifikationer mangler, skal du kontrollere Systemindstillinger → Notifikationer → BitSov.",

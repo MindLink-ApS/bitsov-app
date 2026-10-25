@@ -34,7 +34,7 @@ it('changes mounted settings, composer and wallet labels without a reload', asyn
   find('[data-tab="general"]').click();
   const privacy = find<HTMLAnchorElement>('[data-privacy-policy]');
   expect(privacy?.textContent).toBe('Privatlivspolitik');
-  expect(privacy?.href).toBe('https://mindlink.tech/bitsov/privacy');
+  expect(privacy?.getAttribute('href')).toBe('#');
   const select = find<HTMLSelectElement>('[data-language-pref]');
   select.value = 'en'; select.dispatchEvent(new Event('change', { bubbles: true }));
   expect(document.documentElement.lang).toBe('en');
