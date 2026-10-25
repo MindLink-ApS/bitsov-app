@@ -930,7 +930,6 @@ async fn wait_for_health(state: &NodeState) -> Result<(), String> {
 }
 
 /// The port of a loopback `http://127.0.0.1:<port>/api/v1` base; `None` otherwise.
-#[cfg(all(desktop, not(feature = "mobile")))]
 fn loopback_api_port(api_base: &str) -> Option<u16> {
     let port = api_base.strip_prefix("http://127.0.0.1:")?.strip_suffix("/api/v1")?;
     port.parse().ok().filter(|p| *p != 0)

@@ -64,6 +64,10 @@ fn second_device_fixture_preserves_identifiers_containing_expiry_digits() {
 
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
 fn delegation_fixture_with_skew(second: bool, skew: i64) -> DelegationNode {
+    delegation_fixture_with_claim(second, skew, None)
+}
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+fn delegation_fixture_with_claim(second: bool, skew: i64, claim: Option<(u16, String)>) -> DelegationNode {
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
     use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_ASN1};
@@ -109,6 +113,10 @@ fn delegation_fixture_with_skew(second: bool, skew: i64) -> DelegationNode {
     let k = key_id.clone();
     let token_fp = fp.clone();
     let routes: Routes = Arc::new(move |method, path, body| {
+        if path == "/owner/claim-code" {
+            assert_eq!(method, "GET");
+            return claim.clone().unwrap_or((404, String::new()));
+        }
         let body: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
         if path == "/status" && second {
             return (200, serde_json::json!({"api_capabilities":if cv.load(Ordering::SeqCst) {vec!["second_device_enrollment_v1"]} else {vec![]}}).to_string());
@@ -200,6 +208,105 @@ fn delegation_fixture_with_skew(second: bool, skew: i64) -> DelegationNode {
         pending,
         enrolled,
         challenge_valid,
+    }
+}
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[tokio::test]
+async fn owner_claim_code_uses_the_owner_local_api_and_existing_bearer_without_persistence() {
+    let code = remote_access::second_tests::claim_code();
+    let expires = now_unix() + 300;
+    let d = delegation_fixture_with_claim(false, 0, Some((200,
+        serde_json::json!({"state":"open", "code":code, "expires_at":expires, "device_name":"New device"}).to_string())));
+    d.node.state.remote_mode.store(false, Ordering::SeqCst);
+    let view = add_device::run(&d.node.state, serde_json::from_value(serde_json::json!({"action":"claim_code"})).unwrap()).await.unwrap();
+    let value = serde_json::to_value(view).unwrap();
+    assert_eq!(value["state"], "claim_code");
+    assert_eq!(value["claim"]["state"], "open");
+    assert_eq!(value["claim"]["code"], code);
+    assert_eq!(value["claim"]["expires_at"], expires);
+    let seen = d.node.seen.lock().unwrap();
+    let requests: Vec<_> = seen.iter().filter(|(_, path, _, _)| path == "/api/v1/owner/claim-code").collect();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].2.as_deref(), Some("tok.1"));
+    assert!(requests[0].3.is_empty());
+    drop(seen);
+    assert!(!d.node.state.add_device.lock().await.is_active());
+    let store = device_store(&d.node.state).unwrap();
+    for entry in std::fs::read_dir(store).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            assert!(!std::fs::read(path).unwrap().windows(code.len()).any(|bytes| bytes == code.as_bytes()));
+        }
+    }
+    let ready = serde_json::to_value(add_device::run(&d.node.state, add_device::Input::Status).await.unwrap()).unwrap();
+    assert_eq!(ready["owner"], true, "local enrolled owners can open the code sheet");
+    assert!(!ready.to_string().contains(&code));
+}
+
+#[tokio::test]
+async fn owner_claim_code_refuses_unauthenticated_and_ordinary_pairings() {
+    for auth in [AuthMode::Unauthenticated, AuthMode::Local] {
+        let node = fake(auth, happy());
+        assert!(add_device::run(&node.state, serde_json::from_value(serde_json::json!({"action":"claim_code"})).unwrap()).await.is_err());
+        assert!(!node.targets().iter().any(|p| p.contains("/owner/claim-code")));
+    }
+    let (node, _dir) = paired_fake(happy());
+    assert!(add_device::run(&node.state, serde_json::from_value(serde_json::json!({"action":"claim_code"})).unwrap()).await.is_err());
+    assert!(!node.targets().iter().any(|p| p.contains("/owner/claim-code")));
+}
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[tokio::test]
+async fn owner_claim_code_never_uses_a_remote_router_or_a_revoked_owner() {
+    let d = delegation_node();
+    assert!(add_device::run(&d.node.state, serde_json::from_value(serde_json::json!({"action":"claim_code"})).unwrap()).await.is_err());
+    assert!(d.node.targets().is_empty(), "remote requests must be refused before reaching a proxy");
+    d.node.state.remote_mode.store(false, Ordering::SeqCst);
+    d.enrolled.store(false, Ordering::SeqCst);
+    assert!(add_device::run(&d.node.state, serde_json::from_value(serde_json::json!({"action":"claim_code"})).unwrap()).await.is_err());
+    assert!(!d.node.targets().iter().any(|p| p.contains("/owner/claim-code")));
+}
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[tokio::test]
+async fn owner_claim_code_local_status_remains_available_with_second_device_capability() {
+    let d = delegation_fixture(true);
+    d.node.state.remote_mode.store(false, Ordering::SeqCst);
+    let view = add_device::run(&d.node.state, add_device::Input::Status).await.unwrap();
+    assert_eq!(serde_json::to_value(view).unwrap()["owner"], true);
+    assert!(!d.node.targets().iter().any(|p| p.contains("/owner/claim-code")), "status must not fetch a code");
+}
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[tokio::test]
+async fn owner_claim_code_projects_closed_claimed_and_unavailable_without_secrets() {
+    for state in ["closed", "claimed", "unavailable"] {
+        let d = delegation_fixture_with_claim(false, 0, Some((200, serde_json::json!({"state":state}).to_string())));
+        d.node.state.remote_mode.store(false, Ordering::SeqCst);
+        let view = add_device::run(&d.node.state, serde_json::from_value(serde_json::json!({"action":"claim_code"})).unwrap()).await.unwrap();
+        assert_eq!(serde_json::to_value(view).unwrap()["claim"], serde_json::json!({"state":state}));
+    }
+}
+
+#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[tokio::test]
+async fn owner_claim_code_rejects_errors_expiry_and_malformed_responses_without_echoing_secrets() {
+    let code = remote_access::second_tests::claim_code();
+    for (status, body) in [
+        (403, serde_json::json!({"error":code})),
+        (429, serde_json::json!({"error":code})),
+        (200, serde_json::json!({"state":"open", "code":code, "expires_at":now_unix()-1, "device_name":"Phone"})),
+        (200, serde_json::json!({"state":"open", "code":"invalid", "expires_at":now_unix()+300, "device_name":"Phone"})),
+        (200, serde_json::json!({"state":"claimed", "code":code})),
+    ] {
+        let d = delegation_fixture_with_claim(false, 0, Some((status, body.to_string())));
+        d.node.state.remote_mode.store(false, Ordering::SeqCst);
+        let result = add_device::run(&d.node.state, serde_json::from_value(serde_json::json!({"action":"claim_code"})).unwrap()).await;
+        assert!(result.is_err(), "must refuse response at HTTP {status} for state {}", body["state"]);
+        let error = result.err().unwrap();
+        assert!(!error.message.contains(&code));
+        assert!(!error.message.contains("invalid"));
     }
 }
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
@@ -582,7 +689,7 @@ async fn second_device_flag_off_stops_a_reviewed_approval_without_signing() {
     add_device::run(&d.node.state, add_device::Input::Status).await.unwrap();
     d.challenge_valid.store(false, Ordering::SeqCst);
     let view = add_device::run(&d.node.state, add_device::Input::Approve {op_id:"aa".repeat(12)}).await.unwrap();
-    assert!(matches!(view, add_device::View::Unsupported));
+    assert!(matches!(view, add_device::View::Unsupported { .. }));
     assert!(d.node.posts().is_empty());
 }
 #[cfg(all(target_os = "macos", not(feature = "mobile")))]
