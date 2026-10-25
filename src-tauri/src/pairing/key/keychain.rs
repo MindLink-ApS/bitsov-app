@@ -9,11 +9,11 @@ trait KeyStore {
 }
 
 #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
-struct NativeStore<'a>(&'a Path);
+struct NativeStore<'a>(&'a Path, Option<&'a bitsov_ffi::client_keychain::AuthenticationContext>);
 #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
 impl KeyStore for NativeStore<'_> {
     fn read(&self) -> Result<Option<Zeroizing<[u8; 32]>>, PairError> {
-        bitsov_ffi::client_keychain::read(self.0).map_err(PairError::Local)
+        bitsov_ffi::client_keychain::read_with_context(self.0, self.1).map_err(PairError::Local)
     }
     fn add(&self, seed: &[u8; 32]) -> Result<(), PairError> {
         bitsov_ffi::client_keychain::add(self.0, seed).map_err(PairError::Local)
@@ -21,8 +21,56 @@ impl KeyStore for NativeStore<'_> {
 }
 #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
 pub(super) fn load_native(dir: &Path) -> Result<ClientKey, PairError> {
-    load_selected(dir, &NativeStore(dir), at_rest::installed(),
+    load_native_with_context(dir, None)
+}
+
+#[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
+fn load_native_with_context(dir: &Path, context: Option<&bitsov_ffi::client_keychain::AuthenticationContext>) -> Result<ClientKey, PairError> {
+    load_selected(dir, &NativeStore(dir, context), at_rest::installed(),
         bitsov_ffi::client_keychain::data_protection_available())
+}
+
+/// The packaged process exercises the production selector and identity store.
+/// Only the authentication context differs: headless reads fail instead of
+/// opening a prompt, including in an entitled bundle.
+#[cfg(all(not(test), target_os = "macos", not(feature = "mobile")))]
+pub(super) fn smoke_test() -> Result<&'static str, String> {
+    use bitsov_ffi::client_keychain as native;
+    let entitled = native::data_protection_available();
+    let path = if entitled { "data-protection-keychain" } else { "enclave-sealed-file" };
+    println!("identity storage smoke: path={path}");
+    crate::at_rest::install_macos();
+    let support = std::path::PathBuf::from(std::env::var_os("HOME").ok_or("missing home directory")?)
+        .join("Library/Application Support");
+    let temporary = tempfile::Builder::new().prefix("bitsov-storage-smoke-")
+        .tempdir_in(support).map_err(|e| e.to_string())?;
+    let directory = temporary.path().join("app-client");
+    let context = native::AuthenticationContext::new_headless("Test BitSov identity storage")?;
+    let roundtrip = (|| {
+        let first = load_native_with_context(&directory, Some(&context)).map_err(|e| e.to_string())?;
+        let expected = if entitled { MARKER } else { SEALED_KEY_FILE };
+        if !directory.join(expected).is_file() || directory.join(KEY_FILE).exists() {
+            return Err("identity was not published in the selected protected store".to_string());
+        }
+        println!("identity storage smoke: add OK");
+        let again = load_native_with_context(&directory, Some(&context)).map_err(|e| e.to_string())?;
+        if first.public_hex() != again.public_hex() {
+            return Err("identity changed during protected readback".to_string());
+        }
+        println!("identity storage smoke: read OK");
+        Ok(())
+    })();
+    // Also retire the exact throwaway item if add succeeded but read refused UI.
+    let deletion = if entitled { native::delete(&directory) } else { Ok(()) };
+    deletion?;
+    roundtrip?;
+    if entitled && native::read_with_context(&directory, Some(&context))?.is_some() {
+        return Err("throwaway Keychain identity survived deletion".into());
+    }
+    temporary.close().map_err(|e| e.to_string())?;
+    if directory.exists() { return Err("throwaway identity directory survived deletion".into()); }
+    println!("identity storage smoke: delete OK");
+    Ok(path)
 }
 
 // Backend selection is based on the running process's validated entitlement,

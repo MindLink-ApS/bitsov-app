@@ -596,3 +596,6 @@ mod tests {
 #[cfg(any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")), all(test, unix)))]
 #[path = "key/keychain.rs"]
 mod keychain;
+
+#[cfg(all(not(test), target_os = "macos", not(feature = "mobile")))]
+pub(crate) fn storage_smoke_test() -> Result<&'static str, String> { keychain::smoke_test() }

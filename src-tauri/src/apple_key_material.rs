@@ -3,8 +3,18 @@ use std::path::Path;
 use zeroize::Zeroizing;
 
 type Result<T> = std::result::Result<T, String>;
+/// Authentication refusal stays typed until the app maps it to device_cancelled.
+#[derive(Debug)]
+pub(crate) enum ReadError { Cancelled, Storage(String) }
+impl From<String> for ReadError {
+    fn from(message: String) -> Self { Self::Storage(message) }
+}
+impl From<&str> for ReadError {
+    fn from(message: &str) -> Self { Self::Storage(message.into()) }
+}
+
 trait Store {
-    fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>>;
+    fn read(&self) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, ReadError>;
     fn add(&self, bytes: &[u8]) -> Result<()>;
 }
 
@@ -39,11 +49,11 @@ fn publish(directory: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 #[cfg(test)]
-fn load(directory: &Path, store: &dyn Store) -> Result<Option<Zeroizing<Vec<u8>>>> {
+fn load(directory: &Path, store: &dyn Store) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, ReadError> {
     load_selected(directory, store, true)
 }
 
-fn load_selected(directory: &Path, store: &dyn Store, entitled: bool) -> Result<Option<Zeroizing<Vec<u8>>>> {
+fn load_selected(directory: &Path, store: &dyn Store, entitled: bool) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, ReadError> {
     use std::{io::Read, os::unix::fs::{MetadataExt, OpenOptionsExt}};
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let saved = if entitled { store.read()? } else { None };
@@ -115,12 +125,15 @@ fn load_selected(directory: &Path, store: &dyn Store, entitled: bool) -> Result<
 struct Native<'a>(&'a Path, &'a bitsov_ffi::client_keychain::AuthenticationContext);
 #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
 impl Store for Native<'_> {
-    fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>> { bitsov_ffi::client_keychain::read_blob(self.0, self.1) }
+    fn read(&self) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, ReadError> { bitsov_ffi::client_keychain::read_blob(self.0, self.1).map_err(|error| match error {
+        bitsov_ffi::device_key::DeviceKeyError::Cancelled => ReadError::Cancelled,
+        other => ReadError::Storage(other.to_string()),
+    }) }
     fn add(&self, bytes: &[u8]) -> Result<()> { bitsov_ffi::client_keychain::add_blob(self.0, bytes) }
 }
 
 #[cfg(not(test))]
-pub(crate) fn read_for_signing(directory: &Path, context: &bitsov_ffi::client_keychain::AuthenticationContext) -> Result<Option<Zeroizing<Vec<u8>>>> {
+pub(crate) fn read_for_signing(directory: &Path, context: &bitsov_ffi::client_keychain::AuthenticationContext) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, ReadError> {
     load_selected(directory, &Native(directory, context), bitsov_ffi::client_keychain::data_protection_available())
 }
 #[cfg(not(test))]
@@ -179,7 +192,7 @@ mod tests {
         corrupt: bool,
     }
     impl Store for Memory {
-        fn read(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        fn read(&self) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, ReadError> {
             if self.read_error { return Err("denied".into()); }
             Ok(self.data.borrow().clone())
         }
@@ -208,6 +221,30 @@ mod tests {
         assert_eq!(load_selected(dir.path(), &entitled, true).unwrap().unwrap().as_slice(), b"synthetic-device-blob");
         assert!(!dir.path().join(LEGACY).exists());
         assert!(load_selected(dir.path(), &unavailable, false).is_err());
+    }
+    #[test]
+    fn cancelled_initial_or_migration_read_preserves_the_original_key() {
+        struct CancelledRead { reads: std::cell::Cell<usize>, cancel_on: usize }
+        impl Store for CancelledRead {
+            fn read(&self) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, ReadError> {
+                let count = self.reads.get() + 1;
+                self.reads.set(count);
+                if count == self.cancel_on { Err(ReadError::Cancelled) } else { Ok(None) }
+            }
+            fn add(&self, bytes: &[u8]) -> Result<()> {
+                assert_eq!(bytes, b"synthetic-device-blob");
+                Ok(())
+            }
+        }
+        for cancel_on in [1, 2] {
+            let dir = tempfile::tempdir().unwrap();
+            legacy(dir.path());
+            let store = CancelledRead { reads: std::cell::Cell::new(0), cancel_on };
+            assert!(matches!(load(dir.path(), &store), Err(ReadError::Cancelled)));
+            assert_eq!(std::fs::read(dir.path().join(LEGACY)).unwrap(), b"synthetic-device-blob");
+            assert!(!dir.path().join(MARKER).exists());
+            assert_eq!(store.reads.get(), cancel_on, "cancellation must stop migration");
+        }
     }
     #[test]
     fn migration_verifies_preserves_and_removes_legacy_material() {

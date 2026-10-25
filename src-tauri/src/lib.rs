@@ -55,7 +55,7 @@ pub fn run() {
 }
 
 /// Headless packaging check; call before initializing the application runtime.
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(not(test), target_os = "macos", not(feature = "mobile")))]
 pub fn mac_keychain_smoke_test() -> Result<&'static str, String> {
-    bitsov_ffi::client_keychain::smoke_test()
+    pairing::key::storage_smoke_test()
 }

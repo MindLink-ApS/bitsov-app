@@ -9,7 +9,7 @@ fn mac_storage_selection_checks_runtime_entitlements_before_keychain_migration()
     assert!(swift.contains("SecTaskCopyValueForEntitlement"));
     assert!(swift.contains("com.apple.application-identifier"));
     let key = read("src/pairing/key/keychain.rs");
-    assert!(key.contains("load_selected(dir, &NativeStore(dir), at_rest::installed(),"));
+    assert!(key.contains("load_selected(dir, &NativeStore(dir, context), at_rest::installed(),"));
     assert!(key.contains("bitsov_ffi::client_keychain::data_protection_available()"));
 }
 #[test]

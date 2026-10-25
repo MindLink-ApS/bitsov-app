@@ -219,6 +219,22 @@ for failure in [errSecUserCanceled, errSecAuthFailed, errSecInteractionNotAllowe
 }
 print("PASS: entitlement selection and shared authentication context for protected reads")
 
+// The packaged smoke must fail rather than display authentication UI. Exercise
+// its real context factory and the same readData query used by identity reads.
+let headlessHandle = "Storage smoke".withCString { bitsov_auth_context_create($0, 2) }!
+let headlessContext = Unmanaged<LAContext>.fromOpaque(headlessHandle).takeUnretainedValue()
+var headlessStore = signingStore
+headlessStore.copy = { query, _ in
+    let q = query as! [CFString: Any]
+    precondition(q[kSecUseAuthenticationContext] as? LAContext === headlessContext)
+    precondition(headlessContext.interactionNotAllowed)
+    return errSecInteractionNotAllowed
+}
+let (headlessStatus, headlessData) = headlessStore.readData("profile/app-client", context: headlessContext)
+precondition(headlessStatus == errSecInteractionNotAllowed && headlessData == nil)
+bitsov_auth_context_release(headlessHandle)
+print("PASS: packaged storage smoke forbids authentication UI on protected identity reads")
+
 let publicMetadata = Data(repeating: 4, count: 65)
 let metadataStore = ClientKeychain(copy: { query, output in
     let q = query as! [CFString: Any]

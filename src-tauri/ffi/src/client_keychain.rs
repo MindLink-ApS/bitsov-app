@@ -6,7 +6,7 @@ unsafe extern "C" {
     #[cfg(target_os = "ios")]
     fn bitsov_app_is_backgrounded() -> i32;
     fn bitsov_exclude_app_backup(path: *const std::ffi::c_char) -> i32;
-    fn bitsov_client_key_read(path: *const std::ffi::c_char, output: *mut u8) -> i32;
+    fn bitsov_client_key_read(path: *const std::ffi::c_char, output: *mut u8, context: *mut std::ffi::c_void) -> i32;
     fn bitsov_client_key_add(path: *const std::ffi::c_char, seed: *const u8) -> i32;
     fn bitsov_client_key_delete(path: *const std::ffi::c_char) -> i32;
 }
@@ -29,9 +29,14 @@ pub fn data_protection_available() -> bool {
 pub struct AuthenticationContext(std::ptr::NonNull<std::ffi::c_void>);
 impl AuthenticationContext {
     pub fn new_for_operation(reason: &str, setup_finish: bool) -> Result<Self, String> {
+        Self::create(reason, i32::from(setup_finish))
+    }
+    /// Never display authentication UI; a protected item may refuse this read.
+    pub fn new_headless(reason: &str) -> Result<Self, String> { Self::create(reason, 2) }
+    fn create(reason: &str, mode: i32) -> Result<Self, String> {
         let reason = CString::new(reason).map_err(|_| "invalid signing reason")?;
         // SAFETY: Swift copies the string and returns an owned, opaque context.
-        let pointer = unsafe { bitsov_auth_context_create(reason.as_ptr(), i32::from(setup_finish)) };
+        let pointer = unsafe { bitsov_auth_context_create(reason.as_ptr(), mode) };
         std::ptr::NonNull::new(pointer).map(Self).ok_or_else(|| "cannot create authentication context".into())
     }
     pub fn sign(&self, blob: &[u8], expected: &[u8; 65], message: &[u8], reason: &str, setup: Option<bool>) -> Result<Vec<u8>, crate::device_key::DeviceKeyError> {
@@ -69,11 +74,16 @@ fn error(status: i32) -> String {
 }
 
 pub fn read(path: &Path) -> Result<Option<Zeroizing<[u8; 32]>>, String> {
+    read_with_context(path, None)
+}
+
+pub fn read_with_context(path: &Path, context: Option<&AuthenticationContext>) -> Result<Option<Zeroizing<[u8; 32]>>, String> {
     let path = path_string(path)?;
     let mut seed = Zeroizing::new([0; 32]);
     // SAFETY: the Swift bridge writes exactly 32 bytes on success, retains no
     // pointers, and the path and output buffer remain live throughout the call.
-    match unsafe { bitsov_client_key_read(path.as_ptr(), seed.as_mut_ptr()) } {
+    match unsafe { bitsov_client_key_read(path.as_ptr(), seed.as_mut_ptr(),
+        context.map(|c| c.0.as_ptr()).unwrap_or(std::ptr::null_mut())) } {
         0 => Ok(Some(seed)),
         -25300 => Ok(None), // errSecItemNotFound only; locked is never missing.
         status => Err(error(status)),
@@ -126,15 +136,17 @@ unsafe extern "C" {
     fn bitsov_device_blob_delete(path: *const std::ffi::c_char) -> i32;
 }
 
-pub fn read_blob(path: &Path, context: &AuthenticationContext) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-    let path = path_string(path)?;
+pub fn read_blob(path: &Path, context: &AuthenticationContext) -> Result<Option<Zeroizing<Vec<u8>>>, crate::device_key::DeviceKeyError> {
+    use crate::device_key::{DeviceKeyError, status_error};
+    let path = path_string(path).map_err(|_| DeviceKeyError::Other(-5))?;
     let mut bytes = Zeroizing::new(vec![0; 4096]);
     let mut length = 0;
     // SAFETY: buffers remain live, Swift bounds all writes and retains no pointers.
     match unsafe { bitsov_device_blob_read(path.as_ptr(), bytes.as_mut_ptr(), bytes.len(), &mut length, context.0.as_ptr()) } {
         0 if (1..=bytes.len()).contains(&length) => { bytes.truncate(length); Ok(Some(bytes)) }
         -25300 => Ok(None),
-        status => Err(error(status)),
+        0 => Err(DeviceKeyError::Other(-6)), // malformed successful response
+        status => Err(status_error(status)),
     }
 }
 
@@ -152,19 +164,6 @@ pub fn delete_blob(path: &Path) -> Result<(), String> {
     // SAFETY: Swift retains no pointer to this live path.
     match unsafe { bitsov_device_blob_delete(path.as_ptr()) } {
         0 | -25300 => Ok(()), status => Err(error(status)),
-    }
-}
-
-/// Real Keychain add/read/delete from the packaged process, without UI.
-#[cfg(target_os = "macos")]
-pub fn smoke_test() -> Result<&'static str, String> {
-    unsafe extern "C" { fn bitsov_mac_keychain_smoke() -> i32; }
-    let path = if data_protection_available() { "data-protection-keychain" } else { "enclave-sealed-file" };
-    // SAFETY: no pointers; the native probe uses a unique public marker and
-    // deletes its exact service/account before returning.
-    match unsafe { bitsov_mac_keychain_smoke() } {
-        0 => Ok(path),
-        status => Err(format!("Keychain smoke failed: path={path} status={status}")),
     }
 }
 

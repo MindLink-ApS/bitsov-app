@@ -198,7 +198,7 @@ func signMessage(
             dataRepresentation: blobData, authenticationContext: context
         )
     } catch {
-        return errInvalidBlob
+        return statusForKeyLoadingError(error)
     }
 
     let signature: P256.Signing.ECDSASignature
@@ -217,6 +217,10 @@ func signMessage(
 
 private func statusForSigningError(_ error: Error) -> Int32 {
     let ns = error as NSError
+    if ns.domain == NSOSStatusErrorDomain,
+       [Int(errSecUserCanceled), Int(errSecAuthFailed)].contains(ns.code) {
+        return errCancelled
+    }
     if ns.domain == LAErrorDomain || error is LAError {
         // No Touch ID to ask is not the owner saying no: point to the fallback.
         switch ns.code {
@@ -233,6 +237,13 @@ private func statusForSigningError(_ error: Error) -> Int32 {
         return errCancelled
     }
     return errOther
+}
+
+// Restoring an enclave key can itself request authentication. A cancelled
+// restore must not be reported as invalid key material (which the app retires).
+func statusForKeyLoadingError(_ error: Error) -> Int32 {
+    let status = statusForSigningError(error)
+    return status == errOther ? errInvalidBlob : status
 }
 
 #if os(macOS)
@@ -679,48 +690,3 @@ public func bitsov_dk_sign_setup(
         return status
     }
 }
-
-#if os(macOS)
-// Invoked before Tauri initialization by the packaged executable. The payload
-// is a public smoke-test marker, never identity material. It deliberately has
-// no user-presence ACL so CI can verify the real Keychain without a prompt;
-// the behavioral policy tests cover the ACL on actual identity items.
-@_cdecl("bitsov_mac_keychain_smoke")
-public func bitsov_mac_keychain_smoke() -> Int32 {
-    let dp = bitsov_client_data_protection_available() == 1
-    let service = "tech.mindlink.bitsov.storage-smoke.v1"
-    let account = UUID().uuidString
-    let data = Data("BitSov non-secret storage smoke marker".utf8)
-    let context = LAContext()
-    context.interactionNotAllowed = true
-    defer { context.invalidate() }
-    let operation: (Bool, ([CFString: Any]) -> OSStatus) -> OSStatus = { adding, action in
-        itemQuery(service, account, dp, adding) { base in
-            var query = base
-            query[kSecAttrSynchronizable] = false
-            query[kSecUseAuthenticationContext] = context
-            return action(query)
-        }
-    }
-    let added = operation(true) { base in
-        var query = base
-        query[kSecValueData] = data
-        return SecItemAdd(query as CFDictionary, nil)
-    }
-    guard added == errSecSuccess else { return added }
-    let read = operation(false) { base in
-        var query = base
-        query[kSecReturnData] = true
-        query[kSecMatchLimit] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess else { return status }
-        return result as? Data == data ? errSecSuccess : errSecDecode
-    }
-    let deleted = operation(false) { SecItemDelete($0 as CFDictionary) }
-    guard deleted == errSecSuccess else { return deleted }
-    guard read == errSecSuccess else { return read }
-    let absent = operation(false) { SecItemCopyMatching($0 as CFDictionary, nil) }
-    return absent == errSecItemNotFound ? errSecSuccess : (absent == errSecSuccess ? errSecInternalComponent : absent)
-}
-#endif

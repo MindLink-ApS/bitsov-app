@@ -35,6 +35,11 @@ public func bitsov_auth_context_create(_ reason: UnsafePointer<CChar>?, _ setupF
     guard let reason = reason, let text = String(validatingUTF8: reason), !text.isEmpty else { return nil }
     let context = setupFinish == 1 ? setupReadContext() : LAContext()
     context.localizedReason = text
+    // Mode 2 is the packaged storage smoke: fail rather than display any UI.
+    if setupFinish == 2 {
+        context.interactionNotAllowed = true
+        guard context.interactionNotAllowed else { context.invalidate(); return nil }
+    }
     return Unmanaged.passRetained(context).toOpaque()
 }
 
@@ -216,10 +221,18 @@ func clientAccount(_ path: UnsafePointer<CChar>) throws -> String {
 }
 
 @_cdecl("bitsov_client_key_read")
-public func bitsov_client_key_read(_ path: UnsafePointer<CChar>?, _ output: UnsafeMutablePointer<UInt8>?) -> Int32 {
+public func bitsov_client_key_read(_ path: UnsafePointer<CChar>?, _ output: UnsafeMutablePointer<UInt8>?,
+    _ handle: UnsafeMutableRawPointer? = nil) -> Int32 {
     guard let path = path, let output = output else { return errSecParam }
     return autoreleasepool {
-        do { return ClientKeychain().read(try clientAccount(path), output) }
+        do {
+            let context = handle.map { Unmanaged<LAContext>.fromOpaque($0).takeUnretainedValue() }
+            let (status, result) = ClientKeychain().readData(try clientAccount(path), context: context)
+            guard status == errSecSuccess, var data = result else { return status }
+            defer { data.resetBytes(in: 0..<data.count) }
+            data.copyBytes(to: output, count: 32)
+            return errSecSuccess
+        }
         catch { return errSecParam }
     }
 }
@@ -339,9 +352,12 @@ public func bitsov_device_blob_sign(_ blob: UnsafePointer<UInt8>?, _ count: Int,
     guard let blob = blob, let expected = expected, let handle = handle, (1...4096).contains(count) else { return -5 }
     let context = Unmanaged<LAContext>.fromOpaque(handle).takeUnretainedValue()
     return autoreleasepool {
-        guard let key = try? SecureEnclave.P256.Signing.PrivateKey(
-            dataRepresentation: Data(bytes: blob, count: count), authenticationContext: context),
-            key.publicKey.x963Representation == Data(bytes: expected, count: 65) else { return -3 }
+        let key: SecureEnclave.P256.Signing.PrivateKey
+        do {
+            key = try SecureEnclave.P256.Signing.PrivateKey(
+                dataRepresentation: Data(bytes: blob, count: count), authenticationContext: context)
+        } catch { return statusForKeyLoadingError(error) }
+        guard key.publicKey.x963Representation == Data(bytes: expected, count: 65) else { return -3 }
         if setup == 0 || setup == 1 {
             return bitsov_dk_sign_setup(blob, count, msg, msgLen, reason, setup, outSig, sigCap, outSigLen, handle)
         }

@@ -7404,15 +7404,28 @@ fn sign_stored(key: &DeviceSigningKey, message: &[u8], reason: &str) -> Result<V
 
 #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
 fn sign_stored_with(key: &DeviceSigningKey, message: &[u8], reason: &str, setup: Option<bool>) -> Result<Vec<u8>, ActionError> {
+    let context = bitsov_ffi::client_keychain::AuthenticationContext::new_for_operation(reason, setup == Some(true))
+        .map_err(|e| ActionError::new("device_key", e))?;
+    stored_signing_operation(&key.directory,
+        || crate::apple_key_material::read_for_signing(&key.directory, &context),
+        |blob| context.sign(blob, &key.public, message, reason, setup))
+}
+
+#[cfg(any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")), all(test, unix)))]
+fn stored_signing_operation(
+    directory: &Path,
+    read: impl FnOnce() -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, crate::apple_key_material::ReadError>,
+    sign: impl FnOnce(&[u8]) -> Result<Vec<u8>, device_key::DeviceKeyError>,
+) -> Result<Vec<u8>, ActionError> {
     let result = (|| {
-        let context = bitsov_ffi::client_keychain::AuthenticationContext::new_for_operation(reason, setup == Some(true))
-            .map_err(|e| ActionError::new("device_key", e))?;
-        let blob = crate::apple_key_material::read_for_signing(&key.directory, &context)
-            .map_err(|e| ActionError::new("device_key", e))?
+        let blob = read().map_err(|error| match error {
+            crate::apple_key_material::ReadError::Cancelled => device_error(device_key::DeviceKeyError::Cancelled),
+            crate::apple_key_material::ReadError::Storage(message) => ActionError::new("device_key", message),
+        })?
             .ok_or_else(|| device_error(device_key::DeviceKeyError::Invalid))?;
-        context.sign(&blob, &key.public, message, reason, setup).map_err(device_error)
+        sign(&blob).map_err(device_error)
     })();
-    if let Err(error) = &result { forget_invalid_signing_key(&key.directory, error); }
+    if let Err(error) = &result { forget_invalid_signing_key(directory, error); }
     result
 }
 
@@ -9607,6 +9620,35 @@ mod device_sign_error_tests {
         assert!(forget_invalid_signing_key(dir.path(), &error));
         assert!(device::load_blob(dir.path()).is_none());
         assert!(device::load_record(dir.path()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelled_protected_read_and_signature_preserve_the_enrolled_identity() {
+        for during_read in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let blob = b"synthetic wrapped enclave key";
+            let record = device::Record { registered: true, key_id: Some("registered-key".into()), ..Default::default() };
+            device::save_blob(dir.path(), blob).unwrap();
+            device::save_record(dir.path(), &record).unwrap();
+            for name in ["device-key.keychain", "device-key.public"] {
+                std::fs::write(dir.path().join(name), b"public metadata").unwrap();
+            }
+            let error = stored_signing_operation(dir.path(), || {
+                if during_read { Err(crate::apple_key_material::ReadError::Cancelled) }
+                else { Ok(Some(zeroize::Zeroizing::new(blob.to_vec()))) }
+            }, |loaded| {
+                assert!(!during_read, "a cancelled read must never reach signing");
+                assert_eq!(loaded, blob);
+                Err(device_key::DeviceKeyError::Cancelled)
+            }).unwrap_err();
+            assert_eq!(error.code, "device_cancelled");
+            assert_eq!(device::load_blob(dir.path()).as_deref(), Some(blob.as_slice()));
+            assert_eq!(device::load_record(dir.path()), Some(record));
+            for name in ["device-key.keychain", "device-key.public"] {
+                assert_eq!(std::fs::read(dir.path().join(name)).unwrap(), b"public metadata");
+            }
+        }
     }
 }
 

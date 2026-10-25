@@ -356,11 +356,11 @@ either can make previously migrated Keychain identities inaccessible.
 
 The Mac package workflow invokes the built executable with
 `--keychain-smoke-test` before archiving. This exits before Tauri or any window
-starts. It reports the selected identity path and performs a real, prompt-free
-Keychain add/read/delete using a unique non-secret marker: data-protection
-Keychain for entitled apps, local login Keychain for ad-hoc apps. The marker has
-no authentication ACL; the native policy tests separately verify user presence
-on identity items. Every unexpected Security status fails the smoke test.
+starts. It creates and reloads a throwaway client identity through the production
+storage selector: an enclave-sealed file for ad-hoc apps, or the user-presence
+data-protection Keychain for entitled apps. It prints the path and add/read/delete
+results and removes the exact temporary identity. Authentication UI is disabled;
+an entitled protected read that requires a prompt fails instead of opening one.
 Status polling uses only the public record and file metadata. Protected device
 material is read only for signing, on a blocking worker, with one authentication
 context shared by the read, migration readback, and enclave signature.

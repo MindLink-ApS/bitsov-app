@@ -63,7 +63,8 @@ const ERR_BIOMETRY_UNAVAILABLE: i32 = -7;
 pub(crate) fn status_error(code: i32) -> DeviceKeyError {
     match code {
         ERR_UNAVAILABLE => DeviceKeyError::Unavailable,
-        ERR_CANCELLED => DeviceKeyError::Cancelled,
+        // Security.framework returns these directly from protected reads.
+        ERR_CANCELLED | -128 | -25293 => DeviceKeyError::Cancelled,
         ERR_INVALID_BLOB => DeviceKeyError::Invalid,
         ERR_BIOMETRY_UNAVAILABLE => DeviceKeyError::BiometryUnavailable,
         other => DeviceKeyError::Other(other),
