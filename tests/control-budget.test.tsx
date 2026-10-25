@@ -546,6 +546,9 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     type('[data-composer] textarea', 'hello');
     expect($('[data-budget="grant_limited"]')).not.toBeNull();
+    expect($('[data-send-disabled-reason]')?.textContent).toBe('Over the limit');
+    expect($('[data-node-grant-limit]')?.textContent).toContain('spending limit');
+    expect($('[data-node-grant-limit]')?.textContent).not.toMatch(/\bgrant\b/i);
     expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(true);
     $<HTMLTextAreaElement>('[data-composer] textarea')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await vi.advanceTimersByTimeAsync(0);

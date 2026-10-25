@@ -14,6 +14,34 @@ it.each(['en', 'da'] as const)('puts possessives in %s copy and leaves the estim
   expect(cost().basis).toContain(locale === 'da' ? 'Deres pris' : 'Their price');
   expect(costToSend({ kind: 'peer', id: 'a' }, { ...quote, peer_msat: null }, { name: 'Maya' })!.basis).toContain(locale === 'da' ? 'Maya har ikke delt sin endnu' : 'Maya has not shared theirs yet');
 });
+it('uses one chat name per language and keeps budget words in that language', () => {
+  setLanguagePref('en');
+  expect(t('phoneChats')).toBe('Chats');
+  expect(t('uiTracks')).toBe('Chats');
+  expect(t('uiNodeGrantLimit')).toBe('Over the limit');
+  expect(t('uiYourNodeSSpendGrantCannotCoverThis')).not.toMatch(/grant/i);
+  expect(t('notificationReason')).not.toMatch(/\bhear\b/i);
+  expect(t('notificationGranted')).not.toMatch(/delivery/i);
+  setLanguagePref('da');
+  expect(t('phoneChats')).toBe('Samtaler');
+  expect(t('uiTracks')).toBe('Samtaler');
+  expect(t('phoneOpenChat')).toBe('Åbn samtale');
+  expect(t('uiNodeGrantLimit')).toBe('Over tilladelsen');
+  expect(t('stoppedLine')).toBe('Vælg også “Ordene er forskellige” der.');
+  expect(t('nearbyLine')).toBe('Tillad Enheder i nærheden i Indstillinger.');
+  expect(t('obPairApp')).toBe('Par denne app');
+  expect(t('obStartNode')).toBe('Start noden');
+  expect(t('notificationReason')).not.toMatch(/høre/);
+  for (const key of [
+    'uiThisBudgetAlreadyEqualsYourAppAllIn',
+    'uiRaiseTheAppAllInLimitTo',
+    'uiYourAppAllInLimitIsUsedUp',
+    'uiAppAllInPaymentsLimitRolling24Hours',
+    'uiOneApprovalLetsMessagesPayForTheNext',
+    'uiAppInvoicePaymentsAndKeysendReservePrincipalPlus',
+    'uiFilesReservePrincipalPlusTheNetworkFeeCeiling',
+  ] as const) expect(t(key)).not.toMatch(/limit/i);
+});
 it('retains the payment, on-chain and fee meanings in Danish copy', () => {
   setLanguagePref('da');
   expect(t('extraSpendingApprovedMinLeft', 4)).toBe('Betalinger godkendt, 4 min tilbage');

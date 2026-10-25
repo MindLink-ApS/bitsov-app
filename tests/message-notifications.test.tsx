@@ -52,7 +52,8 @@ it.each(['en', 'da'] as const)('explains permission in %s and requests it only o
   mount = document.createElement('div'); document.body.append(mount);
   dispose = render(() => <NotificationSettings notifications={n} />, mount);
   await n.checkPermission();
-  expect(mount.textContent).toContain(lang === 'en' ? 'without showing message content' : 'uden at vise beskedens indhold');
+  expect(mount.textContent).toContain(lang === 'en' ? 'not the message' : 'ikke beskeden');
+  expect(mount.textContent).not.toMatch(/hear|høre/i);
   n.message(message, 'me', 'Maya'); await flush(); expect(native.requestPermission).not.toHaveBeenCalled();
   mount.querySelector<HTMLButtonElement>('[data-notification-enable]')!.click(); await flush();
   expect(native.requestPermission).toHaveBeenCalledOnce();

@@ -90,7 +90,7 @@ it.each([{ platform: 'Macintosh', narrow: true }, { platform: 'iPad', narrow: fa
 });
 it('uses Danish copy for phone navigation', async () => {
   setLanguagePref('da'); await mount();
-  expect(visible('[data-phone-tabs] button').map(el => el.textContent)).toEqual(['Chats', 'Tegnebog', 'Dig']);
+  expect(visible('[data-phone-tabs] button').map(el => el.textContent)).toEqual(['Samtaler', 'Tegnebog', 'Dig']);
 });
 it('returns from Wallet on Escape without leaving a blank Wallet tab', async () => {
   await mount(); await click('[data-phone-tab="wallet"]');

@@ -53,6 +53,20 @@ it('auto-connects a scan, displays ordered words and only the owner can approve'
   button("They don't match").click(); await tick();
   expect(props.join).toHaveBeenCalledWith({ action: 'cancel' });
   expect(document.body.textContent).toContain('Stopped. Nothing was added.');
+  expect(document.body.textContent).toContain('Choose “Words differ” there too.');
+});
+it('names the Danish refusal button on the other device', async () => {
+  const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  const props = mount({ locale: 'da', status, pairing, device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }) });
+  button('Scan boksens QR-kode').click(); await tick();
+  setPairing({ ...INITIAL_PAIRING, remote: true, state: 'paired' });
+  setStatus({ ready: true, node_id: 'box', error: null }); await tick();
+  button('De er ikke ens').click(); await tick();
+  expect(props.join).toHaveBeenCalledWith({ action: 'cancel' });
+  expect(document.body.textContent).toContain('Stoppet. Intet blev tilføjet.');
+  expect(document.body.textContent).toContain('Vælg også “Ordene er forskellige” der.');
+  expect(document.body.textContent).not.toContain('Words differ');
 });
 it('rejects an unclaimed preview before dialing', async () => {
   const props = mount({ preview: vi.fn().mockResolvedValue({ first_run: true, endpoint: 'box', node_id_fingerprint: '' }) });
