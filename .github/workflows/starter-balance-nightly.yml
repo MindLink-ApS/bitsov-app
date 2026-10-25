@@ -76,7 +76,7 @@ jobs:
           cache: npm
       - name: Frontend — build and test with starter balance enabled
         run: |
-          npm ci --no-audit --no-fund
+          npm ci --ignore-scripts --no-audit --no-fund
           npm run build
           npx vitest run
       - name: Free disk space if needed

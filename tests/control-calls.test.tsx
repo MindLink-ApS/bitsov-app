@@ -1179,7 +1179,7 @@ describe('call engine', () => {
     expect(last()).toMatchObject({ phase: 'ended', reason: 'declined' });
   });
 
-  it('ignores its own echo, other calls, junk, and a second caller while busy', async () => {
+  it('keeps its current caller when echoes, other hangups, junk and a second caller arrive', async () => {
     const { e, last } = engine();
     await e.receive(msg(400, { media: 'audio', sdp: 'x' }, OWN), OWN);
     expect(last()).toBeUndefined();
@@ -1910,11 +1910,13 @@ describe('calls in the shell', () => {
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async (c: MediaStreamConstraints) => stream(!!c.video) } });
   });
   afterEach(() => {
+    setLanguagePref('en');
     dispose?.();
     dispose = undefined;
     mount?.remove();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
   const $ = <T extends Element = HTMLElement>(sel: string) => mount.querySelector<T>(sel);
   // Call and Video call ask first; Ring places the call.
@@ -2587,6 +2589,148 @@ describe('calls in the shell', () => {
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
   });
 
+  it.each(['answer', 'decline', 'timeout', 'cancel'] as const)('loops the bundled ring and stops on %s', async outcome => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
+    const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    const host = stubHost({ messages_list: () => [] });
+    await openShell();
+    if (outcome === 'timeout') vi.useFakeTimers();
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { media: 'audio', sdp: 'offer' }) });
+    await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
+    const audio = play.mock.contexts.find(a => a instanceof HTMLAudioElement && a.loop) as HTMLAudioElement;
+    expect(audio).toBeDefined();
+    expect(audio.src).toMatch(/incoming-ring\.wav/);
+    expect($('[data-incoming-announcement]')?.textContent).toContain('Maya');
+    if (outcome === 'answer') $<HTMLButtonElement>('[data-call-accept]')!.click();
+    if (outcome === 'decline') $<HTMLButtonElement>('[data-call-decline]')!.click();
+    if (outcome === 'cancel') host.emitLive({ type: 'message', room_id: null, message: msg(403, { reason: 'hangup' }) });
+    if (outcome === 'timeout') {
+      await vi.advanceTimersByTimeAsync(RING_MS + 1);
+      vi.useRealTimers();
+    }
+    await vi.waitFor(() => expect(pause.mock.contexts).toContain(audio));
+    expect(audio.currentTime).toBe(0);
+    if (outcome === 'timeout' || outcome === 'cancel') expect($('[data-missed-call]')).not.toBeNull();
+    else expect($('[data-missed-call]')).toBeNull();
+  });
+
+  it('keeps a second priced card visible with a soft tone and working decline while the first call stays live', async () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
+    const host = payHost(); await liveCall();
+    const pc = FakePc.made[0];
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'offer' }) });
+    await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-panel="incoming"]')).not.toBeNull());
+    const accept = $<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!;
+    expect(accept.disabled).toBe(true);
+    await vi.waitFor(() => expect(accept.textContent).toContain('6 sats'));
+    const audio = play.mock.contexts.find(a => a instanceof HTMLAudioElement && a.src.includes('incoming-ring')) as HTMLAudioElement;
+    expect(audio.loop).toBe(false); expect(audio.volume).toBeLessThan(0.5);
+    $<HTMLButtonElement>('[data-waiting-calls] [data-call-decline]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal').some(c => c.args?.kind === 403 && String(c.args.plaintext).includes('f'.repeat(32)))).toBe(true));
+    expect($('[data-call-panel="live"]')).not.toBeNull(); expect(pc.closed).toBe(false);
+    expect($('[data-missed-call]')).toBeNull();
+  });
+
+  it('allows answering the waiting caller after the first call ends, with the same quoted price', async () => {
+    const host = payHost(); await liveCall();
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'second-offer' }) });
+    await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-accept]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-panel="live"] [data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!.disabled).toBe(false));
+    await vi.waitFor(() => expect(text('[data-waiting-calls] [data-call-accept]')).toContain('6 sats'));
+    $<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal').some(c => c.args?.kind === 401 && String(c.args.plaintext).includes('f'.repeat(32)))).toBe(true));
+    expect($('[data-waiting-calls] [data-call-panel]')).toBeNull();
+    expect($('[data-missed-call]')).toBeNull();
+    expect(FakePc.made[1].remote?.sdp).toBe('second-offer');
+    FakePc.made[1].connect();
+    expect($('[data-call-panel="live"]')).not.toBeNull();
+  });
+
+  it('marks a missed call read when its open thread regains focus', async () => {
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    const host = stubHost({ messages_list: () => [] }); await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { media: 'audio', sdp: 'offer' }) });
+    host.emitLive({ type: 'message', room_id: null, message: msg(403, { reason: 'hangup' }) });
+    await vi.waitFor(() => expect($(`[data-track="peer:${A}"] .badge`)?.textContent).toBe('1'));
+    window.dispatchEvent(new Event('focus'));
+    expect($(`[data-track="peer:${A}"] .badge`)).toBeNull();
+    expect($('[data-missed-call]')).not.toBeNull();
+  });
+
+  it.each(['cancel', 'timeout'] as const)('keeps a missed waiting call visible after %s without ending the live call', async outcome => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
+    const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    const host = payHost(); await liveCall();
+    if (outcome === 'timeout') vi.useFakeTimers();
+    const id = 'f'.repeat(32);
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { call_id: id, media: 'audio', sdp: 'second' }) });
+    await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-panel="incoming"]')).not.toBeNull());
+    const tone = play.mock.contexts.find(a => a instanceof HTMLAudioElement && a.src.includes('incoming-ring'));
+    if (outcome === 'timeout') { await vi.advanceTimersByTimeAsync(RING_MS + 1); vi.useRealTimers(); }
+    else host.emitLive({ type: 'message', room_id: null, message: msg(403, { call_id: id, reason: 'hangup' }) });
+    expect(pause.mock.contexts).toContain(tone);
+    expect($('[data-waiting-calls] [data-call-panel="ended"]')).not.toBeNull();
+    expect($('[data-missed-call]')).not.toBeNull();
+    expect($('[data-call-panel="live"]')).not.toBeNull();
+    expect(FakePc.made[0].closed).toBe(false);
+  });
+
+  it('keeps alert lifetimes separate when two callers use the same call id, and stops on unmount', async () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
+    const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    const host = stubHost(); await openShell();
+    const offer = msg(400, { media: 'audio', sdp: 'first' });
+    host.emitLive({ type: 'message', room_id: null, message: offer });
+    host.emitLive({ type: 'message', room_id: null, message: offer });
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { media: 'audio', sdp: 'second' }, 'b'.repeat(64)) });
+    const tones = play.mock.contexts.filter(a => a instanceof HTMLAudioElement && a.src.includes('incoming-ring')) as HTMLAudioElement[];
+    expect(tones).toHaveLength(2);
+    expect(tones.map(a => a.loop)).toEqual([true, false]);
+    host.emitLive({ type: 'message', room_id: null, message: msg(403, { reason: 'hangup' }) });
+    expect(pause.mock.contexts).toContain(tones[0]);
+    expect(pause.mock.contexts).not.toContain(tones[1]);
+    expect($('[data-waiting-calls] [data-call-panel="incoming"]')).not.toBeNull();
+    dispose?.(); dispose = undefined;
+    expect(pause.mock.contexts).toContain(tones[1]);
+  });
+
+  it('restores a missed call in its contact thread after reopening the app', async () => {
+    const host = stubHost({ messages_list: () => [] }); await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { media: 'video', sdp: 'offer' }) });
+    host.emitLive({ type: 'message', room_id: null, message: msg(403, { reason: 'hangup' }) });
+    expect($('[data-missed-call]')).not.toBeNull();
+    dispose?.(); dispose = undefined; mount.remove();
+    stubHost({ messages_list: () => [] }); await openShell();
+    expect($('[data-missed-call]')).not.toBeNull();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-back]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-back]')!.click();
+    expect($('[data-missed-call] [data-call-confirm="video"]')).not.toBeNull();
+    $<HTMLButtonElement>('[data-missed-call] [data-call-confirm-cancel]')!.click();
+    expect(document.activeElement).toBe($('[data-call-back]'));
+  });
+
+  it('keeps cancelled calls in the contact thread with time, unread badge and a priced call-back confirmation', async () => {
+    const host = stubHost({ messages_list: () => [] }); await openShell();
+    $<HTMLButtonElement>('[data-track="discover"]')!.click();
+    const offer = msg(400, { media: 'audio', sdp: 'offer' });
+    host.emitLive({ type: 'message', room_id: null, message: offer });
+    host.emitLive({ type: 'message', room_id: null, message: msg(403, { reason: 'hangup' }) });
+    await vi.waitFor(() => expect($(`[data-track="peer:${A}"] .badge`)?.textContent).toBe('1'));
+    $<HTMLButtonElement>(`[data-track="peer:${A}"]`)!.click();
+    await vi.waitFor(() => expect($('[data-missed-call]')).not.toBeNull());
+    expect(text('[data-missed-call]')).toContain('Missed call');
+    expect($('[data-missed-call] time')?.getAttribute('datetime')).toBeTruthy();
+    expect($(`[data-track="peer:${A}"] .badge`)).toBeNull();
+    host.emitLive({ type: 'message', room_id: null, message: offer });
+    expect(mount.querySelectorAll('[data-missed-call]')).toHaveLength(1);
+    expect($('[data-call-panel="incoming"]')).toBeNull();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-back]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-back]')!.click();
+    await vi.waitFor(() => expect($('[data-missed-call] [data-call-confirm]')).not.toBeNull());
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
   it('rings on a live offer with the answer price, and never adds call signals to the thread', async () => {
     const host = stubHost({ messages_list: () => [] });
     await openShell();
@@ -2991,7 +3135,7 @@ describe('calls in the shell', () => {
     input.value = 'stun:own-node.example:3478';
     input.dispatchEvent(new Event('input', { bubbles: true }));
     $<HTMLButtonElement>('[data-stun-save]')!.click();
-    await vi.waitFor(() => expect(text('[data-stun-note]')).toMatch(/own-node\.example:3478 .*sees your IP address/));
+    await vi.waitFor(() => expect(text('[data-stun-note]')).toBe('Server you chose: own-node.example:3478. That server sees your IP when you place or take a call.'));
     // The next call uses it.
     ring('audio');
     await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
@@ -3005,7 +3149,7 @@ describe('calls in the shell', () => {
 
   it('uses the node\'s own STUN responder by default (never a third party); the owner can turn it off and back on', async () => {
     const own = 'stun:mynode.example.org:3478';
-    stubHost({ node_overview: overviewWith({ stun_port: 3478, stun_url: own }) });
+    stubHost({ node_overview: overviewWith({ stun_source: 'own', stun_port: 3478, stun_url: own }) });
     await openShell();
     $<HTMLButtonElement>('[data-profile]')!.click();
     $<HTMLButtonElement>('[data-open-settings]')!.click();
@@ -3015,7 +3159,7 @@ describe('calls in the shell', () => {
     expect(localStorage.getItem('bitsov.stun')).toBeNull();
     expect($('[data-stun-own]')).toBeNull();
     // The Call button's tooltip says the same (no "No STUN server is set").
-    expect($('[data-call="audio"]')!.getAttribute('title')).toContain(`Uses the STUN server ${own} to find a route.`);
+    expect($('[data-call="audio"]')!.getAttribute('title')).toContain(`Uses your own node (${own}) to find a route.`);
     expect($('[data-call="audio"]')!.getAttribute('title')).not.toContain('No STUN server');
     // A call uses it with no setting saved.
     ring('audio');
@@ -3041,7 +3185,7 @@ describe('calls in the shell', () => {
 
   it('Off survives a reload (stored), and the owner\'s own server beats the node default', async () => {
     const own = 'stun:mynode.example.org:3478';
-    stubHost({ node_overview: overviewWith({ stun_port: 3478, stun_url: own }) });
+    stubHost({ node_overview: overviewWith({ stun_source: 'own', stun_port: 3478, stun_url: own }) });
     await openShell();
     $<HTMLButtonElement>('[data-profile]')!.click();
     $<HTMLButtonElement>('[data-open-settings]')!.click();
@@ -3053,14 +3197,14 @@ describe('calls in the shell', () => {
     // A real reload: fresh module state reads the stored choice; the node default does not come back.
     vi.resetModules();
     const fresh = await import('../src/control/prefs');
-    fresh.setNodeStun(own);
+    fresh.setNodeStun(own, 'own');
     expect(fresh.stunOff()).toBe(true);
     expect(fresh.effectiveStun()).toBe('');
     // Control: with nothing stored, a fresh module falls back to the node default (so the read above is real).
     localStorage.removeItem('bitsov.stun');
     vi.resetModules();
     const clean = await import('../src/control/prefs');
-    clean.setNodeStun(own);
+    clean.setNodeStun(own, 'own');
     expect(clean.stunOff()).toBe(false);
     expect(clean.effectiveStun()).toBe(own);
     localStorage.setItem('bitsov.stun', 'off');
@@ -3079,6 +3223,70 @@ describe('calls in the shell', () => {
     ring('audio');
     await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
     expect(FakePc.made[0].config.iceServers).toEqual([{ urls: 'stun:other.example:3478' }]);
+  });
+
+  it.each([undefined, 3478, 5349])('uses the configured STUN server with honest bilingual labels (own port %s)', async (port) => {
+    const url = 'stun:chosen.example.org:5349';
+    stubHost({ node_overview: overviewWith({ stun_source: 'configured', stun_port: port, stun_url: url }) });
+    await openShell();
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    $<HTMLButtonElement>('[data-open-settings]')!.click();
+    $<HTMLButtonElement>('[data-tab="general"]')!.click();
+    const en = 'Server you chose: chosen.example.org:5349. That server sees your IP when you place or take a call.';
+    const da = 'Server, du har valgt: chosen.example.org:5349. Den server ser din IP-adresse, når du foretager eller modtager et opkald.';
+    await vi.waitFor(() => expect(text('[data-stun-note]')).toBe(en));
+    expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('configured');
+    expect($('[data-stun-own]')).toBeNull();
+    expect($('[data-stun-own-hint]')).toBeNull();
+    expect(localStorage.getItem('bitsov.stun')).toBeNull();
+    for (const [lang, label] of [['da', da], ['en', en]] as const) {
+      setLanguagePref(lang);
+      await vi.waitFor(() => expect(text('[data-stun-note]')).toBe(label));
+      expect($('[data-call="audio"]')!.getAttribute('title')).toContain(label);
+      expect(text('[data-call-settings]')).not.toMatch(/No third party|ingen tredjepart|your own node|din egen node/i);
+      $<HTMLButtonElement>('[data-call="audio"]')!.click();
+      expect(text('[data-call-confirm-box]')).toContain(label);
+      $<HTMLButtonElement>('[data-call-confirm-cancel]')!.click();
+    }
+    ring('audio');
+    await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
+    expect(FakePc.made[0].config.iceServers).toEqual([{ urls: url }]);
+  });
+
+  it.each([
+    { source: undefined, url: 'stun:node.example.org:3478' },
+    { source: null, url: 'stun:node.example.org:3478' },
+    { source: undefined, url: undefined },
+    { source: null, url: undefined },
+  ])('ignores node STUN without a source and keeps the warning (%j)', async ({ source, url }) => {
+    // The host drops an unclassified URL; cover that projected shape too.
+    stubHost({ node_overview: overviewWith({ stun_source: source, stun_port: 3478, stun_url: url }) });
+    await openShell();
+    expect($('[data-call="audio"]')!.getAttribute('title')).toContain('No STUN server is set');
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    $<HTMLButtonElement>('[data-open-settings]')!.click();
+    $<HTMLButtonElement>('[data-tab="general"]')!.click();
+    await vi.waitFor(() => expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('none'));
+    expect(text('[data-stun-note]')).toMatch(/No STUN server: calls contact no third party/);
+    expect($('[data-stun-own]')).toBeNull();
+    expect($('[data-stun-own-hint]')).toBeNull();
+    ring('audio');
+    await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
+    expect(FakePc.made[0].config.iceServers).toEqual([]);
+    expect($('[data-call-network-note]')).not.toBeNull();
+  });
+
+  it('labels own STUN in Danish in Settings and the call-cost line', async () => {
+    stubHost({ node_overview: overviewWith({ stun_source: 'own', stun_port: 3478, stun_url: 'stun:node.example.org:3478' }) });
+    await openShell();
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    $<HTMLButtonElement>('[data-open-settings]')!.click();
+    $<HTMLButtonElement>('[data-tab="general"]')!.click();
+    setLanguagePref('da');
+    await vi.waitFor(() => expect(text('[data-stun-note]')).toContain('din egen node'));
+    expect($('[data-call="audio"]')!.getAttribute('title')).toContain('din egen node');
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    expect(text('[data-call-confirm-box]')).toContain('din egen node');
   });
 
   it('an unusable answer from their app is not a connectivity failure: no relay advice', async () => {
@@ -3108,7 +3316,7 @@ describe('calls in the shell', () => {
   });
 
   it('never offers a malformed or relay URL, and explains a responder without a public address', async () => {
-    stubHost({ node_overview: overviewWith({ stun_port: 3478, stun_url: 'turn:mynode.example.org:3478' }) });
+    stubHost({ node_overview: overviewWith({ stun_source: 'own', stun_port: 3478, stun_url: 'turn:mynode.example.org:3478' }) });
     await openShell();
     $<HTMLButtonElement>('[data-profile]')!.click();
     $<HTMLButtonElement>('[data-open-settings]')!.click();

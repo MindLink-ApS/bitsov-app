@@ -10609,6 +10609,7 @@ mod control_read_tests {
                 "lightning_available": true, "lightning_payment_capable": true,
                 "uptime_secs": 60, "version": 2, "lightning_backend": "ldk",
                 "chain_backend": "esplora", "block_height": 860123,
+                "stun_port": 3478, "stun_url": "stun:chosen.example.org:5349", "stun_source": "configured",
                 "lightning_node_pubkey": "02cd"
             }),
             "/peers" => serde_json::json!([{
@@ -10690,6 +10691,10 @@ mod control_read_tests {
         assert_eq!(overview.block_height, Some(860_123));
         assert_eq!(overview.version.as_deref(), Some("api v2"));
         assert!(overview.read_at > 0);
+        let projected = serde_json::to_value(&overview).unwrap();
+        assert_eq!(projected["stun_url"], "stun:chosen.example.org:5349");
+        assert_eq!(projected["stun_source"], "configured");
+        assert_eq!(node.targets(), ["/api/v1/status"], "STUN comes only from owner status, never public health");
 
         let peers: Vec<control::Peer> = get_json(&node.state, "/peers").await.unwrap();
         assert_eq!(peers[0].label.as_deref(), Some("Maya"));
