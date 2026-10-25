@@ -387,9 +387,12 @@ export function ControlCenter(props: Props) {
   // refreshes reuse them; a live call replaces even a cached negative result.
   // The cutoff moves only after a scan finishes. A page cap leaves a resume
   // cursor so the next reconnect continues into pages this pass did not read.
+  // Every reconnect also rechecks messages newer than the last seen tip, and
+  // a negative is not settled while that newer span is still unread.
+  type CallResume = { before: number; newest: number; anchored?: number; gapBefore?: number };
   const callHistory = new Map<string, Promise<boolean>>();
   const callHistoryNewest = new Map<string, number>();
-  const callHistoryResume = new Map<string, { before: number; newest: number }>();
+  const callHistoryResume = new Map<string, CallResume>();
   const knownCallPeers = new Set<string>();
   const [callHistoryRevision, setCallHistoryRevision] = createSignal(0);
   const noteCallHistory = (id: string) => {
@@ -400,8 +403,8 @@ export function ControlCenter(props: Props) {
   };
   const reconcileCallHistory = () => {
     // A fresh websocket does not replay missed messages. Drop cached negatives
-    // and recheck history newer than the last finished scan, or continue a
-    // scan the page cap stopped. Retain every positive result.
+    // and recheck history newer than the last seen tip, then continue a scan
+    // the page cap stopped. Retain every positive result.
     for (const id of callHistory.keys()) if (!knownCallPeers.has(id)) callHistory.delete(id);
     setCallHistoryRevision(value => value + 1);
   };
@@ -412,21 +415,69 @@ export function ControlCenter(props: Props) {
     const pending = callHistoryResume.get(id);
     let newest = pending?.newest ?? cutoff ?? -Infinity;
     let resume: number | undefined;
+    let gapBefore = pending?.gapBefore;
+    let anchored = pending?.anchored ?? pending?.newest;
     let complete = false;
     const read = (async () => {
-      let before: number | undefined = pending?.before;
+      let before: number | undefined;
       let pages = 0;
+      // 'scan' is a first look or a finished cutoff. With a resume cursor,
+      // 'newer' rechecks the tip, 'gap' finishes messages between that tip
+      // and the scanned prefix, and 'older' continues the page-cap cursor.
+      let mode: 'scan' | 'newer' | 'gap' | 'older' = pending ? 'newer' : 'scan';
+      const pageCap = 3;
       while (phoneShell() && live()) {
         const page = await source.messages(id, before);
         pages += 1;
-        if (before === undefined) newest = Math.max(newest, ...page.map(m => m.timestamp));
+        if (before === undefined && page.length) newest = Math.max(newest, ...page.map(m => m.timestamp));
         if (page.some(m => isCallKind(m.kind))) return true;
         const oldest = Math.min(...page.map(m => m.timestamp));
-        // Empty, already scanned, or stuck: this walk has seen every message
-        // down through the previous cutoff. A full page budget is not that.
-        const exhausted = !page.length || !Number.isFinite(oldest) || (cutoff !== undefined && oldest <= cutoff) || (before !== undefined && oldest >= before);
+        const stuck = !page.length || !Number.isFinite(oldest) || (before !== undefined && oldest >= before);
+        if (mode === 'scan') {
+          // Empty, already scanned, or stuck: this walk has seen every message
+          // down through the previous cutoff. A full page budget is not that.
+          const exhausted = stuck || (cutoff !== undefined && Number.isFinite(oldest) && oldest <= cutoff);
+          if (exhausted) { complete = true; return false; }
+          if (pages >= pageCap) { resume = oldest; return false; }
+          before = oldest;
+          continue;
+        }
+        if (!pending) throw new Error(tr('caCallHistoryReadInterrupted'));
+        if (mode === 'newer' || mode === 'gap') {
+          const stop = mode === 'newer' ? pending.newest : (anchored ?? pending.newest);
+          const reached = Number.isFinite(oldest) && oldest <= stop;
+          if (stuck || reached) {
+            const gapLeft = mode === 'newer' && gapBefore !== undefined && !stuck;
+            if (gapLeft && pages < pageCap) {
+              mode = 'gap';
+              before = gapBefore;
+              continue;
+            }
+            if (gapLeft) { resume = pending.before; return false; }
+            // Newer span is covered. Do not settle a negative until the older
+            // cursor is finished too; a spent page budget keeps that cursor.
+            gapBefore = undefined;
+            if (pages >= pageCap) { resume = pending.before; return false; }
+            mode = 'older';
+            before = pending.before;
+            continue;
+          }
+          if (pages >= pageCap) {
+            gapBefore = oldest;
+            anchored = pending.anchored ?? pending.newest;
+            resume = pending.before;
+            return false;
+          }
+          before = oldest;
+          continue;
+        }
+        if (mode !== 'older') {
+          const leftover: never = mode;
+          throw new Error(tr('caCallHistoryReadInterrupted') + leftover);
+        }
+        const exhausted = stuck || (cutoff !== undefined && Number.isFinite(oldest) && oldest <= cutoff);
         if (exhausted) { complete = true; return false; }
-        if (pages >= 3) { resume = oldest; return false; }
+        if (pages >= pageCap) { resume = oldest; return false; }
         before = oldest;
       }
       throw new Error(tr('caCallHistoryReadInterrupted'));
@@ -444,7 +495,14 @@ export function ControlCenter(props: Props) {
         callHistoryNewest.set(id, newest);
         return;
       }
-      if (resume !== undefined) callHistoryResume.set(id, { before: resume, newest });
+      if (resume !== undefined) {
+        const next: CallResume = { before: resume, newest };
+        if (gapBefore !== undefined) {
+          next.gapBefore = gapBefore;
+          next.anchored = anchored ?? pending?.newest;
+        }
+        callHistoryResume.set(id, next);
+      }
     }, () => { if (callHistory.get(id) === read) callHistory.delete(id); });
     return read;
   };
