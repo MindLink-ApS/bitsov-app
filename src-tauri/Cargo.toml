@@ -48,7 +48,7 @@ tauri-plugin-opener = "2"
 
 # GATE G1 (docs/ARCHITECTURE_BOUNDARY.md): NO konsensus-* dependency here — the node
 # is a bundled BINARY (see tauri.conf.json `externalBin`), never a linked crate. A
-# konsensus-* path/git dep in this file is an automatic G1 FAIL (CODEX_APP_AUTHORITY.md §G).
+# konsensus-* path/git dep in this file fails scripts/authority-check.sh.
 
 # SIGTERM is Unix-only; the Windows stop path uses TerminateProcess via kill().
 [target.'cfg(unix)'.dependencies]

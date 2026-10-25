@@ -19,7 +19,7 @@ describe('the connection card', () => {
       'Live updates: Live',
       // The app asking its own host (usually its cached view of the node): never claimed as a node round trip.
       `Last status check: ${new Date(at).toLocaleTimeString()} · 85 ms (this app ↔ its host)`,
-      'Calls · STUN: your node',
+      'Calls · STUN: your own node',
       'Calls · relay (TURN): none yet',
       'Last call: srflx (this device) / host (theirs)',
     ]);

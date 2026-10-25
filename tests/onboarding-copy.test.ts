@@ -3,21 +3,10 @@ import { join } from 'node:path';
 import ts from 'typescript';
 import { expect, it } from 'vitest';
 
-// Exact literals only: consent prompts are intentionally unchanged in this round.
+// Exact literals only: remaining legacy consent prompts are unchanged in this round.
 // File scoping prevents these exceptions from hiding copy elsewhere.
-// CLI commands and the sats unit also stay literal: translating them would change their meaning.
+// The sats unit stays literal.
 const literalAllowlist: Record<string, readonly string[]> = {
-  'src/onboarding/InitializationRepair.tsx': [
-    'I agree — update and start my node',
-    "This node found an existing identity without the NODE_INITIALIZED marker. Older versions, including v0.3.0-rc7, did not write this marker. An interrupted setup can also cause this.",
-    "With your permission, BitSov will ask the node to mark this data directory as initialized, then start it. The repair writes only the marker; it does not replace your identity. Starting the newer node may apply database migrations that cannot be undone by an older version. Keep a backup of your node data before continuing.",
-    "No repair runs unless you agree. After a successful repair, this prompt is no longer needed for this data directory.",
-    "Repair command",
-    "konsensus repair mark-initialized --config &lt;this node’s config&gt; --confirm",
-    "Your node now charges at least 1 sat per page read; the old setting was 0.05 sat.",
-    "With your permission, BitSov will raise this page price to 1 sat, keep a backup of your settings, and start your node.",
-    "Not now",
-  ],
   'src/onboarding/LockedNode.tsx': [
     'enrolled biometrics', 'faces or fingerprints', 'fingerprints', 'biometric',
     "Unlocked. Remember the password on this",
@@ -27,8 +16,6 @@ const literalAllowlist: Record<string, readonly string[]> = {
     "If your device’s approval key also stops working, another approved owner device or the box must unlock the node first. Then set up",
     "approvals again before unlocking from this device.",
     "Not now",
-    "konsensus start --config &lt;path&gt; --owner-control",
-    "--owner-control",
   ],
   'src/onboarding/PairAnotherNode.tsx': [
     "Replace this app’s node?",
@@ -71,9 +58,6 @@ const literalAllowlist: Record<string, readonly string[]> = {
     "This node’s keys live on the remote machine. Anyone with access — whoever can log in to that computer — can spend what you deposit. Only fund a node whose host you trust.",
     "Nøglerne bliver i boksen. BitSov viser aldrig din gendannelsessætning og kopierer den aldrig.",
     "Your keys stay in the node. BitSov never shows you your recovery phrase and never copies it anywhere.",
-  ],
-  'src/onboarding/AddDevice.tsx': [
-    "konsensus claim-code --show",
   ],
 };
 

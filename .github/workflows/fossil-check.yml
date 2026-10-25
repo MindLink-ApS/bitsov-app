@@ -1,0 +1,31 @@
+name: Fossil Check
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  fossil-check:
+    name: Fossil Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test the diff scanner
+        run: python3 scripts/ci/test-fossil-check.py
+      - name: Check added lines and changed paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          # Only fingerprints enter step environments, which Actions logs.
+          FOSSIL_PRIVATE_NAME_HASHES: ${{ vars.FOSSIL_PRIVATE_NAME_HASHES }}
+        run: python3 scripts/ci/fossil-check.py --base "$BASE_SHA" --head "$HEAD_SHA"

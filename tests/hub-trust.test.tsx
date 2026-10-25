@@ -9,7 +9,7 @@ import { LockedNode } from '../src/onboarding/LockedNode';
 
 const COPY = [
   "The hub is your Lightning service provider: it gives you a channel and routes your payments. It is one provider, not the centre, and you can add or switch to another.",
-  "It can't read your messages. They are end-to-end encrypted between your node and the person you write to.",
+  "It can't read your message contents: they are encrypted between your node and the recipient’s node. Both endpoint nodes can read them.",
   "It never holds your keys or your seed, and it can't spend your money.",
   "It does see the payments it routes for you: amount, time and the next hop. It doesn't see what they were for.",
   "It can refuse to route your payments. If it does, your money is still yours, and you can close the channel and move to another provider.",

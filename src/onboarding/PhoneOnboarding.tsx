@@ -6,7 +6,7 @@ import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
 import { usePairingActivity } from '../pairingActivity';
 import type { JoinView } from './AddDevice';
-import { normalizePairingLink, type ConnectionError, type NodeStatus, type PairingView } from './pairing';
+import { normalizePairingLink, onboardingDiagnostic, type ConnectionError, type NodeStatus, type PairingView } from './pairing';
 import { PrimaryAction } from './PrimaryAction';
 import { phoneCopy } from './phoneCopy';
 import './phoneOnboarding.css';
@@ -299,7 +299,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
         <dt>{c().fingerprint}</dt><dd>{preview()?.node_id_fingerprint ?? props.status().node_id ?? '—'}</dd>
         <dt>{c().endpoint}</dt><dd>{preview()?.endpoint ?? '—'}</dd>
         <dt>{c().hosted}</dt><dd>{preview()?.hosted_by ?? props.pairing().hosted_by ?? '—'}</dd>
-      </dl><Show when={error()?.detail}><p>{error()?.detail}</p></Show>
+      </dl><Show when={error()?.detail}><p>{onboardingDiagnostic(error()!.detail, c().helpLine)}</p></Show>
         <button type="button" disabled={busy()} onClick={() => void run(reset)}>{c().forget}</button>
       </details>
       <Show when={['connecting', 'words', 'fingerprint'].includes(screen())}><button type="button" disabled={busy()} onClick={() => void run(reset)}>{c().cancel}</button></Show>

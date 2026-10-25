@@ -10,10 +10,8 @@ ad-hoc signature, no Developer ID identity, and no notarization. It is not publi
 Gatekeeper warning. It is not a public download. The protocol pin stays
 `v0.3.0-rc19.2`. Windows packaging is out of scope.
 
-This follows [MAC_PACKAGE_PLAN.md](MAC_PACKAGE_PLAN.md) §1, §2, §4 and §5.
-It deviates from §3; see [Deviation](#deviation-release-excludes-the-assistant-page).
-The earlier rc6/rc7 spike evidence is in
-[MAC_PACKAGE_SPIKE.md](MAC_PACKAGE_SPIKE.md).
+See [the assistant-page packaging policy](#deviation-release-excludes-the-assistant-page)
+for the release bundle's frontend boundary.
 
 ## Keychain and Touch ID
 
