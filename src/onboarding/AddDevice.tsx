@@ -140,6 +140,7 @@ export function JoinDevice(props:{api:(input:JoinInput)=>Promise<JoinView>; mobi
       <Match when={view()?.state === 'idle'}>
         <Show when={(view() as {second_device?:boolean}).second_device} fallback={<>
         {/* New device: the ticket was scanned or pasted to get here; next the claim code. */}
+        {/* TODO(#346 A2): show the claim code in-app on an authenticated owner device once the node API supports it. */}
         <PairSteps secondDevice={secondDevice()} current={1} />
         <p>{t('obClaimEntry')}</p>
         <form onSubmit={event => { event.preventDefault(); const value = claim.value; claim.value = ''; void run({action:'start',claim_code:value}); }}>

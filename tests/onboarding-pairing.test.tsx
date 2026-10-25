@@ -787,10 +787,11 @@ describe('pairing panel', () => {
     expect(badge().classList.contains('hosted-by')).toBe(true);
   });
 
-  it('shows the host refusal for an expired ticket and saves nothing', async () => {
+  it('asks for a fresh link without the expired-ticket command and saves nothing', async () => {
     const message = "This pairing link expired 2 h ago. Run konsensus pair-ticket on your node for a new one, and check that this Mac's clock is right.";
     const el = await importWith(() => Promise.reject(message));
-    await vi.waitFor(() => expect(el.querySelector('[data-soft-summary]')?.textContent).toBe(message));
+    await vi.waitFor(() => expect(el.querySelector('[data-soft-summary]')?.textContent).toContain('new pairing link'));
+    expect(el.textContent).not.toContain('konsensus ');
     expect(el.querySelector('[data-import-result]')).toBeNull();
     expect(badge().textContent).toBe('Pairing link');
   });

@@ -6,7 +6,7 @@ import { LocalNodeSwitch } from './LocalNodeSwitch';
 import { DeviceApprovals } from './DeviceApprovals';
 import { SoftError } from '../control/SoftError';
 import { createEffect, createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
-import { connectionErrorDetail, normalizePairingLink, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
+import { connectionErrorDetail, normalizePairingLink, onboardingDiagnostic, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
 import { usePairingActivity } from '../pairingActivity';
@@ -495,7 +495,7 @@ export function Onboarding(props: {
         <Match when={props.pairing().state === 'failed'}>
           <div class="panel pairing error" data-pairing="failed">
             <h2>{t('obPairingFailedTitle')}</h2>
-            <SoftError message={props.pairing().reason ?? t('obPairingFailed')} summary={t('obCouldNotPair')} detailNote={t('obNoFallback')} onReconnect={props.onRetry} />
+            <SoftError message={onboardingDiagnostic(props.pairing().reason ?? t('obPairingFailed'), t('obPairingLinkHelp'))} summary={t('obCouldNotPair')} detailNote={t('obNoFallback')} onReconnect={props.onRetry} />
           </div>
         </Match>
 
@@ -595,7 +595,7 @@ export function Onboarding(props: {
           )}
         </Show>
         <Show when={importError()}>
-          <SoftError message={importError()!} />
+          <SoftError message={onboardingDiagnostic(importError()!, t('obPairingLinkHelp'))} />
         </Show>
       </form>
       </Show>

@@ -6525,7 +6525,6 @@ function Composer(props: {
             {tr('uiThisMessageSendsAutomaticallyOnceYourNodeS')}{' '}
             <button type="button" class="link" data-contact-cancel-visible onClick={() => cancelOwner()}>{tr('uiCancel')}</button> {tr('uiStopsIt')}
           </p>}><div class="approval" data-contact-approval="pending" data-contact-request={JSON.stringify(pending().approval.request)}>
-          {/* TODO(#346 A2): let the owner Mac approve its own first contact in-app. */}
           <p><strong>{tr('uiApproveThisContactAtYourNode')}</strong> {tr('uiRunThisCommandOnceInTheOwnerS')}</p>
           <p>{tr('uiTheCommandApprovesThisContactSBudgetAnd')}</p>
           <Show when={pending().approval.approval_window_secs !== undefined}>
