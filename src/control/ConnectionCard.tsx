@@ -32,7 +32,7 @@ export function nextLastCall(prev: TrackedCall | null, v: CallView): TrackedCall
 }
 
 const STUN_TEXT: Record<StunSource, string> = {
-  get node() { return tr('caYourNode'); },
+  get node() { return tr('callsStunOwnNode'); },
   get custom() { return tr('caAServerYouChose'); },
   get off() { return tr('caOffDirectConnectionsOnly'); },
   get none() { return tr('caNoneYourNodeDoesNotOfferOne'); },

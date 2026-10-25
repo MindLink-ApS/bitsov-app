@@ -81,8 +81,8 @@ import {
   setStunOff,
   stunOff,
   effectiveStun,
+  effectiveStunSource,
   setNodeStun,
-  nodeStun,
   setThemePref,
   stunPref,
   themePref,
@@ -363,7 +363,8 @@ export function ControlCenter(props: Props) {
   // The node's own STUN responder, if `/status` reports one (offered in Settings).
   const ownStun = createMemo<OwnStun | null>(() => {
     const o = overview();
-    return o?.stun_port ? { port: o.stun_port, url: o.stun_url ?? null } : null;
+    return o?.stun_port && o.stun_source === 'own'
+      ? { port: o.stun_port, url: o.stun_url ?? null } : null;
   }, null, { equals: (a, b) => a?.port === b?.port && a?.url === b?.url });
   let overviewRevision = 0;
   const live = () => props.active && (props.live ?? (props.ready && !props.retryAfterSecs));
@@ -375,10 +376,11 @@ export function ControlCenter(props: Props) {
     setReadinessRefused(true);
     setOverview((old) => old ? { ...old, money_ready: false, readiness: null } : old);
   });
-  // Calls use your own node's STUN by default when it reports a valid public stun: URL (never a third party).
+  // Only owner-authenticated /status supplies the node's STUN URL and source.
   createEffect(() => {
-    const url = ownStun()?.url ?? '';
-    setNodeStun(stunServer(url).length ? url : null);
+    const o = overview();
+    const url = o?.stun_url ?? '';
+    setNodeStun(stunServer(url).length ? url : null, o?.stun_source ?? null);
   });
   onCleanup(() => setNodeStun(null));
   const [peers, setPeers] = createSignal<Peer[]>([]);
@@ -1427,7 +1429,7 @@ export function ControlCenter(props: Props) {
       }
     },
     onStreams: (local, remote) => setCallStreams({ local, remote }),
-    // No STUN unless the owner set one: host candidates only.
+    // STUN comes only from the owner's preference or their node's status.
     iceServers: () => stunServer(effectiveStun()),
     busy: () => meetingOn(),
     // H2: the host ends our admission (one paid hangup, or none if the offer was never paid).
@@ -1453,7 +1455,7 @@ export function ControlCenter(props: Props) {
     const v = callView(); setLastCall((prev) => nextLastCall(prev, v));
     if (v.callId && v.peer) setRecentCallPeers(ids => ids.includes(v.peer!.toLowerCase()) ? ids : [...ids, v.peer!.toLowerCase()]);
   });
-  const stunSource = (): StunSource => (stunOff() ? 'off' : stunPref() ? 'custom' : nodeStun() ? 'node' : overview() ? 'none' : 'checking');
+  const stunSource = (): StunSource => (stunOff() ? 'off' : effectiveStunSource() === 'own' ? 'node' : effectiveStunSource() === 'configured' ? 'custom' : overview() ? 'none' : 'checking');
   // Closing the window ends the call here without paying; only Hang up pays.
   onCleanup(() => calls.endLocal());
   if (appPlatform() === 'ios') {
@@ -2503,10 +2505,10 @@ function readBase64(file: File): Promise<string> {
 type OwnStun = { port: number; url: string | null };
 
 /**
- * The owner's STUN server for calls. Off by default: with none, calls use
+ * The owner's STUN server for calls. With none, calls use
  * host candidates only and connect on the same network. A STUN server learns
  * your public address each time you place or accept a call. When the node
- * runs its own responder, it is offered here, and used only after Save.
+ * reports its own responder or a configured server, calls use that by default.
  */
 function CallSettings(props: { own: OwnStun | null }) {
   const [draft, setDraft] = createSignal(stunPref());
@@ -2522,19 +2524,19 @@ function CallSettings(props: { own: OwnStun | null }) {
       return;
     }
     setError(null);
-    // Saving an empty field returns to the default (your own node, when it offers STUN).
+    // Saving an empty field returns to the node's reported default.
     setStunPref(v);
   };
-  /** What calls actually use: the owner's choice, else their own node, else none. */
+  /** What calls actually use, with the status source kept for honest labels. */
   const using = () => effectiveStun();
   return (
     <section data-call-settings>
       <h3>{tr('extraCalls')}</h3>
-      <p class="hint" data-stun-note data-stun-using={using() ? (using() === ownUrl() ? 'own' : 'other') : stunOff() ? 'off' : 'none'}>
+      <p class="hint" data-stun-note data-stun-using={using() ? effectiveStunSource() === 'own' ? 'own' : stunPref() ? 'other' : 'configured' : stunOff() ? 'off' : 'none'}>
         {using()
-          ? using() === ownUrl()
+          ? effectiveStunSource() === 'own'
             ? tr('extraCallsAskYourOwnNodeForYourPublic', using(), stunPref() ? '' : tr('extraThisIsTheDefault'))
-            : tr('extraCallsAskForYourPublicAddressSoThat', using())
+            : chosenStunLabel()
           : stunOff()
             ? tr('extraSTUNIsTurnedOffCallsContactNoThird')
             : tr('extraNoSTUNServerCallsContactNoThirdParty')}
@@ -3385,6 +3387,12 @@ function CallNetworkNote(props: { onOpenSettings?: () => void }) {
   </Show>;
 }
 
+/** The chosen server's address, with the same IP disclosure wherever calls show it. */
+const chosenStunLabel = () => tr('extraCallsAskForYourPublicAddressSoThat', effectiveStun().replace(/^stun:/i, ''));
+const callStunLabel = () => effectiveStun()
+  ? effectiveStunSource() === 'own' ? tr('uiUsesTheSTUNServerToFindARoute', effectiveStun()) : chosenStunLabel()
+  : stunOff() ? tr('uiSTUNIsTurnedOffSoCallsConnectOnly') : tr('uiNoSTUNServerIsSetSoCallsConnect');
+
 /**
  * Call and video buttons. The price is read (never paid) first and shown on
  * the button: offer + hangup, with room for one fresh admission on recovery.
@@ -3408,7 +3416,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   const off = () => props.blocked || cost() === null || props.actions.callActive();
   const title = () =>
     why() ?? (quote() && cost() === null ? tr('uiSNodeDoesNotTakeCallsYet', possessive(props.name)) : cost() !== null
-      ? tr('uiUpToToRingTheirCallPricePlus', fmtAmount(cost()!), fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat), feeCeiling(quote()!.offer_max_routing_fee_msat), fmtAmount(signalCost(quote()!)), fmtAmount(callCost(quote()!)!), effectiveStun() ? tr('uiUsesTheSTUNServerToFindARoute', effectiveStun()) : stunOff() ? tr('uiSTUNIsTurnedOffSoCallsConnectOnly') : tr('uiNoSTUNServerIsSetSoCallsConnect'))
+      ? tr('uiUpToToRingTheirCallPricePlus', fmtAmount(cost()!), fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat), feeCeiling(quote()!.offer_max_routing_fee_msat), fmtAmount(signalCost(quote()!)), fmtAmount(callCost(quote()!)!), callStunLabel())
       : tr('uiReadingTheirCallPrice'));
   const place = (media: CallMedia) => { const q = quote(); if (q && !off()) props.actions.placeCall(props.peer, media, q); };
   // A call pays and rings someone, so one tap only asks: the call/video button
@@ -3467,6 +3475,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
               <strong>{callWord(media())} {props.name}?</strong>
               <Show when={cost() !== null}>{' '}<span class="hint">{tr('uiUpTo105')} {fmtAmount(cost()!)}{tr('uiNothingIsPaidUntilYouPressRing')}</span></Show>
             </p>
+            <p class="hint" data-call-stun-source>{callStunLabel()}</p>
             <div class="call-confirm-actions">
               <button type="button" class="soft" data-call-confirm-cancel onClick={() => disarm()}>{tr('uiCancel')}</button>
               <button ref={ringBtn} type="button" class="primary soft money" data-call-confirm={media()} disabled={off()} onClick={() => { const m = media(); setArmed(null); place(m); }}>{tr('uiRing')}</button>

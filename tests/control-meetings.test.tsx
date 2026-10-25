@@ -833,7 +833,7 @@ describe('meetings in the shell', () => {
     const own = 'stun:mynode.example.org:3478';
     stubHost({ node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 2, e2ee_sessions: 2, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
-      capabilities: ['call_meeting_v1'], stun_port: 3478, stun_url: own }) });
+      capabilities: ['call_meeting_v1'], stun_source: 'own', stun_port: 3478, stun_url: own }) });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="meeting"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call="meeting"]')!.click();

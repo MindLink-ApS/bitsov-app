@@ -351,7 +351,7 @@ describe('control center shell', () => {
       node_overview: () => ({
         node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 2, pending_deliveries: 0, lightning_available: true,
         block_height: 860123, uptime_secs: 60, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
-        stun_port: 3478, stun_url: 'stun:mynode.example.org:3478', onion: 'abcdefghijklmnop.onion',
+        stun_source: 'own', stun_port: 3478, stun_url: 'stun:mynode.example.org:3478', onion: 'abcdefghijklmnop.onion',
       }),
     });
     let copied = '';
@@ -367,7 +367,7 @@ describe('control center shell', () => {
     click('[data-tab="node"]');
     await waitFor(() => expect(mount.querySelector('[data-connection-card]')).not.toBeNull());
     await waitFor(() => expect(mount.querySelector('[data-connection-line="2"]')!.textContent).toMatch(/^Last status check: .+ · \d+ ms \(this app ↔ its host\)$/));
-    expect(mount.querySelector('[data-connection-line="3"]')!.textContent).toBe('Calls · STUN: your node');
+    expect(mount.querySelector('[data-connection-line="3"]')!.textContent).toBe('Calls · STUN: your own node');
     click('[data-connection-copy]');
     await waitFor(() => expect(copied).toContain('BitSov connection'));
     for (const secret of [OWN, A, B, TICKET, 'SECRETTICKET', TOKEN, '203.0.113.7', '127.0.0.1', '9735', '9736', 'mynode.example.org', '3478', 'abcdefghijklmnop', '.onion']) {
