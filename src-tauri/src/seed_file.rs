@@ -90,6 +90,56 @@ fn sync_encrypted(path: &Path) -> Result<(), String> {
     std::fs::File::open(path.parent().ok_or(FAILURE)?).and_then(|dir| dir.sync_all()).map_err(|_| FAILURE.into())
 }
 
+fn matches_verified(plain: &[u8], verified: &[u8]) -> bool {
+    if plain.first() == Some(&0) {
+        // A crash during the overwrite can leave zeroes followed by a suffix of
+        // the old phrase. Only the authenticated ciphertext can retire it.
+        let suffix = plain.iter().position(|b| *b != 0).unwrap_or(plain.len());
+        let rest = &plain[suffix..];
+        // An overwrite can stop inside surrounding UTF-8 whitespace. Discard
+        // only the remaining continuation bytes of that one code point.
+        let partial = rest.iter().take_while(|b| **b & 0xc0 == 0x80).count();
+        return plain.len() >= verified.len() && partial <= 3 && std::str::from_utf8(&rest[partial..])
+            .is_ok_and(|rest| verified.ends_with(rest.trim().as_bytes()));
+    }
+    std::str::from_utf8(plain).is_ok_and(|words| words.trim().as_bytes() == verified)
+}
+
+fn retire_plaintext(path: &Path, mut plain: Zeroizing<Vec<u8>>) -> Result<(), String> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use zeroize::Zeroize;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path).map_err(|_| FAILURE)?;
+    let opened = file.metadata().map_err(|_| FAILURE)?;
+    if !opened.is_file() || opened.len() != plain.len() as u64 { return Err(FAILURE.into()); }
+    #[cfg(unix)] {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if opened.nlink() != 1 || opened.permissions().mode() & 0o077 != 0 { return Err(FAILURE.into()); }
+    }
+    let mut current = Zeroizing::new(Vec::new());
+    (&mut file).take(8193).read_to_end(&mut current).map_err(|_| FAILURE)?;
+    if current.as_slice() != plain.as_slice() { return Err(FAILURE.into()); }
+    drop(current);
+    plain.as_mut_slice().zeroize();
+    file.seek(SeekFrom::Start(0)).and_then(|_| file.write_all(&plain))
+        .and_then(|()| file.sync_all()).map_err(|_| FAILURE)?;
+    // Never unlink a replacement path after overwriting the validated inode.
+    #[cfg(unix)] {
+        use std::os::unix::fs::MetadataExt;
+        let current = std::fs::symlink_metadata(path).map_err(|_| FAILURE)?;
+        if !current.is_file() || current.ino() != opened.ino() || current.dev() != opened.dev()
+            || current.nlink() != 1 { return Err(FAILURE.into()); }
+    }
+    drop(file);
+    std::fs::remove_file(path).map_err(|_| FAILURE)?;
+    std::fs::File::open(path.parent().ok_or(FAILURE)?).and_then(|dir| dir.sync_all()).map_err(|_| FAILURE.into())
+}
+
 /// Called before the child starts, after Keychain unlock. A crash after removing
 /// plaintext but before saving config is recovered from the verified .enc sibling.
 pub fn protect(config: &Path, password: &[u8]) -> Result<(), String> {
@@ -101,10 +151,12 @@ pub fn protect(config: &Path, password: &[u8]) -> Result<(), String> {
         if let Some(bytes) = private_bytes(&path)? {
             let verified = decrypt(&bytes, password)?;
             if let Some(legacy) = legacy {
-                if std::str::from_utf8(&legacy).map_err(|_| FAILURE)?.trim().as_bytes() != verified.as_slice() { return Err(FAILURE.into()); }
+                let words = std::str::from_utf8(&verified).map_err(|_| FAILURE)?;
+                bip39::Mnemonic::parse_in_normalized(bip39::Language::English, words).map_err(|_| FAILURE)?;
+                if !matches_verified(&legacy, &verified) { return Err(FAILURE.into()); }
                 sync_encrypted(&path)?;
-                std::fs::remove_file(path.with_extension("txt")).map_err(|_| FAILURE)?;
-                std::fs::File::open(path.parent().ok_or(FAILURE)?).and_then(|dir| dir.sync_all()).map_err(|_| FAILURE)?;
+                drop(verified);
+                retire_plaintext(&path.with_extension("txt"), legacy)?;
             }
         } else if legacy.is_some() { return Err(FAILURE.into()); }
         return Ok(());
@@ -121,16 +173,19 @@ pub fn protect(config: &Path, password: &[u8]) -> Result<(), String> {
         return Err("The local recovery phrase is missing; no new identity was created.".into());
     }
     if let Some(phrase) = &phrase {
-        let words = std::str::from_utf8(phrase).map_err(|_| FAILURE)?.trim();
-        bip39::Mnemonic::parse_in_normalized(bip39::Language::English, words).map_err(|_| FAILURE)?;
-        if existing.is_none() {
-            use std::io::Write;
-            let bytes = encrypt(words.as_bytes(), password)?;
-            let parent = encrypted.parent().ok_or(FAILURE)?;
-            let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|_| FAILURE)?;
-            tmp.write_all(&bytes).and_then(|()| tmp.as_file().sync_all()).map_err(|_| FAILURE)?;
-            tmp.persist_noclobber(&encrypted).map_err(|_| FAILURE)?;
-            std::fs::File::open(parent).and_then(|dir| dir.sync_all()).map_err(|_| FAILURE)?;
+        // A partially wiped file is recoverable only with existing ciphertext.
+        if phrase.first() != Some(&0) || existing.is_none() {
+            let words = std::str::from_utf8(phrase).map_err(|_| FAILURE)?.trim();
+            bip39::Mnemonic::parse_in_normalized(bip39::Language::English, words).map_err(|_| FAILURE)?;
+            if existing.is_none() {
+                use std::io::Write;
+                let bytes = encrypt(words.as_bytes(), password)?;
+                let parent = encrypted.parent().ok_or(FAILURE)?;
+                let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|_| FAILURE)?;
+                tmp.write_all(&bytes).and_then(|()| tmp.as_file().sync_all()).map_err(|_| FAILURE)?;
+                tmp.persist_noclobber(&encrypted).map_err(|_| FAILURE)?;
+                std::fs::File::open(parent).and_then(|dir| dir.sync_all()).map_err(|_| FAILURE)?;
+            }
         }
     }
     let bytes = private_bytes(&encrypted)?.ok_or(FAILURE)?;
@@ -139,9 +194,9 @@ pub fn protect(config: &Path, password: &[u8]) -> Result<(), String> {
     bip39::Mnemonic::parse_in_normalized(bip39::Language::English, verified_words).map_err(|_| FAILURE)?;
     sync_encrypted(&encrypted)?;
     if let Some(phrase) = phrase {
-        if std::str::from_utf8(&phrase).map_err(|_| FAILURE)?.trim().as_bytes() != verified.as_slice() { return Err(FAILURE.into()); }
-        std::fs::remove_file(&path).map_err(|_| FAILURE)?;
-        std::fs::File::open(path.parent().ok_or(FAILURE)?).and_then(|dir| dir.sync_all()).map_err(|_| FAILURE)?;
+        if !matches_verified(&phrase, &verified) { return Err(FAILURE.into()); }
+        drop(verified);
+        retire_plaintext(&path, phrase)?;
     }
     let mut value = config_value(config)?;
     value["identity"]["mnemonic_file"] = encrypted.to_str().ok_or(FAILURE)?.into();
@@ -196,8 +251,13 @@ mod tests {
         let config = dir.path().join("konsensus.toml");
         device::write_private(&seed, PHRASE.as_bytes()).unwrap();
         std::fs::write(&config, "[identity]\nmnemonic_file = 'mnemonic.txt'\n").unwrap();
+        let mut original = std::fs::File::open(&seed).unwrap();
         protect(&config, b"a sufficiently long password").unwrap();
         assert!(!seed.exists());
+        use std::io::Read;
+        let mut retired = Vec::new();
+        original.read_to_end(&mut retired).unwrap();
+        assert_eq!(retired, vec![0; PHRASE.len()]);
         let encrypted = std::fs::read(seed.with_extension("enc")).unwrap();
         assert!(!encrypted.windows(PHRASE.len()).any(|v| v == PHRASE.as_bytes()));
         assert_eq!(encrypted[0], 1);
@@ -259,10 +319,50 @@ mod tests {
         device::write_private(&seed, PHRASE.as_bytes()).unwrap();
         assert!(protect(&config, b"wrong password").is_err());
         assert!(seed.exists());
+        let mut original = std::fs::File::open(&seed).unwrap();
         protect(&config, b"a sufficiently long password").unwrap();
         assert!(!seed.exists());
+        use std::io::Read;
+        let mut retired = Vec::new();
+        original.read_to_end(&mut retired).unwrap();
+        assert_eq!(retired, vec![0; PHRASE.len()]);
         device::write_private(&seed, b"another identity").unwrap();
         assert!(protect(&config, b"a sufficiently long password").is_err());
         assert!(seed.exists());
+    }
+
+    #[test]
+    fn interrupted_plaintext_wipe_recovers_from_verified_ciphertext() {
+        for (configured, wiped, leading) in [("mnemonic.txt", 1, ""), ("mnemonic.txt", PHRASE.len(), ""),
+            ("mnemonic.enc", PHRASE.len() / 2, ""), ("mnemonic.enc", PHRASE.len() + 1, ""),
+            ("mnemonic.txt", 1, "\n\n"), ("mnemonic.enc", 1, "\n\n")] {
+            let dir = tempfile::tempdir().unwrap();
+            let seed = dir.path().join("mnemonic.txt");
+            let config = dir.path().join("konsensus.toml");
+            device::write_private(&seed.with_extension("enc"), &encrypt(PHRASE.as_bytes(), b"password").unwrap()).unwrap();
+            std::fs::write(&config, format!("[identity]\nmnemonic_file='{configured}'\n")).unwrap();
+            // The process stopped during overwrite, or after fsync before unlink.
+            let mut interrupted = format!("{leading}{PHRASE}\n").into_bytes();
+            interrupted[..wiped].fill(0);
+            device::write_private(&seed, &interrupted).unwrap();
+            assert!(protect(&config, b"wrong password").is_err());
+            assert!(seed.exists());
+            protect(&config, b"password").unwrap();
+            assert!(!seed.exists());
+            assert!(mnemonic_path(&config).unwrap().extension().is_some_and(|ext| ext == "enc"));
+        }
+    }
+
+    #[test]
+    fn every_interrupted_prefix_of_whitespace_wrapped_phrases_is_recoverable() {
+        for original in [format!("\n\n{PHRASE}\n"), format!("\u{2003}{PHRASE}\u{2003}")] {
+            assert!(matches_verified(original.as_bytes(), PHRASE.as_bytes()));
+            for wiped in 1..=original.len() {
+                let mut interrupted = original.as_bytes().to_vec();
+                interrupted[..wiped].fill(0);
+                assert!(matches_verified(&interrupted, PHRASE.as_bytes()), "prefix {wiped}");
+            }
+        }
+        assert!(!matches_verified(b"\0different identity", PHRASE.as_bytes()));
     }
 }

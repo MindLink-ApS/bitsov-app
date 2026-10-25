@@ -8,8 +8,9 @@ variables.
 
 On the next local unlock, an existing plaintext phrase is encrypted in the node's
 versioned file format. The app reads back and decrypts the durable ciphertext
-before removing the plaintext file. An interrupted migration resumes from the
-encrypted sibling. A missing password, an invalid file, or a conflicting identity
+before clearing plaintext memory and zero-filling, syncing, and removing the
+original file. An interrupted migration or overwrite resumes from the encrypted
+sibling. A missing password, an invalid file, or a conflicting identity
 stops startup without replacing the seed.
 
 The API, mesh, Lightning, and any enabled STUN listener bind to loopback by
@@ -18,11 +19,22 @@ configure `[remote_access].listen_addr` at the node to retain LAN listeners; rem
 clients continue to use the authenticated Noise transport, while the API remains
 on loopback.
 
+Hostname-form listeners, including `localhost`, retain their configured ports
+and are mapped to IPv4 loopback without DNS resolution. Numeric IPv6 listeners
+use IPv6 loopback. Explicit remote-access listeners retain the node's parsing.
+
 Beta builds refuse mainnet before starting a local node or granting a remote
 session. Retained mainnet installations are refused, never converted to signet.
 A remote peer must report its test network through authenticated `/status`.
-Protocols that cannot do this before bootstrap or provisional enrollment are
-refused too. Developers can deliberately compile with the Cargo feature
+Home-box setup queries this endpoint over the same pinned Noise connection
+before creating an identity, allowing boxes that declare signet or dev regtest.
+Mainnet or an absent, unknown, or unavailable network is refused. Node rc19.2
+declares its network only in live status: its empty-box bootstrap router has no
+status route or network declaration. Remote first-run setup therefore requires
+a node update exposing its configured network during bootstrap; rc19.2 empty
+boxes remain refused in default beta builds rather than assuming a test network.
+Provisional enrollment without a network declaration is also refused.
+Developers can deliberately compile with the Cargo feature
 `developer-mainnet` to lift the network restriction. Runtime environment variables
 and saved settings cannot lift it; the feature is absent from the default build.
 

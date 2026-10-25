@@ -12,6 +12,14 @@ it.each([
   setLanguagePref('en');
 });
 
+it.each([
+  ['en', 'The node did not confirm its test network; setup is blocked.'],
+  ['da', 'Noden bekræftede ikke sit testnetværk; opsætningen er blokeret.'],
+] as const)('explains an unknown or absent network in %s', (language, reason) => {
+  setLanguagePref(language);
+  expect(softenError('beta_network_unknown')).toEqual({ summary: reason, detail: null, money: true });
+});
+
 describe('softenError', () => {
   it('maps introduction_unavailable to a plain public-address sentence', () => {
     const soft = softenError(

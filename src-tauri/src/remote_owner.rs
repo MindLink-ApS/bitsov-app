@@ -232,19 +232,8 @@ async fn run_pending(state: &NodeState, setup: &mut Setup, input: Input) -> Resu
             password,
             claim_code,
         } => {
-            // This protocol does not declare the box's network before identity
-            // creation. A beta cannot create an identity on an unknown network.
-            crate::beta::network(None)?;
             if setup.attempt.is_some() {
                 return Err("A setup is already pending. Compare or cancel it first.".into());
-            }
-            if password.is_empty() || password.len() > 4096 {
-                return Err("Choose a password of 1–4096 bytes for this box.".into());
-            }
-            let claim = Zeroizing::new(sas::claim_commitment(&claim_code).map_err(str::to_owned)?);
-            drop(claim_code);
-            if !device_available(state) {
-                return Err("Enable Touch ID on this Mac before setting up the box.".into());
             }
             let descriptor = state
                 .remote_descriptor
@@ -264,6 +253,25 @@ async fn run_pending(state: &NodeState, setup: &mut Setup, input: Input) -> Resu
                 .map_err(|_| {
                     "The box restarted or setup is closed. Open a new link from the box page."
                 })?;
+            // Ask the pinned box before creating a device key, saving a password,
+            // or requesting an identity. Keep this check on the ceremony's Noise
+            // connection so an unrelated status endpoint cannot authorize it.
+            if !cfg!(feature = "developer-mainnet") {
+                let (status, bytes) = connection.request("GET", "/api/v1/status", b"", &token).await
+                    .map_err(|_| crate::beta::NETWORK_UNKNOWN.to_string())?;
+                if !(200..300).contains(&status) { return Err(crate::beta::NETWORK_UNKNOWN.into()); }
+                let status: serde_json::Value = serde_json::from_slice(&bytes)
+                    .map_err(|_| crate::beta::NETWORK_UNKNOWN.to_string())?;
+                crate::beta::network(status.get("network").and_then(|v| v.as_str()))?;
+            }
+            if password.is_empty() || password.len() > 4096 {
+                return Err("Choose a password of 1–4096 bytes for this box.".into());
+            }
+            let claim = Zeroizing::new(sas::claim_commitment(&claim_code).map_err(str::to_owned)?);
+            drop(claim_code);
+            if !device_available(state) {
+                return Err("Enable Touch ID on this Mac before setting up the box.".into());
+            }
             let (blob, record) = match local_key(state, &ctx.store).map_err(|e| e.message)? {
                 Some((_, record)) if record.registered => {
                     return Err(
@@ -909,6 +917,134 @@ pub fn has_pending_recovery(store: &Path) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Exercise Create against a paired empty box, including its pinned Noise
+    // transport. An empty password stops after the network gate, before Touch ID.
+    async fn create_on_box(status: u16, body: &str) -> Result<View, String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        async fn read(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+            let len = stream.read_u32().await.unwrap() as usize;
+            assert!(len < 65536);
+            let mut bytes = vec![0; len];
+            stream.read_exact(&mut bytes).await.unwrap();
+            bytes
+        }
+        async fn write(stream: &mut tokio::net::TcpStream, bytes: &[u8]) {
+            stream.write_u32(bytes.len() as u32).await.unwrap();
+            stream.write_all(bytes).await.unwrap();
+        }
+        async fn receive(stream: &mut tokio::net::TcpStream, noise: &mut snow::TransportState) -> Vec<u8> {
+            let frame = read(stream).await;
+            assert_eq!(u16::from_be_bytes([frame[0], frame[1]]) as usize, frame.len() - 2);
+            let mut bytes = vec![0; 65536];
+            let len = noise.read_message(&frame[2..], &mut bytes).unwrap();
+            bytes.truncate(len);
+            bytes
+        }
+        async fn send(stream: &mut tokio::net::TcpStream, noise: &mut snow::TransportState, bytes: &[u8]) {
+            let mut frame = vec![0; bytes.len() + 18];
+            let len = noise.write_message(bytes, &mut frame[2..]).unwrap();
+            frame[..2].copy_from_slice(&(len as u16).to_be_bytes());
+            write(stream, &frame[..len + 2]).await;
+        }
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let secret = [9; 32];
+        let public = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret));
+        let payload = serde_json::json!({"v":1,"endpoint":endpoint,
+            "box_transport_pubkey":hex::encode(public.as_bytes()), "node_id":"",
+            "transport_pubkey":"", "transport_signature":""});
+        let state = NodeState::for_api("http://localhost:1/api/v1");
+        state.remote_mode.store(true, Ordering::SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(remote_access::REMOTE_CONFIG_DIR)).unwrap();
+        device::write_private(&dir.path().join(remote_access::REMOTE_CONFIG_DIR).join(remote_access::REMOTE_CONFIG_FILE),
+            &serde_json::to_vec(&payload).unwrap()).unwrap();
+        *state.remote_descriptor.lock().unwrap() = remote_access::load_persisted(dir.path()).unwrap();
+        let store = dir.path().join("pairing");
+        *state.pairing.lock().unwrap() = Some(Arc::new(PairingCtx {
+            client: PairingClient::new(state.http.clone(), state.api_base.clone()),
+            key: Arc::new(ClientKey::load_or_create(&store).unwrap()),
+            store: store.clone(), data_dir: dir.path().to_path_buf(),
+        }));
+        *state.token.lock().unwrap() = Some("test-token".into());
+        let body = body.to_owned();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut noise = snow::Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse().unwrap())
+                .local_private_key(&secret).build_responder().unwrap();
+            let mut buffer = vec![0; 65536];
+            noise.read_message(&read(&mut stream).await, &mut buffer).unwrap();
+            let len = noise.write_message(&[], &mut buffer).unwrap();
+            write(&mut stream, &buffer[..len]).await;
+            noise.read_message(&read(&mut stream).await, &mut buffer).unwrap();
+            let mut noise = noise.into_transport_mode().unwrap();
+            receive(&mut stream, &mut noise).await;
+            let auth = br#"{"status":"ok","v":1,"client_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","scopes":["identity"]}"#;
+            send(&mut stream, &mut noise, auth).await;
+            if cfg!(feature = "developer-mainnet") {
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+                return;
+            }
+            let request = receive(&mut stream, &mut noise).await;
+            let request = std::str::from_utf8(&request).unwrap();
+            assert!(request.starts_with("GET /api/v1/status HTTP/1.1\r\n"));
+            assert!(request.contains("Authorization: Bearer test-token\r\n"));
+            let response = format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            send(&mut stream, &mut noise, response.as_bytes()).await;
+            // Refused networks must never reach create-pending.
+            let mut byte = [0];
+            assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+        });
+        // Test the action dispatcher on every desktop platform; the outer run
+        // entry point additionally enforces the production Mac-only ceremony.
+        let result = run_pending(&state, &mut Setup::default(), Input::Create {
+            password: Zeroizing::new(String::new()), claim_code: Zeroizing::new("physical".into()),
+        }).await;
+        tokio::time::timeout(Duration::from_secs(2), server).await.unwrap().unwrap();
+        assert!(!store.join("device.json").exists());
+        result
+    }
+
+    #[tokio::test]
+    async fn create_allows_a_signet_box_to_continue_setup() {
+        let error = create_on_box(200, r#"{"network":"signet"}"#).await.err().unwrap();
+        assert_eq!(error, "Choose a password of 1–4096 bytes for this box.");
+    }
+
+    #[tokio::test]
+    async fn create_refuses_a_mainnet_box_before_identity_creation() {
+        if cfg!(feature = "developer-mainnet") { return; }
+        for network in ["bitcoin", "mainnet"] {
+            let error = create_on_box(200, &format!(r#"{{"network":"{network}"}}"#)).await.err().unwrap();
+            assert_eq!(error, crate::beta::MAINNET_DISABLED);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_refuses_unknown_absent_and_unavailable_box_networks() {
+        if cfg!(feature = "developer-mainnet") { return; }
+        for (status, body) in [(200, r#"{"network":"unknown"}"#), (200, "{}"),
+            (200, r#"{"network":null}"#), (200, "invalid"), (503, r#"{"network":"signet"}"#)] {
+            let error = create_on_box(status, body).await.err().unwrap();
+            assert_eq!(error, crate::beta::NETWORK_UNKNOWN);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_allows_a_regtest_box_in_development() {
+        if !cfg!(debug_assertions) { return; }
+        let error = create_on_box(200, r#"{"network":"regtest"}"#).await.err().unwrap();
+        assert_eq!(error, "Choose a password of 1–4096 bytes for this box.");
+    }
+
+    #[cfg(feature = "developer-mainnet")]
+    #[tokio::test]
+    async fn explicit_developer_override_does_not_require_a_bootstrap_network_probe() {
+        let error = create_on_box(404, "{}").await.err().unwrap();
+        assert_eq!(error, "Choose a password of 1–4096 bytes for this box.");
+    }
     #[test]
     fn confirmed_cancel_cleans_retained_escrow_after_attempt_was_lost() {
         use base64::Engine;

@@ -796,12 +796,24 @@ pub fn protect_config(config: &Path, fresh: bool) -> Result<(), String> {
             value.as_table_mut().ok_or("Invalid local node config")?.insert(section.into(), toml::Value::Table(toml::Table::new()));
         }
         let address = value[section].get(field).and_then(|v| v.as_str());
-        let address: std::net::SocketAddr = address.unwrap_or(&format!("127.0.0.1:{port}"))
-            .parse().map_err(|_| "Invalid local listener address")?;
+        let address = address.unwrap_or(&format!("127.0.0.1:{port}")).to_owned();
+        let address: std::net::SocketAddr = address.parse().or_else(|_| {
+            // Hostnames were accepted by the node's string-valued listeners.
+            // Local-only policy needs their port, never a DNS lookup or LAN IP.
+            let (host, port) = address.rsplit_once(':').ok_or("Invalid local listener address")?;
+            if host.is_empty() || host.split('.').any(|label| label.is_empty()
+                || label.starts_with('-') || label.ends_with('-')
+                || !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')) {
+                return Err("Invalid local listener address");
+            }
+            let port = port.parse::<u16>().map_err(|_| "Invalid local listener address")?;
+            Ok(std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)))
+        })?;
         let ip = if address.ip().is_loopback() { address.ip() }
             else if address.is_ipv6() { std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST) }
             else { std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) };
-        value[section][field] = std::net::SocketAddr::new(ip, address.port()).to_string().into();
+        value[section].as_table_mut().ok_or("Invalid local node config")?
+            .insert(field.into(), std::net::SocketAddr::new(ip, address.port()).to_string().into());
     }
     if value != before { seed_file::save_config(config, &value)?; }
     Ok(())
@@ -810,6 +822,28 @@ pub fn protect_config(config: &Path, fresh: bool) -> Result<(), String> {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[test]
+    fn hostname_listeners_are_mapped_to_loopback_without_resolving_dns() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("konsensus.toml");
+        std::fs::write(&config, "[lightning]\nnetwork='signet'\nlistening_address='localhost:19735'\n[network]\nlisten_addr='node.local:19736'\n[api]\nlisten_addr='localhost:13141'\n[calls]\nstun_listen='node.local:13478'\n").unwrap();
+        protect_config(&config, false).unwrap();
+        let value = seed_file::config_value(&config).unwrap();
+        for (section, field, port) in [("api", "listen_addr", 13141), ("network", "listen_addr", 19736),
+            ("lightning", "listening_address", 19735), ("calls", "stun_listen", 13478)] {
+            assert_eq!(value[section][field].as_str(), Some(format!("127.0.0.1:{port}").as_str()));
+        }
+    }
+
+    #[test]
+    fn malformed_hostname_listeners_are_refused() {
+        for address in ["localhost", "localhost:bad", "localhost:65536", ":9736", "bad host:9736", "host:1:2"] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = dir.path().join("konsensus.toml");
+            std::fs::write(&config, format!("[lightning]\nnetwork='signet'\n[network]\nlisten_addr='{address}'\n")).unwrap();
+            assert_eq!(protect_config(&config, false).unwrap_err(), "Invalid local listener address");
+        }
+    }
     #[test]
     fn retained_listeners_are_loopback_unless_authenticated_remote_access_is_explicit() {
         for remote in [false, true] {

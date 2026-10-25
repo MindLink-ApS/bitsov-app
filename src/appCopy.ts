@@ -2,7 +2,7 @@
  * {0}, {1}, … insert values verbatim (especially money and recipients). */
 export const appEn = {
   "betaMainnetDisabled": "This beta uses signet; mainnet is disabled.",
-  "betaNetworkUnknown": "This beta needs a node that confirms its test network.",
+  "betaNetworkUnknown": "The node did not confirm its test network; setup is blocked.",
   "localSeedUnencrypted": "Your recovery phrase is unencrypted on disk. Unlock the local node to protect it before funding or sending.",
   "notificationGranted": "Allowed in BitSov. macOS controls delivery and sound; if alerts are missing, check System Settings → Notifications → BitSov.",
   "notificationApp": "BitSov",
@@ -866,7 +866,7 @@ export const appEn = {
 
 export const appDa: Record<keyof typeof appEn, string> = {
   "betaMainnetDisabled": "Denne beta bruger signet; mainnet er deaktiveret.",
-  "betaNetworkUnknown": "Denne beta kræver en node, der bekræfter sit testnetværk.",
+  "betaNetworkUnknown": "Noden bekræftede ikke sit testnetværk; opsætningen er blokeret.",
   "localSeedUnencrypted": "Din gendannelsesfrase er ukrypteret på disken. Lås den lokale node op for at beskytte den, før du indsætter eller sender penge.",
   "approvalSetupReason": "Touch ID-godkendelser er ikke indstillet på denne enhed. Indstil dem her for at godkende i appen. Indtil da skal din nodes ejer godkende på noden.",
   "approvalSettingsDevices": "Indstillinger → Enheder",
