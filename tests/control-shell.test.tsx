@@ -997,7 +997,8 @@ describe('control center shell', () => {
     await waitFor(() => expect(mount.querySelector('[data-device-settings-hint="off"]')?.textContent).toContain('Touch ID approvals are off.'));
     click('[data-device-settings-link]');
     await waitFor(() => expect(mount.querySelector('[data-device-off="seed_not_encrypted"]')).not.toBeNull());
-    expect(mount.querySelector('[data-device-off]')?.textContent).toContain('Encrypt your recovery phrase to enable Touch ID approvals');
+    expect(mount.querySelector('[data-device-off]')?.textContent).toContain('Ask whoever set up the box for help');
+    expect(mount.querySelector('[data-device-off]')?.textContent).not.toContain('konsensus ');
     expect(mount.querySelector('[data-device-register]')).toBeNull();
     expect(mount.querySelector('[data-touch-approval]')).toBeNull();
   });
@@ -1274,8 +1275,8 @@ describe('control center shell', () => {
     });
   });
 
-  it('shows the one-time owner command for this Mac, and a pending request can be cancelled', async () => {
-    const cmd = 'konsensus device approve --op dd01 --config /Users/owner/node/konsensus.toml';
+  it('shows plain owner approval guidance for this Mac, and a pending request can be cancelled', async () => {
+    const cmd = 'konsensus device approve --op dd01 --config node.toml';
     const { calls } = stubHost({
       pairing_status: () => ({ ...paired, remote: true }),
       device_key_status: () => ({ available: true, state: 'pending', fingerprint: '3F9A-12C4', owner_action: cmd, expires_at_ms: Date.now() + 600_000 }),
@@ -1292,7 +1293,8 @@ describe('control center shell', () => {
     await waitFor(() => expect(mount.querySelector('[data-device-settings-hint="pending"]')).not.toBeNull());
     expect(mount.querySelector('[data-spend] [data-device-owner-action]')).toBeNull();
     click('[data-device-settings-link]');
-    await waitFor(() => expect(mount.querySelector('[data-device-owner-action]')?.textContent).toBe(cmd));
+    await waitFor(() => expect(mount.querySelector('[data-pending-approval]')?.textContent).toContain('Ask whoever set up the box to help approve this device'));
+    expect(mount.querySelector('[data-pending-approval]')?.textContent).not.toContain('konsensus ');
     expect(mount.querySelector('[data-device-fingerprint]')?.textContent).toBe('3F9A-12C4');
     click('[data-device-cancel]');
     await waitFor(() => expect(calls.some((c) => c.cmd === 'device_key_cancel')).toBe(true));

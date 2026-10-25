@@ -47,3 +47,26 @@ it('localizes local ticket validation while preserving host errors', async () =>
   const locked = mount(() => <LockedNode onUnlock={async () => {}} hostError={message} />);
   expect(locked.querySelector('[role="alert"]')?.textContent).toBe(message);
 });
+
+it.each(['en', 'da'] as const)('shows honest, equal node choices in %s', lang => {
+  setLanguagePref(lang);
+  const root = mount(() => <Onboarding status={() => ({ ready: false, node_id: null, error: null })}
+    pairing={() => INITIAL_PAIRING} trustAck={() => false} onRetry={() => {}} />);
+  const local = root.querySelector('[data-target="local"]')!;
+  const home = root.querySelector<HTMLButtonElement>('[data-target="network"]')!;
+  expect(local.textContent).toContain(lang === 'en' ? 'Only this Mac can use this node' : 'Kun denne Mac kan bruge denne node');
+  expect(local.textContent).toContain(lang === 'en' ? 'A phone can join a home node' : 'En telefon kan tilsluttes en hjemmenode');
+  expect(home.textContent).toContain(lang === 'en' ? 'A home node (Pi/Umbrel)' : 'En hjemmenode (Pi/Umbrel)');
+  expect(home.closest('details')).toBeNull();
+  home.click();
+  expect(home.getAttribute('aria-checked')).toBe('true');
+  expect(root.querySelector('[data-remote-access]')).not.toBeNull();
+});
+it.each(['saved node', 'setup link'])('defaults to the home node for an existing %s', path => {
+  const root = mount(() => <Onboarding status={() => ({ ready: false, node_id: null, error: null })}
+    pairing={() => ({ ...INITIAL_PAIRING, remote: path === 'saved node' })}
+    initialPairingLink={path === 'setup link' ? 'bitsov://pair/example' : undefined}
+    trustAck={() => false} onRetry={() => {}} />);
+  expect(root.querySelector('[data-target="network"]')!.getAttribute('aria-checked')).toBe('true');
+  expect(root.querySelector('[data-remote-access]')).not.toBeNull();
+});

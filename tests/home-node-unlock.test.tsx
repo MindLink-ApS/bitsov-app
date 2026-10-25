@@ -262,8 +262,9 @@ it('explains enrollment before unlock without offering a password bypass', () =>
   const mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <LockedNode typedUnlockSupported state="not-enrolled" onUnlock={async () => {}} onUnlockWithPassword={async () => {}} />, mount);
   expect(mount.textContent).toContain('This Mac is not an approved owner device yet');
-  expect(mount.textContent).toContain('another approved owner device');
-  expect(mount.textContent).toContain('--owner-control');
+  expect(mount.textContent).toContain('Open BitSov on a device that is already approved as an owner');
+  expect(mount.textContent).toContain('ask whoever set up the box to unlock it');
+  expect(mount.querySelector('summary')?.textContent).toBe('What does this mean?');
   expect(buttonNamed(mount, 'Set up Touch ID approvals')?.disabled).toBe(true);
   expect(buttonNamed(mount, 'Unlock with Touch ID')).toBeUndefined();
   expect(mount.querySelector('input')).toBeNull();
@@ -275,7 +276,8 @@ it('shows the pending fingerprint, both finish paths, and Cancel', async () => {
   dispose = render(() => <LockedNode state="pending-approval" pending={{ fingerprint: 'AB-CD', owner_action: 'konsensus device approve --op ab12' }} onCancel={cancel} onUnlock={async () => {}} />, mount);
   expect(mount.textContent).toContain('AB-CD');
   expect(mount.textContent).toContain('At the box');
-  expect(mount.textContent).toContain('konsensus device approve --op ab12');
+  expect(mount.textContent).toContain('Ask whoever set up the box to help approve this device');
+  expect(mount.textContent).not.toContain('konsensus ');
   expect(mount.textContent).toContain('From another owner device');
   expect(mount.textContent).toContain('unlocked');
   buttonNamed(mount, 'Cancel')!.click();
