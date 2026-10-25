@@ -200,14 +200,14 @@ Disse kildehenvisninger betyder ikke, at hjemmesiden allerede er udgivet.
 | Calls, STUN, microphone and camera / Opkald, STUN, mikrofon og kamera | `src/control/call.ts`, `src/control/Shell.tsx`, `src/control/prefs.ts`, `src/control/voice.ts`, `src/cameraQrScanner.ts` |
 | Optional AI and encrypted local history / Valgfri AI og krypteret lokal historik | `src-tauri/src/ai.rs`, `src-tauri/src/ai/local.rs`, `src-tauri/src/ai/threads.rs`, `src-tauri/src/ai/threads/storage.rs` |
 | Local notifications / Lokale notifikationer | `src/control/messageNotifications.tsx`, `src-tauri/capabilities/default-approval-notification.json` |
-| Policy URL and browser opener / Politikadresse og browseråbning | `src/privacyPolicy.json`, `src/PrivacyPolicyLink.tsx`, `src-tauri/src/app.rs` (`privacy_policy_open`) |
+| Policy URL and browser opener / Politikadresse og browseråbning | `src-tauri/src/privacy_policy.rs` (`URL`), `src/PrivacyPolicyLink.tsx`, `src-tauri/src/app.rs` (`privacy_policy_open`) |
 
 TODO(website): publish the English and Danish policy text above at
 `/bitsov/privacy` on `mindlink.tech`, before App Review submission. The canonical
-URL is in `src/privacyPolicy.json`. Keep this verification section out of the
+URL is in `src-tauri/src/privacy_policy.rs` (`URL`). Keep this verification section out of the
 published policy.
 
 TODO(hjemmeside): udgiv den engelske og danske politiktekst ovenfor på
 `/bitsov/privacy` på `mindlink.tech` før indsendelse til App Review. Den fælles
-URL findes i `src/privacyPolicy.json`. Udelad dette kontrolafsnit fra den
+URL findes i `src-tauri/src/privacy_policy.rs` (`URL`). Udelad dette kontrolafsnit fra den
 offentliggjorte politik.
