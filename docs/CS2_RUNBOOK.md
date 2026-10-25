@@ -67,7 +67,7 @@ npm run tauri dev
 
 ## Why the disclosure is not optional (Gate G6)
 
-`CODEX_APP_AUTHORITY.md` §B G6: before the funds-holding framing ships, `/auth/local` must be
+Before the funds-holding framing ships, `/auth/local` must be
 app-bound **or** carry an explicit local-trust disclosure — today any loopback process can mint a
 full node JWT and drain the wallet. CS-2 ships the disclosure, not app-binding: the funding UI is
 gated behind an acknowledgement that names the risk in plain language. App-binding `/auth/local`

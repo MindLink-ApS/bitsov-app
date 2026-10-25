@@ -124,6 +124,11 @@ export function onboardingSteps(status: NodeStatus, pairing: PairingView, trustA
 
 export const scopeList = (scopes: string[]) => scopes.join(' + ');
 
+/** Older hosts can include terminal instructions, even in diagnostic details. */
+export function onboardingDiagnostic(message: string, help: string): string {
+  return /\bkonsensus\s/i.test(message) ? help : message;
+}
+
 /** Host connection errors carry sanitized diagnostic copy. */
 export function connectionErrorDetail(error: unknown): string {
   if (error && typeof error === 'object' && 'detail' in error && typeof error.detail === 'string') return error.detail;

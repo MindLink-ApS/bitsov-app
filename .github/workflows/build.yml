@@ -28,7 +28,7 @@ on:
   push:
     branches: [main]
     tags: ['v*']
-    # No push paths filter (Atlas ruling 20 Oct): every push to main builds, so
+    # No push paths filter: every push to main builds, so
     # main's status always reflects a compiled tree. PRs still skip heavy jobs
     # for docs-only changes at the job level.
   merge_group:
@@ -68,7 +68,7 @@ jobs:
       - name: Detect code changes
         id: filter
         if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
         with:
           # paths-filter defaults to 'some': a file matches a filter if it
           # matches ANY pattern, so the '**' entry would make every PR code=true.
@@ -107,9 +107,9 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Install Android Rust target
         run: rustup target add aarch64-linux-android
@@ -127,7 +127,7 @@ jobs:
             echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android24-clang"
           } >> "$GITHUB_ENV"
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri
           shared-key: tauri-android-check
@@ -177,7 +177,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # Free runner disk (toolchains this job never uses) so the link step has room.
       - name: Free disk space
@@ -200,14 +200,14 @@ jobs:
       - name: Cached apt archive verification tests
         run: python3 scripts/ci/test-verify-apt-cache.py
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
 
       - name: Frontend — tsc --noEmit && vite build
         run: |
-          npm ci --no-audit --no-fund
+          npm ci --ignore-scripts --no-audit --no-fund
           npm run build
 
       # Tauri v2 Linux prerequisites. `cargo check` still runs the gtk/webkit -sys build
@@ -216,13 +216,13 @@ jobs:
         timeout-minutes: 5
         uses: ./.github/actions/tauri-prerequisites
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       # Cache registry crates and path crates (src-tauri/ffi, src-tauri/crates/mock-node).
       # The default rust-cache mode skips workspace crates, so a lockfile-stable
       # PR still recompiled them. There is no vendor/ tree in this repo; the
       # flag is what covers one if it is added.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri
           shared-key: tauri-dev
@@ -295,7 +295,7 @@ jobs:
   starter-balance:
     name: Starter balance enabled (build + tests)
     needs: changes
-    # CI-DIET B (Atlas approved): PR/full-ci, tags and merge groups retain
+    # PR/full-ci, tags and merge groups retain
     # coverage; starter-balance-nightly.yml checks main nightly when changed.
     # Revert B and its nightly follow-up together to restore every-main-push runs.
     if: >-
@@ -310,14 +310,14 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
       - name: Frontend — build and test with starter balance enabled
         run: |
-          npm ci --no-audit --no-fund
+          npm ci --ignore-scripts --no-audit --no-fund
           npm run build
           npx vitest run
       - name: Free disk space if needed
@@ -325,8 +325,8 @@ jobs:
       - name: Tauri Linux prerequisites
         timeout-minutes: 5
         uses: ./.github/actions/tauri-prerequisites
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri
           shared-key: tauri-starter-enabled
@@ -367,7 +367,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Fetch + verify the pinned signed node (throwaway keyring)
         run: |
@@ -387,9 +387,9 @@ jobs:
         timeout-minutes: 5
         uses: ./.github/actions/tauri-prerequisites
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri
           shared-key: tauri-dev

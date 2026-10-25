@@ -22,7 +22,8 @@ it('waits for explicit repair consent, supports declining, and stops prompting a
   });
   show(invoke);
   await vi.waitFor(() => expect(mount.querySelector('[data-initialization-repair]')).not.toBeNull());
-  expect(mount.textContent).toContain('NODE_INITIALIZED');
+  expect(mount.textContent).toContain('setup was not recorded as complete');
+  expect(mount.textContent).toContain('ask whoever set up the box for help');
   expect(mount.textContent).toContain('backup');
   expect(invoke.mock.calls.some(([cmd]) => cmd === 'node_repair_initialized')).toBe(false);
   mount.querySelector<HTMLButtonElement>('[data-repair-decline]')!.click();
