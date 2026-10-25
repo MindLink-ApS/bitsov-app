@@ -2,7 +2,7 @@ import { afterEach, expect, it } from 'vitest';
 import { render } from 'solid-js/web';
 import { copy, possessive, setLanguagePref, t } from '../src/i18n';
 import { costToSend, peerNotReadyMessage } from '../src/control/state';
-import { HubTrust, HubChannelConfirm } from '../src/control/HubTrust';
+import { HubTrust } from '../src/control/HubTrust';
 let dispose: (() => void) | undefined;
 let mount: HTMLDivElement;
 afterEach(() => { dispose?.(); mount?.remove(); setLanguagePref('en'); });
@@ -45,15 +45,6 @@ it('changes every provider card and the dismiss accessible name with the languag
   setLanguagePref('en');
   expect(dismiss().textContent).toBe('Hide');
 });
-it('localizes the provider channel confirmation as well as its cards', () => {
-  setLanguagePref('da');
-  mount = document.createElement('div'); document.body.append(mount);
-  dispose = render(() => <HubChannelConfirm nodeId="danish-copy-test" onConfirm={() => {}} onCancel={() => {}} />, mount);
-  expect(mount.querySelector('[data-hub-channel-ack]')?.textContent).toBe('Jeg forstår — åbn kanalen');
-  expect(mount.querySelector('[data-hub-channel-cancel]')?.textContent).toBe('Ikke nu');
-  expect(mount.textContent).toContain('Indstillinger → Node');
-});
-
 it.each([['Rasmus', 'Rasmus’'], ['Lars', 'Lars’'], ['Alex', 'Alex’'], ['Luz', 'Luz’'], ['MAX', 'MAX’'], ['Maya', 'Mayas']])('uses the Danish possessive for %s', (name, possessive) => {
   setLanguagePref('da');
   const quote = { kind: 0, own_msat: 1000, peer_msat: 2000, peer_stale: false, peer_age_secs: 0, max_routing_fee_msat: 0 };

@@ -1,3 +1,5 @@
+import { IOS_STORE_BUILD } from '../buildProfile';
+import { t } from '../i18n';
 import type { StarterStatus } from './starter';
 import type { AddInput, AddView, JoinInput, JoinView } from '../onboarding/AddDevice';
 import type { WatchSample, WatchUpdate } from './watches';
@@ -280,6 +282,8 @@ export interface Source {
 
 export const LIVE_EVENT = 'node-live';
 
+const storeUnavailable = () => Promise.reject({ code: 'ios_store_person_only', message: t('iosStorePersonOnly') });
+
 export const hostSource: Source = {
   mode: 'node',
   nodeStatus: () => invoke<NodeStatus>('node_status'),
@@ -344,9 +348,9 @@ export const hostSource: Source = {
       },
     }),
   frontDoorHashBytes: (bytesB64) => invoke<string>('front_door_hash_bytes', { bytes_b64: bytesB64 }),
-  porchQuote: (peer, path) => invoke<PaymentQuote>('porch_quote', { peer, path }),
-  porchRead: (peer, path, maxMsat) => invoke<PorchRead>('porch_read', { peer, path, max_msat: maxMsat }),
-  porchCards: () => invoke<PorchCard[]>('porch_cards'),
+  porchQuote: IOS_STORE_BUILD ? storeUnavailable : (peer, path) => invoke<PaymentQuote>('porch_quote', { peer, path }),
+  porchRead: IOS_STORE_BUILD ? storeUnavailable : (peer, path, maxMsat) => invoke<PorchRead>('porch_read', { peer, path, max_msat: maxMsat }),
+  porchCards: IOS_STORE_BUILD ? storeUnavailable : () => invoke<PorchCard[]>('porch_cards'),
   sponsorStatus: () => invoke<SponsorStatus>('sponsor_status'),
   sponsorOffer: () => invoke<Introduction>('sponsor_offer'),
   sponsorCandidate: (request) => invoke<SponsorCandidate>('sponsor_candidate', { request }),
@@ -359,8 +363,8 @@ export const hostSource: Source = {
   firstContactStatus: (id, recipient) => invoke<OwnerContactApproval>('first_contact_status', { id, recipient: recipient ?? null }),
   firstContactCancel: (id) => invoke<void>('first_contact_cancel', { id }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
-  starterCurrent: (nodeId) => invoke<StarterStatus>('starter_current', { node_id: nodeId }),
-  starterRequest: (nodeId, requestId) => invoke<StarterStatus>('starter_request', { node_id: nodeId, request_id: requestId }),
+  starterCurrent: IOS_STORE_BUILD ? storeUnavailable : (nodeId) => invoke<StarterStatus>('starter_current', { node_id: nodeId }),
+  starterRequest: IOS_STORE_BUILD ? storeUnavailable : (nodeId, requestId) => invoke<StarterStatus>('starter_request', { node_id: nodeId, request_id: requestId }),
   energy: (span) => invoke<EnergyRead>('energy_read', { span }),
   membrane: (limit) => invoke<MembraneRead>('membrane_read', { limit: limit ?? null }),
   onLive: (handler) => listen<LiveEvent>(LIVE_EVENT, (e) => handler(e.payload)),
@@ -396,7 +400,7 @@ export const hostSource: Source = {
   budgetSet: (target, room, limitMsat) => invoke<BudgetView>('budget_set', { target, room, limit_msat: limitMsat }),
   budgetPause: () => invoke<BudgetView>('budget_pause'),
   budgetResume: () => invoke<BudgetView>('budget_resume'),
-  roomQuote: (roomId) => invoke<RoomQuote>('room_quote', { room_id: roomId }),
+  roomQuote: IOS_STORE_BUILD ? storeUnavailable : (roomId) => invoke<RoomQuote>('room_quote', { room_id: roomId }),
   invoiceCreate: (amountMsat, note) => invoke<InvoiceView>('invoice_create', { amount_msat: amountMsat, note, expiry_secs: null }),
   invoiceAmount: (bolt11) => invoke<InvoiceAmount>('invoice_amount', { bolt11 }),
   invoiceStatus: (bolt11) => invoke<InvoiceStatus>('invoice_status', { bolt11 }),

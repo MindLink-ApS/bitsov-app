@@ -53,6 +53,7 @@ pub fn is_site_page(path: &str) -> bool {
 /// The canonical porch path for what the owner typed or a card names
 /// (`index.md` or `/index.md`), or why it is not one. Checked before any quote.
 pub fn porch_path(input: &str) -> Result<String, ActionError> {
+    crate::store_profile::require_individual(false)?;
     let trimmed = input.trim();
     let path = if trimmed.starts_with('/') { trimmed.to_string() } else { format!("/{trimmed}") };
     if path == CARD_PATH || is_site_page(&path) {

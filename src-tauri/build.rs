@@ -1,3 +1,5 @@
+mod build_profile;
+
 fn main() {
     // Same parent-process flag as vite.config.ts; only the exact value "1" opts in.
     println!("cargo:rerun-if-env-changed=VITE_STARTER_BALANCE");
@@ -5,6 +7,12 @@ fn main() {
     println!("cargo:rerun-if-changed=mobile-capabilities");
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    println!("cargo:rustc-check-cfg=cfg(ios_store)");
+    println!("cargo:rerun-if-changed=build_profile.rs");
+    let ios_store = build_profile::ios_store(&target_os, &std::env::var("PROFILE").unwrap_or_default());
+    if ios_store {
+        println!("cargo:rustc-cfg=ios_store");
+    }
     let mobile_feature = std::env::var_os("CARGO_FEATURE_MOBILE").is_some();
 
     // Listing the commands opts out of Tauri's default allow-all for app commands.
@@ -139,7 +147,9 @@ fn main() {
     // created in release, and a window with no capability has no grants. Debug
     // and test builds still compile capabilities/assistant.json so the ACL test
     // can resolve that label.
-    if matches!(target_os.as_str(), "ios" | "android") || mobile_feature {
+    if ios_store {
+        attributes = attributes.capabilities_path_pattern("./mobile-capabilities/ios-store.json");
+    } else if matches!(target_os.as_str(), "ios" | "android") || mobile_feature {
         attributes = attributes.capabilities_path_pattern("./mobile-capabilities/default.json");
     } else if std::env::var("PROFILE").as_deref() == Ok("release") {
         attributes = attributes.capabilities_path_pattern("./capabilities/default*.json");

@@ -14,6 +14,7 @@
     "preview": "vite preview",
     "authority": "scripts/authority-check.sh",
     "check:layout": "node scripts/ui-layout/meeting-planner-check.mjs",
+    "check:ios-store-bundle": "node scripts/check-ios-store-bundle.mjs",
     "smoke:cs1": "scripts/cs1-local-smoke.sh",
     "smoke:cs2": "scripts/cs2-local-smoke.sh",
     "tauri": "tauri",

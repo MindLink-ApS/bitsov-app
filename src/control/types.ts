@@ -469,6 +469,7 @@ export type ActionError = {
     // a second hangup; the node refusing a call signal before payment.
     | 'call_needs_node_upgrade'
     | 'call_admission_open' | 'call_not_found' | 'hangup_in_flight' | 'call_identity_changed'
+    | 'ios_store_person_only'
     | 'invalid'
     | 'node';
   message: string;

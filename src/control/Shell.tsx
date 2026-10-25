@@ -1,5 +1,6 @@
 import { createPhoneLayout, createPhoneNavigationGuard, PhoneTabs, type PhoneTab } from './PhoneShell';
 import { MediaView } from './CallMedia';
+import { IOS_STORE_BUILD } from '../buildProfile';
 import { createMessageNotifications, NotificationSettings } from './messageNotifications';
 import { isTauri, invoke } from '@tauri-apps/api/core';
 import { OwnerApprovalSheets } from './OwnerApprovalSheet';
@@ -664,7 +665,7 @@ export function ControlCenter(props: Props) {
   let viewGeneration = 0;
   createEffect(on(openKey, () => { viewGeneration++; }, { defer: true }));
   // Our own node checks room bindings (genome `room_binding_v1` on /status).
-  const nodeRooms = () => overview()?.capabilities?.includes(ROOM_CAPABILITY) === true;
+  const nodeRooms = () => !IOS_STORE_BUILD && overview()?.capabilities?.includes(ROOM_CAPABILITY) === true;
   /**
    * Room chats go to their room's thread (they stay in the member's 1:1
    * history, hidden there). A room is first remembered only once its id is
@@ -985,7 +986,7 @@ export function ControlCenter(props: Props) {
               const beforeMeeting = meetingView();
               // receive admits offers synchronously, before its first await. Snapshot this
               // event's transition now so an ignored signal cannot claim a later invitation.
-              void meetings.receive(event.message, ownId());
+              void meetings?.receive(event.message, ownId());
               const invited = meetingView();
               if (invited.phase === 'invited' && invited.id && (beforeMeeting.phase !== 'invited' || beforeMeeting.id !== invited.id)) {
                 notifications?.call(invited.id, nameOf(event.message.sender), () => meetingView().phase === 'invited' && meetingView().id === invited.id);
@@ -1445,7 +1446,7 @@ export function ControlCenter(props: Props) {
   const meetingOn = () => meetingView().phase === 'invited' || meetingView().phase === 'active';
   // Our own node takes meeting legs (genome `call_meeting_v1` on /status).
   const nodeMeets = () => overview()?.capabilities?.includes('call_meeting_v1') === true;
-  const meetings = createMeetingEngine({
+  const meetings = IOS_STORE_BUILD ? null : createMeetingEngine({
     quote: (peer) => act(() => source.callQuote(peer)),
     signal: async (peer, kind, plaintext, maxMsat) => {
       const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat));
@@ -1465,7 +1466,7 @@ export function ControlCenter(props: Props) {
     busy: () => !['idle', 'ended'].includes(callView().phase),
     provenUnpaid: (code) => provenUnpaid(code),
   });
-  onCleanup(() => meetings.endLocal());
+  onCleanup(() => meetings?.endLocal());
 
   // Voice notes: one object URL per message, revoked when the shell goes.
   // A just-sent clip plays from its own bytes; a received one is read once.
@@ -1482,7 +1483,7 @@ export function ControlCenter(props: Props) {
     callActive: () => !['idle', 'ended'].includes(callView().phase) || meetingOn(),
     // Opens the planner; the contact is pre-picked only if their node takes meetings.
     planMeeting: (peer) => {
-      if (meetingOn()) return;
+      if (IOS_STORE_BUILD || meetingOn()) return;
       const id = peer.toLowerCase();
       setMeetingPlan(nodeMeets() && peerById().get(id)?.meetings === true ? [id] : []);
     },
@@ -1924,7 +1925,7 @@ export function ControlCenter(props: Props) {
 
   const welcomeHome = () => <WelcomeHome overview={overview()} moneyBlocked={moneyBlocked()} walletReady={wallet() !== null && !errors.wallet}
       onShare={() => { setTab('frontdoor'); setContextOpen(true); }}
-      onAddContact={() => setTrack({ kind: 'discover' })}
+      onAddContact={() => setTrack({ kind: IOS_STORE_BUILD ? 'new' : 'discover' })}
       onAddSats={() => openWallet('receive')} />;
 
   return (
@@ -2087,7 +2088,7 @@ export function ControlCenter(props: Props) {
                     }}
                   />
                 </Match>
-                <Match when={t().kind === 'discover'}>
+                {!IOS_STORE_BUILD && <Match when={ t().kind === 'discover'}>
                   <DiscoverPanel
                     source={source}
                     now={now()}
@@ -2107,8 +2108,8 @@ export function ControlCenter(props: Props) {
                       openDoorstep(step);
                     }}
                   />
-                </Match>
-                <Match when={t().kind === 'bound' ? localRoom((t() as { id: string }).id) : undefined}>
+                </Match>}
+                {!IOS_STORE_BUILD && <Match when={ t().kind === 'bound' ? localRoom((t() as { id: string }).id) : undefined}>
                   {(room) => (
                     <RoomThread
                       room={room()}
@@ -2139,8 +2140,8 @@ export function ControlCenter(props: Props) {
                       onContext={() => setContextOpen(true)}
                     />
                   )}
-                </Match>
-                <Match when={t().kind === 'porch'}>
+                </Match>}
+                {!IOS_STORE_BUILD && <Match when={ t().kind === 'porch'}>
                   <PorchPanel
                     source={source}
                     now={now()}
@@ -2151,8 +2152,8 @@ export function ControlCenter(props: Props) {
                     spendGate={<SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} />}
                     nameOf={nameOf}
                   />
-                </Match>
-                <Match when={t().kind === 'peer' || t().kind === 'room'}>
+                </Match>}
+                <Match when={t().kind === 'peer' || (!IOS_STORE_BUILD && t().kind === 'room')}>
                   <Conversation
                     nodeRooms={nodeRooms()}
                     moneyBlocked={moneyBlocked()}
@@ -2393,7 +2394,7 @@ export function ControlCenter(props: Props) {
         endStuck={() => void calls.endStuck()}
         callAgain={(peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); }}
       />
-      <MeetingPanel
+      {!IOS_STORE_BUILD && <MeetingPanel
         view={meetingView()}
         streams={meetingStreams()}
         plan={meetingPlan()}
@@ -2404,15 +2405,15 @@ export function ControlCenter(props: Props) {
         nameOf={nameOf}
         quote={actions.callQuote}
         setPlan={setMeetingPlan}
-        invite={(ids, media, quotes) => { setMeetingPlan(null); void meetings.invite(ids, media, quotes); }}
-        join={(quotes) => void meetings.join(quotes)}
-        decline={(quotes) => void meetings.decline(quotes)}
-        leave={() => void meetings.leave()}
-        mute={() => meetings.toggleMute()}
-        camera={() => void meetings.toggleCamera()}
-        dismiss={() => meetings.dismiss()}
-      />
-      <Show when={roomPlan() && props.active}>
+        invite={(ids, media, quotes) => { setMeetingPlan(null); void meetings?.invite(ids, media, quotes); }}
+        join={(quotes) => void meetings?.join(quotes)}
+        decline={(quotes) => void meetings?.decline(quotes)}
+        leave={() => void meetings?.leave()}
+        mute={() => meetings?.toggleMute()}
+        camera={() => void meetings?.toggleCamera()}
+        dismiss={() => meetings?.dismiss()}
+      />}
+      <Show when={!IOS_STORE_BUILD && roomPlan() && props.active}>
         <NewRoomPanel contacts={roomContacts()} nodeRooms={nodeRooms()} onCreate={(picks) => void createRoom(picks)} onCancel={() => setRoomPlan(false)} />
       </Show>
       <Show when={props.active && walletTab()}>
@@ -2698,7 +2699,7 @@ function Rail(props: {
         </Show>
       </div>
 
-      <div class="track-group" data-rooms-soon={props.active && props.nodeRooms ? undefined : ''}>
+      {!IOS_STORE_BUILD && <div class="track-group" data-rooms-soon={props.active && props.nodeRooms ? undefined : ''}>
         <h2>{tr('uiRooms')}</h2>
         <Show
           when={props.active && props.nodeRooms}
@@ -2720,7 +2721,7 @@ function Rail(props: {
             {(r) => item({ kind: 'room', id: r.id.toLowerCase() }, r.name)}
           </For>
         </Show>
-      </div>
+      </div>}
 
       <Show when={props.active && props.knocks.length > 0}>
         <div class="track-group" data-door-group>
@@ -2754,7 +2755,7 @@ function Rail(props: {
         <Show when={props.active}>{item({ kind: 'ai' }, () => tr('uiAskYourNode'), <span class="meta">{tr('uiLocal')}</span>)}</Show>
       </div>
 
-      <div class="track-group">
+      {!IOS_STORE_BUILD && <div class="track-group">
         <h2>{tr('uiBrowse')}</h2>
         <Show when={props.active}>
           <button
@@ -2776,7 +2777,7 @@ function Rail(props: {
             <span class="meta">{tr('uiCardsPagesPaid')}</span>
           </button>
         </Show>
-      </div>
+      </div>}
 
       <div class="rail-foot">
         <Show when={props.active}>
@@ -3417,9 +3418,9 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
       <button type="button" class="soft call-button icon-btn" data-call="video" disabled={off()} title={title()} aria-haspopup="dialog" aria-expanded={armed() === 'video'} onClick={() => arm('video')} aria-label={tr('uiVideoCall98', props.name, cost() !== null ? tr('uiUpTo', fmtAmount(cost()!)) : '')}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="12" height="12" rx="2" /><path d="m15 10 6-3v10l-6-3z" /></svg>
       </button>
-      <button type="button" class="soft call-button icon-btn quiet" data-call="meeting" disabled={off()} title={tr('uiStartAMeetingWithAndUpToMore', props.name, MAX_PARTICIPANTS - 2)} aria-label={tr('uiStartAMeetingWith', props.name)} onClick={() => props.actions.planMeeting(props.peer)}>
+      {!IOS_STORE_BUILD && <button type="button" class="soft call-button icon-btn quiet" data-call="meeting" disabled={off()} title={tr('uiStartAMeetingWithAndUpToMore', props.name, MAX_PARTICIPANTS - 2)} aria-label={tr('uiStartAMeetingWith', props.name)} onClick={() => props.actions.planMeeting(props.peer)}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3" /><path d="M3 20a6 6 0 0 1 12 0" /><circle cx="17" cy="9" r="2.5" /><path d="M17 14a5 5 0 0 1 4 5" /></svg>
-      </button>
+      </button>}
       <Show when={armed()}>
         {(media) => (
           <div class="call-confirm" role="dialog" aria-label={`${callWord(media())} ${props.name}?`} data-call-confirm-box={media()}>
@@ -7877,7 +7878,7 @@ function NewTrack(props: {
           </form>
         </div>
         <p class="send-next">
-          {tr('caInvitesChangeYourNodeSoTheyUseTheSame')}<Show when={!props.nodeRooms}>{' '}{tr('uiThisNodeDoesNotSupportRoomsYet')}</Show>
+          {tr('caInvitesChangeYourNodeSoTheyUseTheSame')}<Show when={!IOS_STORE_BUILD && !props.nodeRooms}>{' '}{tr('uiThisNodeDoesNotSupportRoomsYet')}</Show>
         </p>
       </div>
     </>

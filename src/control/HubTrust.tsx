@@ -1,8 +1,6 @@
 import { t, type CopyKey } from '../i18n';
-import { createSignal, createUniqueId, For, onCleanup, onMount, Show } from 'solid-js';
+import { createSignal, createUniqueId, For, Show } from 'solid-js';
 import { Dynamic } from 'solid-js/web';
-import { SoftError } from './SoftError';
-import { onEscape } from './escapeStack';
 
 // Lightning provider disclosure. Approved EN/DA sentences live in src/appCopy.ts
 // (hub* keys); update that copy table when product wording changes.
@@ -86,74 +84,4 @@ export function lockedHubTrustHidden(): boolean {
 export function hideLockedHubTrust(): void {
   try { localStorage.setItem(LOCKED_HIDDEN_KEY, 'hidden'); }
   catch { /* stays hidden for this screen only */ }
-}
-
-// One acknowledgement per node identity; a different node is a new decision.
-const ackKey = (nodeId: string) => `bitsov.hub-channel-ack.v1.${nodeId.toLowerCase()}`;
-const sessionAcks = new Set<string>();
-
-export function hubChannelAcknowledged(nodeId: string): boolean {
-  const key = ackKey(nodeId);
-  if (sessionAcks.has(key)) return true;
-  try { return localStorage.getItem(key) === 'accepted'; }
-  catch { return false; }
-}
-
-export function acknowledgeHubChannel(nodeId: string): void {
-  const key = ackKey(nodeId);
-  sessionAcks.add(key);
-  try { localStorage.setItem(key, 'accepted'); }
-  catch { /* acknowledgement still holds for this session */ }
-}
-
-/**
- * The one-time confirm step before a node opens its first channel to the
- * MindLink hub. Any path that opens a hub channel must go through it: until the
- * owner acknowledges, `onConfirm` is never called. Once acknowledged for this
- * node, it calls `onConfirm` straight away and shows nothing.
- */
-export function HubChannelConfirm(props: { nodeId: string; onConfirm: () => void | Promise<void>; onCancel: () => void }) {
-  const already = hubChannelAcknowledged(props.nodeId);
-  const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
-  const titleId = createUniqueId();
-  let dialog: HTMLDivElement | undefined;
-  const proceed = async () => {
-    if (busy()) return;
-    setBusy(true);
-    setError(null);
-    try { await props.onConfirm(); }
-    catch (e) { setError(String(e)); }
-    finally { setBusy(false); }
-  };
-  const confirm = () => {
-    acknowledgeHubChannel(props.nodeId);
-    void proceed();
-  };
-  onMount(() => {
-    if (already) void proceed();
-    else {
-      const opener = document.activeElement as HTMLElement | null;
-      dialog?.focus();
-      onCleanup(onEscape(() => { if (!busy()) props.onCancel(); }));
-      onCleanup(() => queueMicrotask(() => { if (opener?.isConnected) opener.focus(); }));
-    }
-  });
-  return (
-    <>
-      <Show when={!already}>
-        <div ref={dialog} class="hub-channel-confirm" role="dialog" aria-labelledby={titleId} tabindex="-1" data-hub-channel-confirm>
-          <HubTrust level={2} titleId={titleId} />
-          <p class="hint">{t('hubReadOnce')}</p>
-          <div class="row">
-            <button type="button" class="primary" data-hub-channel-ack disabled={busy()} onClick={confirm}>
-              {busy() ? t('hubOpening') : t('hubConfirm')}
-            </button>
-            <button type="button" class="link" data-hub-channel-cancel disabled={busy()} onClick={() => props.onCancel()}>{t('hubNotNow')}</button>
-          </div>
-        </div>
-      </Show>
-      <Show when={error()}><SoftError message={error()!} /></Show>
-    </>
-  );
 }

@@ -1,4 +1,5 @@
 import { t as tr } from '../i18n';
+import { IOS_STORE_BUILD } from '../buildProfile';
 /**
  * Mesh meetings of up to 4 (regtest prototype). A meeting is nothing but a set
  * of ordinary 1:1 calls ("legs") that share a meeting id and a fixed roster
@@ -206,7 +207,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
     return next;
   };
   const guarded = async (run: () => Promise<void>) => {
-    if (busy) return;
+    if (IOS_STORE_BUILD || busy) return;
     busy = true;
     try {
       await run();
@@ -712,6 +713,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
 
     /** A 400-403 the node forwarded (already paid, and admitted by its call rules). */
     receive: async (m: Message, ownId: string) => {
+      if (IOS_STORE_BUILD) return;
       const own = ownId.toLowerCase();
       const peer = m.sender.toLowerCase();
       if (peer === own) return;

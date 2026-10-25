@@ -99,7 +99,13 @@ function uiE2eDriver(): Plugin {
 // The parent build process is shared with Cargo. Deliberately do not load this
 // flag from Vite-only .env files, which the Rust host would not see.
 export function starterBalanceFlag(env: Record<string, string | undefined>): '1' | '0' {
-  return env.VITE_STARTER_BALANCE === '1' ? '1' : '0';
+  return iosStoreFlag(env) === '0' && env.VITE_STARTER_BALANCE === '1' ? '1' : '0';
+}
+
+// Tauri release hooks omit TAURI_ENV_DEBUG; debug hooks set it to "true".
+// Ignore VITE_* dotenv and process overrides for this derived build profile.
+export function iosStoreFlag(env: Record<string, string | undefined>): '1' | '0' {
+  return env.TAURI_ENV_PLATFORM === 'ios' && env.TAURI_ENV_DEBUG !== 'true' ? '1' : '0';
 }
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -137,7 +143,10 @@ export function devPort(env: Record<string, string | undefined>): number {
 // so devUrl always matches.
 // The assistant entry is not the window Tauri shows at startup.
 export default defineConfig({
-  define: { 'import.meta.env.VITE_STARTER_BALANCE': JSON.stringify(starterBalanceFlag(process.env)) },
+  define: {
+    'import.meta.env.VITE_STARTER_BALANCE': JSON.stringify(starterBalanceFlag(process.env)),
+    'import.meta.env.VITE_IOS_STORE': JSON.stringify(iosStoreFlag(process.env)),
+  },
   plugins: [solid(), assistantDevCsp(), uiE2eDriver()],
   clearScreen: false,
   server: { port: devPort(process.env), strictPort: true },

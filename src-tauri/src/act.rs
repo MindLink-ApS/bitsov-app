@@ -713,6 +713,7 @@ pub fn elevation_status_path(op_id: &str) -> Result<String, ActionError> {
 /// for an unknown peer, the paid first contact. The app never builds or
 /// delivers an envelope itself (authority invariant A.1).
 pub fn compose_body(recipient: &str, is_room: bool, plaintext: &str) -> Result<serde_json::Value, ActionError> {
+    crate::store_profile::require_individual(!is_room && !is_room_chat(plaintext))?;
     let recipient = if is_room {
         control::room_id(recipient).map_err(ActionError::invalid)?
     } else {
@@ -740,6 +741,7 @@ pub fn call_body(recipient: &str, kind: u16, plaintext: &str) -> Result<serde_js
         return Err(ActionError::invalid("not a call signal"));
     }
     let v: serde_json::Value = serde_json::from_str(plaintext).map_err(|_| ActionError::invalid("the call signal is not JSON"))?;
+    crate::store_profile::require_individual(v.get("meeting").is_none())?;
     if !v.is_object() || plaintext.len() > CALL_SIGNAL_MAX_BYTES {
         return Err(ActionError::invalid("the call signal is too large"));
     }
@@ -965,6 +967,7 @@ pub fn room_quote(
     tables: &[control::PeerPrice],
     policy: RoutingFeePolicy,
 ) -> Result<RoomQuote, ActionError> {
+    crate::store_profile::require_individual(false)?;
     let mut out = Vec::new();
     let mut total_msat = 0u64;
     let mut max_routing_fee_msat = 0u64;

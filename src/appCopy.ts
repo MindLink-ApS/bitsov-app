@@ -1,6 +1,7 @@
 /** First migrated app surfaces. Values are display copy, never protocol tokens.
  * {0}, {1}, … insert values verbatim (especially money and recipients). */
 export const appEn = {
+  "iosStorePersonOnly": "This iOS build supports payments between two individuals only. Nothing was paid.",
   "notificationGranted": "Allowed in BitSov. macOS controls delivery and sound; if alerts are missing, check System Settings → Notifications → BitSov.",
   "notificationApp": "BitSov",
   "notificationSomeone": "Someone",
@@ -200,10 +201,6 @@ export const appEn = {
   "hubRefuses": "It can refuse to route your payments. If it does, your money is still yours, and you can close the channel and move to another provider.",
   "hubLocked": "While your home box is locked (for example after a power cut), it isn't watching your channels. If the hub broadcast an old channel state then, you could lose funds unless you unlock within about a day. That's why, until a watchtower exists, a home box that can be locked should only have channels to the hub, and you should unlock it soon after a restart.",
   "hubFees": "Fees: routing costs a small fee per payment, shown before you pay.",
-  "hubReadOnce": "Read this once before your node opens its first channel to the hub. You can read it again any time in Settings → Node.",
-  "hubOpening": "Opening the channel…",
-  "hubConfirm": "I understand — open the channel",
-  "hubNotNow": "Not now",
   "receiveHow": "Receive how",
   "receiveLightning": "Lightning",
   "receiveOnChain": "On-chain",
@@ -862,6 +859,7 @@ export const appEn = {
 };
 
 export const appDa: Record<keyof typeof appEn, string> = {
+  "iosStorePersonOnly": "Denne iOS-version understøtter kun betalinger mellem to personer. Intet blev betalt.",
   "approvalSetupReason": "Touch ID-godkendelser er ikke indstillet på denne enhed. Indstil dem her for at godkende i appen. Indtil da skal din nodes ejer godkende på noden.",
   "approvalSettingsDevices": "Indstillinger → Enheder",
   "notificationGranted": "Tilladt i BitSov. macOS styrer visning og lyd. Hvis notifikationer mangler, skal du kontrollere Systemindstillinger → Notifikationer → BitSov.",
@@ -1061,10 +1059,6 @@ export const appDa: Record<keyof typeof appEn, string> = {
   "hubRefuses": "Den kan afvise at route dine betalinger. Hvis den gør det, er pengene stadig dine, og du kan lukke kanalen og flytte til en anden udbyder.",
   "hubLocked": "Mens din hjemmeboks er låst (for eksempel efter en strømafbrydelse), overvåger den ikke dine kanaler. Hvis hubben udsender en gammel kanaltilstand imens, kan du miste midler, medmindre du låser op inden for omkring et døgn. Derfor bør en hjemmeboks, der kan låses, kun have kanaler til hubben, indtil der findes et vagttårn, og du bør låse den op kort efter en genstart.",
   "hubFees": "Gebyrer: routing koster et lille gebyr pr. betaling, som vises, før du betaler.",
-  "hubReadOnce": "Læs dette, før din node åbner sin første kanal til hubben. Du kan altid læse det igen i Indstillinger → Node.",
-  "hubOpening": "Åbner kanalen…",
-  "hubConfirm": "Jeg forstår — åbn kanalen",
-  "hubNotNow": "Ikke nu",
   "receiveHow": "Modtag hvordan",
   "receiveLightning": "Lightning",
   "receiveOnChain": "På kæden",

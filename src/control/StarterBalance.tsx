@@ -1,4 +1,5 @@
 import { usePairingActivity } from '../pairingActivity';
+import { IOS_STORE_BUILD } from '../buildProfile';
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { t } from '../i18n';
 import { amount } from './format';
@@ -17,6 +18,7 @@ type Navigation = { open?: boolean; onOpen?: () => void; onHidden?: () => void }
 
 /** Gate before mounting: an unknown network/capability never triggers discovery. */
 export function StarterBalance(props: StarterBalanceProps & Navigation) {
+  if (IOS_STORE_BUILD) return null;
   const eligible = () => (props.enabled ?? (import.meta.env.VITE_STARTER_BALANCE === '1'))
     && props.network === 'signet' && props.capabilities?.includes('starter_channel_request_v1') && props.nodeId;
   return <Show when={eligible()} keyed>{nodeId => <StarterStep nodeId={nodeId} api={props.api}

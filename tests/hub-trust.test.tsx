@@ -2,7 +2,7 @@ import { t } from '../src/i18n';
 import { render } from 'solid-js/web';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from '../src/App';
-import { HubChannelConfirm, HUB_TRUST_CARDS } from '../src/control/HubTrust';
+import { HUB_TRUST_CARDS } from '../src/control/HubTrust';
 import { ControlCenter } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID } from '../src/control/sample';
 import { LockedNode } from '../src/onboarding/LockedNode';
@@ -90,57 +90,5 @@ describe('hub trust disclosure', () => {
     expect(mount.querySelector('[data-hub-trust]')).toBeNull();
     toggle(mount).click();
     expectDisclosure(mount, 2);
-  });
-});
-
-describe('first hub channel confirm step', () => {
-  it('blocks the channel open until the owner acknowledges, then only once per node', async () => {
-    const open = vi.fn(async () => {});
-    const cancel = vi.fn();
-    const node = 'cd'.repeat(32);
-    dispose = render(() => <HubChannelConfirm nodeId={node} onConfirm={open} onCancel={cancel} />, mountIn());
-
-    const dialog = mount.querySelector('[data-hub-channel-confirm]')!;
-    expect(dialog.getAttribute('role')).toBe('dialog');
-    expect(dialog.getAttribute('aria-labelledby')).toBe(dialog.querySelector('h2')!.id);
-    expectDisclosure(dialog, 2);
-    await Promise.resolve();
-    expect(open).not.toHaveBeenCalled();
-
-    mount.querySelector<HTMLButtonElement>('[data-hub-channel-cancel]')!.click();
-    expect(cancel).toHaveBeenCalledTimes(1);
-    expect(open).not.toHaveBeenCalled();
-
-    mount.querySelector<HTMLButtonElement>('[data-hub-channel-ack]')!.click();
-    await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(1));
-    dispose(); mount.remove();
-
-    const again = vi.fn(async () => {});
-    dispose = render(() => <HubChannelConfirm nodeId={node.toUpperCase()} onConfirm={again} onCancel={cancel} />, mountIn());
-    expect(mount.querySelector('[data-hub-channel-confirm]')).toBeNull();
-    await vi.waitFor(() => expect(again).toHaveBeenCalledTimes(1));
-    dispose(); mount.remove();
-
-    const other = vi.fn(async () => {});
-    dispose = render(() => <HubChannelConfirm nodeId={'ef'.repeat(32)} onConfirm={other} onCancel={cancel} />, mountIn());
-    expect(mount.querySelector('[data-hub-channel-confirm]')).not.toBeNull();
-    await Promise.resolve();
-    expect(other).not.toHaveBeenCalled();
-  });
-
-  it('remembers the acknowledgement across restarts of the app', async () => {
-    const node = '12'.repeat(32);
-    dispose = render(() => <HubChannelConfirm nodeId={node} onConfirm={async () => {}} onCancel={() => {}} />, mountIn());
-    mount.querySelector<HTMLButtonElement>('[data-hub-channel-ack]')!.click();
-    expect(localStorage.getItem(`bitsov.hub-channel-ack.v1.${node}`)).toBe('accepted');
-  });
-
-  it('shows a failed open without losing the acknowledgement', async () => {
-    const node = '34'.repeat(32);
-    dispose = render(() => <HubChannelConfirm nodeId={node} onConfirm={() => Promise.reject('The hub is offline.')} onCancel={() => {}} />, mountIn());
-    mount.querySelector<HTMLButtonElement>('[data-hub-channel-ack]')!.click();
-    await vi.waitFor(() => expect(mount.querySelector('[data-soft-error] [role="alert"]')).not.toBeNull());
-    expect(localStorage.getItem(`bitsov.hub-channel-ack.v1.${node}`)).toBe('accepted');
-    expect(mount.querySelector<HTMLButtonElement>('[data-hub-channel-ack]')!.disabled).toBe(false);
   });
 });

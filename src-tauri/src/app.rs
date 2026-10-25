@@ -4242,6 +4242,7 @@ async fn payments_overview(
 }
 
 /// Read-only discovery, scoped to the node identity the renderer is showing.
+#[cfg(not(ios_store))]
 async fn read_starter_current(state: &NodeState, node_id: &str) -> Result<bitsov_app::starter::Status, String> {
     require_starter_build()?;
     read_starter_current_enabled(state, node_id).await
@@ -4250,17 +4251,20 @@ async fn read_starter_current(state: &NodeState, node_id: &str) -> Result<bitsov
 
 // Private enabled paths let boundary tests exercise both modes without mutating
 // process environment. IPC always enters through the build-gated wrappers.
+#[cfg(not(ios_store))]
 fn require_starter_build() -> Result<(), String> {
     if option_env!("VITE_STARTER_BALANCE") == Some("1") { Ok(()) }
     else { Err("Starter balance is disabled in this build.".into()) }
 }
 
+#[cfg(not(ios_store))]
 async fn read_starter_current_enabled(state: &NodeState, node_id: &str) -> Result<bitsov_app::starter::Status, String> {
     let _change = state.remote_change.lock().await;
     read_starter_on_connection(state, node_id).await
 }
 
 // Caller holds remote_change across discovery, auth refresh, dispatch and reply.
+#[cfg(not(ios_store))]
 async fn read_starter_on_connection(state: &NodeState, node_id: &str) -> Result<bitsov_app::starter::Status, String> {
     let overview = read_node_overview(state).await?;
     if overview.node_id != node_id || overview.network.as_deref() != Some("signet")
@@ -4271,6 +4275,7 @@ async fn read_starter_on_connection(state: &NodeState, node_id: &str) -> Result<
 }
 
 /// Receive scope only. Never enter the spend/owner-approval flow or accept amounts.
+#[cfg(not(ios_store))]
 async fn do_starter_request(
     state: &NodeState, node_id: &str, request_id: &str,
 ) -> Result<bitsov_app::starter::Status, String> {
@@ -4279,6 +4284,7 @@ async fn do_starter_request(
         .map_err(|_| "Could not confirm the starter balance request.".into())
 }
 
+#[cfg(not(ios_store))]
 async fn do_starter_request_enabled(
     state: &NodeState, node_id: &str, request_id: &str,
 ) -> Result<bitsov_app::starter::Status, String> {
@@ -4311,6 +4317,7 @@ async fn do_starter_request_enabled(
     decode(bitsov_app::starter::PATH, status, &body)
 }
 
+#[cfg(not(ios_store))]
 #[tauri::command(rename_all = "snake_case")]
 async fn starter_current(
     window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, node_id: String,
@@ -4320,6 +4327,7 @@ async fn starter_current(
     read_starter_current(state.inner(), &node_id).await
 }
 
+#[cfg(not(ios_store))]
 #[tauri::command(rename_all = "snake_case")]
 async fn starter_request(
     window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, node_id: String, request_id: String,
@@ -6025,6 +6033,7 @@ async fn read_room_quote(state: &NodeState, room_id: &str) -> Result<act::RoomQu
 }
 
 async fn read_room_quote_with_status(state: &NodeState, room_id: &str, status: Option<&serde_json::Value>) -> Result<act::RoomQuote, String> {
+    bitsov_app::store_profile::require_individual(false).map_err(|e| e.message)?;
     let room = control::room_id(room_id)?;
     let own_id = state.node_id.lock().unwrap().clone().unwrap_or_default();
     let own_id = if own_id.is_empty() { fetch_node_id(state).await? } else { own_id };
@@ -6239,6 +6248,7 @@ async fn do_message_send_inner(
     first_contact_msat: Option<u64>,
     conversation: bool,
 ) -> Result<act::SendReceipt, ActionError> {
+    bitsov_app::store_profile::require_individual(!is_room && !act::is_room_chat(plaintext))?;
     let existing_operation = pending_operation_id(state).unwrap_or_default();
     let result = async {
     let target = if is_room { control::room_id(recipient) } else { control::node_id(recipient) }.map_err(ActionError::invalid)?;
@@ -8167,6 +8177,7 @@ async fn budget_resume(
 }
 
 /// What one message to a room costs: each member's own price, summed.
+#[cfg(not(ios_store))]
 #[tauri::command(rename_all = "snake_case")]
 async fn room_quote(
     window: WebviewWindow<impl tauri::Runtime>,
@@ -8313,6 +8324,7 @@ async fn call_signal(
 }
 
 /// What one porch read of this contact costs, before anything is paid. Read-only.
+#[cfg(not(ios_store))]
 #[tauri::command(rename_all = "snake_case")]
 async fn porch_quote(
     window: WebviewWindow<impl tauri::Runtime>,
@@ -8326,6 +8338,7 @@ async fn porch_quote(
 }
 
 /// `POST /browse/fetch`: one paid read of a contact's card or page.
+#[cfg(not(ios_store))]
 #[tauri::command(rename_all = "snake_case")]
 async fn porch_read(
     window: WebviewWindow<impl tauri::Runtime>,
@@ -8340,6 +8353,7 @@ async fn porch_read(
 }
 
 /// `GET /browse/cards`: the verified cards this node holds. Never pays.
+#[cfg(not(ios_store))]
 #[tauri::command(rename_all = "snake_case")]
 async fn porch_cards(
     window: WebviewWindow<impl tauri::Runtime>,
@@ -9211,7 +9225,9 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             first_contact_status,
             first_contact_cancel,
             payments_overview,
+            #[cfg(not(ios_store))]
             starter_current,
+            #[cfg(not(ios_store))]
             starter_request,
             energy_read,
             membrane_read,
@@ -9243,6 +9259,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             message_send,
             message_retry,
             spend_dismiss_undelivered,
+            #[cfg(not(ios_store))]
             room_quote,
             invoice_create,
             invoice_amount,
@@ -9259,8 +9276,11 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             call_audio_session,
             call_quote,
             call_signal,
+            #[cfg(not(ios_store))]
             porch_quote,
+            #[cfg(not(ios_store))]
             porch_read,
+            #[cfg(not(ios_store))]
             porch_cards,
             ai_read,
             ai_providers,
@@ -10654,6 +10674,7 @@ mod control_act_tests {
     //! spend window is checked before any request, bodies are exact, a node
     //! refusal locks the window, and the owner-grant path on a paired node.
     include!("add_device_tests.rs");
+    #[cfg(not(ios_store))]
     include!("starter_tests.rs");
     #[tokio::test]
     async fn rc7_and_malformed_capabilities_refuse_all_variable_sends() {
@@ -19767,6 +19788,7 @@ mod assistant_acl_tests {
     }
 
     fn handler_commands(source: &str) -> Vec<String> {
+        let source = source.replace("#[cfg(not(ios_store))]", "");
         let marker = "generate_handler![";
         let start = source.find(marker).expect("generate_handler");
         let rest = &source[start + marker.len()..];

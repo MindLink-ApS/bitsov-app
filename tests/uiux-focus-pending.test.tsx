@@ -1,9 +1,6 @@
-import { readFileSync } from 'node:fs';
-import { createSignal, Show } from 'solid-js';
 import { render } from 'solid-js/web';
 import { afterEach, expect, it, vi } from 'vitest';
 import { ControlCenter } from '../src/control/Shell';
-import { HubChannelConfirm, acknowledgeHubChannel } from '../src/control/HubTrust';
 import { escapeDepth, onEscape } from '../src/control/escapeStack';
 import { sampleSource, SAMPLE_OWN_ID } from '../src/control/sample';
 import type { Source } from '../src/control/source';
@@ -100,47 +97,6 @@ it('InfoModal lets a newer Escape layer close first', async () => {
   expect($('[data-info-modal]')).not.toBeNull();
   esc();
   expect($('[data-info-modal]')).toBeNull();
-});
-
-it.each(['Escape', 'Not now', 'confirm'])('Hub confirm focuses in and restores focus on %s without closing the layer below', async (close) => {
-  let lowerClosed = false;
-  cleanups.push(onEscape(() => { lowerClosed = true; }));
-  const [open, setOpen] = createSignal(false);
-  dispose = render(() => <>
-    <button data-opener onClick={() => setOpen(true)}>Open channel</button>
-    <Show when={open()}><HubChannelConfirm nodeId={`focus-${close}`} onCancel={() => setOpen(false)} onConfirm={() => { setOpen(false); }} /></Show>
-  </>, mountIn());
-  const opener = $('[data-opener]');
-  opener.focus();
-  opener.click();
-  await tick();
-  expect(document.activeElement).toBe($('[data-hub-channel-confirm]'));
-  if (close === 'Escape') esc();
-  else $(close === 'Not now' ? '[data-hub-channel-cancel]' : '[data-hub-channel-ack]').click();
-  await tick();
-  expect($('[data-hub-channel-confirm]')).toBeNull();
-  expect(document.activeElement).toBe(opener);
-  expect(lowerClosed).toBe(false);
-});
-
-it('an already acknowledged hub opens without taking focus or registering an Escape layer', async () => {
-  acknowledgeHubChannel('focus-acknowledged');
-  const [open, setOpen] = createSignal(false);
-  dispose = render(() => <>
-    <button data-opener onClick={() => setOpen(true)}>Open channel</button>
-    <Show when={open()}><HubChannelConfirm nodeId="focus-acknowledged" onCancel={() => setOpen(false)} onConfirm={() => { setOpen(false); }} /></Show>
-  </>, mountIn());
-  $('[data-opener]').focus();
-  $('[data-opener]').click();
-  await tick();
-  expect($('[data-hub-channel-confirm]')).toBeNull();
-  expect(document.activeElement).toBe($('[data-opener]'));
-  expect(escapeDepth()).toBe(0);
-});
-
-it('does not suppress the Hub confirm focus outline', () => {
-  const css = readFileSync('src/styles.css', 'utf8');
-  expect(css).not.toMatch(/\.hub-channel-confirm:focus\s*\{[^}]*outline:\s*(?:none|0)/);
 });
 
 it('an incoming call focuses the call panel once, without refocusing when the answer price arrives', async () => {

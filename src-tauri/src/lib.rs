@@ -7,6 +7,7 @@
 extern crate self as bitsov_app;
 
 pub mod act;
+pub mod store_profile;
 pub mod format;
 pub mod budget;
 pub mod grant;
@@ -14,6 +15,7 @@ pub mod introduction;
 pub mod front_door;
 pub mod porch;
 pub mod sponsor;
+#[cfg(not(ios_store))]
 pub mod starter;
 pub mod ai;
 pub mod spend_journal;
