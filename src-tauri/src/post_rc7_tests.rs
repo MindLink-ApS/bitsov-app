@@ -261,6 +261,52 @@ async fn restored_live_identity_clears_bootstrap_view() {
 }
 
 #[cfg(unix)]
+#[test]
+fn password_delivery_to_an_exited_child_preserves_its_refusal() {
+    for diagnostic in [
+        "Error: refusing to start (identity_without_marker)",
+        "Error: pricing.web_content_msat must be at least 1000 msat (1 sat)",
+    ] {
+        let state = NodeState::default();
+        let child = state.spawn_child(std::process::Command::new("/bin/sh")
+            .args(["-c", "printf '%s\\n' \"$1\" >&2; exit 1", "mock-node", diagnostic])
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())).unwrap();
+        // Unlike wait(), try_wait() preserves our stdin handle so delivery
+        // hits a real broken pipe after exit, independent of scheduling.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "child did not exit");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(child.try_wait().unwrap().unwrap().code(), Some(1));
+        deliver_node_password(&child, supervisor_password(Path::new("."), false).unwrap()).unwrap();
+        let mut stderr = String::new();
+        child.take_stderr().unwrap().read_to_string(&mut stderr).unwrap();
+        assert_eq!(stderr, format!("{diagnostic}\n"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn password_delivery_failure_stops_a_running_child() {
+    let state = NodeState::default();
+    let child = state.spawn_child(std::process::Command::new("/bin/sh")
+        .args(["-c", "exec 0<&-; printf 'ready\\n'; exec sleep 30"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())).unwrap();
+    let mut ready = String::new();
+    std::io::BufReader::new(child.take_stdout().unwrap()).read_line(&mut ready).unwrap();
+    assert_eq!(ready, "ready\n");
+    assert!(child.try_wait().unwrap().is_none());
+    assert_eq!(
+        deliver_node_password(&child, supervisor_password(Path::new("."), false).unwrap()).unwrap_err(),
+        "The seed password pipe failed; the node was stopped."
+    );
+    assert!(child.try_wait().unwrap().is_some());
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn supervised_refusal_waits_for_consent_then_repairs_and_starts_normally() {
     use std::os::unix::fs::PermissionsExt;
@@ -271,6 +317,7 @@ async fn supervised_refusal_waits_for_consent_then_repairs_and_starts_normally()
     std::fs::write(&program, format!(r#"#!/bin/sh
 printf '%s\n' "$1" >> '{}'
 if [ "$1" = repair ]; then touch '{}'; exit 0; fi
+cat >/dev/null
 if [ -f '{}' ]; then exec sleep 30; fi
 printf '%s\n' 'Error: refusing to start: missing marker (identity_and_state_without_marker). Repair: konsensus repair mark-initialized --confirm' >&2
 exit 1
@@ -390,7 +437,7 @@ async fn price_floor_refusal_is_only_offered_after_failed_stderr_exit() {
         let program = dir.path().join("mock-node");
         let config = dir.path().join("konsensus.toml");
         let original = supervisor_config(&config, Some(include_str!("../tests/fixtures/rc7-pricing.toml")));
-        std::fs::write(&program, format!("#!/bin/sh\nprintf '%s\\n' '{diagnostic}' >{output}\nexit {exit}\n")).unwrap();
+        std::fs::write(&program, format!("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{diagnostic}' >{output}\nexit {exit}\n")).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut state = NodeState::default();
         state.seed_password_loader = supervisor_password;
@@ -460,6 +507,7 @@ async fn encrypted_retained_node_requires_two_separate_consents_then_authenticat
     std::fs::write(&program, format!(r#"#!/bin/sh
 printf '%s\n' "$1" >> '{}'
 if [ "$1" = repair ]; then touch '{}'; exit 0; fi
+cat >/dev/null
 if [ ! -f '{}' ]; then
   printf '%s\n' 'Error: refusing to start (identity_without_marker)' >&2
   exit 1

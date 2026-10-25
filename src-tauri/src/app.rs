@@ -752,6 +752,19 @@ fn sidecar_path(name: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+#[cfg(all(desktop, not(feature = "mobile")))]
+fn deliver_node_password(child: &SharedChild, password: zeroize::Zeroizing<Vec<u8>>) -> Result<(), String> {
+    // A node may refuse startup before reading stdin. If it exited, let
+    // supervision drain its refusal diagnostic and offer the repair consent.
+    if owner_password::deliver(child.take_stdin(), password).is_err()
+        && !matches!(child.try_wait(), Ok(Some(_)))
+    {
+        stop_supervised_node(child, Duration::from_secs(1));
+        return Err("The seed password pipe failed; the node was stopped.".into());
+    }
+    Ok(())
+}
+
 /// Start the node and take ownership of the process.
 ///
 /// We spawn through `SharedChild` rather than the shell plugin (app #16 review). The
@@ -802,12 +815,7 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
     let routing_policy = configured_routing_policy(config);
     let network = configured_network(config);
     let child = state.spawn_child(&mut cmd)?;
-    {
-        if owner_password::deliver(child.take_stdin(), password).is_err() {
-            stop_supervised_node(&child, Duration::from_secs(1));
-            return Err("The seed password pipe failed; the node was stopped.".into());
-        }
-    }
+    deliver_node_password(&child, password)?;
     *state.room_routing_policy.lock().unwrap() = routing_policy;
     *state.configured_network.lock().unwrap() = network;
 
