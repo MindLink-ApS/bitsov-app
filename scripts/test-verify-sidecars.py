@@ -202,6 +202,25 @@ class SidecarTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertFalse((empty / "private-keys-v1.d").exists())
 
+    def test_key_import_works_when_mkdir_cannot_set_permissions(self):
+        # Git Bash can create a private temporary directory, but `mkdir -m`
+        # fails on the Windows runner. Keep the real GPG/signature checks.
+        empty = self.root / "empty-keyring"
+        empty.mkdir(mode=0o700)
+        self.env["GNUPGHOME"] = str(empty)
+        mkdir = self.root / "fakebin/mkdir"
+        mkdir.write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = -m ]; then\n'
+            '  echo "mkdir: cannot change permissions" >&2\n'
+            '  exit 1\n'
+            'fi\n'
+            'exec /bin/mkdir "$@"\n')
+        mkdir.chmod(0o755)
+        result = self.run_verify()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertFalse((empty / "private-keys-v1.d").exists())
+
     def test_tauri_hook_refuses_mismatch_and_accepts_verified_binary(self):
         config = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text())
         hook = config["build"].get("beforeBundleCommand")
