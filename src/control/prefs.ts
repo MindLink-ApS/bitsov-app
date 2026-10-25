@@ -1,6 +1,7 @@
 /** UI preferences: theme and BTC/sats display. Local only; no host calls. */
 
 import { createRoot, createSignal } from 'solid-js';
+import type { NodeOverview } from './types';
 
 export type ThemePref = 'system' | 'light' | 'dark';
 export type Denom = 'sats' | 'btc';
@@ -79,12 +80,12 @@ export function watchSystemTheme() {
   return () => mq.removeEventListener?.('change', sync);
 }
 
-// ---- calls: STUN (your own node by default) ----------------------------------
+// ---- calls: STUN (as reported by your node) ----------------------------------
 //
 // Stored choice: absent = default, 'off' = the owner turned STUN off, or the
-// owner's own stun: URL. The default is the paired node's own STUN responder
-// when it reports a public stun_url (no third party). Any other server is the
-// owner's own explicit choice; the app ships none (charter gate G2).
+// owner's chosen stun: URL. The default comes from owner-only /status: the
+// node's own responder or the server configured by its owner. The app ships
+// no STUN server of its own (charter gate G2).
 
 const STUN_KEY = 'bitsov.stun';
 const STUN_OFF = 'off';
@@ -99,13 +100,15 @@ function readStun(): string {
 
 let stunSignal: (() => string) | null = null;
 let setStunSignal: ((v: string) => void) | null = null;
-let nodeStunSignal: (() => string | null) | null = null;
-let setNodeStunSignal: ((v: string | null) => void) | null = null;
+type NodeStunSource = NonNullable<NodeOverview['stun_source']>;
+type NodeStun = { url: string; source: NodeStunSource };
+let nodeStunSignal: (() => NodeStun | null) | null = null;
+let setNodeStunSignal: ((v: NodeStun | null) => void) | null = null;
 createRoot(() => {
   const [stun, setStun] = createSignal(readStun());
   stunSignal = stun;
   setStunSignal = setStun;
-  const [nodeStun, setNodeStunValue] = createSignal<string | null>(null);
+  const [nodeStun, setNodeStunValue] = createSignal<NodeStun | null>(null);
   nodeStunSignal = nodeStun;
   setNodeStunSignal = setNodeStunValue;
 });
@@ -115,13 +118,18 @@ const stunChoice = () => stunSignal?.() ?? readStun();
 export const stunPref = () => (stunChoice() === STUN_OFF ? '' : stunChoice());
 /** The owner turned STUN off: calls use host candidates only, no default. */
 export const stunOff = () => stunChoice() === STUN_OFF;
-/** The paired node's own validated stun: URL, when it reports one. */
-export const nodeStun = () => nodeStunSignal?.() ?? null;
-export function setNodeStun(url: string | null) { setNodeStunSignal?.(url); }
-/** What calls actually use: the owner's choice, else their own node, else none. */
+/** The validated STUN URL and source from the paired node's owner-only status. */
+export const nodeStun = () => nodeStunSignal?.()?.url ?? null;
+export const nodeStunSource = () => nodeStunSignal?.()?.source ?? null;
+export function setNodeStun(url: string | null, source: NodeStunSource | null = null) {
+  setNodeStunSignal?.(url && (source === 'own' || source === 'configured') ? { url, source } : null);
+}
+/** What calls actually use: the app preference, else the node's report, else none. */
 export const effectiveStun = () => stunPref() || (stunOff() ? '' : (nodeStun() ?? ''));
+export const effectiveStunSource = (): NodeStunSource | null => !effectiveStun() ? null
+  : nodeStunSource() === 'own' && effectiveStun() === nodeStun() ? 'own' : 'configured';
 
-/** Set the owner's STUN server; '' returns to the default (your own node). */
+/** Set the owner's STUN server; '' returns to the node's reported default. */
 export function setStunPref(url: string) {
   const v = url.trim();
   setStunSignal?.(v);

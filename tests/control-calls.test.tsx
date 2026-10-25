@@ -1910,6 +1910,7 @@ describe('calls in the shell', () => {
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async (c: MediaStreamConstraints) => stream(!!c.video) } });
   });
   afterEach(() => {
+    setLanguagePref('en');
     dispose?.();
     dispose = undefined;
     mount?.remove();
@@ -2991,7 +2992,7 @@ describe('calls in the shell', () => {
     input.value = 'stun:own-node.example:3478';
     input.dispatchEvent(new Event('input', { bubbles: true }));
     $<HTMLButtonElement>('[data-stun-save]')!.click();
-    await vi.waitFor(() => expect(text('[data-stun-note]')).toMatch(/own-node\.example:3478 .*sees your IP address/));
+    await vi.waitFor(() => expect(text('[data-stun-note]')).toBe('Server you chose: own-node.example:3478. That server sees your IP when you place or take a call.'));
     // The next call uses it.
     ring('audio');
     await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
@@ -3005,7 +3006,7 @@ describe('calls in the shell', () => {
 
   it('uses the node\'s own STUN responder by default (never a third party); the owner can turn it off and back on', async () => {
     const own = 'stun:mynode.example.org:3478';
-    stubHost({ node_overview: overviewWith({ stun_port: 3478, stun_url: own }) });
+    stubHost({ node_overview: overviewWith({ stun_source: 'own', stun_port: 3478, stun_url: own }) });
     await openShell();
     $<HTMLButtonElement>('[data-profile]')!.click();
     $<HTMLButtonElement>('[data-open-settings]')!.click();
@@ -3015,7 +3016,7 @@ describe('calls in the shell', () => {
     expect(localStorage.getItem('bitsov.stun')).toBeNull();
     expect($('[data-stun-own]')).toBeNull();
     // The Call button's tooltip says the same (no "No STUN server is set").
-    expect($('[data-call="audio"]')!.getAttribute('title')).toContain(`Uses the STUN server ${own} to find a route.`);
+    expect($('[data-call="audio"]')!.getAttribute('title')).toContain(`Uses your own node (${own}) to find a route.`);
     expect($('[data-call="audio"]')!.getAttribute('title')).not.toContain('No STUN server');
     // A call uses it with no setting saved.
     ring('audio');
@@ -3041,7 +3042,7 @@ describe('calls in the shell', () => {
 
   it('Off survives a reload (stored), and the owner\'s own server beats the node default', async () => {
     const own = 'stun:mynode.example.org:3478';
-    stubHost({ node_overview: overviewWith({ stun_port: 3478, stun_url: own }) });
+    stubHost({ node_overview: overviewWith({ stun_source: 'own', stun_port: 3478, stun_url: own }) });
     await openShell();
     $<HTMLButtonElement>('[data-profile]')!.click();
     $<HTMLButtonElement>('[data-open-settings]')!.click();
@@ -3053,14 +3054,14 @@ describe('calls in the shell', () => {
     // A real reload: fresh module state reads the stored choice; the node default does not come back.
     vi.resetModules();
     const fresh = await import('../src/control/prefs');
-    fresh.setNodeStun(own);
+    fresh.setNodeStun(own, 'own');
     expect(fresh.stunOff()).toBe(true);
     expect(fresh.effectiveStun()).toBe('');
     // Control: with nothing stored, a fresh module falls back to the node default (so the read above is real).
     localStorage.removeItem('bitsov.stun');
     vi.resetModules();
     const clean = await import('../src/control/prefs');
-    clean.setNodeStun(own);
+    clean.setNodeStun(own, 'own');
     expect(clean.stunOff()).toBe(false);
     expect(clean.effectiveStun()).toBe(own);
     localStorage.setItem('bitsov.stun', 'off');
@@ -3079,6 +3080,70 @@ describe('calls in the shell', () => {
     ring('audio');
     await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
     expect(FakePc.made[0].config.iceServers).toEqual([{ urls: 'stun:other.example:3478' }]);
+  });
+
+  it.each([undefined, 3478, 5349])('uses the configured STUN server with honest bilingual labels (own port %s)', async (port) => {
+    const url = 'stun:chosen.example.org:5349';
+    stubHost({ node_overview: overviewWith({ stun_source: 'configured', stun_port: port, stun_url: url }) });
+    await openShell();
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    $<HTMLButtonElement>('[data-open-settings]')!.click();
+    $<HTMLButtonElement>('[data-tab="general"]')!.click();
+    const en = 'Server you chose: chosen.example.org:5349. That server sees your IP when you place or take a call.';
+    const da = 'Server, du har valgt: chosen.example.org:5349. Den server ser din IP-adresse, når du foretager eller modtager et opkald.';
+    await vi.waitFor(() => expect(text('[data-stun-note]')).toBe(en));
+    expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('configured');
+    expect($('[data-stun-own]')).toBeNull();
+    expect($('[data-stun-own-hint]')).toBeNull();
+    expect(localStorage.getItem('bitsov.stun')).toBeNull();
+    for (const [lang, label] of [['da', da], ['en', en]] as const) {
+      setLanguagePref(lang);
+      await vi.waitFor(() => expect(text('[data-stun-note]')).toBe(label));
+      expect($('[data-call="audio"]')!.getAttribute('title')).toContain(label);
+      expect(text('[data-call-settings]')).not.toMatch(/No third party|ingen tredjepart|your own node|din egen node/i);
+      $<HTMLButtonElement>('[data-call="audio"]')!.click();
+      expect(text('[data-call-confirm-box]')).toContain(label);
+      $<HTMLButtonElement>('[data-call-confirm-cancel]')!.click();
+    }
+    ring('audio');
+    await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
+    expect(FakePc.made[0].config.iceServers).toEqual([{ urls: url }]);
+  });
+
+  it.each([
+    { source: undefined, url: 'stun:node.example.org:3478' },
+    { source: null, url: 'stun:node.example.org:3478' },
+    { source: undefined, url: undefined },
+    { source: null, url: undefined },
+  ])('ignores node STUN without a source and keeps the warning (%j)', async ({ source, url }) => {
+    // The host drops an unclassified URL; cover that projected shape too.
+    stubHost({ node_overview: overviewWith({ stun_source: source, stun_port: 3478, stun_url: url }) });
+    await openShell();
+    expect($('[data-call="audio"]')!.getAttribute('title')).toContain('No STUN server is set');
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    $<HTMLButtonElement>('[data-open-settings]')!.click();
+    $<HTMLButtonElement>('[data-tab="general"]')!.click();
+    await vi.waitFor(() => expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('none'));
+    expect(text('[data-stun-note]')).toMatch(/No STUN server: calls contact no third party/);
+    expect($('[data-stun-own]')).toBeNull();
+    expect($('[data-stun-own-hint]')).toBeNull();
+    ring('audio');
+    await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
+    expect(FakePc.made[0].config.iceServers).toEqual([]);
+    expect($('[data-call-network-note]')).not.toBeNull();
+  });
+
+  it('labels own STUN in Danish in Settings and the call-cost line', async () => {
+    stubHost({ node_overview: overviewWith({ stun_source: 'own', stun_port: 3478, stun_url: 'stun:node.example.org:3478' }) });
+    await openShell();
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    $<HTMLButtonElement>('[data-open-settings]')!.click();
+    $<HTMLButtonElement>('[data-tab="general"]')!.click();
+    setLanguagePref('da');
+    await vi.waitFor(() => expect(text('[data-stun-note]')).toContain('din egen node'));
+    expect($('[data-call="audio"]')!.getAttribute('title')).toContain('din egen node');
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    expect(text('[data-call-confirm-box]')).toContain('din egen node');
   });
 
   it('an unusable answer from their app is not a connectivity failure: no relay advice', async () => {
@@ -3108,7 +3173,7 @@ describe('calls in the shell', () => {
   });
 
   it('never offers a malformed or relay URL, and explains a responder without a public address', async () => {
-    stubHost({ node_overview: overviewWith({ stun_port: 3478, stun_url: 'turn:mynode.example.org:3478' }) });
+    stubHost({ node_overview: overviewWith({ stun_source: 'own', stun_port: 3478, stun_url: 'turn:mynode.example.org:3478' }) });
     await openShell();
     $<HTMLButtonElement>('[data-profile]')!.click();
     $<HTMLButtonElement>('[data-open-settings]')!.click();
