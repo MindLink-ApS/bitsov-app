@@ -32,7 +32,8 @@ cat >&2 <<BANNER
   sha256:   $(shasum -a 256 "$BITSOV_DEV_SIDECAR" | cut -d' ' -f1)
   version:  $("$BITSOV_DEV_SIDECAR" --version 2>/dev/null || echo unknown)
   data dir: $BITSOV_DEV_DATA_DIR
-  This node is a MAINNET node. Fund it only with money you can afford to lose.
+  Signet-only beta: configure signet before launch (docs/DEV_NODE_FROM_MAIN.md).
+  This debug launcher does not enforce the network selection.
 ================================================================================
 BANNER
 

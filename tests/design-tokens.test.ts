@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-// Ember 2.0 tokens (design/CHOICES.md): text meets WCAG AA on every surface it
+// Ember 2.0 tokens: text meets WCAG AA on every surface it
 // sits on, in both themes, and the bundled faces are the only fonts loaded.
 
 const css = readFileSync(join(__dirname, '../src/styles.css'), 'utf8');

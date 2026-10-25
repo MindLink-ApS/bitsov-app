@@ -4,6 +4,7 @@ import { createEffect, createSignal, Show } from 'solid-js';
 import { setUnlockRemembered, unlockRemembered } from './unlockMemory';
 import { hideLockedHubTrust, HubTrustInfo, lockedHubTrustHidden } from '../control/HubTrust';
 import { appPlatform, deviceWords, isMobilePlatform, type AppPlatform } from '../platform';
+import { onboardingDiagnostic } from './pairing';
 
 /** Prefer the runtime platform; retain the legacy mobile prop for Android callers. */
 const platformFor = (props: { platform?: AppPlatform; mobile?: boolean }) =>
@@ -47,6 +48,10 @@ export function LockedNode(props: {
   usePairingActivity(() => busy() || typing());
   const canType = () => !!props.typedUnlockSupported && !!props.onUnlockWithPassword;
   const typedFirst = () => canType() && !remembered();
+  const displayedError = () => {
+    const message = error() || props.hostError;
+    return message ? onboardingDiagnostic(message, t('obLockedOwnerHelp')) : message;
+  };
   createEffect(() => { if (typedFirst() && props.state !== 'not-enrolled' && props.state !== 'pending-approval') setTyping(true); });
   const unlock = async () => {
     if (busy()) return;
@@ -83,7 +88,11 @@ export function LockedNode(props: {
       </Show>
       <Show when={props.state === 'not-enrolled'}>
         <p>{t('obNotOwnerYet', deviceLabel(props))}</p>
-        <p>{t('obUnlockAtBoxBefore')}{' '}<code>konsensus start --config &lt;path&gt; --owner-control</code>{t('obUnlockAtBoxAfter')}</p>
+        <p>{t('obLockedOwnerHelp')}</p>
+        <details>
+          <summary>{t('obWhatDoesThisMean')}</summary>
+          <p>{t('obLockedOwnerExplanation')}</p>
+        </details>
         <p>{t('obOnceUnlockedSettings')}{' '}{isMobilePlatform(platformFor(props)) ? t('obSetupBiometrics') : t('obSetupTouchId')}{t('obFinishAtBox')}</p>
         <button disabled>{isMobilePlatform(platformFor(props)) ? t('obSetupBiometrics') : t('obSetupTouchId')}</button>
         <p class="hint">{t('obSetupWhenUnlocked')}</p>
@@ -130,7 +139,7 @@ export function LockedNode(props: {
         <p data-unlock-attempts>{t('obAttemptsLeft', props.attemptsLeft!)}</p>
       </Show>
       <p class="hint">{t('obLockedPaymentsFail')}</p>
-      <Show when={error() || props.hostError}><p role="alert">{error() || props.hostError}</p></Show>
+      <Show when={displayedError()}><p role="alert">{displayedError()}</p></Show>
     </section>
     <HubTrustInfo level={2} initiallyOpen={!lockedHubTrustHidden()} onHide={hideLockedHubTrust} />
   </div>;
@@ -216,9 +225,7 @@ export function PendingApproval(props: {
   };
   return <div class="approval" data-device="pending" data-pending-approval>
     <p>{t('obCompareFingerprint', deviceLabel(props))} <code data-device-fingerprint>{props.pending.fingerprint}</code></p>
-    <p><strong>{t('obAtBox')}</strong>{t('obAtBoxBeforeCommand')}{' '}<code>--owner-control</code>{t('obRunCommand')}</p>
-    <code class="address" data-device-owner-action>{props.pending.owner_action}</code>
-    <p>{t('obFingerprintCheck')}</p>
+    <p><strong>{t('obAtBox')}</strong>{' '}{t('obBoxApprovalHelp')}</p>
     <p><strong>{t('obAnotherOwnerDevice')}</strong>{t('obAnotherOwnerInstructions')}</p>
     <button type="button" class="link" data-device-cancel disabled={busy() || !props.onCancel} onClick={() => void cancel()}>{t('obCancel')}</button>
     <Show when={error()}><p role="alert">{error()}</p></Show>

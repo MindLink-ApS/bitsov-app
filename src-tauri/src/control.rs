@@ -239,9 +239,12 @@ pub struct NodeStatusResponse {
     /// UDP port of the node's own STUN responder (`[calls] stun_listen`); absent when off.
     #[serde(default)]
     pub stun_port: Option<u16>,
-    /// `stun:host:port` for it at the node's public host; absent without one.
+    /// `stun:host:port` for the own responder or the owner's configured server.
     #[serde(default)]
     pub stun_url: Option<String>,
+    /// Owner-only `/status`: `own`, `configured`, or absent without a server.
+    #[serde(default)]
+    pub stun_source: Option<String>,
     /// Where the node's seed lives (node REMOTE-SIGNER.md §2); absent before it.
     #[serde(default)]
     pub custody_mode: Option<String>,
@@ -568,13 +571,16 @@ pub struct NodeOverview {
     pub chain_backend: Option<String>,
     /// Known capabilities only (see [`KNOWN_CAPABILITIES`]).
     pub capabilities: Vec<String>,
-    /// The node's own STUN responder, if it runs. Only ever *offered* in
-    /// Settings; the owner confirms before calls use it.
+    /// UDP port of the node's own responder, if running. A configured server
+    /// can use a different port or be available without an own responder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stun_port: Option<u16>,
-    /// Its URL, only when well-formed and naming the reported port.
+    /// Validated URL; only an own responder must name the reported port.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stun_url: Option<String>,
+    /// Known source from owner-only `/status`; absent on older nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stun_source: Option<&'static str>,
     /// Node-reported Bitcoin network, normalized for invoice comparison.
     /// Older local LDK nodes fall back to their host configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -637,11 +643,17 @@ pub fn ldk_network_name(configured: &str) -> Option<&'static str> {
     }
 }
 
-/// The node's `stun_url`, kept only when it is a plain `stun:host:port` (no
-/// TURN, credentials or query; IPv6 in brackets) on the port the node reported.
-pub fn own_stun_url(url: Option<&str>, port: Option<u16>) -> Option<String> {
-    let (url, port) = (url?.trim(), port?);
-    let host = url.strip_prefix("stun:")?.strip_suffix(&format!(":{port}"))?;
+/// Owner status's plain `stun:host:port` (no TURN, credentials or query;
+/// IPv6 in brackets). Only `own` must match the node's responder port.
+pub fn node_stun_url(url: Option<&str>, port: Option<u16>, source: Option<&str>) -> Option<String> {
+    let url = url?.trim();
+    let (host, url_port) = url.strip_prefix("stun:")?.rsplit_once(':')?;
+    let parsed_port = url_port.parse::<u16>().ok().filter(|p| *p != 0)?;
+    match source? {
+        "own" if Some(parsed_port) == port && url_port == port?.to_string() => {},
+        "configured" => {},
+        _ => return None,
+    }
     let ok = match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
         Some(v6) => v6.parse::<std::net::Ipv6Addr>().is_ok(),
         None => {
@@ -657,6 +669,11 @@ pub fn own_stun_url(url: Option<&str>, port: Option<u16>) -> Option<String> {
 
 impl NodeOverview {
     pub fn from_status(status: NodeStatusResponse, read_at: u64) -> Self {
+        let stun_source = match status.stun_source.as_deref() {
+            Some("own") => Some("own"),
+            Some("configured") => Some("configured"),
+            _ => None,
+        };
         Self {
             money_ready: status.money_ready,
             readiness: status.readiness,
@@ -672,8 +689,9 @@ impl NodeOverview {
             lightning_backend: status.lightning_backend,
             chain_backend: status.chain_backend,
             capabilities: known_capabilities(&status.api_capabilities),
-            stun_url: own_stun_url(status.stun_url.as_deref(), status.stun_port),
+            stun_url: node_stun_url(status.stun_url.as_deref(), status.stun_port, stun_source),
             stun_port: status.stun_port,
+            stun_source,
             network: status.network.as_deref().and_then(ldk_network_name).map(str::to_string),
             // Provenance is applied by the caller (`verified_local_node`); raw
             // report only, so tests can project both sides.
@@ -1649,7 +1667,7 @@ mod tests {
     #[test]
     fn own_stun_is_projected_only_when_well_formed() {
         let read = |extra: &str| {
-            let s: NodeStatusResponse = serde_json::from_str(&format!(r#"{{"status":"ok","node_id":"x"{extra}}}"#)).unwrap();
+            let s: NodeStatusResponse = serde_json::from_str(&format!(r#"{{"status":"ok","node_id":"x","stun_source":"own"{extra}}}"#)).unwrap();
             serde_json::to_value(NodeOverview::from_status(s, 1)).unwrap()
         };
         let off = read("");
@@ -1658,12 +1676,53 @@ mod tests {
         assert_eq!(port_only["stun_port"], 3478);
         assert!(port_only.get("stun_url").is_none());
         assert_eq!(read(r#","stun_port":3478,"stun_url":"stun:node.example.org:3478""#)["stun_url"], "stun:node.example.org:3478");
+        assert_eq!(read(r#","stun_port":3478,"stun_url":"stun:node.example.org:3478""#)["stun_source"], "own");
         assert_eq!(read(r#","stun_port":3478,"stun_url":"stun:[2001:db8::1]:3478""#)["stun_url"], "stun:[2001:db8::1]:3478");
         for bad in ["turn:node.example.org:3478", "stun:node.example.org:9999", "stun:u:p@h:3478", "stun:h:3478?transport=tcp",
             "stun:-h:3478", "stun::3478", "stun:[not-v6]:3478", "stun:node.example.org"] {
             assert!(read(&format!(r#","stun_port":3478,"stun_url":"{bad}""#)).get("stun_url").is_none(), "{bad}");
         }
         assert!(read(r#","stun_url":"stun:node.example.org:3478""#).get("stun_url").is_none(), "URL without a port is ignored");
+    }
+
+    #[test]
+    fn configured_stun_keeps_its_address_and_port_without_an_own_responder() {
+        for port in [None, Some(3478), Some(5349)] {
+            for url in ["stun:chosen.example.org:5349", "stun:[2001:db8::1]:5349"] {
+                let status = serde_json::from_value(serde_json::json!({
+                    "status": "ok", "node_id": "x", "stun_source": "configured", "stun_url": url, "stun_port": port,
+                })).unwrap();
+                let view = serde_json::to_value(NodeOverview::from_status(status, 1)).unwrap();
+                assert_eq!(view["stun_url"], url);
+                assert_eq!(view["stun_source"], "configured");
+            }
+        }
+    }
+
+    #[test]
+    fn missing_null_or_unknown_stun_source_offers_no_stun() {
+        for source in [None, Some(serde_json::Value::Null), Some(serde_json::json!("unknown"))] {
+            let mut wire = serde_json::json!({
+                "status": "ok", "node_id": "x", "stun_port": 3478, "stun_url": "stun:node.example.org:3478",
+            });
+            if let Some(source) = source { wire["stun_source"] = source; }
+            let status = serde_json::from_value(wire).unwrap();
+            let view = serde_json::to_value(NodeOverview::from_status(status, 1)).unwrap();
+            assert!(view.get("stun_url").is_none());
+            assert!(view.get("stun_source").is_none());
+        }
+    }
+
+    #[test]
+    fn configured_stun_rejects_malformed_urls() {
+        for url in ["turn:chosen.example.org:5349", "stun:u:p@h:5349", "stun:h:5349?transport=tcp",
+            "stun:-h:5349", "stun::5349", "stun:[not-v6]:5349", "stun:chosen.example.org", "stun:h:0", "stun:h:65536"] {
+            let status = serde_json::from_value(serde_json::json!({
+                "status": "ok", "node_id": "x", "stun_source": "configured", "stun_url": url,
+            })).unwrap();
+            let view = serde_json::to_value(NodeOverview::from_status(status, 1)).unwrap();
+            assert!(view.get("stun_url").is_none(), "{url}");
+        }
     }
 
     #[test]

@@ -214,8 +214,10 @@ export type NodeOverview = {
   capabilities?: string[];
   /** UDP port of the node's own STUN responder (`[calls] stun_listen`); absent when off. */
   stun_port?: number | null;
-  /** `stun:host:port` for it at the node's public host; absent without one. Offered, never applied. */
+  /** Validated `stun:host:port` from owner-only `/status`; absent without a known source. */
   stun_url?: string | null;
+  /** Own responder or the owner's configured server; absent when neither is available. */
+  stun_source?: 'own' | 'configured' | null;
   /** Node-reported Bitcoin network, with local LDK config fallback; absent when unknown. */
   network?: string | null;
   /** Where the node's seed lives (node REMOTE-SIGNER.md §2); absent from older nodes. */
@@ -758,6 +760,7 @@ export type Delivery = { status: 'accepted' | 'sent' | 'queued' | 'delivered' | 
 
 /** A local, inline artifact in a track: the result of an action taken there. */
 export type Artifact =
+  | { id: string; at: number; type: 'missed-call'; peer: string; media: 'audio' | 'video' }
   | { id: string; at: number; type: 'invoice'; invoice: InvoiceView }
   /** `invoice`: the bolt11 an invoice payment paid, so a request card can show it paid. */
   | { id: string; at: number; type: 'payment'; receipt: PaymentReceipt; invoice?: string }

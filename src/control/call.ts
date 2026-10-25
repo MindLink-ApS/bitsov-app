@@ -131,6 +131,8 @@ export type Phase = CallState | 'calling' | 'incoming';
 const callState = (phase: Phase): CallState => phase === 'calling' ? 'connecting' : phase === 'incoming' ? 'ringing' : phase;
 
 export type CallView = {
+  /** Stop the alert immediately while a requested decline obtains its quote. */
+  silenced?: boolean;
   phase: Phase;
   state: CallState;
   peer: string | null;
@@ -210,6 +212,7 @@ const peerEnd = (confirmed: string) => ({ record: false, confirmed }) as const;
 export const RECOVERY_CLOSING = 'Your last call is still closing. End it, then call again.';
 
 export const IDLE: CallView = {
+  silenced: false,
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
   liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, offline: false,
   close: null, stuck: null, dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null,
@@ -230,6 +233,8 @@ export type CallDeps = {
   peerConnection: (config: RTCConfiguration) => RTCPeerConnection;
   now: () => number;
   onView: (v: CallView) => void;
+  onWaiting?: (calls: CallView[]) => void;
+  onMissed?: (call: { callId: string; peer: string; media: CallMedia; at: number }) => void;
   /** iOS only: local session policy, never a signal or payment. */
   audioSession?: (live: boolean) => Promise<void>;
   onStreams: (local: MediaStream | null, remote: MediaStream | null) => void;
@@ -283,10 +288,27 @@ export function gathered(pc: RTCPeerConnection, ms: number): Promise<void> {
   });
 }
 
+type IncomingOffer = { callId: string; peer: string; media: CallMedia; at: number; sdp: string };
+
 export type CallEngine = ReturnType<typeof createCallEngine>;
 
 export function createCallEngine(deps: CallDeps) {
   let view: CallView = IDLE;
+  let incomingAt = 0;
+  const seenOffers = new Set<string>();
+  // Each waiting card owns its own signalling tally and timeout, never the live media.
+  const waiting = new Map<string, {
+    view: () => CallView;
+    receive: (m: Message, ownId: string) => Promise<void>;
+    decline: () => Promise<void>;
+    dismiss: () => void;
+    endLocal: () => void;
+    takeIncoming: () => IncomingOffer | null;
+  }>();
+  const publishWaiting = () => {
+    for (const [key, call] of waiting) if (call.view().phase === 'idle') waiting.delete(key);
+    deps.onWaiting?.([...waiting.values()].map(c => c.view()));
+  };
   let pc: RTCPeerConnection | null = null;
   let local: MediaStream | null = null;
   let remote: MediaStream | null = null;
@@ -453,6 +475,9 @@ export function createCallEngine(deps: CallDeps) {
     deps.closeAdmission?.(operationId, peer, callId).catch(() => { /* Host preserves the fence on storage failure. */ }) ?? Promise.resolve();
   /** Local teardown validates identity only; op_end_call performs node-confirmed cleanup. */
   const end = (reason: HangupReason | null, error: string | null = null, opts: { record?: boolean; endAtHost?: boolean; confirmed?: string } = {}) => {
+    if (view.phase === 'incoming' && !view.silenced && reason !== 'declined' && view.callId && view.peer) {
+      deps.onMissed?.({ callId: view.callId, peer: view.peer, media: view.media, at: incomingAt });
+    }
     const { record = true, endAtHost = true, confirmed } = opts;
     const peer = view.peer;
     const operations = [...(view.callId ? admissionOps.get(view.callId) ?? [] : [])];
@@ -796,8 +821,68 @@ export function createCallEngine(deps: CallDeps) {
     }
   };
 
+  /** Accept the ringing call: one paid answer. */
+  const accept = () => guarded(async () => {
+    if (view.phase !== 'incoming' || !offerSdp) return;
+    const callId = view.callId;
+    if (deps.authorize && !await deps.authorize()) return;
+    if (view.callId !== callId || view.phase !== 'incoming') return;
+    clearTimeout(ringTimer);
+    set({ phase: 'connecting' });
+    awaitConnect(callId!);
+    const q = await deps.quote(view.peer!);
+    if (view.callId !== callId || !active()) return;
+    if (!q.ok) { end(null, q.error.message); return; }
+    quote = q.value;
+    let conn: RTCPeerConnection;
+    try {
+      conn = await open(view.media);
+      await conn.setRemoteDescription({ type: 'offer', sdp: offerSdp });
+      await conn.setLocalDescription(await conn.createAnswer());
+      await gathered(conn, GATHER_MS);
+    } catch (error) {
+      if (view.callId !== callId || !active()) return;
+      end(null, tr('caNothingWasPaid', mediaError(error, view.media)));
+      return;
+    }
+    if (view.callId !== callId || !active()) return;
+    negotiated = true; // The peer may see the answer before our host receipt.
+    const r = await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(quote));
+    if (view.callId !== callId || !active()) return;
+    if (!r.ok) end(null, r.error.message);
+    else {
+      negotiated = true;
+      if ((view.phase as Phase) === 'connecting') awaitConnect(callId!);
+      else if ((view.phase as Phase) === 'reconnecting') void restart(conn);
+    }
+  });
+
   return {
     view: () => view,
+    /** Move an untouched waiting offer to the normal answer path after media is free. */
+    acceptWaiting: async (id: string) => {
+      if (active() || busy || deps.busy?.() || view.pendingCount || view.unknownCount || (view.close && view.close.status !== 'closed')) return;
+      const offer = waiting.get(id)?.takeIncoming();
+      if (!offer) return;
+      quote = null;
+      wireId = offer.callId;
+      admissions.add(offer.callId);
+      offerSdp = offer.sdp;
+      incomingAt = offer.at;
+      set({ ...IDLE, phase: 'incoming', peer: offer.peer, callId: offer.callId, media: offer.media, camera: offer.media === 'video' });
+      ringTimer = setTimeout(() => { if (view.callId === offer.callId && view.phase === 'incoming') end('timeout'); }, Math.max(0, RING_MS - (deps.now() - incomingAt)));
+      await accept();
+    },
+    /** Transfer without a hangup or missed record; only a pending offer is movable. */
+    takeIncoming: (): IncomingOffer | null => {
+      if (view.phase !== 'incoming' || view.silenced || busy || !view.callId || !view.peer || !offerSdp) return null;
+      const offer = { callId: view.callId, peer: view.peer, media: view.media, at: incomingAt, sdp: offerSdp };
+      teardown();
+      set(IDLE);
+      return offer;
+    },
+    declineWaiting: (id: string) => waiting.get(id)?.decline(),
+    dismissWaiting: (id: string) => { waiting.get(id)?.dismiss(); },
 
     /** Place a call. The price was shown before this is called. */
     place: (peer: string, media: CallMedia, q: CallQuote) => guarded(async (claim) => {
@@ -865,45 +950,12 @@ export function createCallEngine(deps: CallDeps) {
       }
     }),
 
-    /** Accept the ringing call: one paid answer. */
-    accept: () => guarded(async () => {
-      if (view.phase !== 'incoming' || !offerSdp) return;
-      const callId = view.callId;
-      if (deps.authorize && !await deps.authorize()) return;
-      if (view.callId !== callId || view.phase !== 'incoming') return;
-      clearTimeout(ringTimer);
-      set({ phase: 'connecting' });
-      awaitConnect(callId!);
-      const q = await deps.quote(view.peer!);
-      if (view.callId !== callId || !active()) return;
-      if (!q.ok) { end(null, q.error.message); return; }
-      quote = q.value;
-      let conn: RTCPeerConnection;
-      try {
-        conn = await open(view.media);
-        await conn.setRemoteDescription({ type: 'offer', sdp: offerSdp });
-        await conn.setLocalDescription(await conn.createAnswer());
-        await gathered(conn, GATHER_MS);
-      } catch (error) {
-        if (view.callId !== callId || !active()) return;
-        end(null, tr('caNothingWasPaid', mediaError(error, view.media)));
-        return;
-      }
-      if (view.callId !== callId || !active()) return;
-      negotiated = true; // The peer may see the answer before our host receipt.
-      const r = await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(quote));
-      if (view.callId !== callId || !active()) return;
-      if (!r.ok) end(null, r.error.message);
-      else {
-        negotiated = true;
-        if ((view.phase as Phase) === 'connecting') awaitConnect(callId!);
-        else if ((view.phase as Phase) === 'reconnecting') void restart(conn);
-      }
-    }),
+    accept,
 
     /** Decline a ringing call: one paid hangup, so the caller stops ringing. */
     decline: () => guarded(async () => {
       if (view.phase !== 'incoming') return;
+      set({ silenced: true });
       const owner = { peer: view.peer, callId: view.callId };
       const id = wireId;
       const generation = mediaGeneration;
@@ -956,6 +1008,7 @@ export function createCallEngine(deps: CallDeps) {
 
     /** End without paying anything (the window is closing). The peer's side times out. */
     endLocal: () => {
+      for (const call of waiting.values()) call.endLocal();
       // Also invalidate a preflight that has not entered Calling yet.
       if (!active()) { teardown(); return; }
       if (view.phase === 'calling') cancelled = view.callId;
@@ -1054,11 +1107,14 @@ export function createCallEngine(deps: CallDeps) {
     dismiss: () => { if (view.phase === 'ended' && view.pendingCount === 0) set(IDLE); },
 
     /** A 400-403 the node forwarded (already paid, and admitted by its call registry). */
-    receive: async (m: Message, ownId: string) => {
+    receive: async (m: Message, ownId: string): Promise<void> => {
       if (m.sender.toLowerCase() === ownId.toLowerCase()) return;
       const s = parseSignal(m.kind, m.plaintext);
       if (!s) return;
       const peer = m.sender.toLowerCase();
+      const offerKey = `${peer}:${s.call_id}`;
+      const queued = waiting.get(offerKey);
+      if (queued) { await queued.receive(m, ownId); return; }
       const ours = (pendingRestartId ?? wireId) === s.call_id && view.peer === peer;
       switch (m.kind) {
         case CALL_OFFER:
@@ -1066,9 +1122,18 @@ export function createCallEngine(deps: CallDeps) {
             await answerRestart(s);
             return;
           }
-          // A meeting leg belongs to the meeting engine. Busy: let their ring
-          // time out rather than pay to say so.
-          if (s.meeting || restartParent(s.sdp!) || active() || deps.busy?.()) return;
+          // A meeting leg belongs to the meeting engine. Ordinary offers always
+          // get a visible card, including while another call holds the microphone.
+          if (s.meeting || restartParent(s.sdp!) || seenOffers.has(offerKey)) return;
+          seenOffers.add(offerKey);
+          if (active() || deps.busy?.()) {
+            const child = createCallEngine({ ...deps, busy: () => false, onWaiting: undefined,
+              onView: publishWaiting, onStreams: () => {}, audioSession: undefined });
+            waiting.set(offerKey, child);
+            await child.receive(m, ownId);
+            return;
+          }
+          incomingAt = deps.now();
           quote = null;
           wireId = s.call_id;
           admissions.add(s.call_id);

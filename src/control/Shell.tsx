@@ -1,3 +1,5 @@
+import { IncomingCallAlerts } from './IncomingCallAlerts';
+import { createMissedCalls } from './missedCalls';
 import { createPhoneLayout, createPhoneNavigationGuard, PhoneTabs, type PhoneTab } from './PhoneShell';
 import { MediaView } from './CallMedia';
 import { createMessageNotifications, NotificationSettings } from './messageNotifications';
@@ -79,8 +81,8 @@ import {
   setStunOff,
   stunOff,
   effectiveStun,
+  effectiveStunSource,
   setNodeStun,
-  nodeStun,
   setThemePref,
   stunPref,
   themePref,
@@ -362,7 +364,8 @@ export function ControlCenter(props: Props) {
   // The node's own STUN responder, if `/status` reports one (offered in Settings).
   const ownStun = createMemo<OwnStun | null>(() => {
     const o = overview();
-    return o?.stun_port ? { port: o.stun_port, url: o.stun_url ?? null } : null;
+    return o?.stun_port && o.stun_source === 'own'
+      ? { port: o.stun_port, url: o.stun_url ?? null } : null;
   }, null, { equals: (a, b) => a?.port === b?.port && a?.url === b?.url });
   let overviewRevision = 0;
   const live = () => props.active && (props.live ?? (props.ready && !props.retryAfterSecs));
@@ -374,10 +377,11 @@ export function ControlCenter(props: Props) {
     setReadinessRefused(true);
     setOverview((old) => old ? { ...old, money_ready: false, readiness: null } : old);
   });
-  // Calls use your own node's STUN by default when it reports a valid public stun: URL (never a third party).
+  // Only owner-authenticated /status supplies the node's STUN URL and source.
   createEffect(() => {
-    const url = ownStun()?.url ?? '';
-    setNodeStun(stunServer(url).length ? url : null);
+    const o = overview();
+    const url = o?.stun_url ?? '';
+    setNodeStun(stunServer(url).length ? url : null, o?.stun_source ?? null);
   });
   onCleanup(() => setNodeStun(null));
   const [peers, setPeers] = createSignal<Peer[]>([]);
@@ -649,6 +653,7 @@ export function ControlCenter(props: Props) {
   };
 
   const ownId = () => props.ownId ?? overview()?.node_id ?? '';
+  const missedCalls = createMissedCalls(ownId);
   const peerById = createMemo(() => new Map(peers().map((p) => [p.node_id.toLowerCase(), p])));
   const caps = createMemo(() => organismCaps(overview()), undefined, { equals: (a, b) => a.energy === b.energy && a.membrane === b.membrane });
   /** First contacts at the door this session (never added to peers), newest first. */
@@ -661,6 +666,13 @@ export function ControlCenter(props: Props) {
   });
   const openKey = () => (phoneShell() && phoneTab() !== 'chats') ? null : (track() ? trackKey(track()!) : null);
   createEffect(() => { const key = openKey(); if (key) setThreads('unread', key, 0); });
+  const readFocusedMissedCalls = () => {
+    const key = openKey();
+    if (key?.startsWith('peer:') && !contextOpen() && walletTab() === null) missedCalls.read(key.slice(5));
+  };
+  createEffect(on([openKey, contextOpen, walletTab], () => { if (document.hasFocus()) readFocusedMissedCalls(); }));
+  window.addEventListener('focus', readFocusedMissedCalls);
+  onCleanup(() => window.removeEventListener('focus', readFocusedMissedCalls));
   // Bumped whenever the owner leaves a chat: a retry approval answered after that never goes on to send.
   let viewGeneration = 0;
   createEffect(on(openKey, () => { viewGeneration++; }, { defer: true }));
@@ -1366,6 +1378,14 @@ export function ControlCenter(props: Props) {
 
   // Calls: media is peer to peer in this webview; each signal is one paid send.
   const [callView, setCallView] = createSignal<CallView>(CALL_IDLE);
+  const [waitingCalls, setWaitingCalls] = createSignal<CallView[]>([]);
+  const waitingPanels = new Map<string, HTMLElement>();
+  const isIncoming = (peer: string, id: string) => [callView(), ...waitingCalls()].some(v => v.peer === peer && v.callId === id && v.phase === 'incoming' && !v.silenced);
+  const revealIncoming = (id: string, peer: string) => {
+    setWalletTab(null); setContextOpen(false); setPhoneTab('chats');
+    setTrack({ kind: 'peer', id: peer });
+    queueMicrotask(() => (waitingPanels.get(`${peer}:${id}`) ?? callPanel)?.focus());
+  };
   const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
   const [callApproval, setCallApproval] = createSignal(false);
   const [callApproving, setCallApproving] = createSignal(false);
@@ -1400,10 +1420,17 @@ export function ControlCenter(props: Props) {
     now: () => Date.now(),
     onView: view => {
       setCallView(view);
-      if (view.phase === 'incoming' && view.callId && view.peer) notifications?.call(view.callId, nameOf(view.peer), () => callView().phase === 'incoming' && callView().callId === view.callId);
+      if (view.phase === 'incoming' && !view.silenced && view.callId && view.peer) notifications?.call(`${view.peer}:${view.callId}`, nameOf(view.peer), () => isIncoming(view.peer!, view.callId!), () => revealIncoming(view.callId!, view.peer!));
+    },
+    onMissed: call => missedCalls.add(call, openKey() === `peer:${call.peer}` && document.hasFocus() && !contextOpen() && walletTab() === null),
+    onWaiting: views => {
+      setWaitingCalls(views);
+      for (const view of views) if (view.phase === 'incoming' && !view.silenced && view.callId && view.peer) {
+        notifications?.call(`${view.peer}:${view.callId}`, nameOf(view.peer), () => isIncoming(view.peer!, view.callId!), () => revealIncoming(view.callId!, view.peer!));
+      }
     },
     onStreams: (local, remote) => setCallStreams({ local, remote }),
-    // No STUN unless the owner set one: host candidates only.
+    // STUN comes only from the owner's preference or their node's status.
     iceServers: () => stunServer(effectiveStun()),
     busy: () => meetingOn(),
     // H2: the host ends our admission (one paid hangup, or none if the offer was never paid).
@@ -1429,7 +1456,7 @@ export function ControlCenter(props: Props) {
     const v = callView(); setLastCall((prev) => nextLastCall(prev, v));
     if (v.callId && v.peer) setRecentCallPeers(ids => ids.includes(v.peer!.toLowerCase()) ? ids : [...ids, v.peer!.toLowerCase()]);
   });
-  const stunSource = (): StunSource => (stunOff() ? 'off' : stunPref() ? 'custom' : nodeStun() ? 'node' : overview() ? 'none' : 'checking');
+  const stunSource = (): StunSource => (stunOff() ? 'off' : effectiveStunSource() === 'own' ? 'node' : effectiveStunSource() === 'configured' ? 'custom' : overview() ? 'none' : 'checking');
   // Closing the window ends the call here without paying; only Hang up pays.
   onCleanup(() => calls.endLocal());
   if (appPlatform() === 'ios') {
@@ -1986,7 +2013,7 @@ export function ControlCenter(props: Props) {
         onNewRoom={() => setRoomPlan(true)}
         knocks={knocks()}
         nameOf={nameOf}
-        unread={threads.unread}
+        unread={Object.entries(missedCalls.unread()).reduce((all, [key, count]) => ({ ...all, [key]: (all[key] ?? 0) + count }), { ...threads.unread })}
         openKey={openKey()}
         ownId={ownId()}
         onOpen={(next) => phoneShell() ? openPhoneTrack(next) : setTrack(next)}
@@ -2014,7 +2041,7 @@ export function ControlCenter(props: Props) {
               onEnded={() => { void loadBudget(); void loadWallet(); }} />
           </Show>
           <Show when={notifications && props.active && !contextOpen() && walletTab() === null}>
-            <NotificationSettings notifications={notifications!} offer />
+            <Show when={callView().phase !== 'idle' || waitingCalls().length > 0}><NotificationSettings notifications={notifications!} offer /></Show>
           </Show>
           <Show when={moneyBlocked() && !phoneShell()}>
             <p class="hint money-notice" data-money-notice role="status">{moneyNotice()}</p>
@@ -2164,7 +2191,7 @@ export function ControlCenter(props: Props) {
                     doorstep={t().kind === 'peer' ? doorstep[(t() as { id: string }).id] : undefined}
                     members={t().kind === 'room' ? members[(t() as { id: string }).id] ?? null : null}
                     messages={threads.t[trackKey(t())] ?? []}
-                    artifacts={artifacts[trackKey(t())] ?? []}
+                    artifacts={[...(artifacts[trackKey(t())] ?? []), ...missedCalls.records().filter(r => t().kind === 'peer' && `peer:${r.peer}` === trackKey(t()))]}
                     fresh={threads.fresh}
                     seenEntrances={seenEntrances}
                     deliveries={deliveries}
@@ -2353,6 +2380,18 @@ export function ControlCenter(props: Props) {
       </aside>
       </PairingActivityProvider>
       <span class="sr-only" role="status" aria-live="polite" data-send-live data-send-live-seq={sendLive().seq}>{sendLive().text}</span>
+      <IncomingCallAlerts view={callView()} waiting={waitingCalls()} nameOf={nameOf} />
+      <div class="waiting-calls" data-waiting-calls>
+        <For each={waitingCalls().map(v => `${v.peer}:${v.callId}`)}>{key => {
+          onCleanup(() => waitingPanels.delete(key));
+          const view = () => waitingCalls().find(v => `${v.peer}:${v.callId}` === key)!;
+          return <CallPanel waiting answerBlocked={!['idle', 'ended'].includes(callView().phase) || meetingOn() || callView().pendingCount > 0 || callView().unknownCount > 0 || (!!callView().close && callView().close!.status !== 'closed')} view={view()} payment={null} approval={null} approvalOpen={false}
+            panelRef={el => { waitingPanels.set(key, el); }}
+            blocked={moneyBlocked()} streams={{ local: null, remote: null }} nameOf={nameOf} quote={actions.callQuote}
+            accept={() => { if (!moneyBlocked()) void calls.acceptWaiting(key); }} decline={() => void calls.declineWaiting(key)} dismiss={() => calls.dismissWaiting(key)}
+            hangup={() => {}} mute={() => {}} camera={() => {}} closeAgain={() => {}} endStuck={() => {}} callAgain={() => {}} />;
+        }}</For>
+      </div>
       <CallPanel
         panelRef={el => { callPanel = el; }}
         openCallSettings={() => { setTab('general'); setContextOpen(true); }}
@@ -2468,10 +2507,10 @@ function readBase64(file: File): Promise<string> {
 type OwnStun = { port: number; url: string | null };
 
 /**
- * The owner's STUN server for calls. Off by default: with none, calls use
+ * The owner's STUN server for calls. With none, calls use
  * host candidates only and connect on the same network. A STUN server learns
  * your public address each time you place or accept a call. When the node
- * runs its own responder, it is offered here, and used only after Save.
+ * reports its own responder or a configured server, calls use that by default.
  */
 function CallSettings(props: { own: OwnStun | null }) {
   const [draft, setDraft] = createSignal(stunPref());
@@ -2487,19 +2526,19 @@ function CallSettings(props: { own: OwnStun | null }) {
       return;
     }
     setError(null);
-    // Saving an empty field returns to the default (your own node, when it offers STUN).
+    // Saving an empty field returns to the node's reported default.
     setStunPref(v);
   };
-  /** What calls actually use: the owner's choice, else their own node, else none. */
+  /** What calls actually use, with the status source kept for honest labels. */
   const using = () => effectiveStun();
   return (
     <section data-call-settings>
       <h3>{tr('extraCalls')}</h3>
-      <p class="hint" data-stun-note data-stun-using={using() ? (using() === ownUrl() ? 'own' : 'other') : stunOff() ? 'off' : 'none'}>
+      <p class="hint" data-stun-note data-stun-using={using() ? effectiveStunSource() === 'own' ? 'own' : stunPref() ? 'other' : 'configured' : stunOff() ? 'off' : 'none'}>
         {using()
-          ? using() === ownUrl()
+          ? effectiveStunSource() === 'own'
             ? tr('extraCallsAskYourOwnNodeForYourPublic', using(), stunPref() ? '' : tr('extraThisIsTheDefault'))
-            : tr('extraCallsAskForYourPublicAddressSoThat', using())
+            : chosenStunLabel()
           : stunOff()
             ? tr('extraSTUNIsTurnedOffCallsContactNoThird')
             : tr('extraNoSTUNServerCallsContactNoThirdParty')}
@@ -3107,7 +3146,7 @@ function Conversation(props: {
                     )}
                   </Match>
                   <Match when={artifact()}>
-                    {(a) => <ArtifactView moneyBlocked={props.moneyBlocked} a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} onRetry={(id, approved) => props.actions.retryDelivery(props.track, id, approved)} onStop={(pendingId) => props.actions.stopRetrying(props.track, pendingId)} onRestore={(id) => props.actions.restoreUnsent(props.track, id)} onDiscard={(id) => props.actions.discardUnsent(props.track, id)} />}
+                    {(a) => <ArtifactView callActions={props.actions} moneyBlocked={props.moneyBlocked} a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} onRetry={(id, approved) => props.actions.retryDelivery(props.track, id, approved)} onStop={(pendingId) => props.actions.stopRetrying(props.track, pendingId)} onRestore={(id) => props.actions.restoreUnsent(props.track, id)} onDiscard={(id) => props.actions.discardUnsent(props.track, id)} />}
                   </Match>
                 </Switch>
               </>
@@ -3350,11 +3389,17 @@ function CallNetworkNote(props: { onOpenSettings?: () => void }) {
   </Show>;
 }
 
+/** The chosen server's address, with the same IP disclosure wherever calls show it. */
+const chosenStunLabel = () => tr('extraCallsAskForYourPublicAddressSoThat', effectiveStun().replace(/^stun:/i, ''));
+const callStunLabel = () => effectiveStun()
+  ? effectiveStunSource() === 'own' ? tr('uiUsesTheSTUNServerToFindARoute', effectiveStun()) : chosenStunLabel()
+  : stunOff() ? tr('uiSTUNIsTurnedOffSoCallsConnectOnly') : tr('uiNoSTUNServerIsSetSoCallsConnect');
+
 /**
  * Call and video buttons. The price is read (never paid) first and shown on
  * the button: offer + hangup, with room for one fresh admission on recovery.
  */
-function CallButtons(props: { peer: string; name: string; blocked: boolean; actions: Actions }) {
+function CallButtons(props: { peer: string; name: string; blocked: boolean; actions: Actions; callbackMedia?: CallMedia }) {
   const [quote, setQuote] = createSignal<CallQuote | null>(null);
   const [why, setWhy] = createSignal<string | null>(null);
   createEffect(on(() => props.peer, (peer) => {
@@ -3373,7 +3418,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   const off = () => props.blocked || cost() === null || props.actions.callActive();
   const title = () =>
     why() ?? (quote() && cost() === null ? tr('uiSNodeDoesNotTakeCallsYet', possessive(props.name)) : cost() !== null
-      ? tr('uiUpToToRingTheirCallPricePlus', fmtAmount(cost()!), fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat), feeCeiling(quote()!.offer_max_routing_fee_msat), fmtAmount(signalCost(quote()!)), fmtAmount(callCost(quote()!)!), effectiveStun() ? tr('uiUsesTheSTUNServerToFindARoute', effectiveStun()) : stunOff() ? tr('uiSTUNIsTurnedOffSoCallsConnectOnly') : tr('uiNoSTUNServerIsSetSoCallsConnect'))
+      ? tr('uiUpToToRingTheirCallPricePlus', fmtAmount(cost()!), fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat), feeCeiling(quote()!.offer_max_routing_fee_msat), fmtAmount(signalCost(quote()!)), fmtAmount(callCost(quote()!)!), callStunLabel())
       : tr('uiReadingTheirCallPrice'));
   const place = (media: CallMedia) => { const q = quote(); if (q && !off()) props.actions.placeCall(props.peer, media, q); };
   // A call pays and rings someone, so one tap only asks: the call/video button
@@ -3413,15 +3458,18 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   const callWord = (media: CallMedia) => (media === 'video' ? tr('uiVideoCall') : tr('uiCall'));
   return (
     <div class="call-buttons" data-call-buttons ref={wrap}>
-      <button type="button" class="soft call-button icon-btn" data-call="audio" disabled={off()} title={title()} aria-label={tr('uiCall95', props.name, cost() !== null ? tr('uiUpTo', fmtAmount(cost()!)) : '')} aria-haspopup="dialog" aria-expanded={armed() === 'audio'} onClick={() => arm('audio')}>
+      <button type="button" class={props.callbackMedia ? "soft call-button" : "soft call-button icon-btn"} data-call={props.callbackMedia ?? 'audio'} data-call-back={props.callbackMedia ? '' : undefined} disabled={off()} title={title()} aria-label={props.callbackMedia ? tr('incomingCallBack') : tr('uiCall95', props.name, cost() !== null ? tr('uiUpTo', fmtAmount(cost()!)) : '')} aria-haspopup="dialog" aria-expanded={armed() === (props.callbackMedia ?? 'audio')} onClick={() => arm(props.callbackMedia ?? 'audio')}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z" /></svg>
+        <Show when={props.callbackMedia}>{tr('incomingCallBack')}</Show>
       </button>
+      <Show when={!props.callbackMedia}>
       <button type="button" class="soft call-button icon-btn" data-call="video" disabled={off()} title={title()} aria-haspopup="dialog" aria-expanded={armed() === 'video'} onClick={() => arm('video')} aria-label={tr('uiVideoCall98', props.name, cost() !== null ? tr('uiUpTo', fmtAmount(cost()!)) : '')}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="12" height="12" rx="2" /><path d="m15 10 6-3v10l-6-3z" /></svg>
       </button>
       <button type="button" class="soft call-button icon-btn quiet" data-call="meeting" disabled={off()} title={tr('uiStartAMeetingWithAndUpToMore', props.name, MAX_PARTICIPANTS - 2)} aria-label={tr('uiStartAMeetingWith', props.name)} onClick={() => props.actions.planMeeting(props.peer)}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3" /><path d="M3 20a6 6 0 0 1 12 0" /><circle cx="17" cy="9" r="2.5" /><path d="M17 14a5 5 0 0 1 4 5" /></svg>
       </button>
+      </Show>
       <Show when={armed()}>
         {(media) => (
           <div class="call-confirm" role="dialog" aria-label={`${callWord(media())} ${props.name}?`} data-call-confirm-box={media()}>
@@ -3429,6 +3477,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
               <strong>{callWord(media())} {props.name}?</strong>
               <Show when={cost() !== null}>{' '}<span class="hint">{tr('uiUpTo105')} {fmtAmount(cost()!)}{tr('uiNothingIsPaidUntilYouPressRing')}</span></Show>
             </p>
+            <p class="hint" data-call-stun-source>{callStunLabel()}</p>
             <div class="call-confirm-actions">
               <button type="button" class="soft" data-call-confirm-cancel onClick={() => disarm()}>{tr('uiCancel')}</button>
               <button ref={ringBtn} type="button" class="primary soft money" data-call-confirm={media()} disabled={off()} onClick={() => { const m = media(); setArmed(null); place(m); }}>{tr('uiRing')}</button>
@@ -3449,6 +3498,8 @@ const END_REASON: Record<string, string> = {
 
 /** The call card: incoming (accept/decline with price), ringing, live (mute, camera, duration, hang up), ended. */
 function CallPanel(props: {
+  waiting?: boolean;
+  answerBlocked?: boolean;
   payment: JSX.Element;
   panelRef: (el: HTMLElement) => void;
   approvalOpen: boolean;
@@ -3516,6 +3567,7 @@ function CallPanel(props: {
             <span class="duration" data-call-duration>{duration(Math.max(0, tick() - v().liveAt!))}</span>
           </Show>
         </header>
+        <Show when={props.waiting && props.answerBlocked && v().phase === 'incoming'}><p class="hint">{tr('incomingWaiting')}</p></Show>
         {props.approval}
         {/* Across networks a call needs a STUN server: said where it matters, while a call is being set up or has failed to connect. */}
         <Show when={['calling', 'ringing', 'connecting'].includes(v().phase) || (v().phase === 'ended' && (v().reason === 'failed' || v().reason === 'timeout'))}>
@@ -3603,8 +3655,8 @@ function CallPanel(props: {
         <div class="call-actions">
           <Switch>
             <Match when={v().phase === 'incoming'}>
-              <button type="button" class="primary soft money" data-call-accept disabled={props.blocked} onClick={() => props.accept()}>{tr('uiAccept')}{price(answer())}</button>
-              <button type="button" class="soft" data-call-decline disabled={props.blocked} onClick={() => props.decline()}>{tr('uiDecline')}{price(answer())}</button>
+              <button type="button" class="primary soft money" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced} onClick={() => props.accept()}>{tr('uiAccept')}{price(answer())}</button>
+              <button type="button" class="soft" data-call-decline disabled={props.blocked || props.view.silenced} onClick={() => props.decline()}>{tr('uiDecline')}{price(answer())}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
               <Show when={v().stuck}>
@@ -4069,9 +4121,20 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
   );
 }
 
-function ArtifactView(props: { moneyBlocked: boolean; a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>; onStop?: (pendingId: string | null) => Promise<unknown>; onRestore?: (id: string) => void; onDiscard?: (id: string) => void }) {
+function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>; onStop?: (pendingId: string | null) => Promise<unknown>; onRestore?: (id: string) => void; onDiscard?: (id: string) => void }) {
   return (
     <Switch>
+      <Match when={props.a.type === 'missed-call' && props.a}>
+        {a => {
+          const call = () => a() as Extract<Artifact, { type: 'missed-call' }>;
+          return <article class="msg in" data-missed-call={call().id}>
+            <div class="bubble">{tr('incomingMissed')}</div>
+            <time class="stamp" datetime={new Date(call().at).toISOString()}>{clock(call().at)}</time>
+            <Show when={props.callActions}>{actions => <CallButtons peer={call().peer} name={props.nameOf(call().peer)}
+              blocked={props.moneyBlocked} actions={actions()} callbackMedia={call().media} />}</Show>
+          </article>;
+        }}
+      </Match>
       <Match when={props.a.type === 'unsent' && props.a}>
         {(a) => {
           const u = () => a() as Extract<Artifact, { type: 'unsent' }>;

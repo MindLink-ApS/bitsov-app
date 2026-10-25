@@ -39,7 +39,9 @@ it('changes every provider card and the dismiss accessible name with the languag
   expect([...mount.querySelectorAll('h3')].map(el => el.textContent)).toEqual(['Din Lightning-udbyder', 'Hvad den ikke kan', 'Hvad den ser', 'Hvis den afviser', 'Mens din boks er låst', 'Gebyrer']);
   const paragraphs = [...mount.querySelectorAll('p')].map(el => el.textContent);
   expect(paragraphs).toHaveLength(7);
-  for (const [i, phrase] of ['Hubben er din Lightning-udbyder', 'Den kan ikke læse dine beskeder', 'Den opbevarer aldrig dine nøgler', 'Den ser de betalinger', 'Den kan afvise at route', 'Mens din hjemmeboks er låst', 'Gebyrer: routing'].entries()) expect(paragraphs[i]).toContain(phrase);
+  for (const [i, phrase] of ['Hubben er din Lightning-udbyder', 'Den kan ikke læse indholdet af dine beskeder', 'Den opbevarer aldrig dine nøgler', 'Den ser de betalinger', 'Den kan afvise at route', 'Mens din hjemmeboks er låst', 'Gebyrer: routing'].entries()) expect(paragraphs[i]).toContain(phrase);
+  expect(paragraphs[1]).toContain('mellem din node og modtagerens node');
+  expect(paragraphs[1]).toContain('Begge endenoder kan læse det');
   expect(paragraphs[5]).toContain('omkring et døgn');
   expect(paragraphs[5]).toContain('miste midler');
   setLanguagePref('en');
