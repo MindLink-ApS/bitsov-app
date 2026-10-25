@@ -385,18 +385,23 @@ export function ControlCenter(props: Props) {
   const [recentCallPeers, setRecentCallPeers] = createSignal<string[]>([]);
   // Cache settled/in-flight reads for this shell/source. Reconnects and peer
   // refreshes reuse them; a live call replaces even a cached negative result.
+  // The cutoff moves only after a scan finishes. A page cap leaves a resume
+  // cursor so the next reconnect continues into pages this pass did not read.
   const callHistory = new Map<string, Promise<boolean>>();
   const callHistoryNewest = new Map<string, number>();
+  const callHistoryResume = new Map<string, { before: number; newest: number }>();
   const knownCallPeers = new Set<string>();
   const [callHistoryRevision, setCallHistoryRevision] = createSignal(0);
   const noteCallHistory = (id: string) => {
     knownCallPeers.add(id);
     callHistory.set(id, Promise.resolve(true));
+    callHistoryResume.delete(id);
     setRecentCallPeers(ids => ids.includes(id) ? ids : [...ids, id]);
   };
   const reconcileCallHistory = () => {
-    // A fresh websocket does not replay missed messages. Recheck only history
-    // newer than the last completed negative read; retain every positive result.
+    // A fresh websocket does not replay missed messages. Drop cached negatives
+    // and recheck history newer than the last finished scan, or continue a
+    // scan the page cap stopped. Retain every positive result.
     for (const id of callHistory.keys()) if (!knownCallPeers.has(id)) callHistory.delete(id);
     setCallHistoryRevision(value => value + 1);
   };
@@ -404,18 +409,24 @@ export function ControlCenter(props: Props) {
     const cached = callHistory.get(id);
     if (cached) return cached;
     const cutoff = callHistoryNewest.get(id);
-    let newest = cutoff ?? -Infinity;
+    const pending = callHistoryResume.get(id);
+    let newest = pending?.newest ?? cutoff ?? -Infinity;
+    let resume: number | undefined;
+    let complete = false;
     const read = (async () => {
-      let before: number | undefined;
+      let before: number | undefined = pending?.before;
       let pages = 0;
       while (phoneShell() && live()) {
         const page = await source.messages(id, before);
         pages += 1;
         if (before === undefined) newest = Math.max(newest, ...page.map(m => m.timestamp));
         if (page.some(m => isCallKind(m.kind))) return true;
-        if (pages >= 3) return false;
         const oldest = Math.min(...page.map(m => m.timestamp));
-        if (!page.length || !Number.isFinite(oldest) || (cutoff !== undefined && oldest <= cutoff) || (before !== undefined && oldest >= before)) return false;
+        // Empty, already scanned, or stuck: this walk has seen every message
+        // down through the previous cutoff. A full page budget is not that.
+        const exhausted = !page.length || !Number.isFinite(oldest) || (cutoff !== undefined && oldest <= cutoff) || (before !== undefined && oldest >= before);
+        if (exhausted) { complete = true; return false; }
+        if (pages >= 3) { resume = oldest; return false; }
         before = oldest;
       }
       throw new Error(tr('caCallHistoryReadInterrupted'));
@@ -423,8 +434,17 @@ export function ControlCenter(props: Props) {
     callHistory.set(id, read);
     void read.then(hasCall => {
       if (callHistory.get(id) !== read) return;
-      if (hasCall) knownCallPeers.add(id);
-      else callHistoryNewest.set(id, newest);
+      if (hasCall) {
+        knownCallPeers.add(id);
+        callHistoryResume.delete(id);
+        return;
+      }
+      if (complete) {
+        callHistoryResume.delete(id);
+        callHistoryNewest.set(id, newest);
+        return;
+      }
+      if (resume !== undefined) callHistoryResume.set(id, { before: resume, newest });
     }, () => { if (callHistory.get(id) === read) callHistory.delete(id); });
     return read;
   };

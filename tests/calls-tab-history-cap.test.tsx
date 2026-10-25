@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import { ControlCenter } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID } from '../src/control/sample';
-import type { Message } from '../src/control/types';
+import type { LiveEvent, Message } from '../src/control/types';
 
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -22,12 +22,13 @@ function pageMessages(peer: string, page: number, size = 10): Message[] {
   }));
 }
 
-async function mountMessages(read: (peer: string, before?: number) => Promise<Message[]>) {
+async function mountMessages(read: (peer: string, before?: number) => Promise<Message[]>, onLive?: (handler: (event: LiveEvent) => void) => void) {
   vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone');
   vi.stubGlobal('__TAURI_INTERNALS__', {});
   vi.spyOn(Element.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList);
   const source = sampleSource();
   source.messages = vi.fn(read);
+  if (onLive) source.onLive = async handler => { onLive(handler); return () => {}; };
   dispose = render(() => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={null} />, document.body);
   await tick();
   return source;
@@ -70,4 +71,36 @@ it('still finds a call on the third history page and shows the Calls tab', async
   });
   await vi.waitFor(() => expect(document.querySelector('[data-phone-tab="calls"]')).not.toBeNull());
   expect(vi.mocked(source.messages).mock.calls.filter(([id]) => id === peer).length).toBe(3);
+});
+
+it('resumes a capped scan after reconnect and finds a call on the fourth page', async () => {
+  const peers = (await sampleSource().peers()).map(p => p.node_id);
+  const peer = peers[0];
+  // The node pages 50 messages. Three pages are the cap; the call sits under them.
+  const size = 50;
+  const pages = [0, 1, 2].map(page => pageMessages(peer, page, size));
+  const oldest = (page: Message[]) => Math.min(...page.map(message => message.timestamp));
+  const call: Message = { id: 'page-4-call', sender: peer, recipient: SAMPLE_OWN_ID, kind: 400, plaintext: '{}', timestamp: 1, payment_amount_msat: 1000 };
+  let emit: (event: LiveEvent) => void = () => {};
+  const source = await mountMessages(async (id, before) => {
+    if (id !== peer) return [];
+    if (before === undefined) return pages[0];
+    if (before === oldest(pages[0])) return pages[1];
+    if (before === oldest(pages[1])) return pages[2];
+    if (before === oldest(pages[2])) return [call];
+    return [];
+  }, handler => { emit = handler; });
+  await vi.waitFor(() => {
+    const calls = vi.mocked(source.messages).mock.calls;
+    expect(calls.filter(([id]) => id === peer).map(([, before]) => before)).toEqual([undefined, oldest(pages[0]), oldest(pages[1])]);
+    expect(calls.some(([id]) => id === peers[1])).toBe(true);
+  });
+  await tick();
+  expect(document.querySelector('[data-phone-tab="calls"]')).toBeNull();
+  emit({ type: 'link', state: 'closed', detail: null });
+  emit({ type: 'link', state: 'open', detail: null });
+  await vi.waitFor(() => expect(document.querySelector('[data-phone-tab="calls"]')).not.toBeNull());
+  expect(vi.mocked(source.messages).mock.calls.filter(([id]) => id === peer).map(([, before]) => before)).toEqual([
+    undefined, oldest(pages[0]), oldest(pages[1]), oldest(pages[2]),
+  ]);
 });
