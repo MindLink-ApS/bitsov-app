@@ -232,6 +232,9 @@ async fn run_pending(state: &NodeState, setup: &mut Setup, input: Input) -> Resu
             password,
             claim_code,
         } => {
+            // This protocol does not declare the box's network before identity
+            // creation. A beta cannot create an identity on an unknown network.
+            crate::beta::network(None)?;
             if setup.attempt.is_some() {
                 return Err("A setup is already pending. Compare or cancel it first.".into());
             }

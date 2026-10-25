@@ -13,7 +13,7 @@ export function custodyBadge(mode: CustodyMode | null | undefined): CustodyBadge
     case 'local_seed':
       return {
         label: t('extraSeedOnThisMachine'),
-        tone: 'plain',
+        tone: 'warn',
         title: t('extraYourRecoveryPhraseIsStoredUnencryptedOnThis'),
       };
     case 'encrypted_seed':

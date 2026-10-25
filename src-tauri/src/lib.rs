@@ -35,6 +35,7 @@ pub mod connection_retry;
 pub mod home_node;
 
 mod app;
+mod beta;
 mod phone_recovery;
 
 #[cfg(any(target_os = "android", test))]

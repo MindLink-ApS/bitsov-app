@@ -17,6 +17,8 @@ export type SoftenedError = {
 export function softenError(raw: unknown): SoftenedError {
   const m = String(raw ?? '').trim();
   if (!m) return { summary: tr('caSomethingWentWrong'), detail: null };
+  if (m === 'beta_mainnet_disabled') return { summary: tr('betaMainnetDisabled'), detail: null, money: true };
+  if (m === 'beta_network_unknown') return { summary: tr('betaNetworkUnknown'), detail: null, money: true };
 
   // Preserve the entire money warning. In particular, transport/address text
   // inside an unknown or settled outcome must not turn it into a connection error.

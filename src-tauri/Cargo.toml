@@ -14,6 +14,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 ring = "0.17"
+argon2 = { version = "0.5", features = ["zeroize"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-barcode-scanner = { version = "=2.5.0", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -32,7 +33,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # node's BLAKE3 short-code derivation for the tripwire, and a CSPRNG for the seed.
 ed25519-dalek = "2"
 blake3 = "1"
-bip39 = { version = "2.2.2", default-features = false, features = ["std"] }
+bip39 = { version = "2.2.2", default-features = false, features = ["std", "zeroize"] }
 getrandom = "0.2"
 hex = "0.4"
 tempfile = "3"
@@ -73,6 +74,8 @@ tauri-plugin-barcode-scanner = "=2.5.0"
 
 [features]
 default = []
+# Deliberate build-time override for developers using real funds.
+developer-mainnet = []
 # Lets the host toolchain compile the pure-client cfg path before mobile SDKs
 # are installed. Tauri mobile targets select the same path through `cfg(mobile)`.
 mobile = ["bitsov-ffi/mobile", "dep:tauri-plugin-barcode-scanner"]

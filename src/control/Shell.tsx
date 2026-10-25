@@ -357,7 +357,8 @@ export function ControlCenter(props: Props) {
   const [now, setNow] = createSignal(Date.now());
   const [overview, setOverview] = createSignal<NodeOverview | null>(null);
   const [readinessRefused, setReadinessRefused] = createSignal(false);
-  const moneyBlocked = () => !live() || readinessRefused() || overview()?.money_ready === false;
+  const moneyBlocked = () => !live() || readinessRefused() || overview()?.money_ready === false || overview()?.custody_mode === 'local_seed';
+  const moneyNotice = () => overview()?.custody_mode === 'local_seed' ? tr('localSeedUnencrypted') : `${!live() ? tr('waitingConnection') : tr('moneyNotReady')} ${tr('moneyReadinessScope')}`;
   // The node's own STUN responder, if `/status` reports one (offered in Settings).
   const ownStun = createMemo<OwnStun | null>(() => {
     const o = overview();
@@ -1956,7 +1957,7 @@ export function ControlCenter(props: Props) {
           {props.offline}
           <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
             onEnded={() => { void loadBudget(); void loadWallet(); }} />
-          <Show when={moneyBlocked()}><p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p></Show>
+          <Show when={moneyBlocked()}><p class="hint money-notice" data-money-notice role="status">{moneyNotice()}</p></Show>
         </header>
       </Show>
       <Rail
@@ -2016,7 +2017,7 @@ export function ControlCenter(props: Props) {
             <NotificationSettings notifications={notifications!} offer />
           </Show>
           <Show when={moneyBlocked() && !phoneShell()}>
-            <p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p>
+            <p class="hint money-notice" data-money-notice role="status">{moneyNotice()}</p>
           </Show>
           <Show when={introNotice()}>
             {(n) => (
@@ -2332,6 +2333,7 @@ export function ControlCenter(props: Props) {
               onCancel={async () => setDevice(await source.deviceKeyCancel())} />
           </Match>
           <Match when={tab() === 'wallet'}>
+            <Show when={overview()?.custody_mode === 'local_seed'}><p class="err-note" role="alert" data-seed-unencrypted>{tr('localSeedUnencrypted')}</p></Show>
             <button type="button" class="primary soft" data-open-wallet-page onClick={() => openWallet()}>{tr('caOpenWallet')}</button>
             <WalletPanel moneyBlocked={moneyBlocked()} wallet={wallet()} error={errors.wallet} onReconnect={async () => { await props.onReconnect?.(); await loadWallet(); }} fund={props.fund?.(source, moneyBlocked)} />
           </Match>

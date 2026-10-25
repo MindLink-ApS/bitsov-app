@@ -671,9 +671,9 @@ pub fn start_args(config: &Path, dev: bool, owner: bool) -> Vec<std::ffi::OsStri
     }
     args
 }
-/// Retained plaintext identities need ordinary startup so the node can report
-/// marker/price refusals. They are never enrolled or encrypted by a pin bump.
-/// Fresh bootstrap and encrypted restarts keep the Keychain/descriptor path.
+/// Retained plaintext identities keep ordinary enrollment behavior. Seed-file
+/// protection happens separately before any local child starts. Fresh bootstrap
+/// and encrypted restarts keep the owner-device ceremony path when enabled.
 pub fn launch_enabled(enabled: bool, config: &Path) -> Result<bool, String> {
     if !enabled || !config.try_exists().map_err(|_| "Cannot inspect the node config")? {
         return Ok(enabled);
@@ -729,25 +729,24 @@ fn write_bootstrap_config(config: &Path) -> Result<(), Box<dyn std::error::Error
     let dir = std::fs::canonicalize(config.parent().ok_or("missing config directory")?)?;
     let value = serde_json::json!({
         "tier": "full",
-        "setup_page": {"port": 8080},
-        "identity": {"mnemonic_file": dir.join("identity/mnemonic.txt")},
-        "network": {"listen_addr": "0.0.0.0:9736", "tier": "T2"},
+        "identity": {"mnemonic_file": dir.join("identity/mnemonic.enc")},
+        "network": {"listen_addr": "127.0.0.1:9736", "tier": "T2"},
         "lightning": {
-            "backend": "ldk", "network": "bitcoin",
+            "backend": "ldk", "network": "signet",
             "max_channel_capacity_sats": 1_000_000,
             "max_total_channel_capacity_sats": 2_000_000,
-            "esplora_url": "https://blockstream.info/api",
-            "esplora_url_fallback": "https://mempool.space/api",
-            "listening_address": "0.0.0.0:9735"
+            "esplora_url": "https://mempool.space/signet/api",
+            "esplora_url_fallback": "https://blockstream.info/signet/api",
+            "listening_address": "127.0.0.1:9735"
         },
         "chain": {
-            "backend": "esplora", "api_url": "https://blockstream.info",
-            "esplora_url_fallback": "https://mempool.space"
+            "backend": "esplora", "api_url": "https://mempool.space/signet",
+            "esplora_url_fallback": "https://blockstream.info/signet"
         },
         "payment_gate": {"verify_lightning_settlement": true},
         "storage": {"backend": "sqlite", "path": dir.join("konsensus.db")},
         "backup": {"scb_dir": dir.join("backups")},
-        "api": {"audit_log_path": dir.join("audit.jsonl"), "operator_probes_enabled": false}
+        "api": {"listen_addr": "127.0.0.1:3141", "audit_log_path": dir.join("audit.jsonl"), "operator_probes_enabled": false}
     });
     let text = toml::to_string_pretty(&value)?;
     let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
@@ -774,11 +773,126 @@ pub fn may_create_password(dir: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Existing networks are never rewritten. Only a newly initialized seed gets
+/// the release defaults; retained mainnet installations are refused instead.
+pub fn protect_config(config: &Path, fresh: bool) -> Result<(), String> {
+    let mut value = seed_file::config_value(config)?;
+    let before = value.clone();
+    if fresh {
+        value["lightning"]["network"] = "signet".into();
+        value["lightning"]["esplora_url"] = "https://mempool.space/signet/api".into();
+        value["lightning"]["esplora_url_fallback"] = "https://blockstream.info/signet/api".into();
+        value["chain"]["api_url"] = "https://mempool.space/signet".into();
+        value["chain"]["esplora_url_fallback"] = "https://blockstream.info/signet".into();
+    }
+    crate::beta::config(&value)?;
+    let remote = value.get("remote_access").and_then(|v| v.get("listen_addr")).and_then(|v| v.as_str()).is_some();
+    // A configured authenticated remote listener is the explicit opt-in. The
+    // control API stays local even then; remote clients use the Noise path.
+    for (section, field, port) in [("api", "listen_addr", 3141), ("network", "listen_addr", 9736), ("lightning", "listening_address", 9735), ("calls", "stun_listen", 0)] {
+        if remote && section != "api" { continue; }
+        if section == "calls" && value.get(section).and_then(|v| v.get(field)).is_none() { continue; }
+        if value.get(section).is_none() {
+            value.as_table_mut().ok_or("Invalid local node config")?.insert(section.into(), toml::Value::Table(toml::Table::new()));
+        }
+        let address = value[section].get(field).and_then(|v| v.as_str());
+        let address: std::net::SocketAddr = address.unwrap_or(&format!("127.0.0.1:{port}"))
+            .parse().map_err(|_| "Invalid local listener address")?;
+        let ip = if address.ip().is_loopback() { address.ip() }
+            else if address.is_ipv6() { std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST) }
+            else { std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) };
+        value[section][field] = std::net::SocketAddr::new(ip, address.port()).to_string().into();
+    }
+    if value != before { seed_file::save_config(config, &value)?; }
+    Ok(())
+}
+
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
     #[test]
-    fn retained_plaintext_skips_owner_password_but_fresh_and_encrypted_keep_it() {
+    fn retained_listeners_are_loopback_unless_authenticated_remote_access_is_explicit() {
+        for remote in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = dir.path().join("konsensus.toml");
+            let mut text = "[lightning]\nbackend='ldk'\nnetwork='signet'\nlistening_address='[::]:19735'\n[network]\nlisten_addr='0.0.0.0:19736'\n[api]\nlisten_addr='0.0.0.0:13141'\n[calls]\nstun_listen='0.0.0.0:13478'\n".to_string();
+            if remote { text.push_str("[remote_access]\nlisten_addr='0.0.0.0:18443'\n"); }
+            std::fs::write(&config, text).unwrap();
+            protect_config(&config, false).unwrap();
+            let value = seed_file::config_value(&config).unwrap();
+            assert_eq!(value["api"]["listen_addr"].as_str(), Some("127.0.0.1:13141"));
+            assert_eq!(value["network"]["listen_addr"].as_str(), Some(if remote { "0.0.0.0:19736" } else { "127.0.0.1:19736" }));
+            assert_eq!(value["lightning"]["listening_address"].as_str(), Some(if remote { "[::]:19735" } else { "[::1]:19735" }));
+            assert_eq!(value["calls"]["stun_listen"].as_str(), Some(if remote { "0.0.0.0:13478" } else { "127.0.0.1:13478" }));
+            if remote { assert_eq!(value["remote_access"]["listen_addr"].as_str(), Some("0.0.0.0:18443")); }
+        }
+    }
+    #[test]
+    fn retained_mainnet_is_refused_before_any_config_write() {
+        if cfg!(feature = "developer-mainnet") { return; }
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("konsensus.toml");
+        for network in ["", "network='bitcoin'", "network='mainnet'"] {
+            let original = format!("[lightning]\nbackend='ldk'\n{network}\n");
+            std::fs::write(&config, &original).unwrap();
+            assert_eq!(protect_config(&config, false).unwrap_err(), crate::beta::MAINNET_DISABLED);
+            assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+        }
+    }
+    #[test]
+    fn mainnet_never_reaches_password_unlock_or_child_start() {
+        if cfg!(feature = "developer-mainnet") { return; }
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("konsensus.toml");
+        std::fs::write(&config, "[lightning]\nbackend='ldk'\nnetwork='bitcoin'\n").unwrap();
+        let mut state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        state.seed_password_loader = |_, _| panic!("mainnet must be refused before password access");
+        *state.dev_sidecar.lock().unwrap() = Some(dir.path().join("never-started"));
+        let app = tauri::test::mock_builder().manage(state)
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        assert_eq!(spawn_node(app.handle(), &config).unwrap_err(), crate::beta::MAINNET_DISABLED);
+        assert!(app.state::<NodeState>().child.lock().unwrap().is_none());
+    }
+    #[test]
+    fn missing_seed_never_falls_back_to_ordinary_bootstrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("konsensus.toml");
+        write_bootstrap_config(&config).unwrap();
+        let mut state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        state.seed_password_loader = |_, _| panic!("ordinary startup must refuse a missing seed before password access");
+        *state.dev_sidecar.lock().unwrap() = Some(dir.path().join("never-started"));
+        let app = tauri::test::mock_builder().manage(state)
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        assert!(spawn_node(app.handle(), &config).unwrap_err().contains("recovery phrase is missing"));
+        assert!(app.state::<NodeState>().child.lock().unwrap().is_none());
+    }
+    #[test]
+    fn bootstrap_listeners_are_local_and_home_setup_is_not_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("konsensus.toml");
+        write_bootstrap_config(&config).unwrap();
+        let value: toml::Value = toml::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        for (section, field) in [("network", "listen_addr"), ("lightning", "listening_address"), ("api", "listen_addr")] {
+            let addr: std::net::SocketAddr = value[section][field].as_str().unwrap().parse().unwrap();
+            assert!(addr.ip().is_loopback(), "{section} must stay local");
+        }
+        for owner in [true, false] {
+            let args = start_args(&config, false, owner);
+            assert!(!args.iter().any(|arg| arg == "--home" || arg == "--remote-unlock"));
+        }
+    }
+    #[test]
+    fn bootstrap_uses_signet_backends() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("konsensus.toml");
+        write_bootstrap_config(&config).unwrap();
+        let value: toml::Value = toml::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(value["lightning"]["network"].as_str(), Some("signet"));
+        assert!(value["lightning"]["esplora_url"].as_str().unwrap().contains("/signet/"));
+        assert!(value["chain"]["api_url"].as_str().unwrap().ends_with("/signet"));
+    }
+    #[test]
+    fn retained_plaintext_keeps_enrollment_state_until_protected_startup() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("konsensus.toml");
         assert!(launch_enabled(true, &config).unwrap());
@@ -818,8 +932,12 @@ mod lifecycle_tests {
         assert_eq!(value["tier"].as_str(), Some("full"));
         assert_eq!(
             value["identity"]["mnemonic_file"].as_str(),
-            dir.join("identity/mnemonic.txt").to_str()
+            dir.join("identity/mnemonic.enc").to_str()
         );
+        assert_eq!(value["network"]["listen_addr"].as_str(), Some("127.0.0.1:9736"));
+        assert_eq!(value["lightning"]["listening_address"].as_str(), Some("127.0.0.1:9735"));
+        assert_eq!(value["api"]["listen_addr"].as_str(), Some("127.0.0.1:3141"));
+        assert_eq!(value["lightning"]["network"].as_str(), Some("signet"));
         assert_eq!(value["lightning"]["backend"].as_str(), Some("ldk"));
         assert_eq!(value["network"]["tier"].as_str(), Some("T2"));
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);

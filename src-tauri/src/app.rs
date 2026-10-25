@@ -66,8 +66,6 @@ use shared_child::SharedChild;
 #[cfg(all(desktop, not(feature = "mobile")))]
 use tauri::menu::{Menu, MenuItem};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow};
-#[cfg(all(desktop, not(feature = "mobile")))]
-use tauri_plugin_shell::ShellExt;
 
 // macOS model launcher. The implementation is `cfg(target_os = "macos")`; the
 // module is always parsed so a syntax error still fails the Linux Build job.
@@ -94,6 +92,9 @@ mod local_owner;
 #[cfg(all(desktop, not(feature = "mobile")))]
 #[path = "owner_password.rs"]
 mod owner_password;
+#[cfg(all(desktop, not(feature = "mobile")))]
+#[path = "seed_file.rs"]
+mod seed_file;
 #[path = "home_keychain.rs"]
 mod home_keychain;
 #[cfg(all(desktop, not(feature = "mobile")))]
@@ -167,6 +168,8 @@ struct NodeState {
     remote_only: bool,
     #[cfg(all(desktop, not(feature = "mobile")))]
     owner: local_owner::OwnerState,
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    seed_password_loader: owner_password::Loader,
     ready: Mutex<bool>,
     node_id: Mutex<Option<String>>,
     error: Mutex<Option<String>>,
@@ -477,6 +480,8 @@ impl NodeState {
             device_policy: Mutex::new(device_key::Policy::Biometry),
             #[cfg(all(desktop, not(feature = "mobile")))]
             owner: local_owner::OwnerState::default(),
+            #[cfg(all(desktop, not(feature = "mobile")))]
+            seed_password_loader: owner_password::load,
             device_lapsed: AtomicBool::new(false),
             device_lifecycle: Mutex::new(()),
             trust_write: Mutex::new(()),
@@ -709,30 +714,15 @@ async fn init_node(
     dev_sidecar: Option<&Path>,
 ) -> Result<(), String> {
     app.state::<NodeState>().require_local_node()?;
-    let cmd = match dev_sidecar {
-        Some(program) => app.shell().command(program),
-        None => app
-            .shell()
-            .sidecar("konsensus")
-            .map_err(|e| format!("cannot resolve node sidecar: {e}"))?,
-    };
-    let cmd = cmd.args([
-            "init",
-            "--dir",
-            &data_dir.to_string_lossy(),
-            "--non-interactive",
-            "--tier",
-            "full",
-        ]);
-    match cmd.output().await {
-        Ok(out) if out.status.success() => Ok(()),
-        Ok(out) => Err(format!(
-            "node init failed (exit {:?}): {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
-        Err(e) => Err(format!("node init could not run: {e}")),
-    }
+    let program = match dev_sidecar { Some(program) => program.to_path_buf(), None => sidecar_path(SIDECAR_BIN)? };
+    let data_dir = data_dir.to_path_buf();
+    let load = app.state::<NodeState>().seed_password_loader;
+    tokio::task::spawn_blocking(move || {
+        let fresh = local_owner::may_create_password(&data_dir)?;
+        if !fresh { return Err("The node directory is not empty; setup will not replace it.".into()); }
+        let password = load(&data_dir, true)?;
+        seed_file::initialize(&program, &data_dir, password)
+    }).await.map_err(|_| "Local node setup stopped unexpectedly.")?
 }
 
 /// Resolve the bundled sidecar exactly as `tauri-plugin-shell` does, so the path is
@@ -777,22 +767,37 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
         None => sidecar_path(SIDECAR_BIN)?,
     };
     let local_owner = state.owner.active.load(Ordering::SeqCst);
-    let password = if local_owner {
-        Some(local_owner::prepare_launch(config, owner_password::load)?)
-    } else { None };
+    if config.try_exists().map_err(|_| "Cannot inspect local node config")? {
+        crate::beta::config(&seed_file::config_value(config)?)?;
+    }
+    let owner_password = if local_owner { Some(local_owner::prepare_launch(config, state.seed_password_loader)?) } else { None };
+    local_owner::protect_config(config, false)?;
+    let path = seed_file::mnemonic_path(config)?;
+    let migration = !path.extension().is_some_and(|ext| ext == "enc");
+    if !local_owner && !path.try_exists().map_err(|_| "Cannot inspect the local recovery phrase")?
+        && !path.with_extension("enc").try_exists().map_err(|_| "Cannot inspect the encrypted recovery phrase")?
+    {
+        return Err("The local recovery phrase is missing; restore it before starting the node.".into());
+    }
+    let password = match owner_password {
+        Some(password) => password,
+        None => (state.seed_password_loader)(config.parent().ok_or("Missing node directory")?, migration)?,
+    };
+    seed_file::protect(config, &password)?;
     let mut cmd = std::process::Command::new(&program);
     cmd.args(local_owner::start_args(config, dev, local_owner))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    if local_owner { cmd.stdin(std::process::Stdio::piped()); }
+    if !local_owner { cmd.args(["--password-fd", "0"]); }
+    cmd.stdin(std::process::Stdio::piped());
 
     *state.all_in_caps_node.lock().unwrap() = None;
     *state.readmission_ask.lock().unwrap() = None;
     let routing_policy = configured_routing_policy(config);
     let network = configured_network(config);
     let child = state.spawn_child(&mut cmd)?;
-    if let Some(password) = password {
+    {
         if owner_password::deliver(child.take_stdin(), password).is_err() {
             stop_supervised_node(&child, Duration::from_secs(1));
             return Err("The seed password pipe failed; the node was stopped.".into());
@@ -1271,6 +1276,9 @@ fn refuse_external(state: &NodeState) -> Result<(), String> {
 #[cfg(all(desktop, not(feature = "mobile")))]
 async fn attach_external(app: &AppHandle, app_data_dir: &Path, node: dev_node::ExternalNode) {
     let state = app.state::<NodeState>();
+    if let Err(error) = seed_file::config_value(&node.config).and_then(|value| crate::beta::config(&value)) {
+        return set_error(&state, error);
+    }
     eprintln!(
         "[dev-node] EXTERNAL node on {}, data dir {} (not started or stopped by the app)",
         state.api_base,
@@ -1767,6 +1775,30 @@ fn check_first_run_session(state: &NodeState, session: &PairedSession) -> Result
     Ok(())
 }
 
+/// Inspect only the authenticated peer's status, before publishing its token.
+/// Older peers without a network declaration cannot establish beta authority.
+async fn check_remote_network(state: &NodeState, token: &str) -> Result<(), String> {
+    if !state.remote_mode.load(Ordering::SeqCst) || cfg!(feature = "developer-mainnet") { return Ok(()); }
+    let generation = *state.remote_connect_generation.borrow();
+    let result = async {
+        let response = state.http.get(format!("{}/status", state.api_base))
+            .bearer_auth(token).timeout(Duration::from_secs(10)).send().await
+            .map_err(|_| crate::beta::NETWORK_UNKNOWN.to_string())?;
+        if !response.status().is_success() { return Err(crate::beta::NETWORK_UNKNOWN.into()); }
+        let status: serde_json::Value = response.json().await.map_err(|_| crate::beta::NETWORK_UNKNOWN.to_string())?;
+        crate::beta::status(&status)
+    }.await;
+    let current = state.remote_connect_generation.borrow();
+    if *current != generation { return Err("Remote node changed while checking its network.".into()); }
+    if let Err(error) = &result {
+        *state.ready.lock().unwrap() = false;
+        *state.token.lock().unwrap() = None;
+        *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
+        set_error(state, error.clone());
+    }
+    result
+}
+
 /// Pair with the node, reuse a stored pairing, or — only when `/pair/request`
 /// is 404 — mint via `/auth/local`. Records the outcome in the pairing view.
 async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> {
@@ -1799,6 +1831,7 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
     match outcome {
         Ok(Established::Paired { session, .. }) => {
             check_first_run_session(state, &session)?;
+            check_remote_network(state, &session.token).await?;
             *state.token.lock().unwrap() = Some(session.token.clone());
             *state.auth.lock().unwrap() = AuthMode::Paired(session);
             let ctx = state.pairing.lock().unwrap().clone();
@@ -1809,6 +1842,7 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
             Ok(())
         }
         Ok(Established::LocalFallback { token }) => {
+            check_remote_network(state, &token).await?;
             *state.token.lock().unwrap() = Some(token);
             *state.auth.lock().unwrap() = AuthMode::Local;
             *state.pairing_view.lock().unwrap() = view;
@@ -1866,6 +1900,8 @@ async fn refresh_paired(state: &NodeState) -> Result<(), String> {
     };
     // A buffered old-node reply cannot restore credentials after replacement
     // or Forget. Keep this guard through publication so invalidation is atomic.
+    if *state.remote_connect_generation.borrow() != generation { return Err("the remote connection changed".into()); }
+    if result.is_ok() { check_remote_network(state, &session.token).await?; }
     let current = state.remote_connect_generation.borrow();
     if *current != generation { return Err("the remote connection changed".into()); }
     if let Err(error) = result {
@@ -11112,6 +11148,31 @@ mod control_act_tests {
         let dir = tempfile::tempdir().unwrap();
         *state.config.lock().unwrap() = Some(dir.path().join("konsensus.toml"));
         Fake { state, seen, _dir: dir }
+    }
+
+    #[tokio::test]
+    async fn beta_remote_network_refusal_retires_authority_before_any_action() {
+        if cfg!(feature = "developer-mainnet") { return; }
+        for (network, error) in [(Some("bitcoin"), crate::beta::MAINNET_DISABLED), (Some("mainnet"), crate::beta::MAINNET_DISABLED), (None, crate::beta::NETWORK_UNKNOWN)] {
+            let node = fake(AuthMode::Local, Arc::new(move |_, path, _| {
+                assert_eq!(path, "/status");
+                (200, serde_json::json!({"network":network}).to_string())
+            }));
+            node.state.remote_mode.store(true, Ordering::SeqCst);
+            *node.state.ready.lock().unwrap() = true;
+            assert_eq!(check_remote_network(&node.state, "tok.1").await.unwrap_err(), error);
+            assert!(!node.state.status_snapshot().ready);
+            assert!(node.state.token.lock().unwrap().is_none());
+            assert!(matches!(*node.state.auth.lock().unwrap(), AuthMode::Unauthenticated));
+            assert!(call_api(&node.state, reqwest::Method::POST, "/payments/pay", None).await.is_err());
+            assert_eq!(node.targets(), ["GET /status"]);
+        }
+        let node = fake(AuthMode::Local, Arc::new(|_, _, _| (200, r#"{"network":"signet"}"#.into())));
+        node.state.remote_mode.store(true, Ordering::SeqCst);
+        *node.state.ready.lock().unwrap() = true;
+        check_remote_network(&node.state, "tok.1").await.unwrap();
+        assert!(node.state.status_snapshot().ready);
+        assert!(node.state.token.lock().unwrap().is_some());
     }
 
     /// A node that accepts every action, rc7-shaped.

@@ -60,6 +60,19 @@ fn responses(
 const PHRASE: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
+fn supervisor_password(_: &Path, _: bool) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+    Ok(zeroize::Zeroizing::new(b"supervisor-test-password".to_vec()))
+}
+fn supervisor_config(config: &Path, source: Option<&str>) -> String {
+    let seed = config.parent().unwrap().join("identity/mnemonic.enc");
+    device::write_private(&seed, &seed_file::encrypt(PHRASE.as_bytes(), b"supervisor-test-password").unwrap()).unwrap();
+    let source = source.unwrap_or("[identity]\nmnemonic_file = \"identity/mnemonic\"\n");
+    let mut text = source.replace("\"identity/mnemonic\"", &format!("{seed:?}"));
+    text.push_str("\n[lightning]\nbackend='mock'\nlistening_address='127.0.0.1:9735'\n[network]\nlisten_addr='127.0.0.1:9736'\n[api]\nlisten_addr='127.0.0.1:3141'\n");
+    std::fs::write(config, &text).unwrap();
+    text
+}
+
 #[tokio::test]
 async fn restore_refuses_remote_before_any_request() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -263,7 +276,7 @@ printf '%s\n' 'Error: refusing to start: missing marker (identity_and_state_with
 exit 1
 "#, calls.display(), marker.display(), marker.display())).unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let (state, server) = responses(vec![
+    let (mut state, server) = responses(vec![
         ("GET /api/v1/health ", 200, serde_json::json!({})),
         ("POST /api/v1/pair/request ", 404, serde_json::json!({})),
         (
@@ -278,6 +291,8 @@ exit 1
         ),
     ]);
     let config = dir.path().join("konsensus.toml");
+    supervisor_config(&config, None);
+    state.seed_password_loader = supervisor_password;
     *state.config.lock().unwrap() = Some(config.clone());
     *state.dev_sidecar.lock().unwrap() = Some(program);
     let app = tauri::test::mock_builder()
@@ -374,11 +389,11 @@ async fn price_floor_refusal_is_only_offered_after_failed_stderr_exit() {
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("mock-node");
         let config = dir.path().join("konsensus.toml");
-        let original = include_str!("../tests/fixtures/rc7-pricing.toml");
-        std::fs::write(&config, original).unwrap();
+        let original = supervisor_config(&config, Some(include_str!("../tests/fixtures/rc7-pricing.toml")));
         std::fs::write(&program, format!("#!/bin/sh\nprintf '%s\\n' '{diagnostic}' >{output}\nexit {exit}\n")).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let state = NodeState::default();
+        let mut state = NodeState::default();
+        state.seed_password_loader = supervisor_password;
         *state.config.lock().unwrap() = Some(config.clone());
         *state.dev_sidecar.lock().unwrap() = Some(program);
         let app = tauri::test::mock_builder().manage(state)
@@ -432,20 +447,16 @@ async fn price_floor_repair_requires_its_own_local_stopped_consent() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn retained_node_requires_two_separate_consents_then_authenticates_normally() {
+async fn encrypted_retained_node_requires_two_separate_consents_then_authenticates_normally() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("konsensus.toml");
     let marker = dir.path().join("mock-marker");
     let calls = dir.path().join("calls");
     let program = dir.path().join("mock-node");
-    let seed = dir.path().join("identity/mnemonic");
-    std::fs::create_dir(seed.parent().unwrap()).unwrap();
-    std::fs::write(&seed, "existing-identity").unwrap();
-    let original = include_str!("../tests/fixtures/rc7-pricing.toml");
-    std::fs::write(&config, &original).unwrap();
-    assert!(!local_owner::launch_enabled(true, &config).unwrap(),
-        "a retained seed beside the config must not enable owner mode");
+    let original = supervisor_config(&config, Some(include_str!("../tests/fixtures/rc7-pricing.toml")));
+    let seed = dir.path().join("identity/mnemonic.enc");
+    let seed_before = std::fs::read(&seed).unwrap();
     std::fs::write(&program, format!(r#"#!/bin/sh
 printf '%s\n' "$1" >> '{}'
 if [ "$1" = repair ]; then touch '{}'; exit 0; fi
@@ -464,7 +475,8 @@ exec sleep 30
     // covers the health request racing stderr/exit on the intermediate start.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let state = NodeState::for_api(format!("http://127.0.0.1:{}/api/v1", listener.local_addr().unwrap().port()));
+    let mut state = NodeState::for_api(format!("http://127.0.0.1:{}/api/v1", listener.local_addr().unwrap().port()));
+    state.seed_password_loader = supervisor_password;
     let server_config = config.clone();
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -520,8 +532,7 @@ exec sleep 30
             if done { break; }
         }
     });
-    state.owner.active.store(local_owner::launch_enabled(true, &config).unwrap(), Ordering::SeqCst);
-    assert!(!state.status_snapshot().local_owner, "upgrade must not request a new seed password");
+    state.owner.active.store(false, Ordering::SeqCst);
     *state.config.lock().unwrap() = Some(config.clone());
     *state.dev_sidecar.lock().unwrap() = Some(program);
     let app = tauri::test::mock_builder().manage(state)
@@ -549,7 +560,7 @@ exec sleep 30
     assert_eq!(std::fs::read_to_string(config.with_extension("toml.bak")).unwrap(), original);
     assert!(state.status_snapshot().ready);
     assert!(!state.status_snapshot().local_owner, "retained identity cannot reopen ceremony");
-    assert_eq!(std::fs::read_to_string(seed).unwrap(), "existing-identity");
+    assert_eq!(std::fs::read(seed).unwrap(), seed_before);
     assert_eq!(state.status_snapshot().node_id.as_deref(), Some("existing"));
     assert_eq!(state.status_snapshot().initialization_repair, InitializationRepair::None);
     state.stop_for_restart(Duration::from_secs(2));

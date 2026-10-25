@@ -1,5 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { softenError } from '../src/control/userFacing';
+import { setLanguagePref } from '../src/i18n';
+afterEach(() => setLanguagePref('en'));
+
+it.each([
+  ['en', 'This beta uses signet; mainnet is disabled.'],
+  ['da', 'Denne beta bruger signet; mainnet er deaktiveret.'],
+] as const)('explains the beta network refusal in %s', (language, reason) => {
+  setLanguagePref(language);
+  expect(softenError('beta_mainnet_disabled').summary).toBe(reason);
+  setLanguagePref('en');
+});
 
 describe('softenError', () => {
   it('maps introduction_unavailable to a plain public-address sentence', () => {

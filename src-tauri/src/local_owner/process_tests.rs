@@ -8,7 +8,7 @@ use std::time::Instant;
 const PASSWORD: &str = "owner-process-canary-6f98b212e2c9440a";
 const PHRASE: &str =
     "abandon ability able about above absent absorb abstract absurd abuse access accident";
-const CHILD: &str = "local_owner::process_tests::host_child";
+const CHILD: &str = "app::local_owner::process_tests::host_child";
 
 fn leak(bytes: &[u8], secrets: &[&str]) -> Option<usize> {
     for (i, secret) in secrets.iter().enumerate() {
@@ -104,20 +104,9 @@ fn real_node_create_finalize_restart_lists_device() {
 }
 
 pub(super) fn real_node_binary() -> Option<PathBuf> {
-    let explicit = std::env::var_os("BITSOV_OWNER_TEST_BINARY").map(PathBuf::from);
-    let binary = explicit.clone().or_else(|| {
-        ["target-review-node", "target"]
-            .into_iter()
-            .map(|target| {
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../pa-ownerB")
-                    .join(target)
-                    .join("debug/konsensus")
-            })
-            .find(|p| p.is_file())
-    });
+    let binary = std::env::var_os("BITSOV_OWNER_TEST_BINARY").map(PathBuf::from);
     let Some(binary) = binary else {
-        eprintln!("SKIP real owner node test: build pa-ownerB or set BITSOV_OWNER_TEST_BINARY");
+        eprintln!("SKIP real owner node test: set BITSOV_OWNER_TEST_BINARY");
         return None;
     };
     assert!(binary.is_file(), "explicit real-node binary is missing");
@@ -248,7 +237,7 @@ async fn fixture_lifecycle(root: &Path, dir: &Path) {
     command
         .args([
             "--exact",
-            "local_owner::process_tests::node_fixture_child",
+            "app::local_owner::process_tests::node_fixture_child",
             "--nocapture",
         ])
         .env("BITSOV_OWNER_FIXTURE_ADDR", address.to_string());
