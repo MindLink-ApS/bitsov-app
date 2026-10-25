@@ -1875,3 +1875,16 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
     height: min(1.411765rem, 32px);
   }
 }
+
+/* Waiting calls remain visible above the live-call controls. */
+.waiting-calls {
+  position: fixed;
+  top: max(var(--s-6), env(safe-area-inset-top, 0px));
+  left: max(var(--s-6), env(safe-area-inset-left, 0px));
+  z-index: 51;
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+  display: grid;
+  gap: var(--s-3);
+}
+.waiting-calls .call-panel { position: relative; right: auto; bottom: auto; }
