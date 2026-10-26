@@ -773,6 +773,75 @@ pub struct CallQuote {
     pub signal_max_routing_fee_msat: u64,
     /// Offer plus one hangup, all-in: what a call you place costs at most.
     pub call_total_msat: Option<u64>,
+    /// M6: one paid 60-second block (one minute of call) at the callee's
+    /// advertised kind-404 price. `None` when their node advertises none or
+    /// its table is stale or missing: then no node-routed call is placed.
+    pub block_msat: Option<u64>,
+    /// The routing allowance per block the caller's node may reserve: the
+    /// offer's routing ceiling, which the node applies to every block.
+    pub block_max_routing_fee_msat: u64,
+    /// The most the caller's node will hold for the call's minutes when it
+    /// sends the offer (240 blocks, each at `block_msat` plus its routing
+    /// allowance). An upper bound for consent; the node's own reservation on
+    /// the call status is the authority once the call is placed.
+    pub reservation_max_msat: Option<u64>,
+}
+
+/// M6: a paid call runs in 60-second blocks, at most 240 (four hours).
+pub const CALL_MAX_BLOCKS: u64 = 240;
+/// The callee's per-kind block price in its advert, and the category it
+/// falls back to when the block price equals the realtime tariff.
+pub const CALL_BLOCK_PRICE_KEY: &str = "kind:404";
+pub const CATEGORY_REALTIME: &str = "realtime_signaling";
+
+/// Add the callee's per-minute block price (from its cached price advert,
+/// never paid here) and the most the caller's node will reserve for it.
+pub fn with_call_blocks(mut quote: CallQuote, table: Option<&PeerPrice>) -> CallQuote {
+    let block = table.filter(|t| !t.stale)
+        .and_then(|t| t.prices.get(CALL_BLOCK_PRICE_KEY).or_else(|| t.prices.get(CATEGORY_REALTIME)).copied())
+        .filter(|price| *price > 0)
+        .map(|price| price.max(crate::act::MIN_PAYMENT_MSAT));
+    quote.block_msat = block.filter(|_| quote.offer_msat.is_some());
+    quote.block_max_routing_fee_msat = if quote.block_msat.is_some() { quote.offer_max_routing_fee_msat } else { 0 };
+    quote.reservation_max_msat = quote.block_msat.and_then(|price| price.checked_add(quote.block_max_routing_fee_msat))
+        .and_then(|block| block.checked_mul(CALL_MAX_BLOCKS));
+    quote
+}
+
+/// `GET /calls?peer=` (genome M6 N1/N3): one open call's paid interval and,
+/// for an outgoing call under a paired grant, its spend reservation. Read-only
+/// for the renderer's running cost and block schedule; never payment authority.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CallStatus {
+    pub id: String,
+    /// `reserved`, `ringing`, `live` or `ended`, aged by the node at read time.
+    pub state: String,
+    /// `outgoing` (this node offered) or `incoming`.
+    pub direction: String,
+    /// End of the last settled 60-second block (Unix ms); null before block zero.
+    #[serde(default)]
+    pub paid_until_ms: Option<u64>,
+    #[serde(default)]
+    pub next_block_seq: u32,
+    /// When the next block is due (Unix ms); null when ended or at the cap.
+    #[serde(default)]
+    pub next_block_due_ms: Option<u64>,
+    #[serde(default)]
+    pub reservation: Option<CallReservation>,
+}
+
+/// The node's call-sized hold (genome `CallSpendStatus`), all in msat.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CallReservation {
+    pub reserved_msat: u64,
+    /// Settled block principal plus known routing fees.
+    pub spent_msat: u64,
+    /// Still held, including unresolved payments; released funds excluded.
+    pub remaining_msat: u64,
+    pub per_block_msat: u64,
+    pub per_block_fee_msat: u64,
+    pub released_msat: u64,
+    pub closed: bool,
 }
 
 /// `GET /pricing/peers/:id/call`: the callee's live answer (genome asks it).
@@ -796,6 +865,9 @@ pub fn call_quote(live: Option<&PeerCallPrice>, own_signal_msat: u64) -> CallQuo
         signal_msat: signal,
         signal_max_routing_fee_msat: fee(signal),
         call_total_msat: offer.map(|o| o + fee(o) + signal + fee(signal)),
+        block_msat: None,
+        block_max_routing_fee_msat: 0,
+        reservation_max_msat: None,
     }
 }
 
@@ -1214,6 +1286,43 @@ mod tests {
         assert_eq!((none.offer_msat, none.call_total_msat, none.signal_msat), (None, None, 2_000));
         let big = call_quote(Some(&PeerCallPrice { offer_msat: 2_000_000, signal_msat: 50 }), 50);
         assert_eq!(big.offer_max_routing_fee_msat, 10_000);
+    }
+
+    #[test]
+    fn call_status_reads_the_node_reservation_fields_verbatim() {
+        let calls: Vec<CallStatus> = serde_json::from_value(serde_json::json!([
+            {"id": "0123456789abcdef0123456789abcdef", "state": "live", "direction": "outgoing", "unresolved_paid_admission": false,
+             "created": null, "op_id": null, "paid_until_ms": 1_790_000_060_000u64, "next_block_seq": 1, "next_block_due_ms": 1_790_000_040_000u64,
+             "reservation": {"reserved_msat": 6000, "spent_msat": 22, "remaining_msat": 5978, "per_block_msat": 20, "per_block_fee_msat": 5, "released_msat": 0, "closed": false}},
+            {"id": "1123456789abcdef0123456789abcdef", "state": "ringing", "direction": "incoming", "unresolved_paid_admission": true,
+             "created": null, "op_id": null, "paid_until_ms": null, "next_block_seq": 0, "next_block_due_ms": null},
+        ])).unwrap();
+        let hold = calls[0].reservation.as_ref().unwrap();
+        assert_eq!((hold.reserved_msat, hold.spent_msat, hold.remaining_msat, hold.per_block_msat), (6000, 22, 5978, 20));
+        assert_eq!((calls[0].next_block_seq, calls[0].paid_until_ms), (1, Some(1_790_000_060_000)));
+        assert_eq!((calls[1].reservation.as_ref(), calls[1].next_block_due_ms), (None, None));
+    }
+
+    #[test]
+    fn a_minute_costs_the_callees_advertised_block_price_and_the_reservation_is_bounded() {
+        let live = PeerCallPrice { offer_msat: 10_000, signal_msat: 50 };
+        let table = |prices: &[(&str, u64)], stale: bool| PeerPrice {
+            peer_id: A.into(), prices: prices.iter().map(|(k, v)| (k.to_string(), *v)).collect(), age_secs: 1, stale,
+        };
+        let q = with_call_blocks(call_quote(Some(&live), 50), Some(&table(&[(CALL_BLOCK_PRICE_KEY, 10_000), (CATEGORY_REALTIME, 50)], false)));
+        assert_eq!((q.block_msat, q.block_max_routing_fee_msat), (Some(10_000), 5_000));
+        assert_eq!(q.reservation_max_msat, Some(240 * 15_000));
+        // Equal to the realtime tariff: the advert omits the per-kind key.
+        let realtime = with_call_blocks(call_quote(Some(&live), 50), Some(&table(&[(CATEGORY_REALTIME, 2_000)], false)));
+        assert_eq!(realtime.block_msat, Some(2_000));
+        // Stale or missing advert, or no offer price: no minute price, no call.
+        for q in [
+            with_call_blocks(call_quote(Some(&live), 50), Some(&table(&[(CALL_BLOCK_PRICE_KEY, 10_000)], true))),
+            with_call_blocks(call_quote(Some(&live), 50), None),
+            with_call_blocks(call_quote(None, 50), Some(&table(&[(CALL_BLOCK_PRICE_KEY, 10_000)], false))),
+        ] {
+            assert_eq!((q.block_msat, q.reservation_max_msat, q.block_max_routing_fee_msat), (None, None, 0));
+        }
     }
 
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

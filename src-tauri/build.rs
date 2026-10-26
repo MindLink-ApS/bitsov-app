@@ -120,6 +120,8 @@ fn main() {
             "call_audio_session",
             "call_quote",
             "call_signal",
+            "call_status",
+            "call_block",
             "call_media_open",
             "call_media_send",
             "call_media_close",

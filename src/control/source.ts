@@ -40,6 +40,7 @@ import type {
   FileSaveResult,
   CallQuote,
   CallReceipt,
+  CallStatus,
   InvoiceAmount,
   InvoiceStatus,
   InvoiceView,
@@ -259,6 +260,10 @@ export interface Source {
   closeCallAdmission(operationId: string, peer: string, callId: string): Promise<void>;
   /** One paid call signal (kinds 400-403) under the message budget rules. */
   callSignal(peer: string, kind: number, plaintext: string, maxMsat: number): Promise<CallReceipt>;
+  /** M6: one call's paid interval and reservation at the node; null once the node no longer lists it. Read-only. */
+  callStatus(peer: string, callId: string): Promise<CallStatus | null>;
+  /** M6: pay block `seq` (one minute) of an outgoing call, at most `maxBlockMsat` per minute (the price agreed before dialling). */
+  callBlock(peer: string, callId: string, seq: number, maxBlockMsat: number): Promise<CallReceipt>;
   // AI track: the host reads through its broker; a remote model gets only a body the owner saw
   aiRead(topic: AiTopic, sinceMs: number | null, assistant?: AssistantId): Promise<TopicRead>;
   aiLocalTurn(assistant: AssistantId, question: string, draftText: string): Promise<LocalTurn>;
@@ -414,6 +419,8 @@ export const hostSource: Source = {
   callQuote: (peer) => invoke<CallQuote>('call_quote', { peer }),
   closeCallAdmission: (operationId, peer, callId) => invoke<void>('op_close_call', { operation_id: operationId, peer, call_id: callId }),
   callSignal: (peer, kind, plaintext, maxMsat) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat }),
+  callStatus: (peer, callId) => invoke<CallStatus | null>('call_status', { peer, call_id: callId }),
+  callBlock: (peer, callId, seq, maxBlockMsat) => invoke<CallReceipt>('call_block', { peer, call_id: callId, seq, max_block_msat: maxBlockMsat }),
   aiRead: (topic, sinceMs, assistant) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs, ...(assistant ? { assistant } : {}) }),
   aiLocalTurn: (assistant, question, draftText) => invoke<LocalTurn>('ai_read', { assistant, local_turn: { question, draft_text: draftText } }),
   aiWatchPoll: (assistant, sample, revision) => invoke<WatchUpdate | null>('ai_read', { assistant, watch: { sample, revision } }),

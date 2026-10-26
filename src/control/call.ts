@@ -16,6 +16,7 @@ import { appPlatform, type AppPlatform } from '../platform';
 import { provenUnpaid } from './paymentOutcome';
 import { asActionError } from './state';
 import { amount } from './format';
+import { createCallMinutes, type CallMinutes, type MinutesDeps, type MinutesView } from './callMinutes';
 import type { ActionError, CallQuote, CallReceipt, Message, NodeGrantSummary, OpView } from './types';
 
 export const CALL_OFFER = 400;
@@ -76,7 +77,8 @@ export function stunServer(url: string | null | undefined): RTCIceServer[] {
 export const isCallKind = (kind: number) => kind >= CALL_OFFER && kind <= CALL_HANGUP;
 
 export type CallMedia = 'audio' | 'video';
-export type HangupReason = 'hangup' | 'declined' | 'busy' | 'timeout' | 'failed';
+/** `unpaid` (M6): only received, from the callee's node, when the paid minutes ran out. */
+export type HangupReason = 'hangup' | 'declined' | 'busy' | 'timeout' | 'failed' | 'unpaid';
 
 export type Signal = {
   v: 1;
@@ -92,7 +94,7 @@ export type Signal = {
 };
 
 const CALL_ID = /^[0-9a-f]{32}$/;
-const REASONS: HangupReason[] = ['hangup', 'declined', 'busy', 'timeout', 'failed'];
+const REASONS: HangupReason[] = ['hangup', 'declined', 'busy', 'timeout', 'failed', 'unpaid'];
 
 /** A received signal, checked the way the node checks it. Anything else is ignored. */
 export function parseSignal(kind: number, plaintext: string | null): Signal | null {
@@ -182,6 +184,11 @@ export type CallView = {
   close: CallClose | null;
   /** H2: an earlier call to this peer is still open at the host (`call_admission_open`). */
   stuck: { opId: string | null } | null;
+  /**
+   * M6 node-routed calls: the paid minutes (an outgoing call pays them; an
+   * incoming one only watches the node end it). Amounts are the node's own.
+   */
+  minutes: MinutesView | null;
 };
 
 /** `closed`: the host ended it (or nothing was owed); `unknown`: check pending result; `refused`: still open. */
@@ -211,11 +218,25 @@ const peerEnd = (confirmed: string) => ({ record: false, confirmed }) as const;
 
 export const RECOVERY_CLOSING = 'Your last call is still closing. End it, then call again.';
 
+/** The node-routed adapter's end detail when the node never admitted audio because the first minute was not paid. */
+export const NOT_PAID = 'not_paid';
+
+/**
+ * M6: why a node-routed call could not be placed, in plain words. The node
+ * reserves the call's minutes when the offer goes out; a refusal there names
+ * the grant, the channel or the price, and says nothing was paid.
+ */
+export function callRefusal(error: ActionError): string {
+  // The grant refusals name a per-payment limit; for a call it is the reservation that did not fit.
+  return ['grant_per_call', 'grant_exhausted', 'grant_recipient'].includes(error.code)
+    ? tr('caMinutesGrantRefused', error.message) : error.message;
+}
+
 export const IDLE: CallView = {
   silenced: false,
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
   liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, offline: false,
-  close: null, stuck: null, dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null,
+  close: null, stuck: null, dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null, minutes: null,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
@@ -223,6 +244,13 @@ type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 export type CallDeps = {
   /** M6: media goes through the node link (`nodeRoutedConnection.ts`), not a direct connection. Copy only. */
   routed?: boolean;
+  /**
+   * M6 A2: paid minutes. When set, a call is placed only with the callee's
+   * per-minute price in its quote (the price the owner agreed to), the caller
+   * pays one block per minute from their answer on, and either side ends the
+   * call when its node ends it for payment.
+   */
+  minutes?: MinutesDeps;
   /** Report local teardown by exact admission. Host keeps cleanup pending. No send. */
   closeAdmission?: (operationId: string, peer: string, callId: string) => Promise<void>;
   /** Check current spend permission and show the shell’s approval path before capture. */
@@ -312,6 +340,8 @@ export function createCallEngine(deps: CallDeps) {
     deps.onWaiting?.([...waiting.values()].map(c => c.view()));
   };
   let pc: RTCPeerConnection | null = null;
+  /** M6 A2: this call's paid-minutes session (outgoing: pays; incoming: watches). */
+  let minutes: CallMinutes | null = null;
   let local: MediaStream | null = null;
   let remote: MediaStream | null = null;
   let quote: CallQuote | null = null;
@@ -488,9 +518,13 @@ export function createCallEngine(deps: CallDeps) {
     const ids = own.filter((id) => id !== confirmed);
     const callId = view.callId;
     own = [];
+    // Stop paying minutes at once; keep reading the node until it releases the reservation.
+    const session = minutes;
+    minutes = null;
     teardown();
     healedRefusal = null;
     set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null });
+    if (session) { if (view.outgoing) session.finish(); else session.dispose(); }
     const recorded = record && peer ? Promise.all(operations.map(([operationId, wireCallId]) => closeAdmission(operationId, peer, wireCallId))) : Promise.resolve();
     if (endAtHost && ids.length) void recorded.then(() => closeAdmissions(ids, callId));
   };
@@ -609,7 +643,9 @@ export function createCallEngine(deps: CallDeps) {
           restartTimer = setTimeout(() => { restartTimer = undefined; void restart(conn); }, RESTART_DELAY_MS);
         }
       } else if (state === 'closed') {
-        end('failed', deps.routed ? tr('caTheNodeMediaLinkClosed') : tr('caTheDirectConnectionClosed'));
+        // M6: the node admits call audio only once the first minute is paid.
+        if (deps.routed && (conn as { endDetail?: string | null }).endDetail === NOT_PAID) end('unpaid', tr('caMinutesNotPaidInTime'));
+        else end('failed', deps.routed ? tr('caTheNodeMediaLinkClosed') : tr('caTheDirectConnectionClosed'));
       }
     };
     conn.onconnectionstatechange = () => connectionChanged(conn.connectionState);
@@ -801,6 +837,19 @@ export function createCallEngine(deps: CallDeps) {
     }
   };
 
+  /** M6 A2: one paid-minutes session per call; its view and its stop belong to that call only. */
+  const startMinutes = (peer: string, callId: string, agreedBlockMsat: number, reservationMaxMsat: number | null, pays: boolean) => {
+    minutes?.dispose();
+    minutes = createCallMinutes({
+      peer, callId, agreedBlockMsat, reservationMaxMsat, pays, deps: deps.minutes!, now: deps.now,
+      onChange: (m) => { if (view.callId === callId) set({ minutes: m }); },
+      // The node ended it, or paying stopped: the call ends now, never left 'connected'.
+      onStop: (stop) => { if (view.callId === callId && active()) end(stop.code === 'unpaid' ? 'unpaid' : stop.code === 'node_ended' ? 'hangup' : 'failed', stop.message); },
+    });
+    set({ minutes: minutes.view() });
+    return minutes;
+  };
+
   /** Media is set up but not flowing yet: give up after a while (nothing paid). */
   const awaitConnect = (callId: string) => {
     clearTimeout(ringTimer);
@@ -853,6 +902,8 @@ export function createCallEngine(deps: CallDeps) {
     if (view.callId !== callId || !active()) return;
     if (!r.ok) end(null, r.error.message);
     else {
+      // M6: the caller pays the minutes; this side only watches its node end the call.
+      if (deps.minutes) startMinutes(view.peer!, wireId ?? callId!, 0, null, false).start();
       negotiated = true;
       if ((view.phase as Phase) === 'connecting') awaitConnect(callId!);
       else if ((view.phase as Phase) === 'reconnecting') void restart(conn);
@@ -900,6 +951,12 @@ export function createCallEngine(deps: CallDeps) {
           tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat), amount(grant.per_call_max_msat), amount(grant.remaining_msat), amount(q.call_total_msat)) });
         return;
       }
+      // M6: no node-routed call without the per-minute price the owner agreed to.
+      const block = q.block_msat ?? null;
+      if (deps.minutes && block === null) {
+        set({ ...IDLE, phase: 'ended', peer, error: tr('caMinutesNoPrice') });
+        return;
+      }
       if (deps.authorize && !await deps.authorize()) return;
       if (generation !== mediaGeneration || active() || deps.busy?.()) return;
       quote = q;
@@ -910,6 +967,7 @@ export function createCallEngine(deps: CallDeps) {
       claim(callId);
       own = [];
       set({ ...IDLE, phase: 'calling', peer, callId, media, outgoing: true, camera: media === 'video' });
+      const session = deps.minutes && block !== null ? startMinutes(peer, callId, block, q.reservation_max_msat ?? null, true) : null;
       let conn: RTCPeerConnection;
       try {
         conn = await open(media);
@@ -942,9 +1000,11 @@ export function createCallEngine(deps: CallDeps) {
         return;
       }
       if (!r.ok) {
-        end(null, r.error.message);
+        end(null, session ? callRefusal(r.error) : r.error.message);
         return;
       }
+      // The node reserved this call's minutes when the offer went out: show its own figure.
+      if (session) void session.refresh();
       if (view.phase === 'calling' && !negotiated && !answerInFlight) {
         set({ phase: 'ringing' });
         // An answer can arrive before our offer's receipt; never regress it.
@@ -1154,6 +1214,8 @@ export function createCallEngine(deps: CallDeps) {
             set({ phase: 'connecting' });
             awaitConnect(view.callId!);
           }
+          // M6: block 0 is due at their answer; the node admits audio once it is paid.
+          if (!restarting) minutes?.start();
           try {
             await conn.setRemoteDescription({ type: 'answer', sdp: s.sdp! });
             if (pc === conn) {

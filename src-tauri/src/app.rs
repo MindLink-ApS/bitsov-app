@@ -4789,8 +4789,15 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         if let Some(peer) = peer { let _ = read_first_contact_quote_with_cap(state, &peer, true).await; }
     }
     let all_in_caps = has_all_in_caps(state);
-    let node_grant = check_node_grant_with_envelope_ids(state, path, &body, max_msat,
-        charge.as_ref().and_then(|c| c.envelope_ids)).await?;
+    // M6: a call block draws from the call's reservation, which the node made
+    // under the grant when the offer went out. The grant's remaining budget
+    // already excludes that hold, so it is not checked again here; the node
+    // still refuses a block outside the reservation or the grant.
+    let call_block = path == "/messages/compose" && body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK));
+    let node_grant = if call_block { None } else {
+        check_node_grant_with_envelope_ids(state, path, &body, max_msat,
+            charge.as_ref().and_then(|c| c.envelope_ids)).await?
+    };
     let reserve_msat = match (&charge, &node_grant) {
         // A zero cap: the node pays nothing, re-admission included.
         _ if max_msat == 0 => 0,
@@ -4922,7 +4929,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     if act::not_dispatched_refusal(status.as_u16(), &text) {
         release(state)?;
         abandon(&journal)?;
-        return Err(ActionError::new("not_dispatched", act::not_dispatched_message(&text)));
+        return Err(act::call_not_dispatched(&text)
+            .unwrap_or_else(|| ActionError::new("not_dispatched", act::not_dispatched_message(&text))));
     }
     // Node main b21e9a94 / rc18 20c6449e: calls::refused is used only by
     // reserve_outgoing, before compose_locked creates/executes the operation.
@@ -6720,6 +6728,109 @@ async fn read_call_quote(state: &NodeState, peer: &str) -> Result<control::CallQ
     Ok(control::call_quote(live.as_ref(), own.price_msat))
 }
 
+/// `call_quote`: the call price plus, for M6 node-routed calls, the callee's
+/// advertised per-minute block price and the most the caller's node will
+/// reserve for it. Read-only; the price advert is the node's cached table.
+async fn read_call_quote_with_blocks(state: &NodeState, peer: &str) -> Result<control::CallQuote, String> {
+    let quote = read_call_quote(state, peer).await?;
+    let peer = control::node_id(peer)?;
+    let table: Option<control::PeerPrice> = get_json(state, &format!("/pricing/peers/{peer}")).await.ok();
+    Ok(control::with_call_blocks(quote, table.as_ref()))
+}
+
+/// M6: one call's paid interval and spend reservation as the node reports
+/// them (`GET /calls?peer=`). Read-only: never pays, releases or settles.
+/// `None`: the node no longer lists the call (ended with nothing pending).
+async fn read_call_status(state: &NodeState, peer: &str, call_id: &str) -> Result<Option<control::CallStatus>, ActionError> {
+    let peer = control::node_id(peer).map_err(ActionError::invalid)?;
+    if !act::is_call_id(call_id) {
+        return Err(ActionError::invalid("invalid call id"));
+    }
+    let calls: Vec<control::CallStatus> = get_json(state, &format!("/calls?peer={peer}")).await.map_err(ActionError::node)?;
+    Ok(calls.into_iter().find(|c| c.id == call_id))
+}
+
+/// M6: pay block `seq` (kind 404) of an outgoing node-routed call. The node
+/// draws it from the reservation it made when the offer went out; amount and
+/// routing ceiling come from that reservation, never from the renderer.
+/// `max_block_msat` is the per-minute price the owner agreed to before
+/// dialling: a reservation above it is refused before anything is paid, and
+/// without a reservation (an owner session) it is the ceiling. Same authority
+/// and exactly-once journal as every other call signal.
+async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32, max_block_msat: u64) -> Result<act::CallReceipt, ActionError> {
+    let existing_operation = pending_operation_id(state).unwrap_or_default();
+    let result = async {
+        let target = control::node_id(peer).map_err(ActionError::invalid)?;
+        let status = read_call_status(state, &target, call_id).await?
+            .ok_or_else(|| ActionError::new("call_not_live", "Your node no longer lists this call. Nothing more was paid."))?;
+        if status.direction != "outgoing" || status.state == "ended" {
+            return Err(ActionError::new("call_not_live", "Your node has ended this call. Nothing more was paid."));
+        }
+        if status.next_block_seq != seq {
+            return Err(ActionError::new("call_block_not_due", "Your node expects another minute of this call. Nothing was paid for this one."));
+        }
+        if max_block_msat < act::MIN_PAYMENT_MSAT {
+            return Err(ActionError::invalid("the agreed per-minute price is out of range"));
+        }
+        let (cap, fee) = match status.reservation.as_ref() {
+            Some(hold) if hold.closed => return Err(ActionError::new(
+                "call_reservation_closed", "Your node has closed this call's reservation. Nothing more was paid.")),
+            Some(hold) => {
+                if hold.per_block_msat > max_block_msat {
+                    return Err(ActionError::new("call_price_changed",
+                        "Their node asks more per minute than you agreed to before calling. Nothing more was paid."));
+                }
+                let cap = hold.per_block_msat.checked_add(hold.per_block_fee_msat)
+                    .ok_or_else(|| ActionError::invalid("the call block amount is out of range"))?;
+                (cap, hold.per_block_fee_msat)
+            }
+            // An owner session (no paired grant) keeps no reservation: the
+            // node pays the callee's live price, capped at the agreed one.
+            None => {
+                let fee = act::routing_fee(max_block_msat);
+                (max_block_msat.checked_add(fee).ok_or_else(|| ActionError::invalid("the call block amount is out of range"))?, fee)
+            }
+        };
+        let mut body = act::call_block_body(&target, call_id, seq)?;
+        let needs_contact = || ActionError::new("call_needs_contact", "Calls go to contacts you have already paid. Send them a message first. Nothing was paid.");
+        let (auth, plan) = plan_message(state, &target, false, cap, None)
+            .map_err(|e| if e.code == "first_contact" { needs_contact() } else { e })?;
+        if plan.confirm.is_some() {
+            return Err(needs_contact());
+        }
+        let caps = require_price_caps(state, false).await?;
+        if !caps.operations {
+            return Err(ActionError::new("call_needs_node_upgrade",
+                "Upgrade your node before making calls: it cannot track call payments and admission safely. Nothing was paid."));
+        }
+        body["max_total_msat"] = serde_json::json!(cap);
+        body["max_routing_fee_msat"] = serde_json::json!(fee);
+        let charge = Charge {
+            target: target.clone(),
+            room: false,
+            confirm: None,
+            readmission_possible: caps.readmission_possible,
+            confirmed: false,
+            operation: caps.operations,
+            envelope_ids: Some(caps.envelope_ids),
+        };
+        let text = money_post(state, auth, "/messages/compose", body, cap, Some(charge)).await?;
+        let reply: act::SendReply = text.decode("/messages/compose")?;
+        Ok(act::CallReceipt {
+            operation_id: reply.operation_id.clone(),
+            total_msat: act::with_op(Active(text.operation_id.as_deref()), reply.total_msat())?,
+            message_id: reply.message_id,
+            kind: act::KIND_CALL_BLOCK,
+            amount_msat: reply.amount_msat,
+            max_routing_fee_msat: reply.max_routing_fee_msat,
+            delivered: reply.delivered,
+            accepted: reply.accepted,
+            sent_at_ms: now_ms(),
+        })
+    }.await;
+    act::with_op(Fallback(existing_operation.as_deref()), result)
+}
+
 /// One paid call signal (offer, answer, ICE or hangup) to one contact.
 /// Same authority as a 1:1 message: the owner's budget or the ten-minute
 /// window, one journaled spend at a time, a durable operation id when the
@@ -8393,7 +8504,35 @@ async fn call_quote(
 ) -> Result<control::CallQuote, String> {
     reject_sealed_window(&window)?;
     drop(window);
-    read_call_quote(state.inner(), &peer).await
+    read_call_quote_with_blocks(state.inner(), &peer).await
+}
+
+/// M6: one call's paid interval and reservation, as the node reports them. Read-only.
+#[tauri::command(rename_all = "snake_case")]
+async fn call_status(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    peer: String,
+    call_id: String,
+) -> Result<Option<control::CallStatus>, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    read_call_status(state.inner(), &peer, &call_id).await
+}
+
+/// M6: pay one 60-second block (kind 404) of an outgoing node-routed call.
+#[tauri::command(rename_all = "snake_case")]
+async fn call_block(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    peer: String,
+    call_id: String,
+    seq: u32,
+    max_block_msat: u64,
+) -> Result<act::CallReceipt, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_call_block(state.inner(), &peer, &call_id, seq, max_block_msat).await
 }
 
 /// `POST /messages/compose` for one call signal (kinds 400-403).
@@ -9489,6 +9628,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             call_audio_session,
             call_quote,
             call_signal,
+            call_status,
+            call_block,
             call_media_open,
             call_media_send,
             call_media_close,
@@ -20322,6 +20463,9 @@ mod assistant_acl_tests {
                 "call_audio_session",
                 "call_quote",
                 "call_signal",
+                // M6 A2: a call's paid minutes (status read, one block payment).
+                "call_status",
+                "call_block",
                 // M6 A1: the host-owned node-routed media socket.
                 "call_media_open",
                 "call_media_send",
