@@ -102,6 +102,13 @@ export function starterBalanceFlag(env: Record<string, string | undefined>): '1'
   return env.VITE_STARTER_BALANCE === '1' ? '1' : '0';
 }
 
+// M6 call media path (src/control/callFlags.ts): node-routed audio is the
+// build default; only the exact value "webrtc" selects the pre-M6 lab path
+// (scripts/calls/media-check.py). Same parent-process rule as the flag above.
+export function callMediaFlag(env: Record<string, string | undefined>): 'node' | 'webrtc' {
+  return env.VITE_CALL_MEDIA === 'webrtc' ? 'webrtc' : 'node';
+}
+
 const root = dirname(fileURLToPath(import.meta.url));
 
 // Tauri CLI hooks always set TAURI_ENV_PLATFORM, and set TAURI_ENV_DEBUG=true
@@ -137,7 +144,10 @@ export function devPort(env: Record<string, string | undefined>): number {
 // so devUrl always matches.
 // The assistant entry is not the window Tauri shows at startup.
 export default defineConfig({
-  define: { 'import.meta.env.VITE_STARTER_BALANCE': JSON.stringify(starterBalanceFlag(process.env)) },
+  define: {
+    'import.meta.env.VITE_STARTER_BALANCE': JSON.stringify(starterBalanceFlag(process.env)),
+    'import.meta.env.VITE_CALL_MEDIA': JSON.stringify(callMediaFlag(process.env)),
+  },
   plugins: [solid(), assistantDevCsp(), uiE2eDriver()],
   clearScreen: false,
   server: { port: devPort(process.env), strictPort: true },

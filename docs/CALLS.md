@@ -1,5 +1,97 @@
 # 1:1 calls (regtest prototype)
 
+## M6 A1: node-routed audio
+
+Owner decision (M6): **the node is the cell.** Call audio goes app → own node →
+peer node → peer app. Direct app-to-app WebRTC media is **off** in M6 builds and
+is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
+
+- **Build flag.** `VITE_CALL_MEDIA` (parent build process, like
+  `VITE_STARTER_BALANCE`; fixed at build time in `vite.config.ts`). Unset or
+  anything but the exact value `webrtc` is the M6 profile: node-routed audio
+  on, app-to-app media, video and meetings hidden and unreachable
+  (`src/control/callFlags.ts`). `VITE_CALL_MEDIA=webrtc` is the pre-M6 lab
+  profile only; the WebRTC code stays in the tree for it and for the lab
+  checks below, not for users. The Playwright a11y servers
+  (`playwright.webkit.config.ts`, `playwright.safe-areas.config.ts`) and
+  `scripts/ui-layout/meeting-planner-check.mjs` pin it, because their
+  meeting-planner specs exercise that hidden UI.
+- **The host owns the socket.** The Rust host opens the node's owner-scoped
+  `GET /api/v1/calls/:call_id/media?peer=<counterparty>` WebSocket exactly as
+  it owns `/ws` (`src-tauri/src/control/media.rs`): same loopback API base (a
+  local node, or the loopback proxy of the paired Noise remote-access tunnel),
+  same local proxy credential, the `bitsov.v1` subprotocol, and the token as
+  the `bitsov.jwt.<token>` subprotocol the node reads first (never in the URL).
+  The node admits the socket only for a `(peer, call_id)` it knows, under a
+  paired token with `spend`; the host reconnects with backoff while the call
+  lasts and stops on a refusal. The renderer opens no socket and sees no
+  token; the CSP keeps `connect-src 'self' ipc:` only. Three main-window
+  commands: `call_media_open(call_id, peer, on_frame)`,
+  `call_media_send(raw payload)`, `call_media_close()`. Frames reach the
+  renderer on one Tauri channel (binary frames; link transitions as parsed
+  JSON objects `{ link, detail }`); both directions pass through bounded queues
+  (50 frames) that drop the oldest frame under backpressure.
+- **Wire format.** Each binary message is `seq` (u32, big-endian) then the
+  payload (at most 4096 bytes, the node's cap). The host assigns `seq` upward
+  and validates the shape downward; the node forwards payloads opaquely. The payload is the app's "bitsov media
+  payload v1" (`src/control/mediaFrame.ts`): a type byte, then bytes. `0x00`
+  HELLO carries the codecs this app decodes; `0x01` is one 20 ms G.711 mu-law
+  frame (160 bytes); `0x02` is one 20 ms Opus packet. Each app sends Opus only
+  after the peer's HELLO said it decodes Opus, mu-law until then. A HELLO
+  takes a `seq` but no playout time.
+- **Renderer audio engine** (`src/control/callAudio.ts`). Microphone via the
+  engine's existing `getUserMedia` (echo cancellation and noise suppression
+  requested), 20 ms frames cut by an AudioWorklet, Opus through WebCodecs
+  `AudioEncoder`/`AudioDecoder` where the webview has it, otherwise mu-law in
+  pure TypeScript (no new dependency). Playout runs in an AudioWorklet whose
+  jitter buffer (`src/control/jitterBuffer.ts`) reorders by `seq`, conceals
+  loss by fading the last frame, drops late frames, and adapts its target
+  delay between 60 and 120 ms. Webviews without AudioWorklet fall back to a
+  ScriptProcessorNode and scheduled AudioBufferSourceNodes with the same
+  buffer. Mute, and clean teardown (worklets, codecs, context, socket) on
+  hangup. Opus failing mid-call falls back to mu-law: a broken encoder sends
+  mu-law from the next frame; a broken decoder withdraws Opus with a fresh
+  HELLO (repeated each second while Opus still arrives), and the peer switches
+  on its next frame. If the peer still sends Opus after 5 s, or an audio
+  worklet crashes, the engine reports a fatal error and the call ends.
+- **How the engine switches.** `call.ts` still drives one
+  RTCPeerConnection-shaped object per call; in M6 builds that object is
+  `src/control/nodeRoutedConnection.ts`, not an `RTCPeerConnection`. Its
+  "SDP" is a placeholder carrying `a=x-bitsov-media:node-routed-v1` and the
+  call id; once both descriptions are set it opens the host media socket for
+  the call id and its counterparty, and reports `connected` only when the host
+  reports the link open and the audio graph is ready. An audio graph that
+  cannot be built (no AudioContext, worklet refused) closes the socket and
+  ends the call rather than leaving a silent live call; so does a fatal audio
+  error later in the call. It gathers no
+  candidates and contacts no STUN or TURN server. A peer that
+  answers with direct-media SDP (a pre-M6 app) ends the call as "their
+  answer could not be used", nothing more paid. If the node link drops, the
+  host reconnects; after 30 s without it the call ends. The node's refusal of
+  the socket (for example an unknown call) ends it at once.
+- **Label.** While a node-routed call is ringing, connecting or live the card
+  says *Encrypted between your node and theirs — both nodes can hear it* /
+  *Krypteret mellem din node og deres — begge noder kan høre opkaldet*. The
+  STUN, direct-recovery and relay notes are not shown.
+- **Payment for the node leg is slice A2.** This slice pays nothing for media.
+  The hook is `onSession` on `nodeRoutedConnection.ts` (media session opened
+  / closed, with the call id and time), wired to `callMediaSession` in
+  `Shell.tsx`; the card's `payment` slot stays where it is.
+- **Checks.** `npm test -- tests/g711.test.ts tests/media-frame.test.ts
+  tests/jitter-buffer.test.ts tests/node-routed-connection.test.ts
+  tests/call-audio-failure.test.ts tests/call-media-flag.test.tsx` (codec
+  round trip, frame codec, mid-call Opus fallback and fatal teardown, jitter
+  ordering/loss/late drop/reorder, the adapter, and the shell with the flag
+  on: no `RTCPeerConnection`, no video or meeting controls, the label, live on
+  the host's link). `cargo test control::media` (frame codec, drop-oldest
+  queue, URL rule, a loopback media socket that assigns `seq` upward and
+  validates downward, a refused handshake that does not reconnect). These are
+  headless: they prove the wiring, not audio quality, device capture, or a
+  node that serves the route. Two-device acceptance against a node with the
+  media route is separate evidence.
+
+## Pre-M6 lab path (`VITE_CALL_MEDIA=webrtc` only)
+
 - **Media** goes directly between the two apps (WebRTC in the webview). It never passes through a node and is not billed.
 - **Signalling** is four paid messages through your node: offer (the callee's call price, once per call), answer, ICE, hangup (the realtime price each). Same budget, approval and exactly-once rules as messages. Only contacts you have already paid can be called.
 - **No third party by default.** The app ships no STUN or TURN server. With none set, calls use host candidates only, so they connect on the same network (or over a VPN).
@@ -11,7 +103,7 @@
 - **Media failures:** denied permissions and missing/busy devices show actionable messages. Capture has a 15 s deadline; any stream arriving after cancellation is stopped. Camera re-enable failure leaves the audio call usable and the camera off.
 - **UI state:** `CallView.state` exposes `idle | ringing | connecting | live | reconnecting | ended` through `onView` and the shell's `Actions.callView` accessor. `phase` retains the card's `calling` and `incoming` distinctions. `callId` and `liveAt` remain stable through recovery; dismiss moves ended → idle.
 - **Camera off** stops the camera (its light goes off); camera on captures it again.
-- Checks: `scripts/calls/media-check.py` (real WebRTC in Chromium through the app's call engine, loopback only) and `scripts/calls/regtest-demo.sh <genome>` (paid signalling on regtest plus the media check).
+- Checks: `scripts/calls/media-check.py` (real WebRTC in Chromium through the app's call engine, loopback only) and `scripts/calls/regtest-demo.sh <genome>` (paid signalling on regtest plus the media check). Both need a build with `VITE_CALL_MEDIA=webrtc`.
 
 ## Native media permissions
 

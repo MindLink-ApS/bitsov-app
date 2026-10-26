@@ -221,6 +221,8 @@ export const IDLE: CallView = {
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
 export type CallDeps = {
+  /** M6: media goes through the node link (`nodeRoutedConnection.ts`), not a direct connection. Copy only. */
+  routed?: boolean;
   /** Report local teardown by exact admission. Host keeps cleanup pending. No send. */
   closeAdmission?: (operationId: string, peer: string, callId: string) => Promise<void>;
   /** Check current spend permission and show the shell’s approval path before capture. */
@@ -607,7 +609,7 @@ export function createCallEngine(deps: CallDeps) {
           restartTimer = setTimeout(() => { restartTimer = undefined; void restart(conn); }, RESTART_DELAY_MS);
         }
       } else if (state === 'closed') {
-        end('failed', tr('caTheDirectConnectionClosed'));
+        end('failed', deps.routed ? tr('caTheNodeMediaLinkClosed') : tr('caTheDirectConnectionClosed'));
       }
     };
     conn.onconnectionstatechange = () => connectionChanged(conn.connectionState);

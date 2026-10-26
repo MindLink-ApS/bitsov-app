@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- M6 A1: route call audio through both nodes. The host owns the node's per-call media socket like `/ws` (loopback or the remote-access proxy, bounded drop-oldest queues, three main-window commands); the renderer encodes 20 ms frames with WebCodecs Opus or pure-TypeScript G.711 mu-law, plays them through an AudioWorklet with a 60–120 ms adaptive jitter buffer, and labels the call as encrypted between the two nodes. App-to-app WebRTC media, video and meetings are off in M6 builds (`VITE_CALL_MEDIA=webrtc` keeps the lab path); node payment for the media leg is slice A2.
+
 - Restore in-call Pay after a successful wallet/chat check, reject delayed checks of older payments, and explain failed receipts. Price owner call repairs with a host-enforced ceiling, keep unpriced repair checks payment-free, and refuse acknowledgement of verified foreign-identity records. Pin the call-slot proof guards with mutation regressions and make call timeout/refusal tests independent of preflight scheduling.
 
 - Keep caller recovery refused while the original admission is open, with clear End call and priced Call again controls. Expose unresolved call records for host repair or acknowledgement without releasing unproven liabilities. Bind early peer hangup/busy events to fresh dispatches, preserve stale-event protection for reused call IDs, and retain durable proof for node-refused unsent call slots.

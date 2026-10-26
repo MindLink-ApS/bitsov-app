@@ -296,6 +296,9 @@ struct NodeState {
     trust_write: Mutex<()>,
     /// A pending console approval saved by an earlier run was loaded once.
     approvals_restored: AtomicBool,
+    /// M6 A1: the open node-routed media session, if a call has one. The host
+    /// owns its socket; the renderer only pushes payloads and reads frames.
+    media: Mutex<Option<MediaSession>>,
 }
 
 /// The owner asked for these while an elevation request is pending.
@@ -481,6 +484,7 @@ impl NodeState {
             device_lifecycle: Mutex::new(()),
             trust_write: Mutex::new(()),
             approvals_restored: AtomicBool::new(false),
+            media: Mutex::new(None),
             node_grant: Mutex::new(None),
             all_in_caps_node: Mutex::new(None),
             readmission_ask: Mutex::new(None),
@@ -9078,6 +9082,137 @@ impl NodeState {
     }
 }
 
+// ---- M6 A1: node-routed call media ------------------------------------------
+
+/// One open media session: the host-owned socket task for one call id.
+struct MediaSession {
+    #[allow(dead_code)]
+    call_id: String,
+    uplink: Arc<control::media::FrameQueue>,
+    stop: Arc<AtomicBool>,
+}
+
+/// Stop the current media session, if any. Idempotent; the socket task sees
+/// the flag, closes its socket and reports `ended` on its channel.
+fn stop_media_session(state: &NodeState) {
+    if let Some(session) = state.media.lock().unwrap().take() {
+        session.stop.store(true, Ordering::SeqCst);
+        session.uplink.clear();
+    }
+}
+
+/// Own one media socket for the app the way `live_bridge` owns `/ws`: wait for
+/// the node, present the current token and the loopback proxy credential,
+/// reconnect with backoff, and stop on a refusal, on `stop`, or when the app
+/// quits. Frames from the node reach the renderer through a bounded
+/// drop-oldest queue drained into the channel; link transitions go as JSON.
+async fn media_bridge<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    call_id: String,
+    peer: String,
+    uplink: Arc<control::media::FrameQueue>,
+    stop: Arc<AtomicBool>,
+    channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) {
+    let state = app.state::<NodeState>();
+    let downlink = control::media::FrameQueue::new(control::media::QUEUE_FRAMES);
+    let stopping = || stop.load(Ordering::SeqCst) || state.quitting.load(Ordering::SeqCst);
+    let emit = |link: control::media::MediaLink| {
+        let _ = channel.send(tauri::ipc::InvokeResponseBody::Json(link.to_json()));
+    };
+    let link = control::media::run_media_link(
+        || async {
+            if !*state.ready.lock().unwrap() { return Ok(None); }
+            ensure_fresh_token(&state).await;
+            let Some(token) = state.token.lock().unwrap().clone() else { return Ok(None); };
+            let url = control::media::media_url(&state.api_base, &call_id, &peer)?;
+            Ok(Some((url, token, state.remote_proxy_auth.to_string())))
+        },
+        &uplink,
+        &downlink,
+        &emit,
+        &stopping,
+    );
+    let drain = async {
+        loop {
+            let frame = downlink.pop().await;
+            if channel.send(tauri::ipc::InvokeResponseBody::Raw(frame)).is_err() { break; }
+        }
+    };
+    tokio::select! { _ = link => {}, _ = drain => {} }
+    // Release only this session's slot: a newer session may have replaced it.
+    let mut slot = state.media.lock().unwrap();
+    if slot.as_ref().is_some_and(|session| Arc::ptr_eq(&session.stop, &stop)) {
+        *slot = None;
+    }
+}
+
+/// Open the host-owned media socket for `call_id` with `peer`, the call's
+/// counterparty (M6 A1). Frames the node delivers arrive on `on_frame` as raw
+/// bytes (seq + payload); link transitions arrive as JSON objects
+/// (`{"link": …, "detail": …}`). One session at a time: opening replaces the
+/// previous one. No payment and no admission change here: the node admits the
+/// socket only for a `(peer, call_id)` it already knows, under the owner's token.
+#[tauri::command(rename_all = "snake_case")]
+async fn call_media_open(
+    window: WebviewWindow<impl tauri::Runtime>,
+    app: AppHandle<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    call_id: String,
+    peer: String,
+    on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let call_id = control::media::call_id(&call_id)?;
+    let peer = control::media::peer_id(&peer)?;
+    let uplink = Arc::new(control::media::FrameQueue::new(control::media::QUEUE_FRAMES));
+    let stop = Arc::new(AtomicBool::new(false));
+    stop_media_session(state.inner());
+    *state.media.lock().unwrap() = Some(MediaSession { call_id: call_id.clone(), uplink: uplink.clone(), stop: stop.clone() });
+    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, stop, on_frame));
+    Ok(())
+}
+
+/// The payload bytes of one `call_media_send` request: raw, or a byte array
+/// on an IPC path that cannot carry raw bodies.
+fn media_payload(body: &tauri::ipc::InvokeBody) -> Result<Vec<u8>, String> {
+    let payload = match body {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes.clone(),
+        tauri::ipc::InvokeBody::Json(value) => serde_json::from_value::<Vec<u8>>(value.clone())
+            .map_err(|_| "the media payload must be raw bytes".to_string())?,
+    };
+    if payload.is_empty() || payload.len() > control::media::MAX_PAYLOAD {
+        return Err("the media payload is empty or too large".into());
+    }
+    Ok(payload)
+}
+
+/// One uplink payload for the open media session (raw bytes, no JSON). The
+/// host assigns `seq`; a full queue drops its oldest frame rather than stall.
+#[tauri::command(rename_all = "snake_case")]
+fn call_media_send(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    let payload = media_payload(request.body())?;
+    let slot = state.media.lock().unwrap();
+    let Some(session) = slot.as_ref() else { return Err("no media session is open".into()) };
+    session.uplink.push(payload);
+    Ok(())
+}
+
+/// Close the open media session (hangup or local teardown). Idempotent; only
+/// the socket closes, nothing is sent to the node and nothing is paid.
+#[tauri::command(rename_all = "snake_case")]
+fn call_media_close(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    stop_media_session(state.inner());
+    Ok(())
+}
+
 /// Local audio policy only: no node request, payment, or admission mutation.
 #[tauri::command]
 async fn call_audio_session(window: WebviewWindow<impl tauri::Runtime>, live: bool) -> Result<(), String> {
@@ -9354,6 +9489,9 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             call_audio_session,
             call_quote,
             call_signal,
+            call_media_open,
+            call_media_send,
+            call_media_close,
             porch_quote,
             porch_read,
             porch_cards,
@@ -20184,6 +20322,10 @@ mod assistant_acl_tests {
                 "call_audio_session",
                 "call_quote",
                 "call_signal",
+                // M6 A1: the host-owned node-routed media socket.
+                "call_media_open",
+                "call_media_send",
+                "call_media_close",
                 "porch_quote",
                 "porch_read",
                 "porch_cards",
