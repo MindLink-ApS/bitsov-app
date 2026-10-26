@@ -15,6 +15,13 @@
  * it decodes Opus), otherwise G.711 mu-law in pure TypeScript. Both apps
  * learn each other's codecs from in-band HELLO frames.
  *
+ * Opus failing mid-call is not fatal: a failed encoder sends mu-law from the
+ * next frame; a failed decoder withdraws Opus with a fresh HELLO, which the
+ * peer honours on its next frame (it re-chooses the codec per frame). Only
+ * when that cannot recover (the peer keeps sending Opus) or the audio graph
+ * itself breaks does the engine report a fatal `onError`, and the call ends
+ * rather than staying live with silent audio.
+ *
  * Webviews without AudioWorklet fall back to a ScriptProcessorNode for
  * capture and scheduled AudioBufferSourceNodes for playout, with the same
  * jitter buffer on the main thread.
@@ -32,6 +39,10 @@ export const OPUS_BITRATE = 24_000;
 const FRAME_US = 20_000;
 /** Re-offer our codecs every second until the peer has answered. */
 const HELLO_INTERVAL_MS = 1_000;
+/** Opus frames we cannot decode: re-send our HELLO every this many (one second)... */
+export const OPUS_REHELLO_FRAMES = 50;
+/** ...and give up after this many (five seconds): the call ends instead of staying silent. */
+export const OPUS_FALLBACK_FRAMES = 250;
 
 export type MediaTransport = { send: (payload: Uint8Array) => void };
 
@@ -43,6 +54,11 @@ export type CallAudioDeps = {
   workletUrl?: string;
   /** Test seam: `false` forces the mu-law path even where WebCodecs exists. */
   opus?: boolean;
+  /**
+   * Fatal: this engine can no longer carry audio (no graph at start, an
+   * audio worklet crashed, or the peer kept sending Opus after we withdrew
+   * it). Called at most once; the caller ends the call.
+   */
   onError?: (message: string) => void;
 };
 
@@ -85,24 +101,50 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
   let encoder: Encoder | null = null;
   let decoder: Decoder | null = null;
   let helloTimer: ReturnType<typeof setInterval> | undefined;
+  let failed = false;
+  /** Opus frames received with no decoder to play them. */
+  let undecodable = 0;
   const cleanups: (() => void)[] = [];
   /** Where decoded frames go: the playout worklet, or the main-thread fallback. */
   let playFrame: (seq: number, pcm: Float32Array) => void = () => {};
   let playMarker: (seq: number) => void = () => {};
   let readStats: () => Promise<JitterStats | null> = async () => null;
 
-  const fail = (message: string) => deps.onError?.(message);
+  const fail = (message: string) => {
+    if (closed || failed) return;
+    failed = true;
+    deps.onError?.(message);
+  };
   const send = (payload: Uint8Array) => { if (!closed) deps.transport.send(payload); };
   const sayHello = () => send(helloPayload(localCaps));
+
+  /** The Opus encoder broke: send mu-law from now on (every peer decodes it). */
+  const encoderFailed = () => {
+    encoder?.close();
+    encoder = null;
+  };
+  /** The Opus decoder broke: stop offering Opus so the peer switches to mu-law. */
+  const decoderFailed = () => {
+    if (!decoder) return;
+    decoder.close();
+    decoder = null;
+    localCaps &= ~CAP_OPUS;
+    sayHello();
+  };
 
   /** One captured 20 ms frame at the context rate. */
   const captured = (pcm: Float32Array) => {
     if (closed || !context) return;
     const frame = muted ? new Float32Array(pcm.length) : pcm;
-    sending = chooseCodec(localCaps, peerCaps);
+    sending = encoder ? chooseCodec(localCaps, peerCaps) : 'pcmu';
     if (sending === 'opus' && encoder) {
-      encoder.encode(frame);
-      return;
+      try {
+        encoder.encode(frame);
+        return;
+      } catch {
+        encoderFailed();
+        sending = 'pcmu';
+      }
     }
     send(audioPayload('pcmu', encodeMuLaw(resample(frame, context.sampleRate, PCMU_RATE))));
   };
@@ -115,7 +157,7 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
         chunk.copyTo(bytes);
         send(audioPayload('opus', bytes));
       },
-      error: () => { encoder = null; localCaps &= ~CAP_OPUS; },
+      error: () => encoderFailed(),
     });
     audioEncoder.configure({ codec: 'opus', sampleRate: rate, numberOfChannels: 1, bitrate: OPUS_BITRATE });
     const audioDecoder = new AudioDecoder({
@@ -129,13 +171,13 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
           audio.close();
         }
       },
-      error: () => { decoder = null; },
+      error: () => decoderFailed(),
     });
     audioDecoder.configure({ codec: 'opus', sampleRate: rate, numberOfChannels: 1 });
     return {
       encoder: {
         encode: (pcm) => {
-          if (audioEncoder.state !== 'configured') return;
+          if (audioEncoder.state !== 'configured') throw Object.assign(new Error(), { name: 'OpusEncoderClosed' });
           // A fresh copy: WebCodecs wants a plain ArrayBuffer-backed view, and the worklet's buffer may be reused.
           const samples = new Float32Array(pcm);
           const data = new AudioData({ format: 'f32', sampleRate: rate, numberOfFrames: samples.length, numberOfChannels: 1, timestamp: frames++ * FRAME_US, data: samples });
@@ -145,7 +187,7 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
       },
       decoder: {
         decode: (seq, data) => {
-          if (audioDecoder.state !== 'configured') return;
+          if (audioDecoder.state !== 'configured') throw Object.assign(new Error(), { name: 'OpusDecoderClosed' });
           audioDecoder.decode(new EncodedAudioChunk({ type: 'key', timestamp: seq * FRAME_US, data }));
         },
         close: () => { try { audioDecoder.close(); } catch { /* already closed */ } },
@@ -163,6 +205,9 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
     capture.port.onmessage = (event: MessageEvent<CaptureMessage>) => { if (event.data.type === 'frame') captured(event.data.pcm); };
     const playout = new AudioWorkletNode(ctx, PLAYOUT_PROCESSOR, { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
     playout.connect(ctx.destination);
+    // A crashed worklet means no capture or no playout for the rest of the call.
+    capture.onprocessorerror = () => fail('audio_capture_failed');
+    playout.onprocessorerror = () => fail('audio_playout_failed');
     const post = (message: PlayoutMessage, transfer: Transferable[] = []) => playout.port.postMessage(message, transfer);
     playFrame = (seq, pcm) => post({ type: 'frame', seq, pcm }, [pcm.buffer]);
     playMarker = (seq) => post({ type: 'marker', seq });
@@ -174,6 +219,8 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
     cleanups.push(() => {
       capture.port.onmessage = null;
       playout.port.onmessage = null;
+      capture.onprocessorerror = null;
+      playout.onprocessorerror = null;
       try { source.disconnect(); capture.disconnect(); sink.disconnect(); playout.disconnect(); } catch { /* graph already gone */ }
     });
   };
@@ -263,11 +310,22 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
       if (payload.codec === 'pcmu') {
         if (!context) return;
         playFrame(frame.seq, resample(decodeMuLaw(payload.data), PCMU_RATE, context.sampleRate));
-      } else if (decoder) {
-        decoder.decode(frame.seq, payload.data);
       } else {
+        if (decoder) {
+          try {
+            decoder.decode(frame.seq, payload.data);
+            return;
+          } catch {
+            decoderFailed();
+          }
+        }
         // Opus without a decoder here: no audio for this slot, but no gap either.
         playMarker(frame.seq);
+        // Our HELLO without Opus may have been lost on a reconnect: repeat it,
+        // and end the call rather than stay live and silent if it never lands.
+        undecodable++;
+        if (undecodable >= OPUS_FALLBACK_FRAMES) fail('peer_kept_sending_opus');
+        else if (undecodable % OPUS_REHELLO_FRAMES === 0) sayHello();
       }
     },
     setMuted: (next) => { muted = next; },

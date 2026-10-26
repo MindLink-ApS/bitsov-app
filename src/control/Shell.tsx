@@ -1434,7 +1434,7 @@ export function ControlCenter(props: Props) {
           callId: () => callView().callId,
           peer: () => callView().peer,
           bridge: isTauri() ? hostMediaBridge() : unavailableMediaBridge(),
-          audio: (stream, transport) => createCallAudio({ stream, transport }),
+          audio: (stream, transport, onFatal) => createCallAudio({ stream, transport, onError: onFatal }),
           onSession: callMediaSession,
         })
       : (config) => new RTCPeerConnection(config),

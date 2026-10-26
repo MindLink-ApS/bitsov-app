@@ -25,13 +25,13 @@ function fakeBridge() {
 
 type ReadyMode = 'ready' | 'pending' | 'failing';
 function fakeAudio(mode: ReadyMode = 'ready') {
-  const made: { stream: MediaStream; transport: MediaTransport; fed: Uint8Array[]; closed: boolean; resolve: () => void; reject: () => void }[] = [];
-  const audio = (stream: MediaStream, transport: MediaTransport): CallAudio => {
+  const made: { stream: MediaStream; transport: MediaTransport; fed: Uint8Array[]; closed: boolean; resolve: () => void; reject: () => void; fatal: () => void }[] = [];
+  const audio = (stream: MediaStream, transport: MediaTransport, fatal: () => void): CallAudio => {
     let resolve!: () => void;
     let reject!: () => void;
     const ready = new Promise<void>((ok, no) => { resolve = ok; reject = () => no(new Error('no audio graph')); });
     ready.catch(() => undefined);
-    const entry = { stream, transport, fed: [] as Uint8Array[], closed: false, resolve, reject };
+    const entry = { stream, transport, fed: [] as Uint8Array[], closed: false, resolve, reject, fatal };
     made.push(entry);
     if (mode === 'ready') resolve();
     if (mode === 'failing') reject();
@@ -199,6 +199,33 @@ describe('node-routed connection (the engine’s RTCPeerConnection surface)', ()
     b.link({ link: 'open', detail: null });
     expect(conn.connectionState).toBe('closed');
     expect(sessions).toEqual([]);
+  });
+});
+
+describe('fatal audio errors after connect', () => {
+  it('end the live call: audio engine and socket closed, no silent connected state', async () => {
+    const b = fakeBridge();
+    const a = fakeAudio();
+    const sessions: unknown[] = [];
+    const conn = createNodeRoutedConnection({ callId: () => ID, peer: () => PEER, bridge: b.bridge, audio: a.audio, onSession: (e) => sessions.push(e) });
+    const states: string[] = [];
+    conn.onconnectionstatechange = () => states.push(conn.connectionState);
+    await conn.setLocalDescription(await conn.createOffer());
+    await conn.setRemoteDescription({ type: 'answer', sdp: nodeRoutedSdp('answer', ID) });
+    await tick();
+    b.link({ link: 'open', detail: null });
+    expect(conn.connectionState).toBe('connected');
+    a.made[0].fatal();
+    expect(states).toEqual(['connecting', 'connected', 'closed']);
+    expect(a.made[0].closed).toBe(true);
+    expect(b.closed()).toBe(1);
+    // Frames and a reopened link after the failure change nothing.
+    b.frame(Uint8Array.of(0, 0, 0, 1, 1, 0xff));
+    expect(a.made[0].fed).toHaveLength(0);
+    b.link({ link: 'open', detail: null });
+    expect(conn.connectionState).toBe('closed');
+    a.made[0].fatal();
+    expect(b.closed()).toBe(1);
   });
 });
 

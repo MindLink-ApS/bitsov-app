@@ -8,8 +8,9 @@
  * once both descriptions are in place it opens the host-owned media socket
  * for the call id and its counterparty and streams audio through
  * `callAudio.ts`. The call reports `connected` only once the node link is
- * open AND the audio graph is ready; an audio graph that cannot be built
- * closes the link and ends the call. Signalling (kinds 400-403, paid through
+ * open AND the audio graph is ready; an audio graph that cannot be built,
+ * or a fatal audio error later in the call, closes the link and ends the
+ * call. Signalling (kinds 400-403, paid through
  * the node) is untouched.
  *
  * Nothing here contacts a STUN or TURN server, gathers candidates, or opens
@@ -49,7 +50,8 @@ export type NodeRoutedDeps = {
   /** The call's counterparty (64-hex node id); the node admits the socket only for this pair. */
   peer: () => string | null;
   bridge: MediaBridge;
-  audio: (stream: MediaStream, transport: MediaTransport) => CallAudio;
+  /** Builds the audio engine; it calls `onFatal` when it can no longer carry audio. */
+  audio: (stream: MediaStream, transport: MediaTransport, onFatal: () => void) => CallAudio;
   /**
    * A2 hook (payment slice): the node media session for `callId` opened or
    * closed. Per-call or per-minute node payment attaches here; nothing is
@@ -173,14 +175,17 @@ export class NodeRoutedConnection {
     const peer = this.deps.peer();
     if (!callId || !peer) { this.setState('failed'); return; }
     this.setState('connecting');
-    const audio = this.deps.audio(this.stream ?? emptyStream(), { send: (payload) => this.deps.bridge.send(payload) });
+    let audio: CallAudio | null = null;
+    // A fatal audio error mid-call (a codec that cannot recover, a crashed worklet) ends the call like a failed start.
+    const onFatal = () => { if (audio && this.audio === audio) this.audioFailed(); };
+    audio = this.deps.audio(this.stream ?? emptyStream(), { send: (payload) => this.deps.bridge.send(payload) }, onFatal);
     this.audio = audio;
     audio.ready.then(
       () => { if (this.audio === audio && !this.closed) { this.audioReady = true; this.maybeConnected(); } },
       // No audio graph (no AudioContext, worklet refused): a silent "live" call is worse than an ended one.
       () => { if (this.audio === audio) this.audioFailed(); },
     );
-    this.deps.bridge.open(callId, peer, (frame) => { if (this.audio === audio) audio.feed(frame); }, (link) => this.onLink(link))
+    this.deps.bridge.open(callId, peer, (frame) => { if (audio && this.audio === audio) audio.feed(frame); }, (link) => this.onLink(link))
       .catch(() => this.onLink({ link: 'ended', detail: 'media_link_refused' }));
   }
 
@@ -197,11 +202,13 @@ export class NodeRoutedConnection {
     this.setState('connected');
   }
 
-  /** The audio engine could not start: release it, close the socket, end the call. */
+  /** The audio engine could not start, or broke mid-call: release it, close the socket, end the call. */
   private audioFailed() {
     if (this.closed) return;
     const audio = this.audio;
     this.audio = null;
+    // No way back to `connected`: a late or reconnected link finds no audio.
+    this.audioReady = false;
     void audio?.close();
     void this.deps.bridge.close();
     this.setState('closed');

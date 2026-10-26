@@ -49,7 +49,11 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   delay between 60 and 120 ms. Webviews without AudioWorklet fall back to a
   ScriptProcessorNode and scheduled AudioBufferSourceNodes with the same
   buffer. Mute, and clean teardown (worklets, codecs, context, socket) on
-  hangup.
+  hangup. Opus failing mid-call falls back to mu-law: a broken encoder sends
+  mu-law from the next frame; a broken decoder withdraws Opus with a fresh
+  HELLO (repeated each second while Opus still arrives), and the peer switches
+  on its next frame. If the peer still sends Opus after 5 s, or an audio
+  worklet crashes, the engine reports a fatal error and the call ends.
 - **How the engine switches.** `call.ts` still drives one
   RTCPeerConnection-shaped object per call; in M6 builds that object is
   `src/control/nodeRoutedConnection.ts`, not an `RTCPeerConnection`. Its
@@ -58,7 +62,8 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   the call id and its counterparty, and reports `connected` only when the host
   reports the link open and the audio graph is ready. An audio graph that
   cannot be built (no AudioContext, worklet refused) closes the socket and
-  ends the call rather than leaving a silent live call. It gathers no
+  ends the call rather than leaving a silent live call; so does a fatal audio
+  error later in the call. It gathers no
   candidates and contacts no STUN or TURN server. A peer that
   answers with direct-media SDP (a pre-M6 app) ends the call as "their
   answer could not be used", nothing more paid. If the node link drops, the
@@ -74,7 +79,8 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   `Shell.tsx`; the card's `payment` slot stays where it is.
 - **Checks.** `npm test -- tests/g711.test.ts tests/media-frame.test.ts
   tests/jitter-buffer.test.ts tests/node-routed-connection.test.ts
-  tests/call-media-flag.test.tsx` (codec round trip, frame codec, jitter
+  tests/call-audio-failure.test.ts tests/call-media-flag.test.tsx` (codec
+  round trip, frame codec, mid-call Opus fallback and fatal teardown, jitter
   ordering/loss/late drop/reorder, the adapter, and the shell with the flag
   on: no `RTCPeerConnection`, no video or meeting controls, the label, live on
   the host's link). `cargo test control::media` (frame codec, drop-oldest
