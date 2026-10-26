@@ -780,11 +780,17 @@ pub struct CallQuote {
     /// The routing allowance per block the caller's node may reserve: the
     /// offer's routing ceiling, which the node applies to every block.
     pub block_max_routing_fee_msat: u64,
-    /// The most the caller's node will hold for the call's minutes when it
-    /// sends the offer (240 blocks, each at `block_msat` plus its routing
-    /// allowance). An upper bound for consent; the node's own reservation on
-    /// the call status is the authority once the call is placed.
+    /// The most the caller's node can hold for the call's minutes when it
+    /// sends the offer: 240 blocks (the node's hard cap on `max_call_minutes`),
+    /// each at `block_msat` plus its routing allowance. The node's own limit
+    /// is only visible on its reservation once the offer is out, so this is
+    /// the ceiling the owner agrees to before Ring; the host refuses to pay
+    /// any minute of a reservation above it and hangs up.
     pub reservation_max_msat: Option<u64>,
+    /// Whether the caller's node keeps a call reservation for this session
+    /// (genome N3: only a paired app spending under a grant). Without one the
+    /// host pays no minutes, so a node-routed call is not placed at all.
+    pub minutes_payable: bool,
 }
 
 /// M6: a paid call runs in 60-second blocks, at most 240 (four hours).
@@ -801,11 +807,56 @@ pub fn with_call_blocks(mut quote: CallQuote, table: Option<&PeerPrice>) -> Call
         .and_then(|t| t.prices.get(CALL_BLOCK_PRICE_KEY).or_else(|| t.prices.get(CATEGORY_REALTIME)).copied())
         .filter(|price| *price > 0)
         .map(|price| price.max(crate::act::MIN_PAYMENT_MSAT));
-    quote.block_msat = block.filter(|_| quote.offer_msat.is_some());
-    quote.block_max_routing_fee_msat = if quote.block_msat.is_some() { quote.offer_max_routing_fee_msat } else { 0 };
-    quote.reservation_max_msat = quote.block_msat.and_then(|price| price.checked_add(quote.block_max_routing_fee_msat))
-        .and_then(|block| block.checked_mul(CALL_MAX_BLOCKS));
+    let block = block.filter(|_| quote.offer_msat.is_some());
+    let fee = quote.offer_max_routing_fee_msat;
+    // A ceiling the renderer cannot hold exactly (a JS number) or that
+    // overflows is no ceiling: such a quote places no node-routed call.
+    let max = block.and_then(|price| price.checked_add(fee))
+        .and_then(|per_block| per_block.checked_mul(CALL_MAX_BLOCKS))
+        .filter(|max| *max <= MAX_SAFE_MSAT);
+    quote.block_msat = block.filter(|_| max.is_some());
+    quote.block_max_routing_fee_msat = if quote.block_msat.is_some() { fee } else { 0 };
+    quote.reservation_max_msat = if quote.block_msat.is_some() { max } else { None };
     quote
+}
+
+/// The largest amount the renderer holds exactly (`Number.MAX_SAFE_INTEGER`).
+pub const MAX_SAFE_MSAT: u64 = (1 << 53) - 1;
+
+/// M6: the paid minutes the owner agreed to before Ring, handed to the host
+/// with the offer and kept there for the call. The node's reservation is
+/// checked against it before any minute is paid; it never sets an amount.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MinutesConsent {
+    /// The per-minute price shown (`block_msat`).
+    pub block_msat: u64,
+    /// The routing allowance per minute shown (`block_max_routing_fee_msat`).
+    pub block_max_routing_fee_msat: u64,
+    /// The most the node may hold for the minutes, as shown (`reservation_max_msat`).
+    pub max_hold_msat: u64,
+}
+
+impl MinutesConsent {
+    /// Only a consent the quote could have shown: a payable per-minute price,
+    /// and a total no larger than 240 minutes at that price plus allowance.
+    pub fn validated(self) -> Result<Self, String> {
+        let per_block = self.block_msat.checked_add(self.block_max_routing_fee_msat)
+            .ok_or("the agreed per-minute price is out of range")?;
+        let most = per_block.checked_mul(CALL_MAX_BLOCKS).ok_or("the agreed hold is out of range")?;
+        if self.block_msat < crate::act::MIN_PAYMENT_MSAT || self.max_hold_msat < per_block
+            || self.max_hold_msat > most || self.max_hold_msat > MAX_SAFE_MSAT {
+            return Err("the agreed per-minute price or hold is out of range".into());
+        }
+        Ok(self)
+    }
+
+    /// The node's reservation is within what the owner agreed to: per-minute
+    /// price, routing allowance and the total held.
+    pub fn covers(&self, hold: &CallReservation) -> bool {
+        hold.per_block_msat <= self.block_msat
+            && hold.per_block_fee_msat <= self.block_max_routing_fee_msat
+            && hold.reserved_msat <= self.max_hold_msat
+    }
 }
 
 /// `GET /calls?peer=` (genome M6 N1/N3): one open call's paid interval and,
@@ -840,6 +891,9 @@ pub struct CallReservation {
     pub remaining_msat: u64,
     pub per_block_msat: u64,
     pub per_block_fee_msat: u64,
+    /// The paid-duration cap the node pinned on this hold (`[calls]
+    /// max_call_minutes`, 1-240). Required: a hold without it is not paid.
+    pub max_call_minutes: u16,
     pub released_msat: u64,
     pub closed: bool,
 }
@@ -868,6 +922,7 @@ pub fn call_quote(live: Option<&PeerCallPrice>, own_signal_msat: u64) -> CallQuo
         block_msat: None,
         block_max_routing_fee_msat: 0,
         reservation_max_msat: None,
+        minutes_payable: false,
     }
 }
 
@@ -1293,14 +1348,44 @@ mod tests {
         let calls: Vec<CallStatus> = serde_json::from_value(serde_json::json!([
             {"id": "0123456789abcdef0123456789abcdef", "state": "live", "direction": "outgoing", "unresolved_paid_admission": false,
              "created": null, "op_id": null, "paid_until_ms": 1_790_000_060_000u64, "next_block_seq": 1, "next_block_due_ms": 1_790_000_040_000u64,
-             "reservation": {"reserved_msat": 6000, "spent_msat": 22, "remaining_msat": 5978, "per_block_msat": 20, "per_block_fee_msat": 5, "released_msat": 0, "closed": false}},
+             "reservation": {"max_call_minutes": 240, "reserved_msat": 6000, "spent_msat": 22, "remaining_msat": 5978, "per_block_msat": 20, "per_block_fee_msat": 5, "released_msat": 0, "closed": false}},
             {"id": "1123456789abcdef0123456789abcdef", "state": "ringing", "direction": "incoming", "unresolved_paid_admission": true,
              "created": null, "op_id": null, "paid_until_ms": null, "next_block_seq": 0, "next_block_due_ms": null},
         ])).unwrap();
         let hold = calls[0].reservation.as_ref().unwrap();
         assert_eq!((hold.reserved_msat, hold.spent_msat, hold.remaining_msat, hold.per_block_msat), (6000, 22, 5978, 20));
-        assert_eq!((calls[0].next_block_seq, calls[0].paid_until_ms), (1, Some(1_790_000_060_000)));
+        assert_eq!((calls[0].next_block_seq, calls[0].paid_until_ms, hold.max_call_minutes), (1, Some(1_790_000_060_000), 240));
         assert_eq!((calls[1].reservation.as_ref(), calls[1].next_block_due_ms), (None, None));
+        // A hold without its duration cap is not read as one: the host pays nothing for it.
+        let capless = serde_json::json!([{"id": "0123456789abcdef0123456789abcdef", "state": "live", "direction": "outgoing", "next_block_seq": 0,
+            "reservation": {"reserved_msat": 6000, "spent_msat": 0, "remaining_msat": 6000, "per_block_msat": 20, "per_block_fee_msat": 5, "released_msat": 0, "closed": false}}]);
+        assert!(serde_json::from_value::<Vec<CallStatus>>(capless).is_err());
+    }
+
+    #[test]
+    fn a_consent_holds_only_what_the_quote_showed_and_covers_only_holds_within_it() {
+        let shown = MinutesConsent { block_msat: 10_000, block_max_routing_fee_msat: 5_000, max_hold_msat: 240 * 15_000 };
+        assert_eq!(shown.validated(), Ok(shown));
+        for bad in [
+            MinutesConsent { max_hold_msat: 240 * 15_000 + 1, ..shown },
+            MinutesConsent { max_hold_msat: 14_999, ..shown },
+            MinutesConsent { block_msat: 999, ..shown },
+            MinutesConsent { block_msat: u64::MAX, ..shown },
+            MinutesConsent { block_msat: MAX_SAFE_MSAT, block_max_routing_fee_msat: 0, max_hold_msat: MAX_SAFE_MSAT + 1 },
+        ] {
+            assert!(bad.validated().is_err(), "{bad:?}");
+        }
+        let hold = |per_block: u64, fee: u64, minutes: u16| CallReservation {
+            reserved_msat: (per_block + fee) * u64::from(minutes), spent_msat: 0, remaining_msat: (per_block + fee) * u64::from(minutes),
+            per_block_msat: per_block, per_block_fee_msat: fee, max_call_minutes: minutes, released_msat: 0, closed: false,
+        };
+        assert!(shown.covers(&hold(10_000, 5_000, 240)));
+        assert!(shown.covers(&hold(9_000, 2_000, 60)));
+        assert!(!shown.covers(&hold(10_001, 5_000, 60)), "a higher per-minute price");
+        assert!(!shown.covers(&hold(10_000, 5_001, 60)), "a wider routing allowance");
+        let smaller = MinutesConsent { max_hold_msat: 60 * 15_000, ..shown };
+        assert!(smaller.covers(&hold(10_000, 5_000, 60)));
+        assert!(!smaller.covers(&hold(10_000, 5_000, 61)), "more held in total than agreed");
     }
 
     #[test]
@@ -1323,6 +1408,12 @@ mod tests {
         ] {
             assert_eq!((q.block_msat, q.reservation_max_msat, q.block_max_routing_fee_msat), (None, None, 0));
         }
+        // A maximum the renderer cannot hold exactly is no ceiling: no minute price, no call.
+        let huge = with_call_blocks(call_quote(Some(&live), 50), Some(&table(&[(CALL_BLOCK_PRICE_KEY, MAX_SAFE_MSAT / 200)], false)));
+        assert_eq!((huge.block_msat, huge.reservation_max_msat, huge.block_max_routing_fee_msat), (None, None, 0));
+        let overflow = with_call_blocks(call_quote(Some(&live), 50), Some(&table(&[(CALL_BLOCK_PRICE_KEY, u64::MAX)], false)));
+        assert_eq!((overflow.block_msat, overflow.reservation_max_msat), (None, None));
+        assert!(!q.minutes_payable, "the host sets it from the session, never the quote");
     }
 
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

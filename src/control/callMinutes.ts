@@ -10,10 +10,15 @@
  *
  * This module schedules those payments for one outgoing call and keeps the
  * running cost the card shows. Every amount it shows comes from the node's
- * call status (`reserved`, `spent`, `remaining`, `released`, per-block price);
- * the app never computes an authoritative amount. It never pays a block above
- * the per-minute price the owner agreed to before dialling, never retries a
- * payment whose outcome is unknown, and reports every reason it stops.
+ * call status (`reserved`, `spent`, `remaining`, `released`, per-block price,
+ * `max_call_minutes`); the app never computes an authoritative amount.
+ *
+ * Consent is the host's: the offer carries the minutes the owner agreed to
+ * before Ring, and the host pays no minute of a reservation above them (it
+ * hangs up instead) and none before the owner confirmed the node's exact
+ * hold, shown here as soon as the offer is out (`call_hold`). The renderer
+ * never names an amount to pay. It never retries a payment whose outcome is
+ * unknown, and reports every reason it stops.
  */
 import { t as tr } from '../i18n';
 import { provenUnpaid } from './paymentOutcome';
@@ -44,18 +49,28 @@ export const PAID_WAIT_MS = 30_000;
 export type MinutesDeps = {
   /** `call_status`: the node's view of this call; null once it no longer lists it. Read-only. */
   status: (peer: string, callId: string) => Promise<Outcome<CallStatus | null>>;
-  /** `call_block`: pay block `seq`, at most `maxBlockMsat` per minute. */
-  pay: (peer: string, callId: string, seq: number, maxBlockMsat: number) => Promise<Outcome<CallReceipt>>;
+  /**
+   * `call_hold`: the host checks the node's reservation against the minutes
+   * agreed before Ring (and hangs up if it is above them); with
+   * `confirmReservedMsat` the owner confirms that exact hold.
+   */
+  hold: (peer: string, callId: string, confirmReservedMsat: number | null) => Promise<Outcome<CallStatus>>;
+  /** `call_block`: pay block `seq`. The host takes the amount from the node's reservation. */
+  pay: (peer: string, callId: string, seq: number) => Promise<Outcome<CallReceipt>>;
 };
+
+/** The host refused the node's hold for this call (and hung up where it was above the consent): nothing is paid. */
+export const HOLD_REFUSED = new Set(['call_no_reservation', 'call_hold_above_consent', 'call_no_consent', 'call_reservation_closed']);
 
 /**
  * Why paying stopped. `unpaid`: the paid time ran out and the node ended the
  * call. `node_ended`: the node ended the call for another reason.
  * `payment_failed`: a block was refused (nothing paid for it).
  * `payment_unknown`: a block's outcome is not known. `price_changed`: their
- * node asks more per minute than the owner agreed to.
+ * node asks more per minute than the owner agreed to. `hold_refused`: the
+ * node holds no reservation for the call, or more than the owner agreed to.
  */
-export type MinutesStopCode = 'unpaid' | 'node_ended' | 'payment_failed' | 'payment_unknown' | 'price_changed';
+export type MinutesStopCode = 'unpaid' | 'node_ended' | 'payment_failed' | 'payment_unknown' | 'price_changed' | 'hold_refused';
 export type MinutesStop = { code: MinutesStopCode; message: string };
 
 export type MinutesView = {
@@ -65,6 +80,12 @@ export type MinutesView = {
   reservationMaxMsat: number | null;
   /** The node's reservation for this call, as last read; null until the node reports one. */
   reservation: CallReservation | null;
+  /** The owner confirmed the node's hold (its exact total, at the host). No minute is paid before. */
+  confirmed: boolean;
+  /** The confirmation is with the host. */
+  confirming: boolean;
+  /** Why the last confirmation did not go through (the hold changed, or the host could not be reached). */
+  holdError: string | null;
   /** End of the last paid minute (node clock, Unix ms). */
   paidUntilMs: number | null;
   /** Minutes paid so far (the node's next block sequence). */
@@ -82,8 +103,10 @@ export type MinutesView = {
 
 export type CallMinutes = {
   view: () => MinutesView;
-  /** Read the reservation the node made with the offer (while ringing). */
+  /** Read the reservation the node made with the offer (while ringing), checked by the host. */
   refresh: () => Promise<void>;
+  /** The owner confirms the node's hold as shown; then minutes may be paid. */
+  confirm: () => Promise<void>;
   /** Their answer arrived: pay block 0 now and keep paying while the call runs. */
   start: () => void;
   /** The call ended: stop paying; read the node until it closes the reservation. */
@@ -98,6 +121,7 @@ export const STOP_MESSAGE: Record<MinutesStopCode, () => string> = {
   payment_failed: () => tr('caMinutesPaymentFailed'),
   payment_unknown: () => tr('caMinutesPaymentUnknown'),
   price_changed: () => tr('caMinutesPriceChanged'),
+  hold_refused: () => tr('caMinutesHoldRefused'),
 };
 
 export function createCallMinutes(opts: {
@@ -116,7 +140,8 @@ export function createCallMinutes(opts: {
   const { peer, callId, deps, now } = opts;
   let view: MinutesView = {
     agreedBlockMsat: opts.agreedBlockMsat, reservationMaxMsat: opts.reservationMaxMsat,
-    reservation: null, paidUntilMs: null, blocks: 0, receiptsMsat: 0, paying: false, stop: null, settled: false, final: false,
+    reservation: null, confirmed: false, confirming: false, holdError: null,
+    paidUntilMs: null, blocks: 0, receiptsMsat: 0, paying: false, stop: null, settled: false, final: false,
   };
   /** Paying blocks (between answer and end). */
   let running = false;
@@ -127,6 +152,9 @@ export function createCallMinutes(opts: {
   let attempts = 0;
   let settleUntil = 0;
   let inFlight = false;
+  /** A status read of `tick` is in progress: a second tick would pay the same block twice. */
+  let reading = false;
+  let stopped = false;
   let endedSeen = false;
 
   const emit = (patch: Partial<MinutesView>) => {
@@ -148,8 +176,10 @@ export function createCallMinutes(opts: {
     try { return await deps.status(peer, callId); } catch (error) { return { ok: false, error: asActionError(error) }; }
   };
 
+  /** Stops while ringing (the hold was refused) or while paying; never after the call ended. */
   const stopWith = (code: MinutesStopCode, detail: string | null = null) => {
-    if (!running) return;
+    if (stopped || disposed || settling) return;
+    stopped = true;
     running = false;
     clearTimeout(timer);
     timer = undefined;
@@ -159,8 +189,10 @@ export function createCallMinutes(opts: {
   };
 
   const tick = async () => {
-    if (!running || inFlight) return;
+    if (!running || inFlight || reading) return;
+    reading = true;
     const r = await read();
+    reading = false;
     if (!running) return;
     // A failed read is not evidence of anything: read again shortly. The node's grace ends the call if paying is impossible.
     if (!r.ok) { schedule(RETRY_MS, () => void tick()); return; }
@@ -177,8 +209,10 @@ export function createCallMinutes(opts: {
     const hold = status.reservation;
     if (hold && hold.per_block_msat > view.agreedBlockMsat) { stopWith('price_changed'); return; }
     const due = status.next_block_due_ms;
-    // No block due (the four-hour cap): keep the running cost fresh until the call ends.
+    // No block due (the node's duration cap): keep the running cost fresh until the call ends.
     if (due === null) { schedule(STATUS_POLL_MS, () => void tick()); return; }
+    // The host pays no minute before the owner confirmed the node's hold; confirm() ticks again.
+    if (!view.confirmed) { schedule(STATUS_POLL_MS, () => void tick()); return; }
     // Block 0 is payable from the answer on; a renewal waits a little past its due time (clock skew).
     const wait = due + (status.next_block_seq > 0 ? DUE_MARGIN_MS : 0) - now();
     if (wait > 0) { schedule(Math.min(wait, STATUS_POLL_MS), () => void tick()); return; }
@@ -189,7 +223,7 @@ export function createCallMinutes(opts: {
     inFlight = true;
     emit({ paying: true });
     let r: Outcome<CallReceipt>;
-    try { r = await deps.pay(peer, callId, seq, view.agreedBlockMsat); } catch (error) { r = { ok: false, error: asActionError(error) }; }
+    try { r = await deps.pay(peer, callId, seq); } catch (error) { r = { ok: false, error: asActionError(error) }; }
     inFlight = false;
     // A receipt is counted even if the call ended meanwhile: it was paid.
     emit({ paying: false, ...(r.ok ? { receiptsMsat: view.receiptsMsat + r.value.total_msat, blocks: Math.max(view.blocks, seq + 1) } : {}) });
@@ -197,6 +231,10 @@ export function createCallMinutes(opts: {
     if (r.ok) { attempts = 0; void tick(); return; }
     const code = r.error.code;
     if (code === 'call_price_changed' || code === 'price_cap_exceeded' || code === 'price_changed') { stopWith('price_changed'); return; }
+    // No reservation, or one above the consent: the host hung up and pays none of it.
+    if (HOLD_REFUSED.has(code)) { stopWith('hold_refused', r.error.message); return; }
+    // The host has no confirmation of this hold (it changed): show it again, pay nothing until confirmed.
+    if (code === 'call_hold_unconfirmed' || code === 'call_hold_changed') { emit({ confirmed: false }); schedule(STATUS_POLL_MS, () => void tick()); return; }
     // The node no longer runs the call: read it once more, so their hangup (or the lapse) names the end.
     if (code === 'call_not_live') {
       if (++attempts < MAX_ATTEMPTS) { schedule(0, () => void tick()); return; }
@@ -229,15 +267,39 @@ export function createCallMinutes(opts: {
     schedule(SETTLE_POLL_MS, () => void settle());
   };
 
+  /** The host's check of the node's hold. A refused hold stops the call now; a failed read is tried again. */
+  const checkHold = async (attempt: number): Promise<void> => {
+    if (disposed || settling || stopped || !opts.pays) return;
+    let r: Outcome<CallStatus>;
+    try { r = await deps.hold(peer, callId, null); } catch (error) { r = { ok: false, error: asActionError(error) }; }
+    if (disposed || settling || stopped) return;
+    if (r.ok) { apply(r.value); return; }
+    if (HOLD_REFUSED.has(r.error.code)) { stopWith('hold_refused', r.error.message); return; }
+    if (attempt + 1 < MAX_ATTEMPTS && !running) await new Promise((resolve) => setTimeout(resolve, RETRY_MS)).then(() => checkHold(attempt + 1));
+  };
+
   return {
     view: () => view,
-    refresh: async () => {
-      if (disposed || running || settling) return;
-      const r = await read();
-      if (r.ok && r.value && !disposed && !running && !settling) apply(r.value);
+    refresh: () => checkHold(0),
+    confirm: async () => {
+      const hold = view.reservation;
+      if (disposed || settling || stopped || !opts.pays || !hold || view.confirmed || view.confirming) return;
+      emit({ confirming: true, holdError: null });
+      let r: Outcome<CallStatus>;
+      try { r = await deps.hold(peer, callId, hold.reserved_msat); } catch (error) { r = { ok: false, error: asActionError(error) }; }
+      if (disposed || settling || stopped) return;
+      if (r.ok) {
+        apply(r.value);
+        emit({ confirming: false, confirmed: true });
+        if (running) { clearTimeout(timer); timer = undefined; void tick(); }
+        return;
+      }
+      emit({ confirming: false, holdError: r.error.message });
+      if (HOLD_REFUSED.has(r.error.code)) stopWith('hold_refused', r.error.message);
+      else if (r.error.code === 'call_hold_changed') void checkHold(0);
     },
     start: () => {
-      if (running || disposed || settling) return;
+      if (running || disposed || settling || stopped) return;
       running = true;
       attempts = 0;
       void tick();

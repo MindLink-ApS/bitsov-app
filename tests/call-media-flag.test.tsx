@@ -18,9 +18,9 @@ import type { PairingView as OnboardingPairingView } from '../src/onboarding/pai
 const OWN = '1'.repeat(64);
 const A = 'a'.repeat(64);
 const ID = '0123456789abcdef0123456789abcdef';
-// M6 A2: a node-routed call needs the callee's per-minute price to agree to.
+// M6 A2: a node-routed call needs the callee's per-minute price to agree to, from a session whose node reserves the minutes.
 const QUOTE: CallQuote = { offer_msat: 10_000, offer_max_routing_fee_msat: 5_000, signal_msat: 1_000, signal_max_routing_fee_msat: 5_000, call_total_msat: 21_000,
-  block_msat: 10_000, block_max_routing_fee_msat: 5_000, reservation_max_msat: 3_600_000 };
+  block_msat: 10_000, block_max_routing_fee_msat: 5_000, reservation_max_msat: 3_600_000, minutes_payable: true };
 
 class FakePc {
   static made = 0;
@@ -43,7 +43,7 @@ function stubHost() {
   const status = (args: Record<string, unknown> | undefined) => ({
     id: args!.call_id, state: ended ? 'ended' : 'live', direction: 'outgoing', paid_until_ms: Date.now() + 60_000, next_block_seq: 1,
     next_block_due_ms: Date.now() + 40_000,
-    reservation: { reserved_msat: 3_600_000, spent_msat: 15_000, remaining_msat: 3_585_000, per_block_msat: 10_000, per_block_fee_msat: 5_000, released_msat: 0, closed: ended },
+    reservation: { reserved_msat: 3_600_000, spent_msat: 15_000, remaining_msat: 3_585_000, per_block_msat: 10_000, per_block_fee_msat: 5_000, max_call_minutes: 240, released_msat: 0, closed: ended },
   });
   const REPLIES: Record<string, Reply> = {
     node_status: () => ({ ready: true, node_id: OWN, error: null }),
@@ -62,6 +62,7 @@ function stubHost() {
     call_quote: () => QUOTE,
     call_signal: (args) => ({ message_id: 'sig', kind: (args as { kind: number }).kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }),
     call_status: (args) => status(args),
+    call_hold: (args) => status(args),
     call_block: () => ({ message_id: 'blk', kind: 404, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: Date.now() }),
     op_end_call: (args) => (ended = true, { op_id: 'end', kind: 'call_hangup', peer: A, call_id: (args as { call_id: string }).call_id, state: 'settled', cap_msat: 6_000, paid_msat: 6_000, message_id: 'hangup' }),
     op_list: () => ({ operations: [], skipped: 0, has_more: false }),

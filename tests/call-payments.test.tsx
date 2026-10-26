@@ -1,10 +1,14 @@
 /**
  * M6 A2: a node-routed call is paid while it runs. The owner agrees to the
- * callee's per-minute price and the most the node will hold before Ring; the
- * caller pays one block per minute from the answer on, never above that
- * price; the card shows the node's own running cost; every way the node or
- * the payment stops the call ends it with a plain reason; afterwards the card
- * says what was paid and what was released.
+ * callee's per-minute price and the most any node may hold before Ring (sent
+ * to the host with the offer); once it rings the card shows the node's exact
+ * hold under its own call limit (`max_call_minutes`) and pays no minute until
+ * the owner confirms it; a hold the host refuses (none, or above the consent)
+ * ends the call with nothing paid; the caller pays one block per minute from
+ * the answer on, at the node's reservation price, never an amount of its own;
+ * the card shows the node's own running cost; every way the node or the
+ * payment stops the call ends it with a plain reason; afterwards the card says
+ * what was paid and what was released.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
@@ -28,8 +32,10 @@ const BLOCK = 10_000;
 const FEE = 5_000;
 const QUOTE: CallQuote = {
   offer_msat: 10_000, offer_max_routing_fee_msat: 5_000, signal_msat: 1_000, signal_max_routing_fee_msat: 5_000, call_total_msat: 21_000,
-  block_msat: BLOCK, block_max_routing_fee_msat: FEE, reservation_max_msat: 240 * (BLOCK + FEE),
+  block_msat: BLOCK, block_max_routing_fee_msat: FEE, reservation_max_msat: 240 * (BLOCK + FEE), minutes_payable: true,
 };
+const CONSENT = { block_msat: BLOCK, block_max_routing_fee_msat: FEE, max_hold_msat: 240 * (BLOCK + FEE) };
+const ABOVE = 'Your node reserved 36 sats for this call, more than you agreed to before calling. No minute was paid. The app hung up the call; your node releases what it held.';
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 const ok = <T,>(value: T): Outcome<T> => ({ ok: true, value });
@@ -38,18 +44,20 @@ const receipt = (seq: number): CallReceipt => ({ message_id: `blk${seq}`, kind: 
 
 /**
  * The caller's node as `GET /calls?peer=` reports one call: answered at
- * `answeredAt`, a reservation of 240 blocks, and blocks settling when paid.
+ * `answeredAt`, a reservation of `minutes` blocks (its call limit, 240 by
+ * default), and blocks settling when paid.
  */
-function fakeNode(opts: { now: () => number; perBlock?: number; reservation?: boolean } ) {
+function fakeNode(opts: { now: () => number; perBlock?: number; reservation?: boolean; minutes?: number } ) {
   const perBlock = opts.perBlock ?? BLOCK;
+  const minutes = opts.minutes ?? 240;
   const node = {
     answeredAt: opts.now(),
     seq: 0,
     paidUntil: null as number | null,
     ended: false,
     reservation: opts.reservation === false ? null : {
-      reserved_msat: 240 * (perBlock + FEE), spent_msat: 0, remaining_msat: 240 * (perBlock + FEE),
-      per_block_msat: perBlock, per_block_fee_msat: FEE, released_msat: 0, closed: false,
+      reserved_msat: minutes * (perBlock + FEE), spent_msat: 0, remaining_msat: minutes * (perBlock + FEE),
+      per_block_msat: perBlock, per_block_fee_msat: FEE, max_call_minutes: minutes, released_msat: 0, closed: false,
     } as CallReservation | null,
     status: (): CallStatus => ({
       id: ID, state: node.ended ? 'ended' : 'live', direction: 'outgoing', paid_until_ms: node.paidUntil, next_block_seq: node.seq,
@@ -82,27 +90,94 @@ describe('paying the minutes of one outgoing call', () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(1_790_000_000_000); });
   afterEach(() => { vi.useRealTimers(); });
 
-  function session(node: ReturnType<typeof fakeNode>, pay?: MinutesDeps['pay'], pays = true) {
+  function session(node: ReturnType<typeof fakeNode>, pay?: MinutesDeps['pay'], pays = true, hold?: MinutesDeps['hold']) {
     const views: MinutesView[] = [];
     const stops: MinutesStop[] = [];
     const deps: MinutesDeps = {
       status: vi.fn(async () => ok(node.status())),
+      hold: vi.fn(hold ?? (async () => ok(node.status()))),
       pay: vi.fn(pay ?? (async (_peer, _call, seq) => { node.settle(seq); return ok(receipt(seq)); })),
     };
     const minutes = createCallMinutes({
       peer: A, callId: ID, agreedBlockMsat: BLOCK, reservationMaxMsat: QUOTE.reservation_max_msat!, pays, deps, now: () => Date.now(),
       onChange: (v) => views.push(v), onStop: (s) => stops.push(s),
     });
-    return { minutes, deps, views, stops, last: () => views[views.length - 1] };
+    const last = () => views[views.length - 1];
+    /** Rung: the host checked the node's hold; the owner confirmed it as shown. */
+    const confirmed = async () => { await minutes.refresh(); await minutes.confirm(); expect(last().confirmed).toBe(true); };
+    return { minutes, deps, views, stops, last, confirmed };
   }
 
-  it('pays block 0 at the answer and each next block when the node says it is due, never above the agreed price', async () => {
+  it('pays no minute before the owner confirms the node’s exact hold, then pays block 0', async () => {
+    const node = fakeNode({ now: () => Date.now(), minutes: 60 });
+    const s = session(node);
+    await s.minutes.refresh();
+    expect(s.deps.hold).toHaveBeenLastCalledWith(A, ID, null);
+    expect(s.last()).toMatchObject({ confirmed: false, reservation: { max_call_minutes: 60, reserved_msat: 60 * (BLOCK + FEE) } });
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(STATUS_POLL_MS * 2);
+    expect(s.deps.pay).not.toHaveBeenCalled();
+    await s.minutes.confirm();
+    // The confirmation names the node's own total; the host checks it is still that hold.
+    expect(s.deps.hold).toHaveBeenLastCalledWith(A, ID, 60 * (BLOCK + FEE));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.deps.pay).toHaveBeenCalledTimes(1);
+    expect(s.deps.pay).toHaveBeenLastCalledWith(A, ID, 0);
+    s.minutes.dispose();
+  });
+
+  it('no reservation at the node: the host refuses the hold and hangs up, and no minute is ever paid', async () => {
+    const node = fakeNode({ now: () => Date.now(), reservation: false });
+    const s = session(node, undefined, true, async () => fail('call_no_reservation', 'Your node keeps no reservation for this call’s minutes, so the app pays none of them. No minute was paid. The app hung up the call; your node releases what it held.'));
+    await s.minutes.refresh();
+    expect(s.stops).toEqual([{ code: 'hold_refused', message: expect.stringContaining('keeps no reservation') }]);
+    expect(s.stops[0].message).toContain('does not match what you agreed to');
+    s.minutes.start();
+    await s.minutes.confirm();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(s.deps.pay).not.toHaveBeenCalled();
+    expect(s.deps.hold).toHaveBeenCalledTimes(1);
+  });
+
+  it('a hold above the consent is hung up by the host before block 0: zero minutes paid', async () => {
+    const node = fakeNode({ now: () => Date.now(), perBlock: BLOCK * 2 });
+    const s = session(node, undefined, true, async () => fail('call_hold_above_consent', ABOVE));
+    await s.minutes.refresh();
+    expect(s.stops.map((x) => x.code)).toEqual(['hold_refused']);
+    expect(s.stops[0].message).toContain(ABOVE);
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(s.deps.pay).not.toHaveBeenCalled();
+  });
+
+  it('a block the host refuses for the hold stops the call; a changed hold must be confirmed again', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const s = session(node, async () => fail('call_hold_above_consent', ABOVE));
+    await s.confirmed();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.stops.map((x) => x.code)).toEqual(['hold_refused']);
+    expect(s.deps.pay).toHaveBeenCalledTimes(1);
+    // The hold changed between the card and the confirmation: not confirmed, read again, nothing paid.
+    const changed = session(fakeNode({ now: () => Date.now() }), undefined, true,
+      vi.fn(async (_p: string, _c: string, confirm: number | null) => confirm === null ? ok(node.status()) : fail('call_hold_changed', 'Your node’s hold for this call is not the one you confirmed.')));
+    await changed.minutes.refresh();
+    await changed.minutes.confirm();
+    expect(changed.last()).toMatchObject({ confirmed: false, confirming: false, holdError: expect.stringContaining('not the one you confirmed') });
+    changed.minutes.start();
+    await vi.advanceTimersByTimeAsync(STATUS_POLL_MS * 2);
+    expect(changed.deps.pay).not.toHaveBeenCalled();
+    changed.minutes.dispose();
+  });
+
+  it('pays block 0 at the answer and each next block when the node says it is due, never naming an amount', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const s = session(node);
+    await s.confirmed();
     s.minutes.start();
     await vi.advanceTimersByTimeAsync(0);
     expect(s.deps.pay).toHaveBeenCalledTimes(1);
-    expect(s.deps.pay).toHaveBeenLastCalledWith(A, ID, 0, BLOCK);
+    expect(s.deps.pay).toHaveBeenLastCalledWith(A, ID, 0);
     // The running cost is the node's: one block spent, the rest still reserved.
     expect(s.last().reservation).toMatchObject({ spent_msat: BLOCK + FEE, remaining_msat: 239 * (BLOCK + FEE) });
     expect(s.last().blocks).toBe(1);
@@ -111,7 +186,7 @@ describe('paying the minutes of one outgoing call', () => {
     expect(s.deps.pay).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(3_000);
     expect(s.deps.pay).toHaveBeenCalledTimes(2);
-    expect(s.deps.pay).toHaveBeenLastCalledWith(A, ID, 1, BLOCK);
+    expect(s.deps.pay).toHaveBeenLastCalledWith(A, ID, 1);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(s.deps.pay).toHaveBeenCalledTimes(3);
     expect(s.last()).toMatchObject({ blocks: 3, stop: null, paying: false });
@@ -122,6 +197,7 @@ describe('paying the minutes of one outgoing call', () => {
   it('pays nothing when the node reserved a higher per-minute price than the owner agreed to', async () => {
     const node = fakeNode({ now: () => Date.now(), perBlock: BLOCK + 1 });
     const s = session(node);
+    await s.confirmed();
     s.minutes.start();
     await vi.advanceTimersByTimeAsync(0);
     expect(s.deps.pay).not.toHaveBeenCalled();
@@ -131,6 +207,7 @@ describe('paying the minutes of one outgoing call', () => {
   it('their node now asks more per minute: the block is refused and the call stops', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const s = session(node, async () => fail('call_price_changed'));
+    await s.confirmed();
     s.minutes.start();
     await vi.advanceTimersByTimeAsync(0);
     expect(s.stops.map((x) => x.code)).toEqual(['price_changed']);
@@ -139,6 +216,7 @@ describe('paying the minutes of one outgoing call', () => {
   it('a refused minute stops the call with the refusal, and nothing else is paid', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const s = session(node, async () => fail('grant_paused', 'Your node paused spending after failed payments. Nothing was sent.'));
+    await s.confirmed();
     s.minutes.start();
     await vi.advanceTimersByTimeAsync(0);
     expect(s.stops).toHaveLength(1);
@@ -152,6 +230,7 @@ describe('paying the minutes of one outgoing call', () => {
   it('a minute the node did not dispatch is tried again a few times, then the call stops', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const s = session(node, async () => fail('not_dispatched', 'Nothing was paid.'));
+    await s.confirmed();
     s.minutes.start();
     await vi.advanceTimersByTimeAsync(RETRY_MS * MAX_ATTEMPTS + 1);
     expect(s.deps.pay).toHaveBeenCalledTimes(MAX_ATTEMPTS);
@@ -161,6 +240,7 @@ describe('paying the minutes of one outgoing call', () => {
   it('a minute whose result is unknown is never paid again on top of it', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const s = session(node, async () => fail('spend_unknown', 'The node did not return a complete response.'));
+    await s.confirmed();
     s.minutes.start();
     await vi.advanceTimersByTimeAsync(0);
     expect(s.stops.map((x) => x.code)).toEqual(['payment_unknown']);
@@ -172,6 +252,7 @@ describe('paying the minutes of one outgoing call', () => {
   it('Unpaid: the node ended the call after its paid time and grace ran out', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const s = session(node);
+    await s.confirmed();
     s.minutes.start();
     await vi.advanceTimersByTimeAsync(0);
     // Paying stops elsewhere (say, the app was suspended): the node ends the call once grace runs out.
@@ -185,6 +266,7 @@ describe('paying the minutes of one outgoing call', () => {
   it('the node ended the call for another reason: their hangup gets a moment to name it first', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const s = session(node);
+    await s.confirmed();
     s.minutes.start();
     await vi.advanceTimersByTimeAsync(0);
     node.ended = true;
@@ -197,6 +279,7 @@ describe('paying the minutes of one outgoing call', () => {
   it('after the call it pays nothing more and reads the node until the reservation is released', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const s = session(node);
+    await s.confirmed();
     s.minutes.start();
     await vi.advanceTimersByTimeAsync(0);
     s.minutes.finish();
@@ -250,13 +333,14 @@ describe('the call engine with paid minutes', () => {
   };
   function engine(minutes: MinutesDeps, refuse?: () => Promise<Outcome<CallReceipt>>) {
     const views: CallView[] = [];
-    const signals: { kind: number; plaintext: string }[] = [];
+    const signals: { kind: number; plaintext: string; minutes?: unknown }[] = [];
+    const ended: string[] = [];
     const deps: CallDeps = {
       routed: true,
       minutes,
       quote: async () => ok(QUOTE),
-      signal: async (_peer, kind, plaintext) => {
-        signals.push({ kind, plaintext });
+      signal: async (_peer, kind, plaintext, _max, consent) => {
+        signals.push({ kind, plaintext, ...(consent ? { minutes: consent } : {}) });
         if (refuse) return refuse();
         return ok({ operation_id: `op-${kind}`, message_id: 'm', kind, amount_msat: 1, total_msat: 1, max_routing_fee_msat: 0, delivered: true, accepted: true, sent_at_ms: 0 });
       },
@@ -275,13 +359,42 @@ describe('the call engine with paid minutes', () => {
       onView: (v) => views.push(v),
       onStreams: () => {},
       newCallId: () => ID,
-      endCall: async () => ok({ op_id: 'end', kind: 'call_hangup', peer: A, call_id: ID, state: 'settled', cap_msat: 6_000, paid_msat: 6_000, message_id: 'h' } as never),
+      endCall: async (callId) => { ended.push(callId); return ok({ op_id: 'end', kind: 'call_hangup', peer: A, call_id: ID, state: 'settled', cap_msat: 6_000, paid_msat: 6_000, message_id: 'h' } as never); },
     };
-    return { engine: createCallEngine(deps), views, signals, last: () => views[views.length - 1] };
+    return { engine: createCallEngine(deps), views, signals, ended, last: () => views[views.length - 1] };
   }
+  const minutesOf = (node: ReturnType<typeof fakeNode>, pay: MinutesDeps['pay'], hold?: MinutesDeps['hold']): MinutesDeps =>
+    ({ status: vi.fn(async () => ok(node.status())), hold: vi.fn(hold ?? (async () => ok(node.status()))), pay });
+  const answer = (e: ReturnType<typeof engine>) => e.engine.receive({ id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: 0, plaintext: JSON.stringify({ v: 1, call_id: ID, sdp: nodeRoutedSdp('answer', ID) }), payment_amount_msat: 1 }, OWN);
+
+  it('the offer carries the minutes agreed before Ring, for the host to keep; never from an owner session', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const e = engine(minutesOf(node, vi.fn()));
+    await e.engine.place(A, 'audio', QUOTE);
+    expect(e.signals).toEqual([{ kind: 400, plaintext: expect.any(String), minutes: CONSENT }]);
+    e.engine.dismiss();
+    const owner = engine(minutesOf(node, vi.fn()));
+    await owner.engine.place(A, 'audio', { ...QUOTE, minutes_payable: false });
+    expect(owner.signals).toEqual([]);
+    expect(owner.last()).toMatchObject({ phase: 'ended', error: expect.stringContaining('keeps no reservation for a call’s minutes') });
+  });
+
+  it('a hold above the consent ends the call while ringing: the host hung up, no minute was paid', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const pay = vi.fn(async () => ok(receipt(0)));
+    const e = engine(minutesOf(node, pay, async () => fail('call_hold_above_consent', ABOVE)));
+    await e.engine.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(e.last().phase).toBe('ended'));
+    expect(e.last().error).toContain(ABOVE);
+    expect(e.signals.map((x) => x.kind)).toEqual([400]);
+    expect(e.ended).toEqual([ID]);
+    await answer(e);
+    expect(pay).not.toHaveBeenCalled();
+    expect(e.last().paidMsat).toBe(1);
+  });
 
   it('places no call without the per-minute price the owner agreed to', async () => {
-    const e = engine({ status: vi.fn(), pay: vi.fn() });
+    const e = engine({ status: vi.fn(), hold: vi.fn(), pay: vi.fn() });
     await e.engine.place(A, 'audio', { ...QUOTE, block_msat: null, reservation_max_msat: null });
     expect(e.signals).toEqual([]);
     expect(e.last()).toMatchObject({ phase: 'ended', error: 'Their node does not advertise a per-minute call price, so this call cannot be placed. Nothing was paid.' });
@@ -292,7 +405,7 @@ describe('the call engine with paid minutes', () => {
       ['call_liquidity_insufficient', 'Your node’s channel cannot hold this call’s reservation right now. Nothing was paid.', 'channel cannot hold'],
       ['grant_per_call', 'This is more than the 3,000 sats per payment your node allows. Nothing was sent.', 'reserves the call’s minutes when it rings'],
     ] as const) {
-      const e = engine({ status: vi.fn(async () => ok(null)), pay: vi.fn() }, async () => fail(code, message));
+      const e = engine({ status: vi.fn(async () => ok(null)), hold: vi.fn(), pay: vi.fn() }, async () => fail(code, message));
       await e.engine.place(A, 'audio', QUOTE);
       expect(e.last().phase).toBe('ended');
       expect(e.last().error).toContain(words);
@@ -304,14 +417,16 @@ describe('the call engine with paid minutes', () => {
   it('pays block 0 when their answer arrives, and their node’s `unpaid` hangup ends the call', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const pay = vi.fn(async (_p: string, _c: string, seq: number) => { node.settle(seq); return ok(receipt(seq)); });
-    const e = engine({ status: vi.fn(async () => ok(node.status())), pay });
+    const e = engine(minutesOf(node, pay));
     await e.engine.place(A, 'audio', QUOTE);
     expect(e.signals.map((s) => s.kind)).toEqual([400]);
     expect(e.last().phase).toBe('ringing');
     expect(e.last().minutes).toMatchObject({ agreedBlockMsat: BLOCK, reservationMaxMsat: QUOTE.reservation_max_msat });
+    await vi.waitFor(() => expect(e.last().minutes?.reservation).not.toBeNull());
+    await e.engine.confirmMinutes();
     expect(pay).not.toHaveBeenCalled();
-    await e.engine.receive({ id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: 0, plaintext: JSON.stringify({ v: 1, call_id: ID, sdp: nodeRoutedSdp('answer', ID) }), payment_amount_msat: 1 }, OWN);
-    await vi.waitFor(() => expect(pay).toHaveBeenCalledWith(A, ID, 0, BLOCK));
+    await answer(e);
+    await vi.waitFor(() => expect(pay).toHaveBeenCalledWith(A, ID, 0));
     await vi.waitFor(() => expect(e.last().minutes?.reservation?.spent_msat).toBe(BLOCK + FEE));
     // Their node ended it for payment: a 403 `unpaid` bound to our offer.
     expect(parseSignal(403, JSON.stringify({ v: 1, call_id: ID, reason: 'unpaid' }))?.reason).toBe('unpaid');
@@ -322,9 +437,11 @@ describe('the call engine with paid minutes', () => {
 
   it('a stop while the call runs ends it at once, never left connected', async () => {
     const node = fakeNode({ now: () => Date.now() });
-    const e = engine({ status: vi.fn(async () => ok(node.status())), pay: vi.fn(async () => fail('grant_paused', 'Your node paused spending.')) });
+    const e = engine(minutesOf(node, vi.fn(async () => fail('grant_paused', 'Your node paused spending.'))));
     await e.engine.place(A, 'audio', QUOTE);
-    await e.engine.receive({ id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: 0, plaintext: JSON.stringify({ v: 1, call_id: ID, sdp: nodeRoutedSdp('answer', ID) }), payment_amount_msat: 1 }, OWN);
+    await vi.waitFor(() => expect(e.last().minutes?.reservation).not.toBeNull());
+    await e.engine.confirmMinutes();
+    await answer(e);
     await vi.waitFor(() => expect(e.last().phase).toBe('ended'));
     expect(e.last().error).toContain('A minute of the call could not be paid');
     expect(e.last().reason).toBe('failed');
@@ -358,13 +475,13 @@ const paired = { state: 'paired', scopes: ['read', 'receive', 'spend'], node_id:
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 
-function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply } = {}) {
+function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number } = {}) {
   resetContactsForTests();
   setPetname(A, 'Maya');
   const calls: { cmd: string; args?: unknown }[] = [];
   const callbacks = new Map<number, (e: unknown) => void>();
   let mediaIndex = 0;
-  const node = fakeNode({ now: () => Date.now() });
+  const node = fakeNode({ now: () => Date.now(), minutes: opts.minutes });
   let callId: string | null = null;
   const spending: SpendView = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
   const REPLIES: Record<string, Reply> = {
@@ -392,6 +509,13 @@ function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply } = {}
       return { operation_id: `op-${kind}`, message_id: 'sig', kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
     },
     call_status: (args) => (callId && (args as { call_id: string }).call_id === callId ? { ...node.status(), id: callId } : null),
+    // The host's check of the node's hold (and the owner's confirmation of its exact total).
+    call_hold: (args) => {
+      if (opts.hold) return opts.hold(args);
+      const confirm = (args as { confirm_reserved_msat?: number }).confirm_reserved_msat;
+      if (confirm !== undefined && confirm !== node.reservation?.reserved_msat) throw { code: 'call_hold_changed', message: 'Your node’s hold for this call is not the one you confirmed.' };
+      return { ...node.status(), id: callId };
+    },
     call_block: (args) => {
       if (opts.block) return opts.block(args);
       const seq = (args as { seq: number }).seq;
@@ -472,6 +596,10 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    // The node's exact hold, shown once it rings: no minute is paid until the owner confirms it.
+    await vi.waitFor(() => expect($('[data-call-minutes-confirm]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-minutes-confirm]')!.click();
+    await vi.waitFor(() => expect($('[data-call-minutes-confirm]')).toBeNull());
     const callId = host.callId();
     host.emitLive({ type: 'message', room_id: null, message: { id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, sdp: nodeRoutedSdp('answer', callId) }), payment_amount_msat: 1000 } });
     return callId;
@@ -482,7 +610,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await openShell();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     expect($('[data-call-minute-price]')?.textContent).toBe(`Then ${amount(BLOCK)} a minute, plus up to ${amount(FEE)} routing a minute, paid by your node while the call runs.`);
-    expect($('[data-call-reservation-max]')?.textContent).toBe(`When it rings, your node holds up to ${amount(240 * (BLOCK + FEE))} for the minutes (4 hours at most) and releases what is not used when the call ends.`);
+    expect($('[data-call-reservation-max]')?.textContent).toBe(`When it rings, your node holds the minutes under its own call limit: never more than ${amount(240 * (BLOCK + FEE))} (4 hours, the most a node allows). You see the exact hold and confirm it before the first minute is paid; a larger hold is hung up unpaid.`);
     expect(host.used('call_signal')).toHaveLength(0);
     $<HTMLButtonElement>('[data-call-confirm-cancel]')!.click();
     expect($('[data-call-confirm-box]')).toBeNull();
@@ -496,7 +624,57 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await openShell();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     expect($('[data-call-minute-price]')?.textContent).toContain('pr. minut');
-    expect($('[data-call-reservation-max]')?.textContent).toContain('holder din node højst');
+    expect($('[data-call-reservation-max]')?.textContent).toContain('aldrig mere end');
+  });
+
+  it('once it rings, the card shows the node’s exact hold under its own call limit (max_call_minutes) to confirm', async () => {
+    const host = stubHost({ minutes: 60 });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-hold]')).not.toBeNull());
+    expect($('[data-call-hold]')!.textContent).toBe(
+      `Your node holds ${amount(60 * (BLOCK + FEE))} for this call: up to 60 minutes (its call limit) at ${amount(BLOCK)} a minute plus up to ${amount(FEE)} routing. It releases what is not used when the call ends. No minute is paid until you confirm.`);
+    expect(host.used('call_block')).toHaveLength(0);
+    $<HTMLButtonElement>('[data-call-minutes-confirm]')!.click();
+    await vi.waitFor(() => expect(host.used('call_hold').slice(-1)[0]?.args).toEqual({ peer: A, call_id: host.callId(), confirm_reserved_msat: 60 * (BLOCK + FEE) }));
+    await vi.waitFor(() => expect($('[data-call-hold]')).toBeNull());
+    expect(host.used('call_block')).toHaveLength(0);
+  });
+
+  it('says the hold in Danish too, with the node’s call limit', async () => {
+    stubHost({ minutes: 60 });
+    setLanguagePref('da');
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-hold]')).not.toBeNull());
+    expect($('[data-call-hold]')!.textContent).toContain('højst 60 minutter (dens opkaldsgrænse)');
+    expect($('[data-call-minutes-confirm]')!.textContent).toBe('Bekræft reservation');
+  });
+
+  it('a hold above the consent: the host hung up, the card ends with the reason, and no minute is paid', async () => {
+    const host = stubHost({ hold: () => { throw { code: 'call_hold_above_consent', message: ABOVE }; } });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-ended]')?.textContent).toBe(`Your node’s hold for this call does not match what you agreed to, so the call ended. ${ABOVE}`);
+    expect(host.used('call_block')).toHaveLength(0);
+    expect(host.used('call_media_open')).toHaveLength(0);
+  });
+
+  it('an owner session (no reservation from its node) cannot ring a paid-minutes call, and the button says why', async () => {
+    const host = stubHost({ quote: { ...QUOTE, minutes_payable: false } });
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')?.title).toContain('keeps no reservation for a call’s minutes'));
+    expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(true);
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    expect(host.used('call_signal')).toHaveLength(0);
   });
 
   it('a callee without a per-minute price cannot be rung, and the button says why', async () => {
@@ -517,7 +695,10 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await openShell();
     const callId = await ringAndAnswer(host);
     await vi.waitFor(() => expect(host.used('call_block')).toHaveLength(1));
-    expect(host.used('call_block')[0].args).toEqual({ peer: A, call_id: callId, seq: 0, max_block_msat: BLOCK });
+    // The renderer names no amount: the host pays the node's reservation price.
+    expect(host.used('call_block')[0].args).toEqual({ peer: A, call_id: callId, seq: 0 });
+    expect(host.used('call_signal')[0].args).toMatchObject({ kind: 400, minutes: CONSENT });
+    expect(host.used('call_hold').map((c) => c.args)).toEqual([{ peer: A, call_id: callId }, { peer: A, call_id: callId, confirm_reserved_msat: 240 * (BLOCK + FEE) }]);
     await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1), { timeout: 3_000 });
     // The socket opened after the minute was paid, never before (the node would refuse it).
     expect(host.calls.findIndex((c) => c.cmd === 'call_media_open')).toBeGreaterThan(host.calls.findIndex((c) => c.cmd === 'call_block'));

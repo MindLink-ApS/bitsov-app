@@ -1271,6 +1271,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     callSignal: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
     callStatus: async () => null,
     callBlock: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
+    callHold: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
     voiceNote: async (messageId) => {
       const note = voiceNotes.get(messageId);
       return note ? note : refuse('invalid', 'voice note not stored on this node');
