@@ -1432,6 +1432,7 @@ export function ControlCenter(props: Props) {
     peerConnection: routedCalls
       ? () => createNodeRoutedConnection({
           callId: () => callView().callId,
+          peer: () => callView().peer,
           bridge: isTauri() ? hostMediaBridge() : unavailableMediaBridge(),
           audio: (stream, transport) => createCallAudio({ stream, transport }),
           onSession: callMediaSession,

@@ -7,8 +7,9 @@
  * network connect-src).
  *
  * Downlink: the channel carries raw frames (seq + payload) as binary and
- * link transitions as JSON text. Uplink: one `call_media_send` per payload,
- * raw bytes, no JSON.
+ * link transitions as JSON objects (`{ link, detail }`; Tauri hands a JSON
+ * channel payload to the page already parsed). Uplink: one `call_media_send`
+ * per payload, raw bytes, no JSON.
  */
 import { Channel, invoke } from '@tauri-apps/api/core';
 
@@ -16,24 +17,32 @@ export type MediaLinkState = 'connecting' | 'open' | 'closed' | 'ended';
 export type MediaLink = { link: MediaLinkState; detail: string | null };
 
 export type MediaBridge = {
-  open: (callId: string, onFrame: (frame: Uint8Array) => void, onLink: (link: MediaLink) => void) => Promise<void>;
+  /** Open the host socket for `callId` with `peer`, the call's counterparty (the node admits only that pair). */
+  open: (callId: string, peer: string, onFrame: (frame: Uint8Array) => void, onLink: (link: MediaLink) => void) => Promise<void>;
   send: (payload: Uint8Array) => void;
   close: () => Promise<void>;
 };
 
-type ChannelMessage = ArrayBuffer | Uint8Array | number[] | string;
+type ChannelMessage = ArrayBuffer | Uint8Array | number[] | string | { link?: unknown; detail?: unknown };
 
-export function parseLinkMessage(text: string): MediaLink | null {
-  try {
-    const value = JSON.parse(text) as { link?: unknown; detail?: unknown };
-    if (!['connecting', 'open', 'closed', 'ended'].includes(value.link as string)) return null;
-    return { link: value.link as MediaLinkState, detail: typeof value.detail === 'string' ? value.detail : null };
-  } catch {
-    return null;
+const LINK_STATES: readonly string[] = ['connecting', 'open', 'closed', 'ended'];
+
+/** A link transition as the host sends it: a parsed object, or JSON text from an older host. */
+export function parseLinkMessage(message: unknown): MediaLink | null {
+  let value: unknown = message;
+  if (typeof message === 'string') {
+    try { value = JSON.parse(message); } catch { return null; }
   }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const { link, detail } = value as { link?: unknown; detail?: unknown };
+  if (typeof link !== 'string' || !LINK_STATES.includes(link)) return null;
+  return { link: link as MediaLinkState, detail: typeof detail === 'string' ? detail : null };
 }
 
-/** Frames arrive as an ArrayBuffer on desktop; some mobile IPC paths deliver a byte array. */
+/** A binary channel message: an ArrayBuffer on desktop, a byte array on some mobile IPC paths. */
+export const isFrameMessage = (message: unknown): message is ArrayBuffer | Uint8Array | number[] =>
+  message instanceof ArrayBuffer || message instanceof Uint8Array || Array.isArray(message);
+
 export function frameBytes(message: ArrayBuffer | Uint8Array | number[]): Uint8Array {
   if (message instanceof Uint8Array) return message;
   if (message instanceof ArrayBuffer) return new Uint8Array(message);
@@ -44,19 +53,16 @@ export function frameBytes(message: ArrayBuffer | Uint8Array | number[]): Uint8A
 export function hostMediaBridge(): MediaBridge {
   let current: Channel<ChannelMessage> | null = null;
   return {
-    open: async (callId, onFrame, onLink) => {
+    open: async (callId, peer, onFrame, onLink) => {
       const channel = new Channel<ChannelMessage>();
       channel.onmessage = (message) => {
         if (current !== channel) return;
-        if (typeof message === 'string') {
-          const link = parseLinkMessage(message);
-          if (link) onLink(link);
-          return;
-        }
-        onFrame(frameBytes(message));
+        if (isFrameMessage(message)) { onFrame(frameBytes(message)); return; }
+        const link = parseLinkMessage(message);
+        if (link) onLink(link);
       };
       current = channel;
-      await invoke<void>('call_media_open', { call_id: callId, on_frame: channel });
+      await invoke<void>('call_media_open', { call_id: callId, peer, on_frame: channel });
     },
     send: (payload) => {
       if (!current) return;
@@ -73,7 +79,7 @@ export function hostMediaBridge(): MediaBridge {
 /** No host (browser dev mode, sample data): the link ends at once, so the call does. */
 export function unavailableMediaBridge(): MediaBridge {
   return {
-    open: async (_callId, _onFrame, onLink) => { onLink({ link: 'ended', detail: 'no_host_media_bridge' }); },
+    open: async (_callId, _peer, _onFrame, onLink) => { onLink({ link: 'ended', detail: 'no_host_media_bridge' }); },
     send: () => {},
     close: async () => {},
   };

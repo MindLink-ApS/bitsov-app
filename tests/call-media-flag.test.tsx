@@ -77,7 +77,8 @@ function stubHost() {
       const listen = calls.find((c) => c.cmd === 'plugin:event|listen');
       callbacks.get((listen!.args as { handler: number }).handler)!({ event: 'node-live', id: 1, payload });
     },
-    /** Deliver a host media channel message in order (the renderer's Channel is the `on_frame` arg). */
+    /** Deliver a host media channel message in order (the renderer's Channel is the `on_frame` arg): link
+     *  transitions arrive as parsed JSON objects, frames as ArrayBuffers, exactly as Tauri delivers them. */
     media: (message: unknown) => {
       const opens = calls.filter((c) => c.cmd === 'call_media_open');
       const open = opens[opens.length - 1];
@@ -88,6 +89,27 @@ function stubHost() {
 }
 
 const track = () => ({ kind: 'audio', enabled: true, stop: vi.fn() }) as unknown as MediaStreamTrack;
+
+/** The least Web Audio the engine needs: a context whose worklet loads and whose nodes connect. */
+class FakeAudioNode {
+  port = { postMessage: vi.fn(), onmessage: null as unknown };
+  gain = { value: 1 };
+  connect<T>(next: T) { return next; }
+  disconnect() {}
+}
+class FakeAudioContext {
+  static made: FakeAudioContext[] = [];
+  sampleRate = 48_000;
+  currentTime = 0;
+  destination = new FakeAudioNode();
+  audioWorklet = { addModule: async () => {} };
+  closed = false;
+  constructor() { FakeAudioContext.made.push(this); }
+  async resume() {}
+  async close() { this.closed = true; }
+  createMediaStreamSource() { return new FakeAudioNode(); }
+  createGain() { return new FakeAudioNode(); }
+}
 const stream = () => {
   const tracks = [track()];
   return { getTracks: () => tracks, getAudioTracks: () => tracks, getVideoTracks: () => [], addTrack: () => {}, removeTrack: () => {} } as unknown as MediaStream;
@@ -143,7 +165,10 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     // Tauri 2 sets window.isTauri; the shell picks the host media bridge on it.
     vi.stubGlobal('isTauri', true);
     FakePc.made = 0;
+    FakeAudioContext.made = [];
     vi.stubGlobal('RTCPeerConnection', FakePc);
+    vi.stubGlobal('AudioContext', FakeAudioContext);
+    vi.stubGlobal('AudioWorkletNode', FakeAudioNode);
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => stream() } });
   });
   afterEach(() => {
@@ -204,16 +229,39 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     const callId = JSON.parse((offer.args as { plaintext: string }).plaintext).call_id as string;
     host.emitLive({ type: 'message', room_id: null, message: { id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, sdp: nodeRoutedSdp('answer', callId) }), payment_amount_msat: 1000 } });
     await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
-    expect((host.used('call_media_open')[0].args as { call_id: string }).call_id).toBe(callId);
+    // The node admits the socket only for (peer, call_id): both travel to the host.
+    expect(host.used('call_media_open')[0].args).toMatchObject({ call_id: callId, peer: A });
     expect($('[data-call-panel="connecting"]')).not.toBeNull();
-    host.media(JSON.stringify({ link: 'open', detail: null }));
+    // The audio graph is up (HELLO went out through the host) before the link opens.
+    await vi.waitFor(() => expect(host.used('call_media_send').length).toBeGreaterThan(0));
+    expect(host.used('call_media_send')[0].args).toBeInstanceOf(Uint8Array);
+    host.media({ link: 'connecting', detail: null });
+    host.media({ link: 'open', detail: null });
     await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
     expect($('[data-call-route="node"]')).not.toBeNull();
     expect(FakePc.made).toBe(0);
+    expect(FakeAudioContext.made).toHaveLength(1);
     // Hang up: the host ends the admission and the media socket closes with the call.
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect(host.used('call_media_close').length).toBeGreaterThan(0));
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    await vi.waitFor(() => expect(FakeAudioContext.made[0].closed).toBe(true));
+  });
+
+  it('a node refusal on the media socket ends the call instead of leaving it ringing', async () => {
+    const host = stubHost();
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
+    const callId = JSON.parse((offer.args as { plaintext: string }).plaintext).call_id as string;
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, sdp: nodeRoutedSdp('answer', callId) }), payment_amount_msat: 1000 } });
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
+    host.media({ link: 'ended', detail: 'the node refused the media socket (403)' });
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-ended]')?.textContent).toBe('The call audio link through your node closed.');
   });
 
   it('shows the label in Danish too', async () => {

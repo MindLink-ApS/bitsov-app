@@ -2,11 +2,13 @@
 //! app -> own node -> peer node -> peer app.
 //!
 //! The HOST owns the node's owner-scoped media socket
-//! (`/api/v1/calls/:call_id/media`) exactly as it owns `/ws`: the same loopback
-//! API base (a local node, or the loopback proxy of the paired Noise
-//! remote-access tunnel), the same token and local proxy credential, the same
-//! `bitsov.v1` subprotocol. The renderer never opens a socket or sees the
-//! token (Gate G2).
+//! (`GET /api/v1/calls/:call_id/media?peer=<64 hex>`) exactly as it owns
+//! `/ws`: the same loopback API base (a local node, or the loopback proxy of
+//! the paired Noise remote-access tunnel), the same local proxy credential,
+//! the `bitsov.v1` subprotocol, and the token as the `bitsov.jwt.<token>`
+//! subprotocol the node prefers (never in the URL, which proxies log). The
+//! node admits the socket only for `(peer, call_id)` it knows. The renderer
+//! never opens a socket or sees the token (Gate G2).
 //!
 //! Each binary message is one frame: `seq` (u32, big-endian) then the payload
 //! bytes. The host assigns `seq` on the way up and validates the shape on the
@@ -25,8 +27,13 @@ use tokio_tungstenite::tungstenite::Message as Frame;
 
 /// Big-endian `seq` prefix of every frame.
 pub const SEQ_BYTES: usize = 4;
-/// Largest payload accepted in either direction (one Opus or mu-law frame is far smaller).
-pub const MAX_PAYLOAD: usize = 1500;
+/// Largest payload accepted in either direction: the node's `MAX_CALL_MEDIA_BYTES`
+/// (one Opus or mu-law frame is far smaller).
+pub const MAX_PAYLOAD: usize = 4096;
+/// The subprotocol every node socket speaks.
+pub const WS_PROTOCOL: &str = "bitsov.v1";
+/// The token-bearing subprotocol the node reads first (`/api/v1/ws` too).
+pub const WS_JWT_PROTOCOL_PREFIX: &str = "bitsov.jwt.";
 /// Frames held per direction before the oldest is dropped: one second at 20 ms.
 pub const QUEUE_FRAMES: usize = 50;
 
@@ -90,18 +97,41 @@ pub fn call_id(value: &str) -> Result<String, String> {
     }
 }
 
-/// `ws://127.0.0.1:<port>/api/v1/calls/<call_id>/media?token=…` from the loopback API base.
+/// The call's counterparty: a 64-hex node id, as the node's `peer` parameter wants it.
+pub fn peer_id(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(value.to_ascii_lowercase())
+    } else {
+        Err("the peer id is not a 64-digit hex node id".into())
+    }
+}
+
+/// The token's subprotocol offer: `bitsov.v1, bitsov.jwt.<token>`.
+pub fn ws_protocols(token: &str) -> Result<String, String> {
+    if token.is_empty() || !token.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) {
+        return Err("the node token is not header-safe".into());
+    }
+    Ok(format!("{WS_PROTOCOL}, {WS_JWT_PROTOCOL_PREFIX}{token}"))
+}
+
+/// `ws://127.0.0.1:<port>/api/v1/calls/<call_id>/media?peer=<peer>` from the loopback API base.
 ///
 /// Same rule as [`super::ws_url`]: a plain-http loopback base only. The socket
-/// carries the token and decrypted call audio, so it must never leave the
-/// machine; the remote tunnel is reached through its loopback proxy.
-pub fn media_url(api_base: &str, call_id: &str, token: &str) -> Result<String, String> {
-    let live = super::ws_url(api_base, token)?;
-    let base = live
-        .strip_suffix(&format!("/ws?token={token}"))
-        .ok_or_else(|| "the media socket base is malformed".to_string())?;
+/// carries decrypted call audio, so it must never leave the machine; the
+/// remote tunnel is reached through its loopback proxy. The token travels in
+/// the subprotocol ([`ws_protocols`]), not here.
+pub fn media_url(api_base: &str, call_id: &str, peer: &str) -> Result<String, String> {
+    let rest = api_base
+        .strip_prefix("http://")
+        .ok_or_else(|| "call media needs a plain loopback API base".to_string())?;
+    let host = rest.split(['/', ':']).next().unwrap_or("");
+    if host != "127.0.0.1" && host != "localhost" {
+        return Err("call media is loopback-only".into());
+    }
     let id = self::call_id(call_id)?;
-    Ok(format!("{base}/calls/{id}/media?token={token}"))
+    let peer = peer_id(peer)?;
+    Ok(format!("ws://{}/calls/{id}/media?peer={peer}", rest.trim_end_matches('/')))
 }
 
 /// Bounded frame queue shared between the IPC side and the socket task. When
@@ -217,6 +247,7 @@ pub enum SessionEnd {
 /// the URL (it holds the token).
 pub async fn run_media_session(
     url: &str,
+    token: &str,
     local_proxy_auth: Option<&str>,
     uplink: &FrameQueue,
     downlink: &FrameQueue,
@@ -225,11 +256,13 @@ pub async fn run_media_session(
     on_open: &(dyn Fn() + Send + Sync),
 ) -> Result<(), SessionEnd> {
     let dropped = |why: &str| SessionEnd::Dropped(why.to_string());
+    let ws_protocols = |token: &str| ws_protocols(token).map_err(|why| SessionEnd::Dropped(why));
     let mut request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
         .map_err(|_| dropped("the media request could not be built"))?;
-    request
-        .headers_mut()
-        .insert("Sec-WebSocket-Protocol", "bitsov.v1".parse().expect("static header"));
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        ws_protocols(token)?.parse().map_err(|_| dropped("the node token is not header-safe"))?,
+    );
     if let Some(local_proxy_auth) = local_proxy_auth {
         request.headers_mut().insert(
             crate::remote_access::LOCAL_AUTH_HEADER,
@@ -304,8 +337,8 @@ pub async fn run_media_session(
 
 /// Own the media link for one call: reconnect with backoff while the socket
 /// drops, stop on a refusal or when `stopping` says so. `prepare` rebuilds the
-/// URL and credential on every attempt (the token may have been refreshed);
-/// `Ok(None)` means "not ready yet, try again shortly".
+/// URL, token and proxy credential on every attempt (the token may have been
+/// refreshed); `Ok(None)` means "not ready yet, try again shortly".
 pub async fn run_media_link<F, Fut>(
     mut prepare: F,
     uplink: &FrameQueue,
@@ -314,7 +347,7 @@ pub async fn run_media_link<F, Fut>(
     stopping: &(dyn Fn() -> bool + Send + Sync),
 ) where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<Option<(String, String)>, String>>,
+    Fut: std::future::Future<Output = Result<Option<(String, String, String)>, String>>,
 {
     let mut next_seq = 0u32;
     let mut attempt = 0u32;
@@ -329,10 +362,10 @@ pub async fn run_media_link<F, Fut>(
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 continue;
             }
-            Ok(Some((url, credential))) => {
+            Ok(Some((url, token, credential))) => {
                 emit(MediaLink::Connecting);
                 let opened = AtomicBool::new(false);
-                let result = run_media_session(&url, Some(&credential), uplink, downlink, &mut next_seq, stopping, &|| {
+                let result = run_media_session(&url, &token, Some(&credential), uplink, downlink, &mut next_seq, stopping, &|| {
                     opened.store(true, Ordering::Relaxed);
                     emit(MediaLink::Open);
                 })
@@ -431,22 +464,42 @@ mod tests {
         assert!(call_id("../0123456789abcdef0123456789abcd").is_err());
     }
 
+    const PEER: &str = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+
     #[test]
-    fn media_url_is_loopback_only_and_scoped_to_the_call() {
+    fn peer_ids_are_validated_and_normalized() {
+        assert_eq!(peer_id(&PEER.to_ascii_uppercase()).unwrap(), PEER);
+        assert!(peer_id("").is_err());
+        assert!(peer_id(&PEER[..63]).is_err());
+        assert!(peer_id(&format!("{PEER}0")).is_err());
+        assert!(peer_id(&format!("g{}", &PEER[1..])).is_err());
+    }
+
+    #[test]
+    fn media_url_is_loopback_only_and_names_the_call_and_its_counterparty_without_the_token() {
         let id = "0123456789abcdef0123456789abcdef";
         assert_eq!(
-            media_url("http://127.0.0.1:18080/api/v1", id, "tok").unwrap(),
-            format!("ws://127.0.0.1:18080/api/v1/calls/{id}/media?token=tok")
+            media_url("http://127.0.0.1:18080/api/v1", id, PEER).unwrap(),
+            format!("ws://127.0.0.1:18080/api/v1/calls/{id}/media?peer={PEER}")
         );
         assert_eq!(
-            media_url("http://localhost:18080/api/v1/", id, "tok").unwrap(),
-            format!("ws://localhost:18080/api/v1/calls/{id}/media?token=tok")
+            media_url("http://localhost:18080/api/v1/", &id.to_ascii_uppercase(), &PEER.to_ascii_uppercase()).unwrap(),
+            format!("ws://localhost:18080/api/v1/calls/{id}/media?peer={PEER}")
         );
         let lan = ["http://", "192.0.2.1:18080/api/v1"].concat();
-        assert!(media_url(&lan, id, "tok").is_err());
-        assert!(media_url("https://127.0.0.1:18080/api/v1", id, "tok").is_err());
-        assert!(media_url("http://127.0.0.1:18080/api/v1", "bad", "tok").is_err());
-        assert!(media_url("http://127.0.0.1:18080/api/v1", id, "a b").is_err());
+        assert!(media_url(&lan, id, PEER).is_err());
+        assert!(media_url("https://127.0.0.1:18080/api/v1", id, PEER).is_err());
+        assert!(media_url("http://127.0.0.1:18080/api/v1", "bad", PEER).is_err());
+        assert!(media_url("http://127.0.0.1:18080/api/v1", id, "not-a-peer").is_err());
+        assert!(media_url("http://127.0.0.1:18080/api/v1", id, "").is_err());
+    }
+
+    #[test]
+    fn the_token_rides_the_jwt_subprotocol_the_node_reads_first() {
+        assert_eq!(ws_protocols("tok.1").unwrap(), "bitsov.v1, bitsov.jwt.tok.1");
+        assert!(ws_protocols("").is_err());
+        assert!(ws_protocols("a b").is_err());
+        assert!(ws_protocols("a,b").is_err());
     }
 
     #[test]
@@ -494,7 +547,7 @@ mod tests {
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         let server = tokio::spawn(media_server(listener, seen.clone()));
         let id = "0123456789abcdef0123456789abcdef";
-        let url = media_url(&format!("http://127.0.0.1:{port}/api/v1"), id, "tok").unwrap();
+        let url = media_url(&format!("http://127.0.0.1:{port}/api/v1"), id, PEER).unwrap();
         let uplink = FrameQueue::new(QUEUE_FRAMES);
         let downlink = FrameQueue::new(QUEUE_FRAMES);
         uplink.push(vec![1, 2, 3]);
@@ -505,7 +558,7 @@ mod tests {
         let stopping = || stop.load(Ordering::Relaxed);
         let on_open = || opened.store(true, Ordering::Relaxed);
         let result = {
-            let session = run_media_session(&url, Some("proxy-secret"), &uplink, &downlink, &mut next_seq, &stopping, &on_open);
+            let session = run_media_session(&url, "tok.1", Some("proxy-secret"), &uplink, &downlink, &mut next_seq, &stopping, &on_open);
             tokio::pin!(session);
             tokio::select! {
                 r = &mut session => r,
@@ -525,7 +578,8 @@ mod tests {
         assert_eq!(second, MediaFrame { seq: 13, payload: vec![4] });
         assert!(downlink.try_pop().is_none(), "the malformed frame was dropped");
         let seen = seen.lock().unwrap().clone();
-        assert_eq!(seen, vec![format!("/api/v1/calls/{id}/media?token=tok"), "bitsov.v1".to_string(), "proxy-secret".to_string()]);
+        // The node's contract: `peer` in the query, the token in the subprotocol, never in the URL.
+        assert_eq!(seen, vec![format!("/api/v1/calls/{id}/media?peer={PEER}"), "bitsov.v1, bitsov.jwt.tok.1".to_string(), "proxy-secret".to_string()]);
         server.abort();
     }
 
@@ -550,7 +604,7 @@ mod tests {
         run_media_link(
             || async {
                 attempts.fetch_add(1, Ordering::Relaxed);
-                Ok(Some((media_url(&api, id, "tok").unwrap(), "proxy".to_string())))
+                Ok(Some((media_url(&api, id, PEER).unwrap(), "tok".to_string(), "proxy".to_string())))
             },
             &uplink,
             &downlink,

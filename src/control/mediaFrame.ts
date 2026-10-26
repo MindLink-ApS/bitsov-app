@@ -14,8 +14,8 @@
  */
 
 export const SEQ_BYTES = 4;
-/** Largest payload either side accepts; the host refuses anything bigger. */
-export const MAX_PAYLOAD = 1500;
+/** Largest payload either side accepts (the node's cap); the host refuses anything bigger. */
+export const MAX_PAYLOAD = 4096;
 /** `seq` wraps at 2^32 like the node's u32. */
 export const SEQ_MODULUS = 0x1_0000_0000;
 

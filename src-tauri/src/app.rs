@@ -9109,6 +9109,7 @@ fn stop_media_session(state: &NodeState) {
 async fn media_bridge<R: tauri::Runtime>(
     app: AppHandle<R>,
     call_id: String,
+    peer: String,
     uplink: Arc<control::media::FrameQueue>,
     stop: Arc<AtomicBool>,
     channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
@@ -9124,8 +9125,8 @@ async fn media_bridge<R: tauri::Runtime>(
             if !*state.ready.lock().unwrap() { return Ok(None); }
             ensure_fresh_token(&state).await;
             let Some(token) = state.token.lock().unwrap().clone() else { return Ok(None); };
-            let url = control::media::media_url(&state.api_base, &call_id, &token)?;
-            Ok(Some((url, state.remote_proxy_auth.to_string())))
+            let url = control::media::media_url(&state.api_base, &call_id, &peer)?;
+            Ok(Some((url, token, state.remote_proxy_auth.to_string())))
         },
         &uplink,
         &downlink,
@@ -9146,27 +9147,30 @@ async fn media_bridge<R: tauri::Runtime>(
     }
 }
 
-/// Open the host-owned media socket for `call_id` (M6 A1). Frames the node
-/// delivers arrive on `on_frame` as raw bytes (seq + payload) and link
-/// transitions as JSON text. One session at a time: opening replaces the
-/// previous one. No payment and no admission change here: the node scopes
-/// the socket to the owner's token and to a call it already knows.
+/// Open the host-owned media socket for `call_id` with `peer`, the call's
+/// counterparty (M6 A1). Frames the node delivers arrive on `on_frame` as raw
+/// bytes (seq + payload); link transitions arrive as JSON objects
+/// (`{"link": …, "detail": …}`). One session at a time: opening replaces the
+/// previous one. No payment and no admission change here: the node admits the
+/// socket only for a `(peer, call_id)` it already knows, under the owner's token.
 #[tauri::command(rename_all = "snake_case")]
 async fn call_media_open(
     window: WebviewWindow<impl tauri::Runtime>,
     app: AppHandle<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     call_id: String,
+    peer: String,
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Result<(), String> {
     reject_sealed_window(&window)?;
     drop(window);
     let call_id = control::media::call_id(&call_id)?;
+    let peer = control::media::peer_id(&peer)?;
     let uplink = Arc::new(control::media::FrameQueue::new(control::media::QUEUE_FRAMES));
     let stop = Arc::new(AtomicBool::new(false));
     stop_media_session(state.inner());
     *state.media.lock().unwrap() = Some(MediaSession { call_id: call_id.clone(), uplink: uplink.clone(), stop: stop.clone() });
-    tauri::async_runtime::spawn(media_bridge(app, call_id, uplink, stop, on_frame));
+    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, stop, on_frame));
     Ok(())
 }
 

@@ -6,8 +6,11 @@
  * description, and watches `connectionState`. This adapter answers that same
  * surface without WebRTC: the "SDP" is a placeholder carrying a marker, and
  * once both descriptions are in place it opens the host-owned media socket
- * for the call id and streams audio through `callAudio.ts`. Signalling
- * (kinds 400-403, paid through the node) is untouched.
+ * for the call id and its counterparty and streams audio through
+ * `callAudio.ts`. The call reports `connected` only once the node link is
+ * open AND the audio graph is ready; an audio graph that cannot be built
+ * closes the link and ends the call. Signalling (kinds 400-403, paid through
+ * the node) is untouched.
  *
  * Nothing here contacts a STUN or TURN server, gathers candidates, or opens
  * a direct path to the peer app: the connection state follows the node link.
@@ -43,6 +46,8 @@ export type MediaSessionEvent = { callId: string; state: 'open' | 'closed'; at: 
 export type NodeRoutedDeps = {
   /** The wire call id of the call this connection serves (set by the engine before it opens media). */
   callId: () => string | null;
+  /** The call's counterparty (64-hex node id); the node admits the socket only for this pair. */
+  peer: () => string | null;
   bridge: MediaBridge;
   audio: (stream: MediaStream, transport: MediaTransport) => CallAudio;
   /**
@@ -86,6 +91,9 @@ export class NodeRoutedConnection {
   private opened = false;
   private closed = false;
   private wasOpen = false;
+  /** The node link is up (the host said `open`); `connected` also needs `audioReady`. */
+  private linkOpen = false;
+  private audioReady = false;
   private graceTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly now: () => number;
 
@@ -162,12 +170,41 @@ export class NodeRoutedConnection {
     if (this.opened || this.closed || !this.localDescription || !this.remoteDescription) return;
     this.opened = true;
     const callId = this.deps.callId();
-    if (!callId) { this.setState('failed'); return; }
+    const peer = this.deps.peer();
+    if (!callId || !peer) { this.setState('failed'); return; }
     this.setState('connecting');
     const audio = this.deps.audio(this.stream ?? emptyStream(), { send: (payload) => this.deps.bridge.send(payload) });
     this.audio = audio;
-    this.deps.bridge.open(callId, (frame) => { if (this.audio === audio) audio.feed(frame); }, (link) => this.onLink(link))
+    audio.ready.then(
+      () => { if (this.audio === audio && !this.closed) { this.audioReady = true; this.maybeConnected(); } },
+      // No audio graph (no AudioContext, worklet refused): a silent "live" call is worse than an ended one.
+      () => { if (this.audio === audio) this.audioFailed(); },
+    );
+    this.deps.bridge.open(callId, peer, (frame) => { if (this.audio === audio) audio.feed(frame); }, (link) => this.onLink(link))
       .catch(() => this.onLink({ link: 'ended', detail: 'media_link_refused' }));
+  }
+
+  /** Live only with both halves: the node link open and the audio graph ready. */
+  private maybeConnected() {
+    if (!this.linkOpen || !this.audioReady || this.closed) return;
+    if (!this.wasOpen) {
+      this.wasOpen = true;
+      const callId = this.deps.callId();
+      if (callId) this.deps.onSession?.({ callId, state: 'open', at: this.now() });
+      // No `ontrack`: playout renders straight into the audio context, so
+      // the engine keeps no remote stream and its media element stays idle.
+    }
+    this.setState('connected');
+  }
+
+  /** The audio engine could not start: release it, close the socket, end the call. */
+  private audioFailed() {
+    if (this.closed) return;
+    const audio = this.audio;
+    this.audio = null;
+    void audio?.close();
+    void this.deps.bridge.close();
+    this.setState('closed');
   }
 
   private onLink(link: MediaLink) {
@@ -176,17 +213,12 @@ export class NodeRoutedConnection {
       case 'open': {
         clearTimeout(this.graceTimer);
         this.graceTimer = undefined;
-        if (!this.wasOpen) {
-          this.wasOpen = true;
-          const callId = this.deps.callId();
-          if (callId) this.deps.onSession?.({ callId, state: 'open', at: this.now() });
-          // No `ontrack`: playout renders straight into the audio context, so
-          // the engine keeps no remote stream and its media element stays idle.
-        }
-        this.setState('connected');
+        this.linkOpen = true;
+        this.maybeConnected();
         break;
       }
       case 'closed':
+        this.linkOpen = false;
         // The host reconnects on its own; the call stays live meanwhile.
         if (this.wasOpen && this.graceTimer === undefined) {
           this.graceTimer = setTimeout(() => { this.graceTimer = undefined; this.setState('closed'); }, this.deps.linkGraceMs ?? LINK_GRACE_MS);

@@ -17,19 +17,23 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   `scripts/ui-layout/meeting-planner-check.mjs` pin it, because their
   meeting-planner specs exercise that hidden UI.
 - **The host owns the socket.** The Rust host opens the node's owner-scoped
-  `GET /api/v1/calls/:call_id/media` WebSocket exactly as it owns `/ws`
-  (`src-tauri/src/control/media.rs`): same loopback API base (a local node, or
-  the loopback proxy of the paired Noise remote-access tunnel), same token,
-  same local proxy credential, same `bitsov.v1` subprotocol, reconnect with
-  backoff while the call lasts. The renderer opens no socket and sees no token;
-  the CSP keeps `connect-src 'self' ipc:` only. Three main-window commands:
-  `call_media_open(call_id, on_frame)`, `call_media_send(raw payload)`,
-  `call_media_close()`. Frames reach the renderer on one Tauri channel (binary
-  frames, JSON link transitions); both directions pass through bounded queues
+  `GET /api/v1/calls/:call_id/media?peer=<counterparty>` WebSocket exactly as
+  it owns `/ws` (`src-tauri/src/control/media.rs`): same loopback API base (a
+  local node, or the loopback proxy of the paired Noise remote-access tunnel),
+  same local proxy credential, the `bitsov.v1` subprotocol, and the token as
+  the `bitsov.jwt.<token>` subprotocol the node reads first (never in the URL).
+  The node admits the socket only for a `(peer, call_id)` it knows, under a
+  paired token with `spend`; the host reconnects with backoff while the call
+  lasts and stops on a refusal. The renderer opens no socket and sees no
+  token; the CSP keeps `connect-src 'self' ipc:` only. Three main-window
+  commands: `call_media_open(call_id, peer, on_frame)`,
+  `call_media_send(raw payload)`, `call_media_close()`. Frames reach the
+  renderer on one Tauri channel (binary frames; link transitions as parsed
+  JSON objects `{ link, detail }`); both directions pass through bounded queues
   (50 frames) that drop the oldest frame under backpressure.
 - **Wire format.** Each binary message is `seq` (u32, big-endian) then the
-  payload. The host assigns `seq` upward and validates the shape downward; the
-  node forwards payloads opaquely. The payload is the app's "bitsov media
+  payload (at most 4096 bytes, the node's cap). The host assigns `seq` upward
+  and validates the shape downward; the node forwards payloads opaquely. The payload is the app's "bitsov media
   payload v1" (`src/control/mediaFrame.ts`): a type byte, then bytes. `0x00`
   HELLO carries the codecs this app decodes; `0x01` is one 20 ms G.711 mu-law
   frame (160 bytes); `0x02` is one 20 ms Opus packet. Each app sends Opus only
@@ -51,8 +55,11 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   `src/control/nodeRoutedConnection.ts`, not an `RTCPeerConnection`. Its
   "SDP" is a placeholder carrying `a=x-bitsov-media:node-routed-v1` and the
   call id; once both descriptions are set it opens the host media socket for
-  the call id, and reports `connected` when the host reports the link open.
-  It gathers no candidates and contacts no STUN or TURN server. A peer that
+  the call id and its counterparty, and reports `connected` only when the host
+  reports the link open and the audio graph is ready. An audio graph that
+  cannot be built (no AudioContext, worklet refused) closes the socket and
+  ends the call rather than leaving a silent live call. It gathers no
+  candidates and contacts no STUN or TURN server. A peer that
   answers with direct-media SDP (a pre-M6 app) ends the call as "their
   answer could not be used", nothing more paid. If the node link drops, the
   host reconnects; after 30 s without it the call ends. The node's refusal of
