@@ -448,6 +448,9 @@ pub struct MembraneTotals {
 mod refusals;
 use refusals::{NodePrePaymentRefusals, PrePaymentRefusals};
 
+/// M6 A1: the node-routed call media bridge (frames, queues, the media socket).
+pub mod media;
+
 #[derive(Deserialize, Clone, Debug)]
 pub struct NodeMembrane {
     #[serde(default)]
