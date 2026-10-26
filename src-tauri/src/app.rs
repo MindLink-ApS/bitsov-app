@@ -301,8 +301,9 @@ struct NodeState {
     media: Mutex<Option<MediaSession>>,
     /// M6 A2: the paid minutes the owner agreed to for each outgoing call,
     /// taken with its offer. Memory only and bounded: a call whose consent is
-    /// gone (a restart) pays no further minute.
-    call_consents: Mutex<Vec<CallConsent>>,
+    /// gone (a restart) pays no further minute. Write-once per call id; an
+    /// open call is never evicted (see `CallConsents`).
+    call_consents: Mutex<CallConsents>,
 }
 
 /// M6 A2: one outgoing call's agreed minutes, bound to the node identity,
@@ -316,10 +317,112 @@ struct CallConsent {
     call_id: String,
     consent: control::MinutesConsent,
     confirmed_msat: Option<u64>,
+    phase: ConsentPhase,
+    /// The offer for this call is with the node right now.
+    offering: bool,
 }
 
-/// Agreed minutes kept for this many recent calls (one runs at a time).
-const CALL_CONSENTS_KEPT: usize = 16;
+/// Where one call's consent stands. Only `Admitted` can pay a minute.
+/// `Refused` and `Ended` are tombstones: they never change back, so a call id
+/// can never be given new (wider) terms or have a refused hold paid later.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ConsentPhase {
+    /// Taken before the offer; the node's hold is not checked yet.
+    Offering,
+    /// The node's hold for the call was checked and is within the consent.
+    Admitted,
+    /// The node's hold was refused (none, or above the consent). The call was
+    /// hung up; this refusal is the answer to every later hold or minute.
+    Refused { code: &'static str, message: String },
+    /// The call ended (hung up by the app, or the node ended it).
+    Ended,
+}
+
+impl ConsentPhase {
+    /// Pinned: never evicted (an open or unresolved call).
+    fn open(&self) -> bool { matches!(self, ConsentPhase::Offering | ConsentPhase::Admitted) }
+}
+
+/// The calls' consents: write-once per (node, contact, call id). Open calls
+/// (offering or admitted) are pinned; when the table is full only the oldest
+/// tombstone (refused or ended, whose node hold is closed or ended) is
+/// evicted, and a new call is refused rather than evict an open one.
+#[derive(Debug, Default)]
+struct CallConsents {
+    entries: Vec<CallConsent>,
+}
+
+/// Open calls whose consent the host keeps at once (one call runs at a time).
+const CALL_CONSENTS_OPEN: usize = 16;
+/// Consents kept in all, tombstones included.
+const CALL_CONSENTS_KEPT: usize = 256;
+
+impl CallConsents {
+    fn find(&self, node_id: &str, peer: &str, call_id: &str) -> Option<&CallConsent> {
+        self.entries.iter().find(|c| c.node_id == node_id && c.peer == peer && c.call_id == call_id)
+    }
+
+    fn find_mut(&mut self, node_id: &str, peer: &str, call_id: &str) -> Option<&mut CallConsent> {
+        self.entries.iter_mut().find(|c| c.node_id == node_id && c.peer == peer && c.call_id == call_id)
+    }
+
+    fn open_count(&self) -> usize { self.entries.iter().filter(|c| c.phase.open()).count() }
+
+    /// Take the consent for a call id once. The same terms for a call that is
+    /// still open are a no-op (the same offer again); different terms, or any
+    /// terms for a call that was refused or ended, are refused.
+    fn register(&mut self, node_id: String, peer: &str, call_id: &str, consent: control::MinutesConsent) -> Result<(), ActionError> {
+        if let Some(existing) = self.find(&node_id, peer, call_id) {
+            return match &existing.phase {
+                phase if phase.open() && existing.consent == consent => Ok(()),
+                phase if phase.open() => Err(ActionError::invalid("this call already has agreed minutes; start a new call")),
+                _ => Err(ActionError::invalid("this call has ended; start a new call")),
+            };
+        }
+        if self.open_count() >= CALL_CONSENTS_OPEN {
+            return Err(ActionError::new("call_consents_full",
+                "Too many earlier calls are still open or settling at your node. End them, or wait a moment, then call again. Nothing was paid."));
+        }
+        if self.entries.len() >= CALL_CONSENTS_KEPT {
+            // Only a tombstone goes; there is always one, since open calls are capped below the table.
+            let oldest = self.entries.iter().position(|c| !c.phase.open())
+                .ok_or_else(|| ActionError::new("call_consents_full", "Too many calls are still open at your node. Nothing was paid."))?;
+            self.entries.remove(oldest);
+        }
+        self.entries.push(CallConsent {
+            node_id, peer: peer.into(), call_id: call_id.into(), consent,
+            confirmed_msat: None, phase: ConsentPhase::Offering, offering: false,
+        });
+        Ok(())
+    }
+
+    /// The hold was checked and is within the consent. Only from `Offering`.
+    fn admit(&mut self, node_id: &str, peer: &str, call_id: &str) {
+        if let Some(c) = self.find_mut(node_id, peer, call_id) {
+            if c.phase == ConsentPhase::Offering { c.phase = ConsentPhase::Admitted; }
+        }
+    }
+
+    /// The hold was refused: never payable again. An ended call stays ended.
+    fn refuse(&mut self, node_id: &str, peer: &str, call_id: &str, code: &'static str, message: &str) {
+        if let Some(c) = self.find_mut(node_id, peer, call_id) {
+            if c.phase.open() {
+                c.phase = ConsentPhase::Refused { code, message: message.into() };
+                c.confirmed_msat = None;
+            }
+        }
+    }
+
+    /// The call ended: no further minute. A refusal stays the answer.
+    fn end(&mut self, node_id: &str, peer: Option<&str>, call_id: &str) {
+        for c in self.entries.iter_mut().filter(|c| c.node_id == node_id && c.call_id == call_id && peer.is_none_or(|p| c.peer == p)) {
+            if c.phase.open() {
+                c.phase = ConsentPhase::Ended;
+                c.confirmed_msat = None;
+            }
+        }
+    }
+}
 
 /// The owner asked for these while an elevation request is pending.
 /// A contact's signed re-admission quote shown to the owner. A send of exactly
@@ -505,7 +608,7 @@ impl NodeState {
             trust_write: Mutex::new(()),
             approvals_restored: AtomicBool::new(false),
             media: Mutex::new(None),
-            call_consents: Mutex::new(Vec::new()),
+            call_consents: Mutex::new(CallConsents::default()),
             node_grant: Mutex::new(None),
             all_in_caps_node: Mutex::new(None),
             readmission_ask: Mutex::new(None),
@@ -6771,25 +6874,33 @@ fn minutes_payable(state: &NodeState) -> bool {
 /// The agreed minutes for this outgoing call, if this run took any.
 fn call_consent(state: &NodeState, peer: &str, call_id: &str) -> Option<CallConsent> {
     let node_id = state.node_id.lock().unwrap().clone()?;
-    state.call_consents.lock().unwrap().iter()
-        .find(|c| c.node_id == node_id && c.peer == peer && c.call_id == call_id).cloned()
+    state.call_consents.lock().unwrap().find(&node_id, peer, call_id).cloned()
 }
 
-/// Keep the owner's consent for one call id. The same consent again is a
-/// no-op; a different one for a call id that already has one is refused, so
-/// a ceiling can never be widened or a confirmation reset mid-call.
+/// Keep the owner's consent for one call id, write-once: the same terms for
+/// a call still open are a no-op; different terms, or a call that was refused
+/// or ended, are refused, so a ceiling can never be widened or rebound.
+/// (Offers take it in `offer_within_consent`.)
+#[cfg(test)]
 fn remember_call_consent(state: &NodeState, peer: &str, call_id: &str, consent: control::MinutesConsent) -> Result<(), ActionError> {
     let node_id = state.node_id.lock().unwrap().clone()
         .ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
-    let mut kept = state.call_consents.lock().unwrap();
-    if let Some(existing) = kept.iter().find(|c| c.node_id == node_id && c.peer == peer && c.call_id == call_id) {
-        return if existing.consent == consent { Ok(()) } else {
-            Err(ActionError::invalid("this call already has agreed minutes; start a new call"))
-        };
+    state.call_consents.lock().unwrap().register(node_id, peer, call_id, consent)
+}
+
+/// Retire open consents whose call the node no longer runs (a failed offer,
+/// a call that ended unseen), so they never block new calls. Never touches an
+/// offer that is with the node right now; a failed read changes nothing.
+async fn sweep_call_consents(state: &NodeState) {
+    let Some(node_id) = state.node_id.lock().unwrap().clone() else { return };
+    let open: Vec<(String, String)> = state.call_consents.lock().unwrap().entries.iter()
+        .filter(|c| c.node_id == node_id && c.phase.open() && !c.offering)
+        .map(|c| (c.peer.clone(), c.call_id.clone())).collect();
+    for (peer, call_id) in open {
+        let Ok(status) = read_call_status(state, &peer, &call_id).await else { continue };
+        let gone = status.as_ref().is_none_or(|s| s.state == "ended" || s.reservation.as_ref().is_some_and(|h| h.closed));
+        if gone { state.call_consents.lock().unwrap().end(&node_id, Some(&peer), &call_id); }
     }
-    if kept.len() >= CALL_CONSENTS_KEPT { kept.remove(0); }
-    kept.push(CallConsent { node_id, peer: peer.into(), call_id: call_id.into(), consent, confirmed_msat: None });
-    Ok(())
 }
 
 /// M6 A2: a node-routed offer with the minutes the owner agreed to before
@@ -6805,13 +6916,64 @@ async fn do_call_offer_with_minutes(
         return Err(ActionError::new("call_minutes_unpayable",
             "This app is signed in to your node as its owner, not paired with a spending grant. Your node then keeps no reservation for a call's minutes, so the app cannot pay them. Pair the app with a spending grant to make calls. Nothing was paid."));
     }
+    offer_within_consent(state, peer, plaintext, max_msat, consent).await
+}
+
+/// The offer's admission, bound to the consent. The node makes the call's
+/// hold when it admits the offer, at the callee's live per-minute price; its
+/// API takes no per-minute ceiling. So the host binds what the node does take
+/// and decides the rest before any minute can be paid:
+/// - routing allowance per minute: the offer's routing ceiling, which the
+///   node applies to every block of the hold, is at most the agreed one;
+/// - per-minute price: their advert is read again just before the offer;
+///   above the agreed price (or gone) nothing is sent;
+/// - the hold itself: checked as soon as the offer returns. Until a check
+///   passes the call is `Offering` and no minute is payable; a hold above the
+///   consent is `Refused` for good (set before the hangup), so it is never
+///   paid, and the call is hung up.
+async fn offer_within_consent(
+    state: &NodeState, peer: &str, plaintext: &str, max_msat: u64, consent: control::MinutesConsent,
+) -> Result<act::CallReceipt, ActionError> {
+    let consent = consent.validated().map_err(ActionError::invalid)?;
     let target = control::node_id(peer).map_err(ActionError::invalid)?;
     let call_id = serde_json::from_str::<serde_json::Value>(plaintext).ok()
         .and_then(|v| v["call_id"].as_str().map(str::to_string))
         .filter(|id| act::is_call_id(id))
         .ok_or_else(|| ActionError::invalid("invalid call id"))?;
-    remember_call_consent(state, &target, &call_id, consent)?;
-    do_call_signal(state, &target, act::KIND_CALL_OFFER, plaintext, max_msat).await
+    let node_id = state.node_id.lock().unwrap().clone()
+        .ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
+    if state.call_consents.lock().unwrap().open_count() >= CALL_CONSENTS_OPEN {
+        sweep_call_consents(state).await;
+    }
+    {
+        let mut kept = state.call_consents.lock().unwrap();
+        kept.register(node_id.clone(), &target, &call_id, consent)?;
+        let entry = kept.find_mut(&node_id, &target, &call_id)
+            .ok_or_else(|| ActionError::new("call_no_consent", "Nothing was paid."))?;
+        if entry.phase != ConsentPhase::Offering || entry.offering {
+            return Err(ActionError::new("call_offer_in_flight", "This call's offer was already sent to your node. Nothing more was paid."));
+        }
+        entry.offering = true;
+    }
+    let result = async {
+        let table: Option<control::PeerPrice> = get_json(state, &format!("/pricing/peers/{target}")).await.ok();
+        if control::advert_block_msat(table.as_ref()).is_none_or(|block| block > consent.block_msat) {
+            state.call_consents.lock().unwrap().end(&node_id, Some(&target), &call_id);
+            return Err(ActionError::new("call_price_changed",
+                "Their per-minute price is no longer the one you agreed to. Nothing was sent or paid; check the price and call again."));
+        }
+        do_call_signal_bounded(state, &target, act::KIND_CALL_OFFER, plaintext, max_msat, None,
+            Some(consent.block_max_routing_fee_msat)).await
+    }.await;
+    if let Some(entry) = state.call_consents.lock().unwrap().find_mut(&node_id, &target, &call_id) {
+        entry.offering = false;
+    }
+    let receipt = result?;
+    // Check the hold the node made with the offer now. A refused one is hung
+    // up and stays refused; a failed read leaves the call unpayable until
+    // `call_hold` checks it. The paid offer's receipt is returned either way.
+    let _ = checked_call_hold(state, &target, &call_id).await;
+    Ok(receipt)
 }
 
 /// End an outgoing call whose minutes the host will not pay, through the same
@@ -6823,44 +6985,90 @@ async fn hang_up_unpaid_call(state: &NodeState, call_id: &str) -> &'static str {
     }
 }
 
+/// A consent that can no longer pay: its refusal, or the call ended.
+fn consent_closed(phase: &ConsentPhase) -> Option<ActionError> {
+    match phase {
+        ConsentPhase::Refused { code, message } => Some(ActionError::new(code, message.clone())),
+        ConsentPhase::Ended => Some(ActionError::new("call_not_live", "This call has ended. Nothing more was paid.")),
+        ConsentPhase::Offering | ConsentPhase::Admitted => None,
+    }
+}
+
+const NO_CONSENT: &str = "This app holds no per-minute price you agreed to for this call, so it pays none of its minutes. Nothing was paid.";
+
 /// M6 A2: the node's reservation for this outgoing call, checked against the
 /// owner's consent before any minute is paid. Refuses (proven unpaid) when no
 /// consent was taken, the call is not an open outgoing call, or the hold is
 /// closed. Without a reservation, or with one above the consent (per-minute
-/// price, routing allowance or total held), the host also hangs up: those
-/// minutes are never paid, so the call must not keep running.
+/// price, routing allowance or total held), the host refuses the call's
+/// consent for good, then hangs up: those minutes are never paid. A hold
+/// within the consent admits the call (the only state that can pay).
 async fn checked_call_hold(state: &NodeState, peer: &str, call_id: &str)
     -> Result<(control::CallStatus, control::CallReservation, CallConsent), ActionError> {
     let target = control::node_id(peer).map_err(ActionError::invalid)?;
     if !act::is_call_id(call_id) {
         return Err(ActionError::invalid("invalid call id"));
     }
-    let consent = call_consent(state, &target, call_id).ok_or_else(|| ActionError::new("call_no_consent",
-        "This app holds no per-minute price you agreed to for this call, so it pays none of its minutes. Nothing was paid."))?;
-    let status = read_call_status(state, &target, call_id).await?
-        .ok_or_else(|| ActionError::new("call_not_live", "Your node no longer lists this call. Nothing more was paid."))?;
+    let consent = call_consent(state, &target, call_id).ok_or_else(|| ActionError::new("call_no_consent", NO_CONSENT))?;
+    if let Some(error) = consent_closed(&consent.phase) { return Err(error); }
+    let node_id = consent.node_id.clone();
+    let ended = |state: &NodeState| state.call_consents.lock().unwrap().end(&node_id, Some(&target), call_id);
+    let Some(status) = read_call_status(state, &target, call_id).await? else {
+        // Admitted before and gone now: it ended. An offer not listed yet stays unchecked (and unpayable).
+        if consent.phase == ConsentPhase::Admitted { ended(state); }
+        return Err(ActionError::new("call_not_live", "Your node no longer lists this call. Nothing more was paid."));
+    };
     if status.direction != "outgoing" || status.state == "ended" {
+        if status.state == "ended" { ended(state); }
         return Err(ActionError::new("call_not_live", "Your node has ended this call. Nothing more was paid."));
     }
     let hold = match status.reservation.clone() {
-        Some(hold) if hold.closed => return Err(ActionError::new(
-            "call_reservation_closed", "Your node has closed this call's reservation. Nothing more was paid.")),
+        Some(hold) if hold.closed => {
+            ended(state);
+            return Err(ActionError::new("call_reservation_closed", "Your node has closed this call's reservation. Nothing more was paid."));
+        }
         Some(hold) => hold,
         None => {
+            let message = "Your node keeps no reservation for this call's minutes, so the app pays none of them. No minute was paid.";
+            state.call_consents.lock().unwrap().refuse(&node_id, &target, call_id, "call_no_reservation", message);
             let ended = hang_up_unpaid_call(state, call_id).await;
-            return Err(ActionError::new("call_no_reservation", format!(
-                "Your node keeps no reservation for this call's minutes, so the app pays none of them. No minute was paid. {ended}")));
+            return Err(ActionError::new("call_no_reservation", format!("{message} {ended}")));
         }
     };
     if !consent.consent.covers(&hold) {
-        let ended = hang_up_unpaid_call(state, call_id).await;
-        return Err(ActionError::new("call_hold_above_consent", format!(
-            "Your node reserved {} for this call ({} a minute plus up to {} routing), more than the {} ({} a minute plus up to {} routing) you agreed to before calling. No minute was paid. {ended}",
+        let message = format!(
+            "Your node reserved {} for this call ({} a minute plus up to {} routing), more than the {} ({} a minute plus up to {} routing) you agreed to before calling. No minute was paid.",
             bitsov_app::format::amount(hold.reserved_msat), bitsov_app::format::amount(hold.per_block_msat), bitsov_app::format::amount(hold.per_block_fee_msat),
             bitsov_app::format::amount(consent.consent.max_hold_msat), bitsov_app::format::amount(consent.consent.block_msat),
-            bitsov_app::format::amount(consent.consent.block_max_routing_fee_msat))));
+            bitsov_app::format::amount(consent.consent.block_max_routing_fee_msat));
+        // Refused before the hangup awaits: a minute raced against it finds the refusal.
+        state.call_consents.lock().unwrap().refuse(&node_id, &target, call_id, "call_hold_above_consent", &message);
+        let ended = hang_up_unpaid_call(state, call_id).await;
+        return Err(ActionError::new("call_hold_above_consent", format!("{message} {ended}")));
     }
+    let consent = {
+        let mut kept = state.call_consents.lock().unwrap();
+        kept.admit(&node_id, &target, call_id);
+        let current = kept.find(&node_id, &target, call_id).cloned()
+            .ok_or_else(|| ActionError::new("call_no_consent", NO_CONSENT))?;
+        if let Some(error) = consent_closed(&current.phase) { return Err(error); }
+        current
+    };
     Ok((status, hold, consent))
+}
+
+/// The call's consent is still admitted and its confirmation still names
+/// this exact hold: checked again right before a minute is paid.
+fn consent_payable(state: &NodeState, consent: &CallConsent, reserved_msat: u64) -> Result<(), ActionError> {
+    let kept = state.call_consents.lock().unwrap();
+    let current = kept.find(&consent.node_id, &consent.peer, &consent.call_id)
+        .ok_or_else(|| ActionError::new("call_no_consent", NO_CONSENT))?;
+    if let Some(error) = consent_closed(&current.phase) { return Err(error); }
+    if current.phase != ConsentPhase::Admitted || current.consent != consent.consent || current.confirmed_msat != Some(reserved_msat) {
+        return Err(ActionError::new("call_hold_unconfirmed",
+            "Confirm your node's hold for this call before its first minute is paid. Nothing was paid."));
+    }
+    Ok(())
 }
 
 /// M6 A2 `call_hold`: the node's reservation for an outgoing call, checked
@@ -6876,9 +7084,9 @@ async fn do_call_hold(state: &NodeState, peer: &str, call_id: &str, confirm_rese
                 "Your node's hold for this call is not the one you confirmed. Nothing was paid; check the hold and confirm again."));
         }
         let mut kept = state.call_consents.lock().unwrap();
-        let entry = kept.iter_mut().find(|c| c.node_id == consent.node_id && c.peer == consent.peer && c.call_id == consent.call_id)
-            .ok_or_else(|| ActionError::new("call_no_consent",
-                "This app holds no per-minute price you agreed to for this call, so it pays none of its minutes. Nothing was paid."))?;
+        let entry = kept.find_mut(&consent.node_id, &consent.peer, &consent.call_id)
+            .ok_or_else(|| ActionError::new("call_no_consent", NO_CONSENT))?;
+        if let Some(error) = consent_closed(&entry.phase) { return Err(error); }
         entry.confirmed_msat = Some(hold.reserved_msat);
     }
     Ok(status)
@@ -6908,10 +7116,7 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
     let result = async {
         let target = control::node_id(peer).map_err(ActionError::invalid)?;
         let (status, hold, consent) = checked_call_hold(state, &target, call_id).await?;
-        if consent.confirmed_msat != Some(hold.reserved_msat) {
-            return Err(ActionError::new("call_hold_unconfirmed",
-                "Confirm your node's hold for this call before its first minute is paid. Nothing was paid."));
-        }
+        consent_payable(state, &consent, hold.reserved_msat)?;
         if status.next_block_seq != seq {
             return Err(ActionError::new("call_block_not_due", "Your node expects another minute of this call. Nothing was paid for this one."));
         }
@@ -6941,6 +7146,8 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
             operation: caps.operations,
             envelope_ids: Some(caps.envelope_ids),
         };
+        // Refused or ended while this minute was prepared: nothing is sent.
+        consent_payable(state, &consent, hold.reserved_msat)?;
         let text = money_post(state, auth, "/messages/compose", body, cap, Some(charge)).await?;
         let reply: act::SendReply = text.decode("/messages/compose")?;
         Ok(act::CallReceipt {
@@ -6976,6 +7183,16 @@ async fn do_call_signal(
 async fn do_call_signal_for_admission(
     state: &NodeState, peer: &str, kind: u16, plaintext: &str, max_msat: u64,
     admission: Option<&spend_journal::OperationRecord>,
+) -> Result<act::CallReceipt, ActionError> {
+    do_call_signal_bounded(state, peer, kind, plaintext, max_msat, admission, None).await
+}
+
+/// `fee_limit`: a tighter routing ceiling for this signal. On an offer under
+/// agreed minutes it is the agreed allowance per minute: the caller's node
+/// takes the offer's routing ceiling as every block's (never wider).
+async fn do_call_signal_bounded(
+    state: &NodeState, peer: &str, kind: u16, plaintext: &str, max_msat: u64,
+    admission: Option<&spend_journal::OperationRecord>, fee_limit: Option<u64>,
 ) -> Result<act::CallReceipt, ActionError> {
     let mut existing_operation = admission.map(|r| r.op_id.clone()).or_else(|| pending_operation_id(state).unwrap_or_default());
     let result = async {
@@ -7038,7 +7255,7 @@ async fn do_call_signal_for_admission(
         body["host_hangup_cap_msat"] = serde_json::json!(quote.signal_msat + quote.signal_max_routing_fee_msat);
     }
     body["max_total_msat"] = serde_json::json!(max_msat);
-    body["max_routing_fee_msat"] = serde_json::json!(fee);
+    body["max_routing_fee_msat"] = serde_json::json!(fee_limit.map_or(fee, |limit| fee.min(limit)));
     let charge = Charge {
         target: target.clone(),
         room: false,
@@ -7090,6 +7307,17 @@ async fn do_op_end_call(state: &NodeState, call_id: &str) -> Result<spend_journa
 
 /// A priced owner repair can lower, never raise, the admission's saved ceiling.
 async fn do_op_end_call_with_limit(state: &NodeState, call_id: &str, max_msat: Option<u64>) -> Result<spend_journal::OpView, ActionError> {
+    let result = end_call_admission(state, call_id, max_msat).await;
+    // The app ended the call: no further minute is paid for it (a refusal stays the answer).
+    if result.is_ok() {
+        if let Some(node_id) = state.node_id.lock().unwrap().clone() {
+            state.call_consents.lock().unwrap().end(&node_id, None, call_id);
+        }
+    }
+    result
+}
+
+async fn end_call_admission(state: &NodeState, call_id: &str, max_msat: Option<u64>) -> Result<spend_journal::OpView, ActionError> {
     let mut operation_id = pending_operation_id(state).unwrap_or_default();
     let result = async {
         if call_id.len() != 32 || !call_id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
@@ -14835,6 +15063,177 @@ mod control_act_tests {
         remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
         assert_eq!(do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err().code, "call_hold_above_consent");
         assert_eq!(compose_kinds(&node), [400, 403]);
+    }
+
+    /// The caller's node as above, plus the callee's cached advert (`kind:404`).
+    fn offer_routes(advert_block: u64, reservation: serde_json::Value) -> (Routes, Arc<Mutex<OpsNode>>) {
+        let (routes, paid) = minutes_routes("ringing", reservation);
+        (Arc::new(move |m, p, b| {
+            if p == format!("/pricing/peers/{A}") {
+                return (200, serde_json::json!({"peer_id": A, "prices": {"kind:404": advert_block}, "age_secs": 1, "stale": false}).to_string());
+            }
+            routes(m, p, b)
+        }), paid)
+    }
+
+    fn consent_phase(node: &Fake) -> ConsentPhase {
+        call_consent(&node.state, A, CALL_ID).expect("consent kept").phase
+    }
+
+    #[tokio::test]
+    async fn a2_a_price_change_between_quote_and_offer_pays_no_minute() {
+        // Agreed at 10,000 a minute; their node answers its own node's live ask with 12,000,
+        // so the hold made with the offer is above the consent.
+        let (routes, paid) = offer_routes(10_000, hold_json(12_000, 5_000, 60));
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        offer_within_consent(&node.state, A, OFFER, 15000, MINUTES).await.unwrap();
+        assert_eq!(compose_kinds(&node), [400, 403], "refused and hung up within the offer's admission, before any minute");
+        assert!(matches!(consent_phase(&node), ConsentPhase::Refused { code: "call_hold_above_consent", .. }));
+        // The refusal is final: confirming the exact hold, paying, or checking again never pays it.
+        let reserved = 17_000 * 60;
+        assert_eq!(do_call_hold(&node.state, A, CALL_ID, Some(reserved)).await.unwrap_err().code, "call_hold_above_consent");
+        for seq in [0, 0, 1] {
+            assert_eq!(do_call_block(&node.state, A, CALL_ID, seq).await.unwrap_err().code, "call_hold_above_consent");
+        }
+        assert_eq!(compose_kinds(&node), [400, 403], "zero minutes, one hangup");
+        assert_eq!(paid.lock().unwrap().pays, 2);
+        // The same call id cannot be given new, wider terms afterwards.
+        let wider = control::MinutesConsent { block_msat: 12_000, max_hold_msat: 240 * 17_000, ..MINUTES };
+        assert_eq!(offer_within_consent(&node.state, A, OFFER, 15000, wider).await.unwrap_err().code, "invalid");
+        assert_eq!(compose_kinds(&node), [400, 403]);
+    }
+
+    #[tokio::test]
+    async fn a2_an_advert_above_the_consent_sends_no_offer() {
+        // Their advert rose between the quote and Ring: nothing is sent, nothing held or paid.
+        let (routes, paid) = offer_routes(10_001, hold_json(10_001, 5_000, 60));
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        assert_eq!(offer_within_consent(&node.state, A, OFFER, 15000, MINUTES).await.unwrap_err().code, "call_price_changed");
+        assert!(compose_kinds(&node).is_empty());
+        assert_eq!(paid.lock().unwrap().pays, 0);
+        assert_eq!(consent_phase(&node), ConsentPhase::Ended);
+        assert_eq!(do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err().code, "call_not_live");
+        assert!(compose_kinds(&node).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a2_the_offer_binds_the_agreed_routing_allowance_and_admits_a_hold_within_it() {
+        // Agreed: up to 4,000 routing a minute. The offer's routing ceiling (which the node
+        // applies to every block of the hold) is never wider than that.
+        let agreed = control::MinutesConsent { block_msat: 10_000, block_max_routing_fee_msat: 4_000, max_hold_msat: 240 * 14_000 };
+        let (routes, _) = offer_routes(10_000, hold_json(10_000, 4_000, 60));
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        offer_within_consent(&node.state, A, OFFER, 15000, agreed).await.unwrap();
+        let offer = &compose_bodies(&node)[0];
+        assert_eq!((offer["kind"].as_u64(), offer["max_routing_fee_msat"].as_u64()), (Some(400), Some(4_000)));
+        assert_eq!(consent_phase(&node), ConsentPhase::Admitted, "checked within the offer's admission");
+        // Admitted is not confirmed: still no minute before the owner confirms this exact hold.
+        assert_eq!(do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err().code, "call_hold_unconfirmed");
+        do_call_hold(&node.state, A, CALL_ID, Some(14_000 * 60)).await.unwrap();
+        assert_eq!(call_consent(&node.state, A, CALL_ID).unwrap().confirmed_msat, Some(14_000 * 60));
+        // The app hangs up: no further minute, whatever the node still lists.
+        do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_eq!(consent_phase(&node), ConsentPhase::Ended);
+        assert_eq!(do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err().code, "call_not_live");
+        assert_eq!(compose_kinds(&node), [400, 403], "the offer and the hangup; no minute after the end");
+    }
+
+    #[tokio::test]
+    async fn a2_a_minute_raced_against_the_offers_admission_is_never_paid() {
+        for above in [true, false] {
+            let hold = if above { hold_json(12_000, 5_000, 60) } else { hold_json(10_000, 5_000, 60) };
+            let (routes, paid) = offer_routes(10_000, hold);
+            let (routes, gate) = hold_compose(routes, 0, None, false);
+            let node = fake(AuthMode::Local, routes);
+            approve_calls(&node).await;
+            let wider = control::MinutesConsent { block_msat: 12_000, max_hold_msat: 240 * 17_000, ..MINUTES };
+            // While the offer is with the node: a minute, a confirmation, and a second offer
+            // for the same call (same terms, or wider) all race its admission.
+            let (offer, (block, confirm, again, rebind)) = tokio::join!(
+                offer_within_consent(&node.state, A, OFFER, 15000, MINUTES),
+                during_call(&gate, async {
+                    let again = offer_within_consent(&node.state, A, OFFER, 15000, MINUTES).await;
+                    let rebind = offer_within_consent(&node.state, A, OFFER, 15000, wider).await;
+                    let block = do_call_block(&node.state, A, CALL_ID, 0).await;
+                    let confirm = do_call_hold(&node.state, A, CALL_ID, Some(15_000 * 60)).await;
+                    (block, confirm, again, rebind)
+                }),
+            );
+            offer.unwrap();
+            assert_eq!(again.unwrap_err().code, "call_offer_in_flight");
+            assert_eq!(rebind.unwrap_err().code, "invalid");
+            let block = block.unwrap_err().code;
+            if above {
+                assert_eq!(block, "call_hold_above_consent");
+                assert_eq!(confirm.unwrap_err().code, "call_hold_above_consent");
+                assert_eq!(compose_kinds(&node), [400, 403], "one offer, one hangup, no minute");
+                assert_eq!(paid.lock().unwrap().pays, 2);
+            } else {
+                assert_eq!(block, "call_hold_unconfirmed", "a hold within the consent still waits for the owner");
+                confirm.unwrap();
+                assert_eq!(consent_phase(&node), ConsentPhase::Admitted);
+                assert_eq!(compose_kinds(&node), [400], "one offer, no minute");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a2_a_failed_offer_keeps_its_terms_and_cannot_be_rebound_wider() {
+        let (routes, _) = offer_routes(10_000, hold_json(10_000, 5_000, 60));
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" {
+                return (400, r#"{"error":"call reservation does not fit the grant","code":"not_dispatched","reason":"grant_per_call"}"#.into());
+            }
+            routes(m, p, b)
+        }));
+        approve_calls(&node).await;
+        assert!(offer_within_consent(&node.state, A, OFFER, 15000, MINUTES).await.is_err());
+        let sent = compose_kinds(&node);
+        assert!(!sent.is_empty() && sent.iter().all(|k| *k == 400));
+        assert_eq!(consent_phase(&node), ConsentPhase::Offering, "unresolved: pinned, never evicted");
+        let wider = control::MinutesConsent { block_msat: 20_000, max_hold_msat: 240 * 25_000, ..MINUTES };
+        assert_eq!(offer_within_consent(&node.state, A, OFFER, 15000, wider).await.unwrap_err().code, "invalid");
+        assert_eq!(remember_call_consent(&node.state, A, CALL_ID, wider).unwrap_err().code, "invalid");
+        assert_eq!(compose_kinds(&node), sent, "the wider rebind sent nothing");
+        assert_eq!(call_consent(&node.state, A, CALL_ID).unwrap().consent, MINUTES);
+    }
+
+    #[test]
+    fn a2_consents_are_write_once_and_eviction_never_touches_an_open_call() {
+        let id = |n: usize| format!("{n:032x}");
+        let wider = control::MinutesConsent { block_msat: 20_000, max_hold_msat: 240 * 25_000, ..MINUTES };
+        let mut kept = CallConsents::default();
+        // A full table of open calls (offering or admitted): a new call is refused, none is evicted.
+        for n in 0..CALL_CONSENTS_OPEN {
+            kept.register("node".into(), A, &id(n), MINUTES).unwrap();
+            if n % 2 == 0 { kept.admit("node", A, &id(n)); }
+        }
+        assert_eq!(kept.register("node".into(), A, &id(1000), MINUTES).unwrap_err().code, "call_consents_full");
+        assert_eq!(kept.open_count(), CALL_CONSENTS_OPEN);
+        // Ending one frees a slot; then many short calls press the table far past its size.
+        kept.end("node", Some(A), &id(CALL_CONSENTS_OPEN - 1));
+        for n in 2000..2000 + 3 * CALL_CONSENTS_KEPT {
+            kept.register("node".into(), A, &id(n), MINUTES).unwrap();
+            if n % 3 == 0 { kept.refuse("node", A, &id(n), "call_hold_above_consent", "refused"); } else { kept.end("node", Some(A), &id(n)); }
+        }
+        assert!(kept.entries.len() <= CALL_CONSENTS_KEPT);
+        // Every open call kept its own terms, and none can be rebound wider.
+        for n in 0..CALL_CONSENTS_OPEN - 1 {
+            let c = kept.find("node", A, &id(n)).expect("an open call is never evicted");
+            assert_eq!((c.consent, c.phase.open()), (MINUTES, true));
+            assert_eq!(kept.register("node".into(), A, &id(n), wider).unwrap_err().code, "invalid");
+            assert!(kept.register("node".into(), A, &id(n), MINUTES).is_ok(), "the same offer again is a no-op");
+        }
+        // A kept tombstone refuses any terms; a refusal never becomes ended or admitted again.
+        let last = id(2000 + 3 * CALL_CONSENTS_KEPT - 1);
+        assert_eq!(kept.register("node".into(), A, &last, MINUTES).unwrap_err().code, "invalid");
+        let refused = id((2000..2000 + 3 * CALL_CONSENTS_KEPT).rev().find(|n| n % 3 == 0).unwrap());
+        kept.end("node", Some(A), &refused);
+        kept.admit("node", A, &refused);
+        assert!(matches!(kept.find("node", A, &refused).unwrap().phase, ConsentPhase::Refused { .. }));
     }
 
     #[tokio::test]

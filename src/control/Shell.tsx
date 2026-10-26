@@ -1454,6 +1454,8 @@ export function ControlCenter(props: Props) {
           bridge: isTauri() ? hostMediaBridge() : unavailableMediaBridge(),
           audio: (stream, transport, onFatal) => createCallAudio({ stream, transport, onError: onFatal }),
           admitted: callMinutes ? (callId, peer, closed) => waitUntilPaid(callMinutes.status, peer, callId, () => Date.now(), closed) : undefined,
+          // A media session that closed for good ends its call, so no further minute is paid.
+          onSession: (event) => { if (event.state === 'closed') calls.mediaClosed(event.callId); },
         })
       : (config) => new RTCPeerConnection(config),
     now: () => Date.now(),

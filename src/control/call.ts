@@ -509,7 +509,13 @@ export function createCallEngine(deps: CallDeps) {
   const closeAdmission = (operationId: string, peer: string, callId: string): Promise<void> =>
     deps.closeAdmission?.(operationId, peer, callId).catch(() => { /* Host preserves the fence on storage failure. */ }) ?? Promise.resolve();
   /** Local teardown validates identity only; op_end_call performs node-confirmed cleanup. */
+  /** `end` is tearing the call down (its own media close reports back meanwhile). */
+  let ending = false;
   const end = (reason: HangupReason | null, error: string | null = null, opts: { record?: boolean; endAtHost?: boolean; confirmed?: string } = {}) => {
+    ending = true;
+    try { endNow(reason, error, opts); } finally { ending = false; }
+  };
+  const endNow = (reason: HangupReason | null, error: string | null, opts: { record?: boolean; endAtHost?: boolean; confirmed?: string }) => {
     if (view.phase === 'incoming' && !view.silenced && reason !== 'declined' && view.callId && view.peer) {
       deps.onMissed?.({ callId: view.callId, peer: view.peer, media: view.media, at: incomingAt });
     }
@@ -925,7 +931,8 @@ export function createCallEngine(deps: CallDeps) {
       admissions.add(offer.callId);
       offerSdp = offer.sdp;
       incomingAt = offer.at;
-      set({ ...IDLE, phase: 'incoming', peer: offer.peer, callId: offer.callId, media: offer.media, camera: offer.media === 'video' });
+      const media: CallMedia = deps.routed ? 'audio' : offer.media;
+      set({ ...IDLE, phase: 'incoming', peer: offer.peer, callId: offer.callId, media, camera: media === 'video' });
       ringTimer = setTimeout(() => { if (view.callId === offer.callId && view.phase === 'incoming') end('timeout'); }, Math.max(0, RING_MS - (deps.now() - incomingAt)));
       await accept();
     },
@@ -941,8 +948,10 @@ export function createCallEngine(deps: CallDeps) {
     dismissWaiting: (id: string) => { waiting.get(id)?.dismiss(); },
 
     /** Place a call. The price was shown before this is called. */
-    place: (peer: string, media: CallMedia, q: CallQuote) => guarded(async (claim) => {
+    place: (peer: string, requested: CallMedia, q: CallQuote) => guarded(async (claim) => {
       const generation = mediaGeneration;
+      // M6: a node-routed call carries audio only (no camera is captured or offered).
+      const media: CallMedia = deps.routed ? 'audio' : requested;
       if (active() || deps.busy?.()) return;
       if (q.offer_msat === null || q.call_total_msat === null) {
         set({ ...IDLE, phase: 'ended', peer, error: tr('caTheirNodeDoesNotTakeCallsYetNothingWas') });
@@ -1025,6 +1034,16 @@ export function createCallEngine(deps: CallDeps) {
     }),
 
     accept,
+
+    /**
+     * M6: the node media session of this call closed for good (fatal audio,
+     * the node ended the link). The call ends now, so its minutes stop being
+     * paid, even if the connection's own `closed` state never reached here.
+     */
+    mediaClosed: (callId: string) => {
+      if (ending || !active() || view.callId !== callId) return;
+      end('failed', tr('caTheNodeMediaLinkClosed'));
+    },
 
     /** M6 A2: the owner confirms the node's hold for this outgoing call (as the card shows it). */
     confirmMinutes: async () => { if (view.outgoing && active()) await minutes?.confirm(); },
@@ -1215,7 +1234,12 @@ export function createCallEngine(deps: CallDeps) {
           wireId = s.call_id;
           admissions.add(s.call_id);
           offerSdp = s.sdp!;
-          set({ ...IDLE, phase: 'incoming', peer, callId: s.call_id, media: s.media!, camera: s.media === 'video' });
+          {
+            // M6: a node-routed call is audio only. A video offer is answered with audio:
+            // the camera is never captured or sent, whatever the caller asked for.
+            const media: CallMedia = deps.routed ? 'audio' : s.media!;
+            set({ ...IDLE, phase: 'incoming', peer, callId: s.call_id, media, camera: media === 'video' });
+          }
           ringTimer = setTimeout(() => { if (view.callId === s.call_id && view.phase === 'incoming') end('timeout'); }, RING_MS);
           return;
         case CALL_ANSWER: {

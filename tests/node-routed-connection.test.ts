@@ -229,6 +229,62 @@ describe('fatal audio errors after connect', () => {
   });
 });
 
+describe('the media session ends once, for every way it ends', () => {
+  async function live(sessions: { state: string }[], opts: { linkGraceMs?: number } = {}) {
+    const b = fakeBridge();
+    const a = fakeAudio();
+    const conn = createNodeRoutedConnection({ callId: () => ID, peer: () => PEER, bridge: b.bridge, audio: a.audio, onSession: (e) => sessions.push(e), ...opts });
+    await conn.setLocalDescription(await conn.createOffer());
+    await conn.setRemoteDescription({ type: 'answer', sdp: nodeRoutedSdp('answer', ID) });
+    // The audio graph's `ready` settles on the microtask queue (real or fake timers alike).
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    b.link({ link: 'open', detail: null });
+    expect(conn.connectionState).toBe('connected');
+    return { b, a, conn };
+  }
+
+  it('fatal audio closes the session (so the call’s minutes stop), once, before the engine closes it', async () => {
+    const sessions: { state: string; callId?: string }[] = [];
+    const { a, conn } = await live(sessions);
+    a.made[0].fatal();
+    expect(sessions).toEqual([{ callId: ID, state: 'open', at: expect.any(Number) }, { callId: ID, state: 'closed', at: expect.any(Number) }]);
+    a.made[0].fatal();
+    conn.close();
+    expect(sessions.map((e) => e.state)).toEqual(['open', 'closed']);
+  });
+
+  it('the node ending the link, or the reconnect grace running out, closes it once too', async () => {
+    const ended: { state: string }[] = [];
+    const first = await live(ended);
+    first.b.link({ link: 'ended', detail: 'the node closed the media session' });
+    first.conn.close();
+    expect(ended.map((e) => e.state)).toEqual(['open', 'closed']);
+    vi.useFakeTimers();
+    try {
+      const lapsed: { state: string }[] = [];
+      const second = await live(lapsed, { linkGraceMs: 1000 });
+      second.b.link({ link: 'closed', detail: 'dropped' });
+      expect(lapsed.map((e) => e.state)).toEqual(['open']);
+      await vi.advanceTimersByTimeAsync(1001);
+      second.conn.close();
+      expect(lapsed.map((e) => e.state)).toEqual(['open', 'closed']);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('a session that never opened reports nothing when it ends', async () => {
+    const sessions: unknown[] = [];
+    const b = fakeBridge();
+    const a = fakeAudio();
+    const conn = createNodeRoutedConnection({ callId: () => ID, peer: () => PEER, bridge: b.bridge, audio: a.audio, onSession: (e) => sessions.push(e) });
+    await conn.setLocalDescription(await conn.createOffer());
+    await conn.setRemoteDescription({ type: 'answer', sdp: nodeRoutedSdp('answer', ID) });
+    await tick();
+    a.made[0].fatal();
+    conn.close();
+    expect(sessions).toEqual([]);
+  });
+});
+
 describe('media bridge helpers', () => {
   it('parses link messages as the host sends them (parsed JSON objects), JSON text, and byte frames', () => {
     // Tauri hands an `InvokeResponseBody::Json` channel payload to the page already parsed.

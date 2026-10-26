@@ -20,7 +20,9 @@ import {
   BLOCK_GRACE_MS, ENDED_CONFIRM_MS, MAX_ATTEMPTS, RETRY_MS, STATUS_POLL_MS,
   createCallMinutes, waitUntilPaid, type MinutesDeps, type MinutesStop, type MinutesView,
 } from '../src/control/callMinutes';
-import { nodeRoutedSdp } from '../src/control/nodeRoutedConnection';
+import { createNodeRoutedConnection, nodeRoutedSdp, type MediaSessionEvent } from '../src/control/nodeRoutedConnection';
+import type { CallAudio } from '../src/control/callAudio';
+import type { MediaBridge, MediaLink } from '../src/control/mediaBridge';
 import { amount } from '../src/control/format';
 import type { ActionError, CallQuote, CallReceipt, CallReservation, CallStatus, SpendView } from '../src/control/types';
 import type { PairingView as OnboardingPairingView } from '../src/onboarding/pairing';
@@ -446,6 +448,142 @@ describe('the call engine with paid minutes', () => {
     expect(e.last().error).toContain('A minute of the call could not be paid');
     expect(e.last().reason).toBe('failed');
   });
+});
+
+describe('node-routed calls carry audio only, and a dead media session stops the minutes', () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(1_790_000_000_000); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  const audioStream = () => {
+    const tracks = [{ kind: 'audio', enabled: true, stop: vi.fn() }];
+    return { getTracks: () => tracks, getAudioTracks: () => tracks, getVideoTracks: () => [], addTrack: () => {}, removeTrack: () => {} } as unknown as MediaStream;
+  };
+  const okReceipt = (kind: number): Outcome<CallReceipt> =>
+    ok({ operation_id: `op-${kind}`, message_id: 'm', kind, amount_msat: 1, total_msat: 1, max_routing_fee_msat: 0, delivered: true, accepted: true, sent_at_ms: 0 });
+  const minutesOf = (node: ReturnType<typeof fakeNode>, pay: MinutesDeps['pay']): MinutesDeps =>
+    ({ status: vi.fn(async () => ok(node.status())), hold: vi.fn(async () => ok(node.status())), pay });
+  const answerMessage = { id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: 0, plaintext: JSON.stringify({ v: 1, call_id: ID, sdp: nodeRoutedSdp('answer', ID) }), payment_amount_msat: 1 };
+
+  /** The engine on the real node-routed adapter, a fake host socket and a fake audio engine. */
+  function routedEngine(minutes: MinutesDeps) {
+    const views: CallView[] = [];
+    const signals: { kind: number; plaintext: string }[] = [];
+    const sessions: MediaSessionEvent[] = [];
+    const media: MediaStreamConstraints[] = [];
+    let link: ((l: MediaLink) => void) | null = null;
+    let fatal: (() => void) | null = null;
+    const bridge: MediaBridge = { open: async (_c, _p, _f, l) => { link = l; }, send: () => {}, close: async () => {} };
+    const audio = (_s: MediaStream, _t: unknown, onFatal: () => void): CallAudio => {
+      fatal = onFatal;
+      return { ready: Promise.resolve(), feed: () => {}, setMuted: () => {}, codecs: () => ({ sending: 'pcmu', localCaps: 1, peerCaps: null }), stats: async () => null, close: async () => {} } as CallAudio;
+    };
+    let calls: ReturnType<typeof createCallEngine> | null = null;
+    const deps: CallDeps = {
+      routed: true,
+      minutes,
+      quote: async () => ok(QUOTE),
+      signal: async (_peer, kind, plaintext) => { signals.push({ kind, plaintext }); return okReceipt(kind); },
+      getUserMedia: async (c) => { media.push(c); return audioStream(); },
+      peerConnection: () => createNodeRoutedConnection({
+        callId: () => calls?.view().callId ?? null, peer: () => calls?.view().peer ?? null, bridge, audio,
+        onSession: (event) => { sessions.push(event); if (event.state === 'closed') calls?.mediaClosed(event.callId); },
+      }),
+      now: () => Date.now(),
+      onView: (v) => views.push(v),
+      onStreams: () => {},
+      newCallId: () => ID,
+      endCall: async () => ok({ op_id: 'end', kind: 'call_hangup', peer: A, call_id: ID, state: 'settled', cap_msat: 6_000, paid_msat: 6_000, message_id: 'h' } as never),
+    };
+    calls = createCallEngine(deps);
+    return { engine: calls, views, signals, sessions, media, last: () => views[views.length - 1], link: (l: MediaLink) => link?.(l), fatal: () => fatal?.() };
+  }
+
+  it('a video offer to a node-routed app rings as audio and is answered without the camera', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const e = routedEngine(minutesOf(node, vi.fn()));
+    await e.engine.receive({ id: 'off', kind: 400, sender: A, recipient: OWN, timestamp: 0,
+      plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'video', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 1 }, OWN);
+    expect(e.last()).toMatchObject({ phase: 'incoming', media: 'audio', camera: false });
+    await e.engine.accept();
+    expect(e.media).toEqual([{ audio: true, video: false }]);
+    expect(e.signals.map((x) => x.kind)).toEqual([401]);
+    expect(e.last().camera).toBe(false);
+  });
+
+  it('a node-routed call placed as video goes out as audio, with no camera', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const e = routedEngine(minutesOf(node, vi.fn()));
+    await e.engine.place(A, 'video', QUOTE);
+    expect(e.media).toEqual([{ audio: true, video: false }]);
+    expect(JSON.parse(e.signals[0].plaintext).media).toBe('audio');
+    expect(e.last()).toMatchObject({ media: 'audio', camera: false });
+  });
+
+  it('fatal audio mid-call closes the media session once and the minutes stop: no further block is paid', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const pay = vi.fn(async (_p: string, _c: string, seq: number) => { node.settle(seq); return ok(receipt(seq)); });
+    const e = routedEngine(minutesOf(node, pay));
+    await e.engine.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(e.last().minutes?.reservation).not.toBeNull());
+    await e.engine.confirmMinutes();
+    await e.engine.receive(answerMessage, OWN);
+    await vi.waitFor(() => expect(pay).toHaveBeenCalledWith(A, ID, 0));
+    await vi.advanceTimersByTimeAsync(0);
+    e.link({ link: 'open', detail: null });
+    await vi.waitFor(() => expect(e.last().phase).toBe('live'));
+    expect(e.sessions.map((x) => x.state)).toEqual(['open']);
+    e.fatal();
+    expect(e.last()).toMatchObject({ phase: 'ended', reason: 'failed' });
+    expect(e.sessions.map((x) => x.state)).toEqual(['open', 'closed']);
+    // Long past every renewal: the minutes stopped with the media session.
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(e.sessions.map((x) => x.state)).toEqual(['open', 'closed']);
+  });
+
+  it('a closed media session ends its call even when the connection never reports it; another call id is ignored', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const pay = vi.fn(async (_p: string, _c: string, seq: number) => { node.settle(seq); return ok(receipt(seq)); });
+    const e = engine(minutesOf(node, pay));
+    await e.engine.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(e.last().minutes?.reservation).not.toBeNull());
+    await e.engine.confirmMinutes();
+    await e.engine.receive(answerMessage, OWN);
+    await vi.waitFor(() => expect(pay).toHaveBeenCalledWith(A, ID, 0));
+    e.engine.mediaClosed('f'.repeat(32));
+    expect(e.last().phase).not.toBe('ended');
+    e.engine.mediaClosed(ID);
+    expect(e.last()).toMatchObject({ phase: 'ended', reason: 'failed' });
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(pay).toHaveBeenCalledTimes(1);
+  });
+
+  function engine(minutes: MinutesDeps) {
+    const views: CallView[] = [];
+    const deps: CallDeps = {
+      routed: true,
+      minutes,
+      quote: async () => ok(QUOTE),
+      signal: async (_peer, kind) => okReceipt(kind),
+      getUserMedia: async () => audioStream(),
+      peerConnection: () => {
+        const conn = { connectionState: 'new', onconnectionstatechange: null, localDescription: null as unknown };
+        return Object.assign(conn, {
+          iceGatheringState: 'complete', iceConnectionState: 'new',
+          addTrack: () => ({}), createOffer: async () => ({ type: 'offer', sdp: 'x' }), createAnswer: async () => ({ type: 'answer', sdp: 'x' }),
+          setLocalDescription: async (d: unknown) => { conn.localDescription = d; },
+          setRemoteDescription: async () => {}, addIceCandidate: async () => {}, getStats: async () => new Map(), close: () => {}, restartIce: () => {},
+          addEventListener: () => {}, removeEventListener: () => {},
+        }) as unknown as RTCPeerConnection;
+      },
+      now: () => Date.now(),
+      onView: (v) => views.push(v),
+      onStreams: () => {},
+      newCallId: () => ID,
+      endCall: async () => ok({ op_id: 'end', kind: 'call_hangup', peer: A, call_id: ID, state: 'settled', cap_msat: 6_000, paid_msat: 6_000, message_id: 'h' } as never),
+    };
+    return { engine: createCallEngine(deps), last: () => views[views.length - 1] };
+  }
 });
 
 // ---- the shell ---------------------------------------------------------------

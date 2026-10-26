@@ -75,8 +75,13 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   STUN, direct-recovery and relay notes are not shown.
 - **Payment for the node leg is slice A2** (below). The node admits the media
   socket only once the call's first minute is paid, so payment starts at the
-  answer, not on `onSession` (media session opened / closed, kept for
-  display and diagnostics).
+  answer, not on `onSession` `open`. `onSession` `closed` fires once when an
+  open media session ends for good (fatal audio, the node ended the link, the
+  30 s grace ran out, or the call closed); the shell then ends the call
+  (`mediaClosed`), so its minutes stop being paid.
+- **Audio only.** With the flag on a call is placed as audio and an incoming
+  video offer rings and is answered as audio: the camera is never captured
+  or sent.
 - **Checks.** `npm test -- tests/g711.test.ts tests/media-frame.test.ts
   tests/jitter-buffer.test.ts tests/node-routed-connection.test.ts
   tests/call-audio-failure.test.ts tests/call-media-flag.test.tsx` (codec
@@ -116,8 +121,29 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   `minutes` (`block_msat`, `block_max_routing_fee_msat`, `max_hold_msat`).
   The host refuses one the quote could not have shown, refuses it from an
   owner session (`call_minutes_unpayable`, nothing sent), and keeps it in
-  memory for that node identity, contact and wire call id; a different
-  consent for the same call id is refused, so it can never be widened.
+  memory for that node identity, contact and wire call id. It is write-once
+  for the life of the call and after: the same terms again are a no-op while
+  the call is open, a second offer while the first is with the node is
+  refused (`call_offer_in_flight`), and other terms, or any terms for a call
+  that was refused or ended, are refused (`invalid`), so a ceiling can never
+  be widened or rebound. Open calls (offering or admitted, including an offer
+  whose outcome is unresolved) are never evicted: at most 16 are kept and a
+  new call is refused (`call_consents_full`) rather than evict one, after
+  retiring those the node no longer runs. Refused and ended calls stay as
+  tombstones; when the table (256) is full only the oldest tombstone goes.
+- **Admission is bound to the consent.** The node makes the hold when it
+  admits the offer, at the callee's live per-minute price; its API takes no
+  per-minute ceiling for it. The host binds what the node does take: the
+  offer's routing ceiling, which the node applies to every block of the hold,
+  is at most the agreed allowance per minute. Just before the offer it reads
+  the callee's advert again; a per-minute price above the agreed one (or
+  none) sends nothing (`call_price_changed`). As soon as the offer returns it
+  checks the hold. Until a check passes no minute can be paid; a hold above
+  the consent (say, a live price that rose after the quote) is refused for
+  good before the hangup is sent, so a minute raced against it, a later
+  confirmation or a retry never pays it, and the node releases the hold on
+  the hangup. A node-side ceiling on the reservation itself (so such a hold
+  is never made) needs the node to accept the consent with the offer.
 - **The node's own limit, confirmed.** The node's `max_call_minutes` is not
   visible before the offer (it is on the reservation only), so once the
   offer is out the card reads it through `call_hold(peer, call_id)` and shows
@@ -172,111 +198,25 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   node keeps no reservation, so the host would pay nothing). The node offers
   no pre-dial read of `max_call_minutes`; the Ring confirm shows the
   240-minute ceiling and the exact hold is confirmed once it rings.
-- **Checks.** `npm test -- tests/g711.test.ts tests/media-frame.test.ts
-  tests/jitter-buffer.test.ts tests/node-routed-connection.test.ts
-  tests/call-audio-failure.test.ts tests/call-media-flag.test.tsx` (codec
-  round trip, frame codec, mid-call Opus fallback and fatal teardown, jitter
-  ordering/loss/late drop/reorder, the adapter, and the shell with the flag
-  on: no `RTCPeerConnection`, no video or meeting controls, the label, live on
-  the host's link). `cargo test control::media` (frame codec, drop-oldest
-  queue, URL rule, a loopback media socket that assigns `seq` upward and
-  validates downward, a refused handshake that does not reconnect). These are
-  headless: they prove the wiring, not audio quality, device capture, or a
-  node that serves the route. Two-device acceptance against a node with the
-  media route is separate evidence.
-
-## M6 A2: paid minutes
-
-Node contract: genome M6 N1 (kind 404 `CALL_BLOCK`, 60-second blocks priced by
-the callee's `[pricing] call_block_msat`, 10 s grace, hangup reason `unpaid`)
-and N3 (one call-sized spend reservation made when the offer goes out, drawn
-down per block, released on end, reported on `GET /api/v1/calls?peer=`).
-
-- **Consent before Ring.** `call_quote` adds the callee's per-minute price
-  (`block_msat`: their price advert's `kind:404`, or the `realtime_signaling`
-  category it equals; none when the advert is stale or missing), the routing
-  allowance per block (the offer's routing ceiling, which the node applies to
-  each block), `reservation_max_msat` (240 blocks at that price plus
-  allowance: the most any node may hold, since `max_call_minutes` is at most
-  240) and `minutes_payable` (the session is a paired app spending under a
-  grant, the only kind the node reserves for). A quote whose maximum
-  overflows or exceeds what the renderer holds exactly
-  (`Number.MAX_SAFE_INTEGER`) has no per-minute price. The Ring confirm shows
-  the price and that ceiling, in Danish and English. With no per-minute price,
-  or from an owner session (`/auth/local`, no reservation, so no minute could
-  be paid), the call button is disabled and says why; the engine also
-  refuses to place such a call. Ring then uses the existing spend approval
-  (`authorize`), unchanged.
-- **The host keeps the consent.** The offer goes to `call_signal` with
-  `minutes` (`block_msat`, `block_max_routing_fee_msat`, `max_hold_msat`).
-  The host refuses one the quote could not have shown, refuses it from an
-  owner session (`call_minutes_unpayable`, nothing sent), and keeps it in
-  memory for that node identity, contact and wire call id; a different
-  consent for the same call id is refused, so it can never be widened.
-- **The node's own limit, confirmed.** The node's `max_call_minutes` is not
-  visible before the offer (it is on the reservation only), so once the
-  offer is out the card reads it through `call_hold(peer, call_id)` and shows
-  "Your node holds X for this call: up to N minutes (its call limit) at P a
-  minute plus up to F routing". The host checks the reservation against the
-  consent first: no reservation (`call_no_reservation`) or a per-minute
-  price, routing allowance or total above it (`call_hold_above_consent`)
-  makes the host hang up the call through `op_end_call` before block 0;
-  nothing is paid for minutes and the node releases the hold. Otherwise the
-  owner presses Confirm hold, which calls `call_hold` with
-  `confirm_reserved_msat`; the host records it only if it equals the node's
-  reservation total (`call_hold_changed` otherwise).
-- **Refusals.** The node reserves when the offer goes out, before paying it.
-  `call_liquidity_insufficient` / `call_liquidity_unavailable` (its channel
-  cannot hold the reservation, or it could not check) and the grant refusals
-  (`grant_per_call`, `grant_exhausted`, `grant_recipient`) end the call card
-  with a plain reason and "nothing was paid".
-- **Paying.** From the callee's answer, once the hold is confirmed, the
-  caller pays block 0 and each next block when the node's
-  `next_block_due_ms` comes (plus 1 s for clock skew), through the host
-  command `call_block(peer, call_id, seq)`; the renderer names no amount.
-  The host repeats the hold check (and hangup) above, requires the owner's
-  confirmation of exactly that reservation (`call_hold_unconfirmed`), pays
-  only an outgoing, open call, only the node's `next_block_seq`, at the
-  reservation's `per_block_msat` plus `per_block_fee_msat`. Without a
-  consent kept in this run (say, after a restart) it pays nothing
-  (`call_no_consent`). The body is the genome's minimal `{call_id, seq}`.
-  Same authority, journal (`call_block` operations) and exactly-once path as
-  every call signal; the local grant preflight is skipped because the node
-  already holds the reservation under the grant.
-- **Media waits for payment.** The node refuses the media socket until the
-  first minute settles, so the node-routed adapter opens it only once
-  `call_status` reports the call live with `paid_until_ms` (both sides). Not
-  paid within 30 s: the call ends as "the first minute was not paid in time".
-- **Running cost.** The card shows the node's figures from `call_status`
-  every 5 s: per-minute price and routing allowance, paid so far
-  (`spent_msat`), still reserved (`remaining_msat`). The callee pays nothing
-  for minutes and sees no running cost; it only watches its node.
-- **Stop states.** Each ends the call at once with a plain reason; nothing
-  is left connected: their node's hangup `unpaid`; the node showing the call
-  ended after its paid time and grace (`unpaid`) or for another reason; a
-  minute refused before paying (`payment_failed`: tried again up to 4 times
-  only when the node proved it did not dispatch it); a minute whose outcome
-  is unknown (`payment_unknown`: never paid again on top of it); their node
-  asking more per minute (`price_changed`); a hold the host refused
-  (`hold_refused`: no reservation, or above the consent; the host hung up).
-- **After the call.** Paying stops at once; the card reads the node for up
-  to 20 s until it closes the reservation and then says "Minutes: paid X.
-  Released back to your budget: Y." Until then it says what the node still
-  holds.
-- **Not covered yet.** A node without a reservation (an owner session rather
-  than a paired grant) is described by block receipts ("up to"). The node
-  offers no pre-dial quote of the reservation itself; the consent figure is
-  an upper bound and the node's own reservation is shown once it rings.
 - **Checks.** `npm test -- tests/call-payments.test.tsx` (block schedule and
   agreed-price ceiling, every stop state, settle and release, the paid-media
   gate, the engine's consent gating and refusals, and the shell's consent,
   running cost, Unpaid, refused minute, liquidity refusal and summary; the
   hold shown with `max_call_minutes` and confirmed before block 0; no
   reservation and a hold above the consent paying nothing; an owner session
-  never ringing). Rust host: `a2_no_reservation_or_no_consent_pays_no_minute`,
+  never ringing; audio-only routed calls; a closed media session stopping
+  the minutes). `tests/node-routed-connection.test.ts` (the session closes
+  once on fatal audio, a node end or the grace). Rust host:
+  `a2_no_reservation_or_no_consent_pays_no_minute`,
   `a2_an_owner_session_places_no_paid_minutes_call`,
   `a2_a_minute_pays_the_reservation_amount_never_the_consent_and_only_once_confirmed`,
-  `a2_a_hold_above_the_consent_is_hung_up_before_block_zero`;
+  `a2_a_hold_above_the_consent_is_hung_up_before_block_zero`,
+  `a2_a_price_change_between_quote_and_offer_pays_no_minute`,
+  `a2_an_advert_above_the_consent_sends_no_offer`,
+  `a2_the_offer_binds_the_agreed_routing_allowance_and_admits_a_hold_within_it`,
+  `a2_a_minute_raced_against_the_offers_admission_is_never_paid`,
+  `a2_a_failed_offer_keeps_its_terms_and_cannot_be_rebound_wider`,
+  `a2_consents_are_write_once_and_eviction_never_touches_an_open_call`;
   `control::tests::a_consent_holds_only_what_the_quote_showed_and_covers_only_holds_within_it`,
   `control::tests::a_minute_costs_the_callees_advertised_block_price_and_the_reservation_is_bounded`,
   `call_status_reads_the_node_reservation_fields_verbatim`,

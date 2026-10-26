@@ -803,11 +803,7 @@ pub const CATEGORY_REALTIME: &str = "realtime_signaling";
 /// Add the callee's per-minute block price (from its cached price advert,
 /// never paid here) and the most the caller's node will reserve for it.
 pub fn with_call_blocks(mut quote: CallQuote, table: Option<&PeerPrice>) -> CallQuote {
-    let block = table.filter(|t| !t.stale)
-        .and_then(|t| t.prices.get(CALL_BLOCK_PRICE_KEY).or_else(|| t.prices.get(CATEGORY_REALTIME)).copied())
-        .filter(|price| *price > 0)
-        .map(|price| price.max(crate::act::MIN_PAYMENT_MSAT));
-    let block = block.filter(|_| quote.offer_msat.is_some());
+    let block = advert_block_msat(table).filter(|_| quote.offer_msat.is_some());
     let fee = quote.offer_max_routing_fee_msat;
     // A ceiling the renderer cannot hold exactly (a JS number) or that
     // overflows is no ceiling: such a quote places no node-routed call.
@@ -818,6 +814,16 @@ pub fn with_call_blocks(mut quote: CallQuote, table: Option<&PeerPrice>) -> Call
     quote.block_max_routing_fee_msat = if quote.block_msat.is_some() { fee } else { 0 };
     quote.reservation_max_msat = if quote.block_msat.is_some() { max } else { None };
     quote
+}
+
+/// The callee's per-minute block price from its cached advert (the
+/// per-kind price, or the realtime tariff it equals). `None` when the advert
+/// is stale or missing or names no payable price.
+pub fn advert_block_msat(table: Option<&PeerPrice>) -> Option<u64> {
+    table.filter(|t| !t.stale)
+        .and_then(|t| t.prices.get(CALL_BLOCK_PRICE_KEY).or_else(|| t.prices.get(CATEGORY_REALTIME)).copied())
+        .filter(|price| *price > 0)
+        .map(|price| price.max(crate::act::MIN_PAYMENT_MSAT))
 }
 
 /// The largest amount the renderer holds exactly (`Number.MAX_SAFE_INTEGER`).
