@@ -12,7 +12,10 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   on, app-to-app media, video and meetings hidden and unreachable
   (`src/control/callFlags.ts`). `VITE_CALL_MEDIA=webrtc` is the pre-M6 lab
   profile only; the WebRTC code stays in the tree for it and for the lab
-  checks below, not for users.
+  checks below, not for users. The Playwright a11y servers
+  (`playwright.webkit.config.ts`, `playwright.safe-areas.config.ts`) and
+  `scripts/ui-layout/meeting-planner-check.mjs` pin it, because their
+  meeting-planner specs exercise that hidden UI.
 - **The host owns the socket.** The Rust host opens the node's owner-scoped
   `GET /api/v1/calls/:call_id/media` WebSocket exactly as it owns `/ws`
   (`src-tauri/src/control/media.rs`): same loopback API base (a local node, or
