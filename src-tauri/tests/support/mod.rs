@@ -229,6 +229,10 @@ fn serve_one(node: &PairingMock, reads: Option<&Reads>, check: Option<&Challenge
             && check.is_some_and(|check| !check(&target, authorization.as_deref())) => {
             (401, r#"{"error":"pairing proof did not verify"}"#.to_string())
         }
+        None if method == "GET" && path == "/api/v1/status" => {
+            let (status, _) = node.handle("GET", "/api/v1/identity", bearer.as_deref(), &[]);
+            (status, if status == 200 { r#"{"network":"regtest"}"# } else { "{}" }.to_string())
+        }
         Some(reads) if method == "GET" && READ_PATHS.contains(&path) => {
             let (auth, _) = node.handle("GET", "/api/v1/identity", bearer.as_deref(), &[]);
             if auth != 200 {

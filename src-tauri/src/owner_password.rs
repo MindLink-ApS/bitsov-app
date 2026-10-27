@@ -4,6 +4,7 @@
 use base64::Engine;
 use std::path::Path;
 use zeroize::Zeroizing;
+pub type Loader = fn(&Path, bool) -> Result<Zeroizing<Vec<u8>>, String>;
 
 pub fn load(data_dir: &Path, allow_create: bool) -> Result<Zeroizing<Vec<u8>>, String> {
     if let Some(node) = bound_node(data_dir)? {

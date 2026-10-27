@@ -1,6 +1,9 @@
 /** First migrated app surfaces. Values are display copy, never protocol tokens.
  * {0}, {1}, … insert values verbatim (especially money and recipients). */
 export const appEn = {
+  "betaMainnetDisabled": "This beta uses signet; mainnet is disabled.",
+  "betaNetworkUnknown": "The node did not confirm its test network; setup is blocked.",
+  "localSeedUnencrypted": "Your recovery phrase is unencrypted on disk. Unlock the local node to protect it before funding or sending.",
   obClaimWarning: "The new device will ask for your node’s 18-character claim code. Ask the node’s owner for it, or find it on your BitSov box’s sticker.",
   obClaimEntry: "Enter your node’s 18-character claim code. Ask the node’s owner for it, or find it on your BitSov box’s sticker. A phone can be your first owner device. For later devices, compare the words and approve from an enrolled owner device.",
   obClaimCodeInvalid: "Check the 18-character claim code with your node’s owner or on your BitSov box’s sticker, then try again.",
@@ -878,6 +881,9 @@ export const appEn = {
 };
 
 export const appDa: Record<keyof typeof appEn, string> = {
+  "betaMainnetDisabled": "Denne beta bruger signet; mainnet er deaktiveret.",
+  "betaNetworkUnknown": "Noden bekræftede ikke sit testnetværk; opsætningen er blokeret.",
+  "localSeedUnencrypted": "Din gendannelsesfrase er ukrypteret på disken. Lås den lokale node op for at beskytte den, før du indsætter eller sender penge.",
   obClaimWarning: "Den nye enhed vil bede om din nodes ejerskabskode på 18 tegn. Bed nodens ejer om koden, eller find den på mærkaten på din BitSov-boks.",
   obClaimEntry: "Indtast din nodes ejerskabskode på 18 tegn. Bed nodens ejer om koden, eller find den på mærkaten på din BitSov-boks. En telefon kan være din første ejerenhed. Når du tilføjer flere enheder, skal du sammenligne ordene og godkende fra en godkendt ejerenhed.",
   obClaimCodeInvalid: "Kontrollér ejerskabskoden på 18 tegn med nodens ejer eller på mærkaten på din BitSov-boks, og prøv igen.",

@@ -5,8 +5,10 @@ use std::process::{Command, Stdio};
 // Intentional differences, exhaustively listed:
 // - The scratch roots differ. Only storage.path, backup.scb_dir and
 //   api.audit_log_path are rebased; their relative filenames must still match.
-// - init creates mnemonic.txt; owner bootstrap reserves identity/mnemonic.txt
-//   without creating an identity. Finalize later changes that path to .enc.
+// - init creates mnemonic.txt; owner bootstrap reserves identity/mnemonic.enc
+//   without creating an identity.
+// - App-owned nodes use signet providers and loopback listeners. The home-box
+//   setup-page setting is omitted because local startup never launches it.
 // - The app omits the following serde defaults. Check their literal values
 //   before removing them from init's output, never copy arbitrary node values
 //   into the app config. Older pins can omit these fields too. New fields and
@@ -108,7 +110,6 @@ retention_days = 0
 rotation_count = 24
 
 [api]
-listen_addr = "127.0.0.1:3141"
 rate_limit_rps = 60
 cors_enabled = true
 
@@ -266,8 +267,24 @@ fn bootstrap_config_matches_node_init() {
     };
     let mut app = read(&app_config);
     let mut node = read(&node_dir.join("konsensus.toml"));
-    normalize_paths(&mut app, &app_dir, "identity/mnemonic.txt");
+    normalize_paths(&mut app, &app_dir, "identity/mnemonic.enc");
     normalize_paths(&mut node, &node_dir, "mnemonic.txt");
+    // Explicitly reviewed differences from node init; do not normalize unknown
+    // listener/provider drift into acceptance.
+    for (section, field, expected, replacement) in [
+        ("network", "listen_addr", "0.0.0.0:9736", "127.0.0.1:9736"),
+        ("lightning", "listening_address", "0.0.0.0:9735", "127.0.0.1:9735"),
+        ("lightning", "network", "bitcoin", "signet"),
+        ("lightning", "esplora_url", "https://blockstream.info/api", "https://mempool.space/signet/api"),
+        ("lightning", "esplora_url_fallback", "https://mempool.space/api", "https://blockstream.info/signet/api"),
+        ("chain", "api_url", "https://blockstream.info", "https://mempool.space/signet"),
+        ("chain", "esplora_url_fallback", "https://mempool.space", "https://blockstream.info/signet"),
+    ] {
+        assert_eq!(node[section][field].as_str(), Some(expected), "node default drifted: {section}.{field}");
+        node[section][field] = replacement.into();
+    }
+    assert_eq!(node["setup_page"]["port"].as_integer(), Some(8080));
+    node.as_table_mut().unwrap().remove("setup_page");
     remove_documented_web_defaults(&mut node);
     remove_documented_defaults(
         node.as_table_mut().unwrap(),

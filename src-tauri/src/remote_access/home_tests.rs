@@ -28,6 +28,7 @@ fn setup(endpoint: String, pinned: bool) -> (RemoteDescriptor, Arc<Pins>) {
     let node_id = f["node_id"].as_str().unwrap().to_owned();
     let signature = node.sign(descriptor_signature_message(&node_id, &transport).as_bytes());
     let descriptor = validate_descriptor(StoredDescriptor {
+        network: None,
         enrollment_commitment: None,
         bootstrap_routes: vec![], endpoints: vec![], endpoints_signature: None, box_transport_pubkey: String::new(), box_transport_signature: None,
         v: 1,
@@ -272,6 +273,7 @@ async fn bootstrap_sas_preserves_one_completed_session_across_requests_and_fallb
     let second = live.local_addr().unwrap().to_string();
     let box_key = hex::encode(X25519PublicKey::from(&StaticSecret::from([9;32])).to_bytes());
     let descriptor = validate_descriptor(StoredDescriptor {
+        network: None,
         enrollment_commitment: None,
         v:2, endpoint:first.clone(), endpoints:vec![first, second], bootstrap_routes:vec![], endpoints_signature:None,
         node_id:String::new(), transport_pubkey:String::new(), transport_signature:String::new(),
@@ -335,6 +337,7 @@ fn finalize_preserves_fallback_routes_and_rejects_changed_or_unsigned_pins() {
     let pins=Arc::new(Pins::default());
     let box_key="22".repeat(32);
     let previous=validate_descriptor(StoredDescriptor {
+        network: None,
         enrollment_commitment: None,
         v:2,endpoint:"dead.local:9737".into(),endpoints:vec!["dead.local:9737".into(),"192.168.1.2:9737".into()],bootstrap_routes:vec![],endpoints_signature:None,
         node_id:String::new(),transport_pubkey:String::new(),transport_signature:String::new(),box_transport_pubkey:box_key.clone(),box_transport_signature:None,
@@ -412,6 +415,7 @@ async fn pr287_lost_receipt_recovers_only_through_pinned_locked_auth() {
         let node = fixture()["node_id"].as_str().unwrap().to_owned();
         let box_key = auth["box_transport_pubkey"].as_str().unwrap().to_owned();
         let descriptor = validate_descriptor(StoredDescriptor {
+        network: None,
         enrollment_commitment: None,
             v: 1, endpoint, endpoints: vec![], bootstrap_routes: vec![], endpoints_signature: None,
             node_id: String::new(), transport_pubkey: String::new(), transport_signature: String::new(),
@@ -464,6 +468,7 @@ async fn pr287_precommit_recovery_keeps_bootstrap_available_without_adopting_a_p
         let node = fixture()["node_id"].as_str().unwrap().to_owned();
         let box_key = fixture()["auth"]["box_transport_pubkey"].as_str().unwrap().to_owned();
         let descriptor = validate_descriptor(StoredDescriptor {
+        network: None,
         enrollment_commitment: None,
             v: 1, endpoint: listener.local_addr().unwrap().to_string(), endpoints: vec![],
             bootstrap_routes: vec![], endpoints_signature: None, node_id: String::new(),

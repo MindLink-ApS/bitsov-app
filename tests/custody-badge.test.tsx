@@ -17,7 +17,7 @@ function mountIn() {
 
 describe('custody badge (node REMOTE-SIGNER.md §2)', () => {
   it('words each mode, with hosted custody as the warning that says who can spend', () => {
-    expect(custodyBadge('local_seed')).toMatchObject({ label: 'Seed on this machine', tone: 'plain' });
+    expect(custodyBadge('local_seed')).toMatchObject({ label: 'Seed on this machine', tone: 'warn' });
     expect(custodyBadge('encrypted_seed')).toMatchObject({ label: 'Encrypted seed', tone: 'ok' });
     const hosted = custodyBadge('hosted_custody')!;
     expect(hosted).toMatchObject({ label: 'Hosted custody', tone: 'warn' });
@@ -31,6 +31,27 @@ describe('custody badge (node REMOTE-SIGNER.md §2)', () => {
     expect(remote).toMatchObject({ label: 'Your keys, remote node', tone: 'ok' });
     expect(remote.title).toContain('identity root stay on your device');
     expect(remote.title).toContain('Transport and storage keys');
+  });
+
+  it.each(['local_seed', 'encrypted_seed'] as const)('guards funding and sending for %s', async (mode) => {
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    const base = await source.nodeOverview();
+    source.nodeOverview = async () => ({ ...base, custody_mode: mode, money_ready: true, read_at: Date.now() });
+    source.spendStatus = async () => ({ state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 });
+    dispose = render(() => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />}
+      fund={(_source, blocked) => <button data-fund-start disabled={blocked()}>Fund</button>} />, mountIn());
+    await vi.waitFor(() => expect(mount.querySelector('[data-send]')).not.toBeNull());
+    (mount.querySelector('[data-composer-mode="pay"]') as HTMLButtonElement).click();
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent === 'Direct')!.click();
+    for (const [selector, value] of [['[data-pay-pubkey]', `02${'11'.repeat(32)}`], ['[data-pay-amount]', '10']]) {
+      const input = mount.querySelector<HTMLInputElement>(selector)!;
+      input.value = value;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    await vi.waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-send]')!.disabled).toBe(mode === 'local_seed'));
+    (mount.querySelector('[data-tab="wallet"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(mount.querySelector<HTMLButtonElement>('[data-fund-start]')!.disabled).toBe(mode === 'local_seed'));
+    if (mode === 'local_seed') expect(mount.textContent).toContain('Your recovery phrase is unencrypted on disk');
   });
 
   it('claims nothing for an older node or an unknown value', () => {

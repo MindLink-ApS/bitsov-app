@@ -539,6 +539,7 @@ async fn second_device_background_poll_promotes_access_before_registered_view() 
             if fail_identity.swap(false,Ordering::SeqCst) { return (503,"{}".into()); }
             serde_json::json!({"node_id":identity})
         }
+        else if path == "/status" { serde_json::json!({"network":"signet"}) }
         else if path == "/pair/device-keys" { serde_json::json!({"node":fingerprint,"client_id":client,"device_keys":[{"key_id":*k.lock().unwrap()}]}) }
         else if path.starts_with("/pair/device-key/pending?") { serde_json::json!({"pending":[]}) }
         else if path.starts_with("/pair/device-key/") { serde_json::json!({"status":if r.load(Ordering::SeqCst) {"registered"} else {"pending"}}) }

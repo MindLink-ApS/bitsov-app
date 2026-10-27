@@ -2,15 +2,18 @@ import { t } from '../i18n';
 import { deviceWord } from '../platform';
 import { BoxIllustration } from './BoxIllustration';
 import { PairWords } from './PairWords';
-import { createSignal, For, onCleanup, Show } from 'solid-js';
+import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { invoke } from '@tauri-apps/api/core';
+import { softenError } from '../control/userFacing';
 import { usePairingActivity } from '../pairingActivity';
 
 export type SetupInput =
   | { action: 'create'; password: string; claim_code: string }
+  | { action: 'confirm_network'; confirmed: boolean }
   | { action: 'finalize'; backup_words: string[] }
   | { action: 'match' | 'cancel' | 'poll' };
 export type SetupView =
+  | { state: 'network_confirmation' }
   | { state: 'compare'; words: string[]; expires_at: number }
   | { state: 'backup'; mnemonic: string; backup_check: number[]; expires_at: number }
   | { state: 'backup_check'; backup_check: number[] }
@@ -25,7 +28,7 @@ export function RemoteOwnerCeremony(props: {
   phone?: boolean;
 }) {
   const api = props.api ?? setupApi;
-  const [step, setStep] = createSignal<'start' | 'compare' | 'phrase' | 'backup' | 'waiting_for_box_approval' | 'starting' | 'done' | 'words_differ' | 'uncertain'>('start');
+  const [step, setStep] = createSignal<'start' | 'network_confirmation' | 'compare' | 'phrase' | 'backup' | 'waiting_for_box_approval' | 'starting' | 'done' | 'words_differ' | 'uncertain'>('start');
   const [sas, setSas] = createSignal<string[]>([]);
   const [phrase, setPhrase] = createSignal('');
   const [indices, setIndices] = createSignal<number[]>([]);
@@ -68,6 +71,7 @@ export function RemoteOwnerCeremony(props: {
         return;
       }
       switch (reply.state) {
+        case 'network_confirmation': setStep('network_confirmation'); break;
         case 'compare': setSas(reply.words); setStep('compare'); expire(reply.expires_at); break;
         case 'backup':
           setSas([]); setPhrase(reply.mnemonic); reply.mnemonic = '';
@@ -88,7 +92,8 @@ export function RemoteOwnerCeremony(props: {
         case 'words_differ': pending = false; stopTimers(); clear(); setStep('words_differ'); break;
       }
     } catch (e) {
-      if (alive) { clearTimeout(poll); setError(String(e));
+      if (alive) { clearTimeout(poll); const message = String(e);
+        setError(message === 'beta_mainnet_disabled' || message === 'beta_network_unknown' ? softenError(message).summary : message);
         clear(); setStep('uncertain');
       }
     } finally { if (alive) setBusy(false); }
@@ -116,6 +121,9 @@ export function RemoteOwnerCeremony(props: {
         password: root.querySelector<HTMLInputElement>('#box-password')!.value,
         claim_code: root.querySelector<HTMLInputElement>('#box-claim')!.value,
       })}>{t('obSetupThisBox')}</button>
+    </Show>
+    <Show when={step() === 'network_confirmation'}>
+      <NetworkConfirmation busy={busy()} onAnswer={confirmed => void run({ action: 'confirm_network', confirmed })} />
     </Show>
     <Show when={step() === 'compare'}>
       <PairWords words={sas()} />
@@ -146,9 +154,35 @@ export function RemoteOwnerCeremony(props: {
       <p>{t('obBoxSetupUncertain')}</p>
       <button disabled={busy()} onClick={() => void run({ action: 'poll' })}>{t('obCheckBoxContinue')}</button>
     </Show>
-    <Show when={!['start','compare','done','words_differ','starting'].includes(step())}>
+    <Show when={!['start','network_confirmation','compare','done','words_differ','starting'].includes(step())}>
       <button class="quiet" disabled={busy()} onClick={cancel}>{t('obCancelSetup')}</button>
     </Show>
     <Show when={error()}><p role="alert">{error()}</p></Show>
   </section>;
+}
+
+
+function NetworkConfirmation(props: { busy: boolean; onAnswer: (confirmed: boolean) => void }) {
+  let dialog!: HTMLDialogElement;
+  let cancel!: HTMLButtonElement;
+  let answered = false;
+  let disposed = false;
+  const answer = (confirmed: boolean) => {
+    if (answered || props.busy) return;
+    answered = true;
+    props.onAnswer(confirmed);
+  };
+  onMount(() => { dialog.showModal(); cancel.focus(); });
+  onCleanup(() => { disposed = true; dialog.close(); });
+  return <dialog ref={dialog} role="dialog" class="owner-sheet-scrim" aria-labelledby="box-network-title"
+    onCancel={e => { e.preventDefault(); answer(false); }}
+    onClose={() => { if (!disposed) answer(false); }}
+    onClick={e => { if (e.target === e.currentTarget) answer(false); }}>
+    <div class="owner-approval-sheet">
+      <h3 id="box-network-title">{t('obBoxNetworkTitle')}</h3>
+      <p>{t('obBoxNetworkConfirmation')}</p>
+      <button ref={cancel} type="button" class="soft" disabled={props.busy} onClick={() => answer(false)}>{t('obCancelSetup')}</button>
+      <button type="button" class="primary" disabled={props.busy} onClick={() => answer(true)}>{t('obBoxNetworkConfirm')}</button>
+    </div>
+  </dialog>;
 }

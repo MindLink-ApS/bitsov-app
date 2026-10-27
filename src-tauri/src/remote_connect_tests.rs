@@ -313,6 +313,8 @@ async fn connected_node_session(mut stream: tokio::net::TcpStream, node_id: Stri
             (200, serde_json::json!({"token":"fixture.token", "expires_at":now_unix()+600, "scopes":["read"]}))
         } else if path == "/api/v1/identity" {
             (200, serde_json::json!({"node_id":node_id,"network":"regtest"}))
+        } else if path == "/api/v1/status" {
+            (200, serde_json::json!({"node_id":node_id,"network":"regtest"}))
         } else { (404, serde_json::json!({"error":"not found"})) };
         let body = body.to_string();
         let response = format!("HTTP/1.1 {status} Response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());

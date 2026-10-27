@@ -213,6 +213,7 @@ export function WalletPage(props: {
                   {sats(s().total)}<span class="unit">{satUnit(s().total)}</span>
                 </span>
                 <CustodyBadgeView mode={props.custody} />
+                <Show when={props.custody === 'local_seed'}><p class="err-note" role="alert" data-seed-unencrypted>{tr('localSeedUnencrypted')}</p></Show>
                 <span class="hint" data-balance-pending={s().pending ?? 'unknown'}>
                   {s().pending === null ? t('uiPendingOnChainUnknown') : t('uiPending', fmtAmount(s().pending!))}
                 </span>

@@ -79,8 +79,9 @@ the required sections, absolute identity/storage/backup/audit paths, full-tier
 network and LDK settings, fresh Esplora primary/fallback providers, and payment
 verification. Remaining values use the node's matching serde defaults. No identity,
 marker or database is created. Keep these defaults aligned when updating the pin.
-Existing config is never overwritten, and a nonempty directory missing config is
-refused. Finalize's node-owned alignment changes the mnemonic path to `.enc`.
+Existing config is retained except for the protections described in
+[Local defaults](LOCAL_DEFAULTS.md), and a nonempty directory missing config is
+refused. Bootstrap reserves the encrypted mnemonic path before identity creation.
 
 `local_owner::config_tests::bootstrap_config_matches_node_init` guards this mirror
 against the node binary itself. It shares discovery with the real lifecycle test
@@ -88,7 +89,8 @@ below, runs `init --tier full --non-interactive --dir <scratch>`, and compares p
 TOML with the production bootstrap writer. Both scratch directories are removed
 afterward; init's disposable mnemonic and stdout/stderr never enter test logs.
 The test explicitly lists every permitted difference: absolute scratch roots,
-`mnemonic.txt` versus the owner's `identity/mnemonic.txt`, and the exact serde
+`mnemonic.txt` versus the owner's `identity/mnemonic.enc`, signet providers,
+loopback listeners, the omitted home-box setup page, and the exact serde
 defaults intentionally omitted by the app (including the empty identity
 passphrase). It checks path suffixes and omitted default values before normalizing;
 unknown fields and changed values fail. Older pins may omit listed defaults too.
@@ -99,7 +101,7 @@ ignore the section, so changed values and additional fields still fail. Since rc
 also inherits `cookie_mode = "adaptive"`, the twelve reviewed `[dos_edge]`
 limits, and empty `[node]` / `[tower.clients]`; these are explicitly listed in
 the guard. The rc12 source review found no new config fields or serialized init
-defaults. The existing writer retains setup port 8080 and channel/total caps of
+defaults. The writer omits the home-box setup page and retains channel/total caps of
 1,000,000/2,000,000 sats. rc19.2's signed manifest and binary pins are verified;
 retain the strict guard without new allowances. Config
 compatibility must still be checked against the verified rc19.2 binary in CI.
