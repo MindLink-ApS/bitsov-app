@@ -471,6 +471,14 @@ export type ActionError = {
     // a second hangup; the node refusing a call signal before payment.
     | 'call_needs_node_upgrade'
     | 'call_admission_open' | 'call_not_found' | 'hangup_in_flight' | 'call_identity_changed'
+    // M6 call minutes: the host or node refused a block or the call's reservation before paying.
+    | 'call_block_not_due' | 'call_reservation_closed' | 'call_price_changed'
+    | 'call_liquidity_insufficient' | 'call_liquidity_unavailable'
+    // M6 call minutes: the host refused the node's hold (no reservation, above the consent, unconfirmed).
+    | 'call_no_consent' | 'call_no_reservation' | 'call_hold_above_consent' | 'call_hold_unconfirmed'
+    | 'call_hold_changed' | 'call_minutes_unpayable'
+    // M6 call minutes: the node refused the offer above the agreed per-minute price or hold (genome N3); nothing sent, held or paid.
+    | 'call_offer_price_above_consent' | 'call_offer_hold_above_consent'
     | 'invalid'
     | 'node';
   message: string;
@@ -735,6 +743,51 @@ export type CallQuote = {
   signal_msat: number;
   signal_max_routing_fee_msat: number;
   call_total_msat: number | null;
+  /**
+   * M6 node-routed calls: one paid 60-second block (one minute) at the
+   * callee's advertised price; null when their node advertises none.
+   */
+  block_msat?: number | null;
+  /** The routing allowance per block the caller's node may reserve. */
+  block_max_routing_fee_msat?: number;
+  /**
+   * The most the caller's node can hold for the call's minutes: 240 blocks
+   * (a node's highest duration cap). The ceiling the owner agrees to; the
+   * node's own cap shows on its reservation once it rings.
+   */
+  reservation_max_msat?: number | null;
+  /** The caller's node keeps a call reservation for this session (a paired grant); without one no minutes are paid. */
+  minutes_payable?: boolean;
+};
+/** M6 A2: the minutes the owner agreed to before Ring, handed to the host with the offer (a ceiling, never an amount to pay). */
+export type MinutesConsent = {
+  block_msat: number;
+  block_max_routing_fee_msat: number;
+  max_hold_msat: number;
+};
+/** M6 N3: the caller node's call-sized hold, as `GET /calls?peer=` reports it (msat). */
+export type CallReservation = {
+  reserved_msat: number;
+  /** Settled block principal plus known routing fees. */
+  spent_msat: number;
+  /** Still held, including unresolved payments; released funds excluded. */
+  remaining_msat: number;
+  per_block_msat: number;
+  per_block_fee_msat: number;
+  /** The paid-duration cap the node pinned on this hold (its `[calls] max_call_minutes`). */
+  max_call_minutes: number;
+  released_msat: number;
+  closed: boolean;
+};
+/** `call_status`: one call's paid interval and reservation, read from the node (never payment authority). */
+export type CallStatus = {
+  id: string;
+  state: 'reserved' | 'ringing' | 'live' | 'ended' | string;
+  direction: 'outgoing' | 'incoming' | string;
+  paid_until_ms: number | null;
+  next_block_seq: number;
+  next_block_due_ms: number | null;
+  reservation: CallReservation | null;
 };
 /** `call_signal`: one paid call signal. `total_msat` is a ceiling, not a settled amount. */
 export type CallReceipt = {

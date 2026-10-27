@@ -92,7 +92,7 @@ struct Attempt {
     pending: Pending,
     password: Arc<Mutex<Option<Zeroizing<String>>>>,
     digest: blake3::Hash,
-    blob: Vec<u8>,
+    blob: DeviceSigningKey,
     record: device::Record,
     proof: Option<String>,
     backup: Option<[Zeroizing<String>; 3]>,
@@ -487,7 +487,7 @@ async fn begin_create(state: &NodeState, setup: &mut Setup, pending: PendingNetw
             let _guard = state.device_lifecycle.lock().unwrap();
             device::save_blob(&ctx.store, &blob).map_err(|e| e.message)?;
             device::save_record(&ctx.store, &record).map_err(|e| e.message)?;
-            (blob, record)
+            (device_signing_key(&ctx.store, &record, blob).map_err(|e| e.message)?, record)
         }
     };
     let box_key = descriptor
@@ -741,7 +741,7 @@ enum CompletionStage {
 struct Completion {
     receipt: Receipt,
     binding: UnlockBinding,
-    blob: Vec<u8>,
+    blob: DeviceSigningKey,
     record: device::Record,
     password: Arc<Mutex<Option<Zeroizing<String>>>>,
     deadline: Instant,
@@ -950,18 +950,20 @@ async fn resume(state: &NodeState, completion: &mut Completion) -> Result<View, 
 }
 
 async fn setup_signature(
-    blob: Vec<u8>,
+    blob: DeviceSigningKey,
     message: String,
     reason: String,
     finish: bool,
 ) -> Result<String, ActionError> {
     tokio::task::spawn_blocking(move || {
-        device_key::sign_setup(&blob, message.as_bytes(), &reason, finish)
+        #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
+        { sign_stored_with(&blob, message.as_bytes(), &reason, Some(finish)) }
+        #[cfg(not(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))))]
+        { device_key::sign_setup(&blob, message.as_bytes(), &reason, finish).map_err(device_error) }
     })
     .await
     .map_err(|_| ActionError::new("device_key", "The setup biometric request stopped."))?
     .map(hex::encode)
-    .map_err(device_error)
 }
 
 fn bootstrap_binding(token: &str, client_id: &str, node: &str) -> Result<UnlockBinding, String> {

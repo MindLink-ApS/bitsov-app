@@ -218,3 +218,11 @@ fn invalid_inputs_never_reach_native_signing() {
     assert!(key::sign_setup(&[1], b"m", "bad\0reason", false).is_err());
     NATIVE.with(|n| assert_eq!(n.borrow().calls, 0));
 }
+
+#[test]
+#[cfg(not(feature = "native-test-keys"))]
+fn prompt_free_policy_is_rejected_before_the_native_call() {
+    reset();
+    assert_eq!(key::create(Policy::NoPromptForTests), Err(Error::Unavailable));
+    NATIVE.with(|n| assert_eq!(n.borrow().calls, 0));
+}

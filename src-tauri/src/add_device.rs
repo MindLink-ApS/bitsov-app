@@ -145,7 +145,7 @@ fn check_binding(state: &NodeState, binding: &DeviceBinding) -> Result<(), Actio
     Ok(())
 }
 struct Owner {
-    blob: Vec<u8>,
+    blob: DeviceSigningKey,
     record: device::Record,
     binding: DeviceBinding,
     key_id: String,
@@ -691,7 +691,7 @@ pub(super) async fn join_on_platform(state: &NodeState, input: JoinInput, platfo
             let _guard = state.device_lifecycle.lock().unwrap();
             device::save_blob(&store, &blob)?;
             device::save_record(&store, &record)?;
-            (blob, record)
+            (device_signing_key(&store, &record, blob)?, record)
         }
     };
     let name = device::registration_name(platform);

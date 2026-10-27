@@ -3,7 +3,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod device_key;
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))]
 pub mod client_keychain;
 #[cfg(target_os = "ios")]
 pub mod pairing_link;

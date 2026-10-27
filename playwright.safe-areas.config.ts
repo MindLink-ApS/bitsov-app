@@ -22,6 +22,7 @@ export default defineConfig({
     command: 'npm run dev',
     url: `http://localhost:${port}`,
     reuseExistingServer: false,
-    env: { BITSOV_VITE_PORT: String(port) },
+    // The meeting planner spec needs the pre-M6 call UI, hidden in M6 builds.
+    env: { BITSOV_VITE_PORT: String(port), VITE_CALL_MEDIA: 'webrtc' },
   },
 });

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Exercise the real packaging script without builds, downloads, mounts or ports."""
+import datetime
 import json
+import plistlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -46,7 +48,7 @@ elif name == "npm":
     shutil.copy2("src-tauri/bin/konsensus-aarch64-apple-darwin", app / "Contents/MacOS/konsensus")
     (app / "Contents/Resources/icon.icns").write_bytes(b"icns")
     with (app / "Contents/Info.plist").open("wb") as f:
-        plistlib.dump({"LSMinimumSystemVersion": "11.0"}, f)
+        plistlib.dump({"LSMinimumSystemVersion": "11.0", "CFBundleIdentifier": "org.example.client"}, f)
     pathlib.Path("dist").mkdir(exist_ok=True)
     pathlib.Path("dist/index.html").write_text("release")
     if scenario == "invalid-app":
@@ -96,18 +98,28 @@ elif name == "codesign":
         target = pathlib.Path(args[-1])
         if target == app:
             if scenario != "missing-seal":
-                (app / "Contents/_CodeSignature").mkdir()
+                (app / "Contents/_CodeSignature").mkdir(exist_ok=True)
                 (app / "Contents/_CodeSignature/CodeResources").write_text("sealed resources")
         elif target.name == "konsensus":
             # Signing changes bytes: the source hash check must precede this.
             with target.open("ab") as f:
                 f.write(b"signature")
+    elif args == ["-dv", "--verbose=4", str(app)]:
+        print("TeamIdentifier=ABCDE12345", file=sys.stderr)
+    elif "--extract-certificates" in args:
+        prefix = args[args.index("--extract-certificates") + 1]
+        pathlib.Path(prefix + "0").write_bytes(b"synthetic certificate")
     elif "--verify" in args:
         assert "--deep" in args and "--strict" in args, args
         if scenario == "signature-invalid":
             sys.exit(41)
         assert (app / "Contents/_CodeSignature/CodeResources").is_file()
+        if os.environ.get("BITSOV_MAC_SIGNING_IDENTITY") != "-":
+            assert (app / "Contents/embedded.provisionprofile").is_file()
         pathlib.Path("verified-app").touch()
+elif name == "security":
+    assert args[:2] == ["cms", "-D"], args
+    pathlib.Path(args[args.index("-o") + 1]).write_bytes(pathlib.Path(args[args.index("-i") + 1]).read_bytes())
 elif name == "spctl":
     assert args == ["-a", "-vv", "-t", "exec", str(app)], args
     print("rejected (ad-hoc signature)", file=sys.stderr)
@@ -135,11 +147,21 @@ class PackagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="package mac test ") as tmp:
             root = Path(tmp)
             (root / "scripts").mkdir()
-            for name in ("package-mac.sh", "check-mac-bundle.sh"):
+            for name in ("package-mac.sh", "check-mac-bundle.sh", "mac-keychain-entitlements.py"):
                 shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
             fixture_env = self.fixture.prepare(root)
             (root / "src-tauri/bin").mkdir(parents=True)
             shutil.copy2(ROOT / "src-tauri/tauri.conf.json", root / "src-tauri/tauri.conf.json")
+            shutil.copy2(ROOT / "src-tauri/Entitlements.plist", root / "src-tauri/Entitlements.plist")
+            profile = {"TeamIdentifier": ["ABCDE12345"], "Platform": ["OSX"],
+                       "ExpirationDate": datetime.datetime(2099, 1, 1),
+                       "ProvisionsAllDevices": True, "DeveloperCertificates": [b"synthetic certificate"],
+                       "Entitlements": {"com.apple.application-identifier": "ABCDE12345.org.example.*",
+                                        "com.apple.developer.team-identifier": "ABCDE12345",
+                                        "keychain-access-groups": ["ABCDE12345.*"]}}
+            if scenario == "wrong-certificate":
+                profile["DeveloperCertificates"] = [b"another certificate"]
+            (root / "profile.provisionprofile").write_bytes(plistlib.dumps(profile))
             sidecar = root / "src-tauri/bin/konsensus-aarch64-apple-darwin"
             sidecar.write_bytes(b"stray binary" if scenario == "bad-sidecar" else PAYLOAD)
             sidecar.chmod(0o755)
@@ -152,7 +174,7 @@ class PackagingTests(unittest.TestCase):
             if scenario == "logging-fail":
                 (root / "src-tauri/target/package-mac.log").mkdir()
             fakebin = root / "fakebin"
-            for name in ("uname", "npm", "hdiutil", "plutil", "file", "otool", "codesign", "spctl", "ditto", "xcrun",
+            for name in ("uname", "npm", "hdiutil", "plutil", "file", "otool", "codesign", "spctl", "ditto", "xcrun", "security",
                          "open", "osascript", "vite", "curl", "cargo"):
                 tool = fakebin / name
                 tool.write_text(STUB)
@@ -161,14 +183,15 @@ class PackagingTests(unittest.TestCase):
             env = dict(fixture_env, TRACE=str(trace),
                        SCENARIO=scenario, CI="false", TAURI_BUNDLER_DMG_IGNORE_CI="true",
                        CARGO_TARGET_DIR=str(root / "wrong-target"))
-            env.update(BITSOV_MAC_SIGNING_IDENTITY="-", BITSOV_MAC_NOTARY_PROFILE="")
+            env.update(BITSOV_MAC_SIGNING_IDENTITY="-", BITSOV_MAC_NOTARY_PROFILE="",
+                       BITSOV_MAC_PROVISION_PROFILE="profile.provisionprofile")
             env.update(signing_env or {})
             result = subprocess.run(
                 ["bash", "scripts/package-mac.sh", "--use-existing-sidecar"] + (["--dmg"] if dmg else []),
                 cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             )
             events = [json.loads(line) for line in trace.read_text().splitlines()]
-            self.assertTrue(all(e[0] in ("uname", "npm", "hdiutil", "plutil", "file", "otool", "codesign", "spctl", "ditto", "xcrun")
+            self.assertTrue(all(e[0] in ("uname", "npm", "hdiutil", "plutil", "file", "otool", "codesign", "spctl", "ditto", "xcrun", "security")
                                 for e in events), events)
             image = (root / DMG).read_text() if (root / DMG).exists() else None
             return result, events, image
@@ -231,6 +254,14 @@ class PackagingTests(unittest.TestCase):
         staple = next(i for i, e in enumerate(events) if e[0] == "xcrun" and e[1] == ["stapler", "staple", str(APP)])
         self.assertTrue(any(i > staple and e[0] == "codesign" and "--verify" in e[1]
                             for i, e in enumerate(events)))
+
+    def test_profile_and_certificate_refusals_stop_before_packaging(self):
+        for scenario, profile in [("success", ""), ("wrong-certificate", "profile.provisionprofile")]:
+            result, events, _ = self.run_package(scenario, signing_env={
+                "BITSOV_MAC_SIGNING_IDENTITY": "Developer ID Application: Test",
+                "BITSOV_MAC_PROVISION_PROFILE": profile})
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertFalse(any(e[0] == "hdiutil" for e in events))
 
     def test_notarization_cannot_succeed_with_adhoc_or_failed_submission(self):
         for scenario, identity in (("success", "-"), ("notary-fail", "Developer ID Application: Test")):

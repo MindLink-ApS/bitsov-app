@@ -354,15 +354,98 @@ pub fn load_blob(store: &Path) -> Option<Vec<u8>> {
     read_private(&store.join(BLOB_FILE)).ok().flatten()
 }
 
+#[cfg(not(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))))]
+pub fn read_blob(store: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    #[cfg(all(target_os = "macos", feature = "mobile", not(test)))]
+    { let _ = store; return Err(std::io::Error::other("device Keychain storage is unavailable in the host mobile check")); }
+    #[cfg(not(all(target_os = "macos", feature = "mobile", not(test))))]
+    read_private(&store.join(BLOB_FILE))
+}
+
 pub fn save_blob(store: &Path, blob: &[u8]) -> Result<(), ActionError> {
+    #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
+    { return crate::apple_key_material::save(store, blob).map_err(|e| ActionError::new("device_key", e)); }
+    #[cfg(all(target_os = "macos", feature = "mobile", not(test)))]
+    { return Err(ActionError::new("device_key", "device Keychain storage is unavailable in the host mobile check")); }
+    #[cfg(not(all(not(test), any(target_os = "ios", target_os = "macos"))))]
     write_private(&store.join(BLOB_FILE), blob)
         .map_err(|e| ActionError::new("device_key", format!("Could not save the device key: {e}")))
 }
 
 /// Forget the key (the owner revoked it, or it no longer works on this Mac).
 pub fn forget(store: &Path) {
-    let _ = std::fs::remove_file(store.join(BLOB_FILE));
-    let _ = std::fs::remove_file(store.join(RECORD_FILE));
+    let _ = forget_with(store, || delete_protected(store));
+}
+
+fn delete_protected(store: &Path) -> Result<(), String> {
+    #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
+    { return crate::apple_key_material::delete(store); }
+    #[cfg(not(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))))]
+    { let _ = store; Ok(()) }
+}
+
+/// Retry a prior deletion before an explicit enrollment, never read its blob.
+pub fn retry_forget(store: &Path) -> Result<(), ActionError> {
+    if store.join("device-key.forget").exists() {
+        forget_with(store, || delete_protected(store)).map_err(|e| ActionError::new("device_key", e))?;
+    }
+    Ok(())
+}
+
+fn forget_with(store: &Path, delete: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    // Durable deletion intent prevents an orphaned Keychain item from being
+    // recovered as an enrollment after a crash or transient deletion failure.
+    let intent = store.join("device-key.forget");
+    let publication = write_private(&intent, b"delete-pending").map_err(|e| e.to_string());
+    let deletion = delete();
+    let mut cleanup = Ok(());
+    for name in [BLOB_FILE, RECORD_FILE, "device-key.keychain", "device-key.blob.tmp", "device-key.json.tmp", "device-key.public"] {
+        if let Err(error) = std::fs::remove_file(store.join(name)) {
+            if error.kind() != std::io::ErrorKind::NotFound && cleanup.is_ok() { cleanup = Err(error.to_string()); }
+        }
+    }
+    match deletion.and(cleanup).and(publication) {
+        Ok(()) => std::fs::remove_file(intent).map_err(|e| e.to_string()),
+        Err(error) => { eprintln!("[device-key] could not delete protected item: {error}"); Err(error) },
+    }
+}
+
+/// Presence metadata only: no protected read, enclave operation, or prompt.
+pub fn material_present(store: &Path) -> std::io::Result<bool> {
+    if store.join("device-key.forget").exists() { return Ok(false); }
+    if std::fs::symlink_metadata(store.join("device-key.blob.tmp")).is_ok()
+        && !store.join(BLOB_FILE).exists() && !store.join("device-key.keychain").exists() {
+        return Err(std::io::Error::other("an interrupted device key write requires recovery"));
+    }
+    for name in ["device-key.keychain", BLOB_FILE] {
+        match std::fs::symlink_metadata(store.join(name)) {
+            Ok(meta) if meta.is_file() => return Ok(true),
+            Ok(_) => return Err(std::io::Error::other("invalid device key metadata")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            Err(e) => return Err(e),
+        }
+    }
+    #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
+    if bitsov_ffi::client_keychain::data_protection_available() {
+        return bitsov_ffi::client_keychain::blob_metadata(store).map(|m| m.0).map_err(std::io::Error::other);
+    }
+    Ok(false)
+}
+
+/// Recover interrupted publication from public metadata, without protected data.
+pub fn recover_record(store: &Path) -> Result<Record, ActionError> {
+    let bytes = read_private(&store.join("device-key.public")).map_err(|e| ActionError::new("device_key", e.to_string()))?;
+    #[allow(unused_mut)]
+    let mut public = bytes.and_then(|v| hex::decode(v).ok()).and_then(|v| <[u8; 65]>::try_from(v).ok());
+    #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
+    if public.is_none() && bitsov_ffi::client_keychain::data_protection_available() {
+        public = bitsov_ffi::client_keychain::blob_metadata(store).map_err(|e| ActionError::new("device_key", e))?.1;
+    }
+    let public = public.filter(|p| p[0] == 4).ok_or_else(|| ActionError::new("device_key",
+        "Device key recovery metadata is missing. The existing key was preserved."))?;
+    let record = Record { public_key: hex::encode(public), ..Default::default() };
+    save_record(store, &record)?;
+    Ok(record)
 }
 
 // ---- step 3: the pending approval survives an app restart ---------------------
@@ -395,6 +478,43 @@ pub fn load_pending(path: &Path, now_ms: u64) -> Option<Elevation> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn public_metadata_recovers_interrupted_record_publication_without_secret_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let public = [4; 65];
+        write_private(&dir.path().join("device-key.public"), hex::encode(public).as_bytes()).unwrap();
+        write_private(&dir.path().join("device-key.keychain"), b"public marker").unwrap();
+        let record = recover_record(dir.path()).unwrap();
+        assert_eq!(record.public_key, hex::encode(public));
+        assert!(!record.registered);
+        assert_eq!(load_record(dir.path()), Some(record));
+    }
+    #[test]
+    fn incomplete_or_missing_recovery_metadata_never_authorizes_a_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        write_private(&dir.path().join("device-key.blob.tmp"), b"partial wrapped key").unwrap();
+        assert!(material_present(dir.path()).is_err());
+        std::fs::remove_file(dir.path().join("device-key.blob.tmp")).unwrap();
+        write_private(&dir.path().join("device-key.keychain"), b"public marker").unwrap();
+        assert!(material_present(dir.path()).unwrap());
+        assert!(recover_record(dir.path()).is_err());
+        assert!(dir.path().join("device-key.keychain").exists());
+    }
+    #[test]
+    fn forget_cleans_marker_record_and_temporary_files_even_if_native_delete_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [BLOB_FILE, RECORD_FILE, "device-key.keychain", "device-key.blob.tmp", "device-key.json.tmp", "device-key.public"] {
+            std::fs::write(dir.path().join(name), b"synthetic").unwrap();
+        }
+        assert!(forget_with(dir.path(), || Err("unavailable".into())).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert!(dir.path().join("device-key.forget").is_file());
+        assert!(!material_present(dir.path()).unwrap());
+        forget_with(dir.path(), || Ok(())).unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        save_blob(dir.path(), b"replacement wrapped key").unwrap();
+        assert_eq!(load_blob(dir.path()).unwrap(), b"replacement wrapped key");
+    }
     #[test]
     fn registration_name_identifies_iphone() {
         assert_eq!(registration_name("ios"), "BitSov app on this iPhone");

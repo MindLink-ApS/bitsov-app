@@ -88,7 +88,7 @@ fn pair(node: &Node, app_dir: &std::path::Path) -> NodeAuth {
     let client = PairingClient::new(reqwest::Client::new(), node.server.api_base())
         .expect_challenge_dir(node.dir.path().join("pairing"))
         .with_code_wait(std::time::Duration::from_millis(500));
-    let key = ClientKey::load_or_create(app_dir).unwrap();
+    let key = ClientKey::generate_ephemeral().unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

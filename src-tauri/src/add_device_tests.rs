@@ -28,7 +28,7 @@ async fn add_device_non_owner_cannot_mint_or_approve_even_with_renderer_input() 
     assert!(node.posts().is_empty());
 }
 
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 struct DelegationNode {
     node: Fake,
     _dir: tempfile::TempDir,
@@ -36,11 +36,11 @@ struct DelegationNode {
     enrolled: Arc<AtomicBool>,
     challenge_valid: Arc<AtomicBool>,
 }
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 fn delegation_node() -> DelegationNode { delegation_fixture(false) }
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 fn delegation_fixture(second: bool) -> DelegationNode { delegation_fixture_with_skew(second, 0) }
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 fn second_device_fixture(fp: &str, key_id: &str, expires_at: i64) -> serde_json::Value {
     let raw = include_str!("../tests/fixtures/node356-pending.json")
         .replace(&"11".repeat(16), fp)
@@ -52,7 +52,7 @@ fn second_device_fixture(fp: &str, key_id: &str, expires_at: i64) -> serde_json:
     serde_json::from_str(&raw).unwrap()
 }
 
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[test]
 fn second_device_fixture_preserves_identifiers_containing_expiry_digits() {
     let node = "13001111111111111111111111111111";
@@ -62,7 +62,7 @@ fn second_device_fixture_preserves_identifiers_containing_expiry_digits() {
     assert!(pending.validate(node, "c1", 7, key, 2000).is_ok());
 }
 
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 fn delegation_fixture_with_skew(second: bool, skew: i64) -> DelegationNode {
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
@@ -202,7 +202,7 @@ fn delegation_fixture_with_skew(second: bool, skew: i64) -> DelegationNode {
         challenge_valid,
     }
 }
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[tokio::test]
 async fn add_device_mints_then_delegates_exact_v2_bytes_using_owner_token() {
     let d = delegation_node();
@@ -255,7 +255,7 @@ async fn add_device_mints_then_delegates_exact_v2_bytes_using_owner_token() {
         assert_eq!(token.as_deref(), Some("tok.1"));
     }
 }
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[tokio::test]
 async fn add_device_refuses_changed_comparison_revocation_and_wrong_node_challenge() {
     for failure in ["changed", "revoked", "challenge", "expired"] {
@@ -410,7 +410,7 @@ fn second_device_start_has_no_claim_code_contract() {
     assert!(serde_json::from_value::<add_device::JoinInput>(serde_json::json!({"action":"start_second","claim_code":""})).is_err());
 }
 
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[tokio::test]
 async fn second_device_owner_approves_or_rejects_signed_console_comparison_and_refuses_replay() {
     for reject in [false, true] {
@@ -425,7 +425,7 @@ async fn second_device_owner_approves_or_rejects_signed_console_comparison_and_r
         assert!(add_device::run(state, add_device::Input::Approve {op_id:"aa".repeat(12)}).await.is_err());
     }
 }
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[tokio::test]
 async fn second_device_owner_refuses_wrong_words_expiry_changed_op_and_revoked_owner() {
     for change in ["words", "expiry", "changed", "revoked"] {
@@ -445,7 +445,7 @@ async fn second_device_owner_refuses_wrong_words_expiry_changed_op_and_revoked_o
         assert!(d.node.posts().is_empty());
     }
 }
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[tokio::test]
 async fn second_device_mint_signs_purpose_and_binds_current_ticket() {
     let d = delegation_fixture(true);
@@ -461,7 +461,7 @@ async fn second_device_cannot_start_on_normal_pairing_or_flag_off() {
     assert!(node.posts().is_empty());
 }
 
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[tokio::test]
 async fn second_device_join_uses_pinned_noise_node_digest_and_never_claims_on_refusal() {
     for status in [204, 403, 409, 410] {
@@ -514,7 +514,7 @@ async fn second_device_join_uses_pinned_noise_node_digest_and_never_claims_on_re
     }
 }
 
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[tokio::test]
 async fn second_device_background_poll_promotes_access_before_registered_view() {
     crate::profile::install("tech.mindlink.bitsov.remotetest").unwrap();
@@ -576,7 +576,7 @@ async fn second_device_background_poll_promotes_access_before_registered_view() 
     assert_eq!(serde_json::to_value(add_device::join(state,add_device::JoinInput::Poll).await.unwrap()).unwrap()["state"],"done");
 }
 
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[tokio::test]
 async fn second_device_flag_off_stops_a_reviewed_approval_without_signing() {
     let d = delegation_fixture(true);
@@ -586,7 +586,7 @@ async fn second_device_flag_off_stops_a_reviewed_approval_without_signing() {
     assert!(matches!(view, add_device::View::Unsupported));
     assert!(d.node.posts().is_empty());
 }
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[tokio::test]
 async fn second_device_foreign_ticket_cannot_be_approved_but_can_be_rejected() {
     let d = delegation_fixture(true);
@@ -604,7 +604,7 @@ async fn second_device_foreign_ticket_cannot_be_approved_but_can_be_rejected() {
     assert!(matches!(add_device::run(&d.node.state, add_device::Input::Reject {op_id:"aa".repeat(12)}).await.unwrap(), add_device::View::Rejected));
 }
 
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[tokio::test]
 async fn phone_first_join_accepts_zero_owner_devices_and_requires_console_claim() {
     for (platform, name) in [("android", "BitSov app on this Android phone"), ("ios", "BitSov app on this iPhone")] {
@@ -644,7 +644,7 @@ async fn phone_first_join_accepts_zero_owner_devices_and_requires_console_claim(
     }
 }
 
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[tokio::test]
 async fn second_device_mint_accepts_clock_skew_but_refuses_overlong_tickets() {
     for (skew, accepted) in [(-30, true), (30, true), (60, false)] {
@@ -653,7 +653,7 @@ async fn second_device_mint_accepts_clock_skew_but_refuses_overlong_tickets() {
     }
 }
 
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[tokio::test]
 async fn second_device_poll_skips_bad_entries_and_keeps_valid_comparisons() {
     let d = delegation_fixture(true);

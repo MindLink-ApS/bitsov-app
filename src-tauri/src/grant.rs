@@ -264,6 +264,15 @@ impl Refusal {
                 "grant_first_contact",
                 "Your node needs your OK for this first contact, and it did not get it. Nothing was sent. Confirm the first message again.",
             ),
+            // M6 N3: the call-sized reservation made when an offer goes out.
+            "call_liquidity_insufficient" => ActionError::new(
+                "call_liquidity_insufficient",
+                "Your node's channel cannot hold this call's reservation right now. Nothing was paid. Add outbound capacity, then call again.",
+            ),
+            "call_price_changed" => ActionError::new(
+                "call_price_changed",
+                "Their node now asks more per minute than this call reserved. Nothing more was paid.",
+            ),
             "grant_paused" => ActionError::new(
                 "grant_paused",
                 "Your node paused spending after failed payments. Nothing was sent.",
@@ -480,6 +489,13 @@ mod tests {
         low.remaining_msat = 500;
         assert_eq!(low.check(1_000, None, now).unwrap_err().code, "grant_exhausted");
         assert_eq!(g.check(1, None, 2_000_000).unwrap_err().code, "grant_ended", "expiry is absolute");
+    }
+
+    #[test]
+    fn call_reservation_refusals_are_named() {
+        let r = |reason: &str| refusal(409, &serde_json::json!({"code": "budget_exceeded", "reason": reason, "remaining_msat": null}).to_string()).unwrap();
+        assert_eq!(r("call_liquidity_insufficient").error(None).code, "call_liquidity_insufficient");
+        assert_eq!(r("call_price_changed").error(None).code, "call_price_changed");
     }
 
     #[test]

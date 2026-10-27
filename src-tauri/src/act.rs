@@ -37,6 +37,10 @@ pub const KIND_FILE_REF: u16 = 200;
 /// The offer is the per-call admission, paid at the callee's `call_msat`.
 pub const KIND_CALL_OFFER: u16 = 400;
 pub const KIND_CALL_HANGUP: u16 = 403;
+/// M6 (genome kind 404 `CALL_BLOCK`): one paid 60-second interval of a
+/// node-routed call, priced by the callee and drawn from the call's
+/// reservation at the caller's node. Never sent through `call_signal`.
+pub const KIND_CALL_BLOCK: u16 = 404;
 /// A call signal carries SDP (genome caps it at 16 KiB) plus a small envelope.
 pub const CALL_SIGNAL_MAX_BYTES: usize = 17 * 1024;
 
@@ -252,6 +256,24 @@ pub fn not_dispatched_message(body: &str) -> String {
         }
         Some(r) => format!("{NOT_DISPATCHED_MESSAGE} {r}"),
         None => NOT_DISPATCHED_MESSAGE.to_string(),
+    }
+}
+
+/// Genome M6 N3: a call's spend reservation refused before anything was
+/// dispatched (`not_dispatched` with a call `reason`), in plain words. The
+/// consent refusals come from the ceilings an offer carries (`max_block_msat`,
+/// `max_hold_msat`): the node checked them before it held, paid or sent
+/// anything, so the offer was not sent and nothing is held for it.
+pub fn call_not_dispatched(body: &str) -> Option<ActionError> {
+    let v = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    match v["reason"].as_str()? {
+        "call_liquidity_unavailable" => Some(ActionError::new("call_liquidity_unavailable",
+            "Your node could not check whether its channel can hold this call's reservation. Nothing was paid. Try again shortly.")),
+        "call_price_above_consent" => Some(ActionError::new("call_offer_price_above_consent",
+            "Their node now asks more per minute than you agreed to, so your node did not place the call. Nothing was sent, held or paid. Check the price and call again.")),
+        "call_hold_above_consent" => Some(ActionError::new("call_offer_hold_above_consent",
+            "Your node would hold more for this call's minutes than you agreed to, so it did not place the call. Nothing was sent, held or paid.")),
+        _ => None,
     }
 }
 
@@ -744,6 +766,22 @@ pub fn call_body(recipient: &str, kind: u16, plaintext: &str) -> Result<serde_js
         return Err(ActionError::invalid("the call signal is too large"));
     }
     Ok(json!({ "recipient": recipient, "is_room": false, "kind": kind, "plaintext": plaintext }))
+}
+
+/// `/messages/compose` body for one call block: exactly the genome's minimal
+/// payload (`call_id`, `seq`), built here, never from renderer text.
+pub fn call_block_body(recipient: &str, call_id: &str, seq: u32) -> Result<serde_json::Value, ActionError> {
+    let recipient = control::node_id(recipient).map_err(ActionError::invalid)?;
+    if !is_call_id(call_id) {
+        return Err(ActionError::invalid("invalid call id"));
+    }
+    let plaintext = json!({ "call_id": call_id, "seq": seq }).to_string();
+    Ok(json!({ "recipient": recipient, "is_room": false, "kind": KIND_CALL_BLOCK, "plaintext": plaintext }))
+}
+
+/// A wire call id: 32 lower-case hex characters.
+pub fn is_call_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 /// What one paid call signal cost.
@@ -2007,6 +2045,33 @@ mod tests {
         assert!(call_body(ROOM, 401, "{}").is_err());
         let big = format!(r#"{{"sdp":"{}"}}"#, "a".repeat(CALL_SIGNAL_MAX_BYTES));
         assert!(call_body(&peer, 401, &big).is_err());
+    }
+
+    #[test]
+    fn a_reservation_the_node_could_not_check_is_named_not_generic() {
+        let e = call_not_dispatched(r#"{"error":"call outbound liquidity unavailable","code":"not_dispatched","reason":"call_liquidity_unavailable"}"#).unwrap();
+        assert_eq!(e.code, "call_liquidity_unavailable");
+        assert!(e.message.contains("Nothing was paid"));
+        assert!(call_not_dispatched(r#"{"error":"x","code":"not_dispatched","reason":"room_unknown"}"#).is_none());
+        // Genome N3 consent ceilings on the offer: named, and nothing was sent, held or paid.
+        for (reason, code) in [("call_price_above_consent", "call_offer_price_above_consent"), ("call_hold_above_consent", "call_offer_hold_above_consent")] {
+            let e = call_not_dispatched(&json!({"error": "developer detail", "code": "not_dispatched", "reason": reason}).to_string()).unwrap();
+            assert_eq!(e.code, code);
+            assert!(e.message.contains("you agreed to") && e.message.contains("Nothing was sent, held or paid"), "{}", e.message);
+            assert!(!e.message.contains("developer detail"), "the node's developer text is not shown");
+        }
+        assert!(call_not_dispatched("broken").is_none());
+    }
+
+    #[test]
+    fn a_call_block_body_is_the_minimal_genome_payload() {
+        let peer = "ab".repeat(32);
+        let call = "0123456789abcdef0123456789abcdef";
+        let body = call_block_body(&peer, call, 3).unwrap();
+        assert_eq!(body, json!({"recipient": peer, "is_room": false, "kind": 404, "plaintext": r#"{"call_id":"0123456789abcdef0123456789abcdef","seq":3}"#}));
+        assert!(call_block_body(&peer, &call.to_uppercase(), 0).is_err());
+        assert!(call_block_body(&peer, "0123", 0).is_err());
+        assert!(call_block_body(ROOM, call, 0).is_err());
     }
 
     #[test]

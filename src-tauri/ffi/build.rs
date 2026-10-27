@@ -66,7 +66,13 @@ fn build_device_key_swift() {
 
     let lib = out_dir.join("libbitsov_device_key.a");
     let mut compiler = Command::new(&swiftc);
-    if ios { compiler.args(["../native/client_keychain.swift", "../native/pairing_link.swift", "../native/home_metadata.swift", "../native/phone_recovery.swift", "../native/call_audio.swift"]); }
+    if std::env::var_os("CARGO_FEATURE_NATIVE_TEST_KEYS").is_some() {
+        assert!(!ios && std::env::var("PROFILE").as_deref() == Ok("debug"),
+            "native-test-keys is only supported for debug macOS tests");
+        compiler.args(["-D", "BITSOV_TEST_DEVICE_KEYS"]);
+    }
+    compiler.arg("../native/client_keychain.swift");
+    if ios { compiler.args([ "../native/pairing_link.swift", "../native/home_metadata.swift", "../native/phone_recovery.swift", "../native/call_audio.swift"]); }
     let status = compiler
         .args([
             "-emit-library",
