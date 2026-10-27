@@ -24,6 +24,7 @@ import { createNodeRoutedConnection, nodeRoutedSdp, type MediaSessionEvent } fro
 import type { CallAudio } from '../src/control/callAudio';
 import type { MediaBridge, MediaLink } from '../src/control/mediaBridge';
 import { amount } from '../src/control/format';
+import { provenUnpaid } from '../src/control/paymentOutcome';
 import type { ActionError, CallQuote, CallReceipt, CallReservation, CallStatus, SpendView } from '../src/control/types';
 import type { PairingView as OnboardingPairingView } from '../src/onboarding/pairing';
 
@@ -296,6 +297,22 @@ describe('paying the minutes of one outgoing call', () => {
     expect(s.stops).toEqual([]);
   });
 
+  it('a call its node no longer lists retires the last reservation snapshot: never shown as still held', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    let listed = true;
+    const s = session(node);
+    s.deps.status = vi.fn(async () => ok(listed ? node.status() : null));
+    await s.confirmed();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.last().reservation).toMatchObject({ closed: false });
+    s.minutes.finish();
+    listed = false;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(s.last()).toMatchObject({ settled: true, final: true, reservation: null });
+    expect(s.last().receiptsMsat).toBe(BLOCK + FEE);
+  });
+
   it('the callee only watches: it never pays, and ends when its node ends the call unpaid', async () => {
     const node = fakeNode({ now: () => Date.now(), reservation: false });
     node.settle(0);
@@ -414,6 +431,31 @@ describe('the call engine with paid minutes', () => {
       expect(e.last().error).toContain(message);
       expect(e.last().paidMsat).toBe(0);
     }
+  });
+
+  it('their node refusing the offer above the agreed price or hold ends the call in plain words (EN/DA), nothing sent, held or paid', async () => {
+    const cases = [
+      ['call_offer_price_above_consent', 'Their node now asks more per minute than you agreed to, so your node did not place the call. Nothing was sent, held or paid. Check the price and call again.',
+        'Deres node beder nu om mere pr. minut, end du accepterede, så din node foretog ikke opkaldet. Der blev ikke sendt, reserveret eller betalt noget. Tjek prisen, og ring igen.'],
+      ['call_offer_hold_above_consent', 'Your node would hold more for this call’s minutes than you agreed to, so it did not place the call. Nothing was sent, held or paid.',
+        'Din node ville reservere mere til opkaldets minutter, end du accepterede, så den foretog ikke opkaldet. Der blev ikke sendt, reserveret eller betalt noget.'],
+    ] as const;
+    try {
+      for (const [code, en, da] of cases) {
+        expect(provenUnpaid(code)).toBe(true);
+        for (const [lang, words] of [['en', en], ['da', da]] as const) {
+          setLanguagePref(lang);
+          const hold = vi.fn();
+          const pay = vi.fn();
+          const e = engine({ status: vi.fn(async () => ok(null)), hold, pay }, async () => fail(code, 'host words'));
+          await e.engine.place(A, 'audio', QUOTE);
+          expect(e.signals.map((s) => s.kind)).toEqual([400]);
+          expect(e.last()).toMatchObject({ phase: 'ended', error: words, paidMsat: 0 });
+          expect(hold).not.toHaveBeenCalled();
+          expect(pay).not.toHaveBeenCalled();
+        }
+      }
+    } finally { setLanguagePref('en'); }
   });
 
   it('pays block 0 when their answer arrives, and their node’s `unpaid` hangup ends the call', async () => {
@@ -748,7 +790,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await openShell();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     expect($('[data-call-minute-price]')?.textContent).toBe(`Then ${amount(BLOCK)} a minute, plus up to ${amount(FEE)} routing a minute, paid by your node while the call runs.`);
-    expect($('[data-call-reservation-max]')?.textContent).toBe(`When it rings, your node holds the minutes under its own call limit: never more than ${amount(240 * (BLOCK + FEE))} (4 hours, the most a node allows). You see the exact hold and confirm it before the first minute is paid; a larger hold is hung up unpaid.`);
+    expect($('[data-call-reservation-max]')?.textContent).toBe(`When it rings, your node holds the minutes under its own call limit. The call goes out with your limits: this per-minute price and a hold of at most ${amount(240 * (BLOCK + FEE))} (4 hours, the most a node allows). If their live price or the hold would be higher, your node does not ring them and nothing is paid. You see the exact hold and confirm it before the first minute is paid.`);
     expect(host.used('call_signal')).toHaveLength(0);
     $<HTMLButtonElement>('[data-call-confirm-cancel]')!.click();
     expect($('[data-call-confirm-box]')).toBeNull();
@@ -762,7 +804,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await openShell();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     expect($('[data-call-minute-price]')?.textContent).toContain('pr. minut');
-    expect($('[data-call-reservation-max]')?.textContent).toContain('aldrig mere end');
+    expect($('[data-call-reservation-max]')?.textContent).toContain('ringer din node ikke op');
   });
 
   it('once it rings, the card shows the node’s exact hold under its own call limit (max_call_minutes) to confirm', async () => {

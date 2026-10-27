@@ -477,6 +477,8 @@ export type ActionError = {
     // M6 call minutes: the host refused the node's hold (no reservation, above the consent, unconfirmed).
     | 'call_no_consent' | 'call_no_reservation' | 'call_hold_above_consent' | 'call_hold_unconfirmed'
     | 'call_hold_changed' | 'call_minutes_unpayable'
+    // M6 call minutes: the node refused the offer above the agreed per-minute price or hold (genome N3); nothing sent, held or paid.
+    | 'call_offer_price_above_consent' | 'call_offer_hold_above_consent'
     | 'invalid'
     | 'node';
   message: string;

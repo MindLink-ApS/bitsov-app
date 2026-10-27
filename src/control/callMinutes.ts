@@ -167,8 +167,9 @@ export function createCallMinutes(opts: {
   };
   /** The node's clock: has the paid time (plus grace) run out? */
   const lapsed = () => view.paidUntilMs !== null && now() > view.paidUntilMs + BLOCK_GRACE_MS;
+  // The node's latest view replaces the last one: a reservation it no longer reports is not shown as still held.
   const apply = (status: CallStatus) => emit({
-    reservation: status.reservation ?? view.reservation,
+    reservation: status.reservation ?? null,
     paidUntilMs: status.paid_until_ms ?? view.paidUntilMs,
     blocks: Math.max(view.blocks, status.next_block_seq),
   });
@@ -259,7 +260,8 @@ export function createCallMinutes(opts: {
     if (!settling || disposed) return;
     if (r.ok) {
       const status = r.value;
-      if (!status) { settling = false; emit({ settled: true, final: true }); return; }
+      // The node no longer lists the call: its last reservation snapshot is retired, never shown as still held.
+      if (!status) { settling = false; emit({ reservation: null, settled: true, final: true }); return; }
       apply(status);
       if (!status.reservation || status.reservation.closed) { settling = false; emit({ settled: true, final: true }); return; }
     }

@@ -18,5 +18,6 @@ const PROVEN_UNPAID = new Set([
   // M6 call minutes: refused by the host before paying, or by the node under its grant / not dispatched.
   'call_block_not_due', 'call_reservation_closed', 'call_price_changed', 'call_liquidity_insufficient', 'call_liquidity_unavailable',
   'call_no_consent', 'call_no_reservation', 'call_hold_above_consent', 'call_hold_unconfirmed', 'call_hold_changed', 'call_minutes_unpayable',
+  'call_offer_price_above_consent', 'call_offer_hold_above_consent',
 ]);
 export const provenUnpaid = (code: string) => PROVEN_UNPAID.has(code);

@@ -260,12 +260,19 @@ pub fn not_dispatched_message(body: &str) -> String {
 }
 
 /// Genome M6 N3: a call's spend reservation refused before anything was
-/// dispatched (`not_dispatched` with a call `reason`), in plain words.
+/// dispatched (`not_dispatched` with a call `reason`), in plain words. The
+/// consent refusals come from the ceilings an offer carries (`max_block_msat`,
+/// `max_hold_msat`): the node checked them before it held, paid or sent
+/// anything, so the offer was not sent and nothing is held for it.
 pub fn call_not_dispatched(body: &str) -> Option<ActionError> {
     let v = serde_json::from_str::<serde_json::Value>(body).ok()?;
     match v["reason"].as_str()? {
         "call_liquidity_unavailable" => Some(ActionError::new("call_liquidity_unavailable",
             "Your node could not check whether its channel can hold this call's reservation. Nothing was paid. Try again shortly.")),
+        "call_price_above_consent" => Some(ActionError::new("call_offer_price_above_consent",
+            "Their node now asks more per minute than you agreed to, so your node did not place the call. Nothing was sent, held or paid. Check the price and call again.")),
+        "call_hold_above_consent" => Some(ActionError::new("call_offer_hold_above_consent",
+            "Your node would hold more for this call's minutes than you agreed to, so it did not place the call. Nothing was sent, held or paid.")),
         _ => None,
     }
 }
@@ -2046,6 +2053,13 @@ mod tests {
         assert_eq!(e.code, "call_liquidity_unavailable");
         assert!(e.message.contains("Nothing was paid"));
         assert!(call_not_dispatched(r#"{"error":"x","code":"not_dispatched","reason":"room_unknown"}"#).is_none());
+        // Genome N3 consent ceilings on the offer: named, and nothing was sent, held or paid.
+        for (reason, code) in [("call_price_above_consent", "call_offer_price_above_consent"), ("call_hold_above_consent", "call_offer_hold_above_consent")] {
+            let e = call_not_dispatched(&json!({"error": "developer detail", "code": "not_dispatched", "reason": reason}).to_string()).unwrap();
+            assert_eq!(e.code, code);
+            assert!(e.message.contains("you agreed to") && e.message.contains("Nothing was sent, held or paid"), "{}", e.message);
+            assert!(!e.message.contains("developer detail"), "the node's developer text is not shown");
+        }
         assert!(call_not_dispatched("broken").is_none());
     }
 

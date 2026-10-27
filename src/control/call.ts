@@ -227,6 +227,9 @@ export const NOT_PAID = 'not_paid';
  * the grant, the channel or the price, and says nothing was paid.
  */
 export function callRefusal(error: ActionError): string {
+  // The node checked the offer against the minutes agreed before Ring (genome N3) and refused it.
+  if (error.code === 'call_offer_price_above_consent') return tr('caMinutesOfferPriceAboveConsent');
+  if (error.code === 'call_offer_hold_above_consent') return tr('caMinutesOfferHoldAboveConsent');
   // The grant refusals name a per-payment limit; for a call it is the reservation that did not fit.
   return ['grant_per_call', 'grant_exhausted', 'grant_recipient'].includes(error.code)
     ? tr('caMinutesGrantRefused', error.message) : error.message;

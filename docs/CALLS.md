@@ -126,24 +126,42 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   the call is open, a second offer while the first is with the node is
   refused (`call_offer_in_flight`), and other terms, or any terms for a call
   that was refused or ended, are refused (`invalid`), so a ceiling can never
-  be widened or rebound. Open calls (offering or admitted, including an offer
-  whose outcome is unresolved) are never evicted: at most 16 are kept and a
-  new call is refused (`call_consents_full`) rather than evict one, after
-  retiring those the node no longer runs. Refused and ended calls stay as
-  tombstones; when the table (256) is full only the oldest tombstone goes.
+  be widened or rebound. Payment authority and the node's side of the call
+  are kept apart: a refusal, the app's hangup or a failed offer ends the
+  call's payments at once, but only the node's own call status
+  (`GET /calls?peer=`: the call no longer listed, its hold closed, or no hold
+  and the call ended) shows that it is closed. Until then the call is pinned,
+  whatever its state (open, refused or ended, including a refused call whose
+  hangup failed or is not finished): never evicted, and counted against the
+  limit of 16 per node identity. A new call is refused (`call_consents_full`) rather than evict
+  one, after re-reading the node for every pinned call. "No longer listed"
+  counts only once nothing of the call can still be on its way to the node
+  (its offer was accepted, or no payment is pending at the host), and never
+  while its offer is in flight. When the table (256) is full only the oldest
+  call its node closed goes; a refusal stays the answer for as long as it is
+  kept, and a call id evicted later can only pay again through a new offer
+  that the node accepts within new limits.
 - **Admission is bound to the consent.** The node makes the hold when it
-  admits the offer, at the callee's live per-minute price; its API takes no
-  per-minute ceiling for it. The host binds what the node does take: the
-  offer's routing ceiling, which the node applies to every block of the hold,
-  is at most the agreed allowance per minute. Just before the offer it reads
-  the callee's advert again; a per-minute price above the agreed one (or
-  none) sends nothing (`call_price_changed`). As soon as the offer returns it
-  checks the hold. Until a check passes no minute can be paid; a hold above
-  the consent (say, a live price that rose after the quote) is refused for
-  good before the hangup is sent, so a minute raced against it, a later
-  confirmation or a retry never pays it, and the node releases the hold on
-  the hangup. A node-side ceiling on the reservation itself (so such a hold
-  is never made) needs the node to accept the consent with the offer.
+  admits the offer, at the callee's live per-minute price. The offer carries
+  the consent's ceilings (genome N3, BitSov-bitsov #460): `max_block_msat`
+  (the agreed per-minute price) and `max_hold_msat` (the agreed most held).
+  The node checks its live price and its computed hold against them before
+  it reserves, pays or sends anything, and refuses with `not_dispatched`
+  (`call_price_above_consent`, `call_hold_above_consent`), which the host
+  names `call_offer_price_above_consent` / `call_offer_hold_above_consent`:
+  the call ends with a plain reason in Danish and English, nothing sent,
+  held or paid. The offer's routing ceiling, which the node applies to every
+  block of the hold, is at most the agreed allowance per minute. Just before
+  the offer the host reads the callee's advert again; a per-minute price
+  above the agreed one (or none) sends nothing (`call_price_changed`). The
+  host keeps its own checks as defence in depth: no hold listed under the
+  call id is checked or admitted before the node accepted this very offer
+  (`call_hold_unconfirmed` until then), and as soon as the offer returns the
+  host checks the hold. Until a check passes no minute can be paid; a hold
+  above the consent is refused for good before the hangup is sent, so a
+  minute raced against it, a later confirmation or a retry never pays it,
+  and the node releases the hold when it closes the call. An offer that did
+  not go through ends its consent for good.
 - **The node's own limit, confirmed.** The node's `max_call_minutes` is not
   visible before the offer (it is on the reservation only), so once the
   offer is out the card reads it through `call_hold(peer, call_id)` and shows
@@ -215,12 +233,15 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   `a2_an_advert_above_the_consent_sends_no_offer`,
   `a2_the_offer_binds_the_agreed_routing_allowance_and_admits_a_hold_within_it`,
   `a2_a_minute_raced_against_the_offers_admission_is_never_paid`,
-  `a2_a_failed_offer_keeps_its_terms_and_cannot_be_rebound_wider`,
-  `a2_consents_are_write_once_and_eviction_never_touches_an_open_call`;
+  `a2_a_failed_offer_is_final_and_cannot_be_rebound_wider`,
+  `a2_the_node_refuses_an_offer_above_the_consent_and_nothing_is_held_or_paid`,
+  `a2_a_refused_call_whose_hold_is_still_open_stays_refused_under_table_pressure`,
+  `a2_consents_are_write_once_and_only_a_call_its_node_closed_is_evicted`;
   `control::tests::a_consent_holds_only_what_the_quote_showed_and_covers_only_holds_within_it`,
   `control::tests::a_minute_costs_the_callees_advertised_block_price_and_the_reservation_is_bounded`,
   `call_status_reads_the_node_reservation_fields_verbatim`,
   `act::tests::a_call_block_body_is_the_minimal_genome_payload`,
+  `act::tests::a_reservation_the_node_could_not_check_is_named_not_generic`,
   `grant::tests::call_reservation_refusals_are_named`. Headless: two-device
   acceptance against nodes with N1-N3 is separate evidence.
 
