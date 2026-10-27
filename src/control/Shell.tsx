@@ -52,7 +52,8 @@ import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
 import { callCost, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { nodeRoutedAudio } from './callFlags';
-import { createNodeRoutedConnection, type MediaSessionEvent } from './nodeRoutedConnection';
+import { createNodeRoutedConnection } from './nodeRoutedConnection';
+import { waitUntilPaid, type MinutesDeps, type MinutesView } from './callMinutes';
 import { hostMediaBridge, unavailableMediaBridge } from './mediaBridge';
 import { createCallAudio } from './callAudio';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
@@ -1398,11 +1399,28 @@ export function ControlCenter(props: Props) {
   // -> peer app through the host-owned media socket; app-to-app WebRTC media
   // is unreachable while the flag is on (its code stays for the lab profile).
   const routedCalls = nodeRoutedAudio();
-  // A2 hook (payment slice): the node media session opened or closed. The
-  // per-call node payment UI attaches here; this slice pays nothing for media.
-  const callMediaSession = (_event: MediaSessionEvent) => {};
+  // M6 A2: the caller pays the call's minutes (one kind-404 block per 60 s,
+  // drawn from the reservation its node made with the offer) from the
+  // callee's answer on; both sides read the node's call status. The host
+  // keeps the minutes agreed before Ring (sent with the offer), checks the
+  // node's hold against them (`call_hold`, hanging up above them) and pays no
+  // minute before the owner confirmed that hold. The node admits the media
+  // socket only once the first minute is paid, so the adapter waits for that
+  // (`admitted`) instead of paying on media open.
+  const callMinutes: MinutesDeps | undefined = routedCalls ? {
+    status: (peer, callId) => act(() => source.callStatus(peer, callId)),
+    hold: (peer, callId, confirmReservedMsat) => act(() => source.callHold(peer, callId, confirmReservedMsat)),
+    pay: async (peer, callId, seq) => {
+      const r = await act(() => source.callBlock(peer, callId, seq));
+      if (!r.ok && (needsApproval(r.error) || r.error.code === 'spend_refused')) setCallApproval(true);
+      void loadBudget();
+      void loadWallet();
+      return r;
+    },
+  } : undefined;
   const calls = createCallEngine({
     routed: routedCalls,
+    minutes: callMinutes,
     audioSession: appPlatform() === 'ios' ? (live) => invoke<void>('call_audio_session', { live }) : undefined,
     closeAdmission: (operationId, peer, callId) => source.closeCallAdmission(operationId, peer, callId),
     authorize: async () => {
@@ -1419,8 +1437,8 @@ export function ControlCenter(props: Props) {
     },
     grant: () => budget()?.node_grant ?? null,
     quote: (peer) => act(() => source.callQuote(peer)),
-    signal: async (peer, kind, plaintext, maxMsat) => {
-      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat));
+    signal: async (peer, kind, plaintext, maxMsat, minutes) => {
+      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes));
       if (!r.ok && (needsApproval(r.error) || r.error.code === 'spend_refused' || /token lacks.*spend|403/i.test(r.error.message))) setCallApproval(true);
       void loadBudget();
       void loadWallet();
@@ -1435,7 +1453,9 @@ export function ControlCenter(props: Props) {
           peer: () => callView().peer,
           bridge: isTauri() ? hostMediaBridge() : unavailableMediaBridge(),
           audio: (stream, transport, onFatal) => createCallAudio({ stream, transport, onError: onFatal }),
-          onSession: callMediaSession,
+          admitted: callMinutes ? (callId, peer, closed) => waitUntilPaid(callMinutes.status, peer, callId, () => Date.now(), closed) : undefined,
+          // A media session that closed for good ends its call, so no further minute is paid.
+          onSession: (event) => { if (event.state === 'closed') calls.mediaClosed(event.callId); },
         })
       : (config) => new RTCPeerConnection(config),
     now: () => Date.now(),
@@ -2454,6 +2474,7 @@ export function ControlCenter(props: Props) {
         closeAgain={() => void calls.closeAgain()}
         endStuck={() => void calls.endStuck()}
         callAgain={(peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); }}
+        confirmMinutes={() => { if (!moneyBlocked()) void calls.confirmMinutes(); }}
       />
       <Show when={!routedCalls}>
       <MeetingPanel
@@ -3438,9 +3459,13 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
     const q = quote();
     return q && callCost(q) !== null ? 2 * callCost(q)! : null;
   };
-  const off = () => props.blocked || cost() === null || props.actions.callActive();
+  // M6: a node-routed call is placed only with the callee's per-minute price to agree to,
+  // and only from a session whose node keeps a reservation for its minutes.
+  const noMinutePrice = () => nodeRoutedAudio() && cost() !== null && ((quote()?.block_msat ?? null) === null || (quote()?.reservation_max_msat ?? null) === null);
+  const noMinutesPaid = () => nodeRoutedAudio() && cost() !== null && !noMinutePrice() && quote()?.minutes_payable !== true;
+  const off = () => props.blocked || cost() === null || props.actions.callActive() || noMinutePrice() || noMinutesPaid();
   const title = () =>
-    why() ?? (quote() && cost() === null ? tr('uiSNodeDoesNotTakeCallsYet', possessive(props.name)) : cost() !== null
+    why() ?? (noMinutePrice() ? tr('caMinutesNoPrice') : noMinutesPaid() ? tr('caMinutesOwnerSession') : quote() && cost() === null ? tr('uiSNodeDoesNotTakeCallsYet', possessive(props.name)) : cost() !== null
       ? tr('uiUpToToRingTheirCallPricePlus', fmtAmount(cost()!), fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat), feeCeiling(quote()!.offer_max_routing_fee_msat), fmtAmount(signalCost(quote()!)), fmtAmount(callCost(quote()!)!), callStunLabel())
       : tr('uiReadingTheirCallPrice'));
   const place = (media: CallMedia) => { const q = quote(); if (q && !off()) props.actions.placeCall(props.peer, media, q); };
@@ -3501,6 +3526,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
               <strong>{callWord(media())} {props.name}?</strong>
               <Show when={cost() !== null}>{' '}<span class="hint">{tr('uiUpTo105')} {fmtAmount(cost()!)}{tr('uiNothingIsPaidUntilYouPressRing')}</span></Show>
             </p>
+            <Show when={nodeRoutedAudio() && quote()?.block_msat != null ? quote() : null}>{(q) => <MinutesConsent quote={q()} />}</Show>
             <p class="hint" data-call-stun-source>{callStunLabel()}</p>
             <div class="call-confirm-actions">
               <button type="button" class="soft" data-call-confirm-cancel onClick={() => disarm()}>{tr('uiCancel')}</button>
@@ -3518,7 +3544,77 @@ const CALL_TITLE = CALL_STATE_WORD;
 const END_REASON: Record<string, string> = {
   get hangup() { return tr('callHungUp'); }, get declined() { return tr('callDeclined'); },
   get busy() { return tr('callBusy'); }, get timeout() { return tr('callNoAnswer'); }, get failed() { return tr('callFailed'); },
+  get unpaid() { return tr('caCallEndedUnpaid'); },
 };
+
+/**
+ * M6 consent before Ring: the callee's per-minute price and the most any node
+ * may hold (240 minutes). The caller's node's own limit (`max_call_minutes`)
+ * shows on its reservation once it rings, for the owner to confirm.
+ */
+function MinutesConsent(props: { quote: CallQuote }) {
+  return (
+    <>
+      <p class="hint" data-call-minute-price>{tr('uiCallMinutePrice', fmtAmount(props.quote.block_msat!), fmtAmount(props.quote.block_max_routing_fee_msat ?? 0))}</p>
+      <Show when={props.quote.reservation_max_msat != null}>
+        <p class="hint" data-call-reservation-max>{tr('uiCallReservationMax', fmtAmount(props.quote.reservation_max_msat!))}</p>
+      </Show>
+    </>
+  );
+}
+
+/**
+ * M6: the running cost of an outgoing node-routed call, and its summary once
+ * it ended. Every amount is the node's (its reservation on the call status);
+ * a node without a reservation is described by its block receipts, "up to".
+ */
+function CallMinutesLine(props: { minutes: MinutesView; ended: boolean; confirm?: () => void }) {
+  const m = () => props.minutes;
+  const hold = () => m().reservation;
+  return (
+    <Switch>
+      {/* The node's exact hold, under its own call limit: no minute is paid before the owner confirms it. */}
+      <Match when={!props.ended && !m().confirmed && !m().stop && hold() && !hold()!.closed ? hold() : null}>
+        {(h) => (
+          <div data-call-minutes="confirm">
+            <p class="hint" data-call-hold>{tr('uiMinutesHold', fmtAmount(h().reserved_msat), String(h().max_call_minutes), fmtAmount(h().per_block_msat), fmtAmount(h().per_block_fee_msat))}</p>
+            <Show when={props.confirm}>
+              <button type="button" class="primary money" data-call-minutes-confirm disabled={m().confirming} onClick={() => props.confirm?.()}>{tr('uiMinutesConfirmHold')}</button>
+            </Show>
+            <Show when={m().holdError}><p class="hint" role="status" data-call-hold-error>{m().holdError}</p></Show>
+          </div>
+        )}
+      </Match>
+      <Match when={props.ended && hold()}>
+        {(h) => (
+          <Show when={h().closed} fallback={<p class="hint" data-call-minutes="held">{tr('uiMinutesSummaryHeld', fmtAmount(h().spent_msat), fmtAmount(h().remaining_msat))}</p>}>
+            <p class="hint" data-call-minutes="released">{tr('uiMinutesSummaryReleased', fmtAmount(h().spent_msat), fmtAmount(h().released_msat))}</p>
+          </Show>
+        )}
+      </Match>
+      <Match when={props.ended && m().receiptsMsat > 0}>
+        <p class="hint" data-call-minutes="receipts">{tr('uiMinutesSummaryNoReservation', fmtAmount(m().receiptsMsat))}</p>
+      </Match>
+      <Match when={props.ended}>{null}</Match>
+      <Match when={hold()}>
+        {(h) => (
+          <p class="hint" data-call-minutes="running">
+            {m().blocks > 0 || h().spent_msat > 0
+              ? tr('uiMinutesRunning', fmtAmount(h().per_block_msat), fmtAmount(h().per_block_fee_msat), fmtAmount(h().spent_msat), fmtAmount(h().remaining_msat))
+              : tr('uiMinutesReserved', fmtAmount(h().reserved_msat))}
+            <Show when={m().paying}>{' '}{tr('uiMinutesPaying')}</Show>
+          </p>
+        )}
+      </Match>
+      <Match when={m().receiptsMsat > 0}>
+        <p class="hint" data-call-minutes="running">{tr('uiMinutesNoReservation', fmtAmount(m().agreedBlockMsat), fmtAmount(m().receiptsMsat))}</p>
+      </Match>
+      <Match when={m().reservationMaxMsat !== null}>
+        <p class="hint" data-call-minutes="reserving">{tr('uiMinutesReserving', fmtAmount(m().reservationMaxMsat!))}</p>
+      </Match>
+    </Switch>
+  );
+}
 
 /** The call card: incoming (accept/decline with price), ringing, live (mute, camera, duration, hang up), ended. */
 function CallPanel(props: {
@@ -3546,6 +3642,8 @@ function CallPanel(props: {
   /** H2: end the earlier call the host still holds open to this contact. */
   endStuck: () => void;
   callAgain: (peer: string, media: CallMedia, quote: CallQuote) => void;
+  /** M6 A2: confirm the node's hold for this outgoing call before its first minute is paid. */
+  confirmMinutes?: () => void;
   /** Opens Settings → General, where the STUN server is chosen. */
   openCallSettings?: () => void;
 }) {
@@ -3560,7 +3658,9 @@ function CallPanel(props: {
     if (!peer) return;
     const q = await props.quote(peer);
     if (props.view.callId !== call || props.view.phase !== 'ended') return;
-    if (q.ok && callCost(q.value) !== null) setAgain(q.value);
+    if (q.ok && callCost(q.value) !== null && props.routed && ((q.value.block_msat ?? null) === null || (q.value.reservation_max_msat ?? null) === null)) setAgainError(tr('caMinutesNoPrice'));
+    else if (q.ok && callCost(q.value) !== null && props.routed && q.value.minutes_payable !== true) setAgainError(tr('caMinutesOwnerSession'));
+    else if (q.ok && callCost(q.value) !== null) setAgain(q.value);
     else setAgainError(q.ok ? tr('uiTheirNodeDoesNotTakeCallsYet') : q.error.message);
   };
   let panel: HTMLElement | undefined;
@@ -3681,6 +3781,10 @@ function CallPanel(props: {
           {/* Only a recovery that could not start is framed as one (the call still waits); any other error (a camera, say) as it is. */}
           <p class="hint" data-call-error>{v().recoveryError === RECOVERY_CLOSING ? tr('caRecoveryClosing') : v().phase === 'reconnecting' && v().recoveryError !== null ? tr('uiRecoveryCouldNotStartStillWaitingForThe', v().recoveryError ?? '') : v().error}</p>
         </Show>
+        {/* M6: the call's paid minutes, from the node's own figures; after the call, what was paid and released. */}
+        <Show when={props.routed && v().outgoing && v().minutes ? v().minutes : null}>
+          {(m) => <CallMinutesLine minutes={m()} ended={v().phase === 'ended'} confirm={props.confirmMinutes} />}
+        </Show>
         {props.payment}
         <div class="call-actions">
           <Switch>
@@ -3697,7 +3801,10 @@ function CallPanel(props: {
               </Show>
               <Show when={v().outgoing && v().close?.status === 'closed' && !v().stuck && v().pendingCount === 0 && v().unknownCount === 0}>
                 <Show when={again()} fallback={<button type="button" class="soft" data-call-again disabled={props.blocked} onClick={() => void offerAgain()}>{tr('uiCallAgain')}</button>}>
-                  {(q) => <button type="button" class="primary money" data-call-again-confirm disabled={props.blocked} onClick={() => props.callAgain(v().peer!, v().media, q())}>{tr('uiRingUpTo')} {fmtAmount(2 * callCost(q())!)}</button>}
+                  {(q) => <>
+                    <Show when={props.routed && q().block_msat != null}><MinutesConsent quote={q()} /></Show>
+                    <button type="button" class="primary money" data-call-again-confirm disabled={props.blocked} onClick={() => props.callAgain(v().peer!, v().media, q())}>{tr('uiRingUpTo')} {fmtAmount(2 * callCost(q())!)}</button>
+                  </>}
                 </Show>
                 <Show when={againError()}><p class="hint" role="status">{againError()}</p></Show>
               </Show>

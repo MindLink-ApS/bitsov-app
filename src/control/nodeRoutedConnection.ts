@@ -11,7 +11,10 @@
  * open AND the audio graph is ready; an audio graph that cannot be built,
  * or a fatal audio error later in the call, closes the link and ends the
  * call. Signalling (kinds 400-403, paid through
- * the node) is untouched.
+ * the node) is untouched. M6 A2: the node admits the media socket only once
+ * the call's first minute (block 0) is paid, so with `admitted` set the
+ * socket opens only after the node reports that; a call never paid in time
+ * ends with `endDetail` `not_paid`.
  *
  * Nothing here contacts a STUN or TURN server, gathers candidates, or opens
  * a direct path to the peer app: the connection state follows the node link.
@@ -53,11 +56,19 @@ export type NodeRoutedDeps = {
   /** Builds the audio engine; it calls `onFatal` when it can no longer carry audio. */
   audio: (stream: MediaStream, transport: MediaTransport, onFatal: () => void) => CallAudio;
   /**
-   * A2 hook (payment slice): the node media session for `callId` opened or
-   * closed. Per-call or per-minute node payment attaches here; nothing is
-   * paid by this slice.
+   * The node media session for `callId` opened, or closed for good (fatal
+   * audio, the node ended the link, the reconnect grace ran out, or the call
+   * closed), once each. Paying does not start on `open`: the node admits the
+   * session only after the first minute is paid, so paying starts at the
+   * answer. On `closed` the shell ends the call, which stops its minutes.
    */
   onSession?: (event: MediaSessionEvent) => void;
+  /**
+   * M6 A2: resolves true once the node reports the call live and its first
+   * minute paid (the socket would be refused before that), false if the call
+   * ended or the window ran out. `closed` tells the wait to stop early.
+   */
+  admitted?: (callId: string, peer: string, closed: () => boolean) => Promise<boolean>;
   now?: () => number;
   linkGraceMs?: number;
 };
@@ -87,12 +98,16 @@ export class NodeRoutedConnection {
   onconnectionstatechange: Handler = null;
   oniceconnectionstatechange: Handler = null;
   onicecandidate: Handler = null;
+  /** Why the node link ended for good, when the engine needs to say so (`not_paid`). */
+  endDetail: string | null = null;
 
   private stream: MediaStream | null = null;
   private audio: CallAudio | null = null;
   private opened = false;
   private closed = false;
   private wasOpen = false;
+  /** `onSession` closed was emitted for this session (exactly once). */
+  private sessionEnded = false;
   /** The node link is up (the host said `open`); `connected` also needs `audioReady`. */
   private linkOpen = false;
   private audioReady = false;
@@ -153,8 +168,7 @@ export class NodeRoutedConnection {
     void audio?.close();
     if (this.opened) {
       void this.deps.bridge.close();
-      const callId = this.deps.callId();
-      if (this.wasOpen && callId) this.deps.onSession?.({ callId, state: 'closed', at: this.now() });
+      this.endSession();
     }
     this.connectionState = 'closed';
     this.iceConnectionState = 'closed';
@@ -185,8 +199,21 @@ export class NodeRoutedConnection {
       // No audio graph (no AudioContext, worklet refused): a silent "live" call is worse than an ended one.
       () => { if (this.audio === audio) this.audioFailed(); },
     );
-    this.deps.bridge.open(callId, peer, (frame) => { if (audio && this.audio === audio) audio.feed(frame); }, (link) => this.onLink(link))
+    const open = () => this.deps.bridge.open(callId, peer, (frame) => { if (audio && this.audio === audio) audio.feed(frame); }, (link) => this.onLink(link))
       .catch(() => this.onLink({ link: 'ended', detail: 'media_link_refused' }));
+    const admitted = this.deps.admitted;
+    if (!admitted) { void open(); return; }
+    // Opening before the first minute is paid would be refused and end the call.
+    admitted(callId, peer, () => this.closed || this.audio !== audio).then((paid) => {
+      if (this.closed || this.audio !== audio) return;
+      if (paid) { void open(); return; }
+      this.endDetail = 'not_paid';
+      this.audioFailed();
+    }, () => {
+      if (this.closed || this.audio !== audio) return;
+      this.endDetail = 'not_paid';
+      this.audioFailed();
+    });
   }
 
   /** Live only with both halves: the node link open and the audio graph ready. */
@@ -202,6 +229,18 @@ export class NodeRoutedConnection {
     this.setState('connected');
   }
 
+  /**
+   * The media session that was open is over for good: tell the shell once,
+   * so the call's paid minutes stop (A2) even if the engine never acts on the
+   * `closed` state. Nothing if it never opened.
+   */
+  private endSession() {
+    if (!this.wasOpen || this.sessionEnded) return;
+    this.sessionEnded = true;
+    const callId = this.deps.callId();
+    if (callId) this.deps.onSession?.({ callId, state: 'closed', at: this.now() });
+  }
+
   /** The audio engine could not start, or broke mid-call: release it, close the socket, end the call. */
   private audioFailed() {
     if (this.closed) return;
@@ -209,9 +248,11 @@ export class NodeRoutedConnection {
     this.audio = null;
     // No way back to `connected`: a late or reconnected link finds no audio.
     this.audioReady = false;
+    this.linkOpen = false;
     void audio?.close();
     void this.deps.bridge.close();
     this.setState('closed');
+    this.endSession();
   }
 
   private onLink(link: MediaLink) {
@@ -228,12 +269,13 @@ export class NodeRoutedConnection {
         this.linkOpen = false;
         // The host reconnects on its own; the call stays live meanwhile.
         if (this.wasOpen && this.graceTimer === undefined) {
-          this.graceTimer = setTimeout(() => { this.graceTimer = undefined; this.setState('closed'); }, this.deps.linkGraceMs ?? LINK_GRACE_MS);
+          this.graceTimer = setTimeout(() => { this.graceTimer = undefined; this.setState('closed'); this.endSession(); }, this.deps.linkGraceMs ?? LINK_GRACE_MS);
         }
         break;
       case 'ended':
         // The node refused or dropped the media session for good.
         this.setState('closed');
+        this.endSession();
         break;
       case 'connecting':
         break;

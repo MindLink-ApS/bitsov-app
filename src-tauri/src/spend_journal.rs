@@ -340,7 +340,7 @@ impl Journal {
         };
         if let Some(id) = &pending.operation_id {
             let signal_kind = body["kind"].as_u64().unwrap_or(0);
-            let payload = if (400..=403).contains(&signal_kind) {
+            let payload = if (400..=404).contains(&signal_kind) {
                 body["plaintext"].as_str().and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
             } else { None };
             // Persist only protocol identifiers, never arbitrary caller-supplied strings.
@@ -353,6 +353,7 @@ impl Journal {
             let kind = match signal_kind {
                 400 if recovery.is_some() => "call_recovery",
                 400 => "call_offer", 401 => "call_answer", 402 => "call_ice", 403 => "call_hangup",
+                404 => "call_block",
                 _ if body["plaintext"].as_str().is_some_and(crate::act::is_room_chat) => "room_leg",
                 _ => "message",
             };

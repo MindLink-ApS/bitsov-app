@@ -10,7 +10,7 @@ const moneyMethods = new Set<keyof Source>([
   'retry', 'send', 'pay', 'keysend', 'fileSend', 'invoiceCreate', 'firstContactQuote', 'firstContactRequest',
   'sponsorOffer', 'sponsorCandidate', 'sponsorOwnerApproval', 'sponsorRequest',
   'inviteCreate', 'inviteRedeem', 'fundStart', 'fundingAddress',
-  'callSignal', 'spendRequest', 'relationApprove', 'budgetApprove', 'budgetResume', 'budgetSet', 'porchRead',
+  'callSignal', 'callBlock', 'callHold', 'spendRequest', 'relationApprove', 'budgetApprove', 'budgetResume', 'budgetSet', 'porchRead',
 ]);
 
 export function isMoneyNotReady(error: unknown): boolean {
