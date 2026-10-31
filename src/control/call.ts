@@ -128,22 +128,13 @@ export const callCost = (q: CallQuote) => q.call_total_msat;
 export const signalCost = (q: CallQuote) => q.signal_msat + q.signal_max_routing_fee_msat;
 
 /**
- * The per-payment maximum a node stores on a grant when it imposes its
- * messaging clamp rather than a limit the owner chose. Mirrors the node: that
- * exact value sets no extra per-payment limit for calls (each call payment is
- * bounded by the call's own pinned per-block ceiling); any other value is the
- * owner's own limit, which call payments must also respect.
- */
-export const MESSAGING_PER_CALL_MAX_MSAT = 6_000;
-/**
- * The grant's per-payment limit for a call, or null when none binds it. The
- * host reports what the node recorded; an older host is read from the stored
- * value, where only the node's messaging clamp sets no limit.
+ * The grant's limit on each call payment, as the host reports it: the signed
+ * per-payment value, never the 6-sat cap on other payments. Null for a
+ * relation grant, where each envelope's per-act maximum binds instead (the
+ * host checks it). A summary without the field is read from the signed value.
  */
 export const callPerPaymentMax = (grant: NodeGrantSummary): number | null =>
-  grant.call_per_payment_max_msat !== undefined
-    ? grant.call_per_payment_max_msat
-    : grant.per_call_max_msat === MESSAGING_PER_CALL_MAX_MSAT ? null : grant.per_call_max_msat;
+  grant.call_per_payment_max_msat ?? (grant.envelopes ? null : grant.per_call_max_msat);
 /**
  * What an owner-chosen per-payment limit must allow for a call, as the host
  * checks it: the largest single payment among the offer, one hangup and one

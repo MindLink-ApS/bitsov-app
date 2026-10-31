@@ -1640,21 +1640,36 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(text('[data-node-grant]')).toBe('Your finite node grant allows 396 sats of 400 sats more, at most 50 sats per payment, for 30 min.');
   });
 
-  it('says the node messaging clamp bounds message payments only, not calls', async () => {
+  it.each([
+    ['en', 'Your finite node grant allows 500 sats of 500 sats more, at most 6 sats per message payment, 50 sats per call payment, for 30 min.'],
+    ['da', 'pr. beskedbetaling, 50 sats pr. opkaldsbetaling, i'],
+  ] as const)('shows the message cap and the call limit when the message cap is lower (%s)', async (lang, line) => {
     const until = Date.now() + 30 * 60_000;
     stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }], {
-      node_grant: { expires_at_ms: until, budget_msat: 500_000, remaining_msat: 500_000, per_call_max_msat: 6_000 },
+      node_grant: { expires_at_ms: until, budget_msat: 500_000, remaining_msat: 500_000, per_call_max_msat: 50_000, message_per_payment_max_msat: 6_000, call_per_payment_max_msat: 50_000 },
+    }));
+    await openShell(); setLanguagePref(lang);
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    await waitFor(() => expect($('[data-node-grant]')).not.toBeNull());
+    expect(text('[data-node-grant]')).toContain(line);
+    setLanguagePref('en');
+  });
+
+  it('keeps the plain line for a relation grant, whose envelopes bound each contact', async () => {
+    const until = Date.now() + 30 * 60_000;
+    stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }], {
+      node_grant: { expires_at_ms: until, budget_msat: 500_000, remaining_msat: 500_000, per_call_max_msat: 50_000, message_per_payment_max_msat: 6_000, call_per_payment_max_msat: null, envelopes: { [MAYA]: until } },
     }));
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     await waitFor(() => expect($('[data-node-grant]')).not.toBeNull());
-    expect(text('[data-node-grant]')).toBe('Your finite node grant allows 500 sats of 500 sats more, at most 6 sats per message payment (calls pay each minute up to the price you agree to when calling), for 30 min.');
+    expect(text('[data-node-grant]')).toBe('Your finite node grant allows 500 sats of 500 sats more, at most 50 sats per payment, for 30 min.');
   });
 
-  it('keeps the plain per-payment line when the owner chose that limit for calls too', async () => {
+  it('keeps the plain per-payment line when the message cap equals the call limit', async () => {
     const until = Date.now() + 30 * 60_000;
     stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }], {
-      node_grant: { expires_at_ms: until, budget_msat: 500_000, remaining_msat: 500_000, per_call_max_msat: 6_000, call_per_payment_max_msat: 6_000 },
+      node_grant: { expires_at_ms: until, budget_msat: 500_000, remaining_msat: 500_000, per_call_max_msat: 6_000, message_per_payment_max_msat: 6_000, call_per_payment_max_msat: 6_000 },
     }));
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();

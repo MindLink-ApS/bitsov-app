@@ -19,6 +19,7 @@ import type {
   LinkState,
   LiveEvent,
   Message,
+  NodeGrantSummary,
   NodeOverview,
   Peer,
   PriceQuote,
@@ -271,6 +272,14 @@ export type BudgetStand =
  * after a reconnect (its grant does not budget them yet). The door card comes
  * back once, with their budget as it stands.
  */
+/**
+ * The grant's cap on each non-call payment (messages, files, rooms and
+ * payments), as the host reports it: at most 6 sats, whatever per-payment
+ * limit the owner signed. A summary without the field is read from the signed value.
+ */
+export const messagePerPaymentMax = (grant: NodeGrantSummary): number =>
+  grant.message_per_payment_max_msat ?? grant.per_call_max_msat;
+
 export function budgetStand(view: BudgetView | null, target: string, room: boolean, costMsat: number | null, readmit = false): BudgetStand {
   if (!view) return { kind: 'unknown' };
   if (view.paused) return { kind: 'paused' };
@@ -278,7 +287,7 @@ export function budgetStand(view: BudgetView | null, target: string, room: boole
   if (view.autopay.state !== 'open') return { kind: 'off' };
   const cost = costMsat ?? 0;
   const grant = view.node_grant;
-  if (grant && (grant.remaining_msat === 0 || grant.per_call_max_msat === 0 || cost > grant.remaining_msat || cost > grant.per_call_max_msat)) {
+  if (grant && (grant.remaining_msat === 0 || messagePerPaymentMax(grant) === 0 || cost > grant.remaining_msat || cost > messagePerPaymentMax(grant))) {
     return { kind: 'grant_limited' };
   }
   const ceiling = Math.min(view.autopay.ceiling_msat ?? 0, view.ceiling_msat);

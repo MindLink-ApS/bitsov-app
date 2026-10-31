@@ -4970,10 +4970,11 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // still refuses a block outside the reservation or the grant.
     let call_kind = if path == "/messages/compose" { body["kind"].as_u64() } else { None };
     let call_block = call_kind == Some(u64::from(act::KIND_CALL_BLOCK));
-    // A call offer is capped per payment by the call's own consented ceiling
-    // on the node, and by the grant's per-call maximum only when the owner
-    // chose it (not the node's messaging clamp).
-    let cap = if call_kind == Some(u64::from(act::KIND_CALL_OFFER)) { grant::PaymentCap::CallCeiling } else { grant::PaymentCap::Grant };
+    // A call payment (offer, answer, ICE, hangup) is capped by the call's own
+    // consented ceiling on the node and the call per-payment limit, never by
+    // the 6-sat cap that binds every other payment under a grant.
+    let call_signal = call_kind.is_some_and(|k| (u64::from(act::KIND_CALL_OFFER)..=u64::from(act::KIND_CALL_HANGUP)).contains(&k));
+    let cap = if call_signal { grant::PaymentCap::CallCeiling } else { grant::PaymentCap::Grant };
     let node_grant = if call_block { None } else {
         check_node_grant_with_envelope_ids(state, path, &body, max_msat,
             charge.as_ref().and_then(|c| c.envelope_ids), cap).await?
@@ -5871,10 +5872,10 @@ async fn check_node_grant(state: &NodeState, path: &str, body: &serde_json::Valu
     check_node_grant_with_envelope_ids(state, path, body, max_msat, None, grant::PaymentCap::Grant).await
 }
 
-/// `cap` names the per-payment maximum: the grant's own for messages, files,
-/// rooms and payments; for a call offer, the call's pinned per-block ceiling
-/// (enforced by the node) plus the grant's per-call maximum unless that is
-/// only the node's messaging clamp.
+/// `cap` names the per-payment maximum: the 6-sat message cap for messages,
+/// files, rooms and payments; for one call payment, the call's pinned
+/// per-block ceiling (enforced by the node) plus the call per-payment limit;
+/// none for a whole call's summed payments (`CallTotal`).
 async fn check_node_grant_with_envelope_ids(state: &NodeState, path: &str, body: &serde_json::Value, max_msat: u64, envelope_ids: Option<bool>, cap: grant::PaymentCap) -> Result<Option<NodeGrant>, ActionError> {
     if state.node_grant.lock().unwrap().is_none() {
         return Ok(None);
@@ -7348,16 +7349,17 @@ async fn do_call_signal_bounded(
         // call, not just this offer. money_post still rechecks the paid step.
         let total = quote.call_total_msat.expect("an offer has a call total");
         // The node caps each call payment by the call's pinned per-block
-        // ceiling. A per-call maximum the owner chose binds calls too (the
-        // node's messaging clamp does not): the offer, the hangup and one
-        // agreed minute are separate payments, and each must fit it before
-        // anything is sent. Their sum is checked against the remaining budget.
+        // ceiling and by the call per-payment limit (a relation envelope's
+        // per-act maximum on a relation grant), never by the 6-sat message
+        // cap. The offer, the hangup and one agreed minute are separate
+        // payments, and each must fit it before anything is sent; their sum
+        // is checked against the budgets only.
         let minute = minutes.map_or(0, |m| m.block_msat.saturating_add(m.block_max_routing_fee_msat));
         let hangup = quote.signal_msat.saturating_add(quote.signal_max_routing_fee_msat);
         let per_payment = principal.saturating_add(fee).max(hangup).max(minute);
         check_node_grant_with_envelope_ids(state, "/messages/compose", &body, total, Some(caps.envelope_ids), grant::PaymentCap::CallTotal).await
-            .and_then(|g| match g.as_ref().and_then(|g| g.per_payment_max(grant::PaymentCap::CallCeiling)) {
-                Some(max) if per_payment > max => Err(grant::per_call(max)),
+            .and_then(|g| match g.as_ref().map(|g| g.check_call(per_payment, Some(&target), now_ms())) {
+                Some(Err(error)) => Err(error),
                 _ => Ok(g),
             })
             .map_err(|mut error| {
@@ -16397,7 +16399,7 @@ mod control_act_tests {
     }
 
     #[tokio::test]
-    async fn call_grant_per_call_binds_only_when_the_owner_chose_it() {
+    async fn call_grant_binds_each_call_payment_at_the_signed_limit_not_the_message_cap() {
         let routes = call_routes(Some(10_000));
         let first: Routes = Arc::new(move |m, p, b| {
             if p == "/status" {
@@ -16429,9 +16431,18 @@ mod control_act_tests {
         assert!(error.message.contains("25 sats per payment"), "{}", error.message);
         assert_eq!(composes(&node), 0);
         assert_eq!(budget_now(&node.state).spent_msat, 0);
-        // The node's messaging clamp sets no per-payment limit for a call.
+        // A signed limit of exactly 6 sats is the owner's value: it binds calls.
         let mut grant = g1_grant(3600, 400_000, 400_000);
         grant["per_call_max_msat"] = grant::MESSAGING_PER_CALL_MAX_MSAT.into();
+        *g1.grant.lock().unwrap() = grant;
+        assert_eq!(do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap_err().code, "grant_per_call");
+        assert_eq!(composes(&node), 0);
+        // The 6-sat message cap never binds a call: the node's reported call
+        // limit does.
+        let mut grant = g1_grant(3600, 400_000, 400_000);
+        grant["per_call_max_msat"] = 15_000.into();
+        grant["message_per_payment_max_msat"] = grant::MESSAGING_PER_CALL_MAX_MSAT.into();
+        grant["call_per_payment_max_msat"] = 15_000.into();
         *g1.grant.lock().unwrap() = grant;
         let receipt = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap();
         assert_eq!(receipt.total_msat, 15_000);
@@ -18341,11 +18352,16 @@ mod control_act_tests {
         quote: Arc<Mutex<Option<serde_json::Value>>>,
     }
 
+    /// Most tests here price a message above the 6-sat message cap, so this
+    /// fake node reports a message cap as wide as the budget. The cap itself
+    /// (reported, and the 6-sat fallback for an older node) is covered by
+    /// `g1_what_the_grant_would_refuse_is_refused_before_any_payment`.
     fn g1_grant(expires_in_secs: i64, budget_msat: u64, remaining_msat: u64) -> serde_json::Value {
         let now = now_unix();
         serde_json::json!({"op_id": "ab12", "client_id": "c1", "granted_at": now, "expires_at": now + expires_in_secs,
             "budget_msat": budget_msat, "used_msat": budget_msat - remaining_msat, "remaining_msat": remaining_msat,
-            "per_call_max_msat": budget_msat, "per_recipient_msat": {}, "used_by_recipient": {}})
+            "per_call_max_msat": budget_msat, "message_per_payment_max_msat": budget_msat,
+            "per_recipient_msat": {}, "used_by_recipient": {}})
     }
 
     fn g1_node(scopes: &[&str]) -> (Fake, tempfile::TempDir, G1) {
@@ -20513,9 +20529,18 @@ mod control_act_tests {
         assert_eq!(err.code, "grant_exhausted");
         assert!(err.message.contains("1500 msat left"), "{}", err.message);
         let mut per_call = g1_grant(3600, 400_000, 400_000);
-        per_call["per_call_max_msat"] = 1000.into();
+        per_call["message_per_payment_max_msat"] = 1000.into();
         *g1.grant.lock().unwrap() = per_call;
         assert_eq!(do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap_err().code, "grant_per_call");
+        // An older node reports no message cap: a message is capped at
+        // min(per_call_max_msat, 6 sats), whatever larger limit was signed.
+        let mut older = g1_grant(3600, 400_000, 400_000);
+        older.as_object_mut().unwrap().remove("message_per_payment_max_msat");
+        *g1.grant.lock().unwrap() = older;
+        let err = do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap_err();
+        assert_eq!(err.code, "grant_per_call");
+        assert!(err.message.contains("6 sats"), "{}", err.message);
+        assert_eq!(composes(&node), 0);
         let mut recipient = g1_grant(3600, 400_000, 400_000);
         recipient["per_recipient_msat"] = serde_json::json!({A: 3000});
         recipient["used_by_recipient"] = serde_json::json!({A: 2000});

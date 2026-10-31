@@ -49,7 +49,7 @@ import { custodyBadge, CustodyBadgeView } from './custody';
 import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
-import { callCost, callPerPaymentMax, createCallEngine, MESSAGING_PER_CALL_MAX_MSAT, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { nodeRoutedAudio } from './callFlags';
 import { createNodeRoutedConnection } from './nodeRoutedConnection';
@@ -125,6 +125,7 @@ import {
   type Threads,
   type Unread,
   priceBreakdown,
+  messagePerPaymentMax,
 } from './state';
 import type {
   CallQuote,
@@ -5093,7 +5094,7 @@ function Composer(props: {
     const cost = shown().msat;
     if (props.budgetStale || !g || b?.paused || b?.waiting_for_owner || props.spend?.state === 'pending' ||
         props.actions.noEnvelopeFor()?.toLowerCase() === peer || g.expires_at_ms <= now || cost === null ||
-        g.per_call_max_msat < cost || (g.envelopes && (g.envelopes[peer] ?? 0) <= now)) return null;
+        messagePerPaymentMax(g) < cost || (g.envelopes && (g.envelopes[peer] ?? 0) <= now)) return null;
     let remaining = Math.min(g.remaining_msat, g.recipient_left_msat_by_recipient?.[peer] ?? Infinity);
     if (b.autopay.state === 'open') {
       const used = b.accounted_msat ?? b.spent_msat + b.unsettled_msat;
@@ -5559,7 +5560,7 @@ function Composer(props: {
    */
   const touchCovers = (g: NodeGrantSummary, peer: string, msat: number) => {
     const left = g.recipient_left_msat_by_recipient;
-    return g.per_call_max_msat >= msat && g.remaining_msat >= msat && (!left || !(peer in left) || left[peer] >= msat);
+    return messagePerPaymentMax(g) >= msat && g.remaining_msat >= msat && (!left || !(peer in left) || left[peer] >= msat);
   };
   /**
    * The envelope this Touch ID approval returned is live now, on a fresh read:
@@ -7138,7 +7139,7 @@ function BudgetBar(props: {
           )}
         </Match>
         <Match when={props.stand.kind === 'grant_limited'}>
-          <p class="spend-line" data-node-grant-limit>{tr('uiYourNodeSSpendGrantCannotCoverThis')} {fmtAmount(props.budget.node_grant?.remaining_msat ?? 0)} {tr('uiLeftAndAllowsAtMost')} {fmtAmount(props.budget.node_grant?.per_call_max_msat ?? 0)} {tr('uiPerPaymentAskYourNodeSOwnerFor')}</p>
+          <p class="spend-line" data-node-grant-limit>{tr('uiYourNodeSSpendGrantCannotCoverThis')} {fmtAmount(props.budget.node_grant?.remaining_msat ?? 0)} {tr('uiLeftAndAllowsAtMost')} {fmtAmount(props.budget.node_grant ? messagePerPaymentMax(props.budget.node_grant) : 0)} {tr('uiPerPaymentAskYourNodeSOwnerFor')}</p>
         </Match>
         <Match when={props.stand.kind === 'contact_used' && (props.stand as Extract<BudgetStandT, { kind: 'contact_used' }>)}>
           {(st) => (
@@ -7210,6 +7211,18 @@ function BudgetBar(props: {
 }
 
 /**
+ * An owner grant whose message cap (at most 6 sats) is below its call limit:
+ * both are shown. Null when they are equal, and for a relation grant, whose
+ * envelopes bound each contact (its line is the plain one).
+ */
+function grantSplitCaps(g: NodeGrantSummary): { message: number; call: number } | null {
+  if (g.envelopes) return null;
+  const message = messagePerPaymentMax(g);
+  const call = callPerPaymentMax(g) ?? g.per_call_max_msat;
+  return message < call ? { message, call } : null;
+}
+
+/**
  * The running tally (context panel): what left in the last 24 hours against the
  * daily total, per contact and room, and the one-tap pause for everything.
  */
@@ -7276,7 +7289,14 @@ function BudgetPanel(props: {
               <Show when={b().node_grant}>
                 {(g) => (
                   <span class="hint" data-node-grant>
-                    {tr('caYourFiniteNodeGrantAllows')}{' '}{fmtAmount(g().remaining_msat)}{' '}{tr('uiOf')}{' '}{fmtAmount(g().budget_msat)}{' '}{tr('caMoreAtMost')}{' '}{fmtAmount(g().per_call_max_msat)}{' '}{tr(callPerPaymentMax(g()) === null && g().per_call_max_msat === MESSAGING_PER_CALL_MAX_MSAT ? 'caPerMessagePaymentCallsUseAgreedLimitFor' : 'caPerPaymentFor')}{' '}{timeLeft(g().expires_at_ms, props.now)}.
+                    {tr('caYourFiniteNodeGrantAllows')}{' '}{fmtAmount(g().remaining_msat)}{' '}{tr('uiOf')}{' '}{fmtAmount(g().budget_msat)}{' '}{tr('caMoreAtMost')}{' '}
+                    <Show
+                      when={grantSplitCaps(g())}
+                      fallback={<>{fmtAmount(g().per_call_max_msat)}{' '}{tr('caPerPaymentFor')}</>}
+                    >
+                      {(caps) => <>{fmtAmount(caps().message)}{' '}{tr('caPerMessagePayment')}{' '}{fmtAmount(caps().call)}{' '}{tr('caPerCallPaymentFor')}</>}
+                    </Show>
+                    {' '}{timeLeft(g().expires_at_ms, props.now)}.
                   </span>
                 )}
               </Show>

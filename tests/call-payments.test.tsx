@@ -15,7 +15,7 @@ import { render } from 'solid-js/web';
 import App from '../src/App';
 import { setLanguagePref } from '../src/i18n';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
-import { MESSAGING_PER_CALL_MAX_MSAT, createCallEngine, parseSignal, type CallDeps, type CallView } from '../src/control/call';
+import { createCallEngine, parseSignal, type CallDeps, type CallView } from '../src/control/call';
 import {
   BLOCK_GRACE_MS, ENDED_CONFIRM_MS, MAX_ATTEMPTS, RETRY_MS, STATUS_POLL_MS,
   createCallMinutes, waitUntilPaid, type MinutesDeps, type MinutesStop, type MinutesView,
@@ -413,19 +413,20 @@ describe('the call engine with paid minutes', () => {
     expect(e.last().paidMsat).toBe(1);
   });
 
-  it('an owner-chosen per-payment limit binds one agreed minute; the node messaging clamp does not', async () => {
+  it('the signed per-payment limit binds one agreed minute; the 6-sat message cap does not', async () => {
     const node = fakeNode({ now: () => Date.now() });
-    const grant = (per: number): NodeGrantSummary => ({ expires_at_ms: Date.now() + 3_600_000, budget_msat: 500_000, remaining_msat: 500_000, per_call_max_msat: per });
+    const grant = (per: number): NodeGrantSummary => ({ expires_at_ms: Date.now() + 3_600_000, budget_msat: 500_000, remaining_msat: 500_000, per_call_max_msat: per, message_per_payment_max_msat: Math.min(per, 6_000), call_per_payment_max_msat: per });
     // A 25-sat minute plus its 5-sat allowance: above the owner's 21-sat limit, though the 21-sat admission fits it.
     const dear = { ...QUOTE, block_msat: 25_000, reservation_max_msat: 240 * 30_000 };
     const owner = engine(minutesOf(node, vi.fn()), undefined, grant(21_000));
     await owner.engine.place(A, 'audio', dear);
     expect(owner.signals).toEqual([]);
     expect(owner.last()).toMatchObject({ phase: 'ended', error: expect.stringContaining('This call needs up to 30 sats per payment. Your node grant allows 21 sats per payment.') });
-    const clamp = engine(minutesOf(node, vi.fn()), undefined, grant(MESSAGING_PER_CALL_MAX_MSAT));
-    await clamp.engine.place(A, 'audio', dear);
-    expect(clamp.signals.map((x) => x.kind)).toEqual([400]);
-    clamp.engine.dismiss();
+    // A 30-sat signed limit: messages stay at 6 sats, the 30-sat minute fits.
+    const wide = engine(minutesOf(node, vi.fn()), undefined, grant(30_000));
+    await wide.engine.place(A, 'audio', dear);
+    expect(wide.signals.map((x) => x.kind)).toEqual([400]);
+    wide.engine.dismiss();
   });
 
   it('places no call without the per-minute price the owner agreed to', async () => {
