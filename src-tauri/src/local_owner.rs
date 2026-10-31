@@ -723,7 +723,7 @@ pub fn prepare_launch(
 /// relying on node serde defaults except where the constructor differs. No seed,
 /// marker, database or identity directory is created. Keep in sync with the node
 /// when promoting the gated sidecar pin (see docs/LOCAL_OWNER_CEREMONY.md).
-/// Last reviewed against rc14 (d55a88e); rc19.2 signed-binary drift check is pending.
+/// Last reviewed against rc14 (d55a88e); rc20 signed-binary drift check is pending.
 fn write_bootstrap_config(config: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
     let dir = std::fs::canonicalize(config.parent().ok_or("missing config directory")?)?;
