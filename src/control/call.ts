@@ -127,6 +127,25 @@ export const callCost = (q: CallQuote) => q.call_total_msat;
 /** What one answer/ICE/hangup costs at most, all-in. */
 export const signalCost = (q: CallQuote) => q.signal_msat + q.signal_max_routing_fee_msat;
 
+/**
+ * The per-payment maximum a node stores on a grant when it imposes its
+ * messaging clamp rather than a limit the owner chose. Mirrors the node: that
+ * exact value sets no extra per-payment limit for calls (each call payment is
+ * bounded by the call's own pinned per-block ceiling); any other value is the
+ * owner's own limit, which call payments must also respect.
+ */
+export const MESSAGING_PER_CALL_MAX_MSAT = 6_000;
+/** The grant's per-payment limit for a call, or null when it is only the node's messaging clamp. */
+export const callPerPaymentMax = (grant: NodeGrantSummary): number | null =>
+  grant.per_call_max_msat === MESSAGING_PER_CALL_MAX_MSAT ? null : grant.per_call_max_msat;
+/**
+ * What an owner-chosen per-payment limit must allow for a call: its admission
+ * and one hangup, and one agreed minute (price plus routing allowance), as the
+ * host checks it.
+ */
+export const callPerPaymentNeed = (q: CallQuote, minutes: boolean): number =>
+  Math.max(q.call_total_msat ?? 0, minutes && q.block_msat != null ? q.block_msat + (q.block_max_routing_fee_msat ?? 0) : 0);
+
 export type CallState = 'idle' | 'ringing' | 'connecting' | 'live' | 'reconnecting' | 'ended';
 /** Detailed card phase; consumers can use CallView.state for the shared lifecycle. */
 export type Phase = CallState | 'calling' | 'incoming';
@@ -784,10 +803,15 @@ export function createCallEngine(deps: CallDeps) {
       }
       if (q.offer_msat === null) { reconcileConnection(conn); return; }
       // The node caps each call payment by the call's pinned per-block ceiling,
-      // not the grant's per-call maximum for messages: only the budget is checked here.
+      // and by the grant's per-call maximum only when the owner chose it.
       const grant = deps.grant?.();
       if (grant && q.call_total_msat !== null && q.call_total_msat > grant.remaining_msat) {
         recoveryRefused(conn, tr('caTheRemainingNodeGrantCannotCoverCallRecoveryAsk'));
+        return;
+      }
+      const recoveryLimit = grant ? callPerPaymentMax(grant) : null;
+      if (recoveryLimit !== null && callPerPaymentNeed(q, false) > recoveryLimit) {
+        recoveryRefused(conn, tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(callPerPaymentNeed(q, false)), amount(recoveryLimit)));
         return;
       }
       const id = (deps.newCallId ?? newCallId)();
@@ -963,11 +987,19 @@ export function createCallEngine(deps: CallDeps) {
         return;
       }
       // Bounded by the grant's remaining budget; the node enforces the call's
-      // own per-block ceiling, not the grant's per-call maximum for messages.
+      // own per-block ceiling, and the grant's per-call maximum only when the
+      // owner chose it (never the node's messaging clamp).
       const grant = deps.grant?.();
       if (grant && q.call_total_msat > grant.remaining_msat) {
         set({ ...IDLE, phase: 'ended', peer, error:
           tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat), amount(grant.remaining_msat)) });
+        return;
+      }
+      const perPayment = grant ? callPerPaymentMax(grant) : null;
+      const need = callPerPaymentNeed(q, Boolean(deps.minutes));
+      if (perPayment !== null && need > perPayment) {
+        set({ ...IDLE, phase: 'ended', peer, error:
+          tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(need), amount(perPayment)) });
         return;
       }
       // M6: no node-routed call without the per-minute price and the most held the owner agreed to.
