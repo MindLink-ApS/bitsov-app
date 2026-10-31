@@ -49,7 +49,7 @@ import { custodyBadge, CustodyBadgeView } from './custody';
 import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
-import { callCost, createCallEngine, MESSAGING_PER_CALL_MAX_MSAT, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { callCost, callPerPaymentMax, createCallEngine, MESSAGING_PER_CALL_MAX_MSAT, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { nodeRoutedAudio } from './callFlags';
 import { createNodeRoutedConnection } from './nodeRoutedConnection';
@@ -7276,7 +7276,7 @@ function BudgetPanel(props: {
               <Show when={b().node_grant}>
                 {(g) => (
                   <span class="hint" data-node-grant>
-                    {tr('caYourFiniteNodeGrantAllows')}{' '}{fmtAmount(g().remaining_msat)}{' '}{tr('uiOf')}{' '}{fmtAmount(g().budget_msat)}{' '}{tr('caMoreAtMost')}{' '}{fmtAmount(g().per_call_max_msat)}{' '}{tr(g().per_call_max_msat === MESSAGING_PER_CALL_MAX_MSAT ? 'caPerMessagePaymentCallsUseAgreedLimitFor' : 'caPerPaymentFor')}{' '}{timeLeft(g().expires_at_ms, props.now)}.
+                    {tr('caYourFiniteNodeGrantAllows')}{' '}{fmtAmount(g().remaining_msat)}{' '}{tr('uiOf')}{' '}{fmtAmount(g().budget_msat)}{' '}{tr('caMoreAtMost')}{' '}{fmtAmount(g().per_call_max_msat)}{' '}{tr(callPerPaymentMax(g()) === null && g().per_call_max_msat === MESSAGING_PER_CALL_MAX_MSAT ? 'caPerMessagePaymentCallsUseAgreedLimitFor' : 'caPerPaymentFor')}{' '}{timeLeft(g().expires_at_ms, props.now)}.
                   </span>
                 )}
               </Show>

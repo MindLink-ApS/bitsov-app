@@ -645,6 +645,8 @@ export type NodeGrantSummary = {
   budget_msat: number;
   remaining_msat: number;
   per_call_max_msat: number;
+  /** The per-payment limit that binds a call; null when only the call's pinned per-block ceiling does. Absent on older hosts. */
+  call_per_payment_max_msat?: number | null;
   /** A Touch ID relation grant: each contact with an envelope → when it ends (ms). Absent for a console grant. */
   envelopes?: Record<string, number> | null;
   /** Current node envelope IDs; null without capability support. Null entries are legacy/unknown; absent peers are unknown. Absent on older hosts. */

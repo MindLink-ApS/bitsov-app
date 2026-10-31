@@ -86,6 +86,17 @@ pub struct NodeGrant {
     pub envelope_id_by_recipient: Option<BTreeMap<String, Option<String>>>,
     /// Optional node breaker state, preserved unchanged for the renderer.
     pub breakers: Option<serde_json::Map<String, serde_json::Value>>,
+    /// The per-payment limit the owner set for calls, as the node records it:
+    /// `Some(Some(msat))` an owner limit, `Some(None)` none (each call payment
+    /// is bounded only by the call's pinned per-block ceiling), `None` when an
+    /// older node does not report it.
+    #[serde(default, deserialize_with = "reported")]
+    pub call_per_payment_max_msat: Option<Option<u64>>,
+}
+
+/// A field the node reports, even as null, versus one it omits.
+fn reported<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<u64>>, D::Error> {
+    Option::<u64>::deserialize(d).map(Some)
 }
 
 /// Parse `GET /pair/grant`. Anything but the documented shape is an error: a
@@ -136,13 +147,19 @@ impl NodeGrant {
         self.check_under(PaymentCap::CallCeiling, max_msat, recipient, now_ms)
     }
 
-    /// The per-payment maximum the grant sets under `cap`. `None` for a call
-    /// when the grant carries only the node's messaging clamp.
+    /// The per-payment maximum the grant sets under `cap`. For a call, the
+    /// owner's own limit as the node records it; an older node that does not
+    /// report it is read from the stored value, where only the node's
+    /// messaging clamp sets no limit.
     pub fn per_payment_max(&self, cap: PaymentCap) -> Option<u64> {
         match cap {
             PaymentCap::CallTotal => None,
-            PaymentCap::CallCeiling if self.per_call_max_msat == MESSAGING_PER_CALL_MAX_MSAT => None,
-            PaymentCap::Grant | PaymentCap::CallCeiling => Some(self.per_call_max_msat),
+            PaymentCap::CallCeiling => match self.call_per_payment_max_msat {
+                Some(reported) => reported,
+                None if self.per_call_max_msat == MESSAGING_PER_CALL_MAX_MSAT => None,
+                None => Some(self.per_call_max_msat),
+            },
+            PaymentCap::Grant => Some(self.per_call_max_msat),
         }
     }
 
@@ -209,6 +226,9 @@ pub struct GrantSummary {
     pub budget_msat: u64,
     pub remaining_msat: u64,
     pub per_call_max_msat: u64,
+    /// The per-payment limit that binds a call, or null when each call
+    /// payment is bounded only by the call's pinned per-block ceiling.
+    pub call_per_payment_max_msat: Option<u64>,
     /// A relation grant: each contact with an envelope, and when it ends (ms).
     /// None for an owner console grant, which pays any contact within it.
     pub envelopes: Option<BTreeMap<String, u64>>,
@@ -232,6 +252,7 @@ impl From<&NodeGrant> for GrantSummary {
             budget_msat: g.budget_msat,
             remaining_msat: g.remaining_msat,
             per_call_max_msat: g.per_call_max_msat,
+            call_per_payment_max_msat: g.per_payment_max(PaymentCap::CallCeiling),
             envelopes: g.recipients_only.then(|| {
                 g.recipient_expires_at
                     .iter()
@@ -571,6 +592,19 @@ mod tests {
         };
         assert_eq!(owner.per_payment_max(PaymentCap::CallCeiling), Some(1_000));
         assert_eq!(owner.per_payment_max(PaymentCap::CallTotal), None, "a sum of payments is not one payment");
+        // The node's record wins over the stored value: an owner who chose
+        // exactly the messaging clamp binds calls; one who chose none does not.
+        let chose_six = NodeGrant { per_call_max_msat: MESSAGING_PER_CALL_MAX_MSAT, call_per_payment_max_msat: Some(Some(6_000)), ..owner.clone() };
+        assert_eq!(chose_six.check_call(10_000, Some(A), now).unwrap_err().code, "grant_per_call");
+        assert_eq!(GrantSummary::from(&chose_six).call_per_payment_max_msat, Some(6_000));
+        let chose_none = NodeGrant { per_call_max_msat: 1_000, call_per_payment_max_msat: Some(None), ..owner.clone() };
+        chose_none.check_call(10_000, Some(A), now).unwrap();
+        assert_eq!(chose_none.check(1_001, Some(A), now).unwrap_err().code, "grant_per_call", "messages keep the stored maximum");
+        assert_eq!(GrantSummary::from(&chose_none).call_per_payment_max_msat, None);
+        let parsed = |field: &str| parse(&format!(r#"{{"grant":{{"expires_at":2000,"budget_msat":500000,"used_msat":0,"remaining_msat":500000,"per_call_max_msat":6000{field}}}}}"#)).unwrap().unwrap();
+        assert_eq!(parsed("").call_per_payment_max_msat, None, "an older node omits it");
+        assert_eq!(parsed(r#","call_per_payment_max_msat":null"#).call_per_payment_max_msat, Some(None));
+        assert_eq!(parsed(r#","call_per_payment_max_msat":6000"#).call_per_payment_max_msat, Some(Some(6_000)));
         assert_eq!(owner.check_under(PaymentCap::CallTotal, 21_000, Some(A), now), Ok(()));
         assert_eq!(owner.check_call(10_000, Some(A), now).unwrap_err().code, "grant_per_call");
         assert!(owner.check_call(10_000, Some(A), now).unwrap_err().message.contains("1 sat"));

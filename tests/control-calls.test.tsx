@@ -2447,6 +2447,31 @@ describe('calls in the shell', () => {
     expect(host.used('call_signal')).toHaveLength(0);
   });
 
+  it('follows the node record of the owner call limit over the stored value', async () => {
+    // An owner who chose exactly 6 sats binds calls; one who chose none does not.
+    const refused = stubHost({ budget_status: () => ({ ...openBudget(), node_grant: {
+      expires_at_ms: Date.now() + 3600_000, budget_msat: 500_000,
+      remaining_msat: 500_000, per_call_max_msat: 6_000, call_per_payment_max_msat: 6_000,
+    } }) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toContain('15 sats per payment'));
+    expect(refused.used('call_signal')).toHaveLength(0);
+  });
+
+  it('dials when the node records no owner call limit, whatever the stored maximum', async () => {
+    const host = stubHost({ budget_status: () => ({ ...openBudget(), node_grant: {
+      expires_at_ms: Date.now() + 3600_000, budget_msat: 500_000,
+      remaining_msat: 500_000, per_call_max_msat: 1_000, call_per_payment_max_msat: null,
+    } }) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect(host.used('call_signal')).toHaveLength(1);
+  });
+
   it('checks each call payment alone against an owner-chosen per-payment limit', async () => {
     // A 15-sat limit carries the 15-sat offer and the 6-sat hangup one at a
     // time, though the call needs 21 sats in all from the remaining budget.

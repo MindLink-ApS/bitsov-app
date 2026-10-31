@@ -135,9 +135,15 @@ export const signalCost = (q: CallQuote) => q.signal_msat + q.signal_max_routing
  * owner's own limit, which call payments must also respect.
  */
 export const MESSAGING_PER_CALL_MAX_MSAT = 6_000;
-/** The grant's per-payment limit for a call, or null when it is only the node's messaging clamp. */
+/**
+ * The grant's per-payment limit for a call, or null when none binds it. The
+ * host reports what the node recorded; an older host is read from the stored
+ * value, where only the node's messaging clamp sets no limit.
+ */
 export const callPerPaymentMax = (grant: NodeGrantSummary): number | null =>
-  grant.per_call_max_msat === MESSAGING_PER_CALL_MAX_MSAT ? null : grant.per_call_max_msat;
+  grant.call_per_payment_max_msat !== undefined
+    ? grant.call_per_payment_max_msat
+    : grant.per_call_max_msat === MESSAGING_PER_CALL_MAX_MSAT ? null : grant.per_call_max_msat;
 /**
  * What an owner-chosen per-payment limit must allow for a call, as the host
  * checks it: the largest single payment among the offer, one hangup and one
