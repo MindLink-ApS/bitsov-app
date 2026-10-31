@@ -139,12 +139,17 @@ export const MESSAGING_PER_CALL_MAX_MSAT = 6_000;
 export const callPerPaymentMax = (grant: NodeGrantSummary): number | null =>
   grant.per_call_max_msat === MESSAGING_PER_CALL_MAX_MSAT ? null : grant.per_call_max_msat;
 /**
- * What an owner-chosen per-payment limit must allow for a call: its admission
- * and one hangup, and one agreed minute (price plus routing allowance), as the
- * host checks it.
+ * What an owner-chosen per-payment limit must allow for a call, as the host
+ * checks it: the largest single payment among the offer, one hangup and one
+ * agreed minute (price plus routing allowance). They are separate payments;
+ * their sum is checked against the remaining budget instead.
  */
 export const callPerPaymentNeed = (q: CallQuote, minutes: boolean): number =>
-  Math.max(q.call_total_msat ?? 0, minutes && q.block_msat != null ? q.block_msat + (q.block_max_routing_fee_msat ?? 0) : 0);
+  Math.max(
+    (q.offer_msat ?? 0) + q.offer_max_routing_fee_msat,
+    signalCost(q),
+    minutes && q.block_msat != null ? q.block_msat + (q.block_max_routing_fee_msat ?? 0) : 0,
+  );
 
 export type CallState = 'idle' | 'ringing' | 'connecting' | 'live' | 'reconnecting' | 'ended';
 /** Detailed card phase; consumers can use CallView.state for the shared lifecycle. */

@@ -2428,7 +2428,7 @@ describe('calls in the shell', () => {
     expect(host.used('call_signal')[0].args).toMatchObject({ kind: 400 });
   });
 
-  it.each([1_000, 5_999, 6_001, 20_999])('refuses a call above a per-payment limit the owner chose (%i msat) before media or signalling', async (perCall) => {
+  it.each([1_000, 5_999, 6_001, 14_999])('refuses a call above a per-payment limit the owner chose (%i msat) before media or signalling', async (perCall) => {
     // Only the node's 6-sat messaging clamp is lifted for calls; any other per-call maximum is the owner's.
     const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
     const host = stubHost({ budget_status: () => ({ ...openBudget(), node_grant: {
@@ -2439,11 +2439,26 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     ring('audio');
     await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(/per payment/i));
-    expect(text('[data-call-ended]')).toContain('21 sats per payment');
+    // The largest single payment is the 15-sat offer (the hangup is 6 sats).
+    expect(text('[data-call-ended]')).toContain('15 sats per payment');
     expect(text('[data-call-ended]')).toMatch(/owner.*approve/i);
     expect(capture).not.toHaveBeenCalled();
     expect(FakePc.made).toHaveLength(0);
     expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it('checks each call payment alone against an owner-chosen per-payment limit', async () => {
+    // A 15-sat limit carries the 15-sat offer and the 6-sat hangup one at a
+    // time, though the call needs 21 sats in all from the remaining budget.
+    const host = stubHost({ budget_status: () => ({ ...openBudget(), node_grant: {
+      expires_at_ms: Date.now() + 3600_000, budget_msat: 21_000,
+      remaining_msat: 21_000, per_call_max_msat: 15_000,
+    } }) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect(host.used('call_signal')).toHaveLength(1);
   });
 
   it('dials when the full ceiling equals both grant limits', async () => {

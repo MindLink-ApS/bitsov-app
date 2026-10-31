@@ -7349,11 +7349,13 @@ async fn do_call_signal_bounded(
         let total = quote.call_total_msat.expect("an offer has a call total");
         // The node caps each call payment by the call's pinned per-block
         // ceiling. A per-call maximum the owner chose binds calls too (the
-        // node's messaging clamp does not): the admission and its hangup, and
-        // one agreed minute, must each fit it before anything is sent.
+        // node's messaging clamp does not): the offer, the hangup and one
+        // agreed minute are separate payments, and each must fit it before
+        // anything is sent. Their sum is checked against the remaining budget.
         let minute = minutes.map_or(0, |m| m.block_msat.saturating_add(m.block_max_routing_fee_msat));
-        let per_payment = total.max(minute);
-        check_node_grant_with_envelope_ids(state, "/messages/compose", &body, total, Some(caps.envelope_ids), grant::PaymentCap::CallCeiling).await
+        let hangup = quote.signal_msat.saturating_add(quote.signal_max_routing_fee_msat);
+        let per_payment = principal.saturating_add(fee).max(hangup).max(minute);
+        check_node_grant_with_envelope_ids(state, "/messages/compose", &body, total, Some(caps.envelope_ids), grant::PaymentCap::CallTotal).await
             .and_then(|g| match g.as_ref().and_then(|g| g.per_payment_max(grant::PaymentCap::CallCeiling)) {
                 Some(max) if per_payment > max => Err(grant::per_call(max)),
                 _ => Ok(g),
@@ -16369,21 +16371,25 @@ mod control_act_tests {
         let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(first));
         g1_approved(&node, 500_000).await;
         with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
-        // The 15-sat offer fits, but the 21-sat call does not.
-        for (cap, left, code) in [(20_000, 400_000, "grant_per_call"), (400_000, 20_000, "grant_exhausted")] {
+        // Each payment is checked on its own against an owner-chosen
+        // per-payment limit (the 15-sat offer does not fit 14 sats); the
+        // 21-sat call (offer plus hangup) is checked against what is left.
+        for (cap, left, code, need) in [(14_000, 400_000, "grant_per_call", "15 sats"), (400_000, 20_000, "grant_exhausted", "21 sats")] {
             let mut grant = g1_grant(3600, 400_000, left);
             grant["per_call_max_msat"] = cap.into();
             *g1.grant.lock().unwrap() = grant.clone();
             let error = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap_err();
             assert_eq!(error.code, code);
-            assert!(error.message.contains("21 sats") && error.message.contains("owner") && error.message.contains("approve"), "{}", error.message);
+            assert!(error.message.contains(need) && error.message.contains("owner") && error.message.contains("approve"), "{}", error.message);
             assert_eq!(composes(&node), 0);
             assert_eq!(*g1.grant.lock().unwrap(), grant, "never raise the grant");
             assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
             assert_eq!(budget_now(&node.state).spent_msat, 0);
         }
+        // A 20-sat per-payment limit carries the 15-sat offer and the 6-sat
+        // hangup separately, though together they need 21 sats.
         let mut grant = g1_grant(3600, 400_000, 21_000);
-        grant["per_call_max_msat"] = 21_000.into();
+        grant["per_call_max_msat"] = 20_000.into();
         *g1.grant.lock().unwrap() = grant;
         let receipt = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap();
         assert_eq!(receipt.total_msat, 15_000);

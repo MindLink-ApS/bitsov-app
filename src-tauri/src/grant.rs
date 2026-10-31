@@ -140,6 +140,7 @@ impl NodeGrant {
     /// when the grant carries only the node's messaging clamp.
     pub fn per_payment_max(&self, cap: PaymentCap) -> Option<u64> {
         match cap {
+            PaymentCap::CallTotal => None,
             PaymentCap::CallCeiling if self.per_call_max_msat == MESSAGING_PER_CALL_MAX_MSAT => None,
             PaymentCap::Grant | PaymentCap::CallCeiling => Some(self.per_call_max_msat),
         }
@@ -195,6 +196,10 @@ pub enum PaymentCap {
     /// the grant's per-call maximum when the owner chose it (anything but
     /// `MESSAGING_PER_CALL_MAX_MSAT`).
     CallCeiling,
+    /// A whole call's separate payments summed (offer plus hangup): expiry,
+    /// the total budget and the recipient's budget only. Each payment is
+    /// checked on its own against [`PaymentCap::CallCeiling`] by the caller.
+    CallTotal,
 }
 
 /// What the renderer is told about the node grant. No credentials or authority.
@@ -565,6 +570,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(owner.per_payment_max(PaymentCap::CallCeiling), Some(1_000));
+        assert_eq!(owner.per_payment_max(PaymentCap::CallTotal), None, "a sum of payments is not one payment");
+        assert_eq!(owner.check_under(PaymentCap::CallTotal, 21_000, Some(A), now), Ok(()));
         assert_eq!(owner.check_call(10_000, Some(A), now).unwrap_err().code, "grant_per_call");
         assert!(owner.check_call(10_000, Some(A), now).unwrap_err().message.contains("1 sat"));
         owner.check_call(1_000, Some(A), now).unwrap();
