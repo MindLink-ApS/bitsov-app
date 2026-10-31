@@ -43,8 +43,8 @@ npm run build
 ```
 
 The frontend output is in `dist/`. These commands need no node checkout,
-sidecar binary or GitHub CLI login. While this repository is private, cloning
-it still requires repository access; after publication the same URL is public.
+sidecar binary or GitHub CLI login. This public repository can be cloned
+without authentication.
 
 For a browser preview:
 
@@ -74,7 +74,7 @@ for storage isolation and pairing details.
 
 The default bundled-node package is a separate build path: it requires the
 pinned, signature-verified node sidecar. See [Mac packaging](docs/MAC_PACKAGE.md)
-and [the current node pin](docs/NODE_RC19_2_UPGRADE.md).
+and [the current node pin](scripts/fetch-node-sidecar.sh).
 
 ## Preview builds
 

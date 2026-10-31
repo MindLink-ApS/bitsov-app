@@ -1,9 +1,10 @@
 # CS-2 runbook — first-run fund flow (M1)
 
-**Signed pin:** rc19.2 is published, and all five binary pins come from its
-verified signed `SHA256SUMS`. Fetch and pre-bundle verification enforce those pins.
-Runtime, packaging and hardware acceptance remain separate gates.
-See [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
+**Signed pin:** [the fetch script](../scripts/fetch-node-sidecar.sh) defines the
+release tag, release key and all five binary checksum pins. Fetch and pre-bundle
+verification enforce those pins against signed `SHA256SUMS`. Runtime, packaging
+and hardware acceptance remain separate gates.
+See [the release checklist](RELEASE_CHECKLIST.md).
 
 **Scope (only):** create-or-restore identity → local-trust disclosure → start the tier-`full`
 onboarding for an amount → show the deposit address (text + QR) → poll until the node reports
@@ -12,6 +13,11 @@ no mobile, calls, hosted, or AI.
 
 Builds on CS-1 (`docs/CS1_RUNBOOK.md`): the Rust host already bundles + supervises the node
 sidecar, mints a loopback JWT via `/auth/local`, and reads `/identity`.
+
+The [fetch script](../scripts/fetch-node-sidecar.sh) calls `gh release download`
+for release assets and `gh api` for the release key when it is missing locally.
+It does not check `gh` authentication or fall back to curl; `gh` must be installed
+and able to access the pinned release.
 
 ## The flow
 
@@ -59,7 +65,8 @@ npm run tauri dev
   carries a token, mnemonic, or private key, and the app never asks for the seed
   (`/identity/mnemonic` needs a fresh signed challenge and is not called). The recovery-phrase
   input is write-only: masked, `autocomplete="off"`, cleared the moment it is submitted.
-- **Pinned contract** — BitSov-bitsov `v0.3.0-rc19.2` / `04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`. The `funding-seen` literal lives
+- **Pinned contract** — the BitSov-bitsov release pinned in
+  [the fetch script](../scripts/fetch-node-sidecar.sh). The `funding-seen` literal lives
   in `src-tauri/src/main.rs` only; the renderer reads a derived `funded` boolean.
 
 `scripts/cs2-local-smoke.sh` enforces all of the above statically, and

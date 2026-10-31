@@ -1,6 +1,6 @@
 # Bundled node rc14: upgrade from rc13
 
-Historical release note. The current signed pin is described in [NODE_RC19_2_UPGRADE.md](NODE_RC19_2_UPGRADE.md); runtime and packaging acceptance remain separate gates.
+Historical release note. The current signed pin is described in [the fetch script](../scripts/fetch-node-sidecar.sh); runtime and packaging acceptance remain separate gates.
 
 The app pins `MindLink-ApS/BitSov-bitsov@v0.3.0-rc14`, source commit
 `d55a88e439fd80dae89e263bef8378fd22c9a103`, replacing rc13

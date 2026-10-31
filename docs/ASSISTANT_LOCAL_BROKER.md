@@ -1,23 +1,29 @@
 # Assistant local broker (F2)
 
-**Signed pin:** rc19.2 is published, and all five binary pins come from its
-verified signed `SHA256SUMS`. Fetch and pre-bundle verification enforce those pins.
-Runtime, packaging and hardware acceptance remain separate gates.
-See [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
+**Signed pin:** [the fetch script](../scripts/fetch-node-sidecar.sh) defines the
+release tag, release key and all five binary checksum pins. Fetch and pre-bundle
+verification enforce those pins against signed `SHA256SUMS`. Runtime, packaging
+and hardware acceptance remain separate gates.
+See [the release checklist](RELEASE_CHECKLIST.md).
 
 The sealed assistant window can show the 50 fixture rows read from **your
 local node**, not only from the in-process mock. The host decides which, and
 the window says which it got. Stacked on F1 pairing
 (`docs/ONBOARDING_PAIRING.md`): the broker reads with F1's paired token.
 
-## Status: rc19.2 pin, retained rc7 fixtures
+The [fetch script](../scripts/fetch-node-sidecar.sh) calls `gh release download`
+for release assets and `gh api` for the release key when it is missing locally.
+It does not check `gh` authentication or fall back to curl; `gh` must be installed
+and able to access the pinned release.
 
-The app pins `v0.3.0-rc19.2` (`04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`), which includes pairing and freshness
+## Status: current pin, retained rc7 fixtures
+
+The app uses the release pinned in [the fetch script](../scripts/fetch-node-sidecar.sh), which includes pairing and freshness
 headers. The broker reads only with a paired token. An older rc7 node still
 uses mock rows: its `/auth/local` token never enters the broker. Historical
 rc7 route bodies and fixtures below remain compatibility evidence, not the
 current binary pin. Release-binary runtime checks remain listed in
-[the rc19.2 checklist](NODE_RC19_2_UPGRADE.md).
+[the release checklist](RELEASE_CHECKLIST.md).
 
 ## Live vs mock
 
@@ -274,7 +280,7 @@ choose the backend or cause a read.
   with its cached figure, and `LocalNodeRead` cannot tell. The test server
   carries mock-node's stale flag as a `503` so the fixture's stale rows stay
   `Unavailable`. Genome #78's `BitSov-Data-Stale` / `-As-Of` headers are
-  read (see above) but are available on the rc19.2 pin.
+  read (see above) but are available on the current pin.
 - **Wallet sync vs. the bound.** Balance and channels allow 180 s for the
   80 s default on-chain wallet sync. A node configured with a much slower
   sync will read *Stale* between syncs; the node's own `Stale: 1` (LDK sync
@@ -286,7 +292,7 @@ choose the backend or cause a read.
 
 ## Release acceptance still pending
 
-CI must obtain release access, then fetch and verify rc19.2 and its signed
+CI must obtain release access, then fetch and verify the pinned release and its signed
 checksum assets. Run the paired live-reader and freshness checks
 against that binary; retained rc7 mocks alone do not establish runtime evidence.
 

@@ -2,7 +2,7 @@
 
 Code: `src-tauri/src/ai.rs` (host rules), the `ai_*` commands in `src-tauri/src/main.rs`,
 the `payments` tool in `src-tauri/src/jarvis/broker/`, and `src/control/ai.ts` +
-`src/control/AiTrack.tsx` (track). Bundled node: rc19.2 `04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`; retained rc7 compatibility routes, plus the #78
+`src/control/AiTrack.tsx` (track). Bundled node: [the fetch script’s pinned release](../scripts/fetch-node-sidecar.sh); retained rc7 compatibility routes, plus the #78
 `BitSov-Data-As-Of` / `BitSov-Data-Stale` headers when the node sends them.
 
 This page describes the existing read broker and provider configuration. These

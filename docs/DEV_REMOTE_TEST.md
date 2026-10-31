@@ -81,6 +81,11 @@ The overlay alone sets `bundle.externalBin: []` and replaces
 still requires the pinned, signature-verified sidecar; this profile is an
 explicit development bundle, not a replacement release workflow.
 
+The [fetch script](../scripts/fetch-node-sidecar.sh) calls `gh release download`
+for release assets and `gh api` for the release key when it is missing locally.
+It does not check `gh` authentication or fall back to curl; `gh` must be installed
+and able to access the pinned release.
+
 Run the offline bundle-hook regression suite with:
 
 ```bash

@@ -1,8 +1,8 @@
 # Bundled node rc11: upgrade from rc9
 
-Historical release note. The current signed pin is described in [NODE_RC19_2_UPGRADE.md](NODE_RC19_2_UPGRADE.md); runtime and packaging acceptance remain separate gates.
+Historical release note. The current signed pin is described in [the fetch script](../scripts/fetch-node-sidecar.sh); runtime and packaging acceptance remain separate gates.
 
-Historical rc11 pin (app #174). The current pin and its changes are documented
+Historical rc11 pin (app #174). Later rc14 changes are documented
 in [NODE_RC14_UPGRADE.md](NODE_RC14_UPGRADE.md).
 
 The app pinned `MindLink-ApS/BitSov-bitsov@v0.3.0-rc11`, targeting

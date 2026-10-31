@@ -1,17 +1,23 @@
 # macOS package (ad-hoc signed by default)
 
-**Signed pin:** rc19.2 is published, and all five binary pins come from its
-verified signed `SHA256SUMS`. Fetch and pre-bundle verification enforce those pins.
-Runtime, packaging and hardware acceptance remain separate gates.
-See [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
+**Signed pin:** [the fetch script](../scripts/fetch-node-sidecar.sh) defines the
+release tag, release key and all five binary checksum pins. Fetch and pre-bundle
+verification enforce those pins against signed `SHA256SUMS`. Runtime, packaging
+and hardware acceptance remain separate gates.
+See [the release checklist](RELEASE_CHECKLIST.md).
 
 Internal build of `BitSov.app` for Apple Silicon. By default it has a valid
 ad-hoc signature, no Developer ID identity, and no notarization. It is not published. It is for internal testers who accept a
-Gatekeeper warning. It is not a public download. The protocol pin stays
-`v0.3.0-rc19.2`. Windows packaging is out of scope.
+Gatekeeper warning. It is not a public download. The protocol pin is defined in
+[the fetch script](../scripts/fetch-node-sidecar.sh). Windows packaging is out of scope.
 
 See [the assistant-page packaging policy](#deviation-release-excludes-the-assistant-page)
 for the release bundle's frontend boundary.
+
+The [fetch script](../scripts/fetch-node-sidecar.sh) calls `gh release download`
+for release assets and `gh api` for the release key when it is missing locally.
+It does not check `gh` authentication or fall back to curl; `gh` must be installed
+and able to access the pinned release.
 
 ## Keychain and Touch ID
 
@@ -44,7 +50,7 @@ What the script does:
 
 1. **Sidecar.** Deletes every `src-tauri/bin/konsensus-*`. Then it runs
    `scripts/fetch-node-sidecar.sh` with a throwaway `GNUPGHOME`. That script
-   fetches the pinned rc19.2 release and checks its signature and hash fail-closed.
+   fetches the pinned release and checks its signature and hash fail-closed.
    For local dev, `--use-existing-sidecar` (or
    `BITSOV_USE_EXISTING_SIDECAR=1`) keeps an existing
    `src-tauri/bin/konsensus-aarch64-apple-darwin` and skips the fetch. The
@@ -132,7 +138,7 @@ requires running the package script on macOS.
 Built on macOS 26.6.2 arm64 with Node 22.19.0 using
 `bash scripts/package-mac.sh --dmg --use-existing-sidecar` after the fetch
 script authenticated rc14’s signed checksum manifest. This is historical rc14
-evidence, not rc19.2 acceptance. The unchanged source
+evidence, not acceptance of the pinned release. The unchanged source
 node SHA256 was
 `1b8fdecb87a308aff657a476eb92c5b100496c64076e90a45e3bee0fb2301305`.
 
@@ -261,7 +267,7 @@ gates together and removes the matching checks.
 was 10.13, while the rc7 arm64 sidecar's Mach-O minimum is 11.0 (spike,
 2026-09-14). JSON has no comments, so this note is the record.
 `package-mac.sh` prints the sidecar `minos`. 11.0 is the build floor, not a
-tested support claim. Recheck the rc19.2 sidecar minos in CI using its published signed assets; the historical rc7 inspection is not rc19.2 binary evidence. No macOS version has runtime evidence yet.
+tested support claim. Recheck the pinned sidecar minos in CI using its published signed assets; the historical rc7 inspection is not evidence for the pinned binary. No macOS version has runtime evidence yet.
 
 ## CI artifact
 
@@ -337,7 +343,7 @@ the optional Developer ID/notarization hooks.
 | Gatekeeper on a clean machine | `spctl -a -vv` and a first launch on a machine that has never seen the app, with no existing node or wallet |
 | Publishing | No release, tag, website download, or release metadata until a signed and notarized build exists. `/bitsov/app` stays a waitlist. |
 | PR #13 | `factory/mac-package-spike` stays open. A human decides whether to close it. |
-| Pin | `v0.3.0-rc19.2` (`04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`); fetch and verify signed checksums before packaging. |
+| Pin | the pinned release in [the fetch script](../scripts/fetch-node-sidecar.sh); fetch and verify signed checksums before packaging. |
 
 Set `BITSOV_MAC_PROVISION_PROFILE` to the Developer ID provisioning profile
 authorized for the app and its private Keychain group. Packaging validates its
