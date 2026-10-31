@@ -1,12 +1,18 @@
 # CS-1 runbook — desktop app shell (Linux + macOS since `v0.3.0-rc5`; B10 landed)
 
-**Signed pin:** rc19.2 is published, and all five binary pins come from its
-verified signed `SHA256SUMS`. Fetch and pre-bundle verification enforce those pins.
-Runtime, packaging and hardware acceptance remain separate gates.
-See [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
+**Signed pin:** [the fetch script](../scripts/fetch-node-sidecar.sh) defines the
+release tag, release key and all five binary checksum pins. Fetch and pre-bundle
+verification enforce those pins against signed `SHA256SUMS`. Runtime, packaging
+and hardware acceptance remain separate gates.
+See [the release checklist](RELEASE_CHECKLIST.md).
 
 **Scope (only):** app shell → bundle/spawn the node → loopback auth (`/auth/local`) →
 identity screen → authority verdict. No funding, rooms, messaging, mobile, calls, hosted, AI.
+
+The [fetch script](../scripts/fetch-node-sidecar.sh) calls `gh release download`
+for release assets and `gh api` for the release key when it is missing locally.
+It does not check `gh` authentication or fall back to curl; `gh` must be installed
+and able to access the pinned release.
 
 ## Prerequisites
 - **Linux** (x86_64/aarch64) or **macOS** (arm64/x86_64) for this smoke.
@@ -29,15 +35,16 @@ both lockfiles (`package-lock.json`, `src-tauri/Cargo.lock`) are committed.
 ## What it does
 1. Rust host runs `konsensus init` on first run, then `konsensus start --config …` as a
    **supervised sidecar** (killed on exit; init exit status + stderr are checked).
-2. Polls health, pairs with rc19.2, then reads identity. Only a 404 on pair/request
-   selects the retained rc7 auth/local fallback. The smoke uses rc19.2 read-scoped
+2. Polls health, pairs with the pinned node, then reads identity. Only a 404 on pair/request
+   selects the retained rc7 auth/local fallback. The smoke uses read-scoped
    auth/local directly; it is not a pairing or owner-device test.
 3. SolidJS UI reflects state; it never talks to the node directly and holds no shell/kill authority.
 
 ## Boundary (do not break)
 Node = bundled binary, no `konsensus-*` crate dep (G1). Control plane loopback-only (G2).
 Shell capability is scoped to the `konsensus` sidecar only; CSP is set (not null). Node CLI +
-API paths pinned to BitSov-bitsov `v0.3.0-rc19.2 / 04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`. `scripts/authority-check.sh` checks the app-source boundary;
+API paths follow the BitSov-bitsov release pinned in
+[the fetch script](../scripts/fetch-node-sidecar.sh). `scripts/authority-check.sh` checks the app-source boundary;
 `fetch-node-sidecar.sh` verifies sidecar authenticity and integrity.
 
 ## Local pass/fail smoke
@@ -75,8 +82,8 @@ Two splints carried since CS-1.5.1 are gone: the node fixed both at the root in 
 
 `konsensus start` uses fresh init defaults unchanged. On a retained rc7 upgrade,
 the host can repair the page price only after separate consent; see
-[NODE_RC19_2_UPGRADE.md](NODE_RC19_2_UPGRADE.md).
-Acceptance: `npm run smoke:cs1` must boot rc19.2 with zero config edits; the non-gating `sidecar` CI job
+[retained-identity repair](ONBOARDING_PAIRING.md).
+Acceptance: `npm run smoke:cs1` must boot the pinned release with zero config edits; the non-gating `sidecar` CI job
 fetches and re-verifies the signed pin, then runs the same smoke.
 
 rc7 fixes #66: fresh init writes a primary/fallback pair, and startup validates

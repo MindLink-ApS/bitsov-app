@@ -1,14 +1,19 @@
 # App release checklist
 
-**Signed pin:** rc19.2 is published, and all five binary pins come from its
-verified signed `SHA256SUMS`. Fetch and pre-bundle verification enforce those pins.
-Runtime, packaging and hardware acceptance remain separate gates.
-See [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
+**Signed pin:** [the fetch script](../scripts/fetch-node-sidecar.sh) defines the
+release tag, release key and all five binary checksum pins. Fetch and pre-bundle
+verification enforce those pins against signed `SHA256SUMS`. Runtime, packaging
+and hardware acceptance remain separate gates.
+
+The [fetch script](../scripts/fetch-node-sidecar.sh) calls `gh release download`
+for release assets and `gh api` for the release key when it is missing locally.
+It does not check `gh` authentication or fall back to curl; `gh` must be installed
+and able to access the pinned release.
 
 ## G1: only the pinned, verified node may be bundled
 
-- [ ] Confirm the pin in `scripts/fetch-node-sidecar.sh` (currently
-  `MindLink-ApS/BitSov-bitsov@v0.3.0-rc19.2`) and the release-key fingerprint.
+- [ ] Confirm the release tag, binary checksum pins and release-key fingerprint
+  in [the fetch script](../scripts/fetch-node-sidecar.sh).
   A pin change requires its own review; a locally built node is not a release asset.
 - [ ] Fetch via `bash scripts/fetch-node-sidecar.sh`, then run
   `bash scripts/fetch-node-sidecar.sh --verify-only`. This downloads the pinned

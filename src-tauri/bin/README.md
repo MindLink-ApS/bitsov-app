@@ -7,8 +7,8 @@ re-verifies existing sidecars against the pinned release before bundling (see be
 Sidecars are named with the Rust target triple
 Tauri's resolver expects: `bin/konsensus-<target-triple>[.exe]`.
 
-## Published targets for `v0.3.0-rc20`
-The rc20 signed release provides Linux, macOS and Windows node binaries:
+## Published targets for the pinned release
+The release pinned in [the fetch script](../../scripts/fetch-node-sidecar.sh) provides Linux, macOS and Windows node binaries:
 
 | host | release asset | installed sidecar |
 | --- | --- | --- |
@@ -27,13 +27,18 @@ runs on Linux and macOS (the Darwin `SKIP` was retired with `v0.3.0-rc5`) and st
 ```bash
 ./scripts/fetch-node-sidecar.sh     # downloads the pinned binary for this host, verifies GPG + sha256, installs it
 ```
-The script pins `v0.3.0-rc20` and verifies, fail-closed, that `SHA256SUMS.asc` is a valid
+The [fetch script](../../scripts/fetch-node-sidecar.sh) calls `gh release download`
+for release assets and `gh api` for the release key when it is missing locally.
+It does not check `gh` authentication or fall back to curl; `gh` must be installed
+and able to access the pinned release.
+
+The script defines the release tag and verifies, fail-closed, that `SHA256SUMS.asc` is a valid
 signature by the pinned release key `B299274C…`; if that key is not in your keyring it imports
 `RELEASE_KEY.asc` from BitSov-bitsov `main` into a throwaway keyring (fingerprint checked against
-the pin; your keyring is never written). rc20 is signed and published. All five
+the pin; your keyring is never written). The pinned release is signed and published. All five
 binary pins are recorded from its authenticated manifest; fetch and pre-bundle
 verification require both the signed entry and the recorded pin to match.
-See [the upgrade note](../../docs/NODE_RC19_2_UPGRADE.md). Fetching fails closed if release access or signed
+See [the release checklist](../../docs/RELEASE_CHECKLIST.md). Fetching fails closed if release access or signed
 assets are unavailable. Nothing here publishes anything. Record the sha256 in the authority
 ledger; `scripts/authority-check.sh` checks source/configuration, not sidecar integrity. The
 released artifact is the `konsensus` binary (CLI `konsensus init` / `konsensus start`).

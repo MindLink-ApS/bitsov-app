@@ -4,6 +4,8 @@ BitSov is a signet-only beta. Use test coins and a separate test node for
 development. See the [README](README.md) for prerequisites, a clean-checkout
 build and pairing instructions.
 
+Please follow the [Code of Conduct](CODE_OF_CONDUCT.md) in all community spaces.
+
 ## Build and test
 
 From the repository root, using Node.js 22:

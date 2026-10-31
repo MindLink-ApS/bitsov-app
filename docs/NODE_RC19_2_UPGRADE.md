@@ -1,9 +1,20 @@
-# Bundled node rc19.2: signed upgrade from rc14
+# Historical bundled node upgrade: rc14 to rc19.2
 
-This pins `MindLink-ApS/BitSov-bitsov@v0.3.0-rc19.2`, replacing main's
+Historical release evidence only. The current sidecar tag, release key and binary
+checksum pins are defined in [the fetch script](../scripts/fetch-node-sidecar.sh).
+Use [the release checklist](RELEASE_CHECKLIST.md) for current acceptance gates.
+The historical source hashes, manifests and validation below do not describe or
+validate the current pin.
+
+The [fetch script](../scripts/fetch-node-sidecar.sh) calls `gh release download`
+for release assets and `gh api` for the release key when it is missing locally.
+It does not check `gh` authentication or fall back to curl; `gh` must be installed
+and able to access the pinned release.
+
+This record describes the former `MindLink-ApS/BitSov-bitsov@v0.3.0-rc19.2` pin, replacing the
 rc14 pin (`d55a88e439fd80dae89e263bef8378fd22c9a103`, app #199).
 It supersedes the stale rc18 proposal [app #266](https://github.com/MindLink-ApS/bitsov-app/pull/266),
-which was not merged. This branch is for a **draft PR only**.
+which was not merged. The proposal was prepared as a draft PR.
 
 **rc19.2 is signed and published.** Tag `v0.3.0-rc19.2` resolves to
 BitSov-bitsov commit `04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`. The manifest
@@ -103,7 +114,8 @@ whose fingerprint matches the pin above. Manifest SHA-256:
 | bitsov-linux-x86_64 | `df59ed5649b10dc317cd9c9643109b4e14104d4475661f02cefa8b28d45dcf27` |
 | bitsov-windows-x86_64 | `74905b8b6454722c15b3ddd8198c28551c5d70be83141bacad3608382fccb8d9` |
 
-`scripts/fetch-node-sidecar.sh` enforces these five pins. Both fetch and
+At that release, `scripts/fetch-node-sidecar.sh` enforced these five pins.
+For the current pins, read the script rather than this historical table. Both fetch and
 `--verify-only` return exit 1 with `REFUSED: checksum pin incomplete` before
 network access while any entry is absent, duplicated, malformed or still a
 placeholder. Once all are valid, signed-manifest authentication remains
@@ -117,13 +129,13 @@ test-key/test-payload pins only in temporary script copies, preserving coverage
 of signature, byte and packaging checks. Production-pin tests also exercise the
 real pin lookup; placeholder and malformed-hash refusal remain covered.
 
-## Before promoting this draft
+## Historical promotion checklist
 
 1. Signed manifest verification, tag/source resolution and all five pin entries
    are complete. Review upstream rebuild/waiver evidence separately; this app
    verification does not claim independent rebuilds of every target.
-2. All five script pins and the table above match authenticated `SHA256SUMS`;
-   the source SHA and manifest hash are recorded in current-pin documentation.
+2. Confirm all five script pins match authenticated `SHA256SUMS`;
+   record the source SHA and manifest hash in release evidence.
 3. Fetch and re-verify every supported target. Run the strict full-tier init
    drift guard and owner create/finalize/restart test against verified rc19.2.
    No config-default allowances are added by this draft; new drift must be reviewed.

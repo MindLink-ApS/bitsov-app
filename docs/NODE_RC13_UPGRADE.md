@@ -1,6 +1,6 @@
 # Bundled node rc13: upgrade from rc12
 
-Historical release note. The current signed pin is described in [NODE_RC19_2_UPGRADE.md](NODE_RC19_2_UPGRADE.md); runtime and packaging acceptance remain separate gates.
+Historical release note. The current signed pin is described in [the fetch script](../scripts/fetch-node-sidecar.sh); runtime and packaging acceptance remain separate gates.
 
 Historical rc13 pin (app #193). The current pin and its changes are documented
 in [NODE_RC14_UPGRADE.md](NODE_RC14_UPGRADE.md).
