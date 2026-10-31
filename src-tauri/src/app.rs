@@ -4974,7 +4974,12 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // consented ceiling on the node and the call per-payment limit, never by
     // the 6-sat cap that binds every other payment under a grant.
     let call_signal = call_kind.is_some_and(|k| (u64::from(act::KIND_CALL_OFFER)..=u64::from(act::KIND_CALL_HANGUP)).contains(&k));
-    let cap = if call_signal { grant::PaymentCap::CallCeiling } else { grant::PaymentCap::Grant };
+    // An explicit payment (invoice or keysend) is bounded by the signed
+    // per-payment limit, as on the node; messages, files and rooms keep the
+    // 6-sat message cap.
+    let cap = if call_signal { grant::PaymentCap::CallCeiling }
+        else if is_direct_payment(path) { grant::PaymentCap::Payment }
+        else { grant::PaymentCap::Grant };
     let node_grant = if call_block { None } else {
         check_node_grant_with_envelope_ids(state, path, &body, max_msat,
             charge.as_ref().and_then(|c| c.envelope_ids), cap).await?
@@ -5032,6 +5037,12 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         }
         _ => journal.begin_operation(&node_id, path, &body, max_msat, operation_id.clone().map(|id| (id, op.clone())))?,
     };
+    // Saved with the pending record before the POST below: recovery repeats
+    // exactly this request under exactly this key.
+    if let (true, Some(id)) = (is_direct_payment(path), body["request_id"].as_str()) {
+        pending.direct = Some(spend_journal::DirectRequest { request_id: id.to_string(), path: path.to_string(), body: body.clone() });
+        journal.save(&pending)?;
+    }
     use spend_journal::OperationState as OpState;
     journal.record_outcome(&pending, OpState::Dispatching, None)?;
     let begun = pending.clone();
@@ -5438,12 +5449,21 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
     if let Some(id) = pending.operation_id.clone() {
         return reconcile_operation(state, &journal, pending, &id).await;
     }
-    let path = match &pending.target {
-        Some(Target::Payment { .. }) => "/payments?limit=100".to_string(),
-        Some(Target::Message { peer, .. }) => control::messages_path(peer, None, Some(200))?,
-        None => return Err(spend_journal::unknown("No node-issued receipt ID was returned. Automatic reconciliation is unavailable; inspect the owner node. The app will not retry.")),
+    let replayed = match pending.direct.clone() {
+        Some(direct) => replay_direct_payment(state, &journal, &mut pending, &direct).await?,
+        None => None,
     };
-    let rows: Vec<serde_json::Value> = get_json(state, &path).await?;
+    let rows: Vec<serde_json::Value> = match replayed {
+        Some(receipt) => vec![receipt],
+        None => {
+            let path = match &pending.target {
+                Some(Target::Payment { .. }) => "/payments?limit=100".to_string(),
+                Some(Target::Message { peer, .. }) => control::messages_path(peer, None, Some(200))?,
+                None => return Err(spend_journal::unknown("No node-issued receipt ID was returned. Automatic reconciliation is unavailable; inspect the owner node. The app will not retry.")),
+            };
+            get_json(state, &path).await?
+        }
+    };
     let terminal = rows.iter().find_map(|row| {
         spend_journal::terminal(&pending, std::slice::from_ref(row)).map(|status| (status, row))
     });
@@ -5481,6 +5501,45 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
 }
 
 const NOTHING_PAID: &str = "Not sent - nothing was paid: your node reports no payment for this message. Nothing was dispatched again.";
+
+/// Ask the node about a direct payment by repeating its request under the
+/// same `request_id`. The node answers a key it has seen from its record and
+/// never pays it twice (a request it never received is paid now, once, under
+/// the reservation still held for it). A settled receipt is returned as a
+/// payment row for the caller's accounting; a payment hash it names is saved
+/// as the target. In flight stays unknown; a refusal falls back to the
+/// payment history when the hash is known.
+async fn replay_direct_payment(state: &NodeState, journal: &Journal, pending: &mut spend_journal::Pending, direct: &spend_journal::DirectRequest)
+    -> Result<Option<serde_json::Value>, ActionError> {
+    if !is_direct_payment(&direct.path) || direct.body["request_id"].as_str() != Some(direct.request_id.as_str()) {
+        return Err(spend_journal::unknown("The saved payment request is not readable; inspect the owner node. Nothing was dispatched again."));
+    }
+    // Repeating may pay a request the node never received: never while paused.
+    refuse_if_paused(state)?;
+    refuse_if_connection_waiting(state)?;
+    let (status, text) = call_api(state, reqwest::Method::POST, &direct.path, Some(direct.body.clone())).await
+        .map_err(|e| spend_journal::unknown(format!("Your node could not be asked about this payment ({e}). It is never paid twice under its request ID.")))?;
+    if !status.is_success() {
+        if matches!(pending.target, Some(Target::Payment { .. })) { return Ok(None); }
+        return Err(spend_journal::unknown(api_error(&direct.path, status, &text)));
+    }
+    let mut receipt: serde_json::Value = serde_json::from_str(&text).map_err(spend_journal::unknown)?;
+    if receipt["request_id"].as_str() != Some(direct.request_id.as_str()) {
+        return Err(spend_journal::unknown("The node answered for a different payment request. Nothing was dispatched again."));
+    }
+    let hash = receipt["payment_hash"].as_str()
+        .filter(|h| h.len() == 64 && h.bytes().all(|c| c.is_ascii_hexdigit()))
+        .map(str::to_string);
+    if let (None, Some(hash)) = (&pending.target, &hash) {
+        pending.target = Some(Target::Payment { hash: hash.clone() });
+        journal.save(pending)?;
+    }
+    if receipt["status"].as_str() != Some("settled") || hash.is_none() {
+        return Err(spend_journal::unknown("Your node reports this payment still in flight. Check again shortly. It is never paid twice under its request ID."));
+    }
+    receipt["direction"] = serde_json::json!("outgoing");
+    Ok(Some(receipt))
+}
 const RECONCILE_WAIT: &str = "Payment unknown: the original send may still reach your node. Another spend is blocked; check again in a few minutes. Nothing was dispatched again.";
 
 fn unpaid_grace_elapsed(dispatched_at: u64, now: u64, timeout: Duration) -> bool {
@@ -5873,7 +5932,7 @@ async fn check_node_grant(state: &NodeState, path: &str, body: &serde_json::Valu
 }
 
 /// `cap` names the per-payment maximum: the 6-sat message cap for messages,
-/// files, rooms and payments; for one call payment, the call's pinned
+/// files and rooms; the signed limit for an explicit payment; for one call payment, the call's pinned
 /// per-block ceiling (enforced by the node) plus the call per-payment limit;
 /// none for a whole call's summed payments (`CallTotal`).
 async fn check_node_grant_with_envelope_ids(state: &NodeState, path: &str, body: &serde_json::Value, max_msat: u64, envelope_ids: Option<bool>, cap: grant::PaymentCap) -> Result<Option<NodeGrant>, ActionError> {
@@ -6274,6 +6333,27 @@ async fn require_price_caps(state: &NodeState, room: bool) -> Result<SendCaps, A
 
 /// Genome #113: `operation_id` on 1:1 compose, idempotent POST, `GET /messages/operations/{id}`.
 const OPERATIONS_CAPABILITY: &str = "message_operations_v1";
+
+/// Node #442: `POST /payments/pay` and `/payments/keysend` require a client
+/// `request_id` (an idempotency key bound to the request), answer `202
+/// in_flight` until settled, and answer a repeat from their record.
+const DIRECT_PAYMENT_OPERATIONS_CAPABILITY: &str = "direct_payment_operations_v1";
+
+/// An explicit payment: an invoice or a keysend.
+fn is_direct_payment(path: &str) -> bool {
+    matches!(path, "/payments/pay" | "/payments/keysend")
+}
+
+/// A fresh idempotency key for one direct payment when the node takes one
+/// (it then requires it); `None` for an older node, which refuses unknown
+/// fields. A node whose capabilities cannot be read is not paid at all.
+async fn direct_request_id(state: &NodeState) -> Result<Option<String>, ActionError> {
+    let status: serde_json::Value = get_json(state, "/status").await.map_err(|reason|
+        ActionError::new("price_quote_unavailable", format!("Node capabilities unavailable: {reason}. Nothing was paid.")))?;
+    let offered = status["api_capabilities"].as_array().is_some_and(|caps|
+        caps.iter().any(|cap| cap.as_str() == Some(DIRECT_PAYMENT_OPERATIONS_CAPABILITY)));
+    offered.then(spend_journal::new_operation_id).transpose()
+}
 
 /// The visible conversation ceiling includes admission and routing. Older
 /// nodes reuse paid_send_caps_v1 but may admit outside it; their quote cannot
@@ -6760,6 +6840,8 @@ async fn do_payment_pay(state: &NodeState, bolt11: &str, amount_msat: u64, max_m
     ceiling(quote.total_msat, max_msat)?;
     body["max_routing_fee_msat"] = serde_json::json!(quote.max_routing_fee_msat);
     let charge = plan_manual_charge(state, budget::INVOICE_PAYMENTS, max_msat)?;
+    // One key per payment intent, saved with the pending spend before the POST.
+    if let Some(id) = direct_request_id(state).await? { body["request_id"] = serde_json::json!(id); }
     let text = money_post(state, Auth::Window(generation), "/payments/pay", body, max_msat, Some(charge)).await?;
     Ok(text.decode::<act::PayReply>("/payments/pay")?.receipt(now_ms()))
     }.await;
@@ -6782,6 +6864,7 @@ async fn do_payment_keysend(
     ceiling(quote.total_msat, max_msat)?;
     body["max_routing_fee_msat"] = serde_json::json!(quote.max_routing_fee_msat);
     let charge = plan_manual_charge(state, budget::KEYSEND_PAYMENTS, max_msat)?;
+    if let Some(id) = direct_request_id(state).await? { body["request_id"] = serde_json::json!(id); }
     let text = money_post(state, Auth::Window(generation), "/payments/keysend", body, max_msat, Some(charge)).await?;
     Ok(text.decode::<act::KeysendReply>("/payments/keysend")?.receipt(now_ms()))
     }.await;
@@ -20519,6 +20602,63 @@ mod control_act_tests {
     }
 
     #[tokio::test]
+    async fn g1_an_explicit_payment_is_bounded_by_the_signed_limit_not_the_message_cap() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        g1_approved(&node, 500_000).await;
+        spend_advance(&node.state, true).await.unwrap();
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        // A console grant signed at 50 sats per payment; the node caps messages at 6.
+        let mut grant = g1_grant(3600, 400_000, 400_000);
+        grant["per_call_max_msat"] = 50_000.into();
+        grant["message_per_payment_max_msat"] = grant::MESSAGING_PER_CALL_MAX_MSAT.into();
+        *g1.grant.lock().unwrap() = grant;
+        let dest = format!("03{}", "cd".repeat(32));
+        let ten = act::payment_quote(10_000).unwrap().total_msat;
+        assert!(ten > grant::MESSAGING_PER_CALL_MAX_MSAT && ten <= 50_000);
+        do_payment_keysend(&node.state, &dest, 10_000, None, ten).await.unwrap();
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/payments/keysend").count(), 1);
+        // A message above 6 sats is still refused before any payment.
+        let err = do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap_err();
+        assert_eq!(err.code, "grant_per_call");
+        assert!(err.message.contains("6 sats"), "{}", err.message);
+        // Above the signed limit, a payment is refused too.
+        let fifty = act::payment_quote(50_000).unwrap().total_msat;
+        let err = do_payment_keysend(&node.state, &dest, 50_000, None, fifty).await.unwrap_err();
+        assert_eq!(err.code, "grant_per_call");
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/payments/keysend" || p == "/messages/compose").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn g1_a_messaging_grant_never_funds_an_explicit_payment() {
+        // The node's refusal for an owner-approved messaging grant (the view does not say so).
+        let first: Routes = Arc::new(|_m, p, _b| {
+            if p == "/payments/keysend" {
+                return (409, serde_json::json!({"code": "budget_exceeded", "reason": "messaging_grant", "remaining_msat": null,
+                    "error": "Messaging grants cannot fund payments. Approve a payment separately."}).to_string());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, _g1) = g1_node_with(&["read", "receive"], Some(first));
+        g1_approved(&node, 500_000).await;
+        spend_advance(&node.state, true).await.unwrap();
+        let dest = format!("03{}", "cd".repeat(32));
+        let err = do_payment_keysend(&node.state, &dest, 5000, None, 10000).await.unwrap_err();
+        assert_eq!(err.code, "grant_messaging");
+        assert!(err.message.contains("covers messages and calls") && err.message.contains("Nothing was paid"), "{}", err.message);
+        assert!(pending(&node).is_none(), "refused before any payment");
+        assert_eq!(budget_now(&node.state).spent_msat, 0);
+        // A relation grant says so in its view: refused before posting.
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        g1_approved(&node, 500_000).await;
+        spend_advance(&node.state, true).await.unwrap();
+        let mut relation = g1_grant(3600, 400_000, 400_000);
+        relation["recipients_only"] = true.into();
+        *g1.grant.lock().unwrap() = relation;
+        assert_eq!(do_payment_pay(&node.state, act::TEST_INVOICE_1000, 1000, 6000).await.unwrap_err().code, "grant_messaging");
+        assert!(!node.posts().iter().any(|(p, _)| p.starts_with("/payments/")));
+    }
+
+    #[tokio::test]
     async fn g1_what_the_grant_would_refuse_is_refused_before_any_payment() {
         let (node, _dir, g1) = g1_node(&["read", "receive"]);
         g1_approved(&node, 500_000).await;
@@ -20875,6 +21015,90 @@ mod control_act_tests {
         assert!(do_spend_reconcile(&node.state).await.unwrap().contains("settled"));
         assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
         assert_eq!(node.posts().len(), 1);
+    }
+
+    fn keysend_bodies(node: &Fake) -> Vec<serde_json::Value> {
+        node.posts().into_iter().filter(|(p, _)| p == "/payments/keysend").map(|(_, b)| b).collect()
+    }
+
+    /// Node #442 (`direct_payment_operations_v1`): every direct payment carries
+    /// a client `request_id`, saved with the pending spend before the POST.
+    /// Recovery repeats that very request; the node answers from its record.
+    #[tokio::test]
+    async fn direct_payment_carries_a_saved_request_id_and_recovery_repeats_it() {
+        let hash = "ab".repeat(32);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let reply_hash = hash.clone();
+        let routes: Routes = Arc::new(move |m, p, b| {
+            let hash = &reply_hash;
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1", "direct_payment_operations_v1"]}).to_string());
+            }
+            if p == "/payments/keysend" {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap();
+                let Some(id) = body["request_id"].as_str() else {
+                    return (400, serde_json::json!({"error": "request_id is required", "code": 400}).to_string());
+                };
+                // In flight without a hash, then in flight with one, then settled.
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                let (code, status, hash) = match n { 0 => (202, "in_flight", ""), 1 => (202, "in_flight", hash.as_str()), _ => (200, "settled", hash.as_str()) };
+                return (code, serde_json::json!({"status": status, "request_id": id, "operation_id": format!("keysend:owner:{id}"),
+                    "max_routing_fee_msat": 5000, "fee_paid_msat": if n < 2 { serde_json::Value::Null } else { serde_json::json!(0) },
+                    "payment_hash": hash, "amount_msat": 5000, "preimage": ""}).to_string());
+            }
+            happy()(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        let pk = format!("03{}", "cd".repeat(32));
+        assert_eq!(do_payment_keysend(&node.state, &pk, 5000, Some("thanks"), 10000).await.unwrap().status, "pending");
+        let first = keysend_bodies(&node);
+        assert_eq!(first.len(), 1);
+        let saved = pending(&node).unwrap().direct.expect("saved with the pending spend");
+        assert_eq!((saved.path.as_str(), &saved.body), ("/payments/keysend", &first[0]));
+        assert_eq!(first[0]["request_id"].as_str(), Some(saved.request_id.as_str()));
+        assert_eq!(saved.request_id.len(), 36, "a UUIDv4");
+        assert!(pending(&node).unwrap().target.is_none(), "no hash yet: only the request id can find it");
+        // Another payment waits for this one; nothing is posted.
+        assert_eq!(do_payment_keysend(&node.state, &pk, 5000, None, 10000).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(keysend_bodies(&node).len(), 1);
+        // Recovery repeats the same request under the same key.
+        let still = do_spend_reconcile(&node.state).await.unwrap_err();
+        assert_eq!(still.code, "spend_unknown");
+        assert!(still.message.contains("in flight"), "{}", still.message);
+        assert!(matches!(pending(&node).unwrap().target, Some(Target::Payment { hash: ref h }) if *h == hash));
+        assert!(do_spend_reconcile(&node.state).await.unwrap().contains("settled"));
+        assert!(pending(&node).is_none());
+        let sent = keysend_bodies(&node);
+        assert_eq!(sent.len(), 3);
+        assert!(sent.iter().all(|b| b == &first[0]), "the same request, the same key, every time");
+        assert_eq!(budget_now(&node.state).spent_msat, 5000);
+        // A new payment intent gets a new key.
+        do_payment_keysend(&node.state, &pk, 5000, None, 10000).await.unwrap();
+        let next = keysend_bodies(&node).pop().unwrap();
+        assert!(next["request_id"].as_str().is_some_and(|id| id != saved.request_id));
+    }
+
+    #[tokio::test]
+    async fn direct_payment_sends_a_request_id_only_to_a_node_that_takes_one() {
+        // An older node refuses unknown fields: no key goes to it.
+        let node = fake(AuthMode::Local, happy());
+        spend_advance(&node.state, true).await.unwrap();
+        do_payment_pay(&node.state, act::TEST_INVOICE_1000, 1000, 6000).await.unwrap();
+        do_payment_keysend(&node.state, &format!("03{}", "cd".repeat(32)), 5000, None, 10000).await.unwrap();
+        let posts = node.posts();
+        assert_eq!(posts.len(), 2);
+        assert!(posts.iter().all(|(_, b)| b.get("request_id").is_none()));
+        // A node whose capabilities cannot be read is not paid at all.
+        let node = fake(AuthMode::Local, Arc::new(|m: &str, p: &str, b: &str| {
+            if p == "/status" { return (503, r#"{"error":"busy","code":503}"#.into()); }
+            happy()(m, p, b)
+        }));
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_payment_pay(&node.state, act::TEST_INVOICE_1000, 1000, 6000).await.unwrap_err().code, "price_quote_unavailable");
+        assert!(node.posts().is_empty());
+        assert!(pending(&node).is_none());
     }
 
     #[tokio::test]
