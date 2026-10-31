@@ -81,10 +81,11 @@
         "Let this app spend",
         "Budget: up to 1 234 567 sats",
         "Each payment: up to 1 000 001 msat",
+        "Messages: up to 6 sats each",
         "For: 1 h",
         "To: any contact, within the budget"
       ],
-      "reason": "Let this app spend · Budget: up to 1 234 567 sats · Each payment: up to 1 000 001 msat · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456"
+      "reason": "Let this app spend · Budget: up to 1 234 567 sats · Each payment: up to 1 000 001 msat · Messages: up to 6 sats each · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456"
     },
     {
       "view": {

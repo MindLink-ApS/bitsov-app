@@ -538,14 +538,14 @@ describe('call restart negotiation', () => {
     expect(pc.tracks[0].stop).toHaveBeenCalledOnce();
   });
 
-  it.each(['authorization', 'remaining grant', 'per-call grant'] as const)('keeps a connected caller live when recovery is refused by %s', async (refusal) => {
+  it.each(['authorization', 'remaining grant', 'owner per-payment limit'] as const)('keeps a connected caller live when recovery is refused by %s', async (refusal) => {
     let recovering = false;
     const { e, sent, views } = engine({
       authorize: async () => !recovering || refusal !== 'authorization',
       grant: () => recovering ? {
         expires_at_ms: 3_600_000, budget_msat: 21_000,
         remaining_msat: refusal === 'remaining grant' ? 0 : 21_000,
-        per_call_max_msat: refusal === 'per-call grant' ? 0 : 21_000,
+        per_call_max_msat: refusal === 'owner per-payment limit' ? 1_000 : 21_000,
       } : null,
     });
     await e.place(A, 'audio', QUOTE);
@@ -2333,8 +2333,8 @@ describe('calls in the shell', () => {
     let small = false;
     stubHost({
       call_signal: (args) => ({ message_id: 'sig', kind: args!.kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }),
-      // Later, the node grant is too small for a call: place() refuses before the call has an id.
-      budget_status: () => ({ ...openBudget(), ...(small ? { node_grant: { expires_at_ms: Date.now() + 86_400_000, budget_msat: 200_000, remaining_msat: 200_000, per_call_max_msat: 1000 } } : {}) }),
+      // Later, the node grant has too little left for a call: place() refuses before the call has an id.
+      budget_status: () => ({ ...openBudget(), ...(small ? { node_grant: { expires_at_ms: Date.now() + 86_400_000, budget_msat: 200_000, remaining_msat: 1000, per_call_max_msat: 1000 } } : {}) }),
     });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
@@ -2392,16 +2392,13 @@ describe('calls in the shell', () => {
     expect(text('[data-call-connection]')).toContain('host');
   });
 
-  it.each([
-    ['per-call cap', 500_000, 50_000_000],
-    ['remaining budget', 50_000_000, 500_000],
-  ])('refuses the full call ceiling against the grant %s before media or signalling', async (_reason, cap, remaining) => {
+  it('refuses the full call ceiling against the grant remaining budget before media or signalling', async () => {
     const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
     const host = stubHost({
       call_quote: () => ({ ...QUOTE, call_total_msat: 21_205_000 }),
       budget_status: () => ({ ...openBudget(), node_grant: {
         expires_at_ms: Date.now() + 3600_000, budget_msat: 50_000_000,
-        remaining_msat: remaining, per_call_max_msat: cap,
+        remaining_msat: 500_000, per_call_max_msat: 50_000_000,
       } }),
     });
     await openShell();
@@ -2410,10 +2407,88 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(/owner.*approve/i));
     expect(text('[data-call-ended]')).toContain('21\u202f205 sats');
     expect(text('[data-call-ended]')).toContain('500 sats');
+    expect(text('[data-call-ended]')).not.toMatch(/per call/i);
     expect(capture).not.toHaveBeenCalled();
     expect(FakePc.made).toHaveLength(0);
     expect(host.used('call_signal')).toHaveLength(0);
     expect(host.used('budget_approve')).toHaveLength(0);
+  });
+
+  it('dials when the call payments are above the 6-sat message cap but within the signed limit', async () => {
+    // The node caps messages at 6 sats; each call payment is bounded by the signed limit instead.
+    const host = stubHost({ budget_status: () => ({ ...openBudget(), node_grant: {
+      expires_at_ms: Date.now() + 3600_000, budget_msat: 500_000,
+      remaining_msat: 500_000, per_call_max_msat: 50_000,
+      message_per_payment_max_msat: 6_000, call_per_payment_max_msat: 50_000,
+    } }) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect(host.used('call_signal')).toHaveLength(1);
+    expect(host.used('call_signal')[0].args).toMatchObject({ kind: 400 });
+  });
+
+  it.each([1_000, 5_999, 6_000, 6_001, 14_999])('refuses a call above the signed per-payment limit (%i msat) before media or signalling', async (perCall) => {
+    // The signed value binds every call payment; exactly 6 sats is no exception.
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    const host = stubHost({ budget_status: () => ({ ...openBudget(), node_grant: {
+      expires_at_ms: Date.now() + 3600_000, budget_msat: 500_000,
+      remaining_msat: 500_000, per_call_max_msat: perCall,
+    } }) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(/per payment/i));
+    // The largest single payment is the 15-sat offer (the hangup is 6 sats).
+    expect(text('[data-call-ended]')).toContain('15 sats per payment');
+    expect(text('[data-call-ended]')).toMatch(/owner.*approve/i);
+    expect(capture).not.toHaveBeenCalled();
+    expect(FakePc.made).toHaveLength(0);
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it('follows the node record of the owner call limit over the stored value', async () => {
+    // An owner who chose exactly 6 sats binds calls; one who chose none does not.
+    const refused = stubHost({ budget_status: () => ({ ...openBudget(), node_grant: {
+      expires_at_ms: Date.now() + 3600_000, budget_msat: 500_000,
+      remaining_msat: 500_000, per_call_max_msat: 6_000, call_per_payment_max_msat: 6_000,
+    } }) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toContain('15 sats per payment'));
+    expect(refused.used('call_signal')).toHaveLength(0);
+  });
+
+  it('under a relation grant, a 15-sat offer and a 6-sat hangup each fit a 20-sat envelope', async () => {
+    // The envelope's per-act maximum binds each payment on its own (the host
+    // checks it); only the budgets bound their 21-sat sum.
+    const host = stubHost({ budget_status: () => ({ ...openBudget(), node_grant: {
+      expires_at_ms: Date.now() + 3600_000, budget_msat: 500_000,
+      remaining_msat: 500_000, per_call_max_msat: 20_000,
+      message_per_payment_max_msat: 6_000, call_per_payment_max_msat: null,
+      envelopes: { [A]: Date.now() + 3600_000 },
+    } }) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect(host.used('call_signal')).toHaveLength(1);
+  });
+
+  it('checks each call payment alone against an owner-chosen per-payment limit', async () => {
+    // A 15-sat limit carries the 15-sat offer and the 6-sat hangup one at a
+    // time, though the call needs 21 sats in all from the remaining budget.
+    const host = stubHost({ budget_status: () => ({ ...openBudget(), node_grant: {
+      expires_at_ms: Date.now() + 3600_000, budget_msat: 21_000,
+      remaining_msat: 21_000, per_call_max_msat: 15_000,
+    } }) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect(host.used('call_signal')).toHaveLength(1);
   });
 
   it('dials when the full ceiling equals both grant limits', async () => {

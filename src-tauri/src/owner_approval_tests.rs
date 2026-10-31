@@ -91,7 +91,7 @@ fn changed_and_self_guards_precede_signing_and_preserve_exact_bytes() {
 #[test]
 fn prompt_matches_renderer_approval_reason() {
     assert_eq!(checked_approval(&view(), "owner", view()["approval_message"].as_str().unwrap()).unwrap(),
-        "Let this app spend · Budget: up to 1\u{202f}234\u{202f}567 msat · Each payment: up to 1 sat · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
+        "Let this app spend · Budget: up to 1\u{202f}234\u{202f}567 msat · Each payment: up to 1 sat · Messages: up to 1 sat each · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
     let mut v = view();
     v["request"] = json!({"kind":"first_contact","terms":{"recipient":"AB12-CD34","max_total_msat":1,"budget_msat":1000000}});
     assert_eq!(checked_approval(&v, "owner", v["approval_message"].as_str().unwrap()).unwrap(),
@@ -139,7 +139,7 @@ async fn existing_device_signer_returns_der_hex_verifiable_with_p256_sha256() {
     let v = view();
     let message = v["approval_message"].as_str().unwrap();
     let signature = sign_checked(&v, "owner", message, |exact, reason| {
-        assert_eq!(reason, "Let this app spend · Budget: up to 1\u{202f}234\u{202f}567 msat · Each payment: up to 1 sat · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
+        assert_eq!(reason, "Let this app spend · Budget: up to 1\u{202f}234\u{202f}567 msat · Each payment: up to 1 sat · Messages: up to 1 sat each · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
         device_sign(blob, exact, reason)
     }).await.unwrap();
     assert!(signature
