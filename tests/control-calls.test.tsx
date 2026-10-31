@@ -538,14 +538,14 @@ describe('call restart negotiation', () => {
     expect(pc.tracks[0].stop).toHaveBeenCalledOnce();
   });
 
-  it.each(['authorization', 'remaining grant', 'per-call grant'] as const)('keeps a connected caller live when recovery is refused by %s', async (refusal) => {
+  it.each(['authorization', 'remaining grant'] as const)('keeps a connected caller live when recovery is refused by %s', async (refusal) => {
     let recovering = false;
     const { e, sent, views } = engine({
       authorize: async () => !recovering || refusal !== 'authorization',
       grant: () => recovering ? {
         expires_at_ms: 3_600_000, budget_msat: 21_000,
         remaining_msat: refusal === 'remaining grant' ? 0 : 21_000,
-        per_call_max_msat: refusal === 'per-call grant' ? 0 : 21_000,
+        per_call_max_msat: 21_000,
       } : null,
     });
     await e.place(A, 'audio', QUOTE);
@@ -2333,8 +2333,8 @@ describe('calls in the shell', () => {
     let small = false;
     stubHost({
       call_signal: (args) => ({ message_id: 'sig', kind: args!.kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }),
-      // Later, the node grant is too small for a call: place() refuses before the call has an id.
-      budget_status: () => ({ ...openBudget(), ...(small ? { node_grant: { expires_at_ms: Date.now() + 86_400_000, budget_msat: 200_000, remaining_msat: 200_000, per_call_max_msat: 1000 } } : {}) }),
+      // Later, the node grant has too little left for a call: place() refuses before the call has an id.
+      budget_status: () => ({ ...openBudget(), ...(small ? { node_grant: { expires_at_ms: Date.now() + 86_400_000, budget_msat: 200_000, remaining_msat: 1000, per_call_max_msat: 1000 } } : {}) }),
     });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
@@ -2392,16 +2392,13 @@ describe('calls in the shell', () => {
     expect(text('[data-call-connection]')).toContain('host');
   });
 
-  it.each([
-    ['per-call cap', 500_000, 50_000_000],
-    ['remaining budget', 50_000_000, 500_000],
-  ])('refuses the full call ceiling against the grant %s before media or signalling', async (_reason, cap, remaining) => {
+  it('refuses the full call ceiling against the grant remaining budget before media or signalling', async () => {
     const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
     const host = stubHost({
       call_quote: () => ({ ...QUOTE, call_total_msat: 21_205_000 }),
       budget_status: () => ({ ...openBudget(), node_grant: {
         expires_at_ms: Date.now() + 3600_000, budget_msat: 50_000_000,
-        remaining_msat: remaining, per_call_max_msat: cap,
+        remaining_msat: 500_000, per_call_max_msat: 50_000_000,
       } }),
     });
     await openShell();
@@ -2410,10 +2407,25 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(/owner.*approve/i));
     expect(text('[data-call-ended]')).toContain('21\u202f205 sats');
     expect(text('[data-call-ended]')).toContain('500 sats');
+    expect(text('[data-call-ended]')).not.toMatch(/per call/i);
     expect(capture).not.toHaveBeenCalled();
     expect(FakePc.made).toHaveLength(0);
     expect(host.used('call_signal')).toHaveLength(0);
     expect(host.used('budget_approve')).toHaveLength(0);
+  });
+
+  it('dials when the call ceiling is above the grant per-call cap for messages but within its remaining budget', async () => {
+    // The node caps each call payment by the call's pinned per-block ceiling, not the 6-sat message cap.
+    const host = stubHost({ budget_status: () => ({ ...openBudget(), node_grant: {
+      expires_at_ms: Date.now() + 3600_000, budget_msat: 500_000,
+      remaining_msat: 500_000, per_call_max_msat: 6_000,
+    } }) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect(host.used('call_signal')).toHaveLength(1);
+    expect(host.used('call_signal')[0].args).toMatchObject({ kind: 400 });
   });
 
   it('dials when the full ceiling equals both grant limits', async () => {

@@ -783,8 +783,10 @@ export function createCallEngine(deps: CallDeps) {
         return;
       }
       if (q.offer_msat === null) { reconcileConnection(conn); return; }
+      // The node caps each call payment by the call's pinned per-block ceiling,
+      // not the grant's per-call maximum for messages: only the budget is checked here.
       const grant = deps.grant?.();
-      if (grant && q.call_total_msat !== null && (q.call_total_msat > grant.remaining_msat || q.call_total_msat > grant.per_call_max_msat)) {
+      if (grant && q.call_total_msat !== null && q.call_total_msat > grant.remaining_msat) {
         recoveryRefused(conn, tr('caTheRemainingNodeGrantCannotCoverCallRecoveryAsk'));
         return;
       }
@@ -960,10 +962,12 @@ export function createCallEngine(deps: CallDeps) {
         set({ ...IDLE, phase: 'ended', peer, error: tr('caTheirNodeDoesNotTakeCallsYetNothingWas') });
         return;
       }
+      // Bounded by the grant's remaining budget; the node enforces the call's
+      // own per-block ceiling, not the grant's per-call maximum for messages.
       const grant = deps.grant?.();
-      if (grant && (q.call_total_msat > grant.per_call_max_msat || q.call_total_msat > grant.remaining_msat)) {
+      if (grant && q.call_total_msat > grant.remaining_msat) {
         set({ ...IDLE, phase: 'ended', peer, error:
-          tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat), amount(grant.per_call_max_msat), amount(grant.remaining_msat), amount(q.call_total_msat)) });
+          tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat), amount(grant.remaining_msat)) });
         return;
       }
       // M6: no node-routed call without the per-minute price and the most held the owner agreed to.

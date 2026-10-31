@@ -4968,10 +4968,14 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // under the grant when the offer went out. The grant's remaining budget
     // already excludes that hold, so it is not checked again here; the node
     // still refuses a block outside the reservation or the grant.
-    let call_block = path == "/messages/compose" && body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK));
+    let call_kind = if path == "/messages/compose" { body["kind"].as_u64() } else { None };
+    let call_block = call_kind == Some(u64::from(act::KIND_CALL_BLOCK));
+    // A call offer is capped per payment by the call's own consented ceiling
+    // on the node, not by the grant's per-call maximum for messages.
+    let cap = if call_kind == Some(u64::from(act::KIND_CALL_OFFER)) { grant::PaymentCap::CallCeiling } else { grant::PaymentCap::Grant };
     let node_grant = if call_block { None } else {
         check_node_grant_with_envelope_ids(state, path, &body, max_msat,
-            charge.as_ref().and_then(|c| c.envelope_ids)).await?
+            charge.as_ref().and_then(|c| c.envelope_ids), cap).await?
     };
     let reserve_msat = match (&charge, &node_grant) {
         // A zero cap: the node pays nothing, re-admission included.
@@ -5863,10 +5867,13 @@ fn drop_grant(state: &NodeState) {
 /// Re-read the node grant immediately before a paid request, and refuse what
 /// it would refuse. Only when this run opened its approvals under one.
 async fn check_node_grant(state: &NodeState, path: &str, body: &serde_json::Value, max_msat: u64) -> Result<Option<NodeGrant>, ActionError> {
-    check_node_grant_with_envelope_ids(state, path, body, max_msat, None).await
+    check_node_grant_with_envelope_ids(state, path, body, max_msat, None, grant::PaymentCap::Grant).await
 }
 
-async fn check_node_grant_with_envelope_ids(state: &NodeState, path: &str, body: &serde_json::Value, max_msat: u64, envelope_ids: Option<bool>) -> Result<Option<NodeGrant>, ActionError> {
+/// `cap` names the per-payment maximum: the grant's own for messages, files,
+/// rooms and payments; the call's pinned per-block ceiling (enforced by the
+/// node) for a call offer.
+async fn check_node_grant_with_envelope_ids(state: &NodeState, path: &str, body: &serde_json::Value, max_msat: u64, envelope_ids: Option<bool>, cap: grant::PaymentCap) -> Result<Option<NodeGrant>, ActionError> {
     if state.node_grant.lock().unwrap().is_none() {
         return Ok(None);
     }
@@ -5888,7 +5895,7 @@ async fn check_node_grant_with_envelope_ids(state: &NodeState, path: &str, body:
         _ if body["is_room"].as_bool() == Some(true) => None,
         _ => body["recipient"].as_str(),
     };
-    let checked = g.check(max_msat, recipient, now);
+    let checked = g.check_under(cap, max_msat, recipient, now);
     *state.node_grant.lock().unwrap() = Some(g.clone());
     checked.map(|()| Some(g))
 }
@@ -7338,11 +7345,13 @@ async fn do_call_signal_bounded(
         // Admission plus one hangup: check the ceiling shown for the whole
         // call, not just this offer. money_post still rechecks the paid step.
         let total = quote.call_total_msat.expect("an offer has a call total");
-        check_node_grant_with_envelope_ids(state, "/messages/compose", &body, total, Some(caps.envelope_ids)).await.map_err(|mut error| {
-            if matches!(error.code, "grant_per_call" | "grant_exhausted") {
+        // The node caps each call payment by the call's pinned per-block
+        // ceiling, so only expiry and the budgets are checked here.
+        check_node_grant_with_envelope_ids(state, "/messages/compose", &body, total, Some(caps.envelope_ids), grant::PaymentCap::CallCeiling).await.map_err(|mut error| {
+            if matches!(error.code, "grant_exhausted" | "grant_recipient") {
                 error.message = format!(
-                    "This call needs up to {}. {} The owner would need to approve at least {} per call and enough remaining budget for that ceiling. Nothing was sent or paid.",
-                    bitsov_app::format::amount(total), error.message, bitsov_app::format::amount(total),
+                    "This call needs up to {}. {} The owner would need to approve enough remaining budget for that ceiling. Nothing was sent or paid.",
+                    bitsov_app::format::amount(total), error.message,
                 );
             }
             error
