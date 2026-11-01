@@ -69,7 +69,10 @@ fn path_string(path: &Path) -> Result<CString, String> {
     CString::new(path.to_str().ok_or("invalid client storage path")?)
         .map_err(|_| "invalid client storage path".into())
 }
+pub use crate::keychain_status::{PASSCODE_NOT_SET, PASSCODE_REQUIRED};
+
 fn error(status: i32) -> String {
+    if status == PASSCODE_NOT_SET { return PASSCODE_REQUIRED.into(); }
     format!("client Keychain storage unavailable ({status}); unlock this device and try again")
 }
 

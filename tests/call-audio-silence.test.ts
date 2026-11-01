@@ -83,4 +83,21 @@ describe('call audio: a silenced microphone', () => {
     for (let i = 0; i < SILENT_FRAMES * 2; i++) zeros();
     expect(reports).toEqual([]);
   });
+
+  it('muting or unmuting starts a fresh observation', async () => {
+    const { audio, reports } = await engine();
+    for (let i = 0; i < SILENT_FRAMES; i++) zeros();
+    expect(reports).toEqual([true]);
+    // Muted after silence was reported: that report no longer holds.
+    audio.setMuted(true);
+    expect(reports).toEqual([true, false]);
+    for (let i = 0; i < SILENT_FRAMES * 2; i++) zeros();
+    expect(reports).toEqual([true, false]);
+    // Unmuted into zeros: silence is reported again after a full observation, not before.
+    audio.setMuted(false);
+    for (let i = 0; i < SILENT_FRAMES - 1; i++) zeros();
+    expect(reports).toEqual([true, false]);
+    zeros();
+    expect(reports).toEqual([true, false, true]);
+  });
 });

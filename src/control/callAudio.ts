@@ -79,6 +79,7 @@ export type CallAudio = {
   ready: Promise<void>;
   /** One downlink frame as the host delivered it: seq + payload. */
   feed: (frame: Uint8Array) => void;
+  /** The owner's own mute: sends silence, and is no evidence of a silenced microphone. */
   setMuted: (muted: boolean) => void;
   /** The codec this app sends with right now, and what each side offered. */
   codecs: () => { sending: Codec; localCaps: number; peerCaps: number | null };
@@ -356,7 +357,17 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
         else if (undecodable % OPUS_REHELLO_FRAMES === 0) sayHello();
       }
     },
-    setMuted: (next) => { muted = next; },
+    setMuted: (next) => {
+      if (next === muted) return;
+      muted = next;
+      // Muting or unmuting starts a fresh observation: what the microphone
+      // delivered before says nothing about what it delivers now.
+      zeroFrames = 0;
+      if (silent) {
+        silent = false;
+        deps.onSilence?.(false);
+      }
+    },
     codecs: () => ({ sending, localCaps, peerCaps }),
     stats: () => readStats(),
     close: async () => {
