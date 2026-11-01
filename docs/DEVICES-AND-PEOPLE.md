@@ -5,7 +5,10 @@ independent reviews and the owner decisions listed at the end before any slice
 starts. No code, node contract or release note may cite this file as shipped
 behavior. Hardened after an independent review (round 1): section 3.5 now
 states the push credential path as an open owner decision with three honest
-options, and adds token rotation and the wake-pattern leak.
+options, and adds token rotation and the wake-pattern leak. Owner decisions
+since: wake push is **off by default** (D1; the push credential path stays
+open and must be decided before phase P3 is built), and a lost phone can be
+revoked **without a terminal** (D7, section 4.4).
 
 Three questions, in the order they will hurt users:
 
@@ -214,14 +217,16 @@ are rejected in 3.5; the box-side rules apply to option D too):
   Google learn the same. This is a real leak and must be written down in the
   app's privacy text before release. Decided in section 3.5 (D1).
 
-### 3.5 Decision: wake push is a per-user setting (decided)
+### 3.5 Decision: wake push is a per-user setting, off by default (decided)
 
 Status: **decided by the owner** (D1). The wake push is a **setting each
-person chooses**, in Settings and once during phone setup, in plain words.
+person chooses**, and it is **off by default**. A person turns it on
+themselves, in Settings or during phone setup, after plain words about what
+Apple / Google learn (setting copy below). Nothing turns it on for them.
 There is no BitSov or publisher relay in the plan; options A and B in the
 table above are rejected.
 
-**Wake push on (option D above; the default when the person turns it on).**
+**Wake push on (option D above; only when the person turns it on).**
 The person's own box sends a **content-free wake push directly to the
 platform push service** (APNs for iOS, FCM for Android). The phone wakes and
 fetches everything else (who calls, which message, which approval) from its
@@ -248,7 +253,9 @@ own box over its existing authenticated connection, as section 3.3 requires.
   (HTTP 410) or FCM answers `UNREGISTERED`, and never retries it. Pushing on
   to dead tokens would make the box a liveness oracle.
 
-**Push credential path: open owner decision.** An earlier draft proposed a
+**Push credential path: still OPEN; must be decided before P3 is built.**
+The default (off) is decided; who holds the push credential is not. An
+earlier draft proposed a
 "short-lived sender credential" refreshed on a timer. The review showed that
 this only moves the relay: an APNs provider token (a JWT) is signed with the
 publisher's APNs auth key, so whoever issues the short-lived token holds a
@@ -267,10 +274,11 @@ The design must not call (iii) "no relay". The owner picks one of:
 - (ii) for self-builders, and **push off** for everyone else; or
 - (iii) for everyone, accepting and publishing the leak stated above.
 
-Whether wake push is **on or off by default** is part of the same decision
-(section 7, D1). Until it is decided, P3 does not start.
+The owner must pick one of the three options above before phase P3 is
+built; until then P3 does not start. Wake push being **off by default** is
+already decided (D1) and does not wait for this choice.
 
-**Wake push off (option C above).** No push is ever sent. A locked or
+**Wake push off (option C above; the default).** No push is ever sent. A locked or
 backgrounded phone cannot ring; the person opens the app to see calls and
 messages, which it then fetches from the box as today.
 
@@ -281,6 +289,10 @@ Setting copy (draft, plain words):
 | Title | Vække telefonen ved opkald | Wake the phone for calls |
 | On | Telefonen ringer, også når den er låst. Apple eller Google ser kun, hvornår din boks vækker telefonen, aldrig hvem der ringer eller skriver. | Your phone rings even when locked. Apple or Google only see when your box wakes the phone, never who calls or writes. |
 | Off | Telefonen ringer ikke, når den er låst. Åbn appen for at se opkald og beskeder. Et åbent opkald slutter, når telefonen låses. | Your phone does not ring when locked. Open the app to see calls and messages. An open call ends when the phone locks. |
+
+The setting starts **Off**. The same title and On / Off text appear in
+Settings and in the optional phone-setup step, so the person reads what
+Apple / Google learn before they turn it on.
 
 The Off copy states both effects of `SILENCED_GRACE_MS` (section 2.3): a
 call rings only while the app is open, and an open call ends when the phone
@@ -345,6 +357,45 @@ The spend journal stays per install. It records what *this* install may have
 sent and must keep doing so; it is a fence, not a limit. Approvals already live
 on the node; the per-install part is only the pending view, which can be
 re-read from the node after a restart.
+
+### 4.4 Revoking a lost phone without a terminal (decided, D7)
+
+Owner decision (D7): a lost phone can be revoked **without a terminal and
+without the recovery phrase**, from either of:
+
+- **another owner device** of the same identity (for example the Mac, when
+  the phone is lost), or
+- **the box's own app**, for example the Mac app running on the box's
+  computer, acting with the box's local owner authority. On a box with one
+  owner device this is the path.
+
+Design sketch:
+
+1. Devices lists the identity's owner devices (the node already labels them
+   by platform, section 2.4). The owner picks the lost phone and taps "This
+   phone is lost".
+2. The app shows in plain words what happens: the phone is signed out of
+   the box, it can no longer pay or approve anything, and any budget it was
+   given ends now.
+3. On another owner device, the request is confirmed with Touch ID / Face ID
+   using that device's own key (`device.rs`), signing a domain-separated
+   revoke message (target device, op id, nonce, expiry). In the box's own
+   app, it is confirmed through the box's local owner authority.
+4. The node revokes the phone's pairing tokens and its owner device key at
+   once, ends every grant issued to that pairing, drops its push
+   registration, and records an owner key change (which starts the self
+   grant cooldown in `docs/IN-APP-BUDGET-APPROVAL.md`).
+5. The phone, if found, joins again as a new device (`docs/SECOND_DEVICE_JOIN.md`).
+
+Revocation by a second person, such as a box host revoking a hosted
+person's phone, is not part of this decision.
+
+**Node-repository requirement.** A revoke route that accepts either a
+signature by another enrolled, non-revoked owner device key of the same
+identity over the revoke message, or the box's local owner authority; that
+revokes the target's tokens and device key, ends its grants and records an
+owner key change; and that refuses a device revoking itself through this
+route. The app cannot do this alone.
 
 ## 5. Several people on one box: decided principle
 
@@ -415,27 +466,31 @@ tests beyond regtest.
 
 | Phase | Scope | Depends on |
 |---|---|---|
-| P0 | This document; owner decisions D1–D7 | — |
+| P0 | This document; owner decisions D1–D7 (D1 default and D7 decided) | — |
 | P1 | Notifications on phones while the app is running (lift the macOS-only gate in `Shell.tsx` and `OwnerApprovalSheet.tsx`; same content-free text) | — |
 | P2 | Node: owner-only "answered elsewhere" event; app: stop ringing on it (section 4.2) | Node release |
-| P3 | Box-direct push sender and the per-user wake-push setting (D1, decided), wake-token registration through the box, platform-token re-registration on launch and drop on `Unregistered`, rate limits | Node release, D1 credential path and default |
+| P3 | Box-direct push sender and the per-user wake-push setting (D1, decided), wake-token registration through the box, platform-token re-registration on launch and drop on `Unregistered`, rate limits | Node release, D1 credential path (open; must be decided before P3 is built) |
 | P4 | iOS PushKit + CallKit; Android FCM + foreground service; privacy text | P3 |
 | P5 | Node-side budget grant as single source; local book becomes a cache | Node release, D4 |
+| P2b | Revoke a lost phone without a terminal, from another owner device or the box's own app (section 4.4, D7) | Node release (revoke route) |
 | P6 | Node design for hosting several identities (own seeds, "hosted by", move-out); then the re-keying in 5.3 | M6 done, node release |
 
-## 7. Open owner decisions
+## 7. Owner decisions (decided and open)
 
-- **D1. Decided by the owner:** the wake push is a per-user setting, chosen
-  in Settings and during phone setup in plain words. On (the default when
-  enabled): the box sends a content-free wake push directly to APNs / FCM,
-  the phone fetches everything from its own box, and the platform learns
-  only wake times. Off: no push; a locked phone cannot ring and the person
-  opens the app to see calls and messages. No relay in the plan
+- **D1. Decided by the owner:** the wake push is a per-user setting and it
+  is **off by default**. A person turns it on themselves, in Settings or
+  during phone setup, with plain words about what Apple / Google learn. On:
+  the box sends a content-free wake push directly to APNs / FCM, the phone
+  fetches everything from its own box, and the platform learns the box's
+  address, the device push token and each wake time (and the wake pattern
+  over time). Off (the default): no push; a locked phone cannot ring and
+  the person opens the app to see calls and messages. No relay in the plan
   (section 3.5).
-  **Still open under D1 (review round 1):** who holds the push credential,
-  (ii) per-owner key for self-builders with push off for everyone else, or
-  (iii) a token-issuing service with its stated leak; and whether wake push
-  is on or off by default (section 3.5).
+  **Still OPEN under D1, and must be decided before phase P3 is built:**
+  who holds the push credential, one of the three options in section 3.5:
+  (i) the box holds the APNs / FCM key (rejected in the table), (ii) a
+  per-owner key for self-builders with push off for everyone else, or
+  (iii) a token-issuing service with its stated leak.
 - **D2.** Is a Google-free Android build allowed to have no locked-phone
   ringing, or is a self-hosted push (for example UnifiedPush) required?
 - **D3.** Does "Decline" on one device decline on all, or only silence that
@@ -448,9 +503,11 @@ tests beyond regtest.
   (not their messages or funds). Review note: the host can see that a hosted
   person exists by necessity, because the box routes to them; only content
   and funds are hidden.
-- **D7. Lost phone without a terminal.** Today revoking a lost device needs
-  the box's computer or the recovery phrase. Should a second trusted person
-  (for example the box host) be allowed to revoke a device, or is "go to the
-  box" acceptable? (Shared with the in-app budget approval design.)
+- **D7. Lost phone without a terminal: decided by the owner.** A lost phone
+  can be revoked without a terminal, from another owner device or from the
+  box's own app (for example the Mac app on the box's computer). Design
+  sketch in section 4.4; the revoke route is a node-repository requirement.
+  Revocation by a second person (for example the box host) is not part of
+  this decision. (Shared with the in-app budget approval design.)
 - **D6.** May a CallKit lock screen show the caller's contact name after the
   app has fetched it, or must it always show only "BitSov call"?
