@@ -12,8 +12,9 @@ Three questions, in the order they will hurt users:
 - **(b)** One person has a phone and a Mac. Both should show the same
   conversations, and a call should ring on both and stop on both when one
   answers.
-- **(c)** Several people (for example a family) share one box. What is the
-  foundation, and what must never be faked?
+- **(c)** Several people (for example a family) use one box. The principle is
+  already decided by the owner (section 5); this document lists what the code
+  must change to follow it.
 
 ## 1. Principle, as the code already states it
 
@@ -24,16 +25,19 @@ another person's app directly in M6 builds.
 
 What follows from that, and what this document keeps:
 
-- **One box = one identity.** The node holds the identity key, the wallet and
-  the channels. The app holds no seed and no funds.
+- **One person = one identity with their own seed.** Today a box hosts
+  exactly one person, so in the code one box = one identity. The node holds the
+  identity key, the wallet and the channels. The app holds no seed and no funds.
 - **Owner devices share the identity and its funds.** A phone and a Mac paired
-  to the same box are the same person to everyone else. Each device has its own
-  client key and its own device key (`src-tauri/src/device.rs`), but they speak
-  for one identity.
-- **No sub-accounts, no sub-seeds, no multisig** exist anywhere in the app or
-  the node contract it pins today. Nothing in this document pretends one does.
-  Option (c)2 below is the only path that would add them, and it is new node
-  and protocol work.
+  to the same identity are the same person to everyone else. Each device has
+  its own client key and its own device key (`src-tauri/src/device.rs`), but
+  they speak for one identity.
+- **A box may host several people** (owner decision, 6 October; section 5).
+  Each hosted person is still their own identity with their own seed. Hosting
+  is never a shared wallet and never a sub-account.
+- **No sub-accounts, no shared wallets, no multisig** exist anywhere in the
+  app or the node contract it pins today, and none are planned. Nothing in this
+  document pretends one does.
 
 ## 2. Current state
 
@@ -255,62 +259,67 @@ sent and must keep doing so; it is a fence, not a limit. Approvals already live
 on the node; the per-install part is only the pending view, which can be
 re-read from the node after a restart.
 
-## 5. Design (c): several people on one box
+## 5. Several people on one box: decided principle
 
-Calls and messages must reach **a person**, not a box. Today person = box.
-Three options:
+### 5.1 The decision (owner, 6 October)
 
-### Option 1: one box per person (works today)
+- **Each person is their own identity with their own seed.** A parent, a
+  spouse and a child are three identities, three seeds, three wallets, three
+  sets of devices.
+- **A node may host several people**, for example a family on one box. The
+  box is shared hardware, not a shared account.
+- **Hosted people are shown as "hosted by \<name\>"**, where the name is the
+  person who runs the box. Contacts see that the identity is hosted, and by
+  whom.
+- **Each hosted person keeps their own backup** (their own recovery phrase)
+  and can **move out** to their own node at any time, keeping their identity,
+  funds and contacts.
+- **It is not a shared wallet and not a sub-account.** Nobody, including the
+  person who runs the box, spends another person's funds or reads another
+  person's messages through the app.
 
-Each family member has their own box (or their own hosted node), their own
-identity, wallet and devices. A parent and a spouse are two contacts of each
-other. Nothing new to build. Cost: one box each, or a hosted node each.
+Calls and messages therefore reach **a person, not a box**. Today the two are
+the same, so the code never had to tell them apart.
 
-### Option 2: node-side sub-identities (new node and protocol work)
+### 5.2 Rejected alternative: shared household identity
 
-One box runs several identities, each with its own keys and its own devices.
-Funds are either:
+One identity and one wallet for the whole house, with device labels such as
+"kitchen iPad" or "a parent's phone". Everyone would read every message and
+spend the shared balance, and a call would ring every device in the house.
+**Rejected:** it gives no privacy between people, no separate funds, no way to
+move out, and the wording "family account" would mislead. Device labels remain
+useful for one person's own devices (section 4), nothing more.
 
-- **2a. split by accounting** on one wallet: the node keeps a per-identity
-  balance and enforces it; on chain it is still one wallet, so the operator of
-  the box can move everyone's funds; or
-- **2b. a derived sub-seed per identity**: each person's keys and funds are
-  separate cryptographically; the box hosts them, but recovery and export are
-  per person.
+### 5.3 Code that assumes one node = one person
 
-Either way this is a new identity model in the node: routing, pricing, call
-admission, pairing scopes and backups all change. It cannot be done in the app.
+These places are correct today, because a box hosts one person. Each must be
+re-keyed from "node" to "identity hosted on a node" before a second person can
+be hosted. This list is the work inventory, not a change in this PR.
 
-### Option 3: shared household identity with device labels (no privacy)
+| Place | Assumption today | Must become |
+|---|---|---|
+| `src/control/call.ts` `receive(m, ownId)` and the `CALL_OFFER`…`CALL_HANGUP` flow | Peer and own id are node ids; a call targets a node | A call rings a person (identity); the hosting node routes to that person's devices only |
+| `docs/CALLS.md` node-routed media: `GET /api/v1/calls/:call_id/media?peer=<counterparty>`, `src-tauri/src/control/media.rs` | The counterparty is a node; the media socket is admitted per `(peer node, call_id)` | Admitted per `(peer identity, call_id)` and bound to the answering person's pairing |
+| `src-tauri/src/budget.rs` `book_path()` — `app-spend/budget-<first 16 hex of node id>.json`, "one book per identity" | Book keyed by node id | Keyed by the hosted identity; contact and room budgets keyed by peer identity |
+| `src-tauri/src/device.rs` `approvals_path()` — `approval-<node>.json`; `Intent` envelope "for one contact" | Pending approval and envelopes keyed by node id | Keyed by own identity and peer identity |
+| Relation grants in `src-tauri/src/app.rs` (`read_grant`, `has_envelope(&intent.peer, …)`) | Grant envelope names a peer node | Names a peer identity; grant issued by one hosted identity only |
+| `src-tauri/src/spend_journal.rs` call index (identity/peer/call) | "Identity" is the node's identity | Explicitly the hosted identity the pairing belongs to |
+| `src/control/types.ts` `Peer.node_id`, `Introduction.node_id`, `MemberCost.node_id`; `Message.sender` | Contacts, introductions and room members are node ids | A person id plus the node that hosts it ("hosted by") |
+| `src/control/messageNotifications.tsx` `message(message, ownId, …)` | Own id = the node id | Own id = the signed-in hosted identity |
+| Pairing (`docs/ONBOARDING_PAIRING.md`, `docs/SECOND_DEVICE_JOIN.md`) | A pairing and an owner device belong to the node | A pairing and owner devices belong to one hosted identity; one person's devices never approve another person's |
+| Recovery (`src-tauri/src/local_owner.rs`, one-shot recovery phrase) | One recovery phrase per node | One per hosted person; "move out" exports exactly that person |
 
-One identity, one wallet; each device is labelled ("kitchen iPad",
-"a parent's phone"). Everyone in the house reads every message and can spend
-the shared balance. Calls ring every device (section 4.2). Easy, and honest
-only if the app says so loudly.
+Most of the change is in the node (identity, routing, pricing, call admission,
+pairing scopes, backup and move-out). The app follows the node contract once
+it exists; it cannot do this alone.
 
-### Trade-offs
+### 5.4 What this means now
 
-| | 1. Box per person | 2. Sub-identities | 3. Shared identity |
-|---|---|---|---|
-| Works today | Yes | No | Mostly (labels only) |
-| Privacy between people | Full | 2a: from each other, not from the box owner. 2b: stronger | None |
-| Separate funds | Yes | 2a: accounting only. 2b: yes | No |
-| Call rings the right person | Yes | Yes, after node work | Rings everyone |
-| Hardware / hosting cost | One box each | One box | One box |
-| Node / protocol work | None | Large | Small (labels) |
-| Recovery | Per person | 2a: shared. 2b: per person | Shared |
-| Risk of misleading copy | Low | Medium | High |
-
-### Recommendation
-
-- **Now:** option 1. It needs nothing new and keeps "one box = one identity"
-  true. Onboarding can say "each person in the house gets their own BitSov".
-- **After M6:** write the node design for option 2, with 2b as the default
-  candidate because it keeps funds separate by keys, not by trust in one
-  operator. App work waits for that design.
-- **Not recommended:** option 3 as a product. Device labels are useful for
-  section 4 anyway, but a shared identity must not be offered as "family
-  accounts".
+- **Until the node supports hosting:** each person runs their own box or
+  their own hosted node. Onboarding can say "each person in the house gets
+  their own BitSov". This already matches the decision.
+- **After M6:** the node design for hosting several identities (own seeds,
+  "hosted by", move-out), then the re-keying in 5.3.
 
 ## 6. Phased plan
 
@@ -325,7 +334,7 @@ tests beyond regtest.
 | P3 | Push sender (D1), wake-token registration through the box, rate limits | D1, node release |
 | P4 | iOS PushKit + CallKit; Android FCM + foreground service; privacy text | P3 |
 | P5 | Node-side budget grant as single source; local book becomes a cache | Node release, D4 |
-| P6 | Node design for sub-identities (option 2) | M6 done, D5 |
+| P6 | Node design for hosting several identities (own seeds, "hosted by", move-out); then the re-keying in 5.3 | M6 done, node release |
 
 ## 7. Open owner decisions
 
@@ -337,7 +346,9 @@ tests beyond regtest.
   device?
 - **D4.** Single daily budget per person enforced by the node (recommended),
   or synced per-device books?
-- **D5.** For several people: confirm option 1 now and option 2 (2a or 2b)
-  as the post-M6 node design.
+- **D5.** Several people on one box: the principle is decided (section 5.1).
+  Open details only: which name "hosted by" shows and whether a contact always
+  sees it, and whether the host may see that a hosted person exists on the box
+  (not their messages or funds).
 - **D6.** May a CallKit lock screen show the caller's contact name after the
   app has fetched it, or must it always show only "BitSov call"?
