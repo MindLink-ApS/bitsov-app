@@ -39,7 +39,8 @@ function pairingFailure(reason: string | null): { kind: Failure; detail: string 
 }
 function failure(error: unknown): { kind: Failure; detail: string } {
   // Some host refusals arrive as plain text (the link preview): a bad or spent link is never "check the connection".
-  if (typeof error === 'string' || error instanceof Error) {
+  // An Error that carries a structured kind or code (the native scanner's, say) is handled below as before.
+  if (typeof error === 'string' || (error instanceof Error && !('kind' in error) && !('code' in error))) {
     const text = (typeof error === 'string' ? error : error.message).replace(/bitsov:\/\/pair\/[^\s]+/g, '[redacted]');
     if (/ticket expired, was already used|pairing link expired/i.test(text)) return { kind: 'stale', detail: text };
     if (/invalid remote pairing link/i.test(text)) return { kind: 'bad_link', detail: text };

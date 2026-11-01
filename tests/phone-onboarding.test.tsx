@@ -809,3 +809,10 @@ it('makes keeping the box the strong choice and marks forgetting', async () => {
   expect([first.textContent, first.className]).toEqual(['Keep it', 'phone-primary-plain']);
   expect([second.textContent, second.className]).toEqual(['Yes, forget it', 'phone-danger']);
 });
+it('a refused camera reported as an Error with a kind still shows the camera screen', async () => {
+  const props = mount({ scan: vi.fn().mockRejectedValue(Object.assign(new Error('Camera access denied'), { kind: 'camera' })) });
+  button('Scan the code with the camera').click(); await tick();
+  expect(document.querySelector('h1')?.textContent).toBe("BitSov can't use the camera");
+  expect(button('Paste a link instead')).toBeTruthy();
+  expect(props.preview).not.toHaveBeenCalled();
+});
