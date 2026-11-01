@@ -193,19 +193,20 @@ it('waits for native cancellation before enabling another scan', async () => {
   finish(); await tick(); expect(button("Scan the code with the camera").disabled).toBe(false);
   expect(props.connect).not.toHaveBeenCalled();
 });
-it('keeps Scan out of reach while the paste bubble is up, and says where to tap', async () => {
+it('says where to tap before the paste bubble appears (the page cannot repaint while it is up)', async () => {
+  mount(); await tick();
+  expect(document.querySelector('[data-phone-paste-hint]')?.textContent).toBe('After Paste link, tap the small bubble that appears.');
+  // Gone once the masked field is the way in.
+  vi.stubGlobal('navigator', {});
+  button('Paste link').click(); await tick();
+  expect(document.querySelector('[data-phone-paste-hint]')).toBeNull();
+});
+it('discards a clipboard read superseded by scanning and cancelling', async () => {
   let finish!: (text: string) => void;
   vi.stubGlobal('navigator', { clipboard: { readText: () => new Promise(resolve => { finish = resolve; }) } });
-  const props = mount({ scan: vi.fn(() => new Promise<string>(() => {})) });
-  button('Paste link').click(); await tick();
-  expect(document.querySelector('[data-phone-paste-hint]')?.textContent).toBe('Tap the small bubble that appears to paste.');
-  // A near miss on Scan (the bubble sits over it) does nothing.
-  expect(button('Scan the code with the camera').disabled).toBe(true);
-  button('Scan the code with the camera').click(); await tick();
-  expect(props.scan).not.toHaveBeenCalled();
-  finish(''); await tick();
-  expect(document.querySelector('[data-phone-paste-hint]')).toBeNull();
-  expect(button('Scan the code with the camera').disabled).toBe(false);
+  const props = mount({ scan: () => new Promise(() => {}), cancelScan: async () => {} });
+  button('Paste link').click(); button("Scan the code with the camera").click(); await tick(); button('Cancel').click(); await tick();
+  finish('bitsov://pair/synthetic'); await tick(); expect(props.preview).not.toHaveBeenCalled();
 });
 it('does not resume a late approval poll after mismatched words are cancelled', async () => {
   vi.useFakeTimers();
