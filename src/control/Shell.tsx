@@ -310,7 +310,9 @@ export type Actions = {
   /** The door card: a stranger's signed quote, or null when the node cannot give one. */
   doorQuote: (peer: string) => Promise<FirstContactQuote | null>;
   ownerRequest: (peer: string, cap: number, budget: number) => Promise<Outcome<OwnerContactApproval | null>>;
-  ownerStatus: (id: string, recipient?: string) => Promise<Outcome<OwnerContactApproval>>;
+  ownerStatus: (id: string, recipient?: string, maxMsat?: number) => Promise<Outcome<OwnerContactApproval>>;
+  /** Our node already holds an E2EE session with this contact: it admitted them, so a new client needs no first-contact approval. */
+  knownAtNode?: (peer: string) => boolean;
   /** Owner approval v1 (requester side): ask for an approval on the owner's other device, and read it back. */
   approvalRequest: (request: ApprovalRequest) => Promise<Outcome<ApprovalView>>;
   approvalStatus: (opId: string) => Promise<Outcome<ApprovalView>>;
@@ -1423,6 +1425,8 @@ export function ControlCenter(props: Props) {
     routed: routedCalls,
     minutes: callMinutes,
     audioSession: appPlatform() === 'ios' ? (live) => invoke<void>('call_audio_session', { live }) : undefined,
+    // A locked or backgrounded phone silences the microphone while the call would go on being paid.
+    stopWhenSilenced: isMobilePlatform(),
     closeAdmission: (operationId, peer, callId) => source.closeCallAdmission(operationId, peer, callId),
     authorize: async () => {
       const pairing = await act(() => source.pairingStatus());
@@ -1453,7 +1457,9 @@ export function ControlCenter(props: Props) {
           callId: () => callView().callId,
           peer: () => callView().peer,
           bridge: isTauri() ? hostMediaBridge() : unavailableMediaBridge(),
-          audio: (stream, transport, onFatal) => createCallAudio({ stream, transport, onError: onFatal }),
+          audio: (stream, transport, onFatal) => createCallAudio({ stream, transport, onError: onFatal,
+            // Phones: a microphone the OS silenced counts towards ending the call.
+            ...(isMobilePlatform() ? { onSilence: (silent: boolean) => calls.micSilent(silent) } : {}) }),
           admitted: callMinutes ? (callId, peer, closed) => waitUntilPaid(callMinutes.status, peer, callId, () => Date.now(), closed) : undefined,
           // A media session that closed for good ends its call, so no further minute is paid.
           onSession: (event) => { if (event.state === 'closed') calls.mediaClosed(event.callId); },
@@ -1501,7 +1507,7 @@ export function ControlCenter(props: Props) {
   const stunSource = (): StunSource => (stunOff() ? 'off' : effectiveStunSource() === 'own' ? 'node' : effectiveStunSource() === 'configured' ? 'custom' : overview() ? 'none' : 'checking');
   // Closing the window ends the call here without paying; only Hang up pays.
   onCleanup(() => calls.endLocal());
-  if (appPlatform() === 'ios') {
+  if (isMobilePlatform()) {
     const visibility = () => calls.setBackgrounded(document.visibilityState === 'hidden');
     document.addEventListener('visibilitychange', visibility);
     visibility();
@@ -1705,7 +1711,8 @@ export function ControlCenter(props: Props) {
     },
     doorQuote: (peer) => source.firstContactQuote(peer),
     ownerRequest: (peer, cap, budget) => act(() => source.firstContactRequest(peer, cap, budget)),
-    ownerStatus: (id, recipient) => act(() => source.firstContactStatus(id, recipient)),
+    ownerStatus: (id, recipient, maxMsat) => act(() => maxMsat === undefined ? source.firstContactStatus(id, recipient) : source.firstContactStatus(id, recipient, maxMsat)),
+    knownAtNode: (peer) => peerById().get(peer.toLowerCase())?.session === true,
     approvalRequest: (request) => act(() => source.approvalRequest(request)),
     approvalStatus: (opId) => act(() => source.approvalStatus(opId)),
     breakerResetOffered: () => props.remote === true && overview()?.capabilities?.includes(OWNER_DEVICE_BREAKER_RESET) === true,
@@ -3672,7 +3679,8 @@ function CallPanel(props: {
     });
   }));
   createEffect(() => {
-    if (!['live', 'reconnecting'].includes(props.view.phase)) return;
+    // Also count down a phone call's stop while it is still connecting.
+    if (!['live', 'reconnecting'].includes(props.view.phase) && !(props.view.stopped && props.view.stopped.endsAt !== null)) return;
     setTick(Date.now());
     const t = setInterval(() => setTick(Date.now()), 1000);
     onCleanup(() => clearInterval(t));
@@ -3777,6 +3785,16 @@ function CallPanel(props: {
         {/* Display only: the browser reports no network. Recovery itself stays ICE-driven. */}
         <Show when={v().offline && v().phase !== 'ended' && v().phase !== 'idle'}>
           <p class="hint" role="status" data-call-offline>{tr('uiYouAreOfflineTheCallReconnectsByItself')}</p>
+        </Show>
+        {/* Phones: the call is out of view or its microphone is silenced, and ends unless that clears; or it ended for that. */}
+        <Show when={v().stopped}>
+          {(stop) => (
+            <p class="err-note" role={stop().endsAt === null ? 'alert' : 'status'} data-call-stopped={stop().cause}>
+              {stop().endsAt === null
+                ? tr(stop().cause === 'background' ? 'caCallStoppedBackground' : 'caCallStoppedMicrophone')
+                : tr(stop().cause === 'background' ? 'caCallStoppingBackground' : 'caCallStoppingMicrophone', Math.max(0, Math.ceil((stop().endsAt! - tick()) / 1000)))}
+            </p>
+          )}
         </Show>
         <Show when={v().phase !== 'ended' && v().error}>
           {/* Only a recovery that could not start is framed as one (the call still waits); any other error (a camera, say) as it is. */}
@@ -4928,6 +4946,26 @@ function Composer(props: {
       ...(w.message ? { message: w.message } : {}),
     });
   };
+  // The box owner may approve at the box console instead of on the other device
+  // (`konsensus approve first-contact --op <budget op>`). Watch for that grant
+  // too, for exactly this contact and cap; the node still consumes it once.
+  createEffect(() => {
+    const w = deviceWait();
+    if (!w) return;
+    let stopped = false;
+    let polling = false;
+    const timer = window.setInterval(async () => {
+      if (stopped || polling) return;
+      polling = true;
+      const r = await props.actions.ownerStatus('', w.peer, w.cap);
+      polling = false;
+      if (stopped || deviceWait() !== w || !r.ok || !r.value.ready) return;
+      // The host now holds that grant for this exact send; it goes as approved.
+      setDeviceWait(null);
+      await w.send();
+    }, 2000);
+    onCleanup(() => { stopped = true; window.clearInterval(timer); });
+  });
   onCleanup(() => cancelOwner(true));
   createEffect(() => { if (props.moneyBlocked) { approvalRevision++; cancelOwner(); } });
   const [ownerCountdown, setOwnerCountdown] = createSignal(0);
@@ -5982,16 +6020,20 @@ function Composer(props: {
         await queue.enqueue(() => dispatch(bubble));
       };
       const waitingText = submittedMode === 'message' ? { message: { track: submittedTrack, text: submittedText } } : {};
+      // A contact our node already admitted (it holds their session) is no first
+      // contact at the node: no owner approval, only this app's own contact budget.
+      // A re-admission still asks, and the node still refuses anything unapproved.
+      const admitted = first !== undefined && !room() && !readmit() && props.actions.knownAtNode?.(submittedPeer) === true;
       // Capability-gated, not remote-gated, on purpose: the node's local router
       // mounts request + status, so a pairing on this Mac may ask too (approving
       // is remote-only and happens on another owner device).
-      if (pressed && first !== undefined && !room()) {
+      if (pressed && first !== undefined && !room() && !admitted) {
         // A first contact needs its own approval: an Approve & send does not chain into a second one.
         setNote(tr('uiThisFirstContactNeedsItsOwnApprovalPress'));
         setBusy(false);
         return;
       }
-      if (first !== undefined && !room() && props.actions.ownerDeviceApproval?.()) {
+      if (first !== undefined && !room() && !admitted && props.actions.ownerDeviceApproval?.()) {
         // Owner approval v1: the owner approves on their other device instead of at the node.
         // Captured before the await: leaving while the request is out keeps the text on its chat.
         requesting = waitingText.message ?? null;
@@ -6013,7 +6055,7 @@ function Composer(props: {
         setBusy(false);
         return;
       }
-      if (first !== undefined && !room()) {
+      if (first !== undefined && !room() && !admitted) {
         requesting = waitingText.message ?? null;
         const asked = leaveGeneration;
         const request = await props.actions.ownerRequest(submittedPeer, cap, first);
