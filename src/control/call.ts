@@ -1006,14 +1006,17 @@ export function createCallEngine(deps: CallDeps) {
   /** M6 A2: one paid-minutes session per call; its view and its stop belong to that call only. */
   const startMinutes = (peer: string, callId: string, agreedBlockMsat: number, reservationMaxMsat: number | null, pays: boolean) => {
     minutes?.dispose();
-    minutes = createCallMinutes({
+    const session: CallMinutes = createCallMinutes({
       peer, callId, agreedBlockMsat, reservationMaxMsat, pays, deps: deps.minutes!, now: deps.now,
       onChange: (m) => { if (view.callId === callId) set({ minutes: m }); },
       // The node ended it, or paying stopped: the call ends now, never left 'connected'.
       onStop: (stop) => { if (view.callId === callId && active()) end(stop.code === 'unpaid' ? 'unpaid' : stop.code === 'node_ended' ? 'hangup' : 'failed', stop.message); },
+      // A call that ended (or was replaced) is never paid for, whatever its session still believes.
+      canPay: () => minutes === session && view.callId === callId && active(),
     });
-    set({ minutes: minutes.view() });
-    return minutes;
+    minutes = session;
+    set({ minutes: session.view() });
+    return session;
   };
 
   /** Media is set up but not flowing yet: give up after a while (nothing paid). */

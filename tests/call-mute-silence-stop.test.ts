@@ -6,11 +6,15 @@
  * is no evidence of a silenced microphone; unmuting starts a fresh
  * observation, so the call still ends after the detection time and the
  * grace, and no further minute is paid.
+ *
+ * A suspended phone delivers its timers late: a minute poll (or a status
+ * reply) that arrives after the stop deadline ends the call, and pays no
+ * further minute.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCallEngine, SILENCED_GRACE_MS, type CallDeps, type CallView } from '../src/control/call';
 import { createCallAudio, SILENT_FRAMES } from '../src/control/callAudio';
-import type { MinutesDeps } from '../src/control/callMinutes';
+import { STATUS_POLL_MS, type MinutesDeps } from '../src/control/callMinutes';
 import { createNodeRoutedConnection, nodeRoutedSdp } from '../src/control/nodeRoutedConnection';
 import type { MediaBridge, MediaLink } from '../src/control/mediaBridge';
 import { setLanguagePref } from '../src/i18n';
@@ -98,7 +102,15 @@ function phone() {
   const reports: boolean[] = [];
   const node = fakeNode();
   const pay = vi.fn(async (_p: string, _c: string, seq: number) => { node.settle(seq); return ok<CallReceipt>({ message_id: `blk${seq}`, kind: 404, amount_msat: BLOCK, total_msat: BLOCK + FEE, max_routing_fee_msat: FEE, delivered: true, accepted: true, sent_at_ms: 0 }); });
-  const minutes: MinutesDeps = { status: vi.fn(async () => ok(node.status())), hold: vi.fn(async () => ok(node.status())), pay };
+  /** Status replies held back (a request in flight while the phone is suspended). */
+  let holding = false;
+  const held: (() => void)[] = [];
+  const status = vi.fn((): Promise<Outcome<CallStatus | null>> => holding
+    ? new Promise((resolve) => { held.push(() => resolve(ok(node.status()))); })
+    : Promise.resolve(ok(node.status())));
+  const minutes: MinutesDeps = { status, hold: vi.fn(async () => ok(node.status())), pay };
+  /** The app's wall clock runs ahead of its timers: they were held while the phone was suspended. */
+  let skew = 0;
   // The microphone: a disabled track (the owner's mute) delivers exact zeros, as does a microphone the OS silenced.
   const mic = { kind: 'audio', enabled: true, muted: false, readyState: 'live', stop: vi.fn() };
   let osSilenced = false;
@@ -121,7 +133,7 @@ function phone() {
         workletUrl: 'worklet.js', opus: false, onSilence: (silent) => { reports.push(silent); calls?.micSilent(silent); } }),
       onSession: (event) => { if (event.state === 'closed') calls?.mediaClosed(event.callId); },
     }),
-    now: () => Date.now(),
+    now: () => Date.now() + skew,
     onView: (v) => views.push(v),
     onStreams: () => {},
     newCallId: () => ID,
@@ -146,7 +158,15 @@ function phone() {
     link?.({ link: 'open', detail: null });
     await vi.waitFor(() => expect(engine.view().phase).toBe('live'));
   };
-  return { engine, views, ended, reports, pay, mic, live, silence: () => { osSilenced = true; } };
+  return {
+    engine, views, ended, reports, pay, status, mic, live, silence: () => { osSilenced = true; },
+    /** The wall clock moves on; no timer fires. */
+    suspend: (ms: number) => { skew += ms; },
+    hold: () => { holding = true; },
+    /** Deliver the held status replies now. */
+    release: () => { holding = false; held.splice(0).forEach((reply) => reply()); },
+    heldReplies: () => held.length,
+  };
 }
 
 describe('a phone call muted, then unmuted into a silenced microphone', () => {
@@ -189,5 +209,55 @@ describe('a phone call muted, then unmuted into a silenced microphone', () => {
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(h.pay).toHaveBeenCalledTimes(paid);
     expect(h.engine.view().phase).toBe('ended');
+  });
+});
+
+describe('a suspended phone call whose minute check arrives after the stop deadline', () => {
+  it('an overdue minute poll ends the call and pays no further minute', async () => {
+    const h = phone();
+    await h.live();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(h.engine.view().phase).toBe('live');
+    expect(h.pay).toHaveBeenCalledTimes(1);
+
+    // Hidden at t=30 s: the call ends at t=50 s.
+    h.engine.setBackgrounded(true);
+    const endsAt = h.engine.view().stopped!.endsAt!;
+    // The phone suspends the app past the deadline (t=51 s), then delivers the minute poll it held (due at t=35 s).
+    // The node still runs the call, with the next minute due at t=40 s.
+    h.suspend(endsAt - Date.now() + 1_000);
+    const polls = h.status.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(STATUS_POLL_MS);
+    expect(h.status.mock.calls.length).toBeGreaterThan(polls);
+
+    expect(h.engine.view()).toMatchObject({ phase: 'ended', reason: 'hangup', stopped: { cause: 'background', endsAt: null } });
+    expect(h.ended).toEqual([ID]);
+    expect(h.pay).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(h.pay).toHaveBeenCalledTimes(1);
+  });
+
+  it('a status reply that arrives after the deadline ends the call and pays no further minute', async () => {
+    const h = phone();
+    await h.live();
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(h.pay).toHaveBeenCalledTimes(1);
+
+    // A minute check is on its way to the node when the app is hidden.
+    h.hold();
+    await vi.advanceTimersByTimeAsync(STATUS_POLL_MS);
+    expect(h.heldReplies()).toBe(1);
+    h.engine.setBackgrounded(true);
+    const endsAt = h.engine.view().stopped!.endsAt!;
+    // Its reply comes back only after the deadline, while the node still runs the call with the next minute due.
+    h.suspend(endsAt - Date.now() + 1_000);
+    h.release();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(h.engine.view()).toMatchObject({ phase: 'ended', reason: 'hangup', stopped: { cause: 'background', endsAt: null } });
+    expect(h.ended).toEqual([ID]);
+    expect(h.pay).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(h.pay).toHaveBeenCalledTimes(1);
   });
 });
