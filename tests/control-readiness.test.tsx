@@ -5,6 +5,8 @@ import { render } from 'solid-js/web';
 import { ControlCenter, setShowLegacyRoomsUi } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID, SAMPLE_OPEN_ROOM_ID, SAMPLE_PEERS } from '../src/control/sample';
 import { asActionError, nodePill } from '../src/control/state';
+import { provenUnpaid } from '../src/control/paymentOutcome';
+import { setLanguagePref } from '../src/i18n';
 
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
@@ -163,6 +165,20 @@ describe('node money readiness', () => {
 
   it('maps the node refusal to the common calm message', () => {
     expect(asActionError({ code: 'not_ready', message: 'backend unavailable' }).message).toBe('Money is not ready yet. Your node will retry automatically.');
+  });
+
+  it.each([
+    ['en', 'This permission covers messages and calls. Ask the owner to approve this payment separately. Nothing was paid.'],
+    ['da', 'Denne tilladelse dækker beskeder og opkald. Bed ejeren om at godkende denne betaling særskilt. Intet blev betalt.'],
+  ] as const)('a messaging grant refusing a payment has its own plain words (%s), and nothing was paid', (lang, words) => {
+    setLanguagePref(lang);
+    try {
+      const error = asActionError({ code: 'grant_messaging', message: 'host words' });
+      expect(error).toEqual({ code: 'grant_messaging', message: words });
+      expect(provenUnpaid(error.code)).toBe(true);
+    } finally {
+      setLanguagePref('en');
+    }
   });
 
   it('does not mistake an older node without the field for unavailable money', async () => {

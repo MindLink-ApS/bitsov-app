@@ -435,6 +435,8 @@ export type ActionError = {
     // G1 node grants: refused before any payment (see src-tauri/src/grant.rs).
     | 'grant_ended' | 'grant_exhausted' | 'grant_per_call' | 'grant_recipient' | 'grant_unpriced' | 'grant_ledger' | 'grant_refused' | 'grant_unknown' | 'grant_first_contact' | 'grant_readmission'
     | 'grant_no_envelope'
+    // A messaging grant (relation or owner-approved) never funds an explicit payment.
+    | 'grant_messaging'
     // Spend breakers (node 409 budget_exceeded reasons; the host maps them):
     // grant_paused needs a reset; failures_pending waits for unresolved payments;
     // rate_limited (minute/hour) and velocity recover with time on their own.
