@@ -68,6 +68,8 @@ class SmokeScript(unittest.TestCase):
             self.assertIsNone(re.search(pattern, code, re.IGNORECASE), pattern)
         # Only emulator serials are accepted.
         self.assertIn("^emulator-[0-9]+$", code)
+        # The system launch splash has content; it must not pass as the first screen.
+        self.assertIn('Splash Screen $package', code)
 
 
 class ScreenshotCheck(unittest.TestCase):

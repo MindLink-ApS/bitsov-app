@@ -199,12 +199,16 @@ if [[ $dry_run == 0 ]]; then
       "$adb" -s "$serial" logcat -d > "$out/logcat.txt" 2>&1 || true
       fail "the app is not running after launch (crashed?); see $out/logcat.txt"
     fi
-    if [[ -s "$out/launch.png" && "$top" == *"$package"* ]] &&
+    # Android draws a system splash (the app icon) before the app's own window;
+    # it has content, so it must not count as the first screen.
+    splash=$("$adb" -s "$serial" shell dumpsys window windows 2>/dev/null | grep -c "Splash Screen $package" || true)
+    if [[ -s "$out/launch.png" && "$top" == *"$package"* && $splash == 0 ]] &&
       check=$(trap - ERR; node "$root/scripts/android-screenshot-check.mjs" "$out/launch.png" 2>&1); then
       printf '%s\n' "$check"
       break
     fi
     [[ "$top" == *"$package"* ]] || check='another app is in front of BitSov'
+    [[ $splash == 0 ]] || check='the launch splash is still showing; the app window never appeared'
     if (( attempt >= attempts )); then
       "$adb" -s "$serial" logcat -d --pid="$pid" > "$out/logcat.txt" 2>&1 || true
       fail "${check:-screenshot is missing or empty} ($out/launch.png)"
