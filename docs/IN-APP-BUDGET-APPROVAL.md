@@ -6,8 +6,8 @@ Status: **design, docs only.** Nothing here is built. The owner decided
 `konsensus grant` on the node's computer". This document says how, and what
 the node (a separate repository) must add. It needs review from two
 independent reviewers before any code lands. Hardened after an independent
-review (round 1); the limits that still need the owner are listed in
-section 10.
+review (round 1). The owner has since accepted the self-approval limits and
+decided that a lost phone can be revoked without a terminal (section 10).
 
 ## 1. Current flow
 
@@ -148,13 +148,15 @@ All of these, checked by the node, not only the app:
   device enrollment are out of scope.
 - The terms fit an **owner ceiling** written once at setup (default: the
   app's `DEFAULT_BUDGET_MSAT`, 200 sats a day, with the node's 6-sat cap per
-  message). Anything above it falls back to the node's computer. The exact
-  ceiling is an owner decision (section 10).
+  message). Anything above it falls back to the node's computer. This
+  ceiling is the default, owner-accepted (section 10).
 - **Cooldown after a key change.** Self grants are disabled for **N days**
   after any owner key change on the box: a new enrolment, a re-enrolment of
-  the phone, a key invalidated by a biometric change, or a restore from the
-  recovery phrase. A thief who re-enrols cannot self-grant at once. N is an
-  owner decision (section 10).
+  the phone, a key invalidated by a biometric change, a restore from the
+  recovery phrase, or the revocation of a lost device (section 5.5). A thief
+  who re-enrols cannot self-grant at once. The cooldown is owner-accepted
+  (section 10); this document proposes no number for N, so its value is
+  still to be set before P1 is built.
 - The key is biometric-strong (section 4, R4). On Android without
   `BIOMETRIC_STRONG`, no self grant.
 
@@ -219,11 +221,11 @@ exactly what is shown and exactly what is signed:
   (section 5.1); otherwise `approval_key_cooldown`.
 - Terms equal the stored request and fit the owner ceiling (budget,
   per-call maximum and the sum of per-recipient budgets).
-- Grant written exactly as the console path writes it; expiry at most 24 h,
-  or a shorter maximum for self grants (section 10).
+- Grant written exactly as the console path writes it; expiry at most 24 h
+  (default, owner-accepted; section 10).
 - **Rate limit:** at most **1 live** self-granted grant at a time and at most
   **3 self grants per 24 h** (`approval_rate_limited`). These numbers are the
-  review's proposal; the exact values are an owner decision (section 10).
+  review's proposal, accepted by the owner (section 10).
 - Each self grant appears in the node's log **and in the app's own audit
   view**, which the owner can read without the node's computer.
 
@@ -235,16 +237,27 @@ command moves under "Other ways", as `TouchIdFirst` already does for v1.
 
 ### 5.5 Lost device
 
-- Grant lifetime of at most 24 h (or a shorter self-grant maximum, for
-  example 12 h; section 10) and the owner ceiling cap the damage.
+- Grant lifetime of at most 24 h (section 10) and the owner ceiling cap the
+  damage.
 - Biometry-only key: a thief needs the owner's face or finger.
 - The cooldown after a key change (section 5.1) stops a thief who re-enrols
   from self-granting at once.
-- Revocation without the device: at the node's computer (existing console),
-  or by restoring the identity from the recovery phrase onto a new device,
-  which enrolls a new key and revokes the old one. **For the target owner
-  neither is realistic within a day.** A way to revoke a lost phone without
-  a terminal is an open owner decision (section 10).
+- Revocation without the device, today: at the node's computer (existing
+  console), or by restoring the identity from the recovery phrase onto a new
+  device, which enrolls a new key and revokes the old one. **For the target
+  owner neither is realistic within a day.**
+- **Decided by the owner (section 10): a lost phone can be revoked without
+  a terminal**, from another owner device or from the box's own app (for
+  example the Mac app on the box's computer). Design sketch: the owner opens
+  Devices, picks the lost phone and taps "This phone is lost"; the request
+  is confirmed with Touch ID / Face ID on another owner device, or in the
+  box's own app with the box's local owner authority. The node revokes the
+  phone's pairing tokens and owner device key at once, ends every grant
+  issued to that pairing, including a live self grant, and records an owner
+  key change, so the cooldown (section 5.1) starts. On a single-owner box
+  the box's own app is the path, because there is no other owner device.
+  The full sketch is in `docs/DEVICES-AND-PEOPLE.md` (section 4.4, D7). The
+  node API it needs is a node-repository requirement (section 6).
 - Adding a second owner device later turns self grants off automatically;
   approvals then go device to device (v1).
 
@@ -260,6 +273,7 @@ command moves under "Other ways", as `TouchIdFirst` already does for v1.
 | Cooldown | the node records the time of the last owner key change and refuses self grants within N days of it |
 | Audit | self grants are listed to the requester (time, terms, expiry) so the app can show them |
 | Refusals | `approval_not_single_owner`, `approval_over_ceiling`, `approval_expired`, `approval_changed`, `approval_rate_limited`, `approval_key_cooldown` |
+| Revoke a lost device (node-repository requirement) | a revoke route that accepts either a signature by another enrolled, non-revoked owner device key over a domain-separated revoke message (target device, op id, nonce, expiry), or the box's local owner authority from the box's own app; it revokes the target's tokens and device key, ends its grants, records an owner key change, and refuses revoking the requesting device itself through this route |
 
 The app keeps today's flow for any node without the capability.
 
@@ -305,23 +319,31 @@ platform's own biometric word, as `TouchIdFirst` does.
   `approval_key_cooldown`; replayed signature → refused; same signature on
   another op → refused; a second live self grant → refused; the fourth self
   grant in 24 h → `approval_rate_limited`; a `"-"` grant whose per-recipient
-  sum exceeds the ceiling → `approval_over_ceiling`.
+  sum exceeds the ceiling → `approval_over_ceiling`; a lost device revoked
+  from another owner device or the box's own app → its tokens refused, its
+  grants ended, and the cooldown started.
 - Android: a key that accepts device credentials is refused for self grants;
   a device without `BIOMETRIC_STRONG` is not offered the button.
 - UI: button shown only with the capability and a single owner; console
   command still reachable under "Other ways"; Danish and English copy.
 - Two-node runs on regtest only; no real funds.
 
-## 10. Open owner decisions
+## 10. Owner decisions
 
-Hardening review round 1 left these to the owner; the design does not
-decide them.
+Hardening review round 1 left these to the owner. Both are now decided.
 
-1. **Self-approval limits.** The owner ceiling per day; the maximum
-   lifetime of a self grant (12 h or 24 h); the number per day (proposed:
-   at most 1 live and 3 per 24 h); and N, the cooldown in days after a key
-   change.
-2. **Lost phone without a terminal.** Today revoking a lost device needs the
-   node's computer or the recovery phrase. Should a second trusted person
-   (for example the box host) be allowed to revoke a device, or is "go to
-   the box" acceptable?
+1. **Self-approval limits: decided by the owner, accepted as proposed.**
+   At most **1 live** self grant and **3 self grants per 24 h**
+   (`approval_rate_limited`). No self approval for **N days** after any
+   owner key change (`approval_key_cooldown`). The owner ceiling is the
+   app's `DEFAULT_BUDGET_MSAT`, 200 sats a day, with the node's 6-sat cap
+   per message (default, owner-accepted). The self-grant lifetime is at most
+   24 h, as the console path writes it (default, owner-accepted). This
+   document proposes no number for N; the cooldown rule is accepted, and
+   its value must be set before P1 is built.
+2. **Lost phone without a terminal: decided by the owner, yes.** A lost
+   phone can be revoked from another owner device or from the box's own
+   app (for example the Mac app on the box's computer), with no terminal
+   (section 5.5; sketch in `docs/DEVICES-AND-PEOPLE.md` section 4.4). The
+   node API is a node-repository requirement (section 6). Revocation by a
+   second person, such as a box host, is not part of this decision.
