@@ -281,8 +281,8 @@ describe('invisible payments in the composer and the context panel', () => {
       type('[data-composer] textarea', 'hello'); sendOnly();
       expect(text('[data-first-spend-sheet]')).toContain(lang === 'en' ? 'Your daily approval ended.' : 'Din døgn-godkendelse udløb.');
       expect(text('[data-budget-lapse]')).toContain(lang === 'en'
-        ? (lapse === 'lost' ? 'Your node can no longer approve' : 'Your last request lapsed')
-        : (lapse === 'lost' ? 'Din node kan ikke længere godkende' : 'Din sidste anmodning udløb'));
+        ? (lapse === 'lost' ? 'Your box can no longer approve' : 'Your last request lapsed')
+        : (lapse === 'lost' ? 'Din boks kan ikke længere godkende' : 'Din sidste anmodning udløb'));
     });
 
     it.each(['expired', 'failed'] as const)('retries a %s quote inside the sheet without approving', async problem => {
@@ -358,7 +358,7 @@ describe('invisible payments in the composer and the context panel', () => {
     expect($('[data-first-spend-sheet]')).not.toBeNull();
     unavailable = true; host.emit('closed'); host.emit('open');
     await waitFor(() => expect($<HTMLButtonElement>('[data-first-spend-allow]')!.disabled).toBe(true));
-    expect(text('[data-first-spend-reason]')).toContain('Checking your node');
+    expect(text('[data-first-spend-reason]')).toContain('Checking your box');
     $<HTMLButtonElement>('[data-first-spend-allow]')!.click();
     expect(host.used('budget_approve')).toHaveLength(0);
   });
@@ -457,9 +457,9 @@ describe('invisible payments in the composer and the context panel', () => {
   });
 
   it.each([
-    ['en', 'device_remote_unsupported', "Your node can't take device approvals over remote access yet. Nothing was approved. Update your node, or approve at the node."],
+    ['en', 'device_remote_unsupported', "Your box can't take device approvals over remote access yet. Nothing was approved. Update your box, or approve at the box."],
     ['en', 'device_unsupported', 'This node version does not take device approvals. Approve at the node instead.'],
-    ['da', 'device_remote_unsupported', 'Din node kan endnu ikke modtage enhedsgodkendelser via fjernadgang. Intet blev godkendt. Opdater din node, eller godkend direkte på noden.'],
+    ['da', 'device_remote_unsupported', 'Din boks kan endnu ikke modtage enhedsgodkendelser via fjernadgang. Intet blev godkendt. Opdater din boks, eller godkend direkte på boksen.'],
     ['en', 'device_cancelled', 'Touch ID was cancelled.'],
     ['en', 'node', 'The node could not be reached.'],
   ] as const)('shows a %s %s approval failure in budget mode and keeps the draft', async (lang, code, expected) => {
@@ -591,7 +591,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     await waitFor(() => expect($('[data-budget-scope]')).not.toBeNull());
-    expect(text('[data-budget-scope]').replace(/\s+/g, ' ').trim()).toMatchInlineSnapshot(`"App all-in · rolling 24 h — what it coversCovers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. Paid totals use reported principal and fees. In-flight ceilings are reserved separately; unreported fees remain unknown. Not covered: channel opening/closing, on-chain transfers and fees, owner-direct CLI/API, or background workers. G1 is a separate finite node grant; it does not refill daily. Not a wallet-wide limit."`);
+    expect(text('[data-budget-scope]').replace(/\s+/g, ' ').trim()).toMatchInlineSnapshot(`"App all-in · rolling 24 h — what it coversCovers automatic and manual-window messages, room sends, files, app invoice payments and keysend, and admission, including their maximum network fees. Paid totals use reported principal and fees. In-flight ceilings are reserved separately; unreported fees remain unknown. Not covered: channel opening/closing, on-chain transfers and fees, owner-direct CLI/API, or background workers. G1 is a separate finite box grant; it does not refill daily. Not a wallet-wide limit."`);
     $<HTMLButtonElement>('[data-composer-mode="pay"]')!.click();
     expect(text('[data-budget-payment]')).toContain('reserve principal plus the network fee ceiling');
     $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
@@ -617,7 +617,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await waitFor(() => expect(text('[data-send]')).toBe(kind === 'preset' ? 'Send' : 'Resume payments'));
     await submit();
     await waitFor(() => expect(host.used(cmd)).toHaveLength(1));
-    await waitFor(() => expect(text('[data-composer-note]')).toBe('Waiting for your approval at the node…'));
+    await waitFor(() => expect(text('[data-composer-note]')).toBe('Waiting for your approval at the box…'));
     expect(mount.textContent).not.toContain('Approved. Press Send');
     // The owner approves at the node: the budget opens.
     hostRef.state.budget = open(rows);
@@ -655,12 +655,12 @@ describe('invisible payments in the composer and the context panel', () => {
     type('[data-composer] textarea', 'gm Maya');
     await waitFor(() => expect(text('[data-send]')).toBe('Send'));
     await submit();
-    await waitFor(() => expect(text('[data-composer-note]')).toBe('Waiting for your approval at the node…'));
+    await waitFor(() => expect(text('[data-composer-note]')).toBe('Waiting for your approval at the box…'));
     // Approved at the node, but Maya's contact budget is already used up.
     hostRef.state.budget = open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 50_000 }]);
     await waitFor(() => expect($('[data-budget="contact_used"]')).not.toBeNull(), { timeout: 8000 });
     await waitFor(() => expect($('[data-composer-note]')).toBeNull());
-    expect(mount.textContent).not.toContain('Waiting for your approval at the node');
+    expect(mount.textContent).not.toContain('Waiting for your approval at the box');
     expect(mount.textContent).not.toContain('Approved. Press Send');
     expect(host.used('message_send')).toHaveLength(0);
   }, 20_000);
@@ -1154,7 +1154,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await waitFor(() => expect($('[data-starter-review]')).not.toBeNull());
     type('[data-starter-request-text]', 'bitsov://sponsor-request#REQ');
     $<HTMLButtonElement>('[data-starter-review] button[type="submit"]')!.click();
-    await waitFor(() => expect(text('[data-starter-owner-approval]')).toContain('Approve this gift at your node'));
+    await waitFor(() => expect(text('[data-starter-owner-approval]')).toContain('Approve this gift at your box'));
     expect(host.used('sponsor_approve')).toHaveLength(0);
     expect(host.used('spend_request')).toHaveLength(0);
   });
@@ -1386,7 +1386,7 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('sponsor_request')[0].args).toEqual({ text: OFFER_LINK });
     expect(text('[data-starter-code]')).toContain('482 913');
     expect($('[data-door-starter] svg.qr')?.getAttribute('aria-label')).toBe('Your starter-bitcoin request as a QR code');
-    await waitFor(() => expect(text('[data-starter-status="received"]')).toContain('Received 20\u202f000 sats in your own node'));
+    await waitFor(() => expect(text('[data-starter-status="received"]')).toContain('Received 20\u202f000 sats in your own box'));
     expect(host.used('sponsor_request_status')[0].args).toEqual({ payment_hash: 'ef'.repeat(32) });
     for (const cmd of ['message_send', 'introduction_open', 'sponsor_approve']) expect(host.used(cmd)).toHaveLength(0);
   });
@@ -1637,11 +1637,11 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     await waitFor(() => expect($('[data-node-grant]')).not.toBeNull());
-    expect(text('[data-node-grant]')).toBe('Your finite node grant allows 396 sats of 400 sats more, at most 50 sats per payment, for 30 min.');
+    expect(text('[data-node-grant]')).toBe('Your finite box grant allows 396 sats of 400 sats more, at most 50 sats per payment, for 30 min.');
   });
 
   it.each([
-    ['en', 'Your finite node grant allows 500 sats of 500 sats more, at most 6 sats per message payment, 50 sats per call payment, for 30 min.'],
+    ['en', 'Your finite box grant allows 500 sats of 500 sats more, at most 6 sats per message payment, 50 sats per call payment, for 30 min.'],
     ['da', 'pr. beskedbetaling, 50 sats pr. opkaldsbetaling, i'],
   ] as const)('shows the message cap and the call limit when the message cap is lower (%s)', async (lang, line) => {
     const until = Date.now() + 30 * 60_000;
@@ -1663,7 +1663,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     await waitFor(() => expect($('[data-node-grant]')).not.toBeNull());
-    expect(text('[data-node-grant]')).toBe('Your finite node grant allows 500 sats of 500 sats more, at most 50 sats per payment, for 30 min.');
+    expect(text('[data-node-grant]')).toBe('Your finite box grant allows 500 sats of 500 sats more, at most 50 sats per payment, for 30 min.');
   });
 
   it('keeps the plain per-payment line when the message cap equals the call limit', async () => {
@@ -1674,7 +1674,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     await waitFor(() => expect($('[data-node-grant]')).not.toBeNull());
-    expect(text('[data-node-grant]')).toBe('Your finite node grant allows 500 sats of 500 sats more, at most 6 sats per payment, for 30 min.');
+    expect(text('[data-node-grant]')).toBe('Your finite box grant allows 500 sats of 500 sats more, at most 6 sats per payment, for 30 min.');
   });
 
   it('labels invoice/keysend tally rows without offering contact-budget edits', async () => {

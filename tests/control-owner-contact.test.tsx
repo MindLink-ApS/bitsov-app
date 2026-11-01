@@ -259,7 +259,7 @@ it('first contact on a remote node without Touch ID: the Touch ID offer leads, t
   expect(source.send).not.toHaveBeenCalled();
   // What is true for a pending first contact stays in view: it sends by itself once approved, and Cancel stops it.
   const stays = element('[data-touch-id-first] [data-touch-id-stays-text="first-contact"]');
-  expect(stays.textContent).toContain('This message sends automatically once your node’s owner approves this contact');
+  expect(stays.textContent).toContain('This message sends automatically once your box’s owner approves this contact');
   expect(stays.querySelector('[data-contact-cancel-visible]')).not.toBeNull();
   expect(mount.textContent).not.toContain('press Send when you are ready');
   // Going to Touch ID setup leaves the wait running; when the owner approves, it sends, as the copy said.
@@ -388,7 +388,7 @@ describe('owner approval v1: first contact approved on the owner’s other devic
     const { source } = setup();
     source.approvalRequest = vi.fn(async () => { throw { code: 'approval_off', message: 'x', reason: 'seed_password_not_typed' }; });
     await press('not today');
-    await vi.waitFor(() => expect(element('[data-composer-note]')?.textContent).toContain('password is typed at the node'));
+    await vi.waitFor(() => expect(element('[data-composer-note]')?.textContent).toContain('password is typed at the box'));
     expect(element<HTMLTextAreaElement>('[data-composer] textarea').value).toBe('not today');
     expect(source.send).not.toHaveBeenCalled();
   });

@@ -1654,7 +1654,7 @@ describe('H2: what the host says about ending, said honestly', () => {
       signal: async () => ({ ok: false, error: { code: 'call_needs_node_upgrade', message: 'Upgrade your node before making calls. Nothing was paid.' } }),
     });
     await e.place(A, 'audio', QUOTE);
-    expect(last()).toMatchObject({ phase: 'ended', error: 'Your node needs an update before paid calls work. Nothing was paid.', paidMsat: 0, stuck: null });
+    expect(last()).toMatchObject({ phase: 'ended', error: 'Your box needs an update before paid calls work. Nothing was paid.', paidMsat: 0, stuck: null });
     await new Promise((r) => setTimeout(r, 10));
     expect(endCall).not.toHaveBeenCalled();
     expect(FakePc.made[0].closed).toBe(true);
@@ -2280,7 +2280,7 @@ describe('calls in the shell', () => {
     expect(host.used('call_signal')).toEqual([]);
   });
 
-  /** Settings → Node → the connection card's "Last call" line, then back to the chat. */
+  /** Settings → Box → the connection card's "Last call" line, then back to the chat. */
   async function lastCallLine() {
     $<HTMLButtonElement>('[data-profile]')!.click();
     await vi.waitFor(() => expect($('[data-open-settings]')).not.toBeNull());
@@ -2512,7 +2512,7 @@ describe('calls in the shell', () => {
     try {
       ring('audio');
       await vi.advanceTimersByTimeAsync(30_001);
-      expect(text('[data-call-ended]')).toMatch(/node did not answer.*outcome is unknown/i);
+      expect(text('[data-call-ended]')).toMatch(/box did not answer.*outcome is unknown/i);
       expect($('[data-call-panel="calling"]')).toBeNull();
       expect(FakePc.made[0].closed).toBe(true);
       expect(host.used('call_signal')).toHaveLength(1);
@@ -3034,7 +3034,7 @@ describe('calls in the shell', () => {
     const callId = host.used('call_signal')[0].args!.plaintext as string;
     expect(host.used('op_end_call')[0].args).toEqual({ call_id: JSON.parse(callId).call_id });
     expect(host.used('call_signal').map((c) => c.args!.kind)).toEqual([400]);
-    // "Ending the call at your node…" while it runs; nothing more once it is ended.
+    // "Ending the call at your box…" while it runs; nothing more once it is ended.
     await vi.waitFor(() => expect($('[data-call-close]')).toBeNull());
     expect(host.used('op_end_call')).toHaveLength(1);
   });
@@ -3148,7 +3148,7 @@ describe('calls in the shell', () => {
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     ring('audio');
-    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('A call to Maya is still closing at your node. Nothing was paid for this one. End it to call again.'));
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('A call to Maya is still closing at your box. Nothing was paid for this one. End it to call again.'));
     expect(host.used('op_end_call')).toHaveLength(0);
     $<HTMLButtonElement>('[data-call-end-stuck]')!.click();
     await vi.waitFor(() => expect(text('[data-call-close]')).toBe('The earlier call is ended. You can call them again.'));
@@ -3186,7 +3186,7 @@ describe('calls in the shell', () => {
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     ring('audio');
-    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('Your node needs an update before paid calls work. Nothing was paid.'));
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('Your box needs an update before paid calls work. Nothing was paid.'));
     expect(host.used('op_end_call')).toHaveLength(0);
     expect($('[data-call-close]')).toBeNull();
   });
@@ -3230,11 +3230,11 @@ describe('calls in the shell', () => {
     $<HTMLButtonElement>('[data-open-settings]')!.click();
     $<HTMLButtonElement>('[data-tab="general"]')!.click();
     await vi.waitFor(() => expect($('[data-stun-note]')?.getAttribute('data-stun-using')).toBe('own'));
-    expect(text('[data-stun-note]')).toMatch(/your own node \(stun:mynode\.example\.org:3478\).*No third party.*This is the default\./);
+    expect(text('[data-stun-note]')).toMatch(/your own box \(stun:mynode\.example\.org:3478\).*No third party.*This is the default\./);
     expect(localStorage.getItem('bitsov.stun')).toBeNull();
     expect($('[data-stun-own]')).toBeNull();
     // The Call button's tooltip says the same (no "No STUN server is set").
-    expect($('[data-call="audio"]')!.getAttribute('title')).toContain(`Uses your own node (${own}) to find a route.`);
+    expect($('[data-call="audio"]')!.getAttribute('title')).toContain(`Uses your own box (${own}) to find a route.`);
     expect($('[data-call="audio"]')!.getAttribute('title')).not.toContain('No STUN server');
     // A call uses it with no setting saved.
     ring('audio');
@@ -3318,7 +3318,7 @@ describe('calls in the shell', () => {
       setLanguagePref(lang);
       await vi.waitFor(() => expect(text('[data-stun-note]')).toBe(label));
       expect($('[data-call="audio"]')!.getAttribute('title')).toContain(label);
-      expect(text('[data-call-settings]')).not.toMatch(/No third party|ingen tredjepart|your own node|din egen node/i);
+      expect(text('[data-call-settings]')).not.toMatch(/No third party|ingen tredjepart|your own box|din egen boks/i);
       $<HTMLButtonElement>('[data-call="audio"]')!.click();
       expect(text('[data-call-confirm-box]')).toContain(label);
       $<HTMLButtonElement>('[data-call-confirm-cancel]')!.click();
@@ -3358,10 +3358,10 @@ describe('calls in the shell', () => {
     $<HTMLButtonElement>('[data-open-settings]')!.click();
     $<HTMLButtonElement>('[data-tab="general"]')!.click();
     setLanguagePref('da');
-    await vi.waitFor(() => expect(text('[data-stun-note]')).toContain('din egen node'));
-    expect($('[data-call="audio"]')!.getAttribute('title')).toContain('din egen node');
+    await vi.waitFor(() => expect(text('[data-stun-note]')).toContain('din egen boks'));
+    expect($('[data-call="audio"]')!.getAttribute('title')).toContain('din egen boks');
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
-    expect(text('[data-call-confirm-box]')).toContain('din egen node');
+    expect(text('[data-call-confirm-box]')).toContain('din egen boks');
   });
 
   it('an unusable answer from their app is not a connectivity failure: no relay advice', async () => {
@@ -3386,7 +3386,7 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
     FakePc.made[0].state('closed');
     await vi.waitFor(() => expect($('[data-call-no-relay]')).not.toBeNull());
-    expect(text('[data-call-no-relay]')).toBe('Some networks need a relay to connect a call, and your node does not offer one yet.');
+    expect(text('[data-call-no-relay]')).toBe('Some networks need a relay to connect a call, and your box does not offer one yet.');
     expect(text('[data-call-no-relay]')).not.toMatch(/paid/i);
   });
 

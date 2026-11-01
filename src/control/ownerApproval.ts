@@ -182,7 +182,7 @@ export function termLines(view: ApprovalView, nameOf?: (id: string) => string | 
   }
   if (view.request.kind === 'breaker_reset') {
     const snap = breakerSnapshot(view);
-    if (!snap) return ['Reset this app’s paused spending', 'Your node did not include the grant’s state'];
+    if (!snap) return ['Reset this app’s paused spending', 'Your box did not include the grant’s state'];
     return [
       'Reset this app’s paused spending',
       `Tripped: ${snap.tripped.length ? snap.tripped.map(tripText).join(', ') : 'nothing'}`,

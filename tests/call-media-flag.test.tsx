@@ -164,7 +164,7 @@ describe('call media flag', () => {
     await engine.place(A, 'audio', QUOTE);
     conn!.connectionState = 'closed';
     conn!.onconnectionstatechange?.();
-    expect(views[views.length - 1]).toMatch(/through your node/);
+    expect(views[views.length - 1]).toMatch(/through your box/);
     expect(views[views.length - 1]).not.toMatch(/direct connection/);
   });
 });
@@ -219,7 +219,7 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
-    expect($('[data-call-route="node"]')?.textContent).toBe('Encrypted between your node and theirs — both nodes can hear it');
+    expect($('[data-call-route="node"]')?.textContent).toBe('Encrypted between your box and theirs — both boxes can hear it');
     // The offer went out with the node-routed marker, so an M6 peer joins at its node.
     const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
     expect(JSON.parse((offer.args as { plaintext: string }).plaintext).sdp).toContain('a=x-bitsov-media:node-routed-v1');
@@ -273,7 +273,7 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
     host.media({ link: 'ended', detail: 'the node refused the media socket (403)' });
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect($('[data-call-ended]')?.textContent).toBe('The call audio link through your node closed.');
+    expect($('[data-call-ended]')?.textContent).toBe('The call audio link through your box closed.');
   });
 
   it('shows the label in Danish too', async () => {
@@ -284,6 +284,6 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
     await vi.waitFor(() => expect($('[data-call-route="node"]')).not.toBeNull());
-    expect($('[data-call-route="node"]')?.textContent).toBe('Krypteret mellem din node og deres — begge noder kan høre opkaldet');
+    expect($('[data-call-route="node"]')?.textContent).toBe('Krypteret mellem din boks og deres — begge bokse kan høre opkaldet');
   });
 });

@@ -431,7 +431,7 @@ describe('pairing panel', () => {
     const el = show(starting, booting);
     expect(el.querySelector('[data-target="local"]')).not.toBeNull();
     expect(el.querySelector('h1')!.textContent).toBe('Where should your box run?');
-    expect(el.querySelector('[data-target="network"] strong')!.textContent).toBe('A home node (Pi/Umbrel)');
+    expect(el.querySelector('[data-target="network"] strong')!.textContent).toBe('A box at home (Pi/Umbrel)');
     expect(el.querySelector('[data-target="network"]')!.closest('details')).toBeNull();
   });
 
@@ -452,7 +452,7 @@ describe('pairing panel', () => {
     expect(local.getAttribute('aria-checked')).toBe('true');
     expect(local.textContent).toContain('awake and BitSov must stay open');
     // Said at the fork: a node on this Mac is for this Mac only (no box or sticker assumed).
-    expect(local.querySelector('[data-local-only]')!.textContent).toBe('Only this Mac can use this node. A phone can join a home node or a separately configured Mac that stays on.');
+    expect(local.querySelector('[data-local-only]')!.textContent).toBe('Only this Mac can use this box. A phone can join a box at home or a separately configured Mac that stays on.');
     const home = el.querySelector<HTMLButtonElement>('[data-target="network"]')!;
     expect(home.parentElement).toBe(local.parentElement);
     expect(home.closest('details')).toBeNull();

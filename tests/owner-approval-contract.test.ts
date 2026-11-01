@@ -29,7 +29,7 @@ describe('owner approval contract helpers', () => {
     expect(new Set(texts).size).toBe(APPROVAL_ERROR_CODES.length);
     for (const t of texts) expect(t).not.toMatch(/^approved|has been approved|is approved|\bapproved it\b/i);
     expect(refusalText('approval_budget_exceeded', { remaining_msat: 2000 })).toContain('(2 sats left)');
-    expect(refusalText('approval_off', { reason: 'seed_password_not_typed' })).toContain('password is typed at the node');
+    expect(refusalText('approval_off', { reason: 'seed_password_not_typed' })).toContain('password is typed at the box');
   });
   it('expiry counts down from the node’s expires_at', () => {
     const v = base({ kind: 'first_contact', terms: { recipient: A, max_total_msat: 1 } });
@@ -71,7 +71,7 @@ describe('breaker reset (node #304)', () => {
   });
   it('says so when the node sent no snapshot (nothing is read from request.terms)', () => {
     expect(breakerSnapshot(reset())).toBeNull();
-    expect(termLines(reset())[1]).toBe('Your node did not include the grant’s state');
+    expect(termLines(reset())[1]).toBe('Your box did not include the grant’s state');
   });
   it('keeps malformed grant expiry from crashing the approval view', () => {
     for (const grant_expires_at of [undefined, Number.MAX_SAFE_INTEGER]) {

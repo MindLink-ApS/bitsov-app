@@ -263,7 +263,7 @@ describe('paying the minutes of one outgoing call', () => {
     vi.setSystemTime(node.paidUntil! + BLOCK_GRACE_MS + 1);
     await vi.advanceTimersByTimeAsync(STATUS_POLL_MS);
     expect(s.stops.map((x) => x.code)).toEqual(['unpaid']);
-    expect(s.stops[0].message).toBe('Payment for the call stopped, so their node ended it.');
+    expect(s.stops[0].message).toBe('Payment for the call stopped, so their box ended it.');
   });
 
   it('the node ended the call for another reason: their hangup gets a moment to name it first', async () => {
@@ -421,7 +421,7 @@ describe('the call engine with paid minutes', () => {
     const owner = engine(minutesOf(node, vi.fn()), undefined, grant(21_000));
     await owner.engine.place(A, 'audio', dear);
     expect(owner.signals).toEqual([]);
-    expect(owner.last()).toMatchObject({ phase: 'ended', error: expect.stringContaining('This call needs up to 30 sats per payment. Your node grant allows 21 sats per payment.') });
+    expect(owner.last()).toMatchObject({ phase: 'ended', error: expect.stringContaining('This call needs up to 30 sats per payment. Your box grant allows 21 sats per payment.') });
     // A 30-sat signed limit: messages stay at 6 sats, the 30-sat minute fits.
     const wide = engine(minutesOf(node, vi.fn()), undefined, grant(30_000));
     await wide.engine.place(A, 'audio', dear);
@@ -433,7 +433,7 @@ describe('the call engine with paid minutes', () => {
     const e = engine({ status: vi.fn(), hold: vi.fn(), pay: vi.fn() });
     await e.engine.place(A, 'audio', { ...QUOTE, block_msat: null, reservation_max_msat: null });
     expect(e.signals).toEqual([]);
-    expect(e.last()).toMatchObject({ phase: 'ended', error: 'Their node does not advertise a per-minute call price, so this call cannot be placed. Nothing was paid.' });
+    expect(e.last()).toMatchObject({ phase: 'ended', error: 'Their box does not advertise a per-minute call price, so this call cannot be placed. Nothing was paid.' });
   });
 
   it('a liquidity or grant refusal of the reservation ends the call with a plain reason, nothing paid', async () => {
@@ -452,10 +452,10 @@ describe('the call engine with paid minutes', () => {
 
   it('their node refusing the offer above the agreed price or hold ends the call in plain words (EN/DA), nothing sent, held or paid', async () => {
     const cases = [
-      ['call_offer_price_above_consent', 'Their node now asks more per minute than you agreed to, so your node did not place the call. Nothing was sent, held or paid. Check the price and call again.',
-        'Deres node beder nu om mere pr. minut, end du accepterede, så din node foretog ikke opkaldet. Der blev ikke sendt, reserveret eller betalt noget. Tjek prisen, og ring igen.'],
-      ['call_offer_hold_above_consent', 'Your node would hold more for this call’s minutes than you agreed to, so it did not place the call. Nothing was sent, held or paid.',
-        'Din node ville reservere mere til opkaldets minutter, end du accepterede, så den foretog ikke opkaldet. Der blev ikke sendt, reserveret eller betalt noget.'],
+      ['call_offer_price_above_consent', 'Their box now asks more per minute than you agreed to, so your box did not place the call. Nothing was sent, held or paid. Check the price and call again.',
+        'Deres boks beder nu om mere pr. minut, end du accepterede, så din boks foretog ikke opkaldet. Der blev ikke sendt, reserveret eller betalt noget. Tjek prisen, og ring igen.'],
+      ['call_offer_hold_above_consent', 'Your box would hold more for this call’s minutes than you agreed to, so it did not place the call. Nothing was sent, held or paid.',
+        'Din boks ville reservere mere til opkaldets minutter, end du accepterede, så den foretog ikke opkaldet. Der blev ikke sendt, reserveret eller betalt noget.'],
     ] as const;
     try {
       for (const [code, en, da] of cases) {
@@ -806,8 +806,8 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     const host = stubHost();
     await openShell();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
-    expect($('[data-call-minute-price]')?.textContent).toBe(`Then ${amount(BLOCK)} a minute, plus up to ${amount(FEE)} routing a minute, paid by your node while the call runs.`);
-    expect($('[data-call-reservation-max]')?.textContent).toBe(`When it rings, your node holds the minutes under its own call limit. The call goes out with your limits: this per-minute price and a hold of at most ${amount(240 * (BLOCK + FEE))} (4 hours, the most a node allows). If their live price or the hold would be higher, your node does not ring them and nothing is paid. You see the exact hold and confirm it before the first minute is paid.`);
+    expect($('[data-call-minute-price]')?.textContent).toBe(`Then ${amount(BLOCK)} a minute, plus up to ${amount(FEE)} routing a minute, paid by your box while the call runs.`);
+    expect($('[data-call-reservation-max]')?.textContent).toBe(`When it rings, your box holds the minutes under its own call limit. The call goes out with your limits: this per-minute price and a hold of at most ${amount(240 * (BLOCK + FEE))} (4 hours, the most a box allows). If their live price or the hold would be higher, your box does not ring them and nothing is paid. You see the exact hold and confirm it before the first minute is paid.`);
     expect(host.used('call_signal')).toHaveLength(0);
     $<HTMLButtonElement>('[data-call-confirm-cancel]')!.click();
     expect($('[data-call-confirm-box]')).toBeNull();
@@ -821,7 +821,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await openShell();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     expect($('[data-call-minute-price]')?.textContent).toContain('pr. minut');
-    expect($('[data-call-reservation-max]')?.textContent).toContain('ringer din node ikke op');
+    expect($('[data-call-reservation-max]')?.textContent).toContain('ringer din boks ikke op');
   });
 
   it('once it rings, the card shows the node’s exact hold under its own call limit (max_call_minutes) to confirm', async () => {
@@ -831,7 +831,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
     await vi.waitFor(() => expect($('[data-call-hold]')).not.toBeNull());
     expect($('[data-call-hold]')!.textContent).toBe(
-      `Your node holds ${amount(60 * (BLOCK + FEE))} for this call: up to 60 minutes (its call limit) at ${amount(BLOCK)} a minute plus up to ${amount(FEE)} routing. It releases what is not used when the call ends. No minute is paid until you confirm.`);
+      `Your box holds ${amount(60 * (BLOCK + FEE))} for this call: up to 60 minutes (its call limit) at ${amount(BLOCK)} a minute plus up to ${amount(FEE)} routing. It releases what is not used when the call ends. No minute is paid until you confirm.`);
     expect(host.used('call_block')).toHaveLength(0);
     $<HTMLButtonElement>('[data-call-minutes-confirm]')!.click();
     await vi.waitFor(() => expect(host.used('call_hold').slice(-1)[0]?.args).toEqual({ peer: A, call_id: host.callId(), confirm_reserved_msat: 60 * (BLOCK + FEE) }));
@@ -856,7 +856,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect($('[data-call-ended]')?.textContent).toBe(`Your node’s hold for this call does not match what you agreed to, so the call ended. ${ABOVE}`);
+    expect($('[data-call-ended]')?.textContent).toBe(`Your box’s hold for this call does not match what you agreed to, so the call ended. ${ABOVE}`);
     expect(host.used('call_block')).toHaveLength(0);
     expect(host.used('call_media_open')).toHaveLength(0);
   });

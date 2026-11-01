@@ -35,7 +35,7 @@ it('shows the QR, polls for SAS and never approves without an explicit tap', asy
   expect(root.querySelector('svg[role="img"]')).not.toBeNull();
   expect(root.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('bitsov://pair/test');
   // Where to go on the new device, and the code it will ask for (no box or console jargon).
-  expect(root.querySelector('[data-ticket-where]')!.textContent).toContain('choose “A home node (Pi/Umbrel)” on a computer, then scan or paste this ticket');
+  expect(root.querySelector('[data-ticket-where]')!.textContent).toContain('choose “A box at home (Pi/Umbrel)” on a computer, then scan or paste this ticket');
   expect(root.querySelector('[data-ticket-claim-warning]')!.textContent).toContain('18-character claim code');
   expect(root.textContent).not.toContain('konsensus ');
   await vi.advanceTimersByTimeAsync(2000); await flush();

@@ -8,7 +8,7 @@ import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import type { PairingView } from '../src/onboarding/pairing';
 import type { Amount, PaymentsReport, Peer, TopicRead } from '../src/control/types';
 
-// Slice C: "Ask your node". The rules as pure functions, then the track
+// Slice C: "Ask your box". The rules as pure functions, then the track
 // against a stubbed host (reads, disclosure, one-shot send, drafts) and on
 // sample data. No node, no network, no model.
 
@@ -78,7 +78,7 @@ describe('what a question asks', () => {
     expect(week).toEqual({ kind: 'read', topic: 'payments', sinceMs: NOW - WEEK_MS, window: 'in the last 7 days' });
     expect(understand('what did I spend today', PEERS, NOW)).toMatchObject({ kind: 'read', topic: 'payments', window: 'today' });
     expect(understand('How much is in my wallet?', PEERS, NOW)).toMatchObject({ topic: 'balance' });
-    expect(understand('How is my node doing?', PEERS, NOW)).toMatchObject({ topic: 'node' });
+    expect(understand('How is my box doing?', PEERS, NOW)).toMatchObject({ topic: 'node' });
     expect(understand('How much inbound liquidity do I have?', PEERS, NOW)).toMatchObject({ topic: 'channels' });
     expect(understand('What do I charge?', PEERS, NOW)).toMatchObject({ topic: 'prices' });
     expect(understand('who messaged me?', PEERS, NOW)).toMatchObject({ topic: 'inbox' });
@@ -182,7 +182,7 @@ describe('composing an answer', () => {
     const read = paymentsRead();
     read.outputs = [{ tool: 'payments', report: { state: 'unavailable', reason: { kind: 'timeout' } } }];
     expect(answerFrom(read, intent, names)).toEqual({
-      text: 'Your node did not return your payment history: it did not answer in time. Nothing was guessed.',
+      text: 'Your box did not return your payment history: it did not answer in time. Nothing was guessed.',
       cards: [],
     });
   });
@@ -261,20 +261,20 @@ describe('composing an answer', () => {
       return answerFrom(r, { kind: 'read', topic, sinceMs: null, window: null }, names);
     };
     expect(read('balance').text).toBe(
-      'Your node reports 482\u202f500 sats. That is Lightning and spendable on-chain together. Your local channel balance is 420\u202f000 sats.',
+      'Your box reports 482\u202f500 sats. That is Lightning and spendable on-chain together. Your local channel balance is 420\u202f000 sats.',
     );
-    expect(read('node').text).toBe('Your node is healthy: 3 peers connected, at block 860\u202f123, up 3d 4h.');
+    expect(read('node').text).toBe('Your box is healthy: 3 peers connected, at block 860\u202f123, up 3d 4h.');
     expect(read('node').cards[0].type).toBe('node');
     expect(read('prices').text).toMatch(/^You charge 1 sat for a message; 3 sats for a file/);
   });
 
   it('ages an answer on screen and marks it stale past its bound or when the node says so', () => {
     const f = paymentsRead().freshness;
-    expect(sourceLine(f, NOW, NOW)).toEqual({ state: 'fresh', text: 'Updated just now (by your node’s clock).' });
-    expect(sourceLine(f, NOW, NOW + 30_000).text).toBe('Updated 32s ago (by your node’s clock).');
+    expect(sourceLine(f, NOW, NOW)).toEqual({ state: 'fresh', text: 'Updated just now (by your box’s clock).' });
+    expect(sourceLine(f, NOW, NOW + 30_000).text).toBe('Updated 32s ago (by your box’s clock).');
     expect(sourceLine(f, NOW, NOW + 58_000).state).toBe('stale');
     expect(sourceLine({ ...f, node_as_of: false }, NOW, NOW).text).toContain('when the app read it');
-    expect(sourceLine({ ...f, state: 'stale', node_stale: true }, NOW, NOW).text).toContain('Your node marked it out of date');
+    expect(sourceLine({ ...f, state: 'stale', node_stale: true }, NOW, NOW).text).toContain('Your box marked it out of date');
     expect(sourceLine({ ...f, age_ms: null, state: 'unknown' }, NOW, NOW)).toEqual({ state: 'unknown', text: 'Freshness unknown.' });
   });
 
@@ -284,7 +284,7 @@ describe('composing an answer', () => {
       for (const now of [NOW - 1000, NOW, NOW + 120_000]) {
         const line = sourceLine(f, NOW, now);
         expect(line.state).toBe('stale');
-        expect(line.text).toContain('Your node marked it out of date');
+        expect(line.text).toContain('Your box marked it out of date');
         expect(line.text).toContain('clock is ahead');
       }
     }
@@ -450,7 +450,7 @@ describe('the AI track', () => {
       return structuredClone(saved);
     } });
     await openAi();
-    expect(text('[data-assistants]')).toContain('Node');
+    expect(text('[data-assistants]')).toContain('Box');
     expect(text('[data-assistants]')).toContain('Wallet');
     expect(text('[data-assistants]')).toContain('Inbox');
     click('[data-track="assistant:wallet"]');
@@ -522,7 +522,7 @@ describe('the AI track', () => {
     const host = stubHost({ ai_send: () => ({ provider: 'shared', label: 'Shared open model', host: 'models.example.org', model: 'open-8b', text: prose, sent_bytes: BODY.length }) });
     await openAi();
     click('[data-provider="shared"]');
-    ask('How is my node doing?');
+    ask('How is my box doing?');
     await vi.waitFor(() => expect($('[data-ai-send]')).not.toBeNull());
     click('[data-ai-send]');
     await vi.waitFor(() => expect(text('[data-ai-answer="remote"] [data-ai-text]')).toBe(prose));
@@ -540,7 +540,7 @@ describe('the AI track', () => {
     expect(read.topic).toBe('payments');
     expect(Math.abs((read.since_ms as number) - (Date.now() - WEEK_MS))).toBeLessThan(5000);
     expect(text('[data-ai-source="node"]')).toContain('GET /api/v1/peers');
-    expect(text('[data-ai-fresh]')).toContain('by your node’s clock');
+    expect(text('[data-ai-fresh]')).toContain('by your box’s clock');
     expect($('[data-ai-card="payments"]')?.textContent).toContain('Maya');
     expect(host.used('ai_disclose')).toHaveLength(0);
     expect(host.used('ai_send')).toHaveLength(0);
@@ -555,7 +555,7 @@ describe('the AI track', () => {
     await openAi();
     ask('What did I spend this week?');
     await vi.waitFor(() => expect($('[data-ai-source="node"]')?.getAttribute('data-freshness')).toBe('stale'));
-    expect(text('[data-ai-fresh]')).toContain('Your node marked it out of date');
+    expect(text('[data-ai-fresh]')).toContain('Your box marked it out of date');
     expect(text('[data-ai-fresh]')).toContain('Update time unknown');
     expect(host.used('ai_send')).toHaveLength(0);
   });
@@ -601,7 +601,7 @@ describe('the AI track', () => {
     // The model's words are text, never markup, and labelled as unchecked.
     expect($('[data-ai-answer="remote"] img')).toBeNull();
     expect(text('[data-ai-answer="remote"] [data-ai-text]')).toContain('<img src=x');
-    expect(text('[data-ai-source="remote"]')).toContain('Your node did not check this answer');
+    expect(text('[data-ai-source="remote"]')).toContain('Your box did not check this answer');
     // The record of what left stays under the answer.
     expect(text('[data-ai-sent] pre')).toBe(BODY);
   });
@@ -754,9 +754,9 @@ describe('the AI track', () => {
   it('works end to end on sample data with no host', async () => {
     await openAi(false);
     expect($('[data-sample]')).not.toBeNull();
-    ask('How is my node doing?');
+    ask('How is my box doing?');
     await vi.waitFor(() => expect($('[data-ai-card="node"]')).not.toBeNull());
-    expect(text('[data-ai-text]')).toContain('Your node is healthy');
+    expect(text('[data-ai-text]')).toContain('Your box is healthy');
     click('[data-provider="shared"]');
     ask('What did I spend this week?');
     await vi.waitFor(() => expect($('[data-ai-send]')).not.toBeNull());

@@ -829,7 +829,7 @@ describe('meetings in the shell', () => {
     $<HTMLButtonElement>('[data-meeting-leave]')!.click();
   });
 
-  it('meeting legs use the same STUN as 1:1 calls: your own node by default', async () => {
+  it('meeting legs use the same STUN as 1:1 calls: your own box by default', async () => {
     const own = 'stun:mynode.example.org:3478';
     stubHost({ node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 2, e2ee_sessions: 2, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),

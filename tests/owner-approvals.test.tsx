@@ -137,7 +137,7 @@ describe('round 1 (#216): nothing vanishes, nothing claims more than is known', 
   });
 
   it('a list that could not be read is said, not shown as "nothing is waiting"', () => {
-    show(() => <OwnerApprovals approvals={[]} error="Your node refused this approval. Nothing was approved." now={NOW} approve={vi.fn()} />);
+    show(() => <OwnerApprovals approvals={[]} error="Your box refused this approval. Nothing was approved." now={NOW} approve={vi.fn()} />);
     expect($('[data-owner-approvals-error]')!.textContent).toContain('refused');
     expect($('[data-owner-approvals-empty]')).toBeNull();
   });
@@ -145,7 +145,7 @@ describe('round 1 (#216): nothing vanishes, nothing claims more than is known', 
   it.each([
     ['pending', 'still lists this request as waiting, so it was not approved', true],
     ['gone', 'no longer lists this request (it was approved or it expired)', false],
-    ['unknown', 'your node could not be read', false],
+    ['unknown', 'your box could not be read', false],
   ] as const)('a transport error on approve rechecks the node (%s) and says only what is known', async (now, text, approveAgain) => {
     const approve = vi.fn(async (_id: string, _message: string) => ({ ok: false as const, error: { code: 'node' as const, message: 'connection lost' } }));
     const recheck = vi.fn(async () => now);
@@ -239,7 +239,7 @@ describe('round 3 (#216): one approve in flight, and the first outcome stands', 
     const { settleOutcome } = await import('../src/control/OwnerApprovals');
     const approved = { ok: true, text: 'Approved. The app that asked can go on now.' };
     const refused = { ok: false, text: refusalText('approval_forbidden') };
-    let s = settleOutcome({}, 'op-1', { ok: false, text: 'Couldn’t confirm whether the approval went through. Checking your node…' });
+    let s = settleOutcome({}, 'op-1', { ok: false, text: 'Couldn’t confirm whether the approval went through. Checking your box…' });
     s = settleOutcome(s, 'op-1', approved);
     s = settleOutcome(s, 'op-1', refused);
     s = settleOutcome(s, 'op-2', refused);
