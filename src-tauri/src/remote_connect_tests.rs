@@ -495,3 +495,308 @@ async fn a_refused_pairing_is_not_redialled_until_the_owner_acts() {
     assert!(state.pairing_snapshot().refused);
     server.abort();
 }
+
+// A box whose answers can change mid-test. Every tunnel serves keep-alive HTTP,
+// so a token request can reuse a warm tunnel without another handshake: the
+// counters show both dials and token requests that reach the box.
+#[derive(Default)]
+struct BoxControl {
+    /// Authentication requests inside a completed Noise handshake.
+    handshakes: std::sync::atomic::AtomicUsize,
+    /// Of those, the ones that presented a pairing code.
+    ticket_auths: std::sync::atomic::AtomicUsize,
+    /// `/pair/challenge` and `/pair/token` requests.
+    token_requests: std::sync::atomic::AtomicUsize,
+    /// Answer authentication with `authentication_failed` (revoked client).
+    refuse_auth: std::sync::atomic::AtomicBool,
+    /// Answer a code-bearing authentication with `already_paired`.
+    already_paired: std::sync::atomic::AtomicBool,
+    /// A non-zero status replaces the 200 reply on these token routes.
+    challenge_status: std::sync::atomic::AtomicU16,
+    token_status: std::sync::atomic::AtomicU16,
+}
+
+impl BoxControl {
+    fn counts(&self) -> (usize, usize) {
+        (self.handshakes.load(Ordering::SeqCst), self.token_requests.load(Ordering::SeqCst))
+    }
+    fn refuse(&self, refuse: bool, challenge_status: u16) {
+        self.refuse_auth.store(refuse, Ordering::SeqCst);
+        self.challenge_status.store(challenge_status, Ordering::SeqCst);
+    }
+}
+
+async fn controlled_box_session(mut stream: tokio::net::TcpStream, node_id: String, control: Arc<BoxControl>) -> std::io::Result<()> {
+    async fn frame(stream: &mut tokio::net::TcpStream) -> std::io::Result<Vec<u8>> {
+        let len = stream.read_u32().await? as usize;
+        assert!(len < 65536);
+        let mut bytes = vec![0; len];
+        stream.read_exact(&mut bytes).await?;
+        Ok(bytes)
+    }
+    async fn write(stream: &mut tokio::net::TcpStream, bytes: &[u8]) -> std::io::Result<()> {
+        stream.write_u32(bytes.len() as u32).await?;
+        stream.write_all(bytes).await
+    }
+    async fn encrypted_write(stream: &mut tokio::net::TcpStream, noise: &mut snow::TransportState, bytes: &[u8]) -> std::io::Result<()> {
+        let mut out = vec![0; bytes.len() + 32];
+        let len = noise.write_message(bytes, &mut out[2..]).unwrap();
+        out[..2].copy_from_slice(&(len as u16).to_be_bytes());
+        write(stream, &out[..len + 2]).await
+    }
+    let mut noise = snow::Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse().unwrap())
+        .local_private_key(&[43; 32]).build_responder().unwrap();
+    let mut plain = vec![0; 65536];
+    noise.read_message(&frame(&mut stream).await?, &mut plain).unwrap();
+    let len = noise.write_message(&[], &mut plain).unwrap();
+    write(&mut stream, &plain[..len]).await?;
+    noise.read_message(&frame(&mut stream).await?, &mut plain).unwrap();
+    let mut noise = noise.into_transport_mode().unwrap();
+    let auth = frame(&mut stream).await?;
+    let len = noise.read_message(&auth[2..], &mut plain).unwrap();
+    let request: remote_access::RemoteAuthRequest = serde_json::from_slice(&plain[..len]).unwrap();
+    control.handshakes.fetch_add(1, Ordering::SeqCst);
+    if request.code.is_some() { control.ticket_auths.fetch_add(1, Ordering::SeqCst); }
+    let reply: &[u8] = if control.refuse_auth.load(Ordering::SeqCst) {
+        br#"{"v":1,"status":"error","code":"authentication_failed","message":"unknown client"}"#
+    } else if request.code.is_some() && control.already_paired.load(Ordering::SeqCst) {
+        br#"{"v":1,"status":"error","code":"already_paired","message":"client already paired"}"#
+    } else {
+        br#"{"v":1,"status":"ok","client_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","scopes":["read"]}"#
+    };
+    encrypted_write(&mut stream, &mut noise, reply).await?;
+    if !reply.starts_with(br#"{"v":1,"status":"ok""#) { return Ok(()); }
+    let mut request = Vec::new();
+    loop {
+        let encrypted = frame(&mut stream).await?;
+        let len = noise.read_message(&encrypted[2..], &mut plain).unwrap();
+        request.extend_from_slice(&plain[..len]);
+        while let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+            let head = std::str::from_utf8(&request[..end]).unwrap().to_owned();
+            let body_len = head.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:")
+                .and_then(|value| value.trim().parse::<usize>().ok())).unwrap_or(0);
+            if request.len() < end + 4 + body_len { break; }
+            request.drain(..end + 4 + body_len);
+            let path = head.split_whitespace().nth(1).unwrap();
+            let refusal = |status: &std::sync::atomic::AtomicU16| match status.load(Ordering::SeqCst) {
+                0 => None,
+                code => Some((code, serde_json::json!({"error":"unknown client"}))),
+            };
+            let (status, body) = if path.starts_with("/api/v1/pair/challenge") {
+                control.token_requests.fetch_add(1, Ordering::SeqCst);
+                refusal(&control.challenge_status).unwrap_or((200, serde_json::json!({"challenge":"bitsov-pair-token-v1:test"})))
+            } else if path == "/api/v1/pair/token" {
+                control.token_requests.fetch_add(1, Ordering::SeqCst);
+                refusal(&control.token_status).unwrap_or((200,
+                    serde_json::json!({"token":"fixture.token", "expires_at":now_unix()+600, "scopes":["read"]})))
+            } else if path == "/api/v1/identity" {
+                (200, serde_json::json!({"node_id":node_id,"network":"regtest"}))
+            } else { (404, serde_json::json!({"error":"not found"})) };
+            let body = body.to_string();
+            let response = format!("HTTP/1.1 {status} Response\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            encrypted_write(&mut stream, &mut noise, response.as_bytes()).await?;
+        }
+    }
+}
+
+async fn controlled_box(link: impl FnOnce(String) -> String) -> (String, Arc<BoxControl>, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let link = link(listener.local_addr().unwrap().to_string());
+    let id = hex::encode(SigningKey::from_bytes(&[42; 32]).verifying_key().as_bytes());
+    let control = Arc::new(BoxControl::default());
+    let task = {
+        let control = control.clone();
+        tokio::spawn(async move {
+            let mut sessions = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = sessions.join_next(), if !sessions.is_empty() => {},
+                    accepted = listener.accept() => {
+                        let (stream, _) = accepted.unwrap();
+                        let (id, control) = (id.clone(), control.clone());
+                        sessions.spawn(async move { let _ = controlled_box_session(stream, id, control).await; });
+                    }
+                }
+            }
+        })
+    };
+    (link, control, task)
+}
+
+async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !done() { tokio::time::sleep(Duration::from_millis(10)).await; }
+    }).await.unwrap_or_else(|_| panic!("timed out waiting until {what}"));
+}
+
+/// The live feed's socket: always a new connection to the proxy, so it would
+/// need a new tunnel (and a handshake) to reach the box. Returns the status.
+async fn live_feed_socket(state: &NodeState) -> u16 {
+    let address = state.remote_proxy.lock().unwrap().as_ref().unwrap().local_addr();
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    let request = format!("GET /api/v1/ws HTTP/1.1\r\nHost: {address}\r\n{}: {}\r\nConnection: close\r\n\r\n",
+        remote_access::LOCAL_AUTH_HEADER, state.remote_proxy_auth);
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = vec![0; 1024];
+    let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut response)).await
+        .expect("the proxy answers the live feed's socket").unwrap();
+    std::str::from_utf8(&response[..read]).unwrap().split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0)
+}
+
+/// Make the current session due, then refresh it the way the live feed does
+/// before it opens its socket.
+async fn live_feed_token_refresh(state: &NodeState) {
+    if let AuthMode::Paired(session) = &mut *state.auth.lock().unwrap() { session.expires_at = now_unix(); }
+    ensure_fresh_token(state).await;
+}
+
+/// `node_status`, every 1.5 s: the probe interval elapsed every time.
+async fn status_poll(state: &NodeState) {
+    *state.home_last_probe.lock().unwrap() = None;
+    home_unlock::refresh(state).await;
+}
+
+async fn connected_controlled_box(app: &tauri::App<tauri::test::MockRuntime>, dir: &Path) -> (Arc<BoxControl>, tokio::task::JoinHandle<()>) {
+    let state = app.state::<NodeState>();
+    let (link, control, task) = controlled_box(|endpoint| ticket(endpoint, false)).await;
+    remote_access_connect_at(app.handle(), &state, dir, &link).await.unwrap();
+    until("the session is ready", || state.status_snapshot().ready).await;
+    drop(state.remote_recovery.lock().await);
+    (control, task)
+}
+
+// An established session whose box then refuses it (a revoked app): the token
+// refresh that learns of it stops every automatic path. Status polling, token
+// refresh and the live feed (its recovery, its refresh and its socket) neither
+// dial nor repeat the token exchange until the owner acts; then both resume.
+#[tokio::test]
+async fn a_refused_session_stops_status_probes_token_refresh_and_live_recovery() {
+    let app = app();
+    let state = app.state::<NodeState>();
+    let dir = tempfile::tempdir().unwrap();
+    let (control, task) = connected_controlled_box(&app, dir.path()).await;
+    control.refuse(true, 404);
+    let before = control.counts();
+    live_feed_token_refresh(&state).await;
+    assert_eq!(control.counts(), (before.0, before.1 + 1), "the refresh reached the box over its warm tunnel");
+    let view = serde_json::to_value(state.pairing_snapshot()).unwrap();
+    assert_eq!((view["state"].as_str(), view["refused"].as_bool()), (Some("failed"), Some(true)));
+    assert!(!state.status_snapshot().ready);
+    assert!(matches!(*state.auth.lock().unwrap(), AuthMode::Unauthenticated), "the due session is retired");
+    let refused = control.counts();
+    for _ in 0..3 {
+        status_poll(&state).await;
+        live_feed_token_refresh(&state).await;
+        assert!(refresh_paired(&state).await.is_err());
+        tokio::time::timeout(Duration::from_secs(3), reconnect_remote_background(&state)).await.unwrap().unwrap();
+        assert_eq!(live_feed_socket(&state).await, 403);
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(control.counts(), refused, "no dial and no token request while refused");
+    assert!(state.pairing_snapshot().refused);
+    // The owner acts (Try again) after the box accepts the app again.
+    control.refuse(false, 0);
+    tokio::time::timeout(Duration::from_secs(5), pairing_retry_at(&state, dir.path())).await.unwrap().unwrap();
+    until("the session is ready again", || state.status_snapshot().ready).await;
+    assert!(control.counts().1 > refused.1, "token requests resume");
+    assert!(!state.pairing_snapshot().refused);
+    let resumed = control.counts();
+    assert_eq!(live_feed_socket(&state).await, 404, "the socket reaches the box again");
+    assert_eq!(control.counts().0, resumed.0 + 1, "dials resume");
+    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
+    task.abort();
+}
+
+// The live feed's socket is the first to meet the refusal: the proxy records
+// it. A due token refresh then stays quiet, and the next status poll shows the
+// refusal, all without another dial or token request.
+#[tokio::test]
+async fn a_refusal_met_by_the_proxy_stops_refresh_and_reaches_the_pairing_view() {
+    let app = app();
+    let state = app.state::<NodeState>();
+    let dir = tempfile::tempdir().unwrap();
+    let (control, task) = connected_controlled_box(&app, dir.path()).await;
+    control.refuse(true, 404);
+    let before = control.counts();
+    assert_eq!(live_feed_socket(&state).await, 403);
+    assert_eq!(control.counts(), (before.0 + 1, before.1), "one refused dial");
+    let refused = control.counts();
+    live_feed_token_refresh(&state).await;
+    assert_eq!(control.counts(), refused, "no token request after the proxy met the refusal");
+    status_poll(&state).await;
+    let view = serde_json::to_value(state.pairing_snapshot()).unwrap();
+    assert_eq!((view["state"].as_str(), view["refused"].as_bool()), (Some("failed"), Some(true)));
+    assert!(!state.status_snapshot().ready);
+    for _ in 0..3 {
+        status_poll(&state).await;
+        assert_eq!(live_feed_socket(&state).await, 403);
+    }
+    assert_eq!(control.counts(), refused, "no dial and no token request while refused");
+    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
+    task.abort();
+}
+
+// A remote-mode token exchange the node answers 401, 403 or 404 is a refusal of
+// this app's pairing, end to end: the snapshot says so, and nothing redials.
+#[tokio::test]
+async fn a_refused_token_exchange_after_attach_marks_the_pairing_refused() {
+    for (challenge, token) in [(401, 0), (0, 403), (0, 404)] {
+        let app = app();
+        let state = app.state::<NodeState>();
+        let dir = tempfile::tempdir().unwrap();
+        let (link, control, task) = controlled_box(|endpoint| ticket(endpoint, false)).await;
+        control.challenge_status.store(challenge, Ordering::SeqCst);
+        control.token_status.store(token, Ordering::SeqCst);
+        remote_access_connect_at(app.handle(), &state, dir.path(), &link).await.unwrap();
+        until("the refusal reaches the pairing view", || state.pairing_snapshot().refused).await;
+        drop(state.remote_recovery.lock().await);
+        assert_eq!(state.pairing_snapshot().state, "failed", "{challenge} {token}");
+        let refused = control.counts();
+        status_poll(&state).await;
+        tokio::time::timeout(Duration::from_secs(3), reconnect_remote_background(&state)).await.unwrap().unwrap();
+        assert_eq!(control.counts(), refused, "{challenge} {token}: nothing redials");
+        state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
+        task.abort();
+    }
+}
+
+fn owner_ticket(endpoint: String) -> String {
+    let node = SigningKey::from_bytes(&[42; 32]);
+    let public = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from([43; 32]));
+    let node_id = hex::encode(node.verifying_key().as_bytes());
+    let transport_pubkey = hex::encode(public.as_bytes());
+    let signature = node.sign(remote_access::descriptor_signature_message(&node_id, &transport_pubkey).as_bytes());
+    let value = serde_json::json!({"v": 1, "endpoint": endpoint, "node_id": node_id,
+        "transport_pubkey": transport_pubkey,
+        "transport_signature": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+        "code": format!("owner_{}", "ab".repeat(32)), "expires_at": now_unix() + 300});
+    format!("bitsov://pair/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).unwrap()))
+}
+
+// An app that is already paired scans another ticket for the same box. The box
+// answers `already_paired`: it refused the ticket, not the pairing. The app
+// reconnects with the existing pairing (same client identity, no code) and
+// never presents the ticket again; nothing shows the refused panel.
+#[tokio::test]
+async fn an_already_paired_ticket_reconnects_with_the_existing_pairing() {
+    let app = app();
+    let state = app.state::<NodeState>();
+    let dir = tempfile::tempdir().unwrap();
+    let (link, control, task) = controlled_box(owner_ticket).await;
+    control.already_paired.store(true, Ordering::SeqCst);
+    remote_access_connect_at(app.handle(), &state, dir.path(), &link).await.unwrap();
+    until("the attach settles", || state.status_snapshot().ready || state.pairing_snapshot().state == "failed").await;
+    drop(state.remote_recovery.lock().await);
+    assert!(state.status_snapshot().ready, "reason={:?}", state.pairing_snapshot().reason);
+    assert_eq!(state.pairing_snapshot().state, "paired");
+    assert!(!state.pairing_snapshot().refused);
+    assert!(!state.remote_retry.is_refused());
+    assert_eq!(control.ticket_auths.load(Ordering::SeqCst), 1, "the ticket was presented once");
+    assert!(control.handshakes.load(Ordering::SeqCst) >= 2, "then the existing pairing reconnected");
+    assert!(!remote_access::load_persisted(dir.path()).unwrap().unwrap().has_code());
+    // Later tunnels use the existing pairing too, never the ticket.
+    assert_eq!(live_feed_socket(&state).await, 404, "the socket reaches the box");
+    assert_eq!(control.ticket_auths.load(Ordering::SeqCst), 1);
+    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
+    task.abort();
+}

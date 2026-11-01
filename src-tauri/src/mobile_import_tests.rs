@@ -573,6 +573,8 @@ async fn an_unreachable_node_is_not_a_refusal() {
         remote_access::RemoteError::Waiting(5),
         remote_access::RemoteError::LocalNetwork,
         remote_access::RemoteError::Local("cancelled".into()),
+        // The node refused a ticket, not the pairing this app already holds.
+        remote_access::RemoteError::AlreadyPaired,
     ] {
         assert!(!is_definitive_refusal(&error), "{error}");
     }

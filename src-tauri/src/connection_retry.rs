@@ -38,6 +38,7 @@ pub struct RemoteRetry {
     failure_revision: std::sync::atomic::AtomicU64,
     last_error: std::sync::Mutex<ConnectionFailure>,
     endpoint: std::sync::Mutex<Option<String>>,
+    refused: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -59,6 +60,22 @@ impl RemoteRetry {
     pub fn reset_for_replacement(&self) {
         *self.state.lock().unwrap() = RemoteRetryState::default();
         self.clear_connection_error();
+    }
+
+    /// The node definitively refused this app's saved pairing. Until the owner
+    /// acts (Try again, a new link, Forget), nothing reconnects on its own and
+    /// the proxy admits no new tunnel: every dial would get the same answer.
+    pub fn refuse(&self) {
+        self.refused.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// An owner action: the next attempt may dial again.
+    pub fn clear_refusal(&self) {
+        self.refused.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_refused(&self) -> bool {
+        self.refused.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn set_endpoint(&self, endpoint: &str) {

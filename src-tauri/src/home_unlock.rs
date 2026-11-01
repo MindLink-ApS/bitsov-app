@@ -66,6 +66,11 @@ pub async fn refresh(state: &NodeState) {
     {
         return;
     }
+    // The node refused this app's pairing: polling must neither dial nor
+    // repeat the token exchange until the owner acts.
+    if hold_refused(state) {
+        return;
+    }
     // Nothing clears `ready` when a home node reboots into locked mode (proxied
     // calls just get 503 node_locked), so keep probing while live, but every
     // 60 s instead of 10 s to spare the node's handshake limiter.
