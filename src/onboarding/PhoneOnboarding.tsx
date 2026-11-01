@@ -73,7 +73,6 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   const [preview, setPreview] = createSignal<RemotePreviewView>();
   const [waiting, setWaiting] = createSignal<Extract<JoinView, { state: 'waiting' }>>();
   const [options, setOptions] = createSignal(false);
-  const [pasting, setPasting] = createSignal(false);
   const [confirmForget, setConfirmForget] = createSignal(false);
   const forgetId = createUniqueId();
   let confirmBox: HTMLDivElement | undefined;
@@ -187,12 +186,8 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     if (!alive || busy() || waiting() || joinStarted) return;
     const turn = generation;
     setToast('');
-    // iOS shows a small paste bubble; say where to tap, and keep Scan out of reach of a near miss meanwhile.
-    setPasting(true);
     try {
-      let link: string;
-      // try/finally, not .finally(): a missing clipboard API throws before any promise exists.
-      try { link = await navigator.clipboard.readText(); } finally { setPasting(false); }
+      const link = await navigator.clipboard.readText();
       if (!alive || turn !== generation) return;
       // Nothing came back (the paste prompt was dismissed): offer the field instead of a dead end.
       if (!link.trim()) { setManualPaste(true); setToast(''); return; }
@@ -354,7 +349,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
         <PrimaryAction disabledReason={!preview()?.node_id_fingerprint && !props.status().node_id ? c().working : undefined} onClick={() => void confirmComparison()}>{c().match}</PrimaryAction>
         <button type="button" class="quiet" disabled={busy()} onClick={() => void run(reset)}>{c().mismatch}</button>
       </Show>
-      <Show when={screen() === 'start' || screen() === 'scanner'}><PrimaryAction disabledReason={pasting() ? c().pasteHint : busy() ? c().working : !props.scan ? c().unavailable : undefined} onClick={() => void scan()}>{c().scan}</PrimaryAction></Show>
+      <Show when={screen() === 'start' || screen() === 'scanner'}><PrimaryAction disabledReason={busy() ? c().working : !props.scan ? c().unavailable : undefined} onClick={() => void scan()}>{c().scan}</PrimaryAction></Show>
       <Show when={screen() === 'connecting'}><p class="phone-waiting" role="status"><span class="phone-spinner" aria-hidden="true" />{c().working}</p>
         {/* Connecting opens this app's protected pairing key; say why before iOS asks. */}
         <Show when={(props.platform ?? appPlatform()) === 'ios'}><p class="why" data-faceid-why>{c().faceIdWhy}</p></Show>
@@ -369,7 +364,8 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       <Show when={screen() === 'start' || screen() === 'scanner'}>
         <button type="button" class="phone-secondary" data-phone-paste disabled={busy() || !!waiting() || joinStarted} onClick={() => void paste()}>{c().paste}</button>
       </Show>
-      <Show when={pasting()}><p class="phone-hint" role="status" data-phone-paste-hint>{c().pasteHint}</p></Show>
+      {/* WebKit freezes the page while its paste bubble is up, so the hint is said before the tap. */}
+      <Show when={screen() === 'start' && !manualPaste()}><p class="phone-hint" data-phone-paste-hint>{c().pasteHint}</p></Show>
       {/* Said next to the action that caused it, not at the foot of the page. */}
       <Show when={toast()}><p class="phone-toast" role="status">{toast()}</p></Show>
       <Show when={manualPaste() && (screen() === 'start' || screen() === 'error')}><form class="phone-manual" onSubmit={e => {

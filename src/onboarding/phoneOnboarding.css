@@ -16,8 +16,8 @@
 .phone-onboarding [data-phone-face] > .phone-primary, .phone-onboarding [data-phone-face] > .phone-waiting { margin-top: auto; }
 .phone-onboarding h1 { font-size: max(1.75em, 26px); line-height: 1.15; margin: 0; text-wrap: balance; }
 .phone-onboarding .phone-line { margin: 0; line-height: 1.5; font-size: max(1em, 17px); }
-/* Buttons follow Dynamic Type like the text (font: inherit), and stay at least 48 pt (beats the shell's 44 pt rule). */
-.phone-onboarding button:not(.link), .phone-onboarding summary { min-height: 48px; box-sizing: border-box; font: inherit; font-size: max(1em, 17px); }
+/* Buttons follow Dynamic Type like the text (1em of the system body size), keep their weight, and stay at least 48 pt (beats the shell's 44 pt rule). */
+.phone-onboarding button:not(.link), .phone-onboarding summary { min-height: 48px; box-sizing: border-box; font-family: inherit; font-size: max(1em, 17px); }
 .phone-primary .primary { width: 100%; white-space: normal; }
 .phone-onboarding .why { margin: 10px 0 0; line-height: 1.4; font-size: 14px; }
 .phone-options { margin-top: 0; }
@@ -51,7 +51,8 @@
 .phone-confirm p { margin: 0; line-height: 1.45; }
 .phone-options details[open] > summary::after { transform: rotate(-135deg) translateY(-2px); }
 /* A hint and a message sit right under the action that caused them. */
-.phone-onboarding .phone-hint, .phone-onboarding .phone-toast { margin: -4px 0 0; line-height: 1.45; color: var(--ink); }
+.phone-onboarding .phone-hint { margin: -4px 0 0; line-height: 1.45; color: var(--muted); font-size: max(0.9em, 15px); }
+.phone-onboarding .phone-toast { margin: -4px 0 0; line-height: 1.45; color: var(--ink); }
 /* The forget confirmation: keeping is the strong choice, forgetting is marked as destructive. */
 .phone-confirm .phone-primary-plain { width: 100%; background: var(--ink); color: var(--bg); border: 0; }
 .phone-confirm .phone-danger { width: 100%; background: none; color: var(--err); border: 1.5px solid var(--err); }
