@@ -86,6 +86,16 @@ export type RemoteImportView = {
   restart_required: boolean;
 };
 
+/**
+ * A Live call's audio output, from `call_audio_route` / `call_audio_route_get`.
+ * - `earpiece`: the default for every call, restored when the call ends.
+ * - `speaker`: the loudspeaker, for this call only.
+ * - `external`: a headset, Bluetooth or car route; the app never overrides it.
+ * - `inactive`: no Live call, so nothing was changed.
+ * - `unsupported`: this platform keeps the system route (desktop; Android not yet).
+ */
+export type CallAudioRoute = 'earpiece' | 'speaker' | 'external' | 'inactive' | 'unsupported';
+
 export interface Source {
   readonly mode: 'node' | 'sample';
   // first run
@@ -263,6 +273,13 @@ export interface Source {
   callSignal(peer: string, kind: number, plaintext: string, maxMsat: number, minutes?: MinutesConsent): Promise<CallReceipt>;
   /** M6: one call's paid interval and reservation at the node; null once the node no longer lists it. Read-only. */
   callStatus(peer: string, callId: string): Promise<CallStatus | null>;
+  /**
+   * Speaker or earpiece for the Live call (iPhone). Local audio only: no node request or payment.
+   * Resolves to the resulting route; see `CallAudioRoute`. Outside a Live call nothing changes.
+   */
+  callAudioRoute(route: 'speaker' | 'earpiece'): Promise<CallAudioRoute>;
+  /** The Live call's current audio route; `inactive` without one. */
+  callAudioRouteGet(): Promise<CallAudioRoute>;
   /** M6: pay block `seq` (one minute) of an outgoing call; the host takes the amount from the node's reservation. */
   callBlock(peer: string, callId: string, seq: number): Promise<CallReceipt>;
   /** M6: the host checks the node's hold against the agreed minutes (hangs up above them); with an amount, the owner confirms that hold. */
@@ -423,6 +440,8 @@ export const hostSource: Source = {
   closeCallAdmission: (operationId, peer, callId) => invoke<void>('op_close_call', { operation_id: operationId, peer, call_id: callId }),
   callSignal: (peer, kind, plaintext, maxMsat, minutes) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat, ...(minutes ? { minutes } : {}) }),
   callStatus: (peer, callId) => invoke<CallStatus | null>('call_status', { peer, call_id: callId }),
+  callAudioRoute: (route) => invoke<CallAudioRoute>('call_audio_route', { route }),
+  callAudioRouteGet: () => invoke<CallAudioRoute>('call_audio_route_get'),
   callBlock: (peer, callId, seq) => invoke<CallReceipt>('call_block', { peer, call_id: callId, seq }),
   callHold: (peer, callId, confirmReservedMsat) => invoke<CallStatus>('call_hold', { peer, call_id: callId, ...(confirmReservedMsat === null ? {} : { confirm_reserved_msat: confirmReservedMsat }) }),
   aiRead: (topic, sinceMs, assistant) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs, ...(assistant ? { assistant } : {}) }),

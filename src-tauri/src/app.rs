@@ -9876,6 +9876,65 @@ async fn call_audio_session(window: WebviewWindow<impl tauri::Runtime>, live: bo
     { let _ = (window, live); Ok(()) }
 }
 
+/// Route names shared with the renderer (`CallAudioRoute` in src/control/source.ts).
+/// `unsupported`: this platform keeps the system route (desktop, Android today).
+#[cfg(any(target_os = "ios", test))]
+fn call_audio_route_name(code: i32) -> Result<&'static str, String> {
+    match code {
+        0 => Ok("inactive"),
+        1 => Ok("earpiece"),
+        2 => Ok("speaker"),
+        3 => Ok("external"),
+        _ => Err("Unknown call audio route.".into()),
+    }
+}
+
+fn call_audio_speaker_requested(route: &str) -> Result<bool, String> {
+    match route {
+        "speaker" => Ok(true),
+        "earpiece" => Ok(false),
+        _ => Err("Choose speaker or earpiece.".into()),
+    }
+}
+
+/// Speaker or earpiece for the Live call. Local audio policy only, like
+/// `call_audio_session`. Outside a Live call nothing changes (`inactive`); a
+/// headset, Bluetooth or car route is never overridden (`external`). The route
+/// returns to the earpiece when the call ends.
+#[tauri::command]
+async fn call_audio_route(window: WebviewWindow<impl tauri::Runtime>, route: String) -> Result<String, String> {
+    reject_sealed_window(&window)?;
+    let speaker = call_audio_speaker_requested(&route)?;
+    #[cfg(target_os = "ios")]
+    {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        window.app_handle().run_on_main_thread(move || {
+            let _ = send.send(bitsov_ffi::call_audio::set_speaker(speaker));
+        }).map_err(|error| error.to_string())?;
+        let code = receive.await.map_err(|_| "Call audio dispatcher closed.".to_string())??;
+        call_audio_route_name(code).map(str::to_string)
+    }
+    #[cfg(not(target_os = "ios"))]
+    { let _ = (window, speaker); Ok("unsupported".into()) }
+}
+
+/// The Live call's current audio route; see `call_audio_route`.
+#[tauri::command]
+async fn call_audio_route_get(window: WebviewWindow<impl tauri::Runtime>) -> Result<String, String> {
+    reject_sealed_window(&window)?;
+    #[cfg(target_os = "ios")]
+    {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        window.app_handle().run_on_main_thread(move || {
+            let _ = send.send(bitsov_ffi::call_audio::route());
+        }).map_err(|error| error.to_string())?;
+        let code = receive.await.map_err(|_| "Call audio dispatcher closed.".to_string())?;
+        call_audio_route_name(code).map(str::to_string)
+    }
+    #[cfg(not(target_os = "ios"))]
+    { let _ = window; Ok("unsupported".into()) }
+}
+
 pub(super) fn entry() {
     #[cfg(target_os = "ios")]
     bitsov_ffi::pairing_link::install(|url| crate::pairing_link_ios::receive([url]));
@@ -10134,6 +10193,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             file_fetch,
             file_save,
             call_audio_session,
+            call_audio_route,
+            call_audio_route_get,
             call_quote,
             call_signal,
             call_status,
@@ -21495,6 +21556,8 @@ mod assistant_acl_tests {
                 "file_fetch",
                 "file_save",
                 "call_audio_session",
+                "call_audio_route",
+                "call_audio_route_get",
                 "call_quote",
                 "call_signal",
                 // M6 A2: a call's paid minutes (status read, one block payment).
@@ -22406,3 +22469,43 @@ mod mobile_import_tests;
 #[cfg(test)]
 #[path = "remote_connect_tests.rs"]
 mod remote_connect_tests;
+
+#[cfg(test)]
+mod call_audio_route_tests {
+    use super::{call_audio_route_name, call_audio_speaker_requested};
+
+    #[test]
+    fn route_names_match_the_renderer_contract() {
+        let names: Vec<_> = (0..4).map(|code| call_audio_route_name(code).unwrap()).collect();
+        assert_eq!(names, ["inactive", "earpiece", "speaker", "external"]);
+        assert!(call_audio_route_name(-1).is_err());
+        assert!(call_audio_route_name(4).is_err());
+    }
+
+    #[test]
+    fn only_speaker_or_earpiece_can_be_requested() {
+        assert_eq!(call_audio_speaker_requested("speaker"), Ok(true));
+        assert_eq!(call_audio_speaker_requested("earpiece"), Ok(false));
+        for other in ["", "bluetooth", "Speaker", "external"] {
+            assert!(call_audio_speaker_requested(other).is_err(), "{other}");
+        }
+    }
+
+    /// Desktop keeps the system route: the commands are a no-op there.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    #[test]
+    fn desktop_reports_unsupported_and_changes_nothing() {
+        let app = tauri::test::mock_builder()
+            .invoke_handler(tauri::generate_handler![super::call_audio_route, super::call_audio_route_get])
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+        let request = |cmd: &str, body: serde_json::Value| tauri::test::get_ipc_response(&main, tauri::webview::InvokeRequest {
+            cmd: cmd.into(), callback: tauri::ipc::CallbackFn(0), error: tauri::ipc::CallbackFn(1),
+            url: "tauri://localhost".parse().unwrap(), body: tauri::ipc::InvokeBody::Json(body),
+            headers: Default::default(), invoke_key: tauri::test::INVOKE_KEY.to_string(),
+        }).map(|response| response.deserialize::<String>().unwrap());
+        assert_eq!(request("call_audio_route", serde_json::json!({"route": "speaker"})).unwrap(), "unsupported");
+        assert_eq!(request("call_audio_route_get", serde_json::json!({})).unwrap(), "unsupported");
+        assert!(request("call_audio_route", serde_json::json!({"route": "loud"})).is_err());
+    }
+}
