@@ -5,7 +5,9 @@ Status: **design, docs only.** Nothing here is built. The owner decided
 (the node's spend grant) is approved inside the app, replacing "run
 `konsensus grant` on the node's computer". This document says how, and what
 the node (a separate repository) must add. It needs review from two
-independent reviewers before any code lands.
+independent reviewers before any code lands. Hardened after an independent
+review (round 1); the limits that still need the owner are listed in
+section 10.
 
 ## 1. Current flow
 
@@ -86,9 +88,25 @@ message after a Touch ID / Face ID / fingerprint prompt.
   finger or face. The separation is **token vs. biometric key**, not
   device A vs. device B. The prompt text is built by the host from the
   node's terms, never by the renderer.
+- **Honest limit of R1.** On one device the paired token and the biometric
+  key are used by the **same process**: whatever calls `bitsov_dk_sign` is
+  the host. A compromised host, or a renderer bug that reaches a host
+  command, can both request a grant and raise the prompt. What protects the
+  owner then is only that the prompt shows, and the key signs, the node's
+  own `approval_message` bytes (section 5.2), plus the node-side ceiling,
+  rate limit and cooldown (section 5.3). This is weaker than device A vs.
+  device B, and the design accepts it only for a single-owner box under
+  those bounds.
 - R2, R3: same message binding, op id, epoch and one-use rule as v1.
 - R4: biometric-only policy (no passcode fallback) means an unlocked phone is
-  not enough. Revocation is needed from somewhere else (section 5.5).
+  not enough. On Apple this holds today: the key uses `.biometryCurrentSet`
+  (`src-tauri/native/device_key.swift`), which has no passcode fallback. On
+  **Android** a keystore key with user authentication typically also
+  accepts the device PIN unless restricted, so the key must be created for
+  **`BIOMETRIC_STRONG` only, with no device-credential (PIN, pattern,
+  password) fallback**. A device without strong biometrics gets no self
+  grant; it keeps the console path. Revocation is needed from somewhere
+  else (section 5.5).
 - Precedent: relation envelopes (`device.rs`, `Intent`) are already signed
   by the same device that then pays under them.
 
@@ -130,7 +148,18 @@ All of these, checked by the node, not only the app:
   device enrollment are out of scope.
 - The terms fit an **owner ceiling** written once at setup (default: the
   app's `DEFAULT_BUDGET_MSAT`, 200 sats a day, with the node's 6-sat cap per
-  message). Anything above it falls back to the node's computer.
+  message). Anything above it falls back to the node's computer. The exact
+  ceiling is an owner decision (section 10).
+- **Cooldown after a key change.** Self grants are disabled for **N days**
+  after any owner key change on the box: a new enrolment, a re-enrolment of
+  the phone, a key invalidated by a biometric change, or a restore from the
+  recovery phrase. A thief who re-enrols cannot self-grant at once. N is an
+  owner decision (section 10).
+- The key is biometric-strong (section 4, R4). On Android without
+  `BIOMETRIC_STRONG`, no self grant.
+
+Eligibility is **re-evaluated by the node at approve time**, never cached
+from request time (section 5.3).
 
 ### 5.2 Message and signature
 
@@ -138,6 +167,8 @@ The node builds a domain-separated message, for example:
 
 ```
 bitsov-owner-present-grant-v1
+kind:spend_grant
+message_version:1
 node:<fingerprint>
 client:<client_id>
 device:<key_id>
@@ -158,13 +189,43 @@ message"), signs, re-checks the pairing after the prompt (as `approve()`
 already does), and posts the signature. The domain differs from v1's, so a
 self signature can never be replayed as a v1 approval or the reverse.
 
+**Shown bytes = signed bytes.** The node's `approval_message` bytes are
+exactly what is shown and exactly what is signed:
+
+- The prompt is rendered by the host **only from the node's reply**, never
+  from the app's own request and never from the renderer. The prompt names
+  the request kind and the amount the node stored.
+- The key signs the `approval_message` bytes as returned, not a
+  re-serialisation of fields the host echoes back. Before signing, the host
+  re-reads the message and compares bytes, as `checked_approval` in
+  `owner_approval.rs` does for v1 today (`approval_changed` on any
+  difference, with no prompt).
+- The node verifies the signature against the bytes it stored for this
+  `op_id`, not against fields in the approve request.
+- `recipient:"-"` means no single named recipient. The owner ceiling bounds
+  `budget_msat`, `per_call_max_msat` **and** the sum of any per-recipient
+  budgets, so a `"-"` grant can never exceed the ceiling.
+
 ### 5.3 What the node enforces
 
-- Signature by the registered key of the requesting pairing, current epoch.
+- Signature by the registered key of the requesting pairing, current epoch,
+  over the stored `approval_message` bytes (section 5.2).
 - `op_id` pending, unexpired (at most 10 min), one use; nonce matches.
-- Terms equal the stored request and fit the owner ceiling.
-- Grant written exactly as the console path writes it; expiry at most 24 h.
-- Rate limit: a few self grants per day; each one appears in the node's log.
+- **Single owner re-checked at approve time.** The node evaluates "exactly
+  one enrolled, non-revoked owner key, and it is this pairing's" again when
+  the signature arrives. A second device enrolled between request and
+  approve refuses with `approval_not_single_owner`.
+- **Cooldown.** No owner key change on the box in the last N days
+  (section 5.1); otherwise `approval_key_cooldown`.
+- Terms equal the stored request and fit the owner ceiling (budget,
+  per-call maximum and the sum of per-recipient budgets).
+- Grant written exactly as the console path writes it; expiry at most 24 h,
+  or a shorter maximum for self grants (section 10).
+- **Rate limit:** at most **1 live** self-granted grant at a time and at most
+  **3 self grants per 24 h** (`approval_rate_limited`). These numbers are the
+  review's proposal; the exact values are an owner decision (section 10).
+- Each self grant appears in the node's log **and in the app's own audit
+  view**, which the owner can read without the node's computer.
 
 ### 5.4 Flow in the app
 
@@ -174,11 +235,16 @@ command moves under "Other ways", as `TouchIdFirst` already does for v1.
 
 ### 5.5 Lost device
 
-- Grant lifetime of at most 24 h and the owner ceiling cap the damage.
+- Grant lifetime of at most 24 h (or a shorter self-grant maximum, for
+  example 12 h; section 10) and the owner ceiling cap the damage.
 - Biometry-only key: a thief needs the owner's face or finger.
+- The cooldown after a key change (section 5.1) stops a thief who re-enrols
+  from self-granting at once.
 - Revocation without the device: at the node's computer (existing console),
   or by restoring the identity from the recovery phrase onto a new device,
-  which enrolls a new key and revokes the old one.
+  which enrolls a new key and revokes the old one. **For the target owner
+  neither is realistic within a day.** A way to revoke a lost phone without
+  a terminal is an open owner decision (section 10).
 - Adding a second owner device later turns self grants off automatically;
   approvals then go device to device (v1).
 
@@ -191,7 +257,9 @@ command moves under "Other ways", as `TouchIdFirst` already does for v1.
 | Owner ceiling | stored at owner setup; changed only at the console or by a v1 approval |
 | Request message | `GET /pair/approval/{op_id}` returns the self-grant `approval_message` to the requester |
 | Approve | `POST /pair/approval/{op_id}/approve-self {approver_key_id, signature}` |
-| Refusals | `approval_not_single_owner`, `approval_over_ceiling`, `approval_expired`, `approval_changed`, `approval_rate_limited` |
+| Cooldown | the node records the time of the last owner key change and refuses self grants within N days of it |
+| Audit | self grants are listed to the requester (time, terms, expiry) so the app can show them |
+| Refusals | `approval_not_single_owner`, `approval_over_ceiling`, `approval_expired`, `approval_changed`, `approval_rate_limited`, `approval_key_cooldown` |
 
 The app keeps today's flow for any node without the capability.
 
@@ -207,6 +275,8 @@ The app keeps today's flow for any node without the capability.
 | Done | Godkendt. Gælder til {time}. | Approved. Valid until {time}. |
 | Over ceiling | Beløbet er over din grænse. Godkend det på nodens computer. | This is above your limit. Approve it on the node's computer. |
 | Second device | Du har to enheder nu. Godkend på den anden. | You now have two devices. Approve on the other one. |
+| Cooldown | Du har lige skiftet enhed. Godkend på nodens computer indtil {date}. | You recently changed devices. Approve on the node's computer until {date}. |
+| Rate limited | Du har godkendt nok for i dag. Godkend på nodens computer. | You have approved enough for today. Approve on the node's computer. |
 
 Plain words only: no "grant", "token" or "op id" on screen. Android uses the
 platform's own biometric word, as `TouchIdFirst` does.
@@ -227,9 +297,31 @@ platform's own biometric word, as `TouchIdFirst` does.
   pairing change during the prompt, a v1-domain message, and terms above the
   ceiling; never prompts before the checks pass.
 - Host: the renderer cannot supply the prompt text or the message.
-- Node contract fixtures: second owner device present → refused; revoked
-  key → refused; replayed signature → refused; same signature on another op
-  → refused; rate limit.
+- Host: a message mutated between fetch and sign → `approval_changed`, no
+  prompt; the prompt text equals the node's message fields, byte for byte.
+- Node contract fixtures: second owner device present → refused; a second
+  key enrolled **between request and approve** → `approval_not_single_owner`;
+  revoked key → refused; key re-enrolled less than N days ago →
+  `approval_key_cooldown`; replayed signature → refused; same signature on
+  another op → refused; a second live self grant → refused; the fourth self
+  grant in 24 h → `approval_rate_limited`; a `"-"` grant whose per-recipient
+  sum exceeds the ceiling → `approval_over_ceiling`.
+- Android: a key that accepts device credentials is refused for self grants;
+  a device without `BIOMETRIC_STRONG` is not offered the button.
 - UI: button shown only with the capability and a single owner; console
   command still reachable under "Other ways"; Danish and English copy.
 - Two-node runs on regtest only; no real funds.
+
+## 10. Open owner decisions
+
+Hardening review round 1 left these to the owner; the design does not
+decide them.
+
+1. **Self-approval limits.** The owner ceiling per day; the maximum
+   lifetime of a self grant (12 h or 24 h); the number per day (proposed:
+   at most 1 live and 3 per 24 h); and N, the cooldown in days after a key
+   change.
+2. **Lost phone without a terminal.** Today revoking a lost device needs the
+   node's computer or the recovery phrase. Should a second trusted person
+   (for example the box host) be allowed to revoke a device, or is "go to
+   the box" acceptable?
