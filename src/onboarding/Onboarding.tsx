@@ -188,6 +188,14 @@ export function Onboarding(props: {
     } finally { setScanning(false); }
   };
 
+  // After a refusal: scan (or paste) a new link from an owner device. The saved
+  // link stays until the new one is reviewed and saved.
+  const pairAgain = async () => {
+    if (busy()) return;
+    if (props.onScanRemote) return scanRemote();
+    document.getElementById(props.pairingInputId ?? 'remote-pairing-link')?.focus();
+  };
+
   const forgetRemote = async () => {
     if (busy()) return;
     setPreview(null);
@@ -489,6 +497,24 @@ export function Onboarding(props: {
                 <p class="hint">{t('obLocalSecurityLimit')}</p>
               </div>
             </details>
+          </div>
+        </Match>
+
+        {/* A definitive refusal: one way forward, and no Try again that cannot help. */}
+        <Match when={props.pairing().state === 'failed' && props.pairing().refused}>
+          <div class="panel pairing error" data-pairing="refused">
+            <h2>{t('obRefusedTitle')}</h2>
+            <p class="err-note" role="alert" data-refused-summary>{t('obRefusedLine')}</p>
+            <p class="hint">{props.onScanRemote ? t('obRefusedHow') : t('obRefusedHowPaste')}</p>
+            <button type="button" class="primary" data-pair-again disabled={busy()} onClick={() => void pairAgain()}>
+              {scanning() ? t('obScanning') : props.onScanRemote ? t('obScanNewQr') : t('obPasteNewLink')}
+            </button>
+            <Show when={props.pairing().reason}>{reason => (
+              <details class="quiet-detail" data-soft-detail>
+                <summary>{t('uiDetails')}</summary>
+                <p class="hint">{onboardingDiagnostic(reason(), t('obPairingLinkHelp'))}</p>
+              </details>
+            )}</Show>
           </div>
         </Match>
 

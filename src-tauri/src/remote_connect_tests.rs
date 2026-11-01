@@ -30,7 +30,11 @@ async fn noise_responder(listener: tokio::net::TcpListener) {
 }
 
 async fn noise_auth_reply(listener: tokio::net::TcpListener, accept: bool) -> remote_access::RemoteAuthRequest {
-    let (mut stream, _) = listener.accept().await.unwrap();
+    let (stream, _) = listener.accept().await.unwrap();
+    noise_auth_reply_stream(stream, accept).await
+}
+
+async fn noise_auth_reply_stream(mut stream: tokio::net::TcpStream, accept: bool) -> remote_access::RemoteAuthRequest {
     let secret = [43; 32];
     let mut noise = snow::Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse().unwrap())
         .local_private_key(&secret).build_responder().unwrap();
@@ -445,4 +449,49 @@ async fn unreadable_saved_descriptor_routes_to_review_and_error_recovery() {
     std::fs::write(remote.join(remote_access::REMOTE_CONFIG_FILE), b"invalid").unwrap();
     assert!(connect_remote_at(&state, dir.path(), true).await.is_err());
     assert_eq!(state.status_snapshot().phone_setup, Some(false));
+}
+
+// The node answered "no" to the saved pairing. The live feed's recovery (and on
+// a phone, every focus change) must not dial it again: each dial would repeat
+// the refusal and, on a phone, its Face ID / Touch ID prompt. Only the owner's
+// action (Try again, a new link) dials again.
+#[tokio::test]
+async fn a_refused_pairing_is_not_redialled_until_the_owner_acts() {
+    let app = app();
+    let state = app.state::<NodeState>();
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let link = ticket(listener.local_addr().unwrap().to_string(), false);
+    let dials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let server = {
+        let dials = dials.clone();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                dials.fetch_add(1, Ordering::SeqCst);
+                noise_auth_reply_stream(stream, false).await;
+            }
+        })
+    };
+    let refused = || async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !state.pairing_snapshot().refused { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.expect("the node's refusal reaches the pairing view");
+    };
+    remote_access_connect_at(app.handle(), &state, dir.path(), &link).await.unwrap();
+    refused().await;
+    let _ = state.remote_recovery.lock().await;
+    assert_eq!(dials.load(Ordering::SeqCst), 1);
+    let view = serde_json::to_value(state.pairing_snapshot()).unwrap();
+    assert_eq!((view["state"].as_str(), view["refused"].as_bool()), (Some("failed"), Some(true)));
+    for _ in 0..3 {
+        tokio::time::timeout(Duration::from_secs(3), reconnect_remote_background(&state)).await.unwrap().unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(dials.load(Ordering::SeqCst), 1, "no automatic dial after a refusal");
+    // Try again is the owner's action: it dials once.
+    tokio::time::timeout(Duration::from_secs(5), pairing_retry_at(&state, dir.path())).await.unwrap().unwrap();
+    assert_eq!(dials.load(Ordering::SeqCst), 2);
+    assert!(state.pairing_snapshot().refused);
+    server.abort();
 }

@@ -242,6 +242,10 @@ struct NodeState {
     client_key: Mutex<Option<(PathBuf, Arc<ClientKey>)>>,
     /// Set by the first read attempt of the session, successful or not.
     client_key_attempted: AtomicBool,
+    /// The node definitively refused the saved remote pairing (see
+    /// `is_definitive_refusal`). Until a user action, nothing reconnects on its
+    /// own: no dial, and no read of the protected client identity.
+    remote_refused: AtomicBool,
     remote_pins: Arc<dyn bitsov_app::home_node::BoxPinStore>,
     remote_retry: Arc<bitsov_app::connection_retry::RemoteRetry>,
     remote_recovery: tokio::sync::Mutex<()>,
@@ -548,6 +552,7 @@ impl NodeState {
             view.scopes = session.scopes.clone();
         }
         view.remote = self.remote_mode.load(Ordering::SeqCst);
+        view.refused = view.remote && view.state == "failed" && self.remote_refused.load(Ordering::SeqCst);
         view.hosted_by = self
             .remote_descriptor
             .lock()
@@ -639,6 +644,7 @@ impl NodeState {
             remote_descriptor: Mutex::new(None),
             client_key: Mutex::new(None),
             client_key_attempted: AtomicBool::new(false),
+            remote_refused: AtomicBool::new(false),
             remote_pins: Arc::new(home_keychain::MacBoxPins),
             remote_retry: Arc::new(bitsov_app::connection_retry::RemoteRetry::default()),
             remote_recovery: tokio::sync::Mutex::new(()),
@@ -1501,6 +1507,20 @@ enum Interaction {
 /// Shown when a background reconnect needs the client identity first.
 const CONFIRM_TO_RECONNECT: &str = "Tap Try again to confirm it's you and reconnect.";
 
+/// The node answered and refused this app's saved pairing: an unknown or
+/// revoked client, a used or expired ticket. Retrying the same link and client
+/// identity cannot change that answer. Transport errors, timeouts and busy
+/// replies are never definitive; they keep retrying with backoff.
+fn is_definitive_refusal(error: &remote_access::RemoteError) -> bool {
+    matches!(error, remote_access::RemoteError::Refused(_) | remote_access::RemoteError::Expired(_))
+}
+
+/// The same for the token exchange over an authenticated tunnel: the node no
+/// longer knows or accepts this client.
+fn is_definitive_token_refusal(error: &PairError) -> bool {
+    matches!(error, PairError::Refused { step: "/pair/challenge" | "/pair/token", status: 401 | 403 | 404, .. })
+}
+
 /// The client identity for `store`, read from protected storage once per session.
 /// Its Keychain item requires user presence, so every read can show Face ID or
 /// Touch ID; the key itself is already held in memory by the pairing context and
@@ -1572,6 +1592,7 @@ async fn attach_remote_with(
     *state.pairing_view.lock().unwrap() = PairingView::pending();
     let failed = |error: remote_access::RemoteError| {
         state.remote_retry.failed(&error);
+        if is_definitive_refusal(&error) { state.remote_refused.store(true, Ordering::SeqCst); }
         *state.pairing_view.lock().unwrap() =
             PairingView::from_outcome(&Err(PairError::Local(error.to_string())));
     };
@@ -1862,6 +1883,14 @@ async fn connect_remote_at(state: &NodeState, app_data_dir: &Path, wait: bool) -
 }
 
 async fn connect_remote_with(state: &NodeState, app_data_dir: &Path, wait: bool, interaction: Interaction) -> Result<(), String> {
+    // After a definitive refusal only the owner's action may dial again (Try
+    // again, a new pairing link). Focus, resume and the live feed stay quiet,
+    // so they cannot repeat the refusal or its Face ID / Touch ID prompt.
+    match interaction {
+        Interaction::Background if state.remote_refused.load(Ordering::SeqCst) => return Ok(()),
+        Interaction::Background => {}
+        Interaction::User => state.remote_refused.store(false, Ordering::SeqCst),
+    }
     let mut cancelled = {
         let _change = state.remote_change.lock().await;
         state.remote_connect_generation.subscribe()
@@ -2080,6 +2109,9 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
                 PairError::Refused { step: "/pair/challenge" | "/pair/token", status: 404, .. }
             );
             state.stale_pairing.store(unknown_client, Ordering::SeqCst);
+            if state.remote_mode.load(Ordering::SeqCst) && is_definitive_token_refusal(&e) {
+                state.remote_refused.store(true, Ordering::SeqCst);
+            }
             *state.pairing_view.lock().unwrap() = view;
             Err(e.to_string())
         }
@@ -3044,6 +3076,7 @@ async fn remote_access_forget_at(state: &NodeState, app_data_dir: &Path) -> Resu
     state.remote_connect_generation.send_modify(|generation| *generation = generation.wrapping_add(1));
     let _recovery = state.remote_recovery.lock().await;
     remote_access::forget_persisted(app_data_dir).map_err(|error| error.to_string())?;
+    state.remote_refused.store(false, Ordering::SeqCst);
     // Preserve established connections (Forget still selects the next startup).
     // An unfinished attach, however, must leave no stale remote onboarding state.
     if state.remote_mode.load(Ordering::SeqCst) && state.remote_proxy.lock().unwrap().is_none() {

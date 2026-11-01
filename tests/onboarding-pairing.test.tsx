@@ -343,6 +343,50 @@ describe('pairing panel', () => {
     expect(el.querySelector('[data-pairing="paired"]')).toBeNull();
   });
 
+  it('a remote refusal offers only pairing again: no Try again, and scanning a new QR', async () => {
+    const onRetry = vi.fn();
+    const onScanRemote = vi.fn(async () => { throw new Error('cancelled'); });
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    const refused: PairingView = { ...failed, remote: true, refused: true,
+      reason: 'remote node refused pairing: authentication_failed: unknown client' };
+    dispose = render(() => (
+      <Onboarding status={() => booting} pairing={() => refused} trustAck={() => false}
+        onRetry={onRetry} onScanRemote={onScanRemote} phone />
+    ), mount);
+    const panel = mount.querySelector('[data-pairing="refused"]')!;
+    expect(panel).not.toBeNull();
+    expect(mount.querySelector('[data-pairing="failed"]')).toBeNull();
+    expect(panel.textContent).toContain('no longer accepts this app');
+    expect(panel.textContent).toContain('Add a device');
+    expect(panel.querySelector('[data-soft-reconnect]')).toBeNull();
+    const buttons = panel.querySelectorAll('button');
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0].textContent).toBe('Scan new QR code');
+    buttons[0].click();
+    await vi.waitFor(() => expect(onScanRemote).toHaveBeenCalledTimes(1));
+    expect(onRetry).not.toHaveBeenCalled();
+  });
+
+  it('a refusal without a scanner points at the paste field', () => {
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    const refused: PairingView = { ...failed, remote: true, refused: true };
+    dispose = render(() => (
+      <Onboarding status={() => booting} pairing={() => refused} trustAck={() => false} onRetry={() => {}} phone />
+    ), mount);
+    const action = mount.querySelector<HTMLButtonElement>('[data-pair-again]')!;
+    expect(action.textContent).toBe('Paste new pairing link');
+    action.click();
+    expect(document.activeElement?.id).toBe('remote-pairing-link');
+  });
+
+  it('a failure the node did not refuse keeps Try again', () => {
+    const el = show({ ...failed, remote: true, refused: false });
+    expect(el.querySelector('[data-pairing="refused"]')).toBeNull();
+    expect(el.querySelector('[data-pairing="failed"] [data-soft-reconnect]')).not.toBeNull();
+  });
+
   it('fallback explains the rc7 node and does not claim pairing scopes', () => {
     const el = show(fallback, ready);
     const panel = el.querySelector('[data-pairing="fallback"]')!;
