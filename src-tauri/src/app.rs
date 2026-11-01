@@ -2765,9 +2765,11 @@ async fn open_tailscale(window: WebviewWindow<impl tauri::Runtime>) -> Result<()
 fn remote_access_preview(
     window: WebviewWindow<impl tauri::Runtime>,
     link: String,
-) -> Result<remote_access::RemotePreviewView, String> {
-    reject_sealed_window(&window)?;
-    remote_access::preview_pairing_link(link.trim()).map_err(|error| error.to_string())
+) -> Result<remote_access::RemotePreviewView, remote_access::ConnectionError> {
+    reject_sealed_window(&window).map_err(|_| remote_access::ConnectionError::main_window_only())?;
+    // Structured like remote_access_connect, so an expired link is "expired",
+    // not "other".
+    remote_access::preview_pairing_link(link.trim()).map_err(|error| remote_access::ConnectionError::from(&error))
 }
 
 /// Confirm a reviewed link and attach without restarting the app. Validation
@@ -4348,16 +4350,34 @@ fn do_first_contact_cancel(state: &NodeState, id: &str) {
     if pending.as_ref().is_some_and(|p| p.view.id == id) { *pending = None; }
 }
 
+/// Our node already holds an active E2EE session with `recipient`: the node,
+/// not this client, admitted that contact, so a send there is no first contact
+/// at the node (it asks for a first-contact grant only without a session). An
+/// unreadable list counts as no session.
+async fn node_session_with(state: &NodeState, recipient: &str) -> bool {
+    get_json::<Vec<control::Session>>(state, "/sessions").await
+        .is_ok_and(|sessions| sessions.iter().any(|s| s.active && s.peer_id.eq_ignore_ascii_case(recipient)))
+}
+
 /// A receipt only lets the app attempt compose; the node independently checks
 /// and consumes the actual single-use grant, under the reviewed budget.
 async fn confirm_first_contact(state: &NodeState, recipient: &str, max_msat: u64, contact_budget_msat: u64, offered: bool) -> Result<(), ActionError> {
+    let matching = || state.owner_contact.lock().unwrap().as_ref().filter(|p| {
+        let r = &p.view.request;
+        r.recipient == recipient && r.max_total_msat == max_msat && r.contact_budget_msat == contact_budget_msat
+    }).map(|p| p.view.id.clone());
+    // A contact the node already admitted (a new phone client, say) needs no
+    // first-contact approval from this client: the book line it opens is local.
+    // This grants no authority: without a session, or for a re-admission the
+    // grant does not budget, the node still demands its single-use grant and
+    // pays nothing. An approval the owner gave for exactly these terms is used.
+    if matching().is_none() && node_session_with(state, recipient).await {
+        return Ok(());
+    }
     if state.node_grant.lock().unwrap().is_none() || !offered {
         return if state.remote_mode.load(Ordering::SeqCst) { Err(owner_contact::unavailable()) } else { Ok(()) };
     }
-    let id = state.owner_contact.lock().unwrap().as_ref().filter(|p| {
-        let r = &p.view.request;
-        r.recipient == recipient && r.max_total_msat == max_msat && r.contact_budget_msat == contact_budget_msat
-    }).map(|p| p.view.id.clone()).ok_or_else(|| ActionError::new("owner_only", "Approve this contact at your node first. Nothing was sent."))?;
+    let id = matching().ok_or_else(|| ActionError::new("owner_only", "Approve this contact at your node first. Nothing was sent."))?;
     let view = do_first_contact_status(state, &id).await?;
     if !view.ready { return Err(ActionError::new("owner_only", "Waiting for your approval at the node. Nothing was sent.")); }
     let mut pending = state.owner_contact.lock().unwrap();
@@ -4376,14 +4396,24 @@ async fn first_contact_request(window: WebviewWindow<impl tauri::Runtime>, state
 }
 
 #[tauri::command(rename_all = "snake_case")]
-async fn first_contact_status(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, id: String, recipient: Option<String>) -> Result<owner_contact::View, ActionError> {
+async fn first_contact_status(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, id: String, recipient: Option<String>, max_msat: Option<u64>) -> Result<owner_contact::View, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_first_contact_status_for(state.inner(), &id, recipient.as_deref()).await
+    do_first_contact_status_for(state.inner(), &id, recipient.as_deref(), max_msat).await
 }
 
-async fn do_first_contact_status_for(state: &NodeState, id: &str, recipient: Option<&str>) -> Result<owner_contact::View, ActionError> {
+/// With `recipient`, read the node's first-contact grant for this client's budget
+/// operation: an owner device's approval, or the box owner's console approval
+/// (`konsensus approve first-contact --op <budget op>`). An empty `id` means the
+/// current budget operation, so a wait for another device also sees the console.
+/// `max_msat` binds the exact cap the app asked to have approved.
+async fn do_first_contact_status_for(state: &NodeState, id: &str, recipient: Option<&str>, max_msat: Option<u64>) -> Result<owner_contact::View, ActionError> {
     let Some(recipient) = recipient else { return do_first_contact_status(state, id).await; };
+    let current;
+    let id = if id.is_empty() {
+        current = read_grant(state).await?.ok_or_else(grant::ended)?.op_id;
+        current.as_str()
+    } else { id };
     // Validate before any network access. This id is the node's budget op,
     // not the app-local receipt id used by the legacy branch.
     let (path, recipient) = owner_contact::device_path(id, recipient)?;
@@ -4391,7 +4421,7 @@ async fn do_first_contact_status_for(state: &NodeState, id: &str, recipient: Opt
     let body = read_remote_contact_status(state, &path).await?;
     // Approval may have added a recipient budget, so read it after the status.
     let grant = read_grant(state).await?.ok_or_else(grant::ended)?;
-    let (pending, view) = owner_contact::Pending::device(&body, id, &recipient, &grant, fence, now_ms())?;
+    let (pending, view) = owner_contact::Pending::device(&body, id, &recipient, &grant, fence, now_ms(), max_msat)?;
     if view.ready {
         let r = &view.request;
         let (auth, _) = plan_message(state, &recipient, false, r.max_total_msat, Some(r.contact_budget_msat))?;
@@ -19380,16 +19410,98 @@ mod control_act_tests {
         *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({})));
         g1_approved(&node, 500_000).await;
         let view = do_first_contact_request(&node.state, C, 10000, Some(50_000)).await.unwrap().unwrap();
-        let waiting = do_first_contact_status_for(&node.state, &view.id, None).await.unwrap();
+        let waiting = do_first_contact_status_for(&node.state, &view.id, None, None).await.unwrap();
         assert!(!waiting.ready);
         assert_eq!(waiting.owner_command, view.owner_command);
         assert_eq!(waiting.approval_window_secs, None);
         let until = now_unix() + 120;
         node.state.owner_contact.lock().unwrap().as_ref().unwrap().write_receipt(C, 10000, until);
-        let ready = do_first_contact_status_for(&node.state, &view.id, None).await.unwrap();
+        let ready = do_first_contact_status_for(&node.state, &view.id, None, None).await.unwrap();
         assert!(ready.ready);
         assert_eq!(ready.expires_at_ms, until as u64 * 1000);
         assert!(!node.targets().iter().any(|p| p.contains("/first-contact-grant/")));
+    }
+
+    /// The box owner's console approval (`konsensus approve first-contact --op
+    /// <budget op>`, no device provenance, the node's 5-minute window) satisfies
+    /// a phone waiting for its other owner device, for the exact cap only.
+    #[tokio::test]
+    async fn box_console_approval_of_the_exact_terms_satisfies_the_wait() {
+        let until = now_unix() + 280;
+        let reply = Arc::new(Mutex::new(serde_json::json!({
+            "grant_op_id": "ab12", "recipient": C, "state": "approved", "approval_window_secs": 300,
+            "approval": {"recipient": C, "max_total_msat": 10000, "expires_at": until},
+        })));
+        let response = reply.clone();
+        let route: Routes = Arc::new(move |_, p, _| {
+            if p.starts_with("/pair/first-contact-grant/") {
+                assert_eq!(p, format!("/pair/first-contact-grant/ab12?recipient={C}"));
+                return (200, response.lock().unwrap().to_string());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(route));
+        *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({})));
+        g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({C: 50_000});
+        g1_approved(&node, 500_000).await;
+        // A different cap than the app asked for never makes the wait ready.
+        assert!(do_first_contact_status_for(&node.state, "", Some(C), Some(9000)).await.is_err());
+        assert!(node.state.owner_contact.lock().unwrap().is_none());
+        // An empty id reads the current budget operation; the console window is five minutes.
+        let ready = do_first_contact_status_for(&node.state, "", Some(C), Some(10000)).await.unwrap();
+        assert!(ready.ready);
+        assert_eq!(ready.id, "ab12");
+        assert_eq!(ready.expires_at_ms, until as u64 * 1000);
+        assert_eq!(ready.approval_window_secs, Some(300));
+        do_message_send_with(&node.state, C, false, "hello", 10000, None, Some(50_000)).await.unwrap();
+        assert_eq!(compose_bodies(&node).len(), 1);
+        // An owner-device grant keeps its two-minute bound.
+        reply.lock().unwrap()["approval"]["granted_by"] = "device:0123456789abcdef0123456789abcdef".into();
+        assert!(do_first_contact_status_for(&node.state, "ab12", Some(C), Some(10000)).await.is_err());
+    }
+
+    /// An expired link previews as "expired", like remote_access_connect, not "other".
+    #[test]
+    fn preview_errors_carry_the_connection_error_kind() {
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        let wire = serde_json::json!({"v": 1, "endpoint": "127.0.0.1:9", "node_id": "aa".repeat(32),
+            "transport_pubkey": "bb".repeat(32), "transport_signature": engine.encode([0u8; 64]),
+            "code": engine.encode([1u8; 32]), "expires_at": now_unix() - 600});
+        let link = format!("bitsov://pair/{}", engine.encode(serde_json::to_vec(&wire).unwrap()));
+        let error = remote_access::preview_pairing_link(&link).map_err(|e| remote_access::ConnectionError::from(&e)).unwrap_err();
+        assert_eq!(serde_json::to_value(&error).unwrap()["kind"], "expired");
+    }
+
+    /// A contact the node already admitted (it holds a session) needs no
+    /// first-contact approval from a new client; a new contact still does.
+    #[tokio::test]
+    async fn a_contact_the_node_already_admitted_needs_no_first_contact_approval() {
+        let sessions = Arc::new(Mutex::new(serde_json::json!({"sessions": []})));
+        let listed = sessions.clone();
+        let route: Routes = Arc::new(move |m, p, _| {
+            if p == "/sessions" {
+                assert_eq!(m, "GET");
+                return (200, listed.lock().unwrap()["sessions"].to_string());
+            }
+            if p.starts_with("/pair/first-contact-grant/") { panic!("no approval is read for this send"); }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(route));
+        *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({})));
+        g1_approved(&node, 500_000).await;
+        // No session: a first contact still needs the owner's approval. Nothing is sent.
+        let refused = do_message_send_with(&node.state, C, false, "hello", 10000, None, Some(50_000)).await.unwrap_err();
+        assert_eq!(refused.code, "owner_only");
+        assert!(compose_bodies(&node).is_empty());
+        // An inactive session is no admission either.
+        *sessions.lock().unwrap() = serde_json::json!({"sessions": [{"peer_id": C, "active": false}]});
+        assert!(do_message_send_with(&node.state, C, false, "hello", 10000, None, Some(50_000)).await.is_err());
+        assert!(compose_bodies(&node).is_empty());
+        // The node holds a session: the send goes to the node, which still meters it.
+        *sessions.lock().unwrap() = serde_json::json!({"sessions": [{"peer_id": C.to_uppercase(), "active": true}]});
+        do_message_send_with(&node.state, C, false, "hello", 10000, None, Some(50_000)).await.unwrap();
+        assert_eq!(compose_bodies(&node).len(), 1);
     }
 
     #[tokio::test]
@@ -19411,7 +19523,7 @@ mod control_act_tests {
         *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({})));
         g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({C: 50_000});
         g1_approved(&node, 500_000).await;
-        let waiting = do_first_contact_status_for(&node.state, "ab12", Some(C)).await.unwrap();
+        let waiting = do_first_contact_status_for(&node.state, "ab12", Some(C), None).await.unwrap();
         assert!(!waiting.ready);
         assert_eq!(waiting.id, "ab12");
         assert_eq!(waiting.approval_window_secs, Some(120));
@@ -19423,7 +19535,7 @@ mod control_act_tests {
             "recipient": C, "max_total_msat": 10000, "expires_at": until,
             "granted_by": "device:0123456789abcdef0123456789abcdef",
         });
-        let ready = do_first_contact_status_for(&node.state, "ab12", Some(&C.to_uppercase())).await.unwrap();
+        let ready = do_first_contact_status_for(&node.state, "ab12", Some(&C.to_uppercase()), None).await.unwrap();
         assert!(ready.ready);
         assert_eq!(ready.expires_at_ms, until as u64 * 1000);
         assert_eq!(ready.request, owner_contact::Request {
@@ -19434,7 +19546,7 @@ mod control_act_tests {
         do_message_send_with(&node.state, C, false, "hello", 10000, None, Some(50_000)).await.unwrap();
         assert_eq!(compose_bodies(&node).len(), 1);
         reply.lock().unwrap()["state"] = "consumed".into();
-        assert_eq!(do_first_contact_status_for(&node.state, "ab12", Some(C)).await.unwrap_err().code, "owner_contact_unavailable");
+        assert_eq!(do_first_contact_status_for(&node.state, "ab12", Some(C), None).await.unwrap_err().code, "owner_contact_unavailable");
         assert!(do_message_send_with(&node.state, C, false, "again", 10000, None, Some(50_000)).await.is_err());
         assert_eq!(compose_bodies(&node).len(), 1);
         assert!(node.seen.lock().unwrap().iter().filter(|(_, p, _, _)| p.contains("/first-contact-grant/"))
@@ -19465,12 +19577,12 @@ mod control_act_tests {
         let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(route));
         g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({C: 50_000});
         g1_approved(&node, 500_000).await;
-        do_first_contact_status_for(&node.state, "ab12", Some(C)).await.unwrap();
+        do_first_contact_status_for(&node.state, "ab12", Some(C), None).await.unwrap();
         let replace = async {
             tokio::time::timeout(Duration::from_secs(2), async {
                 while !entered.load(Ordering::SeqCst) { tokio::task::yield_now().await; }
             }).await.unwrap();
-            let result = do_first_contact_status_for(&node.state, "ab12", Some(C)).await;
+            let result = do_first_contact_status_for(&node.state, "ab12", Some(C), None).await;
             released.store(true, Ordering::SeqCst);
             assert!(result.unwrap().ready);
         };
@@ -19483,7 +19595,7 @@ mod control_act_tests {
     async fn first_contact_status_bad_recipient_fails_before_network() {
         let (node, _dir, _) = g1_node(&["read", "receive"]);
         for recipient in ["".to_string(), "a".repeat(63), "a".repeat(65), "g".repeat(64), format!("{C}&other=1"), format!(" {C}"), "é".repeat(32)] {
-            let err = do_first_contact_status_for(&node.state, "ab12", Some(&recipient)).await.unwrap_err();
+            let err = do_first_contact_status_for(&node.state, "ab12", Some(&recipient), None).await.unwrap_err();
             assert_eq!(err.code, "invalid", "{recipient}");
         }
         assert!(node.targets().is_empty());
@@ -21888,7 +22000,7 @@ mod assistant_acl_tests {
                 .map(str::trim)
                 .find(|line| !line.is_empty() && !line.starts_with("//"))
                 .unwrap_or("");
-            let expected = if name == "remote_access_connect" {
+            let expected = if matches!(name.as_str(), "remote_access_connect" | "remote_access_preview") {
                 "reject_sealed_window(&window).map_err(|_| remote_access::ConnectionError::main_window_only())?;"
             } else { "reject_sealed_window(&window)?;" };
             assert_eq!(
@@ -22310,12 +22422,13 @@ mod assistant_acl_tests {
             invoke(&main, "pairing_retry", serde_json::json!({})),
             "the node has not started",
         );
-        for command in ["remote_access_preview", "remote_access_import"] {
-            assert_handler_ran(
-                invoke(&main, command, serde_json::json!({ "link": "not-a-link" })),
-                "invalid remote pairing link",
-            );
-        }
+        assert_handler_ran(
+            invoke(&main, "remote_access_import", serde_json::json!({ "link": "not-a-link" })),
+            "invalid remote pairing link",
+        );
+        // Preview answers with the structured error remote_access_connect uses.
+        let preview = invoke(&main, "remote_access_preview", serde_json::json!({ "link": "not-a-link" })).unwrap_err();
+        assert_eq!(preview["kind"], "other", "{preview}");
         // Do not invoke forget against the user's real app-data directory in
         // this mock app. The persistence tests use isolated temporary folders.
         assert_handler_ran(invoke(&main, "node_unlock", serde_json::json!({})), "not locked");
