@@ -11,6 +11,7 @@ case "${1:-}" in
   --help|-h)
     echo 'Usage: scripts/ios-sim-smoke.sh [--dry-run]'
     echo 'Optional: IOS_SIM_UDID selects an available iPhone simulator.'
+    echo 'Optional: IOS_SIM_NO_WINDOW=1 skips opening the Simulator window.'
     exit 0 ;;
   '') ;;
   *) fail "unknown argument: $1 (use --help)" ;;
@@ -86,6 +87,27 @@ run 'Build Rust simulator library (Debug)' env \
   --target "$target" --features tauri/custom-protocol
 run 'Stage simulator library for the existing Xcode target' \
   cp "$out/cargo/$target/debug/libbitsov_app.a" "$apple/Externals/$arch/debug/libapp.a"
+# An unsigned simulator app has no application identifier, so every Keychain
+# call fails and the app stops before its first screen. Embed simulator-only
+# entitlements in the linked binary (as Xcode does for simulator builds); this
+# is link-time data, not a signature, and never applies to a device build.
+entitlements="$out/simulator.entitlements"
+if [[ $dry_run == 0 ]]; then
+  STEP="write simulator-only entitlements"
+  mkdir -p "$out"
+  cat > "$entitlements" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>application-identifier</key>
+  <string>SIMULATOR.tech.mindlink.bitsov</string>
+  <key>keychain-access-groups</key>
+  <array><string>SIMULATOR.tech.mindlink.bitsov</string></array>
+</dict>
+</plist>
+PLIST
+fi
 run 'Build unsigned Debug app with the simulator SDK' xcodebuild \
   -project "$apple/bitsov-app.xcodeproj" -scheme bitsov-app_iOS \
   -configuration debug -sdk iphonesimulator \
@@ -94,7 +116,9 @@ run 'Build unsigned Debug app with the simulator SDK' xcodebuild \
   "ARCHS=$arch" "VALID_ARCHS=$arch" ONLY_ACTIVE_ARCH=YES \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
   DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= \
-  BITSOV_IOS_SIM_PREBUILT=1 build
+  BITSOV_IOS_SIM_PREBUILT=1 \
+  "OTHER_LDFLAGS=\$(inherited) -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __entitlements -Xlinker $entitlements" \
+  build
 
 app="$out/derived-data/Build/Products/debug-iphonesimulator/BitSov.app"
 if [[ $dry_run == 0 ]]; then
@@ -111,12 +135,15 @@ const { devices } = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const phones = Object.entries(devices)
   .filter(([runtime]) => runtime.startsWith('com.apple.CoreSimulator.SimRuntime.iOS-'))
   .flatMap(([, list]) => list)
-  .filter(d => d.isAvailable && d.deviceTypeIdentifier?.startsWith('com.apple.CoreSimulator.SimDeviceType.iPhone-'));
+  .filter(d => d.isAvailable && d.deviceTypeIdentifier?.startsWith('com.apple.CoreSimulator.SimDeviceType.iPhone-'))
+  // The foldable iPhone Duo renders only black frames when no Simulator window
+  // is attached, so screenshots cannot show the app. Use a standard iPhone.
+  .filter(d => !d.deviceTypeIdentifier.startsWith('com.apple.CoreSimulator.SimDeviceType.iPhone-Duo'));
 const requested = process.env.IOS_SIM_UDID;
 const phone = requested ? phones.find(d => d.udid === requested)
   : phones.find(d => d.state === 'Booted') ?? phones.find(d => d.state === 'Shutdown');
 if (!phone || !['Booted', 'Shutdown'].includes(phone.state)) {
-  console.error('No available iPhone simulator matches. Install an iOS runtime and create an iPhone simulator in Xcode, or check IOS_SIM_UDID.');
+  console.error('No available iPhone simulator matches. Install an iOS runtime and create a standard (not foldable) iPhone simulator in Xcode, or check IOS_SIM_UDID.');
   process.exit(1);
 }
 console.error(`Using ${phone.name} (${phone.udid})`);
@@ -133,11 +160,45 @@ if [[ $state != Booted ]]; then
   run 'Boot selected iPhone simulator (skip if already booted)' xcrun simctl boot "$udid"
 fi
 run 'Wait for simulator boot' xcrun simctl bootstatus "$udid" -b
+# Show the device to whoever runs the smoke. Screenshots do not depend on it:
+# standard iPhone simulators render headless. Recent Xcode releases may not
+# ship Simulator.app; then the run continues headless.
+if [[ ${IOS_SIM_NO_WINDOW:-0} != 1 ]]; then
+  if [[ $dry_run == 0 ]]; then
+    STEP="find Simulator app"
+    simulator_app=$(mdfind "kMDItemCFBundleIdentifier == 'com.apple.iphonesimulator'" 2>/dev/null | head -n 1 || true)
+    developer=$(xcode-select -p 2>/dev/null || true)
+    [[ -n "$simulator_app" || -z "$developer" || ! -d "$developer/Applications/Simulator.app" ]] ||
+      simulator_app="$developer/Applications/Simulator.app"
+    if [[ -n "$simulator_app" ]]; then
+      run 'Open Simulator window for the selected iPhone' open -a "$simulator_app" --args -CurrentDeviceUDID "$udid"
+    else
+      printf '\nSimulator app not found; continuing headless (screenshots still render).\n'
+    fi
+  else
+    run 'Open Simulator window for the selected iPhone (if Simulator.app exists)' \
+      open -a Simulator --args -CurrentDeviceUDID "$udid"
+  fi
+fi
 run 'Install simulator app' xcrun simctl install "$udid" "$app"
 run 'Launch simulator app' xcrun simctl launch --terminate-running-process "$udid" "$bundle_id"
-run 'Allow the first screen to render' sleep 3
-run 'Capture launch screenshot' xcrun simctl io "$udid" screenshot "$out/launch.png"
+run 'Allow the launch animation to finish' sleep "${IOS_SMOKE_SCREENSHOT_DELAY:-2}"
+run 'Capture launch screenshot; retry until the first screen renders' \
+  xcrun simctl io "$udid" screenshot "$out/launch.png"
 if [[ $dry_run == 0 ]]; then
-  [[ -s "$out/launch.png" ]] || fail 'simulator screenshot is missing or empty'
+  # The web view needs a few seconds on a cold simulator. A black or one-colour
+  # frame after the last attempt fails the smoke instead of passing as evidence.
+  STEP="check launch screenshot shows the app"
+  attempts=${IOS_SMOKE_SCREENSHOT_ATTEMPTS:-10}
+  for ((attempt = 1; ; attempt++)); do
+    [[ -s "$out/launch.png" ]] || fail 'simulator screenshot is missing or empty'
+    if check=$(trap - ERR; node "$root/scripts/ios-screenshot-check.mjs" "$out/launch.png" 2>&1); then
+      printf '%s\n' "$check"
+      break
+    fi
+    (( attempt < attempts )) || fail "$check ($out/launch.png)"
+    sleep "${IOS_SMOKE_SCREENSHOT_DELAY:-2}"
+    xcrun simctl io "$udid" screenshot "$out/launch.png" >/dev/null
+  done
   printf '\nLaunch screenshot: %s/launch.png\nContinue with docs/IOS-SMOKE.md.\n' "$out"
 fi

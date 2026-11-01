@@ -11,10 +11,20 @@ scripts/ios-sim-smoke.sh
 ```
 
 Optional: `IOS_SIM_UDID=<simulator UUID>` selects a particular available iPhone.
+Use a standard iPhone model; the foldable iPhone Duo is skipped because it
+renders only black frames without a Simulator window.
 The script builds unsigned Debug with the simulator SDK and bundled frontend;
 it never installs on a phone or uses signing identities, profiles or keychains.
+An unsigned app has no application identifier, so its Keychain calls fail and
+it stops on a blank screen. The script therefore links simulator-only
+entitlements (`application-identifier`, `keychain-access-groups`) into the
+binary, as Xcode does for simulator builds. This is link-time data, not a
+signature, and it never reaches a device build.
 It reuses simulator app data. For first-launch testing choose a fresh iPhone
-simulator in Xcode. Open Simulator to continue manually if its window is closed.
+simulator in Xcode. It opens Simulator.app when Xcode ships one
+(`IOS_SIM_NO_WINDOW=1` skips this); otherwise it runs headless, which still
+renders screenshots on standard iPhones. The smoke fails if `launch.png` stays
+black or one flat colour in the middle of the screen after about 20 seconds.
 Output is gitignored under `test-results/ios-smoke/`; `launch.png` is only launch
 evidence, not a completed M6 test.
 
