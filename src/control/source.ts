@@ -163,7 +163,12 @@ export interface Source {
    * `recipient` (owner_device_approval_v1): `id` is the ApprovalView's grant_op and
    * the host reads /pair/first-contact-grant/{grant_op}?recipient=. Absent: today's id.
    */
-  firstContactStatus(id: string, recipient?: string): Promise<OwnerContactApproval>;
+  /**
+   * With `recipient`: the node's first-contact grant for this client's budget operation
+   * (`id`; empty = the current one), approved on another owner device or at the box console.
+   * `maxMsat` binds the exact cap the app asked to have approved.
+   */
+  firstContactStatus(id: string, recipient?: string, maxMsat?: number): Promise<OwnerContactApproval>;
   firstContactCancel(id: string): Promise<void>;
   wallet(): Promise<WalletOverview>;
   starterCurrent(nodeId: string): Promise<StarterStatus>;
@@ -364,7 +369,7 @@ export const hostSource: Source = {
   sponsorRequest: (text) => invoke<FundingAsk>('sponsor_request', { text }),
   sponsorRequestStatus: (paymentHash) => invoke<FundingStatus>('sponsor_request_status', { payment_hash: paymentHash }),
   firstContactRequest: (recipient, maxMsat, budgetMsat) => invoke<OwnerContactApproval | null>('first_contact_request', { recipient, max_msat: maxMsat, contact_budget_msat: budgetMsat ?? null }),
-  firstContactStatus: (id, recipient) => invoke<OwnerContactApproval>('first_contact_status', { id, recipient: recipient ?? null }),
+  firstContactStatus: (id, recipient, maxMsat) => invoke<OwnerContactApproval>('first_contact_status', { id, recipient: recipient ?? null, max_msat: maxMsat ?? null }),
   firstContactCancel: (id) => invoke<void>('first_contact_cancel', { id }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
   starterCurrent: (nodeId) => invoke<StarterStatus>('starter_current', { node_id: nodeId }),

@@ -337,8 +337,9 @@ describe('owner approval v1: first contact approved on the owner’s other devic
     request: { kind: 'first_contact', terms: { recipient: A, max_total_msat: 14000, budget_msat: 50000 } },
     nonce: '22'.repeat(16), expires_at: Math.floor(Date.now() / 1000) + 300, approval_message: 'm', status: 'pending', owner_action: 'konsensus approve …', ...over,
   });
-  function setup(capable = true) {
+  function setup(capable = true, tweak?: (source: ReturnType<typeof sampleSource>) => void) {
     const source = sampleSource({ firstLiveMs: 1e9 });
+    tweak?.(source);
     source.budgetStatus = async () => ({ ...budget });
     const overview = source.nodeOverview.bind(source);
     source.nodeOverview = async () => ({ ...await overview(), capabilities: capable ? ['owner_device_approval_v1'] : [] });
@@ -383,6 +384,44 @@ describe('owner approval v1: first contact approved on the owner’s other devic
     await new Promise((r) => setTimeout(r, 1200));
     expect(source.send).toHaveBeenCalledTimes(1);
   }, 15_000);
+
+  it('an approval at the box console of exactly these terms ends the wait and sends once', async () => {
+    const { source } = setup();
+    source.firstContactStatus = vi.fn(async (id: string, recipient?: string, maxMsat?: number) => {
+      if (id !== '' || recipient !== A || maxMsat !== 14000) throw { code: 'owner_only', message: 'waiting' };
+      return { id: 'g-fc', ready: true, expires_at_ms: Date.now() + 280_000, owner_command: '', approval_window_secs: 300,
+        request: { client_id: 'this-mac', grant_op_id: 'g-fc', recipient: A, max_total_msat: 14000, contact_budget_msat: 50000 } };
+    }) as never;
+    await press('hello after the console said yes');
+    await vi.waitFor(() => expect(source.firstContactStatus).toHaveBeenCalledWith('', A, 14000), { timeout: 4000 });
+    await vi.waitFor(() => expect(source.send).toHaveBeenCalledTimes(1), { timeout: 6000 });
+    expect(vi.mocked(source.send).mock.calls[0][2]).toBe('hello after the console said yes');
+    await new Promise((r) => setTimeout(r, 2500));
+    expect(source.send).toHaveBeenCalledTimes(1);
+  }, 15_000);
+
+  it('a console approval for another cap never sends', async () => {
+    const { source } = setup();
+    source.firstContactStatus = vi.fn(async () => { throw { code: 'owner_only', message: 'waiting' }; }) as never;
+    await press('only the exact terms');
+    await vi.waitFor(() => expect(source.firstContactStatus).toHaveBeenCalledWith('', A, 14000), { timeout: 4000 });
+    await new Promise((r) => setTimeout(r, 2500));
+    expect(source.send).not.toHaveBeenCalled();
+    expect(element('[data-owner-approval-wait="pending"]')).not.toBeNull();
+  }, 15_000);
+
+  it('a contact the node already admitted sends without any first-contact approval', async () => {
+    const { source } = setup(true, (s) => {
+      const peers = s.peers.bind(s);
+      s.peers = async () => (await peers()).map((p) => p.node_id.toLowerCase() === A ? { ...p, session: true } : p);
+    });
+    await press('hello, we already know each other');
+    await vi.waitFor(() => expect(source.send).toHaveBeenCalledTimes(1), { timeout: 4000 });
+    expect(source.approvalRequest).not.toHaveBeenCalled();
+    expect(source.firstContactRequest).not.toHaveBeenCalled();
+    // The app's own contact budget still opens with this first send.
+    expect(vi.mocked(source.send).mock.calls[0][5]).toBe(50000);
+  });
 
   it('a refused request is said in plain words and nothing is sent', async () => {
     const { source } = setup();

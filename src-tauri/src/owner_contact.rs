@@ -84,13 +84,25 @@ pub fn device_path(id: &str, recipient: &str) -> Result<(String, String), Action
     Ok((format!("{}?{}", url.path(), url.query().unwrap()), recipient))
 }
 
-fn device_reply(body: &str) -> Result<RemoteReply, ActionError> {
+/// An owner device's grant is valid for two minutes; the box owner's console
+/// approval (`konsensus approve first-contact`) for the node's five.
+const DEVICE_GRANT_SECS: u64 = 120;
+
+/// The reply, and whether its approval came from the box owner's console
+/// (no device provenance) rather than an owner device.
+fn device_reply(body: &str) -> Result<(RemoteReply, bool), ActionError> {
     // Device grants carry provenance; the legacy CLI receipt remains strict.
     let mut reply: serde_json::Value = serde_json::from_str(body).map_err(|_| waiting())?;
+    let mut console = false;
     if let Some(approval) = reply.get_mut("approval").and_then(|a| a.as_object_mut()) {
-        approval.remove("granted_by");
+        console = approval.remove("granted_by").is_none();
     }
-    serde_json::from_value(reply).map_err(|_| waiting())
+    Ok((serde_json::from_value(reply).map_err(|_| waiting())?, console))
+}
+
+/// How long a device-path approval may stay usable.
+fn device_window_secs(console: bool) -> u64 {
+    if console { REMOTE_APPROVAL_WINDOW_SECS } else { DEVICE_GRANT_SECS }
 }
 
 impl Pending {
@@ -211,13 +223,17 @@ impl Pending {
 
     /// Observe an owner-device grant without requiring a prior CLI handoff.
     /// Keep a pending record so compose rechecks and consumes the local guard.
-    pub fn device(body: &str, id: &str, recipient: &str, grant: &NodeGrant, fence: (u64, u64), now: u64) -> Result<(Self, View), ActionError> {
-        let reply = device_reply(body)?;
+    /// `expected_cap`: the exact all-in cap the app asked the owner to approve.
+    /// An approval for any other amount never makes this request ready.
+    pub fn device(body: &str, id: &str, recipient: &str, grant: &NodeGrant, fence: (u64, u64), now: u64, expected_cap: Option<u64>) -> Result<(Self, View), ActionError> {
+        let (reply, console) = device_reply(body)?;
         if id != grant.op_id || reply.grant_op_id != id || reply.recipient != recipient {
             return Err(waiting());
         }
         let cap = reply.approval.as_ref().map_or(0, |a| a.max_total_msat);
         if reply.state == "approved" && (cap == 0 || cap > 100_000) { return Err(waiting()); }
+        if reply.state == "approved" && expected_cap.is_some_and(|expected| expected != cap) { return Err(waiting()); }
+        let window = device_window_secs(console);
         let mut pending = Self {
             view: View {
                 // Compose's replacement guard needs a unique local handoff id:
@@ -227,8 +243,8 @@ impl Pending {
                     recipient: recipient.into(), max_total_msat: cap,
                     contact_budget_msat: grant.per_recipient_msat.get(recipient).copied().unwrap_or(cap) },
                 owner_command: String::new(), ready: false,
-                expires_at_ms: now.saturating_add(120_000).min(grant.expires_at_ms()),
-                approval_window_secs: Some(120),
+                expires_at_ms: now.saturating_add(window * 1000).min(grant.expires_at_ms()),
+                approval_window_secs: Some(window),
             },
             fence, dir: None, remote_started_at: Some(now), replaced_approval: None, device_approval: true,
         };
@@ -262,13 +278,13 @@ impl Pending {
 
     pub fn remote_status(&mut self, body: &str, grant: &NodeGrant, fence: (u64, u64), now: u64) -> Result<View, ActionError> {
         self.status(grant, fence, now)?;
-        let mut reply: RemoteReply = if self.device_approval { device_reply(body)? }
-            else { serde_json::from_str(body).map_err(|_| waiting())? };
+        let (mut reply, console): (RemoteReply, bool) = if self.device_approval { device_reply(body)? }
+            else { (serde_json::from_str(body).map_err(|_| waiting())?, false) };
         let r = &self.view.request;
         if reply.grant_op_id != r.grant_op_id || reply.recipient != r.recipient || reply.approval_window_secs == 0 {
             return Err(waiting());
         }
-        let window = reply.approval_window_secs.min(if self.device_approval { 120 } else { REMOTE_APPROVAL_WINDOW_SECS });
+        let window = reply.approval_window_secs.min(if self.device_approval { device_window_secs(console) } else { REMOTE_APPROVAL_WINDOW_SECS });
         self.view.approval_window_secs = Some(window);
         self.view.expires_at_ms = self.view.expires_at_ms.min(
             self.remote_started_at.unwrap().saturating_add(window * 1000));
@@ -287,7 +303,7 @@ impl Pending {
                 let until = u64::try_from(approval.expires_at).unwrap_or(0).saturating_mul(1000);
                 if until <= now { return Err(expired()); }
                 if approval.recipient != r.recipient || approval.max_total_msat != r.max_total_msat || until > grant.expires_at_ms()
-                    || (self.device_approval && until > now.saturating_add(120_000)) {
+                    || (self.device_approval && until > now.saturating_add(device_window_secs(console) * 1000)) {
                     return Err(waiting());
                 }
                 view.ready = true;
@@ -393,7 +409,7 @@ mod tests {
         let recipient = "a".repeat(64);
         reply["approval"]["expires_at"] = 130.into();
         reply["approval"]["granted_by"] = "device:0123456789abcdef0123456789abcdef".into();
-        let (mut pending, view) = Pending::device(&reply.to_string(), "ab12", &recipient, &grant, (1, 2), 10_000).unwrap();
+        let (mut pending, view) = Pending::device(&reply.to_string(), "ab12", &recipient, &grant, (1, 2), 10_000, None).unwrap();
         assert!(view.ready);
         assert_eq!(view.expires_at_ms, 130_000);
         assert_eq!(view.approval_window_secs, Some(120));
@@ -413,9 +429,9 @@ mod tests {
                 "large_cap" => bad["approval"]["max_total_msat"] = 100_001.into(),
                 _ => unreachable!(),
             }
-            assert!(Pending::device(&bad.to_string(), "ab12", &recipient, &grant, (1, 2), 10_000).is_err(), "{change}");
+            assert!(Pending::device(&bad.to_string(), "ab12", &recipient, &grant, (1, 2), 10_000, None).is_err(), "{change}");
         }
-        let (mut pending, _) = Pending::device(&reply.to_string(), "ab12", &recipient, &grant, (1, 2), 10_000).unwrap();
+        let (mut pending, _) = Pending::device(&reply.to_string(), "ab12", &recipient, &grant, (1, 2), 10_000, None).unwrap();
         reply["approval"]["max_total_msat"] = 4000.into();
         assert!(pending.remote_status(&reply.to_string(), &grant, (1, 2), 11_000).is_err(), "compose must reject changed terms");
     }

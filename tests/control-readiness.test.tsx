@@ -181,6 +181,20 @@ describe('node money readiness', () => {
     }
   });
 
+  it.each([
+    ['en', 'This permission covers messages and calls. Ask the owner to approve this payment separately. Nothing was paid.'],
+    ['da', 'Denne tilladelse dækker beskeder og opkald. Bed ejeren om at godkende denne betaling særskilt. Intet blev betalt.'],
+  ] as const)('a messaging grant refusing a payment has its own plain words (%s), and nothing was paid', (lang, words) => {
+    setLanguagePref(lang);
+    try {
+      const error = asActionError({ code: 'grant_messaging', message: 'host words' });
+      expect(error).toEqual({ code: 'grant_messaging', message: words });
+      expect(provenUnpaid(error.code)).toBe(true);
+    } finally {
+      setLanguagePref('en');
+    }
+  });
+
   it('does not mistake an older node without the field for unavailable money', async () => {
     const source = sampleSource();
     expect(nodePill({ ready: true, error: null, overview: await source.nodeOverview(), link: 'open', nowMs: Date.now() }).text).toBe('Connected to your node');

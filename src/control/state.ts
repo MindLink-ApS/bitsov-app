@@ -199,8 +199,9 @@ export function asActionError(e: unknown): ActionError {
   if (e === MONEY_NOT_READY) return { code: 'not_ready', message: MONEY_NOT_READY };
   if (e && typeof e === 'object' && 'code' in e && 'message' in e) {
     const { code, message, undelivered, admission, pending_id, reason, remaining_msat, operation_id } = e as ActionError;
-    // The host's own refusal of a call whose hangup the grant could not pay, in the app's language.
+    // Host refusals with their own plain words, in the app's language.
     const out: ActionError = { code, message: code === 'not_ready' ? MONEY_NOT_READY
+      : code === 'grant_messaging' ? tr('caGrantMessagingPayment')
       : code === 'call_hangup_unpayable' ? tr('caCallHangupUnpayable') : String(message) };
     if (typeof pending_id === 'string' && pending_id) out.pending_id = pending_id;
     if (typeof operation_id === 'string' && operation_id) out.operation_id = operation_id;
