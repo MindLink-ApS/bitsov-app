@@ -2,6 +2,10 @@
 
 Status: **design proposal, docs only.** No code in this change. Needs a
 two-vendor review and the owner decisions listed at the end before any build.
+Hardened after an independent review (round 1): quotes bound to the card
+`seq` (§3.2), node-side hash check before payment (§5), `srcdoc` only and a
+four-webview IPC gate (§7.2), and the fetch-size conflict recorded as open
+item D9.
 
 A box (node) publishes a **public package**: a profile, a CV or a small
 homepage made of files the owner chooses (markdown, images, PDF, and only
@@ -160,6 +164,21 @@ Rules
   a higher `seq`. A reader holding an old card sees the old package or a
   clear "this box has updated its page" line; it never mixes files from two
   manifests.
+- **Quotes are bound to the card `seq`.** A held card may be older than the
+  live one, so the manifest is trusted only through a card whose signature
+  and `seq` the reader has checked:
+  - the quote reply carries the node's current card `seq` and its
+    `manifest_hash`;
+  - the node refuses a quote for a `manifest_hash` that is not in its
+    current card (the grace period in §5 covers fetches already quoted, not
+    new quotes);
+  - the reader refuses a quote whose `seq` is lower than the `seq` of the
+    card it holds, and fetches the newer card first when the quote's `seq`
+    is higher.
+- **Rollback.** The reader keeps the highest `seq` it has seen per node and
+  refuses any card with a lower one, so a peer replaying an old card is
+  refused. A publisher re-publishing an old manifest under a **higher**
+  `seq` is legitimate and accepted.
 - Existing `cv` and `media` fields stay valid. A phase-1 package can list the
   same CV and media bytes, so old readers keep working.
 
@@ -219,13 +238,25 @@ The node serves only paths in the current manifest, refuses anything else
 before payment, and keeps the previous manifest for a short grace period so a
 reader mid-fetch is not cut off.
 
+**Hash checked by the node before payment.** The node re-hashes on
+`PUT /blobs/:hash` and refuses a mismatch (above). On fetch, it serves only
+bytes whose BLAKE3 equals the manifest entry for that path, and it refuses a
+fetch **before payment** when the stored blob's hash differs from the
+manifest entry (a corrupted or swapped store). Each per-file quote is bound
+to (manifest hash, path, file hash, price), so a changed file under the same
+path cannot be sold under the old quote. The reader's own hash check (§6.2)
+is defence in depth, not the first line.
+
 ## 6. Fetch and pay
 
 ### 6.1 One quote, one yes
 
-1. Reader opens a box's card (free if held, one paid read otherwise).
-2. App asks `/browse/quote` with the manifest hash. Reply: manifest, per-file
-   principal, routing fee ceiling per file, and the package total.
+1. Reader opens a box's card (free if held, one paid read otherwise). A
+   held card may be stale; step 2 detects that.
+2. App asks `/browse/quote` with the manifest hash. Reply: manifest, the
+   current card `seq`, per-file principal, routing fee ceiling per file, and
+   the package total. Each per-file quote names (manifest hash, path, file
+   hash, price). The reader applies the `seq` rules in §3.2.
 3. The review shows: "**Up to X sats for N files** from <name>. You pay only
    for files you open." Default selection is the entry page plus files it
    links to; the reader may pick "whole package".
@@ -245,7 +276,10 @@ reader mid-fetch is not cut off.
   (`price_cap_exceeded`), as today.
 - Each body is hashed in the host and compared with the manifest entry. A
   mismatch shows "this file did not match what the box signed" and the
-  amount paid; the file is not shown.
+  amount paid; the file is not shown or cached. Because the node must refuse
+  a mismatch before payment (§5), a mismatch after payment counts as a
+  **node fault**: the reader view marks the box with "this box is
+  misbehaving", never a silent loss.
 - The review line at the end: "Paid X sats for N files."
 
 ### 6.3 Caching
@@ -269,6 +303,16 @@ Order of work: native first, sandbox last.
 
 Package total ≤ 16 MiB in phase 1. SVG is refused (it is script).
 
+**Fetch size conflict (open item D9).** Today `porch::project` refuses any
+fetch reply body over `MAX_BODY_BYTES` (256 KiB, `porch.rs`), so a fetch
+"through the existing `porch_post` path" would refuse every image and PDF
+above 256 KiB, while this table allows 2 MiB images and 5 MiB PDFs. Before
+P2, a per-fetch reply cap for package files must be chosen (for example
+per-mime, matching this table, or files split into chunks under 256 KiB),
+and the doc must say which cap applies to which path. Whatever is chosen,
+the cap is checked on the encoded reply length **before** base64 decode,
+and the decoded length is checked against the manifest `size`.
+
 ### 7.1 Native rules
 
 - Markdown images point at package paths only (`![x](photo.jpg)`). A path in
@@ -284,9 +328,12 @@ Only if D3 says yes, and only after the native view ships.
 - An `<iframe sandbox="allow-scripts">`: **no `allow-same-origin`**, no
   `allow-top-navigation`, `allow-popups`, `allow-forms`, `allow-modals` or
   `allow-downloads`. The frame gets an opaque origin.
-- Content goes in through `srcdoc` (or a `blob:` built from verified bytes),
-  never a URL in the app's origin, never a Tauri asset or custom protocol
-  that shares the app's origin.
+- Content goes in through **`srcdoc` only**. **No `blob:`**: a `blob:` URL
+  created by the app is in the app's origin. Never a URL in the app's
+  origin, never a Tauri asset or custom protocol that shares the app's
+  origin.
+- The frame carries `referrerpolicy="no-referrer"`, so it cannot read the
+  parent's address through `document.referrer`.
 - The frame document carries its own CSP meta, prepended by the host:
   `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline';
   img-src data:; font-src data:; connect-src 'none'; form-action 'none';
@@ -299,22 +346,27 @@ Only if D3 says yes, and only after the native view ships.
   type (for example "navigate to package path"), checked against the manifest.
 - Tauri: the frame must not get the IPC bridge. Verify in a test that
   `window.__TAURI__`, `__TAURI_INTERNALS__` and `fetch('ipc://...')` are
-  absent or fail inside the frame, on macOS WebKit and on the other targets.
+  absent or fail inside the frame, and that a `postMessage` with an
+  off-manifest path is ignored.
+- **Phase gate:** this IPC-absence test runs on **every** target webview:
+  iOS WKWebView, macOS WKWebView, Android WebView and Windows WebView2.
+  `srcdoc` CSP inheritance differs between webviews, so a pass on one proves
+  nothing for the others. P4 does not ship until all four pass.
 - A visible frame border and label: "Page from <name>, running in a sandbox".
 
 ## 8. Abuse and security
 
 | Threat | Mitigation |
 |--------|-----------|
-| Script reaching host commands | no HTML in the app origin; sandbox without `allow-same-origin`; frame CSP with no connect; IPC absence test |
+| Script reaching host commands | no HTML in the app origin; sandbox without `allow-same-origin`; `srcdoc` only, no `blob:`; frame CSP with no connect; IPC absence test on all four webviews as a P4 gate |
 | Tracking pixels, beacons, fonts from the web | no remote fetch anywhere; assets only from the verified package |
-| Swapped or corrupted files | every file hash-checked against the signed manifest before it is shown or cached |
+| Swapped or corrupted files | node refuses a blob whose hash differs from the manifest entry before payment; per-file quote bound to (manifest hash, path, file hash, price); reader hash-checks every file before it is shown or cached and reports a post-payment mismatch as a node fault |
 | Payment griefing (many tiny files, price changes, slow replies) | package cap set once; per-file maximum checked before each payment; ≤ 64 files; node refuses a changed price before paying; 20 s timeout; no retries |
 | Oversized packages | manifest, per-file and total caps checked by the host before the quote is shown and again on each reply |
 | Malicious images or PDFs | host decodes and re-encodes images; PDF has no script or forms; type sniffed against declared mime |
 | Misleading content (fake "pay here" pages) | the page renders inside a framed view with the box's name and node id; the app never takes payment instructions from page content |
 | Path tricks | manifest path rules (§3.1); the node and the host both check |
-| Stale or replayed packages | manifest hash bound to a card with `seq` and a 7-day lifetime; old manifests shown as old |
+| Stale or replayed packages | manifest hash bound to a card with `seq` and a 7-day lifetime; quote carries the current `seq` and the node refuses a quote for a manifest not in its current card; reader keeps `seq` monotonic per node and refuses a lower one; old manifests shown as old |
 | Owner privacy | EXIF stripped; preview shows exactly what a reader gets; PDFs flagged |
 
 ## 9. Demo plan
@@ -341,7 +393,7 @@ page content; the demo ships no real text or photos.
 | P1 | Node: blob store, manifest validation, extended quote/fetch, capability `public_package_v1` | node |
 | P2 | App: manifest types and checks in Rust; `package_publish`; "Min side" with markdown and images; native reader with in-package links and images; cap-bound approval; hash cache | app |
 | P3 | PDF rendering (D2), owner PDF upload | app |
-| P4 | Optional HTML/JS sandbox (D3), with the IPC absence test as a release gate | app |
+| P4 | Optional HTML/JS sandbox (D3), `srcdoc` only, with the IPC absence test on iOS WKWebView, macOS WKWebView, Android WebView and WebView2 as a phase gate | app |
 | P5 | Polish for first-time readers: plain wording, larger type, one-tap "open page" | app |
 
 Each phase ships behind the capability check; an old node simply shows
@@ -354,16 +406,23 @@ today's porch.
   manifest keeps `hash_alg`, fixed to `"blake3"`, for future agility; any
   other value is refused (§3.1).
 - **D2 PDF.** Rasterise in the host (safe, heavier) or a bundled viewer in a
-  sandboxed frame (lighter, larger attack surface).
+  sandboxed frame (lighter, larger attack surface). Review recommendation:
+  rasterise in the host; a bundled JavaScript viewer in a frame would bring
+  P4's attack surface into P3.
 - **D3 HTML/JS at all.** Ship native only, or allow sandboxed HTML/JS for
   company pages. Recommendation: native only until P4 has its own review.
 - **D4 Manifest cost.** Free with the quote (simpler, slightly more free
   load on the node) or one paid read.
-- **D5 App CSP change.** Exactly which `frame-src` value the sandbox needs
-  (`blob:` or none for `srcdoc`), confirmed on each target webview.
+- **D5 App CSP change.** `srcdoc` only is now the design (§7.2), so `blob:`
+  is not added. Still open: whether any `frame-src` value is needed for a
+  `srcdoc` frame, confirmed on each target webview.
 - **D6 Caps.** Defaults for per-file and package caps, cache size, and the
   approval expiry.
 - **D7 Pricing shape.** One page price for all files, or per-file prices set
   by the owner (for example free index, paid PDF).
 - **D8 Migration.** Keep the card's `cv` and `media` fields as they are, or
   fold them into the manifest once P2 ships.
+- **D9 Fetch reply size (open item).** The porch cap of 256 KiB
+  (`MAX_BODY_BYTES`) conflicts with 2 MiB images and 5 MiB PDFs (§7). Choose
+  a per-fetch cap or chunking for package files before P2; checked before
+  base64 decode.
