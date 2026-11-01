@@ -332,6 +332,13 @@ struct CallConsent {
     /// closed (or it held none and the call ended). Never set on the app's
     /// own say-so (a refusal, a hangup that failed or was not seen through).
     node_closed: bool,
+    /// Minutes past their dispatch decision (`commit_minute`) whose POST has
+    /// not returned yet. They were decided before any revocation, so End
+    /// does not stop them; they are paid and accounted like any minute.
+    minutes_in_flight: u32,
+    /// The call ended or was refused while a decided minute was in flight:
+    /// that minute was paid before End.
+    revoked_with_minute_in_flight: bool,
 }
 
 impl CallConsent {
@@ -415,6 +422,7 @@ impl CallConsents {
         self.entries.push(CallConsent {
             node_id, peer: peer.into(), call_id: call_id.into(), consent,
             confirmed_msat: None, phase: ConsentPhase::Offering, offering: false, dispatched: false, node_closed: false,
+            minutes_in_flight: 0, revoked_with_minute_in_flight: false,
         });
         Ok(())
     }
@@ -433,6 +441,7 @@ impl CallConsents {
             if c.phase.open() {
                 c.phase = ConsentPhase::Refused { code, message: message.into() };
                 c.confirmed_msat = None;
+                c.revoked_with_minute_in_flight |= c.minutes_in_flight > 0;
             }
         }
     }
@@ -444,7 +453,32 @@ impl CallConsents {
             if c.phase.open() {
                 c.phase = ConsentPhase::Ended;
                 c.confirmed_msat = None;
+                c.revoked_with_minute_in_flight |= c.minutes_in_flight > 0;
             }
+        }
+    }
+
+    /// The dispatch decision for one minute, under the same lock as every
+    /// revocation (`end`, `refuse`): while its consent is admitted and its
+    /// hold confirmed, the minute is marked in flight and may be posted.
+    /// Once revoked, no later minute passes. The refusal, if not.
+    fn commit_minute(&mut self, node_id: &str, peer: &str, call_id: &str) -> Option<ActionError> {
+        let Some(c) = self.find_mut(node_id, peer, call_id) else {
+            return Some(ActionError::new("call_no_consent", NO_CONSENT));
+        };
+        if let Some(error) = consent_closed(&c.phase) { return Some(error); }
+        if c.phase != ConsentPhase::Admitted || c.confirmed_msat.is_none() {
+            return Some(ActionError::new("call_hold_unconfirmed",
+                "Confirm your node's hold for this call before its first minute is paid. Nothing was paid."));
+        }
+        c.minutes_in_flight += 1;
+        None
+    }
+
+    /// A decided minute's POST returned (whatever its outcome).
+    fn finish_minute(&mut self, node_id: &str, peer: &str, call_id: &str) {
+        if let Some(c) = self.find_mut(node_id, peer, call_id) {
+            c.minutes_in_flight = c.minutes_in_flight.saturating_sub(1);
         }
     }
 
@@ -5129,20 +5163,30 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     journal.save(&pending)?;
     if cfg!(test) { pause_points::at(&state.api_base, "before_dispatch").await; }
     // Journal I/O can take time. Recheck immediately before issuing the
-    // request, after every await: no await follows until it is sent. A
-    // minute also needs its call's consent here, read under the consent
-    // lock that End and teardown take without waiting for the money lock.
-    let minute_refused = if path == "/messages/compose" && body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK)) {
-        block_consent_refusal(state, &node_id, &body)
-    } else { None };
+    // request, after every await: no await follows until it is sent.
     if let Err(e) = refuse_if_connection_waiting(state)
         .and_then(|()| refuse_if_paused(state))
-        .and_then(|()| check_auth(state, auth))
-        .and_then(|()| minute_refused.map_or(Ok(()), Err)) {
+        .and_then(|()| check_auth(state, auth)) {
         abandon(&journal)?;
         release(state)?;
         return Err(e);
     }
+    if cfg!(test) { pause_points::at(&state.api_base, "before_decision").await; }
+    // The last step before a minute's POST: its dispatch decision, taken
+    // atomically under the consent lock that End, teardown and a received
+    // hangup take without waiting for the money lock. Revoked first: nothing
+    // is sent. Decided first: the minute is in flight and End records it.
+    // The lock is not held across the POST.
+    let _minute = if path == "/messages/compose" && body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK)) {
+        let (peer, call_id) = block_identity(&body);
+        if let Some(refused) = state.call_consents.lock().unwrap().commit_minute(&node_id, &peer, &call_id) {
+            abandon(&journal)?;
+            release(state)?;
+            return Err(refused);
+        }
+        Some(MinuteInFlight { state, node_id: node_id.clone(), peer, call_id })
+    } else { None };
+    if cfg!(test) { pause_points::at(&state.api_base, "after_decision").await; }
     let response = state.http.post(format!("{}{path}", state.api_base))
         .bearer_auth(token).json(&body).timeout(state.spend_timeout).send().await
         .map_err(|_| spend_journal::unknown("The node did not return a complete response."))?;
@@ -7359,14 +7403,37 @@ mod pause_points {
     }
 }
 
+/// A call block's peer and wire call id, from its body.
+fn block_identity(body: &serde_json::Value) -> (String, String) {
+    let peer = body["recipient"].as_str().unwrap_or_default().to_string();
+    let call_id = body["plaintext"].as_str().and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+        .and_then(|p| p["call_id"].as_str().map(str::to_string)).unwrap_or_default();
+    (peer, call_id)
+}
+
+/// A minute past its dispatch decision. Dropped once its POST returned,
+/// whatever the outcome: it is then no longer in flight.
+struct MinuteInFlight<'a> {
+    state: &'a NodeState,
+    node_id: String,
+    peer: String,
+    call_id: String,
+}
+
+impl Drop for MinuteInFlight<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut kept) = self.state.call_consents.lock() {
+            kept.finish_minute(&self.node_id, &self.peer, &self.call_id);
+        }
+    }
+}
+
 /// `money_post_with`, under the money lock, for a call block (kind 404): its
 /// call's consent is still admitted and its hold confirmed. The refusal, if not.
 fn block_consent_refusal(state: &NodeState, node_id: &str, body: &serde_json::Value) -> Option<ActionError> {
-    let peer = body["recipient"].as_str().unwrap_or_default();
-    let call_id = body["plaintext"].as_str().and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
-        .and_then(|p| p["call_id"].as_str().map(str::to_string)).unwrap_or_default();
+    let (peer, call_id) = block_identity(body);
     let kept = state.call_consents.lock().unwrap();
-    let Some(current) = kept.find(node_id, peer, &call_id) else {
+    let Some(current) = kept.find(node_id, &peer, &call_id) else {
         return Some(ActionError::new("call_no_consent", NO_CONSENT));
     };
     if let Some(error) = consent_closed(&current.phase) { return Some(error); }
@@ -15554,6 +15621,56 @@ mod control_act_tests {
                 assert!(!compose_kinds(&node).contains(&404), "{point} {ender}: no minute sent");
                 let held = pending(&node);
                 assert!(held.as_ref().is_none_or(|p| p.operation_id.is_some()), "{point} {ender}: the minute's slot is released");
+            }
+        }
+    }
+
+    /// A minute's dispatch decision and its revocation (End, teardown, their
+    /// hangup) are one serialized step under the consent lock. Revoked on
+    /// another thread after the minute's last consent read but before its
+    /// decision: no minute is sent. Revoked after the decision but before
+    /// the POST: exactly one minute is sent, accounted, and recorded as in
+    /// flight when the call ended. 200 rounds each way, multi-threaded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a2_a_minutes_dispatch_decision_and_its_revocation_are_serialized() {
+        for round in 0..200 {
+            for revoke_first in [true, false] {
+                let (routes, _) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+                let node = fake(AuthMode::Local, routes);
+                approve_calls(&node).await;
+                do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+                remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
+                do_call_hold(&node.state, A, CALL_ID, Some(600_000)).await.unwrap();
+                let spent = budget_now(&node.state).spent_msat;
+                let point = if revoke_first { "before_decision" } else { "after_decision" };
+                let (arrived, release) = pause_points::arm(&node.state.api_base, point);
+                let state = &node.state;
+                let revoke = async {
+                    arrived.notified().await;
+                    // On another OS thread, as End, teardown or a received hangup would.
+                    std::thread::scope(|s| { s.spawn(|| end_minutes(state, CALL_ID)).join().unwrap(); });
+                    release.notify_one();
+                };
+                let (minute, ()) = tokio::join!(do_call_block(state, A, CALL_ID, 0), revoke);
+                let sent = compose_kinds(&node).iter().filter(|k| **k == 404).count();
+                let kept = call_consent(state, A, CALL_ID).unwrap();
+                assert_eq!(kept.phase, ConsentPhase::Ended, "round {round}");
+                assert_eq!(kept.minutes_in_flight, 0, "round {round}");
+                assert!(pending(&node).is_none(), "round {round}: resolved and accounted");
+                if revoke_first {
+                    assert_eq!(minute.unwrap_err().code, "call_not_live", "round {round}");
+                    assert_eq!(sent, 0, "round {round}: revoked first, no minute sent");
+                    assert!(!kept.revoked_with_minute_in_flight);
+                    assert_eq!(budget_now(&node.state).spent_msat, spent, "round {round}: nothing accounted");
+                } else {
+                    minute.unwrap();
+                    assert_eq!(sent, 1, "round {round}: decided first, exactly one minute");
+                    assert!(kept.revoked_with_minute_in_flight, "round {round}: in flight when the call ended");
+                    assert!(budget_now(&node.state).spent_msat > spent, "round {round}: the minute is accounted");
+                }
+                // Revoked: no later minute passes the decision.
+                assert_eq!(do_call_block(state, A, CALL_ID, 1).await.unwrap_err().code, "call_not_live", "round {round}");
+                assert_eq!(compose_kinds(&node).iter().filter(|k| **k == 404).count(), sent);
             }
         }
     }
