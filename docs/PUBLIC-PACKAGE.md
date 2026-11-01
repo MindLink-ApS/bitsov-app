@@ -1,7 +1,7 @@
 # Public package: a box's own page, fetched and paid in sats
 
-Status: **design proposal, docs only.** No code in this change. Needs a
-two-vendor review and the owner decisions listed at the end before any build.
+Status: **design proposal, docs only.** No code in this change. Draft; needs two
+independent reviews and the owner decisions listed at the end before any build.
 Hardened after an independent review (round 1): quotes bound to the card
 `seq` (§3.2), node-side hash check before payment (§5), `srcdoc` only and a
 four-webview IPC gate (§7.2), and the fetch-size conflict recorded as open
@@ -33,7 +33,7 @@ before the renderer sees it. Fields that matter here:
 Whole card ≤ `MAX_CARD_BYTES` (16 KiB); lifetime ≤ 7 days; `seq` orders
 re-publishes. `check_safe_path` refuses any `/`, so paths are flat today.
 Content hashes on the card are **BLAKE3** (`front_door_hash_bytes` in
-`app.rs`), not SHA-256.
+`app.rs`), as the owner decided.
 
 `site.manifest_hash` is already in the signed body, but nothing produces or
 reads a manifest yet. The node attaches `site`; the app never sends it.
