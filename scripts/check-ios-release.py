@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Check the iOS release inputs before a TestFlight archive. No signing access.
 
-usage: scripts/check-ios-release.py [--root DIR] [--xcode]
+usage: scripts/check-ios-release.py [--root DIR] [--xcode] [--toolchain]
 
 Static checks read the two shipping Info.plists, the entitlements file and the
 Xcode project. --xcode also asks xcodebuild for the Release device settings
-(`-showBuildSettings`), which reads the project only.
+(`-showBuildSettings`), which reads the project only. --toolchain checks this
+Mac's Rust toolchain for the llvm-objcopy a Release link needs.
 """
 import argparse
 import pathlib
@@ -80,18 +81,33 @@ def xcode_problems(root: pathlib.Path) -> list[str]:
     return problems
 
 
+def toolchain_problems() -> list[str]:
+    """Xcode 27 keeps tauri's Swift @_cdecl entry points local in Release; swift-rs
+    re-exports them only when rustup's llvm-tools provides llvm-objcopy."""
+    sysroot = subprocess.run(["rustc", "--print", "sysroot"], check=True, capture_output=True, text=True).stdout.strip()
+    host = re.search(r"^host: (\S+)$", subprocess.run(["rustc", "-vV"], check=True, capture_output=True, text=True).stdout, flags=re.M)
+    tool = pathlib.Path(sysroot) / "lib/rustlib" / (host.group(1) if host else "") / "bin/llvm-objcopy"
+    if not tool.is_file():
+        return ["llvm-objcopy is missing, so a Release build cannot link; run: rustup component add llvm-tools"]
+    return []
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=pathlib.Path, default=pathlib.Path(__file__).resolve().parent.parent)
     parser.add_argument("--xcode", action="store_true", help="also check xcodebuild Release device settings")
+    parser.add_argument("--toolchain", action="store_true", help="also check this Mac's Rust toolchain for Release links")
     args = parser.parse_args()
     problems = static_problems(args.root)
     if args.xcode:
         problems += xcode_problems(args.root)
+    if args.toolchain:
+        problems += toolchain_problems()
     for problem in problems:
         print(f"iOS release check: {problem}", file=sys.stderr)
     if not problems:
-        print("iOS release check: ok" + (" (with Xcode Release settings)" if args.xcode else ""))
+        extra = [name for name, on in (("Xcode Release settings", args.xcode), ("toolchain", args.toolchain)) if on]
+        print("iOS release check: ok" + (f" (with {', '.join(extra)})" if extra else ""))
     return 1 if problems else 0
 
 

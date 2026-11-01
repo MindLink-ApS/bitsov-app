@@ -11,13 +11,15 @@ in the browser; the repository never stores a team, certificate or profile.
    ```sh
    npm ci
    rustup target add aarch64-apple-ios
-   python3 scripts/check-ios-release.py --xcode
+   rustup component add llvm-tools
+   python3 scripts/check-ios-release.py --xcode --toolchain
    ```
 
    It must print `iOS release check: ok`. It confirms the microphone, camera,
    local-network and Face ID texts, background audio only, the export
-   compliance answer, bitcode off, and that no simulator-only entitlements or
-   team are committed.
+   compliance answer, bitcode off, that no simulator-only entitlements or
+   team are committed, and that the Rust toolchain has `llvm-objcopy` (see
+   [Release link with Xcode 27](#release-link-with-xcode-27)).
 2. **Pick the paid team in Xcode.** Run `npx tauri ios build --open`, or open
    `src-tauri/gen/apple/bitsov-app.xcodeproj`. Select target **bitsov-app_iOS →
    Signing & Capabilities**, keep **Automatically manage signing** ticked, and
@@ -35,18 +37,20 @@ in the browser; the repository never stores a team, certificate or profile.
    - SKU: any private string, for example `bitsov-ios`
    - User Access: Full Access
 
-## Known issue: Release link with Xcode 27.1
+## Release link with Xcode 27
 
-A Release build for iPhone made with Xcode 27.1 (Swift 6.4) did not link in a
-check on 1 Nov 2026. The Swift package that tauri 2.12.0 compiles in Release
-mode emits its `@_cdecl` entry points (`log_stdout`, `on_webview_created`,
-`register_plugin`, `run_plugin_command`, and the barcode scanner's
-`init_plugin_barcode_scanner`) as local symbols, so the app's static library
-cannot resolve them. Debug builds export them, which is why Personal Team
-debug installs work. Before the first upload, run `scripts/ios-testflight.sh`
-once. If it stops with `Undefined symbols … _log_stdout`, the fix belongs in
-the dependency (a tauri release whose Swift entry points are `public`) or the
-toolchain, not in signing.
+Xcode 27's Swift toolchain keeps the `@_cdecl` entry points of tauri's Swift
+packages local in Release builds (`log_stdout`, `on_webview_created`,
+`register_plugin`, `run_plugin_command` and the barcode scanner's
+`init_plugin_barcode_scanner` show as `t` in `nm`). Debug builds export them,
+which is why debug installs from Xcode work. The `swift-rs` build helper used
+by tauri re-exports them with `llvm-objcopy` from rustup's `llvm-tools`
+component, but it skips that step without failing the build when the tool is
+missing. The Release app then fails to link with `Undefined symbols … _log_stdout`.
+
+`rustup component add llvm-tools` fixes it. `scripts/ios-testflight.sh` refuses
+to start without the tool and rebuilds the two Swift packages each time, so an
+archive made before the tool was installed is never reused.
 
 ## Each build
 

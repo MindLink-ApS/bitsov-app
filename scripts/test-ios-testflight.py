@@ -15,8 +15,13 @@ CHECK = ROOT / "scripts/check-ios-release.py"
 BUILD = ROOT / "scripts/ios-testflight.sh"
 FAKE = r'''#!/usr/bin/env python3
 import json, os, sys
+tool, args = os.path.basename(sys.argv[0]), sys.argv[1:]
+if tool == "rustc":
+    if args == ["--print", "sysroot"]: print(os.environ["FAKE_SYSROOT"])
+    elif args == ["-vV"]: print("rustc 1.0.0\nhost: aarch64-apple-darwin")
+    sys.exit(0)
 with open(os.environ["CALL_LOG"], "a") as log:
-    log.write(json.dumps([os.path.basename(sys.argv[0]), *sys.argv[1:]]) + "\n")
+    log.write(json.dumps([tool, *args]) + "\n")
 '''
 
 
@@ -93,12 +98,17 @@ class TestFlightBuildTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         bin_dir = Path(self.tmp.name) / "bin"
         bin_dir.mkdir()
-        for tool in ("npx",):
+        for tool in ("npx", "cargo", "rustc"):
             (bin_dir / tool).write_text(FAKE)
             (bin_dir / tool).chmod(0o755)
         self.log = Path(self.tmp.name) / "calls.jsonl"
+        self.sysroot = Path(self.tmp.name) / "sysroot"
+        self.objcopy = self.sysroot / "lib/rustlib/aarch64-apple-darwin/bin/llvm-objcopy"
+        self.objcopy.parent.mkdir(parents=True)
+        self.objcopy.write_text("#!/bin/sh\n")
+        self.objcopy.chmod(0o755)
         self.env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", CALL_LOG=str(self.log),
-                        BITSOV_IOS_SIM_PREBUILT="1")
+                        BITSOV_IOS_SIM_PREBUILT="1", FAKE_SYSROOT=str(self.sysroot))
         self.env.pop("IOS_BUILD_NUMBER", None)
 
     def run_build(self, *args):
@@ -112,7 +122,11 @@ class TestFlightBuildTest(unittest.TestCase):
                                capture_output=True, text=True, check=True).stdout.strip()
         result = self.run_build()
         self.assertEqual(result.returncode, 0, result.stderr)
-        [call] = self.calls()
+        clean, call = self.calls()
+        # The Swift packages are rebuilt so their entry points get re-exported.
+        self.assertEqual(clean[:2], ["cargo", "clean"])
+        for arg in ("--release", "aarch64-apple-ios", "tauri", "tauri-plugin-barcode-scanner"):
+            self.assertIn(arg, clean)
         self.assertEqual(call[:5], ["npx", "tauri", "ios", "build", "--export-method"])
         self.assertEqual(call[5], "app-store-connect")
         config = json.loads(call[call.index("--config") + 1])
@@ -126,7 +140,7 @@ class TestFlightBuildTest(unittest.TestCase):
         self.env["IOS_BUILD_NUMBER"] = "512"
         result = self.run_build("--", "--open")
         self.assertEqual(result.returncode, 0, result.stderr)
-        [call] = self.calls()
+        call = self.calls()[-1]
         self.assertEqual(json.loads(call[call.index("--config") + 1])["bundle"]["iOS"]["bundleVersion"], "512")
         self.assertEqual(call[-1], "--open")
 
@@ -140,6 +154,13 @@ class TestFlightBuildTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("positive integer", result.stderr)
         self.assertFalse(any(c[0] == "npx" and "--config" in c and '"0' in c[c.index("--config") + 1] for c in self.calls()))
+
+    def test_refuses_without_llvm_objcopy_before_building(self):
+        self.objcopy.unlink()
+        result = self.run_build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("rustup component add llvm-tools", result.stderr)
+        self.assertEqual(self.calls(), [])
 
     def test_dry_run_runs_nothing(self):
         result = self.run_build("--dry-run")

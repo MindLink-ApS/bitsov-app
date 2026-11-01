@@ -32,14 +32,28 @@ if [[ -n $(git status --porcelain --untracked-files=no -- src src-tauri/src src-
   echo 'Note: uncommitted source changes will be in this build.' >&2
 fi
 
+# Xcode 27's Swift toolchain keeps the @_cdecl entry points of tauri's Swift
+# packages (log_stdout, register_plugin, ...) local in Release builds. swift-rs
+# re-exports them with llvm-objcopy from rustup's llvm-tools component, and
+# silently skips that step when the tool is missing, so the Release app then
+# fails to link with "Undefined symbols". Require the tool up front.
+objcopy="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-objcopy"
+[[ -x $objcopy ]] || fail 'llvm-objcopy is missing; run: rustup component add llvm-tools'
+
 # Release profile, M6 node-routed calls (the default), no simulator overrides.
 export VITE_CALL_MEDIA=node
 unset BITSOV_IOS_SIM_PREBUILT
+# Rebuild the Swift packages so an archive made before llvm-tools was installed
+# cannot be reused with its entry points still local.
+clean=(cargo clean --manifest-path src-tauri/Cargo.toml --release --target aarch64-apple-ios
+  -p tauri -p tauri-plugin-barcode-scanner)
 command=(npx tauri ios build --export-method app-store-connect
   --config "{\"bundle\":{\"iOS\":{\"bundleVersion\":\"$number\"}}}" "$@")
 printf 'BitSov %s (build %s)\n' "$version" "$number"
+printf '  '; printf '%q ' "${clean[@]}"; printf '\n'
 printf '  '; printf '%q ' "${command[@]}"; printf '\n'
 if [[ $dry_run == 1 ]]; then exit 0; fi
+"${clean[@]}"
 "${command[@]}"
 cat <<EOF
 
