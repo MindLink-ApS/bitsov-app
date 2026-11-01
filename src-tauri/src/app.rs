@@ -1549,6 +1549,11 @@ async fn attach_remote_with(
     let store = app_data_dir.join(PAIRING_STORE_DIR);
     let key = match client_key(state, &store, interaction) {
         Ok(key) => key,
+        // No passcode: say so as its own kind, so the phone can open Settings.
+        Err(error) if error.to_string() == remote_access::PASSCODE_REQUIRED => {
+            state.remote_retry.failed(&remote_access::RemoteError::DeviceUnavailable);
+            return set_error(&state, error.to_string());
+        }
         // A background attempt leaves any earlier, more specific error in place.
         Err(_) if interaction == Interaction::Background => {
             if state.error.lock().unwrap().is_none() { set_error(state, CONFIRM_TO_RECONNECT); }

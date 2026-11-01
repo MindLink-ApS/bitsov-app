@@ -26,7 +26,8 @@ export function normalizePairingLink(input: string): string {
 
 /** Structured host failures; detail belongs in connection diagnostics. */
 export type ConnectionError = {
-  kind: 'unclaimed' | 'local_network' | 'unreachable' | 'busy' | 'expired' | 'clock' | 'used' | 'tailscale' | 'claim_mismatch' | 'other';
+  kind: 'unclaimed' | 'local_network' | 'unreachable' | 'busy' | 'expired' | 'clock' | 'used' | 'tailscale' | 'claim_mismatch' | 'device_unavailable' | 'other';
+  /** Diagnostic text or a stable code (e.g. `remote_unreachable`); never shown as the reason. */
   detail: string;
 };
 

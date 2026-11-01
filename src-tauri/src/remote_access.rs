@@ -306,6 +306,8 @@ pub enum RemoteError {
     Waiting(u64),
     /// Seconds since the pairing ticket expired.
     Expired(u64),
+    /// This device has no passcode, so its protected identity cannot be stored or read.
+    DeviceUnavailable,
 }
 
 fn elapsed_text(seconds: u64) -> String {
@@ -333,6 +335,7 @@ impl fmt::Display for RemoteError {
             Self::LocalNetwork => f.write_str("Local network access is denied or unavailable. Check BitSov's Local Network permission in Settings and your network connection."),
             Self::AndroidLocalNetwork => f.write_str("Local network access is unavailable. Allow Nearby devices for BitSov in Android Settings, then return to BitSov or tap Reconnect."),
             Self::HandshakeUnavailable => f.write_str(HANDSHAKE_UNAVAILABLE),
+            Self::DeviceUnavailable => f.write_str(PASSCODE_REQUIRED),
             Self::RateLimited(seconds) => write!(f, "Remote connection limited; waiting {seconds} s"),
             Self::Waiting(seconds) => write!(f, "Remote connection unavailable; waiting {seconds} s"),
         }
@@ -360,10 +363,41 @@ pub enum ConnectionErrorKind {
     Clock,
     Used,
     ClaimMismatch,
+    /// No device passcode (and so no Face ID / Touch ID): protected storage is off.
+    DeviceUnavailable,
     Other,
 }
 
 pub const USED_TICKET_MESSAGE: &str = "This ticket expired, was already used, or its owner was revoked. Ask an enrolled owner device for a new ticket.";
+pub const EXPIRED_TICKET_MESSAGE: &str = "This ticket has expired. Ask an enrolled owner device for a new ticket.";
+
+/// Stable diagnostic codes. The renderer maps `kind` (and these codes) to copy;
+/// detail never carries peer text or prose meant for the user.
+pub const UNREACHABLE_CODE: &str = "remote_unreachable";
+pub const CONNECTION_FAILED_CODE: &str = "remote_connection_failed";
+pub const PASSCODE_REQUIRED_CODE: &str = "device_passcode_required";
+/// The Apple Keychain bridge's fixed text for a device without a passcode
+/// (`bitsov_ffi::keychain_status::PASSCODE_REQUIRED`, which Android does not
+/// link). Kept here so every target compiles the classification; a test binds
+/// the two copies wherever the bridge exists.
+pub const PASSCODE_REQUIRED: &str = "This device has no passcode, so Face ID and protected storage are off. Turn on a passcode in Settings, then try again.";
+
+/// Classify the node's refusal of a pairing code by its reason, for every ticket
+/// kind (first pairing, owner, second device, legacy). Only a fixed local
+/// message crosses; the node's text stays out of the renderer.
+fn ticket_refusal(code: &str, message: &str, ticket: Option<&str>) -> Option<&'static str> {
+    if code != "authentication_failed" { return None; }
+    let reason = message.to_ascii_lowercase();
+    // A used, revoked or mismatched code needs a new ticket, whatever its kind.
+    if reason.contains("already used") || reason.contains("did not match") || reason.contains("does not match")
+        || reason.contains("did not verify") {
+        return Some(USED_TICKET_MESSAGE);
+    }
+    if reason.contains("expired") { return Some(EXPIRED_TICKET_MESSAGE); }
+    // Owner and second-device tickets are single use; any other refusal of one
+    // means it can no longer pair this device.
+    ticket.is_some_and(|c| c.starts_with("owner_") || c.starts_with("second_")).then_some(USED_TICKET_MESSAGE)
+}
 
 impl ConnectionError {
     pub fn main_window_only() -> Self {
@@ -400,7 +434,7 @@ impl From<&RemoteError> for ConnectionError {
             RemoteError::Unclaimed => (Unclaimed, error.to_string()),
             RemoteError::LocalNetwork | RemoteError::AndroidLocalNetwork => (LocalNetwork, error.to_string()),
             RemoteError::HandshakeUnavailable | RemoteError::Waiting(_) | RemoteError::Transport(_) =>
-                (Unreachable, "The remote node could not be reached.".into()),
+                (Unreachable, UNREACHABLE_CODE.into()),
             RemoteError::RateLimited(_) => (Busy, "The remote connection is busy. Try again shortly.".into()),
             // A very old expiry can also mean the device clock is wrong. This
             // is a recovery hint, never proof of clock skew or an expiry bypass.
@@ -408,7 +442,11 @@ impl From<&RemoteError> for ConnectionError {
                 (Clock, "Check this device's date and time, or request a fresh pairing link.".into()),
             RemoteError::Expired(_) => (Expired, error.to_string()),
             RemoteError::Refused(message) if message == USED_TICKET_MESSAGE => (Used, USED_TICKET_MESSAGE.into()),
-            _ => (Other, "The remote connection could not be established.".into()),
+            RemoteError::Refused(message) if message == EXPIRED_TICKET_MESSAGE => (Expired, EXPIRED_TICKET_MESSAGE.into()),
+            RemoteError::DeviceUnavailable => (DeviceUnavailable, PASSCODE_REQUIRED_CODE.into()),
+            RemoteError::Local(message) if message == PASSCODE_REQUIRED =>
+                (DeviceUnavailable, PASSCODE_REQUIRED_CODE.into()),
+            _ => (Other, CONNECTION_FAILED_CODE.into()),
         };
         // Peer text may echo authentication codes. Only fixed local copy crosses.
         Self { kind, detail }
@@ -1400,9 +1438,8 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
                 }
                 let reason: String = if code == "already_paired" {
                     "This device already has a pairing. Reconnect with its saved pairing; a second-device ticket is for a new device.".into()
-                } else if code == "authentication_failed"
-                    && descriptor.code.as_deref().is_some_and(|c| c.starts_with("owner_") || c.starts_with("second_")) {
-                    USED_TICKET_MESSAGE.into()
+                } else if let Some(fixed) = ticket_refusal(&code, &message, descriptor.code.as_deref()) {
+                    fixed.into()
                 } else { format!("{code}: {message}").chars().take(160).collect() };
                 Err(RemoteError::Refused(reason))
             }
@@ -3311,6 +3348,57 @@ mod tests {
             r#"{"v":1,"ok":true,"client_id":"abcd","scopes":[]}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn ticket_refusals_become_used_or_expired_for_every_ticket_kind() {
+        // Reasons the node sends with authentication_failed (konsensus-node remote_access).
+        let used = [
+            "first-pairing code is unavailable or already used",
+            "second-device ticket unavailable or already used",
+            "pairing request is unknown, already used, or expired",
+            "pairing code did not match",
+            "remote pairing proof did not verify",
+            "remote pairing key does not match the existing transport binding",
+        ];
+        let expired = ["first-pairing code expired", "second-device ticket invalid or expired", "operation expired"];
+        for ticket in [None, Some("legacy0123"), Some("owner_abc"), Some("second_abc")] {
+            for reason in used {
+                assert_eq!(ticket_refusal("authentication_failed", reason, ticket), Some(USED_TICKET_MESSAGE), "{reason}");
+            }
+            for reason in expired {
+                assert_eq!(ticket_refusal("authentication_failed", reason, ticket), Some(EXPIRED_TICKET_MESSAGE), "{reason}");
+            }
+            assert_eq!(ticket_refusal("box_locked", "first-pairing code expired", ticket), None);
+        }
+        // Any other refusal of a single-use owner or second-device ticket still means used.
+        assert_eq!(ticket_refusal("authentication_failed", "denied", Some("owner_x")), Some(USED_TICKET_MESSAGE));
+        assert_eq!(ticket_refusal("authentication_failed", "denied", Some("legacy")), None);
+        let used = ConnectionError::from(&RemoteError::Refused(USED_TICKET_MESSAGE.into()));
+        assert_eq!((used.kind, used.detail.as_str()), (ConnectionErrorKind::Used, USED_TICKET_MESSAGE));
+        let expired = ConnectionError::from(&RemoteError::Refused(EXPIRED_TICKET_MESSAGE.into()));
+        assert_eq!(expired.kind, ConnectionErrorKind::Expired);
+        // Unknown peer text never reaches the renderer.
+        let other = ConnectionError::from(&RemoteError::Refused("authentication_failed: secret".into()));
+        assert_eq!((other.kind, other.detail.as_str()), (ConnectionErrorKind::Other, CONNECTION_FAILED_CODE));
+    }
+
+    #[test]
+    fn diagnostics_are_codes_and_a_missing_passcode_has_its_own_kind() {
+        for error in [RemoteError::HandshakeUnavailable, RemoteError::Waiting(3), RemoteError::Transport("x".into())] {
+            let mapped = ConnectionError::from(&error);
+            assert_eq!((mapped.kind, mapped.detail.as_str()), (ConnectionErrorKind::Unreachable, UNREACHABLE_CODE));
+        }
+        for error in [RemoteError::DeviceUnavailable,
+                      RemoteError::Local(PASSCODE_REQUIRED.into())] {
+            let mapped = ConnectionError::from(&error);
+            assert_eq!((mapped.kind, mapped.detail.as_str()), (ConnectionErrorKind::DeviceUnavailable, PASSCODE_REQUIRED_CODE));
+        }
+        assert_eq!(serde_json::to_value(ConnectionErrorKind::DeviceUnavailable).unwrap(), "device_unavailable");
+        // The bridge's text and this copy must stay identical (no bridge on Android).
+        #[cfg(not(target_os = "android"))]
+        assert_eq!(bitsov_ffi::keychain_status::PASSCODE_REQUIRED, PASSCODE_REQUIRED);
+        assert_eq!(ConnectionError::from(&RemoteError::Local("other".into())).kind, ConnectionErrorKind::Other);
     }
 
     fn transport_pair() -> (TransportState, TransportState) {
