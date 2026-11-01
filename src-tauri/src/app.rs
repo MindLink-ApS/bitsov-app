@@ -236,6 +236,12 @@ struct NodeState {
     #[cfg(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile"))))]
     home_remember: Arc<Mutex<Option<home_unlock::RememberOffer>>>,
     remote_descriptor: Mutex<Option<remote_access::RemoteDescriptor>>,
+    /// The client identity read from its biometric-protected store, per store
+    /// directory. Read once per process for a user action; never re-read by a
+    /// retry, poll or focus change (see `client_key`).
+    client_key: Mutex<Option<(PathBuf, Arc<ClientKey>)>>,
+    /// Set by the first read attempt of the session, successful or not.
+    client_key_attempted: AtomicBool,
     remote_pins: Arc<dyn bitsov_app::home_node::BoxPinStore>,
     remote_retry: Arc<bitsov_app::connection_retry::RemoteRetry>,
     remote_recovery: tokio::sync::Mutex<()>,
@@ -681,6 +687,8 @@ impl NodeState {
             #[cfg(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile"))))]
             home_remember: Arc::new(Mutex::new(None)),
             remote_descriptor: Mutex::new(None),
+            client_key: Mutex::new(None),
+            client_key_attempted: AtomicBool::new(false),
             remote_pins: Arc::new(home_keychain::MacBoxPins),
             remote_retry: Arc::new(bitsov_app::connection_retry::RemoteRetry::default()),
             remote_recovery: tokio::sync::Mutex::new(()),
@@ -1530,12 +1538,54 @@ async fn attach_external(app: &AppHandle, app_data_dir: &Path, node: dev_node::E
     finish_auth(&state, &app_dir).await;
 }
 
+/// Who asked for a remote connection. The biometric-protected client identity is
+/// read at most once per session without a user action (the launch or first
+/// foreground connection); after that only a user action (import, Try again) may
+/// read it again. Retries, polls and focus changes reuse the identity in memory
+/// or wait, so one Face ID sheet can never lead into the next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Interaction {
+    User,
+    Background,
+}
+
+/// Shown when a background reconnect needs the client identity first.
+const CONFIRM_TO_RECONNECT: &str = "Tap Try again to confirm it's you and reconnect.";
+
+/// The client identity for `store`, read from protected storage once per session.
+/// Its Keychain item requires user presence, so every read can show Face ID or
+/// Touch ID; the key itself is already held in memory by the pairing context and
+/// proxy for every token refresh, so reusing it adds no exposure.
+fn client_key(state: &NodeState, store: &Path, interaction: Interaction) -> Result<Arc<ClientKey>, PairError> {
+    client_key_with(state, store, interaction, ClientKey::load_or_create)
+}
+
+fn client_key_with(
+    state: &NodeState,
+    store: &Path,
+    interaction: Interaction,
+    load: impl FnOnce(&Path) -> Result<ClientKey, PairError>,
+) -> Result<Arc<ClientKey>, PairError> {
+    let mut cached = state.client_key.lock().unwrap();
+    if let Some((directory, key)) = cached.as_ref() {
+        if directory == store { return Ok(key.clone()); }
+    }
+    if interaction == Interaction::Background && state.client_key_attempted.load(Ordering::SeqCst) {
+        return Err(PairError::Local(CONFIRM_TO_RECONNECT.into()));
+    }
+    state.client_key_attempted.store(true, Ordering::SeqCst);
+    let key = Arc::new(load(store)?);
+    *cached = Some((store.to_path_buf(), key.clone()));
+    Ok(key)
+}
+
 /// Remote mode is selected before every local-node resolution path. The only
 /// listener is the loopback Noise proxy; no sidecar is initialized or spawned.
-async fn attach_remote(
+async fn attach_remote_with(
     state: &NodeState,
     app_data_dir: &Path,
     descriptor: remote_access::RemoteDescriptor,
+    interaction: Interaction,
 ) {
     #[cfg(any(mobile, feature = "mobile"))]
     if descriptor.bootstrap_box_key().is_some() && descriptor.node_id().is_empty() {
@@ -1548,8 +1598,13 @@ async fn attach_remote(
     state.remote_retry.set_endpoint(descriptor.endpoint());
     let descriptor = descriptor.with_pin_store(state.remote_pins.clone());
     let store = app_data_dir.join(PAIRING_STORE_DIR);
-    let key = match ClientKey::load_or_create(&store) {
-        Ok(key) => Arc::new(key),
+    let key = match client_key(state, &store, interaction) {
+        Ok(key) => key,
+        // A background attempt leaves any earlier, more specific error in place.
+        Err(_) if interaction == Interaction::Background => {
+            if state.error.lock().unwrap().is_none() { set_error(state, CONFIRM_TO_RECONNECT); }
+            return;
+        }
         Err(error) => return set_error(&state, error.to_string()),
     };
     let ctx = Arc::new(PairingCtx {
@@ -1839,18 +1894,25 @@ async fn finish_remote_auth(state: &NodeState, data_dir: &Path) {
     }
 }
 
-async fn reconnect_remote(state: &NodeState) -> Result<(), String> {
+
+/// The live feed's automatic recovery: never shows a biometric prompt.
+async fn reconnect_remote_background(state: &NodeState) -> Result<(), String> {
+    reconnect_remote_as(state, Interaction::Background).await
+}
+
+async fn reconnect_remote_as(state: &NodeState, interaction: Interaction) -> Result<(), String> {
     let data_dir = state.pairing.lock().unwrap().as_ref().map(|ctx| ctx.data_dir.clone())
         .or_else(|| app_files_dir(state))
         .ok_or_else(|| "pairing is not available yet: the node has not started".to_string())?;
-    reconnect_remote_at(state, &data_dir).await
+    connect_remote_with(state, &data_dir, false, interaction).await
 }
 
-async fn reconnect_remote_at(state: &NodeState, app_data_dir: &Path) -> Result<(), String> {
-    connect_remote_at(state, app_data_dir, false).await
-}
 
 async fn connect_remote_at(state: &NodeState, app_data_dir: &Path, wait: bool) -> Result<(), String> {
+    connect_remote_with(state, app_data_dir, wait, Interaction::User).await
+}
+
+async fn connect_remote_with(state: &NodeState, app_data_dir: &Path, wait: bool, interaction: Interaction) -> Result<(), String> {
     let mut cancelled = {
         let _change = state.remote_change.lock().await;
         state.remote_connect_generation.subscribe()
@@ -1885,7 +1947,7 @@ async fn connect_remote_at(state: &NodeState, app_data_dir: &Path, wait: bool) -
                 state.phone_setup.lock().unwrap().get_or_insert_with(|| saved.as_ref().is_none_or(|d|
                     d.pending_phone_enrollment()));
                 match saved {
-                    Some(descriptor) => attach_remote(state, app_data_dir, descriptor).await,
+                    Some(descriptor) => attach_remote_with(state, app_data_dir, descriptor, interaction).await,
                     None => {
                         #[cfg(any(mobile, feature = "mobile"))]
                         {
@@ -1911,7 +1973,9 @@ async fn resume_remote_at(state: &NodeState, app_data_dir: &Path) -> Result<(), 
     {
         return Ok(());
     }
-    pairing_retry_at(state, app_data_dir).await.map(|_| ())
+    // Focus and foreground events are not user actions: a Face ID sheet itself
+    // moves focus, so prompting here would chain one prompt into the next.
+    pairing_retry_as(state, app_data_dir, Interaction::Background).await.map(|_| ())
 }
 
 #[cfg(any(mobile, feature = "mobile"))]
@@ -1962,7 +2026,7 @@ fn pairing_ctx(state: &NodeState, data_dir: &Path) -> Result<Arc<PairingCtx>, Pa
         return Ok(ctx.clone());
     }
     let store = data_dir.join(PAIRING_STORE_DIR);
-    let key = Arc::new(ClientKey::load_or_create(&store)?);
+    let key = client_key(state, &store, Interaction::User)?;
     let node_dir = state
         .external_node
         .lock()
@@ -3064,6 +3128,10 @@ async fn pairing_retry(
 }
 
 async fn pairing_retry_at(state: &NodeState, app_data_dir: &Path) -> Result<PairingView, String> {
+    pairing_retry_as(state, app_data_dir, Interaction::User).await
+}
+
+async fn pairing_retry_as(state: &NodeState, app_data_dir: &Path, interaction: Interaction) -> Result<PairingView, String> {
     if state.remote_mode.load(Ordering::SeqCst)
         || remote_access::load_persisted(app_data_dir).map_err(|error| error.to_string())?.is_some()
     {
@@ -3076,7 +3144,7 @@ async fn pairing_retry_at(state: &NodeState, app_data_dir: &Path) -> Result<Pair
         {
             return Err("Restart BitSov to connect to the saved remote node.".into());
         }
-        reconnect_remote_at(state, app_data_dir).await?;
+        connect_remote_with(state, app_data_dir, false, interaction).await?;
         return Ok(state.pairing_snapshot());
     }
     let ctx = state
@@ -9912,7 +9980,7 @@ async fn live_bridge(app: AppHandle) {
     let feed = control::run_live_feed(
         || async {
             if state.remote_mode.load(Ordering::SeqCst) && state.remote_retry.is_retrying() {
-                let _ = reconnect_remote(&state).await;
+                let _ = reconnect_remote_background(&state).await;
             }
             if !*state.ready.lock().unwrap() { return Ok(None); }
             ensure_fresh_token(&state).await;
@@ -23641,3 +23709,83 @@ mod mobile_import_tests;
 #[cfg(test)]
 #[path = "remote_connect_tests.rs"]
 mod remote_connect_tests;
+
+#[cfg(test)]
+mod client_key_prompt_tests {
+    use super::{client_key_with, Interaction, NodeState, CONFIRM_TO_RECONNECT};
+    use bitsov_app::pairing::{ClientKey, PairError};
+    use std::cell::Cell;
+
+    /// Each `load` stands for one protected read, i.e. one Face ID / Touch ID prompt.
+    #[test]
+    fn one_read_per_session_serves_every_later_attempt() {
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        let store = tempfile::tempdir().unwrap();
+        let reads = Cell::new(0);
+        let load = |_: &std::path::Path| { reads.set(reads.get() + 1); ClientKey::generate_ephemeral() };
+        let first = client_key_with(&state, store.path(), Interaction::User, load).unwrap();
+        for interaction in [Interaction::Background, Interaction::User, Interaction::Background] {
+            let again = client_key_with(&state, store.path(), interaction, load).unwrap();
+            assert_eq!(again.public_hex(), first.public_hex());
+        }
+        assert_eq!(reads.get(), 1, "later attempts reuse the key already in memory");
+    }
+
+    #[test]
+    fn after_a_cancelled_prompt_only_a_user_action_asks_again() {
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        let store = tempfile::tempdir().unwrap();
+        let cancelled = client_key_with(&state, store.path(), Interaction::User, |_| Err(PairError::Local("cancelled".into())));
+        assert!(cancelled.is_err());
+        for _ in 0..3 {
+            let refused = client_key_with(&state, store.path(), Interaction::Background, |_| panic!("no background prompt"));
+            assert!(matches!(refused, Err(PairError::Local(ref m)) if m == CONFIRM_TO_RECONNECT));
+        }
+        assert!(client_key_with(&state, store.path(), Interaction::User, |_| ClientKey::generate_ephemeral()).is_ok());
+    }
+
+    #[test]
+    fn the_first_connection_may_come_from_a_foreground_resume_but_only_once() {
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        let store = tempfile::tempdir().unwrap();
+        let reads = Cell::new(0);
+        let failing = |_: &std::path::Path| { reads.set(reads.get() + 1); Err::<ClientKey, _>(PairError::Local("cancelled".into())) };
+        assert!(client_key_with(&state, store.path(), Interaction::Background, failing).is_err());
+        assert!(client_key_with(&state, store.path(), Interaction::Background, failing).is_err());
+        assert_eq!(reads.get(), 1, "a Face ID sheet's own focus change cannot chain a second prompt");
+    }
+
+    #[test]
+    fn another_store_reads_its_own_identity() {
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let key_a = client_key_with(&state, a.path(), Interaction::User, |_| ClientKey::generate_ephemeral()).unwrap();
+        let key_b = client_key_with(&state, b.path(), Interaction::User, |_| ClientKey::generate_ephemeral()).unwrap();
+        assert_ne!(key_a.public_hex(), key_b.public_hex());
+    }
+}
+
+// User-action entry points only tests call; production code names its Interaction.
+// Kept after the production code (a source test reads the code above the first
+// test attribute).
+#[cfg(test)]
+#[allow(dead_code)]
+async fn attach_remote(
+    state: &NodeState,
+    app_data_dir: &Path,
+    descriptor: remote_access::RemoteDescriptor,
+) {
+    attach_remote_with(state, app_data_dir, descriptor, Interaction::User).await
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+async fn reconnect_remote(state: &NodeState) -> Result<(), String> {
+    reconnect_remote_as(state, Interaction::User).await
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+async fn reconnect_remote_at(state: &NodeState, app_data_dir: &Path) -> Result<(), String> {
+    connect_remote_at(state, app_data_dir, false).await
+}

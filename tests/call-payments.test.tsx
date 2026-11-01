@@ -15,7 +15,7 @@ import { render } from 'solid-js/web';
 import App from '../src/App';
 import { setLanguagePref } from '../src/i18n';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
-import { createCallEngine, parseSignal, type CallDeps, type CallView } from '../src/control/call';
+import { createCallEngine, parseSignal, SILENCED_GRACE_MS, type CallDeps, type CallView } from '../src/control/call';
 import {
   BLOCK_GRACE_MS, ENDED_CONFIRM_MS, MAX_ATTEMPTS, RETRY_MS, STATUS_POLL_MS,
   createCallMinutes, waitUntilPaid, type MinutesDeps, type MinutesStop, type MinutesView,
@@ -582,7 +582,7 @@ describe('node-routed calls carry audio only, and a dead media session stops the
   const answerMessage = { id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: 0, plaintext: JSON.stringify({ v: 1, call_id: ID, sdp: nodeRoutedSdp('answer', ID) }), payment_amount_msat: 1 };
 
   /** The engine on the real node-routed adapter, a fake host socket and a fake audio engine. */
-  function routedEngine(minutes: MinutesDeps) {
+  function routedEngine(minutes: MinutesDeps, over: Partial<CallDeps> = {}) {
     const views: CallView[] = [];
     const signals: { kind: number; plaintext: string }[] = [];
     const sessions: MediaSessionEvent[] = [];
@@ -610,6 +610,7 @@ describe('node-routed calls carry audio only, and a dead media session stops the
       onStreams: () => {},
       newCallId: () => ID,
       endCall: async () => ok({ op_id: 'end', kind: 'call_hangup', peer: A, call_id: ID, state: 'settled', cap_msat: 6_000, paid_msat: 6_000, message_id: 'h' } as never),
+      ...over,
     };
     calls = createCallEngine(deps);
     return { engine: calls, views, signals, sessions, media, last: () => views[views.length - 1], link: (l: MediaLink) => link?.(l), fatal: () => fatal?.() };
@@ -656,6 +657,37 @@ describe('node-routed calls carry audio only, and a dead media session stops the
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(pay).toHaveBeenCalledTimes(1);
     expect(e.sessions.map((x) => x.state)).toEqual(['open', 'closed']);
+  });
+
+  it('a phone locked mid-call: minutes are paid during the grace, then the call is hung up and no further minute is paid', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const pay = vi.fn(async (_p: string, _c: string, seq: number) => { node.settle(seq); return ok(receipt(seq)); });
+    const ended: string[] = [];
+    const e = routedEngine(minutesOf(node, pay), {
+      stopWhenSilenced: true,
+      endCall: async (callId) => { ended.push(callId); return ok({ op_id: 'end', kind: 'call_hangup', peer: A, call_id: ID, state: 'settled', cap_msat: 6_000, paid_msat: 6_000, message_id: 'h' } as never); },
+    });
+    await e.engine.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(e.last().minutes?.reservation).not.toBeNull());
+    await e.engine.confirmMinutes();
+    await e.engine.receive(answerMessage, OWN);
+    await vi.waitFor(() => expect(pay).toHaveBeenCalledWith(A, ID, 0));
+    await vi.advanceTimersByTimeAsync(0);
+    e.link({ link: 'open', detail: null });
+    await vi.waitFor(() => expect(e.last().phase).toBe('live'));
+    // Locked 30 s in: the next minute falls due inside the grace and is still paid...
+    await vi.advanceTimersByTimeAsync(30_000);
+    e.engine.setBackgrounded(true);
+    await vi.advanceTimersByTimeAsync(SILENCED_GRACE_MS - 1);
+    expect(e.last().phase).toBe('live');
+    expect(pay).toHaveBeenCalledTimes(2);
+    // ...and once the grace is over the call ends through the normal hangup.
+    await vi.advanceTimersByTimeAsync(1);
+    expect(e.last()).toMatchObject({ phase: 'ended', reason: 'hangup', stopped: { cause: 'background', endsAt: null } });
+    expect(ended).toEqual([ID]);
+    expect(e.sessions.map((x) => x.state)).toEqual(['open', 'closed']);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(pay).toHaveBeenCalledTimes(2);
   });
 
   it('a closed media session ends its call even when the connection never reports it; another call id is ignored', async () => {

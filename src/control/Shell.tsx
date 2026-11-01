@@ -1425,6 +1425,8 @@ export function ControlCenter(props: Props) {
     routed: routedCalls,
     minutes: callMinutes,
     audioSession: appPlatform() === 'ios' ? (live) => invoke<void>('call_audio_session', { live }) : undefined,
+    // A locked or backgrounded phone silences the microphone while the call would go on being paid.
+    stopWhenSilenced: isMobilePlatform(),
     closeAdmission: (operationId, peer, callId) => source.closeCallAdmission(operationId, peer, callId),
     authorize: async () => {
       const pairing = await act(() => source.pairingStatus());
@@ -1455,7 +1457,9 @@ export function ControlCenter(props: Props) {
           callId: () => callView().callId,
           peer: () => callView().peer,
           bridge: isTauri() ? hostMediaBridge() : unavailableMediaBridge(),
-          audio: (stream, transport, onFatal) => createCallAudio({ stream, transport, onError: onFatal }),
+          audio: (stream, transport, onFatal) => createCallAudio({ stream, transport, onError: onFatal,
+            // Phones: a microphone the OS silenced counts towards ending the call.
+            ...(isMobilePlatform() ? { onSilence: (silent: boolean) => calls.micSilent(silent) } : {}) }),
           admitted: callMinutes ? (callId, peer, closed) => waitUntilPaid(callMinutes.status, peer, callId, () => Date.now(), closed) : undefined,
           // A media session that closed for good ends its call, so no further minute is paid.
           onSession: (event) => { if (event.state === 'closed') calls.mediaClosed(event.callId); },
@@ -1503,7 +1507,7 @@ export function ControlCenter(props: Props) {
   const stunSource = (): StunSource => (stunOff() ? 'off' : effectiveStunSource() === 'own' ? 'node' : effectiveStunSource() === 'configured' ? 'custom' : overview() ? 'none' : 'checking');
   // Closing the window ends the call here without paying; only Hang up pays.
   onCleanup(() => calls.endLocal());
-  if (appPlatform() === 'ios') {
+  if (isMobilePlatform()) {
     const visibility = () => calls.setBackgrounded(document.visibilityState === 'hidden');
     document.addEventListener('visibilitychange', visibility);
     visibility();
@@ -3675,7 +3679,8 @@ function CallPanel(props: {
     });
   }));
   createEffect(() => {
-    if (!['live', 'reconnecting'].includes(props.view.phase)) return;
+    // Also count down a phone call's stop while it is still connecting.
+    if (!['live', 'reconnecting'].includes(props.view.phase) && !(props.view.stopped && props.view.stopped.endsAt !== null)) return;
     setTick(Date.now());
     const t = setInterval(() => setTick(Date.now()), 1000);
     onCleanup(() => clearInterval(t));
@@ -3780,6 +3785,16 @@ function CallPanel(props: {
         {/* Display only: the browser reports no network. Recovery itself stays ICE-driven. */}
         <Show when={v().offline && v().phase !== 'ended' && v().phase !== 'idle'}>
           <p class="hint" role="status" data-call-offline>{tr('uiYouAreOfflineTheCallReconnectsByItself')}</p>
+        </Show>
+        {/* Phones: the call is out of view or its microphone is silenced, and ends unless that clears; or it ended for that. */}
+        <Show when={v().stopped}>
+          {(stop) => (
+            <p class="err-note" role={stop().endsAt === null ? 'alert' : 'status'} data-call-stopped={stop().cause}>
+              {stop().endsAt === null
+                ? tr(stop().cause === 'background' ? 'caCallStoppedBackground' : 'caCallStoppedMicrophone')
+                : tr(stop().cause === 'background' ? 'caCallStoppingBackground' : 'caCallStoppingMicrophone', Math.max(0, Math.ceil((stop().endsAt! - tick()) / 1000)))}
+            </p>
+          )}
         </Show>
         <Show when={v().phase !== 'ended' && v().error}>
           {/* Only a recovery that could not start is framed as one (the call still waits); any other error (a camera, say) as it is. */}
