@@ -44,6 +44,6 @@
 .phone-manual { display: flex; flex-direction: column; gap: 8px; }
 .phone-manual label { display: flex; flex-direction: column; gap: 8px; }
 .phone-manual input { min-height: 48px; font-size: 17px; }
-.phone-confirm { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; }
+.phone-confirm { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; scroll-margin-bottom: max(24px, env(safe-area-inset-bottom)); }
 .phone-confirm p { margin: 0; line-height: 1.45; }
 .phone-options details[open] > summary::after { transform: rotate(-135deg) translateY(-2px); }

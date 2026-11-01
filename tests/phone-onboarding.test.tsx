@@ -276,7 +276,7 @@ it('uses the Android permission name on the local-network recovery screen', asyn
   expect(document.querySelector('.phone-line')?.textContent).toContain('Nearby devices');
   expect(document.querySelector('.phone-line')?.textContent).not.toContain('Local Network');
 });
-it('refuses a legacy enrollment instead of repeatedly attempting code-free join', async () => {
+it('finishes an already-paired legacy phone instead of attempting a code-free join or a dead end', async () => {
   const props = mount({
     status: () => ({ ready: true, node_id: 'box', error: null }),
     pairing: () => ({ ...INITIAL_PAIRING, remote: true, state: 'paired' }),
@@ -285,7 +285,31 @@ it('refuses a legacy enrollment instead of repeatedly attempting code-free join'
   });
   await tick();
   expect(props.beginJoin).not.toHaveBeenCalled();
-  expect(button('Scan the new QR')).toBeTruthy();
+  // A saved pairing with nothing to enrol is done; "ask for a new QR" was a dead end that needed a relaunch.
+  expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('done');
+  expect(button('Scan the new QR')).toBeUndefined();
+});
+it('still refuses a fresh second-device link the box cannot enrol', async () => {
+  const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  const props = mount({
+    status, pairing,
+    connect: vi.fn(async () => { setPairing({ ...INITIAL_PAIRING, remote: true, state: 'paired' }); setStatus({ ready: true, node_id: 'box', error: null }); return { endpoint: 'box:443', node_id_fingerprint: 'ABCD', restart_required: false }; }),
+    device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }),
+    join: vi.fn().mockResolvedValue({ state: 'idle', second_device: false }),
+  });
+  // A link scanned now that claims second-device enrolment, but the box says it is not: never "done" without enrolling.
+  button('Scan the code with the camera').click(); await tick();
+  await vi.waitFor(() => expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('error'));
+  expect(props.beginJoin).not.toHaveBeenCalled();
+});
+it('offers Paste new link beside Try again when connecting timed out', async () => {
+  vi.useFakeTimers();
+  mount({ connect: vi.fn(() => new Promise<never>(() => {})) });
+  button('Scan the code with the camera').click(); await tick();
+  await vi.advanceTimersByTimeAsync(30_500);
+  expect([...document.querySelectorAll('button.primary')].map(b => b.textContent)).toEqual(['Try again']);
+  expect(document.querySelector('[data-phone-face] [data-phone-paste]')?.textContent).toBe('Paste new link');
 });
 it('offers a new QR after a process restart lost the in-memory comparison', async () => {
   const join = vi.fn().mockRejectedValueOnce({ code: 'enrollment_restart', message: 'sanitized host error' }).mockResolvedValue({ state: 'idle', second_device: true });
