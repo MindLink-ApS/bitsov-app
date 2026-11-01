@@ -12,6 +12,7 @@ import { normalizePairingLink, onboardingDiagnostic, pairingProblem, withoutErro
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
 import { usePairingActivity } from '../pairingActivity';
+import './phoneFirstRun.css';
 
 // Claim discipline (BitSov-bitsov docs/security/pairing.md): less exposure, not solved
 // local security. The short code is a tripwire, never described as what protects the
@@ -80,6 +81,10 @@ export function Onboarding(props: {
   // On a phone the only target is your node (there is no "This Mac").
   const phone = () => props.phone ?? props.mobile ?? isMobilePlatform();
   const mobileBiometrics = () => props.mobile ?? isMobilePlatform();
+  // A phone shows one primary action: Scan until a link is in review. Once paired, or
+  // when pairing failed (its retry is the action), Scan steps back.
+  const reviewWaits = () => phone() && !!props.onScanRemote && !remoteLink() && !preview();
+  const scanLeads = () => reviewWaits() && !['paired', 'fallback', 'failed'].includes(props.pairing().state);
   const device = () => deviceWord() === 'iPad' ? 'iPad' : t('obPhone');
   const [internalTarget, setInternalTarget] = createSignal<NodeTarget>(
     phone() || props.pairing().remote || props.initialPairingLink !== undefined ? 'network' : 'local',
@@ -585,7 +590,7 @@ export function Onboarding(props: {
           <p class="hint">{t('obCameraPurpose')}</p>
           <button
             type="button"
-            class="quiet"
+            classList={{ primary: scanLeads(), quiet: !scanLeads() }}
             data-scan-pairing-qr
             disabled={busy()}
             onClick={() => void scanRemote()}
@@ -620,7 +625,7 @@ export function Onboarding(props: {
         )}</Show>
         <div class="form-actions">
           <Show when={!(phone() && preview()?.view.first_run)}>
-          <button type="submit" class="primary" disabled={busy()}>
+          <button type="submit" classList={{ primary: !reviewWaits(), quiet: reviewWaits() }} disabled={busy()}>
             {importing() ? t('obSaving') : previewing() ? t('obCheckingTicket') : preview() ? t('obUseRemote') : t('obReviewTicket')}
           </button>
           </Show>
