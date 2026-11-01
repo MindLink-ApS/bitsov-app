@@ -39,7 +39,7 @@ it('a lost finalize is reconciled explicitly, never automatically retried', asyn
   await click('Confirm backup with Touch ID');
   expect(api.finalize).toHaveBeenCalledTimes(1);
   expect(document.body.textContent).toContain('Outcome unknown');
-  await click('Check node and continue');
+  await click('Check your box and continue');
   expect(api.reconcile).toHaveBeenCalledTimes(1);
   expect(api.finalize).toHaveBeenCalledTimes(1);
 });

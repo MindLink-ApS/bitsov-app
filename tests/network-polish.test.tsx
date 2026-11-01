@@ -68,7 +68,7 @@ it('keeps retry single-flight, explains failures and allows a later retry', asyn
 it('shows only the observed last-seen timestamp and distinguishes a local node', () => {
   dispose = render(() => <OfflineNode remote={false} lastSeen={0} onRetry={() => {}} />, document.body);
   expect(document.querySelector('time')?.getAttribute('datetime')).toBe('1970-01-01T00:00:00.000Z');
-  expect(document.body.textContent).toContain('Your node is offline');
+  expect(document.body.textContent).toContain('Your box is offline');
   expect(document.body.textContent).toContain('running on this computer');
 });
 

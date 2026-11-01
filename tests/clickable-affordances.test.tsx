@@ -17,7 +17,7 @@ it('the node status pill reads as a button and opens Settings → Node', async (
   expect(pill.getAttribute('aria-haspopup')).toBe('dialog');
   expect(pill.title).toContain('open node settings');
   // The chevron adds no words to the status text.
-  expect(mount.querySelector('.node-pill .what')?.textContent).toBe('Connected to your node');
+  expect(mount.querySelector('.node-pill .what')?.textContent).toBe('Connected to your box');
   expect(pill.textContent).not.toMatch(/\d+\/\d+/);
   expect(mount.querySelector('.track-group h2')?.textContent).toBe('Contacts');
   pill.click();
