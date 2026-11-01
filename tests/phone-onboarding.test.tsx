@@ -23,7 +23,7 @@ function mount(extra: Partial<PhoneOnboardingProps> = {}) {
   dispose = render(() => <PhoneOnboarding {...props} />, document.body);
   return props;
 }
-it('starts with one action and a collapsed paste route, without a secret input', async () => {
+it('starts with one primary action and Paste beside it, without a secret input', async () => {
   mount();
   await tick();
   const heading = document.querySelector('h1')!;
@@ -36,6 +36,10 @@ it('starts with one action and a collapsed paste route, without a secret input',
   expect(button("Scan your box’s QR")).toBeTruthy();
   expect(document.querySelector('details')?.open).toBe(false);
   expect(button('Paste link')).toBeTruthy();
+  // Paste is a first-class second way in on the face, not hidden under Other options.
+  expect(button('Paste link').closest('[data-phone-face]')).not.toBeNull();
+  expect(button('Paste link').closest('details')).toBeNull();
+  expect(button('Paste link').classList.contains('primary')).toBe(false);
   expect(document.querySelector('input, textarea')).toBeNull();
 });
 it('auto-connects a scan, displays ordered words and only the owner can approve', async () => {
@@ -75,8 +79,8 @@ it.each([
   ['local_network', 'Allow BitSov on your local network', 'Open Settings'],
   ['unreachable', "Can't reach your box", 'Try again'],
   ['tailscale', "Can't reach your box", 'Open Tailscale'],
-  ['expired', 'This QR has expired', 'Scan the new QR'],
-  ['used', 'This QR has expired', 'Scan the new QR'],
+  ['expired', 'This link no longer works', 'Paste new link'],
+  ['used', 'This link no longer works', 'Paste new link'],
   ['clock', 'This QR has expired', 'Scan the new QR'],
   ['claim_mismatch', 'This phone could not be added', 'Start over'],
   ['busy', 'Your box is busy', 'Try again'],
@@ -218,7 +222,8 @@ it('paste cannot replace enrollment after its polling connection fails', async (
   const join = vi.fn().mockResolvedValueOnce({ state: 'waiting', words: ['one', 'two', 'three', 'four'], expires_at: Date.now()/1000+300 }).mockRejectedValue({ kind: 'unreachable' });
   const props = mount({ status: () => ({ ready: true, node_id: 'box', error: null }), pairing: () => ({ ...INITIAL_PAIRING, remote: true, state: 'paired' }), device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }), join });
   await tick(); await vi.advanceTimersByTimeAsync(1500);
-  expect(button('Paste link').disabled).toBe(true); button('Paste link').click(); await tick();
+  // Paste is offered only before a link is in use; during enrollment there is nothing to tap.
+  expect(document.querySelector('[data-phone-paste]')).toBeNull();
   expect(readText).not.toHaveBeenCalled(); expect(props.connect).not.toHaveBeenCalled();
 });
 it.each([
@@ -233,7 +238,8 @@ it.each([
   expect(input).not.toBeNull();
   expect(input!.type).toBe('password');
   expect(input!.autocomplete).toBe('off');
-  expect(document.querySelector<HTMLDetailsElement>('.phone-options')!.open).toBe(true);
+  // The fallback field opens on the face, under Paste, not inside Other options.
+  expect(input!.closest('[data-phone-face]')).not.toBeNull();
   expect(document.body.textContent).not.toContain('private failure');
   input!.value = 'bitsov://pair/synthetic'; input!.dispatchEvent(new Event('input', { bubbles: true }));
   button('Use link').click(); await tick();
@@ -414,8 +420,8 @@ it('focuses each changed error once, including recovery-only changes, without a 
   await change('expired');
   expect(document.activeElement).toBe(heading);
   expect(announcements).toHaveLength(2);
-  expect(announcements[1]).toContain('This QR has expired');
-  // Same heading, different recovery instruction; refocus even if already on it.
+  expect(announcements[1]).toContain('This link no longer works');
+  // A different failure with its own instruction; refocus even if already on it.
   await change('clock');
   expect(document.activeElement).toBe(heading);
   expect(announcements).toHaveLength(3);
@@ -544,4 +550,74 @@ it('leaves a connection that progresses alone', async () => {
   expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('words');
   await vi.advanceTimersByTimeAsync(60_000);
   expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('words');
+});
+// A stale ticket (expired, used, or a code the box no longer accepts) stops at once and offers a new link.
+const USED_TICKET = 'remote node refused pairing: This ticket expired, was already used, or its owner was revoked. Ask an enrolled owner device for a new ticket.';
+it.each([
+  ['en', 'This link no longer works', 'Ask for a new link on your computer.', 'Paste new link'],
+  ['da', 'Linket virker ikke længere', 'Bed om et nyt link på din computer.', 'Indsæt nyt link'],
+])('forgets a stale ticket the host reports at once and offers one paste action (%s)', async (locale, heading, line, action) => {
+  const props = mount({ locale, status: () => ({ ready: false, node_id: null, error: null, connection_error: { kind: 'used', detail: 'x' } }) });
+  await tick();
+  expect(document.querySelector('h1')?.textContent).toBe(heading);
+  expect(document.querySelector('.phone-line')?.textContent).toBe(line);
+  expect([...document.querySelectorAll('button.primary')].map(b => b.textContent)).toEqual([action]);
+  // Nobody pressed anything: the dead link is already gone, so nothing can replay it.
+  expect(props.forget).toHaveBeenCalledOnce();
+  expect(props.retry).not.toHaveBeenCalled();
+});
+it('ends Connecting on the host’s code-mismatch refusal without offering Try again', async () => {
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  const props = mount({ pairing, device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }) });
+  button("Scan your box’s QR").click(); await tick();
+  expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('connecting');
+  setPairing({ ...INITIAL_PAIRING, remote: true, state: 'failed', reason: USED_TICKET });
+  await tick();
+  expect(document.querySelector('h1')?.textContent).toBe('This link no longer works');
+  expect(button('Try again')).toBeUndefined();
+  expect(props.forget).toHaveBeenCalledOnce();
+  expect(props.retry).not.toHaveBeenCalled();
+});
+it('reads the clipboard in the tap and connects only after the stale link is forgotten', async () => {
+  let forgotten!: () => void;
+  const forget = vi.fn(() => new Promise<void>(resolve => { forgotten = resolve; }));
+  const readText = vi.fn().mockResolvedValue('bitsov://pair/fresh');
+  vi.stubGlobal('navigator', { clipboard: { readText } });
+  const props = mount({ forget, status: () => ({ ready: false, node_id: null, error: null, connection_error: { kind: 'expired', detail: '' } }) });
+  await tick();
+  button('Paste new link').click();
+  // Synchronously inside the tap, so iOS can show its paste prompt.
+  expect(readText).toHaveBeenCalledOnce();
+  await tick();
+  expect(props.connect).not.toHaveBeenCalled();
+  forgotten(); await tick();
+  expect(props.connect).toHaveBeenCalledExactlyOnceWith('bitsov://pair/fresh');
+  expect(forget).toHaveBeenCalledOnce();
+});
+it('shows the same message when the clipboard still holds the old link', async () => {
+  vi.stubGlobal('navigator', { clipboard: { readText: vi.fn().mockResolvedValue('bitsov://pair/old') } });
+  const props = mount({ preview: vi.fn().mockRejectedValue({ kind: 'used', detail: '' }) });
+  await tick();
+  button('Paste link').click(); await tick();
+  expect(document.querySelector('h1')?.textContent).toBe('This link no longer works');
+  expect(props.connect).not.toHaveBeenCalled();
+  // Nothing was saved by this attempt, so nothing is forgotten on the phone's behalf.
+  expect(props.forget).not.toHaveBeenCalled();
+});
+it('keeps Try again for a refusal that is not a stale ticket', async () => {
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  const props = mount({ pairing, device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }) });
+  button("Scan your box’s QR").click(); await tick();
+  setPairing({ ...INITIAL_PAIRING, remote: true, state: 'failed', reason: 'remote node refused pairing: authentication_failed: no' });
+  await tick();
+  expect(button('Try again')).toBeTruthy();
+  expect(props.forget).not.toHaveBeenCalled();
+});
+it.each(['ios', 'android'] as const)('explains a Face ID prompt before Connecting opens the pairing key (%s)', async platform => {
+  mount({ platform, connect: vi.fn(() => new Promise<never>(() => {})) });
+  button("Scan your box’s QR").click(); await tick();
+  expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('connecting');
+  const why = document.querySelector('[data-faceid-why]');
+  if (platform === 'ios') expect(why?.textContent).toBe('You may be asked for Face ID: it opens this app’s pairing key.');
+  else expect(why).toBeNull();
 });

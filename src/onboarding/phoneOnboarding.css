@@ -35,3 +35,9 @@
 .phone-words li { border: 1px solid var(--line-strong, #555); border-radius: 12px; padding: 18px 12px; font-size: 19px; overflow-wrap: anywhere; }
 .phone-fingerprint { overflow-wrap: anywhere; }
 .phone-toast { font-size: 14px; }
+/* The second way in sits right under the primary: as big, quieter. */
+.phone-onboarding .phone-secondary { width: 100%; white-space: normal; background: var(--raised); color: var(--ink); border: 1px solid var(--line-strong, #555); }
+.phone-onboarding [data-phone-face] > .phone-primary + .phone-secondary { margin-top: -8px; }
+.phone-manual { display: flex; flex-direction: column; gap: 8px; }
+.phone-manual label { display: flex; flex-direction: column; gap: 8px; }
+.phone-manual input { min-height: 48px; font-size: 17px; }
