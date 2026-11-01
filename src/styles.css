@@ -1904,3 +1904,5 @@ html:is([data-platform='ios'], [data-platform='android']) .call-panel [data-call
 .call-meter-note { display: block; font-size: var(--t-xs); font-weight: 400; color: var(--muted); }
 .call-route-external { align-self: center; padding: 0 var(--s-2); }
 html:is([data-platform='ios'], [data-platform='android']) .call-panel .call-route-external { min-height: 52px; display: flex; align-items: center; justify-content: center; }
+/* Phones: never print an owner shell command (konsensus …); it is run at the box's computer, not here. */
+html:is([data-platform='ios'], [data-platform='android']) [data-owner-action] { display: none; }

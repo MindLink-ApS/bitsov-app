@@ -199,7 +199,9 @@ export function asActionError(e: unknown): ActionError {
   if (e === MONEY_NOT_READY) return { code: 'not_ready', message: MONEY_NOT_READY };
   if (e && typeof e === 'object' && 'code' in e && 'message' in e) {
     const { code, message, undelivered, admission, pending_id, reason, remaining_msat, operation_id } = e as ActionError;
-    const out: ActionError = { code, message: code === 'not_ready' ? MONEY_NOT_READY : String(message) };
+    // A raw node refusal with start flags (owner approvals off) is never shown as-is.
+    const plain = /owner_approval_unavailable/.test(String(message)) ? tr('caOwnerApprovalUnavailable') : String(message);
+    const out: ActionError = { code, message: code === 'not_ready' ? MONEY_NOT_READY : plain };
     if (typeof pending_id === 'string' && pending_id) out.pending_id = pending_id;
     if (typeof operation_id === 'string' && operation_id) out.operation_id = operation_id;
     // Owner approval refusals: only the node's known reasons, and an amount that is one.

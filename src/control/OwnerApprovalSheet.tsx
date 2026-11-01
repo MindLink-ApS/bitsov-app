@@ -1,8 +1,8 @@
 import { isTauri } from '@tauri-apps/api/core';
 import { createApprovalNotifications } from './ownerApprovalNotification';
-import { createEffect, createSignal, createUniqueId, onCleanup, onMount, Show, untrack } from 'solid-js';
+import { createEffect, createSignal, createUniqueId, For, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { language, t } from '../i18n';
-import { approvalReason, secondsLeft, shortKey, type ApprovalView } from './ownerApproval';
+import { approvalReason, displayTermLines, secondsLeft, shortKey, type ApprovalView } from './ownerApproval';
 import { approveOwnerRequest, type OwnerApprovalsProps } from './OwnerApprovals';
 import { onEscape } from './escapeStack';
 
@@ -138,9 +138,18 @@ function OwnerApprovalSheet(props: Props & { view: ApprovalView; count: number; 
       <Show when={!outcome()?.ok && props.count > 1}><p class="hint" data-owner-approval-queue>{t('ownerApprovalQueue', props.count)}</p></Show>
       <h2 id={title}>{t('ownerApprovalTitle')}</h2>
       <p class="hint">{t('ownerApprovalRequesterShort', shortKey(props.view.client_pubkey))}</p>
+      {/* Danish readers get the same terms in Danish; the English text that is signed stays verbatim below it. */}
+      <Show when={language() === 'da'}>
+        <ul class="owner-approval-terms" role="list" data-owner-sheet-terms-da>
+          <For each={displayTermLines(props.view, 'da', props.nameOf)}>{(line, i) => <li classList={{ lead: i() === 0 }}>{line}</li>}</For>
+        </ul>
+      </Show>
       {/* termLines() is English even when the sheet is Danish. Shown verbatim, including U+202F amounts. */}
-      <p class="owner-sheet-terms" lang="en" data-owner-sheet-terms>{approvalReason(props.view)}</p>
-      <Show when={language() === 'da'}><p class="hint">{t('ownerApprovalTermsLanguage')}</p></Show>
+      <Show when={language() === 'da'} fallback={<p class="owner-sheet-terms" lang="en" data-owner-sheet-terms>{approvalReason(props.view)}</p>}>
+        <details class="quiet-detail"><summary>{t('ownerApprovalTermsLanguage')}</summary>
+          <p class="owner-sheet-terms" lang="en" data-owner-sheet-terms>{approvalReason(props.view)}</p>
+        </details>
+      </Show>
       <details class="quiet-detail"><summary>{t('ownerApprovalSignedMessage')}</summary>
         <pre class="approval-message" lang="en">{props.view.approval_message}</pre>
       </details>

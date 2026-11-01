@@ -37,8 +37,13 @@ describe.each(['en', 'da'] as const)('owner approval sheet (%s)', lang => {
     expect(requester.textContent).toBe(lang === 'en'
       ? 'Requested by app cdcdcd…cdcdcd'
       : 'Anmodet af app cdcdcd…cdcdcd');
-    expect(requester.nextElementSibling).toBe($('[data-owner-sheet-terms]'));
+    // English: the signed terms verbatim. Danish: the same terms in Danish, the English verbatim under "shown in English".
+    expect(requester.nextElementSibling).toBe($(lang === 'en' ? '[data-owner-sheet-terms]' : '[data-owner-sheet-terms-da]'));
     expect(sheet.textContent!.match(/Budget: up to 2\u202f000 sats/g)).toHaveLength(1);
+    if (lang === 'da') {
+      expect([...sheet.querySelectorAll('[data-owner-sheet-terms-da] li')].map(li => li.textContent).slice(0, 2)).toEqual(['Lad appen betale', 'Budget: højst 2\u202f000 sats']);
+      expect($('[data-owner-sheet-terms]').closest('details')?.querySelector('summary')?.textContent).toBe('Vilkårene vises på engelsk, præcis som din Mac signerer dem.');
+    }
   });
   it('opens on arrival with exact biometric terms, requester, one primary and queue count', async () => {
     setLanguagePref(lang); const s = setup();

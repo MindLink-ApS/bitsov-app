@@ -6889,6 +6889,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
                 <strong>{tr('uiConfirmAtYourNode')}</strong> {tr('uiYourNodeAsksItsOwnerToApproveThis')}
               </p>
               <code class="address" data-owner-action>{p().owner_action}</code>
+              <Show when={isMobilePlatform()}><p class="hint" data-approve-on-box>{tr('caApproveOnBox')}</p></Show>
               <p class="hint">
                 {tr('uiThisAppCannotApproveItForYouThe')} {minutes(p().expires_at_ms)} {tr('uiMinYourDraftIsKept')}{' '}
                 <button type="button" class="link" data-spend-cancel onClick={() => void props.actions.cancelSpend()}>
@@ -6906,6 +6907,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
                 <strong>{tr('uiThisNodeCannotGrantSpendingToTheApp')}</strong> {tr('uiReceivingStillWorksYourNodeSays')}
               </p>
               <code class="address" data-owner-action>{p().owner_action}</code>
+              <Show when={isMobilePlatform()}><p class="hint" data-approve-on-box>{tr('caOwnerApprovalUnavailable')}</p></Show>
             </div>
           )}
         </Match>
@@ -6936,9 +6938,14 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
         <DeviceSetup device={props.actions.device()} now={props.now} actions={props.actions} />
       </Show>
       <Reconcile actions={props.actions} hasPending={props.hasPending || Boolean(props.spend?.pending)} />
-      <Show when={props.error}>
-        <p class="err-note">{props.error}</p>
-      </Show>
+      <Show when={props.error}>{(error) =>
+        // The node has owner approvals off: say so plainly, never the raw HTTP error or its start flags.
+        <Show when={/owner_approval_unavailable/.test(error())} fallback={<p class="err-note">{error()}</p>}>
+          <p class="err-note" data-owner-approval-unavailable>{tr('caOwnerApprovalUnavailable')}{' '}
+            <button type="button" class="link" disabled={props.actions.moneyBlocked() || asking()} onClick={() => void askAgain()}>{tr('caCheckAgain')}</button>
+          </p>
+        </Show>
+      }</Show>
     </div>
   );
 }

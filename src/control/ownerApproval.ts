@@ -201,6 +201,50 @@ export function termLines(view: ApprovalView, nameOf?: (id: string) => string | 
   ];
 }
 
+/**
+ * The same terms for reading, in the reader's language. Display only: the Touch ID
+ * reason and the signed message stay the English `termLines` / `approval_message`.
+ * Built from the same fields as `termLines`, line for line, with nothing inferred.
+ */
+export function displayTermLines(view: ApprovalView, lang: 'en' | 'da', nameOf?: (id: string) => string | null): string[] {
+  if (lang !== 'da') return termLines(view, nameOf);
+  const who = (id: string) => {
+    const n = nameOf?.(id);
+    return n ? `${n} (${shortKey(id)})` : shortKey(id);
+  };
+  const tid = (secs: number) => secs % 3600 === 0 ? t('caTermsHours', secs / 3600) : secs % 60 === 0 ? `${secs / 60} min` : `${secs} s`;
+  if (view.request.kind === 'spend_grant') {
+    const g = view.request.terms;
+    return [
+      t('caTermsSpendLead'),
+      t('caTermsBudget', sats(g.budget_msat)),
+      t('caTermsEach', sats(g.per_call_max_msat)),
+      t('caTermsMessages', sats(Math.min(g.per_call_max_msat, MESSAGE_PAYMENT_CAP_MSAT))),
+      t('caTermsFor', tid(g.window_secs)),
+      g.recipient ? t('caTermsOnlyTo', who(g.recipient)) : t('caTermsAnyContact'),
+    ];
+  }
+  if (view.request.kind === 'breaker_reset') {
+    const snap = breakerSnapshot(view);
+    if (!snap) return [t('caTermsResetLead'), t('caTermsNoState')];
+    return [
+      t('caTermsResetLead'),
+      t('caTermsTripped', snap.tripped.length ? snap.tripped.map(tripText).join(', ') : t('caTermsNothing')),
+      t('caTermsBudgetLeft', sats(snap.budget_msat), sats(snap.remaining_msat)),
+      t('caTermsEach', sats(snap.per_call_max_msat)),
+      t('caTermsGrantEnds', approvalDate(snap.grant_expires_at)),
+      t('caTermsResets', snap.resets_last_day),
+    ];
+  }
+  const c = view.request.terms;
+  return [
+    t('caTermsContactLead'),
+    t('caTermsTo', who(c.recipient)),
+    t('caTermsFirst', sats(c.max_total_msat)),
+    ...(c.budget_msat !== undefined ? [t('caTermsContactBudget', sats(c.budget_msat))] : []),
+  ];
+}
+
 /** The biometric reason: terms plus attribution, within Android's 300 UTF-16 units. */
 export function approvalReason(view: ApprovalView): string {
   const attribution = ` · Requested by app ${shortKey(view.client_pubkey)}`;
