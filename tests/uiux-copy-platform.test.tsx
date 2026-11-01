@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import { copyPlainText } from '../src/assistant/copy';
 import { endpointBadge, OWN_RULES } from '../src/assistant/endpoint';
-import { ControlCenter } from '../src/control/Shell';
+import { ControlCenter, setHidePhoneExtras } from '../src/control/Shell';
 import { FrontDoorEditor } from '../src/control/Discover';
 import { sampleSource, SAMPLE_OWN_ID } from '../src/control/sample';
 import { Onboarding } from '../src/onboarding/Onboarding';
@@ -17,6 +17,7 @@ let dispose: (() => void) | undefined;
 let mount: HTMLElement;
 const realExec = document.execCommand;
 afterEach(() => {
+  setHidePhoneExtras(true);
   dispose?.();
   mount?.remove();
   document.execCommand = realExec;
@@ -114,6 +115,8 @@ it('Profile: the image pickers use the app’s own words, not the native "Choose
 
 it.each([['iPhone', IPHONE], ['Android', ANDROID]])('assistant, Browse and Wallet copy on %s uses phone wording', async (_label, userAgent) => {
   asPhone(userAgent);
+  // These features are behind the M6 phone flag; their phone wording still holds when it is lifted.
+  setHidePhoneExtras(false);
   mountIt(() => <ControlCenter source={sampleSource({ firstLiveMs: 1e9 })} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />);
   await vi.waitFor(() => expect($('[data-track="assistant:node"]')).not.toBeNull());
   $<HTMLButtonElement>('[data-track="assistant:node"]')!.click();

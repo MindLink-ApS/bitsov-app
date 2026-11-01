@@ -248,6 +248,8 @@ export const NOT_PAID = 'not_paid';
  * the grant, the channel or the price, and says nothing was paid.
  */
 export function callRefusal(error: ActionError): string {
+  // Calls go to contacts already paid: nothing was created or paid; the next step is a message.
+  if (error.code === 'call_needs_contact') return tr('caCallNeedsContact');
   // The node checked the offer against the minutes agreed before Ring (genome N3) and refused it.
   if (error.code === 'call_offer_price_above_consent') return tr('caMinutesOfferPriceAboveConsent');
   if (error.code === 'call_offer_hold_above_consent') return tr('caMinutesOfferHoldAboveConsent');
@@ -1061,7 +1063,7 @@ export function createCallEngine(deps: CallDeps) {
         return;
       }
       if (!r.ok) {
-        end(null, session ? callRefusal(r.error) : r.error.message);
+        end(null, session || r.error.code === 'call_needs_contact' ? callRefusal(r.error) : r.error.message);
         return;
       }
       // The node reserved this call's minutes when the offer went out: the host checks that hold

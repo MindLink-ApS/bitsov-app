@@ -458,7 +458,7 @@ export type ActionError = {
     // Porch reads (src-tauri/src/porch.rs). Refused before paying:
     | 'porch_knock_first' | 'porch_unreachable' | 'porch_busy' | 'porch_own_node' | 'porch_path_invalid'
     | 'porch_not_found' | 'porch_quote_unavailable' | 'porch_quote_invalid' | 'porch_room'
-    | 'porch_unsupported' | 'porch_unavailable' | 'porch_needs_contact' | 'porch_readmission'
+    | 'porch_unsupported' | 'porch_unavailable' | 'porch_needs_contact' | 'porch_readmission' | 'call_needs_contact'
     // Paid, with no usable answer; never retried:
     | 'porch_timeout' | 'porch_reply_invalid' | 'porch_card_mismatch'
     | 'not_ready' | 'app_not_ready'

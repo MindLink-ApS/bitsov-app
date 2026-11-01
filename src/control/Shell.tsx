@@ -2472,6 +2472,7 @@ export function ControlCenter(props: Props) {
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
         audioRoute={{ get: () => props.source.callAudioRouteGet(), set: route => props.source.callAudioRoute(route) }}
+        openChat={peer => { setCallApproval(false); calls.dismiss(); const next = { kind: 'peer' as const, id: peer.toLowerCase() }; if (phoneShell()) openPhoneTrack(next); else setTrack(next); }}
         dismiss={() => { setCallApproval(false); calls.dismiss(); }}
         closeAgain={() => void calls.closeAgain()}
         endStuck={() => void calls.endStuck()}
@@ -2785,6 +2786,8 @@ function Rail(props: {
         </Show>
       </div>
 
+      {/* M6 on phones is messages and calls: rooms, assistants, profiles and the porch wait behind one flag. */}
+      <Show when={!phoneExtrasHidden()}>
       <div class="track-group" data-rooms-soon={props.active && props.nodeRooms ? undefined : ''}>
         <h2>{tr('uiRooms')}</h2>
         <Show
@@ -2808,6 +2811,7 @@ function Rail(props: {
           </For>
         </Show>
       </div>
+      </Show>
 
       <Show when={props.active && props.knocks.length > 0}>
         <div class="track-group" data-door-group>
@@ -2831,6 +2835,7 @@ function Rail(props: {
         </div>
       </Show>
 
+      <Show when={!phoneExtrasHidden()}>
       <div class="track-group" data-assistants>
         <h2>{tr('uiAssistants')}</h2>
         <Show when={props.active}>
@@ -2864,6 +2869,7 @@ function Rail(props: {
           </button>
         </Show>
       </div>
+      </Show>
 
       <div class="rail-foot">
         <Show when={props.active}>
@@ -3559,7 +3565,8 @@ function MinutesConsent(props: { quote: CallQuote }) {
     <>
       <p class="hint" data-call-minute-price>{tr('uiCallMinutePrice', fmtAmount(props.quote.block_msat!), fmtAmount(props.quote.block_max_routing_fee_msat ?? 0))}</p>
       <Show when={props.quote.reservation_max_msat != null}>
-        <p class="hint" data-call-reservation-max>{tr('uiCallReservationMax', fmtAmount(props.quote.reservation_max_msat!))}</p>
+        {/* The length comes from this quote (its hold over one minute's price and routing), never a fixed 4 hours. */}
+        <p class="hint" data-call-reservation-max>{tr('uiCallReservationMax', fmtAmount(props.quote.reservation_max_msat!), String(Math.floor(props.quote.reservation_max_msat! / Math.max(1, props.quote.block_msat! + (props.quote.block_max_routing_fee_msat ?? 0)))))}</p>
       </Show>
     </>
   );
@@ -3659,6 +3666,8 @@ function CallPanel(props: {
   confirmMinutes?: () => void;
   /** Opens Settings → General, where the STUN server is chosen. */
   openCallSettings?: () => void;
+  /** A call refused because the contact has not been paid yet: open their chat to send a first message. */
+  openChat?: (peer: string) => void;
   /** iOS: speaker or earpiece for a live call. Absent, or `unsupported`, hides the control. */
   audioRoute?: { get: () => Promise<CallAudioRoute>; set: (route: 'speaker' | 'earpiece') => Promise<CallAudioRoute> };
 }) {
@@ -3717,6 +3726,8 @@ function CallPanel(props: {
   };
   const routeName = (r: CallAudioRoute) => (r === 'speaker' ? tr('caRouteSpeaker') : tr('caRouteEarpiece'));
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
+  // The host refused before anything was created (`call_needs_contact`): no signal or media lines, one next step.
+  const needsContact = () => v().phase === 'ended' && v().error === tr('caCallNeedsContact');
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
@@ -3760,6 +3771,7 @@ function CallPanel(props: {
           <MediaView stream={props.streams.remote} video={false} muted={false} kind="remote" />
         </Show>
         {/* The host reports each signal's ceiling, not settled fees: after the call, "up to" is the honest total. */}
+        <Show when={!needsContact()}>
         <Show when={v().phase === 'ended'} fallback={
           <Show when={v().paidMsat > 0}>
             <p class="hint" data-call-paid>{tr('uiSignalCostCap')} {fmtAmount(v().paidMsat)} {tr('uiIncludesMaximumRoutingFeesSettledAmountMayBe')}</p>
@@ -3788,6 +3800,7 @@ function CallPanel(props: {
               <p class="hint" data-call-paid="nothing">{tr('uiThisCallPaidNothing')}</p>
             </Match>
           </Switch>
+        </Show>
         </Show>
         <Show when={v().connection}>
           {(connection) => <p class="hint" data-call-connection>{tr('uiConnection')} {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} {tr('uiLocal140')} {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} {tr('uiRemote')}</p>}
@@ -3826,6 +3839,9 @@ function CallPanel(props: {
             <Match when={v().phase === 'incoming'}>
               <button type="button" class="primary soft money" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced} onClick={() => props.accept()}>{tr('uiAccept')}{price(answer())}</button>
               <button type="button" class="soft" data-call-decline disabled={props.blocked || props.view.silenced} onClick={() => props.decline()}>{tr('uiDecline')}{price(answer())}</button>
+            </Match>
+            <Match when={needsContact() && props.openChat && v().peer}>
+              <button type="button" class="primary soft" data-call-message-first onClick={() => props.openChat!(v().peer!)}>{tr('caMessageFirst')}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
               <Show when={v().stuck}>
@@ -5089,7 +5105,8 @@ function Composer(props: {
           setAmount(draftAmount);
           setMemo(p.text);
         }
-        setDrafted(true);
+        // Only an AI draft is labelled as one; an Unsent card holds the person's own words.
+        setDrafted(!p.unsentId);
         if (p.unsentId) props.actions.discardUnsent(props.track, p.unsentId);
         props.onPrefillUsed?.();
       },
@@ -5551,7 +5568,8 @@ function Composer(props: {
     if (trackKey(untrack(() => props.track)) === trackKey(c.track) && !untrack(draft)) {
       props.actions.settleWaiting(c.track, c.bubble, '');
       setDraft(c.text);
-      setDrafted(true);
+      // The person's own text, back after the approval: not an AI draft.
+      setDrafted(false);
       setNote(tr('uiApprovedPressSendToSendIt'));
     } else props.actions.settleWaiting(c.track, c.bubble, tr('uiApprovedPressSendToSendIt238'));
   };
@@ -7421,6 +7439,10 @@ export function setShowLegacyIntroductionUi(enabled: boolean) {
 }
 
 /** Product default hides legacy prototype rooms; current rooms use node-verified bindings. */
+/** Phones (M6): messages and calls only. Rooms, assistants, profiles and the porch return when this is false. */
+let hidePhoneExtras = true;
+export function setHidePhoneExtras(hidden: boolean) { hidePhoneExtras = hidden; }
+const phoneExtrasHidden = () => hidePhoneExtras && isMobilePlatform();
 let showLegacyRoomsUi = false;
 export function setShowLegacyRoomsUi(enabled: boolean) {
   showLegacyRoomsUi = enabled;

@@ -406,7 +406,7 @@ describe('app shell pairing wiring', () => {
         expect(mount.querySelector('[data-ob-head]')).toBeNull();
         expect(mount.textContent).not.toContain('Your box has stopped');
         if (remaining) {
-          expect(mount.textContent).toContain(`waiting ${remaining} s`);
+          expect(mount.textContent).toContain(`in ${remaining} s`);
           expect(mount.querySelector('[data-node-offline] time')).not.toBeNull();
         } else expect(mount.querySelector('[data-node-offline]')).toBeNull();
       }

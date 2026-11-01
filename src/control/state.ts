@@ -1,6 +1,7 @@
 import { t as tr } from '../i18n';
 import { t, possessive } from '../i18n';
 import { MONEY_NOT_READY, readinessLine } from './readiness';
+import { isMobilePlatform } from '../platform';
 import { feeCeiling } from './format';
 // Control-center state as pure functions over plain data, so the rules are
 // testable without a window: which track a live message belongs to, how history
@@ -44,7 +45,8 @@ export const peerName = (peer: Peer | undefined, id: string): string => {
   contactRevision();
   const pet = petnameOf(id);
   if (pet) return pet;
-  return t('extraUnnamedContact', shortId(id));
+  // A phone names an unnamed contact plainly; its id stays in the contact's details.
+  return isMobilePlatform() ? t('caNewContact') : t('extraUnnamedContact', shortId(id));
 };
 
 /** Remote-supplied name (peer label / profile card). Suggestion only — never truth. */
@@ -189,9 +191,9 @@ export function peerNotReadyMessage(error: unknown, name: string): string | null
   } else if (typeof error === 'string' && error.startsWith('peer_not_ready:')) {
     reason = error.slice('peer_not_ready:'.length);
   }
-  return reason === 'chain_unavailable' || reason === 'not_synced'
-    ? t('extraSNodeIsnTReadyToReceiveYet', possessive(name))
-    : null;
+  if (reason !== 'chain_unavailable' && reason !== 'not_synced') return null;
+  // Phones: no chain jargon, just that it is temporary.
+  return isMobilePlatform() ? t('caPeerNotReadyPhone', possessive(name)) : t('extraSNodeIsnTReadyToReceiveYet', possessive(name));
 }
 
 /** Any rejection from the host, as an action error. */
@@ -445,7 +447,7 @@ export function nodePill(input: {
     return { tone: 'warn', text: t('uiNodeNotAnswering'), live: false };
   }
   if (input.overview.money_ready === false) return { tone: 'warn', text: readinessLine(input.overview, input.nowMs)!, live: input.link === 'open' };
-  if (input.overview.money_ready === true && input.link === 'open') return { tone: 'ok', text: t('uiLocalOKMoneyReady'), live: true };
+  if (input.overview.money_ready === true && input.link === 'open') return { tone: 'ok', text: isMobilePlatform() ? t('caPillReady') : t('uiLocalOKMoneyReady'), live: true };
   if (input.link === 'open') return { tone: 'ok', text: t('uiConnectedToYourNode'), live: true };
   return { tone: 'warn', text: t('uiNodeUpLiveFeedReconnecting'), live: false };
 }

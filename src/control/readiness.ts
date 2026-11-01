@@ -2,6 +2,7 @@ import { t } from '../i18n';
 import type { Source } from './source';
 import type { NodeOverview } from './types';
 import { ago } from './format';
+import { isMobilePlatform } from '../platform';
 
 export const MONEY_NOT_READY = 'Money is not ready yet. Your box will retry automatically.';
 
@@ -41,6 +42,8 @@ export function readinessSource(get: () => Source, blocked: () => boolean, refus
 
 export function readinessLine(node: NodeOverview | null, now: number): string | null {
   if (node?.money_ready == null) return null;
+  // Phones say only whether the box is ready; the diagnostic stays on the Mac.
+  if (isMobilePlatform()) return node.money_ready ? t('caPillReady') : t('caPillNotReady');
   const reading = t('extraRead', ago(node.read_at, now));
   if (node.money_ready) return t('extraLocalOKMoneyReady', reading);
   const state = node.readiness;

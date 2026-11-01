@@ -220,8 +220,8 @@ describe('invisible payments in the composer and the context panel', () => {
       await openShell(); setLanguagePref(lang);
       type('[data-composer] textarea', 'custom budget'); sendOnly();
       await waitFor(() => expect($<HTMLButtonElement>('[data-first-spend-allow]')!.disabled).toBe(false));
-      const owner = lang === 'en' ? 'Approve at your box' : 'Godkend på din boks';
-      const disclaimer = lang === 'en' ? 'It grants no permission by itself.' : 'Det giver ikke i sig selv nogen tilladelse.';
+      const owner = lang === 'en' ? 'Approve in BitSov on your computer' : 'Godkend i BitSov på din computer';
+      const disclaimer = lang === 'en' ? 'It grants no permission by itself.' : 'Det giver ikke tilladelse i sig selv.';
       if (path === 'owner') {
         expect(text('[data-first-spend-sheet]')).toContain(owner);
         expect(text('[data-first-spend-sheet]')).toContain(disclaimer);

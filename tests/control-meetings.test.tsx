@@ -852,7 +852,7 @@ describe('meetings in the shell', () => {
     host.emitLive({ type: 'message', room_id: null, message: offer(A, cid(0xa1), [A, OWN, B]) });
     await vi.waitFor(() => expect(text('[data-meeting-join]')).toBe('Join · 33 sats'));
     retry = 42;
-    await vi.waitFor(() => expect(text('.node-pill')).toContain('waiting 42 s'), { timeout: 2500 });
+    await vi.waitFor(() => expect(text('.node-pill')).toContain('in 42 s'), { timeout: 2500 });
     expect($<HTMLButtonElement>('[data-meeting-join]')!.disabled).toBe(true);
     expect($<HTMLButtonElement>('[data-meeting-decline]')!.disabled).toBe(true);
     expect(host.used('call_signal')).toHaveLength(0);
