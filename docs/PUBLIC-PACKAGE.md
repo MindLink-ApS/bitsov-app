@@ -120,7 +120,7 @@ through it, every file.
 {
   "v": 1,
   "kind": "cv",
-  "hash_alg": "sha256",
+  "hash_alg": "blake3",
   "entry": "index.md",
   "title": "Curriculum vitae",
   "files": [
@@ -135,8 +135,12 @@ through it, every file.
 Rules
 
 - `kind`: `profile`, `cv` or `site` (a hint for layout only).
-- `hash_alg`: see open decision D1 (SHA-256 as briefed, or BLAKE3 to match the
-  card). One algorithm per manifest; the manifest's own hash uses the same.
+- `hash_alg`: fixed to `"blake3"` (decision D1). Every file hash and the
+  manifest's own hash are BLAKE3, 32 bytes as 64 lowercase hex, the same
+  function as the card, media and avatar hashes (`front_door_hash_bytes` in
+  `app.rs`). The field stays in the format for future agility: version 1
+  readers and the node refuse any other value, so a later algorithm needs a
+  deliberate format change, never a silent mix inside one manifest.
 - `entry`: optional; defaults to `index.md`. Must be listed in `files`.
 - Paths: relative, ≤ 128 chars, at most 2 levels, `[a-z0-9._-]` segments, no
   leading dot, no `..`, `\`, `%` or control characters. Paths are unique after
@@ -345,9 +349,10 @@ today's porch.
 
 ## 11. Open decisions
 
-- **D1 Hash algorithm.** SHA-256 as briefed, or BLAKE3 to match the card,
-  media and avatar hashes already in use. Mixing both in one card is
-  possible but adds a second code path.
+- **D1 Hash algorithm. Decided: BLAKE3.** Consistent with the card, media
+  and avatar hashes already in use, so there is one hash code path. The
+  manifest keeps `hash_alg`, fixed to `"blake3"`, for future agility; any
+  other value is refused (§3.1).
 - **D2 PDF.** Rasterise in the host (safe, heavier) or a bundled viewer in a
   sandboxed frame (lighter, larger attack surface).
 - **D3 HTML/JS at all.** Ship native only, or allow sandboxed HTML/JS for
