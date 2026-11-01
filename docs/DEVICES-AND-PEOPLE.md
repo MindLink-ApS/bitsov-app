@@ -1,7 +1,7 @@
 # Devices and people: locked phones, several devices, several people
 
-Status: **design proposal, docs only.** Nothing here is built. It needs a
-two-vendor review and the owner decisions listed at the end before any slice
+Status: **design proposal, docs only.** Nothing here is built. It needs two
+independent reviews and the owner decisions listed at the end before any slice
 starts. No code, node contract or release note may cite this file as shipped
 behavior. Hardened after an independent review (round 1): section 3.5 now
 states the push credential path as an open owner decision with three honest
