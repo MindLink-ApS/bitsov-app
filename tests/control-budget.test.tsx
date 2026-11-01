@@ -458,7 +458,7 @@ describe('invisible payments in the composer and the context panel', () => {
 
   it.each([
     ['en', 'device_remote_unsupported', "Your box can't take device approvals over remote access yet. Nothing was approved. Update your box, or approve at the box."],
-    ['en', 'device_unsupported', 'This node version does not take device approvals. Approve at the node instead.'],
+    ['en', 'device_unsupported', 'This box version does not take device approvals. Approve on your box instead.'],
     ['da', 'device_remote_unsupported', 'Din boks kan endnu ikke modtage enhedsgodkendelser via fjernadgang. Intet blev godkendt. Opdater din boks, eller godkend direkte på boksen.'],
     ['en', 'device_cancelled', 'Touch ID was cancelled.'],
     ['en', 'node', 'The node could not be reached.'],

@@ -2,7 +2,7 @@ import { t } from '../i18n';
 
 /** Same guidance, naming the device in the reader's hand. The phone sentence is the host status string. */
 export function firstRunGuidance(device: 'phone' | 'iPad'): string {
-  return `This node isn't set up yet. Finish setup on a Mac, then add this ${device}.`;
+  return `This box isn't set up yet. Finish setup on a Mac, then add this ${device}.`;
 }
 
 /** Host status string for an unclaimed node. The UI may name an iPad; the match stays this sentence. */

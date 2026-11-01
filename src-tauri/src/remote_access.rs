@@ -323,13 +323,13 @@ impl fmt::Display for RemoteError {
             Self::Invalid(message) => write!(f, "invalid remote pairing link: {message}"),
             Self::Expired(seconds) => write!(
                 f,
-                "This pairing link expired {} ago. Ask your owner device for a new ticket, or run konsensus pair-ticket on your node, and check this device's clock.",
+                "This pairing link expired {} ago. Make a new code on your computer (for support: konsensus pair-ticket on your box), and check this device's clock.",
                 elapsed_text(*seconds)
             ),
             Self::Local(message) => f.write_str(message),
             Self::Transport(message) => write!(f, "remote transport failed: {message}"),
             Self::Refused(message) => write!(f, "remote node refused pairing: {message}"),
-            Self::Unclaimed => f.write_str("This node isn't set up yet. Finish setup on a Mac, then add this phone."),
+            Self::Unclaimed => f.write_str("This box isn't set up yet. Finish setup on a Mac, then add this phone."),
             Self::LocalNetwork => f.write_str("Local network access is denied or unavailable. Check BitSov's Local Network permission in Settings and your network connection."),
             Self::AndroidLocalNetwork => f.write_str("Local network access is unavailable. Allow Nearby devices for BitSov in Android Settings, then return to BitSov or tap Reconnect."),
             Self::HandshakeUnavailable => f.write_str(HANDSHAKE_UNAVAILABLE),

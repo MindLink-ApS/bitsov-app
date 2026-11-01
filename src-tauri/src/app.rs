@@ -1839,7 +1839,7 @@ async fn connect_remote_at(state: &NodeState, app_data_dir: &Path, wait: bool) -
                         #[cfg(any(mobile, feature = "mobile"))]
                         {
                             *state.pairing_view.lock().unwrap() = PairingView::starting();
-                            set_error(state, "Pair this phone with your home node to continue.");
+                            set_error(state, "Pair this phone with your box to continue.");
                         }
                     }
                 }
@@ -2989,7 +2989,7 @@ async fn remote_access_forget_at(state: &NodeState, app_data_dir: &Path) -> Resu
         state.remote_mode.store(state.remote_only, Ordering::SeqCst);
         state.remote_retry.clear_connection_error();
         #[cfg(all(desktop, not(feature = "mobile")))]
-        set_error(state, "Restart BitSov to continue after forgetting the remote node.");
+        set_error(state, "Restart BitSov to continue after forgetting your box.");
     }
     Ok(())
 }
@@ -7930,8 +7930,8 @@ fn device_available(state: &NodeState) -> bool {
 fn device_error(e: device_key::DeviceKeyError) -> ActionError {
     match e {
         device_key::DeviceKeyError::Cancelled => ActionError::new("device_cancelled", "Biometric approval was cancelled. Nothing was approved."),
-        device_key::DeviceKeyError::Unavailable => ActionError::new("device_unavailable", "This phone has no hardware-backed Android Keystore key the app can use. Approve at the node instead."),
-        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Strong biometric approval is not available on this phone right now (none enrolled, unavailable, or locked out). Nothing was approved. Approve at the node instead, with the konsensus grant command."),
+        device_key::DeviceKeyError::Unavailable => ActionError::new("device_unavailable", "This phone has no hardware-backed Android Keystore key the app can use. Approve on your box instead."),
+        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Strong biometric approval is not available on this phone right now (none enrolled, unavailable, or locked out). Nothing was approved. Approve on your box instead (for support: the konsensus grant command)."),
         device_key::DeviceKeyError::Invalid => ActionError::new("device_invalid", "This phone's approval key no longer works (for example, biometric enrollment changed). Set up biometric approvals again."),
         device_key::DeviceKeyError::Other(code) => ActionError::new("device_key", format!("Android Keystore refused ({code}). Nothing was approved.")),
     }
@@ -7941,8 +7941,8 @@ fn device_error(e: device_key::DeviceKeyError) -> ActionError {
 fn device_error(e: device_key::DeviceKeyError) -> ActionError {
     match e {
         device_key::DeviceKeyError::Cancelled => ActionError::new("device_cancelled", "Biometric approval (Touch ID or Face ID) was cancelled. Nothing was approved."),
-        device_key::DeviceKeyError::Unavailable => ActionError::new("device_unavailable", "This device has no Secure Enclave the app can use. Approve at the node instead."),
-        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Touch ID or Face ID is not available on this device right now (not enrolled, or locked out after failed tries). Nothing was approved. Approve at the node instead, with the konsensus grant command."),
+        device_key::DeviceKeyError::Unavailable => ActionError::new("device_unavailable", "This device has no Secure Enclave the app can use. Approve on your box instead."),
+        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Touch ID or Face ID is not available on this device right now (not enrolled, or locked out after failed tries). Nothing was approved. Approve on your box instead (for support: the konsensus grant command)."),
         device_key::DeviceKeyError::Invalid => ActionError::new("device_invalid", "This device's approval key no longer works (for example, the enrolled fingerprints or face changed). Set up biometric approvals again."),
         device_key::DeviceKeyError::Other(code) => ActionError::new("device_key", format!("The Secure Enclave refused ({code}). Nothing was approved.")),
     }
@@ -8055,7 +8055,7 @@ struct RegisteredKey {
 async fn device_binding(state: &NodeState) -> Result<DeviceBinding, ActionError> {
     let (status, body) = call_api(state, reqwest::Method::GET, "/pair/device-keys", None).await.map_err(ActionError::node)?;
     if status == reqwest::StatusCode::NOT_FOUND {
-        return Err(ActionError::new("device_unsupported", "This node version does not take device approvals. Approve at the node instead."));
+        return Err(ActionError::new("device_unsupported", "This box version does not take device approvals. Approve on your box instead."));
     }
     if !status.is_success() {
         return Err(ActionError::node(api_error("/pair/device-keys", status, &body)));

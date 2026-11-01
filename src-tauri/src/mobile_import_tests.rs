@@ -78,7 +78,7 @@ async fn import_clears_unpaired_error_and_attaches_without_restart() {
     let link = ticket(listener.local_addr().unwrap().to_string(), false);
     assert!(!remote_access::preview_pairing_link(&link).unwrap().first_run);
     let server = tokio::spawn(noise_responder(listener));
-    set_error(&state, "Pair this phone with your home node to continue.");
+    set_error(&state, "Pair this phone with your box to continue.");
     let result = remote_access_import_at(app.handle(), &state, dir.path(), &link).await.unwrap();
     assert!(state.status_snapshot().error.is_none());
     assert!(!result.restart_required);
@@ -114,7 +114,7 @@ async fn first_run_ticket_is_not_dialed_on_attach_or_retry() {
     let descriptor = remote_access::load_persisted(dir.path()).unwrap().unwrap();
     tokio::time::timeout(Duration::from_secs(5), attach_remote(&state, dir.path(), descriptor)).await.unwrap();
     pairing_retry_at(&state, dir.path()).await.unwrap();
-    assert_eq!(state.status_snapshot().error.as_deref(), Some("This node isn't set up yet. Finish setup on a Mac, then add this phone."));
+    assert_eq!(state.status_snapshot().error.as_deref(), Some("This box isn't set up yet. Finish setup on a Mac, then add this phone."));
     assert!(state.remote_proxy.lock().unwrap().is_none());
     assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
 }
@@ -124,9 +124,9 @@ async fn invalid_import_preserves_error_and_does_not_start_remote_mode() {
     let app = app();
     let state = app.state::<NodeState>();
     let dir = tempfile::tempdir().unwrap();
-    set_error(&state, "Pair this phone with your home node to continue.");
+    set_error(&state, "Pair this phone with your box to continue.");
     assert!(remote_access_import_at(app.handle(), &state, dir.path(), "invalid").await.is_err());
-    assert_eq!(state.status_snapshot().error.as_deref(), Some("Pair this phone with your home node to continue."));
+    assert_eq!(state.status_snapshot().error.as_deref(), Some("Pair this phone with your box to continue."));
     assert!(!state.remote_mode.load(Ordering::SeqCst));
     assert!(remote_access::load_persisted(dir.path()).unwrap().is_none());
 }
@@ -143,7 +143,7 @@ async fn first_run_import_reports_setup_guidance_without_dialing() {
     tokio::time::timeout(Duration::from_secs(2), async {
         while state.status_snapshot().error.is_none() { tokio::task::yield_now().await; }
     }).await.unwrap();
-    assert_eq!(state.status_snapshot().error.as_deref(), Some("This node isn't set up yet. Finish setup on a Mac, then add this phone."));
+    assert_eq!(state.status_snapshot().error.as_deref(), Some("This box isn't set up yet. Finish setup on a Mac, then add this phone."));
     assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
 }
 

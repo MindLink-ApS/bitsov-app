@@ -1274,17 +1274,17 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     callHold: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
     voiceNote: async (messageId) => {
       const note = voiceNotes.get(messageId);
-      return note ? note : refuse('invalid', 'voice note not stored on this node');
+      return note ? note : refuse('invalid', 'voice note not stored on this box');
     },
     fileFetch: async (messageId) => {
       const file = receivedFiles.get(messageId);
-      if (!file) return refuse('invalid', 'file not stored on this node');
+      if (!file) return refuse('invalid', 'file not stored on this box');
       if (file.size_bytes > 1_400_000) return refuse('invalid', 'file over 1.4 MB');
       return file;
     },
     fileSave: async (messageId) => {
       const file = receivedFiles.get(messageId);
-      if (!file) return refuse('invalid', 'file not stored on this node');
+      if (!file) return refuse('invalid', 'file not stored on this box');
       if (file.size_bytes > 1_400_000) return refuse('invalid', 'file over 1.4 MB');
       // Sample has no native dialog: treat as saved (tests inject their own host).
       const result: FileSaveResult = { saved: true, filename: file.filename, mime_type: file.mime_type, size_bytes: file.size_bytes };
