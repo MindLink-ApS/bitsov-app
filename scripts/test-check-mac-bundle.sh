@@ -78,7 +78,7 @@ noop() { :; }
 append() { printf '%s' "$2" >> "$1"; }
 default_min_plist() { plist 10.13 > BitSov.app/Contents/Info.plist; }
 
-expect pass 'good bundle tree with rc20 expectation' '(node v0.3.0-rc20)' noop
+expect pass 'good bundle tree with rc21 expectation' '(node v0.3.0-rc21)' noop
 expect fail 'bundled sidecar missing' 'FAIL  bundled sidecar is executable' \
   rm BitSov.app/Contents/MacOS/konsensus
 expect fail 'bundled sidecar differs from the verified one' 'FAIL  bundled sidecar matches the verified sidecar' \
