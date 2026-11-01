@@ -34,6 +34,14 @@ is discarded. Remote video is muted and an independent audio-only playback
 element carries the voice, avoiding video playback suspension also pausing
 received audio. Microphone mute remains the user's choice.
 
+A Live call does not stay open in the background indefinitely: on phones the
+call engine (`stopWhenSilenced`) hangs up a call that stays out of view, or
+whose microphone the OS muted or silenced, after `SILENCED_GRACE_MS` (20 s),
+through the normal Hang up, so no minute is paid for a call nobody can hear.
+Returning within that time continues the call. Background audio therefore
+covers short interruptions (a glance at another app, a brief lock), not a
+call held with the screen locked.
+
 No silent playback, background task, new signalling or automatic payment is
 introduced. Hang up, `op_end_call`, and in-call Pay use their existing paths.
 There is no background session acquired at app startup or while simply viewing
