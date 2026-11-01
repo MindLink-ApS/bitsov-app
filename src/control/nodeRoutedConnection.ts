@@ -111,6 +111,8 @@ export class NodeRoutedConnection {
   /** The node link is up (the host said `open`); `connected` also needs `audioReady`. */
   private linkOpen = false;
   private audioReady = false;
+  /** The owner's own mute, kept for an audio engine built later. */
+  private muted = false;
   private graceTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly now: () => number;
 
@@ -150,6 +152,16 @@ export class NodeRoutedConnection {
     }
     this.remoteDescription = description;
     this.maybeOpen();
+  }
+
+  /**
+   * The owner muted or unmuted the microphone (the engine also disables the
+   * track). The audio engine sends silence while muted and does not count
+   * it as a silenced microphone; unmuting starts a fresh observation.
+   */
+  setMuted(muted: boolean): void {
+    this.muted = muted;
+    this.audio?.setMuted(muted);
   }
 
   async addIceCandidate(_candidate: RTCIceCandidateInit): Promise<void> {}
@@ -194,6 +206,7 @@ export class NodeRoutedConnection {
     const onFatal = () => { if (audio && this.audio === audio) this.audioFailed(); };
     audio = this.deps.audio(this.stream ?? emptyStream(), { send: (payload) => this.deps.bridge.send(payload) }, onFatal);
     this.audio = audio;
+    if (this.muted) audio.setMuted(true);
     audio.ready.then(
       () => { if (this.audio === audio && !this.closed) { this.audioReady = true; this.maybeConnected(); } },
       // No audio graph (no AudioContext, worklet refused): a silent "live" call is worse than an ended one.
