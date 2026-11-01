@@ -1,6 +1,6 @@
 # No payment, no packet — a layer-by-layer audit
 
-Status: analysis and design proposal. Docs only. Needs two-vendor review and
+Status: analysis and design proposal. Docs only. Draft; needs two independent reviews and
 an owner decision before any ticket below is started. Hardened after an
 independent review (round 1): quote oracle, signed receipts, push fan-out
 bound, block-boundary media cases, ticket A-6, a restated pre-payment bound,
