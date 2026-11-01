@@ -310,7 +310,9 @@ export type Actions = {
   /** The door card: a stranger's signed quote, or null when the node cannot give one. */
   doorQuote: (peer: string) => Promise<FirstContactQuote | null>;
   ownerRequest: (peer: string, cap: number, budget: number) => Promise<Outcome<OwnerContactApproval | null>>;
-  ownerStatus: (id: string, recipient?: string) => Promise<Outcome<OwnerContactApproval>>;
+  ownerStatus: (id: string, recipient?: string, maxMsat?: number) => Promise<Outcome<OwnerContactApproval>>;
+  /** Our node already holds an E2EE session with this contact: it admitted them, so a new client needs no first-contact approval. */
+  knownAtNode?: (peer: string) => boolean;
   /** Owner approval v1 (requester side): ask for an approval on the owner's other device, and read it back. */
   approvalRequest: (request: ApprovalRequest) => Promise<Outcome<ApprovalView>>;
   approvalStatus: (opId: string) => Promise<Outcome<ApprovalView>>;
@@ -1705,7 +1707,8 @@ export function ControlCenter(props: Props) {
     },
     doorQuote: (peer) => source.firstContactQuote(peer),
     ownerRequest: (peer, cap, budget) => act(() => source.firstContactRequest(peer, cap, budget)),
-    ownerStatus: (id, recipient) => act(() => source.firstContactStatus(id, recipient)),
+    ownerStatus: (id, recipient, maxMsat) => act(() => maxMsat === undefined ? source.firstContactStatus(id, recipient) : source.firstContactStatus(id, recipient, maxMsat)),
+    knownAtNode: (peer) => peerById().get(peer.toLowerCase())?.session === true,
     approvalRequest: (request) => act(() => source.approvalRequest(request)),
     approvalStatus: (opId) => act(() => source.approvalStatus(opId)),
     breakerResetOffered: () => props.remote === true && overview()?.capabilities?.includes(OWNER_DEVICE_BREAKER_RESET) === true,
@@ -4928,6 +4931,26 @@ function Composer(props: {
       ...(w.message ? { message: w.message } : {}),
     });
   };
+  // The box owner may approve at the box console instead of on the other device
+  // (`konsensus approve first-contact --op <budget op>`). Watch for that grant
+  // too, for exactly this contact and cap; the node still consumes it once.
+  createEffect(() => {
+    const w = deviceWait();
+    if (!w) return;
+    let stopped = false;
+    let polling = false;
+    const timer = window.setInterval(async () => {
+      if (stopped || polling) return;
+      polling = true;
+      const r = await props.actions.ownerStatus('', w.peer, w.cap);
+      polling = false;
+      if (stopped || deviceWait() !== w || !r.ok || !r.value.ready) return;
+      // The host now holds that grant for this exact send; it goes as approved.
+      setDeviceWait(null);
+      await w.send();
+    }, 2000);
+    onCleanup(() => { stopped = true; window.clearInterval(timer); });
+  });
   onCleanup(() => cancelOwner(true));
   createEffect(() => { if (props.moneyBlocked) { approvalRevision++; cancelOwner(); } });
   const [ownerCountdown, setOwnerCountdown] = createSignal(0);
@@ -5982,16 +6005,20 @@ function Composer(props: {
         await queue.enqueue(() => dispatch(bubble));
       };
       const waitingText = submittedMode === 'message' ? { message: { track: submittedTrack, text: submittedText } } : {};
+      // A contact our node already admitted (it holds their session) is no first
+      // contact at the node: no owner approval, only this app's own contact budget.
+      // A re-admission still asks, and the node still refuses anything unapproved.
+      const admitted = first !== undefined && !room() && !readmit() && props.actions.knownAtNode?.(submittedPeer) === true;
       // Capability-gated, not remote-gated, on purpose: the node's local router
       // mounts request + status, so a pairing on this Mac may ask too (approving
       // is remote-only and happens on another owner device).
-      if (pressed && first !== undefined && !room()) {
+      if (pressed && first !== undefined && !room() && !admitted) {
         // A first contact needs its own approval: an Approve & send does not chain into a second one.
         setNote(tr('uiThisFirstContactNeedsItsOwnApprovalPress'));
         setBusy(false);
         return;
       }
-      if (first !== undefined && !room() && props.actions.ownerDeviceApproval?.()) {
+      if (first !== undefined && !room() && !admitted && props.actions.ownerDeviceApproval?.()) {
         // Owner approval v1: the owner approves on their other device instead of at the node.
         // Captured before the await: leaving while the request is out keeps the text on its chat.
         requesting = waitingText.message ?? null;
@@ -6013,7 +6040,7 @@ function Composer(props: {
         setBusy(false);
         return;
       }
-      if (first !== undefined && !room()) {
+      if (first !== undefined && !room() && !admitted) {
         requesting = waitingText.message ?? null;
         const asked = leaveGeneration;
         const request = await props.actions.ownerRequest(submittedPeer, cap, first);
