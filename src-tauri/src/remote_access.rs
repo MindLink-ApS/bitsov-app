@@ -335,7 +335,7 @@ impl fmt::Display for RemoteError {
             Self::LocalNetwork => f.write_str("Local network access is denied or unavailable. Check BitSov's Local Network permission in Settings and your network connection."),
             Self::AndroidLocalNetwork => f.write_str("Local network access is unavailable. Allow Nearby devices for BitSov in Android Settings, then return to BitSov or tap Reconnect."),
             Self::HandshakeUnavailable => f.write_str(HANDSHAKE_UNAVAILABLE),
-            Self::DeviceUnavailable => f.write_str(bitsov_ffi::keychain_status::PASSCODE_REQUIRED),
+            Self::DeviceUnavailable => f.write_str(PASSCODE_REQUIRED),
             Self::RateLimited(seconds) => write!(f, "Remote connection limited; waiting {seconds} s"),
             Self::Waiting(seconds) => write!(f, "Remote connection unavailable; waiting {seconds} s"),
         }
@@ -376,6 +376,11 @@ pub const EXPIRED_TICKET_MESSAGE: &str = "This ticket has expired. Ask an enroll
 pub const UNREACHABLE_CODE: &str = "remote_unreachable";
 pub const CONNECTION_FAILED_CODE: &str = "remote_connection_failed";
 pub const PASSCODE_REQUIRED_CODE: &str = "device_passcode_required";
+/// The Apple Keychain bridge's fixed text for a device without a passcode
+/// (`bitsov_ffi::keychain_status::PASSCODE_REQUIRED`, which Android does not
+/// link). Kept here so every target compiles the classification; a test binds
+/// the two copies wherever the bridge exists.
+pub const PASSCODE_REQUIRED: &str = "This device has no passcode, so Face ID and protected storage are off. Turn on a passcode in Settings, then try again.";
 
 /// Classify the node's refusal of a pairing code by its reason, for every ticket
 /// kind (first pairing, owner, second device, legacy). Only a fixed local
@@ -439,7 +444,7 @@ impl From<&RemoteError> for ConnectionError {
             RemoteError::Refused(message) if message == USED_TICKET_MESSAGE => (Used, USED_TICKET_MESSAGE.into()),
             RemoteError::Refused(message) if message == EXPIRED_TICKET_MESSAGE => (Expired, EXPIRED_TICKET_MESSAGE.into()),
             RemoteError::DeviceUnavailable => (DeviceUnavailable, PASSCODE_REQUIRED_CODE.into()),
-            RemoteError::Local(message) if message == bitsov_ffi::keychain_status::PASSCODE_REQUIRED =>
+            RemoteError::Local(message) if message == PASSCODE_REQUIRED =>
                 (DeviceUnavailable, PASSCODE_REQUIRED_CODE.into()),
             _ => (Other, CONNECTION_FAILED_CODE.into()),
         };
@@ -3385,11 +3390,14 @@ mod tests {
             assert_eq!((mapped.kind, mapped.detail.as_str()), (ConnectionErrorKind::Unreachable, UNREACHABLE_CODE));
         }
         for error in [RemoteError::DeviceUnavailable,
-                      RemoteError::Local(bitsov_ffi::keychain_status::PASSCODE_REQUIRED.into())] {
+                      RemoteError::Local(PASSCODE_REQUIRED.into())] {
             let mapped = ConnectionError::from(&error);
             assert_eq!((mapped.kind, mapped.detail.as_str()), (ConnectionErrorKind::DeviceUnavailable, PASSCODE_REQUIRED_CODE));
         }
         assert_eq!(serde_json::to_value(ConnectionErrorKind::DeviceUnavailable).unwrap(), "device_unavailable");
+        // The bridge's text and this copy must stay identical (no bridge on Android).
+        #[cfg(not(target_os = "android"))]
+        assert_eq!(bitsov_ffi::keychain_status::PASSCODE_REQUIRED, PASSCODE_REQUIRED);
         assert_eq!(ConnectionError::from(&RemoteError::Local("other".into())).kind, ConnectionErrorKind::Other);
     }
 

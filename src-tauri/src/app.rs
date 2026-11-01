@@ -1501,7 +1501,7 @@ async fn attach_remote(
         Ok(key) => Arc::new(key),
         Err(error) => {
             // No passcode: say so as its own kind, so the phone can open Settings.
-            if error.to_string() == bitsov_ffi::keychain_status::PASSCODE_REQUIRED {
+            if error.to_string() == remote_access::PASSCODE_REQUIRED {
                 state.remote_retry.failed(&remote_access::RemoteError::DeviceUnavailable);
             }
             return set_error(&state, error.to_string());
