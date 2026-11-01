@@ -53,6 +53,19 @@ export function mediaError(error: unknown, media: CallMedia, platform: AppPlatfo
 
 /** How long a dropped connection may take to come back before the call ends. */
 export const DISCONNECT_GRACE_MS = 10_000;
+/**
+ * Phones only: how long a call may stay locked, backgrounded or with a
+ * silenced microphone before it is hung up. The phone OS silences the
+ * microphone of an app it does not show, while the call (and its paid
+ * minutes) would otherwise go on. Coming back within this time continues the
+ * call; after it, the call ends through the normal hangup and no further
+ * minute is paid.
+ */
+export const SILENCED_GRACE_MS = 20_000;
+/** Why a phone call stopped (or is about to): the app went out of view, or the microphone went quiet. */
+export type CallStopCause = 'background' | 'microphone';
+/** `endsAt`: while the grace runs, when the call ends; null once it ended for this cause. */
+export type CallStop = { cause: CallStopCause; endsAt: number | null };
 /** 1:1 recovery includes gathering and paid signalling; meetings keep their own grace. */
 export const RECONNECT_GRACE_MS = 30_000;
 const RESTART_DELAY_MS = 2_000;
@@ -210,6 +223,11 @@ export type CallView = {
    * incoming one only watches the node end it). Amounts are the node's own.
    */
   minutes: MinutesView | null;
+  /**
+   * Phones only: the call is out of view or its microphone is silenced
+   * (`endsAt` set: it ends then unless that clears), or it ended for that.
+   */
+  stopped: CallStop | null;
 };
 
 /** `closed`: the host ended it (or nothing was owed); `unknown`: check pending result; `refused`: still open. */
@@ -261,6 +279,7 @@ export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
   liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, offline: false,
   close: null, stuck: null, dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null, minutes: null,
+  stopped: null,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
@@ -294,6 +313,12 @@ export type CallDeps = {
   onMissed?: (call: { callId: string; peer: string; media: CallMedia; at: number }) => void;
   /** iOS only: local session policy, never a signal or payment. */
   audioSession?: (live: boolean) => Promise<void>;
+  /**
+   * Phones (iOS, Android): hang up a call that stays out of view or whose
+   * microphone stays silenced for SILENCED_GRACE_MS (see `setBackgrounded`,
+   * `micSilent`). Desktop builds leave it off.
+   */
+  stopWhenSilenced?: boolean;
   onStreams: (local: MediaStream | null, remote: MediaStream | null) => void;
   newCallId?: () => string;
   /** Read at each call: the owner's STUN setting, `[]` (host only) by default. */
@@ -413,6 +438,82 @@ export function createCallEngine(deps: CallDeps) {
   let audioQueue = Promise.resolve();
   let backgrounded = false;
   let videoGeneration = 0;
+
+  // Phones (`stopWhenSilenced`): a call out of view, or with a silenced
+  // microphone, is hung up after SILENCED_GRACE_MS unless that clears first.
+  /** The OS muted our microphone track (the owner's own mute never does). */
+  let micMuted = false;
+  /** The capture path has heard only digital silence for a while (see callAudio `onSilence`). */
+  let micQuiet = false;
+  /** Our microphone track ended: it never comes back in this call. */
+  let micEnded = false;
+  let stopTimer: ReturnType<typeof setTimeout> | undefined;
+  let offMic: (() => void) | null = null;
+  let checkingStop = false;
+  /** The engine's own hangup, bound once the engine is built. */
+  let stopHangup: () => void = () => {};
+  // From the answer on: the phases in which the minutes are paid.
+  const stopGuarded = () => view.phase === 'connecting' || view.phase === 'live' || view.phase === 'reconnecting';
+  const stopCause = (): CallStopCause | null =>
+    backgrounded ? 'background' : micEnded || micMuted || (micQuiet && !view.muted) ? 'microphone' : null;
+  const clearStop = () => { clearTimeout(stopTimer); stopTimer = undefined; };
+  const stopNow = (cause: CallStopCause) => {
+    clearStop();
+    const was = checkingStop;
+    checkingStop = true;
+    try { set({ stopped: { cause, endsAt: null } }); } finally { checkingStop = was; }
+    // The normal hangup: it ends the minutes at once, then ends the call at the host.
+    stopHangup();
+  };
+  const checkStop = () => {
+    if (!deps.stopWhenSilenced || checkingStop) return;
+    checkingStop = true;
+    try {
+      if (!stopGuarded()) { clearStop(); return; }
+      const cause = stopCause();
+      if (!cause) {
+        if (stopTimer !== undefined || view.stopped) { clearStop(); set({ stopped: null }); }
+        return;
+      }
+      if (micEnded) { stopNow(cause); return; }
+      if (stopTimer === undefined) {
+        const callId = view.callId;
+        stopTimer = setTimeout(() => {
+          stopTimer = undefined;
+          const still = stopCause();
+          if (view.callId === callId && stopGuarded() && still) stopNow(still);
+        }, SILENCED_GRACE_MS);
+        set({ stopped: { cause, endsAt: deps.now() + SILENCED_GRACE_MS } });
+      } else if (view.stopped?.cause !== cause) {
+        set({ stopped: { cause, endsAt: view.stopped?.endsAt ?? deps.now() + SILENCED_GRACE_MS } });
+      }
+    } finally { checkingStop = false; }
+  };
+  /** Follow the OS's mute and end of our microphone track (phones only). */
+  const watchMic = (stream: MediaStream) => {
+    offMic?.();
+    offMic = null;
+    micMuted = false;
+    micQuiet = false;
+    micEnded = false;
+    if (!deps.stopWhenSilenced) return;
+    const tracks = stream.getAudioTracks();
+    const mute = () => { if (local === stream) { micMuted = true; checkStop(); } };
+    const unmute = () => { if (local === stream) { micMuted = tracks.some((t) => t.muted === true && t.readyState !== 'ended'); checkStop(); } };
+    const ended = () => { if (local === stream) { micEnded = true; checkStop(); } };
+    for (const t of tracks) {
+      t.addEventListener?.('mute', mute);
+      t.addEventListener?.('unmute', unmute);
+      t.addEventListener?.('ended', ended);
+    }
+    offMic = () => {
+      for (const t of tracks) {
+        t.removeEventListener?.('mute', mute);
+        t.removeEventListener?.('unmute', unmute);
+        t.removeEventListener?.('ended', ended);
+      }
+    };
+  };
   const updateAudio = (live: boolean) => {
     if (!deps.audioSession || live === audioLive) return;
     audioLive = live;
@@ -439,6 +540,7 @@ export function createCallEngine(deps: CallDeps) {
     updateAudio(pc !== null && (view.phase === 'live' ||
       (view.phase === 'reconnecting' && view.liveAt !== null)));
     deps.onView(view);
+    checkStop();
   };
   const active = () => view.phase !== 'idle' && view.phase !== 'ended';
 
@@ -467,6 +569,12 @@ export function createCallEngine(deps: CallDeps) {
     ringTimer = undefined;
     clearTimeout(dropTimer);
     dropTimer = undefined;
+    clearStop();
+    offMic?.();
+    offMic = null;
+    micMuted = false;
+    micQuiet = false;
+    micEnded = false;
     videoSender = null;
     const oldPc = pc;
     pc = null;
@@ -556,7 +664,9 @@ export function createCallEngine(deps: CallDeps) {
     minutes = null;
     teardown();
     healedRefusal = null;
-    set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null });
+    // A stop that already ended the call stays said; one still in its grace does not.
+    set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null,
+      stopped: view.stopped?.endsAt === null ? view.stopped : null });
     if (session) { if (view.outgoing) session.finish(); else session.dispose(); }
     const recorded = record && peer ? Promise.all(operations.map(([operationId, wireCallId]) => closeAdmission(operationId, peer, wireCallId))) : Promise.resolve();
     if (endAtHost && ids.length) void recorded.then(() => closeAdmissions(ids, callId));
@@ -653,6 +763,7 @@ export function createCallEngine(deps: CallDeps) {
       throw new Error(MEDIA_ERROR());
     }
     local = stream;
+    watchMic(stream);
     const conn = deps.peerConnection({ iceServers: deps.iceServers?.() ?? [] });
     pc = conn;
     stream.getTracks().forEach((t) => {
@@ -950,7 +1061,7 @@ export function createCallEngine(deps: CallDeps) {
     }
   });
 
-  return {
+  const api = {
     view: () => view,
     /** Move an untouched waiting offer to the normal answer path after media is free. */
     acceptWaiting: async (id: string) => {
@@ -1181,18 +1292,30 @@ export function createCallEngine(deps: CallDeps) {
       if (view.callId === callId && view.close?.status === 'closed') set({ close: { status: 'closed', message: tr('caTheEarlierCallIsEndedYouCanCallThem') } });
     },
 
-    /** iOS visibility only: stop video capture, retain audio and transport.
-     * Foregrounding never captures again without the owner's camera action. */
+    /** Phone visibility: stop video capture, retain audio and transport.
+     * Foregrounding never captures again without the owner's camera action.
+     * With `stopWhenSilenced`, a call that stays hidden is hung up after
+     * SILENCED_GRACE_MS. */
     setBackgrounded: (hidden: boolean) => {
       if (hidden && !backgrounded) videoGeneration++;
       backgrounded = hidden;
       if (hidden) pauseVideo();
+      checkStop();
+    },
+
+    /** The capture path heard only digital silence for a while (true), or sound again (false). */
+    micSilent: (silent: boolean) => {
+      if (micQuiet === silent) return;
+      micQuiet = silent;
+      checkStop();
     },
 
     toggleMute: () => {
       if (!local) return;
       const muted = !view.muted;
       local.getAudioTracks().forEach((t) => { t.enabled = !muted; });
+      // The owner's own mute is silent on purpose; unmuting needs fresh evidence of a silenced microphone.
+      if (!muted) micQuiet = false;
       set({ muted });
     },
 
@@ -1334,4 +1457,6 @@ export function createCallEngine(deps: CallDeps) {
       }
     },
   };
+  stopHangup = () => { void api.hangup(); };
+  return api;
 }
