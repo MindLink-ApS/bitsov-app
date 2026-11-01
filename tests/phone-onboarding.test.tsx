@@ -52,7 +52,7 @@ it('auto-connects a scan, displays ordered words and only the owner can approve'
   setPairing({ ...INITIAL_PAIRING, remote: true, state: 'paired' });
   setStatus({ ready: true, node_id: 'box', error: null }); await tick();
   expect([...document.querySelectorAll('[data-pair-word]')].map(e => e.textContent)).toEqual(['alpha', 'beta', 'gamma', 'delta']);
-  expect(document.body.textContent).toContain('If the screen that showed the QR has the same words, approve there.');
+  expect(document.body.textContent).toContain('If they are, approve on your computer.');
   expect(button('They match')).toBeUndefined();
   expect(props.beginJoin).toHaveBeenCalledWith();
   button("They don't match").click(); await tick();
@@ -70,7 +70,7 @@ it('reads clipboard only on tap and never echoes an invalid value', async () => 
   vi.stubGlobal('navigator', { clipboard: { readText } });
   const props = mount(); expect(readText).not.toHaveBeenCalled();
   button('Paste link').click(); await tick();
-  expect(document.body.textContent).toContain('Nothing to paste.');
+  expect(document.body.textContent).toContain('There’s no link to paste.');
   expect(document.body.textContent).not.toContain('private clipboard contents');
   expect(props.connect).not.toHaveBeenCalled();
 });
@@ -136,7 +136,7 @@ it('never reports a mismatch cancellation as successful if cancellation fails', 
 });
 it('keeps fingerprint confirmation for a host without delegation', async () => {
   const props = mount({ status: () => ({ ready: true, node_id: 'ABCDEF', error: null }), pairing: () => ({ ...INITIAL_PAIRING, remote: true, state: 'paired' }), device: () => ({ available: false, delegation_supported: false, state: 'unavailable', fingerprint: null, owner_action: null, expires_at_ms: null }) });
-  await tick(); expect(document.querySelector('h1')?.textContent).toBe('Does this match your other screen?');
+  await tick(); expect(document.querySelector('h1')?.textContent).toBe('Is the same code on your computer?');
   expect(props.beginJoin).not.toHaveBeenCalled(); button('They match').click();
   expect(button('Open BitSov')).toBeTruthy();
 });
@@ -554,8 +554,8 @@ it('leaves a connection that progresses alone', async () => {
 // A stale ticket (expired, used, or a code the box no longer accepts) stops at once and offers a new link.
 const USED_TICKET = 'remote node refused pairing: This ticket expired, was already used, or its owner was revoked. Ask an enrolled owner device for a new ticket.';
 it.each([
-  ['en', 'This link no longer works', 'Ask for a new link on your computer.', 'Paste new link'],
-  ['da', 'Linket virker ikke længere', 'Bed om et nyt link på din computer.', 'Indsæt nyt link'],
+  ['en', 'This link no longer works', 'Make a new code on your computer, then paste the new link here.', 'Paste new link'],
+  ['da', 'Linket virker ikke længere', 'Lav en ny kode på computeren, og indsæt så det nye link her.', 'Indsæt nyt link'],
 ])('forgets a stale ticket the host reports at once and offers one paste action (%s)', async (locale, heading, line, action) => {
   const props = mount({ locale, status: () => ({ ready: false, node_id: null, error: null, connection_error: { kind: 'used', detail: 'x' } }) });
   await tick();
@@ -620,4 +620,46 @@ it.each(['ios', 'android'] as const)('explains a Face ID prompt before Connectin
   const why = document.querySelector('[data-faceid-why]');
   if (platform === 'ios') expect(why?.textContent).toBe('You may be asked for Face ID: it opens this app’s pairing key.');
   else expect(why).toBeNull();
+});
+// Run 1 fixes: biometrics said plainly, a confirmed forget, and the compare screen names the computer.
+it.each([
+  ['ios', 'device_biometry', 'Face ID isn’t turned on', 'Turn on Face ID or a passcode in Settings, then come back here.', 'Open Settings'],
+  ['android', 'device_unavailable', 'Fingerprint isn’t turned on', 'Turn on a fingerprint or a screen lock in Settings, then come back here.', 'Open Settings'],
+  ['ios', 'device_cancelled', 'Face ID was cancelled', 'Nothing was added. Try again when you’re ready.', 'Try again'],
+] as const)('%s says %s plainly instead of a connection error', async (platform, code, heading, line, action) => {
+  const props = mount({ platform, status: () => ({ ready: true, node_id: 'box', error: null }), pairing: () => ({ ...INITIAL_PAIRING, remote: true, state: 'paired' }),
+    device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }),
+    join: vi.fn().mockResolvedValue({ state: 'idle', second_device: true }),
+    beginJoin: vi.fn().mockRejectedValue({ code, message: 'Approve at the node instead, with the konsensus grant command.' }) });
+  await vi.waitFor(() => expect(document.querySelector('h1')?.textContent).toBe(heading));
+  expect(document.querySelector('.phone-line')?.textContent).toBe(line);
+  expect([...document.querySelectorAll('button.primary')].map(b => b.textContent)).toEqual([action]);
+  expect(document.body.textContent).not.toMatch(/konsensus|node/);
+  if (code === 'device_biometry') { button('Open Settings').click(); await tick(); expect(props.openSettings).toHaveBeenCalledOnce(); }
+});
+it('asks once before forgetting the box, and Keep it changes nothing', async () => {
+  const props = mount();
+  await tick();
+  button('Forget this box').click(); await tick();
+  expect(document.querySelector('[data-phone-forget-confirm]')?.textContent).toContain('Forget this box? This phone stops using it.');
+  expect(props.forget).not.toHaveBeenCalled();
+  button('Keep it').click(); await tick();
+  expect(document.querySelector('[data-phone-forget-confirm]')).toBeNull();
+  expect(props.forget).not.toHaveBeenCalled();
+  button('Forget this box').click(); await tick();
+  button('Yes, forget it').click(); await tick();
+  expect(props.forget).toHaveBeenCalledOnce();
+});
+it('keeps Forget this box outside the help sections', async () => {
+  mount(); await tick();
+  const forget = button('Forget this box');
+  expect(forget.parentElement?.matches('.phone-options')).toBe(true);
+});
+it('names the computer on the Danish compare screen', async () => {
+  const words = ['alpha', 'beta', 'gamma', 'delta'];
+  mount({ locale: 'da', status: () => ({ ready: true, node_id: 'box', error: null }), pairing: () => ({ ...INITIAL_PAIRING, remote: true, state: 'paired' }),
+    device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }),
+    beginJoin: vi.fn().mockResolvedValue({ state: 'waiting', words, expires_at: Date.now()/1000 + 300 }) });
+  await vi.waitFor(() => expect(document.querySelector('h1')?.textContent).toBe('Står de samme 4 ord på din computer?'));
+  expect([...document.querySelectorAll('[data-pair-word]')].map(w => w.textContent)).toEqual(words);
 });
