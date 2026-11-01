@@ -166,7 +166,7 @@ pub struct AdmissionView {
     pub quoted: bool,
 }
 
-pub const MONEY_NOT_READY: &str = "Money is not ready yet. Your node will retry automatically.";
+pub const MONEY_NOT_READY: &str = "Money is not ready yet. Your box will retry automatically.";
 
 /// Only this explicit pre-dispatch refusal may release a pending spend.
 /// A generic 503 (or a broken response) still has an unknown outcome.

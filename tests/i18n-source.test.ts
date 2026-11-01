@@ -19,7 +19,7 @@ const protocol: Record<string, Record<string, string[]>> = {
   'control/call.ts': { createCallEngine: ['NotFoundError'], RECOVERY_CLOSING: ['Your last call is still closing. End it, then call again.'] },
   // M6 A1: the placeholder session description that carries the node-routed marker (wire bytes, never shown).
   'control/nodeRoutedConnection.ts': { nodeRoutedSdp: ['o=bitsov 0 0 IN IP4 0.0.0.0', 'c=IN IP4 0.0.0.0'] },
-  'control/readiness.ts': { readinessSource: ['not_ready'], MONEY_NOT_READY: ['Money is not ready yet. Your node will retry automatically.'] },
+  'control/readiness.ts': { readinessSource: ['not_ready'], MONEY_NOT_READY: ['Money is not ready yet. Your box will retry automatically.'] },
   'control/polling.ts': { pollingSource: ['Shell closed', 'Shell stopped'] },
   'control/wallet.ts': { artifactActivity: ['Paid an invoice', 'Paid a node directly', 'Invoice · {0}'], activityLabel: ['Invoice · '] },
   'control/StarterBalance.tsx': { StarterStep: ['storage', 'request', 'read'] },

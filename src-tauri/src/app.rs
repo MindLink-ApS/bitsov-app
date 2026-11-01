@@ -4651,7 +4651,7 @@ enum Auth {
 /// A cooldown is a proven pre-dispatch refusal, before journal or reservation I/O.
 fn refuse_if_connection_waiting(state: &NodeState) -> Result<(), ActionError> {
     if state.remote_retry.remaining().is_some() {
-        return Err(ActionError::new("not_ready", "Waiting for the connection. Your node will retry automatically."));
+        return Err(ActionError::new("not_ready", "Waiting for the connection. Your box will retry automatically."));
     }
     Ok(())
 }
