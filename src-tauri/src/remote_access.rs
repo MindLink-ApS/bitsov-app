@@ -47,11 +47,39 @@ const MAX_LOCAL_REQUEST_PREFIX: usize = 64 * 1024;
 const LOCAL_AUTH_TIMEOUT: Duration = Duration::from_secs(2);
 const REMOTE_READER_QUEUE: usize = 2;
 const MAX_LOCAL_CONNECTIONS: usize = 8;
+/// Of those, slots only a call media socket may use, so a full HTTP pool
+/// plus the live WebSocket cannot starve a call's audio.
+const RESERVED_MEDIA_CONNECTIONS: usize = 1;
+/// A proxied request waits at most this long for its remote tunnel (handshake
+/// queue included). Shorter than the slowest local caller's own timeout, so a
+/// request is never forwarded after that caller has given up.
+const REMOTE_CONNECT_DEADLINE: Duration = Duration::from_secs(60);
 const MAX_PENDING_LOCAL_AUTH: usize = 16;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const HANDSHAKE_UNAVAILABLE: &str = "remote handshake limit or endpoint unavailable";
+/// Response header naming the code of an error the loopback proxy itself
+/// wrote (the same code is in the JSON body). Node responses never pass
+/// through `write_proxy_error`.
+pub const PROXY_ERROR_HEADER: &str = "x-bitsov-proxy-error";
+/// Proxy-originated codes that only mean "no tunnel right now": worth a retry.
+const TRANSIENT_PROXY_ERRORS: [&str; 5] = [
+    "remote_retry_wait", "remote_proxy_busy", "remote_proxy_auth_busy",
+    "remote_handshake_unavailable", "remote_transport_refused",
+];
+
+/// The code of a transient error written by this proxy, read from its header
+/// or else its JSON body. `None` for anything else, including every response
+/// the node itself sent.
+pub fn transient_proxy_error(header: Option<&str>, body: Option<&[u8]>) -> Option<&'static str> {
+    #[derive(Deserialize)]
+    struct Body { code: String }
+    let body_code = || body.filter(|b| b.len() <= 1024)
+        .and_then(|b| serde_json::from_slice::<Body>(b).ok()).map(|b| b.code);
+    let code = header.map(str::to_owned).or_else(body_code)?;
+    TRANSIENT_PROXY_ERRORS.into_iter().find(|known| *known == code)
+}
 
 /// Longest `hosted_by` label shown, in characters (the node's own limit).
 pub const HOSTED_BY_MAX_CHARS: usize = 64;
@@ -1806,10 +1834,10 @@ fn is_unauthenticated_local(error: &RemoteError) -> bool {
     )
 }
 
-async fn write_proxy_error(local: &mut TcpStream, status: &str, code: &str, message: &str) {
+pub(crate) async fn write_proxy_error(local: &mut TcpStream, status: &str, code: &str, message: &str) {
     let body = format!(r#"{{"code":"{code}","message":"{message}"}}"#);
     let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{PROXY_ERROR_HEADER}: {code}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = tokio::time::timeout(WRITE_TIMEOUT, async {
@@ -1889,6 +1917,36 @@ async fn connect_authenticated(
     Ok((remote, noise, client_id, scopes))
 }
 
+// The endpoint that last completed the handshake and authentication, per box
+// identity. Endpoints are public routing data; this is never persisted.
+static PREFERRED_ENDPOINTS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+const MAX_PREFERRED_ENDPOINTS: usize = 8;
+
+fn endpoint_memory_key(descriptor: &RemoteDescriptor) -> String {
+    format!("{}/{}/{}", descriptor.node_id, descriptor.transport_pubkey, descriptor.box_transport_pubkey)
+}
+
+/// Try the endpoint that worked last time first, then the rest in their
+/// advertised order. An unknown or no longer advertised endpoint changes nothing.
+fn ordered_endpoints<'a>(descriptor: &RemoteDescriptor, mut endpoints: Vec<&'a str>) -> Vec<&'a str> {
+    let key = endpoint_memory_key(descriptor);
+    let preferred = PREFERRED_ENDPOINTS.lock().ok()
+        .and_then(|memory| memory.iter().find(|(k, _)| *k == key).map(|(_, endpoint)| endpoint.clone()));
+    if let Some(index) = preferred.and_then(|p| endpoints.iter().position(|endpoint| *endpoint == p)) {
+        let endpoint = endpoints.remove(index);
+        endpoints.insert(0, endpoint);
+    }
+    endpoints
+}
+
+fn remember_endpoint(descriptor: &RemoteDescriptor, endpoint: &str) {
+    let key = endpoint_memory_key(descriptor);
+    let Ok(mut memory) = PREFERRED_ENDPOINTS.lock() else { return };
+    memory.retain(|(k, _)| *k != key);
+    if memory.len() >= MAX_PREFERRED_ENDPOINTS { memory.remove(0); }
+    memory.push((key, endpoint.to_owned()));
+}
+
 async fn connect_bound(
     descriptor: &RemoteDescriptor, key: &ClientKey, name: &str, recovery_node: Option<&str>,
     before_auth: Option<&(dyn Fn() -> Result<(), RemoteError> + Sync)>,
@@ -1896,6 +1954,8 @@ async fn connect_bound(
     let routes = if descriptor.endpoints.is_empty() { &descriptor.bootstrap_routes } else { &descriptor.endpoints };
     let endpoints = if routes.is_empty() { vec![descriptor.endpoint.as_str()] }
         else { routes.iter().map(String::as_str).collect() };
+    // Each unreachable endpoint costs up to CONNECT_TIMEOUT, on every new tunnel.
+    let endpoints = ordered_endpoints(descriptor, endpoints);
     let mut last = RemoteError::HandshakeUnavailable;
     for endpoint in endpoints {
         let attempt = async {
@@ -1914,6 +1974,7 @@ async fn connect_bound(
         match attempt {
             Ok((mut remote, mut noise, hash)) => {
                 let (client, scopes, proofs) = encrypted_auth(&mut remote, &mut noise, descriptor, key, name, recovery_node, before_auth).await?;
+                remember_endpoint(descriptor, endpoint);
                 return Ok((remote, noise, hash, client, scopes, proofs));
             }
             Err(error @ RemoteError::RateLimited(_)) => return Err(error),
@@ -2246,6 +2307,28 @@ pub async fn authenticate_pinned_transport_and_save_record(
     descriptor.into_inner().map_err(|_| RemoteError::Local("remote descriptor lock is poisoned".into()))
 }
 
+/// Resolves once the local caller has closed or reset its connection. Bytes
+/// it sent after the buffered request stay queued for the tunnel.
+async fn caller_gone(local: &TcpStream) {
+    let mut byte = [0u8; 1];
+    if let Ok(1..) = local.peek(&mut byte).await {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// A call media WebSocket upgrade (`/api/v1/calls/<id>/media`), which may use
+/// the reserved slots.
+fn is_call_media_upgrade(http: &LocalHttpSanitizer, initial: &[u8]) -> bool {
+    let line = initial.split(|byte| *byte == b'\r').next().unwrap_or_default();
+    let Some(target) = std::str::from_utf8(line).ok()
+        .and_then(|line| line.strip_prefix("GET "))
+        .and_then(|line| line.strip_suffix(" HTTP/1.1")) else { return false };
+    let path = target.split('?').next().unwrap_or_default();
+    matches!(http.state, LocalHttpState::Upgraded)
+        && path.strip_prefix("/api/v1/calls/").and_then(|rest| rest.strip_suffix("/media"))
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+}
+
 struct AuthenticatedLocal {
     stream: TcpStream,
     http: LocalHttpSanitizer,
@@ -2270,16 +2353,26 @@ async fn serve_connection(
         .lock()
         .map_err(|_| RemoteError::Local("remote descriptor lock is poisoned".into()))?
         .clone();
-    let (remote, noise, client_id, scopes) = match retry
-        .run(|| connect_authenticated(&snapshot, &key, &client_name))
-        .await
-    {
+    // The request is already buffered. If its caller gives up while the
+    // tunnel is still being set up, drop it instead of forwarding it late.
+    let connected = tokio::select! {
+        biased;
+        () = caller_gone(&local) => return Ok(()),
+        connected = tokio::time::timeout(
+            REMOTE_CONNECT_DEADLINE,
+            retry.run(|| connect_authenticated(&snapshot, &key, &client_name)),
+        ) => connected.unwrap_or(Err(RemoteError::HandshakeUnavailable)),
+    };
+    let (remote, noise, client_id, scopes) = match connected {
         Ok(connection) => connection,
         Err(error) => {
             write_connection_error(&mut local, &error).await;
             return Err(error);
         }
     };
+    if futures_util::FutureExt::now_or_never(caller_gone(&local)).is_some() {
+        return Ok(());
+    }
 
     if noise.get_remote_static() != Some(&snapshot.transport_pubkey_bytes[..]) {
         write_proxy_error(&mut local, "503 Service Unavailable", "node_locked", "Node is locked after restart").await;
@@ -2372,12 +2465,13 @@ pub fn loopback_addr(api_base: &str) -> Result<SocketAddr, RemoteError> {
 }
 
 /// Each HTTP connection occupies a Noise tunnel. Retain a bounded warm pool,
-/// leaving the proxy's eighth slot for the live WebSocket. Local connect stays
-/// bounded, while WAN requests have time to complete without losing the tunnel.
+/// leaving one shared slot for the live WebSocket (the reserved media slot is
+/// out of reach for HTTP anyway). Local connect stays bounded, while WAN
+/// requests have time to complete without losing the tunnel.
 pub fn http_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(2))
-        .pool_max_idle_per_host(MAX_LOCAL_CONNECTIONS - 1)
+        .pool_max_idle_per_host(MAX_LOCAL_CONNECTIONS - RESERVED_MEDIA_CONNECTIONS - 1)
         .pool_idle_timeout(Duration::from_secs(55))
         .timeout(Duration::from_secs(15))
         .no_proxy()
@@ -2409,7 +2503,8 @@ pub async fn start_proxy(
     // HTTP keep-alive and WebSocket connections each retain one remote
     // TCP/Noise tunnel. Independent byte streams are never interleaved; this
     // bounded set is the safe reusable pool without adding a mux wire protocol.
-    let tunnel_permits = Arc::new(Semaphore::new(MAX_LOCAL_CONNECTIONS));
+    let tunnel_permits = Arc::new(Semaphore::new(MAX_LOCAL_CONNECTIONS - RESERVED_MEDIA_CONNECTIONS));
+    let media_permits = Arc::new(Semaphore::new(RESERVED_MEDIA_CONNECTIONS));
     let auth_permits = Arc::new(Semaphore::new(MAX_PENDING_LOCAL_AUTH));
     let last_error = Arc::new(Mutex::new(None));
 
@@ -2465,6 +2560,7 @@ pub async fn start_proxy(
                         let local_auth = local_auth.clone();
                         let last_error = last_error.clone();
                         let tunnel_permits = tunnel_permits.clone();
+                        let media_permits = media_permits.clone();
                         let retry = retry.clone();
                         let mut connection_stopped = stopped.clone();
                         connections.spawn(async move {
@@ -2489,7 +2585,10 @@ pub async fn start_proxy(
                                     }
                                 };
                             drop(auth_permit);
-                            let Ok(tunnel_permit) = tunnel_permits.try_acquire_owned() else {
+                            let reserved = if is_call_media_upgrade(&local_http, &initial_local) {
+                                media_permits.try_acquire_owned().ok()
+                            } else { None };
+                            let Some(tunnel_permit) = reserved.or_else(|| tunnel_permits.try_acquire_owned().ok()) else {
                                 write_proxy_error(
                                     &mut stream,
                                     "503 Service Unavailable",
@@ -3960,6 +4059,234 @@ mod tests {
         assert!(server.await.unwrap().is_err());
     }
 
+    // Handshake and authenticate every accepted tunnel, then hand back what
+    // arrives inside it (the forwarded HTTP bytes) until the tunnel closes.
+    async fn authenticating_responder(listener: TcpListener, secret: [u8; 32], forwarded: mpsc::UnboundedSender<Vec<u8>>) {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(authenticate_and_forward(stream, secret, forwarded.clone()));
+        }
+    }
+
+    async fn authenticate_and_forward(mut stream: TcpStream, secret: [u8; 32], forwarded: mpsc::UnboundedSender<Vec<u8>>) -> Result<(), RemoteError> {
+        let mut noise = Builder::new(NOISE_PROTOCOL.parse().unwrap())
+            .local_private_key(&secret).build_responder().unwrap();
+        let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
+        let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
+        noise.read_message(&message, &mut output).unwrap();
+        let length = noise.write_message(&[], &mut output).unwrap();
+        write_frame(&mut stream, &output[..length]).await?;
+        let message = read_frame(&mut stream, MAX_HANDSHAKE_FRAME).await?;
+        noise.read_message(&message, &mut output).unwrap();
+        let mut noise = noise.into_transport_mode().unwrap();
+        let encrypted = read_frame(&mut stream, MAX_TRANSPORT_FRAME).await?;
+        let auth = decode_transport(&mut noise, &encrypted, MAX_AUTH_PLAINTEXT)?;
+        let _: RemoteAuthRequest = serde_json::from_slice(&auth).unwrap();
+        let response = serde_json::to_vec(&RemoteAuthResponse::Ok {
+            v: 1, client_id: "0123456789abcdef0123456789abcdef".into(),
+            scopes: vec!["read".into()],
+            box_transport_pubkey: None, box_transport_signature: None,
+            transport_pubkey: None, transport_signature: None,
+        }).unwrap();
+        let encrypted = encode_transport(&mut noise, &response)?;
+        write_frame(&mut stream, &encrypted).await?;
+        loop {
+            let encrypted = read_frame(&mut stream, MAX_TRANSPORT_FRAME).await?;
+            let _ = forwarded.send(decode_transport(&mut noise, &encrypted, MAX_NOISE_PLAINTEXT)?);
+        }
+    }
+
+    async fn proxy_for(descriptor: RemoteDescriptor, local_auth: &Arc<str>, retry: Arc<RemoteRetry>) -> (RemoteProxy, tempfile::TempDir, tempfile::TempDir) {
+        let app_dir = tempfile::tempdir().unwrap();
+        persist_at(&config_path(app_dir.path()), &descriptor).unwrap();
+        let pairing_store = tempfile::tempdir().unwrap();
+        let key = Arc::new(ClientKey::load_or_create(pairing_store.path()).unwrap());
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = probe.local_addr().unwrap();
+        drop(probe);
+        let proxy = start_proxy(&format!("http://{local_addr}/api/v1"), app_dir.path(), descriptor, key,
+            "BitSov test", pairing_store.path().to_path_buf(), local_auth.clone(), retry).await.unwrap();
+        (proxy, app_dir, pairing_store)
+    }
+
+    // The caller gives up while the tunnel is still being set up (here: the
+    // box holds the handshake). The buffered request must not be sent later.
+    #[tokio::test]
+    async fn a_request_whose_caller_gave_up_is_never_forwarded() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let secret = [66u8; 32];
+        let node = SigningKey::from_bytes(&[65u8; 32]);
+        let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+        let descriptor = parse_pairing_link(&signed_link(
+            listener.local_addr().unwrap().to_string(), &node, public, &test_code(67),
+        )).unwrap();
+        let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (forwarded, mut forwarded_rx) = mpsc::unbounded_channel();
+        let server = tokio::spawn({
+            let release = release.clone();
+            async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                accepted_tx.send(()).unwrap();
+                release.notified().await;
+                let _ = authenticate_and_forward(stream, secret, forwarded).await;
+            }
+        });
+        let local_auth: Arc<str> = Arc::from("c".repeat(64));
+        let (proxy, _app, _store) = proxy_for(descriptor, &local_auth, Arc::new(RemoteRetry::default())).await;
+
+        let mut caller = TcpStream::connect(proxy.local_addr()).await.unwrap();
+        caller.write_all(format!(
+            "GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\n{LOCAL_AUTH_HEADER}: {local_auth}\r\n\r\n"
+        ).as_bytes()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), accepted_rx.recv()).await.unwrap().unwrap();
+        // The caller's own timeout fires: it closes the connection.
+        drop(caller);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        release.notify_one();
+        let late = tokio::time::timeout(Duration::from_secs(2), forwarded_rx.recv()).await;
+        assert!(!matches!(late, Ok(Some(_))), "a request was forwarded after its caller gave up");
+        drop(proxy);
+        server.abort();
+    }
+
+    // A request queued behind a slow tunnel setup gets a bounded wait. After
+    // the deadline it is answered (503) and never forwarded.
+    #[tokio::test]
+    async fn a_queued_request_has_an_overall_connect_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let secret = [69u8; 32];
+        let node = SigningKey::from_bytes(&[68u8; 32]);
+        let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+        let descriptor = parse_pairing_link(&signed_link(
+            listener.local_addr().unwrap().to_string(), &node, public, &test_code(70),
+        )).unwrap();
+        let (forwarded, mut forwarded_rx) = mpsc::unbounded_channel();
+        let server = tokio::spawn(authenticating_responder(listener, secret, forwarded));
+        let local_auth: Arc<str> = Arc::from("d".repeat(64));
+        let retry = Arc::new(RemoteRetry::default());
+        let (proxy, _app, _store) = proxy_for(descriptor, &local_auth, retry.clone()).await;
+
+        // Another tunnel setup holds the handshake queue.
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        let holder = tokio::spawn({
+            let retry = retry.clone();
+            async move { retry.run(|| async { let _ = held.await; Ok(()) }).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut caller = TcpStream::connect(proxy.local_addr()).await.unwrap();
+        caller.write_all(format!(
+            "GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\n{LOCAL_AUTH_HEADER}: {local_auth}\r\n\r\n"
+        ).as_bytes()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::pause();
+        tokio::time::advance(REMOTE_CONNECT_DEADLINE + Duration::from_secs(1)).await;
+        tokio::time::resume();
+        let mut response = String::new();
+        let read = tokio::time::timeout(Duration::from_secs(2), caller.read_to_string(&mut response)).await;
+        release.send(()).unwrap();
+        holder.await.unwrap().unwrap();
+        let late = tokio::time::timeout(Duration::from_secs(1), forwarded_rx.recv()).await;
+        assert!(!matches!(late, Ok(Some(_))), "a request was forwarded after the connect deadline");
+        assert!(read.is_ok(), "the caller is answered at the deadline");
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"), "{response}");
+        assert!(response.contains("remote_handshake_unavailable"));
+        drop(proxy);
+        server.abort();
+    }
+
+    #[test]
+    fn only_the_proxys_own_transient_errors_are_retryable() {
+        for code in TRANSIENT_PROXY_ERRORS {
+            assert_eq!(transient_proxy_error(Some(code), None), Some(code));
+            let body = format!(r#"{{"code":"{code}","message":"x"}}"#);
+            assert_eq!(transient_proxy_error(None, Some(body.as_bytes())), Some(code));
+        }
+        for code in ["remote_pairing_refused", "remote_proxy_unauthorized", "node_locked", "call_not_admitted"] {
+            assert_eq!(transient_proxy_error(Some(code), None), None);
+        }
+        assert_eq!(transient_proxy_error(None, Some(br#"{"error":"not admitted"}"#)), None);
+        assert_eq!(transient_proxy_error(None, Some(b"Service Unavailable")), None);
+        assert_eq!(transient_proxy_error(None, None), None);
+    }
+
+    // Skip one CONNECT_TIMEOUT on the virtual clock once the dead endpoint
+    // holds an attempt. Real loopback IO runs on the real clock, because a
+    // paused clock auto-advances while the runtime waits for socket events.
+    async fn skip_dead_endpoint(accepts: &std::sync::atomic::AtomicUsize, expected: usize) {
+        while accepts.load(std::sync::atomic::Ordering::SeqCst) < expected {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::pause();
+        tokio::time::advance(CONNECT_TIMEOUT).await;
+        tokio::time::resume();
+    }
+
+    // A box can advertise an address this device cannot reach (for example a
+    // container bridge) before the reachable one. Only the first new tunnel
+    // may pay the connect timeout for it.
+    #[tokio::test]
+    async fn new_tunnels_try_the_endpoint_that_last_worked_first() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_endpoint = dead.local_addr().unwrap().to_string();
+        let dead_accepts = Arc::new(AtomicUsize::new(0));
+        let silent = tokio::spawn({
+            let dead_accepts = dead_accepts.clone();
+            async move {
+                let mut held = Vec::new();
+                loop {
+                    // Accept the TCP connection, never answer the handshake.
+                    held.push(dead.accept().await.unwrap().0);
+                    dead_accepts.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        let live = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_endpoint = live.local_addr().unwrap().to_string();
+        let secret = [62u8; 32];
+        let node = SigningKey::from_bytes(&[61u8; 32]);
+        let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+        let mut descriptor = parse_pairing_link(&signed_link(
+            dead_endpoint.clone(), &node, public, &test_code(63),
+        )).unwrap();
+        descriptor.endpoints = vec![dead_endpoint, live_endpoint];
+        let (forwarded, _forwarded_rx) = mpsc::unbounded_channel();
+        let server = tokio::spawn(authenticating_responder(live, secret, forwarded));
+        let store = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(store.path()).unwrap();
+
+        let start = tokio::time::Instant::now();
+        let (first, ()) = tokio::join!(
+            connect_authenticated(&descriptor, &key, "test phone"),
+            skip_dead_endpoint(&dead_accepts, 1),
+        );
+        assert!(first.is_ok(), "the second endpoint answers");
+        assert!(start.elapsed() >= CONNECT_TIMEOUT, "{:?}", start.elapsed());
+        assert_eq!(dead_accepts.load(Ordering::SeqCst), 1);
+
+        // No clock skip this time: the remembered endpoint answers at once.
+        let second = tokio::time::timeout(Duration::from_secs(2),
+            connect_authenticated(&descriptor, &key, "test phone")).await
+            .expect("the remembered endpoint is tried first, without a connect timeout");
+        assert!(second.is_ok());
+        assert_eq!(dead_accepts.load(Ordering::SeqCst), 1, "the unreachable endpoint is not tried again");
+
+        // A descriptor that no longer lists the remembered endpoint falls back
+        // to its own order.
+        let mut moved = descriptor.clone();
+        moved.endpoints.truncate(1);
+        let (result, ()) = tokio::join!(
+            connect_authenticated(&moved, &key, "test phone"),
+            skip_dead_endpoint(&dead_accepts, 2),
+        );
+        assert!(result.is_err());
+        assert_eq!(dead_accepts.load(Ordering::SeqCst), 2);
+        silent.abort();
+        server.abort();
+    }
+
     #[tokio::test]
     async fn proxy_caps_authenticated_local_connections() {
         let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4008,7 +4335,7 @@ mod tests {
             "GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\n{LOCAL_AUTH_HEADER}: {local_auth}\r\n\r\n"
         );
         let mut held_local = Vec::new();
-        for _ in 0..MAX_LOCAL_CONNECTIONS {
+        for _ in 0..MAX_LOCAL_CONNECTIONS - RESERVED_MEDIA_CONNECTIONS {
             let mut stream = TcpStream::connect(proxy.local_addr()).await.unwrap();
             stream.write_all(request.as_bytes()).await.unwrap();
             held_local.push(stream);
@@ -4032,7 +4359,26 @@ mod tests {
         let response = String::from_utf8(response).unwrap();
         assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
         assert!(response.contains("remote_proxy_busy"));
+        assert!(response.contains(&format!("{PROXY_ERROR_HEADER}: remote_proxy_busy\r\n")));
 
+        // A call's media socket still gets the reserved slot (it queues for
+        // the handshake like the others); a second one does not.
+        let media = format!(
+            "GET /api/v1/calls/0123456789abcdef0123456789abcdef/media?peer={} HTTP/1.1\r\nHost: localhost\r\n\
+             Connection: Upgrade\r\nUpgrade: websocket\r\n{LOCAL_AUTH_HEADER}: {local_auth}\r\n\r\n", "ab".repeat(32)
+        );
+        let mut call_media = TcpStream::connect(proxy.local_addr()).await.unwrap();
+        call_media.write_all(media.as_bytes()).await.unwrap();
+        let mut byte = [0u8; 1];
+        assert!(tokio::time::timeout(Duration::from_millis(200), call_media.read(&mut byte)).await.is_err(),
+            "the media socket must not be turned away while HTTP holds every shared slot");
+        let mut second_media = TcpStream::connect(proxy.local_addr()).await.unwrap();
+        second_media.write_all(media.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(1), second_media.read_to_end(&mut response)).await.unwrap();
+        assert!(String::from_utf8(response).unwrap().contains("remote_proxy_busy"));
+
+        drop(call_media);
         drop(held_local);
         drop(proxy);
         remote_server.abort();
