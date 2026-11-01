@@ -5324,7 +5324,8 @@ function Composer(props: {
   const firstContactCostLine = (): string | null => {
     if (!doorWanted() || (!door() && !readmitPrice())) return null;
     const q = readmitPrice() ?? doorQuote();
-    if (priceProblem()) return priceProblem();
+    // A price problem is said once, on the price line with its Retry; never repeated here.
+    if (priceProblem()) return null;
     if (!q) return tr('firstSpendCostLoading');
     return tr('firstSpendCost', fmtAmount(q.admission_msat), fmtAmount(q.message_msat),
       fmtAmount(q.max_routing_fee_msat ?? 0), fmtAmount(q.total_msat));
@@ -6263,6 +6264,11 @@ function Composer(props: {
       ? props.spend?.state === 'pending' || props.spend?.state === 'unavailable' || props.spend === null
       : !ready());
 
+  const sendPriceId = createUniqueId();
+  const shownReason = () => {
+    const reason = disabledReason();
+    return reason && !(mode() === 'message' && reason === priceLine()) ? reason : null;
+  };
   const disabledReason = (): string | null => {
     if (!disabled()) return null;
     if (mode() === 'message' && !draft().trim()) return tr('uiTypeAMessageFirst');
@@ -6569,7 +6575,7 @@ function Composer(props: {
             class="primary soft send-btn money"
             disabled={disabled()}
             data-send
-            aria-describedby={disabledReason() ? sendReasonId : undefined}
+            aria-describedby={shownReason() ? sendReasonId : disabledReason() ? sendPriceId : undefined}
             onClick={(e) => { if (e.detail > 1) e.preventDefault(); }}
             title={sendTitle()}
             aria-label={sendTitle()}
@@ -6578,8 +6584,9 @@ function Composer(props: {
           </button>
         </Show>
       </div>
-      <Show when={disabledReason()}>
-        <p id={sendReasonId} class="hint" data-send-disabled-reason>{disabledReason()}</p>
+      {/* Why Send is off, unless the price line below already says exactly that (with its Retry). */}
+      <Show when={shownReason()}>
+        <p id={sendReasonId} class="hint" data-send-disabled-reason>{shownReason()}</p>
       </Show>
       <Show when={mode() === 'message' && liveGrantRemaining() !== null}>
         <p class="hint" data-send-budget>{tr('sendBudgetRemaining', fmtAmount(liveGrantRemaining()!))}</p>
@@ -6587,7 +6594,7 @@ function Composer(props: {
       <div class="composer-meta">
       <Show when={mode() === 'message'}>
         <div class="send-price" classList={{ priced: !priceProblem() && (paidLine() !== null || messageShown().msat !== null) }}>
-          <span data-send-price aria-live="polite">{priceLine()}</span>
+          <span id={sendPriceId} data-send-price aria-live="polite">{priceLine()}</span>
           <Show when={firstContactCostLine()}><span class="first-contact-cost" data-first-contact-cost>{firstContactCostLine()}</span></Show>
           <Show when={priceProblem() && priceProblem() !== tr('uiPriceLoading')}>
             {' '}<button type="button" class="link" data-price-retry disabled={busy()} onClick={retryPrice}>{tr('uiRetry')}</button>
@@ -6625,7 +6632,10 @@ function Composer(props: {
                   <span class="unit">{satUnit(shown().msat!)}</span>
                 </span>
               </Show>
-              <span class="basis" title={shown().basis}>{shown().basis}</span>
+              {/* The price line already says a price problem (with Retry): not repeated as the cost basis. */}
+              <Show when={!(mode() === 'message' && priceProblem() && shown().basis === priceProblem())}>
+                <span class="basis" title={shown().basis}>{shown().basis}</span>
+              </Show>
             </div>
           </div>
         </Show>

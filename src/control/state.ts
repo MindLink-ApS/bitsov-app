@@ -41,12 +41,18 @@ export const trackKey = (t: TrackRef): string =>
  * Display name for a contact: the owner's local petname, else Unnamed contact plus a short id.
  * Remote profile names live in {@link claimedName} only — never as the rail title.
  */
+// Phones number unnamed contacts in the order they first appear this session (Ny kontakt, Ny kontakt 2, …).
+const unnamedOrder = new Map<string, number>();
 export const peerName = (peer: Peer | undefined, id: string): string => {
   contactRevision();
   const pet = petnameOf(id);
   if (pet) return pet;
+  if (!isMobilePlatform()) return t('extraUnnamedContact', shortId(id));
   // A phone names an unnamed contact plainly; its id stays in the contact's details.
-  return isMobilePlatform() ? t('caNewContact') : t('extraUnnamedContact', shortId(id));
+  const key = id.toLowerCase();
+  if (!unnamedOrder.has(key)) unnamedOrder.set(key, unnamedOrder.size + 1);
+  const n = unnamedOrder.get(key)!;
+  return n === 1 ? t('caNewContact') : t('caNewContactN', n);
 };
 
 /** Remote-supplied name (peer label / profile card). Suggestion only — never truth. */

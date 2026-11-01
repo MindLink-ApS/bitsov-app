@@ -20,6 +20,9 @@ it('a phone names an unnamed contact "Ny kontakt"; the Mac keeps the id', () => 
   expect(peerName(undefined, ID)).toMatch(/^Kontakt uden navn \(/);
   phone();
   expect(peerName(undefined, ID)).toBe('Ny kontakt');
+  // A second unnamed contact gets a number; each keeps its own.
+  expect(peerName(undefined, 'b'.repeat(64))).toBe('Ny kontakt 2');
+  expect(peerName(undefined, ID.toUpperCase())).toBe('Ny kontakt');
 });
 
 it('a phone says a contact’s box is temporarily not ready, without chain jargon', () => {
