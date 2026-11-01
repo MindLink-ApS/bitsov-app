@@ -117,6 +117,37 @@ mod owner_contact;
 /// this; only a debug `dev-node` build may move the port (`dev_node::api_base`).
 const API_BASE: &str = "http://127.0.0.1:3141/api/v1";
 
+/// An iOS Simulator app shares the Mac's loopback interface, where a desktop app
+/// or local node may already hold 3141. There the phone's home-node proxy must
+/// never use 3141; it takes a port the OS chooses instead (`phone_api_base`).
+/// Devices keep 3141: their loopback belongs to the phone alone.
+#[cfg(any(mobile, feature = "mobile", test))]
+const IOS_SIMULATOR: bool = cfg!(all(target_os = "ios", any(target_env = "sim", target_abi = "sim")));
+
+/// The loopback base a phone's host uses for its home-node proxy. The renderer
+/// never dials it (CSP `connect-src 'self' ipc:`); every request, the media
+/// socket and the proxy itself read `NodeState::api_base`, so the host alone
+/// needs the chosen port.
+///
+/// A simulator reserves a free loopback port and releases it for the proxy to
+/// bind, the same bind-later window 3141 has on a device. If no port can be
+/// reserved, the base names port 0: the proxy refuses it and requests fail, so
+/// it fails closed instead of falling back to 3141.
+#[cfg(any(mobile, feature = "mobile", test))]
+fn phone_api_base(simulator: bool) -> String {
+    if !simulator {
+        return API_BASE.to_string();
+    }
+    let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .and_then(|listener| listener.local_addr())
+        .map(|address| address.port())
+        .ok()
+        // The OS never picks 3141 from its ephemeral range; refuse it anyway.
+        .filter(|port| *port != 0 && *port != 3141)
+        .unwrap_or(0);
+    format!("http://127.0.0.1:{port}/api/v1")
+}
+
 /// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc20` / `0e10897eef1b7b21ab36e4d70aaf4282b5a30a9b`): the funding
 /// state machine moves to this step once the node has observed the required deposit
 /// in its own wallet. Kept host-side so the renderer never re-implements the contract.
@@ -510,7 +541,7 @@ impl Default for NodeState {
             std::process::exit(2)
         });
         #[cfg(any(mobile, feature = "mobile"))]
-        let api_base = API_BASE.to_string();
+        let api_base = phone_api_base(IOS_SIMULATOR);
         Self::for_api(api_base)
     }
 }
@@ -10499,6 +10530,29 @@ mod api_base_tests {
         // `cargo test` builds without `dev-node`: the product base, always.
         #[cfg(not(all(debug_assertions, feature = "dev-node")))]
         assert_eq!(super::NodeState::default().api_base, API_BASE);
+    }
+
+    /// A simulator shares the Mac's loopback: its proxy never takes 3141.
+    #[test]
+    fn simulator_phone_proxy_never_uses_3141() {
+        assert!(!super::IOS_SIMULATOR, "host tests are not a simulator build");
+        assert_eq!(super::phone_api_base(false), API_BASE);
+        for _ in 0..50 {
+            let base = super::phone_api_base(true);
+            let port = loopback_api_port(&base).expect("a usable loopback port");
+            assert_ne!(port, 3141, "{base}");
+            let address = super::remote_access::loopback_addr(&base).unwrap();
+            assert!(address.ip().is_loopback());
+            // The reservation was released, so the proxy can bind it.
+            drop(std::net::TcpListener::bind(address).expect("the reserved port is free again"));
+        }
+    }
+
+    /// Port 0 is the fail-closed base: the proxy refuses it, never 3141.
+    #[test]
+    fn the_unreserved_simulator_base_is_refused() {
+        assert!(super::remote_access::loopback_addr("http://127.0.0.1:0/api/v1").is_err());
+        assert_eq!(loopback_api_port("http://127.0.0.1:0/api/v1"), None);
     }
 
     /// The restore path stops only the listener on this app's own API port.
