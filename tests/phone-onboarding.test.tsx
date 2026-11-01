@@ -477,4 +477,87 @@ it.each([
   expect(onContinue).toHaveBeenCalledTimes(2);
   expect(document.querySelector('[role="alert"]')).toBeNull();
   expect(action().disabled).toBe(false);
+// A failed pairing or a stalled connection ends the wait with one plain action.
+const connectingProps = (pairing: () => ReturnType<PhoneOnboardingProps['pairing']>) => ({
+  pairing,
+  device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }) as const,
+});
+const headingText = () => document.querySelector('[data-phone-face] [tabindex="-1"]')?.textContent;
+const primary = () => [...document.querySelectorAll<HTMLButtonElement>('button.primary')];
+it.each([
+  ['en', "Pairing didn't finish", "This phone and your box couldn't complete pairing.", 'Try again'],
+  ['da', 'Parringen blev ikke færdig', 'Telefonen og boksen kunne ikke gøre parringen færdig.', 'Prøv igen'],
+])('replaces Connecting with the pairing failure and one action (%s)', async (locale, heading, line, action) => {
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  const props = mount({ locale, ...connectingProps(pairing) });
+  button(locale === 'en' ? "Scan your box’s QR" : 'Scan boksens QR-kode').click(); await tick();
+  expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('connecting');
+  setPairing({ ...INITIAL_PAIRING, remote: true, state: 'failed',
+    reason: 'the node refused /pair/challenge (403): {"code":"remote_proxy_unauthorized"} bitsov://pair/secretticket' });
+  await tick();
+  expect(headingText()).toBe(heading);
+  expect(document.querySelector('.phone-line')?.textContent).toBe(line);
+  expect(document.querySelector('.phone-status')).toBeNull();
+  expect(primary()).toHaveLength(1);
+  expect(primary()[0].textContent).toBe(action);
+  expect((primary()[0] as HTMLButtonElement).disabled).toBe(false);
+  expect(document.body.textContent).not.toContain('secretticket');
+  primary()[0].click(); await tick();
+  expect(props.retry).toHaveBeenCalledTimes(1);
+  expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('connecting');
+});
+it('names an unreachable box when the pairing failed in transport', async () => {
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  mount(connectingProps(pairing));
+  button("Scan your box’s QR").click(); await tick();
+  setPairing({ ...INITIAL_PAIRING, remote: true, state: 'failed', reason: 'remote transport failed: connection refused' });
+  await tick();
+  expect(headingText()).toBe("Can't reach your box");
+  expect(primary().map(b => b.textContent)).toEqual(['Try again']);
+});
+it.each([
+  ['en', 'This is taking too long', 'Your box isn’t answering. Check that it’s on.', 'Try again'],
+  ['da', 'Det tager for lang tid', 'Din boks svarer ikke. Tjek, at den er tændt.', 'Prøv igen'],
+])('stops waiting after 30 s without progress (%s)', async (locale, heading, line, action) => {
+  vi.useFakeTimers();
+  const props = mount({ locale, ...connectingProps(() => INITIAL_PAIRING), connect: vi.fn(() => new Promise<never>(() => {})) });
+  button(locale === 'en' ? "Scan your box’s QR" : 'Scan boksens QR-kode').click(); await tick();
+  expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('connecting');
+  await vi.advanceTimersByTimeAsync(29_000);
+  expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('connecting');
+  await vi.advanceTimersByTimeAsync(1_500);
+  expect(headingText()).toBe(heading);
+  expect(document.querySelector('.phone-line')?.textContent).toBe(line);
+  expect(primary().map(b => b.textContent)).toEqual([action]);
+  // The stalled connect no longer holds the action disabled.
+  expect((primary()[0] as HTMLButtonElement).disabled).toBe(false);
+  primary()[0].click(); await tick();
+  expect(props.retry).toHaveBeenCalledTimes(1);
+});
+it('does not let an earlier failure cut short a new attempt; the timeout still ends it', async () => {
+  vi.useFakeTimers();
+  // An earlier attempt's outcome, still reported when the new one starts.
+  const failed = { ...INITIAL_PAIRING, state: 'failed' as const, reason: 'the node refused /pair/token (403): no' };
+  mount(connectingProps(() => failed));
+  await tick();
+  button("Scan your box’s QR").click(); await tick();
+  expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('connecting');
+  await vi.advanceTimersByTimeAsync(30_500);
+  expect(headingText()).toBe('This is taking too long');
+});
+it('leaves a connection that progresses alone', async () => {
+  vi.useFakeTimers();
+  const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  const waiting = { state: 'waiting' as const, words: ['alpha', 'beta', 'gamma', 'delta'], expires_at: Date.now()/1000 + 600 };
+  const join = vi.fn().mockResolvedValueOnce({ state: 'idle', second_device: true }).mockResolvedValue(waiting);
+  mount({ status, ...connectingProps(pairing), join, beginJoin: vi.fn().mockResolvedValue(waiting) });
+  button("Scan your box’s QR").click(); await tick();
+  await vi.advanceTimersByTimeAsync(10_000);
+  setPairing({ ...INITIAL_PAIRING, remote: true, state: 'paired' });
+  setStatus({ ready: true, node_id: 'box', error: null });
+  await vi.advanceTimersByTimeAsync(1_500);
+  expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('words');
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('words');
 });

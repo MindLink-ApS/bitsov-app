@@ -1,5 +1,5 @@
 import { language, systemLanguage } from '../i18n';
-import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { appPlatform, type AppPlatform } from '../platform';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
@@ -22,8 +22,16 @@ export type PhoneOnboardingProps = {
   incoming?: { link: string } | null; onConsumeLink?: () => void; onDone: () => void;
 };
 type Screen = 'start' | 'scanner' | 'connecting' | 'words' | 'fingerprint' | 'done' | 'error';
-type Failure = ConnectionError['kind'] | 'camera' | 'mismatch' | 'approval_expired' | 'unsupported';
-const kinds = new Set<Failure>(['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired', 'unsupported']);
+type Failure = ConnectionError['kind'] | 'camera' | 'mismatch' | 'approval_expired' | 'unsupported' | 'pairing_failed' | 'timeout';
+const kinds = new Set<Failure>(['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired', 'unsupported', 'pairing_failed', 'timeout']);
+/** Without any progress for this long, "Connecting" becomes a plain failure with one action. */
+export const CONNECTING_TIMEOUT_MS = 30_000;
+/** The host's pairing outcome is free text; only its transport class picks the copy. */
+function pairingFailure(reason: string | null): { kind: Failure; detail: string } {
+  const detail = (reason ?? '').replace(/bitsov:\/\/pair\/[^\s]+/g, '[redacted]');
+  const transport = /unreachable|could not be reached|timed out|connection refused|transport failed/i.test(detail);
+  return { kind: transport ? 'unreachable' : 'pairing_failed', detail };
+}
 function failure(error: unknown): { kind: Failure; detail: string } {
   const outer = error && typeof error === 'object' ? error as Record<string, unknown> : {};
   if (outer.code === 'enrollment_restart') return { kind: 'approval_expired', detail: '' };
@@ -56,9 +64,12 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   let resumeSaved = true;
   let resume: 'camera' | 'connection' | undefined;
   let previousHostError: ConnectionError | null | undefined;
+  let previousPairingFailure: string | undefined;
   usePairingActivity(() => busy() || ['scanner', 'connecting', 'words', 'fingerprint'].includes(screen()));
   onCleanup(() => { alive = false; generation++; pendingLink = ''; if (pasteInput) pasteInput.value = ''; if (screen() === 'scanner') void props.cancelScan?.().catch(() => {}); });
   const fail = (e: unknown) => { joinGeneration++; setError(failure(e)); setScreen('error'); };
+  // Retire an in-flight connect so its late result cannot leave the action disabled.
+  const stopWaiting = () => { generation++; pendingLink = ''; setBusy(false); };
   const receive = (v: JoinView) => {
     if (v.state === 'waiting') { setWaiting(v); setScreen('words'); }
     if (v.state === 'done') { setWaiting(undefined); setScreen('done'); }
@@ -184,8 +195,24 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     if (e && (e.kind !== previousHostError?.kind || e.detail !== previousHostError?.detail)) fail(e);
     previousHostError = e;
     if (resumeSaved && screen() === 'start' && props.pairing().remote && !e) { resumeSaved = false; setScreen('connecting'); }
+    // A failed pairing ends the wait. React to a new outcome only, so a stale
+    // failure cannot cut short the attempt that replaces it (the timeout covers that).
+    const p = props.pairing();
+    const pairingFailed = p.state === 'failed' ? `failed:${p.reason ?? ''}` : undefined;
+    if (pairingFailed && pairingFailed !== previousPairingFailure && ['connecting', 'words'].includes(untrack(screen))) {
+      stopWaiting(); fail(pairingFailure(p.reason));
+    }
+    previousPairingFailure = pairingFailed;
     void progressJoin();
   });
+  // No progress for CONNECTING_TIMEOUT_MS: stop waiting and say so plainly.
+  createEffect(on(screen, current => {
+    if (current !== 'connecting') return;
+    const timer = window.setTimeout(() => {
+      if (alive && screen() === 'connecting') { stopWaiting(); fail({ kind: 'timeout', detail: '' }); }
+    }, CONNECTING_TIMEOUT_MS);
+    onCleanup(() => window.clearTimeout(timer));
+  }));
   createEffect(() => {
     const incoming = props.incoming;
     if (incoming && !busy() && !waiting() && !joinStarted && ['start', 'error'].includes(screen())) {
@@ -221,6 +248,8 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       case 'mismatch': return [t.stopped, t.stoppedLine, t.restart];
       case 'claim_mismatch': return [t.claimMismatch, t.claimMismatchLine, t.restart];
       case 'busy': return [t.busy, t.busyLine, t.retry];
+      case 'pairing_failed': return [t.pairFailed, t.pairFailedLine, t.retry];
+      case 'timeout': return [t.timeout, t.timeoutLine, t.retry];
       default: return [t.other, t.otherLine, t.retry];
     }
   };
