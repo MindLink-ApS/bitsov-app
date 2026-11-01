@@ -22,11 +22,11 @@ export type PhoneOnboardingProps = {
   incoming?: { link: string } | null; onConsumeLink?: () => void; onDone: () => void;
 };
 type Screen = 'start' | 'scanner' | 'connecting' | 'words' | 'fingerprint' | 'done' | 'error';
-type Failure = ConnectionError['kind'] | 'camera' | 'mismatch' | 'approval_expired' | 'unsupported' | 'pairing_failed' | 'timeout' | 'stale' | 'biometry' | 'biometry_cancelled';
-const kinds = new Set<Failure>(['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired', 'unsupported', 'pairing_failed', 'timeout', 'stale', 'biometry', 'biometry_cancelled']);
+type Failure = ConnectionError['kind'] | 'camera' | 'mismatch' | 'approval_expired' | 'unsupported' | 'pairing_failed' | 'timeout' | 'stale' | 'biometry' | 'biometry_cancelled' | 'bad_link';
+const kinds = new Set<Failure>(['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired', 'unsupported', 'pairing_failed', 'timeout', 'stale', 'biometry', 'biometry_cancelled', 'bad_link']);
 const LOOPBACK = /^(127\.|localhost\b|\[::1\])/i;
 /** A ticket that can never pair again: expired, already used, or its code no longer matches. */
-const staleKinds = new Set<Failure>(['expired', 'used', 'stale']);
+const staleKinds = new Set<Failure>(['expired', 'used', 'stale', 'bad_link']);
 /** Without any progress for this long, "Connecting" becomes a plain failure with one action. */
 export const CONNECTING_TIMEOUT_MS = 30_000;
 /** The host's pairing outcome is free text; only its transport class picks the copy. */
@@ -38,6 +38,13 @@ function pairingFailure(reason: string | null): { kind: Failure; detail: string 
   return { kind: transport ? 'unreachable' : 'pairing_failed', detail };
 }
 function failure(error: unknown): { kind: Failure; detail: string } {
+  // Some host refusals arrive as plain text (the link preview): a bad or spent link is never "check the connection".
+  if (typeof error === 'string' || error instanceof Error) {
+    const text = (typeof error === 'string' ? error : error.message).replace(/bitsov:\/\/pair\/[^\s]+/g, '[redacted]');
+    if (/ticket expired, was already used|pairing link expired/i.test(text)) return { kind: 'stale', detail: text };
+    if (/invalid remote pairing link/i.test(text)) return { kind: 'bad_link', detail: text };
+    return { kind: 'other', detail: text };
+  }
   const outer = error && typeof error === 'object' ? error as Record<string, unknown> : {};
   if (outer.code === 'enrollment_restart') return { kind: 'approval_expired', detail: '' };
   // The phone cannot use (or the person cancelled) Face ID, a fingerprint or a passcode: say that, not "can't connect".
@@ -66,6 +73,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   const [preview, setPreview] = createSignal<RemotePreviewView>();
   const [waiting, setWaiting] = createSignal<Extract<JoinView, { state: 'waiting' }>>();
   const [options, setOptions] = createSignal(false);
+  const [pasting, setPasting] = createSignal(false);
   const [confirmForget, setConfirmForget] = createSignal(false);
   const forgetId = createUniqueId();
   let confirmBox: HTMLDivElement | undefined;
@@ -126,7 +134,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   const connect = async (input: string) => {
     if (!alive || busy() || waiting() || joinStarted || ['words', 'fingerprint', 'connecting'].includes(screen())) return;
     let link: string;
-    try { link = normalizePairingLink(input); } catch { setToast(c().empty); return; }
+    try { link = normalizePairingLink(input); } catch { setToast(input.trim() ? c().notLink : c().empty); return; }
     // Never let a pending forget remove the link that replaces it.
     if (forgetting) { await forgetting; if (!alive || busy()) return; }
     resumeSaved = false; pendingLink = ''; compared = false;
@@ -178,8 +186,13 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   const paste = async () => {
     if (!alive || busy() || waiting() || joinStarted) return;
     const turn = generation;
+    setToast('');
+    // iOS shows a small paste bubble; say where to tap, and keep Scan out of reach of a near miss meanwhile.
+    setPasting(true);
     try {
-      const link = await navigator.clipboard.readText();
+      let link: string;
+      // try/finally, not .finally(): a missing clipboard API throws before any promise exists.
+      try { link = await navigator.clipboard.readText(); } finally { setPasting(false); }
       if (!alive || turn !== generation) return;
       // Nothing came back (the paste prompt was dismissed): offer the field instead of a dead end.
       if (!link.trim()) { setManualPaste(true); setToast(''); return; }
@@ -282,6 +295,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       case 'unreachable': return [t.unreachable, t.unreachableLine, t.retry];
       case 'approval_expired': return [t.approvalExpired, t.expiredLine, t.newQr];
       case 'expired': case 'used': case 'stale': return [t.stale, t.staleLine, t.pasteNew];
+      case 'bad_link': return [t.badLink, t.badLinkLine, t.pasteNew];
       case 'clock': return [t.expired, t.clockLine, t.newQr];
       case 'camera': return [t.camera, (props.platform ?? appPlatform()) === 'android' ? t.androidCameraLine : t.cameraLine, t.settings];
       case 'mismatch': return [t.stopped, t.stoppedLine, t.restart];
@@ -340,20 +354,24 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
         <PrimaryAction disabledReason={!preview()?.node_id_fingerprint && !props.status().node_id ? c().working : undefined} onClick={() => void confirmComparison()}>{c().match}</PrimaryAction>
         <button type="button" class="quiet" disabled={busy()} onClick={() => void run(reset)}>{c().mismatch}</button>
       </Show>
-      <Show when={screen() === 'start' || screen() === 'scanner'}><PrimaryAction disabledReason={busy() ? c().working : !props.scan ? c().unavailable : undefined} onClick={() => void scan()}>{c().scan}</PrimaryAction></Show>
+      <Show when={screen() === 'start' || screen() === 'scanner'}><PrimaryAction disabledReason={pasting() ? c().pasteHint : busy() ? c().working : !props.scan ? c().unavailable : undefined} onClick={() => void scan()}>{c().scan}</PrimaryAction></Show>
       <Show when={screen() === 'connecting'}><p class="phone-waiting" role="status"><span class="phone-spinner" aria-hidden="true" />{c().working}</p>
         {/* Connecting opens this app's protected pairing key; say why before iOS asks. */}
         <Show when={(props.platform ?? appPlatform()) === 'ios'}><p class="why" data-faceid-why>{c().faceIdWhy}</p></Show>
       </Show>
       <Show when={screen() === 'done'}><PrimaryAction onClick={props.onDone}>{c().open}</PrimaryAction></Show>
       <Show when={screen() === 'error'}><PrimaryAction disabledReason={busy() ? c().working : undefined} onClick={() => void (stale() ? paste() : run(recover))}>{errorCopy()[2]}</PrimaryAction></Show>
-      <Show when={screen() === 'error' && error()?.kind === 'timeout'}>
-        <button type="button" class="phone-secondary" data-phone-paste disabled={busy()} onClick={() => void paste()}>{c().pasteNew}</button>
+      {/* A timeout, or a refused camera, still has a way in: paste the link instead. */}
+      <Show when={screen() === 'error' && (error()?.kind === 'timeout' || error()?.kind === 'camera')}>
+        <button type="button" class="phone-secondary" data-phone-paste disabled={busy()} onClick={() => void paste()}>{error()?.kind === 'camera' ? c().pasteInstead : c().pasteNew}</button>
       </Show>
       {/* Paste is the second first-class way in: one tap reads the clipboard (iOS asks to allow it). */}
       <Show when={screen() === 'start' || screen() === 'scanner'}>
         <button type="button" class="phone-secondary" data-phone-paste disabled={busy() || !!waiting() || joinStarted} onClick={() => void paste()}>{c().paste}</button>
       </Show>
+      <Show when={pasting()}><p class="phone-hint" role="status" data-phone-paste-hint>{c().pasteHint}</p></Show>
+      {/* Said next to the action that caused it, not at the foot of the page. */}
+      <Show when={toast()}><p class="phone-toast" role="status">{toast()}</p></Show>
       <Show when={manualPaste() && (screen() === 'start' || screen() === 'error')}><form class="phone-manual" onSubmit={e => {
         e.preventDefault();
         const link = pasteInput?.value ?? '';
@@ -361,7 +379,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
         void connect(link);
       }}>
         <label>{c().manualPaste}<input ref={pasteInput} aria-label={c().link} type="password" autocomplete="off" autocapitalize="none" spellcheck={false} /></label>
-        <button type="submit" disabled={busy()}>{c().useLink}</button>
+        <button type="submit" class="phone-secondary" disabled={busy()}>{c().useLink}</button>
       </form></Show>
     </section>
     <details class="phone-options" open={options()} onToggle={e => setOptions(e.currentTarget.open)}>
@@ -385,6 +403,8 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       </dl><Show when={error()?.detail}><p>{hostDetail(error()!.detail) ?? onboardingDiagnostic(error()!.detail, c().helpLine)}</p></Show>
       </details>
       {/* Forgetting drops the saved box: one plain confirmation, never behind the help sections. */}
+      {/* Only when there is a box to forget. */}
+      <Show when={props.pairing().remote || !!preview() || !!props.status().node_id}>
       <Show when={confirmForget()} fallback={
         <button type="button" data-phone-forget disabled={busy()} onClick={() => {
           clearManualPaste(); setConfirmForget(true);
@@ -394,12 +414,13 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       }>
         <div ref={confirmBox} class="phone-confirm" role="group" aria-labelledby={forgetId} data-phone-forget-confirm>
           <p id={forgetId}>{c().forgetConfirm}</p>
-          <button type="button" disabled={busy()} onClick={() => { setConfirmForget(false); void run(reset); }}>{c().forgetYes}</button>
-          <button type="button" class="quiet" disabled={busy()} onClick={() => setConfirmForget(false)}>{c().keepBox}</button>
+          {/* The safe choice is the strong one; forgetting is marked as the destructive one. */}
+          <button type="button" class="phone-primary-plain" disabled={busy()} onClick={() => setConfirmForget(false)}>{c().keepBox}</button>
+          <button type="button" class="phone-danger" disabled={busy()} onClick={() => { setConfirmForget(false); void run(reset); }}>{c().forgetYes}</button>
         </div>
+      </Show>
       </Show>
       <Show when={['connecting', 'words', 'fingerprint'].includes(screen())}><button type="button" disabled={busy()} onClick={() => void run(reset)}>{c().cancel}</button></Show>
     </details>
-    <Show when={toast()}><p class="phone-toast" role="status">{toast()}</p></Show>
   </main>;
 }
