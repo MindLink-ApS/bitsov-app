@@ -1,15 +1,23 @@
-# No payment, no packet — a layer-by-layer audit
+# No payment, no service — a layer-by-layer audit
+
+The doctrine is officially worded **"No payment, no service"** (owner
+decision, section 9). "No payment, no packet" stays as the original slogan;
+it was reframed because a packet must arrive before anyone can tell whether
+it is paid, so the rule binds the service a node gives, not each packet.
 
 Status: analysis and design proposal. Docs only. Draft; needs two independent reviews and
 an owner decision before any ticket below is started. Hardened after an
 independent review (round 1): quote oracle, signed receipts, push fan-out
 bound, block-boundary media cases, ticket A-6, a restated pre-payment bound,
-and a merged harness (section 7). Adopting the wording "no payment, no
-service" is still an open owner decision (section 9).
+and a merged harness (section 7). The wording "No payment, no service" is
+**decided by the owner** (section 9, item 1); items 2 to 4 are still open.
 
-## 1. The doctrine as stated
+## 1. The doctrine as first stated
 
 > No payment, no packet.
+
+This is the original slogan. The official wording is "No payment, no
+service" (section 4, decided by the owner).
 
 The owner's intent: ideally all traffic into and out of a BitSov node is paid
 in sats, and AI or MCP clients that talk to the node use sats as their token.
@@ -276,11 +284,12 @@ can only make the *useful* response depend on payment. The goal therefore is
    device of the callee (devices × 1), so a single small offer cannot cause
    an unbounded number of pushes.
 
-## 4. The reframed doctrine
+## 4. The reframed doctrine (official wording, decided)
 
-The literal sentence fails at 3.1–3.5 and 3.9–3.10. Proposed wording that
-can hold end to end (adopting it is an **open owner decision**, section 9,
-item 1; this document does not decide it):
+The literal sentence fails at 3.1–3.5 and 3.9–3.10. The wording below can
+hold end to end and is the doctrine's **official wording, decided by the
+owner** (section 9, item 1). "No payment, no packet" remains the original
+slogan:
 
 > **No payment, no service.** A BitSov node does no processing, delivery or
 > forwarding of peer-to-peer application traffic that has not been paid in
@@ -489,10 +498,12 @@ duplicates.
 
 ## 9. Decisions needed from the owner
 
-1. **Open:** adopt the section 4 wording ("No payment, no service: one
-   bounded free quote and a free refusal; everything inside your own cell
-   and the planes below the node are exempt") in place of "every packet is
-   paid", or a variant.
+1. **Decided by the owner:** the doctrine is officially worded **"No
+   payment, no service"** (section 4: one bounded free quote and a free
+   refusal; everything inside your own cell and the planes below the node
+   are exempt), in place of "every packet is paid". "No payment, no packet"
+   stays as the original slogan; it was reframed because a node can only
+   refuse service, not stop an unpaid packet from arriving.
 2. Confirm the cell boundary: own apps, own devices, in-cell clients with a
    grant. Confirm that intra-cell traffic is never priced.
 3. Confirm which free operations stay free (F2 first-contact quote, F3 porch
