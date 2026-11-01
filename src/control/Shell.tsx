@@ -49,7 +49,7 @@ import { custodyBadge, CustodyBadgeView } from './custody';
 import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
-import { callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, isCallTrafficKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { nodeRoutedAudio } from './callFlags';
 import { createNodeRoutedConnection } from './nodeRoutedConnection';
@@ -3067,8 +3067,8 @@ function Conversation(props: {
       room: props.roomQuote,
       nowMs: props.now,
     });
-  // Protocol payloads belong to their own views, not the chat stream.
-  const items = createMemo(() => streamItems(props.messages.filter((m) => !isCallKind(m.kind) && !isPorchKind(m.kind) && !(props.track.kind === 'peer' && roomOf(m, props.ownId))), props.artifacts));
+  // Protocol payloads belong to their own views, not the chat stream (a call's minute blocks included).
+  const items = createMemo(() => streamItems(props.messages.filter((m) => !isCallTrafficKind(m.kind) && !isPorchKind(m.kind) && !(props.track.kind === 'peer' && roomOf(m, props.ownId))), props.artifacts));
   // Solid's For keys by identity. Primitive ids keep rows mounted when reads replace objects.
   const keyedItems = createMemo(() => new Map(items().map((item) => [
     item.type === 'message' ? `message:${item.message.id}` : `artifact:${item.artifact.id}`, item,

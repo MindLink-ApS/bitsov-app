@@ -1862,6 +1862,8 @@ function stubHost(overrides: Record<string, Reply> = {}) {
       ? [
           { id: 'chat-1', kind: 0, sender: A, recipient: OWN, timestamp: Date.now() - 5000, plaintext: 'hello', payment_amount_msat: 2000 },
           { id: 'call-1', kind: 400, sender: A, recipient: OWN, timestamp: Date.now() - 4000, plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: 'v=0' }), payment_amount_msat: 10_000 },
+          // A paid minute block (M6, kind 404) is call traffic too, never a chat bubble.
+          { id: 'block-1', kind: 404, sender: OWN, recipient: A, timestamp: Date.now() - 3000, plaintext: JSON.stringify({ call_id: ID, seq: 0 }), payment_amount_msat: 10_000 },
         ]
       : []),
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
@@ -2638,6 +2640,8 @@ describe('calls in the shell', () => {
     // Call signals from history are not chat bubbles.
     await vi.waitFor(() => expect($('[data-message="chat-1"]')).not.toBeNull());
     expect($('[data-message="call-1"]')).toBeNull();
+    expect($('[data-message="block-1"]')).toBeNull();
+    expect(document.body.textContent).not.toContain('"seq"');
     expect(host.used('call_signal')).toHaveLength(0);
     ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());

@@ -85,12 +85,15 @@ describe('wallet: activity', () => {
       msg('m3', 400, OWN, B, 10_000),
       msg('m4', 200, B, OWN, 4000),
       msg('m5', 0, A, OWN, null),
+      // A paid call minute (M6 block, kind 404) is part of the call, not a message.
+      msg('m6', 404, OWN, B, 10_000),
     ], OWN);
     expect(items.map((a) => [a.kind, a.direction, a.who, a.label])).toEqual([
       ['message', 'in', A, 'Message received'],
       ['message', 'out', A, 'Message sent'],
       ['call', 'out', B, 'Call'],
       ['file', 'in', B, 'Received a file'],
+      ['call', 'out', B, 'Call'],
     ]);
   });
   it('filters by kind and direction, and totals only money that moved', () => {

@@ -75,6 +75,10 @@ export function stunServer(url: string | null | undefined): RTCIceServer[] {
 }
 
 export const isCallKind = (kind: number) => kind >= CALL_OFFER && kind <= CALL_HANGUP;
+/** M6: the caller pays one minute block per 60 s as its own message (genome N1/N3). */
+export const CALL_BLOCK = 404;
+/** A call's signals and its paid minute blocks: call traffic, never chat bubbles. */
+export const isCallTrafficKind = (kind: number) => isCallKind(kind) || kind === CALL_BLOCK;
 
 export type CallMedia = 'audio' | 'video';
 /** `unpaid` (M6): only received, from the callee's node, when the paid minutes ran out. */
