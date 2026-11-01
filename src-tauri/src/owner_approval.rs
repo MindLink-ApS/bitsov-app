@@ -323,6 +323,8 @@ fn checked_approval(view: &Value, client: &str, displayed: &str) -> Result<Strin
             "Let this app spend".into(),
             format!("Budget: up to {}", sats(budget_msat)),
             format!("Each payment: up to {}", sats(per_call_max_msat)),
+            // The node caps every non-call payment at 6 sats, whatever is signed.
+            format!("Messages: up to {} each", sats(per_call_max_msat.min(grant::MESSAGING_PER_CALL_MAX_MSAT))),
             format!("For: {}", span(window_secs)),
             recipient
                 .filter(|s| !s.is_empty())

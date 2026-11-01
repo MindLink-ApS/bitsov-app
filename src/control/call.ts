@@ -127,6 +127,27 @@ export const callCost = (q: CallQuote) => q.call_total_msat;
 /** What one answer/ICE/hangup costs at most, all-in. */
 export const signalCost = (q: CallQuote) => q.signal_msat + q.signal_max_routing_fee_msat;
 
+/**
+ * The grant's limit on each call payment, as the host reports it: the signed
+ * per-payment value, never the 6-sat cap on other payments. Null for a
+ * relation grant, where each envelope's per-act maximum binds instead (the
+ * host checks it). A summary without the field is read from the signed value.
+ */
+export const callPerPaymentMax = (grant: NodeGrantSummary): number | null =>
+  grant.call_per_payment_max_msat ?? (grant.envelopes ? null : grant.per_call_max_msat);
+/**
+ * What an owner-chosen per-payment limit must allow for a call, as the host
+ * checks it: the largest single payment among the offer, one hangup and one
+ * agreed minute (price plus routing allowance). They are separate payments;
+ * their sum is checked against the remaining budget instead.
+ */
+export const callPerPaymentNeed = (q: CallQuote, minutes: boolean): number =>
+  Math.max(
+    (q.offer_msat ?? 0) + q.offer_max_routing_fee_msat,
+    signalCost(q),
+    minutes && q.block_msat != null ? q.block_msat + (q.block_max_routing_fee_msat ?? 0) : 0,
+  );
+
 export type CallState = 'idle' | 'ringing' | 'connecting' | 'live' | 'reconnecting' | 'ended';
 /** Detailed card phase; consumers can use CallView.state for the shared lifecycle. */
 export type Phase = CallState | 'calling' | 'incoming';
@@ -783,9 +804,16 @@ export function createCallEngine(deps: CallDeps) {
         return;
       }
       if (q.offer_msat === null) { reconcileConnection(conn); return; }
+      // The node caps each call payment by the call's pinned per-block ceiling,
+      // and by the grant's per-call maximum only when the owner chose it.
       const grant = deps.grant?.();
-      if (grant && q.call_total_msat !== null && (q.call_total_msat > grant.remaining_msat || q.call_total_msat > grant.per_call_max_msat)) {
+      if (grant && q.call_total_msat !== null && q.call_total_msat > grant.remaining_msat) {
         recoveryRefused(conn, tr('caTheRemainingNodeGrantCannotCoverCallRecoveryAsk'));
+        return;
+      }
+      const recoveryLimit = grant ? callPerPaymentMax(grant) : null;
+      if (recoveryLimit !== null && callPerPaymentNeed(q, false) > recoveryLimit) {
+        recoveryRefused(conn, tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(callPerPaymentNeed(q, false)), amount(recoveryLimit)));
         return;
       }
       const id = (deps.newCallId ?? newCallId)();
@@ -960,10 +988,20 @@ export function createCallEngine(deps: CallDeps) {
         set({ ...IDLE, phase: 'ended', peer, error: tr('caTheirNodeDoesNotTakeCallsYetNothingWas') });
         return;
       }
+      // Bounded by the grant's remaining budget; the node enforces the call's
+      // own per-block ceiling, and the grant's per-call maximum only when the
+      // owner chose it (never the node's messaging clamp).
       const grant = deps.grant?.();
-      if (grant && (q.call_total_msat > grant.per_call_max_msat || q.call_total_msat > grant.remaining_msat)) {
+      if (grant && q.call_total_msat > grant.remaining_msat) {
         set({ ...IDLE, phase: 'ended', peer, error:
-          tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat), amount(grant.per_call_max_msat), amount(grant.remaining_msat), amount(q.call_total_msat)) });
+          tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat), amount(grant.remaining_msat)) });
+        return;
+      }
+      const perPayment = grant ? callPerPaymentMax(grant) : null;
+      const need = callPerPaymentNeed(q, Boolean(deps.minutes));
+      if (perPayment !== null && need > perPayment) {
+        set({ ...IDLE, phase: 'ended', peer, error:
+          tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(need), amount(perPayment)) });
         return;
       }
       // M6: no node-routed call without the per-minute price and the most held the owner agreed to.

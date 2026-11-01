@@ -43,6 +43,8 @@ export const OWNER_DEVICE_APPROVAL = 'owner_device_approval_v1';
 export const OWNER_DEVICE_BREAKER_RESET = 'owner_device_approval_breaker_reset_v1';
 /** Node requests expire 300 s after creation; there is no decline or cancel endpoint. */
 export const APPROVAL_LIFETIME_SECS = 300;
+/** The node's cap on each non-call payment under a grant (6 sats), whatever per-payment limit is signed. */
+export const MESSAGE_PAYMENT_CAP_MSAT = 6_000;
 
 export type SpendGrantTerms = {
   budget_msat: number;
@@ -172,6 +174,8 @@ export function termLines(view: ApprovalView, nameOf?: (id: string) => string | 
       'Let this app spend',
       `Budget: up to ${sats(t.budget_msat)}`,
       `Each payment: up to ${sats(t.per_call_max_msat)}`,
+      // The node caps every non-call payment at 6 sats, whatever is signed.
+      `Messages: up to ${sats(Math.min(t.per_call_max_msat, MESSAGE_PAYMENT_CAP_MSAT))} each`,
       `For: ${span(t.window_secs)}`,
       t.recipient ? `Only to: ${who(t.recipient)}` : 'To: any contact, within the budget',
     ];
