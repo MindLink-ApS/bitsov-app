@@ -22,8 +22,8 @@ export type PhoneOnboardingProps = {
   incoming?: { link: string } | null; onConsumeLink?: () => void; onDone: () => void;
 };
 type Screen = 'start' | 'scanner' | 'connecting' | 'words' | 'fingerprint' | 'done' | 'error';
-type Failure = ConnectionError['kind'] | 'camera' | 'mismatch' | 'approval_expired' | 'unsupported' | 'pairing_failed' | 'timeout' | 'stale';
-const kinds = new Set<Failure>(['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired', 'unsupported', 'pairing_failed', 'timeout', 'stale']);
+type Failure = ConnectionError['kind'] | 'camera' | 'mismatch' | 'approval_expired' | 'unsupported' | 'pairing_failed' | 'timeout' | 'stale' | 'biometry' | 'biometry_cancelled';
+const kinds = new Set<Failure>(['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired', 'unsupported', 'pairing_failed', 'timeout', 'stale', 'biometry', 'biometry_cancelled']);
 /** A ticket that can never pair again: expired, already used, or its code no longer matches. */
 const staleKinds = new Set<Failure>(['expired', 'used', 'stale']);
 /** Without any progress for this long, "Connecting" becomes a plain failure with one action. */
@@ -39,6 +39,9 @@ function pairingFailure(reason: string | null): { kind: Failure; detail: string 
 function failure(error: unknown): { kind: Failure; detail: string } {
   const outer = error && typeof error === 'object' ? error as Record<string, unknown> : {};
   if (outer.code === 'enrollment_restart') return { kind: 'approval_expired', detail: '' };
+  // The phone cannot use (or the person cancelled) Face ID, a fingerprint or a passcode: say that, not "can't connect".
+  if (outer.code === 'device_biometry' || outer.code === 'device_unavailable') return { kind: 'biometry', detail: '' };
+  if (outer.code === 'device_cancelled') return { kind: 'biometry_cancelled', detail: '' };
   const e = outer.connection_error && typeof outer.connection_error === 'object' ? outer.connection_error as Record<string, unknown> : outer;
   // Only structured, sanitized host diagnostics are accepted. Never echo scanner/clipboard errors.
   return { kind: kinds.has(e.kind as Failure) ? e.kind as Failure : 'other', detail: typeof e.detail === 'string' ? e.detail.replace(/bitsov:\/\/pair\/[^\s]+/g, '[redacted]') : '' };
@@ -62,6 +65,8 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   const [preview, setPreview] = createSignal<RemotePreviewView>();
   const [waiting, setWaiting] = createSignal<Extract<JoinView, { state: 'waiting' }>>();
   const [options, setOptions] = createSignal(false);
+  const [confirmForget, setConfirmForget] = createSignal(false);
+  const forgetId = createUniqueId();
   let alive = true, generation = 0, joinGeneration = 0, joining = false, joinStarted = false;
   // Keep an uncommitted link only in memory until comparison or cancellation.
   let pendingLink = '', compared = false;
@@ -199,7 +204,9 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   };
   const recover = async () => {
     const kind = error()?.kind;
-    if (kind === 'camera' || kind === 'local_network') {
+    if (kind === 'biometry') {
+      resume = 'connection'; await props.openSettings();
+    } else if (kind === 'camera' || kind === 'local_network') {
       resume = kind === 'camera' ? 'camera' : 'connection';
       await props.openSettings();
     } else if (kind === 'tailscale') {
@@ -252,6 +259,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     document.addEventListener('visibilitychange', foreground);
     onCleanup(() => { window.clearInterval(timer); document.removeEventListener('visibilitychange', foreground); });
   });
+  const android = () => (props.platform ?? appPlatform()) === 'android';
   const errorCopy = () => {
     const t = c();
     switch (error()?.kind) {
@@ -268,6 +276,8 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       case 'claim_mismatch': return [t.claimMismatch, t.claimMismatchLine, t.restart];
       case 'busy': return [t.busy, t.busyLine, t.retry];
       case 'pairing_failed': return [t.pairFailed, t.pairFailedLine, t.retry];
+      case 'biometry': return android() ? [t.androidBiometry, t.androidBiometryLine, t.settings] : [t.biometry, t.biometryLine, t.settings];
+      case 'biometry_cancelled': return android() ? [t.androidBiometryCancelled, t.biometryCancelledLine, t.retry] : [t.biometryCancelled, t.biometryCancelledLine, t.retry];
       case 'timeout': return [t.timeout, t.timeoutLine, t.retry];
       default: return [t.other, t.otherLine, t.retry];
     }
@@ -357,8 +367,17 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
         <dt>{c().endpoint}</dt><dd>{preview()?.endpoint ?? '—'}</dd>
         <dt>{c().hosted}</dt><dd>{preview()?.hosted_by ?? props.pairing().hosted_by ?? '—'}</dd>
       </dl><Show when={error()?.detail}><p>{onboardingDiagnostic(error()!.detail, c().helpLine)}</p></Show>
-        <button type="button" disabled={busy()} onClick={() => void run(reset)}>{c().forget}</button>
       </details>
+      {/* Forgetting drops the saved box: one plain confirmation, never behind the help sections. */}
+      <Show when={confirmForget()} fallback={
+        <button type="button" data-phone-forget disabled={busy()} onClick={() => { clearManualPaste(); setConfirmForget(true); }}>{c().forget}</button>
+      }>
+        <div class="phone-confirm" role="group" aria-labelledby={forgetId} data-phone-forget-confirm>
+          <p id={forgetId}>{c().forgetConfirm}</p>
+          <button type="button" disabled={busy()} onClick={() => { setConfirmForget(false); void run(reset); }}>{c().forgetYes}</button>
+          <button type="button" class="quiet" disabled={busy()} onClick={() => setConfirmForget(false)}>{c().keepBox}</button>
+        </div>
+      </Show>
       <Show when={['connecting', 'words', 'fingerprint'].includes(screen())}><button type="button" disabled={busy()} onClick={() => void run(reset)}>{c().cancel}</button></Show>
     </details>
     <Show when={toast()}><p class="phone-toast" role="status">{toast()}</p></Show>

@@ -1,4 +1,6 @@
-.phone-onboarding { width: min(100%, 440px); min-height: 100svh; margin: 0 auto; padding: max(28px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left)); box-sizing: border-box; display: flex; flex-direction: column; gap: 24px; }
+.phone-onboarding { width: min(100%, 440px); min-height: 100%; max-height: 100%; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; margin: 0 auto; padding: max(28px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left)); box-sizing: border-box; display: flex; flex-direction: column; gap: 24px; }
+/* The iOS root is fixed and clips (styles.css): the phone flow is its own scroll area, inside the safe areas. */
+.phone-flow-host { height: 100%; }
 /* iOS Dynamic Type: the system body size (ignored where unsupported), in the app's own face. Sizes below are relative to it. */
 .phone-onboarding { font: -apple-system-body; font-family: var(--font-sans, inherit); }
 .phone-progress { display: flex; gap: 8px; list-style: none; margin: 0; padding: 0; }
@@ -8,7 +10,7 @@
 .phone-progress-label { font-size: 0.8em; color: var(--muted); }
 .phone-progress [aria-current='step'] .phone-progress-label { color: var(--ink); font-weight: 600; }
 /* The words sit at the top; the one action sits low, in the thumb's reach. */
-.phone-onboarding [data-phone-face] { flex: 1; display: flex; flex-direction: column; justify-content: flex-start; align-items: stretch; gap: 20px; padding-top: 8vh; }
+.phone-onboarding [data-phone-face] { flex: 1 0 auto; display: flex; flex-direction: column; justify-content: flex-start; align-items: stretch; gap: 20px; padding-top: 8vh; }
 .phone-onboarding [data-phone-face] > .phone-primary, .phone-onboarding [data-phone-face] > .phone-waiting { margin-top: auto; }
 .phone-onboarding h1 { font-size: max(1.75em, 26px); line-height: 1.15; margin: 0; text-wrap: balance; }
 .phone-onboarding .phone-line { margin: 0; line-height: 1.5; font-size: max(1em, 17px); }
@@ -32,8 +34,9 @@
 .phone-options p, .phone-options dd { overflow-wrap: anywhere; }
 .phone-options dd { margin: 0 0 12px; }
 .phone-words { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 0; list-style-position: inside; margin: 8px 0; }
-.phone-words li { border: 1px solid var(--line-strong, #555); border-radius: 12px; padding: 18px 12px; font-size: 19px; overflow-wrap: anywhere; }
-.phone-fingerprint { overflow-wrap: anywhere; }
+.phone-words li { border: 1px solid var(--line-strong, #555); border-radius: 12px; padding: 20px 12px; font-size: max(1.5em, 24px); font-weight: 600; text-align: center; overflow-wrap: anywhere; }
+.phone-words { list-style: none; counter-reset: none; }
+.phone-fingerprint { display: block; padding: 16px; border: 1px solid var(--line-strong, #555); border-radius: 12px; font-size: max(1.4em, 22px); letter-spacing: 0.06em; text-align: center; overflow-wrap: anywhere; }
 .phone-toast { font-size: 14px; }
 /* The second way in sits right under the primary: as big, quieter. */
 .phone-onboarding .phone-secondary { width: 100%; white-space: normal; background: var(--raised); color: var(--ink); border: 1px solid var(--line-strong, #555); }
@@ -41,3 +44,6 @@
 .phone-manual { display: flex; flex-direction: column; gap: 8px; }
 .phone-manual label { display: flex; flex-direction: column; gap: 8px; }
 .phone-manual input { min-height: 48px; font-size: 17px; }
+.phone-confirm { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; }
+.phone-confirm p { margin: 0; line-height: 1.45; }
+.phone-options details[open] > summary::after { transform: rotate(-135deg) translateY(-2px); }

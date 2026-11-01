@@ -477,7 +477,7 @@ function AppScreen() {
         }
       }} onDone={() => { setRememberOffer(false); setRememberSaved(false); }} />
     </Show>
-    <Show when={phoneFlow()}><div hidden={!!status().locked}>{phoneOnboarding()}</div></Show>
+    <Show when={phoneFlow()}><div class="phone-flow-host" hidden={!!status().locked}>{phoneOnboarding()}</div></Show>
     <Show when={!status().locked} fallback={<LockedNode
       mobile={onPhone}
       platform={platform}
