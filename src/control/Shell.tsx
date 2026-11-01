@@ -3569,6 +3569,15 @@ function MinutesConsent(props: { quote: CallQuote }) {
  * it ended. Every amount is the node's (its reservation on the call status);
  * a node without a reservation is described by its block receipts, "up to".
  */
+/** The call's two figures at a glance, from the same node values as the sentence under it (display only). */
+function CallMeter(props: { items: [string, number, string?][] }) {
+  return (
+    <dl class="call-meter" data-call-meter>
+      <For each={props.items}>{([label, msat, note]) => <div><dt>{label}</dt><dd>{fmtAmount(msat)}<Show when={note}><span class="call-meter-note">{note}</span></Show></dd></div>}</For>
+    </dl>
+  );
+}
+
 function CallMinutesLine(props: { minutes: MinutesView; ended: boolean; confirm?: () => void }) {
   const m = () => props.minutes;
   const hold = () => m().reservation;
@@ -3587,25 +3596,27 @@ function CallMinutesLine(props: { minutes: MinutesView; ended: boolean; confirm?
         )}
       </Match>
       <Match when={props.ended && hold()}>
-        {(h) => (
+        {(h) => (<>
+          <CallMeter items={[[tr('caMeterPaidTotal'), h().spent_msat]]} />
           <Show when={h().closed} fallback={<p class="hint" data-call-minutes="held">{tr('uiMinutesSummaryHeld', fmtAmount(h().spent_msat), fmtAmount(h().remaining_msat))}</p>}>
             <p class="hint" data-call-minutes="released">{tr('uiMinutesSummaryReleased', fmtAmount(h().spent_msat), fmtAmount(h().released_msat))}</p>
           </Show>
-        )}
+        </>)}
       </Match>
       <Match when={props.ended && m().receiptsMsat > 0}>
         <p class="hint" data-call-minutes="receipts">{tr('uiMinutesSummaryNoReservation', fmtAmount(m().receiptsMsat))}</p>
       </Match>
       <Match when={props.ended}>{null}</Match>
       <Match when={hold()}>
-        {(h) => (
+        {(h) => (<>
+          <CallMeter items={[[tr('caMeterPerMinute'), h().per_block_msat, tr('caMeterRouting', fmtAmount(h().per_block_fee_msat))], [tr('caMeterPaidSoFar'), h().spent_msat]]} />
           <p class="hint" data-call-minutes="running">
             {m().blocks > 0 || h().spent_msat > 0
               ? tr('uiMinutesRunning', fmtAmount(h().per_block_msat), fmtAmount(h().per_block_fee_msat), fmtAmount(h().spent_msat), fmtAmount(h().remaining_msat))
               : tr('uiMinutesReserved', fmtAmount(h().reserved_msat))}
             <Show when={m().paying}>{' '}{tr('uiMinutesPaying')}</Show>
           </p>
-        )}
+        </>)}
       </Match>
       <Match when={m().receiptsMsat > 0}>
         <p class="hint" data-call-minutes="running">{tr('uiMinutesNoReservation', fmtAmount(m().agreedBlockMsat), fmtAmount(m().receiptsMsat))}</p>

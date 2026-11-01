@@ -901,6 +901,9 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(host.calls.findIndex((c) => c.cmd === 'call_media_open')).toBeGreaterThan(host.calls.findIndex((c) => c.cmd === 'call_block'));
     await vi.waitFor(() => expect($('[data-call-minutes="running"]')?.textContent).toBe(
       `${amount(BLOCK)} a minute (plus up to ${amount(FEE)} routing). Paid so far: ${amount(BLOCK + FEE)}. Still reserved: ${amount(239 * (BLOCK + FEE))}.`));
+    // The same node figures at a glance: the price per minute (its routing ceiling beside it) and what was paid so far.
+    const meter = () => [...document.querySelectorAll('[data-call-meter] > div')].map(d => [d.querySelector('dt')!.textContent, d.querySelector('dd')!.textContent]);
+    expect(meter()).toEqual([['Per minute', `${amount(BLOCK)}+ up to ${amount(FEE)} routing`], ['Paid so far', amount(BLOCK + FEE)]]);
     host.media({ link: 'open', detail: null });
     await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
     expect($('[data-call-route="node"]')).not.toBeNull();
@@ -950,6 +953,8 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     await vi.waitFor(() => expect($('[data-call-minutes="released"]')?.textContent).toBe(
       `Minutes: paid ${amount(BLOCK + FEE)}. Released back to your budget: ${amount(239 * (BLOCK + FEE))}.`), { timeout: 4_000 });
+    expect([...document.querySelectorAll('[data-call-meter] > div')].map(d => [d.querySelector('dt')!.textContent, d.querySelector('dd')!.textContent]))
+      .toEqual([['Paid in all', amount(BLOCK + FEE)]]);
     expect(host.used('call_block')).toHaveLength(1);
   }, 15_000);
 });
