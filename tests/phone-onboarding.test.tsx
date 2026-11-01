@@ -695,7 +695,7 @@ it.each(['ios', 'android'] as const)('explains a Face ID prompt before Connectin
   button("Scan the code with the camera").click(); await tick();
   expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('connecting');
   const why = document.querySelector('[data-faceid-why]');
-  if (platform === 'ios') expect(why?.textContent).toBe('You may be asked for Face ID: it opens this app’s pairing key.');
+  if (platform === 'ios') expect(why?.textContent).toBe('You may be asked for Face ID. It keeps the connection to your box safe.');
   else expect(why).toBeNull();
 });
 // Run 1 fixes: biometrics said plainly, a confirmed forget, and the compare screen names the computer.
