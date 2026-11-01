@@ -4885,6 +4885,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     let mut existing_operation = pending_operation_id(state).unwrap_or_default();
     let result = async {
     let _money = state.money.lock().await;
+    if cfg!(test) { pause_points::at(&state.api_base, "after_lock").await; }
     // A failed refresh cannot erase an ID already observed before the wait.
     existing_operation = pending_operation_id(state).unwrap_or_else(|_| existing_operation.clone());
     refuse_if_connection_waiting(state)?;
@@ -4892,6 +4893,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     let prior = journal.pending()?;
     existing_operation = prior.as_ref().and_then(|p| p.operation_id.clone());
     ensure_fresh_token(state).await;
+    if cfg!(test) { pause_points::at(&state.api_base, "after_token").await; }
     let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
     if body["host_expected_node_id"].as_str().is_some_and(|expected| expected != node_id) {
@@ -5084,10 +5086,18 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     pending.non_dispatch_proven = false;
     pending.dispatched_at = Some(spend_journal::timestamp_ms());
     journal.save(&pending)?;
-    // Journal I/O can take time. Recheck immediately before issuing the request.
+    if cfg!(test) { pause_points::at(&state.api_base, "before_dispatch").await; }
+    // Journal I/O can take time. Recheck immediately before issuing the
+    // request, after every await: no await follows until it is sent. A
+    // minute also needs its call's consent here, read under the consent
+    // lock that End and teardown take without waiting for the money lock.
+    let minute_refused = if path == "/messages/compose" && body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK)) {
+        block_consent_refusal(state, &node_id, &body)
+    } else { None };
     if let Err(e) = refuse_if_connection_waiting(state)
         .and_then(|()| refuse_if_paused(state))
-        .and_then(|()| check_auth(state, auth)) {
+        .and_then(|()| check_auth(state, auth))
+        .and_then(|()| minute_refused.map_or(Ok(()), Err)) {
         release(state)?;
         abandon(&journal)?;
         return Err(e);
@@ -7178,6 +7188,37 @@ fn consent_payable(state: &NodeState, consent: &CallConsent, reserved_msat: u64)
     Ok(())
 }
 
+/// Pause points inside `money_post_with` for the race tests, per fake node
+/// (`api_base`): a test arms a point, waits until a request arrives there,
+/// acts, then releases it. Reached only under `cfg!(test)`; never armed or
+/// awaited in a build.
+mod pause_points {
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
+
+    struct Gate { api_base: String, point: &'static str, arrived: Arc<Notify>, release: Arc<Notify> }
+    static GATES: Mutex<Vec<Gate>> = Mutex::new(Vec::new());
+
+    /// One pause at `point` for this node: (arrived, release). Tests only.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn arm(api_base: &str, point: &'static str) -> (Arc<Notify>, Arc<Notify>) {
+        let (arrived, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        GATES.lock().unwrap().push(Gate { api_base: api_base.into(), point, arrived: arrived.clone(), release: release.clone() });
+        (arrived, release)
+    }
+
+    pub async fn at(api_base: &str, point: &'static str) {
+        let gate = {
+            let mut gates = GATES.lock().unwrap();
+            gates.iter().position(|g| g.api_base == api_base && g.point == point).map(|i| gates.remove(i))
+        };
+        if let Some(gate) = gate {
+            gate.arrived.notify_one();
+            gate.release.notified().await;
+        }
+    }
+}
+
 /// `money_post_with`, under the money lock, for a call block (kind 404): its
 /// call's consent is still admitted and its hold confirmed. The refusal, if not.
 fn block_consent_refusal(state: &NodeState, node_id: &str, body: &serde_json::Value) -> Option<ActionError> {
@@ -7245,6 +7286,17 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
         let cap = hold.per_block_msat.checked_add(hold.per_block_fee_msat)
             .ok_or_else(|| ActionError::invalid("the call block amount is out of range"))?;
         let fee = hold.per_block_fee_msat;
+        // As paid, a minute is its price plus the routing fee the node pinned
+        // on the hold (none on a usable direct channel). That whole payment
+        // must fit the grant's call limit, or nothing is sent.
+        let known = state.node_grant.lock().unwrap().clone();
+        if let Some(g) = known {
+            let per_act = if g.recipients_only { g.per_act_max_by_recipient.get(&target).copied().unwrap_or(0) } else { u64::MAX };
+            let limit = g.per_payment_max(grant::PaymentCap::CallCeiling).unwrap_or(u64::MAX).min(per_act);
+            if cap > limit {
+                return Err(grant::per_call(limit));
+            }
+        }
         let mut body = act::call_block_body(&target, call_id, seq)?;
         let needs_contact = || ActionError::new("call_needs_contact", "Calls go to contacts you have already paid. Send them a message first. Nothing was paid.");
         let (auth, plan) = plan_message(state, &target, false, cap, None)
@@ -7456,6 +7508,9 @@ async fn do_call_signal_bounded(
 /// Local teardown is not evidence that the node has closed its admission.
 /// The renderer must name the exact admission, not a reusable wire call id.
 async fn do_op_close_call(state: &NodeState, operation_id: &str, peer: &str, call_id: &str) -> Result<(), ActionError> {
+    // Local teardown: no further minute of this call is paid. Revoked at
+    // once, before waiting for a minute that may hold the money lock.
+    if act::is_call_id(call_id) { end_minutes(state, call_id); }
     let _money = state.money.lock().await;
     let journal = locked_spend_journal(state)?;
     let offer = journal.operation_record(operation_id)?
@@ -7465,8 +7520,6 @@ async fn do_op_close_call(state: &NodeState, operation_id: &str, peer: &str, cal
         || !matches!(offer.kind.as_str(), "call_offer" | "call_recovery") {
         return Err(ActionError::new("call_not_found", "No outgoing admission is recorded for this identity."));
     }
-    // Local teardown: no further minute of this call is paid.
-    end_minutes(state, call_id);
     // Keep admission and payment fenced until node-confirmed cleanup.
     Ok(())
 }
@@ -9526,6 +9579,10 @@ fn capture_call_observation(state: &NodeState, event: &control::LiveEvent) -> Re
     let Some(dir) = app_files_dir(state) else { return Ok(None) };
     let Some(offer) = spend_journal::read_completed_call_admission(&dir.join("app-spend"), &node_id, &message.sender, call_id)?
         else { return Ok(None) };
+    if message.kind == 403 {
+        // They hung up our call: no further minute of it is paid, at once.
+        state.call_consents.lock().unwrap().end(&node_id, Some(&message.sender), call_id);
+    }
     Ok(Some(CallObservation { offer, ended: message.kind == 403 }))
 }
 
@@ -15287,15 +15344,103 @@ mod control_act_tests {
         do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
         remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
         do_call_hold(&node.state, A, CALL_ID, Some(600_000)).await.unwrap();
+        let offer = node.posts().len();
+        let op = spend_journal(&node.state).unwrap().call_operations_for(OWN, None, Some(CALL_ID)).unwrap()
+            .into_iter().find(|r| r.kind == "call_offer").unwrap().op_id;
+        // Another task holds the money lock; the minute waits for it.
         let guard = node.state.money.lock().await;
         let block = do_call_block(&node.state, A, CALL_ID, 0);
         tokio::pin!(block);
         assert!(tokio::time::timeout(Duration::from_millis(60), &mut block).await.is_err(), "waits for the money lock");
-        end_minutes(&node.state, CALL_ID);
+        // Local teardown revokes at once, without waiting for that lock.
+        let close = do_op_close_call(&node.state, &op, A, CALL_ID);
+        tokio::pin!(close);
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut close).await.is_err(), "close waits for the lock");
+        assert_eq!(consent_phase(&node), ConsentPhase::Ended, "revoked before the lock");
         drop(guard);
         assert_eq!(block.await.unwrap_err().code, "call_not_live");
+        close.await.unwrap();
         assert_eq!(compose_kinds(&node), [400]);
+        assert_eq!(node.posts().len(), offer);
         assert!(pending(&node).is_none());
+    }
+
+    /// End, local teardown or their hangup while a minute is paused at each
+    /// await inside the money path (the money lock taken, the token
+    /// refreshed, just before the POST): the minute is never sent.
+    #[tokio::test]
+    async fn a2_a_minute_paused_at_each_await_is_never_sent_after_the_call_ends() {
+        for point in ["after_lock", "after_token", "before_dispatch"] {
+            for ender in ["end", "close", "their_hangup"] {
+                let (routes, _) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+                let node = fake(AuthMode::Local, routes);
+                approve_calls(&node).await;
+                do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+                remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
+                do_call_hold(&node.state, A, CALL_ID, Some(600_000)).await.unwrap();
+                let op = spend_journal(&node.state).unwrap().call_operations_for(OWN, None, Some(CALL_ID)).unwrap()
+                    .into_iter().find(|r| r.kind == "call_offer").unwrap().op_id;
+                let (arrived, release) = pause_points::arm(&node.state.api_base, point);
+                let state = &node.state;
+                let stop = async {
+                    arrived.notified().await;
+                    match ender {
+                        "end" => {
+                            let end = do_op_end_call(state, CALL_ID);
+                            tokio::pin!(end);
+                            // Revoked at once; the hangup then waits for the minute's lock.
+                            let _ = tokio::time::timeout(Duration::from_millis(20), &mut end).await;
+                            assert_eq!(consent_phase(&node), ConsentPhase::Ended, "{point} {ender}");
+                            release.notify_one();
+                            let _ = end.await;
+                        }
+                        "close" => {
+                            let close = do_op_close_call(state, &op, A, CALL_ID);
+                            tokio::pin!(close);
+                            let _ = tokio::time::timeout(Duration::from_millis(20), &mut close).await;
+                            assert_eq!(consent_phase(&node), ConsentPhase::Ended, "{point} {ender}");
+                            release.notify_one();
+                            close.await.unwrap();
+                        }
+                        _ => {
+                            assert!(capture_call_observation(state, &inbound_call_event(403, "hangup")).unwrap().is_some());
+                            assert_eq!(consent_phase(&node), ConsentPhase::Ended, "{point} {ender}");
+                            release.notify_one();
+                        }
+                    }
+                };
+                let (block, ()) = tokio::join!(do_call_block(state, A, CALL_ID, 0), stop);
+                assert_eq!(block.unwrap_err().code, "call_not_live", "{point} {ender}");
+                assert!(!compose_kinds(&node).contains(&404), "{point} {ender}: no minute sent");
+                let held = pending(&node);
+                assert!(held.as_ref().is_none_or(|p| p.operation_id.is_some()), "{point} {ender}: the minute's slot is released");
+            }
+        }
+    }
+
+    /// As paid, a minute is its price plus the routing fee pinned on the hold:
+    /// at the call limit with no fee it is paid; one msat of fee over, it is not.
+    #[tokio::test]
+    async fn a2_a_minute_as_paid_must_fit_the_call_limit_with_its_routing_fee() {
+        for (fee, paid) in [(0, true), (1, false)] {
+            let (routes, _) = minutes_routes("live", hold_json(10_000, fee, 60));
+            let node = fake(AuthMode::Local, routes);
+            approve_calls(&node).await;
+            do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+            remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
+            do_call_hold(&node.state, A, CALL_ID, Some((10_000 + fee) * 60)).await.unwrap();
+            let mut grant = g1_grant(3600, 400_000, 400_000);
+            grant["per_call_max_msat"] = 10_000.into();
+            grant["call_per_payment_max_msat"] = 10_000.into();
+            *node.state.node_grant.lock().unwrap() = grant::parse(&serde_json::json!({"grant": grant}).to_string()).unwrap();
+            let result = do_call_block(&node.state, A, CALL_ID, 0).await;
+            if paid {
+                assert!(compose_kinds(&node).contains(&404), "fee 0: {:?}", result.err());
+            } else {
+                assert_eq!(result.unwrap_err().code, "grant_per_call");
+                assert_eq!(compose_kinds(&node), [400], "fee 1: refused before any payment");
+            }
+        }
     }
 
     #[tokio::test]
@@ -16605,6 +16750,36 @@ mod control_act_tests {
                 let err = result.unwrap_err();
                 assert_eq!(err.code, "grant_per_call", "{block}");
                 assert_eq!(composes(&node), 0, "refused before any POST");
+            }
+        }
+    }
+
+    /// Answer, ICE and hangup at exactly the message cap are sent; one msat
+    /// over, nothing is.
+    #[tokio::test]
+    async fn call_signals_are_sent_at_the_message_cap_and_refused_one_msat_over() {
+        let plaintext = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","candidate":"","sdp_mid":"0","sdp":"v=0","reason":"hangup"}"#;
+        for kind in [401u16, 402, 403] {
+            // A fresh node per signal: each one sent holds the single spending slot until checked.
+            let (node, _dir, g1) = call_grant_node(10_000);
+            g1_approved(&node, 500_000).await;
+            with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+            let quote = read_call_quote(&node.state, A).await.unwrap();
+            let signal = quote.signal_msat + quote.signal_max_routing_fee_msat;
+            for (cap, sent) in [(signal - 1, false), (signal, true)] {
+                let before = composes(&node);
+                let mut grant = g1_grant(3600, 400_000, 400_000);
+                grant["per_call_max_msat"] = 50_000.into();
+                grant["call_per_payment_max_msat"] = 50_000.into();
+                grant["message_per_payment_max_msat"] = cap.into();
+                *g1.grant.lock().unwrap() = grant;
+                let result = do_call_signal(&node.state, A, kind, plaintext, signal).await;
+                if sent {
+                    assert_eq!(composes(&node), before + 1, "{kind} at {cap}: {:?}", result.err());
+                } else {
+                    assert_eq!(result.unwrap_err().code, "grant_per_call", "{kind} at {cap}");
+                    assert_eq!(composes(&node), before, "{kind} one msat over: nothing sent");
+                }
             }
         }
     }

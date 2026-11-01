@@ -5,6 +5,8 @@ import { render } from 'solid-js/web';
 import { ControlCenter, setShowLegacyRoomsUi } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID, SAMPLE_OPEN_ROOM_ID, SAMPLE_PEERS } from '../src/control/sample';
 import { asActionError, nodePill } from '../src/control/state';
+import { provenUnpaid } from '../src/control/paymentOutcome';
+import { setLanguagePref } from '../src/i18n';
 
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
@@ -163,6 +165,20 @@ describe('node money readiness', () => {
 
   it('maps the node refusal to the common calm message', () => {
     expect(asActionError({ code: 'not_ready', message: 'backend unavailable' }).message).toBe('Money is not ready yet. Your node will retry automatically.');
+  });
+
+  it.each([
+    ['en', 'Hanging up this call would cost more than your node grant allows per message payment, so it could not be ended. The owner would need to approve a larger per-payment limit. Nothing was sent or paid.'],
+    ['da', 'At lægge på i dette opkald ville koste mere, end din nodes tilladelse giver pr. beskedbetaling, så opkaldet ville ikke kunne afsluttes. Ejeren skal godkende en højere grænse pr. betaling. Intet blev sendt eller betalt.'],
+  ] as const)('the host refusing a call it could not end reads in the app language (%s), and nothing was paid', (lang, words) => {
+    setLanguagePref(lang);
+    try {
+      const error = asActionError({ code: 'call_hangup_unpayable', message: 'host words in English' });
+      expect(error).toEqual({ code: 'call_hangup_unpayable', message: words });
+      expect(provenUnpaid(error.code)).toBe(true);
+    } finally {
+      setLanguagePref('en');
+    }
   });
 
   it('does not mistake an older node without the field for unavailable money', async () => {
