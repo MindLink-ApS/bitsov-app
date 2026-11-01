@@ -178,20 +178,23 @@ For CallKit, the caller name shown on the lock screen is resolved by the app
 after the fetch, then updated with `reportCall(with:updated:)`. If the fetch
 fails in time, the screen says "BitSov call" and nothing else.
 
-### 3.4 Who sends the push (open, privacy-critical)
+### 3.4 Who sends the push (privacy-critical; decided in 3.5)
 
 APNs and FCM only accept pushes from a server holding the developer's
-credentials (APNs key / FCM service account). The box cannot hold those
-credentials safely, because every box would then hold a key that can push to
-every BitSov device. So something central has to send. Options:
+credentials (APNs key / FCM service account). A long-lived copy of those
+credentials in every box would be a key that can push to every BitSov
+device, so the box can only send directly if it gets a narrow, short-lived
+way to authenticate (section 3.5). Options:
 
 | Sender | What it learns | Cost |
 |---|---|---|
 | A. Relay run by the publisher | Device push token, the box that asked, time of each wake | One small stateless service; a new party in the metadata path |
 | B. Relay per hub / operator | Same, but split across operators | Each operator needs push credentials; harder to run |
 | C. No push; keep the phone connected | Nothing new | Not allowed by iOS for a suspended app; drains battery on Android |
+| D. The box itself, direct to APNs / FCM | Apple / Google: device push token and wake time, as in every option; no new party | Needs a safe credential path for the box (section 3.5) |
 
-Minimum rules if A or B is chosen:
+Rules for any push sender (written for the relay options A and B, which
+are rejected in 3.5; the box-side rules apply to option D too):
 
 - The relay never sees who calls whom. The box sends "wake token X"; the
   relay maps X to a push token and forgets the request. No caller id, no peer
@@ -203,7 +206,51 @@ Minimum rules if A or B is chosen:
   strangers that the node would refuse anyway never cause a push.
 - The relay still learns "this box woke this device at this time". Apple and
   Google learn the same. This is a real leak and must be written down in the
-  app's privacy text before release. Owner decision D1.
+  app's privacy text before release. Decided in section 3.5 (D1).
+
+### 3.5 Decision: wake push is a per-user setting (decided)
+
+Status: **decided by the owner** (D1). The wake push is a **setting each
+person chooses**, in Settings and once during phone setup, in plain words.
+There is no BitSov or publisher relay in the plan; options A and B in the
+table above are rejected.
+
+**Wake push on (option D above; the default when the person turns it on).**
+The person's own box sends a **content-free wake push directly to the
+platform push service** (APNs for iOS, FCM for Android). The phone wakes and
+fetches everything else (who calls, which message, which approval) from its
+own box over its existing authenticated connection, as section 3.3 requires.
+
+- What Apple / Google learn: only that this device was woken at this time
+  (plus, as with any push, the sending network address). No caller, no
+  peer, no amount, no text; the payload is the opaque wake token and type
+  from section 3.3.
+- No one else learns anything: there is no relay holding a "box woke device
+  at time T" log.
+- Rules from 3.4 still apply: wake tokens rotate and are registered by the
+  device through its own box; a peer can never trigger a push; the box
+  rate-limits per peer and never pushes for calls it would refuse.
+- Credential path (to settle before P3): the box must not hold a long-lived
+  key that can push to every BitSov device. Candidate: a short-lived, scoped
+  sender credential (for example an APNs provider token or FCM access token
+  valid about an hour), refreshed on a timer, never per wake, so whoever
+  issues it does not learn wake times. A self-built app can use the owner's
+  own push credentials.
+
+**Wake push off (option C above).** No push is ever sent. A locked or
+backgrounded phone cannot ring; the person opens the app to see calls and
+messages, which it then fetches from the box as today.
+
+Setting copy (draft, plain words):
+
+| | Dansk | English |
+|---|---|---|
+| Title | Vække telefonen ved opkald | Wake the phone for calls |
+| On | Telefonen ringer, også når den er låst. Apple eller Google ser kun, hvornår din boks vækker telefonen, aldrig hvem der ringer eller skriver. | Your phone rings even when locked. Apple or Google only see when your box wakes the phone, never who calls or writes. |
+| Off | Telefonen ringer ikke, når den er låst. Åbn appen for at se opkald og beskeder. | Your phone does not ring when locked. Open the app to see calls and messages. |
+
+The privacy text before release states the "device woken at time T" leak
+for people who turn the push on.
 
 ## 4. Design (b): one person, several devices
 
@@ -331,15 +378,20 @@ tests beyond regtest.
 | P0 | This document; owner decisions D1–D6 | — |
 | P1 | Notifications on phones while the app is running (lift the macOS-only gate in `Shell.tsx` and `OwnerApprovalSheet.tsx`; same content-free text) | — |
 | P2 | Node: owner-only "answered elsewhere" event; app: stop ringing on it (section 4.2) | Node release |
-| P3 | Push sender (D1), wake-token registration through the box, rate limits | D1, node release |
+| P3 | Box-direct push sender and the per-user wake-push setting (D1, decided), wake-token registration through the box, rate limits | Node release |
 | P4 | iOS PushKit + CallKit; Android FCM + foreground service; privacy text | P3 |
 | P5 | Node-side budget grant as single source; local book becomes a cache | Node release, D4 |
 | P6 | Node design for hosting several identities (own seeds, "hosted by", move-out); then the re-keying in 5.3 | M6 done, node release |
 
 ## 7. Open owner decisions
 
-- **D1.** Who sends pushes (relay by the publisher, per operator, or none),
-  and is the "box woke device at time T" leak acceptable with disclosure?
+- **D1. Decided by the owner:** the wake push is a per-user setting, chosen
+  in Settings and during phone setup in plain words. On (the default when
+  enabled): the box sends a content-free wake push directly to APNs / FCM,
+  the phone fetches everything from its own box, and the platform learns
+  only wake times. Off: no push; a locked phone cannot ring and the person
+  opens the app to see calls and messages. No relay in the plan
+  (section 3.5).
 - **D2.** Is a Google-free Android build allowed to have no locked-phone
   ringing, or is a self-hosted push (for example UnifiedPush) required?
 - **D3.** Does "Decline" on one device decline on all, or only silence that
