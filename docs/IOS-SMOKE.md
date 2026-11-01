@@ -28,6 +28,13 @@ black or one flat colour in the middle of the screen after about 20 seconds.
 Output is gitignored under `test-results/ios-smoke/`; `launch.png` is only launch
 evidence, not a completed M6 test.
 
+The simulator shares the Mac's network, including `127.0.0.1`. The app's
+home-node proxy binds `127.0.0.1:3141`, so a desktop app or node already
+listening there would answer the simulator app instead of the paired node.
+The smoke refuses to launch while that port is in use; quit the desktop app
+and any local node first, and keep them closed while testing in the simulator.
+On a phone, `127.0.0.1` is the phone itself, so this applies to the simulator only.
+
 Use a reachable M6 home node, a second paired tester/peer, funded test balances,
 and small spending limits. Obtain the node's actual connection/pairing details
 from its owner. A phone needs a reachable LAN/VPN address; its `localhost` is

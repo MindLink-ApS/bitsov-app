@@ -180,6 +180,19 @@ if [[ ${IOS_SIM_NO_WINDOW:-0} != 1 ]]; then
       open -a Simulator --args -CurrentDeviceUDID "$udid"
   fi
 fi
+# The simulator shares this Mac's loopback. The app's home-node proxy binds
+# 127.0.0.1:3141, so a desktop app or node already on that port would receive
+# the simulator app's requests. Refuse to launch rather than talk to it.
+# lsof only lists local sockets; it never connects to the port.
+if [[ $dry_run == 0 ]]; then
+  STEP="check that the app's loopback port is free"
+  if lsof -nP -iTCP@127.0.0.1:3141 -sTCP:LISTEN >/dev/null 2>&1; then
+    fail 'something on this Mac already listens on 127.0.0.1:3141 (a desktop app or node). The simulator app would use it as its home node. Quit it, then rerun.'
+  fi
+else
+  run "Refuse to launch while this Mac listens on the app's loopback port" \
+    lsof -nP -iTCP@127.0.0.1:3141 -sTCP:LISTEN
+fi
 run 'Install simulator app' xcrun simctl install "$udid" "$app"
 run 'Launch simulator app' xcrun simctl launch --terminate-running-process "$udid" "$bundle_id"
 run 'Allow the launch animation to finish' sleep "${IOS_SMOKE_SCREENSHOT_DELAY:-2}"

@@ -71,6 +71,8 @@ elif tool == "xcrun":
         print(json.dumps({"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-18-0": devices}}))
     elif args[:4] == ["simctl", "io", "PHONE", "screenshot"]:
         pathlib.Path(args[4]).write_bytes(png(os.environ.get("SCREEN", "app")))
+elif tool == "lsof":
+    sys.exit(0 if os.environ.get("PORT_BUSY") == "1" else 1)
 elif tool == "mdfind":
     print(os.environ.get("SIMULATOR_APP", ""))
 elif tool == "xcode-select":
@@ -98,7 +100,7 @@ class SmokeTest(unittest.TestCase):
         (self.root / "node_modules/.bin/vite").touch()
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        for name in ("xcodebuild", "xcrun", "cargo", "rustup", "npm", "mdfind", "xcode-select", "open"):
+        for name in ("xcodebuild", "xcrun", "cargo", "rustup", "npm", "mdfind", "xcode-select", "open", "lsof"):
             tool = self.bin / name
             tool.write_text(FAKE_TOOL)
             tool.chmod(0o755)
@@ -108,6 +110,7 @@ class SmokeTest(unittest.TestCase):
                         CALL_LOG=str(self.log), FIXTURE_ROOT=str(self.root))
         self.env.pop("IOS_SIM_UDID", None)
         self.env.pop("IOS_SIM_NO_WINDOW", None)
+        self.env.pop("PORT_BUSY", None)
         self.env.update(IOS_SMOKE_SCREENSHOT_ATTEMPTS="2", IOS_SMOKE_SCREENSHOT_DELAY="0")
 
     def run_smoke(self, *args):
@@ -184,6 +187,15 @@ class SmokeTest(unittest.TestCase):
         result = self.run_smoke()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(any(c[0] == "open" for c in self.calls()))
+
+    def test_refuses_to_launch_while_host_uses_app_loopback_port(self):
+        self.env["PORT_BUSY"] = "1"
+        result = self.run_smoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("127.0.0.1:3141", result.stderr)
+        calls = self.calls()
+        self.assertIn(["lsof", "-nP", "-iTCP@127.0.0.1:3141", "-sTCP:LISTEN"], calls)
+        self.assertFalse(any(c[:3] in (["xcrun", "simctl", "install"], ["xcrun", "simctl", "launch"]) for c in calls))
 
     def test_black_or_blank_screenshot_fails(self):
         for screen, message in (("black", "screenshot is black"), ("flat", "one flat colour")):
