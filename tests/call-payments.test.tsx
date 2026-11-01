@@ -416,17 +416,50 @@ describe('the call engine with paid minutes', () => {
   it('the signed per-payment limit binds one agreed minute; the 6-sat message cap does not', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const grant = (per: number): NodeGrantSummary => ({ expires_at_ms: Date.now() + 3_600_000, budget_msat: 500_000, remaining_msat: 500_000, per_call_max_msat: per, message_per_payment_max_msat: Math.min(per, 6_000), call_per_payment_max_msat: per });
-    // A 25-sat minute plus its 5-sat allowance: above the owner's 21-sat limit, though the 21-sat admission fits it.
+    // A 25-sat minute (its price; the 5-sat allowance stays in the hold): above the owner's 21-sat limit.
     const dear = { ...QUOTE, block_msat: 25_000, reservation_max_msat: 240 * 30_000 };
     const owner = engine(minutesOf(node, vi.fn()), undefined, grant(21_000));
     await owner.engine.place(A, 'audio', dear);
     expect(owner.signals).toEqual([]);
-    expect(owner.last()).toMatchObject({ phase: 'ended', error: expect.stringContaining('This call needs up to 30 sats per payment. Your node grant allows 21 sats per payment.') });
+    expect(owner.last()).toMatchObject({ phase: 'ended', error: expect.stringContaining('This call needs up to 25 sats per payment. Your node grant allows 21 sats per payment.') });
     // A 30-sat signed limit: messages stay at 6 sats, the 30-sat minute fits.
     const wide = engine(minutesOf(node, vi.fn()), undefined, grant(30_000));
     await wide.engine.place(A, 'audio', dear);
     expect(wide.signals.map((x) => x.kind)).toEqual([400]);
     wide.engine.dismiss();
+  });
+
+  it.each([[10_000, true], [10_001, false]] as const)('compares a minute at its price with the signed limit: block %i', async (block, dials) => {
+    // The node pins no routing fee for a usable direct channel; the 5-sat allowance stays in the hold.
+    const node = fakeNode({ now: () => Date.now() });
+    const grant: NodeGrantSummary = { expires_at_ms: Date.now() + 3_600_000, budget_msat: 500_000, remaining_msat: 500_000,
+      per_call_max_msat: 10_000, message_per_payment_max_msat: 6_000, call_per_payment_max_msat: 10_000 };
+    const q = { ...QUOTE, offer_msat: 1_000, call_total_msat: 12_000, block_msat: block, reservation_max_msat: 240 * (block + FEE) };
+    const e = engine(minutesOf(node, vi.fn()), undefined, grant);
+    await e.engine.place(A, 'audio', q);
+    if (dials) {
+      expect(e.signals.map((x) => x.kind)).toEqual([400]);
+      e.engine.dismiss();
+    } else {
+      expect(e.signals).toEqual([]);
+      expect(e.last()).toMatchObject({ phase: 'ended', error: expect.stringContaining(`This call needs up to ${amount(10_001)} per payment. Your node grant allows ${amount(10_000)} per payment.`) });
+    }
+  });
+
+  it('places no call whose hangup the message cap could not pay, so a call can always be ended', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const grant = (message: number): NodeGrantSummary => ({ expires_at_ms: Date.now() + 3_600_000, budget_msat: 500_000, remaining_msat: 500_000,
+      per_call_max_msat: 50_000, message_per_payment_max_msat: message, call_per_payment_max_msat: 50_000 });
+    // QUOTE's hangup: 1 sat plus a 5-sat routing allowance.
+    const tight = engine(minutesOf(node, vi.fn()), undefined, grant(5_999));
+    await tight.engine.place(A, 'audio', QUOTE);
+    expect(tight.signals).toEqual([]);
+    expect(tight.last()).toMatchObject({ phase: 'ended', error: expect.stringContaining('could not be ended') });
+    expect(tight.last().error).toContain('Nothing was sent or paid.');
+    const fits = engine(minutesOf(node, vi.fn()), undefined, grant(6_000));
+    await fits.engine.place(A, 'audio', QUOTE);
+    expect(fits.signals.map((x) => x.kind)).toEqual([400]);
+    fits.engine.dismiss();
   });
 
   it('places no call without the per-minute price the owner agreed to', async () => {
