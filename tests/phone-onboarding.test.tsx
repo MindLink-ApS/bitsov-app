@@ -136,7 +136,7 @@ it('never reports a mismatch cancellation as successful if cancellation fails', 
 });
 it('keeps fingerprint confirmation for a host without delegation', async () => {
   const props = mount({ status: () => ({ ready: true, node_id: 'ABCDEF', error: null }), pairing: () => ({ ...INITIAL_PAIRING, remote: true, state: 'paired' }), device: () => ({ available: false, delegation_supported: false, state: 'unavailable', fingerprint: null, owner_action: null, expires_at_ms: null }) });
-  await tick(); expect(document.querySelector('h1')?.textContent).toBe('Is the same code on your computer?');
+  await tick(); expect(document.querySelector('h1')?.textContent).toBe('Is the same code where you got the link?');
   expect(props.beginJoin).not.toHaveBeenCalled(); button('They match').click();
   expect(button('Open BitSov')).toBeTruthy();
 });
