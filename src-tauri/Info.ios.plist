@@ -5,6 +5,12 @@
   <!-- Background audio is used only by a Live call; no VoIP push/CallKit. -->
   <key>UIBackgroundModes</key>
   <array><string>audio</string></array>
+  <!-- Export compliance: only standard, published algorithms (TLS, Noise with
+       X25519/ChaCha20-Poly1305/BLAKE2s, Ed25519, BLAKE3, P-256 via the OS), in a
+       mass-market app with public source. The account owner confirms this
+       answer for their own filing; see docs/IOS-TESTFLIGHT.md. -->
+  <key>ITSAppUsesNonExemptEncryption</key>
+  <false/>
   <key>NSFaceIDUsageDescription</key>
   <string>BitSov uses Face ID to approve actions with your device key.</string>
   <key>NSMicrophoneUsageDescription</key>
