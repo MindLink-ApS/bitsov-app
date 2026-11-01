@@ -2,7 +2,9 @@
 
 Status: **proposal, docs only.** Nothing here is built. It needs review from
 two independent reviewers and an explicit owner decision on the open items at
-the end before any code lands.
+the end before any code lands. Open decision 1 (writes inside a client's
+grant without per-action approval) is **decided by the owner: yes** (section
+5.6); the other items in section 9 are still open.
 
 This document describes how an AI client that speaks the Model Context
 Protocol (MCP), or a plugin, could read from and act on the owner's own BitSov
@@ -112,6 +114,14 @@ The node today knows `read`, `receive` and `spend`, not `message` / `pay` /
 the split and the node grant bounds the total. That gap is an open decision
 (section 9).
 
+**Doctrine: the grant is the token.** An MCP client's access is paid with
+sats as its token. What a client may do on the owner's node is exactly what
+its own node grant pays for: budget, per-call cap, recipient allowlist and
+expiry. There is no second, unpaid permission layer beside it. When the
+grant is spent, expired or revoked, the client's write access is gone; a new
+grant is an owner action at the node, never something a client can mint,
+extend or borrow from another client.
+
 ### 5.4 Read tools first
 
 Phase 1 exposes only reads, mapped one to one onto existing topics in
@@ -159,17 +169,36 @@ repeat with the same key and same body returns the original outcome; the same
 key with a different body is refused. Unknown outcomes stay unknown until
 `GET /messages/operations/{id}` resolves them, as today.
 
-### 5.6 Owner-approved text stays, until decided otherwise
+### 5.6 Writes inside the grant run without per-action approval (decided)
 
-Until the owner explicitly decides otherwise (section 9), a write from an MCP
-client does **not** go out on its own. It becomes a pending item in the app,
-like today's `Proposal`, showing recipient, amount and exact text. The owner's
-tap sends exactly those bytes, following the `ai_disclose` / `ai_send`
-pattern: the host holds the body under a random id, and the tap can only send
-what was shown. The grant still bounds it.
+Owner decision (section 9, item 1): **inside a client's own node grant**
+(total budget, per-call cap, recipient allowlist, expiry), a write tool may
+execute **without a per-action owner tap**. The owner's approval is given
+once, when the owner writes that client's grant at the node; each write then
+spends from it. Anything outside the grant is refused, never queued for a
+tap that would widen it.
 
-If the owner later allows writes without a tap, it is per client, per scope,
-and still inside that client's grant.
+What stays in place, unchanged by this decision:
+
+- **The node's debit is the hard bound.** The node refuses anything over the
+  grant total, the per-call cap, an off-allowlist recipient or an expired
+  grant. Host checks only make refusals earlier and clearer (section 5.5).
+- **Idempotency.** Every write carries a required `idempotency_key` mapped to
+  one spend-journal `operation_id`; a retry never pays twice.
+- **Tool results are untrusted.** Received messages and node data reach the
+  client wrapped as `untrusted_data`; injected text can at most spend what
+  the grant already allows, to recipients it already allows.
+- **Audit log.** Every write is logged with tool, recipient, amount, node
+  outcome, `operation_id` and grant remaining (section 5.7).
+- **One-tap revoke** per client and **Stop all** for every client
+  (section 5.7).
+
+Optional stricter mode: the owner may set a client to "ask me each time".
+Its writes then become pending items in the app, like today's `Proposal`,
+showing recipient, amount and exact text; the owner's tap sends exactly
+those bytes, following the `ai_disclose` / `ai_send` pattern (the host holds
+the body under a random id, and the tap can only send what was shown). The
+grant bounds that mode too.
 
 ### 5.7 Audit log and revoke
 
@@ -219,7 +248,7 @@ Settings > AI
      Scopes:   [x] read  [x] message  [ ] pay  [ ] call
      Grant:    120 of 500 sats left, max 6 per message,
                3 recipients, ends in 5 h 12 m   [ End grant ]
-     Writes:   ask me each time (default)
+     Writes:   run inside the grant  [ ask me each time ]
 
    Audit (last 50)                  filter: [all clients v]
      14:02  Chat app   send_message  Contact A  6 sats   settled
@@ -235,10 +264,10 @@ presents it once; the owner names the client and picks scopes. Default is
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| 0 | This document, review, owner decisions. | Two independent reviews, owner sign-off on section 9. |
+| 0 | This document, review, owner decisions. | Two independent reviews, owner sign-off on the open items in section 9 (item 1 is decided). |
 | 1 | MCP server off by default, stdio shim, per-client pairing, read tools, audit log, revoke. | Tests: scope denial for every tool and topic, untrusted wrapping, revoke ends sessions, nothing listens when off. |
-| 2 | Per-client G1 grants and the grant panel. Write tools that only create pending items (owner taps to send). Idempotency via spend journal. | Tests: over-cap, over-budget, off-allowlist and expired grant refused; same key never double-pays; crash mid-send reconciles. |
-| 3 | Optional, per client: writes without a tap inside the grant, if the owner approves it in section 9. | Node-side check that a client grant cannot exceed what the owner wrote; injection tests against received messages. |
+| 2 | Per-client G1 grants and the grant panel. Write tools that execute inside the client's grant without a per-action tap (decided). Idempotency via spend journal; audit log, revoke and stop-all cover writes. | Tests: over-cap, over-budget, off-allowlist and expired grant refused by the node; same key never double-pays; crash mid-send reconciles; node-side check that a client grant cannot exceed what the owner wrote; injection tests against received messages; revoke and stop-all end writes at once. |
+| 3 | Optional, per client: "ask me each time" mode (writes become pending items the owner taps). | Tests: the tap sends exactly the shown bytes; a pending item still cannot exceed the grant. |
 | 4 | Plugins as MCP clients (documentation and pairing flow only). | Same tests as phases 1 to 3, run against a plugin client. |
 | 5 | Lightning pay rail for paid model or tool calls. | Separate design review. |
 
@@ -252,9 +281,12 @@ presents it once; the owner names the client and picks scopes. Default is
 
 ## 9. Open decisions for the owner
 
-1. **Writes without per-action approval inside a grant?** Default in this
-   proposal: no, every write is a pending item the owner taps. Allowing it
-   would be per client and per scope, never global.
+1. **Writes without per-action approval inside a grant? Decided by the
+   owner: yes.** Inside a client's own node grant (budget, per-call cap,
+   recipient allowlist, expiry), write tools may execute without per-action
+   owner approval. Audit log, one-tap revoke, stop-all, idempotency,
+   untrusted tool results and the node's debit as the hard bound all stay.
+   Doctrine: the client's grant is its token (section 5.3). See section 5.6.
 2. **Node-side operation scopes.** Should the node learn `message` / `pay` /
    `call` as distinct grant scopes, so the split in 5.3 is enforced by the
    node rather than the host? And should a client grant refuse every
