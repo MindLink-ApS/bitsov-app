@@ -1530,17 +1530,6 @@ fn client_key_with(
 
 /// Remote mode is selected before every local-node resolution path. The only
 /// listener is the loopback Noise proxy; no sidecar is initialized or spawned.
-// Test entry points for a user action; each test module uses some of them.
-#[cfg(test)]
-#[allow(dead_code)]
-async fn attach_remote(
-    state: &NodeState,
-    app_data_dir: &Path,
-    descriptor: remote_access::RemoteDescriptor,
-) {
-    attach_remote_with(state, app_data_dir, descriptor, Interaction::User).await
-}
-
 async fn attach_remote_with(
     state: &NodeState,
     app_data_dir: &Path,
@@ -1854,12 +1843,6 @@ async fn finish_remote_auth(state: &NodeState, data_dir: &Path) {
     }
 }
 
-// Test entry points for a user action; each test module uses some of them.
-#[cfg(test)]
-#[allow(dead_code)]
-async fn reconnect_remote(state: &NodeState) -> Result<(), String> {
-    reconnect_remote_as(state, Interaction::User).await
-}
 
 /// The live feed's automatic recovery: never shows a biometric prompt.
 async fn reconnect_remote_background(state: &NodeState) -> Result<(), String> {
@@ -1873,12 +1856,6 @@ async fn reconnect_remote_as(state: &NodeState, interaction: Interaction) -> Res
     connect_remote_with(state, &data_dir, false, interaction).await
 }
 
-// Test entry points for a user action; each test module uses some of them.
-#[cfg(test)]
-#[allow(dead_code)]
-async fn reconnect_remote_at(state: &NodeState, app_data_dir: &Path) -> Result<(), String> {
-    connect_remote_at(state, app_data_dir, false).await
-}
 
 async fn connect_remote_at(state: &NodeState, app_data_dir: &Path, wait: bool) -> Result<(), String> {
     connect_remote_with(state, app_data_dir, wait, Interaction::User).await
@@ -22551,4 +22528,29 @@ mod client_key_prompt_tests {
         let key_b = client_key_with(&state, b.path(), Interaction::User, |_| ClientKey::generate_ephemeral()).unwrap();
         assert_ne!(key_a.public_hex(), key_b.public_hex());
     }
+}
+
+// User-action entry points only tests call; production code names its Interaction.
+// Kept after the production code (a source test reads the code above the first
+// test attribute).
+#[cfg(test)]
+#[allow(dead_code)]
+async fn attach_remote(
+    state: &NodeState,
+    app_data_dir: &Path,
+    descriptor: remote_access::RemoteDescriptor,
+) {
+    attach_remote_with(state, app_data_dir, descriptor, Interaction::User).await
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+async fn reconnect_remote(state: &NodeState) -> Result<(), String> {
+    reconnect_remote_as(state, Interaction::User).await
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+async fn reconnect_remote_at(state: &NodeState, app_data_dir: &Path) -> Result<(), String> {
+    connect_remote_at(state, app_data_dir, false).await
 }
