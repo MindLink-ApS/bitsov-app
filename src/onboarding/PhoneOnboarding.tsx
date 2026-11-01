@@ -185,9 +185,9 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       await props.openSettings();
     } else if (kind === 'tailscale') {
       resume = 'connection'; await props.openTailscale();
-    } else if (['expired', 'used', 'clock', 'approval_expired', 'unsupported'].includes(kind ?? '')) {
+    } else if (['expired', 'used', 'clock', 'approval_expired', 'unsupported', 'unclaimed'].includes(kind ?? '')) {
       await reset(); setBusy(false); await scan();
-    } else if (['unclaimed', 'mismatch', 'claim_mismatch'].includes(kind ?? '')) await reset();
+    } else if (['mismatch', 'claim_mismatch'].includes(kind ?? '')) await reset();
     else await retry();
   };
   createEffect(() => {
@@ -237,7 +237,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     const t = c();
     switch (error()?.kind) {
       case 'unsupported': return [t.update, t.updateLine, t.newQr];
-      case 'unclaimed': return [t.unclaimed, t.unclaimedLine, t.restart];
+      case 'unclaimed': return [t.unclaimed, t.unclaimedLine, t.unclaimedAction];
       case 'local_network': return [t.localNetwork, (props.platform ?? appPlatform()) === 'android' ? t.nearbyLine : t.localNetworkLine, t.settings];
       case 'tailscale': return [t.unreachable, t.tailscaleLine, t.tailscale];
       case 'unreachable': return [t.unreachable, t.unreachableLine, t.retry];
@@ -284,7 +284,11 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     });
   }));
   return <main class="phone-onboarding" data-phone-onboarding={screen()} lang={c() === phoneCopy.da ? 'da' : 'en'}>
-    <div class="phone-progress" aria-hidden="true"><For each={[0, 1, 2]}>{n => <span classList={{ filled: n === 0 || n === 1 && ['words', 'fingerprint', 'done'].includes(screen()) || n === 2 && screen() === 'done' }} />}</For></div>
+    <ol class="phone-progress" aria-label={c().progress}><For each={[c().stepScan, c().stepCompare, c().stepDone]}>{(label, i) => {
+      const reached = () => i() === 0 || i() === 1 && ['words', 'fingerprint', 'done'].includes(screen()) || i() === 2 && screen() === 'done';
+      const current = () => reached() && (i() === 2 || !(i() === 0 ? ['words', 'fingerprint', 'done'] : ['done']).includes(screen()));
+      return <li classList={{ filled: reached() }} aria-current={current() ? 'step' : undefined}><span class="phone-progress-bar" aria-hidden="true" /><span class="phone-progress-label">{label}</span></li>;
+    }}</For></ol>
     <section data-phone-face>
       <h1 ref={heading} tabindex="-1" aria-describedby={lineId}>{face()[0]}</h1>
       <p id={lineId} class="phone-line">{face()[1]}</p>
@@ -296,7 +300,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
         <button type="button" class="quiet" disabled={busy()} onClick={() => void run(reset)}>{c().mismatch}</button>
       </Show>
       <Show when={screen() === 'start' || screen() === 'scanner'}><PrimaryAction disabledReason={busy() ? c().working : !props.scan ? c().unavailable : undefined} onClick={() => void scan()}>{c().scan}</PrimaryAction></Show>
-      <Show when={screen() === 'connecting'}><p class="phone-status" role="status">{c().working}</p></Show>
+      <Show when={screen() === 'connecting'}><p class="phone-waiting" role="status"><span class="phone-spinner" aria-hidden="true" />{c().working}</p></Show>
       <Show when={screen() === 'done'}><PrimaryAction onClick={props.onDone}>{c().open}</PrimaryAction></Show>
       <Show when={screen() === 'error'}><PrimaryAction disabledReason={busy() ? c().working : undefined} onClick={() => void run(recover)}>{errorCopy()[2]}</PrimaryAction></Show>
     </section>

@@ -29,7 +29,8 @@ it('starts with one action and a collapsed paste route, without a secret input',
   const heading = document.querySelector('h1')!;
   expect(document.activeElement).toBe(heading);
   expect(heading.getAttribute('aria-describedby')).toBeTruthy();
-  expect(document.getElementById(heading.getAttribute('aria-describedby')!)?.textContent).toBe('Other device → Add a device.');
+  // Says where the QR comes from, in the computer's own words, instead of a cryptic arrow.
+  expect(document.getElementById(heading.getAttribute('aria-describedby')!)?.textContent).toBe('On your computer, open BitSov and choose Settings → Devices → Add a device. Then scan the QR it shows.');
   expect(document.querySelector('[data-phone-face]')?.getAttribute('aria-live')).toBeNull();
   expect(document.querySelectorAll('button.primary')).toHaveLength(1);
   expect(button("Scan your box’s QR")).toBeTruthy();
@@ -47,7 +48,7 @@ it('auto-connects a scan, displays ordered words and only the owner can approve'
   setPairing({ ...INITIAL_PAIRING, remote: true, state: 'paired' });
   setStatus({ ready: true, node_id: 'box', error: null }); await tick();
   expect([...document.querySelectorAll('[data-pair-word]')].map(e => e.textContent)).toEqual(['alpha', 'beta', 'gamma', 'delta']);
-  expect(document.body.textContent).toContain('Approve on your other device.');
+  expect(document.body.textContent).toContain('If the screen that showed the QR has the same words, approve there.');
   expect(button('They match')).toBeUndefined();
   expect(props.beginJoin).toHaveBeenCalledWith();
   button("They don't match").click(); await tick();
@@ -70,7 +71,7 @@ it('reads clipboard only on tap and never echoes an invalid value', async () => 
   expect(props.connect).not.toHaveBeenCalled();
 });
 it.each([
-  ['unclaimed', "This box isn't set up yet", 'Start over'],
+  ['unclaimed', "This box isn't set up yet", 'I’ve set it up – scan again'],
   ['local_network', 'Allow BitSov on your local network', 'Open Settings'],
   ['unreachable', "Can't reach your box", 'Try again'],
   ['tailscale', "Can't reach your box", 'Open Tailscale'],
@@ -165,10 +166,19 @@ it('does not import a delayed clipboard result after unmount', async () => {
   finish('bitsov://pair/synthetic'); await tick();
   expect(props.preview).not.toHaveBeenCalled(); expect(props.connect).not.toHaveBeenCalled();
 });
-it('start over after unclaimed preview never cancels a nonexistent enrollment', async () => {
-  const props = mount({ preview: vi.fn().mockResolvedValue({ first_run: true, endpoint: 'box', node_id_fingerprint: '' }), join: vi.fn().mockRejectedValue('no remote connection') });
-  button("Scan your box’s QR").click(); await tick(); button('Start over').click(); await tick();
-  expect(props.join).not.toHaveBeenCalled(); expect(button("Scan your box’s QR")).toBeTruthy();
+it('an unclaimed box says what to do on the computer, then scans again; it never cancels a nonexistent enrollment', async () => {
+  const preview = vi.fn().mockResolvedValueOnce({ first_run: true, endpoint: 'box', node_id_fingerprint: '' })
+    .mockResolvedValue({ second_device: true, endpoint: 'box:443', node_id_fingerprint: 'ABCD' });
+  const props = mount({ preview, join: vi.fn().mockRejectedValue('no remote connection') });
+  button("Scan your box’s QR").click(); await tick();
+  expect(document.querySelector('h1')?.textContent).toBe("This box isn't set up yet");
+  expect(document.body.textContent).toContain('Open BitSov on your computer and set up your box there. Then come back and scan again.');
+  expect(button('Start over')).toBeUndefined();
+  button('I’ve set it up – scan again').click(); await tick();
+  expect(props.scan).toHaveBeenCalledTimes(2);
+  expect(props.join).not.toHaveBeenCalled();
+  // The box is set up now: the second scan connects.
+  expect(props.connect).toHaveBeenCalledWith('bitsov://pair/synthetic');
 });
 it('waits for native cancellation before enabling another scan', async () => {
   let finish!: () => void;
@@ -354,6 +364,33 @@ it('shows connecting progress without a dummy primary action', async () => {
   await tick();
   expect(document.querySelectorAll('button.primary')).toHaveLength(0);
   expect(document.querySelector('[role="status"]')?.textContent).toBe('Please wait…');
+  // A progress indicator, not something that looks like a text field (and not the shell's status strip class).
+  expect(document.querySelector('[role="status"] .phone-spinner')?.getAttribute('aria-hidden')).toBe('true');
+  expect(document.querySelector('.phone-status')).toBeNull();
+  expect(document.body.textContent).toContain('This usually takes less than half a minute.');
+  expect(document.body.textContent).not.toContain('Keep your other device nearby');
+});
+
+it('labels the three steps and marks the current one', async () => {
+  const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  mount({ status, pairing, device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }) });
+  const steps = () => [...document.querySelectorAll('.phone-progress li')].map(li => [li.textContent, li.getAttribute('aria-current')]);
+  expect(document.querySelector('.phone-progress')?.getAttribute('aria-label')).toBe('Progress');
+  expect(steps()).toEqual([['Scan', 'step'], ['Compare', null], ['Done', null]]);
+  button("Scan your box’s QR").click(); await tick();
+  setPairing({ ...INITIAL_PAIRING, remote: true, state: 'paired' });
+  setStatus({ ready: true, node_id: 'box', error: null }); await tick();
+  expect(steps()).toEqual([['Scan', null], ['Compare', 'step'], ['Done', null]]);
+});
+
+it('Danish copy says where the QR comes from and what to do on an unclaimed box', async () => {
+  mount({ locale: 'da-DK', preview: vi.fn().mockResolvedValue({ first_run: true, endpoint: 'box', node_id_fingerprint: '' }) });
+  expect(document.body.textContent).toContain('Åbn BitSov på din computer, og vælg Indstillinger → Enheder → Tilføj en enhed.');
+  expect([...document.querySelectorAll('.phone-progress-label')].map(e => e.textContent)).toEqual(['Scan', 'Sammenlign', 'Færdig']);
+  button('Scan boksens QR-kode').click(); await tick();
+  expect(document.body.textContent).toContain('Åbn BitSov på din computer, og sæt boksen op dér.');
+  expect(button('Jeg har sat den op – scan igen')).toBeTruthy();
 });
 
 it('focuses each changed error once, including recovery-only changes, without a live duplicate', async () => {
