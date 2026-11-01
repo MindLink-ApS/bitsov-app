@@ -74,6 +74,8 @@ accept the computer's key, then `adb install -r <debug APK>`.
 - [ ] Hang up: both sides leave Live, audio stops, and the cost/remaining hold
   settles or a clear recovery action is shown. Repeat with an incoming call
   answered and hung up on the Android phone.
+- [ ] Locked-screen test: lock the caller's phone for 30 s; expect the call to
+  end and minutes to stop.
 
 Known Android limits for this test: keep BitSov in front with the screen on
 for the whole call. Android silences the microphone of an app in the
