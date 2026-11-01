@@ -1499,7 +1499,13 @@ async fn attach_remote(
     let store = app_data_dir.join(PAIRING_STORE_DIR);
     let key = match ClientKey::load_or_create(&store) {
         Ok(key) => Arc::new(key),
-        Err(error) => return set_error(&state, error.to_string()),
+        Err(error) => {
+            // No passcode: say so as its own kind, so the phone can open Settings.
+            if error.to_string() == bitsov_ffi::keychain_status::PASSCODE_REQUIRED {
+                state.remote_retry.failed(&remote_access::RemoteError::DeviceUnavailable);
+            }
+            return set_error(&state, error.to_string());
+        }
     };
     let ctx = Arc::new(PairingCtx {
         client: PairingClient::new(state.http.clone(), state.api_base.clone()),

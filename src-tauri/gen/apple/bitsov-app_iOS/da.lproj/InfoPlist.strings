@@ -1,0 +1,5 @@
+/* Danish permission texts. English is in Info.plist. */
+"NSCameraUsageDescription" = "BitSov bruger kun kameraet under et videoopkald, du foretager eller tager imod, eller når du scanner en QR-kode til parring.";
+"NSMicrophoneUsageDescription" = "BitSov bruger kun mikrofonen, mens du optager en talebesked eller er i et opkald.";
+"NSLocalNetworkUsageDescription" = "BitSov skal have adgang til dit lokale netværk for at forbinde til din boks og ringe til andre.";
+"NSFaceIDUsageDescription" = "BitSov bruger Face ID til at godkende handlinger med din enhedsnøgle.";
