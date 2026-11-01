@@ -78,7 +78,7 @@ import {
   outboundKind,
   type MembraneEntry,
 } from './body';
-import type { Source } from './source';
+import type { CallAudioRoute, Source } from './source';
 import {
   denom,
   setDenom,
@@ -2471,6 +2471,7 @@ export function ControlCenter(props: Props) {
         hangup={() => void calls.hangup()}
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
+        audioRoute={{ get: () => props.source.callAudioRouteGet(), set: route => props.source.callAudioRoute(route) }}
         dismiss={() => { setCallApproval(false); calls.dismiss(); }}
         closeAgain={() => void calls.closeAgain()}
         endStuck={() => void calls.endStuck()}
@@ -3658,6 +3659,8 @@ function CallPanel(props: {
   confirmMinutes?: () => void;
   /** Opens Settings → General, where the STUN server is chosen. */
   openCallSettings?: () => void;
+  /** iOS: speaker or earpiece for a live call. Absent, or `unsupported`, hides the control. */
+  audioRoute?: { get: () => Promise<CallAudioRoute>; set: (route: 'speaker' | 'earpiece') => Promise<CallAudioRoute> };
 }) {
   const [tick, setTick] = createSignal(Date.now());
   const [answer, setAnswer] = createSignal<number | null>(null);
@@ -3693,6 +3696,26 @@ function CallPanel(props: {
     if (peer) void props.quote(peer).then((r) => { if (r.ok) setAnswer(signalCost(r.value)); });
   }));
   const v = () => props.view;
+  // The route iOS actually uses: shown as reported, and read again on focus (a headset can override the speaker).
+  const [route, setRoute] = createSignal<CallAudioRoute>('unsupported');
+  const readRoute = () => {
+    const audio = props.audioRoute;
+    if (!audio || v().phase !== 'live') { setRoute('unsupported'); return; }
+    void audio.get().then(r => { if (v().phase === 'live') setRoute(r); }, () => setRoute('unsupported'));
+  };
+  createEffect(on(() => (v().phase === 'live' ? v().callId : null), () => readRoute()));
+  onMount(() => {
+    const refresh = () => { if (document.visibilityState === 'visible') readRoute(); };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    onCleanup(() => { window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh); });
+  });
+  const switchRoute = async () => {
+    const audio = props.audioRoute;
+    if (!audio) return;
+    try { setRoute(await audio.set(route() === 'speaker' ? 'earpiece' : 'speaker')); } catch { readRoute(); }
+  };
+  const routeName = (r: CallAudioRoute) => (r === 'speaker' ? tr('caRouteSpeaker') : tr('caRouteEarpiece'));
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
   return (
@@ -3825,6 +3848,12 @@ function CallPanel(props: {
             <Match when={v().phase !== 'idle'}>
               <Show when={v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting'}>
                 <button type="button" class="soft" data-call-mute aria-pressed={v().muted} onClick={() => props.mute()}>{tr('uiMute')}</button>
+                <Show when={route() === 'speaker' || route() === 'earpiece'}>
+                  <button type="button" class="soft" data-call-audio-route={route()} aria-pressed={route() === 'speaker'}
+                    aria-label={tr('caRouteSwitch', routeName(route()), routeName(route() === 'speaker' ? 'earpiece' : 'speaker'))}
+                    onClick={() => void switchRoute()}>{routeName(route())}</button>
+                </Show>
+                <Show when={route() === 'external'}><span class="hint call-route-external" data-call-audio-route="external">{tr('caRouteExternal')}</span></Show>
                 <Show when={v().media === 'video'}>
                   <button type="button" class="soft" data-call-camera aria-pressed={v().camera} onClick={() => props.camera()}>{tr('uiCamera')}</button>
                 </Show>

@@ -672,7 +672,7 @@ const paired = { state: 'paired', scopes: ['read', 'receive', 'spend'], node_id:
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 
-function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number } = {}) {
+function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number; audio?: { route: string; afterSet?: string } } = {}) {
   resetContactsForTests();
   setPetname(A, 'Maya');
   const calls: { cmd: string; args?: unknown }[] = [];
@@ -731,6 +731,11 @@ function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?
     call_media_close: () => null,
     'plugin:event|listen': () => 1,
     'plugin:event|unlisten': () => null,
+    // iOS audio route (#382): the host reports what the system actually uses.
+    ...(opts.audio ? {
+      call_audio_route_get: () => opts.audio!.route,
+      call_audio_route: (args) => { opts.audio!.route = opts.audio!.afterSet ?? (args as { route: string }).route; return opts.audio!.route; },
+    } : {}),
   };
   vi.stubGlobal('__TAURI_INTERNALS__', {
     transformCallback: (cb: (e: unknown) => void) => { const id = callbacks.size + 1; callbacks.set(id, cb); return id; },
@@ -957,4 +962,60 @@ describe('the shell: consent, running cost, stop states and summary', () => {
       .toEqual([['Paid in all', amount(BLOCK + FEE)]]);
     expect(host.used('call_block')).toHaveLength(1);
   }, 15_000);
+
+  describe('speaker or earpiece on a live phone call', () => {
+    async function live(audio?: { route: string; afterSet?: string }) {
+      const host = stubHost({ audio });
+      await openShell();
+      $<HTMLButtonElement>('[data-call="audio"]')!.click();
+      $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+      await vi.waitFor(() => expect($('[data-call-minutes-confirm]')).not.toBeNull());
+      $<HTMLButtonElement>('[data-call-minutes-confirm]')!.click();
+      await vi.waitFor(() => expect($('[data-call-minutes-confirm]')).toBeNull());
+      const callId = host.callId();
+      host.emitLive({ type: 'message', room_id: null, message: { id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, sdp: nodeRoutedSdp('answer', callId) }), payment_amount_msat: 1000 } });
+      await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1), { timeout: 3_000 });
+      host.media({ link: 'open', detail: null });
+      await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+      return host;
+    }
+    const toggle = () => $<HTMLButtonElement>('button[data-call-audio-route]');
+
+    it('starts on the earpiece, switches to the speaker and shows the route the host reports', async () => {
+      const host = await live({ route: 'earpiece' });
+      await vi.waitFor(() => expect(toggle()?.textContent).toBe('Earpiece'));
+      expect(toggle()!.getAttribute('aria-pressed')).toBe('false');
+      expect(toggle()!.getAttribute('aria-label')).toBe('Sound: Earpiece. Tap for Speaker.');
+      // Next to Mute, before the big hang-up.
+      expect(toggle()!.previousElementSibling?.matches('[data-call-mute]')).toBe(true);
+      toggle()!.click();
+      await vi.waitFor(() => expect(toggle()?.textContent).toBe('Speaker'));
+      expect(toggle()!.getAttribute('aria-pressed')).toBe('true');
+      expect(host.used('call_audio_route').map(c => c.args)).toEqual([{ route: 'speaker' }]);
+    }, 15_000);
+
+    it('a headset wins over the speaker: shows a label, not a toggle', async () => {
+      await live({ route: 'earpiece', afterSet: 'external' });
+      await vi.waitFor(() => expect(toggle()).not.toBeNull());
+      toggle()!.click();
+      await vi.waitFor(() => expect($('[data-call-audio-route="external"]')?.textContent).toBe('Sound in headset'));
+      expect(toggle()).toBeNull();
+    }, 15_000);
+
+    it('reads the route again when the app comes back into focus', async () => {
+      const audio = { route: 'speaker' };
+      await live(audio);
+      await vi.waitFor(() => expect(toggle()?.textContent).toBe('Speaker'));
+      audio.route = 'external';
+      window.dispatchEvent(new Event('focus'));
+      await vi.waitFor(() => expect($('[data-call-audio-route="external"]')).not.toBeNull());
+    }, 15_000);
+
+    it('shows nothing where the host has no route control (desktop, Android)', async () => {
+      const host = await live({ route: 'unsupported' });
+      await vi.waitFor(() => expect(host.used('call_audio_route_get').length).toBeGreaterThan(0));
+      expect($('[data-call-audio-route]')).toBeNull();
+      expect($('[data-call-mute]')).not.toBeNull();
+    }, 15_000);
+  });
 });

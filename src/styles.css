@@ -1902,3 +1902,5 @@ html:is([data-platform='ios'], [data-platform='android']) .call-panel [data-call
   order: 10; min-height: 60px; background: var(--err); border-color: var(--err); color: #fff; font-weight: 600; font-size: 19px;
 }
 .call-meter-note { display: block; font-size: var(--t-xs); font-weight: 400; color: var(--muted); }
+.call-route-external { align-self: center; padding: 0 var(--s-2); }
+html:is([data-platform='ios'], [data-platform='android']) .call-panel .call-route-external { min-height: 52px; display: flex; align-items: center; justify-content: center; }
