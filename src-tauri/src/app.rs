@@ -5037,12 +5037,6 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         }
         _ => journal.begin_operation(&node_id, path, &body, max_msat, operation_id.clone().map(|id| (id, op.clone())))?,
     };
-    // Saved with the pending record before the POST below: recovery repeats
-    // exactly this request under exactly this key.
-    if let (true, Some(id)) = (is_direct_payment(path), body["request_id"].as_str()) {
-        pending.direct = Some(spend_journal::DirectRequest { request_id: id.to_string(), path: path.to_string(), body: body.clone() });
-        journal.save(&pending)?;
-    }
     use spend_journal::OperationState as OpState;
     journal.record_outcome(&pending, OpState::Dispatching, None)?;
     let begun = pending.clone();
@@ -5081,6 +5075,13 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     };
     if charged.is_some() {
         pending.budgeted = true;
+        // A direct payment's request is saved only now, in the same write
+        // that records its reservation as held, and before the POST below:
+        // recovery repeats exactly this request under exactly this key, and
+        // only while that reservation is held.
+        if let (true, Some(id)) = (is_direct_payment(path), body["request_id"].as_str()) {
+            pending.direct = Some(spend_journal::DirectRequest { request_id: id.to_string(), path: path.to_string(), body: body.clone() });
+        }
         journal.save(&pending)?;
     }
     let release = |state: &NodeState| match &charged {
@@ -5094,8 +5095,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     if let Err(e) = refuse_if_connection_waiting(state)
         .and_then(|()| refuse_if_paused(state))
         .and_then(|()| check_auth(state, auth)) {
-        release(state)?;
         abandon(&journal)?;
+        release(state)?;
         return Err(e);
     }
     let response = state.http.post(format!("{}{path}", state.api_base))
@@ -5104,23 +5105,23 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     let status = response.status();
     // These statuses are rejected by authentication before any handler runs.
     if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
-        release(state)?;
         abandon(&journal)?;
+        release(state)?;
         state.autopay.lock().unwrap().lock();
         *state.node_grant.lock().unwrap() = None;
         return Err(state.spend.lock().unwrap().refused());
     }
     let text = response.text().await.map_err(|_| spend_journal::unknown("The response was interrupted."))?;
     if act::readiness_refusal(status.as_u16(), &text) {
-        release(state)?;
         abandon(&journal)?;
+        release(state)?;
         return Err(ActionError::new("not_ready", act::MONEY_NOT_READY));
     }
     // Proven non-dispatch (#115): nothing left the wallet. Clear the journal
     // and release the app reservation; any other error stays spend_unknown.
     if act::not_dispatched_refusal(status.as_u16(), &text) {
-        release(state)?;
         abandon(&journal)?;
+        release(state)?;
         return Err(act::call_not_dispatched(&text)
             .unwrap_or_else(|| ActionError::new("not_dispatched", act::not_dispatched_message(&text))));
     }
@@ -5152,8 +5153,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     }
     // G1: the node refused under its grant before reserving or paying anything.
     if let Some(refusal) = grant::refusal(status.as_u16(), &text) {
-        release(state)?;
         abandon(&journal)?;
+        release(state)?;
         let known = state.node_grant.lock().unwrap().clone();
         if refusal.ends_grant() { drop_grant(state); }
         return Err(refusal.error(known.as_ref()));
@@ -5187,8 +5188,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     if let Some(code) = operation_id.as_ref().and(act::operation_conflict(status.as_u16(), &text)) {
         match code {
             "operation_mismatch" => {
-                release(state)?;
                 abandon(&journal)?;
+                release(state)?;
                 return Err(ActionError::new("operation_mismatch", act::OPERATION_MISMATCH));
             }
             "failed_paid" => {
@@ -5514,11 +5515,22 @@ async fn replay_direct_payment(state: &NodeState, journal: &Journal, pending: &m
     if !is_direct_payment(&direct.path) || direct.body["request_id"].as_str() != Some(direct.request_id.as_str()) {
         return Err(spend_journal::unknown("The saved payment request is not readable; inspect the owner node. Nothing was dispatched again."));
     }
-    // Repeating may pay a request the node never received: never while paused.
-    refuse_if_paused(state)?;
-    refuse_if_connection_waiting(state)?;
-    let (status, text) = call_api(state, reqwest::Method::POST, &direct.path, Some(direct.body.clone())).await
-        .map_err(|e| spend_journal::unknown(format!("Your node could not be asked about this payment ({e}). It is never paid twice under its request ID.")))?;
+    // Repeating may pay a request the node never received: only under the
+    // reservation still held for it, and never while paused. Checked again
+    // after the token refresh, the last await before the POST (the caller
+    // holds the money lock; pausing does not take it).
+    if let Some(refused) = replay_refusal(state, journal, pending) { return Err(refused); }
+    ensure_fresh_token(state).await;
+    if let Some(refused) = replay_refusal(state, journal, pending) { return Err(refused); }
+    let token = state.token.lock().unwrap().clone()
+        .ok_or_else(|| spend_journal::unknown("The node is not authenticated yet. Nothing was dispatched again."))?;
+    // One attempt, no re-authentication loop: a refused sign-in sends nothing.
+    let response = state.http.post(format!("{}{}", state.api_base, direct.path))
+        .bearer_auth(token).json(&direct.body).timeout(state.spend_timeout).send().await
+        .map_err(|_| spend_journal::unknown("Your node did not answer about this payment. It is never paid twice under its request ID."))?;
+    let status = response.status();
+    let text = response.text().await
+        .map_err(|_| spend_journal::unknown("Your node's answer about this payment was interrupted. It is never paid twice under its request ID."))?;
     if !status.is_success() {
         if matches!(pending.target, Some(Target::Payment { .. })) { return Ok(None); }
         return Err(spend_journal::unknown(api_error(&direct.path, status, &text)));
@@ -5540,6 +5552,22 @@ async fn replay_direct_payment(state: &NodeState, journal: &Journal, pending: &m
     receipt["direction"] = serde_json::json!("outgoing");
     Ok(Some(receipt))
 }
+/// A saved direct-payment request may be repeated only while this exact
+/// pending record is current, unaccounted, and its reservation is held in the
+/// budget book at its full bound; and only while payments are not paused.
+/// The refusal, if not.
+fn replay_refusal(state: &NodeState, journal: &Journal, pending: &spend_journal::Pending) -> Option<ActionError> {
+    if let Err(refused) = refuse_if_paused(state).and_then(|()| refuse_if_connection_waiting(state)) {
+        return Some(refused);
+    }
+    let current = match journal.pending() { Ok(current) => current, Err(error) => return Some(error) };
+    let unchanged = current.as_ref().is_some_and(|c| c.id == pending.id && c.direct == pending.direct
+        && c.accounting_msat.is_none() && c.budgeted);
+    let held = unchanged && with_book(state, false, |book| Ok(book.ledger.iter().any(|e|
+        e.id == pending.charge_id() && !e.settled && e.msat >= pending.max_msat))).unwrap_or(false);
+    (!held).then(|| spend_journal::unknown("This payment's budget reservation is not held, so its request was not sent again. Inspect the owner node."))
+}
+
 const RECONCILE_WAIT: &str = "Payment unknown: the original send may still reach your node. Another spend is blocked; check again in a few minutes. Nothing was dispatched again.";
 
 fn unpaid_grace_elapsed(dispatched_at: u64, now: u64, timeout: Duration) -> bool {
@@ -7741,8 +7769,8 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     if let Err(e) = refuse_if_connection_waiting(state)
         .and_then(|()| refuse_if_paused(state))
         .and_then(|()| check_auth(state, auth)) {
-        release(state)?;
         abandon(&journal)?;
+        release(state)?;
         return Err(e);
     }
     let response = state.http.post(format!("{}{}", state.api_base, porch::ROUTE))
@@ -7750,8 +7778,8 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
         .map_err(|_| spend_journal::unknown("The node did not return a complete response."))?;
     let status = response.status();
     if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
-        release(state)?;
         abandon(&journal)?;
+        release(state)?;
         state.autopay.lock().unwrap().lock();
         *state.node_grant.lock().unwrap() = None;
         return Err(state.spend.lock().unwrap().refused());
@@ -7791,8 +7819,8 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
         }
     };
     if let Some(e) = nothing_paid {
-        release(state)?;
         abandon(&journal)?;
+        release(state)?;
         return Err(e);
     }
     if !status.is_success() {
@@ -21078,6 +21106,171 @@ mod control_act_tests {
         do_payment_keysend(&node.state, &pk, 5000, None, 10000).await.unwrap();
         let next = keysend_bodies(&node).pop().unwrap();
         assert!(next["request_id"].as_str().is_some_and(|id| id != saved.request_id));
+    }
+
+    /// A node that pays each `request_id` once and answers a repeat from its
+    /// record. `first` decides the first POST: `lost_before` (never reaches
+    /// the node), `lost_after` (paid, reply lost) or `in_flight` (no hash yet).
+    fn idempotent_keysend_node(first: &'static str) -> (Routes, Arc<Mutex<Vec<String>>>) {
+        let paid: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = paid.clone();
+        let posts = Arc::new(AtomicUsize::new(0));
+        let hash = "ab".repeat(32);
+        (Arc::new(move |m, p, b| {
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1", "direct_payment_operations_v1"]}).to_string());
+            }
+            if p != "/payments/keysend" { return happy()(m, p, b); }
+            let body: serde_json::Value = serde_json::from_str(b).unwrap();
+            let Some(id) = body["request_id"].as_str() else { return (400, r#"{"error":"request_id is required","code":400}"#.into()); };
+            let n = posts.fetch_add(1, Ordering::SeqCst);
+            if n == 0 && first == "lost_before" { return (503, r#"{"error":"unavailable","code":503}"#.into()); }
+            let mut paid = seen.lock().unwrap();
+            if !paid.iter().any(|p| p == id) { paid.push(id.to_string()); }
+            if n == 0 && first == "lost_after" { return (503, r#"{"error":"unavailable","code":503}"#.into()); }
+            let (code, status, hash) = if n == 0 && first == "in_flight" { (202, "in_flight", "") } else { (200, "settled", hash.as_str()) };
+            (code, serde_json::json!({"status": status, "request_id": id, "operation_id": format!("keysend:owner:{id}"),
+                "max_routing_fee_msat": 5000, "fee_paid_msat": if code == 200 { serde_json::json!(0) } else { serde_json::Value::Null },
+                "payment_hash": hash, "amount_msat": 5000, "preimage": ""}).to_string())
+        }), paid)
+    }
+
+    fn reservation_held(node: &Fake, id: &str) -> bool {
+        book(node).iter().any(|(entry, _, settled)| entry == id && !settled)
+    }
+
+    /// Check pending result repeats a saved request only while its
+    /// reservation is held: at every point a restart can leave the journal
+    /// and the budget book, a check never pays unreserved and never twice.
+    #[tokio::test]
+    async fn direct_payment_replay_needs_its_held_reservation_at_every_restart_point() {
+        let pk = format!("03{}", "cd".repeat(32));
+        // Saved, reserved, POST lost before the node: the check pays it once, accounted.
+        // Saved, reserved, paid, reply lost: the check answers from the record, nothing new.
+        for first in ["lost_before", "lost_after"] {
+            let (routes, paid) = idempotent_keysend_node(first);
+            let node = fake(AuthMode::Local, routes);
+            spend_advance(&node.state, true).await.unwrap();
+            assert_eq!(do_payment_keysend(&node.state, &pk, 5000, None, 10000).await.unwrap_err().code, "spend_unknown");
+            let held = pending(&node).unwrap();
+            assert!(held.budgeted && held.direct.is_some() && reservation_held(&node, held.charge_id()), "{first}: saved with its reservation");
+            assert!(do_spend_reconcile(&node.state).await.unwrap().contains("settled"), "{first}");
+            assert!(pending(&node).is_none());
+            assert_eq!(paid.lock().unwrap().len(), 1, "{first}: paid once");
+            assert_eq!(budget_now(&node.state).spent_msat, 5000, "{first}: accounted");
+            assert_eq!(keysend_bodies(&node).len(), 2);
+        }
+        // Reservation released before the record was cleared (or never made
+        // before the request was saved): the check refuses and sends nothing.
+        for broken in ["released", "unbudgeted", "settled"] {
+            let (routes, paid) = idempotent_keysend_node("in_flight");
+            let node = fake(AuthMode::Local, routes);
+            spend_advance(&node.state, true).await.unwrap();
+            do_payment_keysend(&node.state, &pk, 5000, None, 10000).await.unwrap();
+            let mut record = pending(&node).unwrap();
+            let charge = record.charge_id().to_string();
+            match broken {
+                "released" => with_book(&node.state, true, |b| { b.release(&charge); Ok(()) }).unwrap(),
+                "unbudgeted" => {
+                    with_book(&node.state, true, |b| { b.release(&charge); Ok(()) }).unwrap();
+                    record.budgeted = false;
+                    spend_journal(&node.state).unwrap().save(&record).unwrap();
+                }
+                _ => with_book(&node.state, true, |b| { b.settle(&charge, 5000, now_ms()); Ok(()) }).unwrap(),
+            }
+            let err = do_spend_reconcile(&node.state).await.unwrap_err();
+            assert_eq!(err.code, "spend_unknown", "{broken}");
+            assert!(err.message.contains("reservation is not held"), "{broken}: {}", err.message);
+            assert_eq!(keysend_bodies(&node).len(), 1, "{broken}: nothing sent again");
+            assert_eq!(paid.lock().unwrap().len(), 1);
+            assert!(pending(&node).is_some(), "{broken}: the fence stays");
+        }
+        // Accounted, not yet cleared: finished from the record, nothing sent.
+        let (routes, _) = idempotent_keysend_node("in_flight");
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        do_payment_keysend(&node.state, &pk, 5000, None, 10000).await.unwrap();
+        let mut record = pending(&node).unwrap();
+        record.accounting_msat = Some(10000);
+        spend_journal(&node.state).unwrap().save(&record).unwrap();
+        let _ = do_spend_reconcile(&node.state).await;
+        assert_eq!(keysend_bodies(&node).len(), 1);
+        // Refused before dispatch: the record is cleared before its reservation is released.
+        let node = fake(AuthMode::Local, Arc::new(|m: &str, p: &str, b: &str| {
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "direct_payment_operations_v1"]}).to_string());
+            }
+            if p == "/payments/keysend" { return (400, r#"{"error":"not_dispatched","code":"not_dispatched"}"#.into()); }
+            happy()(m, p, b)
+        }));
+        spend_advance(&node.state, true).await.unwrap();
+        assert!(do_payment_keysend(&node.state, &pk, 5000, None, 10000).await.is_err());
+        assert!(pending(&node).is_none());
+        assert!(book(&node).is_empty(), "released once the record is gone");
+    }
+
+    /// Pausing while the replay waits for a token refresh sends nothing:
+    /// pause and the reservation are checked again after that await.
+    #[tokio::test]
+    async fn direct_payment_replay_sends_nothing_when_paused_during_the_token_refresh() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let (inner, paid) = idempotent_keysend_node("in_flight");
+        let (gate, arrived) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let wait = Mutex::new(wait);
+        let (g, a) = (gate.clone(), arrived.clone());
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p.starts_with("/pair/challenge") && g.swap(false, SeqCst) {
+                a.store(true, SeqCst);
+                let _ = wait.lock().unwrap().recv();
+                return (0, String::new());
+            }
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+                    "spend_budget_grant_v1", "direct_payment_operations_v1"]}).to_string());
+            }
+            if p == "/payments/keysend" { return inner(m, p, b); }
+            (0, String::new())
+        });
+        let (node, _dir, _g1) = g1_node_with(&["read", "receive"], Some(first));
+        g1_approved(&node, 500_000).await;
+        spend_advance(&node.state, true).await.unwrap();
+        let pk = format!("03{}", "cd".repeat(32));
+        do_payment_keysend(&node.state, &pk, 5000, None, 10000).await.unwrap();
+        assert_eq!(keysend_bodies(&node).len(), 1);
+        // Age the session into the refresh margin: the check refreshes first.
+        if let AuthMode::Paired(session) = &mut *node.state.auth.lock().unwrap() {
+            session.expires_at = now_unix() + 30;
+        }
+        gate.store(true, SeqCst);
+        let (checked, ()) = tokio::join!(do_spend_reconcile(&node.state), async {
+            while !arrived.load(SeqCst) { tokio::time::sleep(Duration::from_millis(5)).await; }
+            do_budget_pause(&node.state).unwrap();
+            release.send(()).unwrap();
+        });
+        assert_eq!(checked.unwrap_err().code, "budget_paused");
+        assert_eq!(keysend_bodies(&node).len(), 1, "no POST after the pause");
+        assert_eq!(paid.lock().unwrap().len(), 1);
+        assert!(pending(&node).is_some());
+    }
+
+    /// A replay refused at sign-in is not re-authenticated and sent again.
+    #[tokio::test]
+    async fn direct_payment_replay_is_one_attempt_without_reauthentication() {
+        let (inner, _) = idempotent_keysend_node("in_flight");
+        let posts = Arc::new(AtomicUsize::new(0));
+        let n = posts.clone();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/payments/keysend" && n.fetch_add(1, Ordering::SeqCst) > 0 {
+                return (401, r#"{"error":"unauthorized","code":401}"#.into());
+            }
+            inner(m, p, b)
+        }));
+        spend_advance(&node.state, true).await.unwrap();
+        do_payment_keysend(&node.state, &format!("03{}", "cd".repeat(32)), 5000, None, 10000).await.unwrap();
+        assert_eq!(do_spend_reconcile(&node.state).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(keysend_bodies(&node).len(), 2, "the first payment and one check, no re-sent check");
+        assert!(pending(&node).is_some());
     }
 
     #[tokio::test]
