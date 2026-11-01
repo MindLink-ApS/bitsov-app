@@ -13,6 +13,7 @@ import { t as tr } from '../i18n';
  * one offer and one hangup for the caller, one answer for the callee.
  */
 import { appPlatform, type AppPlatform } from '../platform';
+import { MESSAGE_PAYMENT_CAP_MSAT } from './ownerApproval';
 import { provenUnpaid } from './paymentOutcome';
 import { asActionError, messagePerPaymentMax } from './state';
 import { amount } from './format';
@@ -154,6 +155,15 @@ export const hangupOverMessageCap = (q: CallQuote, grant: NodeGrantSummary | nul
   const cap = messagePerPaymentMax(grant);
   return signalCost(q) > cap ? cap : null;
 };
+/**
+ * Why a hangup does not fit (`hangupOverMessageCap`), in words: a lower signed
+ * limit the owner could raise, or the 6-sat most any message payment may
+ * carry, which no approval raises.
+ */
+export const hangupOverMessageCapCopy = (q: CallQuote, cap: number): string =>
+  signalCost(q) > MESSAGE_PAYMENT_CAP_MSAT
+    ? tr('caHangingUpThisCallCostsMoreThanMessageMax', amount(signalCost(q)), amount(MESSAGE_PAYMENT_CAP_MSAT))
+    : tr('caHangingUpThisCallCostsMoreThanMessageCap', amount(signalCost(q)), amount(cap));
 
 export type CallState = 'idle' | 'ringing' | 'connecting' | 'live' | 'reconnecting' | 'ended';
 /** Detailed card phase; consumers can use CallView.state for the shared lifecycle. */
@@ -825,7 +835,7 @@ export function createCallEngine(deps: CallDeps) {
       }
       const recoveryHangupCap = hangupOverMessageCap(q, grant);
       if (recoveryHangupCap !== null) {
-        recoveryRefused(conn, tr('caHangingUpThisCallCostsMoreThanMessageCap', amount(signalCost(q)), amount(recoveryHangupCap)));
+        recoveryRefused(conn, hangupOverMessageCapCopy(q, recoveryHangupCap));
         return;
       }
       const id = (deps.newCallId ?? newCallId)();
@@ -1018,8 +1028,7 @@ export function createCallEngine(deps: CallDeps) {
       }
       const hangupCap = hangupOverMessageCap(q, grant);
       if (hangupCap !== null) {
-        set({ ...IDLE, phase: 'ended', peer, error:
-          tr('caHangingUpThisCallCostsMoreThanMessageCap', amount(signalCost(q)), amount(hangupCap)) });
+        set({ ...IDLE, phase: 'ended', peer, error: hangupOverMessageCapCopy(q, hangupCap) });
         return;
       }
       // M6: no node-routed call without the per-minute price and the most held the owner agreed to.

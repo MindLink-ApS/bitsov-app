@@ -456,10 +456,35 @@ describe('the call engine with paid minutes', () => {
     expect(tight.signals).toEqual([]);
     expect(tight.last()).toMatchObject({ phase: 'ended', error: expect.stringContaining('could not be ended') });
     expect(tight.last().error).toContain('Nothing was sent or paid.');
+    // A lower signed limit: the owner could approve enough.
+    expect(tight.last().error).toContain(`The owner would need to approve at least ${amount(6_000)} per payment.`);
     const fits = engine(minutesOf(node, vi.fn()), undefined, grant(6_000));
     await fits.engine.place(A, 'audio', QUOTE);
     expect(fits.signals.map((x) => x.kind)).toEqual([400]);
     fits.engine.dismiss();
+  });
+
+  it.each([
+    ['en', 'A larger per-payment limit would not change that.', 'approve'],
+    ['da', 'En højere grænse pr. betaling ville ikke ændre det.', 'godkende'],
+  ] as const)('a hangup above the 6-sat message maximum asks for no larger limit (%s)', async (lang, words, ask) => {
+    setLanguagePref(lang);
+    try {
+      const node = fakeNode({ now: () => Date.now() });
+      const grant: NodeGrantSummary = { expires_at_ms: Date.now() + 3_600_000, budget_msat: 500_000, remaining_msat: 500_000,
+        per_call_max_msat: 50_000, message_per_payment_max_msat: 6_000, call_per_payment_max_msat: 50_000 };
+      // A 2-sat hangup plus its 5-sat routing allowance: above what any message payment may carry.
+      const e = engine(minutesOf(node, vi.fn()), undefined, grant);
+      await e.engine.place(A, 'audio', { ...QUOTE, signal_msat: 2_000 });
+      expect(e.signals).toEqual([]);
+      const error = e.last().error ?? '';
+      expect(error).toContain(words);
+      expect(error).toContain(amount(7_000));
+      expect(error).toContain(amount(6_000));
+      expect(error).not.toContain(ask);
+    } finally {
+      setLanguagePref('en');
+    }
   });
 
   it('places no call without the per-minute price the owner agreed to', async () => {

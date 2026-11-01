@@ -7706,6 +7706,13 @@ async fn do_call_signal_bounded(
         if let Some(g) = checked {
             let per_act = if g.recipients_only { g.per_act_max_by_recipient.get(&target.to_ascii_lowercase()).copied().unwrap_or(0) } else { u64::MAX };
             let limit = g.per_payment_max(grant::PaymentCap::Grant).unwrap_or(u64::MAX).min(per_act);
+            // Above the most any message payment may carry, no approval helps;
+            // below it, a lower signed limit (or contact amount) could be raised.
+            if hangup > grant::MESSAGING_PER_CALL_MAX_MSAT {
+                return Err(ActionError::new("call_hangup_above_message_max", format!(
+                    "Hanging up this call can cost up to {}, more than the {} any message payment may carry, so it could not be ended. A larger per-payment limit would not change that. Nothing was sent or paid.",
+                    bitsov_app::format::amount(hangup), bitsov_app::format::amount(grant::MESSAGING_PER_CALL_MAX_MSAT))));
+            }
             if hangup > limit {
                 return Err(ActionError::new("call_hangup_unpayable", format!(
                     "Hanging up this call can cost up to {}, more than the {} per message payment your node allows, so it could not be ended. The owner would need to approve at least {} per payment. Nothing was sent or paid.",
@@ -17237,6 +17244,7 @@ mod control_act_tests {
         let err = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap_err();
         assert_eq!(err.code, "call_hangup_unpayable");
         assert!(err.message.contains("could not be ended") && err.message.contains("Nothing was sent or paid"), "{}", err.message);
+        assert!(err.message.contains("would need to approve at least"), "a lower signed limit can be raised: {}", err.message);
         assert_eq!(composes(&node), 0);
         // An answer above the message cap is refused though the call limit is wide.
         let answer = OFFER.replace("\"media\":\"audio\",", "");
@@ -17248,6 +17256,43 @@ mod control_act_tests {
         *g1.grant.lock().unwrap() = grant;
         do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap();
         assert_eq!(composes(&node), 1);
+    }
+
+    /// A hangup above the most any message payment may carry (6 sats) is
+    /// refused apart from a lower signed limit: no approval could make it
+    /// payable, so the refusal does not ask for one.
+    #[tokio::test]
+    async fn call_hangup_above_the_message_maximum_asks_for_no_larger_limit() {
+        let routes = call_routes(Some(10_000));
+        let dear: Routes = Arc::new(move |m, p, b| {
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": [
+                    "paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1",
+                    "message_operations_v1"]}).to_string());
+            }
+            if p == format!("/pricing/peers/{A}/call") {
+                return (200, serde_json::json!({"peer_id": A, "offer_msat": 10_000, "signal_msat": 2_000}).to_string());
+            }
+            if p.contains("/call") || p == "/payments/price/401" || p == "/messages/compose" {
+                routes(m, p, b)
+            } else { (0, String::new()) }
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(dear));
+        g1_approved(&node, 500_000).await;
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        let quote = read_call_quote(&node.state, A).await.unwrap();
+        let hangup = quote.signal_msat + quote.signal_max_routing_fee_msat;
+        assert!(hangup > grant::MESSAGING_PER_CALL_MAX_MSAT, "{hangup}");
+        let mut grant = g1_grant(3600, 400_000, 400_000);
+        grant["per_call_max_msat"] = 50_000.into();
+        grant["call_per_payment_max_msat"] = 50_000.into();
+        grant["message_per_payment_max_msat"] = grant::MESSAGING_PER_CALL_MAX_MSAT.into();
+        *g1.grant.lock().unwrap() = grant;
+        let err = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap_err();
+        assert_eq!(err.code, "call_hangup_above_message_max");
+        assert!(err.message.contains("could not be ended") && err.message.contains("Nothing was sent or paid"), "{}", err.message);
+        assert!(err.message.contains("would not change that") && !err.message.contains("approve"), "{}", err.message);
+        assert_eq!(composes(&node), 0);
     }
 
     #[tokio::test]
