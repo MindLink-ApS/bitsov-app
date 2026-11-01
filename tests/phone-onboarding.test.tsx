@@ -30,10 +30,10 @@ it('starts with one primary action and Paste beside it, without a secret input',
   expect(document.activeElement).toBe(heading);
   expect(heading.getAttribute('aria-describedby')).toBeTruthy();
   // Says where the QR comes from, in the computer's own words, instead of a cryptic arrow.
-  expect(document.getElementById(heading.getAttribute('aria-describedby')!)?.textContent).toBe('On your computer, open BitSov and choose Settings → Devices → Add a device. Then scan the QR it shows.');
+  expect(document.getElementById(heading.getAttribute('aria-describedby')!)?.textContent).toBe('On your computer, open BitSov and choose Settings → Devices → Add a device. A square code appears. Tap the button below and hold your phone up to it.');
   expect(document.querySelector('[data-phone-face]')?.getAttribute('aria-live')).toBeNull();
   expect(document.querySelectorAll('button.primary')).toHaveLength(1);
-  expect(button("Scan your box’s QR")).toBeTruthy();
+  expect(button("Scan the code with the camera")).toBeTruthy();
   expect(document.querySelector('details')?.open).toBe(false);
   expect(button('Paste link')).toBeTruthy();
   // Paste is a first-class second way in on the face, not hidden under Other options.
@@ -46,7 +46,7 @@ it('auto-connects a scan, displays ordered words and only the owner can approve'
   const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
   const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
   const props = mount({ status, pairing, device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }) });
-  button("Scan your box’s QR").click(); await tick();
+  button("Scan the code with the camera").click(); await tick();
   expect(props.connect).toHaveBeenCalledWith('bitsov://pair/synthetic');
   expect(document.body.textContent).not.toContain('bitsov://');
   setPairing({ ...INITIAL_PAIRING, remote: true, state: 'paired' });
@@ -61,7 +61,7 @@ it('auto-connects a scan, displays ordered words and only the owner can approve'
 });
 it('rejects an unclaimed preview before dialing', async () => {
   const props = mount({ preview: vi.fn().mockResolvedValue({ first_run: true, endpoint: 'box', node_id_fingerprint: '' }) });
-  button("Scan your box’s QR").click(); await tick();
+  button("Scan the code with the camera").click(); await tick();
   expect(props.connect).not.toHaveBeenCalled();
   expect(document.body.textContent).toContain("This box isn't set up yet");
 });
@@ -94,7 +94,7 @@ it.each([
   expect(document.querySelector('[data-phone-face]')?.textContent).not.toContain('diagnostic');
 });
 it('explains a disabled primary and connects its accessible description', async () => {
-  mount({ scan: () => new Promise(() => {}) }); button("Scan your box’s QR").click(); await tick();
+  mount({ scan: () => new Promise(() => {}) }); button("Scan the code with the camera").click(); await tick();
   const primary = document.querySelector<HTMLButtonElement>('button.primary')!;
   expect(primary.disabled).toBe(true);
   expect(document.getElementById(primary.getAttribute('aria-describedby')!)?.textContent).toBeTruthy();
@@ -102,7 +102,7 @@ it('explains a disabled primary and connects its accessible description', async 
 it('ships Danish copy while preserving the protocol words', () => {
   mount({ locale: 'da-DK' });
   expect(document.querySelector('h1')?.textContent).toBe('Forbind til din boks');
-  expect(button('Scan boksens QR-kode')).toBeTruthy();
+  expect(button('Scan koden med kameraet')).toBeTruthy();
   expect(document.querySelector('summary')?.textContent).toBe('Andre muligheder');
 });
 it('only reaches Done after the host reports completion', async () => {
@@ -142,7 +142,7 @@ it('keeps fingerprint confirmation for a host without delegation', async () => {
 });
 it('shows camera denial as E4 with one settings action', async () => {
   mount({ scan: vi.fn().mockRejectedValue({ kind: 'camera' }) });
-  button("Scan your box’s QR").click(); await tick();
+  button("Scan the code with the camera").click(); await tick();
   expect(document.querySelector('h1')?.textContent).toBe("BitSov can't use the camera");
   expect(button('Open Settings')).toBeTruthy(); expect(document.querySelectorAll('.primary')).toHaveLength(1);
 });
@@ -174,7 +174,7 @@ it('an unclaimed box says what to do on the computer, then scans again; it never
   const preview = vi.fn().mockResolvedValueOnce({ first_run: true, endpoint: 'box', node_id_fingerprint: '' })
     .mockResolvedValue({ second_device: true, endpoint: 'box:443', node_id_fingerprint: 'ABCD' });
   const props = mount({ preview, join: vi.fn().mockRejectedValue('no remote connection') });
-  button("Scan your box’s QR").click(); await tick();
+  button("Scan the code with the camera").click(); await tick();
   expect(document.querySelector('h1')?.textContent).toBe("This box isn't set up yet");
   expect(document.body.textContent).toContain('Open BitSov on your computer and set up your box there. Then come back and scan again.');
   expect(button('Start over')).toBeUndefined();
@@ -187,16 +187,16 @@ it('an unclaimed box says what to do on the computer, then scans again; it never
 it('waits for native cancellation before enabling another scan', async () => {
   let finish!: () => void;
   const props = mount({ scan: () => new Promise(() => {}), cancelScan: () => new Promise(resolve => { finish = resolve; }) });
-  button("Scan your box’s QR").click(); await tick(); button('Cancel').click(); await tick();
-  expect(button("Scan your box’s QR").disabled).toBe(true);
-  finish(); await tick(); expect(button("Scan your box’s QR").disabled).toBe(false);
+  button("Scan the code with the camera").click(); await tick(); button('Cancel').click(); await tick();
+  expect(button("Scan the code with the camera").disabled).toBe(true);
+  finish(); await tick(); expect(button("Scan the code with the camera").disabled).toBe(false);
   expect(props.connect).not.toHaveBeenCalled();
 });
 it('discards a clipboard read superseded by scanning and cancelling', async () => {
   let finish!: (text: string) => void;
   vi.stubGlobal('navigator', { clipboard: { readText: () => new Promise(resolve => { finish = resolve; }) } });
   const props = mount({ scan: () => new Promise(() => {}), cancelScan: async () => {} });
-  button('Paste link').click(); button("Scan your box’s QR").click(); await tick(); button('Cancel').click(); await tick();
+  button('Paste link').click(); button("Scan the code with the camera").click(); await tick(); button('Cancel').click(); await tick();
   finish('bitsov://pair/synthetic'); await tick(); expect(props.preview).not.toHaveBeenCalled();
 });
 it('does not resume a late approval poll after mismatched words are cancelled', async () => {
@@ -212,7 +212,7 @@ it('native cancellation is single-flight even when Cancel is tapped twice', asyn
   let finish!: () => void;
   const cancelScan = vi.fn(() => new Promise<void>(resolve => { finish = resolve; }));
   mount({ scan: () => new Promise(() => {}), cancelScan });
-  button("Scan your box’s QR").click(); await tick(); const cancel = button('Cancel'); cancel.click(); cancel.click();
+  button("Scan the code with the camera").click(); await tick(); const cancel = button('Cancel'); cancel.click(); cancel.click();
   expect(cancelScan).toHaveBeenCalledOnce(); finish(); await tick();
 });
 it('paste cannot replace enrollment after its polling connection fails', async () => {
@@ -259,7 +259,7 @@ it('clears an unfinished manual paste when onboarding unmounts', async () => {
 it.each(['android', 'ios'] as const)('%s clears an unfinished manual paste on reset and scanner handoff', async platform => {
   vi.stubGlobal('navigator', {});
   const props = mount({ platform, scan: () => new Promise(() => {}) });
-  for (const action of ['Forget this box', "Scan your box’s QR"]) {
+  for (const action of ['Forget this box', "Scan the code with the camera"]) {
     button('Paste link').click(); await tick();
     const input = document.querySelector<HTMLInputElement>('input')!;
     input.value = 'bitsov://pair/private-unsubmitted';
@@ -310,7 +310,7 @@ it.each(['incoming', 'scan', 'paste'] as const)('compares a legacy %s preview be
     preview: vi.fn().mockResolvedValue({ second_device: false, endpoint: 'box', node_id_fingerprint: 'ABCD' }),
     device: () => ({ available: false, delegation_supported: false, state: 'unavailable', fingerprint: null, owner_action: null, expires_at_ms: null }),
   });
-  if (route !== 'incoming') button(route === 'scan' ? "Scan your box’s QR" : 'Paste link').click();
+  if (route !== 'incoming') button(route === 'scan' ? "Scan the code with the camera" : 'Paste link').click();
   await tick();
   expect(vi.mocked(props.connect).mock.calls.length).toBe(0);
   expect(document.querySelector('.phone-fingerprint')?.textContent).toBe('ABCD');
@@ -326,10 +326,10 @@ it('cancels a legacy preview without committing and discards its pending link', 
   const props = mount({
     preview: vi.fn().mockResolvedValue({ endpoint: 'box', node_id_fingerprint: 'ABCD' }),
   });
-  button("Scan your box’s QR").click(); await tick();
+  button("Scan the code with the camera").click(); await tick();
   expect(vi.mocked(props.connect).mock.calls.length).toBe(0);
   button('Cancel').click(); await tick();
-  expect(button("Scan your box’s QR")).toBeTruthy();
+  expect(button("Scan the code with the camera")).toBeTruthy();
   expect(document.querySelector('.phone-fingerprint')).toBeNull();
   expect(vi.mocked(props.connect).mock.calls.length).toBe(0);
   expect(props.join).not.toHaveBeenCalled();
@@ -338,7 +338,7 @@ it.each(['en', 'da'])('rejects a legacy comparison through a visible quiet butto
   const props = mount({ locale,
     preview: vi.fn().mockResolvedValue({ second_device: false, endpoint: 'box', node_id_fingerprint: 'ABCD' }),
   });
-  const scanLabel = locale === 'da' ? 'Scan boksens QR-kode' : "Scan your box’s QR";
+  const scanLabel = locale === 'da' ? 'Scan koden med kameraet' : "Scan the code with the camera";
   button(scanLabel).click(); await tick();
   const confirm = button(locale === 'da' ? 'De er ens' : 'They match');
   const mismatch = button(locale === 'da' ? 'De er ikke ens' : "They don't match");
@@ -384,7 +384,7 @@ it('labels the three steps and marks the current one', async () => {
   const steps = () => [...document.querySelectorAll('.phone-progress li')].map(li => [li.textContent, li.getAttribute('aria-current')]);
   expect(document.querySelector('.phone-progress')?.getAttribute('aria-label')).toBe('Progress');
   expect(steps()).toEqual([['Scan', 'step'], ['Compare', null], ['Done', null]]);
-  button("Scan your box’s QR").click(); await tick();
+  button("Scan the code with the camera").click(); await tick();
   setPairing({ ...INITIAL_PAIRING, remote: true, state: 'paired' });
   setStatus({ ready: true, node_id: 'box', error: null }); await tick();
   expect(steps()).toEqual([['Scan', null], ['Compare', 'step'], ['Done', null]]);
@@ -394,7 +394,7 @@ it('Danish copy says where the QR comes from and what to do on an unclaimed box'
   mount({ locale: 'da-DK', preview: vi.fn().mockResolvedValue({ first_run: true, endpoint: 'box', node_id_fingerprint: '' }) });
   expect(document.body.textContent).toContain('Åbn BitSov på din computer, og vælg Indstillinger → Enheder → Tilføj en enhed.');
   expect([...document.querySelectorAll('.phone-progress-label')].map(e => e.textContent)).toEqual(['Scan', 'Sammenlign', 'Færdig']);
-  button('Scan boksens QR-kode').click(); await tick();
+  button('Scan koden med kameraet').click(); await tick();
   expect(document.body.textContent).toContain('Åbn BitSov på din computer, og sæt boksen op dér.');
   expect(button('Jeg har sat den op – scan igen')).toBeTruthy();
 });
@@ -448,7 +448,7 @@ it('announces an error present at mount only once', async () => {
 it('moves focus from a disappearing action to the new step and its current description', async () => {
   mount({ preview: async () => ({ second_device: false, endpoint: 'box', node_id_fingerprint: 'ABCD' }) });
   await tick();
-  const scan = button("Scan your box’s QR");
+  const scan = button("Scan the code with the camera");
   scan.focus(); scan.click(); await tick();
   expect(scan.isConnected).toBe(false);
   const heading = document.querySelector('h1')!;
@@ -480,7 +480,7 @@ it.each([
 ])('replaces Connecting with the pairing failure and one action (%s)', async (locale, heading, line, action) => {
   const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
   const props = mount({ locale, ...connectingProps(pairing) });
-  button(locale === 'en' ? "Scan your box’s QR" : 'Scan boksens QR-kode').click(); await tick();
+  button(locale === 'en' ? "Scan the code with the camera" : 'Scan koden med kameraet').click(); await tick();
   expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('connecting');
   setPairing({ ...INITIAL_PAIRING, remote: true, state: 'failed',
     reason: 'the node refused /pair/challenge (403): {"code":"remote_proxy_unauthorized"} bitsov://pair/secretticket' });
@@ -499,7 +499,7 @@ it.each([
 it('names an unreachable box when the pairing failed in transport', async () => {
   const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
   mount(connectingProps(pairing));
-  button("Scan your box’s QR").click(); await tick();
+  button("Scan the code with the camera").click(); await tick();
   setPairing({ ...INITIAL_PAIRING, remote: true, state: 'failed', reason: 'remote transport failed: connection refused' });
   await tick();
   expect(headingText()).toBe("Can't reach your box");
@@ -511,7 +511,7 @@ it.each([
 ])('stops waiting after 30 s without progress (%s)', async (locale, heading, line, action) => {
   vi.useFakeTimers();
   const props = mount({ locale, ...connectingProps(() => INITIAL_PAIRING), connect: vi.fn(() => new Promise<never>(() => {})) });
-  button(locale === 'en' ? "Scan your box’s QR" : 'Scan boksens QR-kode').click(); await tick();
+  button(locale === 'en' ? "Scan the code with the camera" : 'Scan koden med kameraet').click(); await tick();
   expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('connecting');
   await vi.advanceTimersByTimeAsync(29_000);
   expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('connecting');
@@ -530,7 +530,7 @@ it('does not let an earlier failure cut short a new attempt; the timeout still e
   const failed = { ...INITIAL_PAIRING, state: 'failed' as const, reason: 'the node refused /pair/token (403): no' };
   mount(connectingProps(() => failed));
   await tick();
-  button("Scan your box’s QR").click(); await tick();
+  button("Scan the code with the camera").click(); await tick();
   expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('connecting');
   await vi.advanceTimersByTimeAsync(30_500);
   expect(headingText()).toBe('This is taking too long');
@@ -542,7 +542,7 @@ it('leaves a connection that progresses alone', async () => {
   const waiting = { state: 'waiting' as const, words: ['alpha', 'beta', 'gamma', 'delta'], expires_at: Date.now()/1000 + 600 };
   const join = vi.fn().mockResolvedValueOnce({ state: 'idle', second_device: true }).mockResolvedValue(waiting);
   mount({ status, ...connectingProps(pairing), join, beginJoin: vi.fn().mockResolvedValue(waiting) });
-  button("Scan your box’s QR").click(); await tick();
+  button("Scan the code with the camera").click(); await tick();
   await vi.advanceTimersByTimeAsync(10_000);
   setPairing({ ...INITIAL_PAIRING, remote: true, state: 'paired' });
   setStatus({ ready: true, node_id: 'box', error: null });
@@ -569,7 +569,7 @@ it.each([
 it('ends Connecting on the host’s code-mismatch refusal without offering Try again', async () => {
   const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
   const props = mount({ pairing, device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }) });
-  button("Scan your box’s QR").click(); await tick();
+  button("Scan the code with the camera").click(); await tick();
   expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('connecting');
   setPairing({ ...INITIAL_PAIRING, remote: true, state: 'failed', reason: USED_TICKET });
   await tick();
@@ -607,7 +607,7 @@ it('shows the same message when the clipboard still holds the old link', async (
 it('keeps Try again for a refusal that is not a stale ticket', async () => {
   const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
   const props = mount({ pairing, device: () => ({ available: true, delegation_supported: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }) });
-  button("Scan your box’s QR").click(); await tick();
+  button("Scan the code with the camera").click(); await tick();
   setPairing({ ...INITIAL_PAIRING, remote: true, state: 'failed', reason: 'remote node refused pairing: authentication_failed: no' });
   await tick();
   expect(button('Try again')).toBeTruthy();
@@ -615,7 +615,7 @@ it('keeps Try again for a refusal that is not a stale ticket', async () => {
 });
 it.each(['ios', 'android'] as const)('explains a Face ID prompt before Connecting opens the pairing key (%s)', async platform => {
   mount({ platform, connect: vi.fn(() => new Promise<never>(() => {})) });
-  button("Scan your box’s QR").click(); await tick();
+  button("Scan the code with the camera").click(); await tick();
   expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('connecting');
   const why = document.querySelector('[data-faceid-why]');
   if (platform === 'ios') expect(why?.textContent).toBe('You may be asked for Face ID: it opens this app’s pairing key.');
@@ -662,4 +662,27 @@ it('names the computer on the Danish compare screen', async () => {
     beginJoin: vi.fn().mockResolvedValue({ state: 'waiting', words, expires_at: Date.now()/1000 + 300 }) });
   await vi.waitFor(() => expect(document.querySelector('h1')?.textContent).toBe('Står de samme 4 ord på din computer?'));
   expect([...document.querySelectorAll('[data-pair-word]')].map(w => w.textContent)).toEqual(words);
+});
+it('opens the paste field when the paste prompt comes back empty, instead of a dead end', async () => {
+  vi.stubGlobal('navigator', { clipboard: { readText: vi.fn().mockResolvedValue('') } });
+  const props = mount({ locale: 'da' });
+  button('Indsæt link').click(); await tick();
+  expect(document.querySelector('input[aria-label="Parringslink"]')).not.toBeNull();
+  expect(document.body.textContent).not.toContain('Der er intet link at indsætte');
+  expect(props.connect).not.toHaveBeenCalled();
+});
+it('hides a loopback address and says host diagnostics in Danish', async () => {
+  const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
+  mount({ locale: 'da', status, preview: vi.fn().mockResolvedValue({ second_device: false, endpoint: '127.0.0.1:14740', node_id_fingerprint: 'abcd1234…ef567890' }) });
+  await tick();
+  // A real preview with a loopback address (the fallback code path), then the host's English diagnostic.
+  button('Scan koden med kameraet').click(); await tick();
+  expect(document.querySelector('.phone-fingerprint')?.textContent).toBe('abcd1234…ef567890');
+  const details = [...document.querySelectorAll('details')].find(d => d.querySelector('summary')?.textContent === 'Tekniske oplysninger (til support)')!;
+  expect(details).toBeTruthy();
+  expect(document.body.textContent).not.toContain('127.0.0.1');
+  setStatus({ ready: false, node_id: null, error: null, connection_error: { kind: 'unreachable', detail: 'The remote node could not be reached.' } }); await tick();
+  expect(details.textContent).not.toContain('The remote node could not be reached.');
+  expect(details.textContent).toContain('Tjek, at din boks er tændt.');
+  expect(document.body.textContent).not.toContain('127.0.0.1');
 });

@@ -24,6 +24,7 @@ export type PhoneOnboardingProps = {
 type Screen = 'start' | 'scanner' | 'connecting' | 'words' | 'fingerprint' | 'done' | 'error';
 type Failure = ConnectionError['kind'] | 'camera' | 'mismatch' | 'approval_expired' | 'unsupported' | 'pairing_failed' | 'timeout' | 'stale' | 'biometry' | 'biometry_cancelled';
 const kinds = new Set<Failure>(['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired', 'unsupported', 'pairing_failed', 'timeout', 'stale', 'biometry', 'biometry_cancelled']);
+const LOOPBACK = /^(127\.|localhost\b|\[::1\])/i;
 /** A ticket that can never pair again: expired, already used, or its code no longer matches. */
 const staleKinds = new Set<Failure>(['expired', 'used', 'stale']);
 /** Without any progress for this long, "Connecting" becomes a plain failure with one action. */
@@ -177,7 +178,10 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     const turn = generation;
     try {
       const link = await navigator.clipboard.readText();
-      if (alive && turn === generation) await connect(link);
+      if (!alive || turn !== generation) return;
+      // Nothing came back (the paste prompt was dismissed): offer the field instead of a dead end.
+      if (!link.trim()) { setManualPaste(true); setToast(''); return; }
+      await connect(link);
     }
     catch { if (alive && turn === generation) { setManualPaste(true); setToast(''); } }
   };
@@ -260,6 +264,12 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     onCleanup(() => { window.clearInterval(timer); document.removeEventListener('visibilitychange', foreground); });
   });
   const android = () => (props.platform ?? appPlatform()) === 'android';
+  // The host's fixed English diagnostics, said in the reader's language.
+  const hostDetail = (detail: string): string | undefined => ({
+    'The remote node could not be reached.': c().unreachableLine,
+    'The remote connection could not be established.': c().otherLine,
+    'The remote connection is busy. Try again shortly.': c().busyLine,
+  } as Record<string, string>)[detail];
   const errorCopy = () => {
     const t = c();
     switch (error()?.kind) {
@@ -364,9 +374,10 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       <details><summary>{c().help}</summary><p>{c().helpLine}</p></details>
       <details><summary>{c().details}</summary><dl>
         <dt>{c().fingerprint}</dt><dd>{preview()?.node_id_fingerprint ?? props.status().node_id ?? '—'}</dd>
-        <dt>{c().endpoint}</dt><dd>{preview()?.endpoint ?? '—'}</dd>
+        {/* A loopback proxy address (127.0.0.1:…) means nothing to a person; show only a real address. */}
+        <Show when={preview()?.endpoint && !LOOPBACK.test(preview()!.endpoint)}><dt>{c().endpoint}</dt><dd>{preview()!.endpoint}</dd></Show>
         <dt>{c().hosted}</dt><dd>{preview()?.hosted_by ?? props.pairing().hosted_by ?? '—'}</dd>
-      </dl><Show when={error()?.detail}><p>{onboardingDiagnostic(error()!.detail, c().helpLine)}</p></Show>
+      </dl><Show when={error()?.detail}><p>{hostDetail(error()!.detail) ?? onboardingDiagnostic(error()!.detail, c().helpLine)}</p></Show>
       </details>
       {/* Forgetting drops the saved box: one plain confirmation, never behind the help sections. */}
       <Show when={confirmForget()} fallback={
