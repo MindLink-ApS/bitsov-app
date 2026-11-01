@@ -1,15 +1,32 @@
-.phone-onboarding { width: min(100%, 440px); min-height: 100svh; margin: 0 auto; padding: max(28px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom)); box-sizing: border-box; display: flex; flex-direction: column; gap: 32px; }
-.phone-progress { display: flex; gap: 8px; }
-.phone-progress span { height: 4px; flex: 1; background: var(--line-strong, #444); border-radius: 4px; }
-.phone-progress .filled { background: var(--ink, #efebe5); }
-.phone-onboarding [data-phone-face] { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: stretch; gap: 20px; }
-.phone-onboarding h1 { font-size: clamp(26px, 7.5vw, 34px); line-height: 1.15; margin: 0; text-wrap: balance; }
-.phone-onboarding .phone-line { margin: 0; line-height: 1.55; font-size: 17px; }
-.phone-onboarding button, .phone-onboarding summary { min-height: 48px; box-sizing: border-box; }
+.phone-onboarding { width: min(100%, 440px); min-height: 100svh; margin: 0 auto; padding: max(28px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left)); box-sizing: border-box; display: flex; flex-direction: column; gap: 24px; }
+/* iOS Dynamic Type: the system body size (ignored where unsupported), in the app's own face. Sizes below are relative to it. */
+.phone-onboarding { font: -apple-system-body; font-family: var(--font-sans, inherit); }
+.phone-progress { display: flex; gap: 8px; list-style: none; margin: 0; padding: 0; }
+.phone-progress li { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.phone-progress-bar { height: 4px; background: var(--line-strong, #444); border-radius: 4px; }
+.phone-progress .filled .phone-progress-bar { background: var(--ink, #efebe5); }
+.phone-progress-label { font-size: 0.8em; color: var(--muted); }
+.phone-progress [aria-current='step'] .phone-progress-label { color: var(--ink); font-weight: 600; }
+/* The words sit at the top; the one action sits low, in the thumb's reach. */
+.phone-onboarding [data-phone-face] { flex: 1; display: flex; flex-direction: column; justify-content: flex-start; align-items: stretch; gap: 20px; padding-top: 8vh; }
+.phone-onboarding [data-phone-face] > .phone-primary, .phone-onboarding [data-phone-face] > .phone-waiting { margin-top: auto; }
+.phone-onboarding h1 { font-size: max(1.75em, 26px); line-height: 1.15; margin: 0; text-wrap: balance; }
+.phone-onboarding .phone-line { margin: 0; line-height: 1.5; font-size: max(1em, 17px); }
+.phone-onboarding button, .phone-onboarding summary { min-height: 48px; box-sizing: border-box; font-size: max(1em, 17px); }
 .phone-primary .primary { width: 100%; white-space: normal; }
 .phone-onboarding .why { margin: 10px 0 0; line-height: 1.4; font-size: 14px; }
-.phone-options { margin-top: auto; }
-.phone-options summary { cursor: pointer; padding: 12px 0; }
+.phone-options { margin-top: 0; }
+/* An app control, not the browser's disclosure triangle. */
+.phone-options summary { cursor: pointer; padding: 12px 0; list-style: none; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-weight: 500; }
+.phone-options summary::-webkit-details-marker { display: none; }
+.phone-options summary::after { content: ''; width: 8px; height: 8px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(45deg) translateY(-2px); transition: transform 0.15s ease; }
+.phone-options[open] > summary::after { transform: rotate(-135deg) translateY(-2px); }
+.phone-options details summary { justify-content: flex-start; }
+/* Progress, not an input: a spinner and a plain line (its own class: the shell's .phone-status is a status strip). */
+.phone-onboarding .phone-waiting { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 0; padding: 14px 0; color: var(--muted); background: none; border: 0; }
+.phone-spinner { width: 20px; height: 20px; border-radius: 50%; border: 2.5px solid var(--line-strong, #555); border-top-color: var(--ink, #efebe5); animation: phone-spin 0.9s linear infinite; flex: none; }
+@keyframes phone-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .phone-spinner { animation-duration: 2.4s; } }
 .phone-options button { width: 100%; margin: 8px 0; background: var(--raised); color: var(--ink); border: 1px solid var(--faint); }
 .phone-onboarding button:disabled { opacity: 1; color: var(--muted); background: var(--surface); border: 1px solid var(--faint); }
 .phone-options p, .phone-options dd { overflow-wrap: anywhere; }
