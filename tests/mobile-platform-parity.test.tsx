@@ -138,8 +138,8 @@ describe.each([
     } });
     show(() => <App />);
     const shown = device === 'iPad'
-      ? "This node isn't set up yet. Finish setup on a Mac, then add this iPad."
-      : message;
+      ? "This box isn't set up yet. Finish setup on a Mac, then add this iPad."
+      : "This box isn't set up yet. Finish setup on a Mac, then add this phone.";
     await vi.waitFor(() => expect($('.state.error [role="status"]')?.textContent).toBe(shown));
     expect($('[data-phone-onboarding]')).toBeNull();
     if (device === 'iPad') expect(mount.textContent).not.toContain('this phone');
@@ -157,8 +157,8 @@ describe.each([
     const form = $<HTMLFormElement>('form[data-remote-access]');
     form.requestSubmit();
     const shown = device === 'iPad'
-      ? "This node isn't set up yet. Finish setup on a Mac, then add this iPad."
-      : "This node isn't set up yet. Finish setup on a Mac, then add this phone.";
+      ? "This box isn't set up yet. Finish setup on a Mac, then add this iPad."
+      : "This box isn't set up yet. Finish setup on a Mac, then add this phone.";
     await vi.waitFor(() => expect($('[data-pairing-preview]')?.textContent).toBe(shown));
     if (device === 'iPad') expect(mount.textContent).not.toContain('this phone');
     expect(form.querySelector('button[type="submit"]')).toBeNull();
@@ -177,14 +177,14 @@ describe.each([
     } });
     show(() => <App />);
     await vi.waitFor(() => expect($('[data-review-pairing]')).not.toBeNull());
-    expect(mount.textContent).toContain(`Connect this ${device} to your node`);
+    expect(mount.textContent).toContain(`Connect this ${device} to your box`);
     expect($('[data-target="local"]')).toBeNull();
     expect($('[data-step="node"]')).toBeNull();
     expect(mount.textContent).not.toMatch(/This Mac|Use this Mac instead|Start local node/);
     $<HTMLButtonElement>('[data-review-pairing]').click();
     const dialog = $('[data-pairing-link-screen]');
-    expect(dialog.getAttribute('aria-label')).toBe(`Pair this ${device} with your node`);
-    expect(dialog.querySelector('h1')?.textContent).toBe(`Pair this ${device} with your node`);
+    expect(dialog.getAttribute('aria-label')).toBe(`Pair this ${device} with your box`);
+    expect(dialog.querySelector('h1')?.textContent).toBe(`Pair this ${device} with your box`);
     expect(dialog.textContent).toContain(`does not pair this ${device}`);
     expect(!!dialog.querySelector('[data-scan-pairing-qr]')).toBe(true);
     cleanCopy(dialog);

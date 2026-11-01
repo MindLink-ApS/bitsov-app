@@ -401,11 +401,11 @@ describe('invisible payments in the composer and the context panel', () => {
     expect($('[data-composer]')?.textContent).not.toContain('Approval needed');
     expect(host.used('budget_approve')).toHaveLength(0);
     host.emit('closed');
-    await waitFor(() => expect(mount.textContent).toContain('live feed reconnecting'));
+    await waitFor(() => expect(mount.textContent).toContain('live updates are reconnecting'));
     host.state.budget = budgetView(); // Node revoked the grant during its restart.
     host.emit('open');
     await waitFor(() => expect($('[data-budget="off"]')).not.toBeNull(), { timeout: 500 });
-    expect(mount.textContent).not.toContain('live feed reconnecting');
+    expect(mount.textContent).not.toContain('live updates are reconnecting');
     expect(host.used('message_send')).toHaveLength(0);
   });
 
