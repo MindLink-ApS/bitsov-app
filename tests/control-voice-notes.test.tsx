@@ -394,7 +394,7 @@ describe('voice notes in the composer and thread', () => {
       messages_list: (args) => (args!.peer === A
         ? [{ id: IN_ID, kind: 200, sender: A, recipient: OWN, timestamp: Date.now() - 1000, plaintext: '[file: voice-note-20260929-120000.webm]', payment_amount_msat: 3000 }]
         : []),
-      voice_note_fetch: () => Promise.reject('voice note not stored on this node'),
+      voice_note_fetch: () => Promise.reject('voice note not stored on this box'),
     });
     await openShell();
     await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] [data-voice-play]`)).not.toBeNull());
