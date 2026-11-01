@@ -26,6 +26,15 @@ async fn noise_responder(listener: tokio::net::TcpListener) {
 }
 
 async fn noise_auth_reply(listener: tokio::net::TcpListener, accept: bool) -> remote_access::RemoteAuthRequest {
+    noise_auth_reply_with(&listener, accept).await
+}
+
+/// One refused enrollment on a listener that stays open for the next attempt.
+async fn noise_auth_reply_on(listener: &tokio::net::TcpListener) -> Option<String> {
+    noise_auth_reply_with(listener, false).await.client_pubkey
+}
+
+async fn noise_auth_reply_with(listener: &tokio::net::TcpListener, accept: bool) -> remote_access::RemoteAuthRequest {
     let (mut stream, _) = listener.accept().await.unwrap();
     let secret = [43; 32];
     let mut noise = snow::Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse().unwrap())
@@ -463,4 +472,53 @@ async fn failed_ticket_save_without_previous_ticket_surfaces_pairing_guidance() 
     }).await.expect("failed save must not leave an idle app without guidance");
     assert!(state.status_snapshot().error.unwrap().contains("Pair this phone"));
     assert!(remote_access::load_persisted(dir.path()).unwrap().is_none());
+}
+
+// The client identity sits behind Face ID / Touch ID. Focus changes, foreground
+// resumes and the live feed's retries must never read it; a user action reads it
+// once per process and every later attempt reuses the key in memory.
+#[tokio::test]
+async fn background_reconnects_never_read_the_protected_client_identity() {
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let link = ticket(listener.local_addr().unwrap().to_string(), false);
+    remote_access::import_pairing_link(dir.path(), &link).unwrap();
+    // The session's first prompt was cancelled.
+    let store = dir.path().join(PAIRING_STORE_DIR);
+    assert!(client_key_with(&state, &store, Interaction::User, |_| Err(PairError::Local("cancelled".into()))).is_err());
+    // A focus change (the Face ID sheet closing) and the live feed's recovery.
+    tokio::time::timeout(Duration::from_secs(3), resume_remote_at(&state, dir.path())).await.unwrap().unwrap();
+    let descriptor = remote_access::load_persisted(dir.path()).unwrap().unwrap();
+    attach_remote_with(&state, dir.path(), descriptor, Interaction::Background).await;
+    assert!(state.client_key.lock().unwrap().is_none());
+    assert!(!dir.path().join(PAIRING_STORE_DIR).join(pairing::KEY_FILE).exists());
+    assert_eq!(state.status_snapshot().error.as_deref(), Some(CONFIRM_TO_RECONNECT));
+    assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
+}
+
+#[tokio::test]
+async fn one_user_read_serves_every_later_retry_and_resume() {
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    remote_access::import_pairing_link(dir.path(), &ticket(address, false)).unwrap();
+    let server = tokio::spawn(async move {
+        let first = noise_auth_reply_on(&listener).await;
+        let second = noise_auth_reply_on(&listener).await;
+        (first, second)
+    });
+    // The user's Try again reads the identity (the one prompt).
+    tokio::time::timeout(Duration::from_secs(5), pairing_retry_at(&state, dir.path())).await.unwrap().unwrap();
+    let key = state.client_key.lock().unwrap().as_ref().map(|(_, key)| key.public_hex().to_string()).unwrap();
+    // Remove the stored identity: any further read would now create a new key.
+    std::fs::remove_file(dir.path().join(PAIRING_STORE_DIR).join(pairing::KEY_FILE)).unwrap();
+    // A focus change then retries in the background with the key in memory.
+    tokio::time::timeout(Duration::from_secs(5), resume_remote_at(&state, dir.path())).await.unwrap().unwrap();
+    let (first, second) = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+    assert!(first.is_some());
+    assert_eq!(first, second, "the same client identity authenticated both attempts");
+    assert_eq!(state.client_key.lock().unwrap().as_ref().map(|(_, key)| key.public_hex().to_string()).unwrap(), key);
+    assert!(!dir.path().join(PAIRING_STORE_DIR).join(pairing::KEY_FILE).exists(), "no second read or create");
 }

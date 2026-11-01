@@ -3,8 +3,10 @@
 use std::fmt;
 
 /// Upper bound for a key blob. Observed size is about 570 bytes.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const BLOB_CAP: usize = 4096;
 /// Upper bound for a DER ECDSA P-256 signature (at most 72 bytes).
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const SIG_CAP: usize = 72;
 /// X9.63 uncompressed P-256 public key: 0x04 || X || Y.
 pub const PUBLIC_KEY_LEN: usize = 65;
@@ -19,6 +21,7 @@ pub enum Policy {
 }
 
 impl Policy {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn code(self) -> i32 {
         match self {
             Policy::Biometry => 1,
@@ -52,14 +55,21 @@ impl fmt::Display for DeviceKeyError {
 
 impl std::error::Error for DeviceKeyError {}
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const OK: i32 = 0;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const ERR_UNAVAILABLE: i32 = -1;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const ERR_CANCELLED: i32 = -2;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const ERR_INVALID_BLOB: i32 = -3;
 // A malformed bridge response does not mean the stored enclave key is invalid.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const ERR_TRANSPORT: i32 = -6;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const ERR_BIOMETRY_UNAVAILABLE: i32 = -7;
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) fn status_error(code: i32) -> DeviceKeyError {
     match code {
         ERR_UNAVAILABLE => DeviceKeyError::Unavailable,
