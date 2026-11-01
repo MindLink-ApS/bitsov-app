@@ -30,7 +30,7 @@ it('starts with one primary action and Paste beside it, without a secret input',
   expect(document.activeElement).toBe(heading);
   expect(heading.getAttribute('aria-describedby')).toBeTruthy();
   // Says where the QR comes from, in the computer's own words, instead of a cryptic arrow.
-  expect(document.getElementById(heading.getAttribute('aria-describedby')!)?.textContent).toBe('On your computer, open BitSov and choose Settings → Devices → Add a device. A square code appears. Tap the button below and hold your phone up to it.');
+  expect(document.getElementById(heading.getAttribute('aria-describedby')!)?.textContent).toBe('On your computer: open BitSov → Settings → Devices → Add a device. A square code appears. Tap the button below and hold your phone up to it.');
   expect(document.querySelector('[data-phone-face]')?.getAttribute('aria-live')).toBeNull();
   expect(document.querySelectorAll('button.primary')).toHaveLength(1);
   expect(button("Scan the code with the camera")).toBeTruthy();
@@ -392,7 +392,7 @@ it('labels the three steps and marks the current one', async () => {
 
 it('Danish copy says where the QR comes from and what to do on an unclaimed box', async () => {
   mount({ locale: 'da-DK', preview: vi.fn().mockResolvedValue({ first_run: true, endpoint: 'box', node_id_fingerprint: '' }) });
-  expect(document.body.textContent).toContain('Åbn BitSov på din computer, og vælg Indstillinger → Enheder → Tilføj en enhed.');
+  expect(document.body.textContent).toContain('På computeren: åbn BitSov → Indstillinger → Enheder → Tilføj en enhed.');
   expect([...document.querySelectorAll('.phone-progress-label')].map(e => e.textContent)).toEqual(['Scan', 'Sammenlign', 'Færdig']);
   button('Scan koden med kameraet').click(); await tick();
   expect(document.body.textContent).toContain('Åbn BitSov på din computer, og sæt boksen op dér.');
