@@ -118,6 +118,8 @@ fn main() {
             "file_fetch",
             "file_save",
             "call_audio_session",
+            "call_audio_route",
+            "call_audio_route_get",
             "call_quote",
             "call_signal",
             "call_status",
