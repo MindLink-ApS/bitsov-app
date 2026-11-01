@@ -369,6 +369,7 @@ function AppScreen() {
               <Show when={pairing().remote && pairing().bootstrap === 'bootstrap'} fallback={
                 <Show when={status().local_owner && pairing().bootstrap === 'bootstrap' && !pairing().remote}
                   fallback={<IdentityGate
+                  phone={onPhone}
                   source={source()}
                   nodeId={() => status().node_id}
                   remote={pairing().remote}
@@ -550,6 +551,8 @@ function PairingLinkOverlay(props: ParentProps<{ onClose: () => void }>) {
  * before there is money on this node, not after.
  */
 function IdentityGate(props: {
+  /** A phone reads the remote disclosure in its own language and plain words. */
+  phone?: boolean;
   source: Source;
   nodeId: () => string | null;
   remote: boolean;
@@ -620,6 +623,16 @@ function IdentityGate(props: {
       </details>
 
       <Show
+        when={!(props.phone && props.remote)}
+        fallback={
+          <section class="panel disclosure" data-gate="g6-remote-trust">
+            <h2>{t('obPhoneTrustTitle')}</h2>
+            <p>{t('obPhoneTrustLine')}</p>
+            <p>{t('obPhoneTrustKeys')}</p>
+          </section>
+        }
+      >
+      <Show
         when={props.remote}
         fallback={
           <section class="panel disclosure" data-gate="g6-local-trust">
@@ -649,6 +662,7 @@ function IdentityGate(props: {
           </p>
         </section>
       </Show>
+      </Show>
 
       <Show when={!props.bootstrap}>
       <button class="primary" disabled={busy() || savingTrust()} onClick={async () => {
@@ -658,7 +672,7 @@ function IdentityGate(props: {
         catch (e) { setError(String(e)); }
         finally { setSavingTrust(false); }
       }}>
-        I understand — continue to funding
+        {props.phone ? t('obPhoneTrustContinue') : 'I understand — continue to funding'}
       </button>
       </Show>
 
@@ -671,7 +685,7 @@ function IdentityGate(props: {
         when={showRestore()}
         fallback={
           <button class="link" data-restore-open onClick={() => setShowRestore(true)}>
-            {t('obRestoreIdentity')}</button>
+            {props.phone ? t('obPhoneRestore') : t('obRestoreIdentity')}</button>
         }
       >
         <form class="panel restore" onSubmit={submitRestore}>

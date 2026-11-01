@@ -235,12 +235,12 @@ export function Onboarding(props: {
         fallback={
           <header class="ob-head" data-ob-head="trust">
             {/* Named like its step: the stepper above says "Your identity". */}
-            <h1>{t('obYourIdentity')}</h1>
+            <h1>{phone() && !props.pairing().bootstrap ? t('obPhoneAlmostDone') : t('obYourIdentity')}</h1>
             <Show
               when={!props.pairing().bootstrap}
               fallback={<Show when={props.status().local_owner && !props.pairing().remote} fallback={<p class="lede">{t('obNoIdentity')}{' '}{props.pairing().remote ? t('obRestoreAtNode') : t('obRestoreOnMac')} {t('obCreateNotAvailable')}</p>}><p class="lede">{t('obCreateIdentityBelow')}</p></Show>}
             >
-              <p class="lede">{t('obReadTrust')}</p>
+              <p class="lede">{phone() ? t('obPhoneTrustLede') : t('obReadTrust')}</p>
             </Show>
           </header>
         }
@@ -446,8 +446,8 @@ export function Onboarding(props: {
               </div>
             </div>
 
-            {/* What this app may do stays in view (not behind the details). */}
-            <p class="pairing-access">
+            {/* What this app may do stays in view (not behind the details). A phone keeps it in the details. */}
+            <p class="pairing-access" hidden={phone()}>
               {t('obAccess')}{' '}<strong>{scopeList(props.pairing().scopes)}</strong>
             </p>
 
@@ -522,7 +522,8 @@ export function Onboarding(props: {
         </p>
       </Show>
       {/* Touch ID approvals belong to setup, right after pairing (they used to live only in + New). */}
-      <Show when={props.onRegisterDevice && props.onCancelDevice && props.pairing().state === 'paired' && stage() !== 'node' && !approvalsSkipped()}>
+      {/* A phone sets up approvals later, in Settings; its first run ends at the trust step. */}
+      <Show when={!phone() && props.onRegisterDevice && props.onCancelDevice && props.pairing().state === 'paired' && stage() !== 'node' && !approvalsSkipped()}>
         <DeviceApprovals
           device={props.device?.() ?? null}
           joinDevice={props.joinDevice}

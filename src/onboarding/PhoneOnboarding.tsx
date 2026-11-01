@@ -68,6 +68,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   const [options, setOptions] = createSignal(false);
   const [confirmForget, setConfirmForget] = createSignal(false);
   const forgetId = createUniqueId();
+  let confirmBox: HTMLDivElement | undefined;
   let alive = true, generation = 0, joinGeneration = 0, joining = false, joinStarted = false;
   // Keep an uncommitted link only in memory until comparison or cancellation.
   let pendingLink = '', compared = false;
@@ -111,7 +112,8 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       receive(v);
       if (v.state === 'idle' && (joinStarted || screen() === 'words')) { fail({ kind: 'approval_expired' }); return; }
       if (v.state === 'idle' && !joinStarted) {
-        if (v.second_device !== true) { fail({ kind: 'unsupported' }); return; }
+        // Already paired by a compared or saved (not second-device) link: nothing to enrol, so it is done.
+        if (v.second_device !== true) { if (compared || !preview()) setScreen('done'); else fail({ kind: 'unsupported' }); return; }
         joinStarted = true;
         const next = await props.beginJoin();
         if (alive && turn === generation && joinTurn === joinGeneration) {
@@ -345,6 +347,9 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       </Show>
       <Show when={screen() === 'done'}><PrimaryAction onClick={props.onDone}>{c().open}</PrimaryAction></Show>
       <Show when={screen() === 'error'}><PrimaryAction disabledReason={busy() ? c().working : undefined} onClick={() => void (stale() ? paste() : run(recover))}>{errorCopy()[2]}</PrimaryAction></Show>
+      <Show when={screen() === 'error' && error()?.kind === 'timeout'}>
+        <button type="button" class="phone-secondary" data-phone-paste disabled={busy()} onClick={() => void paste()}>{c().pasteNew}</button>
+      </Show>
       {/* Paste is the second first-class way in: one tap reads the clipboard (iOS asks to allow it). */}
       <Show when={screen() === 'start' || screen() === 'scanner'}>
         <button type="button" class="phone-secondary" data-phone-paste disabled={busy() || !!waiting() || joinStarted} onClick={() => void paste()}>{c().paste}</button>
@@ -381,9 +386,13 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       </details>
       {/* Forgetting drops the saved box: one plain confirmation, never behind the help sections. */}
       <Show when={confirmForget()} fallback={
-        <button type="button" data-phone-forget disabled={busy()} onClick={() => { clearManualPaste(); setConfirmForget(true); }}>{c().forget}</button>
+        <button type="button" data-phone-forget disabled={busy()} onClick={() => {
+          clearManualPaste(); setConfirmForget(true);
+          // Bring the whole confirmation into view, inside the safe areas.
+          queueMicrotask(() => confirmBox?.scrollIntoView?.({ block: 'nearest' }));
+        }}>{c().forget}</button>
       }>
-        <div class="phone-confirm" role="group" aria-labelledby={forgetId} data-phone-forget-confirm>
+        <div ref={confirmBox} class="phone-confirm" role="group" aria-labelledby={forgetId} data-phone-forget-confirm>
           <p id={forgetId}>{c().forgetConfirm}</p>
           <button type="button" disabled={busy()} onClick={() => { setConfirmForget(false); void run(reset); }}>{c().forgetYes}</button>
           <button type="button" class="quiet" disabled={busy()} onClick={() => setConfirmForget(false)}>{c().keepBox}</button>
