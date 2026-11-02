@@ -15,10 +15,14 @@ payment attached to the packet. So the self-approval ceiling below is a
 changeable default, not protocol. Money-path correctness and the review gate are
 not defaults.
 
-**This cannot work on a box whose seed password comes from a file or a flag.**
-Section 5.1 requires device approvals to be on, and the node turns them off on
-such a box. Reported, node-side, to confirm: both real boxes are such boxes. See
-section 5.1 and the node-repository requirement in section 6.
+**Until a node setting ships, this does not work on a box whose seed password
+comes from a file or a flag.** Section 5.1 requires device approvals to be on,
+and the node turns them off on such a box. Both real test boxes run this way
+today: they log `seed_password_not_typed`. The owner decided yes: device
+approvals on such a box become an owner-chosen setting, off until the owner
+chooses it. It is node work after the Thursday call proof, under the normal
+review gate. See section 5.1, the node-repository requirement in section 6 and
+section 10, item 4.
 
 ## 1. Current flow
 
@@ -180,14 +184,13 @@ or a flag: `owner_approval_key` returns `seed_password_not_typed`
 `crates/konsensus-api/src/pairing/device.rs:28-30`, node commit `b3f1ad1`). They
 are on only with a typed password, or a descriptor or remote unlock together
 with `--local-owner-device`, and only with an encrypted seed. Every device route
-then refuses (`device_authority`, `pairing/device.rs:1536-1542`). Reported,
-node-side, to confirm: both real boxes take the password from a file or flag.
-The field test of 1 November approved at the node's console, which fits, but its
-record does not name the password source. On such a box the owner has no
+then refuses (`device_authority`, `pairing/device.rs:1536-1542`). Both real test boxes run this way today: they log `seed_password_not_typed`. On such a box the owner has no
 enrolled device key either: `POST /pair/device-key` is refused
 (`pairing/device.rs:522`). So in-app approval is not offered there, and
 `konsensus grant` at the node's computer stays the only path. The capability alone
-does not change this; see the device approval policy in section 6.
+does not change this. Until the owner-chosen device approval setting in section 6
+ships, these flows do not work on such a box; after that, only once the owner
+chooses it.
 
 ### 5.2 Message and signature
 
@@ -285,8 +288,9 @@ command moves under "Other ways", as `TouchIdFirst` already does for v1.
   the box's own app is the path, because there is no other owner device.
   The full sketch is in `docs/DEVICES-AND-PEOPLE.md` (section 4.4, D7). The
   node API it needs is a node-repository requirement (section 6). On a box
-  whose seed password comes from a file or a flag this does not work: neither
-  path has an owner key to rely on (section 5.1).
+  whose seed password comes from a file or a flag this does not work until the
+  node setting in section 6 ships: neither path has an owner key to rely on
+  (section 5.1).
 - Adding a second owner device later turns self grants off automatically;
   approvals then go device to device (v1).
 
@@ -302,7 +306,7 @@ command moves under "Other ways", as `TouchIdFirst` already does for v1.
 | Cooldown | the node records the time of the last owner key change and refuses self grants within 3 days of it |
 | Audit | self grants are listed to the requester (time, terms, expiry) so the app can show them |
 | Refusals | `approval_not_single_owner`, `approval_over_ceiling`, `approval_expired`, `approval_changed`, `approval_key_cooldown` |
-| Device approval policy (node-repository requirement; does not exist) | a supported way for a box whose seed password comes from a file or a flag to have device approvals: either a start that uses neither, or a policy that turns approvals on for it. The node's reason for the gate is that a same-user program could read that password, so this needs its own security review. Without it, this whole design and the lost-phone revoke stay off on such a box |
+| Device approval setting (node-repository requirement; does not exist) | an owner-chosen setting for device approvals on a box whose seed password comes from a file or a flag, off until the owner chooses it (decided, section 10, item 4). Its design is not part of this document. The node's reason for the gate is that a same-user program could read that password. It is node work after the Thursday call proof, under the normal review gate. Until it ships, this whole design and the lost-phone revoke do not work on such a box, and both real test boxes run this way today |
 | Revoke a lost device (node-repository requirement) | a revoke route that accepts either a signature by another enrolled, non-revoked owner device key over a domain-separated revoke message (target device, op id, nonce, expiry), or the box's local owner authority from the box's own app; it revokes the target's tokens and device key, ends its grants, records an owner key change, and refuses revoking the requesting device itself through this route |
 
 The app keeps today's flow for any node without the capability, and for any box
@@ -363,7 +367,7 @@ platform's own biometric word, as `TouchIdFirst` does.
 
 ## 10. Owner decisions
 
-Items 1 and 2 are decided. Item 3 is open.
+Items 1, 2 and 4 are decided. Item 3 is open.
 
 1. **Self-approval limits: decided by the owner.** The ceiling is **2,500 sats
    per 24 h**, a changeable default, counted as a total across self grants. It
@@ -374,15 +378,15 @@ Items 1 and 2 are decided. Item 3 is open.
    key change (`approval_key_cooldown`); the owner set the cooldown to 3 days,
    and it stays because it guards the money path after a key change. The
    self-grant lifetime is at most 24 h, as the console path writes it
-   (owner-confirmed). The earlier limit of 3 self grants per 24 h is removed
-   under the principle above: the total does that work.
+   (owner-confirmed). The earlier limit of 3 self grants per 24 h is
+   removed because the 24-hour total bounds the money; owner confirmation requested.
 2. **Lost phone without a terminal: decided by the owner, yes.** A lost
    phone can be revoked from another owner device or from the box's own
    app (for example the Mac app on the box's computer), with no terminal
    (section 5.5; sketch in `docs/DEVICES-AND-PEOPLE.md` section 4.4). The
-   node API and a device approval policy are node-repository requirements
-   (section 6); today neither path works on a box whose seed password comes
-   from a file or a flag. Revocation by a
+   node API and the device approval setting (item 4) are node-repository
+   requirements (section 6); until that setting ships, neither path works on a
+   box whose seed password comes from a file or a flag. Revocation by a
    second person, such as a box host, is not part of this decision.
 3. **Per-payment limit on a self grant: open, the owner has not set it.** This
    document used to state the ceiling with the node's 6-sat cap per message. If
@@ -395,6 +399,9 @@ Items 1 and 2 are decided. Item 3 is open.
    conflict remains, and the signed limit is the choice to make. `{cap}` in the
    prompt and copy stands for it, and copy must say "per payment" if it covers
    calls. This is read from the code in both repositories, not yet from a test.
-
-Also open with the owner: device approvals on a box whose seed password comes
-from a file or a flag (section 5.1 and the policy row in section 6).
+4. **Device approvals on a box whose seed password comes from a file or a flag:
+   decided by the owner, yes.** They become an owner-chosen setting, off until
+   the owner chooses it. It is node work after the Thursday call proof, under
+   the normal review gate, and a node-repository requirement (section 6). Until
+   that setting ships, these flows do not work on such a box. Both real test
+   boxes run this way today: they log `seed_password_not_typed`.
