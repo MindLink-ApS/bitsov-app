@@ -6,7 +6,8 @@ the end before any code lands. Open decision 1 (writes inside a client's
 grant without per-action approval) is **decided by the owner: yes** (section
 5.6). Open decision 2 (AI payments only to named recipients, always) is
 **decided by the owner: always** (section 5.5). AI messages are **autonomous
-within budget**, and the AI budget is **1,000 sats per 24 h**, a changeable
+within budget** by default, which the user can change per client (section 5.6),
+and the AI budget is **1,000 sats per 24 h**, a changeable
 default (section 9, item 3). Hardened after an
 independent review (round 1): section 5.5 corrects a factual error about the
 recipient allowlist, and section 5.10 lists what the node must add before
@@ -232,9 +233,15 @@ What stays in place, unchanged by this decision:
 - **One-tap revoke** per client and **Stop all** for every client
   (section 5.7).
 
-An owner who wants to tap every send keeps a client on `read`: the existing
-assistants' proposals already prefill a draft the owner sends. There is no
-separate per-client approval mode.
+**Per-client setting: "ask me each time", off by default.** Autonomy within the
+budget is the default, and the user can change it per client. With it on, that
+client's writes become pending items in the app, like today's `Proposal`,
+showing recipient, amount and exact text; the user's tap sends exactly those
+bytes, following the `ai_disclose` / `ai_send` pattern (the host holds the body
+under a random id, and the tap can only send what was shown). The grant bounds
+that mode too. The host enforces this setting, like the scope split in section
+5.3; the node's debit stays the hard bound. UI copy must never present it as the
+safe or recommended default; doing so would reopen the decision above.
 
 ### 5.7 Audit log and revoke
 
@@ -287,19 +294,17 @@ some of them earlier, but a host-only check is not a bound.
 | N-2 | **`recipients_only` for owner-written client grants**, including grants that fund the `pay` scope. | Makes the recipient allowlist a node bound (section 5.5). |
 | N-3 | **A node-side label on client grants** and a command that ends every grant with that label. | Kill switch that does not trust the host (section 5.7). |
 | N-4 | Node-side operation scopes (`message` / `pay` / `call`), if the owner wants them (section 9, item 2). | Moves the scope split in 5.3 from the host to the node. |
-| N-5 | **A device approval policy for boxes whose seed password comes from a file or a flag.** It does not exist. It needs a supported start that uses neither, or a policy that turns approvals on for such a box, and its own security review. | "Add client" pairs with a device key (section 4), and `POST /pair/device-key` refuses while approvals are off (`crates/konsensus-api/src/pairing/device.rs:522`). So do the signed relation intents behind a `recipients_only` grant (`pairing/device.rs:1286`). |
+| N-5 | **An owner-chosen device approval setting for boxes whose seed password comes from a file or a flag.** Decided by the owner: yes, off until the owner chooses it. It does not exist, and its design is not part of this document. It is node work after the Thursday call proof, under the normal review gate. | "Add client" pairs with a device key (section 4), and `POST /pair/device-key` refuses while approvals are off (`crates/konsensus-api/src/pairing/device.rs:522`). So do the signed relation intents behind a `recipients_only` grant (`pairing/device.rs:1286`). |
 
-**Device approvals are off on such a box.** The node turns device approvals off when the seed's password came from a file
+**Device approvals are off on such a box until that setting ships.** The node turns device approvals off when the seed's password came from a file
 or a flag: `owner_approval_key` returns `seed_password_not_typed`
 (`crates/konsensus-node/src/main.rs:1087-1107`,
 `crates/konsensus-api/src/pairing/device.rs:28-30`, node commit `b3f1ad1`). They
 are on only with a typed password, or a descriptor or remote unlock together
 with `--local-owner-device`, and only with an encrypted seed. Every device route
-then refuses (`device_authority`, `pairing/device.rs:1536-1542`). Reported,
-node-side, to confirm: both real boxes take the password from a file or flag.
-The field test of 1 November approved at the node's console, which fits, but its
-record does not name the password source. So the add-client screen
-and the client grants above are not described as working on such a box. A grant
+then refuses (`device_authority`, `pairing/device.rs:1536-1542`). Both real test boxes run this way today: they log `seed_password_not_typed`. So the add-client screen
+and the client grants above do not work on such a box until the setting in N-5
+ships. A grant
 written at the node's console still works where the box runs with
 `--owner-control`, but that is the terminal step this design wants to avoid.
 
@@ -320,6 +325,7 @@ Settings > AI
      Scopes:   [x] read  [x] message  [ ] pay  [ ] call
      Grant:    120 of 1,000 sats left, max 6 per message,
                3 recipients, ends in 5 h 12 m   [ End grant ]
+     Writes:   run inside the grant  [ ask me each time ]
 
    Audit (last 50)                  filter: [all clients v]
      14:02  Chat app   send_message  Contact A  6 sats   settled
@@ -332,7 +338,9 @@ presents it once; the owner names the client and picks scopes. Default is
 `read` only, no grant.
 
 This screen depends on device approvals, as section 5.10 states (N-5): on a box
-whose seed password comes from a file or a flag it does not work today.
+whose seed password comes from a file or a flag it does not work until the
+owner-chosen node setting in N-5 ships. Both real test boxes run this way today:
+they log `seed_password_not_typed`.
 
 ## 7. Phased plan
 
@@ -341,7 +349,8 @@ whose seed password comes from a file or a flag it does not work today.
 | 0 | This document, review, owner decisions. | Two independent reviews, owner sign-off on the open items in section 9 (items 1, 2 and 3 are decided). |
 | 1 | MCP server off by default, stdio shim, per-client pairing, read tools, audit log, revoke. | Tests: scope denial for every tool and topic, untrusted wrapping, revoke ends sessions, nothing listens when off. |
 | 2 | Per-client G1 grants (`recipients_only`) and the grant panel. Write tools that execute inside the client's grant without a per-action tap (decided). Idempotency via spend journal; audit log, revoke and stop-all cover writes. Requires node changes N-2 and N-3 (section 5.10). | Tests: over-cap, over-budget, off-allowlist and expired grant refused by the node; a pay to a recipient with no budget entry on a grant that is not `recipients_only` is refused by the host before any POST; the 11th write in a minute is refused by the node's default breaker; same key never double-pays and the same key with a new body is refused and audited; crash mid-send reconciles; node-side check that a client grant cannot exceed what the owner wrote; injection tests against received messages; revoke, stop-all and the node-side kill switch end writes at once; audit rows equal attempts. |
-| 3 | Plugins as MCP clients (documentation and pairing flow only). | Same tests as phases 1 and 2, run against a plugin client. |
+| 2b | Per-client "ask me each time" setting, off by default (section 5.6). | Tests: a new client starts with it off; the tap sends exactly the shown bytes; a pending item still cannot exceed the grant. |
+| 3 | Plugins as MCP clients (documentation and pairing flow only). | Same tests as phases 1, 2 and 2b, run against a plugin client. |
 | 4 | Lightning pay rail for paid model or tool calls. | Separate design review. |
 
 ## 8. Testing approach
@@ -359,7 +368,9 @@ whose seed password comes from a file or a flag it does not work today.
    recipient allowlist, expiry), write tools may execute without per-action
    owner approval. Audit log, one-tap revoke, stop-all, idempotency,
    untrusted tool results and the node's debit as the hard bound all stay.
-   Doctrine: the client's grant is its token (section 5.3). See section 5.6.
+   Doctrine: the client's grant is its token (section 5.3). This is the
+   default; the user can change it per client with "ask me each time", off by
+   default. See section 5.6.
 2. **AI payments only to named recipients, always? Decided by the owner:
    yes, always.** AI/MCP client grants are always `recipients_only`; the
    host refuses write and pay scopes on any client grant that is not, and
