@@ -279,6 +279,18 @@ describe('paying the minutes of one outgoing call', () => {
     expect(s.stops.map((x) => x.code)).toEqual(['node_ended']);
   });
 
+  it('a block the node keeps refusing as not live ends with node_ended, never as an unknown payment', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const s = session(node, async () => fail('call_not_live', 'The node refused this call signal before payment. Nothing was paid.'));
+    await s.confirmed();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(s.deps.pay).toHaveBeenCalledTimes(MAX_ATTEMPTS);
+    expect(s.stops.map((x) => x.code)).toEqual(['node_ended']);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(s.deps.pay).toHaveBeenCalledTimes(MAX_ATTEMPTS);
+  });
+
   it('after the call it pays nothing more and reads the node until the reservation is released', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const s = session(node);
