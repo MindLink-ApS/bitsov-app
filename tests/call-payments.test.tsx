@@ -516,6 +516,26 @@ describe('the call engine with paid minutes', () => {
     }
   });
 
+  it('the box refusing the call for this contact’s budget (grant_recipient) ends it in plain words (EN/DA), nothing held or paid', async () => {
+    const cases = [
+      ['en', 'Your box turned the call down: this contact’s budget on your box can’t hold the call. Nothing was paid. Raise this contact’s budget on your box, then ring again.'],
+      ['da', 'Din boks afviste opkaldet: kontaktens budget på boksen kan ikke rumme opkaldet. Der er ikke betalt noget. Hæv kontaktens budget på boksen, og ring igen.'],
+    ] as const;
+    try {
+      for (const [lang, words] of cases) {
+        setLanguagePref(lang);
+        const hold = vi.fn();
+        const pay = vi.fn();
+        const e = engine({ status: vi.fn(async () => ok(null)), hold, pay },
+          async () => fail('grant_recipient', 'Your node’s budget for this recipient has 50 sats left, less than this costs. Nothing was sent.'));
+        await e.engine.place(A, 'audio', QUOTE);
+        expect(e.last()).toMatchObject({ phase: 'ended', error: words, paidMsat: 0 });
+        expect(hold).not.toHaveBeenCalled();
+        expect(pay).not.toHaveBeenCalled();
+      }
+    } finally { setLanguagePref('en'); }
+  });
+
   it('their node refusing the offer above the agreed price or hold ends the call in plain words (EN/DA), nothing sent, held or paid', async () => {
     const cases = [
       ['call_offer_price_above_consent', 'Their node now asks more per minute than you agreed to, so your node did not place the call. Nothing was sent, held or paid. Check the price and call again.',

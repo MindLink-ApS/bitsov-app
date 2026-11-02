@@ -2,6 +2,7 @@ import { IncomingCallAlerts } from './IncomingCallAlerts';
 import { createMissedCalls } from './missedCalls';
 import { createPhoneLayout, createPhoneNavigationGuard, PhoneTabs, type PhoneTab } from './PhoneShell';
 import { MediaView } from './CallMedia';
+import { RingBudgetNote } from './ringBudget';
 import { createMessageNotifications, NotificationSettings } from './messageNotifications';
 import { isTauri, invoke } from '@tauri-apps/api/core';
 import { OwnerApprovalSheets } from './OwnerApprovalSheet';
@@ -339,6 +340,8 @@ export type Actions = {
   /** Place a call after the price was shown. */
   placeCall: (peer: string, media: CallMedia, quote: CallQuote) => void;
   callActive: () => boolean;
+  /** Read-only, display only: the current node grant for the call confirm's contact-budget line; null when unknown or stale. */
+  callGrant?: () => NodeGrantSummary | null;
   callView?: () => CallView;
   /** Open the meeting planner with this contact picked. Pays nothing. */
   planMeeting: (peer: string) => void;
@@ -1556,6 +1559,7 @@ export function ControlCenter(props: Props) {
     placeCall: (peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); },
     callView,
     callActive: () => !['idle', 'ended'].includes(callView().phase) || meetingOn(),
+    callGrant: () => grantUnknown() || (budget() !== null && (!budgetConfirmed() || !!errors.budgetPoll)) ? null : budget()?.node_grant ?? null,
     // Opens the planner; the contact is pre-picked only if their node takes meetings.
     planMeeting: (peer) => {
       if (meetingOn() || routedCalls) return;
@@ -3534,7 +3538,10 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
               <strong>{callWord(media())} {props.name}?</strong>
               <Show when={cost() !== null}>{' '}<span class="hint">{tr('uiUpTo105')} {fmtAmount(cost()!)}{tr('uiNothingIsPaidUntilYouPressRing')}</span></Show>
             </p>
-            <Show when={nodeRoutedAudio() && quote()?.block_msat != null ? quote() : null}>{(q) => <MinutesConsent quote={q()} />}</Show>
+            <Show when={nodeRoutedAudio() && quote()?.block_msat != null ? quote() : null}>{(q) => <>
+              <MinutesConsent quote={q()} />
+              <RingBudgetNote grant={props.actions.callGrant?.() ?? null} peer={props.peer} name={props.name} quote={q()} />
+            </>}</Show>
             <p class="hint" data-call-stun-source>{callStunLabel()}</p>
             <div class="call-confirm-actions">
               <button type="button" class="soft" data-call-confirm-cancel onClick={() => disarm()}>{tr('uiCancel')}</button>
