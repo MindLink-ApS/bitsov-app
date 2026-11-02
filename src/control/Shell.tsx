@@ -3837,14 +3837,14 @@ function CallPanel(props: {
             </Match>
           </Switch>
         </div>
+        {/* M6: the honest label for a node-routed call, from ringing until it ends. It stays visible until the apps encrypt end to end. */}
+        <Show when={props.routed && v().phase !== 'idle' && v().phase !== 'ended'}>
+          <p class="hint" data-call-route="node">{tr('caNodeRoutedCallLabel')}</p>
+        </Show>
         {/* A short card while the call lasts: the longer notes wait behind Details (display only; same texts and amounts). */}
         <Show when={v().phase !== 'ended' && (!props.routed || v().phase !== 'idle')}>
           <details class="quiet-detail" data-call-details>
             <summary>{tr('uiDetails')}</summary>
-            {/* M6: the honest label for a node-routed call, from ringing until it ends. */}
-            <Show when={props.routed && v().phase !== 'idle'}>
-              <p class="hint" data-call-route="node">{tr('caNodeRoutedCallLabel')}</p>
-            </Show>
             {/* Not on the ended card: it promises a recovery that can no longer happen. */}
             <Show when={!props.routed}>
               <p class="hint" data-call-recovery-note>{tr('uiTheConnectionMayRecoverOnItsOwnA')}</p>

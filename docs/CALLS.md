@@ -70,9 +70,10 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   host reconnects; after 30 s without it the call ends. The node's refusal of
   the socket (for example an unknown call) ends it at once.
 - **Label.** While a node-routed call is ringing, connecting or live the
-  card's **Details** disclosure says *The call goes through your box and
-  theirs.* / *Opkaldet går gennem din boks og deres.* The audio is not
-  end-to-end encrypted between the apps: both nodes forward it. The STUN,
+  card shows, outside the **Details** disclosure, *The call goes through your box and theirs. Both boxes can hear it.* /
+  *Opkaldet går gennem din boks og deres. Begge bokse kan høre det.* The audio is not end-to-end encrypted between the
+  apps: both nodes forward it. The line stays visible until the apps encrypt
+  end to end. The STUN,
   direct-recovery and relay notes are not shown.
 - **Short card.** During a call the card shows the name, the timer, one cost
   line (the paid minutes on an outgoing routed call), mute and hang up; the

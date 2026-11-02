@@ -219,7 +219,7 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
-    expect($('[data-call-route="node"]')?.textContent).toBe('The call goes through your box and theirs.');
+    expect($('[data-call-route="node"]')?.textContent).toBe('The call goes through your box and theirs. Both boxes can hear it.');
     // The offer went out with the node-routed marker, so an M6 peer joins at its node.
     const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
     expect(JSON.parse((offer.args as { plaintext: string }).plaintext).sdp).toContain('a=x-bitsov-media:node-routed-v1');
@@ -310,30 +310,31 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     expect([...mount.querySelectorAll('[role="menuitem"]')].some((b) => b.textContent === 'Pay')).toBe(true);
   });
 
-  it('the routing line sits behind a closed Details disclosure, which is gone once the call ends', async () => {
+  it('the routing line stays visible outside the closed Details disclosure, and both are gone once the call ends', async () => {
     const host = stubHost();
     await routedLive(host);
     const details = $<HTMLDetailsElement>('[data-call-panel] [data-call-details]')!;
     expect(details).not.toBeNull();
     expect(details.open).toBe(false);
     expect(details.querySelector('summary')?.textContent).toBe('Details');
-    expect(details.querySelector('[data-call-route="node"]')?.textContent).toBe('The call goes through your box and theirs.');
+    expect(details.querySelector('[data-call-route="node"]')).toBeNull();
+    expect($('[data-call-panel] [data-call-route="node"]')?.textContent).toBe('The call goes through your box and theirs. Both boxes can hear it.');
     expect($('[data-call-panel]')!.querySelectorAll('[data-call-route]')).toHaveLength(1);
-    // No alarming wording anywhere on the card.
-    expect($('[data-call-panel]')!.textContent).not.toMatch(/can hear/);
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     expect($('[data-call-details]')).toBeNull();
+    expect($('[data-call-route]')).toBeNull();
   });
 
-  it('Danish: Detaljer holds the plain routing line', async () => {
+  it('Danish: the routing line says both boxes can hear the call, outside Detaljer', async () => {
     const host = stubHost();
     setLanguagePref('da');
     await routedLive(host);
     const details = $<HTMLDetailsElement>('[data-call-panel] [data-call-details]')!;
     expect(details.querySelector('summary')?.textContent).toBe('Detaljer');
-    expect(details.querySelector('[data-call-route="node"]')?.textContent).toBe('Opkaldet går gennem din boks og deres.');
-    expect($('[data-call-panel]')!.textContent).not.toMatch(/begge noder kan høre|Betal|Lightning-betalingsadresse/);
+    expect(details.querySelector('[data-call-route="node"]')).toBeNull();
+    expect($('[data-call-panel] [data-call-route="node"]')?.textContent).toBe('Opkaldet går gennem din boks og deres. Begge bokse kan høre det.');
+    expect($('[data-call-panel]')!.textContent).not.toMatch(/Betal|Lightning-betalingsadresse/);
   });
 
   it('shows the label in Danish too', async () => {
@@ -344,6 +345,6 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
     await vi.waitFor(() => expect($('[data-call-route="node"]')).not.toBeNull());
-    expect($('[data-call-route="node"]')?.textContent).toBe('Opkaldet går gennem din boks og deres.');
+    expect($('[data-call-route="node"]')?.textContent).toBe('Opkaldet går gennem din boks og deres. Begge bokse kan høre det.');
   });
 });
