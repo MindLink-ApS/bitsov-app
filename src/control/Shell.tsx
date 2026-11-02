@@ -26,6 +26,7 @@ import { DeviceApprovals } from '../onboarding/DeviceApprovals';
 import { approvalMemory, BreakerCard, breakerReason, OwnerApprovals, OwnerApprovalWait, type BreakerReason } from './OwnerApprovals';
 import { OWNER_DEVICE_APPROVAL, OWNER_DEVICE_BREAKER_RESET, refusalText, type ApprovalRequest, type ApprovalView, type DeviceKeysView } from './ownerApproval';
 import { HubTrustInfo } from './HubTrust';
+import { CopyVersions, VersionRows } from './BuildVersions';
 import { pollingSource } from './polling';
 import { deliveryPoller } from './deliveryPoll';
 import { readSpendPreset, saveSpendPreset } from './prefs';
@@ -50,6 +51,7 @@ import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './W
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
 import { callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { CallReportCopy } from './CallReportCopy';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { nodeRoutedAudio } from './callFlags';
 import { createNodeRoutedConnection } from './nodeRoutedConnection';
@@ -3805,6 +3807,8 @@ function CallPanel(props: {
           {(m) => <CallMinutesLine minutes={m()} ended={v().phase === 'ended'} confirm={props.confirmMinutes} />}
         </Show>
         {props.payment}
+        {/* M6 P3: after the call, the app's own record of it, to copy next to the node journal. Display only. */}
+        <CallReportCopy view={v()} routed={!!props.routed} />
         <div class="call-actions">
           <Switch>
             <Match when={v().phase === 'incoming'}>
@@ -8164,6 +8168,7 @@ function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Elem
       {props.connection}
       <Show when={props.overview} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>
         {(o) => (
+          <>
           <dl class="facts">
             <dt>{tr('caStatus')}</dt>
             <dd>
@@ -8194,9 +8199,10 @@ function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Elem
             <dd>{o().chain_backend ?? tr('caUnknown')}</dd>
             <dt>{tr('caUptime')}</dt>
             <dd class="sats">{uptime(o().uptime_secs)}</dd>
-            <dt>API</dt>
-            <dd>{o().version ?? tr('caUnknown')}</dd>
+            <VersionRows overview={o()} />
           </dl>
+          <CopyVersions overview={o()} />
+          </>
         )}
       </Show>
       <p class="fresh-line" classList={{ stale: fresh().stale }} data-freshness>

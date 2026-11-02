@@ -4,6 +4,8 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   cacheDir: '.cache/vitest',
   plugins: [solid()],
+  // A fixed build identity for tests (vite.config.ts resolves the real one).
+  define: { __APP_COMMIT__: JSON.stringify('0123456789ab'), __APP_VERSION__: JSON.stringify('0.0.1') },
   test: {
     environment: 'happy-dom',
     setupFiles: ['tests/setup.ts'],

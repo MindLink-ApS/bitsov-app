@@ -18,11 +18,23 @@ pub async fn probe(state: &NodeState) -> Result<bool, String> {
         .unwrap()
         .clone()
         .ok_or("Pairing is unavailable.")?;
-    let connection = state
+    // With a saved box pin this is an authenticated handshake, so polling can
+    // be the first to meet a revoked pairing. Record that refusal before it
+    // becomes a string. A non-200 lock status below shares the `Refused`
+    // variant but says nothing about the pairing: it never stops reconnects.
+    let connection = match state
         .remote_retry
-        .run(|| LockedConnection::connect(&descriptor, &ctx.key, PAIRING_CLIENT_NAME))
+        .run_unless_refused(|| LockedConnection::connect(&descriptor, &ctx.key, PAIRING_CLIENT_NAME))
         .await
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(connection) => connection,
+        Err(error) => {
+            if error.is_definitive_refusal() && state.remote_retry.is_refused() {
+                refused_by_probe(state, &error);
+            }
+            return Err(error.to_string());
+        }
+    };
     if let Some(mut connection) = connection {
         let status = connection.status().await.map_err(|e| e.to_string())?;
         state.home_locked.store(true, Ordering::SeqCst);
@@ -64,6 +76,11 @@ pub async fn refresh(state: &NodeState) {
     if !state.remote_mode.load(Ordering::SeqCst)
         || state.remote_descriptor.lock().unwrap().is_none()
     {
+        return;
+    }
+    // The node refused this app's pairing: polling must neither dial nor
+    // repeat the token exchange until the owner acts.
+    if hold_refused(state) {
         return;
     }
     // Nothing clears `ready` when a home node reboots into locked mode (proxied

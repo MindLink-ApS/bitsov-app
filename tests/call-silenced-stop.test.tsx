@@ -174,6 +174,63 @@ describe('a phone call that is locked, backgrounded or silenced', () => {
     expect(h.e.view().phase).toBe('ended');
   });
 
+  it('a late timer: back in view after the deadline, the call ends at once instead of going on', async () => {
+    const h = setup();
+    await h.live();
+    h.e.setBackgrounded(true);
+    // The phone held the app's timers while it was hidden: the clock moved on, no timer ran.
+    vi.setSystemTime(Date.now() + SILENCED_GRACE_MS + 10_000);
+    expect(h.e.view().phase).toBe('live');
+    h.e.setBackgrounded(false);
+    expect(h.e.view()).toMatchObject({ phase: 'ended', reason: 'hangup', stopped: { cause: 'background', endsAt: null } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.ended).toEqual([ID]);
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(h.ended).toEqual([ID]);
+  });
+
+  it('a late timer: the microphone unmuted after the deadline still ends the call', async () => {
+    const h = setup();
+    await h.live();
+    h.mics[0].osMute(true);
+    vi.setSystemTime(Date.now() + SILENCED_GRACE_MS);
+    h.mics[0].osMute(false);
+    expect(h.e.view()).toMatchObject({ phase: 'ended', reason: 'hangup', stopped: { cause: 'microphone', endsAt: null } });
+  });
+
+  it('another cause during the grace keeps the first deadline, and the countdown shows it', async () => {
+    const h = setup();
+    await h.live();
+    const endsAt = Date.now() + SILENCED_GRACE_MS;
+    h.mics[0].osMute(true);
+    expect(h.e.view().stopped).toEqual({ cause: 'microphone', endsAt });
+    await vi.advanceTimersByTimeAsync(5_000);
+    h.e.setBackgrounded(true);
+    expect(h.e.view().stopped).toEqual({ cause: 'background', endsAt });
+    await vi.advanceTimersByTimeAsync(10_000);
+    h.e.setBackgrounded(false);
+    expect(h.e.view().stopped).toEqual({ cause: 'microphone', endsAt });
+    await vi.advanceTimersByTimeAsync(endsAt - Date.now() - 1);
+    expect(h.e.view().phase).toBe('live');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.e.view()).toMatchObject({ phase: 'ended', stopped: { cause: 'microphone', endsAt: null } });
+  });
+
+  it('a microphone already muted by the OS when the call starts counts, without a mute event', async () => {
+    const h = setup({
+      getUserMedia: async () => {
+        const mic = new MicTrack();
+        mic.muted = true;
+        const tracks = [mic as unknown as MediaStreamTrack];
+        return { getTracks: () => tracks, getAudioTracks: () => tracks, getVideoTracks: () => [], addTrack: () => {}, removeTrack: () => {} } as unknown as MediaStream;
+      },
+    });
+    await h.live();
+    expect(h.e.view().stopped).toMatchObject({ cause: 'microphone', endsAt: Date.now() + SILENCED_GRACE_MS });
+    await vi.advanceTimersByTimeAsync(SILENCED_GRACE_MS);
+    expect(h.e.view().phase).toBe('ended');
+  });
+
   it('hidden while ringing: the grace starts at their answer, not before', async () => {
     const h = setup();
     await h.e.place(A, 'audio', QUOTE);

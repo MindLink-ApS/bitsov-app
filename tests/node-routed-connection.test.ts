@@ -25,20 +25,20 @@ function fakeBridge() {
 
 type ReadyMode = 'ready' | 'pending' | 'failing';
 function fakeAudio(mode: ReadyMode = 'ready') {
-  const made: { stream: MediaStream; transport: MediaTransport; fed: Uint8Array[]; closed: boolean; resolve: () => void; reject: () => void; fatal: () => void }[] = [];
+  const made: { stream: MediaStream; transport: MediaTransport; fed: Uint8Array[]; muted: boolean[]; closed: boolean; resolve: () => void; reject: () => void; fatal: () => void }[] = [];
   const audio = (stream: MediaStream, transport: MediaTransport, fatal: () => void): CallAudio => {
     let resolve!: () => void;
     let reject!: () => void;
     const ready = new Promise<void>((ok, no) => { resolve = ok; reject = () => no(new Error('no audio graph')); });
     ready.catch(() => undefined);
-    const entry = { stream, transport, fed: [] as Uint8Array[], closed: false, resolve, reject, fatal };
+    const entry = { stream, transport, fed: [] as Uint8Array[], muted: [] as boolean[], closed: false, resolve, reject, fatal };
     made.push(entry);
     if (mode === 'ready') resolve();
     if (mode === 'failing') reject();
     return {
       ready,
       feed: (f) => { entry.fed.push(f); },
-      setMuted: () => {},
+      setMuted: (m) => { entry.muted.push(m); },
       codecs: () => ({ sending: 'pcmu', localCaps: 1, peerCaps: null }),
       stats: async () => null,
       close: async () => { entry.closed = true; },
@@ -96,6 +96,18 @@ describe('node-routed connection (the engine’s RTCPeerConnection surface)', ()
     expect(b.closed()).toBe(1);
     expect(sessions).toHaveLength(2);
     expect(sessions[1]).toMatchObject({ state: 'closed' });
+  });
+
+  it('passes the owner’s mute to the audio engine, also when it was set before the engine was built', async () => {
+    const b = fakeBridge();
+    const a = fakeAudio();
+    const conn = createNodeRoutedConnection({ callId: () => ID, peer: () => PEER, bridge: b.bridge, audio: a.audio }) as unknown as { setMuted: (m: boolean) => void } & RTCPeerConnection;
+    conn.setMuted(true);
+    await conn.setLocalDescription(await conn.createOffer());
+    await conn.setRemoteDescription({ type: 'answer', sdp: nodeRoutedSdp('answer', ID) });
+    expect(a.made[0].muted).toEqual([true]);
+    conn.setMuted(false);
+    expect(a.made[0].muted).toEqual([true, false]);
   });
 
   it('refuses a direct-media answer so the engine ends the call with nothing more paid', async () => {

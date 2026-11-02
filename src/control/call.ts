@@ -465,6 +465,8 @@ export function createCallEngine(deps: CallDeps) {
   /** Our microphone track ended: it never comes back in this call. */
   let micEnded = false;
   let stopTimer: ReturnType<typeof setTimeout> | undefined;
+  /** While the grace runs: when the call ends. A change of cause never moves it. */
+  let stopEndsAt: number | null = null;
   let offMic: (() => void) | null = null;
   let checkingStop = false;
   /** The engine's own hangup, bound once the engine is built. */
@@ -473,7 +475,7 @@ export function createCallEngine(deps: CallDeps) {
   const stopGuarded = () => view.phase === 'connecting' || view.phase === 'live' || view.phase === 'reconnecting';
   const stopCause = (): CallStopCause | null =>
     backgrounded ? 'background' : micEnded || micMuted || (micQuiet && !view.muted) ? 'microphone' : null;
-  const clearStop = () => { clearTimeout(stopTimer); stopTimer = undefined; };
+  const clearStop = () => { clearTimeout(stopTimer); stopTimer = undefined; stopEndsAt = null; };
   const stopNow = (cause: CallStopCause) => {
     clearStop();
     const was = checkingStop;
@@ -486,7 +488,15 @@ export function createCallEngine(deps: CallDeps) {
     if (!deps.stopWhenSilenced || checkingStop) return;
     checkingStop = true;
     try {
-      if (!stopGuarded()) { clearStop(); return; }
+      if (!stopGuarded()) {
+        clearStop();
+        // A countdown is never shown for a call that is no longer paid for.
+        if (view.stopped && view.stopped.endsAt !== null) set({ stopped: null });
+        return;
+      }
+      // The deadline passed (a phone may deliver the timer late, after it is
+      // back in view): the call ends now, whatever changed meanwhile.
+      if (stopEndsAt !== null && deps.now() >= stopEndsAt) { stopNow(view.stopped?.cause ?? stopCause() ?? 'background'); return; }
       const cause = stopCause();
       if (!cause) {
         if (stopTimer !== undefined || view.stopped) { clearStop(); set({ stopped: null }); }
@@ -495,14 +505,17 @@ export function createCallEngine(deps: CallDeps) {
       if (micEnded) { stopNow(cause); return; }
       if (stopTimer === undefined) {
         const callId = view.callId;
+        stopEndsAt = deps.now() + SILENCED_GRACE_MS;
         stopTimer = setTimeout(() => {
           stopTimer = undefined;
-          const still = stopCause();
-          if (view.callId === callId && stopGuarded() && still) stopNow(still);
+          stopEndsAt = null;
+          // The deadline is reached: the call ends, never runs on past it.
+          if (view.callId === callId && stopGuarded()) stopNow(stopCause() ?? view.stopped?.cause ?? cause);
         }, SILENCED_GRACE_MS);
-        set({ stopped: { cause, endsAt: deps.now() + SILENCED_GRACE_MS } });
-      } else if (view.stopped?.cause !== cause) {
-        set({ stopped: { cause, endsAt: view.stopped?.endsAt ?? deps.now() + SILENCED_GRACE_MS } });
+        set({ stopped: { cause, endsAt: stopEndsAt } });
+      } else if (view.stopped?.cause !== cause || view.stopped?.endsAt !== stopEndsAt) {
+        // Another cause keeps the deadline already running; the countdown shows that one.
+        set({ stopped: { cause, endsAt: stopEndsAt } });
       }
     } finally { checkingStop = false; }
   };
@@ -515,6 +528,8 @@ export function createCallEngine(deps: CallDeps) {
     micEnded = false;
     if (!deps.stopWhenSilenced) return;
     const tracks = stream.getAudioTracks();
+    // A track the OS already muted fires no 'mute' event.
+    micMuted = tracks.some((t) => t.muted === true && t.readyState !== 'ended');
     const mute = () => { if (local === stream) { micMuted = true; checkStop(); } };
     const unmute = () => { if (local === stream) { micMuted = tracks.some((t) => t.muted === true && t.readyState !== 'ended'); checkStop(); } };
     const ended = () => { if (local === stream) { micEnded = true; checkStop(); } };
@@ -1013,14 +1028,17 @@ export function createCallEngine(deps: CallDeps) {
   /** M6 A2: one paid-minutes session per call; its view and its stop belong to that call only. */
   const startMinutes = (peer: string, callId: string, agreedBlockMsat: number, reservationMaxMsat: number | null, pays: boolean) => {
     minutes?.dispose();
-    minutes = createCallMinutes({
+    const session: CallMinutes = createCallMinutes({
       peer, callId, agreedBlockMsat, reservationMaxMsat, pays, deps: deps.minutes!, now: deps.now,
       onChange: (m) => { if (view.callId === callId) set({ minutes: m }); },
       // The node ended it, or paying stopped: the call ends now, never left 'connected'.
       onStop: (stop) => { if (view.callId === callId && active()) end(stop.code === 'unpaid' ? 'unpaid' : stop.code === 'node_ended' ? 'hangup' : 'failed', stop.message); },
+      // A call that ended (or was replaced) is never paid for, whatever its session still believes.
+      canPay: () => minutes === session && view.callId === callId && active(),
     });
-    set({ minutes: minutes.view() });
-    return minutes;
+    minutes = session;
+    set({ minutes: session.view() });
+    return session;
   };
 
   /** Media is set up but not flowing yet: give up after a while (nothing paid). */
@@ -1343,6 +1361,8 @@ export function createCallEngine(deps: CallDeps) {
       local.getAudioTracks().forEach((t) => { t.enabled = !muted; });
       // The owner's own mute is silent on purpose; unmuting needs fresh evidence of a silenced microphone.
       if (!muted) micQuiet = false;
+      // Node-routed audio: the capture path must know, so unmuting starts a fresh silence observation.
+      (pc as { setMuted?: (muted: boolean) => void } | null)?.setMuted?.(muted);
       set({ muted });
     },
 

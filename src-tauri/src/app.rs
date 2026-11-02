@@ -598,6 +598,9 @@ impl NodeState {
             view.scopes = session.scopes.clone();
         }
         view.remote = self.remote_mode.load(Ordering::SeqCst);
+        // `remote_retry` holds the refusal (see `is_definitive_refusal`): until a
+        // user action nothing reconnects on its own, and the proxy shares it.
+        view.refused = view.remote && view.state == "failed" && self.remote_retry.is_refused();
         view.hosted_by = self
             .remote_descriptor
             .lock()
@@ -1552,6 +1555,47 @@ enum Interaction {
 /// Shown when a background reconnect needs the client identity first.
 const CONFIRM_TO_RECONNECT: &str = "Tap Try again to confirm it's you and reconnect.";
 
+/// The node answered and refused this app's saved pairing: an unknown or
+/// revoked client, a used or expired ticket. Retrying the same link and client
+/// identity cannot change that answer. Transport errors, timeouts and busy
+/// replies are never definitive; they keep retrying with backoff. Neither is
+/// `already_paired`: the node refused a ticket, not the existing pairing.
+fn is_definitive_refusal(error: &remote_access::RemoteError) -> bool {
+    error.is_definitive_refusal()
+}
+
+/// The same for the token exchange over an authenticated tunnel: the node no
+/// longer knows or accepts this client.
+fn is_definitive_token_refusal(error: &PairError) -> bool {
+    matches!(error, PairError::Refused { step: "/pair/challenge" | "/pair/token", status: 401 | 403 | 404, .. })
+}
+
+/// Automatic paths (status probes, token refresh) stop here while the node's
+/// refusal stands: no dial and no token request. The proxy may have recorded
+/// the refusal first, so this also retires the session and shows the refusal.
+fn hold_refused(state: &NodeState) -> bool {
+    if !state.remote_mode.load(Ordering::SeqCst) || !state.remote_retry.is_refused() {
+        return false;
+    }
+    *state.ready.lock().unwrap() = false;
+    *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
+    *state.token.lock().unwrap() = None;
+    let mut view = state.pairing_view.lock().unwrap();
+    if view.state != "failed" {
+        let refused = remote_access::RemoteError::Refused(remote_access::REFUSED_PAIRING_MESSAGE.into());
+        *view = PairingView::from_outcome(&Err(PairError::Local(refused.to_string())));
+    }
+    true
+}
+
+/// A status probe met the node's refusal first: show it and retire the session
+/// like every other refused path, so later polls and recovery stay quiet.
+fn refused_by_probe(state: &NodeState, error: &remote_access::RemoteError) {
+    *state.pairing_view.lock().unwrap() =
+        PairingView::from_outcome(&Err(PairError::Local(error.to_string())));
+    hold_refused(state);
+}
+
 /// The client identity for `store`, read from protected storage once per session.
 /// Its Keychain item requires user presence, so every read can show Face ID or
 /// Touch ID; the key itself is already held in memory by the pairing context and
@@ -1600,6 +1644,11 @@ async fn attach_remote_with(
     let store = app_data_dir.join(PAIRING_STORE_DIR);
     let key = match client_key(state, &store, interaction) {
         Ok(key) => key,
+        // No passcode: say so as its own kind, so the phone can open Settings.
+        Err(error) if error.to_string() == remote_access::PASSCODE_REQUIRED => {
+            state.remote_retry.failed(&remote_access::RemoteError::DeviceUnavailable);
+            return set_error(&state, error.to_string());
+        }
         // A background attempt leaves any earlier, more specific error in place.
         Err(_) if interaction == Interaction::Background => {
             if state.error.lock().unwrap().is_none() { set_error(state, CONFIRM_TO_RECONNECT); }
@@ -1623,6 +1672,7 @@ async fn attach_remote_with(
     *state.pairing_view.lock().unwrap() = PairingView::pending();
     let failed = |error: remote_access::RemoteError| {
         state.remote_retry.failed(&error);
+        if is_definitive_refusal(&error) { state.remote_retry.refuse(); }
         *state.pairing_view.lock().unwrap() =
             PairingView::from_outcome(&Err(PairError::Local(error.to_string())));
     };
@@ -1913,6 +1963,14 @@ async fn connect_remote_at(state: &NodeState, app_data_dir: &Path, wait: bool) -
 }
 
 async fn connect_remote_with(state: &NodeState, app_data_dir: &Path, wait: bool, interaction: Interaction) -> Result<(), String> {
+    // After a definitive refusal only the owner's action may dial again (Try
+    // again, a new pairing link). Focus, resume and the live feed stay quiet,
+    // so they cannot repeat the refusal or its Face ID / Touch ID prompt.
+    match interaction {
+        Interaction::Background if state.remote_retry.is_refused() => return Ok(()),
+        Interaction::Background => {}
+        Interaction::User => state.remote_retry.clear_refusal(),
+    }
     let mut cancelled = {
         let _change = state.remote_change.lock().await;
         state.remote_connect_generation.subscribe()
@@ -2131,6 +2189,9 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
                 PairError::Refused { step: "/pair/challenge" | "/pair/token", status: 404, .. }
             );
             state.stale_pairing.store(unknown_client, Ordering::SeqCst);
+            if state.remote_mode.load(Ordering::SeqCst) && is_definitive_token_refusal(&e) {
+                state.remote_retry.refuse();
+            }
             *state.pairing_view.lock().unwrap() = view;
             Err(e.to_string())
         }
@@ -2139,6 +2200,9 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
 
 /// Mint a fresh paired token and install it. No fallback on failure.
 async fn refresh_paired(state: &NodeState) -> Result<(), String> {
+    if hold_refused(state) {
+        return Err(remote_access::RemoteError::Refused(remote_access::REFUSED_PAIRING_MESSAGE.into()).to_string());
+    }
     let (generation, session, ctx) = {
         // The watch read guard also fences the snapshot against a switch's
         // synchronous invalidation; it is never held across network work.
@@ -2171,6 +2235,14 @@ async fn refresh_paired(state: &NodeState) -> Result<(), String> {
             *state.ready.lock().unwrap() = false;
             *state.pairing_view.lock().unwrap() = PairingView::from_outcome(&Err(error));
             set_error(state, message.clone());
+        } else if remote && is_definitive_token_refusal(&error) {
+            // The node no longer accepts this client. Retire the due session
+            // so later automatic refreshes stop instead of repeating it.
+            state.remote_retry.refuse();
+            *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
+            *state.token.lock().unwrap() = None;
+            *state.ready.lock().unwrap() = false;
+            *state.pairing_view.lock().unwrap() = PairingView::from_outcome(&Err(error));
         }
         return Err(message);
     }
@@ -2988,6 +3060,8 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     #[cfg(any(target_os = "android", all(target_os = "macos", desktop, not(feature = "mobile"))))]
     { *state.home_remember.lock().unwrap() = None; }
     state.stale_pairing.store(false, Ordering::SeqCst);
+    // A new link is the owner's action: it may dial even after a refusal.
+    state.remote_retry.clear_refusal();
     state.remote_mode.store(true, Ordering::SeqCst);
     *state.error.lock().unwrap() = None;
     state.remote_retry.clear_connection_error();
@@ -3095,6 +3169,7 @@ async fn remote_access_forget_at(state: &NodeState, app_data_dir: &Path) -> Resu
     state.remote_connect_generation.send_modify(|generation| *generation = generation.wrapping_add(1));
     let _recovery = state.remote_recovery.lock().await;
     remote_access::forget_persisted(app_data_dir).map_err(|error| error.to_string())?;
+    state.remote_retry.clear_refusal();
     // Preserve established connections (Forget still selects the next startup).
     // An unfinished attach, however, must leave no stale remote onboarding state.
     if state.remote_mode.load(Ordering::SeqCst) && state.remote_proxy.lock().unwrap().is_none() {

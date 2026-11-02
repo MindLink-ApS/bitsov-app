@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
@@ -111,6 +113,28 @@ export function callMediaFlag(env: Record<string, string | undefined>): 'node' |
 
 const root = dirname(fileURLToPath(import.meta.url));
 
+// The app's build identity, shown and copied in the Node panel (M6 P2: freeze
+// the exact app and node pair). CI's GITHUB_SHA wins; else the local checkout's
+// HEAD, with "-dirty" when it has uncommitted changes (never on CI); else
+// "unknown". Display only: nothing reads it to decide anything.
+const COMMIT = /^[0-9a-f]{7,40}$/i;
+export type Git = (args: string[]) => string;
+const runGit: Git = (args) =>
+  execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+export function appCommit(env: Record<string, string | undefined>, git: Git = runGit): string {
+  const ci = env.GITHUB_SHA?.trim() ?? '';
+  if (COMMIT.test(ci)) return ci.slice(0, 12).toLowerCase();
+  let commit: string;
+  try { commit = git(['rev-parse', '--short=12', 'HEAD']).trim().toLowerCase(); } catch { return 'unknown'; }
+  if (!COMMIT.test(commit)) return 'unknown';
+  if (env.CI) return commit;
+  try { if (git(['status', '--porcelain']).trim() !== '') commit += '-dirty'; } catch { /* the commit alone */ }
+  return commit;
+}
+export function appVersion(): string {
+  try { return String(JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')).version ?? 'unknown'); } catch { return 'unknown'; }
+}
+
 // Tauri CLI hooks always set TAURI_ENV_PLATFORM, and set TAURI_ENV_DEBUG=true
 // only for a debug build; a release `tauri build` leaves it unset (never
 // "false"). Under Tauri, include the assistant page only when debug, so a
@@ -147,6 +171,8 @@ export default defineConfig({
   define: {
     'import.meta.env.VITE_STARTER_BALANCE': JSON.stringify(starterBalanceFlag(process.env)),
     'import.meta.env.VITE_CALL_MEDIA': JSON.stringify(callMediaFlag(process.env)),
+    __APP_COMMIT__: JSON.stringify(appCommit(process.env)),
+    __APP_VERSION__: JSON.stringify(appVersion()),
   },
   plugins: [solid(), assistantDevCsp(), uiE2eDriver()],
   clearScreen: false,

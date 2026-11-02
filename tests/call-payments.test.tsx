@@ -297,6 +297,72 @@ describe('paying the minutes of one outgoing call', () => {
     expect(s.stops).toEqual([]);
   });
 
+  /** A session whose call can end from inside a published view, as the call engine's own checks do. */
+  function endable(node: ReturnType<typeof fakeNode>, clock: { skew: number }, endOn: (v: MinutesView) => boolean, canPay?: () => boolean) {
+    const deps: MinutesDeps = {
+      status: vi.fn(async () => ok(node.status())),
+      hold: vi.fn(async () => ok(node.status())),
+      pay: vi.fn(async (_peer: string, _call: string, seq: number) => { node.settle(seq); return ok(receipt(seq)); }),
+    };
+    const views: MinutesView[] = [];
+    let ending = false;
+    const minutes = createCallMinutes({
+      peer: A, callId: ID, agreedBlockMsat: BLOCK, reservationMaxMsat: QUOTE.reservation_max_msat!, pays: true, deps,
+      now: () => Date.now() + clock.skew, canPay,
+      onChange: (v) => { views.push(v); if (!ending && endOn(v)) { ending = true; minutes.finish(); } },
+      onStop: () => {},
+    });
+    return { minutes, deps, views, last: () => views[views.length - 1] };
+  }
+
+  it('a status that ends the call when it is shown is followed by no payment, though a minute is due', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const clock = { skew: 0 };
+    let endNow = false;
+    const s = endable(node, clock, () => endNow);
+    await s.minutes.refresh();
+    await s.minutes.confirm();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(s.deps.pay).toHaveBeenCalledTimes(1);
+    // The next poll arrives late, with block 1 overdue; showing it ends the call.
+    clock.skew = 21_000;
+    endNow = true;
+    await vi.advanceTimersByTimeAsync(STATUS_POLL_MS);
+    expect(s.deps.pay).toHaveBeenCalledTimes(1);
+    // Ended: the session reads the node until it releases the reservation, and never pays again.
+    node.close();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(s.deps.pay).toHaveBeenCalledTimes(1);
+    expect(s.last()).toMatchObject({ paying: false, settled: true, final: true });
+  });
+
+  it('a call that ends when the payment is announced is not paid', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const s = endable(node, { skew: 0 }, (v) => v.paying);
+    await s.minutes.refresh();
+    await s.minutes.confirm();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(s.deps.pay).not.toHaveBeenCalled();
+    expect(s.last().paying).toBe(false);
+  });
+
+  it('pays nothing for a call that is no longer going on', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    let going = true;
+    const s = endable(node, { skew: 0 }, () => false, () => going);
+    await s.minutes.refresh();
+    await s.minutes.confirm();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.deps.pay).toHaveBeenCalledTimes(1);
+    going = false;
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(s.deps.pay).toHaveBeenCalledTimes(1);
+    s.minutes.dispose();
+  });
+
   it('a call its node no longer lists retires the last reservation snapshot: never shown as still held', async () => {
     const node = fakeNode({ now: () => Date.now() });
     let listed = true;
