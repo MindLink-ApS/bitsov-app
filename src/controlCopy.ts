@@ -1147,7 +1147,12 @@ export const controlEn = {
   "caUptimeDays": "{0}d {1}h",
   "caUptimeHours": "{0}h {1}m",
   "caUptimeMinutes": "{0}m",
-  "caMessageNoun": "a message"
+  "caMessageNoun": "a message",
+  "caAppBuild": "App build",
+  "caNodeApi": "Node API",
+  "caNodeCapabilities": "Node capabilities",
+  "caNetwork": "Network",
+  "caCopyVersions": "Copy versions"
 };
 
 export const controlDa: Record<keyof typeof controlEn, string> = {
@@ -2298,5 +2303,10 @@ export const controlDa: Record<keyof typeof controlEn, string> = {
   "caUptimeDays": "{0}d {1}t",
   "caUptimeHours": "{0}t {1}m",
   "caUptimeMinutes": "{0}m",
-  "caMessageNoun": "en besked"
+  "caMessageNoun": "en besked",
+  "caAppBuild": "App-build",
+  "caNodeApi": "Node-API",
+  "caNodeCapabilities": "Node-funktioner",
+  "caNetwork": "Netværk",
+  "caCopyVersions": "Kopiér versioner"
 };
