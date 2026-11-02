@@ -208,10 +208,22 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   is unknown (`payment_unknown`: never paid again on top of it); their node
   asking more per minute (`price_changed`); a hold the host refused
   (`hold_refused`: no reservation, or above the consent; the host hung up).
-- **After the call.** Paying stops at once; the card reads the node for up
-  to 20 s until it closes the reservation and then says "Minutes: paid X.
-  Released back to your budget: Y." Until then it says what the node still
-  holds.
+- **Ending a paid call.** After End begins, no new minute is issued: End,
+  local teardown and a hangup (ours or theirs) revoke the call's consent at
+  once, waiting for nothing, and a minute reads that consent under the money
+  lock and again as its last step before the POST. At most one minute already
+  issued may settle; it holds the money lock until its outcome is recorded.
+  Anything later is refused by the node, from the call's own state and clock.
+  Once the money lock is free the hangup still goes through its preparation
+  and any pending-result check first, so it can be delayed or refused there.
+  A hangup that is sent goes under that lock, so the node sees it
+  after that minute. A client cannot unsend what it handed to the network, so
+  the app promises no more than this. A minute whose POST got no answer stays
+  pending with its outcome unknown, and that fence holds the hangup back until
+  the result is checked.
+- **After the call.** The card reads the node for up to 20 s until it closes
+  the reservation and then says "Minutes: paid X. Released back to your
+  budget: Y." Until then it says what the node still holds.
 - **Not covered yet.** An owner session places no paid-minutes call (its
   node keeps no reservation, so the host would pay nothing). The node offers
   no pre-dial read of `max_call_minutes`; the Ring confirm shows the
@@ -236,7 +248,14 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   `a2_a_failed_offer_is_final_and_cannot_be_rebound_wider`,
   `a2_the_node_refuses_an_offer_above_the_consent_and_nothing_is_held_or_paid`,
   `a2_a_refused_call_whose_hold_is_still_open_stays_refused_under_table_pressure`,
-  `a2_consents_are_write_once_and_only_a_call_its_node_closed_is_evicted`;
+  `a2_consents_are_write_once_and_only_a_call_its_node_closed_is_evicted`,
+  `a2_end_revokes_minutes_before_a_failed_hangup_and_a_paused_minute_pays_nothing`,
+  `a2_a_minute_waiting_for_the_money_lock_pays_nothing_once_its_call_ends`,
+  `a2_a_minute_paused_at_each_await_is_never_sent_after_the_call_ends`,
+  `a2_a_hangup_refused_while_prepared_still_revokes_the_minutes`,
+  `a2_a_minute_revoked_first_is_never_sent_and_one_decided_first_goes_before_the_hangup`,
+  `a2_a_minute_racing_end_or_teardown_goes_before_the_hangup_or_not_at_all`,
+  `a2_a_refused_minutes_cleanup_holds_no_consent_lock_against_end`;
   `control::tests::a_consent_holds_only_what_the_quote_showed_and_covers_only_holds_within_it`,
   `control::tests::a_minute_costs_the_callees_advertised_block_price_and_the_reservation_is_bounded`,
   `call_status_reads_the_node_reservation_fields_verbatim`,
