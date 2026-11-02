@@ -9,6 +9,11 @@ independent reviewers before any code lands. Hardened after an independent
 review (round 1). The owner has since accepted the self-approval limits and
 decided that a lost phone can be revoked without a terminal (section 10).
 
+**This cannot work on a box whose seed password comes from a file or a flag.**
+Section 5.1 requires device approvals to be on, and the node turns them off on
+such a box. Reported, node-side, to confirm: both real boxes are such boxes. See
+section 5.1 and the node-repository requirement in section 6.
+
 ## 1. Current flow
 
 1. The app has a paired token with `read + receive`. To pay, it asks for
@@ -42,7 +47,7 @@ The first owner device key itself is enrolled at identity creation
 (`docs/SECOND_DEVICE_JOIN.md`). Later devices need word comparison and
 approval by an existing owner device.
 
-## 2. Why this blocks a 70-year-old
+## 2. Why this blocks a first-time user
 
 - It needs a terminal, a command with a quoted path, and a code read from a
   second screen. Many owners have never opened a terminal.
@@ -162,6 +167,21 @@ All of these, checked by the node, not only the app:
 Eligibility is **re-evaluated by the node at approve time**, never cached
 from request time (section 5.3).
 
+**Boxes that cannot qualify today.** The node turns device approvals off when the seed's password came from a file
+or a flag: `owner_approval_key` returns `seed_password_not_typed`
+(`crates/konsensus-node/src/main.rs:1087-1107`,
+`crates/konsensus-api/src/pairing/device.rs:28-30`, node commit `b3f1ad1`). They
+are on only with a typed password, or a descriptor or remote unlock together
+with `--local-owner-device`, and only with an encrypted seed. Every device route
+then refuses (`device_authority`, `pairing/device.rs:1536-1542`). Reported,
+node-side, to confirm: both real boxes take the password from a file or flag.
+The field test of 1 November approved at the node's console, which fits, but its
+record does not name the password source. On such a box the owner has no
+enrolled device key either: `POST /pair/device-key` is refused
+(`pairing/device.rs:522`). So in-app approval is not offered there, and
+`konsensus grant` at the node's computer stays the only path. The capability alone
+does not change this; see the device approval policy in section 6.
+
 ### 5.2 Message and signature
 
 The node builds a domain-separated message, for example:
@@ -256,7 +276,9 @@ command moves under "Other ways", as `TouchIdFirst` already does for v1.
   key change, so the cooldown (section 5.1) starts. On a single-owner box
   the box's own app is the path, because there is no other owner device.
   The full sketch is in `docs/DEVICES-AND-PEOPLE.md` (section 4.4, D7). The
-  node API it needs is a node-repository requirement (section 6).
+  node API it needs is a node-repository requirement (section 6). On a box
+  whose seed password comes from a file or a flag this does not work: neither
+  path has an owner key to rely on (section 5.1).
 - Adding a second owner device later turns self grants off automatically;
   approvals then go device to device (v1).
 
@@ -272,9 +294,11 @@ command moves under "Other ways", as `TouchIdFirst` already does for v1.
 | Cooldown | the node records the time of the last owner key change and refuses self grants within 3 days of it |
 | Audit | self grants are listed to the requester (time, terms, expiry) so the app can show them |
 | Refusals | `approval_not_single_owner`, `approval_over_ceiling`, `approval_expired`, `approval_changed`, `approval_rate_limited`, `approval_key_cooldown` |
+| Device approval policy (node-repository requirement; does not exist) | a supported way for a box whose seed password comes from a file or a flag to have device approvals: either a start that uses neither, or a policy that turns approvals on for it. The node's reason for the gate is that a same-user program could read that password, so this needs its own security review. Without it, this whole design and the lost-phone revoke stay off on such a box |
 | Revoke a lost device (node-repository requirement) | a revoke route that accepts either a signature by another enrolled, non-revoked owner device key over a domain-separated revoke message (target device, op id, nonce, expiry), or the box's local owner authority from the box's own app; it revokes the target's tokens and device key, ends its grants, records an owner key change, and refuses revoking the requesting device itself through this route |
 
-The app keeps today's flow for any node without the capability.
+The app keeps today's flow for any node without the capability, and for any box
+with device approvals off.
 
 ## 7. UI copy (draft)
 
@@ -342,5 +366,7 @@ Hardening review round 1 left these to the owner. Both are now decided.
    phone can be revoked from another owner device or from the box's own
    app (for example the Mac app on the box's computer), with no terminal
    (section 5.5; sketch in `docs/DEVICES-AND-PEOPLE.md` section 4.4). The
-   node API is a node-repository requirement (section 6). Revocation by a
+   node API and a device approval policy are node-repository requirements
+   (section 6); today neither path works on a box whose seed password comes
+   from a file or a flag. Revocation by a
    second person, such as a box host, is not part of this decision.
