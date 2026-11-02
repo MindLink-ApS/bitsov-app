@@ -407,7 +407,7 @@ above fail: a device signature chains to the owner key that is off
 those boxes.** Decided by the owner (D7): yes, off until the owner chooses it. It
 does not exist, and its design is not part of this document. The node's reason for
 the gate is that a same-user program could read that password. It is node work
-after the Thursday call proof, under the normal review gate. Until it ships, D7 is
+after the 5 Nov call proof, under the normal review gate. Until it ships, D7 is
 a decision about the design, not something that works on such a box.
 
 ## 5. Several people on one box: PARKED
@@ -507,7 +507,7 @@ tests beyond regtest.
 | P3 | Self-builders only: box-direct push sender using the person's own credentials and the wake-push setting (D1, decided), wake-token registration through the box, platform-token re-registration on launch and drop on `Unregistered`, rate limits | Node release |
 | P4 | Self-builders only: iOS PushKit + CallKit; Android FCM + foreground service; privacy text | P3 |
 | P5 | Node-side budget grant as single source; local book becomes a cache | Node release, D4 |
-| P2b | Revoke a lost phone without a terminal, from another owner device or the box's own app (section 4.4, D7) | Node release (revoke route, and the owner-chosen device approval setting for boxes whose seed password comes from a file or a flag, after the Thursday call proof) |
+| P2b | Revoke a lost phone without a terminal, from another owner device or the box's own app (section 4.4, D7) | Node release (revoke route, and the owner-chosen device approval setting for boxes whose seed password comes from a file or a flag, after the 5 Nov call proof) |
 
 Hosting other people on a box is not a phase. It is parked (section 5).
 
@@ -541,7 +541,7 @@ Hosting other people on a box is not a phase. It is parked (section 5).
   sketch in section 4.4; the revoke route is a node-repository requirement. So
   is the device approval setting for boxes whose seed password comes from a file
   or a flag: decided by the owner, an owner-chosen setting, off until the owner
-  chooses it, node work after the Thursday call proof, under the normal review
+  chooses it, node work after the 5 Nov call proof, under the normal review
   gate. Until it ships, neither path works on those boxes, and both real test
   boxes run this way today (section 4.4).
   Revocation by a second person (for example the box host) is not part of
