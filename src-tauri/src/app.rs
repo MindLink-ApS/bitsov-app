@@ -4857,6 +4857,8 @@ struct Charge {
     operation: bool,
     /// Envelope identity support from this send's status; None asks afresh.
     envelope_ids: Option<bool>,
+    /// `final_failure_node` of this send's status; None for a send with no operation.
+    failure_final_on: Option<String>,
 }
 
 fn budget_dir(state: &NodeState) -> Result<(PathBuf, String), ActionError> {
@@ -4934,7 +4936,7 @@ fn plan_manual_charge(state: &NodeState, target: &str, max_msat: u64) -> Result<
     }))?;
     Ok(Charge {
         target: target.into(), room: false, confirm: None,
-        readmission_possible: false, confirmed: false, operation: false, envelope_ids: None,
+        readmission_possible: false, confirmed: false, operation: false, envelope_ids: None, failure_final_on: None,
     })
 }
 
@@ -5198,6 +5200,12 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         Some(p) if p.op.as_deref() == Some(op.as_str()) && p.operation_id.is_some() => p.operation_id.clone(),
         _ => Some(spend_journal::new_operation_id()?),
     };
+    // What this send's status vouches for binds to the node it dispatches to, and
+    // only to a payment this attempt makes: a reused id may name an older row,
+    // unless the node refused that attempt before any dispatch.
+    let failure_final_on = charge.as_ref().and_then(|c| c.failure_final_on.clone()).filter(|on| *on == node_id
+        && operation_id.is_some() && (prior.as_ref().and_then(|p| p.operation_id.as_ref()) != operation_id.as_ref()
+            || prior.as_ref().is_some_and(|p| p.non_dispatch_proven)));
     // Once minted/reused, the id accompanies every failure, including begin,
     // retry snapshot writes, ledger repair and the outcome error handler itself.
     let outcome = async {
@@ -5220,7 +5228,12 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
             journal.save(&next)?;
             next
         }
-        _ => journal.begin_operation(&node_id, path, &body, max_msat, operation_id.clone().map(|id| (id, op.clone())))?,
+        _ => {
+            let mut started = journal.begin_operation(&node_id, path, &body, max_msat, operation_id.clone().map(|id| (id, op.clone())))?;
+            // Saved with the dispatch time below, before the POST.
+            started.failure_final_on = failure_final_on;
+            started
+        }
     };
     use spend_journal::OperationState as OpState;
     journal.record_outcome(&pending, OpState::Dispatching, None)?;
@@ -5735,6 +5748,7 @@ async fn do_spend_reconcile(state: &NodeState) -> Result<String, ActionError> {
 }
 
 const NOTHING_PAID: &str = "Not sent - nothing was paid: your node reports no payment for this message. Nothing was dispatched again.";
+const PAYMENT_FAILED: &str = "Not sent - nothing was paid: your node reports that the payment failed. Nothing was dispatched again. You can send it again.";
 
 /// Ask the node about a direct payment by repeating its request under the
 /// same `request_id`. The node answers a key it has seen from its record and
@@ -5818,6 +5832,56 @@ fn operation_reply_outcome(reply: &act::SendReply) -> spend_journal::Outcome {
     }
 }
 
+/// The node's answer for a payment its wallet tried and that failed for good:
+/// `released`, still naming the payment's hash, with nothing settled or paid
+/// again. The node writes it in one place, its `reconcile`, on a failed or
+/// expired status for exactly this hash, amount and direction, and treats it as
+/// proof: it may pay that operation again (`compose_locked`) and calls it
+/// "definitely not paid" (`payloads::call::settlement`). Its abandon refuses
+/// this row, because the hash shows a dispatch, so no tombstone can ever follow.
+fn reports_failed_payment(reply: &act::SendReply) -> bool {
+    reply.state.as_deref() == Some("released") && reply.payment_hash.is_some()
+        && reply.amount_msat == 0 && reply.readmission_msat.unwrap_or(0) == 0
+        && reply.fee_paid_msat.is_none() && reply.retry_allowed
+        && !reply.accepted && !reply.delivered
+}
+
+/// Nothing this app already holds contradicts that reply. Only a previous
+/// reading of the same failure may be on record: zero paid, the same hash.
+fn no_payment_on_record(journal: &Journal, pending: &spend_journal::Pending, id: &str, reply: &act::SendReply) -> Result<bool, ActionError> {
+    use spend_journal::OperationState as OpState;
+    let clean = pending.undelivered.is_none() && !pending.over_budget
+        && pending.accounting_msat.unwrap_or(0) == 0
+        && pending.paid.as_ref().is_none_or(|p| p.msat == 0 && !p.fee_unknown);
+    Ok(clean && journal.operation_record(id)?.is_some_and(|r| r.paid_msat.unwrap_or(0) == 0
+        && r.payment_hash.as_ref().is_none_or(|hash| Some(hash) == reply.payment_hash.as_ref())
+        && !matches!(r.state, OpState::Paid | OpState::Settled | OpState::Closed | OpState::FailedPaid)))
+}
+
+/// This node's identity, if its status shows that a payment it reports failed is
+/// really over. LDK reports a payment failed once none of its HTLCs is left and
+/// none will be retried (`Event::PaymentFailed`), and it does not retry after a
+/// restart. Node rc14 and older could also mark an outgoing payment failed when an
+/// inbound HTLC used its hash, with the payment still in flight; rc15 stopped that
+/// and was the first to offer abandon, the capability checked here. Any other
+/// wallet's status comes from outside this source, so it does not count.
+fn final_failure_node(status: &serde_json::Value) -> Option<String> {
+    let offers_abandon = status["api_capabilities"].as_array()
+        .is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some("message_operation_abandon_v1")));
+    if status["lightning_backend"].as_str() != Some("ldk") || !offers_abandon { return None; }
+    status["node_id"].as_str().map(str::to_string)
+}
+
+/// Today's status alone cannot vouch for that reply: an upgrade carries a row over
+/// unchanged, and the node never reads the wallet for it again. So it counts only
+/// for a payment dispatched under such a status, recorded then for this identity,
+/// and while the node still shows it.
+async fn wallet_failure_is_final(state: &NodeState, pending: &spend_journal::Pending) -> Result<bool, ActionError> {
+    if pending.failure_final_on.as_deref() != Some(pending.node_id.as_str()) { return Ok(false); }
+    let status: serde_json::Value = get_json(state, "/status").await.map_err(spend_journal::unknown)?;
+    Ok(final_failure_node(&status).as_deref() == Some(pending.node_id.as_str()))
+}
+
 /// Ask the node what became of this send (`GET /messages/operations/{id}`).
 /// Never re-sends and never pays: a retry is a separate owner action that
 /// reuses the same id. Unknown or unrecognised states keep the fence.
@@ -5856,7 +5920,13 @@ async fn reconcile_operation_with_reply(state: &NodeState, journal: &Journal, mu
         Some(decode(&text)?)
     };
     let mut outcome = reply.as_ref().map_or(Outcome::NothingPaid, operation_reply_outcome);
-    if outcome == Outcome::NothingPaid {
+    let payment_failed = match &reply {
+        Some(reply) if reports_failed_payment(reply) && no_payment_on_record(journal, &pending, id, reply)? => wallet_failure_is_final(state, &pending).await?,
+        _ => false,
+    };
+    if payment_failed {
+        outcome = Outcome::NothingPaid;
+    } else if outcome == Outcome::NothingPaid {
         // History can be ahead of the pending slot after a crash between the
         // evidence write and save below. Its amount/hash survive Unknown
         // transitions, so repeated empty lookups cannot erase that evidence.
@@ -5870,7 +5940,7 @@ async fn reconcile_operation_with_reply(state: &NodeState, journal: &Journal, mu
     // A durable tombstone also survives a lost abandon reply or a host crash.
     let mut abandoned = outcome == Outcome::NothingPaid
         && reply.as_ref().is_some_and(|r| r.state.as_deref() == Some("abandoned"));
-    if outcome == Outcome::NothingPaid && retry.is_none() && !abandoned {
+    if outcome == Outcome::NothingPaid && retry.is_none() && !abandoned && !payment_failed {
         let status: serde_json::Value = get_json(state, "/status").await.map_err(spend_journal::unknown)?;
         let offers_abandon = status["api_capabilities"].as_array().is_some_and(|caps|
             caps.iter().any(|cap| cap.as_str() == Some("message_operation_abandon_v1")));
@@ -5901,7 +5971,7 @@ async fn reconcile_operation_with_reply(state: &NodeState, journal: &Journal, mu
     if journal.pending()?.is_none_or(|now| now.id != pending.id || in_flight(&now) != in_flight(&pending)) {
         return Err(spend_journal::unknown("The pending result changed while your node was asked. Nothing was dispatched again; check the pending result again."));
     }
-    if outcome == Outcome::NothingPaid && retry.is_none() && !abandoned {
+    if outcome == Outcome::NothingPaid && retry.is_none() && !abandoned && !payment_failed {
         let now = spend_journal::timestamp_ms();
         // Old journals have no dispatch time: start a durable, conservative
         // window now rather than assuming an old or missing GET is final.
@@ -5929,19 +5999,26 @@ async fn reconcile_operation_with_reply(state: &NodeState, journal: &Journal, mu
             return Err(spend_journal::unknown("Your node holds no payment for a message it reported paid. Inspect the owner node; the app will not retry."));
         }
         (Outcome::NothingPaid, _) => {
-            if pending.budgeted { close_charge(state, pending.charge_id(), None, None)?; }
+            // A crash before the save below repeats this release. An earlier
+            // identical send shares the charge id: its row must not go instead.
+            let own_row = !payment_failed || with_book(state, false, |book| Ok(book.ledger.iter().rev()
+                .find(|e| e.id == pending.charge_id()).is_some_and(|e| !e.settled || e.msat == 0)))?;
+            if pending.budgeted && own_row { close_charge(state, pending.charge_id(), None, None)?; }
             pending.resumable = true;
             pending.budgeted = false;
             pending.accounting_msat = None;
+            pending.evidence_reservation_msat = None;
             pending.paid = None;
             pending.target = None;
             journal.record_outcome(&pending, OpState::Unpaid, None)?;
-            if abandoned {
+            // This id is never posted again. A later attempt is a new operation,
+            // so no old reading of this row can ever stand for it.
+            if abandoned || payment_failed {
                 pending.operation_id = None;
                 pending.operation_record = None;
             }
             journal.save(&pending)?;
-            return Ok(NOTHING_PAID.into());
+            return Ok(if payment_failed { PAYMENT_FAILED } else { NOTHING_PAID }.into());
         }
         (_, Some(reply)) => reply,
         (_, None) => unreachable!("only NothingPaid lacks a reply"),
@@ -6846,7 +6923,7 @@ async fn do_message_send_inner(
             body["max_routing_fee_msat"] = serde_json::json!(ask.max_routing_fee_msat);
         }
     }
-    let charge = Charge { target: target.clone(), room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room, envelope_ids: Some(caps.envelope_ids) };
+    let charge = Charge { target: target.clone(), room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room, envelope_ids: Some(caps.envelope_ids), failure_final_on: final_failure_node(&caps.status) };
     let sent = money_post(state, auth, "/messages/compose", body.clone(), max_msat, Some(charge)).await;
     let sent = match sent {
         // After a reconnect or restart the contact asks for admission again,
@@ -7003,7 +7080,7 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
         confirm_first_contact(state, &target, cap, contact_budget, caps.readmission_possible).await?;
     }
     // Nothing can be paid under a zero cap, re-admission included.
-    let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations, envelope_ids: Some(caps.envelope_ids) };
+    let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations, envelope_ids: Some(caps.envelope_ids), failure_final_on: None };
     let text = match money_post_with(state, auth, "/messages/compose", body, cap, Some(charge), Some(&undelivered)).await {
         // The node pays re-admission under a cap that fits the contact's signed
         // quote: Retry delivery (zero cap) asks the owner for that price.
@@ -7656,6 +7733,7 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
             confirmed: false,
             operation: caps.operations,
             envelope_ids: Some(caps.envelope_ids),
+            failure_final_on: final_failure_node(&caps.status),
         };
         // Refused or ended while this minute was prepared: nothing is sent.
         consent_payable(state, &consent, hold.reserved_msat)?;
@@ -7831,6 +7909,7 @@ async fn do_call_signal_bounded(
         confirmed: false,
         operation: caps.operations,
         envelope_ids: Some(caps.envelope_ids),
+        failure_final_on: final_failure_node(&caps.status),
     };
     let text = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await?;
     let reply: act::SendReply = text.decode("/messages/compose")?;
@@ -8060,6 +8139,7 @@ async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64)
         confirmed: false,
         operation: false,
         envelope_ids: None,
+        failure_final_on: None,
     };
     let (text, accounted) = porch_post(state, auth, body, max_msat, charge).await?;
     porch::project(&text, &target, &path, accounted, now_unix().max(0) as u64).map_err(|e| {
@@ -8240,6 +8320,7 @@ async fn do_file_send(
         confirmed: node_ok.is_some(),
         operation: false,
         envelope_ids: Some(caps.envelope_ids),
+        failure_final_on: None,
     };
     let text = money_post(
         state,
@@ -13012,7 +13093,7 @@ mod control_act_tests {
             // A minute reaches the node only under an admitted, confirmed consent.
             if kind == 404 { admit_minutes(&node.state, A, CALL_ID); }
             let charge = Charge { target: A.into(), room, confirm: None, readmission_possible: false,
-                confirmed: false, operation: true, envelope_ids: Some(true) };
+                confirmed: false, operation: true, envelope_ids: Some(true), failure_final_on: None };
             let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()), path,
                 serde_json::json!({"recipient": A, "is_room": room, "kind": kind, "plaintext": OFFER}),
                 15000, Some(charge), None).await.unwrap_err();
@@ -13064,7 +13145,7 @@ mod control_act_tests {
             journal.save(&prior).unwrap();
             drop(journal);
             let charge = Charge { target: A.into(), room: false, confirm: None, readmission_possible: false,
-                confirmed: false, operation: has_operation_id, envelope_ids: Some(true) };
+                confirmed: false, operation: has_operation_id, envelope_ids: Some(true), failure_final_on: None };
             let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()),
                 "/messages/compose", body, 15000, Some(charge), prior.undelivered.as_ref()).await.unwrap_err();
             if has_operation_id && (kind == 400 || !delivery_retry) {
@@ -13385,7 +13466,7 @@ mod control_act_tests {
         let mut body = act::compose_body(ROOM, true, "hi").unwrap();
         body["max_total_msat"] = serde_json::json!(13000);
         body["max_recipient_msat"] = serde_json::json!({A: 7000, C: 6000});
-        let charge = Charge { target: ROOM.into(), room: true, confirm: plan.confirm, readmission_possible: false, confirmed: false, operation: true, envelope_ids: None };
+        let charge = Charge { target: ROOM.into(), room: true, confirm: plan.confirm, readmission_possible: false, confirmed: false, operation: true, envelope_ids: None, failure_final_on: None };
         money_post(&ops.state, auth, "/messages/compose", body, 13000, Some(charge)).await.unwrap();
         assert_eq!(op_ids(&node), [None]);
         assert_eq!(op_ids(&ops), [None], "genome refuses operation_id for rooms (slice 4)");
@@ -14018,7 +14099,7 @@ mod control_act_tests {
                     else if command == "porch" {
                         porch_post(&node.state, Auth::Window(0), serde_json::json!({}), 6000,
                             Charge { target: A.into(), room: false, confirm: None,
-                                readmission_possible: false, confirmed: false, operation: false, envelope_ids: None }).await.map(|_| ())
+                                readmission_possible: false, confirmed: false, operation: false, envelope_ids: None, failure_final_on: None }).await.map(|_| ())
                     }
                     else { money_post_with(&node.state, Auth::Window(0), "/messages/compose",
                         serde_json::json!({}), 7000, None, None).await.map(|_| ()) }
@@ -16102,6 +16183,616 @@ mod control_act_tests {
         assert!(!pending(&node).unwrap().resumable, "the fence stays");
     }
 
+    // ---- A payment the wallet tried and failed ------------------------------------
+    //
+    // Node rc21's replies, captured from its own handlers with the wallet reporting
+    // the payment failed. The POST gets 502 and `payment_unknown`, and so does a
+    // lookup until the node's sweep, which runs every 15 s and moves the row to
+    // `released` with its hash kept. Abandon refuses that row with the same view.
+
+    const FAILED_HASH: &str = "6a6857524cdc4e20c9c4f8469d7e8ce0cb268ba77e7e58511925c0b9237e87b6";
+
+    /// A minute's routing ceiling reads 0 there, a message's 5000.
+    fn failed_ceiling(kind: u16) -> u64 {
+        if kind == act::KIND_CALL_BLOCK { 0 } else { 5000 }
+    }
+
+    fn failed_post_reply(id: &str, kind: u16) -> String {
+        serde_json::json!({"accepted": false, "code": 502, "error": "invoice payment payment failed", "max_routing_fee_msat": failed_ceiling(kind),
+            "operation_id": id, "payment_hash": FAILED_HASH, "retry_allowed": false, "state": "payment_unknown"}).to_string()
+    }
+
+    fn failed_view(id: &str, kind: u16, swept: bool) -> serde_json::Value {
+        serde_json::json!({"accepted": false, "amount_msat": 0, "delivered": false, "max_routing_fee_msat": failed_ceiling(kind),
+            "message_id": "87837f113ee4b408a1080a73286ca9edfa2bf32fd144c8ff5261fbf6a7cf48c6", "operation_id": id,
+            "payment_hash": FAILED_HASH, "retry_allowed": swept, "state": if swept { "released" } else { "payment_unknown" }})
+    }
+
+    fn ldk_status() -> serde_json::Value {
+        serde_json::json!({"node_id": OWN, "lightning_backend": "ldk", "api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+            "message_operations_v1", "message_operation_abandon_v1"]})
+    }
+
+    /// Node rc14, as far as this rule reads it: LDK, and no abandon yet.
+    fn rc14_status() -> serde_json::Value {
+        serde_json::json!({"node_id": OWN, "lightning_backend": "ldk", "api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1", "message_operations_v1"]})
+    }
+
+    /// One failed payment on the node, and what the test may change about it.
+    #[derive(Clone)]
+    struct FailedPayment {
+        /// The next payment of the node's failing kind fails.
+        armed: Arc<std::sync::atomic::AtomicBool>,
+        /// The node's sweep has run.
+        swept: Arc<std::sync::atomic::AtomicBool>,
+        /// `/status`. `None`: it cannot be read.
+        status: Arc<Mutex<Option<serde_json::Value>>>,
+        /// Fields that differ from rc21's view, for replies that must stay fenced.
+        changes: Arc<Mutex<serde_json::Value>>,
+        ids: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl FailedPayment {
+        fn sweep(&self) { self.swept.store(true, std::sync::atomic::Ordering::SeqCst); }
+        fn arm(&self) { self.armed.store(true, std::sync::atomic::Ordering::SeqCst); }
+        fn change(&self, changes: serde_json::Value) { *self.changes.lock().unwrap() = changes; }
+        fn report(&self, status: Option<serde_json::Value>) { *self.status.lock().unwrap() = status; }
+    }
+
+    /// A node on LDK whose wallet fails the next payment of `kind`, when armed.
+    fn node_failing(kind: u16, inner: Routes) -> (Routes, FailedPayment) {
+        let wallet = FailedPayment {
+            armed: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            swept: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            status: Arc::new(Mutex::new(Some(ldk_status()))),
+            changes: Arc::new(Mutex::new(serde_json::json!({}))),
+            ids: Arc::new(Mutex::new(Vec::new())),
+        };
+        let node = wallet.clone();
+        (Arc::new(move |m, p, b| {
+            use std::sync::atomic::Ordering::SeqCst;
+            if p == "/status" {
+                return match node.status.lock().unwrap().as_ref() {
+                    Some(status) => (200, status.to_string()),
+                    None => (500, "{}".into()),
+                };
+            }
+            if let Some(rest) = p.strip_prefix("/messages/operations/") {
+                let (id, abandon) = rest.strip_suffix("/abandon").map_or((rest, false), |id| (id, true));
+                if node.ids.lock().unwrap().iter().any(|known| known == id) {
+                    let mut view = failed_view(id, kind, node.swept.load(SeqCst));
+                    for (field, value) in node.changes.lock().unwrap().as_object().unwrap() {
+                        view[field] = value.clone();
+                    }
+                    return (if abandon { 409 } else { 200 }, view.to_string());
+                }
+            }
+            if p == "/messages/compose" {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap();
+                if body["kind"] == kind && node.armed.swap(false, SeqCst) {
+                    let id = body["operation_id"].as_str().unwrap().to_string();
+                    node.ids.lock().unwrap().push(id.clone());
+                    return (502, failed_post_reply(&id, kind));
+                }
+            }
+            inner(m, p, b)
+        }), wallet)
+    }
+
+    fn abandons(node: &Fake) -> usize {
+        node.targets().iter().filter(|t| t.ends_with("/abandon")).count()
+    }
+
+    async fn failed_message(routes: Routes) -> (Fake, String) {
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        let error = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        assert_eq!(error.code, "payment_unknown", "{}", error.message);
+        (node, error.operation_id.unwrap())
+    }
+
+    /// A message's payment failed: the fence holds until the sweep, then one check
+    /// proves it unpaid. Nothing is charged, the node is not asked to abandon a row
+    /// it would refuse, and sending again is a new operation.
+    #[tokio::test]
+    async fn a_failed_message_clears_after_the_sweep_and_goes_again_as_a_new_operation() {
+        let (ops, _) = ops_node();
+        let (routes, wallet) = node_failing(control::KIND_CHAT, ops);
+        let (node, id) = failed_message(routes).await;
+        let reserved = budget_now(&node.state).unsettled_msat;
+        assert!(reserved > 0, "the reservation is held");
+        let held = pending(&node).unwrap();
+        assert_eq!(held.failure_final_on.as_deref(), Some(OWN), "this send's status vouched for the node");
+        assert_eq!(do_message_send(&node.state, A, false, "another", 14000, None).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(do_spend_reconcile(&node.state).await.unwrap_err().code, "payment_unknown");
+        assert_eq!(pending(&node).unwrap().id, held.id, "the fence holds before the sweep");
+        assert_eq!(budget_now(&node.state).unsettled_msat, reserved);
+        wallet.sweep();
+        assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap(), PAYMENT_FAILED);
+        let cleared = pending(&node).unwrap();
+        assert!(cleared.resumable && !cleared.budgeted, "the next send replaces it");
+        assert_eq!(cleared.operation_id, None, "this id is never posted again");
+        assert_eq!((cleared.accounting_msat, cleared.evidence_reservation_msat), (None, None));
+        let record = ledger_record(&node, &id);
+        assert_eq!((record["state"].as_str(), record["paid_msat"].as_u64()), (Some("unpaid"), Some(0)));
+        assert!(book(&node).is_empty(), "the reservation is released and nothing is charged");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        assert_eq!(abandons(&node), 0);
+        assert_eq!(compose_bodies(&node).len(), 1, "nothing was sent again");
+        let receipt = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap();
+        let resent = receipt.operation_id.unwrap();
+        assert_ne!(resent, id);
+        assert_eq!(op_ids(&node), [Some(id), Some(resent)]);
+        assert_eq!(settled(&node), [2000], "only the second attempt is paid");
+        assert!(pending(&node).is_none());
+    }
+
+    /// The reply to the POST may be lost as well: the same check of the same row.
+    #[tokio::test]
+    async fn a_failed_payment_whose_reply_was_lost_clears_the_same_way() {
+        let (ops, _) = ops_node();
+        let (routes, wallet) = node_failing(control::KIND_CHAT, ops);
+        let lost: Routes = Arc::new(move |m, p, b| {
+            let (status, text) = routes(m, p, b);
+            if p == "/messages/compose" && status == 502 { (500, "{}".into()) } else { (status, text) }
+        });
+        let node = fake(AuthMode::Local, lost);
+        spend_advance(&node.state, true).await.unwrap();
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
+        wallet.sweep();
+        assert_eq!(do_spend_reconcile(&node.state).await.unwrap(), PAYMENT_FAILED);
+        assert!(book(&node).is_empty());
+        assert_eq!(abandons(&node), 0);
+    }
+
+    /// A minute's payment failed on a call the node keeps: before the sweep End
+    /// stays unknown and sends no hangup; after it, End resolves the minute as
+    /// unpaid and pays the hangup. Only the hangup is charged, and the next send goes.
+    #[tokio::test]
+    async fn a_failed_minute_clears_after_the_sweep_and_end_pays_the_hangup() {
+        let (inner, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let (routes, wallet) = node_failing(act::KIND_CALL_BLOCK, inner);
+        let node = minute_ready(routes).await;
+        let spent = budget_now(&node.state).spent_msat;
+        let minute = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+        assert_eq!(minute.code, "payment_unknown");
+        let id = minute.operation_id.unwrap();
+        assert!(budget_now(&node.state).unsettled_msat > 0, "its reservation is held");
+        let early = do_op_end_call(&node.state, CALL_ID).await.unwrap_err();
+        assert_eq!(early.code, "payment_unknown");
+        assert_eq!(compose_kinds(&node), [400, 404], "no hangup before the sweep");
+        wallet.sweep();
+        let end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_eq!((end.kind.as_str(), &end.state, end.paid_msat),
+            ("call_hangup", &spend_journal::OperationState::Settled, Some(PAID_SIGNAL_MSAT)));
+        assert_eq!(compose_kinds(&node), [400, 404, 403]);
+        assert!(pending(&node).is_none());
+        let record = ledger_record(&node, &id);
+        assert_eq!((record["state"].as_str(), record["paid_msat"].as_u64()), (Some("unpaid"), Some(0)));
+        assert_eq!(budget_now(&node.state).spent_msat, spent + PAID_SIGNAL_MSAT, "the hangup, not the minute");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        assert_eq!(abandons(&node), 0);
+        assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap().op_id, end.op_id, "ended once");
+        let pays = paid.lock().unwrap().pays;
+        spend_advance(&node.state, true).await.unwrap();
+        do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap();
+        assert_eq!(paid.lock().unwrap().pays, pays + 1, "the next send goes");
+    }
+
+    /// rc21 ends a paired caller's call when its minute fails, so it refuses the
+    /// hangup before paying. End closes the admission on that refusal. No fence is
+    /// left, nothing is held or charged, and both the next send and the next call go.
+    #[tokio::test]
+    async fn a_failed_minute_on_a_call_the_node_ended_leaves_no_fence_and_end_closes_it() {
+        let (inner, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let (routes, wallet) = node_failing(act::KIND_CALL_BLOCK, inner);
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            if p == "/messages/compose" && serde_json::from_str::<serde_json::Value>(b).unwrap()["kind"] == 403 {
+                return (400, NODE_ENDED_HANGUP.into());
+            }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let spent = budget_now(&node.state).spent_msat;
+        assert_eq!(do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err().code, "payment_unknown");
+        wallet.sweep();
+        let end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_eq!((end.kind.as_str(), &end.state, end.paid_msat), ("call_hangup", &spend_journal::OperationState::Unpaid, Some(0)));
+        assert_eq!(compose_kinds(&node), [400, 404, 403], "the minute no longer fences the hangup");
+        assert!(!admission_is_open(&node, &offer));
+        assert!(pending(&node).is_none_or(|p| p.resumable && p.operation_id.is_none()));
+        assert_eq!(budget_now(&node.state).spent_msat, spent);
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        let pays = paid.lock().unwrap().pays;
+        spend_advance(&node.state, true).await.unwrap();
+        do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap();
+        do_call_signal(&node.state, A, 400, &OFFER.replace(CALL_ID, REDIAL_ID), 15000).await.expect("the contact can be called again");
+        assert_eq!(paid.lock().unwrap().pays, pays + 2, "the next send and the next call go");
+    }
+
+    /// A failed offer closes its admission with nothing paid, so End sends no
+    /// hangup and the contact can be called again. A failed hangup is unpaid too,
+    /// closes nothing, and End sends another under a new operation.
+    #[tokio::test]
+    async fn a_failed_offer_or_hangup_clears_the_same_way() {
+        let (inner, _) = ledger_call_routes();
+        let (routes, wallet) = node_failing(act::KIND_CALL_OFFER, inner);
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let offer = do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap_err();
+        assert_eq!(offer.code, "payment_unknown");
+        wallet.sweep();
+        let end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_eq!((end.kind.as_str(), &end.state, end.paid_msat), ("call_offer", &spend_journal::OperationState::Unpaid, Some(0)));
+        assert_eq!(compose_kinds(&node), [400], "nothing to hang up");
+        let redial = OFFER.replace(CALL_ID, "1123456789abcdef0123456789abcdef");
+        do_call_signal(&node.state, A, 400, &redial, 15000).await.expect("the contact can be called again");
+
+        let (inner, _) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let (routes, wallet) = node_failing(act::KIND_CALL_HANGUP, inner);
+        let node = minute_ready(routes).await;
+        let first = do_op_end_call(&node.state, CALL_ID).await.unwrap_err();
+        assert_eq!(first.code, "payment_unknown");
+        wallet.sweep();
+        assert_eq!(do_spend_reconcile(&node.state).await.unwrap(), PAYMENT_FAILED);
+        let end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_ne!(Some(end.op_id.clone()), first.operation_id);
+        assert_eq!((end.kind.as_str(), &end.state), ("call_hangup", &spend_journal::OperationState::Settled));
+        assert_eq!(compose_kinds(&node), [400, 403, 403]);
+    }
+
+    /// Only that exact reply. Anything else this node can say keeps the fence and
+    /// its usual accounting: a payment still open, one on record, any money or
+    /// delivery reported with it, or a release with no hash and an abandon refused.
+    #[tokio::test]
+    async fn every_other_reply_stays_fenced() {
+        for (changes, code, accounted) in [
+            (serde_json::json!({"state": "paying", "retry_allowed": false}), "payment_unknown", None),
+            (serde_json::json!({"state": "payment_unknown", "retry_allowed": false}), "payment_unknown", None),
+            // The state alone decides, even with every other field as in that reply.
+            (serde_json::json!({"state": "paying"}), "payment_unknown", None),
+            (serde_json::json!({"state": "payment_unknown"}), "payment_unknown", None),
+            (serde_json::json!({"state": "something_new"}), "payment_unknown", None),
+            (serde_json::json!({"state": "prepared"}), "payment_unknown", Some(0)),
+            (serde_json::json!({"payment_hash": null}), "payment_unknown", None),
+            // Accounted with the node's 5000 msat routing ceiling: the fee is not known.
+            (serde_json::json!({"state": "paid", "amount_msat": 2000}), "undelivered_pending", Some(7000)),
+            (serde_json::json!({"amount_msat": 2000}), "payment_unknown", Some(7000)),
+            (serde_json::json!({"readmission_msat": 1000}), "payment_unknown", Some(6000)),
+            (serde_json::json!({"fee_paid_msat": 0}), "payment_unknown", Some(0)),
+            (serde_json::json!({"delivered": true}), "payment_unknown", Some(0)),
+            (serde_json::json!({"accepted": true}), "payment_unknown", Some(0)),
+            (serde_json::json!({"retry_allowed": false}), "payment_unknown", Some(0)),
+        ] {
+            let (ops, _) = ops_node();
+            let (routes, wallet) = node_failing(control::KIND_CHAT, ops);
+            let (node, id) = failed_message(routes).await;
+            wallet.sweep();
+            wallet.change(changes.clone());
+            let error = do_spend_reconcile(&reopen(&node)).await.unwrap_err();
+            assert_eq!(error.code, code, "{changes}: {}", error.message);
+            let held = pending(&node).unwrap();
+            assert!(!held.resumable, "{changes}");
+            assert_eq!(held.operation_id.as_deref(), Some(id.as_str()), "{changes}");
+            assert_eq!(held.accounting_msat, accounted, "{changes}");
+            assert_eq!(do_message_send(&node.state, A, false, "another", 14000, None).await.unwrap_err().code, "spend_unknown", "{changes}");
+            assert_eq!(compose_bodies(&node).len(), 1, "{changes}: never sent again");
+            // The rc21 reply, read after any of those, does not undo what they showed.
+            wallet.change(serde_json::json!({}));
+            let again = do_spend_reconcile(&reopen(&node)).await;
+            if accounted.is_some_and(|paid| paid > 0) {
+                assert!(again.is_err(), "{changes}: an amount on record is never erased");
+                assert!(!pending(&node).unwrap().resumable, "{changes}");
+            }
+        }
+    }
+
+    /// Dispatched under a status that vouched for it, then read when the node no
+    /// longer shows that status: another wallet, a node older than rc15, or another
+    /// identity. So nothing changes for them; an unreadable status keeps it all.
+    #[tokio::test]
+    async fn the_same_reply_from_another_wallet_or_an_older_node_stays_fenced() {
+        let caps = ldk_status()["api_capabilities"].clone();
+        for status in [
+            serde_json::json!({"node_id": OWN, "lightning_backend": "lnd", "api_capabilities": caps}),
+            serde_json::json!({"node_id": OWN, "lightning_backend": "lnbits", "api_capabilities": caps}),
+            serde_json::json!({"node_id": OWN, "lightning_backend": "cln", "api_capabilities": caps}),
+            serde_json::json!({"node_id": OWN, "lightning_backend": "mock", "api_capabilities": caps}),
+            serde_json::json!({"node_id": OWN, "api_capabilities": caps}),
+            rc14_status(),
+            serde_json::json!({"node_id": OWN, "lightning_backend": "ldk"}),
+            serde_json::json!({"node_id": A, "lightning_backend": "ldk", "api_capabilities": caps}),
+            serde_json::json!({"lightning_backend": "ldk", "api_capabilities": caps}),
+        ] {
+            let (ops, _) = ops_node();
+            let (routes, wallet) = node_failing(control::KIND_CHAT, ops);
+            let (node, id) = failed_message(routes).await;
+            wallet.sweep();
+            wallet.report(Some(status.clone()));
+            let error = do_spend_reconcile(&reopen(&node)).await.unwrap_err();
+            assert_eq!(error.code, "payment_unknown", "{status}: {}", error.message);
+            let held = pending(&node).unwrap();
+            assert!(!held.resumable && held.evidence_reservation_msat.is_some(), "{status}");
+            assert_eq!(held.operation_id.as_deref(), Some(id.as_str()), "{status}");
+            assert_eq!(do_message_send(&node.state, A, false, "another", 14000, None).await.unwrap_err().code, "spend_unknown", "{status}");
+            assert_eq!(abandons(&node), 0, "{status}");
+        }
+        let (ops, _) = ops_node();
+        let (routes, wallet) = node_failing(control::KIND_CHAT, ops);
+        let (node, _) = failed_message(routes).await;
+        wallet.sweep();
+        wallet.report(None);
+        let before = book(&node);
+        assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap_err().code, "spend_unknown");
+        assert!(!pending(&node).unwrap().resumable);
+        assert_eq!(book(&node), before, "nothing was released or accounted");
+    }
+
+    /// The app itself holds evidence of money for this operation, whatever put it
+    /// there: the reply does not outweigh it. The slot and the ledger each count.
+    #[tokio::test]
+    async fn a_failure_read_against_a_payment_on_record_stays_fenced() {
+        for (in_slot, on_record) in [
+            (serde_json::json!({"undelivered": {"peer": A, "paid_msat": 2000, "retry": true, "in_flight": true}}), serde_json::json!({})),
+            (serde_json::json!({"over_budget": true}), serde_json::json!({})),
+            (serde_json::json!({"accounting_msat": 2000, "evidence_reservation_msat": 14000}), serde_json::json!({})),
+            (serde_json::json!({"paid": {"msat": 2000, "fee_unknown": false}}), serde_json::json!({})),
+            (serde_json::json!({"paid": {"msat": 0, "fee_unknown": true}}), serde_json::json!({})),
+            (serde_json::json!({}), serde_json::json!({"paid_msat": 2000})),
+            (serde_json::json!({}), serde_json::json!({"state": "paid"})),
+            (serde_json::json!({}), serde_json::json!({"state": "settled"})),
+            (serde_json::json!({}), serde_json::json!({"state": "closed"})),
+            (serde_json::json!({}), serde_json::json!({"state": "failed_paid"})),
+        ] {
+            let (ops, _) = ops_node();
+            let (routes, wallet) = node_failing(control::KIND_CHAT, ops);
+            let (node, id) = failed_message(routes).await;
+            wallet.sweep();
+            let patch = |path: &std::path::Path, changes: &serde_json::Value| {
+                let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                for (field, changed) in changes.as_object().unwrap() { value[field] = changed.clone(); }
+                std::fs::write(path, value.to_string()).unwrap();
+            };
+            patch(&journal_file(&node), &in_slot);
+            patch(&node._dir.path().join("app-spend").join("ops").join(format!("{id}.json")), &on_record);
+            let result = do_spend_reconcile(&reopen(&node)).await;
+            let case = format!("{in_slot} {on_record}");
+            assert!(result.is_err(), "{case}: {result:?}");
+            let held = pending(&node).unwrap();
+            assert!(!held.resumable, "{case}");
+            assert_eq!(held.operation_id.as_deref(), Some(id.as_str()), "{case}");
+            assert_eq!(compose_bodies(&node).len(), 1, "{case}: never sent again");
+        }
+    }
+
+    /// A hash this app already read for the operation that differs from the
+    /// reply's: not the same failure, so it proves nothing.
+    #[tokio::test]
+    async fn a_failure_of_another_hash_than_the_one_on_record_stays_fenced() {
+        let (ops, _) = ops_node();
+        let (routes, wallet) = node_failing(control::KIND_CHAT, ops);
+        let (node, _) = failed_message(routes).await;
+        wallet.sweep();
+        wallet.change(serde_json::json!({"payment_hash": OP_HASH}));
+        wallet.report(Some(serde_json::json!({"lightning_backend": "lnd"})));
+        assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap_err().code, "payment_unknown");
+        wallet.change(serde_json::json!({}));
+        wallet.report(Some(ldk_status()));
+        assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap_err().code, "payment_unknown");
+        assert!(!pending(&node).unwrap().resumable);
+    }
+
+    /// Checked twice, nothing is released or accounted twice. A crash before the
+    /// slot's save repeats the release, and an earlier identical send, which
+    /// shares the charge id, keeps its paid row.
+    #[tokio::test]
+    async fn checking_a_failed_payment_again_releases_and_accounts_nothing_more() {
+        let (ops, _) = ops_node();
+        let (routes, wallet) = node_failing(control::KIND_CHAT, ops);
+        wallet.armed.store(false, std::sync::atomic::Ordering::SeqCst);
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap();
+        let paid = book(&node);
+        assert_eq!(paid.iter().map(|e| (e.1, e.2)).collect::<Vec<_>>(), [(2000, true)]);
+        wallet.arm();
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "payment_unknown");
+        assert_eq!(book(&node).len(), 2, "same charge id, its own reservation");
+        assert_eq!(book(&node)[1].0, paid[0].0);
+        let before_the_check = std::fs::read(journal_file(&node)).unwrap();
+        wallet.sweep();
+        assert_eq!(do_spend_reconcile(&node.state).await.unwrap(), PAYMENT_FAILED);
+        assert_eq!(book(&node), paid);
+        let spent = budget_now(&node.state).spent_msat;
+        assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap(), NOTHING_PAID, "already resolved");
+        assert_eq!(book(&node), paid);
+        std::fs::write(journal_file(&node), before_the_check).unwrap();
+        assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap(), PAYMENT_FAILED);
+        assert_eq!(book(&node), paid, "the earlier send keeps its row");
+        assert_eq!(budget_now(&node.state).spent_msat, spent);
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        assert_eq!(compose_bodies(&node).len(), 2, "no check sends anything");
+    }
+
+    /// The same for a minute, whose unpaid record a restart would otherwise fence.
+    #[tokio::test]
+    async fn checking_a_failed_minute_again_after_a_crash_changes_nothing() {
+        let (inner, _) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let (routes, wallet) = node_failing(act::KIND_CALL_BLOCK, inner);
+        let node = minute_ready(routes).await;
+        assert_eq!(do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err().code, "payment_unknown");
+        let before_the_check = std::fs::read(journal_file(&node)).unwrap();
+        wallet.sweep();
+        let spent = budget_now(&node.state).spent_msat;
+        let rows = book(&node).len();
+        assert_eq!(do_spend_reconcile(&node.state).await.unwrap(), PAYMENT_FAILED);
+        assert_eq!(book(&node).len(), rows - 1, "its reservation is released once");
+        std::fs::write(journal_file(&node), before_the_check).unwrap();
+        assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap(), PAYMENT_FAILED);
+        assert_eq!(book(&node).len(), rows - 1, "and not a second row");
+        assert_eq!(budget_now(&node.state).spent_msat, spent);
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        assert_eq!(pending(&node).unwrap().operation_id, None);
+        assert_eq!(compose_kinds(&node), [400, 404]);
+    }
+
+    /// The row rc14 writes when an inbound HTLC reuses an outgoing payment's hash:
+    /// `released`, the hash, nothing settled, with the payment still in flight. An
+    /// upgrade carries it over unchanged and the node never reads the wallet for it
+    /// again, so its reply is the same while that payment is pending and after it
+    /// settled. Today's status passes. Only what was recorded at dispatch can tell,
+    /// and it says no: the fence stays, and nothing is paid a second time.
+    #[tokio::test]
+    async fn a_row_carried_across_an_upgrade_stays_fenced_pending_or_settled() {
+        let (ops, _) = ops_node();
+        let (routes, wallet) = node_failing(control::KIND_CHAT, ops);
+        wallet.report(Some(rc14_status()));
+        let (node, id) = failed_message(routes).await;
+        assert_eq!(pending(&node).unwrap().failure_final_on, None);
+        wallet.sweep();
+        wallet.report(Some(ldk_status()));
+        for phase in ["still pending", "settled since"] {
+            let error = do_spend_reconcile(&reopen(&node)).await.unwrap_err();
+            assert_eq!(error.code, "payment_unknown", "{phase}: {}", error.message);
+            let held = pending(&node).unwrap();
+            assert!(!held.resumable && held.evidence_reservation_msat.is_some(), "{phase}");
+            assert_eq!(held.operation_id.as_deref(), Some(id.as_str()), "{phase}");
+            assert_eq!(ledger_record(&node, &id)["state"], "paid_undelivered", "{phase}");
+            assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown", "{phase}");
+            assert_eq!(compose_bodies(&node).len(), 1, "{phase}: no second payment");
+            assert_eq!(abandons(&node), 0, "{phase}");
+        }
+    }
+
+    /// A status that does not show all of it, for this node, when the send is made,
+    /// leaves that send unproven for good, whatever the node shows later. A status
+    /// that cannot be read at all stops the send: nothing goes out to fence.
+    #[tokio::test]
+    async fn a_status_that_cannot_vouch_at_dispatch_leaves_the_send_fenced() {
+        let caps = ldk_status()["api_capabilities"].clone();
+        for at_dispatch in [
+            serde_json::json!({"node_id": OWN, "lightning_backend": "lnd", "api_capabilities": caps}),
+            serde_json::json!({"node_id": OWN, "lightning_backend": "mock", "api_capabilities": caps}),
+            serde_json::json!({"node_id": OWN, "api_capabilities": caps}),
+            serde_json::json!({"lightning_backend": "ldk", "api_capabilities": caps}),
+            serde_json::json!({"node_id": A, "lightning_backend": "ldk", "api_capabilities": caps}),
+            rc14_status(),
+        ] {
+            let (ops, _) = ops_node();
+            let (routes, wallet) = node_failing(control::KIND_CHAT, ops);
+            wallet.report(Some(at_dispatch.clone()));
+            let (node, id) = failed_message(routes).await;
+            assert_eq!(pending(&node).unwrap().failure_final_on, None, "{at_dispatch}");
+            wallet.sweep();
+            wallet.report(Some(ldk_status()));
+            assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap_err().code, "payment_unknown", "{at_dispatch}");
+            let held = pending(&node).unwrap();
+            assert!(!held.resumable, "{at_dispatch}");
+            assert_eq!(held.operation_id.as_deref(), Some(id.as_str()), "{at_dispatch}");
+        }
+        let (ops, _) = ops_node();
+        let (routes, wallet) = node_failing(control::KIND_CHAT, ops);
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        wallet.report(None);
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "price_quote_unavailable");
+        assert!(compose_bodies(&node).is_empty(), "nothing goes out");
+        assert!(pending(&node).is_none());
+    }
+
+    /// What was recorded names one node. A record for any other does not count.
+    #[tokio::test]
+    async fn a_record_for_another_node_identity_does_not_count() {
+        let (ops, _) = ops_node();
+        let (routes, wallet) = node_failing(control::KIND_CHAT, ops);
+        let (node, id) = failed_message(routes).await;
+        wallet.sweep();
+        let mut held: serde_json::Value = serde_json::from_slice(&std::fs::read(journal_file(&node)).unwrap()).unwrap();
+        assert_eq!(held["failure_final_on"], OWN);
+        held["failure_final_on"] = serde_json::json!(A);
+        std::fs::write(journal_file(&node), held.to_string()).unwrap();
+        assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap_err().code, "payment_unknown");
+        let still = pending(&node).unwrap();
+        assert!(!still.resumable);
+        assert_eq!(still.operation_id.as_deref(), Some(id.as_str()));
+    }
+
+    /// A resend reuses its id only after the node refused the first attempt. If
+    /// that refusal is on record, no earlier payment can be on the row, so this
+    /// attempt's failure is what the reply shows. Without it the row may be older.
+    #[tokio::test]
+    async fn a_resend_under_the_same_id_counts_only_over_a_proven_unsent_attempt() {
+        for proven in [true, false] {
+            let (ops, state) = ops_node();
+            state.lock().unwrap().readmission_capped = true;
+            let (routes, wallet) = node_failing(control::KIND_CHAT, ops);
+            wallet.armed.store(false, std::sync::atomic::Ordering::SeqCst);
+            let node = fake(AuthMode::Local, routes);
+            spend_advance(&node.state, true).await.unwrap();
+            assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "readmission_capped");
+            let first = pending(&node).unwrap();
+            assert!(first.resumable && first.non_dispatch_proven, "the node refused it before dispatch");
+            if !proven {
+                let mut held: serde_json::Value = serde_json::from_slice(&std::fs::read(journal_file(&node)).unwrap()).unwrap();
+                held["non_dispatch_proven"] = serde_json::json!(false);
+                std::fs::write(journal_file(&node), held.to_string()).unwrap();
+            }
+            state.lock().unwrap().readmission_capped = false;
+            wallet.arm();
+            let error = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+            assert_eq!(error.code, "payment_unknown", "{proven}: {}", error.message);
+            assert_eq!(error.operation_id, first.operation_id, "the same id");
+            wallet.sweep();
+            if proven {
+                assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap(), PAYMENT_FAILED);
+                assert_eq!(pending(&node).unwrap().operation_id, None);
+            } else {
+                assert_eq!(pending(&node).unwrap().failure_final_on, None);
+                assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap_err().code, "payment_unknown");
+                assert!(!pending(&node).unwrap().resumable);
+            }
+        }
+    }
+
+    /// A slot written by an earlier build has no record of what the node was at
+    /// dispatch. Its next check, End and a restart all keep the fence, as before:
+    /// it cannot be told from a row carried across an upgrade.
+    #[tokio::test]
+    async fn a_failed_payment_stuck_by_an_earlier_build_stays_fenced() {
+        fn as_an_earlier_build_wrote_it(node: &Fake) {
+            let mut held: serde_json::Value = serde_json::from_slice(&std::fs::read(journal_file(node)).unwrap()).unwrap();
+            held.as_object_mut().unwrap().remove("failure_final_on").expect("this build writes it");
+            std::fs::write(journal_file(node), held.to_string()).unwrap();
+        }
+        let (ops, _) = ops_node();
+        let (routes, wallet) = node_failing(control::KIND_CHAT, ops);
+        let (node, id) = failed_message(routes).await;
+        as_an_earlier_build_wrote_it(&node);
+        wallet.sweep();
+        for _ in 0..2 {
+            let stuck = do_spend_reconcile(&reopen(&node)).await.unwrap_err();
+            assert!(stuck.message.starts_with("Accounted: 0 msat of payment evidence"), "{}", stuck.message);
+        }
+        let held = pending(&node).unwrap();
+        assert_eq!((held.accounting_msat, held.evidence_reservation_msat.is_some(), held.budgeted, held.resumable), (Some(0), true, true, false));
+        assert_eq!(settled(&node), [0]);
+        assert_eq!(ledger_record(&node, &id)["state"], "paid_undelivered");
+        assert_eq!(do_spend_dismiss_undelivered(&node.state, &held.id).unwrap_err().code, "spend_unknown");
+        assert_eq!(do_message_send(&node.state, A, false, "another", 14000, None).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(abandons(&node), 0);
+        assert_eq!(compose_bodies(&node).len(), 1);
+
+        let (inner, _) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let (routes, wallet) = node_failing(act::KIND_CALL_BLOCK, inner);
+        let node = minute_ready(routes).await;
+        assert_eq!(do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err().code, "payment_unknown");
+        as_an_earlier_build_wrote_it(&node);
+        wallet.sweep();
+        assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap_err().code, "payment_unknown");
+        assert_eq!(compose_kinds(&node), [400, 404], "no hangup");
+        assert!(!pending(&node).unwrap().resumable);
+    }
+
     /// Only this call's own minute is reconciled: another call's pending minute
     /// keeps its fence, and End of this call never asks about it.
     #[tokio::test]
@@ -18045,7 +18736,7 @@ mod control_act_tests {
             journal.record_outcome(&prior, spend_journal::OperationState::Unpaid, None).unwrap();
         }
         let charge = Charge { target: A.into(), room: false, confirm: None, readmission_possible: false,
-            confirmed: false, operation: true, envelope_ids: Some(true) };
+            confirmed: false, operation: true, envelope_ids: Some(true), failure_final_on: None };
         let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()),
             "/messages/compose", body, 15000, Some(charge), None).await.unwrap_err();
         assert_eq!(err.code, "not_dispatched");
