@@ -16135,6 +16135,198 @@ mod control_act_tests {
         }
     }
 
+    /// One side of the app's remote tunnel, as the box runs it: the pinned
+    /// handshake, an accepted client, then the decrypted stream is relayed to
+    /// the fake node at `node`. Each record holds one ciphertext.
+    async fn box_behind_tunnel(listener: tokio::net::TcpListener, secret: [u8; 32], node: std::net::SocketAddr) {
+        use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+        async fn read_frame(stream: &mut (impl AsyncRead + Unpin)) -> std::io::Result<Vec<u8>> {
+            let length = stream.read_u32().await? as usize;
+            let mut frame = vec![0u8; length];
+            stream.read_exact(&mut frame).await?;
+            Ok(frame)
+        }
+        async fn write_frame(stream: &mut (impl AsyncWrite + Unpin), frame: &[u8]) -> std::io::Result<()> {
+            stream.write_u32(frame.len() as u32).await?;
+            stream.write_all(frame).await
+        }
+        fn seal(noise: &mut snow::TransportState, plain: &[u8]) -> Vec<u8> {
+            let mut sealed = vec![0u8; plain.len() + 18];
+            let length = noise.write_message(plain, &mut sealed[2..]).unwrap();
+            sealed[..2].copy_from_slice(&(length as u16).to_be_bytes());
+            sealed.truncate(length + 2);
+            sealed
+        }
+        fn open(noise: &mut snow::TransportState, record: &[u8]) -> Vec<u8> {
+            let mut plain = vec![0u8; record.len()];
+            let length = noise.read_message(&record[2..], &mut plain).unwrap();
+            plain.truncate(length);
+            plain
+        }
+        async fn serve(stream: tokio::net::TcpStream, secret: [u8; 32], node: std::net::SocketAddr) -> std::io::Result<()> {
+            let (mut from_app, mut to_app) = stream.into_split();
+            let mut noise = snow::Builder::new(remote_access::NOISE_PROTOCOL.parse().unwrap())
+                .local_private_key(&secret).build_responder().unwrap();
+            let mut scratch = vec![0u8; 65_535];
+            let message = read_frame(&mut from_app).await?;
+            noise.read_message(&message, &mut scratch).unwrap();
+            let length = noise.write_message(&[], &mut scratch).unwrap();
+            write_frame(&mut to_app, &scratch[..length]).await?;
+            let message = read_frame(&mut from_app).await?;
+            noise.read_message(&message, &mut scratch).unwrap();
+            let mut noise = noise.into_transport_mode().unwrap();
+            let auth = read_frame(&mut from_app).await?;
+            let _ = open(&mut noise, &auth);
+            let accepted = serde_json::to_vec(&remote_access::RemoteAuthResponse::Ok {
+                v: 1, client_id: "0123456789abcdef0123456789abcdef".into(), scopes: vec!["read".into()],
+                box_transport_pubkey: None, box_transport_signature: None,
+                transport_pubkey: None, transport_signature: None,
+            }).unwrap();
+            write_frame(&mut to_app, &seal(&mut noise, &accepted)).await?;
+            let (mut node_read, mut node_write) = tokio::net::TcpStream::connect(node).await?.into_split();
+            let (frames, mut frames_rx) = tokio::sync::mpsc::unbounded_channel();
+            let reader = tokio::spawn(async move {
+                while let Ok(frame) = read_frame(&mut from_app).await {
+                    if frames.send(frame).is_err() { break; }
+                }
+            });
+            let mut buffer = vec![0u8; 16 * 1024];
+            loop {
+                tokio::select! {
+                    frame = frames_rx.recv() => {
+                        let Some(frame) = frame else { break };
+                        node_write.write_all(&open(&mut noise, &frame)).await?;
+                    }
+                    read = node_read.read(&mut buffer) => {
+                        let read = read?;
+                        if read == 0 { break; }
+                        write_frame(&mut to_app, &seal(&mut noise, &buffer[..read])).await?;
+                    }
+                }
+            }
+            reader.abort();
+            Ok(())
+        }
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(serve(stream, secret, node));
+        }
+    }
+
+    /// The real loopback proxy in front of `node`, reaching it through a real
+    /// tunnel. Requests made after this go proxy, tunnel, box, fake node.
+    async fn proxied(node: &mut Fake) -> (remote_access::RemoteProxy, tempfile::TempDir, tempfile::TempDir, tokio::task::JoinHandle<()>) {
+        use base64::Engine;
+        use ed25519_dalek::Signer;
+        let upstream = remote_access::loopback_addr(&node.state.api_base).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let secret = [91u8; 32];
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[92u8; 32]);
+        let node_id = hex::encode(signing.verifying_key().as_bytes());
+        let transport_pubkey = hex::encode(x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret)).to_bytes());
+        let signature = signing.sign(remote_access::descriptor_signature_message(&node_id, &transport_pubkey).as_bytes());
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let link = serde_json::to_vec(&remote_access::PairingLinkV1 {
+            v: 1, endpoint: listener.local_addr().unwrap().to_string(), node_id, transport_pubkey,
+            transport_signature: b64.encode(signature.to_bytes()), code: b64.encode([93u8; 32]),
+            ..Default::default()
+        }).unwrap();
+        let link = format!("bitsov://pair/{}", b64.encode(link));
+        let descriptor = remote_access::parse_pairing_link(&link).unwrap();
+        let server = tokio::spawn(box_behind_tunnel(listener, secret, upstream));
+        let (app_dir, store) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        remote_access::import_pairing_link(app_dir.path(), &link).unwrap();
+        let key = Arc::new(bitsov_app::pairing::ClientKey::load_or_create(store.path()).unwrap());
+        let free = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        let base = format!("http://127.0.0.1:{port}/api/v1");
+        let proxy = remote_access::start_proxy(&base, app_dir.path(), descriptor, key, "BitSov test",
+            store.path().to_path_buf(), node.state.remote_proxy_auth.clone(), node.state.remote_retry.clone()).await.unwrap();
+        node.state.api_base = base;
+        (proxy, app_dir, store, server)
+    }
+
+    // A minute on a fresh remote tunnel that never connects. The proxy answers
+    // at its deadline, before the app's own payment timeout, so the outcome is
+    // known: nothing went out, nothing stays pending, and End is not fenced.
+    #[tokio::test]
+    async fn a_minute_past_the_tunnel_deadline_is_not_dispatched_and_end_pays_the_hangup() {
+        let (routes, paid) = minutes_routes("live", hold_json(10_000, 5_000, 60));
+        // The tunnel stalls just as the node answers the minute's last read.
+        let stall = Arc::new(Mutex::new(None::<Arc<bitsov_app::connection_retry::RemoteRetry>>));
+        let (entered, stalled_at) = tokio::sync::oneshot::channel::<()>();
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        let (entered, held) = (Mutex::new(Some(entered)), Mutex::new(Some(held)));
+        let runtime = tokio::runtime::Handle::current();
+        let wrapped: Routes = {
+            let stall = stall.clone();
+            Arc::new(move |m, p, b| {
+                if m == "GET" && p == "/status" {
+                    if let Some(retry) = stall.lock().unwrap().take() {
+                        let held = held.lock().unwrap().take().unwrap();
+                        let entered = entered.lock().unwrap().take().unwrap();
+                        runtime.spawn(async move {
+                            retry.run(|| async { let _ = entered.send(()); let _ = held.await; Ok(()) }).await
+                        });
+                        // A dial younger than a second makes the money path
+                        // refuse by itself. This one has been stuck for longer.
+                        std::thread::sleep(Duration::from_millis(1100));
+                    }
+                }
+                routes(m, p, b)
+            })
+        };
+        let mut node = fake(AuthMode::Local, wrapped);
+        approve_calls(&node).await;
+        do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
+        do_call_hold(&node.state, A, CALL_ID, Some(900_000)).await.unwrap();
+        let (proxy, _app, _store, server) = proxied(&mut node).await;
+        *stall.lock().unwrap() = Some(node.state.remote_retry.clone());
+        let minute = do_call_block(&node.state, A, CALL_ID, 0);
+        tokio::pin!(minute);
+        let code = tokio::select! {
+            result = &mut minute => panic!("answered before the deadline: {:?}", result.map(|r| r.kind).map_err(|e| e.code)),
+            _ = async {
+                stalled_at.await.unwrap();
+                // The money lock is taken only for the POST.
+                while node.state.money.try_lock().is_ok() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            } => {
+                // Twice at most: a POST queued only after the first step still
+                // has its whole payment timeout, so this cannot fake an answer.
+                let mut answer = None;
+                for _ in 0..2 {
+                    tokio::time::pause();
+                    tokio::time::advance(Duration::from_secs(61)).await;
+                    tokio::time::resume();
+                    if let Ok(result) = tokio::time::timeout(Duration::from_secs(3), &mut minute).await {
+                        answer = Some(result);
+                        break;
+                    }
+                }
+                answer.expect("the proxy answers at its deadline").unwrap_err().code
+            }
+        };
+        assert_eq!(code, "not_dispatched");
+        assert!(pending(&node).is_none(), "nothing stays pending behind a proven non-dispatch");
+        release.send(()).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(compose_kinds(&node), [400], "the held minute never reached the node");
+        assert_eq!(paid.lock().unwrap().pays, 1);
+
+        let ended = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_eq!(ended.kind, "call_hangup");
+        assert_eq!(compose_kinds(&node), [400, 403], "End paid one hangup through the same proxy, and no minute");
+        assert_eq!(paid.lock().unwrap().pays, 2);
+        assert!(pending(&node).is_none());
+        drop(proxy);
+        server.abort();
+    }
+
     // Node rc21 checks a block again after its reservation, and answers a late
     // one with a plain 400 before anything is paid. That must not fence End.
     #[tokio::test]
