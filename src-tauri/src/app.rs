@@ -1537,6 +1537,14 @@ fn hold_refused(state: &NodeState) -> bool {
     true
 }
 
+/// A status probe met the node's refusal first: show it and retire the session
+/// like every other refused path, so later polls and recovery stay quiet.
+fn refused_by_probe(state: &NodeState, error: &remote_access::RemoteError) {
+    *state.pairing_view.lock().unwrap() =
+        PairingView::from_outcome(&Err(PairError::Local(error.to_string())));
+    hold_refused(state);
+}
+
 /// The client identity for `store`, read from protected storage once per session.
 /// Its Keychain item requires user presence, so every read can show Face ID or
 /// Touch ID; the key itself is already held in memory by the pairing context and

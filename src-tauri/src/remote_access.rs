@@ -2333,18 +2333,14 @@ async fn serve_connection(
         .clone();
     // The node refused this app's pairing: admit no new tunnel (live feed, API
     // polling) until the owner acts, and record a refusal seen here first.
-    if retry.is_refused() {
-        let error = RemoteError::Refused(REFUSED_PAIRING_MESSAGE.into());
-        write_connection_error(&mut local, &error).await;
-        return Err(error);
-    }
+    // Both happen inside the serialized admission, so tunnels queued behind
+    // the refused handshake answer 403 without dialing.
     let (remote, noise, client_id, scopes) = match retry
-        .run(|| connect_authenticated(&snapshot, &key, &client_name))
+        .run_unless_refused(|| connect_authenticated(&snapshot, &key, &client_name))
         .await
     {
         Ok(connection) => connection,
         Err(error) => {
-            if error.is_definitive_refusal() { retry.refuse(); }
             write_connection_error(&mut local, &error).await;
             return Err(error);
         }
