@@ -481,10 +481,6 @@ export type ActionError = {
     | 'call_hold_changed' | 'call_minutes_unpayable'
     // M6 call minutes: the node refused the offer above the agreed per-minute price or hold (genome N3); nothing sent, held or paid.
     | 'call_offer_price_above_consent' | 'call_offer_hold_above_consent'
-    // A hangup above the grant's message cap: the call could not be ended, so it is not placed.
-    // `call_hangup_unpayable`: a lower signed limit the owner could raise;
-    // `call_hangup_above_message_max`: above the most any message payment may carry.
-    | 'call_hangup_unpayable' | 'call_hangup_above_message_max'
     | 'invalid'
     | 'node';
   message: string;

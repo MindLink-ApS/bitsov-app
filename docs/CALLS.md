@@ -212,11 +212,13 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   local teardown and a hangup (ours or theirs) revoke the call's consent at
   once, waiting for nothing, and a minute reads that consent under the money
   lock and again as its last step before the POST. At most one minute already
-  issued may settle; it holds the money lock until it is accounted. Anything
-  later is refused by the node, from the call's own state and clock. The
-  hangup goes out as soon as the money lock is free, so the node sees it after
-  that minute. A client cannot unsend what it handed to the network, so the
-  app promises no more than this.
+  issued may settle; it holds the money lock until its outcome is recorded.
+  Anything later is refused by the node, from the call's own state and clock.
+  The hangup goes out as soon as the money lock is free, so the node sees it
+  after that minute. A client cannot unsend what it handed to the network, so
+  the app promises no more than this. A minute whose POST got no answer stays
+  pending with its outcome unknown, and that fence holds the hangup back until
+  the result is checked.
 - **After the call.** The card reads the node for up to 20 s until it closes
   the reservation and then says "Minutes: paid X. Released back to your
   budget: Y." Until then it says what the node still holds.
@@ -248,6 +250,7 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   `a2_end_revokes_minutes_before_a_failed_hangup_and_a_paused_minute_pays_nothing`,
   `a2_a_minute_waiting_for_the_money_lock_pays_nothing_once_its_call_ends`,
   `a2_a_minute_paused_at_each_await_is_never_sent_after_the_call_ends`,
+  `a2_a_hangup_refused_while_prepared_still_revokes_the_minutes`,
   `a2_a_minute_revoked_first_is_never_sent_and_one_decided_first_goes_before_the_hangup`,
   `a2_a_minute_racing_end_or_teardown_goes_before_the_hangup_or_not_at_all`,
   `a2_a_refused_minutes_cleanup_holds_no_consent_lock_against_end`;
