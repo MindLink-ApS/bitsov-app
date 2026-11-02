@@ -5143,14 +5143,12 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // still refuses a block outside the reservation or the grant.
     let call_kind = if path == "/messages/compose" { body["kind"].as_u64() } else { None };
     let call_block = call_kind == Some(u64::from(act::KIND_CALL_BLOCK));
-    // A call payment (offer, answer, ICE, hangup) is capped by the call's own
-    // consented ceiling on the node and the call per-payment limit, never by
-    // the 6-sat cap that binds every other payment under a grant.
-    let call_signal = call_kind.is_some_and(|k| (u64::from(act::KIND_CALL_OFFER)..=u64::from(act::KIND_CALL_HANGUP)).contains(&k));
-    // An explicit payment (invoice or keysend) is bounded by the signed
-    // per-payment limit, as on the node; messages, files and rooms keep the
-    // 6-sat message cap.
-    let cap = if call_signal { grant::PaymentCap::CallCeiling }
+    // As the node: only an offer (and a block, from its hold) has call
+    // authority, capped by the call per-payment limit. Answer, ICE and hangup
+    // are bounded like messages, by the 6-sat message cap. An explicit
+    // payment (invoice or keysend) is bounded by the signed per-payment
+    // limit; messages, files and rooms keep the message cap.
+    let cap = if call_kind == Some(u64::from(act::KIND_CALL_OFFER)) { grant::PaymentCap::CallCeiling }
         else if is_direct_payment(path) { grant::PaymentCap::Payment }
         else { grant::PaymentCap::Grant };
     let node_grant = if call_block { None } else {
@@ -7509,6 +7507,17 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
         let cap = hold.per_block_msat.checked_add(hold.per_block_fee_msat)
             .ok_or_else(|| ActionError::invalid("the call block amount is out of range"))?;
         let fee = hold.per_block_fee_msat;
+        // As paid, a minute is its price plus the routing fee the node pinned
+        // on the hold (none on a usable direct channel). That whole payment
+        // must fit the grant's call limit, or nothing is sent.
+        let known = state.node_grant.lock().unwrap().clone();
+        if let Some(g) = known {
+            let per_act = if g.recipients_only { g.per_act_max_by_recipient.get(&target).copied().unwrap_or(0) } else { u64::MAX };
+            let limit = g.per_payment_max(grant::PaymentCap::CallCeiling).unwrap_or(u64::MAX).min(per_act);
+            if cap > limit {
+                return Err(grant::per_call(limit));
+            }
+        }
         let mut body = act::call_block_body(&target, call_id, seq)?;
         let needs_contact = || ActionError::new("call_needs_contact", "Calls go to contacts you have already paid. Send them a message first. Nothing was paid.");
         let (auth, plan) = plan_message(state, &target, false, cap, None)
@@ -7632,16 +7641,17 @@ async fn do_call_signal_bounded(
         // Admission plus one hangup: check the ceiling shown for the whole
         // call, not just this offer. money_post still rechecks the paid step.
         let total = quote.call_total_msat.expect("an offer has a call total");
-        // The node caps each call payment by the call's pinned per-block
-        // ceiling and by the call per-payment limit (a relation envelope's
-        // per-act maximum on a relation grant), never by the 6-sat message
-        // cap. The offer, the hangup and one agreed minute are separate
-        // payments, and each must fit it before anything is sent; their sum
-        // is checked against the budgets only.
-        let minute = minutes.map_or(0, |m| m.block_msat.saturating_add(m.block_max_routing_fee_msat));
+        // The node caps the offer and each minute by the call per-payment
+        // limit (a relation envelope's per-act maximum on a relation grant),
+        // never by the 6-sat message cap; their sum is checked against the
+        // budgets only. A minute is compared at its price: the node pins no
+        // routing fee for a usable direct channel and refuses, before any
+        // hold or payment, a minute whose ceiling does not fit. The routing
+        // allowance stays in the hold and the budget checks.
+        let minute = minutes.map_or(0, |m| m.block_msat);
         let hangup = quote.signal_msat.saturating_add(quote.signal_max_routing_fee_msat);
-        let per_payment = principal.saturating_add(fee).max(hangup).max(minute);
-        check_node_grant_with_envelope_ids(state, "/messages/compose", &body, total, Some(caps.envelope_ids), grant::PaymentCap::CallTotal).await
+        let per_payment = principal.saturating_add(fee).max(minute);
+        let checked = check_node_grant_with_envelope_ids(state, "/messages/compose", &body, total, Some(caps.envelope_ids), grant::PaymentCap::CallTotal).await
             .and_then(|g| match g.as_ref().map(|g| g.check_call(per_payment, Some(&target), now_ms())) {
                 Some(Err(error)) => Err(error),
                 _ => Ok(g),
@@ -7660,6 +7670,24 @@ async fn do_call_signal_bounded(
                 }
                 error
             })?;
+        // A hangup is bounded like a message (the 6-sat cap). A call that
+        // could not be ended is never started.
+        if let Some(g) = checked {
+            let per_act = if g.recipients_only { g.per_act_max_by_recipient.get(&target.to_ascii_lowercase()).copied().unwrap_or(0) } else { u64::MAX };
+            let limit = g.per_payment_max(grant::PaymentCap::Grant).unwrap_or(u64::MAX).min(per_act);
+            // Above the most any message payment may carry, no approval helps;
+            // below it, a lower signed limit (or contact amount) could be raised.
+            if hangup > grant::MESSAGING_PER_CALL_MAX_MSAT {
+                return Err(ActionError::new("call_hangup_above_message_max", format!(
+                    "Hanging up this call can cost up to {}, more than the {} any message payment may carry, so it could not be ended. A larger per-payment limit would not change that. Nothing was sent or paid.",
+                    bitsov_app::format::amount(hangup), bitsov_app::format::amount(grant::MESSAGING_PER_CALL_MAX_MSAT))));
+            }
+            if hangup > limit {
+                return Err(ActionError::new("call_hangup_unpayable", format!(
+                    "Hanging up this call can cost up to {}, more than the {} per message payment your node allows, so it could not be ended. The owner would need to approve at least {} per payment. Nothing was sent or paid.",
+                    bitsov_app::format::amount(hangup), bitsov_app::format::amount(limit), bitsov_app::format::amount(hangup))));
+            }
+        }
     }
     if kind == act::KIND_CALL_OFFER {
         body["host_hangup_cap_msat"] = serde_json::json!(quote.signal_msat + quote.signal_max_routing_fee_msat);
@@ -15467,6 +15495,31 @@ mod control_act_tests {
         assert_eq!(block["plaintext"], format!(r#"{{"call_id":"{CALL_ID}","seq":0}}"#));
     }
 
+    /// As paid, a minute is its price plus the routing fee pinned on the hold:
+    /// at the call limit with no fee it is paid; one msat of fee over, it is not.
+    #[tokio::test]
+    async fn a2_a_minute_as_paid_must_fit_the_call_limit_with_its_routing_fee() {
+        for (fee, paid) in [(0, true), (1, false)] {
+            let (routes, _) = minutes_routes("live", hold_json(10_000, fee, 60));
+            let node = fake(AuthMode::Local, routes);
+            approve_calls(&node).await;
+            do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+            remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
+            do_call_hold(&node.state, A, CALL_ID, Some((10_000 + fee) * 60)).await.unwrap();
+            let mut grant = g1_grant(3600, 400_000, 400_000);
+            grant["per_call_max_msat"] = 10_000.into();
+            grant["call_per_payment_max_msat"] = 10_000.into();
+            *node.state.node_grant.lock().unwrap() = grant::parse(&serde_json::json!({"grant": grant}).to_string()).unwrap();
+            let result = do_call_block(&node.state, A, CALL_ID, 0).await;
+            if paid {
+                assert!(compose_kinds(&node).contains(&404), "fee 0: {:?}", result.err());
+            } else {
+                assert_eq!(result.unwrap_err().code, "grant_per_call");
+                assert_eq!(compose_kinds(&node), [400], "fee 1: refused before any payment");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn a2_a_hold_above_the_consent_is_hung_up_before_block_zero() {
         // Agreed: at most 60 minutes' worth. The node reserved 240 minutes at the agreed price.
@@ -16709,10 +16762,10 @@ mod control_act_tests {
         let mut grant = g1_grant(3600, 400_000, 400_000);
         grant["per_call_max_msat"] = 21_000.into();
         *g1.grant.lock().unwrap() = grant;
-        let minute = control::MinutesConsent { block_msat: 20_000, block_max_routing_fee_msat: 5_000, max_hold_msat: 240 * 25_000 };
+        let minute = control::MinutesConsent { block_msat: 22_000, block_max_routing_fee_msat: 5_000, max_hold_msat: 240 * 27_000 };
         let error = do_call_signal_bounded(&node.state, A, 400, OFFER, 15_000, None, Some(&minute)).await.unwrap_err();
         assert_eq!(error.code, "grant_per_call");
-        assert!(error.message.contains("25 sats per payment"), "{}", error.message);
+        assert!(error.message.contains("22 sats per payment"), "{}", error.message);
         assert_eq!(composes(&node), 0);
         assert_eq!(budget_now(&node.state).spent_msat, 0);
         // A signed limit of exactly 6 sats is the owner's value: it binds calls.
@@ -16731,6 +16784,151 @@ mod control_act_tests {
         let receipt = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap();
         assert_eq!(receipt.total_msat, 15_000);
         assert_eq!(composes(&node), 1);
+    }
+
+    fn call_grant_node(offer_msat: u64) -> (Fake, tempfile::TempDir, G1) {
+        let routes = call_routes(Some(offer_msat));
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": [
+                    "paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1",
+                    "message_operations_v1"]}).to_string());
+            }
+            if p.contains("/call") || p == "/payments/price/401" || p == "/messages/compose" {
+                routes(m, p, b)
+            } else { (0, String::new()) }
+        });
+        g1_node_with(&["read", "receive"], Some(first))
+    }
+
+    /// A minute is compared at its price with the signed per-payment limit:
+    /// the node pins no routing fee for a usable direct channel.
+    #[tokio::test]
+    async fn call_grant_compares_a_minute_at_its_price_with_the_signed_limit() {
+        for (block, posts) in [(10_000, true), (10_001, false)] {
+            // A 1-sat offer, all-in within the 10-sat limit.
+            let (node, _dir, g1) = call_grant_node(1_000);
+            g1_approved(&node, 500_000).await;
+            with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+            let quote = read_call_quote(&node.state, A).await.unwrap();
+            let offer = quote.offer_msat.unwrap() + quote.offer_max_routing_fee_msat;
+            assert!(offer <= 10_000);
+            let mut grant = g1_grant(3600, 400_000, 400_000);
+            grant["per_call_max_msat"] = 10_000.into();
+            grant["call_per_payment_max_msat"] = 10_000.into();
+            grant["message_per_payment_max_msat"] = grant::MESSAGING_PER_CALL_MAX_MSAT.into();
+            *g1.grant.lock().unwrap() = grant;
+            // The routing allowance stays in the hold; only the price meets the limit.
+            let minute = control::MinutesConsent { block_msat: block, block_max_routing_fee_msat: 5_000, max_hold_msat: 240 * (block + 5_000) };
+            let result = do_call_signal_bounded(&node.state, A, 400, OFFER, offer, None, Some(&minute)).await;
+            if posts {
+                assert_eq!(composes(&node), 1, "{block}: {:?}", result.err());
+            } else {
+                let err = result.unwrap_err();
+                assert_eq!(err.code, "grant_per_call", "{block}");
+                assert_eq!(composes(&node), 0, "refused before any POST");
+            }
+        }
+    }
+
+    /// Answer, ICE and hangup at exactly the message cap are sent; one msat
+    /// over, nothing is.
+    #[tokio::test]
+    async fn call_signals_are_sent_at_the_message_cap_and_refused_one_msat_over() {
+        let plaintext = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","candidate":"","sdp_mid":"0","sdp":"v=0","reason":"hangup"}"#;
+        for kind in [401u16, 402, 403] {
+            // A fresh node per signal: each one sent holds the single spending slot until checked.
+            let (node, _dir, g1) = call_grant_node(10_000);
+            g1_approved(&node, 500_000).await;
+            with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+            let quote = read_call_quote(&node.state, A).await.unwrap();
+            let signal = quote.signal_msat + quote.signal_max_routing_fee_msat;
+            for (cap, sent) in [(signal - 1, false), (signal, true)] {
+                let before = composes(&node);
+                let mut grant = g1_grant(3600, 400_000, 400_000);
+                grant["per_call_max_msat"] = 50_000.into();
+                grant["call_per_payment_max_msat"] = 50_000.into();
+                grant["message_per_payment_max_msat"] = cap.into();
+                *g1.grant.lock().unwrap() = grant;
+                let result = do_call_signal(&node.state, A, kind, plaintext, signal).await;
+                if sent {
+                    assert_eq!(composes(&node), before + 1, "{kind} at {cap}: {:?}", result.err());
+                } else {
+                    assert_eq!(result.unwrap_err().code, "grant_per_call", "{kind} at {cap}");
+                    assert_eq!(composes(&node), before, "{kind} one msat over: nothing sent");
+                }
+            }
+        }
+    }
+
+    /// A hangup is bounded like a message (the 6-sat cap): an offer whose
+    /// hangup could not be paid is refused. Answer, ICE and hangup are checked
+    /// against the message cap, not the call limit.
+    #[tokio::test]
+    async fn call_grant_bounds_answer_ice_and_hangup_by_the_message_cap() {
+        let (node, _dir, g1) = call_grant_node(10_000);
+        g1_approved(&node, 500_000).await;
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        let quote = read_call_quote(&node.state, A).await.unwrap();
+        let hangup = quote.signal_msat + quote.signal_max_routing_fee_msat;
+        // The message cap one msat below the hangup: no offer, nothing paid.
+        let mut grant = g1_grant(3600, 400_000, 400_000);
+        grant["per_call_max_msat"] = 50_000.into();
+        grant["call_per_payment_max_msat"] = 50_000.into();
+        grant["message_per_payment_max_msat"] = (hangup - 1).into();
+        *g1.grant.lock().unwrap() = grant.clone();
+        let err = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap_err();
+        assert_eq!(err.code, "call_hangup_unpayable");
+        assert!(err.message.contains("could not be ended") && err.message.contains("Nothing was sent or paid"), "{}", err.message);
+        assert!(err.message.contains("would need to approve at least"), "a lower signed limit can be raised: {}", err.message);
+        assert_eq!(composes(&node), 0);
+        // An answer above the message cap is refused though the call limit is wide.
+        let answer = OFFER.replace("\"media\":\"audio\",", "");
+        let err = do_call_signal(&node.state, A, 401, &answer, hangup).await.unwrap_err();
+        assert_eq!(err.code, "grant_per_call");
+        assert_eq!(composes(&node), 0);
+        // With the hangup within the message cap the offer goes out.
+        grant["message_per_payment_max_msat"] = hangup.into();
+        *g1.grant.lock().unwrap() = grant;
+        do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap();
+        assert_eq!(composes(&node), 1);
+    }
+
+    /// A hangup above the most any message payment may carry (6 sats) is
+    /// refused apart from a lower signed limit: no approval could make it
+    /// payable, so the refusal does not ask for one.
+    #[tokio::test]
+    async fn call_hangup_above_the_message_maximum_asks_for_no_larger_limit() {
+        let routes = call_routes(Some(10_000));
+        let dear: Routes = Arc::new(move |m, p, b| {
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": [
+                    "paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1",
+                    "message_operations_v1"]}).to_string());
+            }
+            if p == format!("/pricing/peers/{A}/call") {
+                return (200, serde_json::json!({"peer_id": A, "offer_msat": 10_000, "signal_msat": 2_000}).to_string());
+            }
+            if p.contains("/call") || p == "/payments/price/401" || p == "/messages/compose" {
+                routes(m, p, b)
+            } else { (0, String::new()) }
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(dear));
+        g1_approved(&node, 500_000).await;
+        with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+        let quote = read_call_quote(&node.state, A).await.unwrap();
+        let hangup = quote.signal_msat + quote.signal_max_routing_fee_msat;
+        assert!(hangup > grant::MESSAGING_PER_CALL_MAX_MSAT, "{hangup}");
+        let mut grant = g1_grant(3600, 400_000, 400_000);
+        grant["per_call_max_msat"] = 50_000.into();
+        grant["call_per_payment_max_msat"] = 50_000.into();
+        grant["message_per_payment_max_msat"] = grant::MESSAGING_PER_CALL_MAX_MSAT.into();
+        *g1.grant.lock().unwrap() = grant;
+        let err = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap_err();
+        assert_eq!(err.code, "call_hangup_above_message_max");
+        assert!(err.message.contains("could not be ended") && err.message.contains("Nothing was sent or paid"), "{}", err.message);
+        assert!(err.message.contains("would not change that") && !err.message.contains("approve"), "{}", err.message);
+        assert_eq!(composes(&node), 0);
     }
 
     #[tokio::test]
