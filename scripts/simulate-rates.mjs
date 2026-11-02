@@ -56,16 +56,28 @@ const BREAKERS = { perMinute: 10, perHour: 60, failures: 5, msatPer10Min: 1_000_
 /** The `max_call_minutes` the two test boxes reported. A configured value, not the node default. */
 const TEST_BOX_LIMIT = 10;
 
-const OFFER = 10 * SAT;
 const SIGNAL = 1 * SAT;
 const PAGE = 1 * SAT;
+/** The prices the two test boxes ran in the field test of 1 November. Only the replay in T11 uses them. */
+const FIELD_OFFER = 10 * SAT;
+const FIELD_BLOCK = 10 * SAT;
+
+// ---- the standard card: decided by the owner -----------------------------------
+
+/** Message 1, offer 5, minute 2 sats; call limit 60 minutes (the node default). No sub-sat prices. */
+const CARD = { message: 1 * SAT, offer: 5 * SAT, block: 2 * SAT, limit: NODE_DEFAULT_LIMIT };
+/** Suggested contact and daily defaults; the owner has not set these. Both are changeable. */
+const SUGGESTED_CONTACT = 1000 * SAT;
+const SUGGESTED_DAILY = 2500 * SAT;
+/** Decided by the owner: the AI client budget per 24 h. */
+const AI_BUDGET = 1000 * SAT;
 
 // ---- the model -----------------------------------------------------------------
 
 /** A rate set. Prices in msat; `limit` in minutes. */
 const rates = (o = {}) => ({
-  block: 10 * SAT, message: 1 * SAT, limit: NODE_DEFAULT_LIMIT, contact: 50 * SAT, daily: 500 * SAT,
-  perCall: PER_CALL_CAP_DEFAULT, offer: OFFER, blockFee: null, outbound: OUTBOUND_DEFAULT, ...o,
+  block: CARD.block, message: CARD.message, limit: CARD.limit, contact: SUGGESTED_CONTACT, daily: SUGGESTED_DAILY,
+  perCall: PER_CALL_CAP_DEFAULT, offer: CARD.offer, blockFee: null, outbound: OUTBOUND_DEFAULT, ...o,
 });
 
 const fee = (r) => r.blockFee ?? routingFee(r.offer);
@@ -224,27 +236,23 @@ function table(title, headers, rows) {
 
 const BLOCKS = [1, 2, 5, 10, 20].map((n) => n * SAT);
 const MESSAGES = [1, 2, 5].map((n) => n * SAT);
-const LIMITS = [10, 30, 60];
+const LIMITS = [TEST_BOX_LIMIT, NODE_DEFAULT_LIMIT];
 const CONTACTS = [50, 250, 500, 1000, 2500].map((n) => n * SAT);
 const DAILIES = [200, 1000, 2500, 5000, 10000].map((n) => n * SAT);
 const STANDARD_MINUTES = 10;
 
 const TEST_BOX = TEST_BOX_LIMIT;
+const SUGGESTED = rates();
 const NAMED = [
-  ['Node default limit 60: 50 / 500', rates({ contact: 50 * SAT, daily: 500 * SAT })],
-  ['Node default limit 60: 1 000 / 2 500', rates({ contact: 1000 * SAT, daily: 2500 * SAT })],
-  ['Node default limit 60: 2 500 / 2 500', rates({ contact: 2500 * SAT, daily: 2500 * SAT })],
-  ['Test boxes limit 10: 50 / 500', rates({ limit: TEST_BOX, contact: 50 * SAT, daily: 500 * SAT })],
-  ['Test boxes limit 10: as re-approved, 250 / 500', rates({ limit: TEST_BOX, contact: 250 * SAT, daily: 500 * SAT })],
-  ['Test boxes limit 10: 1 000 / 2 500', rates({ limit: TEST_BOX, contact: 1000 * SAT, daily: 2500 * SAT })],
-  ['#394 ceiling, per-call 6, limit 10', rates({ limit: TEST_BOX, contact: 200 * SAT, daily: 200 * SAT, perCall: MESSAGE_CAP })],
-  ['#394 ceiling, per-call 50, limit 10', rates({ limit: TEST_BOX, contact: 200 * SAT, daily: 200 * SAT })],
-  ['#394 ceiling, per-call 50, limit 60', rates({ contact: 200 * SAT, daily: 200 * SAT })],
-  ['Proposed: limit 30', rates({ limit: 30, contact: 1000 * SAT, daily: 2500 * SAT })],
-  ['Cheap: 2 sats a minute', rates({ block: 2 * SAT, limit: 30, contact: 250 * SAT, daily: 1000 * SAT })],
-  ['Long calls: limit 60', rates({ contact: 2500 * SAT, daily: 10000 * SAT })],
+  ['Card, limit 60: today, 50 / 500', rates({ contact: 50 * SAT, daily: 500 * SAT })],
+  ['Card, limit 60: 500 / 2 500', rates({ contact: 500 * SAT })],
+  ['Card, limit 60: suggested 1 000 / 2 500', SUGGESTED],
+  ['Card, limit 10: today, 50 / 500', rates({ limit: TEST_BOX, contact: 50 * SAT, daily: 500 * SAT })],
+  ['Card, limit 10: suggested 1 000 / 2 500', rates({ limit: TEST_BOX })],
+  ['Card, limit 60: suggested, per-payment 6', rates({ perCall: MESSAGE_CAP })],
+  ['Card, limit 60: suggested, per-payment 10', rates({ perCall: ENVELOPE_PER_ACT_DEFAULT })],
+  ['AI client budget', rates({ contact: AI_BUDGET, daily: AI_BUDGET })],
 ];
-const PROPOSED = NAMED.find(([name]) => name === 'Proposed: limit 30')[1];
 
 function* grid() {
   for (const block of BLOCKS) for (const message of MESSAGES) for (const limit of LIMITS)
@@ -271,7 +279,7 @@ function printTables() {
   say(`1 000 sats = ${fiat(1000 * SAT)} on that assumption. "Actual" assumes ${sats(ACTUAL_ROUTING_MSAT)} sat of routing per payment; "ceiling" counts the full routing allowance.`);
   say();
 
-  table('T1. One call, by block price and box limit (offer 10 sats, routing allowance 5 sats a block)',
+  table(`T1. One call, by block price and box limit (offer ${sats(CARD.offer)} sats, routing allowance ${sats(routingFee(CARD.offer))} sats a block; the card is ${sats(CARD.block)} sats a minute)`,
     ['sats/min', 'box limit', 'each min, all-in', 'hold', 'free at Ring', 'allowance share', 'largest payment', '10-min call, price only', '10-min call, ceiling'],
     BLOCKS.flatMap((block) => LIMITS.map((limit) => {
       const r = rates({ block, limit });
@@ -279,8 +287,8 @@ function printTables() {
       return [sats(block), limit, sats(perMinute(r)), sats(holdOf(r)), sats(ringNeed(r)), percent(fee(r), perMinute(r)), sats(perPaymentNeed(r)), sats(c.principal), sats(c.ceiling)];
     })));
 
-  table('T1b. Hold at 10 sats a minute if the routing allowance per block changed (node and app change)',
-    ['allowance/block', 'box limit 10', 'box limit 30', 'box limit 60'],
+  table(`T1b. Hold at ${sats(CARD.block)} sats a minute if the routing allowance per block changed (node and app change)`,
+    ['allowance/block', ...LIMITS.map((limit) => `box limit ${limit}`)],
     [5, 2, 1, 0].map((f) => [sats(f * SAT), ...LIMITS.map((limit) => sats(holdOf(rates({ limit, blockFee: f * SAT }))))]));
 
   for (const limit of LIMITS) {
@@ -293,7 +301,7 @@ function printTables() {
   }
 
   for (const limit of LIMITS) {
-    table(`T3. What refuses the first call of a fresh day, 10 sats a minute, box limit ${limit}`,
+    table(`T3. What refuses the first call of a fresh day, ${sats(CARD.block)} sats a minute, box limit ${limit}`,
       ['contact \\ daily', ...DAILIES.map((d) => sats(d))],
       CONTACTS.map((contact) => [sats(contact), ...DAILIES.map((daily) =>
         callRefusal(rates({ limit, contact, daily }), Math.min(contact, daily), daily) ?? 'rings')]));
@@ -323,7 +331,7 @@ function printTables() {
     for (const [name, events] of PROFILES) if (simulateDay(r, events, 'ceiling').refused === 0) clean.set(name, clean.get(name) + 1);
     if (simulateDay(r, day({ messages: 1 }), 'ceiling').first === 'message cap') messageRefused.set(r.message, messageRefused.get(r.message) + 1);
   }
-  table(`T5. The whole grid: ${total} rate sets (5 block x 3 message x 3 limit x 5 contact x 5 daily; --csv prints them)`,
+  table(`T5. The whole grid: ${total} rate sets (5 block x 3 message x 2 limit x 5 contact x 5 daily; --csv prints them)`,
     ['profile', 'rate sets with no refusal (ceiling)', 'share'],
     [...clean].map(([name, n]) => [name, n, percent(n, total)]));
   table('T5b. The 6-sat message cap against the message price',
@@ -331,6 +339,19 @@ function printTables() {
     MESSAGES.map((m) => {
       const c = paidAction(m);
       return [sats(m), sats(routingFee(m)), sats(c.ceiling), c.ceiling <= MESSAGE_CAP ? 'yes' : 'NO', messageRefused.get(m), percent(routingFee(m), c.ceiling), Math.floor((200 * SAT) / c.ceiling), Math.floor((200 * SAT) / c.actual)];
+    }));
+  const smallestContact = (limit, events) => {
+    for (let contact = 1; contact <= 2500; contact++) {
+      if (simulateDay(rates({ limit, contact: contact * SAT, daily: APP_MAX_DAILY }), events, 'ceiling').refused === 0) return `${grouped(String(contact))} sats`;
+    }
+    return 'above 2 500';
+  };
+  table('T5d. The card: the exact smallest contact budget for the regular day, and what the suggested defaults leave',
+    ['box limit', 'smallest contact budget', 'regular refused at 1 000 / 2 500', 'heavy refused at 1 000 / 2 500', 'heavy, first refusal'],
+    LIMITS.map((limit) => {
+      const r = rates({ limit });
+      const h = simulateDay(r, HEAVY, 'ceiling');
+      return [limit, smallestContact(limit, REGULAR), `${simulateDay(r, REGULAR, 'ceiling').refused}/${REGULAR.length}`, `${h.refused}/${HEAVY.length}`, h.first ?? 'none'];
     }));
   const smallest = (limit, block, events) => {
     for (const contact of CONTACTS) for (const daily of DAILIES) {
@@ -343,8 +364,8 @@ function printTables() {
     BLOCKS.flatMap((block) => LIMITS.map((limit) => [sats(block), limit, smallest(limit, block, REGULAR), smallest(limit, block, HEAVY)])));
 
   table('T6. Exposure: the worst a compromised or misbehaving app can spend',
-    ['daily budget', 'worst/day', 'fiat', 'worst, 3 self grants in 24 h (#394)', 'fiat', 'worst, 30 days', 'fiat', '10-min calls that ring (proposed rates, ceiling)'],
-    DAILIES.map((d) => [sats(d), sats(d), fiat(d), sats(3 * d), fiat(3 * d), sats(30 * d), fiat(30 * d), fullCalls({ ...PROPOSED, contact: d, daily: d }, STANDARD_MINUTES, 'ceiling')]));
+    ['daily budget', 'worst/day', 'fiat', 'worst, 30 days', 'fiat', '10-min calls that ring (card, ceiling)'],
+    DAILIES.map((d) => [sats(d), sats(d), fiat(d), sats(30 * d), fiat(30 * d), fullCalls({ ...SUGGESTED, contact: d, daily: d }, STANDARD_MINUTES, 'ceiling')]));
 
   table('T6b. Exposure per contact: the most one contact can be paid in 24 h',
     ['contact budget', 'worst/contact/day', 'fiat', 'contacts to reach a 2 500 daily budget', 'messages, ceiling', 'messages, actual'],
@@ -389,42 +410,32 @@ function printTables() {
     ['sats/min', 'callee takes/hour', 'fiat', 'routing/hour', 'routing share', 'allowance share of each block', 'if prepaid 5 min at a time: routing/hour', 'routing share'],
     BLOCKS.map((block) => {
       const routing = 60 * ACTUAL_ROUTING_MSAT;
-      const f = routingFee(OFFER);
+      const f = routingFee(CARD.offer);
       return [sats(block), sats(60 * block), fiat(60 * block), sats(routing), percent(routing, 60 * block + routing), percent(f, block + f), sats(12 * ACTUAL_ROUTING_MSAT), percent(12 * ACTUAL_ROUTING_MSAT, 60 * block + 12 * ACTUAL_ROUTING_MSAT)];
     }));
 
   const channels = [10_000, 50_000, 200_000, 1_000_000];
   table('T9. Liquidity: the hold against the channel, for the length of the call (channel sizes are ASSUMPTIONS)',
     ['sats/min', 'box limit', 'hold', ...channels.flatMap((c) => [`${sats(c * SAT)} outbound`, 'calls at once'])],
-    [[10, 10], [10, 30], [10, 60], [10, 240], [5, 30], [2, 30], [20, 30]].map(([block, limit]) => {
+    [[2, 10], [2, 60], [2, 240], [10, 10], [10, 60]].map(([block, limit]) => {
       const hold = holdOf(rates({ block: block * SAT, limit }));
       return [block, limit, sats(hold), ...channels.flatMap((c) => [percent(hold, c * SAT), Math.floor((c * SAT) / hold)])];
     }));
 
-  table('T10. The in-app self-approval ceiling (#394: 200 sats a day today), used as contact and daily budget, 10 sats a minute',
-    ['ceiling', 'worst/24 h, 3 grants', 'fiat', 'calls ring, limit 10', 'calls ring, limit 30', 'regular refused, limit 10', 'regular refused, limit 30', 'approves a 2 500 daily default in the app?'],
-    [200, 500, 1000, 2500, 5000].map((n) => {
-      const d = n * SAT;
-      const short = rates({ limit: 10, contact: d, daily: d });
-      const long = rates({ limit: 30, contact: d, daily: d });
-      return [sats(d), sats(3 * d), fiat(3 * d), fullCalls(short, STANDARD_MINUTES, 'ceiling'), fullCalls(long, STANDARD_MINUTES, 'ceiling'),
-        `${simulateDay(short, REGULAR, 'ceiling').refused}/${REGULAR.length}`, `${simulateDay(long, REGULAR, 'ceiling').refused}/${REGULAR.length}`, n >= 2500 ? 'yes' : 'no, node computer'];
-    }));
-
-  const today = rates({ limit: TEST_BOX });
+  const today = rates({ limit: TEST_BOX, block: FIELD_BLOCK, offer: FIELD_OFFER });
   table(`T11. Replay of the field test: 10 sats a minute, offer 10, the test boxes' reported limit ${TEST_BOX}, so ${sats(ringNeed(today))} sats free at Ring`,
     ['free in the budget', 'result', 'left beside the hold'],
     [47, 50, 171, 200, 250, 500].map((n) => [`${n} sats`, n * SAT < ringNeed(today) ? 'offer and hangup fit; refused at the hold' : 'rings', sats(n * SAT - Math.min(n * SAT, ringNeed(today)))]));
   const unconfigured = rates();
-  table(`T11c. The same on a box with the node default limit ${NODE_DEFAULT_LIMIT}: ${sats(ringNeed(unconfigured))} sats free at Ring`,
+  table(`T11c. The card on a box with the node default limit ${NODE_DEFAULT_LIMIT}: ${sats(ringNeed(unconfigured))} sats free at Ring`,
     ['free in the budget', 'result', 'left beside the hold', 'full 10-min calls that ring', 'messages left beside the hold, ceiling'],
-    [50, 100, 250, 500, 921, 1000, 2500].map((n) => {
+    [50, 100, 250, 436, 500, 1000, 2500].map((n) => {
       const r = rates({ contact: n * SAT, daily: APP_MAX_DAILY });
       const fits = n * SAT >= ringNeed(unconfigured);
       return [`${n} sats`, fits ? 'rings' : (n * SAT < preflightOf(unconfigured) ? 'refused before the hold' : 'offer and hangup fit; refused at the hold'),
         fits ? sats(n * SAT - ringNeed(unconfigured)) : '-', fullCalls(r, STANDARD_MINUTES, 'ceiling'), fits ? Math.floor((n * SAT - ringNeed(unconfigured)) / paidAction(SAT).ceiling) : '-'];
     }));
-  table('T11b. Blocks paid by call length (block 0 at the answer, the next 20 s before each minute ends)',
+  table('T11b. Blocks paid by call length, at the field test price (block 0 at the answer, the next 20 s before each minute ends)',
     ['call length', 'blocks', 'blocks at 10 sats', 'with the 10-sat offer'],
     [['0:30', 30], ['1:00', 60], ['3:30', 210], ['4:30', 270], ['5:00', 300], ['10:00', 600]].map(([label, seconds]) => {
       const blocks = blocksPaid(seconds, 240);
@@ -434,21 +445,21 @@ function printTables() {
   const ringsIn10 = (limit) => Math.floor(BREAKERS.msatPer10Min / ringNeed(rates({ limit })));
   table(`T12. What counts against the node's default breakers (${BREAKERS.perMinute} a minute, ${BREAKERS.perHour} an hour, ${BREAKERS.failures} failures, ${sats(BREAKERS.msatPer10Min)} sats per 10 minutes). A ring counts the hold and the offer as 2 payments and their whole reserved amount, even when released; blocks draw on the hold and count no further`,
     ['need', 'payments counted', 'sats counted in 10 min (ceiling)', 'fits one time?', 'how many in 10 minutes'],
-    [...[TEST_BOX, 30, NODE_DEFAULT_LIMIT].map((limit) => [`one ring, any length, limit ${limit}`, 2, sats(ringNeed(rates({ limit }))), ringNeed(rates({ limit })) <= BREAKERS.msatPer10Min ? 'fits' : 'REFUSED', ringsIn10(limit)]),
+    [...LIMITS.map((limit) => [`one ring, any length, limit ${limit}`, 2, sats(ringNeed(rates({ limit }))), ringNeed(rates({ limit })) <= BREAKERS.msatPer10Min ? 'fits' : 'REFUSED', ringsIn10(limit)]),
       ['a burst of 10 messages', 10, sats(10 * paidAction(SAT).ceiling), 'fits', `${BREAKERS.perMinute} a minute`],
       ['a burst of 61 messages in an hour', 61, sats(61 * paidAction(SAT).ceiling), 'REFUSED, the 61st', `${BREAKERS.perHour} an hour`],
       ['ai client: 200 actions over 10 hours', 20, sats(Math.round((200 / 60) * 10) * paidAction(SAT).ceiling), 'fits', `${BREAKERS.perHour} an hour`],
       ['porch reader: 30 reads in an hour', 30, sats(5 * paidAction(PAGE).ceiling), 'fits', `${BREAKERS.perHour} an hour`]]);
 
   const AI = PROFILES[3][1];
-  const VELOCITY_10_MIN = 100 * SAT;
-  table(`T13. AI client grant sizes against 200 small actions a day (each recipient may use the whole grant; drain time at ${sats(VELOCITY_10_MIN)} sats per 10 minutes)`,
-    ['grant/day', 'fiat', 'actions, ceiling', 'actions, actual', 'refused, ceiling', 'refused, actual', 'fastest drain at that velocity'],
-    [100, 200, 500, 1000, 1500, 2500].map((n) => {
+  const allIn = paidAction(CARD.message).ceiling;
+  table(`T13. AI client budget (decided: ${sats(AI_BUDGET)} sats per 24 h) against 200 small actions a day. The node's default breaker of ${BREAKERS.perHour} payments an hour is the rate bound; at ${sats(allIn)} sats all-in that is ${sats(BREAKERS.perHour * allIn)} sats an hour`,
+    ['budget/day', 'fiat', 'actions, ceiling', 'actions, actual', 'refused, ceiling', 'refused, actual', 'fastest drain at the breaker'],
+    [AI_BUDGET / SAT].map((n) => {
       const d = n * SAT;
       const r = rates({ contact: d, daily: d });
       return [sats(d), fiat(d), Math.floor(d / paidAction(SAT).ceiling), Math.floor(d / paidAction(SAT).actual),
-        percent(simulateDay(r, AI, 'ceiling').refused, AI.length), percent(simulateDay(r, AI, 'actual').refused, AI.length), `${Math.ceil(d / VELOCITY_10_MIN) * 10} min`];
+        percent(simulateDay(r, AI, 'ceiling').refused, AI.length), percent(simulateDay(r, AI, 'actual').refused, AI.length), `${Math.ceil((60 * Math.ceil(d / allIn)) / BREAKERS.perHour)} min`];
     }));
 
   console.log(out.join('\n').trimEnd());
