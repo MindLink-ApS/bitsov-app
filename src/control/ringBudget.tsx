@@ -6,7 +6,9 @@
  * (`recipient_left_msat_by_recipient`, lower-case keys; a contact without its
  * own budget is absent). The hold is the node's own call limit
  * (`max_call_minutes`) × the shown per-minute price and routing allowance,
- * plus the offer and its routing cap. The host does not report that limit
+ * plus the offer and the closing hangup, each with its routing cap. The node
+ * reserves that closing allowance inside the hold, so it counts here too. The
+ * host does not report that limit
  * before Ring, so the only known value is the one the box pinned on an
  * earlier call's reservation this session (kept in memory, never stored).
  *
@@ -19,6 +21,9 @@ import { t as tr } from '../i18n';
 import { amount as fmtAmount } from './format';
 import type { CallQuote, NodeGrantSummary } from './types';
 
+/** The node's minimum closing reserve: a hold always funds at least this for its hangup. */
+const MIN_CLOSING_MSAT = 1_000;
+
 export type RingBudgetShort = { leftMsat: number; holdMsat: number };
 
 /** A node call limit the node could pin (1-240 whole minutes); anything else is unknown. */
@@ -28,12 +33,14 @@ export const knownCallLimit = (minutes: number | null | undefined): number | nul
 /**
  * What this call would hold with the node's call limit known (display only):
  * minutes × (per-minute price + per-minute routing allowance) + offer + offer
- * routing cap. Null when the limit or the per-minute price is unknown.
+ * routing cap + closing allowance (hangup + its routing cap, at least the
+ * node's minimum). Null when the limit or the per-minute price is unknown.
  */
 export function callHoldMsat(q: CallQuote | null, callLimitMinutes: number | null): number | null {
   const minutes = knownCallLimit(callLimitMinutes);
   if (!q || minutes === null || q.block_msat == null || q.offer_msat == null) return null;
-  return minutes * (q.block_msat + (q.block_max_routing_fee_msat ?? 0)) + q.offer_msat + q.offer_max_routing_fee_msat;
+  const closing = Math.max(q.signal_msat + q.signal_max_routing_fee_msat, MIN_CLOSING_MSAT);
+  return minutes * (q.block_msat + (q.block_max_routing_fee_msat ?? 0)) + q.offer_msat + q.offer_max_routing_fee_msat + closing;
 }
 
 /** The contact's remainder and the call's hold when the hold is higher; otherwise null. */

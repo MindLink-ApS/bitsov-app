@@ -518,8 +518,8 @@ describe('the call engine with paid minutes', () => {
 
   it('the box refusing the call for this contact’s budget (grant_recipient) ends it in plain words (EN/DA), nothing held or paid', async () => {
     const cases = [
-      ['en', 'Your box turned the call down: this contact’s budget on your box can’t hold the call. Nothing was paid. Raise this contact’s budget on your box, then ring again.'],
-      ['da', 'Din boks afviste opkaldet: kontaktens budget på boksen kan ikke rumme opkaldet. Der er ikke betalt noget. Hæv kontaktens budget på boksen, og ring igen.'],
+      ['en', 'Your box turned the call down: this contact’s budget on your box can’t hold the call. Nothing was paid. A bigger budget for this contact usually has to be approved on the box’s own computer.'],
+      ['da', 'Din boks afviste opkaldet: kontaktens budget på boksen kan ikke rumme opkaldet. Der er ikke betalt noget. Et større budget til kontakten skal som regel godkendes på boksens egen computer.'],
     ] as const;
     try {
       for (const [lang, words] of cases) {
@@ -965,9 +965,9 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     $<HTMLButtonElement>('[data-call-dismiss]')!.click();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
-    const hold = 10 * (BLOCK + FEE) + QUOTE.offer_msat! + QUOTE.offer_max_routing_fee_msat;
+    const hold = 10 * (BLOCK + FEE) + QUOTE.offer_msat! + QUOTE.offer_max_routing_fee_msat + QUOTE.signal_msat + QUOTE.signal_max_routing_fee_msat;
     expect($('[data-call-contact-budget-short]')?.textContent).toBe(
-      `Your box has only ${amount(left)} left for Maya right now. A call holds up to ${amount(hold)}, so your box will likely turn it down. Raise this contact’s budget on your box before you ring.`);
+      `Your box has only ${amount(left)} left for Maya right now. A call holds up to ${amount(hold)}, so your box will likely turn it down. A bigger budget for this contact usually has to be approved on the box’s own computer.`);
     // Display only: Ring stays enabled; the box remains the authority.
     expect($<HTMLButtonElement>('[data-call-confirm="audio"]')!.disabled).toBe(false);
     expect(host.used('call_block')).toHaveLength(0);
