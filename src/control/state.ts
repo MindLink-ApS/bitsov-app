@@ -430,6 +430,13 @@ export type Pill = { tone: 'ok' | 'warn' | 'err' | 'idle'; text: string; live: b
 export const NOT_ANSWERING_AFTER_MISSES = 3;
 export const NOT_ANSWERING_AFTER_MS = 5_000;
 
+/**
+ * Safety net while the status poll answers: the 60 s stale-overview rule
+ * flashed "not answering" during a live test while the node answered; 180 s
+ * keeps a hung box (status answers, its overview read never returns) visible.
+ */
+export const STALE_OVERVIEW_NOT_ANSWERING_MS = 180_000;
+
 /** Host errors that mean "could not reach the node right now", not a verdict from it. */
 const TRANSIENT_NODE_ERROR = /connection[ _](refused|lost|closed)|ECONN|network[ _]error|failed to fetch|timed?[ _]out|unreachable|remote unavailable|remote handshake limit or endpoint unavailable|remote_handshake_unavailable/i;
 
@@ -483,8 +490,8 @@ export function nodePill(input: {
   quiet?: boolean;
   /**
    * `ready`/`error` come from the debounced status poll. Its answer then
-   * outranks the overview's age: a late overview read alone never says the
-   * node is not answering while the node does answer.
+   * outranks the overview's age up to STALE_OVERVIEW_NOT_ANSWERING_MS: a late
+   * overview read says the node is not answering only past that safety net.
    */
   statusChecked?: boolean;
 }): Pill {
@@ -496,7 +503,8 @@ export function nodePill(input: {
   if (input.error) return { tone: 'err', text: t('uiNodeStopped'), live: false };
   if (!input.ready) return { tone: 'idle', text: t('uiStartingNode'), live: false };
   if (!input.overview) return { tone: 'ok', text: t('uiNodeRunning'), live: false };
-  if (!input.statusChecked && freshness(input.overview.read_at, input.nowMs).stale) {
+  const overviewAge = input.nowMs - input.overview.read_at;
+  if (input.statusChecked ? overviewAge > STALE_OVERVIEW_NOT_ANSWERING_MS : freshness(input.overview.read_at, input.nowMs).stale) {
     return { tone: 'warn', text: t('uiNodeNotAnswering'), live: false };
   }
   if (input.overview.money_ready === false) return { tone: 'warn', text: readinessLine(input.overview, input.nowMs)!, live: input.link === 'open' };

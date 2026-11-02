@@ -3,6 +3,7 @@ import {
   INITIAL_PILL_STATUS,
   NOT_ANSWERING_AFTER_MISSES,
   NOT_ANSWERING_AFTER_MS,
+  STALE_OVERVIEW_NOT_ANSWERING_MS,
   nodePill,
   pillStatusAfter,
   type PillStatus,
@@ -149,11 +150,27 @@ describe('status pill hysteresis', () => {
     expect(pill.text).toBe('Remote connection · waiting 12 s');
   });
 
-  it('a late overview read alone does not say not answering while the node answers', () => {
+  it('a stale overview: 61 s does not flip the pill, 181 s does, a fresh read clears it', () => {
+    expect(STALE_OVERVIEW_NOT_ANSWERING_MS).toBe(180_000);
+    poll(good);
+    const readAt = Date.now();
+    vi.advanceTimersByTime(61_000 - POLL_MS);
+    poll(good);
+    expect(Date.now() - readAt).toBe(61_000);
+    expect(pillFor(held, { overviewAt: readAt }).tone).toBe('ok');
+    vi.advanceTimersByTime(120_000 - POLL_MS);
+    poll(good);
+    expect(Date.now() - readAt).toBe(181_000);
+    expect(pillFor(held, { overviewAt: readAt })).toEqual({ tone: 'warn', text: 'Node not answering', live: false });
+    // A fresh overview read clears it.
+    expect(pillFor(held, { overviewAt: Date.now() })).toEqual({ tone: 'ok', text: 'Connected to your node', live: true });
+  });
+
+  it('a late overview read under the safety net does not say not answering while the node answers', () => {
     poll(good);
     vi.advanceTimersByTime(5 * 60_000);
     poll(good);
-    expect(pillFor(held, { overviewAt: Date.now() - 5 * 60_000 }).tone).toBe('ok');
+    expect(pillFor(held, { overviewAt: Date.now() - 2 * 60_000 }).tone).toBe('ok');
     // Without the status poll's answer the overview's age still decides.
     expect(nodePill({ ready: true, error: null, overview: overview(Date.now() - 5 * 60_000), link: 'open', nowMs: Date.now() }).text)
       .toBe('Node not answering');
