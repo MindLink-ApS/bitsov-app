@@ -226,6 +226,19 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   known yet, and the node ends the call itself once its paid time runs out.
   When the admission is already closed (a peer hangup), End does not reconcile,
   and a lost minute stays pending until the owner's check.
+- **A call the node already ended.** The minute cap, a minute that failed for
+  good, an unpaid expiry and the ring deadline end the call at the caller's
+  node with no hangup coming back. End still asks. The node refuses that hangup
+  before anything is paid (`not_dispatched`, reason `call_not_live`), and that
+  refusal closes the admission, so the contact can be called again. A contact
+  left stuck by an earlier build recovers on its next End. Any other
+  `not_dispatched` of a hangup leaves the admission open: while the node's own
+  closing notice is being paid it answers `call_signal_in_flight`, and "Try
+  ending it again" then closes it. A minute the wallet tried and failed stays
+  pending first, as above, and no hangup goes out while that result is not
+  known. A minute's refusal stays `not_dispatched` even with this reason,
+  because the node also gives it to a minute that is early or out of order on
+  a live call.
 - **After the call.** The card reads the node for up to 20 s until it closes
   the reservation and then says "Minutes: paid X. Released back to your
   budget: Y." Until then it says what the node still holds.
@@ -285,7 +298,18 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   `a2_end_with_its_minute_still_paying_reports_unknown_and_sends_no_hangup`,
   `a2_end_accounts_a_minute_with_a_known_result_then_pays_the_hangup`,
   `a2_end_needs_the_node_to_confirm_it_abandoned_a_swallowed_minute`,
-  `a2_end_leaves_another_calls_pending_minute_fenced`;
+  `a2_end_leaves_another_calls_pending_minute_fenced`,
+  `end_closes_a_call_the_node_ended_at_its_minute_cap`,
+  `end_closes_a_call_the_node_ended_after_a_failed_minute`,
+  `end_closes_an_offer_nobody_answered`,
+  `end_closes_a_call_the_node_ended_after_resolving_its_lost_minute`,
+  `an_admission_stuck_by_an_older_build_recovers_on_its_next_end`,
+  `end_refused_for_another_reason_stays_refused_until_the_call_is_over`,
+  `end_stays_unknown_while_the_node_reports_a_hangup_payment_unresolved`,
+  `end_sends_no_hangup_while_a_failed_minute_is_unresolved`,
+  `a_minute_refused_not_dispatched_stays_not_dispatched`,
+  `a_fresh_call_signal_refused_not_dispatched_keeps_only_the_closing_reason`,
+  `a_resent_hangup_refused_not_dispatched_closes_nothing`;
   `control::tests::a_consent_holds_only_what_the_quote_showed_and_covers_only_holds_within_it`,
   `control::tests::a_minute_costs_the_callees_advertised_block_price_and_the_reservation_is_bounded`,
   `call_status_reads_the_node_reservation_fields_verbatim`,

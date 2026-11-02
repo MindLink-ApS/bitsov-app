@@ -5320,47 +5320,68 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         release(state)?;
         return Err(ActionError::new("not_ready", act::MONEY_NOT_READY));
     }
+    // A call refusal proves unpaid only for a fresh attempt (new operation id or
+    // none). An existing kind-400 operation can return call_id_used after ring
+    // expiry while its earlier payment is unresolved; delivery retries also stay
+    // held.
+    let fresh_operation = operation_id.is_none()
+        || prior.as_ref().and_then(|p| p.operation_id.as_ref()) != operation_id.as_ref();
+    let fresh_attempt = retry.is_none() && fresh_operation && one_to_one;
+    let call_signal = body["kind"].as_u64().is_some_and(|kind| (400..=403).contains(&kind));
+    let call_signal_refused = |reason: &'static str| -> Result<ActionError, ActionError> {
+        release(state)?;
+        // Persist node closure evidence before restoring/clearing the slot.
+        journal.record_outcome(&begun, OpState::Unpaid, Some(&serde_json::json!({"reason": reason})))?;
+        abandon(&journal)?;
+        Ok(ActionError::new(reason, "The node refused this call signal before payment. Nothing was paid."))
+    };
     // Proven non-dispatch (#115): nothing left the wallet. Clear the journal
     // and release the app reservation; any other error stays spend_unknown.
     if act::not_dispatched_refusal(status.as_u16(), &text) {
-        abandon(&journal)?;
-        release(state)?;
-        return Err(act::call_not_dispatched(&text)
-            .unwrap_or_else(|| ActionError::new("not_dispatched", act::not_dispatched_message(&text))));
+        // Node rc19.2 and later answer a fresh 1:1 call signal this way, with
+        // the rule's reason. "No live call" is how End learns the node has ended
+        // the call by itself (its minute cap, a failed minute, an unpaid expiry,
+        // the ring deadline), and the journal needs that reason to close the
+        // admission. A minute keeps the generic answer: rc21 gives it this reason
+        // too when it is early or out of order on a call that stays live, and the
+        // scheduler retries `not_dispatched` but reads `call_not_live` as over.
+        let call_gone = (fresh_attempt && call_signal)
+            .then(|| serde_json::from_str::<serde_json::Value>(&text).ok()).flatten()
+            .and_then(|v| Some((act::call_gone_reason(&v)?, act::reports_no_payment(&v))));
+        match call_gone {
+            Some((reason, true)) => return Err(call_signal_refused(reason)?),
+            // It also names a state that may hold a payment: this proves nothing.
+            Some((_, false)) => {}
+            None => {
+                abandon(&journal)?;
+                release(state)?;
+                return Err(act::call_not_dispatched(&text)
+                    .unwrap_or_else(|| ActionError::new("not_dispatched", act::not_dispatched_message(&text))));
+            }
+        }
     }
     // Node main b21e9a94 / rc18 20c6449e: calls::refused is used only by
     // reserve_outgoing, before compose_locked creates/executes the operation.
-    // This proves unpaid only for a fresh attempt (new operation id or none).
-    // An existing kind-400 operation can return call_id_used after ring expiry
-    // while its earlier payment is unresolved; delivery retries also stay held.
+    // Nodes since rc19.2 send a fresh call signal the reply above instead, and
+    // keep this bare reason for an operation they already know.
     //
     // Node rc21 also checks a block (kind 404) again after its reservation, in
     // block_dispatch_guard, and refuses a late one with this same 400 before
     // the operation pays. Only that refusal proves a block unpaid, and not if
     // the node reports the operation in any state but unpaid.
-    let fresh_operation = operation_id.is_none()
-        || prior.as_ref().and_then(|p| p.operation_id.as_ref()) != operation_id.as_ref();
     let block = body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK));
-    if retry.is_none() && fresh_operation && one_to_one
-        && (block || body["kind"].as_u64().is_some_and(|kind| (400..=403).contains(&kind)))
-        && status == reqwest::StatusCode::BAD_REQUEST {
+    if fresh_attempt && (block || call_signal) && status == reqwest::StatusCode::BAD_REQUEST {
         if let Some(reason) = serde_json::from_str::<serde_json::Value>(&text).ok()
             .and_then(|v| match v["reason"].as_str()? {
-                "call_not_live" if block => matches!(v.get("state").map(serde_json::Value::as_str),
-                    None | Some(Some("prepared" | "released"))).then_some("call_not_live"),
+                "call_not_live" => act::reports_no_payment(&v).then_some("call_not_live"),
                 _ if block => None,
                 "call_id_used" => Some("call_id_used"),
                 "call_busy" => Some("call_busy"),
                 "call_signal_in_flight" => Some("call_signal_in_flight"),
                 "call_signal_invalid" => Some("call_signal_invalid"),
-                "call_not_live" => Some("call_not_live"),
                 _ => None,
             }) {
-            release(state)?;
-            // Persist node closure evidence before restoring/clearing the slot.
-            journal.record_outcome(&begun, OpState::Unpaid, Some(&serde_json::json!({"reason": reason})))?;
-            abandon(&journal)?;
-            return Err(ActionError::new(reason, "The node refused this call signal before payment. Nothing was paid."));
+            return Err(call_signal_refused(reason)?);
         }
     }
     // G1: the node refused under its grant before reserving or paying anything.
@@ -13134,7 +13155,7 @@ mod control_act_tests {
         let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
             if p == "/messages/compose" && serde_json::from_str::<serde_json::Value>(b).unwrap()["kind"] == 403 {
                 // The node has expired the call: hangup is refused before payment.
-                (400, r#"{"reason":"call_not_live"}"#.into())
+                (400, NODE_ENDED_HANGUP.into())
             } else if p == "/status" || p == "/messages/compose" { ops(m, p, b) }
             else { calls(m, p, b) }
         }));
@@ -17991,9 +18012,8 @@ mod control_act_tests {
             paid.lock().unwrap().script = vec![("failed_paid", true)];
             let mut node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
                 let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
-                if p == "/messages/compose" && body["kind"] == 403
-                    && matches!(closure, "call_not_live" | "call_not_found") {
-                    (400, serde_json::json!({"reason": closure, "error": "call expired"}).to_string())
+                if p == "/messages/compose" && body["kind"] == 403 && closure == "call_not_live" {
+                    (400, NODE_ENDED_HANGUP.into())
                 } else { routes(m, p, b) }
             }));
             node.state.spend_timeout = Duration::from_millis(60);
@@ -18047,7 +18067,7 @@ mod control_act_tests {
             let mut node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
                 let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
                 if p == "/messages/compose" && body["kind"] == 403 {
-                    (400, serde_json::json!({"reason": reason, "error":"call expired"}).to_string())
+                    (400, NODE_ENDED_HANGUP.into())
                 } else { routes(m, p, b) }
             }));
             node.state.spend_timeout = Duration::from_millis(60);
@@ -18096,6 +18116,480 @@ mod control_act_tests {
                 }
             }
         }
+    }
+
+    // ---- End of a call the node already ended --------------------------------
+    //
+    // The replies below are what node rc21 sends, where a test does not say
+    // otherwise. A signal under a new operation id is refused by `refused` in the
+    // node's calls.rs before the operation exists: HTTP 400, `code:
+    // "not_dispatched"`, the rule's `reason`, no state. The node's own
+    // `call_not_live_is_not_dispatched`
+    // (crates/konsensus-api/tests/outbox_operations/call_refusals.rs) pins the
+    // status, code, reason and a non-empty error. Only a retry of an operation it
+    // already knows gets a bare `{"code":400,...}`.
+
+    /// A hangup of a call the node no longer runs: its minute cap or a failed
+    /// minute ended it, it lapsed unpaid, it rang out, or its row is gone.
+    const NODE_ENDED_HANGUP: &str = r#"{"code":"not_dispatched","error":"no live call with that id","reason":"call_not_live"}"#;
+    /// The node's own closing notice, or a minute, still holds the reservation.
+    const NODE_SIGNAL_IN_FLIGHT: &str = r#"{"code":"not_dispatched","error":"another signal for this call is still being paid","reason":"call_signal_in_flight"}"#;
+
+    /// The caller's node for one answered call. Once `ended` is set it has ended
+    /// the call by itself: its status says so, its hold is closed, and a hangup
+    /// gets the refusal above. Everything else still works as on a live node.
+    fn node_ending_the_call(ended: Arc<AtomicBool>) -> (Routes, Arc<Mutex<OpsNode>>) {
+        let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        (Arc::new(move |m, p, b| {
+            if ended.load(Ordering::SeqCst) {
+                if p.starts_with("/calls?") {
+                    let mut hold = hold_json(8_000, 2_000, 60);
+                    hold["closed"] = true.into();
+                    return (200, serde_json::json!([{"id": CALL_ID, "state": "ended", "direction": "outgoing", "unresolved_paid_admission": false,
+                        "created": null, "op_id": null, "paid_until_ms": null, "next_block_seq": 1, "next_block_due_ms": null, "reservation": hold}]).to_string());
+                }
+                if p == "/messages/compose" && serde_json::from_str::<serde_json::Value>(b).unwrap()["kind"] == 403 {
+                    return (400, NODE_ENDED_HANGUP.into());
+                }
+            }
+            routes(m, p, b)
+        }), paid)
+    }
+
+    const REDIAL_ID: &str = "1123456789abcdef0123456789abcdef";
+
+    fn hangups(node: &Fake) -> usize {
+        node.posts().iter().filter(|(p, b)| p == "/messages/compose" && b["kind"] == 403).count()
+    }
+
+    fn admission_is_open(node: &Fake, offer: &str) -> bool {
+        let records = spend_journal(&node.state).unwrap().call_operations(OWN, Some(A)).unwrap();
+        spend_journal::admission_open(records.iter().find(|r| r.op_id == offer).unwrap(), &records)
+    }
+
+    /// What End owes a call the node already ended: a closed answer, nothing
+    /// paid, the admission shut for good, and the contact can be called again.
+    async fn end_closes_and_the_contact_can_be_called(node: &Fake, paid: &Arc<Mutex<OpsNode>>) {
+        let offer = offer_op(node);
+        let (spent, pays) = (budget_now(&node.state).spent_msat, paid.lock().unwrap().pays);
+        let sent = hangups(node);
+        let end = do_op_end_call(&node.state, CALL_ID).await.expect("End closes a call the node already ended");
+        assert_eq!(hangups(node), sent + 1, "one hangup was asked for");
+        assert_eq!((end.kind.as_str(), end.state), ("call_hangup", spend_journal::OperationState::Unpaid));
+        assert_eq!(end.paid_msat, Some(0));
+        let record = ledger_record(node, &end.op_id);
+        assert_eq!(record["reason"], "call_not_live");
+        assert_eq!(record["parent_op"], offer.as_str());
+        // No fence: at most a minute End resolved as abandoned, which holds no
+        // payment and which the next action replaces.
+        assert!(pending(node).is_none_or(|p| p.resumable && p.operation_id.is_none()));
+        assert_eq!(budget_now(&node.state).spent_msat, spent, "nothing was paid");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        assert_eq!(paid.lock().unwrap().pays, pays, "nothing was paid");
+        assert!(!admission_is_open(node, &offer));
+        // Closed for good: End again, even after a restart, is the same answer and no POST.
+        assert_eq!(do_op_end_call(&reopen(node), CALL_ID).await.unwrap().op_id, end.op_id);
+        assert_eq!(hangups(node), sent + 1);
+        // The next offer to this contact is admitted, and it is the only thing paid.
+        let redial = OFFER.replace(CALL_ID, REDIAL_ID);
+        do_call_signal(&node.state, A, 400, &redial, 15000).await.expect("the next offer is admitted");
+        assert_eq!(paid.lock().unwrap().pays, pays + 1);
+        assert!(pending(node).is_none());
+    }
+
+    #[tokio::test]
+    async fn end_closes_a_call_the_node_ended_at_its_minute_cap() {
+        let ended = Arc::new(AtomicBool::new(false));
+        let (routes, paid) = node_ending_the_call(ended.clone());
+        let node = minute_ready(routes).await;
+        do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+        // The owner's paid minutes are used up. The node ends the call and
+        // notifies only the callee: no hangup ever reaches this side.
+        ended.store(true, Ordering::SeqCst);
+        assert_eq!(do_call_block(&node.state, A, CALL_ID, 1).await.unwrap_err().code, "call_not_live");
+        assert_eq!(compose_kinds(&node), [400, 404], "the status read stops the next minute");
+        end_closes_and_the_contact_can_be_called(&node, &paid).await;
+        assert_eq!(compose_kinds(&node), [400, 404, 403, 400]);
+    }
+
+    /// The definite failures of a minute that leave End free to ask: the direct
+    /// channel no longer carries it, or the price is above the hold. The node
+    /// ends the call (`fail_outgoing` in its calls.rs) and refuses the minute
+    /// before paying. A minute the wallet tried and failed holds the pending
+    /// fence instead; see `end_sends_no_hangup_while_a_failed_minute_is_unresolved`.
+    #[tokio::test]
+    async fn end_closes_a_call_the_node_ended_after_a_failed_minute() {
+        for (status, code) in [(400, "not_dispatched"), (409, "call_price_changed")] {
+            let ended = Arc::new(AtomicBool::new(false));
+            let (routes, paid) = node_ending_the_call(ended.clone());
+            let failing = ended.clone();
+            let node = minute_ready(Arc::new(move |m, p, b| {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+                if p == "/messages/compose" && body["kind"] == 404 {
+                    failing.store(true, Ordering::SeqCst);
+                    let mut reply = if status == 400 {
+                        serde_json::json!({"code": "not_dispatched", "reason": "call_direct_channel_lost",
+                            "error": "the direct channel to this contact no longer carries the next call block; the call ends and nothing more is paid"})
+                    } else {
+                        serde_json::json!({"code": "budget_exceeded", "reason": "call_price_changed", "remaining_msat": null,
+                            "error": "call block price or routing fee exceeds the reserved ceiling; nothing was dispatched"})
+                    };
+                    for (key, value) in [("accepted", serde_json::json!(false)), ("operation_id", body["operation_id"].clone()),
+                        ("payment_hash", serde_json::Value::Null), ("retry_allowed", serde_json::json!(true)), ("state", serde_json::json!("released"))] {
+                        reply[key] = value;
+                    }
+                    return (status, reply.to_string());
+                }
+                routes(m, p, b)
+            })).await;
+            assert_eq!(do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err().code, code);
+            assert!(pending(&node).is_none());
+            end_closes_and_the_contact_can_be_called(&node, &paid).await;
+            assert_eq!(compose_kinds(&node), [400, 404, 403, 400]);
+        }
+    }
+
+    /// The node sets the ring deadline when the offer settles. The app's ring
+    /// timer starts at the receipt, later, so End of a call nobody answered
+    /// always reaches the node after that deadline.
+    #[tokio::test]
+    async fn end_closes_an_offer_nobody_answered() {
+        let (routes, paid) = node_ending_the_call(Arc::new(AtomicBool::new(true)));
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        end_closes_and_the_contact_can_be_called(&node, &paid).await;
+        assert_eq!(compose_kinds(&node), [400, 403, 400]);
+    }
+
+    /// A minute whose reply was lost, on a call the node then ended: End asks about
+    /// the minute by id, the node confirms it abandoned it, and the hangup's
+    /// refusal closes the admission.
+    #[tokio::test]
+    async fn end_closes_a_call_the_node_ended_after_resolving_its_lost_minute() {
+        let ended = Arc::new(AtomicBool::new(false));
+        let over = ended.clone();
+        let (routes, paid) = minutes_routes_with_abandon();
+        let mut node = minute_ready(Arc::new(move |m, p, b| {
+            if over.load(Ordering::SeqCst) && p == "/messages/compose"
+                && serde_json::from_str::<serde_json::Value>(b).unwrap()["kind"] == 403 {
+                return (400, NODE_ENDED_HANGUP.into());
+            }
+            routes(m, p, b)
+        })).await;
+        lose_minute_reply(&mut node, &paid, None).await;
+        let minute = pending(&node).unwrap().operation_id.unwrap();
+        ended.store(true, Ordering::SeqCst);
+        end_closes_and_the_contact_can_be_called(&node, &paid).await;
+        assert_eq!(ledger_record(&node, &minute)["state"], "unpaid");
+        assert_eq!(compose_kinds(&node), [400, 404, 403, 400]);
+    }
+
+    /// A contact stuck by a build without this fix: each End left an unpaid
+    /// hangup with no reason, which closes nothing and does not block another.
+    /// The next End from the repair card, after an update, closes it.
+    #[tokio::test]
+    async fn an_admission_stuck_by_an_older_build_recovers_on_its_next_end() {
+        let (routes, paid) = node_ending_the_call(Arc::new(AtomicBool::new(true)));
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        let offer = offer_op(&node);
+        {
+            use spend_journal::OperationState::{Dispatching, Unpaid};
+            let journal = spend_journal(&node.state).unwrap();
+            let payload = serde_json::json!({"v": 1, "call_id": CALL_ID, "reason": "hangup"}).to_string();
+            let body = serde_json::json!({"recipient": A, "kind": 403, "plaintext": payload, "host_admission_op": offer});
+            for _ in 0..2 {
+                let id = spend_journal::new_operation_id().unwrap();
+                let old = journal.begin_operation(OWN, "/messages/compose", &body, 6000, Some((id.clone(), spend_journal::operation(&body)))).unwrap();
+                journal.record_outcome(&old, Dispatching, None).unwrap();
+                journal.record_outcome(&old, Unpaid, None).unwrap();
+                journal.clear().unwrap();
+                let record = ledger_record(&node, &id);
+                assert_eq!((record["state"].as_str(), record["parent_op"].as_str()), (Some("unpaid"), Some(offer.as_str())));
+                assert!(record["reason"].is_null());
+            }
+        }
+        assert!(admission_is_open(&node, &offer));
+        let redial = OFFER.replace(CALL_ID, REDIAL_ID);
+        let stuck = do_call_signal(&node.state, A, 400, &redial, 15000).await.unwrap_err();
+        assert_eq!(stuck.code, "call_admission_open");
+        assert_eq!(stuck.operation_id.as_deref(), Some(offer.as_str()));
+        // The updated app starts: the card finds the call by the operation the refusal names.
+        let updated = reopen(&node);
+        do_budget_approve(&updated, 500000, budget::PresetId::Careful).await.unwrap();
+        let listed = do_op_list(&updated, Some(A)).await.unwrap();
+        let call_id = listed.operations.iter().find(|o| o.op_id == offer).unwrap().call_id.clone().unwrap();
+        let end = do_op_end_call(&updated, &call_id).await.expect("End closes the stuck admission");
+        assert_eq!((end.kind.as_str(), end.state, end.paid_msat), ("call_hangup", spend_journal::OperationState::Unpaid, Some(0)));
+        assert_eq!(ledger_record(&node, &end.op_id)["reason"], "call_not_live");
+        assert!(!admission_is_open(&node, &offer));
+        assert_eq!(paid.lock().unwrap().pays, 1, "the repair paid nothing");
+        do_call_signal(&updated, A, 400, &redial, 15000).await.expect("the contact can be called again");
+        assert_eq!(paid.lock().unwrap().pays, 2);
+    }
+
+    /// Any other `not_dispatched` of a hangup says nothing about the call. It
+    /// keeps today's answer and leaves the admission open; End closes it only
+    /// once the node says the call is over.
+    #[tokio::test]
+    async fn end_refused_for_another_reason_stays_refused_until_the_call_is_over() {
+        for closing_notice in [true, false] {
+            let ended = Arc::new(AtomicBool::new(false));
+            let (routes, paid) = node_ending_the_call(ended.clone());
+            let refused = Arc::new(Mutex::new(String::new()));
+            let seen = refused.clone();
+            let check = ended.clone();
+            let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+                if p == "/messages/compose" && body["kind"] == 403 && !check.load(Ordering::SeqCst) {
+                    let reply = if closing_notice { NODE_SIGNAL_IN_FLIGHT.to_string() } else {
+                        // The wallet refused before dispatch: no call reason at all.
+                        serde_json::json!({"accepted": false, "code": "not_dispatched", "error": "local validation", "max_routing_fee_msat": 0,
+                            "operation_id": body["operation_id"], "payment_hash": null, "retry_allowed": true, "state": "released"}).to_string()
+                    };
+                    *seen.lock().unwrap() = reply.clone();
+                    return (400, reply);
+                }
+                routes(m, p, b)
+            }));
+            approve_calls(&node).await;
+            do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+            let offer = offer_op(&node);
+            let (spent, pays) = (budget_now(&node.state).spent_msat, paid.lock().unwrap().pays);
+
+            let error = do_op_end_call(&node.state, CALL_ID).await.unwrap_err();
+            assert_eq!(error.code, "not_dispatched", "{closing_notice}");
+            assert_eq!(error.message, act::not_dispatched_message(&refused.lock().unwrap()));
+            let record = ledger_record(&node, error.operation_id.as_deref().unwrap());
+            assert_eq!((record["kind"].as_str(), record["state"].as_str()), (Some("call_hangup"), Some("unpaid")));
+            assert!(record["reason"].is_null(), "{record}");
+            assert!(pending(&node).is_none());
+            assert_eq!((budget_now(&node.state).spent_msat, paid.lock().unwrap().pays), (spent, pays));
+            assert!(admission_is_open(&node, &offer));
+            let redial = OFFER.replace(CALL_ID, REDIAL_ID);
+            assert_eq!(do_call_signal(&node.state, A, 400, &redial, 15000).await.unwrap_err().code, "call_admission_open");
+
+            // Nothing about that refusal stands in the way once the call is over.
+            ended.store(true, Ordering::SeqCst);
+            end_closes_and_the_contact_can_be_called(&node, &paid).await;
+            assert_eq!(hangups(&node), 2);
+        }
+    }
+
+    /// A hangup whose payment the node reports unresolved stays unknown, whatever
+    /// reason comes with it: nothing closes, the fence holds, no second hangup.
+    /// The first two replies are rc21's for an unresolved hangup. rc21 attaches a
+    /// state only to operations it knows, so it never sends the others, where a
+    /// call reason comes with such a state; they must not read as closure anyway.
+    #[tokio::test]
+    async fn end_stays_unknown_while_the_node_reports_a_hangup_payment_unresolved() {
+        let refused = |state: &str| serde_json::json!({"accepted": false, "code": "not_dispatched", "error": "no live call with that id",
+            "payment_hash": OP_HASH, "reason": "call_not_live", "retry_allowed": false, "state": state});
+        let bare = |state: &str| serde_json::json!({"accepted": false, "code": 400, "error": "no live call with that id",
+            "payment_hash": OP_HASH, "reason": "call_not_live", "retry_allowed": false, "state": state});
+        for (status, reply, code) in [
+            (502, serde_json::json!({"accepted": false, "code": 502, "error": "keysend outcome unknown; not retrying via invoice: connection error: response lost after dispatch",
+                "max_routing_fee_msat": 0, "payment_hash": null, "retry_allowed": false, "state": "payment_unknown"}), "payment_unknown"),
+            (409, serde_json::json!({"accepted": false, "code": "payment_unresolved", "error": "payment_unresolved",
+                "payment_hash": null, "retry_allowed": false, "state": "payment_unknown"}), "payment_unknown"),
+            (400, refused("paying"), "payment_unknown"),
+            (400, refused("payment_unknown"), "payment_unknown"),
+            (400, refused("paid"), "spend_unknown"),
+            (400, bare("paying"), "payment_unknown"),
+            (400, bare("payment_unknown"), "payment_unknown"),
+            (400, bare("paid"), "spend_unknown"),
+        ] {
+            let case = reply.to_string();
+            let answer = reply.clone();
+            let (routes, paid) = ledger_call_routes();
+            let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+                if p == "/messages/compose" && body["kind"] == 403 {
+                    let mut reply = answer.clone();
+                    reply["operation_id"] = body["operation_id"].clone();
+                    return (status, reply.to_string());
+                }
+                routes(m, p, b)
+            }));
+            approve_calls(&node).await;
+            do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+            let offer = offer_op(&node);
+
+            let error = do_op_end_call(&node.state, CALL_ID).await.unwrap_err();
+            assert_eq!(error.code, code, "{case}");
+            let id = error.operation_id.clone().unwrap();
+            let record = ledger_record(&node, &id);
+            assert_eq!(record["state"], "unknown", "{case}");
+            assert!(record["reason"].is_null(), "{case}");
+            assert_eq!(pending(&node).unwrap().operation_id.as_deref(), Some(id.as_str()), "{case}");
+            assert!(budget_now(&node.state).unsettled_msat > 0, "{case}");
+            assert!(admission_is_open(&node, &offer), "{case}");
+            let redial = OFFER.replace(CALL_ID, REDIAL_ID);
+            assert_eq!(do_call_signal(&node.state, A, 400, &redial, 15000).await.unwrap_err().code, "call_admission_open", "{case}");
+            // End joins that unresolved hangup; the card reads it as unknown.
+            let joined = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+            assert_eq!((joined.op_id.as_str(), joined.state), (id.as_str(), spend_journal::OperationState::Unknown), "{case}");
+            assert_eq!(hangups(&node), 1, "{case}");
+            assert_eq!(paid.lock().unwrap().pays, 1, "{case}");
+        }
+    }
+
+    /// rc21 answers a minute the wallet tried and failed with 502 and
+    /// `payment_unknown` (its state until the node's next sweep), and ends the
+    /// call. That minute's slot holds: End sends no hangup and claims no closure.
+    #[tokio::test]
+    async fn end_sends_no_hangup_while_a_failed_minute_is_unresolved() {
+        let ended = Arc::new(AtomicBool::new(false));
+        let (routes, _) = node_ending_the_call(ended.clone());
+        let failing = ended.clone();
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p == "/messages/compose" && body["kind"] == 404 {
+                failing.store(true, Ordering::SeqCst);
+                return (502, serde_json::json!({"accepted": false, "code": 502, "error": "invoice payment payment failed", "max_routing_fee_msat": 0,
+                    "operation_id": body["operation_id"], "payment_hash": OP_HASH, "retry_allowed": false, "state": "payment_unknown"}).to_string());
+            }
+            if m == "GET" {
+                if let Some(id) = p.strip_prefix("/messages/operations/") {
+                    return (200, serde_json::json!({"accepted": false, "amount_msat": 0, "delivered": false, "max_routing_fee_msat": 0, "message_id": "m1",
+                        "operation_id": id, "payment_hash": OP_HASH, "retry_allowed": false, "state": "payment_unknown"}).to_string());
+                }
+            }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let minute = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+        assert_eq!(minute.code, "payment_unknown");
+        let id = minute.operation_id.unwrap();
+        let held = pending(&node).unwrap();
+        for _ in 0..2 {
+            let end = do_op_end_call(&node.state, CALL_ID).await.unwrap_err();
+            assert_eq!(end.code, "payment_unknown");
+            assert_eq!(end.pending_id.as_deref(), Some(held.id.as_str()), "names the pending result");
+        }
+        assert_eq!(compose_kinds(&node), [400, 404], "no hangup goes out");
+        assert_eq!(pending(&node).unwrap().operation_id.as_deref(), Some(id.as_str()));
+        assert_eq!(ledger_record(&node, &id)["state"], "unknown");
+        assert!(admission_is_open(&node, &offer));
+    }
+
+    /// rc21 gives a minute this reason also when it is early or out of order, on
+    /// a call that stays live. `not_dispatched` is what lets the scheduler try
+    /// again shortly (`callMinutes.ts`); `call_not_live` would make it stop a
+    /// healthy call. It reads the call's own status before each attempt, so an
+    /// ended call still stops as ended, and nothing reads a minute's reason.
+    #[tokio::test]
+    async fn a_minute_refused_not_dispatched_stays_not_dispatched() {
+        for error in ["call block is not due yet", "call block sequence is duplicated or out of order", "no live call with that id"] {
+            let reply = serde_json::json!({"code": "not_dispatched", "error": error, "reason": "call_not_live"}).to_string();
+            let sent = reply.clone();
+            let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+            let node = minute_ready(Arc::new(move |m, p, b| {
+                if p == "/messages/compose" && serde_json::from_str::<serde_json::Value>(b).unwrap()["kind"] == 404 {
+                    return (400, sent.clone());
+                }
+                routes(m, p, b)
+            })).await;
+            let spent = budget_now(&node.state).spent_msat;
+            let refused = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+            assert_eq!(refused.code, "not_dispatched", "{error}");
+            assert_eq!(refused.message, act::not_dispatched_message(&reply));
+            let record = ledger_record(&node, refused.operation_id.as_deref().unwrap());
+            assert_eq!((record["kind"].as_str(), record["state"].as_str()), (Some("call_block"), Some("unpaid")), "{error}");
+            assert!(record["reason"].is_null(), "{error}");
+            assert!(pending(&node).is_none());
+            assert_eq!(budget_now(&node.state).spent_msat, spent);
+            assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+            assert_eq!(paid.lock().unwrap().pays, 1, "only the offer");
+            assert_eq!(consent_phase(&node), ConsentPhase::Admitted, "the call goes on");
+        }
+    }
+
+    /// The `not_dispatched` reasons of a fresh 1:1 call signal, as rc21 words them
+    /// for each kind. Only "no live call" reaches the journal and the caller; the
+    /// rest keep today's generic refusal. rc21 has no such refusal of an offer,
+    /// whose id is either unused or burned; the rule is the same for all four.
+    #[tokio::test]
+    async fn a_fresh_call_signal_refused_not_dispatched_keeps_only_the_closing_reason() {
+        for (kind, reason, error, code) in [
+            (400, "call_not_live", "no live call with that id", "call_not_live"),
+            (400, "call_id_used", "call offer replayed: this call id was already used", "not_dispatched"),
+            (400, "call_busy", "too many calls tracked; try again later", "not_dispatched"),
+            (400, "call_signal_invalid", "invalid call signal: call_id must be 32 lowercase hex", "not_dispatched"),
+            (401, "call_not_live", "no live call with that id", "call_not_live"),
+            (401, "call_not_live", "the call is not ringing", "call_not_live"),
+            (401, "call_not_live", "only the callee answers a call", "call_not_live"),
+            (401, "call_signal_in_flight", "another signal for this call is still being paid", "not_dispatched"),
+            (402, "call_not_live", "no live call with that id", "call_not_live"),
+            (402, "call_signal_invalid", "invalid call signal: fields do not match the kind", "not_dispatched"),
+            (403, "call_not_live", "no live call with that id", "call_not_live"),
+            (403, "call_signal_in_flight", "another signal for this call is still being paid", "not_dispatched"),
+            (403, "call_signal_invalid", "invalid call signal: fields do not match the kind", "not_dispatched"),
+        ] {
+            let reply = serde_json::json!({"code": "not_dispatched", "error": error, "reason": reason}).to_string();
+            let sent = reply.clone();
+            let (ops, _) = ops_node();
+            let calls = call_routes(Some(10000));
+            let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                if p == "/messages/compose" { (400, sent.clone()) }
+                else if p == "/status" { ops(m, p, b) }
+                else { calls(m, p, b) }
+            }));
+            approve_calls(&node).await;
+            let err = do_call_signal(&node.state, A, kind, OFFER, 15000).await.unwrap_err();
+            let closes = code == "call_not_live";
+            assert_eq!(err.code, code, "kind {kind}: {error}");
+            assert_eq!(err.message, if closes { "The node refused this call signal before payment. Nothing was paid.".to_string() }
+                else { act::not_dispatched_message(&reply) }, "kind {kind}: {error}");
+            let record = ledger_record(&node, err.operation_id.as_deref().unwrap());
+            assert_eq!(record["state"], "unpaid");
+            assert_eq!(record["paid_msat"], 0);
+            assert_eq!(record["reason"], if closes { serde_json::json!(reason) } else { serde_json::Value::Null }, "kind {kind}: {error}");
+            assert!(pending(&node).is_none());
+            assert!(book(&node).is_empty(), "reservation released");
+            assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+            assert_eq!(budget_now(&node.state).spent_msat, 0);
+        }
+    }
+
+    /// A retry says nothing new: an earlier attempt under this id may have paid.
+    /// The closing reason is taken only from a fresh operation. A refusal of a
+    /// resumable resend keeps today's answer and closes nothing.
+    #[tokio::test]
+    async fn a_resent_hangup_refused_not_dispatched_closes_nothing() {
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" && serde_json::from_str::<serde_json::Value>(b).unwrap()["kind"] == 403 {
+                return (400, NODE_ENDED_HANGUP.into());
+            }
+            routes(m, p, b)
+        }));
+        approve_calls(&node).await;
+        spend_advance(&node.state, true).await.unwrap();
+        do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        let offer = offer_op(&node);
+        let payload = serde_json::json!({"v": 1, "call_id": CALL_ID, "reason": "hangup"}).to_string();
+        let mut body = act::call_body(A, 403, &payload).unwrap();
+        body["host_admission_op"] = serde_json::json!(offer);
+        let id = spend_journal::new_operation_id().unwrap();
+        {
+            let journal = spend_journal(&node.state).unwrap();
+            let mut prior = journal.begin_operation(OWN, "/messages/compose", &body, 15000, Some((id.clone(), spend_journal::operation(&body)))).unwrap();
+            prior.resumable = true;
+            prior.non_dispatch_proven = true;
+            journal.save(&prior).unwrap();
+            journal.record_outcome(&prior, spend_journal::OperationState::Unpaid, None).unwrap();
+        }
+        let charge = Charge { target: A.into(), room: false, confirm: None, readmission_possible: false,
+            confirmed: false, operation: true, envelope_ids: Some(true) };
+        let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()),
+            "/messages/compose", body, 15000, Some(charge), None).await.unwrap_err();
+        assert_eq!(err.code, "not_dispatched");
+        assert_eq!(err.operation_id.as_deref(), Some(id.as_str()), "the saved id was reused");
+        assert!(ledger_record(&node, &id)["reason"].is_null());
+        assert!(admission_is_open(&node, &offer));
     }
 
     #[tokio::test]

@@ -14,7 +14,9 @@ connection diagnostics, payment display, and #278 refusal handling.
   admission's closure. A bound hangup requires node operation support.
 - **I5:** Cancel, timeout, and local failure request `op_end_call`. The host
   reconciles an uncertain offer and sends one hangup using its saved signal
-  ceiling. A proven `call_not_live` refusal closes the admission for free.
+  ceiling. A proven `call_not_live` refusal closes the admission for free:
+  a fresh hangup of a call the node already ended gets it as `not_dispatched`
+  (nodes since rc19.2).
   Paid-undelivered and failed-paid offers retain their payment history while
   cleanup proceeds; a paid-undelivered slot is retired only after accounting,
   with no retry in flight, no unresolved partial evidence, and no overrun.
@@ -50,8 +52,9 @@ result. Known message operations keep their existing reconciliation behavior.
 On upgrade, a resumable/Unpaid call or untyped legacy slot that retains an
 operation ID is restored to Unknown with its budget liability. Restoration is
 idempotent; a confirmed abandonment has cleared that ID and remains released.
-#278's allow-list and fresh-operation/retry conditions remain intact; no new
-node `call_not_found` refusal mapping is inferred.
+#278's allow-list and fresh-operation/retry conditions remain intact. A fresh
+signal's `not_dispatched` refusal closes only on `call_not_live` or
+`call_not_found` and only with no payment on record; rc21 sends only the first.
 
 One reply proves a dispatched payment unpaid without a tombstone: `released`
 with a payment hash and nothing settled, re-admitted, charged as a fee, accepted

@@ -1647,6 +1647,34 @@ describe('H2: what the host says about ending, said honestly', () => {
     expect(last()).toMatchObject({ stuck: null, close: { status: 'closed', message: 'The earlier call is ended. You can call them again.' } });
   });
 
+  // The host's answer for a call the node already ended: its hangup, unpaid, closing the admission.
+  it('call_admission_open: an earlier call the node already ended is closed, nothing paid, and the card says so', async () => {
+    const earlier = 'c'.repeat(32);
+    const endCall = vi.fn(async (id: string) => ({ ok: true as const, value: { ...view('unpaid'), call_id: id, paid_msat: 0 } }));
+    const { e, last } = engine({
+      endCall, stuckCall: async () => earlier,
+      signal: async () => ({ ok: false, error: { code: 'call_admission_open', message: 'End the existing call before starting another admission. Nothing was paid.', operation_id: 'op-old' } }),
+    });
+    await e.place(A, 'audio', QUOTE);
+    await e.endStuck();
+    expect(endCall.mock.calls).toEqual([[earlier]]);
+    expect(last()).toMatchObject({ stuck: null, paidMsat: 0, unknownCount: 0, unknownMsat: 0, close: { status: 'closed', message: 'The earlier call is ended. You can call them again.' } });
+  });
+
+  it('a call nobody answered: End asks the host once, its unpaid hangup closes the call, nothing is owed', async () => {
+    vi.useFakeTimers();
+    try {
+      const endCall = vi.fn(async (id: string) => ({ ok: true as const, value: { ...view('unpaid'), call_id: id, paid_msat: 0 } }));
+      const { e, last, sent } = engine({ endCall });
+      await e.place(A, 'audio', QUOTE);
+      expect(last().phase).toBe('ringing');
+      await vi.advanceTimersByTimeAsync(RING_MS);
+      expect(endCall.mock.calls).toEqual([[ID]]);
+      expect(sent.map(s => s.kind)).toEqual([400]);
+      expect(last()).toMatchObject({ phase: 'ended', reason: 'timeout', close: { status: 'closed', message: null }, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0 });
+    } finally { vi.useRealTimers(); }
+  });
+
   it('call_needs_node_upgrade (refused before dispatch): says so honestly, nothing paid, nothing to end at the host', async () => {
     const endCall = vi.fn();
     const { e, last } = engine({
