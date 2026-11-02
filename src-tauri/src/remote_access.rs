@@ -4468,6 +4468,67 @@ mod tests {
         drop(proxy);
     }
 
+    // A caller gives up only through its client's timeout, and `caller_gone`
+    // sees that only if the client closes the socket. Pin both halves: the
+    // close itself, and the request it stops at the proxy.
+    #[tokio::test]
+    async fn a_client_timeout_closes_the_socket_and_the_request_is_never_forwarded() {
+        // The whole request was read and no answer ever comes.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/{}", listener.local_addr().unwrap(), "api/v1/messages/compose");
+        let client = http_client_builder().timeout(Duration::from_millis(500)).build().unwrap();
+        let request = tokio::spawn(client.post(url).body("{\"kind\":404}").send());
+        let (mut accepted, _) = listener.accept().await.unwrap();
+        let mut seen = Vec::new();
+        let mut buffer = [0u8; 4096];
+        while !seen.ends_with(b"{\"kind\":404}") {
+            let read = accepted.read(&mut buffer).await.unwrap();
+            assert_ne!(read, 0, "the client gave up before it sent the request");
+            seen.extend_from_slice(&buffer[..read]);
+        }
+        assert!(request.await.unwrap().unwrap_err().is_timeout());
+        let closed = tokio::time::timeout(Duration::from_secs(2), accepted.read(&mut buffer)).await
+            .expect("the client closes its socket when the request times out");
+        assert!(matches!(closed, Ok(0) | Err(_)), "{closed:?}");
+
+        // Through the proxy, with the tunnel still queued, for the client-wide
+        // timeout (the 15 s callers) and a per-request one (the money path).
+        for per_request in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let secret = [87u8; 32];
+            let node = SigningKey::from_bytes(&[86u8; 32]);
+            let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+            let descriptor = parse_pairing_link(&signed_link(
+                listener.local_addr().unwrap().to_string(), &node, public, &test_code(88),
+            )).unwrap();
+            let (forwarded, mut forwarded_rx) = mpsc::unbounded_channel();
+            let server = tokio::spawn(authenticating_responder(listener, secret, forwarded));
+            let local_auth: Arc<str> = Arc::from("6".repeat(64));
+            let retry = Arc::new(RemoteRetry::default());
+            let (proxy, _app, _store) = proxy_for(descriptor, &local_auth, retry.clone()).await;
+            let (release, held) = tokio::sync::oneshot::channel::<()>();
+            let holder = tokio::spawn({
+                let retry = retry.clone();
+                async move { retry.run(|| async { let _ = held.await; Ok(()) }).await }
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            let builder = http_client_builder();
+            let client = if per_request { builder } else { builder.timeout(Duration::from_millis(200)) }.build().unwrap();
+            let url = format!("http://{}/{}", proxy.local_addr(), "api/v1/messages/compose");
+            let post = client.post(url).header(LOCAL_AUTH_HEADER, local_auth.as_ref()).body("{\"kind\":404}");
+            let post = if per_request { post.timeout(Duration::from_millis(200)) } else { post };
+            assert!(post.send().await.unwrap_err().is_timeout());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            release.send(()).unwrap();
+            holder.await.unwrap().unwrap();
+            let late = tokio::time::timeout(Duration::from_secs(1), forwarded_rx.recv()).await;
+            assert!(!matches!(late, Ok(Some(_))), "forwarded after the client timed out (per request: {per_request})");
+            drop(proxy);
+            server.abort();
+        }
+    }
+
     // A body too large for the first read is still in the socket when the
     // caller closes. The close must be seen behind it.
     #[tokio::test]
