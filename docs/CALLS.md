@@ -229,6 +229,16 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
 - **After the call.** The card reads the node for up to 20 s until it closes
   the reservation and then says "Minutes: paid X. Released back to your
   budget: Y." Until then it says what the node still holds.
+- **A minute whose payment failed.** The node answers the POST with
+  `payment_unknown`, and so does a lookup until its sweep (every 15 s). The
+  sweep moves the row to `released`, keeping the payment hash. From an LDK node
+  that offers abandonment (rc15 or later) that reply proves the minute unpaid:
+  End or the owner's check releases its reservation, the ledger says unpaid, and
+  its operation id is never posted again. End then sends the hangup. A paired
+  caller's node has already ended the call, so it refuses that hangup before
+  paying. From any other wallet the reply keeps the fence, as unknown. The same
+  holds for a message, an offer and a hangup whose payment failed. A resend is a
+  new operation.
 - **Not covered yet.** An owner session places no paid-minutes call (its
   node keeps no reservation, so the host would pay nothing). The node offers
   no pre-dial read of `max_call_minutes`; the Ring confirm shows the
@@ -261,6 +271,16 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   `a2_a_minute_revoked_first_is_never_sent_and_one_decided_first_goes_before_the_hangup`,
   `a2_a_minute_racing_end_or_teardown_goes_before_the_hangup_or_not_at_all`,
   `a2_a_refused_minutes_cleanup_holds_no_consent_lock_against_end`,
+  `a_failed_minute_clears_after_the_sweep_and_end_pays_the_hangup`,
+  `a_failed_minute_on_a_call_the_node_ended_leaves_no_fence`,
+  `a_failed_offer_or_hangup_clears_the_same_way`,
+  `a_failed_message_clears_after_the_sweep_and_goes_again_as_a_new_operation`,
+  `every_other_reply_stays_fenced`,
+  `the_same_reply_from_another_wallet_or_an_older_node_stays_fenced`,
+  `a_failure_read_against_a_payment_on_record_stays_fenced`,
+  `checking_a_failed_payment_again_releases_and_accounts_nothing_more`,
+  `checking_a_failed_minute_again_after_a_crash_changes_nothing`,
+  `a_failed_payment_stuck_by_an_earlier_build_recovers_on_its_next_check`,
   `a2_end_reconciles_a_minute_the_node_swallowed_then_pays_the_hangup`,
   `a2_end_with_its_minute_still_paying_reports_unknown_and_sends_no_hangup`,
   `a2_end_accounts_a_minute_with_a_known_result_then_pays_the_hangup`,

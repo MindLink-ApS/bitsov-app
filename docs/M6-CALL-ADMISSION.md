@@ -53,6 +53,16 @@ idempotent; a confirmed abandonment has cleared that ID and remains released.
 #278's allow-list and fresh-operation/retry conditions remain intact; no new
 node `call_not_found` refusal mapping is inferred.
 
+One reply proves a dispatched payment unpaid without a tombstone: `released`
+with a payment hash and nothing settled, re-admitted, charged as a fee, accepted
+or delivered, from an LDK node that offers abandonment (rc15 or later). The node
+writes it only after the wallet reported exactly that payment failed, and LDK
+reports that once no HTLC of it is left and none will be retried. The node
+refuses to abandon that row, so the app retires the operation ID itself and never
+posts it again. With no later POST, no old reading of the row can race one. The
+same reply from another wallet stays payment evidence: its status comes from
+outside the node's source and cannot be shown final there.
+
 ## Recovery and owner repair follow-up
 
 Atlas confirmed that caller-side paid recovery stays refused while the original

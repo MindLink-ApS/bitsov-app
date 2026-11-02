@@ -233,6 +233,8 @@ pub enum Outcome {
     Paid,
     /// `prepared` / `released`: candidate only; the caller must check payment
     /// evidence and confirm abandonment or wait out the legacy grace window.
+    /// A payment the wallet failed for good has its own proof, in the host's
+    /// `reports_failed_payment`.
     NothingPaid,
     /// `failed_paid`: paid, and refused for good.
     FailedPaid,
