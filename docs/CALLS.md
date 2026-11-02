@@ -221,9 +221,11 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   the app promises no more than this. A minute whose POST got no answer stays
   pending with its outcome unknown, which fences the hangup, so End first asks
   the node about it by operation id. Not paid and abandoned, or a known result
-  (accounted as that): End then hangs up. Still paying or unknown: End says so,
-  names the pending result and sends no hangup, and the node ends the call
-  itself once its paid time runs out.
+  (accounted as that): End then hangs up. Still paying or unknown: End sends no
+  hangup, its error carries the pending id, the card says the result is not
+  known yet, and the node ends the call itself once its paid time runs out.
+  When the admission is already closed (a peer hangup), End does not reconcile,
+  and a lost minute stays pending until the owner's check.
 - **After the call.** The card reads the node for up to 20 s until it closes
   the reservation and then says "Minutes: paid X. Released back to your
   budget: Y." Until then it says what the node still holds.
