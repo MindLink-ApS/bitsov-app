@@ -38,6 +38,7 @@ pub struct RemoteRetry {
     failure_revision: std::sync::atomic::AtomicU64,
     last_error: std::sync::Mutex<ConnectionFailure>,
     endpoint: std::sync::Mutex<Option<String>>,
+    refused: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -59,6 +60,22 @@ impl RemoteRetry {
     pub fn reset_for_replacement(&self) {
         *self.state.lock().unwrap() = RemoteRetryState::default();
         self.clear_connection_error();
+    }
+
+    /// The node definitively refused this app's saved pairing. Until the owner
+    /// acts (Try again, a new link, Forget), nothing reconnects on its own and
+    /// the proxy admits no new tunnel: every dial would get the same answer.
+    pub fn refuse(&self) {
+        self.refused.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// An owner action: the next attempt may dial again.
+    pub fn clear_refusal(&self) {
+        self.refused.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_refused(&self) -> bool {
+        self.refused.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn set_endpoint(&self, endpoint: &str) {
@@ -150,10 +167,39 @@ impl RemoteRetry {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, crate::remote_access::RemoteError>>,
     {
-        use crate::remote_access::RemoteError;
         // Serialize through the outcome so queued requests see the first
         // failure's deadline before they can send another handshake.
         let _attempt = self.attempt.lock().await;
+        self.run_admitted(operation).await
+    }
+
+    /// For automatic dials of an existing pairing (proxy tunnels, status
+    /// probes). The refusal is checked and recorded while the attempt lock is
+    /// held, so requests queued behind a refused handshake never send another.
+    pub async fn run_unless_refused<T, F, Fut>(&self, operation: F) -> Result<T, crate::remote_access::RemoteError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, crate::remote_access::RemoteError>>,
+    {
+        use crate::remote_access::{RemoteError, REFUSED_PAIRING_MESSAGE};
+        let _attempt = self.attempt.lock().await;
+        if self.is_refused() {
+            return Err(RemoteError::Refused(REFUSED_PAIRING_MESSAGE.into()));
+        }
+        let result = self.run_admitted(operation).await;
+        if result.as_ref().err().is_some_and(RemoteError::is_definitive_refusal) {
+            self.refuse();
+        }
+        result
+    }
+
+    /// The caller holds `attempt`.
+    async fn run_admitted<T, F, Fut>(&self, operation: F) -> Result<T, crate::remote_access::RemoteError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, crate::remote_access::RemoteError>>,
+    {
+        use crate::remote_access::RemoteError;
         if let Some(seconds) = self.remaining() {
             return Err(RemoteError::Waiting(seconds));
         }

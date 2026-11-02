@@ -298,6 +298,9 @@ pub enum RemoteError {
     Local(String),
     Transport(String),
     Refused(String),
+    /// The node already holds a pairing for this app's client identity and
+    /// refused only the ticket. The existing pairing still reconnects.
+    AlreadyPaired,
     HandshakeUnavailable,
     Unclaimed,
     LocalNetwork,
@@ -331,6 +334,7 @@ impl fmt::Display for RemoteError {
             Self::Local(message) => f.write_str(message),
             Self::Transport(message) => write!(f, "remote transport failed: {message}"),
             Self::Refused(message) => write!(f, "remote node refused pairing: {message}"),
+            Self::AlreadyPaired => write!(f, "remote node refused pairing: {ALREADY_PAIRED_MESSAGE}"),
             Self::Unclaimed => f.write_str("This node isn't set up yet. Finish setup on a Mac, then add this phone."),
             Self::LocalNetwork => f.write_str("Local network access is denied or unavailable. Check BitSov's Local Network permission in Settings and your network connection."),
             Self::AndroidLocalNetwork => f.write_str("Local network access is unavailable. Allow Nearby devices for BitSov in Android Settings, then return to BitSov or tap Reconnect."),
@@ -343,6 +347,22 @@ impl fmt::Display for RemoteError {
 }
 
 impl std::error::Error for RemoteError {}
+
+impl RemoteError {
+    /// The node answered and refused this app's saved pairing: an unknown or
+    /// revoked client, a used or expired ticket. Retrying the same link and
+    /// client identity cannot change that answer. Transport errors, timeouts,
+    /// busy replies and `AlreadyPaired` (the pairing itself stands) are never
+    /// definitive.
+    pub fn is_definitive_refusal(&self) -> bool {
+        matches!(self, Self::Refused(_) | Self::Expired(_))
+    }
+}
+
+/// Shown for a pairing the node has already refused while it stays refused.
+pub const REFUSED_PAIRING_MESSAGE: &str = "this app's pairing was refused; pair again from an enrolled device";
+
+const ALREADY_PAIRED_MESSAGE: &str = "This device already has a pairing. Reconnect with its saved pairing; a second-device ticket is for a new device.";
 
 /// Stable renderer contract. Detail is diagnostic copy, never a ticket or key.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1436,9 +1456,10 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
                         "authentication reply has an unsupported version".into(),
                     ));
                 }
-                let reason: String = if code == "already_paired" {
-                    "This device already has a pairing. Reconnect with its saved pairing; a second-device ticket is for a new device.".into()
-                } else if let Some(fixed) = ticket_refusal(&code, &message, descriptor.code.as_deref()) {
+                if code == "already_paired" {
+                    return Err(RemoteError::AlreadyPaired);
+                }
+                let reason: String = if let Some(fixed) = ticket_refusal(&code, &message, descriptor.code.as_deref()) {
                     fixed.into()
                 } else { format!("{code}: {message}").chars().take(160).collect() };
                 Err(RemoteError::Refused(reason))
@@ -1862,7 +1883,7 @@ async fn write_connection_error(local: &mut TcpStream, error: &RemoteError) {
     }
     let (status, code, message) = match error {
         RemoteError::HandshakeUnavailable => ("503 Service Unavailable", "remote_handshake_unavailable", HANDSHAKE_UNAVAILABLE),
-        RemoteError::Refused(_) => ("403 Forbidden", "remote_pairing_refused", "remote node refused pairing"),
+        RemoteError::Refused(_) | RemoteError::AlreadyPaired => ("403 Forbidden", "remote_pairing_refused", "remote node refused pairing"),
         _ => ("502 Bad Gateway", "remote_transport_refused", "remote transport validation failed"),
     };
     write_proxy_error(local, status, code, message).await;
@@ -2254,7 +2275,10 @@ pub async fn authenticate_pinned_transport_and_save_record(
     let (_, _, _, client_id, scopes, _) = retry.run(|| async {
         let snapshot = current.lock().unwrap().clone();
         let result = connect_bound(&snapshot, key, client_name, None, Some(&retire)).await;
-        if matches!(&result, Err(RemoteError::Transport(_) | RemoteError::HandshakeUnavailable))
+        // The ticket was retired before its proof was sent. After a lost reply,
+        // or when the node already pairs this client identity, reconnect with
+        // the existing pairing: same keys, no code, never the ticket again.
+        if matches!(&result, Err(RemoteError::Transport(_) | RemoteError::HandshakeUnavailable | RemoteError::AlreadyPaired))
             && one_use(&snapshot) && !current.lock().unwrap().has_code() {
             let consumed = current.lock().unwrap().clone();
             return connect_bound(&consumed, key, client_name, None, None).await;
@@ -2307,8 +2331,12 @@ async fn serve_connection(
         .lock()
         .map_err(|_| RemoteError::Local("remote descriptor lock is poisoned".into()))?
         .clone();
+    // The node refused this app's pairing: admit no new tunnel (live feed, API
+    // polling) until the owner acts, and record a refusal seen here first.
+    // Both happen inside the serialized admission, so tunnels queued behind
+    // the refused handshake answer 403 without dialing.
     let (remote, noise, client_id, scopes) = match retry
-        .run(|| connect_authenticated(&snapshot, &key, &client_name))
+        .run_unless_refused(|| connect_authenticated(&snapshot, &key, &client_name))
         .await
     {
         Ok(connection) => connection,
