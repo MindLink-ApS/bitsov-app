@@ -6,7 +6,9 @@ starts. No code, node contract or release note may cite this file as shipped
 behavior. Hardened after an independent review (round 1): section 3.5 adds token
 rotation and the wake-pattern leak. Owner decisions since: wake push is **for
 self-builders only**, and off for everyone else (D1, section 3.5); a lost phone
-can be revoked **without a terminal** (D7, section 4.4); hosting other people on
+can be revoked **without a terminal** (D7, section 4.4); device approvals on a
+box whose seed password comes from a file or a flag become an owner-chosen
+setting, off until the owner chooses it (D7, section 4.4); hosting other people on
 a box is **parked** until the key boundary meets the charter (section 5). Corrected
 after a second review: what a person running a shared box can read and hear
 (section 5.1), and which boxes the revoke in section 4.4 can work on.
@@ -388,27 +390,25 @@ revokes the target's tokens and device key, ends its grants and records an
 owner key change; and that refuses a device revoking itself through this
 route. The app cannot do this alone.
 
-**This does not work on a box whose seed password comes from a file or a flag,
-and no planned route changes that yet.** The node turns device approvals off when the seed's password came from a file
+**Until a node setting ships, this does not work on a box whose seed password
+comes from a file or a flag.** The node turns device approvals off when the seed's password came from a file
 or a flag: `owner_approval_key` returns `seed_password_not_typed`
 (`crates/konsensus-node/src/main.rs:1087-1107`,
 `crates/konsensus-api/src/pairing/device.rs:28-30`, node commit `b3f1ad1`). They
 are on only with a typed password, or a descriptor or remote unlock together
 with `--local-owner-device`, and only with an encrypted seed. Every device route
-then refuses (`device_authority`, `pairing/device.rs:1536-1542`). Reported,
-node-side, to confirm: both real boxes take the password from a file or flag.
-The field test of 1 November approved at the node's console, which fits, but its
-record does not name the password source. On such a box both paths
+then refuses (`device_authority`, `pairing/device.rs:1536-1542`). Both real test boxes run this way today: they log `seed_password_not_typed`. On such a box both paths
 above fail: a device signature chains to the owner key that is off
 (`pairing/device.rs:1569`), and the box's local owner authority needs
 `--local-owner-device`, which needs `--password-fd` or home mode
 (`main.rs:1204-1210`). Today the only revoke there is at the node's computer.
 
-**Second node-repository requirement: a device approval policy for those boxes.**
-Either a supported start that does not use a file or flag, or a policy that turns
-approvals on for them. The node's reason for the gate is that a same-user program
-could read that password, so this needs its own security review. Until it exists,
-D7 is a decision about the design, not something that works on such a box.
+**Second node-repository requirement: an owner-chosen device approval setting for
+those boxes.** Decided by the owner (D7): yes, off until the owner chooses it. It
+does not exist, and its design is not part of this document. The node's reason for
+the gate is that a same-user program could read that password. It is node work
+after the Thursday call proof, under the normal review gate. Until it ships, D7 is
+a decision about the design, not something that works on such a box.
 
 ## 5. Several people on one box: PARKED
 
@@ -507,7 +507,7 @@ tests beyond regtest.
 | P3 | Self-builders only: box-direct push sender using the person's own credentials and the wake-push setting (D1, decided), wake-token registration through the box, platform-token re-registration on launch and drop on `Unregistered`, rate limits | Node release |
 | P4 | Self-builders only: iOS PushKit + CallKit; Android FCM + foreground service; privacy text | P3 |
 | P5 | Node-side budget grant as single source; local book becomes a cache | Node release, D4 |
-| P2b | Revoke a lost phone without a terminal, from another owner device or the box's own app (section 4.4, D7) | Node release (revoke route, and a device approval policy for boxes whose seed password comes from a file or a flag) |
+| P2b | Revoke a lost phone without a terminal, from another owner device or the box's own app (section 4.4, D7) | Node release (revoke route, and the owner-chosen device approval setting for boxes whose seed password comes from a file or a flag, after the Thursday call proof) |
 
 Hosting other people on a box is not a phase. It is parked (section 5).
 
@@ -539,8 +539,11 @@ Hosting other people on a box is not a phase. It is parked (section 5).
   can be revoked without a terminal, from another owner device or from the
   box's own app (for example the Mac app on the box's computer). Design
   sketch in section 4.4; the revoke route is a node-repository requirement. So
-  is a device approval policy for boxes whose seed password comes from a file or
-  a flag: on those, neither path works today (section 4.4).
+  is the device approval setting for boxes whose seed password comes from a file
+  or a flag: decided by the owner, an owner-chosen setting, off until the owner
+  chooses it, node work after the Thursday call proof, under the normal review
+  gate. Until it ships, neither path works on those boxes, and both real test
+  boxes run this way today (section 4.4).
   Revocation by a second person (for example the box host) is not part of
   this decision. (Shared with the in-app budget approval design.)
 - **D6.** May a CallKit lock screen show the caller's contact name after the
