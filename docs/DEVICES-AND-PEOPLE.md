@@ -8,7 +8,9 @@ states the push credential path as an open owner decision with three honest
 options, and adds token rotation and the wake-pattern leak. Owner decisions
 since: wake push is **off by default** (D1; the push credential path stays
 open and must be decided before phase P3 is built), and a lost phone can be
-revoked **without a terminal** (D7, section 4.4).
+revoked **without a terminal** (D7, section 4.4). Corrected after a second
+review: what a person running a shared box can read and hear (section 5.1), and
+which boxes the revoke in section 4.4 can work on.
 
 Three questions, in the order they will hurt users:
 
@@ -17,7 +19,7 @@ Three questions, in the order they will hurt users:
 - **(b)** One person has a phone and a Mac. Both should show the same
   conversations, and a call should ring on both and stop on both when one
   answers.
-- **(c)** Several people (for example a family) use one box. The principle is
+- **(c)** Several people (for example a household) use one box. The principle is
   already decided by the owner (section 5); this document lists what the code
   must change to follow it.
 
@@ -397,14 +399,35 @@ revokes the target's tokens and device key, ends its grants and records an
 owner key change; and that refuses a device revoking itself through this
 route. The app cannot do this alone.
 
+**This does not work on a box whose seed password comes from a file or a flag,
+and no planned route changes that yet.** The node turns device approvals off when the seed's password came from a file
+or a flag: `owner_approval_key` returns `seed_password_not_typed`
+(`crates/konsensus-node/src/main.rs:1087-1107`,
+`crates/konsensus-api/src/pairing/device.rs:28-30`, node commit `b3f1ad1`). They
+are on only with a typed password, or a descriptor or remote unlock together
+with `--local-owner-device`, and only with an encrypted seed. Every device route
+then refuses (`device_authority`, `pairing/device.rs:1536-1542`). Reported,
+node-side, to confirm: both real boxes take the password from a file or flag.
+The field test of 1 November approved at the node's console, which fits, but its
+record does not name the password source. On such a box both paths
+above fail: a device signature chains to the owner key that is off
+(`pairing/device.rs:1569`), and the box's local owner authority needs
+`--local-owner-device`, which needs `--password-fd` or home mode
+(`main.rs:1204-1210`). Today the only revoke there is at the node's computer.
+
+**Second node-repository requirement: a device approval policy for those boxes.**
+Either a supported start that does not use a file or flag, or a policy that turns
+approvals on for them. The node's reason for the gate is that a same-user program
+could read that password, so this needs its own security review. Until it exists,
+D7 is a decision about the design, not something that works on such a box.
+
 ## 5. Several people on one box: decided principle
 
 ### 5.1 The decision (owner, 6 October)
 
-- **Each person is their own identity with their own seed.** A parent, a
-  spouse and a child are three identities, three seeds, three wallets, three
-  sets of devices.
-- **A node may host several people**, for example a family on one box. The
+- **Each person is their own identity with their own seed.** Three people are
+  three identities, three seeds, three wallets, three sets of devices.
+- **A node may host several people**, for example a household on one box. The
   box is shared hardware, not a shared account.
 - **Hosted people are shown as "hosted by \<name\>"**, where the name is the
   person who runs the box. Contacts see that the identity is hosted, and by
@@ -412,9 +435,27 @@ route. The app cannot do this alone.
 - **Each hosted person keeps their own backup** (their own recovery phrase)
   and can **move out** to their own node at any time, keeping their identity,
   funds and contacts.
-- **It is not a shared wallet and not a sub-account.** Nobody, including the
-  person who runs the box, spends another person's funds or reads another
-  person's messages through the app.
+- **It is not a shared wallet and not a sub-account.** The app gives nobody a
+  way to spend another person's funds or read another person's messages.
+- **That is a limit of the app, not a technical guarantee.** The person running
+  a shared box could technically read and hear what passes through it. The box
+  decrypts every message: the node's end-to-end session runs between nodes, and
+  the app hands its node the plaintext (`plaintext` in `POST /messages/compose`,
+  `crates/konsensus-api/src/handlers/messages/compose.rs:67`, encrypted for the
+  peer at `:3076`). Call audio reaches the box as plain codec frames, which the
+  node forwards (`docs/CALLS.md`, "Wire format"; the call card already says *both
+  nodes can hear it*). The seed of a hosted identity is decrypted into the host's
+  memory too (`custody_mode`, `crates/konsensus-node/src/main.rs`). **So being
+  hosted requires trusting the host, until there is end-to-end encryption
+  between apps.** That encryption does not exist and is not in this plan.
+- **Saying so is part of the "hosted by" consent.** Before someone agrees to be
+  hosted, the app says in plain words:
+  - Dansk: "\<navn\> driver den boks, du bliver hostet på. \<navn\> ser ikke
+    dine beskeder i appen, men kan teknisk set læse og høre det, der går gennem
+    boksen. Bliv kun hostet af en, du stoler på."
+  - English: "\<name\> runs the box that hosts you. \<name\> doesn't see your
+    messages in the app, but could technically read and hear what passes through
+    the box. Only be hosted by someone you trust."
 
 Calls and messages therefore reach **a person, not a box**. Today the two are
 the same, so the code never had to tell them apart.
@@ -422,10 +463,10 @@ the same, so the code never had to tell them apart.
 ### 5.2 Rejected alternative: shared household identity
 
 One identity and one wallet for the whole house, with device labels such as
-"kitchen iPad" or "a parent's phone". Everyone would read every message and
+"kitchen iPad" or "the old phone". Everyone would read every message and
 spend the shared balance, and a call would ring every device in the house.
 **Rejected:** it gives no privacy between people, no separate funds, no way to
-move out, and the wording "family account" would mislead. Device labels remain
+move out, and the wording "household account" would mislead. Device labels remain
 useful for one person's own devices (section 4), nothing more.
 
 ### 5.3 Code that assumes one node = one person
@@ -472,7 +513,7 @@ tests beyond regtest.
 | P3 | Box-direct push sender and the per-user wake-push setting (D1, decided), wake-token registration through the box, platform-token re-registration on launch and drop on `Unregistered`, rate limits | Node release, D1 credential path (open; must be decided before P3 is built) |
 | P4 | iOS PushKit + CallKit; Android FCM + foreground service; privacy text | P3 |
 | P5 | Node-side budget grant as single source; local book becomes a cache | Node release, D4 |
-| P2b | Revoke a lost phone without a terminal, from another owner device or the box's own app (section 4.4, D7) | Node release (revoke route) |
+| P2b | Revoke a lost phone without a terminal, from another owner device or the box's own app (section 4.4, D7) | Node release (revoke route, and a device approval policy for boxes whose seed password comes from a file or a flag) |
 | P6 | Node design for hosting several identities (own seeds, "hosted by", move-out); then the re-keying in 5.3 | M6 done, node release |
 
 ## 7. Owner decisions (decided and open)
@@ -500,13 +541,16 @@ tests beyond regtest.
 - **D5.** Several people on one box: the principle is decided (section 5.1).
   Open details only: which name "hosted by" shows and whether a contact always
   sees it, and whether the host may see that a hosted person exists on the box
-  (not their messages or funds). Review note: the host can see that a hosted
-  person exists by necessity, because the box routes to them; only content
-  and funds are hidden.
+  (the app shows the host no messages or funds). Review note: the host can see
+  that a hosted person exists by necessity, because the box routes to them. The
+  app hides content and funds from the host, but the box itself does not:
+  section 5.1.
 - **D7. Lost phone without a terminal: decided by the owner.** A lost phone
   can be revoked without a terminal, from another owner device or from the
   box's own app (for example the Mac app on the box's computer). Design
-  sketch in section 4.4; the revoke route is a node-repository requirement.
+  sketch in section 4.4; the revoke route is a node-repository requirement. So
+  is a device approval policy for boxes whose seed password comes from a file or
+  a flag: on those, neither path works today (section 4.4).
   Revocation by a second person (for example the box host) is not part of
   this decision. (Shared with the in-app budget approval design.)
 - **D6.** May a CallKit lock screen show the caller's contact name after the
