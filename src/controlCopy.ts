@@ -277,6 +277,7 @@ export const controlEn = {
   "caCheckNow": "Check now",
   "caCopyDetails": "Copy details",
   "caCopied": "Copied.",
+  "uiCopyCallReport": "Copy call report",
   "caCouldNotCopy": "Could not copy.",
   "caEnterThePrevious64CharacterNodeKey": "Enter the previous 64-character node key.",
   "caCouldNotLinkUnknownPreviousKeyOrThisKey": "Could not link — unknown previous key, or this key already belongs to another contact.",
@@ -1147,7 +1148,12 @@ export const controlEn = {
   "caUptimeDays": "{0}d {1}h",
   "caUptimeHours": "{0}h {1}m",
   "caUptimeMinutes": "{0}m",
-  "caMessageNoun": "a message"
+  "caMessageNoun": "a message",
+  "caAppBuild": "App build",
+  "caNodeApi": "Node API",
+  "caNodeCapabilities": "Node capabilities",
+  "caNetwork": "Network",
+  "caCopyVersions": "Copy versions"
 };
 
 export const controlDa: Record<keyof typeof controlEn, string> = {
@@ -1428,6 +1434,7 @@ export const controlDa: Record<keyof typeof controlEn, string> = {
   "caCheckNow": "Kontrollér nu",
   "caCopyDetails": "Kopiér oplysninger",
   "caCopied": "Kopieret.",
+  "uiCopyCallReport": "Kopiér opkaldsrapport",
   "caCouldNotCopy": "Kunne ikke kopiere.",
   "caEnterThePrevious64CharacterNodeKey": "Indtast den tidligere nodenøgle på 64 tegn.",
   "caCouldNotLinkUnknownPreviousKeyOrThisKey": "Kunne ikke knytte nøglen til kontakten — den tidligere nøgle er ukendt, eller denne nøgle tilhører allerede en anden kontakt.",
@@ -2298,5 +2305,10 @@ export const controlDa: Record<keyof typeof controlEn, string> = {
   "caUptimeDays": "{0}d {1}t",
   "caUptimeHours": "{0}t {1}m",
   "caUptimeMinutes": "{0}m",
-  "caMessageNoun": "en besked"
+  "caMessageNoun": "en besked",
+  "caAppBuild": "App-build",
+  "caNodeApi": "Node-API",
+  "caNodeCapabilities": "Node-funktioner",
+  "caNetwork": "Netværk",
+  "caCopyVersions": "Kopiér versioner"
 };
