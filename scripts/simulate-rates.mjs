@@ -17,7 +17,7 @@ const FIAT_CODE = 'DKK';
 const BTC_PRICE_ASSUMPTION = 600_000;
 /** ASSUMPTION: what one payment really costs in routing, for the "actual" column. One hop at a 1-sat base fee. */
 const ACTUAL_ROUTING_MSAT = 1_000;
-/** ASSUMPTION: the per-payment limit a box signs on a grant. Node-side; 50 sats is the value in the app's test fixtures. */
+/** ASSUMPTION: the per-payment limit in the model. An owner-written grant defaults to its whole budget (node cli.rs `per_call`); an envelope uses its per-act maximum. */
 const PER_CALL_CAP_DEFAULT = 50_000;
 /** ASSUMPTION: the caller's outbound capacity in the profile runs. Node-side; large enough not to bind here. */
 const OUTBOUND_DEFAULT = 1_000_000_000;
@@ -40,13 +40,21 @@ const ADMISSION_FLOOR = 1 * SAT;
 /** src/control/callMinutes.ts: a block buys 60 s; docs/CALLS.md and the same file: the next one is due 20 s before it ends */
 const BLOCK_SECONDS = 60;
 const BLOCK_DUE_BEFORE_END_SECONDS = 20;
-/** src-tauri/src/grant.rs and owner_approval_tests.rs: breaker values in test FIXTURES only. The node's real defaults are node-side. */
-const BREAKER_FIXTURE = { perMinute: 2, perHour: 12, msatPer10Min: 9_000 };
 
 /** src-tauri/src/act.rs routing_fee */
 const routingFee = (principal) => (principal === 0 ? 0 : Math.min(Math.max(Math.floor(principal / 100), 5_000), 10_000));
 
+// ---- read from the node repository at commit b3f1ad1 ---------------------------
+
+/** crates/konsensus-node/src/config.rs:1333 default_max_call_minutes: what a box uses unless its config sets another value */
+const NODE_DEFAULT_LIMIT = 60;
+/** crates/konsensus-api/src/spend_budget.rs:138-147 BreakerLimits::default */
+const BREAKERS = { perMinute: 10, perHour: 60, failures: 5, msatPer10Min: 1_000_000 };
+
 // ---- reported by the owner's box and test; node-side, to be confirmed --------
+
+/** The `max_call_minutes` the two test boxes reported. A configured value, not the node default. */
+const TEST_BOX_LIMIT = 10;
 
 const OFFER = 10 * SAT;
 const SIGNAL = 1 * SAT;
@@ -56,19 +64,19 @@ const PAGE = 1 * SAT;
 
 /** A rate set. Prices in msat; `limit` in minutes. */
 const rates = (o = {}) => ({
-  block: 10 * SAT, message: 1 * SAT, limit: 10, contact: 50 * SAT, daily: 500 * SAT,
+  block: 10 * SAT, message: 1 * SAT, limit: NODE_DEFAULT_LIMIT, contact: 50 * SAT, daily: 500 * SAT,
   perCall: PER_CALL_CAP_DEFAULT, offer: OFFER, blockFee: null, outbound: OUTBOUND_DEFAULT, ...o,
 });
 
 const fee = (r) => r.blockFee ?? routingFee(r.offer);
 const perMinute = (r) => r.block + fee(r);
-/** docs/CALLS.md: the hold is (price + routing allowance) x the box's max_call_minutes. */
+/** The minutes of the hold: (price + routing allowance) x the caller's max_call_minutes. The node adds the closing hangup to the same reservation. */
 const holdOf = (r) => perMinute(r) * r.limit;
 const offerAllIn = (r) => r.offer + routingFee(r.offer);
 const hangupAllIn = () => SIGNAL + routingFee(SIGNAL);
 /** The app's own check before the offer (src-tauri/src/app.rs): offer plus one hangup. */
 const preflightOf = (r) => offerAllIn(r) + hangupAllIn();
-/** What must be free at Ring. Whether the node adds the hangup to the hold is node-side; this counts it. */
+/** What must be free at Ring: the hold (minutes + closing hangup) and the offer, reserved together (node handlers/messages/compose.rs, pairing/call_spend.rs). */
 const ringNeed = (r) => preflightOf(r) + holdOf(r);
 /** src/control/call.ts callPerPaymentNeed */
 const perPaymentNeed = (r) => Math.max(offerAllIn(r), hangupAllIn(), perMinute(r));
@@ -221,17 +229,22 @@ const CONTACTS = [50, 250, 500, 1000, 2500].map((n) => n * SAT);
 const DAILIES = [200, 1000, 2500, 5000, 10000].map((n) => n * SAT);
 const STANDARD_MINUTES = 10;
 
+const TEST_BOX = TEST_BOX_LIMIT;
 const NAMED = [
-  ['Today: first-contact default', rates({ contact: 50 * SAT, daily: 500 * SAT })],
-  ['Today: as re-approved', rates({ contact: 250 * SAT, daily: 500 * SAT })],
-  ['#394 ceiling, per-call 6', rates({ contact: 200 * SAT, daily: 200 * SAT, perCall: MESSAGE_CAP })],
-  ['#394 ceiling, per-call 50', rates({ contact: 200 * SAT, daily: 200 * SAT })],
-  ['Fallback: 10-min box', rates({ contact: 1000 * SAT, daily: 2500 * SAT })],
-  ['Proposed', rates({ limit: 30, contact: 1000 * SAT, daily: 2500 * SAT })],
+  ['Node default limit 60: 50 / 500', rates({ contact: 50 * SAT, daily: 500 * SAT })],
+  ['Node default limit 60: 1 000 / 2 500', rates({ contact: 1000 * SAT, daily: 2500 * SAT })],
+  ['Node default limit 60: 2 500 / 2 500', rates({ contact: 2500 * SAT, daily: 2500 * SAT })],
+  ['Test boxes limit 10: 50 / 500', rates({ limit: TEST_BOX, contact: 50 * SAT, daily: 500 * SAT })],
+  ['Test boxes limit 10: as re-approved, 250 / 500', rates({ limit: TEST_BOX, contact: 250 * SAT, daily: 500 * SAT })],
+  ['Test boxes limit 10: 1 000 / 2 500', rates({ limit: TEST_BOX, contact: 1000 * SAT, daily: 2500 * SAT })],
+  ['#394 ceiling, per-call 6, limit 10', rates({ limit: TEST_BOX, contact: 200 * SAT, daily: 200 * SAT, perCall: MESSAGE_CAP })],
+  ['#394 ceiling, per-call 50, limit 10', rates({ limit: TEST_BOX, contact: 200 * SAT, daily: 200 * SAT })],
+  ['#394 ceiling, per-call 50, limit 60', rates({ contact: 200 * SAT, daily: 200 * SAT })],
+  ['Proposed: limit 30', rates({ limit: 30, contact: 1000 * SAT, daily: 2500 * SAT })],
   ['Cheap: 2 sats a minute', rates({ block: 2 * SAT, limit: 30, contact: 250 * SAT, daily: 1000 * SAT })],
-  ['Long calls', rates({ limit: 60, contact: 2500 * SAT, daily: 10000 * SAT })],
+  ['Long calls: limit 60', rates({ contact: 2500 * SAT, daily: 10000 * SAT })],
 ];
-const PROPOSED = NAMED.find(([name]) => name === 'Proposed')[1];
+const PROPOSED = NAMED.find(([name]) => name === 'Proposed: limit 30')[1];
 
 function* grid() {
   for (const block of BLOCKS) for (const message of MESSAGES) for (const limit of LIMITS)
@@ -279,7 +292,7 @@ function printTables() {
       })]));
   }
 
-  for (const limit of [10, 30]) {
+  for (const limit of LIMITS) {
     table(`T3. What refuses the first call of a fresh day, 10 sats a minute, box limit ${limit}`,
       ['contact \\ daily', ...DAILIES.map((d) => sats(d))],
       CONTACTS.map((contact) => [sats(contact), ...DAILIES.map((daily) =>
@@ -345,6 +358,13 @@ function printTables() {
       ...N.flatMap((n) => [sats(n * (admission + message)), fiat(n * (admission + message))]),
       sats(admission + 1000 * message),
     ])));
+  table(`T7c. First contact under a grant: the node caps admission plus first message, all-in, at ${sats(MESSAGE_CAP)} sats (node pairing.rs grant_first_contact_locked). Routed uses the default ceilings; direct uses no routing`,
+    ['admission', 'message', 'all-in, routed', 'routed under a grant?', 'all-in, direct', 'direct under a grant?'],
+    [ADMISSION_FLOOR, 2 * SAT, 5 * SAT, 10 * SAT, 50 * SAT, ADMISSION_CAP].map((admission) => {
+      const routed = paidAction(admission).ceiling + paidAction(SAT).ceiling;
+      const direct = admission + SAT;
+      return [sats(admission), 1, sats(routed), routed <= MESSAGE_CAP ? 'fits' : 'REFUSED', sats(direct), direct <= MESSAGE_CAP ? 'fits' : 'REFUSED'];
+    }));
   table('T7b. Spam: unsolicited rings at the offer price (the callee takes the offer; no minute is paid unless answered)',
     ['offer', ...N.flatMap((n) => [`N=${n} sats`, 'fiat'])],
     [1, 5, 10, 20].map((o) => [sats(o * SAT), ...N.flatMap((n) => [sats(n * o * SAT), fiat(n * o * SAT)])]));
@@ -391,10 +411,19 @@ function printTables() {
         `${simulateDay(short, REGULAR, 'ceiling').refused}/${REGULAR.length}`, `${simulateDay(long, REGULAR, 'ceiling').refused}/${REGULAR.length}`, n >= 2500 ? 'yes' : 'no, node computer'];
     }));
 
-  const today = rates();
-  table(`T11. Replay of the field test: 10 sats a minute, offer 10, box limit 10, so ${sats(ringNeed(today))} sats free at Ring`,
+  const today = rates({ limit: TEST_BOX });
+  table(`T11. Replay of the field test: 10 sats a minute, offer 10, the test boxes' reported limit ${TEST_BOX}, so ${sats(ringNeed(today))} sats free at Ring`,
     ['free in the budget', 'result', 'left beside the hold'],
     [47, 50, 171, 200, 250, 500].map((n) => [`${n} sats`, n * SAT < ringNeed(today) ? 'offer and hangup fit; refused at the hold' : 'rings', sats(n * SAT - Math.min(n * SAT, ringNeed(today)))]));
+  const unconfigured = rates();
+  table(`T11c. The same on a box with the node default limit ${NODE_DEFAULT_LIMIT}: ${sats(ringNeed(unconfigured))} sats free at Ring`,
+    ['free in the budget', 'result', 'left beside the hold', 'full 10-min calls that ring', 'messages left beside the hold, ceiling'],
+    [50, 100, 250, 500, 921, 1000, 2500].map((n) => {
+      const r = rates({ contact: n * SAT, daily: APP_MAX_DAILY });
+      const fits = n * SAT >= ringNeed(unconfigured);
+      return [`${n} sats`, fits ? 'rings' : (n * SAT < preflightOf(unconfigured) ? 'refused before the hold' : 'offer and hangup fit; refused at the hold'),
+        fits ? sats(n * SAT - ringNeed(unconfigured)) : '-', fullCalls(r, STANDARD_MINUTES, 'ceiling'), fits ? Math.floor((n * SAT - ringNeed(unconfigured)) / paidAction(SAT).ceiling) : '-'];
+    }));
   table('T11b. Blocks paid by call length (block 0 at the answer, the next 20 s before each minute ends)',
     ['call length', 'blocks', 'blocks at 10 sats', 'with the 10-sat offer'],
     [['0:30', 30], ['1:00', 60], ['3:30', 210], ['4:30', 270], ['5:00', 300], ['10:00', 600]].map(([label, seconds]) => {
@@ -402,20 +431,20 @@ function printTables() {
       return [label, blocks, blocks * 10, blocks * 10 + 10];
     }));
 
-  table('T12. Payment rate needed, against the breaker values in the test fixtures (node defaults are node-side, to be confirmed)',
-    ['need', 'payments/min', 'payments/hour', `fixture ${BREAKER_FIXTURE.perMinute}/min`, `fixture ${BREAKER_FIXTURE.perHour}/hour`, 'sats in 10 min (ceiling)', `fixture ${sats(BREAKER_FIXTURE.msatPer10Min)} sats/10 min`],
-    [['one call for an hour, 10 sats a minute', 2, 60, 10 * perMinute(today)],
-      ['one call, reserved at Ring, limit 30', 1, 1, ringNeed(rates({ limit: 30 }))],
-      ['a burst of 10 messages', 10, 10, 10 * paidAction(SAT).ceiling],
-      ['ai client: 200 actions over 10 hours', 1, 20, Math.round((200 / 60) * 10) * paidAction(SAT).ceiling],
-      ['porch reader: 30 reads in an hour', 1, 30, 5 * paidAction(PAGE).ceiling]].map(([name, perMin, perHour, inTen]) => [name, perMin, perHour,
-      perMin <= BREAKER_FIXTURE.perMinute ? 'fits' : 'REFUSED', perHour <= BREAKER_FIXTURE.perHour ? 'fits' : 'REFUSED', sats(inTen), inTen <= BREAKER_FIXTURE.msatPer10Min ? 'fits' : 'REFUSED']));
+  const ringsIn10 = (limit) => Math.floor(BREAKERS.msatPer10Min / ringNeed(rates({ limit })));
+  table(`T12. What counts against the node's default breakers (${BREAKERS.perMinute} a minute, ${BREAKERS.perHour} an hour, ${BREAKERS.failures} failures, ${sats(BREAKERS.msatPer10Min)} sats per 10 minutes). A ring counts the hold and the offer as 2 payments and their whole reserved amount, even when released; blocks draw on the hold and count no further`,
+    ['need', 'payments counted', 'sats counted in 10 min (ceiling)', 'fits one time?', 'how many in 10 minutes'],
+    [...[TEST_BOX, 30, NODE_DEFAULT_LIMIT].map((limit) => [`one ring, any length, limit ${limit}`, 2, sats(ringNeed(rates({ limit }))), ringNeed(rates({ limit })) <= BREAKERS.msatPer10Min ? 'fits' : 'REFUSED', ringsIn10(limit)]),
+      ['a burst of 10 messages', 10, sats(10 * paidAction(SAT).ceiling), 'fits', `${BREAKERS.perMinute} a minute`],
+      ['a burst of 61 messages in an hour', 61, sats(61 * paidAction(SAT).ceiling), 'REFUSED, the 61st', `${BREAKERS.perHour} an hour`],
+      ['ai client: 200 actions over 10 hours', 20, sats(Math.round((200 / 60) * 10) * paidAction(SAT).ceiling), 'fits', `${BREAKERS.perHour} an hour`],
+      ['porch reader: 30 reads in an hour', 30, sats(5 * paidAction(PAGE).ceiling), 'fits', `${BREAKERS.perHour} an hour`]]);
 
   const AI = PROFILES[3][1];
   const VELOCITY_10_MIN = 100 * SAT;
   table(`T13. AI client grant sizes against 200 small actions a day (each recipient may use the whole grant; drain time at ${sats(VELOCITY_10_MIN)} sats per 10 minutes)`,
     ['grant/day', 'fiat', 'actions, ceiling', 'actions, actual', 'refused, ceiling', 'refused, actual', 'fastest drain at that velocity'],
-    [200, 500, 1000, 1500, 2500].map((n) => {
+    [100, 200, 500, 1000, 1500, 2500].map((n) => {
       const d = n * SAT;
       const r = rates({ contact: d, daily: d });
       return [sats(d), fiat(d), Math.floor(d / paidAction(SAT).ceiling), Math.floor(d / paidAction(SAT).actual),
