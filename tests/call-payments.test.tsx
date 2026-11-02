@@ -790,7 +790,7 @@ const paired = { state: 'paired', scopes: ['read', 'receive', 'spend'], node_id:
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 
-function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number } = {}) {
+function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number; budget?: Reply } = {}) {
   resetContactsForTests();
   setPetname(A, 'Maya');
   const calls: { cmd: string; args?: unknown }[] = [];
@@ -812,7 +812,7 @@ function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?
     payments_overview: () => ({ balance_msat: 1_000_000, lightning_outbound_msat: 500_000, channels: [] }),
     fund_state: () => null,
     spend_status: () => spending,
-    budget_status: () => null,
+    budget_status: opts.budget ?? (() => null),
     call_quote: () => opts.quote ?? QUOTE,
     call_signal: (args) => {
       const kind = (args as { kind: number }).kind;
@@ -941,6 +941,37 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect($('[data-call-minute-price]')?.textContent).toContain('pr. minut');
     expect($('[data-call-reservation-max]')?.textContent).toContain('ringer din node ikke op');
   });
+
+  it('the contact-budget line shows only once the box’s call limit is known: none before any call, then with the 10-minute limit its reservation pinned', async () => {
+    const left = 50_000;
+    const host = stubHost({ minutes: 10, budget: () => ({
+      paused: false, waiting_for_owner: false, ceiling_msat: 500_000, max_daily_msat: 100_000_000, spent_msat: 0, unsettled_msat: 0,
+      preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }],
+      rows: [], autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null }, window_ms: 600_000,
+      node_grant: { expires_at_ms: Date.now() + 86_400_000, budget_msat: 5_000_000, remaining_msat: 5_000_000, per_call_max_msat: 5_000_000,
+        recipient_left_msat_by_recipient: { [A]: left } },
+    }) });
+    await openShell();
+    // The limit is unknown before any call: no warning, Ring enabled.
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    expect($('[data-call-reservation-max]')).not.toBeNull();
+    expect($('[data-call-contact-budget-short]')).toBeNull();
+    expect($<HTMLButtonElement>('[data-call-confirm="audio"]')!.disabled).toBe(false);
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    // The box pins its 10-minute limit on the reservation.
+    await vi.waitFor(() => expect($('[data-call-hold]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-dismiss]')?.disabled).toBe(false), { timeout: 4_000 });
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    const hold = 10 * (BLOCK + FEE) + QUOTE.offer_msat! + QUOTE.offer_max_routing_fee_msat;
+    expect($('[data-call-contact-budget-short]')?.textContent).toBe(
+      `Your box has only ${amount(left)} left for Maya right now. A call holds up to ${amount(hold)}, so your box will likely turn it down. Raise this contact’s budget on your box before you ring.`);
+    // Display only: Ring stays enabled; the box remains the authority.
+    expect($<HTMLButtonElement>('[data-call-confirm="audio"]')!.disabled).toBe(false);
+    expect(host.used('call_block')).toHaveLength(0);
+  }, 15_000);
 
   it('once it rings, the card shows the node’s exact hold under its own call limit (max_call_minutes) to confirm', async () => {
     const host = stubHost({ minutes: 60 });

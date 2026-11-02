@@ -2,7 +2,7 @@ import { IncomingCallAlerts } from './IncomingCallAlerts';
 import { createMissedCalls } from './missedCalls';
 import { createPhoneLayout, createPhoneNavigationGuard, PhoneTabs, type PhoneTab } from './PhoneShell';
 import { MediaView } from './CallMedia';
-import { RingBudgetNote } from './ringBudget';
+import { knownCallLimit, RingBudgetNote } from './ringBudget';
 import { createMessageNotifications, NotificationSettings } from './messageNotifications';
 import { isTauri, invoke } from '@tauri-apps/api/core';
 import { OwnerApprovalSheets } from './OwnerApprovalSheet';
@@ -342,6 +342,8 @@ export type Actions = {
   callActive: () => boolean;
   /** Read-only, display only: the current node grant for the call confirm's contact-budget line; null when unknown or stale. */
   callGrant?: () => NodeGrantSummary | null;
+  /** Display only: the call limit (minutes) this box pinned on a reservation earlier this session; null when not seen. */
+  callLimitMinutes?: () => number | null;
   callView?: () => CallView;
   /** Open the meeting planner with this contact picked. Pays nothing. */
   planMeeting: (peer: string) => void;
@@ -1390,6 +1392,16 @@ export function ControlCenter(props: Props) {
 
   // Calls: media is peer to peer in this webview; each signal is one paid send.
   const [callView, setCallView] = createSignal<CallView>(CALL_IDLE);
+  // Display only, this session, never stored: the call limit (`max_call_minutes`) the box last
+  // pinned on one of our reservations. The host does not report it before Ring; the
+  // contact-budget line in the call confirm uses it, and shows nothing until it is seen.
+  const [seenCallLimit, setSeenCallLimit] = createSignal<{ node: string; minutes: number } | null>(null);
+  createEffect(() => {
+    const minutes = knownCallLimit(callView().minutes?.reservation?.max_call_minutes);
+    const node = ownId();
+    if (node && minutes !== null) setSeenCallLimit({ node, minutes });
+  });
+  const callLimitMinutes = () => { const s = seenCallLimit(); return s && s.node === ownId() ? s.minutes : null; };
   const [waitingCalls, setWaitingCalls] = createSignal<CallView[]>([]);
   const waitingPanels = new Map<string, HTMLElement>();
   const isIncoming = (peer: string, id: string) => [callView(), ...waitingCalls()].some(v => v.peer === peer && v.callId === id && v.phase === 'incoming' && !v.silenced);
@@ -1559,6 +1571,7 @@ export function ControlCenter(props: Props) {
     placeCall: (peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); },
     callView,
     callActive: () => !['idle', 'ended'].includes(callView().phase) || meetingOn(),
+    callLimitMinutes,
     callGrant: () => grantUnknown() || (budget() !== null && (!budgetConfirmed() || !!errors.budgetPoll)) ? null : budget()?.node_grant ?? null,
     // Opens the planner; the contact is pre-picked only if their node takes meetings.
     planMeeting: (peer) => {
@@ -3540,7 +3553,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
             </p>
             <Show when={nodeRoutedAudio() && quote()?.block_msat != null ? quote() : null}>{(q) => <>
               <MinutesConsent quote={q()} />
-              <RingBudgetNote grant={props.actions.callGrant?.() ?? null} peer={props.peer} name={props.name} quote={q()} />
+              <RingBudgetNote grant={props.actions.callGrant?.() ?? null} peer={props.peer} name={props.name} quote={q()} callLimitMinutes={props.actions.callLimitMinutes?.() ?? null} />
             </>}</Show>
             <p class="hint" data-call-stun-source>{callStunLabel()}</p>
             <div class="call-confirm-actions">
