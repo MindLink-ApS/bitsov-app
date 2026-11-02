@@ -745,7 +745,6 @@ fn unresolved_calls(dir: &Path, node_id: &str) -> Result<Vec<UnresolvedCall>, Ac
 pub fn list_operations(dir: &Path, node_id: &str, peer: Option<&str>, limit: usize) -> Result<OpList, ActionError> {
     let limit = limit.clamp(1, OP_LIST_LIMIT);
     let mut rows = std::collections::BTreeMap::new();
-    let mut calls = Vec::new();
     let mut skipped = 0;
     let mut matched = 0;
     for entry in history_entries(dir)? {
@@ -757,18 +756,10 @@ pub fn list_operations(dir: &Path, node_id: &str, peer: Option<&str>, limit: usi
         };
         if record.node_id != node_id || peer.is_some_and(|p| p != record.peer) { continue; }
         matched += 1;
-        if peer.is_some() && matches!(record.kind.as_str(), "call_offer" | "call_recovery" | "call_hangup") {
-            calls.push(record.clone());
-        }
         rows.insert((record.created_ms, record.op_id.clone()), record);
         if rows.len() > limit { rows.pop_first(); }
     }
-    // Ending a stuck call finds its admission here by id. A contact's later
-    // messages and minutes must not push the one that blocks calling them out.
-    let open: Vec<_> = calls.iter()
-        .filter(|r| admission_open(r, &calls) && !rows.contains_key(&(r.created_ms, r.op_id.clone())))
-        .cloned().collect();
-    Ok(OpList { operations: rows.into_values().rev().chain(open).map(Into::into).collect(), skipped, has_more: matched > limit, unresolved_calls: unresolved_calls(dir, node_id)? })
+    Ok(OpList { operations: rows.into_values().rev().map(Into::into).collect(), skipped, has_more: matched > limit, unresolved_calls: unresolved_calls(dir, node_id)? })
 }
 
 /// Read an atomic index/record snapshot when a live signal arrives, before
@@ -1136,34 +1127,6 @@ mod tests {
         assert!(journal.repair_call_index("node", id).unwrap().is_none());
         assert_eq!(std::fs::read_to_string(path).unwrap(), "PRIVATE damaged");
         assert!(journal.call_operations("node", None).is_err());
-    }
-
-    #[test]
-    fn listing_a_peer_keeps_its_open_admission_past_the_newest_rows() {
-        let dir = tempfile::tempdir().unwrap();
-        let open = history_fixture(dir.path(), 1, OperationState::Settled, "call_offer");
-        let closed = history_fixture(dir.path(), 2, OperationState::Settled, "call_offer");
-        let mut hangup = history_fixture(dir.path(), 3, OperationState::Unpaid, "call_hangup");
-        hangup.parent_op = Some(closed.op_id.clone());
-        hangup.reason = Some("call_not_live".into());
-        std::fs::write(dir.path().join("ops").join(format!("{}.json", hangup.op_id)), serde_json::to_vec(&hangup).unwrap()).unwrap();
-        // A refused hangup with no reason closes nothing.
-        let mut refused = history_fixture(dir.path(), 4, OperationState::Unpaid, "call_hangup");
-        refused.parent_op = Some(open.op_id.clone());
-        std::fs::write(dir.path().join("ops").join(format!("{}.json", refused.op_id)), serde_json::to_vec(&refused).unwrap()).unwrap();
-        for id in 10..20 { history_fixture(dir.path(), id, OperationState::Settled, "call_block"); }
-        let page = list_operations(dir.path(), "node", Some("peer"), 3).unwrap();
-        let ids: Vec<&str> = page.operations.iter().map(|o| o.op_id.as_str()).collect();
-        assert_eq!(ids.len(), 4, "{ids:?}");
-        assert!(ids[0].ends_with("000000000013") && ids[2].ends_with("000000000011"), "{ids:?}");
-        assert_eq!(ids[3], open.op_id, "newest first, then the open admission");
-        assert!(page.has_more);
-        // Inside the window it is not listed twice.
-        let wide = list_operations(dir.path(), "node", Some("peer"), 100).unwrap();
-        assert_eq!(wide.operations.iter().filter(|o| o.op_id == open.op_id).count(), 1);
-        // Other peers and the unscoped list keep their plain window.
-        assert!(list_operations(dir.path(), "node", Some("other"), 3).unwrap().operations.is_empty());
-        assert_eq!(list_operations(dir.path(), "node", None, 3).unwrap().operations.len(), 3);
     }
 
     #[test]
