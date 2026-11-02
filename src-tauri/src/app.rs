@@ -12985,6 +12985,7 @@ mod control_act_tests {
                 } else { happy()(m, p, b) }
             }));
             spend_advance(&node.state, true).await.unwrap();
+            if kind == 404 { admit_minutes(&node.state, A, CALL_ID); }
             let body = serde_json::json!({"recipient": A, "is_room": false, "kind": kind, "plaintext": OFFER});
             let op = spend_journal::operation(&body);
             let id = has_operation_id.then(|| spend_journal::new_operation_id().unwrap());
