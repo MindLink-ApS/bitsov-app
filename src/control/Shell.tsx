@@ -51,6 +51,7 @@ import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './W
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
 import { callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { CallReportCopy } from './CallReportCopy';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { nodeRoutedAudio } from './callFlags';
 import { createNodeRoutedConnection } from './nodeRoutedConnection';
@@ -3806,6 +3807,8 @@ function CallPanel(props: {
           {(m) => <CallMinutesLine minutes={m()} ended={v().phase === 'ended'} confirm={props.confirmMinutes} />}
         </Show>
         {props.payment}
+        {/* M6 P3: after the call, the app's own record of it, to copy next to the node journal. Display only. */}
+        <CallReportCopy view={v()} routed={!!props.routed} />
         <div class="call-actions">
           <Switch>
             <Match when={v().phase === 'incoming'}>
