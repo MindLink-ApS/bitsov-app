@@ -4246,7 +4246,7 @@ mod tests {
         let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let local_addr = probe.local_addr().unwrap();
         drop(probe);
-        let proxy = start_proxy(&format!("http://{local_addr}/api/v1"), app_dir.path(), descriptor, key,
+        let proxy = start_proxy(&format!("http://{local_addr}/{}", "api/v1"), app_dir.path(), descriptor, key,
             "BitSov test", pairing_store.path().to_path_buf(), local_auth.clone(), retry).await.unwrap();
         (proxy, app_dir, pairing_store)
     }
