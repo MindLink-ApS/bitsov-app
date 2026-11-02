@@ -31,7 +31,7 @@ limits must move with them, or calls still fail:
 | Per-payment limit on a grant or envelope | 6 or 10 sats on some paths | 50 sats |
 | In-app self-approval ceiling (#394) | 200 sats a day | 2,500 sats a day, as a 24-hour total |
 
-At these numbers the family profile (30 messages and two 10-minute calls a
+At these numbers the regular profile (30 messages and two 10-minute calls a
 day) is refused nothing and costs about 328 sats a day, or 59 DKK a month on
 the assumption above. Most of that goes to the person called, not to the
 network.
@@ -135,7 +135,7 @@ Profiles:
 | Profile | One day |
 |---|---|
 | light | 3 messages |
-| family | 30 messages, two 10-minute calls, one contact |
+| regular | 30 messages, two 10-minute calls, one contact |
 | heavy | 100 messages, five calls to the box limit, five contacts |
 | AI client | 200 small paid actions, three recipients |
 | porch reader | 30 page reads across five boxes |
@@ -196,36 +196,36 @@ a message. Sets use 10 sats a minute unless named. The T4 month is 30 such days.
 | Rate set | Profile | Sats/day | Sats/month | DKK/month (assumed) | Free at Ring | Refused | First refusal |
 |---|---|---|---|---|---|---|---|
 | Today: 50 / 500, limit 10 | light | 6 | 180 | 1.08 | - | 0/0 | none |
-| | family | 46 | 1,380 | 8.28 | - | 75%/28% | contact budget |
+| | regular | 46 | 1,380 | 8.28 | - | 75%/28% | contact budget |
 | | heavy | 200 | 6,000 | 36 | - | 62%/5% | contact, at hold |
 | | AI client | 138 | 4,140 | 25 | - | 88%/66% | contact budget |
-| As re-approved: 250 / 500 | family | 183 | 5,490 | 33 | 171 | 56%/3% | contact budget |
+| As re-approved: 250 / 500 | regular | 183 | 5,490 | 33 | 171 | 56%/3% | contact budget |
 | | heavy | 446 | 13,380 | 80 | 171 | 48%/3% | daily, at hold |
-| #394 today: 200 / 200, per-call 6 | family | 60 | 1,800 | 11 | - | 6%/6% | per-call cap |
-| #394 today: 200 / 200, per-call 50 | family | 183 | 5,490 | 33 | 171 | 6%/3% | daily, at hold |
-| 2 sats a min: 250 / 1,000, limit 30 | family | 60 | 1,800 | 11 | - | 6%/6% | contact, at hold |
+| #394 today: 200 / 200, per-call 6 | regular | 60 | 1,800 | 11 | - | 6%/6% | per-call cap |
+| #394 today: 200 / 200, per-call 50 | regular | 183 | 5,490 | 33 | 171 | 6%/3% | daily, at hold |
+| 2 sats a min: 250 / 1,000, limit 30 | regular | 60 | 1,800 | 11 | - | 6%/6% | contact, at hold |
 | **Proposed: 1,000 / 2,500, limit 30** | light | 6 | 180 | 1.08 | - | 0/0 | none |
-| | family | 328 | 9,840 | 59 | 471 | 0/0 | none |
+| | regular | 328 | 9,840 | 59 | 471 | 0/0 | none |
 | | heavy | 1,915 | 57,450 | 345 | 471 | 1%/0% | daily, at hold |
 | | AI client | 400 | 12,000 | 72 | - | 0/0 | none |
 | | porch reader | 60 | 1,800 | 11 | - | 0/0 | none |
-| Same, limit 10 | family | 306 | 9,180 | 55 | 171 | 0/0 | none |
+| Same, limit 10 | regular | 306 | 9,180 | 55 | 171 | 0/0 | none |
 | Long calls: 2,500 / 10,000, limit 60 | heavy | 3,565 | 106,950 | 642 | 921 | 0/0 | none |
 
 Across the grid (T5, `ceiling`), the share of rate sets refusing nothing: light
-33%, family 11%, heavy 9%, AI client 12%, porch reader 100%. Light tops out at
+33%, regular 11%, heavy 9%, AI client 12%, porch reader 100%. Light tops out at
 33% because a message above 1 sat is refused (next section).
 
 Smallest candidate budgets refusing nothing at 10 sats a minute (T5c,
 contact / daily):
 
-| Box limit | Family | Heavy |
+| Box limit | Regular | Heavy |
 |---|---|---|
 | 10 | 1,000 / 1,000 | 500 / 2,500 |
 | 30 | 1,000 / 1,000 | 1,000 / 5,000 |
 | 60 | 2,500 / 2,500 | 2,500 / 10,000 |
 
-Family needs a higher contact budget than heavy because its day goes to one contact.
+Regular needs a higher contact budget than heavy because its day goes to one contact.
 
 ### Findings
 
@@ -351,7 +351,7 @@ least one hold. The callee's inbound must also take the blocks.
 | Per minute | 10 sats | **10 sats** | Node default | Keeps routing a minor part. Already tested live. An hour is 600 sats, 3.60 DKK on the assumption, paid to the person called. 5 sats would lower the hold by a third; below that the routing floor dominates. |
 | Block, grace, due time | 60 s, 10 s, 20 s | **no change** | Protocol | Short enough to limit loss on either side; nothing in the simulation asks for more. |
 | Box `max_call_minutes` | 10 | **30** | Node default | A call cut off at 10 minutes is a failure for the person using it. Costs a larger hold, 471 instead of 171 sats free at Ring; the extra is held, not spent. Above 30, one contact budget holds one call (limit 60: `1/1`). |
-| Default contact budget | 50 sats a day | **1,000 sats a day** | App default | Family refuses nothing at limit 10 or 30, and three to five full calls fit. Exposure per contact goes up 20 times, to 6 DKK a day on the assumption. |
+| Default contact budget | 50 sats a day | **1,000 sats a day** | App default | Regular refuses nothing at limit 10 or 30, and three to five full calls fit. Exposure per contact goes up 20 times, to 6 DKK a day on the assumption. |
 | First-contact choices | 50, 100, 250 | **Kun beskeder 250; Til opkald 1,000, preselected; Til lange opkald 2,500** | App default | "Til opkald" is the default, so a call works without a second decision. 250 says plainly that it is for messages. |
 | Default daily budget | 500 (Careful) | **2,500 sats** | App default | Eleven 10-minute calls across contacts, and heavy loses at most one call. Worst day 15 DKK on the assumption. |
 | Presets, daily / contact | see section 1 | **Careful 1,000 / 1,000; Everyday 2,500 / 1,000 (default); Generous 10,000 / 2,500** | App default | No preset may refuse a call. Careful keeps the smallest worst day. Room budgets are not simulated and stay as they are. |
@@ -369,7 +369,7 @@ least one hold. The callee's inbound must also take the blocks.
 
 ### If the owner keeps the 10-minute limit
 
-Everything else stands. The family result is the same (306 sats a day, no
+Everything else stands. The regular result is the same (306 sats a day, no
 refusals) and a 1,000-sat contact budget holds five full calls. The tradeoff is
 calls that stop at 10 minutes.
 
@@ -401,7 +401,7 @@ in section 2 are gross, not net.
 **Recommendation for #394:** a ceiling of 2,500 sats, counted as a total across
 self grants in any 24 hours, so the worst day stays at 2,500 sats, and a signed
 per-payment limit of 50 sats. If the owner wants a smaller ceiling, 1,000 sats is
-the lowest that still works (family refused nothing, T10), and the default daily
+the lowest that still works (regular refused nothing, T10), and the default daily
 budget should then also be 1,000. A default above the ceiling could not be
 approved in the app.
 
@@ -464,7 +464,7 @@ routing node between the boxes. Test funds only.
 | Step | Do | Answers |
 |---|---|---|
 | 1 | Set the proposed prices, limits 10 and 30, read `GET /pair/grant` and call status | Node-side items 1, 2, 7 |
-| 2 | Run a family and a heavy day at contact budgets 50, 250, 500, 1,000 | Refusal points against T3, T4; the first refusal must match |
+| 2 | Run a regular and a heavy day at contact budgets 50, 250, 500, 1,000 | Refusal points against T3, T4; the first refusal must match |
 | 3 | Run direct, 1-hop and 3-hop routes; record `fee_paid_msat` for 1-sat and 10-sat payments | Real routing against the 5-sat allowance; whether a 2-sat allowance would work |
 | 4 | Run an hour-long call and a burst of messages | Node-side item 3: the real breakers, and whether blocks count |
 | 5 | Try a relation grant with a 6-sat envelope, then a 50-sat one | Node-side item 4; finding 4 |

@@ -164,12 +164,12 @@ function day({ messages, calls = 0, minutes = 10, contacts = 1, kind = 'msg', un
 
 const PROFILES = [
   ['light', day({ messages: 3 })],
-  ['family', day({ messages: 30, calls: 2, minutes: 10 })],
+  ['regular', day({ messages: 30, calls: 2, minutes: 10 })],
   ['heavy', day({ messages: 100, calls: 5, minutes: 'limit', contacts: 5 })],
   ['ai client', day({ messages: 200, contacts: 3 })],
   ['porch reader', day({ messages: 30, contacts: 5, kind: 'page', unbudgeted: true })],
 ];
-const FAMILY = PROFILES[1][1];
+const REGULAR = PROFILES[1][1];
 const HEAVY = PROFILES[2][1];
 
 /** Sequential full calls of `minutes` that ring inside one budget. */
@@ -326,8 +326,8 @@ function printTables() {
     return 'none in grid';
   };
   table('T5c. Smallest candidate contact / daily budget with no refusal (message 1 sat, budgets count ceilings)',
-    ['sats/min', 'box limit', 'family', 'heavy'],
-    BLOCKS.flatMap((block) => LIMITS.map((limit) => [sats(block), limit, smallest(limit, block, FAMILY), smallest(limit, block, HEAVY)])));
+    ['sats/min', 'box limit', 'regular', 'heavy'],
+    BLOCKS.flatMap((block) => LIMITS.map((limit) => [sats(block), limit, smallest(limit, block, REGULAR), smallest(limit, block, HEAVY)])));
 
   table('T6. Exposure: the worst a compromised or misbehaving app can spend',
     ['daily budget', 'worst/day', 'fiat', 'worst, 3 self grants in 24 h (#394)', 'fiat', 'worst, 30 days', 'fiat', '10-min calls that ring (proposed rates, ceiling)'],
@@ -382,13 +382,13 @@ function printTables() {
     }));
 
   table('T10. The in-app self-approval ceiling (#394: 200 sats a day today), used as contact and daily budget, 10 sats a minute',
-    ['ceiling', 'worst/24 h, 3 grants', 'fiat', 'calls ring, limit 10', 'calls ring, limit 30', 'family refused, limit 10', 'family refused, limit 30', 'approves a 2 500 daily default in the app?'],
+    ['ceiling', 'worst/24 h, 3 grants', 'fiat', 'calls ring, limit 10', 'calls ring, limit 30', 'regular refused, limit 10', 'regular refused, limit 30', 'approves a 2 500 daily default in the app?'],
     [200, 500, 1000, 2500, 5000].map((n) => {
       const d = n * SAT;
       const short = rates({ limit: 10, contact: d, daily: d });
       const long = rates({ limit: 30, contact: d, daily: d });
       return [sats(d), sats(3 * d), fiat(3 * d), fullCalls(short, STANDARD_MINUTES, 'ceiling'), fullCalls(long, STANDARD_MINUTES, 'ceiling'),
-        `${simulateDay(short, FAMILY, 'ceiling').refused}/${FAMILY.length}`, `${simulateDay(long, FAMILY, 'ceiling').refused}/${FAMILY.length}`, n >= 2500 ? 'yes' : 'no, node computer'];
+        `${simulateDay(short, REGULAR, 'ceiling').refused}/${REGULAR.length}`, `${simulateDay(long, REGULAR, 'ceiling').refused}/${REGULAR.length}`, n >= 2500 ? 'yes' : 'no, node computer'];
     }));
 
   const today = rates();
