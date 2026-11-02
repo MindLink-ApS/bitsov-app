@@ -3,14 +3,18 @@
 Status: **design proposal, docs only.** Nothing here is built. It needs two
 independent reviews and the owner decisions listed at the end before any slice
 starts. No code, node contract or release note may cite this file as shipped
-behavior. Hardened after an independent review (round 1): section 3.5 now
-states the push credential path as an open owner decision with three honest
-options, and adds token rotation and the wake-pattern leak. Owner decisions
-since: wake push is **off by default** (D1; the push credential path stays
-open and must be decided before phase P3 is built), and a lost phone can be
-revoked **without a terminal** (D7, section 4.4). Corrected after a second
-review: what a person running a shared box can read and hear (section 5.1), and
-which boxes the revoke in section 4.4 can work on.
+behavior. Hardened after an independent review (round 1): section 3.5 adds token
+rotation and the wake-pattern leak. Owner decisions since: wake push is **for
+self-builders only**, and off for everyone else (D1, section 3.5); a lost phone
+can be revoked **without a terminal** (D7, section 4.4); hosting other people on
+a box is **parked** until the key boundary meets the charter (section 5). Corrected
+after a second review: what a person running a shared box can read and hear
+(section 5.1), and which boxes the revoke in section 4.4 can work on.
+
+**Principle.** Build little policy in; ship defaults the user can change. BitSov
+is the base for open source, and what nodes share is timechain entrainment and
+payment attached to the packet. Money-path correctness and the review gate are
+not defaults.
 
 Three questions, in the order they will hurt users:
 
@@ -19,9 +23,8 @@ Three questions, in the order they will hurt users:
 - **(b)** One person has a phone and a Mac. Both should show the same
   conversations, and a call should ring on both and stop on both when one
   answers.
-- **(c)** Several people (for example a household) use one box. The principle is
-  already decided by the owner (section 5); this document lists what the code
-  must change to follow it.
+- **(c)** Several people (for example a household) use one box. **Parked, not
+  planned** (section 5). The analysis stays; nothing here is scheduled.
 
 ## 1. Principle, as the code already states it
 
@@ -39,9 +42,9 @@ What follows from that, and what this document keeps:
   to the same identity are the same person to everyone else. Each device has
   its own client key and its own device key (`src-tauri/src/device.rs`), but
   they speak for one identity.
-- **A box may host several people** (owner decision, 6 October; section 5).
-  Each hosted person is still their own identity with their own seed. Hosting
-  is never a shared wallet and never a sub-account.
+- **Hosting several people on a box is parked** (section 5). The owner's
+  principle of 6 October still describes the shape: each hosted person is their
+  own identity with their own seed, never a shared wallet and never a sub-account.
 - **No sub-accounts, no shared wallets, no multisig** exist anywhere in the
   app or the node contract it pins today, and none are planned. Nothing in this
   document pretends one does.
@@ -140,6 +143,10 @@ answered. It keeps ringing until the caller hangs up or `RING_MS` runs out.
 
 ## 3. Design (a): ring a locked phone
 
+Decided: this design applies only to an app a person builds and signs themselves
+with their own push credentials (section 3.5). A locked phone does not ring for
+anyone else.
+
 ### 3.1 iOS: PushKit VoIP + CallKit
 
 - Add the `voip` background mode and a PushKit VoIP push registration. Apple
@@ -192,43 +199,38 @@ registered device per paid offer.
 ### 3.4 Who sends the push (privacy-critical; decided in 3.5)
 
 APNs and FCM only accept pushes from a server holding the developer's
-credentials (APNs key / FCM service account). A long-lived copy of those
-credentials in every box would be a key that can push to every BitSov
-device, so the box can only send directly if it gets a narrow, short-lived
-way to authenticate (section 3.5). Options:
+credentials (APNs key / FCM service account). A shared copy of those credentials
+in every box would be a key that can push to every BitSov device, so no box holds
+one (section 3.5). Options:
 
 | Sender | What it learns | Cost |
 |---|---|---|
-| A. Relay run by the publisher | Device push token, the box that asked, time of each wake | One small stateless service; a new party in the metadata path |
-| B. Relay per hub / operator | Same, but split across operators | Each operator needs push credentials; harder to run |
+| A. Relay run by the publisher (rejected) | Device push token, the box that asked, time of each wake | One small stateless service; a new party in the metadata path |
+| B. Relay per hub / operator (rejected) | Same, but split across operators | Each operator needs push credentials; harder to run |
 | C. No push; keep the phone connected | Nothing new | Not allowed by iOS for a suspended app; drains battery on Android |
-| D. The box itself, direct to APNs / FCM | Apple / Google: device push token and wake time, as in every option; no new party | Needs a safe credential path for the box (section 3.5) |
+| D. The box itself, direct to APNs / FCM | Apple / Google: device push token and wake time, as in every option; no new party | Self-builders only, with their own credentials (section 3.5) |
 
-Rules for any push sender (written for the relay options A and B, which
-are rejected in 3.5; the box-side rules apply to option D too):
+Rules for the box as push sender:
 
-- The relay never sees who calls whom. The box sends "wake token X"; the
-  relay maps X to a push token and forgets the request. No caller id, no peer
-  node id.
 - Wake tokens rotate and are registered by the device through its own box,
   not by the caller's box. A peer can never trigger a push directly.
 - Rate limits at the box (per peer, per minute) so a stranger cannot use
   pushes to drain a battery or probe whether a device is online. Calls from
   strangers that the node would refuse anyway never cause a push.
-- The relay still learns "this box woke this device at this time". Apple and
-  Google learn the same. This is a real leak and must be written down in the
-  app's privacy text before release. Decided in section 3.5 (D1).
+- Apple and Google learn "this box woke this device at this time". This is a
+  real leak and must be written down in the privacy text of a self-built app
+  (section 3.5).
 
-### 3.5 Decision: wake push is a per-user setting, off by default (decided)
+### 3.5 Decision: wake push is for self-builders only (decided)
 
-Status: **decided by the owner** (D1). The wake push is a **setting each
-person chooses**, and it is **off by default**. A person turns it on
-themselves, in Settings or during phone setup, after plain words about what
-Apple / Google learn (setting copy below). Nothing turns it on for them.
-There is no BitSov or publisher relay in the plan; options A and B in the
-table above are rejected.
+Status: **decided by the owner** (D1). Wake push exists only in an app a person
+builds and signs themselves, with their own push credentials. It starts off there
+too; that person turns it on in Settings after plain words about what Apple /
+Google learn (setting copy below). For everyone else it is off and cannot be turned
+on. There is no BitSov or publisher relay in the plan; options A and B in the table
+above are rejected.
 
-**Wake push on (option D above; only when the person turns it on).**
+**Wake push on (option D above; self-builders only).**
 The person's own box sends a **content-free wake push directly to the
 platform push service** (APNs for iOS, FCM for Android). The phone wakes and
 fetches everything else (who calls, which message, which approval) from its
@@ -242,9 +244,8 @@ own box over its existing authenticated connection, as section 3.3 requires.
   both push, the platform can see wakes that line up between them, which
   hints that those two people talk. The privacy text must say this, not only
   "when your box wakes the phone".
-- Whether anyone **beyond** Apple / Google learns anything depends on the
-  credential path, which is not settled (below). Only options (i) and (ii)
-  keep a third party out entirely.
+- Nobody **beyond** Apple / Google learns anything: no relay and no token
+  service sit in the path, and the credentials are the person's own.
 - Rules from 3.4 still apply: wake tokens rotate and are registered by the
   device through its own box; a peer can never trigger a push; the box
   rate-limits per peer and never pushes for calls it would refuse.
@@ -255,32 +256,21 @@ own box over its existing authenticated connection, as section 3.3 requires.
   (HTTP 410) or FCM answers `UNREGISTERED`, and never retries it. Pushing on
   to dead tokens would make the box a liveness oracle.
 
-**Push credential path: still OPEN; must be decided before P3 is built.**
-The default (off) is decided; who holds the push credential is not. An
-earlier draft proposed a
-"short-lived sender credential" refreshed on a timer. The review showed that
-this only moves the relay: an APNs provider token (a JWT) is signed with the
-publisher's APNs auth key, so whoever issues the short-lived token holds a
-key that can push to every BitSov device, and still learns which boxes are
-alive at each refresh (and can correlate refreshes with wake bursts at
-coarse granularity). That proposal is withdrawn. The honest options are:
+**Push credential path: decided by the owner: self-builders only.** A person
+who builds and signs their own app, with their own app id and their own APNs / FCM
+credentials, can enable wake push. Those credentials live on that person's own box
+and can push only to that person's own app. It is off for everyone else:
 
-| Option | Who holds the push key | What leaks beyond Apple / Google | Who it works for |
-|---|---|---|---|
-| (i) The box holds the APNs / FCM key | every box, for a shared app id | nothing new, but each box holds a key that can push to every device of the app | rejected: one leaked box key pushes to everyone |
-| (ii) Per-owner app id and per-owner push key | the owner, for an app they build and sign themselves | nothing new | self-builders only |
-| (iii) A token-issuing service | the service, which holds the publisher key | the service learns which boxes are alive at each refresh, and holds a key that can push to every device | everyone, but it is a credential relay: the metadata-light relay the owner rejected in D1 |
+- no shared app-wide key on any box, because one leaked box key could push to
+  every device of the app;
+- no relay and no token-issuing service, because either one holds a key that can
+  push to every device and learns which boxes are alive.
 
-The design must not call (iii) "no relay". The owner picks one of:
+**A locked phone does not ring for anyone else.** In a build the person did not
+sign themselves there is no wake-push setting to turn on.
 
-- (ii) for self-builders, and **push off** for everyone else; or
-- (iii) for everyone, accepting and publishing the leak stated above.
-
-The owner must pick one of the three options above before phase P3 is
-built; until then P3 does not start. Wake push being **off by default** is
-already decided (D1) and does not wait for this choice.
-
-**Wake push off (option C above; the default).** No push is ever sent. A locked or
+**Wake push off (option C above; everyone else, and a self-builder's default).**
+No push is ever sent. A locked or
 backgrounded phone cannot ring; the person opens the app to see calls and
 messages, which it then fetches from the box as today.
 
@@ -289,22 +279,21 @@ Setting copy (draft, plain words):
 | | Dansk | English |
 |---|---|---|
 | Title | Vække telefonen ved opkald | Wake the phone for calls |
-| On | Telefonen ringer, også når den er låst. Apple eller Google ser kun, hvornår din boks vækker telefonen, aldrig hvem der ringer eller skriver. | Your phone rings even when locked. Apple or Google only see when your box wakes the phone, never who calls or writes. |
-| Off | Telefonen ringer ikke, når den er låst. Åbn appen for at se opkald og beskeder. Et åbent opkald slutter, når telefonen låses. | Your phone does not ring when locked. Open the app to see calls and messages. An open call ends when the phone locks. |
+| On (self-built app only) | Telefonen ringer, også når den er låst. Apple eller Google ser kun, hvornår din boks vækker telefonen, aldrig hvem der ringer eller skriver. | Your phone rings even when locked. Apple or Google only see when your box wakes the phone, never who calls or writes. |
+| Off (self-built app only) | Telefonen ringer ikke, når den er låst. Åbn appen for at se opkald og beskeder. Et åbent opkald slutter, når telefonen låses. | Your phone does not ring when locked. Open the app to see calls and messages. An open call ends when the phone locks. |
+| Every other build, no setting | Telefonen ringer ikke, når den er låst. Åbn appen for at se opkald og beskeder. Et åbent opkald slutter, når telefonen låses. Kun en app, du selv bygger og signerer med dine egne push-nøgler, kan vække telefonen. | Your phone does not ring when locked. Open the app to see calls and messages. An open call ends when the phone locks. Only an app you build and sign yourself, with your own push keys, can wake the phone. |
 
-The setting starts **Off**. The same title and On / Off text appear in
-Settings and in the optional phone-setup step, so the person reads what
-Apple / Google learn before they turn it on.
+In a self-built app the setting starts **Off** and lives in Settings, so the person
+reads what Apple / Google learn before they turn it on.
 
 The Off copy states both effects of `SILENCED_GRACE_MS` (section 2.3): a
 call rings only while the app is open, and an open call ends when the phone
 locks.
 
-The privacy text before release states, for people who turn the push on:
+The privacy text of a self-built app states, for people who turn the push on:
 the box's IP as sender, the device push token, each wake time, and the
 wake pattern over time (call frequency, and wakes that line up between two
-boxes). If option (iii) is chosen, it also names the token-issuing service
-and what it learns.
+boxes).
 
 ## 4. Design (b): one person, several devices
 
@@ -323,7 +312,7 @@ Remaining gaps, for later slices:
 
 - The callee's **node** owns the ring. On an incoming offer it fans out to
   every registered owner device: live `/ws` where connected, a content-free
-  push (section 3) where not.
+  push (section 3) where not and where a self-built app has it on.
 - The first device that sends a valid answer for the call id wins. The node
   binds the call (and its media socket, which it already admits per
   `(peer, call_id)`) to that device's pairing, and rejects a second answer for
@@ -421,9 +410,14 @@ approvals on for them. The node's reason for the gate is that a same-user progra
 could read that password, so this needs its own security review. Until it exists,
 D7 is a decision about the design, not something that works on such a box.
 
-## 5. Several people on one box: decided principle
+## 5. Several people on one box: PARKED
 
-### 5.1 The decision (owner, 6 October)
+**Parked, not planned, until the key boundary meets the charter.** The reason is
+the honest host-trust statement in section 5.1: whoever runs the box holds a hosted
+person's decrypted seed in memory and can read and hear what passes through. The
+analysis below stays as the record. Nothing in this section is scheduled.
+
+### 5.1 The principle as decided on 6 October (parked)
 
 - **Each person is their own identity with their own seed.** Three people are
   three identities, three seeds, three wallets, three sets of devices.
@@ -437,7 +431,8 @@ D7 is a decision about the design, not something that works on such a box.
   funds and contacts.
 - **It is not a shared wallet and not a sub-account.** The app gives nobody a
   way to spend another person's funds or read another person's messages.
-- **That is a limit of the app, not a technical guarantee.** The person running
+- **That is a limit of the app, not a technical guarantee, and it is the reason
+  hosting is parked.** The person running
   a shared box could technically read and hear what passes through it. The box
   decrypts every message: the node's end-to-end session runs between nodes, and
   the app hands its node the plaintext (`plaintext` in `POST /messages/compose`,
@@ -460,7 +455,7 @@ D7 is a decision about the design, not something that works on such a box.
 Calls and messages therefore reach **a person, not a box**. Today the two are
 the same, so the code never had to tell them apart.
 
-### 5.2 Rejected alternative: shared household identity
+### 5.2 Rejected alternative: shared household identity (parked with the rest)
 
 One identity and one wallet for the whole house, with device labels such as
 "kitchen iPad" or "the old phone". Everyone would read every message and
@@ -469,11 +464,11 @@ spend the shared balance, and a call would ring every device in the house.
 move out, and the wording "household account" would mislead. Device labels remain
 useful for one person's own devices (section 4), nothing more.
 
-### 5.3 Code that assumes one node = one person
+### 5.3 Code that assumes one node = one person (parked)
 
-These places are correct today, because a box hosts one person. Each must be
-re-keyed from "node" to "identity hosted on a node" before a second person can
-be hosted. This list is the work inventory, not a change in this PR.
+These places are correct today, because a box hosts one person. Each would have to
+be re-keyed from "node" to "identity hosted on a node" before a second person could
+be hosted. This list is the analysis, not a work list: none of it is planned.
 
 | Place | Assumption today | Must become |
 |---|---|---|
@@ -494,11 +489,10 @@ it exists; it cannot do this alone.
 
 ### 5.4 What this means now
 
-- **Until the node supports hosting:** each person runs their own box or
-  their own hosted node. Onboarding can say "each person in the house gets
-  their own BitSov". This already matches the decision.
-- **After M6:** the node design for hosting several identities (own seeds,
-  "hosted by", move-out), then the re-keying in 5.3.
+- **Each person runs their own box.** Onboarding can say "each person in the
+  house gets their own BitSov".
+- **Hosting comes back only** when the key boundary meets the charter. Until then
+  there is no node design for it and no re-keying.
 
 ## 6. Phased plan
 
@@ -507,39 +501,35 @@ tests beyond regtest.
 
 | Phase | Scope | Depends on |
 |---|---|---|
-| P0 | This document; owner decisions D1–D7 (D1 default and D7 decided) | — |
+| P0 | This document; owner decisions (D1, D7 and D8 decided; D5 parked) | — |
 | P1 | Notifications on phones while the app is running (lift the macOS-only gate in `Shell.tsx` and `OwnerApprovalSheet.tsx`; same content-free text) | — |
 | P2 | Node: owner-only "answered elsewhere" event; app: stop ringing on it (section 4.2) | Node release |
-| P3 | Box-direct push sender and the per-user wake-push setting (D1, decided), wake-token registration through the box, platform-token re-registration on launch and drop on `Unregistered`, rate limits | Node release, D1 credential path (open; must be decided before P3 is built) |
-| P4 | iOS PushKit + CallKit; Android FCM + foreground service; privacy text | P3 |
+| P3 | Self-builders only: box-direct push sender using the person's own credentials and the wake-push setting (D1, decided), wake-token registration through the box, platform-token re-registration on launch and drop on `Unregistered`, rate limits | Node release |
+| P4 | Self-builders only: iOS PushKit + CallKit; Android FCM + foreground service; privacy text | P3 |
 | P5 | Node-side budget grant as single source; local book becomes a cache | Node release, D4 |
 | P2b | Revoke a lost phone without a terminal, from another owner device or the box's own app (section 4.4, D7) | Node release (revoke route, and a device approval policy for boxes whose seed password comes from a file or a flag) |
-| P6 | Node design for hosting several identities (own seeds, "hosted by", move-out); then the re-keying in 5.3 | M6 done, node release |
+
+Hosting other people on a box is not a phase. It is parked (section 5).
 
 ## 7. Owner decisions (decided and open)
 
-- **D1. Decided by the owner:** the wake push is a per-user setting and it
-  is **off by default**. A person turns it on themselves, in Settings or
-  during phone setup, with plain words about what Apple / Google learn. On:
-  the box sends a content-free wake push directly to APNs / FCM, the phone
-  fetches everything from its own box, and the platform learns the box's
-  address, the device push token and each wake time (and the wake pattern
-  over time). Off (the default): no push; a locked phone cannot ring and
-  the person opens the app to see calls and messages. No relay in the plan
+- **D1. Decided by the owner:** wake push is for self-builders only. A person
+  who builds and signs their own app with their own push credentials can enable
+  it, in Settings, with plain words about what Apple / Google learn. On: the box
+  sends a content-free wake push directly to APNs / FCM, the phone fetches
+  everything from its own box, and the platform learns the box's address, the
+  device push token and each wake time (and the wake pattern over time). It is off
+  for everyone else: no push; a locked phone cannot ring and the person opens the
+  app to see calls and messages. No shared app-wide key on boxes, no relay
   (section 3.5).
-  **Still OPEN under D1, and must be decided before phase P3 is built:**
-  who holds the push credential, one of the three options in section 3.5:
-  (i) the box holds the APNs / FCM key (rejected in the table), (ii) a
-  per-owner key for self-builders with push off for everyone else, or
-  (iii) a token-issuing service with its stated leak.
 - **D2.** Is a Google-free Android build allowed to have no locked-phone
   ringing, or is a self-hosted push (for example UnifiedPush) required?
 - **D3.** Does "Decline" on one device decline on all, or only silence that
   device?
 - **D4.** Single daily budget per person enforced by the node (recommended),
   or synced per-device books?
-- **D5.** Several people on one box: the principle is decided (section 5.1).
-  Open details only: which name "hosted by" shows and whether a contact always
+- **D5. Parked with hosting (section 5).** Several people on one box: the
+  principle was decided (section 5.1). Details not to be decided now: which name "hosted by" shows and whether a contact always
   sees it, and whether the host may see that a hosted person exists on the box
   (the app shows the host no messages or funds). Review note: the host can see
   that a hosted person exists by necessity, because the box routes to them. The
@@ -555,3 +545,5 @@ tests beyond regtest.
   this decision. (Shared with the in-app budget approval design.)
 - **D6.** May a CallKit lock screen show the caller's contact name after the
   app has fetched it, or must it always show only "BitSov call"?
+- **D8. Decided by the owner:** video requires encryption first, or the two
+  designed together.
