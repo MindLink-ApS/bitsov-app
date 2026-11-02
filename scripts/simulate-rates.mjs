@@ -392,7 +392,7 @@ function printTables() {
     }));
 
   const today = rates();
-  table(`T11. Replay of the live test: 10 sats a minute, offer 10, box limit 10, so ${sats(ringNeed(today))} sats free at Ring`,
+  table(`T11. Replay of the field test: 10 sats a minute, offer 10, box limit 10, so ${sats(ringNeed(today))} sats free at Ring`,
     ['free in the budget', 'result', 'left beside the hold'],
     [47, 50, 171, 200, 250, 500].map((n) => [`${n} sats`, n * SAT < ringNeed(today) ? 'offer and hangup fit; refused at the hold' : 'rings', sats(n * SAT - Math.min(n * SAT, ringNeed(today)))]));
   table('T11b. Blocks paid by call length (block 0 at the answer, the next 20 s before each minute ends)',

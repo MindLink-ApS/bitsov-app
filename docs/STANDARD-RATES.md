@@ -40,7 +40,7 @@ network.
 
 Status: **app** is read in this repo. **Node-side** is not visible in this
 repo and must be confirmed in the node repo. **Reported** comes from the
-owner's box and the live test of 1 November.
+owner's box and the field test of 1 November.
 
 ### Budgets and grants
 
@@ -72,7 +72,7 @@ owner's box and the live test of 1 November.
 | First-contact admission: at least 1 sat, capped by the node at 100 sats | `docs/NODE_RC11_UPGRADE.md`, `docs/CONTROL_CENTER_ACT.md` | node-side |
 | Front-door prices `admission_msat`, `message_msat`, `page_msat` are advertised on the card. Fixture: 100, 10, 1 sat | `src-tauri/src/front_door.rs`, `porch.rs` tests | fields app, **values node-side** |
 | Package prices | none found in this repo | not present |
-| AI client grant | none in this repo; the assistant broker refuses spend routes and no sats rail to a model vendor exists | `docs/ASSISTANT_LOCAL_BROKER.md`, `docs/CONTROL_CENTER_AI.md` |
+| AI client grant | none in this repo; the assistant broker refuses spend routes and no sats rail to a model provider exists | `docs/ASSISTANT_LOCAL_BROKER.md`, `docs/CONTROL_CENTER_AI.md` |
 
 ### Calls
 
@@ -87,7 +87,7 @@ owner's box and the live test of 1 November.
 | App check before the offer: offer plus one hangup against the budgets; largest single payment against the per-payment limit | `src-tauri/src/app.rs` `do_call_signal`, `src/control/call.ts` `callPerPaymentNeed` | app |
 | Calls go only to contacts already paid; the first contact is a message | `app.rs` `call_needs_contact` | app |
 
-### The live test, 1 November (reported)
+### The field test, 1 November (reported)
 
 67 sats for the day, including a call of about 5 minutes at 60 sats. A 47-sat
 remainder refused a call. The box's recipient budget had to be re-approved at 250.
@@ -112,7 +112,7 @@ The simulation agrees with all three:
    decides between the two columns below.
 3. What are the real breaker values, and do blocks and holds count against them?
    The fixture's 9 sats per 10 minutes would refuse every call (T12), so the
-   live test shows the real values differ or calls are exempt.
+   field test shows the real values differ or calls are exempt.
 4. What per-payment limit does a grant get by default, and does a relation
    envelope bind every call payment as `check_under` assumes?
 5. What happens to a call at `max_call_minutes`? The model ends it there.
@@ -248,7 +248,7 @@ Regular needs a higher contact budget than heavy because its day goes to one con
    budget by the shown message cost; check it stays all-in when this changes.
 6. **The Ring text names the wrong number.** It shows the 240-minute ceiling,
    3,600 sats, because the box limit cannot be read before the offer. A
-   70-year-old sees a figure 8 times the real hold at limit 30.
+   first-time user sees a figure 8 times the real hold at limit 30.
 
 ### Exposure
 
@@ -407,7 +407,7 @@ approved in the app.
 
 This changes an owner-accepted default, so it is a decision below.
 
-## 5. What a 70-year-old should see
+## 5. What a first-time user should see
 
 A call should never fail because of a default nobody chose. Plain words only; the
 hold stays in the details.
@@ -457,7 +457,7 @@ Three changes would make this true, and all need work outside this document:
 
 ## 7. Next step: a run without real funds
 
-Run the proposed card on regtest, then signet, with the existing two-node harness
+Run the proposed card on regtest, then signet, with the existing two-node test bench
 and call demo (`scripts/calls/regtest-demo.sh`, `scripts/real-ui-e2e/`) plus one
 routing node between the boxes. Test funds only.
 
