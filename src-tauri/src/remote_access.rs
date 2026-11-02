@@ -1869,17 +1869,19 @@ async fn authenticated_prefix(
 }
 
 fn map_pre_auth_failure(error: RemoteError) -> RemoteError {
+    if is_lost_connection(&error) { RemoteError::HandshakeUnavailable } else { error }
+}
+
+/// The connection timed out or dropped: the box gave no answer to act on.
+fn is_lost_connection(error: &RemoteError) -> bool {
     match error {
-        RemoteError::Transport(message)
-            if message.starts_with("cannot read frame")
-                || message.starts_with("cannot write frame")
-                || message.starts_with("cannot connect to endpoint")
-                || message == "connection timed out"
-                || message == "frame write timed out" =>
-        {
-            RemoteError::HandshakeUnavailable
-        }
-        other => other,
+        RemoteError::HandshakeUnavailable => true,
+        RemoteError::Transport(message) => message.starts_with("cannot read frame")
+            || message.starts_with("cannot write frame")
+            || message.starts_with("cannot connect to endpoint")
+            || message == "connection timed out"
+            || message == "frame write timed out",
+        _ => false,
     }
 }
 
@@ -2008,6 +2010,12 @@ fn remember_endpoint(descriptor: &RemoteDescriptor, endpoint: &str) {
     memory.push((key, endpoint.to_owned()));
 }
 
+fn forget_endpoint(descriptor: &RemoteDescriptor, endpoint: &str) {
+    let key = endpoint_memory_key(descriptor);
+    let Ok(mut memory) = PREFERRED_ENDPOINTS.lock() else { return };
+    memory.retain(|(k, remembered)| *k != key || remembered != endpoint);
+}
+
 async fn connect_bound(
     descriptor: &RemoteDescriptor, key: &ClientKey, name: &str, recovery_node: Option<&str>,
     before_auth: Option<&(dyn Fn() -> Result<(), RemoteError> + Sync)>,
@@ -2034,9 +2042,21 @@ async fn connect_bound(
         }.await;
         match attempt {
             Ok((mut remote, mut noise, hash)) => {
-                let (client, scopes, proofs) = encrypted_auth(&mut remote, &mut noise, descriptor, key, name, recovery_node, before_auth).await?;
-                remember_endpoint(descriptor, endpoint);
-                return Ok((remote, noise, hash, client, scopes, proofs));
+                match encrypted_auth(&mut remote, &mut noise, descriptor, key, name, recovery_node, before_auth).await {
+                    Ok((client, scopes, proofs)) => {
+                        remember_endpoint(descriptor, endpoint);
+                        return Ok((remote, noise, hash, client, scopes, proofs));
+                    }
+                    // A one-time code may already be spent on this box, so the
+                    // next endpoint could only refuse it, and an answer from the
+                    // box is final. Leaving here also keeps `before_auth` to one
+                    // run for a code; without a code it has nothing to retire.
+                    Err(error) if descriptor.has_code() || !is_lost_connection(&error) => return Err(error),
+                    Err(error) => {
+                        forget_endpoint(descriptor, endpoint);
+                        last = error;
+                    }
+                }
             }
             Err(error @ RemoteError::RateLimited(_)) => return Err(error),
             // Keep the actionable OS error if a later fallback is unreachable.
@@ -4717,6 +4737,204 @@ mod tests {
         assert_eq!(dead_accepts.load(Ordering::SeqCst), 2);
         silent.abort();
         server.abort();
+    }
+
+    // What a box does once it has the app's authentication request.
+    enum AuthStage { Stall, Drop, Answer(Vec<u8>) }
+
+    // Completes the handshake on every tunnel, then behaves as `stage` says.
+    // Returns how many authentication requests arrived.
+    fn box_failing_auth(listener: TcpListener, secret: [u8; 32], stage: AuthStage) -> (Arc<std::sync::atomic::AtomicUsize>, tokio::task::JoinHandle<()>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = requests.clone();
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let Ok(mut noise) = read_auth_request(&mut stream, secret).await else { continue };
+                counted.fetch_add(1, Ordering::SeqCst);
+                match &stage {
+                    AuthStage::Stall => held.push(stream),
+                    AuthStage::Drop => drop(stream),
+                    AuthStage::Answer(answer) => {
+                        let encrypted = encode_transport(&mut noise, answer).unwrap();
+                        write_frame(&mut stream, &encrypted).await.unwrap();
+                        held.push(stream);
+                    }
+                }
+            }
+        });
+        (requests, server)
+    }
+
+    // Counts connections and answers nothing.
+    fn counting_listener(listener: TcpListener) -> (Arc<std::sync::atomic::AtomicUsize>, tokio::task::JoinHandle<()>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dials = Arc::new(AtomicUsize::new(0));
+        let counted = dials.clone();
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                held.push(listener.accept().await.unwrap().0);
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        (dials, server)
+    }
+
+    // One box at two addresses. `seed` keeps its endpoint memory to this test.
+    fn box_at_two_endpoints(seed: u8, first: &str, second: &str) -> ([u8; 32], RemoteDescriptor) {
+        let secret = [seed; 32];
+        let node = SigningKey::from_bytes(&[seed + 1; 32]);
+        let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+        let mut descriptor = parse_pairing_link(&signed_link(first.to_owned(), &node, public, &test_code(seed + 2))).unwrap();
+        descriptor.endpoints = vec![first.to_owned(), second.to_owned()];
+        (secret, descriptor)
+    }
+
+    async fn loopback_listener() -> (TcpListener, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        (listener, endpoint)
+    }
+
+    // The memory is only replaced by a later success, so an endpoint that
+    // finishes the handshake and then fails must not hold back the others.
+    #[tokio::test]
+    async fn a_remembered_endpoint_that_fails_in_auth_gives_way_to_the_next() {
+        use std::sync::atomic::Ordering;
+        for (seed, stage) in [(120u8, AuthStage::Stall), (130, AuthStage::Drop)] {
+            let stalls = matches!(stage, AuthStage::Stall);
+            let (remembered, remembered_endpoint) = loopback_listener().await;
+            let (real, real_endpoint) = loopback_listener().await;
+            let (secret, mut descriptor) = box_at_two_endpoints(seed, &remembered_endpoint, &real_endpoint);
+            descriptor.code = None;
+            let (requests, failing) = box_failing_auth(remembered, secret, stage);
+            let (forwarded, _forwarded_rx) = mpsc::unbounded_channel();
+            let server = tokio::spawn(authenticating_responder(real, secret, forwarded));
+            let store = tempfile::tempdir().unwrap();
+            let key = ClientKey::load_or_create(store.path()).unwrap();
+            remember_endpoint(&descriptor, &remembered_endpoint);
+
+            let first = if stalls {
+                tokio::join!(
+                    connect_authenticated(&descriptor, &key, "test phone"),
+                    skip_dead_endpoint(&requests, 1),
+                ).0
+            } else {
+                connect_authenticated(&descriptor, &key, "test phone").await
+            };
+            assert!(first.is_ok(), "the other endpoint answers: {:?}", first.err());
+            assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+            // No clock skip: the endpoint that worked is tried first.
+            let second = tokio::time::timeout(Duration::from_secs(2),
+                connect_authenticated(&descriptor, &key, "test phone")).await
+                .expect("the next tunnel starts at the endpoint that worked");
+            assert!(second.is_ok());
+            assert_eq!(requests.load(Ordering::SeqCst), 1, "the failing endpoint is not tried again");
+            failing.abort();
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_in_auth_is_final_and_does_not_try_the_next_endpoint() {
+        use std::sync::atomic::Ordering;
+        let answer = |code: &str| serde_json::to_vec(&RemoteAuthResponse::Error {
+            v: 1, code: code.into(), message: "unknown client".into(),
+        }).unwrap();
+        type Expected = fn(&RemoteError) -> bool;
+        let cases: [(u8, Vec<u8>, Expected); 3] = [
+            (140, answer("authentication_failed"), |error| matches!(error, RemoteError::Refused(_))),
+            (150, answer("already_paired"), |error| matches!(error, RemoteError::AlreadyPaired)),
+            (160, b"not an authentication reply".to_vec(), |error| matches!(error, RemoteError::Transport(m) if m.contains("wrong shape"))),
+        ];
+        for (seed, reply, expected) in cases {
+            let (answering, answering_endpoint) = loopback_listener().await;
+            let (other, other_endpoint) = loopback_listener().await;
+            let (secret, mut descriptor) = box_at_two_endpoints(seed, &answering_endpoint, &other_endpoint);
+            descriptor.code = None;
+            let (requests, answers) = box_failing_auth(answering, secret, AuthStage::Answer(reply));
+            let (dials, silent) = counting_listener(other);
+            let store = tempfile::tempdir().unwrap();
+            let key = ClientKey::load_or_create(store.path()).unwrap();
+            remember_endpoint(&descriptor, &answering_endpoint);
+
+            let error = connect_authenticated(&descriptor, &key, "test phone").await.err().expect("the box refused");
+            assert!(expected(&error), "{error}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(requests.load(Ordering::SeqCst), 1);
+            assert_eq!(dials.load(Ordering::SeqCst), 0, "{error}");
+            assert_eq!(ordered_endpoints(&descriptor, vec![&other_endpoint, &answering_endpoint])[0], answering_endpoint,
+                "an endpoint that answered stays remembered");
+            answers.abort();
+            silent.abort();
+        }
+    }
+
+    // The first box may have consumed the ticket with no reply reaching the app.
+    // Sending it to another endpoint could only turn that into a refusal.
+    #[tokio::test]
+    async fn a_one_time_code_is_not_sent_to_another_endpoint_after_an_auth_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for (seed, stage) in [(170u8, AuthStage::Stall), (180, AuthStage::Drop)] {
+            let stalls = matches!(stage, AuthStage::Stall);
+            let (first, first_endpoint) = loopback_listener().await;
+            let (other, other_endpoint) = loopback_listener().await;
+            let (secret, descriptor) = box_at_two_endpoints(seed, &first_endpoint, &other_endpoint);
+            assert!(descriptor.has_code());
+            let (requests, failing) = box_failing_auth(first, secret, stage);
+            let (dials, silent) = counting_listener(other);
+            let store = tempfile::tempdir().unwrap();
+            let key = ClientKey::load_or_create(store.path()).unwrap();
+            let retired = AtomicUsize::new(0);
+            let retire = || -> Result<(), RemoteError> {
+                retired.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            };
+
+            let connect = connect_bound(&descriptor, &key, "test phone", None, Some(&retire));
+            let result = if stalls {
+                tokio::join!(connect, skip_dead_endpoint(&requests, 1)).0
+            } else {
+                connect.await
+            };
+            let error = result.err().expect("no endpoint may pair");
+            assert!(is_lost_connection(&error), "{error}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(requests.load(Ordering::SeqCst), 1);
+            assert_eq!(dials.load(Ordering::SeqCst), 0, "the ticket stays with the first box");
+            assert_eq!(retired.load(Ordering::SeqCst), 1);
+            failing.abort();
+            silent.abort();
+        }
+    }
+
+    // With every endpoint failing, no success replaces the memory, so the one
+    // that failed in auth has to be forgotten. Another endpoint's memory stays.
+    #[tokio::test]
+    async fn only_the_endpoint_that_failed_in_auth_is_forgotten() {
+        let (failing_listener, failing_endpoint) = loopback_listener().await;
+        let (closed, closed_endpoint) = loopback_listener().await;
+        drop(closed);
+        let (secret, mut descriptor) = box_at_two_endpoints(190, &closed_endpoint, &failing_endpoint);
+        descriptor.code = None;
+        let (_requests, failing) = box_failing_auth(failing_listener, secret, AuthStage::Drop);
+        let store = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(store.path()).unwrap();
+        let advertised = vec![closed_endpoint.as_str(), failing_endpoint.as_str()];
+
+        remember_endpoint(&descriptor, &closed_endpoint);
+        assert!(connect_authenticated(&descriptor, &key, "test phone").await.is_err());
+        let reversed: Vec<&str> = advertised.iter().rev().copied().collect();
+        assert_eq!(ordered_endpoints(&descriptor, reversed.clone())[0], closed_endpoint, "not the endpoint that failed");
+
+        remember_endpoint(&descriptor, &failing_endpoint);
+        assert!(connect_authenticated(&descriptor, &key, "test phone").await.is_err());
+        assert_eq!(ordered_endpoints(&descriptor, advertised.clone()), advertised, "the memory is gone");
+        failing.abort();
     }
 
     #[tokio::test]
