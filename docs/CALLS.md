@@ -219,8 +219,13 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   A hangup that is sent goes under that lock, so the node sees it
   after that minute. A client cannot unsend what it handed to the network, so
   the app promises no more than this. A minute whose POST got no answer stays
-  pending with its outcome unknown, and that fence holds the hangup back until
-  the result is checked.
+  pending with its outcome unknown, which fences the hangup, so End first asks
+  the node about it by operation id. Not paid and abandoned, or a known result
+  (accounted as that): End then hangs up. Still paying or unknown: End sends no
+  hangup, its error carries the pending id, the card says the result is not
+  known yet, and the node ends the call itself once its paid time runs out.
+  When the admission is already closed (a peer hangup), End does not reconcile,
+  and a lost minute stays pending until the owner's check.
 - **After the call.** The card reads the node for up to 20 s until it closes
   the reservation and then says "Minutes: paid X. Released back to your
   budget: Y." Until then it says what the node still holds.
@@ -255,7 +260,12 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   `a2_a_hangup_refused_while_prepared_still_revokes_the_minutes`,
   `a2_a_minute_revoked_first_is_never_sent_and_one_decided_first_goes_before_the_hangup`,
   `a2_a_minute_racing_end_or_teardown_goes_before_the_hangup_or_not_at_all`,
-  `a2_a_refused_minutes_cleanup_holds_no_consent_lock_against_end`;
+  `a2_a_refused_minutes_cleanup_holds_no_consent_lock_against_end`,
+  `a2_end_reconciles_a_minute_the_node_swallowed_then_pays_the_hangup`,
+  `a2_end_with_its_minute_still_paying_reports_unknown_and_sends_no_hangup`,
+  `a2_end_accounts_a_minute_with_a_known_result_then_pays_the_hangup`,
+  `a2_end_needs_the_node_to_confirm_it_abandoned_a_swallowed_minute`,
+  `a2_end_leaves_another_calls_pending_minute_fenced`;
   `control::tests::a_consent_holds_only_what_the_quote_showed_and_covers_only_holds_within_it`,
   `control::tests::a_minute_costs_the_callees_advertised_block_price_and_the_reservation_is_bounded`,
   `call_status_reads_the_node_reservation_fields_verbatim`,
