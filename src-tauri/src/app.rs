@@ -316,9 +316,6 @@ struct NodeState {
     /// (whose guard lives through the whole body), and nothing else is locked,
     /// awaited or written while either is held.
     call_consents: Mutex<CallConsents>,
-    /// A minute past its dispatch decision finished (`MinuteInFlight`): wakes
-    /// a revocation waiting for it (`minutes_settled`).
-    minutes_settled: tokio::sync::Notify,
 }
 
 /// M6 A2: one outgoing call's agreed minutes, bound to the node identity,
@@ -347,14 +344,6 @@ struct CallConsent {
     /// closed (or it held none and the call ended). Never set on the app's
     /// own say-so (a refusal, a hangup that failed or was not seen through).
     node_closed: bool,
-    /// Minutes past their dispatch decision (`commit_minute`) whose POST has
-    /// not returned yet. They were decided before any revocation, so End
-    /// does not stop them; they are paid and accounted like any minute, and
-    /// End returns only once they finished (`minutes_settled`).
-    minutes_in_flight: u32,
-    /// The call ended or was refused while a decided minute was in flight:
-    /// that minute was paid before End.
-    revoked_with_minute_in_flight: bool,
 }
 
 impl CallConsent {
@@ -438,7 +427,6 @@ impl CallConsents {
         self.entries.push(CallConsent {
             node_id, peer: peer.into(), call_id: call_id.into(), consent,
             confirmed_msat: None, phase: ConsentPhase::Offering, offering: false, dispatched: false, node_closed: false,
-            minutes_in_flight: 0, revoked_with_minute_in_flight: false,
         });
         Ok(())
     }
@@ -457,7 +445,6 @@ impl CallConsents {
             if c.phase.open() {
                 c.phase = ConsentPhase::Refused { code, message: message.into() };
                 c.confirmed_msat = None;
-                c.revoked_with_minute_in_flight |= c.minutes_in_flight > 0;
             }
         }
     }
@@ -469,39 +456,8 @@ impl CallConsents {
             if c.phase.open() {
                 c.phase = ConsentPhase::Ended;
                 c.confirmed_msat = None;
-                c.revoked_with_minute_in_flight |= c.minutes_in_flight > 0;
             }
         }
-    }
-
-    /// The dispatch decision for one minute, under the same lock as every
-    /// revocation (`end`, `refuse`): while its consent is admitted and its
-    /// hold confirmed, the minute is marked in flight and may be posted.
-    /// Once revoked, no later minute passes. The refusal, if not.
-    fn commit_minute(&mut self, node_id: &str, peer: &str, call_id: &str) -> Option<ActionError> {
-        let Some(c) = self.find_mut(node_id, peer, call_id) else {
-            return Some(ActionError::new("call_no_consent", NO_CONSENT));
-        };
-        if let Some(error) = consent_closed(&c.phase) { return Some(error); }
-        if c.phase != ConsentPhase::Admitted || c.confirmed_msat.is_none() {
-            return Some(ActionError::new("call_hold_unconfirmed",
-                "Confirm your node's hold for this call before its first minute is paid. Nothing was paid."));
-        }
-        c.minutes_in_flight += 1;
-        None
-    }
-
-    /// A decided minute's POST returned (whatever its outcome).
-    fn finish_minute(&mut self, node_id: &str, peer: &str, call_id: &str) {
-        if let Some(c) = self.find_mut(node_id, peer, call_id) {
-            c.minutes_in_flight = c.minutes_in_flight.saturating_sub(1);
-        }
-    }
-
-    /// Decided minutes of this call (any contact, or one) not finished yet.
-    fn minutes_in_flight(&self, node_id: &str, peer: Option<&str>, call_id: &str) -> u32 {
-        self.entries.iter().filter(|c| c.node_id == node_id && c.call_id == call_id && peer.is_none_or(|p| c.peer == p))
-            .map(|c| c.minutes_in_flight).sum()
     }
 
     /// Record the node's own view of the call (`GET /calls?peer=`). Closed
@@ -721,7 +677,6 @@ impl NodeState {
             approvals_restored: AtomicBool::new(false),
             media: Mutex::new(None),
             call_consents: Mutex::new(CallConsents::default()),
-            minutes_settled: tokio::sync::Notify::new(),
             node_grant: Mutex::new(None),
             all_in_caps_node: Mutex::new(None),
             readmission_ask: Mutex::new(None),
@@ -5124,9 +5079,9 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         return act::with_op(Active(body["host_admission_op"].as_str()), Err(ActionError::new(
             "call_identity_changed", "This call belongs to another node identity. Nothing was paid.")));
     }
-    // A minute is paid only while its call's consent is still admitted and
+    // A minute is issued only while its call's consent is still admitted and
     // confirmed, checked again under the money lock: End (or a refusal) that
-    // came while this minute waited here pays nothing.
+    // came while this minute waited here issues nothing.
     if path == "/messages/compose" && body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK)) {
         if let Some(refused) = block_consent_refusal(state, &node_id, &body) { return Err(refused); }
     }
@@ -5332,24 +5287,20 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         return Err(e);
     }
     if cfg!(test) { pause_points::at(&state.api_base, "before_decision").await; }
-    // The last step before a minute's POST: its dispatch decision, taken
-    // atomically under the consent lock that End, teardown and a received
-    // hangup take without waiting for the money lock. Revoked first: nothing
-    // is sent. Decided first: the minute is in flight until its POST and its
-    // accounting are done, and End waits for it (`minutes_settled`) before it
-    // returns. The consent lock is released at the end of the decision's own
-    // statement, before any cleanup below (which locks the budget and the node
-    // identity) and before the POST.
-    let _minute = if path == "/messages/compose" && body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK)) {
-        let (peer, call_id) = block_identity(&body);
-        let refused = state.call_consents.lock().unwrap().commit_minute(&node_id, &peer, &call_id);
-        if let Some(refused) = refused {
+    // The last step before a minute's POST: its consent, read once more under
+    // the lock that End, teardown and a received hangup take without waiting
+    // for the money lock. Revoked first: nothing is sent. Not revoked yet: this
+    // one minute goes out, and the money lock this path holds orders End's
+    // hangup after it. The consent lock is held only inside the check, not
+    // during the cleanup below (which locks the budget and the node identity)
+    // or the POST.
+    if path == "/messages/compose" && body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK)) {
+        if let Some(refused) = block_consent_refusal(state, &node_id, &body) {
             abandon(&journal)?;
             release(state)?;
             return Err(refused);
         }
-        Some(MinuteInFlight { state, node_id: node_id.clone(), peer, call_id })
-    } else { None };
+    }
     if cfg!(test) { pause_points::at(&state.api_base, "after_decision").await; }
     let response = state.http.post(format!("{}{path}", state.api_base))
         .bearer_auth(token).json(&body).timeout(state.spend_timeout).send().await
@@ -7575,42 +7526,10 @@ fn block_identity(body: &serde_json::Value) -> (String, String) {
     (peer, call_id)
 }
 
-/// A minute past its dispatch decision. Dropped once its POST returned and
-/// its outcome was recorded (or the send was abandoned): it is then no longer
-/// in flight, and a revocation waiting for it is woken.
-struct MinuteInFlight<'a> {
-    state: &'a NodeState,
-    node_id: String,
-    peer: String,
-    call_id: String,
-}
-
-impl Drop for MinuteInFlight<'_> {
-    fn drop(&mut self) {
-        let kept = self.state.call_consents.lock();
-        if let Ok(mut kept) = kept { kept.finish_minute(&self.node_id, &self.peer, &self.call_id); }
-        self.state.minutes_settled.notify_waiters();
-    }
-}
-
-/// Wait until no decided minute of this call is in flight, so a revocation
-/// returns only after any minute it did not stop has finished. No lock is
-/// held while waiting. Bounded by the request timeout (and a margin for its
-/// accounting); End then still waits for the money lock that minute holds.
-async fn minutes_settled(state: &NodeState, node_id: &str, peer: Option<&str>, call_id: &str) {
-    let deadline = tokio::time::Instant::now() + state.spend_timeout + Duration::from_secs(10);
-    loop {
-        // Registered before the check, so a minute finishing in between still wakes it.
-        let finished = state.minutes_settled.notified();
-        tokio::pin!(finished);
-        finished.as_mut().enable();
-        let in_flight = state.call_consents.lock().unwrap().minutes_in_flight(node_id, peer, call_id);
-        if in_flight == 0 || tokio::time::timeout_at(deadline, finished).await.is_err() { return; }
-    }
-}
-
 /// `money_post_with`, under the money lock, for a call block (kind 404): its
-/// call's consent is still admitted and its hold confirmed. The refusal, if not.
+/// call's consent is still admitted and its hold confirmed. The refusal, if
+/// not. Called when the minute reaches the lock and again as its last step
+/// before the POST.
 fn block_consent_refusal(state: &NodeState, node_id: &str, body: &serde_json::Value) -> Option<ActionError> {
     let (peer, call_id) = block_identity(body);
     let kept = state.call_consents.lock().unwrap();
@@ -7765,7 +7684,7 @@ async fn do_call_signal_bounded(
     if kind == act::KIND_CALL_HANGUP {
         if let Some(call_id) = serde_json::from_str::<serde_json::Value>(plaintext).ok()
             .and_then(|v| v["call_id"].as_str().filter(|id| act::is_call_id(id)).map(str::to_string)) {
-            end_minutes(state, &call_id).await;
+            end_minutes(state, &call_id);
         }
     }
     let mut existing_operation = admission.map(|r| r.op_id.clone()).or_else(|| pending_operation_id(state).unwrap_or_default());
@@ -7903,10 +7822,10 @@ async fn do_call_signal_bounded(
 /// Local teardown is not evidence that the node has closed its admission.
 /// The renderer must name the exact admission, not a reusable wire call id.
 async fn do_op_close_call(state: &NodeState, operation_id: &str, peer: &str, call_id: &str) -> Result<(), ActionError> {
-    // Local teardown: no further minute of this call is paid. Revoked at
-    // once, without the money lock; a minute already past its decision is
-    // waited for (`end_minutes`).
-    if act::is_call_id(call_id) { end_minutes(state, call_id).await; }
+    // Local teardown: no new minute of this call is issued. Revoked at once,
+    // without the money lock; a minute already issued holds that lock until
+    // it is accounted, and teardown is ordered after it.
+    if act::is_call_id(call_id) { end_minutes(state, call_id); }
     let _money = state.money.lock().await;
     let journal = locked_spend_journal(state)?;
     let offer = journal.operation_record(operation_id)?
@@ -7929,21 +7848,23 @@ async fn do_op_end_call(state: &NodeState, call_id: &str) -> Result<spend_journa
 
 /// A priced owner repair can lower, never raise, the admission's saved ceiling.
 async fn do_op_end_call_with_limit(state: &NodeState, call_id: &str, max_msat: Option<u64>) -> Result<spend_journal::OpView, ActionError> {
-    // The app is ending the call: no further minute is paid for it, whatever
+    // The app is ending the call: no new minute is issued for it, whatever
     // becomes of the hangup (a refusal stays the answer). Revoked before the
     // hangup is even prepared, so a minute being prepared finds it ended.
-    end_minutes(state, call_id).await;
+    end_minutes(state, call_id);
     end_call_admission(state, call_id, max_msat).await
 }
 
-/// No further minute of this call is paid, for this node identity. Returns
-/// once a minute already past its dispatch decision has finished: revoked
-/// first, no minute is sent; decided first, End happens after it.
-async fn end_minutes(state: &NodeState, call_id: &str) {
+/// No new minute of this call is issued, for this node identity. Takes no
+/// money lock and waits for nothing, so End, teardown and a hangup can call it
+/// the moment they begin. At most one minute already issued may still settle:
+/// it holds the money lock until it is accounted, so a hangup goes out after
+/// it, as soon as that lock is free. Anything that reaches the node later is
+/// refused there, by the call's own state and clock.
+fn end_minutes(state: &NodeState, call_id: &str) {
     let node_id = state.node_id.lock().unwrap().clone();
     let Some(node_id) = node_id else { return };
     state.call_consents.lock().unwrap().end(&node_id, None, call_id);
-    minutes_settled(state, &node_id, None, call_id).await;
 }
 
 async fn end_call_admission(state: &NodeState, call_id: &str, max_msat: Option<u64>) -> Result<spend_journal::OpView, ActionError> {
@@ -9979,9 +9900,9 @@ fn capture_call_observation(state: &NodeState, event: &control::LiveEvent) -> Re
     let Some(offer) = spend_journal::read_completed_call_admission(&dir.join("app-spend"), &node_id, &message.sender, call_id)?
         else { return Ok(None) };
     if message.kind == 403 {
-        // They hung up our call: no further minute of it is paid, at once. A
-        // minute already past its decision finishes under the money lock,
-        // which recording this hangup (`persist_call_observation`) waits for.
+        // They hung up our call: no new minute of it is issued, at once. A
+        // minute already issued finishes under the money lock, which recording
+        // this hangup (`persist_call_observation`) waits for.
         state.call_consents.lock().unwrap().end(&node_id, Some(&message.sender), call_id);
     }
     Ok(Some(CallObservation { offer, ended: message.kind == 403 }))
@@ -15764,15 +15685,16 @@ mod control_act_tests {
         assert_eq!(compose_kinds(&node), [400]);
         assert_eq!(node.posts().len(), offer);
         assert!(pending(&node).is_none());
+        assert!(minute_records(&node).is_empty(), "refused under the lock, before any record");
     }
 
-    /// End, local teardown or their hangup while a minute is paused at each
-    /// await inside the money path (the money lock taken, the token
-    /// refreshed, just before the POST): the minute is never sent.
+    /// End, local teardown, our own hangup signal or their hangup while a minute
+    /// is paused at each await inside the money path (the money lock taken, the
+    /// token refreshed, just before the POST): the minute is never sent.
     #[tokio::test]
     async fn a2_a_minute_paused_at_each_await_is_never_sent_after_the_call_ends() {
         for point in ["after_lock", "after_token", "before_dispatch"] {
-            for ender in ["end", "close", "their_hangup"] {
+            for ender in ["end", "close", "hangup_signal", "their_hangup"] {
                 let (routes, _) = minutes_routes("live", hold_json(8_000, 2_000, 60));
                 let node = fake(AuthMode::Local, routes);
                 approve_calls(&node).await;
@@ -15802,6 +15724,15 @@ mod control_act_tests {
                             assert_eq!(consent_phase(&node), ConsentPhase::Ended, "{point} {ender}");
                             release.notify_one();
                             close.await.unwrap();
+                        }
+                        "hangup_signal" => {
+                            let plaintext = format!(r#"{{"v":1,"call_id":"{CALL_ID}","reason":"hangup"}}"#);
+                            let hangup = do_call_signal(state, A, 403, &plaintext, 15_000);
+                            tokio::pin!(hangup);
+                            let _ = tokio::time::timeout(Duration::from_millis(20), &mut hangup).await;
+                            assert_eq!(consent_phase(&node), ConsentPhase::Ended, "{point} {ender}");
+                            release.notify_one();
+                            let _ = hangup.await;
                         }
                         _ => {
                             assert!(capture_call_observation(state, &inbound_call_event(403, "hangup")).unwrap().is_some());
@@ -15837,127 +15768,154 @@ mod control_act_tests {
         tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap()
     }
 
-    /// End on another OS thread against a minute's dispatch decision.
-    /// Revoked first: End returns while the minute is still paused before its
-    /// decision, and that minute is never sent or charged. Decided first: End
-    /// does not return while the minute is in flight; when it returns, exactly
-    /// one minute was sent and accounted.
-    #[test]
-    fn a2_end_returns_after_a_decided_minute_and_a_minute_revoked_first_is_never_sent() {
+    /// What one paid signal costs on the ledger call node.
+    const PAID_SIGNAL_MSAT: u64 = 2_000;
+
+    /// The operations of this call's minutes, oldest first by creation.
+    fn minute_records(node: &Fake) -> Vec<spend_journal::OperationRecord> {
+        spend_journal(&node.state).unwrap().call_operations_for(OWN, None, Some(CALL_ID)).unwrap()
+            .into_iter().filter(|r| r.kind == "call_block").collect()
+    }
+
+    /// The call's offer operation, as local teardown names it.
+    fn offer_op(node: &Fake) -> String {
+        spend_journal(&node.state).unwrap().call_operations_for(OWN, None, Some(CALL_ID)).unwrap()
+            .into_iter().find(|r| r.kind == "call_offer").unwrap().op_id
+    }
+
+    /// A hangup signal refused while it is prepared, before the money lock and
+    /// with nothing sent, has still revoked the call's minutes.
+    #[tokio::test]
+    async fn a2_a_hangup_refused_while_prepared_still_revokes_the_minutes() {
         use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let (inner, _) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let unreadable = Arc::new(AtomicBool::new(false));
+        let u = unreadable.clone();
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            if p == "/payments/price/401" && u.load(SeqCst) { return (500, "{}".into()); }
+            inner(m, p, b)
+        })).await;
+        unreadable.store(true, SeqCst);
+        let plaintext = format!(r#"{{"v":1,"call_id":"{CALL_ID}","reason":"hangup"}}"#);
+        do_call_signal(&node.state, A, 403, &plaintext, 15_000).await.unwrap_err();
+        assert_eq!(consent_phase(&node), ConsentPhase::Ended);
+        assert_eq!(compose_kinds(&node), [400], "nothing was sent");
+        assert_eq!(do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err().code, "call_not_live");
+        assert_eq!(minutes_sent(&node), 0);
+    }
+
+    /// End or local teardown on another OS thread against a minute's last step.
+    /// Either one revokes at once, while the minute still holds the money lock.
+    /// Revoked first: no kind 404 goes out and the minute is charged nothing.
+    /// Decided first: exactly one kind 404 goes out and is accounted, and End's
+    /// hangup is ordered after it.
+    #[test]
+    fn a2_a_minute_revoked_first_is_never_sent_and_one_decided_first_goes_before_the_hangup() {
         let rt = race_runtime();
-        for revoke_first in [true, false] {
-            let (routes, _) = minutes_routes("live", hold_json(8_000, 2_000, 60));
-            let node = rt.block_on(minute_ready(routes));
-            let state = &node.state;
-            let spent = budget_now(state).spent_msat;
-            let point = if revoke_first { "before_decision" } else { "after_decision" };
-            let (arrived, release) = pause_points::arm(&state.api_base, point);
-            let returned = AtomicBool::new(false);
-            std::thread::scope(|s| {
-                let minute = s.spawn(|| rt.block_on(do_call_block(state, A, CALL_ID, 0)));
-                rt.block_on(arrived.notified());
-                let end = s.spawn(|| {
-                    rt.block_on(end_minutes(state, CALL_ID));
-                    returned.store(true, SeqCst);
-                    // What End's caller sees the moment it returns.
-                    (minutes_sent(&node), budget_now(state).spent_msat)
-                });
-                // Every assertion below runs after the minute is released, so a
-                // failure ends the test instead of leaving it paused.
-                if revoke_first {
-                    // End completes while the minute is still paused.
+        for ender in ["end", "close"] {
+            for revoke_first in [true, false] {
+                let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+                let node = rt.block_on(minute_ready(routes));
+                let state = &node.state;
+                let spent = budget_now(state).spent_msat;
+                let op = offer_op(&node);
+                let point = if revoke_first { "before_decision" } else { "after_decision" };
+                let case = format!("{ender} {point}");
+                let (arrived, release) = pause_points::arm(&state.api_base, point);
+                std::thread::scope(|s| {
+                    let minute = s.spawn(|| rt.block_on(do_call_block(state, A, CALL_ID, 0)));
+                    rt.block_on(arrived.notified());
+                    let stop = s.spawn(|| rt.block_on(async {
+                        if ender == "end" { do_op_end_call(state, CALL_ID).await.map(|_| ()) }
+                        else { do_op_close_call(state, &op, A, CALL_ID).await }
+                    }));
                     let deadline = Instant::now() + Duration::from_secs(2);
-                    while !returned.load(SeqCst) && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(2)); }
-                    let completed = returned.load(SeqCst);
+                    while consent_phase(&node) != ConsentPhase::Ended && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    let phase = consent_phase(&node);
+                    let sent_while_paused = compose_kinds(&node);
+                    // Every assertion below runs after the minute is released, so a
+                    // failure ends the test instead of leaving it paused.
                     release.notify_one();
-                    assert!(completed, "End completes without waiting for a minute it stopped");
-                    assert_eq!(end.join().unwrap().0, 0);
-                    assert_eq!(minute.join().unwrap().unwrap_err().code, "call_not_live");
-                } else {
-                    std::thread::sleep(Duration::from_millis(100));
-                    let waited = !returned.load(SeqCst);
-                    release.notify_one();
-                    assert!(waited, "End waits for the minute it did not stop");
-                    minute.join().unwrap().unwrap();
-                    let (sent, now) = end.join().unwrap();
-                    assert_eq!(sent, 1, "decided first: exactly one minute, sent before End returned");
-                    assert!(now > spent, "and accounted before End returned");
-                }
-            });
-            let kept = call_consent(state, A, CALL_ID).unwrap();
-            assert_eq!((&kept.phase, kept.minutes_in_flight), (&ConsentPhase::Ended, 0), "{point}");
-            assert_eq!(kept.revoked_with_minute_in_flight, !revoke_first, "{point}");
-            assert!(pending(&node).is_none(), "{point}");
-            if revoke_first {
-                assert_eq!(budget_now(state).spent_msat, spent, "revoked first: nothing charged");
+                    assert_eq!(phase, ConsentPhase::Ended, "{case}: revoked at once, without the money lock");
+                    assert_eq!(sent_while_paused, [400], "{case}: nothing goes out while the minute holds the lock");
+                    let minute = minute.join().unwrap();
+                    if revoke_first {
+                        assert_eq!(minute.unwrap_err().code, "call_not_live", "{case}");
+                    } else {
+                        minute.unwrap();
+                    }
+                    stop.join().unwrap().unwrap();
+                });
+                let hangups = u64::from(ender == "end");
+                let minutes = u64::from(!revoke_first);
+                let mut order = vec![400];
+                if !revoke_first { order.push(404); }
+                if ender == "end" { order.push(403); }
+                assert_eq!(compose_kinds(&node), order, "{case}: the minute, if any, then the hangup");
+                assert_eq!(budget_now(state).spent_msat, spent + (minutes + hangups) * PAID_SIGNAL_MSAT, "{case}: charged exactly what was sent");
+                assert_eq!(paid.lock().unwrap().pays as u64, 1 + minutes + hangups, "{case}");
+                let records = minute_records(&node);
+                assert_eq!(records.len(), 1, "{case}");
+                assert_eq!(records[0].state, if revoke_first { spend_journal::OperationState::Unpaid } else { spend_journal::OperationState::Settled }, "{case}");
+                assert_eq!(records[0].paid_msat.unwrap_or(0), minutes * PAID_SIGNAL_MSAT, "{case}");
+                assert!(pending(&node).is_none(), "{case}");
+                assert_eq!(consent_phase(&node), ConsentPhase::Ended, "{case}");
+                // Revoked: no later minute passes.
+                assert_eq!(rt.block_on(do_call_block(state, A, CALL_ID, 1)).unwrap_err().code, "call_not_live", "{case}");
+                assert_eq!(minutes_sent(&node), minutes as usize, "{case}");
             }
-            // Revoked: no later minute passes the decision.
-            assert_eq!(rt.block_on(do_call_block(state, A, CALL_ID, 1)).unwrap_err().code, "call_not_live", "{point}");
-            assert_eq!(minutes_sent(&node), usize::from(!revoke_first), "{point}");
         }
     }
 
-    /// A minute and End, local teardown or the bare revocation, racing freely
-    /// on OS threads (End started at staggered delays). The node flags any
-    /// minute that reaches it after End returned: there is none, and what End
-    /// saw when it returned is final. Bounded: a deadlock fails the round
+    /// A minute and End or local teardown, racing freely on OS threads (the
+    /// ender started at staggered delays). The outcome is one of the two the
+    /// guarantee allows: no kind 404 and nothing charged for it, or exactly one,
+    /// accounted, with End's hangup after it. Bounded: a deadlock fails the round
     /// after a timeout instead of hanging.
     #[test]
-    fn a2_no_minute_reaches_the_node_after_end_returned() {
-        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    fn a2_a_minute_racing_end_or_teardown_goes_before_the_hangup_or_not_at_all() {
         let rt = race_runtime();
         let mut outcomes = [0usize; 2];
         for round in 0..24u64 {
-            let ender = round % 3;
-            let (ended, late) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
-            let (inner, _) = minutes_routes("live", hold_json(8_000, 2_000, 60));
-            let (e, l) = (ended.clone(), late.clone());
-            let routes: Routes = Arc::new(move |m, p, b| {
-                if p == "/messages/compose" && e.load(SeqCst)
-                    && serde_json::from_str::<serde_json::Value>(b).unwrap_or_default()["kind"] == act::KIND_CALL_BLOCK {
-                    l.store(true, SeqCst);
-                }
-                inner(m, p, b)
-            });
+            let end = round % 2 == 0;
+            let (routes, _) = minutes_routes("live", hold_json(8_000, 2_000, 60));
             // Leaked so the racing tasks can outlive a failed round.
             let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
-            let op = spend_journal(&node.state).unwrap().call_operations_for(OWN, None, Some(CALL_ID)).unwrap()
-                .into_iter().find(|r| r.kind == "call_offer").unwrap().op_id;
+            let op = offer_op(node);
             let spent = budget_now(&node.state).spent_msat;
-            let delay = Duration::from_micros(round / 3 * 1_500);
+            let delay = Duration::from_micros(round / 2 * 250);
             let race = async move {
                 let minute = tokio::spawn(do_call_block(&node.state, A, CALL_ID, 0));
-                let end = tokio::spawn(async move {
+                let stop = tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
-                    match ender {
-                        0 => { let _ = do_op_end_call(&node.state, CALL_ID).await; }
-                        1 => do_op_close_call(&node.state, &op, A, CALL_ID).await.unwrap(),
-                        _ => end_minutes(&node.state, CALL_ID).await,
-                    }
-                    ended.store(true, SeqCst);
-                    minutes_sent(node)
+                    if end { do_op_end_call(&node.state, CALL_ID).await.map(|_| ()) }
+                    else { do_op_close_call(&node.state, &op, A, CALL_ID).await }
                 });
-                (minute.await.unwrap(), end.await.unwrap())
+                (minute.await.unwrap(), stop.await.unwrap())
             };
-            let Ok((minute, sent_at_end)) = rt.block_on(async { tokio::time::timeout(Duration::from_secs(20), race).await }) else {
+            let Ok((minute, stop)) = rt.block_on(async { tokio::time::timeout(Duration::from_secs(20), race).await }) else {
                 rt.shutdown_background();
-                panic!("round {round}: a minute and End did not finish (deadlock)");
+                panic!("round {round}: a minute and its ender did not finish (deadlock)");
             };
-            assert!(!late.load(SeqCst), "round {round}: a minute reached the node after End returned");
-            assert_eq!(minutes_sent(node), sent_at_end, "round {round}");
-            assert!(sent_at_end <= 1, "round {round}");
-            let kept = call_consent(&node.state, A, CALL_ID).unwrap();
-            assert_eq!(kept.minutes_in_flight, 0, "round {round}");
-            if sent_at_end == 0 {
+            stop.unwrap();
+            let minutes = minutes_sent(node);
+            assert!(minutes <= 1, "round {round}");
+            let mut order = vec![400];
+            if minutes == 1 { order.push(404); }
+            if end { order.push(403); }
+            assert_eq!(compose_kinds(node), order, "round {round}: the minute, if any, then the hangup");
+            let charged = (minutes as u64 + u64::from(end)) * PAID_SIGNAL_MSAT;
+            assert_eq!(budget_now(&node.state).spent_msat, spent + charged, "round {round}: charged exactly what was sent");
+            if minutes == 0 {
                 assert_eq!(minute.unwrap_err().code, "call_not_live", "round {round}");
-                // End itself pays a hangup; the other two pay nothing.
-                if ender != 0 { assert_eq!(budget_now(&node.state).spent_msat, spent, "round {round}: nothing charged"); }
             } else {
                 minute.unwrap();
-                if ender != 0 { assert!(budget_now(&node.state).spent_msat > spent, "round {round}: the minute is accounted"); }
             }
-            outcomes[sent_at_end] += 1;
+            assert!(pending(node).is_none(), "round {round}");
+            assert_eq!(consent_phase(node), ConsentPhase::Ended, "round {round}");
+            outcomes[minutes] += 1;
         }
         eprintln!("revoked first: {}, decided first: {}", outcomes[0], outcomes[1]);
     }
