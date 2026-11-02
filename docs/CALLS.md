@@ -214,7 +214,9 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   lock and again as its last step before the POST. At most one minute already
   issued may settle; it holds the money lock until its outcome is recorded.
   Anything later is refused by the node, from the call's own state and clock.
-  The hangup goes out as soon as the money lock is free, so the node sees it
+  Once the money lock is free the hangup still goes through its preparation
+  and any pending-result check first, so it can be delayed or refused there.
+  A hangup that is sent goes under that lock, so the node sees it
   after that minute. A client cannot unsend what it handed to the network, so
   the app promises no more than this. A minute whose POST got no answer stays
   pending with its outcome unknown, and that fence holds the hangup back until
