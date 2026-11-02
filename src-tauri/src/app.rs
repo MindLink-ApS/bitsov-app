@@ -15721,9 +15721,9 @@ mod control_act_tests {
         remote_access::import_pairing_link(app_dir.path(), &link).unwrap();
         let key = Arc::new(bitsov_app::pairing::ClientKey::load_or_create(store.path()).unwrap());
         let free = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local_addr = free.local_addr().unwrap();
+        let port = free.local_addr().unwrap().port();
         drop(free);
-        let base = format!("http://{local_addr}/{}", "api/v1");
+        let base = format!("http://127.0.0.1:{port}/api/v1");
         let proxy = remote_access::start_proxy(&base, app_dir.path(), descriptor, key, "BitSov test",
             store.path().to_path_buf(), node.state.remote_proxy_auth.clone(), node.state.remote_retry.clone()).await.unwrap();
         node.state.api_base = base;
