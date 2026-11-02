@@ -136,6 +136,8 @@ export function createCallMinutes(opts: {
   onChange: (view: MinutesView) => void;
   /** Paying stopped while the call was running: the call must end now. */
   onStop: (stop: MinutesStop) => void;
+  /** The call this session pays for is still going on (checked right before every payment). */
+  canPay?: () => boolean;
 }): CallMinutes {
   const { peer, callId, deps, now } = opts;
   let view: MinutesView = {
@@ -173,6 +175,12 @@ export function createCallMinutes(opts: {
     paidUntilMs: status.paid_until_ms ?? view.paidUntilMs,
     blocks: Math.max(view.blocks, status.next_block_seq),
   });
+  /**
+   * Paying may go on. Publishing a view runs the call's own checks, which can
+   * end the call there and then (`finish` or `dispose`): every step after an
+   * `emit` or an `await` asks again before it pays or schedules anything.
+   */
+  const payable = () => running && !disposed && !settling && !stopped && (opts.canPay?.() ?? true);
   const read = async (): Promise<Outcome<CallStatus | null>> => {
     try { return await deps.status(peer, callId); } catch (error) { return { ok: false, error: asActionError(error) }; }
   };
@@ -199,6 +207,8 @@ export function createCallMinutes(opts: {
     if (!r.ok) { schedule(RETRY_MS, () => void tick()); return; }
     const status = r.value;
     if (status) apply(status);
+    // Publishing the status may have ended the call (a stop deadline that passed while the app was suspended).
+    if (!running) return;
     if (!status || status.state === 'ended') {
       // Their hangup may be on its way: give it a moment to name the end first.
       if (!endedSeen && !lapsed()) { endedSeen = true; schedule(ENDED_CONFIRM_MS, () => void tick()); return; }
@@ -217,12 +227,19 @@ export function createCallMinutes(opts: {
     // Block 0 is payable from the answer on; a renewal waits a little past its due time (clock skew).
     const wait = due + (status.next_block_seq > 0 ? DUE_MARGIN_MS : 0) - now();
     if (wait > 0) { schedule(Math.min(wait, STATUS_POLL_MS), () => void tick()); return; }
+    if (!payable()) return;
     await payBlock(status.next_block_seq);
   };
 
   const payBlock = async (seq: number) => {
     inFlight = true;
     emit({ paying: true });
+    // The view just published can end the call: no block is paid for a call that ended.
+    if (!payable()) {
+      inFlight = false;
+      emit({ paying: false });
+      return;
+    }
     let r: Outcome<CallReceipt>;
     try { r = await deps.pay(peer, callId, seq); } catch (error) { r = { ok: false, error: asActionError(error) }; }
     inFlight = false;
@@ -235,7 +252,11 @@ export function createCallMinutes(opts: {
     // No reservation, or one above the consent: the host hung up and pays none of it.
     if (HOLD_REFUSED.has(code)) { stopWith('hold_refused', r.error.message); return; }
     // The host has no confirmation of this hold (it changed): show it again, pay nothing until confirmed.
-    if (code === 'call_hold_unconfirmed' || code === 'call_hold_changed') { emit({ confirmed: false }); schedule(STATUS_POLL_MS, () => void tick()); return; }
+    if (code === 'call_hold_unconfirmed' || code === 'call_hold_changed') {
+      emit({ confirmed: false });
+      if (running) schedule(STATUS_POLL_MS, () => void tick());
+      return;
+    }
     // The node no longer runs the call: read it once more, so their hangup (or the lapse) names the end.
     if (code === 'call_not_live') {
       if (++attempts < MAX_ATTEMPTS) { schedule(0, () => void tick()); return; }

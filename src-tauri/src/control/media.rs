@@ -773,6 +773,42 @@ mod tests {
         server.abort();
     }
 
+    // While the app's pairing is refused the proxy answers every tunnel with
+    // this code. Reconnecting could only get the same answer.
+    #[tokio::test]
+    async fn the_proxys_pairing_refusal_ends_the_link_at_once() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = std::sync::Arc::new(AtomicU64::new(0));
+        let server = tokio::spawn({
+            let served = served.clone();
+            async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).await.unwrap() == 1 { head.push(byte[0]); }
+                    crate::remote_access::write_proxy_error(&mut stream, "403 Forbidden", "remote_pairing_refused", "remote node refused pairing").await;
+                    served.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        let api = format!("http://127.0.0.1:{port}/api/v1");
+        let id = "0123456789abcdef0123456789abcdef";
+        let (uplink, downlink) = (FrameQueue::new(QUEUE_FRAMES), FrameQueue::new(QUEUE_FRAMES));
+        let events = Mutex::new(Vec::new());
+        tokio::time::timeout(Duration::from_secs(10), run_media_link(
+            || async { Ok(Some((media_url(&api, id, PEER).unwrap(), "tok".to_string(), "proxy".to_string()))) },
+            &uplink, &downlink, &|event| events.lock().unwrap().push(event), &|| false,
+        )).await.expect("a pairing refusal must end the link, not reconnect");
+        assert_eq!(events.into_inner().unwrap(), vec![
+            MediaLink::Connecting, MediaLink::Ended(Some("the node refused the media socket (403)".into())),
+        ]);
+        assert_eq!(served.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn a_stopped_link_reports_ended_and_returns() {
         let uplink = FrameQueue::new(QUEUE_FRAMES);
