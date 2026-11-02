@@ -15495,31 +15495,6 @@ mod control_act_tests {
         assert_eq!(block["plaintext"], format!(r#"{{"call_id":"{CALL_ID}","seq":0}}"#));
     }
 
-    /// As paid, a minute is its price plus the routing fee pinned on the hold:
-    /// at the call limit with no fee it is paid; one msat of fee over, it is not.
-    #[tokio::test]
-    async fn a2_a_minute_as_paid_must_fit_the_call_limit_with_its_routing_fee() {
-        for (fee, paid) in [(0, true), (1, false)] {
-            let (routes, _) = minutes_routes("live", hold_json(10_000, fee, 60));
-            let node = fake(AuthMode::Local, routes);
-            approve_calls(&node).await;
-            do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
-            remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
-            do_call_hold(&node.state, A, CALL_ID, Some((10_000 + fee) * 60)).await.unwrap();
-            let mut grant = g1_grant(3600, 400_000, 400_000);
-            grant["per_call_max_msat"] = 10_000.into();
-            grant["call_per_payment_max_msat"] = 10_000.into();
-            *node.state.node_grant.lock().unwrap() = grant::parse(&serde_json::json!({"grant": grant}).to_string()).unwrap();
-            let result = do_call_block(&node.state, A, CALL_ID, 0).await;
-            if paid {
-                assert!(compose_kinds(&node).contains(&404), "fee 0: {:?}", result.err());
-            } else {
-                assert_eq!(result.unwrap_err().code, "grant_per_call");
-                assert_eq!(compose_kinds(&node), [400], "fee 1: refused before any payment");
-            }
-        }
-    }
-
     #[tokio::test]
     async fn a2_a_hold_above_the_consent_is_hung_up_before_block_zero() {
         // Agreed: at most 60 minutes' worth. The node reserved 240 minutes at the agreed price.
@@ -16827,6 +16802,31 @@ mod control_act_tests {
                 let err = result.unwrap_err();
                 assert_eq!(err.code, "grant_per_call", "{block}");
                 assert_eq!(composes(&node), 0, "refused before any POST");
+            }
+        }
+    }
+
+    /// As paid, a minute is its price plus the routing fee pinned on the hold:
+    /// at the call limit with no fee it is paid; one msat of fee over, it is not.
+    #[tokio::test]
+    async fn a2_a_minute_as_paid_must_fit_the_call_limit_with_its_routing_fee() {
+        for (fee, paid) in [(0, true), (1, false)] {
+            let (routes, _) = minutes_routes("live", hold_json(10_000, fee, 60));
+            let node = fake(AuthMode::Local, routes);
+            approve_calls(&node).await;
+            do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+            remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
+            do_call_hold(&node.state, A, CALL_ID, Some((10_000 + fee) * 60)).await.unwrap();
+            let mut grant = g1_grant(3600, 400_000, 400_000);
+            grant["per_call_max_msat"] = 10_000.into();
+            grant["call_per_payment_max_msat"] = 10_000.into();
+            *node.state.node_grant.lock().unwrap() = grant::parse(&serde_json::json!({"grant": grant}).to_string()).unwrap();
+            let result = do_call_block(&node.state, A, CALL_ID, 0).await;
+            if paid {
+                assert!(compose_kinds(&node).contains(&404), "fee 0: {:?}", result.err());
+            } else {
+                assert_eq!(result.unwrap_err().code, "grant_per_call");
+                assert_eq!(compose_kinds(&node), [400], "fee 1: refused before any payment");
             }
         }
     }
