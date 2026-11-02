@@ -13,8 +13,9 @@ import { t as tr } from '../i18n';
  * one offer and one hangup for the caller, one answer for the callee.
  */
 import { appPlatform, type AppPlatform } from '../platform';
+import { MESSAGE_PAYMENT_CAP_MSAT } from './ownerApproval';
 import { provenUnpaid } from './paymentOutcome';
-import { asActionError } from './state';
+import { asActionError, messagePerPaymentMax } from './state';
 import { amount } from './format';
 import { createCallMinutes, type CallMinutes, type MinutesDeps, type MinutesView } from './callMinutes';
 import type { ActionError, CallQuote, CallReceipt, Message, MinutesConsent, NodeGrantSummary, OpView } from './types';
@@ -149,17 +150,33 @@ export const signalCost = (q: CallQuote) => q.signal_msat + q.signal_max_routing
 export const callPerPaymentMax = (grant: NodeGrantSummary): number | null =>
   grant.call_per_payment_max_msat ?? (grant.envelopes ? null : grant.per_call_max_msat);
 /**
- * What an owner-chosen per-payment limit must allow for a call, as the host
- * checks it: the largest single payment among the offer, one hangup and one
- * agreed minute (price plus routing allowance). They are separate payments;
- * their sum is checked against the remaining budget instead.
+ * What the call per-payment limit must allow, as the host checks it: the
+ * larger of the offer (all-in) and one agreed minute at its PRICE. The node
+ * pins no routing fee for a usable direct channel and refuses a minute whose
+ * ceiling does not fit before any hold or payment; the routing allowance
+ * stays in the hold and the budget checks. Answer, ICE and hangup are
+ * bounded like messages instead (`hangupOverMessageCap`).
  */
 export const callPerPaymentNeed = (q: CallQuote, minutes: boolean): number =>
   Math.max(
     (q.offer_msat ?? 0) + q.offer_max_routing_fee_msat,
-    signalCost(q),
-    minutes && q.block_msat != null ? q.block_msat + (q.block_max_routing_fee_msat ?? 0) : 0,
+    minutes && q.block_msat != null ? q.block_msat : 0,
   );
+/** The message cap a hangup exceeds, or null: a call that could not be ended is never placed. */
+export const hangupOverMessageCap = (q: CallQuote, grant: NodeGrantSummary | null | undefined): number | null => {
+  if (!grant) return null;
+  const cap = messagePerPaymentMax(grant);
+  return signalCost(q) > cap ? cap : null;
+};
+/**
+ * Why a hangup does not fit (`hangupOverMessageCap`), in words: a lower signed
+ * limit the owner could raise, or the 6-sat most any message payment may
+ * carry, which no approval raises.
+ */
+export const hangupOverMessageCapCopy = (q: CallQuote, cap: number): string =>
+  signalCost(q) > MESSAGE_PAYMENT_CAP_MSAT
+    ? tr('caHangingUpThisCallCostsMoreThanMessageMax', amount(signalCost(q)), amount(MESSAGE_PAYMENT_CAP_MSAT))
+    : tr('caHangingUpThisCallCostsMoreThanMessageCap', amount(signalCost(q)), amount(cap));
 
 export type CallState = 'idle' | 'ringing' | 'connecting' | 'live' | 'reconnecting' | 'ended';
 /** Detailed card phase; consumers can use CallView.state for the shared lifecycle. */
@@ -942,6 +959,11 @@ export function createCallEngine(deps: CallDeps) {
         recoveryRefused(conn, tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(callPerPaymentNeed(q, false)), amount(recoveryLimit)));
         return;
       }
+      const recoveryHangupCap = hangupOverMessageCap(q, grant);
+      if (recoveryHangupCap !== null) {
+        recoveryRefused(conn, hangupOverMessageCapCopy(q, recoveryHangupCap));
+        return;
+      }
       const id = (deps.newCallId ?? newCallId)();
       if (admissions.has(id)) throw new Error(tr('caCouldNotAllocateAFreshCallIdForRecovery'));
       conn.restartIce?.();
@@ -1131,6 +1153,11 @@ export function createCallEngine(deps: CallDeps) {
       if (perPayment !== null && need > perPayment) {
         set({ ...IDLE, phase: 'ended', peer, error:
           tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(need), amount(perPayment)) });
+        return;
+      }
+      const hangupCap = hangupOverMessageCap(q, grant);
+      if (hangupCap !== null) {
+        set({ ...IDLE, phase: 'ended', peer, error: hangupOverMessageCapCopy(q, hangupCap) });
         return;
       }
       // M6: no node-routed call without the per-minute price and the most held the owner agreed to.
