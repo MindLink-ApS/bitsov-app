@@ -237,6 +237,10 @@ pub enum SessionEnd {
     Refused(u16),
     /// The socket dropped or timed out; worth a reconnect.
     Dropped(String),
+    /// The app's own loopback proxy, not the node, turned the handshake away
+    /// (its connection limit, a retry wait, or no tunnel to the node yet).
+    /// Worth a reconnect, a bounded number of times.
+    ProxyUnavailable(String),
     /// The caller asked to stop.
     Stopped,
 }
@@ -275,7 +279,15 @@ pub async fn run_media_session(
         .await
         .map_err(|_| dropped("the media handshake timed out"))?
         .map_err(|e| match e {
-            tokio_tungstenite::tungstenite::Error::Http(response) => SessionEnd::Refused(response.status().as_u16()),
+            tokio_tungstenite::tungstenite::Error::Http(response) => {
+                match crate::remote_access::transient_proxy_error(
+                    response.headers().get(crate::remote_access::PROXY_ERROR_HEADER).and_then(|v| v.to_str().ok()),
+                    response.body().as_deref(),
+                ) {
+                    Some(code) => SessionEnd::ProxyUnavailable(format!("the local proxy could not reach the node ({code})")),
+                    None => SessionEnd::Refused(response.status().as_u16()),
+                }
+            }
             _ => dropped("the node's media socket is not reachable"),
         })?;
     on_open();
@@ -335,6 +347,10 @@ pub async fn run_media_session(
     Ok(())
 }
 
+/// Consecutive proxy-side refusals (without the socket opening in between)
+/// before the link gives up. With `backoff` this waits roughly 30 to 60 s.
+pub const MAX_PROXY_RETRIES: u32 = 6;
+
 /// Own the media link for one call: reconnect with backoff while the socket
 /// drops, stop on a refusal or when `stopping` says so. `prepare` rebuilds the
 /// URL, token and proxy credential on every attempt (the token may have been
@@ -351,6 +367,7 @@ pub async fn run_media_link<F, Fut>(
 {
     let mut next_seq = 0u32;
     let mut attempt = 0u32;
+    let mut proxy_refusals = 0u32;
     loop {
         if stopping() {
             emit(MediaLink::Ended(None));
@@ -372,6 +389,7 @@ pub async fn run_media_link<F, Fut>(
                 .await;
                 if opened.load(Ordering::Relaxed) {
                     attempt = 0;
+                    proxy_refusals = 0;
                 }
                 match result {
                     Ok(()) => None,
@@ -384,6 +402,14 @@ pub async fn run_media_link<F, Fut>(
                         return;
                     }
                     Err(SessionEnd::Dropped(detail)) => Some(detail),
+                    Err(SessionEnd::ProxyUnavailable(detail)) => {
+                        proxy_refusals += 1;
+                        if proxy_refusals >= MAX_PROXY_RETRIES {
+                            emit(MediaLink::Ended(Some(detail)));
+                            return;
+                        }
+                        Some(detail)
+                    }
                 }
             }
             Err(error) => Some(error),
@@ -618,6 +644,169 @@ mod tests {
             vec![MediaLink::Connecting, MediaLink::Ended(Some("the node refused the media socket (404)".into()))]
         );
         server.await.unwrap();
+    }
+
+    /// Answers each media handshake the way the app's loopback proxy does when
+    /// it has no tunnel for it (`proxied` times), or as the node itself would
+    /// with a bare 503, then accepts the socket.
+    async fn refusing_server(listener: tokio::net::TcpListener, proxied: usize, node_503: bool, served: std::sync::Arc<AtomicU64>) {
+        use tokio::io::AsyncReadExt;
+        for _ in 0..proxied {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).await.unwrap() == 1 { head.push(byte[0]); }
+            crate::remote_access::write_proxy_error(&mut stream, "503 Service Unavailable", "remote_proxy_busy", "remote proxy connection limit reached").await;
+            served.fetch_add(1, Ordering::SeqCst);
+        }
+        let (stream, _) = listener.accept().await.unwrap();
+        let result = tokio_tungstenite::accept_hdr_async(stream, move |_: &Request, mut res: Response| {
+            if node_503 {
+                return Err(Response::builder().status(503).body(Some(r#"{"code":"call_media_unavailable"}"#.to_string())).unwrap());
+            }
+            res.headers_mut().insert("Sec-WebSocket-Protocol", "bitsov.v1".parse().unwrap());
+            Ok(res)
+        }).await;
+        served.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut ws) = result {
+            while let Some(Ok(_)) = ws.next().await {}
+        }
+    }
+
+    /// Skip each reconnect backoff on the virtual clock once the link has
+    /// reported `closed` that many times (socket IO stays on the real clock).
+    async fn skip_backoffs(events: &Mutex<Vec<MediaLink>>, done: &dyn Fn(&[MediaLink]) -> bool) {
+        let mut skipped = 0;
+        loop {
+            let (closed, finished) = {
+                let events = events.lock().unwrap();
+                (events.iter().filter(|e| matches!(e, MediaLink::Closed(_))).count(), done(&events))
+            };
+            if finished { return; }
+            if closed > skipped {
+                skipped = closed;
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(31)).await;
+                tokio::time::resume();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_proxy_side_refusal_reconnects_instead_of_ending_the_call() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = std::sync::Arc::new(AtomicU64::new(0));
+        let server = tokio::spawn(refusing_server(listener, 2, false, served.clone()));
+        let api = format!("http://127.0.0.1:{port}/api/v1");
+        let id = "0123456789abcdef0123456789abcdef";
+        let (uplink, downlink) = (FrameQueue::new(QUEUE_FRAMES), FrameQueue::new(QUEUE_FRAMES));
+        let events = Mutex::new(Vec::new());
+        let stop = AtomicBool::new(false);
+        let emit = |event| {
+            if event == MediaLink::Open { stop.store(true, Ordering::SeqCst); }
+            events.lock().unwrap().push(event)
+        };
+        let stopping = || stop.load(Ordering::SeqCst);
+        let link = run_media_link(
+            || async { Ok(Some((media_url(&api, id, PEER).unwrap(), "tok".to_string(), "proxy".to_string()))) },
+            &uplink, &downlink, &emit, &stopping,
+        );
+        // Generous: each skipped backoff also moves this clock by 31 s.
+        tokio::time::timeout(Duration::from_secs(600), async {
+            tokio::join!(link, skip_backoffs(&events, &|e| e.iter().any(|e| matches!(e, MediaLink::Ended(_)))))
+        }).await.unwrap();
+        let busy = MediaLink::Closed(Some("the local proxy could not reach the node (remote_proxy_busy)".into()));
+        assert_eq!(events.into_inner().unwrap(), vec![
+            MediaLink::Connecting, busy.clone(), MediaLink::Connecting, busy,
+            MediaLink::Connecting, MediaLink::Open, MediaLink::Ended(None),
+        ]);
+        assert_eq!(served.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_side_refusals_are_retried_a_bounded_number_of_times() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = std::sync::Arc::new(AtomicU64::new(0));
+        let server = tokio::spawn(refusing_server(listener, 100, false, served.clone()));
+        let api = format!("http://127.0.0.1:{port}/api/v1");
+        let id = "0123456789abcdef0123456789abcdef";
+        let (uplink, downlink) = (FrameQueue::new(QUEUE_FRAMES), FrameQueue::new(QUEUE_FRAMES));
+        let events = Mutex::new(Vec::new());
+        let emit = |event| events.lock().unwrap().push(event);
+        let link = run_media_link(
+            || async { Ok(Some((media_url(&api, id, PEER).unwrap(), "tok".to_string(), "proxy".to_string()))) },
+            &uplink, &downlink, &emit, &|| false,
+        );
+        // Generous: each skipped backoff also moves this clock by 31 s.
+        tokio::time::timeout(Duration::from_secs(600), async {
+            tokio::join!(link, skip_backoffs(&events, &|e| e.iter().any(|e| matches!(e, MediaLink::Ended(_)))))
+        }).await.unwrap();
+        let events = events.into_inner().unwrap();
+        assert_eq!(served.load(Ordering::SeqCst), u64::from(MAX_PROXY_RETRIES));
+        assert_eq!(events.last(), Some(&MediaLink::Ended(Some("the local proxy could not reach the node (remote_proxy_busy)".into()))));
+        assert!(!events.contains(&MediaLink::Open));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn the_nodes_own_503_still_ends_the_link() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = std::sync::Arc::new(AtomicU64::new(0));
+        let server = tokio::spawn(refusing_server(listener, 0, true, served.clone()));
+        let api = format!("http://127.0.0.1:{port}/api/v1");
+        let id = "0123456789abcdef0123456789abcdef";
+        let (uplink, downlink) = (FrameQueue::new(QUEUE_FRAMES), FrameQueue::new(QUEUE_FRAMES));
+        let events = Mutex::new(Vec::new());
+        run_media_link(
+            || async { Ok(Some((media_url(&api, id, PEER).unwrap(), "tok".to_string(), "proxy".to_string()))) },
+            &uplink, &downlink, &|event| events.lock().unwrap().push(event), &|| false,
+        ).await;
+        assert_eq!(events.into_inner().unwrap(), vec![
+            MediaLink::Connecting, MediaLink::Ended(Some("the node refused the media socket (503)".into())),
+        ]);
+        assert_eq!(served.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    // While the app's pairing is refused the proxy answers every tunnel with
+    // this code. Reconnecting could only get the same answer.
+    #[tokio::test]
+    async fn the_proxys_pairing_refusal_ends_the_link_at_once() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = std::sync::Arc::new(AtomicU64::new(0));
+        let server = tokio::spawn({
+            let served = served.clone();
+            async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).await.unwrap() == 1 { head.push(byte[0]); }
+                    crate::remote_access::write_proxy_error(&mut stream, "403 Forbidden", "remote_pairing_refused", "remote node refused pairing").await;
+                    served.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        let api = format!("http://127.0.0.1:{port}/api/v1");
+        let id = "0123456789abcdef0123456789abcdef";
+        let (uplink, downlink) = (FrameQueue::new(QUEUE_FRAMES), FrameQueue::new(QUEUE_FRAMES));
+        let events = Mutex::new(Vec::new());
+        tokio::time::timeout(Duration::from_secs(10), run_media_link(
+            || async { Ok(Some((media_url(&api, id, PEER).unwrap(), "tok".to_string(), "proxy".to_string()))) },
+            &uplink, &downlink, &|event| events.lock().unwrap().push(event), &|| false,
+        )).await.expect("a pairing refusal must end the link, not reconnect");
+        assert_eq!(events.into_inner().unwrap(), vec![
+            MediaLink::Connecting, MediaLink::Ended(Some("the node refused the media socket (403)".into())),
+        ]);
+        assert_eq!(served.load(Ordering::SeqCst), 1);
+        server.abort();
     }
 
     #[tokio::test]
