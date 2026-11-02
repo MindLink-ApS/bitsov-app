@@ -149,14 +149,13 @@ All of these, checked by the node, not only the app:
 - The terms fit an **owner ceiling** written once at setup (default: the
   app's `DEFAULT_BUDGET_MSAT`, 200 sats a day, with the node's 6-sat cap per
   message). Anything above it falls back to the node's computer. This
-  ceiling is the default, owner-accepted (section 10).
-- **Cooldown after a key change.** Self grants are disabled for **N days**
+  ceiling is owner-confirmed (section 10).
+- **Cooldown after a key change.** Self grants are disabled for **3 days**
   after any owner key change on the box: a new enrolment, a re-enrolment of
   the phone, a key invalidated by a biometric change, a restore from the
   recovery phrase, or the revocation of a lost device (section 5.5). A thief
   who re-enrols cannot self-grant at once. The cooldown is owner-accepted
-  (section 10); this document proposes no number for N, so its value is
-  still to be set before P1 is built.
+  (section 10); the owner set it to 3 days.
 - The key is biometric-strong (section 4, R4). On Android without
   `BIOMETRIC_STRONG`, no self grant.
 
@@ -217,12 +216,12 @@ exactly what is shown and exactly what is signed:
   one enrolled, non-revoked owner key, and it is this pairing's" again when
   the signature arrives. A second device enrolled between request and
   approve refuses with `approval_not_single_owner`.
-- **Cooldown.** No owner key change on the box in the last N days
+- **Cooldown.** No owner key change on the box in the last 3 days
   (section 5.1); otherwise `approval_key_cooldown`.
 - Terms equal the stored request and fit the owner ceiling (budget,
   per-call maximum and the sum of per-recipient budgets).
 - Grant written exactly as the console path writes it; expiry at most 24 h
-  (default, owner-accepted; section 10).
+  (owner-confirmed; section 10).
 - **Rate limit:** at most **1 live** self-granted grant at a time and at most
   **3 self grants per 24 h** (`approval_rate_limited`). These numbers are the
   review's proposal, accepted by the owner (section 10).
@@ -270,7 +269,7 @@ command moves under "Other ways", as `TouchIdFirst` already does for v1.
 | Owner ceiling | stored at owner setup; changed only at the console or by a v1 approval |
 | Request message | `GET /pair/approval/{op_id}` returns the self-grant `approval_message` to the requester |
 | Approve | `POST /pair/approval/{op_id}/approve-self {approver_key_id, signature}` |
-| Cooldown | the node records the time of the last owner key change and refuses self grants within N days of it |
+| Cooldown | the node records the time of the last owner key change and refuses self grants within 3 days of it |
 | Audit | self grants are listed to the requester (time, terms, expiry) so the app can show them |
 | Refusals | `approval_not_single_owner`, `approval_over_ceiling`, `approval_expired`, `approval_changed`, `approval_rate_limited`, `approval_key_cooldown` |
 | Revoke a lost device (node-repository requirement) | a revoke route that accepts either a signature by another enrolled, non-revoked owner device key over a domain-separated revoke message (target device, op id, nonce, expiry), or the box's local owner authority from the box's own app; it revokes the target's tokens and device key, ends its grants, records an owner key change, and refuses revoking the requesting device itself through this route |
@@ -315,7 +314,7 @@ platform's own biometric word, as `TouchIdFirst` does.
   prompt; the prompt text equals the node's message fields, byte for byte.
 - Node contract fixtures: second owner device present → refused; a second
   key enrolled **between request and approve** → `approval_not_single_owner`;
-  revoked key → refused; key re-enrolled less than N days ago →
+  revoked key → refused; key re-enrolled less than 3 days ago →
   `approval_key_cooldown`; replayed signature → refused; same signature on
   another op → refused; a second live self grant → refused; the fourth self
   grant in 24 h → `approval_rate_limited`; a `"-"` grant whose per-recipient
@@ -334,13 +333,11 @@ Hardening review round 1 left these to the owner. Both are now decided.
 
 1. **Self-approval limits: decided by the owner, accepted as proposed.**
    At most **1 live** self grant and **3 self grants per 24 h**
-   (`approval_rate_limited`). No self approval for **N days** after any
+   (`approval_rate_limited`). No self approval for **3 days** after any
    owner key change (`approval_key_cooldown`). The owner ceiling is the
    app's `DEFAULT_BUDGET_MSAT`, 200 sats a day, with the node's 6-sat cap
-   per message (default, owner-accepted). The self-grant lifetime is at most
-   24 h, as the console path writes it (default, owner-accepted). This
-   document proposes no number for N; the cooldown rule is accepted, and
-   its value must be set before P1 is built.
+   per message (owner-confirmed). The self-grant lifetime is at most
+   24 h, as the console path writes it (owner-confirmed). The owner set the cooldown to 3 days.
 2. **Lost phone without a terminal: decided by the owner, yes.** A lost
    phone can be revoked from another owner device or from the box's own
    app (for example the Mac app on the box's computer), with no terminal
