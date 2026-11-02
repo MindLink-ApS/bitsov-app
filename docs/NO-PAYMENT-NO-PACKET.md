@@ -9,8 +9,11 @@ Status: analysis and design proposal. Docs only. Draft; needs two independent re
 an owner decision before any ticket below is started. Hardened after an
 independent review (round 1): quote oracle, signed receipts, push fan-out
 bound, block-boundary media cases, ticket A-6, a restated pre-payment bound,
-and a merged harness (section 7). The wording "No payment, no service" is
+and a merged test bench (section 7). The wording "No payment, no service" is
 **decided by the owner** (section 9, item 1); items 2 to 4 are still open.
+Corrected after a second review against the node source (commit `b3f1ad1` of
+the node repository): ticket A-6, rows F1 and F2, and the pre-payment bound in
+3.12, which is now stated as **not established**.
 
 ## 1. The doctrine as first stated
 
@@ -110,9 +113,10 @@ it is marked *node-side* and should be confirmed in the node repository.
   (`Noise_XX_25519_ChaChaPoly_BLAKE2s`, `NOISE_PROTOCOL` in
   `src-tauri/src/remote_access.rs`): XX handshake, encrypted auth request,
   then framed transport (16 KiB plaintext cap, 60 s idle timeout, handshake
-  limit `HANDSHAKE_UNAVAILABLE`). (b) Node to node federation session: the
-  peer handshake and Hello with capabilities (`porch::PEER_CAPABILITY` shows
-  the Hello lists `Custom("porch_read_v1")`).
+  limit `HANDSHAKE_UNAVAILABLE`). That 16 KiB belongs to the app tunnel only.
+  (b) Node to node federation session: the peer handshake and Hello with
+  capabilities (`porch::PEER_CAPABILITY` shows the Hello lists
+  `Custom("porch_read_v1")`). Its frame budget is 16 MiB (see 3.12).
 - **Sender.** (a) The owner's app. (b) Any node that dials ours, including
   one dialed via a front door or introduction (`/front-door/open`,
   `src-tauri/src/app.rs`).
@@ -268,12 +272,27 @@ can only make the *useful* response depend on payment. The goal therefore is
 2. Cheap rejection, with an honest fixed cost. Inside an encrypted session
    the header is itself inside the ciphertext, so "refuse from a cleartext
    header before decryption" is not possible. The fixed pre-payment cost is
-   **one Diffie-Hellman plus one AEAD open of a bounded first frame** (16 KiB
-   plaintext cap, as in the Noise framing of `src-tauri/src/remote_access.rs`;
-   the federation session's cap is *node-side* and must be confirmed). After
-   that, no store lookup, state write or signature check beyond the
-   session's happens before "unpaid, refuse". N-2 publishes this cost in
-   bytes and microseconds.
+   one Diffie-Hellman plus reading and opening the first frame. **The size of
+   that frame is not bounded by anything small, so this pre-payment bound is
+   NOT established.** The 16 KiB in `src-tauri/src/remote_access.rs`
+   (`MAX_NOISE_PLAINTEXT`) is the app's own tunnel to its box, not a peer. Peer
+   to peer, the node's numbers are:
+   - 16 MiB frame budget: `MAX_FRAME_BYTES` =
+     `konsensus_core::wire_json::MAX_JSON_BYTES`
+     (`crates/konsensus-message/src/wire.rs:85`,
+     `crates/konsensus-core/src/wire_json.rs:10`);
+   - 16 MiB + 1 KiB for one Noise message, and its buffer is allocated from the
+     length prefix before the bytes arrive
+     (`read_noise_message`, `crates/konsensus-message/src/transport/mod.rs:851`);
+   - 64 bytes only for the pre-Noise frame of the cookie step
+     (`MAX_PRE_NOISE_FRAME`, `crates/konsensus-message/src/transport/cookie.rs:64`);
+     the 16 MiB cap applies once that step has passed.
+
+   The total is limited by the connection and handshake limits (F1), but an
+   unpaid peer may still make a node read and decrypt up to 16 MiB before it can
+   say "unpaid, refuse". Whether no store lookup, state write or signature check
+   beyond the session's happens first is also unproven (N-1). Ticket N-10 is the
+   fix; until it lands, no document may quote a small pre-payment frame bound.
 3. Rate limits per source on every free operation, and on handshakes.
 4. Quotes that are stateless (the first-contact quote already is: "Pays and
    reserves nothing", `src-tauri/src/app.rs`) and constant-size.
@@ -316,8 +335,8 @@ Corollaries:
 
 | # | Operation | Where | Who can cause it | Recommendation |
 | --- | --- | --- | --- | --- |
-| F1 | Session handshake and Hello | node federation (node-side) | any dialer | **Bound.** Per-IP handshake rate; fixed-size Hello; drop silently past the limit. Keep counting `session_before_payment`. |
-| F2 | First-contact quote | `/messages/first-contact/quote` (`src-tauri/src/app.rs`) | any connected stranger | **Bound.** Already stateless. Add per-source rate and a response-size cap. |
+| F1 | Session handshake and Hello | node federation (node-side) | any dialer | **Rate and capacity bound exists; cite it, add a test.** `DosEdgeConfig` defaults (`crates/konsensus-message/src/transport/edge.rs:28-43`), enforced in `transport/connection.rs`: 10 connections a second per IP (burst 40), 2 Noise starts a second (burst 8), 128 pending, 64 handshakes, 4 per IP, 8 per subnet, cookie above 32, 3 s cookie and 10 s handshake deadlines. Existing tests: `crates/konsensus-message/tests/cookie_handshake.rs`. Add: a test of the defaults against T1 with the byte counters. **Size is not bound:** see 3.12 and N-10. Keep counting `session_before_payment`. |
+| F2 | First-contact quote | `/messages/first-contact/quote` (`src-tauri/src/app.rs`), which asks the target for its admission invoice | any connected stranger | **Rate bound exists; cite it, add a test.** `AdmissionQuotes::permit` (`crates/konsensus-node/src/admission_quotes.rs:40`, called from `session_handler.rs:1371`): one quote per source per 10 s, 16 per 10 s in total, no reissue of an attempt, at most 1,024 guards, refuses new work rather than evicting. Existing test: same file, `source_identity_rotation_global_flood_and_replay_are_bounded`. Add: T14 end to end, including a check of the reply's size, because a response-size cap is not confirmed (N-2). |
 | F3 | Porch quote | `/browse/quote` (`read_porch_quote`) | admitted peers only | **Keep, bound.** Admission already gates it. Rate-limit per peer; cap response size; make `NotFound` and `Forbidden` indistinguishable (byte-identical) for paths outside the manifest, so the quote is not a free path oracle; consider folding into the fetch's price-cap check so a separate quote is optional. |
 | F4 | Price adverts / peer price tables | `/pricing/peers` (node-side) | peers | **Bound.** One advert per peer per epoch; signed; cacheable. Cannot be priced (needed to pay). |
 | F5 | Peer exchange | node-side (`peer_exchange_before_payment`) | peers | **Remove for non-admitted peers; price or bound for admitted ones.** |
@@ -348,16 +367,34 @@ App (this repo):
   token, no fiat key in the node.
 - **A-5 Receipt wording.** In delivery UI, describe a receipt as part of the
   paid message ("paid and delivered"), not a separate event.
-- **A-6 No minute block after End.** Known open issue: the P1 tracked in PR
-  #366 (not fixed here). Today End ends the consent only after the hangup
-  request returns, and a block that passed its last consent check can still
-  post afterwards, so a minute can be paid for silence; a failed hangup can
-  leave the consent open. That pays for a service not received, against the
-  doctrine's spirit. Test (T16): End called while a block is in `money_post`;
-  assert the block is not posted, or is posted and then counted as
-  `failed_paid` with no further block. Second test (T17): the hangup POST
-  fails; assert the consent is Ended and the next block is refused
-  `call_not_live`.
+- **A-6 Keep the End guarantee honest and tested.** The earlier text of this
+  ticket was wrong for main. Which code does what:
+
+  | Code | End and the minute consent |
+  | --- | --- |
+  | origin/main at `edd59ae`, and #366 (head `206bb3e`, merged as `14095f3`) | **Revokes first.** `do_op_end_call_with_limit` calls `end_minutes` before `end_call_admission` (`src-tauri/src/app.rs:7960-7966` on main). A hangup (`do_call_signal_bounded`, `app.rs:7792-7797`) and local teardown (`do_op_close_call`, `app.rs:7937`) do the same as they begin, whatever becomes of the hangup. |
+  | Any tree without `14095f3`, including this branch's own base `96c3b72` | **Revokes after.** `end_call_admission` runs first, and the consent ends only if it returned Ok. That is the code the earlier text described. |
+
+  There is no open P1 here on main and no open PR for it: #366 is merged, and
+  #405, #406 and #407 followed it.
+
+  What stays true on main, and must not be overstated: **at most one minute
+  already issued may still settle** (`end_minutes`, `app.rs:7968-7973`). A minute
+  reads the consent as its last step before the POST (`do_call_block`,
+  `app.rs:7739`) and holds the money lock until its outcome is recorded, so the
+  hangup goes out after it. In remote mode, that POST goes to the loopback proxy,
+  which may hold the request for up to 60 s while its tunnel is set up
+  (`REMOTE_CONNECT_DEADLINE`, `src-tauri/src/remote_access.rs:56`) and forwards it
+  unless the caller has closed (#396, also on main). So **a minute the remote
+  proxy has already accepted can reach the box after End began.** That path is on
+  main, not only on an open PR. It is still one minute at most, and it still goes
+  before the hangup. It is read from the code; no test covers it yet.
+
+  Tests already on main: `a2_end_revokes_minutes_before_a_failed_hangup_and_a_paused_minute_pays_nothing`,
+  `a2_a_minute_revoked_first_is_never_sent_and_one_decided_first_goes_before_the_hangup`
+  and `a2_a_hangup_refused_while_prepared_still_revokes_the_minutes` (`app.rs`).
+  They cover T16 and T17. To add: T16b, the proxy case. Reported, node-side, to
+  confirm: the node refuses a late minute by the call's own state and clock.
 
 Node:
 
@@ -385,6 +422,11 @@ Node:
 - **N-9 Media at block boundaries.** Forward frames between `paid_until_ms`
   and the end of grace; a late block within grace extends `paid_until_ms`
   without a gap (T8b, T8c).
+- **N-10 Establish the pre-payment frame bound.** An unpaid peer can make a node
+  allocate, read and decrypt up to 16 MiB (3.12). Give frames from a peer that
+  has not paid a small limit of their own, and do not allocate from the length
+  prefix alone. Then publish the number (N-2) and prove it with T21. Until then
+  the bound in 3.12 is not established.
 
 Ops:
 
@@ -400,9 +442,9 @@ Ops:
 Goal: show that an unpaid peer gets nothing but a bounded quote or a refusal,
 and measure what that costs the receiver.
 
-### 7.1 Harness
+### 7.1 Test bench
 
-A regtest harness (like the existing two-node UI E2E,
+A regtest test bench (like the existing two-node UI E2E,
 `docs/UI_E2E_TWO_NODE.md`) with three nodes, **A** (owner), **B** (contact)
 and **H** (hostile peer, speaks the federation protocol, never pays, can
 replay captured frames), plus two headless app hosts (A's and B's). It runs
@@ -415,13 +457,13 @@ For each case: send the request (unpaid unless the case says otherwise),
 assert the expected reply, and assert the side effects listed did **not**
 happen.
 
-Each case lists the matching case of the independent review's harness
+Each case lists the matching case of the independent review's test bench
 (S1 to S22) where one exists; the two lists are merged here without
 duplicates.
 
 | Case | Review | Setup and request | Expected | Must not happen / bound |
 | --- | --- | --- | --- | --- |
-| T1 | S1 | Session handshake flood: H opens 500 sessions a minute to A | after N (default 30 a minute per IP) silent drop | unbounded sockets; `bytes_out` > `bytes_in`; CPU per refused handshake above one DH plus one AEAD open |
+| T1 | S1 | Session handshake flood: H opens 500 sessions a minute to A | refused at the `DosEdgeConfig` defaults (`edge.rs:28-43`, F1): 10 connections a second per IP, burst 40; at most 4 at once per IP; 2 Noise starts a second, burst 8 | unbounded sockets; `bytes_out` > `bytes_in`; work per refused handshake above one DH plus reading and opening its frame (limit: T21) |
 | T2 | S2 | Chat compose (kind 0) without payment | refusal | message stored (`store_writes` > 0), `/ws` event at A's app, notification, receipt sent, `pushes_sent` > 0 |
 | T3 | S3 | File ref 200 without payment | refusal | file fetched or stored |
 | T4 | S4 | Call offer 400 without payment | refusal | ring event at callee app; `pushes_sent` > 0 |
@@ -437,20 +479,23 @@ duplicates.
 | T11 | S15 | Porch fetch without payment | refusal | page bytes sent |
 | T12 | S16 | H sends a delivery receipt for a message A never sent, or an unsigned / wrongly signed receipt | drop and count | delivery state changed at A's app |
 | T13 | S17 | Peer exchange / gossip / Lightning info from a stranger | refusal | peer list or channel data sent |
-| T14 | S18 | First-contact quote flood (200 a minute) | rate-limited, stateless | state written per quote (`store_writes` > 0) |
+| T14 | S18 | First-contact quote flood (200 a minute) | rate-limited by `AdmissionQuotes`: one per source per 10 s, 16 per 10 s in total | durable state written per quote (`store_writes` > 0); the reply larger than the request |
 | T15 | S19 | STUN binding from outside the cell | no reply (M6 default, after N-5) | binding response; any bytes out |
-| T16 | S11 | **Block after End (A-6).** A's host calls End while block n is in `money_post` (mock node delays 2 s) | block n not posted; or posted, then counted `failed_paid` and no block n+1 | a `call_block` record created after End's timestamp |
-| T17 | S12 | A's hangup POST returns 500, then a block is due | consent Ended; block refused `call_not_live` | any further payment |
+| T16 | S11 | **Block after End (A-6).** A's host calls End while block n is in `money_post` (mock node delays 2 s) | revoked first: block n never posted. Decided first: exactly one, accounted, and End's hangup after it | a new block issued after End's revoke; a block after the hangup; block n+1 |
+| T16b | new | **Same through the remote proxy (A-6).** A minute is accepted by the loopback proxy, its tunnel is held, End is called, then the tunnel opens | at most that one minute reaches the box, and before the hangup | a second minute; a hangup that overtakes the minute |
+| T17 | S12 | A's hangup POST returns 500, then a block is due | consent ended before the hangup; the block is refused and nothing is sent | any further payment |
 | T18 | S20 | Fake MCP client: pay to an off-allowlist recipient, over the per-call cap, 11 writes in a minute, idempotency key replayed with a new body | each refused at host and node; node 409 reasons match | audit rows ≠ attempts; any payment |
 | T19 | S21 | Self grant: mutated `approval_message`; second key enrolled mid-flow; signature replayed on another op | refused, no prompt | any grant written |
 | T20 | S22 | Package fetch: tampered blob; price raised after quote; path off manifest | refused before payment / `price_cap_exceeded` / refused | any msat paid in any of the three |
+| T21 | new | **Unpaid large frame (N-10).** H sends a length prefix of 16 MiB, first without the bytes and then with them, before any payment | measure allocation, read and decrypt, and record them. Today the node accepts up to 16 MiB plus 1 KiB (`transport/mod.rs:851`). Passes only once N-10 sets a smaller limit | memory or bytes read above the N-10 limit; any store write or forward before the refusal |
 
 ### 7.3 Measurements
 
 - **Bytes processed pre-payment**: per case, bytes read and written by the
   receiving node before refusal. Assert each is under the published bound
   (N-2), and that response bytes never exceed request bytes (no
-  amplification).
+  amplification). No such bound exists yet for an unpaid peer's frame: 3.12,
+  N-10, T21.
 - **Work before refusal**: count of store writes, outbound connections and
   Lightning calls during T2–T15. Expected: zero.
 - **Per-case counters**, recorded by an instrumented node build (N-3):
@@ -473,8 +518,8 @@ duplicates.
 - The M6 build makes no STUN contact (`tests/call-media-flag.test.tsx`
   asserts no `RTCPeerConnection`).
 - **A-6 host tests** (T16, T17): End during a delayed `money_post`, and a
-  failed hangup; see A-6. These reference the open P1 in PR #366 and pass
-  only once that is fixed.
+  failed hangup; on main already (see A-6). T16b, the remote proxy case, is
+  still to be written.
 - The renderer never names a minute amount: it calls
   `call_block(peer, call_id, seq)` only.
 - A `recipient_left` of `None` (no per-recipient entry) is treated as
@@ -494,7 +539,7 @@ duplicates.
 | Intra-cell (apps, pairing, polling, approvals) | exempt by doctrine; protected by authority, not payment |
 | STUN / TURN, push, updates | impossible; M6 already avoids STUN for calls |
 | AI | local and broker exempt; remote model is fiat, off-node; MCP holds with change as grant holders |
-| DoS | payment cannot stop packets; minimise and measure pre-payment work |
+| DoS | payment cannot stop packets; connection and quote rates are bound, the size of an unpaid frame is not (16 MiB, N-10); minimise and measure pre-payment work |
 
 ## 9. Decisions needed from the owner
 
@@ -508,5 +553,5 @@ duplicates.
    grant. Confirm that intra-cell traffic is never priced.
 3. Confirm which free operations stay free (F2 first-contact quote, F3 porch
    quote, F4 price adverts) and their bounds.
-4. Approve the node tickets N-1 to N-9 for scheduling, and the hostile-peer
-   harness of section 7.
+4. Approve the node tickets N-1 to N-10 for scheduling, and the hostile-peer
+   test bench of section 7.
