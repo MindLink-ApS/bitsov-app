@@ -7812,8 +7812,9 @@ async fn do_op_close_call(state: &NodeState, operation_id: &str, peer: &str, cal
 }
 
 /// End an outgoing admission using host-owned identity and cap. Waiting for the
-/// money lock joins any offer/hangup receipt already in flight. Only a matching
-/// unknown offer is reconciled; unrelated sends retain their existing fence.
+/// money lock joins any offer/hangup receipt already in flight. Only this call's
+/// own unknown send (its offer or one of its minutes) is reconciled; unrelated
+/// sends retain their existing fence.
 async fn do_op_end_call(state: &NodeState, call_id: &str) -> Result<spend_journal::OpView, ActionError> {
     do_op_end_call_with_limit(state, call_id, None).await
 }
@@ -7864,28 +7865,34 @@ async fn end_call_admission(state: &NodeState, call_id: &str, max_msat: Option<u
                 return Ok((**hangup).clone().into());
             }
             if !spend_journal::admission_open(offer, &records) { return Ok(offer.clone().into()); }
-            if let Some(p) = pending.filter(|p| p.operation_id.as_deref() == Some(&offer.op_id) && !p.resumable) {
-                // A lost offer receipt is checked by exact operation id, never
-                // replaced or guessed unpaid just because the renderer timed out.
-                match reconcile_operation(state, &journal, p, &offer.op_id).await {
+            // This call's own send whose receipt was lost: its offer, or one of
+            // its minutes, which would otherwise fence the hangup.
+            let own = pending.filter(|p| !p.resumable).and_then(|p| {
+                let id = p.operation_id.clone()?;
+                (id == offer.op_id || calls.iter().any(|r| r.op_id == id && r.kind == "call_block")).then_some((p, id))
+            });
+            if let Some((p, id)) = own {
+                // Checked by exact operation id, never replaced or guessed
+                // unpaid just because a request timed out.
+                match reconcile_operation(state, &journal, p, &id).await {
                     Ok(_) => {}
                     Err(error) if error.code == "failed_paid" => {
                         // Reconciliation accounted this terminal payment and
                         // cleared its slot; the admission still needs cleanup.
-                        if journal.pending()?.is_some() || journal.operation_record(&offer.op_id)?
+                        if journal.pending()?.is_some() || journal.operation_record(&id)?
                             .is_none_or(|r| r.state != spend_journal::OperationState::FailedPaid) {
                             return Err(error);
                         }
                     }
                     Err(error) if error.code == "undelivered_pending" => {
                         let p = journal.pending()?.ok_or_else(|| spend_journal::unknown("Missing paid call operation."))?;
-                        if p.operation_id.as_deref() != Some(&offer.op_id) || p.over_budget
+                        if p.operation_id.as_deref() != Some(&id) || p.over_budget
                             || p.evidence_reservation_msat.is_some() || p.accounting_msat.is_none()
                             || p.undelivered.as_ref().is_none_or(|u| u.in_flight) {
                             return Err(error);
                         }
                         // End cancels further app delivery retries of this
-                        // offer. Preserve its paid evidence and admission fence;
+                        // send. Preserve its paid evidence and admission fence;
                         // only retire the fully accounted dispatch slot so the
                         // single, parent-bound hangup can be sent.
                         close_charge(state, p.charge_id(), p.accounting_msat, p.target.as_ref())?;
@@ -15890,6 +15897,164 @@ mod control_act_tests {
             outcomes[minutes] += 1;
         }
         eprintln!("revoked first: {}, decided first: {}", outcomes[0], outcomes[1]);
+    }
+
+    /// `minute_ready`'s routes on a node that offers the operation abandon and
+    /// confirms it, as genome `message_operation_abandon_v1` does.
+    fn minutes_routes_with_abandon() -> (Routes, Arc<Mutex<OpsNode>>) {
+        let (inner, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        (Arc::new(move |m, p, b| {
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+                    "message_operations_v1", "message_operation_abandon_v1"]}).to_string());
+            }
+            if let Some(id) = p.strip_prefix("/messages/operations/").and_then(|id| id.strip_suffix("/abandon")) {
+                return (200, op_reply(id, "abandoned"));
+            }
+            inner(m, p, b)
+        }), paid)
+    }
+
+    /// Pay block 0 under a 60 ms request timeout, so its reply is lost. `state`:
+    /// what the node made of it; `None`, it never saw it. Returns once the node
+    /// has done so, with the request timeout back for what follows.
+    async fn lose_minute_reply(node: &mut Fake, paid: &Arc<Mutex<OpsNode>>, state: Option<&'static str>) {
+        let before = {
+            let mut ops = paid.lock().unwrap();
+            match state {
+                Some(state) => ops.script = vec![(state, true)],
+                None => ops.drop_next = true,
+            }
+            ops.ops.len()
+        };
+        node.state.spend_timeout = Duration::from_millis(60);
+        assert_eq!(do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err().code, "spend_unknown");
+        node.state.spend_timeout = Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let ops = paid.lock().unwrap();
+            let reached = if state.is_some() { ops.ops.len() > before } else { !ops.drop_next };
+            drop(ops);
+            if reached { return; }
+            assert!(Instant::now() < deadline, "the node never took the minute");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }
+
+    /// A node that swallowed the minute: no answer within `spend_timeout`, no
+    /// record of it, and the abandon confirmed. End asks by operation id, the
+    /// abandon fences the minute, and End pays the hangup.
+    #[tokio::test]
+    async fn a2_end_reconciles_a_minute_the_node_swallowed_then_pays_the_hangup() {
+        let (routes, paid) = minutes_routes_with_abandon();
+        let mut node = minute_ready(routes).await;
+        let spent = budget_now(&node.state).spent_msat;
+        lose_minute_reply(&mut node, &paid, None).await;
+        let id = pending(&node).unwrap().operation_id.unwrap();
+        let end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_eq!((end.kind.as_str(), &end.state, end.paid_msat),
+            ("call_hangup", &spend_journal::OperationState::Settled, Some(PAID_SIGNAL_MSAT)), "a paid hangup");
+        assert_eq!(compose_kinds(&node), [400, 404, 403], "exactly one minute, then one hangup");
+        assert!(pending(&node).is_none());
+        assert_eq!(ledger_record(&node, &id)["state"], "unpaid");
+        assert_eq!(budget_now(&node.state).spent_msat, spent + PAID_SIGNAL_MSAT, "only the hangup is charged");
+        let targets = node.targets();
+        let at = |what: String| targets.iter().position(|t| *t == what).unwrap_or_else(|| panic!("{what}: {targets:?}"));
+        let last_compose = targets.iter().rposition(|t| t == "POST /messages/compose").unwrap();
+        assert!(at(format!("GET /messages/operations/{id}")) < at(format!("POST /messages/operations/{id}/abandon")));
+        assert!(at(format!("POST /messages/operations/{id}/abandon")) < last_compose, "abandoned before the hangup");
+    }
+
+    /// The node reports the minute still paying: End says the outcome is
+    /// unknown, names the pending result and sends no hangup. Once the node
+    /// knows the outcome, End accounts the minute and pays the hangup.
+    #[tokio::test]
+    async fn a2_end_with_its_minute_still_paying_reports_unknown_and_sends_no_hangup() {
+        let (routes, paid) = minutes_routes_with_abandon();
+        let mut node = minute_ready(routes).await;
+        let spent = budget_now(&node.state).spent_msat;
+        lose_minute_reply(&mut node, &paid, Some("paying")).await;
+        let held = pending(&node).unwrap();
+        let id = held.operation_id.clone().unwrap();
+        let error = do_op_end_call(&node.state, CALL_ID).await.unwrap_err();
+        assert_eq!(error.code, "payment_unknown");
+        assert_eq!(error.pending_id.as_deref(), Some(held.id.as_str()), "names the pending result");
+        assert_eq!(compose_kinds(&node), [400, 404], "no hangup");
+        assert_eq!(pending(&node).unwrap().id, held.id, "the fence stays");
+        assert!(!node.targets().contains(&format!("POST /messages/operations/{id}/abandon")), "a paying minute is not abandoned");
+        assert_eq!(consent_phase(&node), ConsentPhase::Ended);
+        paid.lock().unwrap().ops.get_mut(&id).unwrap().1 = "acked";
+        let end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_eq!(end.kind, "call_hangup");
+        assert_eq!(compose_kinds(&node), [400, 404, 403]);
+        assert!(pending(&node).is_none());
+        assert_eq!(budget_now(&node.state).spent_msat, spent + 2 * PAID_SIGNAL_MSAT, "the minute and the hangup");
+    }
+
+    /// The node knows what became of the minute: End accounts it as that
+    /// result, retires its slot and pays the hangup once.
+    #[tokio::test]
+    async fn a2_end_accounts_a_minute_with_a_known_result_then_pays_the_hangup() {
+        for (outcome, recorded) in [("acked", "settled"), ("sent", "settled"), ("paid", "paid_undelivered"), ("failed_paid", "failed_paid")] {
+            let (routes, paid) = minutes_routes_with_abandon();
+            let mut node = minute_ready(routes).await;
+            let spent = budget_now(&node.state).spent_msat;
+            lose_minute_reply(&mut node, &paid, Some(outcome)).await;
+            let id = pending(&node).unwrap().operation_id.unwrap();
+            let end = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+            assert_eq!(end.kind, "call_hangup", "{outcome}");
+            assert_eq!(compose_kinds(&node), [400, 404, 403], "{outcome}");
+            assert_eq!(ledger_record(&node, &id)["state"], recorded, "{outcome}");
+            assert!(pending(&node).is_none(), "{outcome}");
+            assert_eq!(budget_now(&node.state).spent_msat, spent + 2 * PAID_SIGNAL_MSAT, "{outcome}: the minute and the hangup");
+            // Ending it again changes nothing and pays nothing.
+            assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap().op_id, end.op_id, "{outcome}");
+            assert_eq!(compose_kinds(&node), [400, 404, 403], "{outcome}");
+        }
+    }
+
+    /// A node with no abandon: its empty lookup cannot exclude the minute still
+    /// arriving, so End stays unknown and sends no hangup.
+    #[tokio::test]
+    async fn a2_end_needs_the_node_to_confirm_it_abandoned_a_swallowed_minute() {
+        let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let mut node = minute_ready(routes).await;
+        lose_minute_reply(&mut node, &paid, None).await;
+        let held = pending(&node).unwrap();
+        let error = do_op_end_call(&node.state, CALL_ID).await.unwrap_err();
+        assert_eq!(error.code, "payment_unknown");
+        assert_eq!(error.pending_id.as_deref(), Some(held.id.as_str()));
+        assert_eq!(compose_kinds(&node), [400, 404], "no hangup");
+        assert!(!pending(&node).unwrap().resumable, "the fence stays");
+    }
+
+    /// Only this call's own minute is reconciled: another call's pending minute
+    /// keeps its fence, and End of this call never asks about it.
+    #[tokio::test]
+    async fn a2_end_leaves_another_calls_pending_minute_fenced() {
+        const OTHER_CALL: &str = "1123456789abcdef0123456789abcdef";
+        let (inner, paid) = minutes_routes_with_abandon();
+        let other = format!("/pricing/peers/{C}/call");
+        let mut node = minute_ready(Arc::new(move |m, p, b| {
+            if p == other {
+                return (200, serde_json::json!({"peer_id": C, "offer_msat": 10_000, "signal_msat": 50}).to_string());
+            }
+            inner(m, p, b)
+        })).await;
+        with_book(&node.state, true, |b| b.set_limit(C, false, 50_000)).unwrap();
+        do_call_signal(&node.state, C, 400, &OFFER.replace(CALL_ID, OTHER_CALL), 15_000).await.unwrap();
+        lose_minute_reply(&mut node, &paid, None).await;
+        let held = pending(&node).unwrap();
+        let minute = held.operation_id.clone().unwrap();
+        let error = do_op_end_call(&node.state, OTHER_CALL).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown", "the generic fence");
+        assert_eq!(compose_kinds(&node), [400, 400, 404], "no hangup");
+        assert!(!node.targets().iter().any(|t| t.contains(&minute) && t.contains("/messages/operations/")), "never asked about");
+        assert_eq!(pending(&node).unwrap().id, held.id);
+        // Ending the minute's own call resolves it, and then the other can end too.
+        assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap().kind, "call_hangup");
+        assert_eq!(do_op_end_call(&node.state, OTHER_CALL).await.unwrap().kind, "call_hangup");
+        assert_eq!(compose_kinds(&node), [400, 400, 404, 403, 403]);
     }
 
     /// Lock order: a minute refused at its decision cleans up (journal, budget,
