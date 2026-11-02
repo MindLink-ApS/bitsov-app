@@ -287,6 +287,8 @@ This is out of scope until phases 1 and 2 are stable.
 
 Write tools (phase 2) depend on these node changes. The host can approximate
 some of them earlier, but a host-only check is not a bound.
+N-5 also blocks phase 1: per-client pairing uses `POST /pair/device-key`,
+which the node refuses on a box whose seed password comes from a file or a flag.
 
 | # | Requirement | Why |
 |---|---|---|
@@ -294,7 +296,7 @@ some of them earlier, but a host-only check is not a bound.
 | N-2 | **`recipients_only` for owner-written client grants**, including grants that fund the `pay` scope. | Makes the recipient allowlist a node bound (section 5.5). |
 | N-3 | **A node-side label on client grants** and a command that ends every grant with that label. | Kill switch that does not trust the host (section 5.7). |
 | N-4 | Node-side operation scopes (`message` / `pay` / `call`), if the owner wants them (section 9, item 2). | Moves the scope split in 5.3 from the host to the node. |
-| N-5 | **An owner-chosen device approval setting for boxes whose seed password comes from a file or a flag.** Decided by the owner: yes, off until the owner chooses it. It does not exist, and its design is not part of this document. It is node work after the Thursday call proof, under the normal review gate. | "Add client" pairs with a device key (section 4), and `POST /pair/device-key` refuses while approvals are off (`crates/konsensus-api/src/pairing/device.rs:522`). So do the signed relation intents behind a `recipients_only` grant (`pairing/device.rs:1286`). |
+| N-5 | **An owner-chosen device approval setting for boxes whose seed password comes from a file or a flag.** Decided by the owner: yes, off until the owner chooses it. It does not exist, and its design is not part of this document. It is node work after the 5 Nov call proof, under the normal review gate. | "Add client" pairs with a device key (section 4), and `POST /pair/device-key` refuses while approvals are off (`crates/konsensus-api/src/pairing/device.rs:522`). So do the signed relation intents behind a `recipients_only` grant (`pairing/device.rs:1286`). |
 
 **Device approvals are off on such a box until that setting ships.** The node turns device approvals off when the seed's password came from a file
 or a flag: `owner_approval_key` returns `seed_password_not_typed`
