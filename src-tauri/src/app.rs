@@ -5303,13 +5303,22 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // This proves unpaid only for a fresh attempt (new operation id or none).
     // An existing kind-400 operation can return call_id_used after ring expiry
     // while its earlier payment is unresolved; delivery retries also stay held.
+    //
+    // Node rc21 also checks a block (kind 404) again after its reservation, in
+    // block_dispatch_guard, and refuses a late one with this same 400 before
+    // the operation pays. Only that refusal proves a block unpaid, and not if
+    // the node reports the operation in any state but unpaid.
     let fresh_operation = operation_id.is_none()
         || prior.as_ref().and_then(|p| p.operation_id.as_ref()) != operation_id.as_ref();
+    let block = body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK));
     if retry.is_none() && fresh_operation && one_to_one
-        && body["kind"].as_u64().is_some_and(|kind| (400..=403).contains(&kind))
+        && (block || body["kind"].as_u64().is_some_and(|kind| (400..=403).contains(&kind)))
         && status == reqwest::StatusCode::BAD_REQUEST {
         if let Some(reason) = serde_json::from_str::<serde_json::Value>(&text).ok()
             .and_then(|v| match v["reason"].as_str()? {
+                "call_not_live" if block => matches!(v.get("state").map(serde_json::Value::as_str),
+                    None | Some(Some("prepared" | "released"))).then_some("call_not_live"),
+                _ if block => None,
                 "call_id_used" => Some("call_id_used"),
                 "call_busy" => Some("call_busy"),
                 "call_signal_in_flight" => Some("call_signal_in_flight"),
@@ -12809,8 +12818,22 @@ mod control_act_tests {
             ("/messages/compose", false, 403, 409, r#"{"reason":"call_not_live"}"#),
             ("/messages/compose", false, 403, 400, r#"{"reason":"call_price_unknown"}"#),
             ("/messages/compose", false, 399, 400, r#"{"reason":"call_not_live"}"#),
-            ("/messages/compose", false, 404, 400, r#"{"reason":"call_not_live"}"#),
             ("/payments/keysend", false, 403, 400, r#"{"reason":"call_not_live"}"#),
+            // A block: only `call_not_live`, only as a 1:1 400, only with no payment on record.
+            ("/messages/compose", false, 404, 400, r#"{"reason":"call_id_used"}"#),
+            ("/messages/compose", false, 404, 400, r#"{"reason":"call_busy"}"#),
+            ("/messages/compose", false, 404, 400, r#"{"reason":"call_signal_in_flight"}"#),
+            ("/messages/compose", false, 404, 400, r#"{"reason":"call_signal_invalid"}"#),
+            ("/messages/compose", false, 404, 400, r#"{"reason":"call_duration_cap"}"#),
+            ("/messages/compose", false, 404, 400, r#"{"code":"call_not_live"}"#),
+            ("/messages/compose", false, 404, 409, r#"{"reason":"call_not_live"}"#),
+            ("/messages/compose", false, 404, 502, r#"{"reason":"call_not_live"}"#),
+            ("/messages/compose", true, 404, 400, r#"{"reason":"call_not_live"}"#),
+            ("/messages/compose", false, 405, 400, r#"{"reason":"call_not_live"}"#),
+            ("/messages/compose", false, 404, 400, r#"{"reason":"call_not_live","state":"paying"}"#),
+            ("/messages/compose", false, 404, 400, r#"{"reason":"call_not_live","state":"payment_unknown"}"#),
+            ("/messages/compose", false, 404, 400, r#"{"reason":"call_not_live","state":"paid"}"#),
+            ("/messages/compose", false, 404, 400, r#"{"reason":"call_not_live","state":null}"#),
             ("/messages/compose", false, 403, 400, r#"{"code":"call_not_live"}"#),
             ("/messages/compose", false, 403, 400, "broken"),
         ] {
@@ -12840,11 +12863,12 @@ mod control_act_tests {
         // A resumable resend reuses an id whose earlier payment may still be
         // unresolved. A delivery retry retains its earlier payment, even on
         // legacy nodes without operation ids. Neither refusal proves unpaid.
-        for kind in [400, 401] {
+        for kind in [400, 401, 404] {
         for (delivery_retry, has_operation_id) in [(false, true), (true, true), (true, false)] {
             let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
-                if p == "/messages/compose" { (400, r#"{"reason":"call_id_used"}"#.into()) }
-                else { happy()(m, p, b) }
+                if p == "/messages/compose" {
+                    (400, if kind == 404 { r#"{"reason":"call_not_live"}"# } else { r#"{"reason":"call_id_used"}"# }.into())
+                } else { happy()(m, p, b) }
             }));
             spend_advance(&node.state, true).await.unwrap();
             let body = serde_json::json!({"recipient": A, "is_room": false, "kind": kind, "plaintext": OFFER});
@@ -15615,6 +15639,51 @@ mod control_act_tests {
                 do_call_hold(&node.state, A, CALL_ID, Some(15_000 * 60)).await.unwrap();
                 assert_eq!(compose_kinds(&node), [400], "one offer, no minute");
             }
+        }
+    }
+
+    // Node rc21 checks a block again after its reservation, and answers a late
+    // one with a plain 400 before anything is paid. That must not fence End.
+    #[tokio::test]
+    async fn a2_a_minute_refused_after_its_reservation_is_proven_unpaid_and_end_is_free() {
+        for reply in [
+            r#"{"error":"call not live","code":400,"reason":"call_not_live"}"#,
+            r#"{"error":"call not live","code":400,"reason":"call_not_live","operation_id":"x","state":"prepared","payment_hash":null,"accepted":false,"retry_allowed":true}"#,
+            r#"{"error":"call not live","code":400,"reason":"call_not_live","operation_id":"x","state":"released","payment_hash":null,"accepted":false,"retry_allowed":true}"#,
+        ] {
+            let (routes, paid) = minutes_routes("live", hold_json(10_000, 5_000, 60));
+            let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                if p == "/messages/compose" && serde_json::from_str::<serde_json::Value>(b).unwrap()["kind"] == 404 {
+                    return (400, reply.into());
+                }
+                routes(m, p, b)
+            }));
+            approve_calls(&node).await;
+            do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+            remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
+            do_call_hold(&node.state, A, CALL_ID, Some(900_000)).await.unwrap();
+            let spent = budget_now(&node.state).spent_msat;
+            // Each attempt of the scheduler (`MAX_ATTEMPTS` in callMinutes.ts) gets the same
+            // answer, which is what it reads as "the node no longer runs the call".
+            for attempt in 1..=4 {
+                let err = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+                assert_eq!(err.code, "call_not_live", "attempt {attempt}: {reply}");
+                assert!(err.message.contains("Nothing was paid"), "{}", err.message);
+                assert!(pending(&node).is_none(), "attempt {attempt} leaves no pending: {reply}");
+                assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+                assert_eq!(budget_now(&node.state).spent_msat, spent, "nothing was charged");
+                let record = ledger_record(&node, err.operation_id.as_deref().unwrap());
+                assert_eq!((record["kind"].as_str(), record["state"].as_str()), (Some("call_block"), Some("unpaid")));
+                assert_eq!(record["paid_msat"], 0);
+            }
+            assert_eq!(compose_kinds(&node), [400, 404, 404, 404, 404]);
+            assert_eq!(paid.lock().unwrap().pays, 1, "only the offer was paid");
+
+            let ended = do_op_end_call(&node.state, CALL_ID).await.unwrap();
+            assert_eq!(ended.kind, "call_hangup");
+            assert_eq!(compose_kinds(&node), [400, 404, 404, 404, 404, 403], "End paid its hangup with no reconcile first");
+            assert_eq!(paid.lock().unwrap().pays, 2);
+            assert!(pending(&node).is_none());
         }
     }
 
