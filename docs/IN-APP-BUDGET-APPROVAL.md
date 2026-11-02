@@ -20,7 +20,7 @@ comes from a file or a flag.** Section 5.1 requires device approvals to be on,
 and the node turns them off on such a box. Both real test boxes run this way
 today: they log `seed_password_not_typed`. The owner decided yes: device
 approvals on such a box become an owner-chosen setting, off until the owner
-chooses it. It is node work after the Thursday call proof, under the normal
+chooses it. It is node work after the 5 Nov call proof, under the normal
 review gate. See section 5.1, the node-repository requirement in section 6 and
 section 10, item 4.
 
@@ -306,7 +306,7 @@ command moves under "Other ways", as `TouchIdFirst` already does for v1.
 | Cooldown | the node records the time of the last owner key change and refuses self grants within 3 days of it |
 | Audit | self grants are listed to the requester (time, terms, expiry) so the app can show them |
 | Refusals | `approval_not_single_owner`, `approval_over_ceiling`, `approval_expired`, `approval_changed`, `approval_key_cooldown` |
-| Device approval setting (node-repository requirement; does not exist) | an owner-chosen setting for device approvals on a box whose seed password comes from a file or a flag, off until the owner chooses it (decided, section 10, item 4). Its design is not part of this document. The node's reason for the gate is that a same-user program could read that password. It is node work after the Thursday call proof, under the normal review gate. Until it ships, this whole design and the lost-phone revoke do not work on such a box, and both real test boxes run this way today |
+| Device approval setting (node-repository requirement; does not exist) | an owner-chosen setting for device approvals on a box whose seed password comes from a file or a flag, off until the owner chooses it (decided, section 10, item 4). Its design is not part of this document. The node's reason for the gate is that a same-user program could read that password. It is node work after the 5 Nov call proof, under the normal review gate. Until it ships, this whole design and the lost-phone revoke do not work on such a box, and both real test boxes run this way today |
 | Revoke a lost device (node-repository requirement) | a revoke route that accepts either a signature by another enrolled, non-revoked owner device key over a domain-separated revoke message (target device, op id, nonce, expiry), or the box's local owner authority from the box's own app; it revokes the target's tokens and device key, ends its grants, records an owner key change, and refuses revoking the requesting device itself through this route |
 
 The app keeps today's flow for any node without the capability, and for any box
@@ -401,7 +401,7 @@ Items 1, 2 and 4 are decided. Item 3 is open.
    calls. This is read from the code in both repositories, not yet from a test.
 4. **Device approvals on a box whose seed password comes from a file or a flag:
    decided by the owner, yes.** They become an owner-chosen setting, off until
-   the owner chooses it. It is node work after the Thursday call proof, under
+   the owner chooses it. It is node work after the 5 Nov call proof, under
    the normal review gate, and a node-repository requirement (section 6). Until
    that setting ships, these flows do not work on such a box. Both real test
    boxes run this way today: they log `seed_password_not_typed`.
