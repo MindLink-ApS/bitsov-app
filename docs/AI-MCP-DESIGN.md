@@ -284,6 +284,21 @@ some of them earlier, but a host-only check is not a bound.
 | N-2 | **`recipients_only` for owner-written client grants**, including grants that fund the `pay` scope. | Makes the recipient allowlist a node bound (section 5.5). |
 | N-3 | **A node-side label on client grants** and a command that ends every grant with that label. | Kill switch that does not trust the host (section 5.7). |
 | N-4 | Node-side operation scopes (`message` / `pay` / `call`), if the owner wants them (section 9, item 2). | Moves the scope split in 5.3 from the host to the node. |
+| N-5 | **A device approval policy for boxes whose seed password comes from a file or a flag.** It does not exist. It needs a supported start that uses neither, or a policy that turns approvals on for such a box, and its own security review. | "Add client" pairs with a device key (section 4), and `POST /pair/device-key` refuses while approvals are off (`crates/konsensus-api/src/pairing/device.rs:522`). So do the signed relation intents behind a `recipients_only` grant (`pairing/device.rs:1286`). |
+
+**Device approvals are off on such a box.** The node turns device approvals off when the seed's password came from a file
+or a flag: `owner_approval_key` returns `seed_password_not_typed`
+(`crates/konsensus-node/src/main.rs:1087-1107`,
+`crates/konsensus-api/src/pairing/device.rs:28-30`, node commit `b3f1ad1`). They
+are on only with a typed password, or a descriptor or remote unlock together
+with `--local-owner-device`, and only with an encrypted seed. Every device route
+then refuses (`device_authority`, `pairing/device.rs:1536-1542`). Reported,
+node-side, to confirm: both real boxes take the password from a file or flag.
+The field test of 1 November approved at the node's console, which fits, but its
+record does not name the password source. So the add-client screen
+and the client grants above are not described as working on such a box. A grant
+written at the node's console still works where the box runs with
+`--owner-control`, but that is the terminal step this design wants to avoid.
 
 ## 6. UI sketch (Settings → AI)
 
@@ -313,6 +328,9 @@ Settings > AI
 Pairing a new client: "Add client" shows a one-time code; the shim or client
 presents it once; the owner names the client and picks scopes. Default is
 `read` only, no grant.
+
+This screen depends on device approvals, as section 5.10 states (N-5): on a box
+whose seed password comes from a file or a flag it does not work today.
 
 ## 7. Phased plan
 
