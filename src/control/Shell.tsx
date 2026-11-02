@@ -26,6 +26,7 @@ import { DeviceApprovals } from '../onboarding/DeviceApprovals';
 import { approvalMemory, BreakerCard, breakerReason, OwnerApprovals, OwnerApprovalWait, type BreakerReason } from './OwnerApprovals';
 import { OWNER_DEVICE_APPROVAL, OWNER_DEVICE_BREAKER_RESET, refusalText, type ApprovalRequest, type ApprovalView, type DeviceKeysView } from './ownerApproval';
 import { HubTrustInfo } from './HubTrust';
+import { CopyVersions, VersionRows } from './BuildVersions';
 import { pollingSource } from './polling';
 import { deliveryPoller } from './deliveryPoll';
 import { readSpendPreset, saveSpendPreset } from './prefs';
@@ -8164,6 +8165,7 @@ function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Elem
       {props.connection}
       <Show when={props.overview} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>
         {(o) => (
+          <>
           <dl class="facts">
             <dt>{tr('caStatus')}</dt>
             <dd>
@@ -8194,9 +8196,10 @@ function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Elem
             <dd>{o().chain_backend ?? tr('caUnknown')}</dd>
             <dt>{tr('caUptime')}</dt>
             <dd class="sats">{uptime(o().uptime_secs)}</dd>
-            <dt>API</dt>
-            <dd>{o().version ?? tr('caUnknown')}</dd>
+            <VersionRows overview={o()} />
           </dl>
+          <CopyVersions overview={o()} />
+          </>
         )}
       </Show>
       <p class="fresh-line" classList={{ stale: fresh().stale }} data-freshness>
