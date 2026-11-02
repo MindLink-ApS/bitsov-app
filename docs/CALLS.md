@@ -71,10 +71,9 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   the socket (for example an unknown call) ends it at once.
 - **Label.** While a node-routed call is ringing, connecting or live the
   card's **Details** disclosure says *The call goes through your box and
-  theirs, not a company server.* / *Opkaldet går gennem din boks og deres —
-  ikke gennem en fremmed server.* The audio is not end-to-end encrypted
-  between the apps: both nodes forward it. The STUN, direct-recovery and relay
-  notes are not shown.
+  theirs.* / *Opkaldet går gennem din boks og deres.* The audio is not
+  end-to-end encrypted between the apps: both nodes forward it. The STUN,
+  direct-recovery and relay notes are not shown.
 - **Short card.** During a call the card shows the name, the timer, one cost
   line (the paid minutes on an outgoing routed call), mute and hang up; the
   longer notes sit behind **Details**. The in-call direct payment (*Pay*) is
