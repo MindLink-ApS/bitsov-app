@@ -58,13 +58,21 @@ signal's `not_dispatched` refusal closes only on `call_not_live` or
 
 One reply proves a dispatched payment unpaid without a tombstone: `released`
 with a payment hash and nothing settled, re-admitted, charged as a fee, accepted
-or delivered, from an LDK node that offers abandonment (rc15 or later). The node
-writes it only after the wallet reported exactly that payment failed, and LDK
-reports that once no HTLC of it is left and none will be retried. The node
-refuses to abandon that row, so the app retires the operation ID itself and never
-posts it again. With no later POST, no old reading of the row can race one. The
-same reply from another wallet stays payment evidence: its status comes from
-outside the node's source and cannot be shown final there.
+or delivered. The node writes it only after the wallet reported exactly that
+payment failed, and LDK reports that once no HTLC of it is left and none will be
+retried. But the node's current status cannot say what wrote a row: rc14 could
+write the same row for a payment still in flight, when an inbound HTLC reused its
+hash, and an upgrade carries that row over unchanged. So it counts only for a
+send whose own status, read before dispatch and journaled with it, showed this
+node on LDK with abandonment (rc15 or later), and only while the node still shows
+that. On SQLite an older node cannot write the row afterwards: it refuses to open
+a database that rc15 or later has migrated. The node refuses to abandon that row,
+so the app retires the operation ID itself and never posts it again. With no later
+POST, no old reading of the row can race one.
+
+The same reply stays payment evidence without that record: for a slot written by
+an earlier build, under an older node or under another wallet, whose status comes
+from outside the node's source. There is no way out of that fence in the app.
 
 ## Recovery and owner repair follow-up
 
