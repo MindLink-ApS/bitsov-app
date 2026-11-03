@@ -225,7 +225,10 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   hangup, its error carries the pending id, the card says the result is not
   known yet, and the node ends the call itself once its paid time runs out.
   When the admission is already closed (a peer hangup), End does not reconcile,
-  and a lost minute stays pending until the owner's check.
+  and a lost minute stays pending. The ended card then runs the owner's check
+  (`spend_reconcile`, the same read and abandon) once by itself. If that cannot
+  settle it, the card keeps one line saying other payments wait, and the "Check
+  pending result" link.
 - **A call the node already ended.** The minute cap, a minute that failed for
   good, an unpaid expiry and the ring deadline end the call at the caller's
   node with no hangup coming back. End still asks. The node refuses that hangup

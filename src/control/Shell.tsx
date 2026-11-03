@@ -4636,6 +4636,21 @@ function InCallPay(props: {
     if (checked && result()?.state === 'unknown') setResult({ state: 'checked', text: checked.text });
   }, { defer: true }));
   usePairingActivity(() => expanded() || busy() || approving());
+  // Their hangup ended the call while a minute was being paid, and nothing was
+  // ended at the host for it: its pending result holds every paid action. The
+  // same read-only check as the link below runs once by itself, and the line and
+  // the link stay only if it could not settle the result. End answers for itself.
+  const [minuteChecked, setMinuteChecked] = createSignal(false);
+  const minuteLost = () => props.view.callId === props.callId && props.view.phase === 'ended'
+    && props.view.minutes?.lostMinute === true && !minuteChecked()
+    && (props.view.close === null || props.view.close.status === 'refused');
+  createEffect(on(minuteLost, (lost) => { if (lost) void props.actions.reconcile(); }));
+  // A successful check from anywhere has settled it, as for an unknown payment below.
+  createEffect(on(() => props.reconciliation, (checked) => {
+    if (!checked || !minuteLost()) return;
+    setMinuteChecked(true);
+    setResult({ state: 'checked', text: checked.text });
+  }, { defer: true }));
   // A new unit or mapping requires a new amount; never reinterpret a visible draft.
   createEffect(on(destination, () => setAmount(''), { defer: true }));
   createEffect(() => { if (!live()) { setExpanded(false); setAmount(''); } });
@@ -4697,7 +4712,8 @@ function InCallPay(props: {
     </Show>
     <Show when={busy()}><p class="hint" role="status" data-call-pay-status="sending">{tr('uiSendingPayment')}</p></Show>
     <Show when={result()}>{(r) => <p class={r().state === 'failed' ? 'err-note' : 'hint'} role="status" data-call-pay-status={r().state}>{r().text}</p>}</Show>
-    <Show when={props.pending || result()?.state === 'unknown'}>
+    <Show when={minuteLost()}><p class="err-note" role="alert" data-call-lost-minute>{tr('caLostMinuteWarning')}</p></Show>
+    <Show when={props.pending || result()?.state === 'unknown' || minuteLost()}>
       <Reconcile actions={props.actions} hasPending onChecked={(text) => {
         if (result()?.state === 'unknown') setResult({ state: 'checked', text });
       }} />

@@ -94,6 +94,12 @@ export type MinutesView = {
   receiptsMsat: number;
   /** A block payment is in flight. */
   paying: boolean;
+  /**
+   * The call ended while a minute was being paid, and that minute's result never
+   * came back. Nothing was ended at the host for it (their hangup closes the
+   * admission by itself), so its pending result holds every paid action until checked.
+   */
+  lostMinute: boolean;
   stop: MinutesStop | null;
   /** The call ended and the node closed the reservation (or no longer lists the call). */
   settled: boolean;
@@ -143,7 +149,7 @@ export function createCallMinutes(opts: {
   let view: MinutesView = {
     agreedBlockMsat: opts.agreedBlockMsat, reservationMaxMsat: opts.reservationMaxMsat,
     reservation: null, confirmed: false, confirming: false, holdError: null,
-    paidUntilMs: null, blocks: 0, receiptsMsat: 0, paying: false, stop: null, settled: false, final: false,
+    paidUntilMs: null, blocks: 0, receiptsMsat: 0, paying: false, lostMinute: false, stop: null, settled: false, final: false,
   };
   /** Paying blocks (between answer and end). */
   let running = false;
@@ -244,7 +250,8 @@ export function createCallMinutes(opts: {
     try { r = await deps.pay(peer, callId, seq); } catch (error) { r = { ok: false, error: asActionError(error) }; }
     inFlight = false;
     // A receipt is counted even if the call ended meanwhile: it was paid.
-    emit({ paying: false, ...(r.ok ? { receiptsMsat: view.receiptsMsat + r.value.total_msat, blocks: Math.max(view.blocks, seq + 1) } : {}) });
+    emit({ paying: false, ...(r.ok ? { receiptsMsat: view.receiptsMsat + r.value.total_msat, blocks: Math.max(view.blocks, seq + 1) }
+      : !running && !provenUnpaid(r.error.code) ? { lostMinute: true } : {}) });
     if (!running) return;
     if (r.ok) { attempts = 0; void tick(); return; }
     const code = r.error.code;
