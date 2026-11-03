@@ -22,18 +22,23 @@ export type PhoneOnboardingProps = {
   incoming?: { link: string } | null; onConsumeLink?: () => void; onDone: () => void;
 };
 type Screen = 'start' | 'scanner' | 'connecting' | 'words' | 'fingerprint' | 'done' | 'error';
-type Failure = ConnectionError['kind'] | 'camera' | 'mismatch' | 'approval_expired' | 'unsupported' | 'pairing_failed' | 'timeout' | 'stale' | 'biometry' | 'biometry_cancelled' | 'bad_link';
-const kinds = new Set<Failure>(['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired', 'unsupported', 'pairing_failed', 'timeout', 'stale', 'biometry', 'biometry_cancelled', 'bad_link']);
+type Failure = ConnectionError['kind'] | 'camera' | 'mismatch' | 'approval_expired' | 'unsupported' | 'pairing_failed' | 'timeout' | 'stale' | 'refused' | 'biometry' | 'biometry_cancelled' | 'bad_link';
+const kinds = new Set<Failure>(['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired', 'unsupported', 'pairing_failed', 'timeout', 'stale', 'refused', 'biometry', 'biometry_cancelled', 'bad_link']);
 const LOOPBACK = /^(127\.|localhost\b|\[::1\])/i;
-/** A ticket that can never pair again: expired, already used, or its code no longer matches. */
-const staleKinds = new Set<Failure>(['expired', 'used', 'stale', 'bad_link']);
+/** Only a new link helps: an expired, used or malformed link, or a box that refused this app. */
+const staleKinds = new Set<Failure>(['expired', 'used', 'stale', 'bad_link', 'refused']);
 /** Without any progress for this long, "Connecting" becomes a plain failure with one action. */
 export const CONNECTING_TIMEOUT_MS = 30_000;
-/** The host's pairing outcome is free text; only its transport class picks the copy. */
-function pairingFailure(reason: string | null): { kind: Failure; detail: string } {
+/**
+ * The host's pairing outcome is free text; it only picks the copy, and never
+ * drops anything. `refused` is the host's typed answer: the box said no to this
+ * app's saved pairing (see `PairingView.refused`).
+ */
+function pairingFailure(reason: string | null, refused: boolean): { kind: Failure; detail: string } {
   const detail = (reason ?? '').replace(/bitsov:\/\/pair\/[^\s]+/g, '[redacted]');
   // The host's fixed copy for a spent or superseded one-time code (the box saw a code that did not match).
   if (/ticket expired, was already used|pairing link expired/i.test(detail)) return { kind: 'stale', detail };
+  if (refused) return { kind: 'refused', detail };
   const transport = /unreachable|could not be reached|timed out|connection refused|transport failed/i.test(detail);
   return { kind: transport ? 'unreachable' : 'pairing_failed', detail };
 }
@@ -88,18 +93,19 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   onCleanup(() => { alive = false; generation++; pendingLink = ''; if (pasteInput) pasteInput.value = ''; if (screen() === 'scanner') void props.cancelScan?.().catch(() => {}); });
   const fail = (e: unknown) => { joinGeneration++; setError(failure(e)); setScreen('error'); };
   const stale = () => staleKinds.has(error()?.kind as Failure);
-  // A dead ticket the host reported must never be tried again: forget the saved,
-  // never-consumed link at once, so neither the host nor Try again replays it.
-  let forgetting: Promise<void> | undefined;
-  const forgetTicket = () => forgetting ??= (async () => {
+  // A link the host says cannot pair ends this attempt, so the one action (a new
+  // link) can start the next. The saved box stays until a new link is reviewed
+  // and saved, or the owner forgets it: no error, typed or not, drops it. The
+  // host itself stops redialling after a refusal.
+  let retiring: Promise<void> | undefined;
+  const retireAttempt = () => retiring ??= (async () => {
     generation++; resumeSaved = false; pendingLink = ''; compared = false;
     try {
       if (joinStarted || waiting() || props.device()?.state === 'pending') await props.join({ action: 'cancel' });
-      await props.forget();
     } catch { /* The message and its one action still stand. */ }
-    finally { joinStarted = false; setWaiting(undefined); setPreview(undefined); forgetting = undefined; }
+    finally { joinStarted = false; setWaiting(undefined); setPreview(undefined); retiring = undefined; }
   })();
-  const hostFail = (e: unknown) => { fail(e); if (stale()) void forgetTicket(); };
+  const hostFail = (e: unknown) => { fail(e); if (stale()) void retireAttempt(); };
   // Retire an in-flight connect so its late result cannot leave the action disabled.
   const stopWaiting = () => { generation++; pendingLink = ''; setBusy(false); };
   const receive = (v: JoinView) => {
@@ -135,8 +141,8 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     if (!alive || busy() || waiting() || joinStarted || ['words', 'fingerprint', 'connecting'].includes(screen())) return;
     let link: string;
     try { link = normalizePairingLink(input); } catch { setToast(input.trim() ? c().notLink : c().empty); return; }
-    // Never let a pending forget remove the link that replaces it.
-    if (forgetting) { await forgetting; if (!alive || busy()) return; }
+    // A new link starts only after the old attempt has ended.
+    if (retiring) { await retiring; if (!alive || busy()) return; }
     resumeSaved = false; pendingLink = ''; compared = false;
     clearManualPaste();
     setBusy(true); setToast(''); setError(undefined); setOptions(false); setScreen('connecting');
@@ -241,7 +247,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     const p = props.pairing();
     const pairingFailed = p.state === 'failed' ? `failed:${p.reason ?? ''}` : undefined;
     if (pairingFailed && pairingFailed !== previousPairingFailure && ['connecting', 'words'].includes(untrack(screen))) {
-      stopWaiting(); hostFail(pairingFailure(p.reason));
+      stopWaiting(); hostFail(pairingFailure(p.reason, p.refused === true));
     }
     previousPairingFailure = pairingFailed;
     void progressJoin();
@@ -291,6 +297,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       case 'unreachable': return [t.unreachable, t.unreachableLine, t.retry];
       case 'approval_expired': return [t.approvalExpired, t.expiredLine, t.newQr];
       case 'expired': case 'used': case 'stale': return [t.stale, t.staleLine, t.pasteNew];
+      case 'refused': return [t.refused, t.staleLine, t.pasteNew];
       case 'bad_link': return [t.badLink, t.badLinkLine, t.pasteNew];
       case 'clock': return [t.expired, t.clockLine, t.newQr];
       case 'camera': return [t.camera, (props.platform ?? appPlatform()) === 'android' ? t.androidCameraLine : t.cameraLine, t.settings];
