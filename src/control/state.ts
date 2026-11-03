@@ -435,7 +435,7 @@ export const NOT_ANSWERING_AFTER_MS = 5_000;
 
 /**
  * Safety net while the status poll answers: the 60 s stale-overview rule
- * flashed "not answering" during a live test while the node answered; 180 s
+ * flashed "not answering" while the node was still answering; 180 s
  * keeps a hung box (status answers, its overview read never returns) visible.
  */
 export const STALE_OVERVIEW_NOT_ANSWERING_MS = 180_000;
