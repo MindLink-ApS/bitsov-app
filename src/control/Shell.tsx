@@ -117,6 +117,7 @@ import {
   messagesWorth,
   needsApproval,
   nodePill,
+  type PillStatus,
   peerName,
   sentMessage,
   spendLine,
@@ -199,6 +200,8 @@ type Props = {
   nodeLocked?: boolean;
   ready: boolean;
   error: string | null;
+  /** The pill's own ready/error, debounced in App so one missed status read does not flip it. */
+  pillStatus?: PillStatus;
   ownId: string | null;
   /** First-run content shown in the centre until `active`. */
   firstRun: JSX.Element;
@@ -1936,8 +1939,15 @@ export function ControlCenter(props: Props) {
     },
   };
 
-  const pill = () =>
-    nodePill({ remote: props.remote, phone: props.phone, retryAfterSecs: props.retryAfterSecs, ready: props.ready, error: props.error, overview: overview(), link: link(), nowMs: now() });
+  const pill = () => {
+    const held = props.pillStatus;
+    return nodePill({
+      remote: props.remote, phone: props.phone, retryAfterSecs: props.retryAfterSecs,
+      ready: held ? held.ready : props.ready, error: held ? held.error : props.error,
+      quiet: held?.quiet, statusChecked: !!held,
+      overview: overview(), link: link(), nowMs: now(),
+    });
+  };
 
   const trackName = (t: TrackRef): string => {
     if (t.kind === 'peer') return peerName(peerById().get(t.id), t.id);
