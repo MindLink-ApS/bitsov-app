@@ -277,6 +277,24 @@ pub fn call_not_dispatched(body: &str) -> Option<ActionError> {
     }
 }
 
+/// The refusal of a call signal says the node runs no such call: the evidence
+/// that closes an admission (`spend_journal::hangup_closes`). Node rc21 sends
+/// only `call_not_live`; `call_not_found` reads the same.
+pub fn call_gone_reason(reply: &serde_json::Value) -> Option<&'static str> {
+    match reply["reason"].as_str()? {
+        "call_not_live" => Some("call_not_live"),
+        "call_not_found" => Some("call_not_found"),
+        _ => None,
+    }
+}
+
+/// The reply puts no payment on record: it names no operation state (refused
+/// before the operation existed), or one that holds none. Any other state, a
+/// null one included, is not proof of unpaid.
+pub fn reports_no_payment(reply: &serde_json::Value) -> bool {
+    matches!(reply.get("state").map(serde_json::Value::as_str), None | Some(Some("prepared" | "released")))
+}
+
 /// Genome `room_binding_v1` compose refusals (`reason` on a `not_dispatched`),
 /// in plain words. The node's own `error` is for developers and is not shown.
 fn room_refusal_words(reason: &str) -> Option<&'static str> {
@@ -2061,6 +2079,29 @@ mod tests {
             assert!(!e.message.contains("developer detail"), "the node's developer text is not shown");
         }
         assert!(call_not_dispatched("broken").is_none());
+    }
+
+    #[test]
+    fn a_call_is_gone_only_on_its_two_reasons_and_only_with_no_payment_on_record() {
+        for (reply, reason, unpaid) in [
+            // Node rc21: refused before the operation exists, so no state.
+            (json!({"code": "not_dispatched", "error": "no live call with that id", "reason": "call_not_live"}), Some("call_not_live"), true),
+            (json!({"code": "not_dispatched", "reason": "call_not_found"}), Some("call_not_found"), true),
+            (json!({"code": "not_dispatched", "reason": "call_not_live", "state": "prepared"}), Some("call_not_live"), true),
+            (json!({"code": "not_dispatched", "reason": "call_not_live", "state": "released"}), Some("call_not_live"), true),
+            (json!({"code": "not_dispatched", "reason": "call_not_live", "state": "paying"}), Some("call_not_live"), false),
+            (json!({"code": "not_dispatched", "reason": "call_not_live", "state": "payment_unknown"}), Some("call_not_live"), false),
+            (json!({"code": "not_dispatched", "reason": "call_not_live", "state": "paid"}), Some("call_not_live"), false),
+            (json!({"code": "not_dispatched", "reason": "call_not_live", "state": null}), Some("call_not_live"), false),
+            (json!({"code": "not_dispatched", "reason": "call_not_live", "state": 7}), Some("call_not_live"), false),
+            (json!({"code": "not_dispatched", "reason": "call_signal_in_flight"}), None, true),
+            (json!({"code": "not_dispatched", "reason": "call_id_used"}), None, true),
+            (json!({"code": "not_dispatched", "reason": 7}), None, true),
+            (json!({"code": "not_dispatched"}), None, true),
+        ] {
+            assert_eq!(call_gone_reason(&reply), reason, "{reply}");
+            assert_eq!(reports_no_payment(&reply), unpaid, "{reply}");
+        }
     }
 
     #[test]

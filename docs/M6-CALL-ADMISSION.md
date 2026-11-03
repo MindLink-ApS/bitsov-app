@@ -14,7 +14,9 @@ connection diagnostics, payment display, and #278 refusal handling.
   admission's closure. A bound hangup requires node operation support.
 - **I5:** Cancel, timeout, and local failure request `op_end_call`. The host
   reconciles an uncertain offer and sends one hangup using its saved signal
-  ceiling. A proven `call_not_live` refusal closes the admission for free.
+  ceiling. A proven `call_not_live` refusal closes the admission for free:
+  a fresh hangup of a call the node already ended gets it as `not_dispatched`
+  (nodes since rc19.2).
   Paid-undelivered and failed-paid offers retain their payment history while
   cleanup proceeds; a paid-undelivered slot is retired only after accounting,
   with no retry in flight, no unresolved partial evidence, and no overrun.
@@ -50,8 +52,27 @@ result. Known message operations keep their existing reconciliation behavior.
 On upgrade, a resumable/Unpaid call or untyped legacy slot that retains an
 operation ID is restored to Unknown with its budget liability. Restoration is
 idempotent; a confirmed abandonment has cleared that ID and remains released.
-#278's allow-list and fresh-operation/retry conditions remain intact; no new
-node `call_not_found` refusal mapping is inferred.
+#278's allow-list and fresh-operation/retry conditions remain intact. A fresh
+signal's `not_dispatched` refusal closes only on `call_not_live` or
+`call_not_found` and only with no payment on record; rc21 sends only the first.
+
+One reply proves a dispatched payment unpaid without a tombstone: `released`
+with a payment hash and nothing settled, re-admitted, charged as a fee, accepted
+or delivered. The node writes it only after the wallet reported exactly that
+payment failed, and LDK reports that once no HTLC of it is left and none will be
+retried. But the node's current status cannot say what wrote a row: rc14 could
+write the same row for a payment still in flight, when an inbound HTLC reused its
+hash, and an upgrade carries that row over unchanged. So it counts only for a
+send whose own status, read before dispatch and journaled with it, showed this
+node on LDK with abandonment (rc15 or later), and only while the node still shows
+that. On SQLite an older node cannot write the row afterwards: it refuses to open
+a database that rc15 or later has migrated. The node refuses to abandon that row,
+so the app retires the operation ID itself and never posts it again. With no later
+POST, no old reading of the row can race one.
+
+The same reply stays payment evidence without that record: for a slot written by
+an earlier build, under an older node or under another wallet, whose status comes
+from outside the node's source. There is no way out of that fence in the app.
 
 ## Recovery and owner repair follow-up
 
