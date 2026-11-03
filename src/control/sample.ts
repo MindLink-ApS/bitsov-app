@@ -1270,8 +1270,6 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     closeCallAdmission: async () => {},
     callSignal: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
     callStatus: async () => null,
-    callAudioRoute: async () => 'unsupported',
-    callAudioRouteGet: async () => 'unsupported',
     callBlock: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
     callHold: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
     voiceNote: async (messageId) => {
