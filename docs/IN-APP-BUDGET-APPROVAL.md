@@ -6,8 +6,9 @@ Status: **design, docs only.** Nothing here is built. The owner decided
 `konsensus grant` on the node's computer". This document says how, and what
 the node (a separate repository) must add. It needs review from two
 independent reviewers before any code lands. Hardened after an independent
-review (round 1). The owner has since accepted the self-approval limits and
-decided that a lost phone can be revoked without a terminal (section 10).
+review (round 1). The owner has since accepted the self-approval limits, set
+the per-payment limit and decided that a lost phone can be revoked without a
+terminal (section 10).
 
 **Principle.** Build little policy in; ship defaults the user can change. BitSov
 is the base for open source, and what nodes share is timechain entrainment and
@@ -20,9 +21,11 @@ comes from a file or a flag.** Section 5.1 requires device approvals to be on,
 and the node turns them off on such a box. Both real test boxes run this way
 today: they log `seed_password_not_typed`. The owner decided yes: device
 approvals on such a box become an owner-chosen setting, off until the owner
-chooses it. It is node work after the 5 Nov call proof, under the normal
+chooses it. It is node work after the call proof, under the normal
 review gate. See section 5.1, the node-repository requirement in section 6 and
 section 10, item 4.
+
+Device approvals are being built as an owner-chosen setting.
 
 ## 1. Current flow
 
@@ -164,8 +167,12 @@ All of these, checked by the node, not only the app:
 - The terms fit the **self-approval ceiling**: 2,500 sats per 24 h, a default
   the node ships and the owner can change (section 6). It is a total across
   self grants in any 24 hours. Anything above it falls back to the node's
-  computer. The owner set this number (section 10). The per-payment limit a
-  self grant signs is an open point (section 10, item 3).
+  computer. The owner set this number (section 10).
+- The terms fit the **per-payment limit**: 50 sats, inside the ceiling, a default
+  the node ships and the owner can change (section 6). A self grant signs it as
+  `per_call_max_msat`, and it adds nothing to the 2,500. A self grant asking for
+  more falls back to the node's computer. The owner set this number (section 10,
+  item 3).
 - **Cooldown after a key change.** Self grants are disabled for **3 days**
   after any owner key change on the box: a new enrolment, a re-enrolment of
   the phone, a key invalidated by a biometric change, a restore from the
@@ -216,7 +223,7 @@ nonce:<node nonce>
 The host fetches it from a requester-readable route, checks it field by
 field against what the app asked for, builds the biometric prompt text from
 those fields ("approve paying up to 2,500 sats today, at most {cap} per
-message"), signs, re-checks the pairing after the prompt (as `approve()`
+payment"), signs, re-checks the pairing after the prompt (as `approve()`
 already does), and posts the signature. The domain differs from v1's, so a
 self signature can never be replayed as a v1 approval or the reverse.
 
@@ -235,7 +242,8 @@ exactly what is shown and exactly what is signed:
   `op_id`, not against fields in the approve request.
 - `recipient:"-"` means no single named recipient. The ceiling bounds
   `budget_msat`, `per_call_max_msat` **and** the sum of any per-recipient
-  budgets, so a `"-"` grant can never exceed the ceiling.
+  budgets, so a `"-"` grant can never exceed the ceiling. The per-payment limit
+  (section 5.1) also bounds `per_call_max_msat`.
 
 ### 5.3 What the node enforces
 
@@ -250,7 +258,9 @@ exactly what is shown and exactly what is signed:
   (section 5.1); otherwise `approval_key_cooldown`.
 - Terms equal the stored request and fit the ceiling (budget, per-call maximum
   and the sum of per-recipient budgets), counting the self grants of the last
-  24 hours in the total (`approval_over_ceiling`).
+  24 hours in the total (`approval_over_ceiling`). `per_call_max_msat` is at most
+  the per-payment limit, 50 sats by default (the same refusal). Messages under
+  the grant keep the node's 6-sat cap whatever it signs (section 10, item 3).
 - Grant written exactly as the console path writes it; expiry at most 24 h
   (owner-confirmed; section 10).
 - At most **1 live** self-granted grant at a time. A count of self grants per
@@ -301,12 +311,13 @@ command moves under "Other ways", as `TouchIdFirst` already does for v1.
 | Capability | `/status.api_capabilities` gains `owner_present_spend_grant_v1` |
 | Eligibility | `GET /pair/device-keys` reports the owner key count and whether this pairing's key is the only one |
 | Self-approval ceiling | ships as a default of 2,500 sats per 24 h, counted as a total across self grants; the owner changes it at the console or by a v1 approval, never by a self grant, so a compromised host cannot raise it |
+| Per-payment limit | ships as a default of 50 sats, inside the ceiling, signed as `per_call_max_msat`; the owner changes it the same way as the ceiling, never by a self grant. It does not raise the node's 6-sat cap on messages |
 | Request message | `GET /pair/approval/{op_id}` returns the self-grant `approval_message` to the requester |
 | Approve | `POST /pair/approval/{op_id}/approve-self {approver_key_id, signature}` |
 | Cooldown | the node records the time of the last owner key change and refuses self grants within 3 days of it |
 | Audit | self grants are listed to the requester (time, terms, expiry) so the app can show them |
 | Refusals | `approval_not_single_owner`, `approval_over_ceiling`, `approval_expired`, `approval_changed`, `approval_key_cooldown` |
-| Device approval setting (node-repository requirement; does not exist) | an owner-chosen setting for device approvals on a box whose seed password comes from a file or a flag, off until the owner chooses it (decided, section 10, item 4). Its design is not part of this document. The node's reason for the gate is that a same-user program could read that password. It is node work after the 5 Nov call proof, under the normal review gate. Until it ships, this whole design and the lost-phone revoke do not work on such a box, and both real test boxes run this way today |
+| Device approval setting (node-repository requirement; not shipped) | an owner-chosen setting for device approvals on a box whose seed password comes from a file or a flag, off until the owner chooses it (decided, section 10, item 4). Its design is not part of this document. The node's reason for the gate is that a same-user program could read that password. It is node work after the call proof, under the normal review gate. Until it ships, this whole design and the lost-phone revoke do not work on such a box, and both real test boxes run this way today |
 | Revoke a lost device (node-repository requirement) | a revoke route that accepts either a signature by another enrolled, non-revoked owner device key over a domain-separated revoke message (target device, op id, nonce, expiry), or the box's local owner authority from the box's own app; it revokes the target's tokens and device key, ends its grants, records an owner key change, and refuses revoking the requesting device itself through this route |
 
 The app keeps today's flow for any node without the capability, and for any box
@@ -317,10 +328,10 @@ with device approvals off.
 | Key | Dansk | English |
 |---|---|---|
 | Title | Godkend dagens beløb | Approve today's amount |
-| Body | Appen må betale op til {budget} i dag, højst {cap} pr. besked. | The app may pay up to {budget} today, at most {cap} per message. |
+| Body | Appen må betale op til {budget} i dag, højst {cap} pr. betaling. | The app may pay up to {budget} today, at most {cap} per payment. |
 | Button (phone) | Godkend med Face ID | Approve with Face ID |
 | Button (Mac) | Godkend med Touch ID | Approve with Touch ID |
-| Prompt | godkend op til {budget} i dag, højst {cap} pr. besked | approve paying up to {budget} today, at most {cap} per message |
+| Prompt | godkend op til {budget} i dag, højst {cap} pr. betaling | approve paying up to {budget} today, at most {cap} per payment |
 | Done | Godkendt. Gælder til {time}. | Approved. Valid until {time}. |
 | Over ceiling | Beløbet er over din grænse. Godkend det på nodens computer. | This is above your limit. Approve it on the node's computer. |
 | Second device | Du har to enheder nu. Godkend på den anden. | You now have two devices. Approve on the other one. |
@@ -354,9 +365,11 @@ platform's own biometric word, as `TouchIdFirst` does.
   would take the 24-hour total above 2,500 sats → `approval_over_ceiling`, and
   one of exactly 2,500 → allowed; a shorter grant that expired still counts in
   the total; a changed ceiling applies to the next request; a `"-"` grant whose
-  per-recipient sum exceeds the ceiling → `approval_over_ceiling`; a call under
-  a self grant signed at a 6-sat and at a 10-sat per-payment limit (section 10,
-  item 3); a lost device revoked
+  per-recipient sum exceeds the ceiling → `approval_over_ceiling`; a self grant
+  signing above the per-payment limit → `approval_over_ceiling`; a call on the
+  standard price under a self grant signed at 50 sats → allowed, and at 6 sats →
+  refused; a message above 6 sats all-in under a 50-sat self grant → refused
+  (section 10, item 3); a lost device revoked
   from another owner device or the box's own app → its tokens refused, its
   grants ended, and the cooldown started.
 - Android: a key that accepts device credentials is refused for self grants;
@@ -367,7 +380,7 @@ platform's own biometric word, as `TouchIdFirst` does.
 
 ## 10. Owner decisions
 
-Items 1, 2 and 4 are decided. Item 3 is open.
+All four items are decided.
 
 1. **Self-approval limits: decided by the owner.** The ceiling is **2,500 sats
    per 24 h**, a changeable default, counted as a total across self grants. It
@@ -378,8 +391,8 @@ Items 1, 2 and 4 are decided. Item 3 is open.
    key change (`approval_key_cooldown`); the owner set the cooldown to 3 days,
    and it stays because it guards the money path after a key change. The
    self-grant lifetime is at most 24 h, as the console path writes it
-   (owner-confirmed). The earlier limit of 3 self grants per 24 h is
-   removed because the 24-hour total bounds the money; owner confirmation requested.
+   (owner-confirmed). The earlier limit of 3 self grants per 24 h stays
+   removed because the 24-hour total bounds the money; confirmed by the owner.
 2. **Lost phone without a terminal: decided by the owner, yes.** A lost
    phone can be revoked from another owner device or from the box's own
    app (for example the Mac app on the box's computer), with no terminal
@@ -388,20 +401,21 @@ Items 1, 2 and 4 are decided. Item 3 is open.
    requirements (section 6); until that setting ships, neither path works on a
    box whose seed password comes from a file or a flag. Revocation by a
    second person, such as a box host, is not part of this decision.
-3. **Per-payment limit on a self grant: open, the owner has not set it.** This
-   document used to state the ceiling with the node's 6-sat cap per message. If
-   a self grant signs `per_call_max_msat` at 6 sats, it refuses every call, at
-   any budget. At the standard price of 1 / 5 / 2 sats (message / offer /
-   minute) the largest single call payment is 10 sats all-in: the 5-sat offer
-   plus its 5-sat routing allowance. A minute is 7. Both are above 6. A box
-   still pricing at 10 / 10 needs 15. The node's own 6-sat cap on non-call
-   payments is separate and does not need to be signed into the grant. So the
-   conflict remains, and the signed limit is the choice to make. `{cap}` in the
-   prompt and copy stands for it, and copy must say "per payment" if it covers
-   calls. This is read from the code in both repositories, not yet from a test.
+3. **Per-payment limit on a self grant: decided by the owner, 50 sats.** It sits
+   inside the 24-hour ceiling, counts toward that total and is an
+   owner-changeable setting (section 6). A self grant signs it as
+   `per_call_max_msat`. At the standard price of 1 / 5 / 2 sats (message / offer
+   / minute) it covers the call payments: the offer, 10 sats all-in (5 plus its
+   5-sat routing allowance), and each minute, 7. A box still pricing at 10 / 10
+   needs 15, and 50 fits an offer or a minute priced up to 45 sats. It does not
+   cover messages: they keep the node's own 6-sat cap, which the app mirrors, and
+   a 1-sat message is 6 all-in. The closing hangup stays under that cap too. The
+   hold at Ring is not one payment; the budget bounds it. `{cap}` in the prompt
+   and copy stands for this limit, and copy says "per payment". This is read from
+   the code in both repositories, not yet from a test.
 4. **Device approvals on a box whose seed password comes from a file or a flag:
    decided by the owner, yes.** They become an owner-chosen setting, off until
-   the owner chooses it. It is node work after the 5 Nov call proof, under
+   the owner chooses it. It is node work after the call proof, under
    the normal review gate, and a node-repository requirement (section 6). Until
    that setting ships, these flows do not work on such a box. Both real test
    boxes run this way today: they log `seed_password_not_typed`.
