@@ -156,7 +156,7 @@ describe('optimistic send', () => {
     await vi.waitFor(() => expect(sending()).toHaveLength(0));
     expect(area().value).toBe('');
     expect(mount.textContent).not.toMatch(/press Send to try again/);
-    await vi.waitFor(() => expect($('[data-send-live]')?.textContent).toBe('Paid, refused by their node.'));
+    await vi.waitFor(() => expect($('[data-send-live]')?.textContent).toBe('Paid, refused by their box.'));
     expect($('[data-failed-text]')?.textContent).toBe('refused for good');
   });
 

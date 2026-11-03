@@ -52,4 +52,44 @@ assert(partial == [true, false, false, true], "A failed rollback is cleaned befo
 try rollbackFailure.setLive(false)
 assert(partial == [true, false, false, true, false])
 
-print("call audio lifecycle: 7 scenarios passed")
+// Speaker / earpiece: only during a Live call, earpiece by default, reset when
+// the call ends, and never over a headset, Bluetooth or car route.
+var port = CallAudioOutput.earpiece
+var overrides: [Bool] = []
+let routed = CallAudioLifecycle(setSession: { _ in }, overrideSpeaker: { on in
+    overrides.append(on); port = on ? .speaker : .earpiece
+}, output: { port })
+assert(routed.route == .inactive)
+let idleRoute = try routed.setSpeaker(true)
+assert(idleRoute == .inactive && overrides.isEmpty, "No route change outside a Live call")
+try routed.setLive(true)
+assert(routed.route == .earpiece, "A call starts on the earpiece")
+let onSpeaker = try routed.setSpeaker(true)
+assert(onSpeaker == .speaker && routed.route == .speaker)
+let offSpeaker = try routed.setSpeaker(false)
+assert(offSpeaker == .earpiece)
+_ = try routed.setSpeaker(true)
+try routed.setLive(false)
+assert(overrides == [true, false, true, false] && port == .earpiece, "Ending the call resets the speaker")
+assert(routed.route == .inactive)
+try routed.setLive(true)
+port = .external
+let headset = try routed.setSpeaker(true)
+assert(headset == .external, "A headset or Bluetooth route is left alone")
+assert(overrides.count == 4 && routed.route == .external)
+try routed.setLive(false)
+assert(overrides.count == 4, "No reset is needed when nothing was overridden")
+port = .earpiece
+try routed.setLive(true)
+_ = try routed.setSpeaker(true)
+routed.terminate()
+assert(overrides.last == false && routed.route == .inactive, "Termination also resets the speaker")
+let late = try routed.setSpeaker(true)
+assert(late == .inactive, "No route change after termination")
+
+let refusing = CallAudioLifecycle(setSession: { _ in }, overrideSpeaker: { _ in throw Failure.unavailable })
+try refusing.setLive(true)
+do { _ = try refusing.setSpeaker(true); assertionFailure("Override failure is reported") } catch {}
+try refusing.setLive(false)
+
+print("call audio lifecycle: 9 scenarios passed")

@@ -80,7 +80,7 @@ import {
   outboundKind,
   type MembraneEntry,
 } from './body';
-import type { Source } from './source';
+import type { CallAudioRoute, Source } from './source';
 import {
   denom,
   setDenom,
@@ -2480,6 +2480,8 @@ export function ControlCenter(props: Props) {
         hangup={() => void calls.hangup()}
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
+        audioRoute={{ get: () => props.source.callAudioRouteGet(), set: route => props.source.callAudioRoute(route) }}
+        openChat={peer => { setCallApproval(false); calls.dismiss(); const next = { kind: 'peer' as const, id: peer.toLowerCase() }; if (phoneShell()) openPhoneTrack(next); else setTrack(next); }}
         dismiss={() => { setCallApproval(false); calls.dismiss(); }}
         closeAgain={() => void calls.closeAgain()}
         endStuck={() => void calls.endStuck()}
@@ -2793,6 +2795,8 @@ function Rail(props: {
         </Show>
       </div>
 
+      {/* M6 on phones is messages and calls: rooms, assistants, profiles and the porch wait behind one flag. */}
+      <Show when={!phoneExtrasHidden()}>
       <div class="track-group" data-rooms-soon={props.active && props.nodeRooms ? undefined : ''}>
         <h2>{tr('uiRooms')}</h2>
         <Show
@@ -2816,6 +2820,7 @@ function Rail(props: {
           </For>
         </Show>
       </div>
+      </Show>
 
       <Show when={props.active && props.knocks.length > 0}>
         <div class="track-group" data-door-group>
@@ -2839,6 +2844,7 @@ function Rail(props: {
         </div>
       </Show>
 
+      <Show when={!phoneExtrasHidden()}>
       <div class="track-group" data-assistants>
         <h2>{tr('uiAssistants')}</h2>
         <Show when={props.active}>
@@ -2872,6 +2878,7 @@ function Rail(props: {
           </button>
         </Show>
       </div>
+      </Show>
 
       <div class="rail-foot">
         <Show when={props.active}>
@@ -3567,7 +3574,8 @@ function MinutesConsent(props: { quote: CallQuote }) {
     <>
       <p class="hint" data-call-minute-price>{tr('uiCallMinutePrice', fmtAmount(props.quote.block_msat!), fmtAmount(props.quote.block_max_routing_fee_msat ?? 0))}</p>
       <Show when={props.quote.reservation_max_msat != null}>
-        <p class="hint" data-call-reservation-max>{tr('uiCallReservationMax', fmtAmount(props.quote.reservation_max_msat!))}</p>
+        {/* The length comes from this quote (its hold over one minute's price and routing), never a fixed 4 hours. */}
+        <p class="hint" data-call-reservation-max>{tr('uiCallReservationMax', fmtAmount(props.quote.reservation_max_msat!), String(Math.floor(props.quote.reservation_max_msat! / Math.max(1, props.quote.block_msat! + (props.quote.block_max_routing_fee_msat ?? 0)))))}</p>
       </Show>
     </>
   );
@@ -3578,6 +3586,15 @@ function MinutesConsent(props: { quote: CallQuote }) {
  * it ended. Every amount is the node's (its reservation on the call status);
  * a node without a reservation is described by its block receipts, "up to".
  */
+/** The call's two figures at a glance, from the same node values as the sentence under it (display only). */
+function CallMeter(props: { items: [string, number, string?][] }) {
+  return (
+    <dl class="call-meter" data-call-meter>
+      <For each={props.items}>{([label, msat, note]) => <div><dt>{label}</dt><dd>{fmtAmount(msat)}<Show when={note}><span class="call-meter-note">{note}</span></Show></dd></div>}</For>
+    </dl>
+  );
+}
+
 function CallMinutesLine(props: { minutes: MinutesView; ended: boolean; confirm?: () => void }) {
   const m = () => props.minutes;
   const hold = () => m().reservation;
@@ -3596,25 +3613,27 @@ function CallMinutesLine(props: { minutes: MinutesView; ended: boolean; confirm?
         )}
       </Match>
       <Match when={props.ended && hold()}>
-        {(h) => (
+        {(h) => (<>
+          <CallMeter items={[[tr('caMeterPaidTotal'), h().spent_msat]]} />
           <Show when={h().closed} fallback={<p class="hint" data-call-minutes="held">{tr('uiMinutesSummaryHeld', fmtAmount(h().spent_msat), fmtAmount(h().remaining_msat))}</p>}>
             <p class="hint" data-call-minutes="released">{tr('uiMinutesSummaryReleased', fmtAmount(h().spent_msat), fmtAmount(h().released_msat))}</p>
           </Show>
-        )}
+        </>)}
       </Match>
       <Match when={props.ended && m().receiptsMsat > 0}>
         <p class="hint" data-call-minutes="receipts">{tr('uiMinutesSummaryNoReservation', fmtAmount(m().receiptsMsat))}</p>
       </Match>
       <Match when={props.ended}>{null}</Match>
       <Match when={hold()}>
-        {(h) => (
+        {(h) => (<>
+          <CallMeter items={[[tr('caMeterPerMinute'), h().per_block_msat, tr('caMeterRouting', fmtAmount(h().per_block_fee_msat))], [tr('caMeterPaidSoFar'), h().spent_msat]]} />
           <p class="hint" data-call-minutes="running">
             {m().blocks > 0 || h().spent_msat > 0
               ? tr('uiMinutesRunning', fmtAmount(h().per_block_msat), fmtAmount(h().per_block_fee_msat), fmtAmount(h().spent_msat), fmtAmount(h().remaining_msat))
               : tr('uiMinutesReserved', fmtAmount(h().reserved_msat))}
             <Show when={m().paying}>{' '}{tr('uiMinutesPaying')}</Show>
           </p>
-        )}
+        </>)}
       </Match>
       <Match when={m().receiptsMsat > 0}>
         <p class="hint" data-call-minutes="running">{tr('uiMinutesNoReservation', fmtAmount(m().agreedBlockMsat), fmtAmount(m().receiptsMsat))}</p>
@@ -3656,6 +3675,10 @@ function CallPanel(props: {
   confirmMinutes?: () => void;
   /** Opens Settings → General, where the STUN server is chosen. */
   openCallSettings?: () => void;
+  /** A call refused because the contact has not been paid yet: open their chat to send a first message. */
+  openChat?: (peer: string) => void;
+  /** iOS: speaker or earpiece for a live call. Absent, or `unsupported`, hides the control. */
+  audioRoute?: { get: () => Promise<CallAudioRoute>; set: (route: 'speaker' | 'earpiece') => Promise<CallAudioRoute> };
 }) {
   const [tick, setTick] = createSignal(Date.now());
   const [answer, setAnswer] = createSignal<number | null>(null);
@@ -3692,7 +3715,29 @@ function CallPanel(props: {
     if (peer) void props.quote(peer).then((r) => { if (r.ok) setAnswer(signalCost(r.value)); });
   }));
   const v = () => props.view;
+  // The route iOS actually uses: shown as reported, and read again on focus (a headset can override the speaker).
+  const [route, setRoute] = createSignal<CallAudioRoute>('unsupported');
+  const readRoute = () => {
+    const audio = props.audioRoute;
+    if (!audio || v().phase !== 'live') { setRoute('unsupported'); return; }
+    void audio.get().then(r => { if (v().phase === 'live') setRoute(r); }, () => setRoute('unsupported'));
+  };
+  createEffect(on(() => (v().phase === 'live' ? v().callId : null), () => readRoute()));
+  onMount(() => {
+    const refresh = () => { if (document.visibilityState === 'visible') readRoute(); };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    onCleanup(() => { window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh); });
+  });
+  const switchRoute = async () => {
+    const audio = props.audioRoute;
+    if (!audio) return;
+    try { setRoute(await audio.set(route() === 'speaker' ? 'earpiece' : 'speaker')); } catch { readRoute(); }
+  };
+  const routeName = (r: CallAudioRoute) => (r === 'speaker' ? tr('caRouteSpeaker') : tr('caRouteEarpiece'));
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
+  // The host refused before anything was created (`call_needs_contact`): no signal or media lines, one next step.
+  const needsContact = () => v().phase === 'ended' && v().error === tr('caCallNeedsContact');
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
@@ -3736,6 +3781,7 @@ function CallPanel(props: {
           <MediaView stream={props.streams.remote} video={false} muted={false} kind="remote" />
         </Show>
         {/* The host reports each signal's ceiling, not settled fees: after the call, "up to" is the honest total. */}
+        <Show when={!needsContact()}>
         <Show when={v().phase === 'ended'} fallback={
           <Show when={v().paidMsat > 0}>
             <p class="hint" data-call-paid>{tr('uiSignalCostCap')} {fmtAmount(v().paidMsat)} {tr('uiIncludesMaximumRoutingFeesSettledAmountMayBe')}</p>
@@ -3764,6 +3810,7 @@ function CallPanel(props: {
               <p class="hint" data-call-paid="nothing">{tr('uiThisCallPaidNothing')}</p>
             </Match>
           </Switch>
+        </Show>
         </Show>
         <Show when={v().connection}>
           {(connection) => <p class="hint" data-call-connection>{tr('uiConnection')} {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} {tr('uiLocal140')} {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} {tr('uiRemote')}</p>}
@@ -3815,6 +3862,9 @@ function CallPanel(props: {
               <button type="button" class="primary soft money" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced} onClick={() => props.accept()}>{tr('uiAccept')}{price(answer())}</button>
               <button type="button" class="soft" data-call-decline disabled={props.blocked || props.view.silenced} onClick={() => props.decline()}>{tr('uiDecline')}{price(answer())}</button>
             </Match>
+            <Match when={needsContact() && props.openChat && v().peer}>
+              <button type="button" class="primary soft" data-call-message-first onClick={() => props.openChat!(v().peer!)}>{tr('caMessageFirst')}</button>
+            </Match>
             <Match when={v().phase === 'ended'}>
               <Show when={v().stuck}>
                 <button type="button" class="soft money" data-call-end-stuck onClick={() => props.endStuck()}>{tr('uiEndThatCall')}</button>
@@ -3836,6 +3886,12 @@ function CallPanel(props: {
             <Match when={v().phase !== 'idle'}>
               <Show when={v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting'}>
                 <button type="button" class="soft" data-call-mute aria-pressed={v().muted} onClick={() => props.mute()}>{tr('uiMute')}</button>
+                <Show when={route() === 'speaker' || route() === 'earpiece'}>
+                  <button type="button" class="soft" data-call-audio-route={route()} aria-pressed={route() === 'speaker'}
+                    aria-label={tr('caRouteSwitch', routeName(route()), routeName(route() === 'speaker' ? 'earpiece' : 'speaker'))}
+                    onClick={() => void switchRoute()}>{routeName(route())}</button>
+                </Show>
+                <Show when={route() === 'external'}><span class="hint call-route-external" data-call-audio-route="external">{tr('caRouteExternal')}</span></Show>
                 <Show when={v().media === 'video'}>
                   <button type="button" class="soft" data-call-camera aria-pressed={v().camera} onClick={() => props.camera()}>{tr('uiCamera')}</button>
                 </Show>
@@ -5091,7 +5147,8 @@ function Composer(props: {
           setAmount(draftAmount);
           setMemo(p.text);
         }
-        setDrafted(true);
+        // Only an AI draft is labelled as one; an Unsent card holds the person's own words.
+        setDrafted(!p.unsentId);
         if (p.unsentId) props.actions.discardUnsent(props.track, p.unsentId);
         props.onPrefillUsed?.();
       },
@@ -5309,7 +5366,8 @@ function Composer(props: {
   const firstContactCostLine = (): string | null => {
     if (!doorWanted() || (!door() && !readmitPrice())) return null;
     const q = readmitPrice() ?? doorQuote();
-    if (priceProblem()) return priceProblem();
+    // A price problem is said once, on the price line with its Retry; never repeated here.
+    if (priceProblem()) return null;
     if (!q) return tr('firstSpendCostLoading');
     return tr('firstSpendCost', fmtAmount(q.admission_msat), fmtAmount(q.message_msat),
       fmtAmount(q.max_routing_fee_msat ?? 0), fmtAmount(q.total_msat));
@@ -5553,7 +5611,8 @@ function Composer(props: {
     if (trackKey(untrack(() => props.track)) === trackKey(c.track) && !untrack(draft)) {
       props.actions.settleWaiting(c.track, c.bubble, '');
       setDraft(c.text);
-      setDrafted(true);
+      // The person's own text, back after the approval: not an AI draft.
+      setDrafted(false);
       setNote(tr('uiApprovedPressSendToSendIt'));
     } else props.actions.settleWaiting(c.track, c.bubble, tr('uiApprovedPressSendToSendIt238'));
   };
@@ -6251,6 +6310,11 @@ function Composer(props: {
       ? props.spend?.state === 'pending' || props.spend?.state === 'unavailable' || props.spend === null
       : !ready());
 
+  const sendPriceId = createUniqueId();
+  const shownReason = () => {
+    const reason = disabledReason();
+    return reason && !(mode() === 'message' && reason === priceLine()) ? reason : null;
+  };
   const disabledReason = (): string | null => {
     if (!disabled()) return null;
     if (mode() === 'message' && !draft().trim()) return tr('uiTypeAMessageFirst');
@@ -6557,7 +6621,7 @@ function Composer(props: {
             class="primary soft send-btn money"
             disabled={disabled()}
             data-send
-            aria-describedby={disabledReason() ? sendReasonId : undefined}
+            aria-describedby={shownReason() ? sendReasonId : disabledReason() ? sendPriceId : undefined}
             onClick={(e) => { if (e.detail > 1) e.preventDefault(); }}
             title={sendTitle()}
             aria-label={sendTitle()}
@@ -6566,8 +6630,9 @@ function Composer(props: {
           </button>
         </Show>
       </div>
-      <Show when={disabledReason()}>
-        <p id={sendReasonId} class="hint" data-send-disabled-reason>{disabledReason()}</p>
+      {/* Why Send is off, unless the price line below already says exactly that (with its Retry). */}
+      <Show when={shownReason()}>
+        <p id={sendReasonId} class="hint" data-send-disabled-reason>{shownReason()}</p>
       </Show>
       <Show when={mode() === 'message' && liveGrantRemaining() !== null}>
         <p class="hint" data-send-budget>{tr('sendBudgetRemaining', fmtAmount(liveGrantRemaining()!))}</p>
@@ -6575,7 +6640,7 @@ function Composer(props: {
       <div class="composer-meta">
       <Show when={mode() === 'message'}>
         <div class="send-price" classList={{ priced: !priceProblem() && (paidLine() !== null || messageShown().msat !== null) }}>
-          <span data-send-price aria-live="polite">{priceLine()}</span>
+          <span id={sendPriceId} data-send-price aria-live="polite">{priceLine()}</span>
           <Show when={firstContactCostLine()}><span class="first-contact-cost" data-first-contact-cost>{firstContactCostLine()}</span></Show>
           <Show when={priceProblem() && priceProblem() !== tr('uiPriceLoading')}>
             {' '}<button type="button" class="link" data-price-retry disabled={busy()} onClick={retryPrice}>{tr('uiRetry')}</button>
@@ -6613,7 +6678,10 @@ function Composer(props: {
                   <span class="unit">{satUnit(shown().msat!)}</span>
                 </span>
               </Show>
-              <span class="basis" title={shown().basis}>{shown().basis}</span>
+              {/* The price line already says a price problem (with Retry): not repeated as the cost basis. */}
+              <Show when={!(mode() === 'message' && priceProblem() && shown().basis === priceProblem())}>
+                <span class="basis" title={shown().basis}>{shown().basis}</span>
+              </Show>
             </div>
           </div>
         </Show>
@@ -6895,6 +6963,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
                 <strong>{tr('uiConfirmAtYourNode')}</strong> {tr('uiYourNodeAsksItsOwnerToApproveThis')}
               </p>
               <code class="address" data-owner-action>{p().owner_action}</code>
+              <Show when={isMobilePlatform()}><p class="hint" data-approve-on-box>{tr('caApproveOnBox')}</p></Show>
               <p class="hint">
                 {tr('uiThisAppCannotApproveItForYouThe')} {minutes(p().expires_at_ms)} {tr('uiMinYourDraftIsKept')}{' '}
                 <button type="button" class="link" data-spend-cancel onClick={() => void props.actions.cancelSpend()}>
@@ -6912,6 +6981,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
                 <strong>{tr('uiThisNodeCannotGrantSpendingToTheApp')}</strong> {tr('uiReceivingStillWorksYourNodeSays')}
               </p>
               <code class="address" data-owner-action>{p().owner_action}</code>
+              <Show when={isMobilePlatform()}><p class="hint" data-approve-on-box>{tr('caOwnerApprovalUnavailable')}</p></Show>
             </div>
           )}
         </Match>
@@ -6942,9 +7012,14 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
         <DeviceSetup device={props.actions.device()} now={props.now} actions={props.actions} />
       </Show>
       <Reconcile actions={props.actions} hasPending={props.hasPending || Boolean(props.spend?.pending)} />
-      <Show when={props.error}>
-        <p class="err-note">{props.error}</p>
-      </Show>
+      <Show when={props.error}>{(error) =>
+        // The node has owner approvals off: say so plainly, never the raw HTTP error or its start flags.
+        <Show when={/owner_approval_unavailable/.test(error())} fallback={<p class="err-note">{error()}</p>}>
+          <p class="err-note" data-owner-approval-unavailable>{tr('caOwnerApprovalUnavailable')}{' '}
+            <button type="button" class="link" disabled={props.actions.moneyBlocked() || asking()} onClick={() => void askAgain()}>{tr('caCheckAgain')}</button>
+          </p>
+        </Show>
+      }</Show>
     </div>
   );
 }
@@ -7420,6 +7495,10 @@ export function setShowLegacyIntroductionUi(enabled: boolean) {
 }
 
 /** Product default hides legacy prototype rooms; current rooms use node-verified bindings. */
+/** Phones (M6): messages and calls only. Rooms, assistants, profiles and the porch return when this is false. */
+let hidePhoneExtras = true;
+export function setHidePhoneExtras(hidden: boolean) { hidePhoneExtras = hidden; }
+const phoneExtrasHidden = () => hidePhoneExtras && isMobilePlatform();
 let showLegacyRoomsUi = false;
 export function setShowLegacyRoomsUi(enabled: boolean) {
   showLegacyRoomsUi = enabled;

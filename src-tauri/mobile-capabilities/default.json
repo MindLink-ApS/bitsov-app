@@ -111,6 +111,8 @@
     "allow-file-fetch",
     "allow-file-save",
     "allow-call-audio-session",
+    "allow-call-audio-route",
+    "allow-call-audio-route-get",
     "allow-call-quote",
     "allow-call-signal",
     "allow-call-status",

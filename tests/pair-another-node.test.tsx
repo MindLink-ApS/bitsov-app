@@ -41,7 +41,7 @@ async function reviewAndChoose() {
   await vi.waitFor(() => expect(mount.querySelector('[data-pair-another-confirm]')).not.toBeNull());
 }
 
-describe('Settings → Node: Pair another node', () => {
+describe('Settings → Box: Pair another node', () => {
   it.each([true, false, undefined])('shows the button only for a remote node (remote=%s)', async (remote) => {
     const source = sampleSource({ firstLiveMs: 1e9 });
     dispose = render(() => <ControlCenter source={source} active ready remote={remote} error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mountIn());

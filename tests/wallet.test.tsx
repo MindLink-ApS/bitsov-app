@@ -245,7 +245,7 @@ describe('the Wallet page', () => {
     expect(text('[data-balance-reserved]')).toMatch(/Reserved.*channel fee reserve/i);
     expect(text('[data-balance-closing]')).toMatch(/Closing\/locked/);
     expect(text('[data-wallet-basis]')).toMatch(/does not report.*separately/);
-    expect(text('[data-wallet-online]')).toMatch(/home node must stay online.*no watchtower/i);
+    expect(text('[data-wallet-online]')).toMatch(/box must stay online.*no watchtower/i);
     // What is behind the page is out of reach while it is open.
     const inert = (el: Element | null) => !!el && (el.hasAttribute('inert') || (el as HTMLElement & { inert?: boolean }).inert === true);
     expect(inert($('nav.rail'))).toBe(true);
@@ -353,7 +353,7 @@ describe('the Wallet page', () => {
     expect(text('[data-wallet-basis]')).toMatch(/overlap.*do not add up/i);
     expect(text('[data-wallet-basis]')).toMatch(/closing.*before sweep fees.*already.*on-chain/i);
     expect(text('[data-balance-reserved]')).toMatch(/included in.*on-chain total/i);
-    expect(text('[data-wallet-balance]')).toContain('Node-reported total');
+    expect(text('[data-wallet-balance]')).toContain('Box-reported total');
     expect(text('[data-balance-total]')).toBe('480\u202f000sats');
     // These deliberately non-reconciling amounts must never become a second total.
     expect(text('[data-wallet-balance]')).not.toMatch(/387\u202f000|412\u202f000|452\u202f000/);
@@ -408,7 +408,7 @@ describe('the Wallet page', () => {
       .toEqual(['Spendable', 'Reserved (channel fee reserve)', 'Closing/locked']);
     expect([...mount.querySelectorAll('.wallet-hero .split-amount')].map((el) => el.textContent))
       .toEqual(['Unknown', 'Unknown', 'Unknown']);
-    expect(text('[data-wallet-basis]').trim()).toBe('Your node reports one total, but does not report these amounts separately. The total is not a spendable balance.');
+    expect(text('[data-wallet-basis]').trim()).toBe('Your box reports one total, but does not report these amounts separately. The total is not a spendable balance.');
     expect($('[data-balance-contested]')).toBeNull();
   });
 
@@ -608,7 +608,7 @@ describe('the Wallet page', () => {
     await vi.waitFor(() => expect($('[data-send-amount]')).not.toBeNull());
     type('[data-send-amount]', '1');
     type('[data-send-to]', 'tb1qsampledata0notarealaddress0donotsend');
-    await vi.waitFor(() => expect(text('[data-send-hint]')).toMatch(/on-chain is an owner action at your node/));
+    await vi.waitFor(() => expect(text('[data-send-hint]')).toMatch(/on-chain is an owner action at your box/));
     expect($<HTMLButtonElement>('[data-send-review]')!.disabled).toBe(true);
     type('[data-send-to]', PAYEE);
     type('[data-send-memo]', 'thanks');
@@ -683,7 +683,7 @@ describe('the Wallet page', () => {
     stubHost({ payments_overview: () => ({ ...WALLET, channels: [] }) });
     await openWallet('channels');
     await vi.waitFor(() => expect($('[data-wallet-page] [data-channels-empty]')).not.toBeNull());
-    const sentence = 'No channels yet. A channel is how your node sends and receives over Lightning; paid messages need one.';
+    const sentence = 'No channels yet. A channel is how your box sends and receives over Lightning; paid messages need one.';
     expect(text('[data-wallet-page] [data-channels-empty]')).toBe(sentence);
     expect(text('[data-wallet-page] [data-channels-empty]')).not.toMatch(/fund|deposit/i);
     // The second surface: Settings → Wallet.

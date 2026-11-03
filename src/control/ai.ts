@@ -118,7 +118,7 @@ const TOPICS: [AiTopic, RegExp][] = [
   ['channels', /\b(channels?|liquidity|inbound|outbound|capacity)\b/],
   ['balance', /\b(balance|funds?|wallet|how much (money|bitcoin|btc|sats?)|savings|do i have)\b/],
   ['inbox', /\b(inbox|who (wrote|messaged|sent me)|incoming|unread|messages? (did i get|from))\b/],
-  ['node', /\b(node|status|health|healthy|uptime|online|block|synced?|peers? connected|how is it doing)\b/],
+  ['node', /\b(node|box|status|health|healthy|uptime|online|block|synced?|peers? connected|how is it doing)\b/],
 ];
 
 // Built-in suggestions keep the existing rule-parser meaning in either language.

@@ -39,9 +39,9 @@ describe('an empty chat says only what is known', () => {
 
   it('a failed read shows only its error, never "no messages"', async () => {
     const source = sampleSource({ firstLiveMs: 1e9 });
-    source.messages = vi.fn(async () => { throw { code: 'node', message: 'Your node did not answer.' }; });
+    source.messages = vi.fn(async () => { throw { code: 'node', message: 'Your box did not answer.' }; });
     await open(source);
-    await vi.waitFor(() => expect(mount.textContent).toContain('Your node did not answer.'));
+    await vi.waitFor(() => expect(mount.textContent).toContain('Your box did not answer.'));
     expect($('[data-thread-empty]')).toBeNull();
     expect($('[data-thread-loading]')).toBeNull();
     expect(mount.textContent).not.toMatch(/No messages here yet|Nothing here yet/);
@@ -73,7 +73,7 @@ describe('an empty chat says only what is known', () => {
     let fail!: () => void;
     source.messages = vi.fn((peer: string) => {
       if (peer.toLowerCase() !== A || !reopened) return Promise.resolve([]);
-      return new Promise<never>((_r, reject) => { fail = () => reject({ code: 'node', message: 'Your node did not answer.' }); });
+      return new Promise<never>((_r, reject) => { fail = () => reject({ code: 'node', message: 'Your box did not answer.' }); });
     }) as never;
     await open(source);
     await vi.waitFor(() => expect($('[data-thread-empty]')).not.toBeNull());
@@ -87,7 +87,7 @@ describe('an empty chat says only what is known', () => {
     expect(mount.textContent).not.toMatch(/No messages here yet/);
     await vi.waitFor(() => expect(fail).toBeDefined());
     fail();
-    await vi.waitFor(() => expect(mount.textContent).toContain('Your node did not answer.'));
+    await vi.waitFor(() => expect(mount.textContent).toContain('Your box did not answer.'));
     expect($('[data-thread-empty]')).toBeNull();
     expect($('[data-thread-loading]')).toBeNull();
     expect(mount.textContent).not.toMatch(/No messages here yet/);
@@ -124,11 +124,11 @@ describe('an empty chat says only what is known', () => {
 
     it('newer read fails, then an older read succeeds: the error stays and nothing says "no messages"', async () => {
       const { newest, older } = await overlapping();
-      newest.reject({ code: 'node', message: 'Your node did not answer.' });
-      await vi.waitFor(() => expect(mount.textContent).toContain('Your node did not answer.'));
+      newest.reject({ code: 'node', message: 'Your box did not answer.' });
+      await vi.waitFor(() => expect(mount.textContent).toContain('Your box did not answer.'));
       for (const r of older) r.resolve([]);
       await new Promise((r) => setTimeout(r, 20));
-      expect(mount.textContent).toContain('Your node did not answer.');
+      expect(mount.textContent).toContain('Your box did not answer.');
       expect($('[data-thread-empty]')).toBeNull();
     });
   });
@@ -159,8 +159,8 @@ it('localizes the room empty state, notices, composer and payment outcomes in Da
     onLeave={() => {}} onContext={() => {}} />, mount);
   expect($('[data-thread-empty] h2')?.textContent).toBe('Ingen beskeder her endnu');
   expect($('[data-thread-empty] .hint')?.textContent).toBe('En besked her betaler hvert medlem deres egen pris.');
-  expect($('[data-room-honesty]')?.textContent).toContain('krypteres fra din node til hvert medlems node');
-  expect($('[data-room-honesty]')?.textContent).toContain('Begge endenoder kan læse den');
+  expect($('[data-room-honesty]')?.textContent).toContain('krypteres fra din boks til hvert medlems boks');
+  expect($('[data-room-honesty]')?.textContent).toContain('Begge bokse kan læse den');
   expect($('[data-room-earlier]')?.textContent).toBe('Vis tidligere beskeder');
   expect($('[data-room-blocked]')?.textContent).toBe('Betalinger er ikke klar endnu, så der kan ikke sendes fra dette rum.');
   expect($('[data-room-draft]')?.getAttribute('placeholder')).toBe('Besked til Ada');
@@ -171,7 +171,7 @@ it('localizes the room empty state, notices, composer and payment outcomes in Da
   setSends([{ at: 0, text: 'hello', outcomes: [{ peer: A, state: 'refused', paidMsat: 1000, note: null }] }]);
   expect($('[data-room-send]')?.textContent).toContain('Din rumbesked · op til 1 sat i alt');
   expect($('[data-room-leg] strong')?.textContent).toBe('Til Ada:');
-  expect($('[data-room-leg-note]')?.textContent).toContain('betalt, afvist af deres node; send den ikke igen · du betalte op til 1 sat');
+  expect($('[data-room-leg-note]')?.textContent).toContain('betalt, afvist af deres boks; send den ikke igen · du betalte op til 1 sat');
   setSends([]);
   setLanguagePref('en');
   expect($('[data-thread-empty] h2')?.textContent).toBe('No messages here yet');

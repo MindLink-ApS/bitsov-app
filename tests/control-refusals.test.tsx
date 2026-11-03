@@ -50,7 +50,7 @@ it('shows all eight refusal reasons in words, with separate hourly counts, sourc
   expect(panel!.textContent).toContain('Refused knocks before payment');
   expect(panel!.textContent).toContain('UTC');
   expect(panel!.textContent).toContain('control requests');
-  expect(panel!.textContent).toContain('node');
+  expect(panel!.textContent).toContain('box');
   expect(select('[data-refusals-fresh]')!.textContent).toContain('20s ago');
   const labels = ['Session setup', 'Delivery replies', 'Price requests and replies', 'Peer exchange', 'Lightning information', 'Gossip', 'Invoice error replies', 'Admission payment required'];
   for (const [i, reason] of reasons.entries()) {

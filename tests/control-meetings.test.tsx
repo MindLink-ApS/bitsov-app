@@ -829,7 +829,7 @@ describe('meetings in the shell', () => {
     $<HTMLButtonElement>('[data-meeting-leave]')!.click();
   });
 
-  it('meeting legs use the same STUN as 1:1 calls: your own node by default', async () => {
+  it('meeting legs use the same STUN as 1:1 calls: your own box by default', async () => {
     const own = 'stun:mynode.example.org:3478';
     stubHost({ node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 2, e2ee_sessions: 2, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
@@ -852,7 +852,7 @@ describe('meetings in the shell', () => {
     host.emitLive({ type: 'message', room_id: null, message: offer(A, cid(0xa1), [A, OWN, B]) });
     await vi.waitFor(() => expect(text('[data-meeting-join]')).toBe('Join · 33 sats'));
     retry = 42;
-    await vi.waitFor(() => expect(text('.node-pill')).toContain('waiting 42 s'), { timeout: 2500 });
+    await vi.waitFor(() => expect(text('.node-pill')).toContain('in 42 s'), { timeout: 2500 });
     expect($<HTMLButtonElement>('[data-meeting-join]')!.disabled).toBe(true);
     expect($<HTMLButtonElement>('[data-meeting-decline]')!.disabled).toBe(true);
     expect(host.used('call_signal')).toHaveLength(0);

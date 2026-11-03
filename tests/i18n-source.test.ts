@@ -23,7 +23,7 @@ const protocol: Record<string, Record<string, string[]>> = {
   'control/callReport.ts': {
     callReportLines: ['BitSov call report', 'app record; compare with the node journal', 'clock: this device', 'block_receipts: count and sum only; seq, amount and time of each are in the node journal'],
   },
-  'control/readiness.ts': { readinessSource: ['not_ready'], MONEY_NOT_READY: ['Money is not ready yet. Your node will retry automatically.'] },
+  'control/readiness.ts': { readinessSource: ['not_ready'], MONEY_NOT_READY: ['Money is not ready yet. Your box will retry automatically.'] },
   'control/polling.ts': { pollingSource: ['Shell closed', 'Shell stopped'] },
   'control/wallet.ts': { artifactActivity: ['Paid an invoice', 'Paid a node directly', 'Invoice · {0}'], activityLabel: ['Invoice · '] },
   'control/StarterBalance.tsx': { StarterStep: ['storage', 'request', 'read'] },
@@ -33,7 +33,7 @@ const protocol: Record<string, Record<string, string[]>> = {
     SAMPLE_READS: ['GET /api/v1/messages?limit=50', 'GET /api/v1/messages?peer=… ({0} contacts)'],
     // Fixed model instructions are payload bytes, shown verbatim in the preview.
     SAMPLE_SYSTEM: ["You answer a person's question about their own BitSov node, using only the JSON they send. Amounts are millisatoshis unless a field says sats. \"withheld\" and \"rounded\" mean the person chose not to share the exact value: do not guess it. If the data does not answer the question, say so in one sentence. Do not ask for more data, keys or passwords. Do not tell them to send or pay anything; the app does that only when they ask it to. Answer in at most four short sentences."],
-    sampleSource: ['api v2', 'konsensus grant --op 5a3f0c9e21d4b7a8e6f10c2d', 'front_door_invalid: the node dialed an address this front door does not allow', '# Sample only: no real gift request or owner command.', 'konsensus device approve --op 7c2e91d04b5a3f6e8d1c0b2a --config /Users/you/bitsov/konsensus.toml', '/messages/compose failed (400): Recipient is offline. Message will be queued and sent when they reconnect.', 'insufficient payment: required 2000 msat, got 1000 msat', 'payment not found', 'voice note not stored on this node', 'file not stored on this node', 'file over 1.4 MB'],
+    sampleSource: ['api v2', 'konsensus grant --op 5a3f0c9e21d4b7a8e6f10c2d', 'front_door_invalid: the node dialed an address this front door does not allow', '# Sample only: no real gift request or owner command.', 'konsensus device approve --op 7c2e91d04b5a3f6e8d1c0b2a --config /Users/you/bitsov/konsensus.toml', '/messages/compose failed (400): Recipient is offline. Message will be queued and sent when they reconnect.', 'insufficient payment: required 2000 msat, got 1000 msat', 'payment not found', 'voice note not stored on this box', 'file not stored on this box', 'file over 1.4 MB'],
   },
 };
 

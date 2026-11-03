@@ -54,9 +54,9 @@ it.each(['en', 'da'] as const)('shows honest, equal node choices in %s', lang =>
     pairing={() => INITIAL_PAIRING} trustAck={() => false} onRetry={() => {}} />);
   const local = root.querySelector('[data-target="local"]')!;
   const home = root.querySelector<HTMLButtonElement>('[data-target="network"]')!;
-  expect(local.textContent).toContain(lang === 'en' ? 'Only this Mac can use this node' : 'Kun denne Mac kan bruge denne node');
-  expect(local.textContent).toContain(lang === 'en' ? 'A phone can join a home node' : 'En telefon kan tilsluttes en hjemmenode');
-  expect(home.textContent).toContain(lang === 'en' ? 'A home node (Pi/Umbrel)' : 'En hjemmenode (Pi/Umbrel)');
+  expect(local.textContent).toContain(lang === 'en' ? 'Only this Mac can use this box' : 'Kun denne Mac kan bruge denne boks');
+  expect(local.textContent).toContain(lang === 'en' ? 'A phone can join a box at home' : 'En telefon kan tilsluttes en boks');
+  expect(home.textContent).toContain(lang === 'en' ? 'A box at home (Pi/Umbrel)' : 'En boks (Pi/Umbrel)');
   expect(home.closest('details')).toBeNull();
   home.click();
   expect(home.getAttribute('aria-checked')).toBe('true');

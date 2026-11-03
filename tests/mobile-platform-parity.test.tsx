@@ -114,7 +114,7 @@ describe.each([
   });
 
   it('App routes saved first-run tickets through phoneCopy without an unavailable error or reconnect button', async () => {
-    const message = "This node isn't set up yet. Finish setup on a Mac, then add this phone.";
+    const message = "This box isn't set up yet. Finish setup on a Mac, then add this phone.";
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
       if (cmd === 'node_status') return Promise.resolve({ phone_setup: true, ready: false, node_id: null, error: message, connection_error: { kind: 'unclaimed', detail: message } });
       if (cmd === 'pairing_status') return Promise.resolve({ state: 'starting', remote: false, scopes: [], bootstrap: null });
@@ -130,7 +130,7 @@ describe.each([
   });
 
   it('App preserves device-specific first-run guidance outside the new phone setup flow', async () => {
-    const message = "This node isn't set up yet. Finish setup on a Mac, then add this phone.";
+    const message = "This box isn't set up yet. Finish setup on a Mac, then add this phone.";
     vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string) => {
       if (cmd === 'node_status') return Promise.resolve({ phone_setup: false, ready: false, node_id: null, error: message });
       if (cmd === 'pairing_status') return Promise.resolve({ state: 'starting', remote: false, scopes: [], bootstrap: null });

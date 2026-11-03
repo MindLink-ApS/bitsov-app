@@ -1,9 +1,9 @@
 import { t as tr } from '../i18n';
-import { t } from '../i18n';
+import { language, t } from '../i18n';
 import { deviceWord, isMobilePlatform } from '../platform';
 import { createEffect, createSignal, For, onCleanup, Show } from 'solid-js';
 import type { ActionError } from './types';
-import { refusalText, secondsLeft, shortKey, termLines, type ApprovalView } from './ownerApproval';
+import { displayTermLines, refusalText, secondsLeft, shortKey, termLines, type ApprovalView } from './ownerApproval';
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
@@ -95,7 +95,7 @@ export function OwnerApprovals(props: OwnerApprovalsProps) {
             {(v) => (
               <li class="owner-approval" data-owner-approval={v.op_id}>
                 <ul class="owner-approval-terms" data-approval-terms role="list">
-                  <For each={termLines(v, props.nameOf)}>{(line, i) => <li classList={{ lead: i() === 0 }}>{line}</li>}</For>
+                  <For each={displayTermLines(v, language() === 'da' ? 'da' : 'en', props.nameOf)}>{(line, i) => <li classList={{ lead: i() === 0 }}>{line}</li>}</For>
                 </ul>
                 <p class="hint" data-approval-client>
                   {t('ownerApprovalRequester', shortKey(v.client_pubkey))}

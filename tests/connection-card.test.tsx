@@ -15,17 +15,17 @@ const base = { remote: true, link: 'open' as const, live: true, answer, stun: 'n
 describe('the connection card', () => {
   it('says how this device reaches its node, when the node last answered, and what calls use', () => {
     expect(connectionSummary(base)).toEqual([
-      'How this device reaches your node: over the network (a node you run elsewhere)',
+      'How this device reaches your box: over the network (a box you run elsewhere)',
       'Live updates: Live',
       // The app asking its own host (usually its cached view of the node): never claimed as a node round trip.
       `Last status check: ${new Date(at).toLocaleTimeString()} · 85 ms (this app ↔ its host)`,
-      'Calls · STUN: your own node',
+      'Calls · STUN: your own box',
       'Calls · relay (TURN): none yet',
       'Last call: srflx (this device) / host (theirs)',
     ]);
-    expect(connectionSummary(base).join('\n')).not.toMatch(/from your node:|round trip/i);
+    expect(connectionSummary(base).join('\n')).not.toMatch(/from your (node|box):|round trip/i);
     const local = connectionSummary({ ...base, remote: false, link: 'closed', stun: 'off', lastCall: null });
-    expect(local[0]).toBe('How this device reaches your node: on this Mac');
+    expect(local[0]).toBe('How this device reaches your box: on this Mac');
     expect(local[1]).toBe('Live updates: Reconnecting');
     expect(local[3]).toBe('Calls · STUN: off (direct connections only)');
     expect(local[5]).toBe('Last call: no call yet');
@@ -34,14 +34,14 @@ describe('the connection card', () => {
     expect(connectionSummary({ ...base, lastCall: { connected: true, route: null } })[5]).toBe('Last call: connected, route unavailable');
     expect(connectionSummary({ ...base, stun: 'checking' })[3]).toBe('Calls · STUN: checking…');
     expect(connectionSummary({ ...base, stun: 'custom' })[3]).toBe('Calls · STUN: a server you chose');
-    expect(connectionSummary({ ...base, stun: 'none' })[3]).toBe('Calls · STUN: none (your node does not offer one)');
+    expect(connectionSummary({ ...base, stun: 'none' })[3]).toBe('Calls · STUN: none (your box does not offer one)');
   });
 
   it('offline, it says since when the node has not answered', () => {
-    expect(connectionSummary({ ...base, live: false })[2]).toBe(`Last status check: your node not answering since ${new Date(at).toLocaleTimeString()}`);
+    expect(connectionSummary({ ...base, live: false })[2]).toBe(`Last status check: your box not answering since ${new Date(at).toLocaleTimeString()}`);
     expect(connectionSummary({ ...base, live: false, answer: null })[2]).toBe('Last status check: no answer yet');
     // Locked is not offline.
-    expect(connectionSummary({ ...base, live: false, locked: true })[2]).toBe('Last status check: your node is locked');
+    expect(connectionSummary({ ...base, live: false, locked: true })[2]).toBe('Last status check: your box is locked');
     expect(connectionSummary({ ...base, link: null })[1]).toBe('Live updates: Waiting');
   });
 
@@ -85,7 +85,7 @@ describe('the connection card', () => {
 
   it('a local refusal is tracked with no id, so a peer-chosen call_id can never claim it', () => {
     const peer = 'a'.repeat(64);
-    const refused = nextLastCall(null, { ...IDLE, phase: 'ended', peer, error: 'Their node does not take calls yet. Nothing was paid.' });
+    const refused = nextLastCall(null, { ...IDLE, phase: 'ended', peer, error: 'Their box does not take calls yet. Nothing was paid.' });
     expect(refused).toEqual({ id: null, connected: false, route: null });
     // A peer's incoming call, whatever call_id it picks, does not touch it while it only rings.
     for (const callId of ['refused-1', 'local-1', 'null', '']) {

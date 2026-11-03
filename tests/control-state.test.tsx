@@ -170,7 +170,7 @@ describe('node pill and freshness', () => {
     expect(nodePill(phone)).toEqual({ tone: 'idle', text: 'Connect to your box', live: false });
     expect(nodePill({ ...phone, error: null }).text).toBe('Connect to your box');
     // Paired to a remote node, the remote wording applies as before.
-    expect(nodePill({ ...phone, remote: true }).text).toBe('Remote connection unavailable');
+    expect(nodePill({ ...phone, remote: true }).text).toBe('No connection to your box');
     expect(nodePill({ ...phone, phone: false }).text).toBe('Your box has stopped');
   });
 });
