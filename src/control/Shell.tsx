@@ -2477,6 +2477,7 @@ export function ControlCenter(props: Props) {
             blocked={moneyBlocked() || grantUnknown() || (budget() !== null && (!budgetConfirmed() || !!errors.budgetPoll)) || !!budget()?.paused}
             pending={callView().pendingCount > 0 || (budget()?.unsettled_msat ?? 0) > 0}
             spend={spend()} spendError={errors.spend ?? errors.spendPoll} now={now()} actions={actions}
+            entry={!routedCalls}
           />
         }</Show>}
         blocked={moneyBlocked()}
@@ -3704,6 +3705,8 @@ function CallPanel(props: {
   const v = () => props.view;
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
+  /** The M6 paid-minutes line is on the card (same condition as its render below). */
+  const minutesShown = () => !!(props.routed && v().outgoing && v().minutes);
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
       <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[v().phase]} ${who()}`}>
@@ -3719,14 +3722,6 @@ function CallPanel(props: {
         {/* Across networks a call needs a STUN server: said where it matters, while a call is being set up or has failed to connect. */}
         <Show when={!props.routed && (['calling', 'ringing', 'connecting'].includes(v().phase) || (v().phase === 'ended' && (v().reason === 'failed' || v().reason === 'timeout')))}>
           <CallNetworkNote onOpenSettings={props.openCallSettings} />
-        </Show>
-        {/* M6: the honest label for a node-routed call, from ringing until it ends. Payment for the node leg is slice A2. */}
-        <Show when={props.routed && v().phase !== 'idle' && v().phase !== 'ended'}>
-          <p class="hint" data-call-route="node">{tr('caNodeRoutedCallLabel')}</p>
-        </Show>
-        {/* Not on the ended card: it promises a recovery that can no longer happen. */}
-        <Show when={!props.routed && v().phase !== 'ended'}>
-          <p class="hint" data-call-recovery-note>{tr('uiTheConnectionMayRecoverOnItsOwnA')}</p>
         </Show>
         {/* While reconnecting: what is happening, and when the call ends if it does not come back (display only). */}
         <Show when={v().phase === 'reconnecting'}>
@@ -3747,7 +3742,7 @@ function CallPanel(props: {
         </Show>
         {/* The host reports each signal's ceiling, not settled fees: after the call, "up to" is the honest total. */}
         <Show when={v().phase === 'ended'} fallback={
-          <Show when={v().paidMsat > 0}>
+          <Show when={v().paidMsat > 0 && !minutesShown()}>
             <p class="hint" data-call-paid>{tr('uiSignalCostCap')} {fmtAmount(v().paidMsat)} {tr('uiIncludesMaximumRoutingFeesSettledAmountMayBe')}</p>
           </Show>
         }>
@@ -3775,7 +3770,7 @@ function CallPanel(props: {
             </Match>
           </Switch>
         </Show>
-        <Show when={v().connection}>
+        <Show when={v().phase === 'ended' ? v().connection : null}>
           {(connection) => <p class="hint" data-call-connection>{tr('uiConnection')} {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} {tr('uiLocal140')} {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} {tr('uiRemote')}</p>}
         </Show>
         <Show when={v().phase === 'ended'}>
@@ -3856,6 +3851,27 @@ function CallPanel(props: {
             </Match>
           </Switch>
         </div>
+        {/* M6: the honest label for a node-routed call, from ringing until it ends. It stays visible until the apps encrypt end to end. */}
+        <Show when={props.routed && v().phase !== 'idle' && v().phase !== 'ended'}>
+          <p class="hint" data-call-route="node">{tr('caNodeRoutedCallLabel')}</p>
+        </Show>
+        {/* A short card while the call lasts: the longer notes wait behind Details (display only; same texts and amounts). */}
+        <Show when={v().phase !== 'ended' && (!props.routed || v().phase !== 'idle')}>
+          <details class="quiet-detail" data-call-details>
+            <summary>{tr('uiDetails')}</summary>
+            {/* Not on the ended card: it promises a recovery that can no longer happen. */}
+            <Show when={!props.routed}>
+              <p class="hint" data-call-recovery-note>{tr('uiTheConnectionMayRecoverOnItsOwnA')}</p>
+            </Show>
+            {/* With the paid minutes as the cost line, the signal cap is the detail. */}
+            <Show when={v().paidMsat > 0 && minutesShown()}>
+              <p class="hint" data-call-paid>{tr('uiSignalCostCap')} {fmtAmount(v().paidMsat)} {tr('uiIncludesMaximumRoutingFeesSettledAmountMayBe')}</p>
+            </Show>
+            <Show when={v().connection}>
+              {(connection) => <p class="hint" data-call-connection>{tr('uiConnection')} {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} {tr('uiLocal140')} {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} {tr('uiRemote')}</p>}
+            </Show>
+          </details>
+        </Show>
       </aside>
     </Show>
   );
@@ -4623,6 +4639,8 @@ function InCallPay(props: {
   spendError: string | undefined;
   now: number;
   actions: Actions;
+  /** False on a node-routed call: no Pay button on the short call card. Receipts and the pending check stay. */
+  entry?: boolean;
 }) {
   // The keyed parent remounts for a new call. A late receipt stays with this call.
   const peer = props.view.peer!;
@@ -4676,7 +4694,7 @@ function InCallPay(props: {
     } finally { setBusy(false); }
   };
   return <section class="in-call-pay" data-in-call-pay aria-label={tr('uiDirectPaymentDuringCall')}>
-    <Show when={live()}>
+    <Show when={live() && props.entry !== false}>
       <button type="button" class="soft money" data-call-pay aria-expanded={expanded()} disabled={blocked() || !destination()} onClick={() => setExpanded(!expanded())}>{tr('uiPay')}</button>
       <Show when={!destination()}><p class="hint">{tr('uiTheirLightningPaymentAddressIsUnavailableYourNode')}</p></Show>
       <Show when={props.pending}><p class="hint">{tr('uiCheckPendingResultBeforePaying')}</p></Show>
