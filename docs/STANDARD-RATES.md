@@ -36,7 +36,7 @@ This replaces the earlier card of offer 10, minute 10 and limit 30.
 | AI client budget | none | 1,000 sats per 24 h | decided |
 | Default contact budget | 50 sats a day (Careful) | 1,000 sats a day | suggested; owner has not set this |
 | Default daily budget | 500 sats (Careful) | 2,500 sats | suggested; owner has not set this |
-| Per-payment limit on an envelope | 6 or 10 sats | at least 10 for this card | open (section 6) |
+| Per-payment limit on an envelope or a self grant | 6 or 10 sats | 50 sats, owner-changeable | decided (section 6) |
 | First-contact admission | 100 in a fixture; **cannot be paid under a grant** | 1 sat, until the node lets a grant pay more | open (section 6) |
 
 One call on this card (T1):
@@ -86,7 +86,7 @@ from the owner's box and the field test of 1 November.
 | `recipients_only`: only contacts with a live envelope may be paid; such a grant funds no explicit payment | `grant.rs` | app, mirrors node |
 | Breakers per grant, defaults: 10 payments a minute, 60 an hour, pause after 5 failures, 1,000 sats per 10 minutes. The 2, 12, 3 and 9 in this repo's tests are fixtures, not defaults | `crates/konsensus-api/src/spend_budget.rs:138-147` | node |
 | What a ring counts: the hold and the offer, as 2 payments and their whole reserved amount, even if released. Blocks draw on the hold and no breaker check runs there | `handlers/messages/compose.rs:3646-3648`, `pairing/call_spend.rs:336-417` | node |
-| Self-approval: 2,500 sats per 24 h as a total, 1 live, 3-day cooldown; its per-payment limit is open | open draft #394, `docs/IN-APP-BUDGET-APPROVAL.md` on its branch | owner decision, changeable default |
+| Self-approval: 2,500 sats per 24 h as a total, 1 live, 3-day cooldown, per-payment limit 50 sats | open draft #394, `docs/IN-APP-BUDGET-APPROVAL.md` on its branch | owner decision, changeable default |
 
 ### Prices and routing
 
@@ -233,7 +233,8 @@ such days.
    grant `check_under` still refuses any call with `grant_per_call`. The default
    without a quote, 10, now just fits. This comes from reading the code in both repos
    (`spend_budget/calls.rs:168` in the node), not from a test; section 7, step 5
-   tests it.
+   tests it. The owner set the limit at 50 (section 6, item 2), so the envelope
+   default is now a change to make, not a choice.
 5. **What a budget buys depends on fee reporting.** 200 sats is 33 messages on
    ceilings and 100 on 1-sat fees (T5b). The chip's message count divides the
    budget by the shown message cost; check it stays all-in when this changes.
@@ -358,7 +359,7 @@ least one hold. The callee's inbound must also take the blocks.
 | Default contact budget | **1,000 sats a day**, suggested; owner has not set this | App default | Holds seven full 10-minute calls on ceilings at limit 60. Exposure per contact goes up 20 times, to 6 DKK a day on the assumption. |
 | Default daily budget | **2,500 sats**, suggested; owner has not set this | App default | Equals the self-approval ceiling, so it can be approved in the app. Heavy loses at most one call. Worst day 15 DKK on the assumption. |
 | Envelope default (`DEFAULT_BUDGET_MSAT`) | **1,000 sats**, suggested; owner has not set this | App default | Follows the contact budget; 200 rings no call at limit 60. |
-| Per-payment limit | **open** | App and node default | See section 6. Totals and holds bound the money either way, and messages keep their 6-sat cap. If it covers calls, the Touch ID text must say "per payment", not "per message" (`device.rs` `intent_reason`). |
+| Per-payment limit | **50 sats**, decided | App and node default | Owner-changeable, inside the daily ceiling. On this card it covers the offer (10 all-in) and each minute (7 all-in); see section 6, item 2. Totals and holds bound the money either way, and messages keep their 6-sat cap. The Touch ID text must say "per payment", not "per message" (`device.rs` `intent_reason`). |
 | Self-approval ceiling (#394) | **2,500 sats per 24 h, as a total**, decided | Node default | The owner can change it. |
 | AI client budget | **1,000 sats per 24 h**, decided | Node default | 166 to 500 small actions a day (T13). The node's default breakers are the rate bound: 60 payments an hour at 6 sats all-in is 360 sats an hour, so the messaging budget lasts at least 167 minutes. No separate AI velocity limit. |
 | Human grant breakers | 10 a minute, 60 an hour, 5 failures, 1,000 sats per 10 minutes, no change | Node default | Two rings fit in 10 minutes (T12). |
@@ -377,14 +378,15 @@ Everyday's 200 rings none at limit 60.
 - **Raising the contact budget raises exposure.** Per contact, 50 to 1,000 sats.
   The daily budget still caps the total, and a colluding contact gets that money
   at most once a day.
-- **The 6-sat cap in #394 must not become the call limit.** A self grant signing
-  `per_call_max_msat` at 6 sats refuses every call (T3b, T4). The node's 6-sat cap
-  on non-call payments is separate. Section 6, item 2.
+- **The self-grant limit in #394 is 50 sats, not the 6-sat cap.** A self grant
+  signing `per_call_max_msat` at 6 sats would refuse every call (T3b, T4). The
+  node's 6-sat cap on non-call payments is separate. Section 6, item 2.
 - **In-app approval also depends on the box.** #394 needs device approvals, which
   the node turns off when the seed's password comes from a file or a flag
   (`owner_approval_key`, `crates/konsensus-node/src/main.rs:1087-1107`). Reported,
-  to confirm: both real boxes are such boxes. There the self-approval ceiling
-  changes nothing until the node has a policy for them.
+  to confirm: both real boxes are such boxes. Device approvals are being built as
+  an owner-chosen setting; there the self-approval ceiling changes nothing until
+  it ships.
 
 ## 5. What a first-time user should see
 
@@ -415,19 +417,24 @@ default**; a box set to 10 must say 10, which needs item 1.
    So this needs a node change, must never raise silently, and until then the copy
    says a bigger budget is approved on the box's own computer (#399).
 
-## 6. Owner decisions still open
+## 6. Owner decisions
 
-Decided and no longer asked: the prices, the call limit, the self-approval ceiling
-and the AI client budget.
+Decided and no longer asked: the prices, the call limit, the self-approval ceiling,
+the AI client budget and the per-payment limit (item 2). Items 1, 3 and 4 are open.
 
 1. **How much may the app spend by default?** Suggested, not set: up to 1,000 sats
    a day to one person and 2,500 sats a day in total (about 6 and 15 DKK at the
    assumed price). The user can change both. If the phone or app were misused, that
    is the most that could go in a day.
-2. **What per-payment limit goes on an envelope or a self grant?** 6 sats refuses
-   every call. 10 fits this card, but not a box still on 10 sats a minute, which needs 15. An
-   earlier draft proposed 50, which fits a box that prices its minute up to 45
-   sats. This is not decided.
+2. **What per-payment limit goes on an envelope or a self grant? Decided by the
+   owner: 50 sats,** inside the daily ceiling, an owner-changeable setting. On this
+   card it covers the call payments: the offer, 10 sats all-in, and each minute, 7.
+   A box on 10 sats a minute needs 15, and 50 fits an offer or a minute priced up to
+   45 sats. It does not cover messages, files, a first contact or the closing
+   hangup: those keep the node's 6-sat cap, which the app mirrors. The hold at Ring
+   is checked against the budgets, not this limit. The tables already model 50
+   (`PER_CALL_CAP_DEFAULT`). The app and node still have to change: today an envelope
+   approved from the message box takes the message cost as its maximum (finding 4).
 3. **Should a call get shorter instead of being refused?** Ask for this in the node
    repo, so a nearly used budget gives a shorter call rather than no call.
 4. **What should a stranger pay to reach you for the first time?** Under an app's
@@ -448,7 +455,7 @@ routing node between the boxes. Test funds only.
 | 2 | Run a regular and a heavy day at contact budgets 50, 250, 500, 1,000 | Refusal points against T3, T4; the first refusal must match |
 | 3 | Run direct, 1-hop and 3-hop routes; record `fee_paid_msat` for 1-sat, 2-sat and 5-sat payments | Real routing against the 5-sat allowance; whether a 2-sat allowance would work |
 | 4 | Run an hour-long call, repeated rings within 10 minutes and a burst of messages | Node-side item 3: that blocks count nothing more and holds count in full |
-| 5 | Try a relation grant with a 6-sat envelope, then a 10-sat one; try a first contact, routed and direct | Finding 4; node-side item 4 |
+| 5 | Try a relation grant with a 6-sat envelope, then a 10-sat one, then a 50-sat one; try a first contact, routed and direct | Finding 4; node-side item 4 |
 | 6 | Reach `max_call_minutes`; drop a block; shrink the channel until `call_liquidity_insufficient` | Node-side items 5, 6; the smallest workable channel |
 | 7 | Run many short calls in parallel and watch HTLC slots and dust exposure | The channel-use claim above |
 
