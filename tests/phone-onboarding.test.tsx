@@ -643,14 +643,14 @@ const USED_TICKET = 'remote node refused pairing: This ticket expired, was alrea
 it.each([
   ['en', 'This link no longer works', 'Make a new code on your computer, then paste the new link here.', 'Paste new link'],
   ['da', 'Linket virker ikke længere', 'Lav en ny kode på computeren, og indsæt så det nye link her.', 'Indsæt nyt link'],
-])('forgets a stale ticket the host reports at once and offers one paste action (%s)', async (locale, heading, line, action) => {
+])('a stale ticket the host reports offers one paste action and keeps the saved box (%s)', async (locale, heading, line, action) => {
   const props = mount({ locale, status: () => ({ ready: false, node_id: null, error: null, connection_error: { kind: 'used', detail: 'x' } }) });
   await tick();
   expect(document.querySelector('h1')?.textContent).toBe(heading);
   expect(document.querySelector('.phone-line')?.textContent).toBe(line);
   expect([...document.querySelectorAll('button.primary')].map(b => b.textContent)).toEqual([action]);
-  // Nobody pressed anything: the dead link is already gone, so nothing can replay it.
-  expect(props.forget).toHaveBeenCalledOnce();
+  // Nobody pressed anything, so nothing is dropped; the host itself stops redialling.
+  expect(props.forget).not.toHaveBeenCalled();
   expect(props.retry).not.toHaveBeenCalled();
 });
 it('ends Connecting on the host’s code-mismatch refusal without offering Try again', async () => {
@@ -662,24 +662,87 @@ it('ends Connecting on the host’s code-mismatch refusal without offering Try a
   await tick();
   expect(document.querySelector('h1')?.textContent).toBe('This link no longer works');
   expect(button('Try again')).toBeUndefined();
-  expect(props.forget).toHaveBeenCalledOnce();
+  // The refusal's text picks the words. It never drops the saved box.
+  expect(props.forget).not.toHaveBeenCalled();
   expect(props.retry).not.toHaveBeenCalled();
 });
-it('reads the clipboard in the tap and connects only after the stale link is forgotten', async () => {
-  let forgotten!: () => void;
-  const forget = vi.fn(() => new Promise<void>(resolve => { forgotten = resolve; }));
+it.each([
+  ['the used-ticket text', USED_TICKET],
+  ['the expired-link text', 'This pairing link expired 5 minutes ago. Make a new code on your computer.'],
+  ['the refused-pairing text', 'remote node refused pairing: this app\'s pairing was refused; pair again from an enrolled device'],
+])('refusal text without the typed flag never forgets the saved box: %s', async (_name, reason) => {
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  const props = mount({ pairing });
+  button('Scan the code with the camera').click(); await tick();
+  setPairing({ ...INITIAL_PAIRING, remote: true, state: 'failed', reason });
+  await tick();
+  expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('error');
+  expect(props.forget).not.toHaveBeenCalled();
+});
+it.each([
+  ['en', 'Your box no longer accepts this phone', 'Paste new link', 'Try again'],
+  ['da', 'Din boks godkender ikke længere denne telefon', 'Indsæt nyt link', 'Prøv igen'],
+])('the typed refusal stops at one new-link action and keeps the saved box until a new link replaces it (%s)', async (locale, heading, action, tryAgain) => {
+  vi.stubGlobal('navigator', { clipboard: { readText: vi.fn().mockResolvedValue('bitsov://pair/fresh') } });
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  const props = mount({ locale, pairing });
+  button(locale === 'en' ? 'Scan the code with the camera' : 'Scan koden med kameraet').click(); await tick();
+  setPairing({ ...INITIAL_PAIRING, remote: true, state: 'failed', refused: true, reason: 'remote node refused pairing: this app\'s pairing was refused; pair again from an enrolled device' });
+  await tick();
+  expect(document.querySelector('h1')?.textContent).toBe(heading);
+  expect([...document.querySelectorAll('button.primary')].map(b => b.textContent)).toEqual([action]);
+  expect(button(tryAgain)).toBeUndefined();
+  expect(props.forget).not.toHaveBeenCalled();
+  expect(props.retry).not.toHaveBeenCalled();
+  // The one action reviews a new link. The saved box still has not been forgotten.
+  button(action).click(); await tick();
+  expect(props.preview).toHaveBeenCalledWith('bitsov://pair/fresh');
+  expect(props.forget).not.toHaveBeenCalled();
+});
+it('only the owner forgets a refused box, after the one confirmation', async () => {
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  const props = mount({ pairing });
+  button('Scan the code with the camera').click(); await tick();
+  setPairing({ ...INITIAL_PAIRING, remote: true, state: 'failed', refused: true, reason: 'x' });
+  await tick();
+  expect(props.forget).not.toHaveBeenCalled();
+  document.querySelector<HTMLButtonElement>('[data-phone-forget]')!.click(); await tick();
+  expect(props.forget).not.toHaveBeenCalled();
+  document.querySelector<HTMLButtonElement>('.phone-danger')!.click(); await tick();
+  expect(props.forget).toHaveBeenCalledOnce();
+});
+it.each([
+  ['the pairing outcome', 'pairing'],
+  ['a connection error', 'status'],
+] as const)('an already_paired response in %s never forgets: the pairing itself stands', async (_name, where) => {
+  const reason = 'remote node refused pairing: This device already has a pairing. Reconnect with its saved pairing; a second-device ticket is for a new device.';
+  const [pairing, setPairing] = createSignal(INITIAL_PAIRING);
+  const [connectionError, setConnectionError] = createSignal<ConnectionError | null>(null);
+  const props = mount({ pairing, status: () => ({ ready: false, node_id: null, error: null, connection_error: connectionError() }) });
+  button('Scan the code with the camera').click(); await tick();
+  if (where === 'pairing') setPairing({ ...INITIAL_PAIRING, remote: true, state: 'failed', reason });
+  else setConnectionError({ kind: 'other', detail: 'remote_connection_failed' }); // The host's AlreadyPaired crosses as Other.
+  await tick();
+  expect(document.querySelector('h1')?.textContent).not.toBe('Your box no longer accepts this phone');
+  expect(props.forget).not.toHaveBeenCalled();
+});
+it('a new link waits for the dead attempt to end, without forgetting anything', async () => {
+  let cancelled!: (v: { state: 'idle' }) => void;
+  const join = vi.fn((input: { action: string }) => input.action === 'cancel'
+    ? new Promise<{ state: 'idle' }>(resolve => { cancelled = resolve; })
+    : Promise.resolve({ state: 'idle' as const, second_device: true }));
   const readText = vi.fn().mockResolvedValue('bitsov://pair/fresh');
   vi.stubGlobal('navigator', { clipboard: { readText } });
-  const props = mount({ forget, status: () => ({ ready: false, node_id: null, error: null, connection_error: { kind: 'expired', detail: '' } }) });
+  const props = mount({ join: join as unknown as PhoneOnboardingProps['join'], device: () => ({ available: true, delegation_supported: true, state: 'pending', fingerprint: null, owner_action: null, expires_at_ms: null }), status: () => ({ ready: false, node_id: null, error: null, connection_error: { kind: 'expired', detail: '' } }) });
   await tick();
   button('Paste new link').click();
   // Synchronously inside the tap, so iOS can show its paste prompt.
   expect(readText).toHaveBeenCalledOnce();
   await tick();
   expect(props.connect).not.toHaveBeenCalled();
-  forgotten(); await tick();
+  cancelled({ state: 'idle' }); await tick();
   expect(props.connect).toHaveBeenCalledExactlyOnceWith('bitsov://pair/fresh');
-  expect(forget).toHaveBeenCalledOnce();
+  expect(props.forget).not.toHaveBeenCalled();
 });
 it('shows the same message when the clipboard still holds the old link', async () => {
   vi.stubGlobal('navigator', { clipboard: { readText: vi.fn().mockResolvedValue('bitsov://pair/old') } });
