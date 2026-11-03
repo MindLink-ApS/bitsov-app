@@ -797,6 +797,18 @@ it.each([
   expect(document.querySelector('.phone-options')?.textContent).toContain('invalid remote pairing link');
   expect(props.forget).not.toHaveBeenCalled();
 });
+it('the host\u2019s structured refusal of a malformed link also says the link is broken', async () => {
+  const props = mount({ locale: 'da', preview: vi.fn().mockRejectedValue({ kind: 'other', detail: 'remote_connection_failed' }) });
+  button('Scan koden med kameraet').click(); await tick();
+  expect(document.querySelector('h1')?.textContent).toBe('Linket virker ikke');
+  expect(button('Prøv igen')).toBeUndefined();
+  expect(props.forget).not.toHaveBeenCalled();
+});
+it('a preview that names its own kind keeps it: an expired link stays expired', async () => {
+  mount({ preview: vi.fn().mockRejectedValue({ kind: 'expired', detail: 'x' }) });
+  button('Scan the code with the camera').click(); await tick();
+  expect(document.querySelector('h1')?.textContent).not.toBe('This link doesn’t work');
+});
 it('a refused camera still offers a way in: paste a link instead', async () => {
   const readText = vi.fn().mockResolvedValue('bitsov://pair/synthetic');
   vi.stubGlobal('navigator', { clipboard: { readText } });

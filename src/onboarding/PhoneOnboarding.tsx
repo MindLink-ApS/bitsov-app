@@ -149,7 +149,9 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     const turn = ++generation;
     joinStarted = false;
     try {
-      const view = await props.preview(link);
+      let view: RemotePreviewView;
+      // The preview only reads the link and dials nothing, so a generic refusal means the link itself is bad.
+      try { view = await props.preview(link); } catch (e) { const f = failure(e); throw f.kind === 'other' ? { kind: 'bad_link', detail: f.detail } : e; }
       if (!alive || turn !== generation) return;
       if (view.first_run) { fail({ kind: 'unclaimed' }); return; }
       setPreview(view);
