@@ -10,6 +10,7 @@ import { connectionErrorDetail, normalizePairingLink, onboardingDiagnostic, onbo
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
 import { usePairingActivity } from '../pairingActivity';
+import './phoneFirstRun.css';
 
 // Claim discipline (BitSov-bitsov docs/security/pairing.md): less exposure, not solved
 // local security. The short code is a tripwire, never described as what protects the
@@ -76,6 +77,10 @@ export function Onboarding(props: {
   // On a phone the only target is your node (there is no "This Mac").
   const phone = () => props.phone ?? props.mobile ?? isMobilePlatform();
   const mobileBiometrics = () => props.mobile ?? isMobilePlatform();
+  // A phone shows one primary action: Scan until a link is in review. Once paired, or
+  // when pairing failed (its retry is the action), Scan steps back.
+  const reviewWaits = () => phone() && !!props.onScanRemote && !remoteLink() && !preview();
+  const scanLeads = () => reviewWaits() && !['paired', 'fallback', 'failed'].includes(props.pairing().state);
   const device = () => deviceWord() === 'iPad' ? 'iPad' : t('obPhone');
   const [internalTarget, setInternalTarget] = createSignal<NodeTarget>(
     phone() || props.pairing().remote || props.initialPairingLink !== undefined ? 'network' : 'local',
@@ -238,12 +243,12 @@ export function Onboarding(props: {
         fallback={
           <header class="ob-head" data-ob-head="trust">
             {/* Named like its step: the stepper above says "Your identity". */}
-            <h1>{t('obYourIdentity')}</h1>
+            <h1>{phone() && !props.pairing().bootstrap ? t('obPhoneAlmostDone') : t('obYourIdentity')}</h1>
             <Show
               when={!props.pairing().bootstrap}
               fallback={<Show when={props.status().local_owner && !props.pairing().remote} fallback={<p class="lede">{t('obNoIdentity')}{' '}{props.pairing().remote ? t('obRestoreAtNode') : t('obRestoreOnMac')} {t('obCreateNotAvailable')}</p>}><p class="lede">{t('obCreateIdentityBelow')}</p></Show>}
             >
-              <p class="lede">{t('obReadTrust')}</p>
+              <p class="lede">{phone() ? t('obPhoneTrustLede') : t('obReadTrust')}</p>
             </Show>
           </header>
         }
@@ -449,8 +454,8 @@ export function Onboarding(props: {
               </div>
             </div>
 
-            {/* What this app may do stays in view (not behind the details). */}
-            <p class="pairing-access">
+            {/* What this app may do stays in view (not behind the details). A phone keeps it in the details. */}
+            <p class="pairing-access" hidden={phone()}>
               {t('obAccess')}{' '}<strong>{scopeList(props.pairing().scopes)}</strong>
             </p>
 
@@ -543,7 +548,8 @@ export function Onboarding(props: {
         </p>
       </Show>
       {/* Touch ID approvals belong to setup, right after pairing (they used to live only in + New). */}
-      <Show when={props.onRegisterDevice && props.onCancelDevice && props.pairing().state === 'paired' && stage() !== 'node' && !approvalsSkipped()}>
+      {/* A phone sets up approvals later, in Settings; its first run ends at the trust step. */}
+      <Show when={!phone() && props.onRegisterDevice && props.onCancelDevice && props.pairing().state === 'paired' && stage() !== 'node' && !approvalsSkipped()}>
         <DeviceApprovals
           device={props.device?.() ?? null}
           joinDevice={props.joinDevice}
@@ -565,7 +571,7 @@ export function Onboarding(props: {
           <p class="hint">{t('obCameraPurpose')}</p>
           <button
             type="button"
-            class="quiet"
+            classList={{ primary: scanLeads(), quiet: !scanLeads() }}
             data-scan-pairing-qr
             disabled={busy()}
             onClick={() => void scanRemote()}
@@ -600,7 +606,7 @@ export function Onboarding(props: {
         )}</Show>
         <div class="form-actions">
           <Show when={!(phone() && preview()?.view.first_run)}>
-          <button type="submit" class="primary" disabled={busy()}>
+          <button type="submit" classList={{ primary: !reviewWaits(), quiet: reviewWaits() }} disabled={busy()}>
             {importing() ? t('obSaving') : previewing() ? t('obCheckingTicket') : preview() ? t('obUseRemote') : t('obReviewTicket')}
           </button>
           </Show>

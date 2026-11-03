@@ -226,6 +226,7 @@ describe('control center shell', () => {
     start();
     await waitFor(() => expect(mount.querySelector('[data-gate="g6-local-trust"]')).not.toBeNull());
     expect(mount.querySelector('[data-first-run]')).not.toBeNull();
+    expect(mount.querySelector('[data-first-run]')!.classList.contains('phone-first-run')).toBe(false);
     expect(mount.querySelector('.rail')).not.toBeNull();
     expect(mount.querySelector('[data-panel="wallet"]')).toBeNull();
     expect(new Set(calls.map((c) => c.cmd))).toEqual(new Set(['node_status', 'pairing_status', 'device_key_status']));
@@ -1373,7 +1374,7 @@ describe('control center shell', () => {
 
     // No link event is pushed by the test: the state comes only from the replay
     // the shell asks for after subscribing.
-    await waitFor(() => expect(mount.querySelector('.node-pill .what')?.textContent).toBe('Connected to your node'));
+    await waitFor(() => expect(mount.querySelector('.node-pill .what')?.textContent).toBe('Connected to your box'));
     expect(mount.querySelector('[data-pill]')?.getAttribute('data-pill')).toBe('ok');
     const listenAt = calls.findIndex((c) => c.cmd === 'plugin:event|listen');
     const replayAt = calls.findIndex((c) => c.cmd === 'live_link');
