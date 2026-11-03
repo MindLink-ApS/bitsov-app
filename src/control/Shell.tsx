@@ -3564,17 +3564,18 @@ const END_REASON: Record<string, string> = {
 };
 
 /**
- * M6 consent before Ring: the callee's per-minute price and the most any node
- * may hold (240 minutes). The caller's node's own limit (`max_call_minutes`)
- * shows on its reservation once it rings, for the owner to confirm.
+ * M6 consent before Ring: the callee's per-minute price, in figures. The hold is
+ * said without a figure: the ceiling this call goes out with (`max_hold_msat`,
+ * 240 minutes) is not what the node will hold, and the node's own limit
+ * (`max_call_minutes`) is only known from its reservation once it rings, where
+ * the owner sees the exact amount and confirms it.
  */
 function MinutesConsent(props: { quote: CallQuote }) {
   return (
     <>
       <p class="hint" data-call-minute-price>{tr('uiCallMinutePrice', fmtAmount(props.quote.block_msat!), fmtAmount(props.quote.block_max_routing_fee_msat ?? 0))}</p>
       <Show when={props.quote.reservation_max_msat != null}>
-        {/* The length comes from this quote (its hold over one minute's price and routing), never a fixed 4 hours. */}
-        <p class="hint" data-call-reservation-max>{tr('uiCallReservationMax', fmtAmount(props.quote.reservation_max_msat!), String(Math.floor(props.quote.reservation_max_msat! / Math.max(1, props.quote.block_msat! + (props.quote.block_max_routing_fee_msat ?? 0)))))}</p>
+        <p class="hint" data-call-reservation-max>{tr('uiCallReservationMax')}</p>
       </Show>
     </>
   );
@@ -3638,7 +3639,7 @@ function CallMinutesLine(props: { minutes: MinutesView; ended: boolean; confirm?
         <p class="hint" data-call-minutes="running">{tr('uiMinutesNoReservation', fmtAmount(m().agreedBlockMsat), fmtAmount(m().receiptsMsat))}</p>
       </Match>
       <Match when={m().reservationMaxMsat !== null}>
-        <p class="hint" data-call-minutes="reserving">{tr('uiMinutesReserving', fmtAmount(m().reservationMaxMsat!))}</p>
+        <p class="hint" data-call-minutes="reserving">{tr('uiMinutesReserving')}</p>
       </Match>
     </Switch>
   );

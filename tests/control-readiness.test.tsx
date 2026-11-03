@@ -168,8 +168,8 @@ describe('node money readiness', () => {
   });
 
   it.each([
-    ['en', 'Hanging up this call would cost more than your node grant allows per message payment, so it could not be ended. The owner would need to approve a larger per-payment limit. Nothing was sent or paid.'],
-    ['da', 'At lægge på i dette opkald ville koste mere, end din nodes tilladelse giver pr. beskedbetaling, så opkaldet ville ikke kunne afsluttes. Ejeren skal godkende en højere grænse pr. betaling. Intet blev sendt eller betalt.'],
+    ['en', 'Hanging up this call would cost more than your box grant allows per message payment, so it could not be ended. The owner would need to approve a larger per-payment limit. Nothing was sent or paid.'],
+    ['da', 'At lægge på i dette opkald ville koste mere, end din boks’ tilladelse giver pr. beskedbetaling, så opkaldet ville ikke kunne afsluttes. Ejeren skal godkende en højere grænse pr. betaling. Intet blev sendt eller betalt.'],
   ] as const)('the host refusing a call it could not end reads in the app language (%s), and nothing was paid', (lang, words) => {
     setLanguagePref(lang);
     try {

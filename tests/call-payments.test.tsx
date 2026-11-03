@@ -520,7 +520,7 @@ describe('the call engine with paid minutes', () => {
       e.engine.dismiss();
     } else {
       expect(e.signals).toEqual([]);
-      expect(e.last()).toMatchObject({ phase: 'ended', error: expect.stringContaining(`This call needs up to ${amount(10_001)} per payment. Your node grant allows ${amount(10_000)} per payment.`) });
+      expect(e.last()).toMatchObject({ phase: 'ended', error: expect.stringContaining(`This call needs up to ${amount(10_001)} per payment. Your box grant allows ${amount(10_000)} per payment.`) });
     }
   });
 
@@ -840,7 +840,7 @@ const paired = { state: 'paired', scopes: ['read', 'receive', 'spend'], node_id:
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 
-function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number } = {}) {
+function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number; noHold?: boolean } = {}) {
   resetContactsForTests();
   setPetname(A, 'Maya');
   const calls: { cmd: string; args?: unknown }[] = [];
@@ -873,7 +873,7 @@ function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?
       }
       return { operation_id: `op-${kind}`, message_id: 'sig', kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
     },
-    call_status: (args) => (callId && (args as { call_id: string }).call_id === callId ? { ...node.status(), id: callId } : null),
+    call_status: (args) => (callId && (args as { call_id: string }).call_id === callId ? { ...node.status(), id: callId, ...(opts.noHold ? { reservation: null } : {}) } : null),
     // The host's check of the node's hold (and the owner's confirmation of its exact total).
     call_hold: (args) => {
       if (opts.hold) return opts.hold(args);
@@ -975,7 +975,10 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await openShell();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     expect($('[data-call-minute-price]')?.textContent).toBe(`Then ${amount(BLOCK)} a minute, plus up to ${amount(FEE)} routing a minute, paid by your box while the call runs.`);
-    expect($('[data-call-reservation-max]')?.textContent).toBe(`When it rings, your box holds the minutes under its own call limit. The call goes out with your limits: this per-minute price and a hold of at most ${amount(240 * (BLOCK + FEE))} (up to 240 minutes). If their live price or the hold would be higher, your box does not ring them and nothing is paid. You see the exact hold and confirm it before the first minute is paid.`);
+    expect($('[data-call-reservation-max]')?.textContent).toBe('When it rings, your box holds the minutes under its own call limit, at this per-minute price. It shows the exact amount when it rings, and you confirm it before the first minute is paid. If their live price is higher, or the hold would go over what this app allows, your box does not ring them and nothing is paid.');
+    // The app's ceiling is not what the box will hold: neither its amount nor its minutes are shown as if they were.
+    expect($('[data-call-reservation-max]')?.textContent).not.toContain(amount(240 * (BLOCK + FEE)));
+    expect($('[data-call-confirm-box]')?.textContent).not.toMatch(/240|\b\d+ minutes/);
     expect(host.used('call_signal')).toHaveLength(0);
     $<HTMLButtonElement>('[data-call-confirm-cancel]')!.click();
     expect($('[data-call-confirm-box]')).toBeNull();
@@ -990,6 +993,22 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     expect($('[data-call-minute-price]')?.textContent).toContain('pr. minut');
     expect($('[data-call-reservation-max]')?.textContent).toContain('ringer din boks ikke op');
+    expect($('[data-call-reservation-max]')?.textContent).toContain('Den viser det præcise beløb, når det ringer');
+    expect($('[data-call-reservation-max]')?.textContent).not.toMatch(/\d/);
+  });
+
+  it.each([
+    ['en', 'Your box will show the exact amount for the minutes when it rings.'],
+    ['da', 'Din boks viser det præcise beløb til minutterne, når det ringer.'],
+  ])('while ringing, before the box reports a hold, it names no amount, yet the ceiling still goes out unchanged (%s)', async (lang, line) => {
+    const host = stubHost({ noHold: true, hold: () => new Promise(() => {}) });
+    if (lang === 'da') setLanguagePref('da');
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-minutes="reserving"]')).not.toBeNull());
+    expect($('[data-call-minutes="reserving"]')!.textContent).toBe(line);
+    expect(host.used('call_signal')[0].args).toMatchObject({ kind: 400, minutes: CONSENT });
   });
 
   it('once it rings, the card shows the node’s exact hold under its own call limit (max_call_minutes) to confirm', async () => {
