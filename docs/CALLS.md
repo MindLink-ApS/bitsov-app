@@ -232,13 +232,29 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   before anything is paid (`not_dispatched`, reason `call_not_live`), and that
   refusal closes the admission, so the contact can be called again. A contact
   left stuck by an earlier build recovers on its next End. Any other
-  `not_dispatched` of a hangup leaves the admission open: while the node's own
+  `not_dispatched` of a hangup leaves the admission open until the node ends the
+  call (see the next item): while the node's own
   closing notice is being paid it answers `call_signal_in_flight`, and "Try
   ending it again" then closes it. A minute the wallet tried and failed stays
   pending first, as above, and no hangup goes out while that result is not
   known. A minute's refusal stays `not_dispatched` even with this reason,
   because the node also gives it to a minute that is early or out of order on
   a live call.
+- **The callee goes offline mid-call.** The node refuses the minute (no call
+  price) and the hangup (recipient offline) before anything leaves the wallet,
+  and says so in its reply: `released`, no payment hash, nothing settled, retry
+  allowed, for this operation id. Compose writes that only after `proven_unpaid`,
+  and a released row is never paid unless the same id is posted again. So for an
+  attempt that was this id's first, the app reads it as `not_dispatched`, for
+  any paid send: nothing is fenced and no check is needed. A `prepared` row, a
+  hash, an amount, or a retry of an id the node already held stays unknown. A
+  minute refused this way is tried again as above. End then waits for the node,
+  reading the call and holding no lock, while other paid actions go out. The node
+  ends the call by itself at its paid time plus 10 seconds, at most about 90
+  seconds away. End then asks once more, and "no live call" closes the admission.
+  If the node shows no end within 100 seconds, or the read fails, the refusal
+  stays the answer and "Try ending it again" stays on the card. The same wait
+  covers a hangup the wallet refused before dispatch.
 - **After the call.** The card reads the node for up to 20 s until it closes
   the reservation and then says "Minutes: paid X. Released back to your
   budget: Y." Until then it says what the node still holds.

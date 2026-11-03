@@ -295,6 +295,31 @@ pub fn reports_no_payment(reply: &serde_json::Value) -> bool {
     matches!(reply.get("state").map(serde_json::Value::as_str), None | Some(Some("prepared" | "released")))
 }
 
+/// The node's own record that this attempt paid nothing: its reply to the POST
+/// names this operation as `released` with no payment hash and nothing settled.
+/// Node compose writes that only when the attempt failed and `proven_unpaid`
+/// holds: no wallet dispatch began (`dispatched` is set before the first wallet
+/// poll and cleared only for a proven non-dispatch), no admission is pending or
+/// recorded, the wallet knows none of its admission hashes. Its other writer, a
+/// payment the wallet failed for good, always keeps the hash. A released row is
+/// never paid on its own: recovery selects only paying, payment_unknown, paid,
+/// sent and rejected_retryable. Only a POST of the same id could pay it, and the
+/// app mints a new id for every later attempt.
+pub fn released_without_payment(body: &str, operation_id: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return false };
+    let zero_or_absent = |field: &str| v.get(field).is_none_or(|value| value.is_null() || value == 0);
+    v["operation_id"] == operation_id && v["state"] == "released"
+        && v.get("payment_hash").is_some_and(serde_json::Value::is_null)
+        && v["retry_allowed"] == true && v["accepted"] == false
+        && zero_or_absent("amount_msat") && zero_or_absent("readmission_msat") && zero_or_absent("fee_paid_msat")
+}
+
+/// The owner's words for that refusal. The node's offline wording promises a
+/// queue, but a released operation is not sent later: only a new send goes out.
+pub fn released_refusal_message(body: &str) -> String {
+    not_dispatched_message(body).replace(" Message will be queued and sent when they reconnect.", "")
+}
+
 /// Genome `room_binding_v1` compose refusals (`reason` on a `not_dispatched`),
 /// in plain words. The node's own `error` is for developers and is not shown.
 fn room_refusal_words(reason: &str) -> Option<&'static str> {
