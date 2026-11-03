@@ -1510,6 +1510,7 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .call-repairs { flex: 0 0 auto; max-height: 35vh; overflow: auto; padding: var(--s-3) var(--s-4); border-bottom: 1px solid var(--line-strong); background: var(--raised); }
 .call-repairs .call-actions { align-items: center; margin-top: var(--s-2); }
 .in-call-pay { display: grid; gap: var(--s-2); }
+.in-call-pay:empty { display: none; }
 .in-call-pay .pay-flow { min-width: 0; }
 .in-call-pay .amount-input { min-width: 0; width: 100%; }
 

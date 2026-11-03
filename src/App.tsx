@@ -20,6 +20,7 @@ import { Onboarding, type NodeTarget } from './onboarding/Onboarding';
 import { FIRST_RUN_PHONE_MESSAGE, INITIAL_PAIRING, type NodeStatus, type PairingView } from './onboarding/pairing';
 import { amount as fmtAmount } from './control/format';
 import { ControlCenter } from './control/Shell';
+import { INITIAL_PILL_STATUS, pillStatusAfter, transientNodeError, type PillStatus } from './control/state';
 import { hostSource, inHost, sampleRequest, type SampleStart, type Source } from './control/source';
 import { sampleSource } from './control/sample';
 import type { DeviceView, FundingAddress, FundState } from './control/types';
@@ -84,6 +85,10 @@ function AppScreen() {
   const rooms = new URLSearchParams(window.location.search).get('rooms') === '1';
   const [source, setSource] = createSignal<Source>(sample ? sampleSource({ organism, noPeers, peerCount, rooms }) : hostSource);
   const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });
+  // What the rail pill shows: the status poll, with one missed read debounced (display only).
+  const [pillStatus, setPillStatus] = createSignal<PillStatus>(INITIAL_PILL_STATUS);
+  const notePillStatus = (read: NodeStatus) =>
+    setPillStatus(prev => pillStatusAfter(prev, read, pairing().refused === true, Date.now()));
   // Gate G6: the funds UI stays behind an explicit trust disclosure.
   const [sessionTrust, setSessionTrust] = createSignal<string | null>(null);
   const trustKey = () => status().node_id ? `bitsov.trust.v1.${pairing().remote ? 'remote' : 'local'}.${status().node_id!.toLowerCase()}` : null;
@@ -191,8 +196,7 @@ function AppScreen() {
   onCleanup(watches.close);
   const [lastSeen, setLastSeen] = createSignal<{ nodeId: string; at: number } | null>(null);
   const offline = () => !status().locked && (!!status().retry_after_secs ||
-    (!status().ready && !!status().error && !softenError(status().error).money &&
-      /connection[ _](refused|lost|closed)|ECONN|network[ _]error|failed to fetch|timed?[ _]out|unreachable|remote unavailable|remote handshake limit or endpoint unavailable|remote_handshake_unavailable/i.test(status().error!)));
+    (!status().ready && !!status().error && !softenError(status().error).money && transientNodeError(status().error)));
   const offlineScreen = (level: () => 1 | 2 = () => 2) => <Show when={offline()}><OfflineNode remote={pairing().remote} level={level()}
     lastSeen={!status().node_id || status().node_id === lastSeen()?.nodeId ? lastSeen()?.at : null}
     retryAfterSecs={status().retry_after_secs} onRetry={retryPairing} /></Show>;
@@ -226,13 +230,16 @@ function AppScreen() {
     try {
       const next = await source().nodeStatus();
       setStatus(next);
+      notePillStatus(next);
       if (next.ready && !next.retry_after_secs && next.node_id) {
         setLastSeen({ nodeId: next.node_id, at: Date.now() });
         setNodeAnswer({ at: Date.now(), ms: Math.round(performance.now() - started) });
       }
       setRememberOffer(!!next.remember_offer);
     } catch (e) {
-      setStatus({ ready: false, node_id: null, error: String(e) });
+      const failed: NodeStatus = { ready: false, node_id: null, error: String(e) };
+      setStatus(failed);
+      notePillStatus(failed);
     }
   };
   const poll = async () => {
@@ -480,7 +487,7 @@ function AppScreen() {
     <Show
       when={trustAck()}
       fallback={
-        <ControlCenter localApproval={pairing().state === 'fallback'} spendScoped={pairing().scopes.includes('spend')} remote={pairing().remote} phone={onPhone} retryAfterSecs={status().retry_after_secs} onReconnect={retryPairing} source={source()} active={false} ready={status().ready} error={status().error} ownId={status().node_id} firstRun={firstRun} />
+        <ControlCenter localApproval={pairing().state === 'fallback'} spendScoped={pairing().scopes.includes('spend')} remote={pairing().remote} phone={onPhone} retryAfterSecs={status().retry_after_secs} onReconnect={retryPairing} source={source()} active={false} ready={status().ready} error={status().error} pillStatus={pillStatus()} ownId={status().node_id} firstRun={firstRun} />
       }
     >
       <ControlCenter
@@ -504,6 +511,7 @@ function AppScreen() {
         nodeLocked={status().locked === true}
         ready={status().ready}
         error={status().error}
+        pillStatus={pillStatus()}
         ownId={status().node_id}
         firstRun={firstRun}
         fund={(guarded, blocked) => <Fund source={guarded} moneyBlocked={blocked} ready={live} />}
