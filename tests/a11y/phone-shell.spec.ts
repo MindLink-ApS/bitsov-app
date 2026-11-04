@@ -39,6 +39,20 @@ for (const lang of ['en', 'da']) {
     expect(end.bottom).toBeLessThanOrEqual(874);
     expect(end.bar).toBeLessThanOrEqual(874);
   });
+  for (const platform of ['ios', 'android']) {
+    test(`${lang}: the + menu is not clipped by the composer on ${platform}`, async ({ page }) => {
+      await page.goto(`${preview}?scene=list&lang=${lang}`);
+      await page.locator('[data-phone-list] [data-track^="peer:"]').first().click();
+      await page.waitForSelector('[data-composer-bar]');
+      await page.evaluate((p) => { document.documentElement.dataset.platform = p; }, platform);
+      await page.locator('[data-composer-plus]').click();
+      const onTop = await page.locator('[data-composer-mode="pay"]').evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) === el;
+      });
+      expect(onTop).toBe(true);
+    });
+  }
   test(`${lang}: first-spend is in the top layer above the tabs, with edge Back blocked`, async ({ page }) => {
     await page.goto(`${preview}?scene=first-spend&lang=${lang}`);
     await expect(page.locator('[data-first-spend-scrim]')).toBeVisible();
