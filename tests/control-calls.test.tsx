@@ -3231,6 +3231,30 @@ describe('calls in the shell', () => {
     } finally { setLanguagePref('en'); }
   });
 
+  it('a contact refusal leaves nothing behind on the next paid call', async () => {
+    let refuse = true;
+    stubHost({ call_signal: (args) => {
+      if (refuse) throw { code: 'call_needs_contact', message: 'Calls go to contacts you have already paid. Send them a message first. Nothing was paid.' };
+      return { message_id: 'sig', kind: args!.kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+    } });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-message-first]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-message-first]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel]')).toBeNull());
+    refuse = false;
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-hangup]')).not.toBeNull());
+    await vi.waitFor(() => expect($('[data-call-paid]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-message-first]')).toBeNull();
+    expect($('[data-call-dismiss]')).not.toBeNull();
+    await vi.waitFor(() => expect($('[data-call-paid="settled"]')).not.toBeNull());
+  });
+
   it('the STUN server is an owner setting, validated, with a note that it contacts that server', async () => {
     stubHost();
     await openShell();

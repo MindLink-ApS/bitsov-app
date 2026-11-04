@@ -98,14 +98,20 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   // and saved, or the owner forgets it: no error, typed or not, drops it. The
   // host itself stops redialling after a refusal.
   let retiring: Promise<void> | undefined;
-  const retireAttempt = () => retiring ??= (async () => {
+  const retireAttempt = () => {
+    if (retiring) return retiring;
+    // Cleared only once assigned: the body can finish before this line returns.
+    const done = endAttempt().finally(() => { if (retiring === done) retiring = undefined; });
+    return retiring = done;
+  };
+  const endAttempt = async () => {
     // A bumped generation skips the in-flight connect's own cleanup, so clear its busy state here.
     generation++; setBusy(false); resumeSaved = false; pendingLink = ''; compared = false;
     try {
       if (joinStarted || waiting() || props.device()?.state === 'pending') await props.join({ action: 'cancel' });
     } catch { /* The message and its one action still stand. */ }
-    finally { joinStarted = false; setWaiting(undefined); setPreview(undefined); retiring = undefined; }
-  })();
+    finally { joinStarted = false; setWaiting(undefined); setPreview(undefined); }
+  };
   const hostFail = (e: unknown) => { fail(e); if (stale()) void retireAttempt(); };
   // Retire an in-flight connect so its late result cannot leave the action disabled.
   const stopWaiting = () => { generation++; pendingLink = ''; setBusy(false); };
@@ -139,7 +145,7 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     finally { joining = false; }
   };
   const connect = async (input: string) => {
-    if (!alive || busy() || waiting() || joinStarted || ['words', 'fingerprint', 'connecting'].includes(screen())) return;
+    if (!alive || busy() || (!retiring && (waiting() || joinStarted)) || ['words', 'fingerprint', 'connecting'].includes(screen())) return;
     let link: string;
     try { link = normalizePairingLink(input); } catch { setToast(input.trim() ? c().notLink : c().empty); return; }
     // A new link starts only after the old attempt has ended.
@@ -193,7 +199,8 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     } finally { if (alive && turn === generation) setBusy(false); }
   };
   const paste = async () => {
-    if (!alive || busy() || waiting() || joinStarted) return;
+    // A retiring attempt no longer blocks a new link: connect waits for it to end.
+    if (!alive || busy() || (!retiring && (waiting() || joinStarted))) return;
     const turn = generation;
     setToast('');
     try {
