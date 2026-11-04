@@ -365,6 +365,13 @@ describe('rooms in the shell', () => {
     expect($('[data-room-new]') !== null).toBe(supported);
   });
 
+  it('does not say the node lacks rooms before the node has answered', async () => {
+    stubHost({ node_overview: () => new Promise(() => {}) });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-rooms-coming-soon]')).not.toBeNull());
+    expect(text('[data-rooms-coming-soon]')).toBe('Rooms show here once your box answers.');
+  });
+
   it('keeps the coming-soon line (and no New room) while our node does not check room bindings', async () => {
     stubHost({ node_overview: () => overview(['call_meeting_v1']) });
     await openShell();
