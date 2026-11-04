@@ -302,6 +302,8 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     expect($('[data-call-panel] .who')?.textContent).toBe('Maya');
     expect($('[data-call-duration]')).not.toBeNull();
     expect($('[data-call-mute]')).not.toBeNull();
+    // Paid minutes are running: no greyed Pay on the card of a node-routed call.
+    expect($('[data-call-pay]')).toBeNull();
     expect($('[data-call-hangup]')).not.toBeNull();
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());

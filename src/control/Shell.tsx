@@ -1,4 +1,4 @@
-import { IncomingCallAlerts } from './IncomingCallAlerts';
+import { IncomingCallAlerts, OutgoingRingback } from './IncomingCallAlerts';
 import { createMissedCalls } from './missedCalls';
 import { createPhoneLayout, createPhoneNavigationGuard, PhoneTabs, type PhoneTab } from './PhoneShell';
 import { MediaView } from './CallMedia';
@@ -2441,6 +2441,7 @@ export function ControlCenter(props: Props) {
       </PairingActivityProvider>
       <span class="sr-only" role="status" aria-live="polite" data-send-live data-send-live-seq={sendLive().seq}>{sendLive().text}</span>
       <IncomingCallAlerts view={callView()} waiting={waitingCalls()} nameOf={nameOf} />
+      <OutgoingRingback view={callView()} />
       <div class="waiting-calls" data-waiting-calls>
         <For each={waitingCalls().map(v => `${v.peer}:${v.callId}`)}>{key => {
           onCleanup(() => waitingPanels.delete(key));
@@ -3638,6 +3639,10 @@ function CallMinutesLine(props: { minutes: MinutesView; ended: boolean; confirm?
 }
 
 /** The call card: incoming (accept/decline with price), ringing, live (mute, camera, duration, hang up), ended. */
+/** A steady colour for a contact's call screen, from their id alone. */
+const hueOf = (id: string) => [...id].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 17);
+const initialOf = (name: string) => [...name.trim()][0]?.toUpperCase() ?? '';
+
 function CallPanel(props: {
   waiting?: boolean;
   answerBlocked?: boolean;
@@ -3707,9 +3712,24 @@ function CallPanel(props: {
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
   /** The M6 paid-minutes line is on the card (same condition as its render below). */
   const minutesShown = () => !!(props.routed && v().outgoing && v().minutes);
+  // An outgoing call takes the whole window until it ends, and can step aside for the chat.
+  // A waiting call, an approval and the incoming card keep the floating card.
+  const [compact, setCompact] = createSignal(false);
+  createEffect(on(() => props.view.callId, () => setCompact(false)));
+  const fullCall = () => !props.waiting && !props.approvalOpen && v().outgoing && ['calling', 'ringing', 'connecting', 'live', 'reconnecting'].includes(v().phase);
+  const immersive = () => fullCall() && !compact();
+  const ringingOut = () => v().phase === 'calling' || v().phase === 'ringing';
+  const hasDuration = () => (v().phase === 'live' || v().phase === 'reconnecting') && v().liveAt !== null;
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
-      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[v().phase]} ${who()}`}>
+      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={v().phase} data-call-immersive={immersive() ? '' : undefined} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[v().phase]} ${who()}`}>
+        <Show when={immersive()}>
+          <div class="call-backdrop" style={{ '--call-hue': String(hueOf(v().peer ?? '')) }} aria-hidden="true" />
+          <div class="call-avatar" data-call-avatar data-ringing={ringingOut() ? '' : undefined} style={{ '--call-hue': String(hueOf(v().peer ?? '')) }} aria-hidden="true">{initialOf(who())}</div>
+        </Show>
+        <Show when={fullCall()}>
+          <button type="button" class="link call-compact" data-call-compact aria-pressed={compact()} onClick={() => setCompact(c => !c)}>{compact() ? tr('caCallFullScreen') : tr('caCallShowChat')}</button>
+        </Show>
         <header>
           <strong data-call-title aria-live="polite">{CALL_TITLE[v().phase]}{v().media === 'video' ? tr('uiVideo') : ''}</strong>
           <span class="who">{who()}</span>
@@ -3789,6 +3809,9 @@ function CallPanel(props: {
             </p>
           )}
         </Show>
+        <Show when={v().muted && v().phase !== 'ended'}>
+          <p class="call-muted-note" role="status" data-call-muted>{tr('caCallMutedNote')}</p>
+        </Show>
         {/* Display only: the browser reports no network. Recovery itself stays ICE-driven. */}
         <Show when={v().offline && v().phase !== 'ended' && v().phase !== 'idle'}>
           <p class="hint" role="status" data-call-offline>{tr('uiYouAreOfflineTheCallReconnectsByItself')}</p>
@@ -3815,6 +3838,12 @@ function CallPanel(props: {
         {/* M6 P3: after the call, the app's own record of it, to copy next to the node journal. Display only. */}
         <CallReportCopy view={v()} routed={!!props.routed} />
         <div class="call-actions">
+          <Show when={immersive()}>
+            <div class="call-bar-who" aria-hidden="true">
+              <strong>{who()}</strong>
+              <span>{hasDuration() ? duration(Math.max(0, tick() - v().liveAt!)) : CALL_TITLE[v().phase]}</span>
+            </div>
+          </Show>
           <Switch>
             <Match when={v().phase === 'incoming'}>
               <button type="button" class="primary soft money" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced} onClick={() => props.accept()}>{tr('uiAccept')}{price(answer())}</button>
@@ -3840,13 +3869,13 @@ function CallPanel(props: {
             </Match>
             <Match when={v().phase !== 'idle'}>
               <Show when={v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting'}>
-                <button type="button" class="soft" data-call-mute aria-pressed={v().muted} onClick={() => props.mute()}>{tr('uiMute')}</button>
+                <button type="button" class="soft" data-call-mute aria-pressed={v().muted} onClick={() => props.mute()}>{v().muted ? tr('caCallUnmute') : tr('uiMute')}</button>
                 <Show when={v().media === 'video'}>
                   <button type="button" class="soft" data-call-camera aria-pressed={v().camera} onClick={() => props.camera()}>{tr('uiCamera')}</button>
                 </Show>
               </Show>
               <button type="button" class="danger soft" data-call-hangup onClick={() => props.hangup()}>
-                {v().recoveryError === RECOVERY_CLOSING ? tr('uiEndCall') : v().phase === 'calling' ? tr('uiCancel') : tr('uiHangUp')}
+                {v().recoveryError === RECOVERY_CLOSING ? tr('uiEndCall') : v().phase === 'calling' ? tr('uiCancel') : immersive() ? tr('caCallEnd') : tr('uiHangUp')}
               </button>
             </Match>
           </Switch>
