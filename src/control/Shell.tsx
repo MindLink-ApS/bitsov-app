@@ -3708,7 +3708,8 @@ function CallPanel(props: {
     setNoPrice(false);
     const peer = props.view.peer;
     if (callId && peer) void props.quote(peer).then((r) => {
-      if (props.view.callId !== callId) return;
+      // A waiting card can be gone by now, and its view with it.
+      if ((props.view as CallView | undefined)?.callId !== callId) return;
       if (r.ok && answerCost(r.value) !== null) setShown(r.value);
       else setNoPrice(true);
     });

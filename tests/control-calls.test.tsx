@@ -2992,6 +2992,25 @@ describe('calls in the shell', () => {
     expect(host.used('op_end_call')).toHaveLength(0);
   });
 
+  it('a price read that lands after its waiting card has gone is dropped without an error', async () => {
+    const seen: unknown[] = [];
+    const onError = (reason: unknown) => { seen.push(reason); };
+    process.on('unhandledRejection', onError);
+    try {
+      let read = (_q: CallQuote) => {};
+      let answer: Reply = () => QUOTE;
+      const host = payHost({ call_quote: (args) => answer(args) }); await liveCall();
+      answer = () => new Promise<CallQuote>((resolve) => { read = resolve; });
+      host.emitLive({ type: 'message', room_id: null, message: msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'second-offer' }) });
+      await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-ignore]')).not.toBeNull());
+      $<HTMLButtonElement>('[data-waiting-calls] [data-call-ignore]')!.click();
+      await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-panel]')).toBeNull());
+      read(QUOTE);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(seen).toEqual([]);
+    } finally { process.off('unhandledRejection', onError); }
+  });
+
   it('Ignore on a waiting card leaves the live call alone and sends nothing', async () => {
     const host = payHost(); await liveCall();
     const before = host.used('call_signal').length;
