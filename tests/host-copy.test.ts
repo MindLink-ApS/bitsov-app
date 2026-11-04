@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { setLanguagePref } from '../src/i18n';
 import { HOST_COPY_DA, hostText } from '../src/control/hostCopy';
 import { asActionError } from '../src/control/state';
+import { softenError } from '../src/control/userFacing';
 
 const rust = (dir: string): string[] => readdirSync(dir).flatMap((n) => {
   const p = join(dir, n);
@@ -36,6 +37,10 @@ describe('host refusals in Danish', () => {
       if (/nothing (more |new )?was|no minute was/i.test(en)) expect(da, en).toMatch(/intet/i);
       expect(da, en).not.toBe(en);
     }
+  });
+  it('a money refusal keeps its warning in Danish, so nothing can replace it', () => {
+    const fill = (t: string) => t.replace(/\{\d*\}/g, '5');
+    for (const [en, da] of HOST_COPY_DA) if (softenError(fill(en)).money) expect(softenError(fill(da)).money, en).toBe(true);
   });
   it('translates the exact refusal, with its values, only in Danish', () => {
     const refusal = 'This is more than the 50 sats per payment your node allows. Nothing was sent.';
