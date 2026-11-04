@@ -5490,8 +5490,10 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // attempt holds no payment. A later try is a new operation.
     if fresh_attempt && block
         && operation_id.as_deref().is_some_and(|id| act::peer_not_ready_unpaid(status.as_u16(), &text, id)) {
-        abandon(&journal)?;
+        // Release first: the record of the reservation goes only once the book
+        // no longer holds it.
         release(state)?;
+        abandon(&journal)?;
         return Err(ActionError::new("peer_not_ready", act::PEER_NOT_READY_MINUTE));
     }
     if !status.is_success() {
@@ -17295,6 +17297,43 @@ mod control_act_tests {
         let receipt = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
         assert_ne!(receipt.operation_id.as_deref(), Some(first.as_str()), "a new operation");
         assert_eq!(paid.lock().unwrap().pays, pays + 1, "paid once");
+    }
+
+    /// The book write that releases the minute's reservation fails. The record of
+    /// that reservation stays, so it can still be settled; it is never left held
+    /// in the book with nothing pointing at it.
+    #[tokio::test]
+    async fn a2_a_failed_release_on_a_callee_catching_up_keeps_the_record() {
+        let armed = Arc::new(Mutex::new(None::<PathBuf>));
+        let hook = armed.clone();
+        let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p == "/messages/compose" && body["kind"] == 404 {
+                if let Some(dir) = hook.lock().unwrap().take() {
+                    // A directory in the way of the book's atomic replacement.
+                    let p = spend_journal::read_pending(&dir).unwrap().unwrap();
+                    std::fs::create_dir(budget::book_path(&dir, &p.node_id).with_extension("json.tmp")).unwrap();
+                }
+                return (503, callee_catching_up_reply(&body["operation_id"]).to_string());
+            }
+            routes(m, p, b)
+        })).await;
+        let dir = journal_file(&node).parent().unwrap().to_path_buf();
+        *armed.lock().unwrap() = Some(dir.clone());
+        let pays = paid.lock().unwrap().pays;
+
+        let error = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+        assert!(armed.lock().unwrap().is_none(), "the fault was reached");
+        assert_ne!(error.code, "peer_not_ready", "{}", error.message);
+        assert!(budget_now(&node.state).unsettled_msat > 0, "the book still holds the reservation");
+        let held = pending(&node).expect("the reservation keeps its record");
+        assert!(held.budgeted);
+        assert!(book(&node).iter().any(|(id, _, settled)| id == held.charge_id() && !settled),
+            "the record names the held reservation");
+        assert_eq!(paid.lock().unwrap().pays, pays);
+        let book_tmp = budget::book_path(&dir, &held.node_id).with_extension("json.tmp");
+        std::fs::remove_dir(book_tmp).unwrap();
     }
 
     /// The whole of the reply must prove it. Short of that, the same refusal stays
