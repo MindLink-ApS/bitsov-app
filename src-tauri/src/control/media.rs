@@ -316,7 +316,14 @@ pub struct VideoPath {
     next_seq: AtomicU32,
     wake: tokio::sync::Notify,
     window: Mutex<SentWindow>,
+    held_until: Mutex<tokio::time::Instant>,
 }
+
+/// Audio frames queued behind the one going out that mean audio is catching up after a stall.
+const AUDIO_BACKLOG_FRAMES: usize = 2;
+/// How long video stays off the socket once audio is catching up: long enough
+/// for the node's one-second window to hold the backlog and the next second's audio.
+const AUDIO_CATCH_UP: Duration = Duration::from_millis(1200);
 
 /// Everything sent on this socket in the last second, audio included. The node
 /// closes the socket past its budget, so when audio is catching up after a stall,
@@ -373,6 +380,7 @@ impl VideoPath {
             next_seq: AtomicU32::new(0),
             wake: tokio::sync::Notify::new(),
             window: Mutex::new(SentWindow::new(DEFAULT_NODE_MESSAGES, DEFAULT_NODE_BYTES)),
+            held_until: Mutex::new(tokio::time::Instant::now()),
         }
     }
 
@@ -444,7 +452,14 @@ impl VideoPath {
     }
 
     fn has_room(&self) -> bool {
-        self.window.lock().unwrap().has_room(tokio::time::Instant::now())
+        let now = tokio::time::Instant::now();
+        now >= *self.held_until.lock().unwrap() && self.window.lock().unwrap().has_room(now)
+    }
+
+    /// Audio is catching up: what it sends now and in the next second counts in the
+    /// same window at the node, so video stays off until that window has passed.
+    fn hold_for_audio(&self) {
+        *self.held_until.lock().unwrap() = tokio::time::Instant::now() + AUDIO_CATCH_UP;
     }
 
     /// Video's own `seq`, so audio's never has a gap.
@@ -631,6 +646,9 @@ pub async fn run_media_session_with_video(
                 *next_seq = next_seq.wrapping_add(1);
                 if let Some(video) = video {
                     video.note_sent(bytes.len());
+                    if uplink.len() >= AUDIO_BACKLOG_FRAMES {
+                        video.hold_for_audio();
+                    }
                 }
                 tokio::time::timeout(Duration::from_secs(5), socket.send(Frame::Binary(bytes.into())))
                     .await
@@ -1045,14 +1063,34 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(400)).await;
             let at_400ms = seen.lock().unwrap().iter().filter(|f: &&MediaFrame| is_video_payload(&f.payload)).count();
-            assert!(at_400ms <= 5, "85 of 100 messages in the second: {at_400ms} video frames");
-            // Once the second has passed, what waited goes.
-            tokio::time::sleep(Duration::from_millis(1_000)).await;
+            assert_eq!(at_400ms, 0, "the next second's audio still has to fit this window");
+            // Once that window has passed, what waited goes.
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
             stop.store(true, Ordering::SeqCst);
         };
         let (result, ()) = tokio::join!(session, drive);
         assert_eq!(result, Err(SessionEnd::Stopped));
         assert!(seen.lock().unwrap().iter().filter(|f| is_video_payload(&f.payload)).count() > 10, "video went on once there was room");
+    }
+
+    #[tokio::test]
+    async fn the_second_of_sends_is_counted_even_without_a_backlog() {
+        // Audio spread out, as much as a backlog would be: only the count can hold video.
+        let mut window = SentWindow::new(DEFAULT_NODE_MESSAGES, DEFAULT_NODE_BYTES);
+        let start = tokio::time::Instant::now();
+        for i in 0..84u64 {
+            window.note(100, start + Duration::from_millis(i));
+        }
+        assert!(window.has_room(start + Duration::from_millis(84)));
+        window.note(100, start + Duration::from_millis(84));
+        assert!(!window.has_room(start + Duration::from_millis(85)), "85 of 100 is the margin");
+        assert!(window.has_room(start + Duration::from_millis(1002)), "a second on, the first ones are forgotten");
+        // Bytes count too.
+        let mut window = SentWindow::new(DEFAULT_NODE_MESSAGES, DEFAULT_NODE_BYTES);
+        for _ in 0..13 {
+            window.note(4100, start);
+        }
+        assert!(!window.has_room(start), "13 full frames leave no room for a 14th");
     }
 
     #[tokio::test]
