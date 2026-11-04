@@ -58,6 +58,7 @@ import { createNodeRoutedConnection } from './nodeRoutedConnection';
 import { waitUntilPaid, type MinutesDeps, type MinutesView } from './callMinutes';
 import { hostMediaBridge, unavailableMediaBridge } from './mediaBridge';
 import { createCallAudio } from './callAudio';
+import { audioStats, type AudioStatRow } from './callAudioStats';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
 import { NewRoomPanel, RoomThread, type RoomSend, type ThreadRead } from './RoomPanel';
 import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
@@ -1463,6 +1464,8 @@ export function ControlCenter(props: Props) {
           peer: () => callView().peer,
           bridge: isTauri() ? hostMediaBridge() : unavailableMediaBridge(),
           audio: (stream, transport, onFatal) => createCallAudio({ stream, transport, onError: onFatal,
+            // Local numbers about this call's audio, kept in memory for the call report only.
+            onStats: ((id) => (row: AudioStatRow) => audioStats.add(id, row))(callView().callId),
             // Phones: a microphone the OS silenced counts towards ending the call.
             ...(isMobilePlatform() ? { onSilence: (silent: boolean) => calls.micSilent(silent) } : {}) }),
           admitted: callMinutes ? (callId, peer, closed) => waitUntilPaid(callMinutes.status, peer, callId, () => Date.now(), closed) : undefined,

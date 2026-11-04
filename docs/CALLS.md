@@ -54,6 +54,22 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   HELLO (repeated each second while Opus still arrives), and the peer switches
   on its next frame. If the peer still sends Opus after 5 s, or an audio
   worklet crashes, the engine reports a fatal error and the call ends.
+- **Local audio statistics** (`src/control/callAudioStats.ts`). About every
+  five seconds the engine closes one row of plain numbers: the jitter buffer's
+  counters since the last row, the codec in use and frames received per codec,
+  the microphone track's `getSettings()` (numeric and boolean fields only),
+  peak, RMS (tenths of dBFS) and clipped-sample counts for the captured frames
+  and for the decoded frames handed to playout, all-zero 128-sample blocks in
+  the captured frames, frames the host's two queues dropped (read through
+  `call_media_stats`, a counter read), gaps between received frames, the
+  longest main-thread timer gap, and when the owner muted and unmuted. A
+  last partial row is closed at hangup. Rows hold no audio samples, message
+  content, device ids or labels; they are kept in memory for the last five
+  calls (an hour each at most), never written to disk or sent anywhere, and
+  appear only as extra lines of "Copy call report" for the owner to copy.
+  Capture is measured on the main thread from frames the worklet already
+  posts; the worklets are unchanged. Output device type is not recorded: the
+  webview exposes no type without device ids or labels.
 - **How the engine switches.** `call.ts` still drives one
   RTCPeerConnection-shaped object per call; in M6 builds that object is
   `src/control/nodeRoutedConnection.ts`, not an `RTCPeerConnection`. Its
