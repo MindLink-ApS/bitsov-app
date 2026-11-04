@@ -1885,3 +1885,7 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
   gap: var(--s-3);
 }
 .waiting-calls .call-panel { position: relative; right: auto; bottom: auto; }
+
+/* The node's approval, step by step. */
+.approval-steps { margin: var(--s-2) 0; padding-left: 1.4em; display: flex; flex-direction: column; gap: var(--s-2); }
+.approval-steps code { display: block; margin: var(--s-1) 0; overflow-wrap: anywhere; }

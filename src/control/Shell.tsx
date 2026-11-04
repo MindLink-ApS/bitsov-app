@@ -47,7 +47,7 @@ import { PorchPanel } from './Porch';
 import { ContactPanel } from './ContactPanel';
 import { onEscape } from './escapeStack';
 import { custodyBadge, CustodyBadgeView } from './custody';
-import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
+import { CopyButton, NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
 import { callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, isCallTrafficKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
@@ -6877,6 +6877,24 @@ function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: J
 /** What is true while a spend request waits, for whichever action raised it (the default holds for every consumer). */
 const spendWaitDefault = () => tr('spendWaitDefault');
 
+/** The node's own approval, for someone who has never used a terminal: where, what, and who can do it. */
+function NodeApprovalSteps(props: { command?: string | null }) {
+  return <>
+    <Show when={props.command}>
+      {(command) => <ol class="approval-steps" data-approval-steps>
+        <li>{tr('caApprovalStepOpen')}</li>
+        <li>
+          {tr('caApprovalStepPaste')}
+          <code class="address" data-owner-action>{command()}</code>
+          <CopyButton text={command()} label={tr('caApprovalCopy')} />
+        </li>
+        <li>{tr('caApprovalStepCode')}</li>
+      </ol>}
+    </Show>
+    <p class="hint" data-approval-who>{tr('caApprovalWho')}</p>
+  </>;
+}
+
 function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions; hasPending?: boolean; stays?: string }) {
   const line = () => spendLine(props.spend, props.now);
   const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
@@ -6922,7 +6940,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
               <p>
                 <strong>{tr('uiConfirmAtYourNode')}</strong> {tr('uiYourNodeAsksItsOwnerToApproveThis')}
               </p>
-              <code class="address" data-owner-action>{p().owner_action}</code>
+              <NodeApprovalSteps command={p().owner_action} />
               <p class="hint">
                 {tr('uiThisAppCannotApproveItForYouThe')} {minutes(p().expires_at_ms)} {tr('uiMinYourDraftIsKept')}{' '}
                 <button type="button" class="link" data-spend-cancel onClick={() => void props.actions.cancelSpend()}>
@@ -7065,7 +7083,8 @@ function Reconcile(props: { actions: Actions; hasPending?: boolean; onChecked?: 
       const revision = props.actions.pendingRevision();
       const outcome = await props.actions.reconcile();
       if (revision !== props.actions.pendingRevision()) return;
-      setResult(outcome.ok ? outcome.value : outcome.error.message);
+      // "No pending spend" reads as a dead end beside an approval that is still waiting.
+      setResult(outcome.ok ? (/^no pending spend\.?$/i.test(outcome.value.trim()) ? tr('caNoPaymentWaiting') : outcome.value) : outcome.error.message);
       setUndelivered(!outcome.ok && outcome.error.code === 'undelivered_pending' ? outcome.error.pending_id ?? null : null);
       if (outcome.ok) props.onChecked?.(outcome.value);
     } finally { setChecking(false); }
@@ -7154,9 +7173,7 @@ function BudgetBar(props: {
             <p>
               <strong>{tr('uiConfirmAtYourNode')}</strong> {tr('uiOneApprovalLetsMessagesPayForTheNext')}
             </p>
-            <Show when={props.spend?.pending}>
-              {(p) => <code class="address" data-owner-action>{p().owner_action}</code>}
-            </Show>
+            <NodeApprovalSteps command={props.spend?.pending?.owner_action} />
             <p class="hint">{tr('uiThisAppCannotApproveItForYouYour')}</p>
           </div>
           </TouchIdFirst>
