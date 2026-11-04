@@ -417,6 +417,7 @@ export function createCallEngine(deps: CallDeps) {
     view: () => CallView;
     receive: (m: Message, ownId: string) => Promise<void>;
     decline: (shown: CallQuote) => Promise<void>;
+    ignore: () => void;
     note: (message: string) => void;
     dismiss: () => void;
     endLocal: () => void;
@@ -1152,6 +1153,7 @@ export function createCallEngine(deps: CallDeps) {
     /** Why a press on this waiting card did nothing yet. */
     note: (message: string) => { if (view.phase === 'incoming') set({ error: message }); },
     dismissWaiting: (id: string) => { waiting.get(id)?.dismiss(); },
+    ignoreWaiting: (id: string) => { waiting.get(id)?.ignore(); },
 
     /** Place a call. The price was shown before this is called. */
     place: (peer: string, requested: CallMedia, q: CallQuote) => guarded(async (claim) => {
@@ -1268,6 +1270,13 @@ export function createCallEngine(deps: CallDeps) {
 
     /** M6 A2: the owner confirms the node's hold for this outgoing call (as the card shows it). */
     confirmMinutes: async () => { if (view.outgoing && active()) await minutes?.confirm(); },
+
+    /** Stop ringing on this device: nothing is sent or paid, and their ring times out by itself. */
+    ignore: () => {
+      if (view.phase !== 'incoming' || view.silenced) return;
+      teardown();
+      set(IDLE);
+    },
 
     /** Decline a ringing call: one paid hangup, at most the price `shown` on the button, so the caller stops ringing. */
     decline: (shown: CallQuote) => guarded(async () => {

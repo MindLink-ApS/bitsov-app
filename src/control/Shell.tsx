@@ -2448,7 +2448,7 @@ export function ControlCenter(props: Props) {
           return <CallPanel waiting answerBlocked={!['idle', 'ended'].includes(callView().phase) || meetingOn() || callView().pendingCount > 0 || callView().unknownCount > 0 || (!!callView().close && callView().close!.status !== 'closed')} view={view()} payment={null} approval={null} approvalOpen={false}
             panelRef={el => { waitingPanels.set(key, el); }}
             blocked={moneyBlocked()} streams={{ local: null, remote: null }} nameOf={nameOf} quote={actions.callQuote}
-            accept={(shown) => { if (!moneyBlocked()) void calls.acceptWaiting(key, shown); }} decline={(shown) => void calls.declineWaiting(key, shown)} dismiss={() => calls.dismissWaiting(key)}
+            accept={(shown) => { if (!moneyBlocked()) void calls.acceptWaiting(key, shown); }} decline={(shown) => void calls.declineWaiting(key, shown)} ignore={() => calls.ignoreWaiting(key)} dismiss={() => calls.dismissWaiting(key)}
             hangup={() => {}} mute={() => {}} camera={() => {}} closeAgain={() => {}} endStuck={() => {}} callAgain={() => {}} />;
         }}</For>
       </div>
@@ -2488,6 +2488,7 @@ export function ControlCenter(props: Props) {
         quote={actions.callQuote}
         accept={(shown) => { if (!moneyBlocked()) void calls.accept(shown); }}
         decline={(shown) => void calls.decline(shown)}
+        ignore={() => calls.ignore()}
         hangup={() => void calls.hangup()}
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
@@ -3654,6 +3655,8 @@ function CallPanel(props: {
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
   accept: (shown: CallQuote) => void;
   decline: (shown: CallQuote) => void;
+  /** Stop ringing here: nothing sent or paid. */
+  ignore: () => void;
   hangup: () => void;
   mute: () => void;
   camera: () => void;
@@ -3829,6 +3832,7 @@ function CallPanel(props: {
             <Match when={v().phase === 'incoming'}>
               <button type="button" class="primary soft money" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.accept(q); }}>{tr('uiAccept')}{price()}</button>
               <button type="button" class="soft" data-call-decline disabled={props.blocked || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.decline(q); }}>{tr('uiDecline')}{price()}</button>
+              <button type="button" class="soft" data-call-ignore disabled={props.view.silenced} onClick={() => props.ignore()}>{tr('uiIgnore')}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
               <Show when={v().stuck}>

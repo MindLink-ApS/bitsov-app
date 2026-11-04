@@ -137,6 +137,37 @@ describe('answering and declining within the price shown', () => {
     }
   });
 
+  it('Ignore stops the ring here: no quote read, no signal, no record, and nothing later', async () => {
+    vi.useFakeTimers();
+    try {
+      const quote = vi.fn(async () => ({ ok: true as const, value: QUOTE }));
+      const onMissed = vi.fn();
+      const { e, sent, last } = engine({ quote, onMissed });
+      await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+      expect(last().phase).toBe('incoming');
+      e.ignore();
+      expect(last().phase).toBe('idle');
+      await vi.advanceTimersByTimeAsync(120_000);
+      await e.receive(msg(403, { reason: 'timeout' }), OWN);
+      expect(last().phase).toBe('idle');
+      expect(sent).toHaveLength(0);
+      expect(quote).not.toHaveBeenCalled();
+      expect(onMissed).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('a press waiting on approval when Ignore lands pays nothing', async () => {
+    let allow: (yes: boolean) => void = () => {};
+    const { e, sent, last } = engine({ authorize: () => new Promise<boolean>((resolve) => { allow = resolve; }) });
+    await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    const accepting = e.accept(QUOTE);
+    e.ignore();
+    allow(true);
+    await accepting;
+    expect(sent).toHaveLength(0);
+    expect(last().phase).toBe('idle');
+  });
+
   it('a waiting Accept pressed while the engine is starting another call says why nothing happened', async () => {
     let allow: (yes: boolean) => void = () => {};
     let gate = false;
@@ -2940,6 +2971,37 @@ describe('calls in the shell', () => {
     expect(text('[data-call-accept]')).toBe('Accept');
     expect(text('[data-call-answer-price]')).toMatch(/nothing can be paid/i);
     expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it('with no readable price, Ignore stops the ring and no signal is sent', async () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
+    const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    let answer: Reply = () => QUOTE;
+    const host = stubHost({ messages_list: () => [], call_quote: (args) => answer(args) });
+    await openShell();
+    answer = () => { throw { code: 'node', message: 'Could not read it' }; };
+    incoming(host);
+    await vi.waitFor(() => expect($('[data-call-answer-price]')).not.toBeNull());
+    const audio = play.mock.contexts.find(a => a instanceof HTMLAudioElement && a.loop) as HTMLAudioElement;
+    expect(text('[data-call-ignore]')).toBe('Ignore');
+    $<HTMLButtonElement>('[data-call-ignore]')!.click();
+    await vi.waitFor(() => expect(pause.mock.contexts).toContain(audio));
+    expect($('[data-call-panel="incoming"]')).toBeNull();
+    expect($('[data-missed-call]')).toBeNull();
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('op_end_call')).toHaveLength(0);
+  });
+
+  it('Ignore on a waiting card leaves the live call alone and sends nothing', async () => {
+    const host = payHost(); await liveCall();
+    const before = host.used('call_signal').length;
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'second-offer' }) });
+    await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-ignore]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-waiting-calls] [data-call-ignore]')!.click();
+    await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-panel]')).toBeNull());
+    expect($('[data-call-panel="live"]')).not.toBeNull();
+    expect(host.used('call_signal')).toHaveLength(before);
+    expect($('[data-missed-call]')).toBeNull();
   });
 
   it.each([
