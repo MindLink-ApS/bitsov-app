@@ -272,13 +272,13 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   A minute refused as above is tried again as above. End then waits for the node,
   reading the call and holding no lock, while other paid actions go out. The node
   ends the call by itself at its paid time plus 10 seconds, at most about 90
-  seconds away. End then asks once more, and "no live call" closes the admission.
-  If the node shows no end within 100 seconds, a read in progress included, or the
-  read fails, the refusal stays the answer and "Try ending it again" stays on the
-  card. If the spending approval runs out during the wait, End cannot ask again;
-  the node has already shown the call ended, so End records that and closes the
-  admission, sending nothing. The same wait covers a hangup the wallet refused
-  before dispatch.
+  seconds away. The node showing the call ended closes the admission: End records
+  that, as for their hangup, and asks for nothing more, so a pause, a lapsed
+  approval or a used-up budget during the wait cannot keep it open. It sends
+  nothing, and another send's pending result stays as it was. If the node shows no
+  end within 100 seconds, a read in progress included, or the read fails, the
+  refusal stays the answer and "Try ending it again" stays on the card. The same
+  wait covers a hangup the wallet refused before dispatch.
 - **After the call.** The card reads the node for up to 20 s until it closes
   the reservation and then says "Minutes: paid X. Released back to your
   budget: Y." Until then it says what the node still holds.
