@@ -3723,6 +3723,29 @@ function CallPanel(props: {
   const immersive = () => fullCall() && !compact();
   const ringingOut = () => v().phase === 'calling' || v().phase === 'ringing';
   const hasDuration = () => (v().phase === 'live' || v().phase === 'reconnecting') && v().liveAt !== null;
+  // The full screen hides everything but itself and any waiting call, so focus stays on what can be seen.
+  createEffect(on(immersive, (full) => {
+    if (!full) return;
+    const before = document.activeElement as HTMLElement | null;
+    queueMicrotask(() => panel?.focus());
+    const onTab = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab' || (document.activeElement as Element | null)?.closest?.('dialog[open]')) return;
+      const list = [panel, document.querySelector('[data-waiting-calls]')].flatMap(root => root
+        ? [...root.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, audio[controls], [tabindex="0"]')]
+        : []).filter(el => el.getClientRects().length > 0);
+      if (!list.length) return;
+      e.preventDefault();
+      const at = list.indexOf(document.activeElement as HTMLElement);
+      list[e.shiftKey ? (at <= 0 ? list.length - 1 : at - 1) : (at + 1) % list.length].focus();
+    };
+    document.addEventListener('keydown', onTab, true);
+    onCleanup(() => {
+      document.removeEventListener('keydown', onTab, true);
+      // Back to where the person was, or the message box if that is gone (a Ring button closes as it is pressed).
+      const target = before?.isConnected && before !== document.body && !panel?.contains(before) ? before : document.querySelector<HTMLElement>('[data-composer] textarea');
+      queueMicrotask(() => target?.focus());
+    });
+  }));
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
       <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={v().phase} data-call-immersive={immersive() ? '' : undefined} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[v().phase]} ${who()}`}>

@@ -3258,6 +3258,8 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($('[data-call-immersive]')).not.toBeNull());
     expect($('[data-call-avatar]')!.getAttribute('data-ringing')).toBe('');
     expect(text('[data-call-hangup]')).toMatch(/^(Cancel|End)$/);
+    // What was paid stays on the full screen.
+    await vi.waitFor(() => expect($('[data-call-immersive] [data-call-paid]')).not.toBeNull());
     await vi.waitFor(() => expect(played.filter(a => /ringback/.test(a.src) && !a.paused)).toHaveLength(1));
     // Stepping aside keeps the call and its plain card.
     $<HTMLButtonElement>('[data-call-compact]')!.click();

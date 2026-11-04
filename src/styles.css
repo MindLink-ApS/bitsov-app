@@ -1878,7 +1878,8 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
   position: fixed;
   top: max(var(--s-6), env(safe-area-inset-top, 0px));
   left: max(var(--s-6), env(safe-area-inset-left, 0px));
-  z-index: 51;
+  /* Above the full call screen (60): a second caller must stay reachable. */
+  z-index: 61;
   max-height: calc(100dvh - 48px);
   overflow-y: auto;
   display: grid;
