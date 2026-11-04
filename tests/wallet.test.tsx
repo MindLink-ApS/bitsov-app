@@ -668,6 +668,18 @@ describe('the Wallet page', () => {
     expect(text('[data-send-result]')).not.toContain('7 sats');
   });
 
+  it('says the contacts could not be read once, in the main pane, when no chat is open', async () => {
+    stubHost({ peers_list: () => { throw 'read failed'; } });
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(mount.textContent).toContain('We could not load your contacts.'));
+    expect(mount.textContent!.split('We could not load your contacts.')).toHaveLength(2);
+    expect(mount.querySelector('.rail')?.textContent).not.toContain('No contacts yet');
+  });
+
   it('does not say there are no contacts or payments when contacts could not be read', async () => {
     stubHost({ peers_list: () => { throw 'read failed'; } });
     await openWallet();
