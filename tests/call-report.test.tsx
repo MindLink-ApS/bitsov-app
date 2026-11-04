@@ -70,6 +70,7 @@ describe('the call report', () => {
     const capped = minutes({ blocks: 60, reservation: { ...minutes().reservation!, max_call_minutes: 60 }, stop: stop('node_ended') });
     expect(reason(ended({ minutes: capped }))).toBe('end_reason: duration_cap');
     expect(reason(ended({ reason: 'failed', minutes: minutes({ stop: stop('payment_failed') }) }))).toBe('end_reason: payment_failed');
+    expect(reason(ended({ reason: 'failed', minutes: minutes({ stop: stop('budget_limit') }) }))).toBe('end_reason: budget_limit');
     expect(reason(ended({ reason: 'hangup', minutes: minutes({ stop: stop('node_ended') }) }))).toBe('end_reason: node_ended');
     // An incoming call the app only watched: no reservation of ours, nothing summed.
     const lines = callReportLines({ view: ended({ outgoing: false, minutes: null, reason: 'declined' }), routed: true, endedAt: ENDED_AT });

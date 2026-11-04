@@ -69,10 +69,17 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   answer could not be used", nothing more paid. If the node link drops, the
   host reconnects; after 30 s without it the call ends. The node's refusal of
   the socket (for example an unknown call) ends it at once.
-- **Label.** While a node-routed call is ringing, connecting or live the card
-  says *Encrypted between your node and theirs — both nodes can hear it* /
-  *Krypteret mellem din node og deres — begge noder kan høre opkaldet*. The
-  STUN, direct-recovery and relay notes are not shown.
+- **Label.** While a node-routed call is ringing, connecting or live the
+  card shows, outside the **Details** disclosure, *The call goes through your box and theirs. Both boxes can hear it.* /
+  *Opkaldet går gennem din boks og deres. Begge bokse kan høre det.* The audio is not end-to-end encrypted between the
+  apps: both nodes forward it. The line stays visible until the apps encrypt
+  end to end. The STUN,
+  direct-recovery and relay notes are not shown.
+- **Short card.** During a call the card shows the name, the timer, one cost
+  line (the paid minutes on an outgoing routed call), mute and hang up; the
+  longer notes sit behind **Details**. The in-call direct payment (*Pay*) is
+  not offered on a node-routed call; its receipts and pending-result check
+  stay on the card. Amounts and payment flows are unchanged.
 - **Payment for the node leg is slice A2** (below). The node admits the media
   socket only once the call's first minute is paid, so payment starts at the
   answer, not on `onSession` `open`. `onSession` `closed` fires once when an
@@ -204,7 +211,12 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   is left connected: their node's hangup `unpaid`; the node showing the call
   ended after its paid time and grace (`unpaid`) or for another reason; a
   minute refused before paying (`payment_failed`: tried again up to 4 times
-  only when the node proved it did not dispatch it); a minute whose outcome
+  when the node proved it did not dispatch it; a passing refusal, `not_ready`,
+  `peer_not_ready`, a rate breaker or a channel read that failed, is tried again
+  every 2 seconds while paid time and grace remain, at most 15 times, each try a
+  new operation); a budget with no room for the next minute (`budget_limit`,
+  `budget_exhausted` or `ceiling_exhausted`: a limit the owner set, so the call
+  ends at once with its own reason); a minute whose outcome
   is unknown (`payment_unknown`: never paid again on top of it); their node
   asking more per minute (`price_changed`); a hold the host refused
   (`hold_refused`: no reservation, or above the consent; the host hung up).

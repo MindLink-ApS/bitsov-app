@@ -20,8 +20,8 @@ const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,6}$/;
 const MIN_MS = Date.UTC(2020, 0, 1);
 const MAX_MS = Date.UTC(2100, 0, 1);
 const HANGUP_REASONS = new Set(['hangup', 'declined', 'busy', 'timeout', 'failed', 'unpaid']);
-const STOP_CODES = new Set(['unpaid', 'node_ended', 'payment_failed', 'payment_unknown', 'price_changed', 'hold_refused']);
-const PAYMENT_STOPS = new Set(['payment_failed', 'payment_unknown', 'price_changed', 'hold_refused']);
+const STOP_CODES = new Set(['unpaid', 'node_ended', 'payment_failed', 'budget_limit', 'payment_unknown', 'price_changed', 'hold_refused']);
+const PAYMENT_STOPS = new Set(['payment_failed', 'budget_limit', 'payment_unknown', 'price_changed', 'hold_refused']);
 
 const msat = (n: unknown) => (typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 ? String(n) : UNKNOWN);
 const count = msat;

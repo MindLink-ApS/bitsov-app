@@ -424,6 +424,60 @@ export function freshness(readAt: number | null, nowMs: number): { label: string
 
 export type Pill = { tone: 'ok' | 'warn' | 'err' | 'idle'; text: string; live: boolean };
 
+/**
+ * Pill hysteresis (display only). One status read that comes back unreachable
+ * or timed out is not an outage: the pill says the node is not answering only
+ * after this many failed reads in a row, spanning at least this long. The
+ * first good read clears it. Polling, node calls and money gates are unchanged.
+ */
+export const NOT_ANSWERING_AFTER_MISSES = 3;
+export const NOT_ANSWERING_AFTER_MS = 5_000;
+
+/**
+ * Safety net while the status poll answers: the 60 s stale-overview rule
+ * flashed "not answering" while the node was still answering; 180 s
+ * keeps a hung box (status answers, its overview read never returns) visible.
+ */
+export const STALE_OVERVIEW_NOT_ANSWERING_MS = 180_000;
+
+/** Host errors that mean "could not reach the node right now", not a verdict from it. */
+const TRANSIENT_NODE_ERROR = /connection[ _](refused|lost|closed)|ECONN|network[ _]error|failed to fetch|timed?[ _]out|unreachable|remote unavailable|remote handshake limit or endpoint unavailable|remote_handshake_unavailable/i;
+
+export function transientNodeError(error: string | null | undefined): boolean {
+  return !!error && TRANSIENT_NODE_ERROR.test(error);
+}
+
+/** Failed status reads in a row, and when the first of them came back. */
+export type StatusChecks = { misses: number; since: number | null };
+export const NO_MISSES: StatusChecks = { misses: 0, since: null };
+
+/** The ready/error pair the pill shows, debounced from the status poll. */
+export type PillStatus = { ready: boolean; error: string | null; quiet: boolean; checks: StatusChecks };
+export const INITIAL_PILL_STATUS: PillStatus = { ready: false, error: null, quiet: false, checks: NO_MISSES };
+
+export function notAnswering(checks: StatusChecks, nowMs: number): boolean {
+  return checks.misses >= NOT_ANSWERING_AFTER_MISSES && checks.since !== null && nowMs - checks.since >= NOT_ANSWERING_AFTER_MS;
+}
+
+/**
+ * Fold one status read into what the pill shows. Only a transient miss is
+ * debounced: a locked node, a host cooldown, a refused pairing or any other
+ * error shows at once, as does every good read. While misses are unconfirmed
+ * the pill keeps what it said before (on first load: still connecting).
+ */
+export function pillStatusAfter(
+  prev: PillStatus,
+  read: { ready: boolean; error: string | null; locked?: boolean; retry_after_secs?: number | null },
+  refused: boolean,
+  nowMs: number,
+): PillStatus {
+  const missed = !refused && !read.locked && !read.retry_after_secs && !read.ready && transientNodeError(read.error);
+  if (!missed) return { ready: read.ready, error: read.error, quiet: false, checks: NO_MISSES };
+  const checks = { misses: prev.checks.misses + 1, since: prev.checks.since ?? nowMs };
+  if (notAnswering(checks, nowMs)) return { ready: read.ready, error: read.error, quiet: true, checks };
+  return { ...prev, checks };
+}
+
 /** The rail's node pill: one glance at whether this seat is connected to its node. */
 export function nodePill(input: {
   remote?: boolean;
@@ -435,15 +489,25 @@ export function nodePill(input: {
   overview: NodeOverview | null;
   link: LinkState | null;
   nowMs: number;
+  /** Status reads have failed long enough to say so (see `pillStatusAfter`). */
+  quiet?: boolean;
+  /**
+   * `ready`/`error` come from the debounced status poll. Its answer then
+   * outranks the overview's age up to STALE_OVERVIEW_NOT_ANSWERING_MS: a late
+   * overview read says the node is not answering only past that safety net.
+   */
+  statusChecked?: boolean;
 }): Pill {
   if (input.phone && !input.remote) return { tone: 'idle', text: t('uiConnectToYourNode'), live: false };
   if (input.retryAfterSecs) return { tone: 'warn', text: t('uiRemoteConnectionWaitingS', input.retryAfterSecs), live: false };
+  if (input.quiet) return { tone: 'warn', text: t('uiNodeNotAnswering'), live: false };
   if (input.remote && input.error) return { tone: 'warn', text: t('uiRemoteConnectionUnavailable'), live: false };
   if (input.remote && !input.ready) return { tone: 'idle', text: t('uiConnectingToRemoteNode'), live: false };
   if (input.error) return { tone: 'err', text: t('uiNodeStopped'), live: false };
   if (!input.ready) return { tone: 'idle', text: t('uiStartingNode'), live: false };
   if (!input.overview) return { tone: 'ok', text: t('uiNodeRunning'), live: false };
-  if (freshness(input.overview.read_at, input.nowMs).stale) {
+  const overviewAge = input.nowMs - input.overview.read_at;
+  if (input.statusChecked ? overviewAge > STALE_OVERVIEW_NOT_ANSWERING_MS : freshness(input.overview.read_at, input.nowMs).stale) {
     return { tone: 'warn', text: t('uiNodeNotAnswering'), live: false };
   }
   if (input.overview.money_ready === false) return { tone: 'warn', text: readinessLine(input.overview, input.nowMs)!, live: input.link === 'open' };
