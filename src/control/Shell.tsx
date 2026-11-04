@@ -3467,12 +3467,15 @@ const callStunLabel = () => effectiveStun()
 function CallButtons(props: { peer: string; name: string; blocked: boolean; actions: Actions; callbackMedia?: CallMedia; offline?: boolean }) {
   const [quote, setQuote] = createSignal<CallQuote | null>(null);
   const [why, setWhy] = createSignal<string | null>(null);
+  // Only the latest read counts: one begun while they were offline can answer after the one begun when they came back.
+  let quoteRequest = 0;
   // An unconnected contact's node gives no live call price: read it again when they are back.
   createEffect(on([() => props.peer, () => props.offline], ([peer]) => {
+    const request = ++quoteRequest;
     setQuote(null);
     setWhy(null);
     void props.actions.callQuote(peer).then((r) => {
-      if (props.peer !== peer) return;
+      if (request !== quoteRequest || props.peer !== peer) return;
       if (r.ok) setQuote(r.value);
       else setWhy(r.error.message);
     });

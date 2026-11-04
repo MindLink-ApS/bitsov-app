@@ -2996,6 +2996,32 @@ describe('calls in the shell', () => {
     expect(host.used('call_quote').length).toBeGreaterThan(1);
   }, 30_000);
 
+  it.each(['price', 'refusal'] as const)('a %s read while they were offline, answering after the read on their return, changes nothing', async (late) => {
+    const STALE = 'Their node did not answer in time.';
+    let connected = false;
+    let answerOffline: () => void = () => {};
+    const host = stubHost({
+      peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected, fingerprint: null }],
+      call_quote: () => {
+        if (connected) return QUOTE;
+        return new Promise((resolve, reject) => {
+          answerOffline = () => late === 'price'
+            ? resolve({ ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null })
+            : reject({ code: 'price_quote_unavailable', message: STALE });
+        });
+      },
+    });
+    await openShell();
+    await vi.waitFor(() => expect(host.used('call_quote').length).toBeGreaterThan(0));
+    connected = true;
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false), { timeout: 20_000 });
+    const online = $('[data-call="audio"]')!.getAttribute('title');
+    answerOffline();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false);
+    expect($('[data-call="audio"]')!.getAttribute('title')).toBe(online);
+  }, 30_000);
+
   it('says an offline contact in Danish too', async () => {
     stubHost({
       peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: false, fingerprint: null }],
