@@ -17,7 +17,7 @@ import { setLanguagePref } from '../src/i18n';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import { createCallEngine, parseSignal, SILENCED_GRACE_MS, type CallDeps, type CallView } from '../src/control/call';
 import {
-  BLOCK_GRACE_MS, ENDED_CONFIRM_MS, MAX_ATTEMPTS, RETRY_MS, STATUS_POLL_MS,
+  BLOCK_GRACE_MS, ENDED_CONFIRM_MS, MAX_ATTEMPTS, PASSING_MAX_ATTEMPTS, RETRY_MS, STATUS_POLL_MS,
   createCallMinutes, waitUntilPaid, type MinutesDeps, type MinutesStop, type MinutesView,
 } from '../src/control/callMinutes';
 import { createNodeRoutedConnection, nodeRoutedSdp, type MediaSessionEvent } from '../src/control/nodeRoutedConnection';
@@ -238,6 +238,99 @@ describe('paying the minutes of one outgoing call', () => {
     await vi.advanceTimersByTimeAsync(RETRY_MS * MAX_ATTEMPTS + 1);
     expect(s.deps.pay).toHaveBeenCalledTimes(MAX_ATTEMPTS);
     expect(s.stops.map((x) => x.code)).toEqual(['payment_failed']);
+  });
+
+  // The refusal a real node gives while its chain source is silent.
+  const NOT_READY = 'Money is not ready yet. Your node will retry automatically.';
+
+  it('a minute refused for a passing reason keeps the call: tried again, paid once when it clears', async () => {
+    for (const code of ['not_ready', 'peer_not_ready', 'grant_rate_limited', 'grant_velocity', 'call_liquidity_unavailable']) {
+      const node = fakeNode({ now: () => Date.now() });
+      let refusals = 8;
+      const s = session(node, async (_peer, _call, seq) => {
+        if (refusals-- > 0) return fail(code, NOT_READY);
+        node.settle(seq);
+        return ok(receipt(seq));
+      });
+      await s.confirmed();
+      s.minutes.start();
+      await vi.advanceTimersByTimeAsync(RETRY_MS * 8 + 1);
+      expect(s.stops, code).toEqual([]);
+      expect(s.deps.pay, code).toHaveBeenCalledTimes(9);
+      expect(node.seq, code).toBe(1);
+      expect((s.deps.pay as ReturnType<typeof vi.fn>).mock.calls.every(([, , seq]) => seq === 0), code).toBe(true);
+      expect(s.last().receiptsMsat, code).toBe(BLOCK + FEE);
+      s.minutes.dispose();
+    }
+  });
+
+  it('a passing refusal is tried again only while paid time and grace remain', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    let refusing = false;
+    const s = session(node, async (_peer, _call, seq) => {
+      if (refusing) return fail('not_ready', NOT_READY);
+      node.settle(seq);
+      return ok(receipt(seq));
+    });
+    await s.confirmed();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(node.seq).toBe(1);
+    refusing = true;
+    // Block 1 falls due 20 seconds before the paid time ends; the node's grace ends 10 seconds after it.
+    await vi.advanceTimersByTimeAsync(39_000);
+    (s.deps.pay as ReturnType<typeof vi.fn>).mockClear();
+    await vi.advanceTimersByTimeAsync(20_000 + BLOCK_GRACE_MS);
+    const tries = (s.deps.pay as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(tries).toBeGreaterThan(MAX_ATTEMPTS);
+    expect(tries).toBeLessThanOrEqual(PASSING_MAX_ATTEMPTS);
+    expect(s.stops.map((x) => x.code)).toEqual(['payment_failed']);
+    expect(s.stops[0].message).toContain('could not be paid');
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect((s.deps.pay as ReturnType<typeof vi.fn>).mock.calls.length).toBe(tries);
+    expect(node.seq).toBe(1);
+  });
+
+  it('a call that never paid its first minute stops trying after the bound', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const s = session(node, async () => fail('not_ready', NOT_READY));
+    await s.confirmed();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(RETRY_MS * PASSING_MAX_ATTEMPTS + 1);
+    expect(s.deps.pay).toHaveBeenCalledTimes(PASSING_MAX_ATTEMPTS);
+    expect(s.stops.map((x) => x.code)).toEqual(['payment_failed']);
+    expect(node.seq).toBe(0);
+  });
+
+  it('the call ending stops the tries of a passing refusal', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const s = session(node, async () => fail('not_ready', NOT_READY));
+    await s.confirmed();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(RETRY_MS + 1);
+    expect(s.deps.pay).toHaveBeenCalledTimes(2);
+    s.minutes.finish();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(s.deps.pay).toHaveBeenCalledTimes(2);
+    expect(s.stops).toEqual([]);
+  });
+
+  it('a budget that has no room ends the call at once with its own plain reason, in both languages', async () => {
+    for (const code of ['budget_exhausted', 'ceiling_exhausted']) {
+      for (const [language, words] of [['en', 'You have reached your budget'], ['da', 'Du har nået dit budget']] as const) {
+        setLanguagePref(language);
+        const node = fakeNode({ now: () => Date.now() });
+        const s = session(node, async () => fail(code, 'You have used 42 sats of 50 sats for this contact in the last 24 hours, and this costs 10 sats. Raise the budget to send.'));
+        await s.confirmed();
+        s.minutes.start();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(s.stops.map((x) => x.code), code).toEqual(['budget_limit']);
+        expect(s.stops[0].message, code).toContain(words);
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(s.deps.pay, code).toHaveBeenCalledTimes(1);
+      }
+    }
+    setLanguagePref('system');
   });
 
   it('a minute whose result is unknown is never paid again on top of it', async () => {
@@ -1095,6 +1188,32 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect($('[data-call-ended]')?.textContent).toBe('A minute of the call could not be paid, so the call ended. Nothing was paid for that minute. Your node paused spending after failed payments. Nothing was sent.');
     expect(host.used('call_media_open')).toHaveLength(0);
   });
+
+  it('a budget with no room ends the call with its own plain reason, not as a failed payment', async () => {
+    const host = stubHost({ block: () => { throw { code: 'budget_exhausted', message: 'You have used 42 sats of 50 sats for this contact in the last 24 hours, and this costs 10 sats. Raise the budget to send.' }; } });
+    await openShell();
+    await ringAndAnswer(host);
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-ended]')?.textContent).toBe('You have reached your budget, so the call ended. Nothing was paid for the next minute. Raise the budget to call again.');
+    expect(host.used('call_block')).toHaveLength(1);
+  });
+
+  it('money not ready does not end the call: the shell holds the minute until the node reads ready, then it is paid once', async () => {
+    let refusals = 1;
+    const host = stubHost({ block: (args) => {
+      if (refusals-- > 0) throw { code: 'not_ready', message: 'Money is not ready yet. Your node will retry automatically.' };
+      const seq = (args as { seq: number }).seq;
+      host.node.settle(seq);
+      return receipt(seq);
+    } });
+    await openShell();
+    await ringAndAnswer(host);
+    await vi.waitFor(() => expect(host.used('call_block')).toHaveLength(1));
+    // Until the next overview read the shell refuses the tries itself, so the host hears of none.
+    await vi.waitFor(() => expect(host.node.seq).toBe(1), { timeout: 14_000 });
+    expect($('[data-call-panel="ended"]')).toBeNull();
+    expect(host.used('call_block').map((c) => (c.args as { seq: number }).seq)).toEqual([0, 0]);
+  }, 20_000);
 
   it('a liquidity refusal of the reservation ends the call before ringing, nothing paid', async () => {
     const host = stubHost({ offer: () => { throw { code: 'call_liquidity_insufficient', message: 'Your node’s channel cannot hold this call’s reservation right now. Nothing was paid. Add outbound capacity, then call again.' }; } });
