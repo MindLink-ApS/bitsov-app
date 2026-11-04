@@ -25,6 +25,21 @@ for (const lang of ['en', 'da']) {
     const bounds = await tabs.boundingBox();
     expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(852);
   });
+  test(`${lang}: a long reason on an unsent message stays on screen`, async ({ page }) => {
+    await page.goto(`${preview}?scene=list&lang=${lang}`);
+    await page.locator('[data-phone-list] [data-track^="peer:"]').first().click();
+    await page.waitForSelector('[data-stream]');
+    const box = await page.evaluate(() => {
+      const card = document.createElement('article');
+      card.className = 'msg out unsent';
+      card.innerHTML = '<div class="bubble">hi</div><div class="stamp"><span class="sats" data-unsent-reason>Ikke sendt · intet betalt · Beløbet ændrede sig under ventetiden på godkendelse, og endnu mere tekst.</span></div>';
+      document.querySelector('[data-stream]')!.append(card);
+      const r = card.querySelector('[data-unsent-reason]')!.getBoundingClientRect();
+      return { left: r.left, right: r.right, width: window.innerWidth };
+    });
+    expect(box.left).toBeGreaterThanOrEqual(0);
+    expect(box.right).toBeLessThanOrEqual(box.width);
+  });
   test(`${lang}: first-spend is in the top layer above the tabs, with edge Back blocked`, async ({ page }) => {
     await page.goto(`${preview}?scene=first-spend&lang=${lang}`);
     await expect(page.locator('[data-first-spend-scrim]')).toBeVisible();

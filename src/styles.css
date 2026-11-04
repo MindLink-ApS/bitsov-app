@@ -1345,6 +1345,9 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .msg.sending .bubble { opacity: 0.72; animation: msg-send var(--d-mid) var(--ease-out); }
 /* Unsent: kept whole on its own track, plainly not delivered. */
 .msg.unsent .bubble { opacity: 0.72; border: 1px dashed var(--unknown-ink); background: transparent; }
+/* The reason can be long: it wraps inside the screen instead of running off the left edge. */
+.msg.unsent { max-width: 100%; min-width: 0; }
+.msg.unsent .stamp [data-unsent-reason] { white-space: normal; overflow-wrap: anywhere; min-width: 0; text-align: right; }
 .msg.unsent .unsent-actions { display: flex; gap: var(--s-3, 12px); justify-content: flex-end; }
 .artifact.failed .failed-text { margin: 4px 0 0; padding-left: 8px; border-left: 2px solid var(--unknown-ink); white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg.sending .stamp :is(.sats, .money-text) { color: var(--muted); }

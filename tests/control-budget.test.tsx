@@ -1856,7 +1856,7 @@ describe('invisible payments in the composer and the context panel', () => {
     const backInBox = () => box() === 'gm Maya' && text('[data-composer-note]') === 'This first contact needs its own approval. Press Send to ask for it.';
     const keptUnsent = () => [...mount.querySelectorAll('[data-unsent]')].some((card) =>
       card.textContent!.includes('gm Maya') &&
-      /The price changed while it waited for approval\.|This first contact needs its own approval/.test(card.querySelector('[data-unsent-reason]')?.textContent ?? ''));
+      /The amount changed while it waited for approval\.|This first contact needs its own approval/.test(card.querySelector('[data-unsent-reason]')?.textContent ?? ''));
     await waitFor(() => expect(backInBox() || keptUnsent()).toBe(true), { timeout: 8000 });
     expect($('[data-sending]')).toBeNull();
     await nextRead(host);
