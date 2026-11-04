@@ -17249,6 +17249,34 @@ mod control_act_tests {
         }
     }
 
+    /// `call_needs_contact` comes from the budget plan, a read of the book, at both
+    /// of its sites: before the money path, the journal and any reservation.
+    #[tokio::test]
+    async fn a_contact_refusal_comes_before_the_money_path_at_both_sites() {
+        // A minute, on a call whose contact has since left the book.
+        let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let node = minute_ready(routes).await;
+        let (composed, pays, spent) = (compose_kinds(&node), paid.lock().unwrap().pays, budget_now(&node.state).spent_msat);
+        with_book(&node.state, true, |b| b.set_limit(A, false, 0)).unwrap();
+        let err = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+        assert_eq!(err.code, "call_needs_contact", "{err:?}");
+        assert!(err.message.contains("Nothing was paid"));
+        assert_eq!(compose_kinds(&node), composed, "no POST");
+        assert_eq!(paid.lock().unwrap().pays, pays);
+        assert!(pending(&node).is_none(), "no record");
+        assert!(minute_records(&node).is_empty(), "no operation");
+        assert_eq!((budget_now(&node.state).unsettled_msat, budget_now(&node.state).spent_msat), (0, spent), "no reservation");
+
+        // A signal: the answer to a caller who is not in the book.
+        let node = fake(AuthMode::Local, call_routes(Some(10_000)));
+        do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
+        let err = do_call_signal(&node.state, C, 401, OFFER, 15_000).await.unwrap_err();
+        assert_eq!(err.code, "call_needs_contact", "{err:?}");
+        assert!(!node.posts().iter().any(|(p, _)| p == "/messages/compose"), "no POST");
+        assert!(pending(&node).is_none(), "no record");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0, "no reservation");
+    }
+
     #[tokio::test]
     async fn a2_a_failed_offer_is_final_and_cannot_be_rebound_wider() {
         let (routes, _) = offer_routes(10_000, hold_json(10_000, 5_000, 60));

@@ -14,7 +14,7 @@ const PROVEN_UNPAID = new Set([
   'grant_ended', 'grant_per_call', 'grant_exhausted', 'grant_recipient', 'grant_unpriced', 'grant_paused', 'grant_failures_pending', 'grant_rate_limited',
   'grant_velocity', 'grant_ledger', 'grant_refused', 'grant_first_contact', 'grant_readmission', 'grant_no_envelope', 'grant_unknown', 'grant_messaging',
   'spend_locked', 'spend_expired', 'budget_needed', 'budget_paused', 'budget_exhausted', 'ceiling_exhausted', 'budget_ledger_full', 'first_contact',
-  'call_needs_node_upgrade', 'call_admission_open', 'call_identity_changed',
+  'call_needs_node_upgrade', 'call_needs_contact', 'call_admission_open', 'call_identity_changed',
   // M6 call minutes: refused by the host before paying, or by the node under its grant / not dispatched.
   'call_block_not_due', 'call_reservation_closed', 'call_price_changed', 'call_liquidity_insufficient', 'call_liquidity_unavailable',
   'call_no_consent', 'call_no_reservation', 'call_hold_above_consent', 'call_hold_unconfirmed', 'call_hold_changed', 'call_minutes_unpayable',
