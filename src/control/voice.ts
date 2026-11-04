@@ -66,16 +66,17 @@ export function fileNameOf(plaintext: string | null): string | null {
         return n ? baseName(n) : null;
       }
     } catch {
-      // not a file record: treated as a plain name below
+      // A truncated or malformed file record: its text is payload, never a name.
+      return null;
     }
   }
   const m = /^\[file: (.+)\]$/.exec(text);
-  return m ? m[1] : text || null;
+  return baseName(m ? m[1] : text);
 }
 
-/** A name without any directory part. */
-function baseName(n: string): string {
-  return n.trim().split(/[\\/]/).pop() || n.trim();
+/** A name without any directory part, or null when the last component is empty. */
+function baseName(n: string): string | null {
+  return n.trim().split(/[\\/]/).pop()?.trim() || null;
 }
 
 /** A kind-200 message whose file this app recorded as a voice note. */
