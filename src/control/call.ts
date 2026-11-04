@@ -217,6 +217,8 @@ export type CallView = {
   reason: HangupReason | null;
   /** A refusal to show (nothing was paid for the refused step). */
   error: string | null;
+  /** The host's stable code for `error`, for anything that branches on it: the text follows the language. */
+  errorCode?: string | null;
   /**
    * The browser reports no network (display only). Never read by the call's
    * own logic: recovery stays ICE-driven (restart after its delay, or ended
@@ -1220,6 +1222,7 @@ export function createCallEngine(deps: CallDeps) {
       }
       if (!r.ok) {
         end(null, session || r.error.code === 'call_needs_contact' ? callRefusal(r.error) : r.error.message);
+        set({ errorCode: r.error.code });
         return;
       }
       // The node reserved this call's minutes when the offer went out: the host checks that hold

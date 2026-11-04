@@ -4,7 +4,6 @@ import { t, language } from '../i18n';
 // Call sites must use amount() (or sats()+satUnit()); never append a unit literal.
 
 import { denom } from './prefs';
-import { isMobilePlatform } from '../platform';
 
 /** Use narrow no-break spaces so a number cannot wrap between digit groups.
  * Opt into display-only thin spaces only inside a white-space: nowrap container. */
@@ -101,8 +100,7 @@ export function paidAmount(principal: number, fee?: number): string {
   const known = fee !== undefined && Number.isSafeInteger(fee) && fee >= 0;
   const total = principal + (known ? fee : 0);
   if (!Number.isSafeInteger(total) || total < 0) return t('uiPaidAmountUnknown');
-  // Phones keep the receipt short: the unreported-fee note stays on the Mac and in the payment's details.
-  return t('uiPaid498', amount(total), known || isMobilePlatform() ? '' : t('uiNetworkFeeNotReported'));
+  return t('uiPaid498', amount(total), known ? '' : t('uiNetworkFeeNotReported'));
 }
 
 /** Additional liabilities never masquerade as paid amounts. */

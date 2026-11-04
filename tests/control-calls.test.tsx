@@ -3219,6 +3219,18 @@ describe('calls in the shell', () => {
     expect($('[data-call-close]')).toBeNull();
   });
 
+  it('a contact refusal keeps its one next step when the language changes', async () => {
+    stubHost({ call_signal: () => { throw { code: 'call_needs_contact', message: 'Calls go to contacts you have already paid. Send them a message first. Nothing was paid.' }; } });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-message-first]')).not.toBeNull());
+    setLanguagePref('da');
+    try {
+      await vi.waitFor(() => expect($('[data-call-message-first]')?.textContent).toBe('Send en besked først'));
+    } finally { setLanguagePref('en'); }
+  });
+
   it('the STUN server is an owner setting, validated, with a note that it contacts that server', async () => {
     stubHost();
     await openShell();

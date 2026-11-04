@@ -99,7 +99,8 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   // host itself stops redialling after a refusal.
   let retiring: Promise<void> | undefined;
   const retireAttempt = () => retiring ??= (async () => {
-    generation++; resumeSaved = false; pendingLink = ''; compared = false;
+    // A bumped generation skips the in-flight connect's own cleanup, so clear its busy state here.
+    generation++; setBusy(false); resumeSaved = false; pendingLink = ''; compared = false;
     try {
       if (joinStarted || waiting() || props.device()?.state === 'pending') await props.join({ action: 'cancel' });
     } catch { /* The message and its one action still stand. */ }
@@ -209,6 +210,13 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     setBusy(true);
     try { await action(); } catch (e) { if (alive) fail(e); }
     finally { if (alive) setBusy(false); }
+  };
+  const savedBox = () => props.pairing().remote || !!props.status().node_id;
+  const hasBox = () => savedBox() || !!preview();
+  const askForget = () => {
+    clearManualPaste(); setConfirmForget(true);
+    // Bring the whole confirmation into view, inside the safe areas.
+    queueMicrotask(() => confirmBox?.scrollIntoView?.({ block: 'nearest' }));
   };
   const reset = async () => {
     clearManualPaste();
@@ -410,13 +418,9 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       </details>
       {/* Forgetting drops the saved box: one plain confirmation, never behind the help sections. */}
       {/* Only when there is a box to forget. */}
-      <Show when={props.pairing().remote || !!preview() || !!props.status().node_id}>
+      <Show when={hasBox()}>
       <Show when={confirmForget()} fallback={
-        <button type="button" data-phone-forget disabled={busy()} onClick={() => {
-          clearManualPaste(); setConfirmForget(true);
-          // Bring the whole confirmation into view, inside the safe areas.
-          queueMicrotask(() => confirmBox?.scrollIntoView?.({ block: 'nearest' }));
-        }}>{c().forget}</button>
+        <button type="button" data-phone-forget disabled={busy()} onClick={askForget}>{c().forget}</button>
       }>
         <div ref={confirmBox} class="phone-confirm" role="group" aria-labelledby={forgetId} data-phone-forget-confirm>
           <p id={forgetId}>{c().forgetConfirm}</p>
@@ -426,7 +430,8 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
         </div>
       </Show>
       </Show>
-      <Show when={['connecting', 'words', 'fingerprint'].includes(screen())}><button type="button" disabled={busy()} onClick={() => void run(reset)}>{c().cancel}</button></Show>
+      {/* Cancelling drops a saved box too, so it asks the same one question first. */}
+      <Show when={!confirmForget() && ['connecting', 'words', 'fingerprint'].includes(screen())}><button type="button" disabled={busy()} onClick={() => { if (savedBox()) askForget(); else void run(reset); }}>{c().cancel}</button></Show>
     </details>
   </main>;
 }

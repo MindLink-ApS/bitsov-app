@@ -41,9 +41,9 @@ it('the phone status pill and readiness line say only Klar or Ikke klar', () => 
   expect(pill.text).toBe('Klar');
 });
 
-it('a phone receipt leaves out the unreported-fee note; the Mac keeps it', () => {
+it('a phone receipt keeps the unreported-fee note, like the Mac', () => {
   setLanguagePref('da');
   expect(paidAmount(1000)).toContain('netværksgebyr ikke oplyst');
   phone();
-  expect(paidAmount(1000)).not.toContain('netværksgebyr');
+  expect(paidAmount(1000)).toContain('netværksgebyr ikke oplyst');
 });

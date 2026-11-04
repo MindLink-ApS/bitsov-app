@@ -3726,7 +3726,7 @@ function CallPanel(props: {
   const v = () => props.view;
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
   // The host refused before anything was created (`call_needs_contact`): no signal or media lines, one next step.
-  const needsContact = () => v().phase === 'ended' && v().error === tr('caCallNeedsContact');
+  const needsContact = () => v().phase === 'ended' && v().errorCode === 'call_needs_contact';
   const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
   /** The M6 paid-minutes line is on the card (same condition as its render below). */
   const minutesShown = () => !!(props.routed && v().outgoing && v().minutes);
