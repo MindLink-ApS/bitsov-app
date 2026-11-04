@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { setLanguagePref } from '../src/i18n';
 import { HOST_COPY_DA, hostText } from '../src/control/hostCopy';
 import { asActionError } from '../src/control/state';
+import { softenError } from '../src/control/userFacing';
 
 const rust = (dir: string): string[] => readdirSync(dir).flatMap((n) => {
   const p = join(dir, n);
@@ -19,10 +20,10 @@ const hostRefusals = () => rust('src-tauri/src').flatMap((f) => {
 const NOT_LISTED = new Set(['{} {}', 'private owner approval receipts are not supported on this platform', '{} {} not a connected peer, so the node would skip them without telling you. Rooms send only when every member is connected.']);
 
 /** Plain-text host errors a person can read: sentences, as opposed to lowercase diagnostics. */
-const plainErrors = () => ['src-tauri/src/app.rs', 'src-tauri/src/remote_owner.rs', 'src-tauri/src/remote_owner/recovery.rs'].flatMap((f) => {
+const plainErrors = () => rust('src-tauri/src').flatMap((f) => {
   const source = readFileSync(f, 'utf8').split('#[cfg(test)]')[0];
   return [...source.matchAll(/(?:Err\(\s*(?:format!\(\s*)?|map_err\(\|[a-z_]+\|\s*(?:format!\(\s*)?|\.ok_or(?:_else\(\|\|)?\(?\s*(?:format!\(\s*)?)"([A-Z][^"]{14,})"/g)]
-    .map((m) => m[1].replace(/\\\s*\n\s*/g, '').replace(/\{[a-z_]*\}/g, '{}'));
+    .map((m) => m[1].replace(/\\\s*\n\s*/g, '').replace(/\{[A-Za-z_]*\}/g, '{}'));
 });
 
 afterEach(() => setLanguagePref('en'));
@@ -35,7 +36,7 @@ describe('host refusals in Danish', () => {
       && !/^(Hanging up this call|Money is not ready|This permission covers)/.test(m));
     expect(missing).toEqual([]);
   });
-  it('has Danish for the sentences in the host\'s setup and repair errors', () => {
+  it('has Danish for every sentence in the host\'s plain-text errors', () => {
     const known = new Set(HOST_COPY_DA.map(([en]) => en));
     expect([...new Set(plainErrors())].filter((m) => !known.has(m))).toEqual([]);
   });
@@ -47,6 +48,10 @@ describe('host refusals in Danish', () => {
       if (/nothing (more |new )?was|no minute was/i.test(en)) expect(da, en).toMatch(/intet/i);
       expect(da, en).not.toBe(en);
     }
+  });
+  it('a money refusal keeps its warning in Danish, so nothing can replace it', () => {
+    const fill = (t: string) => t.replace(/\{\d*\}/g, '5');
+    for (const [en, da] of HOST_COPY_DA) if (softenError(fill(en)).money) expect(softenError(fill(da)).money, en).toBe(true);
   });
   it('translates the exact refusal, with its values, only in Danish', () => {
     const refusal = 'This is more than the 50 sats per payment your node allows. Nothing was sent.';
