@@ -1122,7 +1122,7 @@ describe('call engine', () => {
     const { e, sent, last } = engine();
     await e.place(A, 'audio', { ...QUOTE, offer_msat: null, call_total_msat: null });
     expect(sent).toHaveLength(0);
-    expect(last().error).toMatch(/does not take calls/);
+    expect(last().error).toMatch(/gave no call price\. They may be offline.*Nothing was paid/);
     const denied = engine({ getUserMedia: () => Promise.reject(new Error('denied')) });
     await denied.e.place(A, 'video', QUOTE);
     expect(denied.sent).toHaveLength(0);
@@ -2844,7 +2844,8 @@ describe('calls in the shell', () => {
     host.emitLive({ type: 'message', room_id: null, message: { id: 'live-offer', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: 'v=0 offer' }), payment_amount_msat: 10_000 } });
     await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
     expect(text('[data-call-title]')).toBe('Incoming call');
-    await vi.waitFor(() => expect(text('[data-call-accept]')).toBe('Accept · 6 sats'));
+    await vi.waitFor(() => expect(text('[data-call-accept]')).toBe('Accept · up to 6 sats'));
+    expect(text('[data-call-decline]')).toBe('Decline · up to 6 sats');
     expect($('[data-message="live-offer"]')).toBeNull();
     $<HTMLButtonElement>('[data-call-accept]')!.click();
     await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
@@ -2976,7 +2977,7 @@ describe('calls in the shell', () => {
   it('a contact whose node does not take calls cannot be rung', async () => {
     const host = stubHost({ call_quote: () => ({ ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null }) });
     await openShell();
-    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('title')).toMatch(/does not take calls yet/));
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('title')).toMatch(/gave no call price\. They may be offline/));
     expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(true);
     expect(host.used('call_signal')).toHaveLength(0);
   });

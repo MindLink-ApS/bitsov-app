@@ -3704,7 +3704,8 @@ function CallPanel(props: {
   }));
   const v = () => props.view;
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
-  const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
+  // A ceiling, not what it will cost: the routing fee is usually far less.
+  const price = (m: number | null) => (m === null ? '' : ` · ${tr('caUpToAmount', fmtAmount(m))}`);
   /** The M6 paid-minutes line is on the card (same condition as its render below). */
   const minutesShown = () => !!(props.routed && v().outgoing && v().minutes);
   return (

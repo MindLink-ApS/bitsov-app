@@ -22,6 +22,7 @@ export const controlEn = {
 
   "caCallHistoryReadInterrupted": "Call history read interrupted",
   "caCouldNotLoadContacts": "We could not load your contacts.",
+  "caUpToAmount": "up to {0}",
   "caOnThis": "On this {0}",
   "caNothingWasSent": "Nothing was sent.",
   "caThisAnswerWasNotSaved": "This answer was not saved. {0}",
@@ -873,7 +874,7 @@ export const controlEn = {
   "caCouldNotAllocateAFreshCallIdForRecovery": "Could not allocate a fresh call id for recovery.",
   "caCallRecoveryFailed": "Call recovery failed: {0}",
   "caTheCallCouldNotConnect": "The call could not connect.",
-  "caTheirNodeDoesNotTakeCallsYetNothingWas": "Their node does not take calls yet. Nothing was paid.",
+  "caTheirNodeDoesNotTakeCallsYetNothingWas": "Their box gave no call price. They may be offline, or their box may not take calls yet. Nothing was paid.",
   "caThisCallNeedsUpToYourNodeGrantAllows": "This call needs up to {0}. Your node grant has {1} remaining. The owner would need to approve enough remaining budget for that ceiling. Nothing was sent or paid.",
   "caThisCallNeedsUpToPerPaymentYourNodeGrantAllows": "This call needs up to {0} per payment. Your node grant allows {1} per payment. The owner would need to approve at least {0} per payment. Nothing was sent or paid.",
   "caCallHangupUnpayable": "Hanging up this call would cost more than your node grant allows per message payment, so it could not be ended. The owner would need to approve a larger per-payment limit. Nothing was sent or paid.",
@@ -1184,6 +1185,7 @@ export const controlDa: Record<keyof typeof controlEn, string> = {
 
   "caCallHistoryReadInterrupted": "Læsning af opkaldshistorikken blev afbrudt",
   "caCouldNotLoadContacts": "Vi kunne ikke hente dine kontakter.",
+  "caUpToAmount": "højst {0}",
   "caOnThis": "På denne {0}",
   "caNothingWasSent": "Der blev ikke sendt noget.",
   "caThisAnswerWasNotSaved": "Dette svar blev ikke gemt. {0}",
@@ -2035,7 +2037,7 @@ export const controlDa: Record<keyof typeof controlEn, string> = {
   "caCouldNotAllocateAFreshCallIdForRecovery": "Kunne ikke tildele et nyt opkalds-id til genoprettelse.",
   "caCallRecoveryFailed": "Kunne ikke genoprette opkaldet: {0}",
   "caTheCallCouldNotConnect": "Opkaldet kunne ikke forbinde.",
-  "caTheirNodeDoesNotTakeCallsYetNothingWas": "Deres node modtager ikke opkald endnu. Intet blev betalt.",
+  "caTheirNodeDoesNotTakeCallsYetNothingWas": "Deres boks oplyste ingen opkaldspris. De er måske offline, eller deres boks tager måske ikke imod opkald endnu. Intet blev betalt.",
   "caThisCallNeedsUpToYourNodeGrantAllows": "Dette opkald kræver højst {0}. Din nodes tilladelse har {1} tilbage. Ejeren skal godkende nok resterende budget til den grænse. Intet blev sendt eller betalt.",
   "caThisCallNeedsUpToPerPaymentYourNodeGrantAllows": "Dette opkald kræver højst {0} pr. betaling. Din nodes tilladelse giver {1} pr. betaling. Ejeren skal godkende mindst {0} pr. betaling. Intet blev sendt eller betalt.",
   "caCallHangupUnpayable": "At lægge på i dette opkald ville koste mere, end din nodes tilladelse giver pr. beskedbetaling, så opkaldet ville ikke kunne afsluttes. Ejeren skal godkende en højere grænse pr. betaling. Intet blev sendt eller betalt.",
