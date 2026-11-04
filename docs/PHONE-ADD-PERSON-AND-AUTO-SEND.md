@@ -58,9 +58,36 @@ One press means one send. After the approval the message goes without a second p
 - A file or voice note follows the same rules. Holding a file in memory across a long approval is a separate question.
 - The message shows as waiting in its own bubble until it has gone.
 
-### Tracing needed before building
+### Why the amount moves
 
-Why the amount moves after an approval on a phone has not been traced. If it moves on every approval, for example between an estimate and a quote, the third check would stop every automatic send. That has to be understood first.
+Traced by reading the code; nothing was run. The composer has two ways of computing the amount, and approval can switch between them. The contact's price and the fee do not drift, and the approval paths do not read the price again.
+
+- **Plain:** the message price plus the routing ceiling.
+- **Door:** the signed total, which includes admission.
+
+`doorWanted` picks one from the budget's state, and approving changes that state. So the amount on Send can change with no change in price:
+
+| Case | Before | After | Direction |
+|---|---|---|---|
+| Returning contact, no budget row | Plain | Door | Up, by the admission |
+| No outgoing message in the thread, but a budget row exists | Door | Plain | Down |
+| A door quote expires during a slow approval | Door | None | Stops the send |
+
+A true first contact does not move. A note after a press can also appear with no amount moving, if the composer's mode changed during the wait. A price really can change while waiting, but that is the rarer case. Nothing here depends on the phone: the same applies on a Mac with Touch ID.
+
+### What this means for the checks
+
+The "at most what the person saw" check passes when the amount goes down and when only the mode changed, but still stops the first case. That case needs a decision before automatic send can work for it: either the person sees the higher amount before approving, or it stops and asks. What the person saw is also loose, because the button shows no amount on some paths.
+
+Where a fix would sit: the choice of formula, not the checks. That goes to the money review.
+
+### Not known from the code
+
+- Whether the node charges admission to a peer it has already admitted.
+- How long a door quote lasts.
+- The order the composer's effects run in within one pass.
+
+Logging the amount, the formula choice, the budget state, the mode and which sentence fired, at the press and at each stop, would settle these.
 
 ### Not part of this
 
