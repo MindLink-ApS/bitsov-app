@@ -21,7 +21,7 @@
  * unknown, and reports every reason it stops.
  */
 import { t as tr } from '../i18n';
-import { provenUnpaid } from './paymentOutcome';
+import { knownPaid, provenUnpaid } from './paymentOutcome';
 import { asActionError } from './state';
 import type { ActionError, CallReceipt, CallReservation, CallStatus } from './types';
 
@@ -109,8 +109,8 @@ export type MinutesView = {
   /** A block payment is in flight. */
   paying: boolean;
   /**
-   * The call ended while a minute was being paid, and that minute's result never
-   * came back. Nothing was ended at the host for it (their hangup closes the
+   * The call ended while a minute was being paid, and that minute's result is not
+   * known (paid and proven unpaid are both known). Nothing was ended at the host for it (their hangup closes the
    * admission by itself), so its pending result holds every paid action until checked.
    */
   lostMinute: boolean;
@@ -267,7 +267,7 @@ export function createCallMinutes(opts: {
     inFlight = false;
     // A receipt is counted even if the call ended meanwhile: it was paid.
     emit({ paying: false, ...(r.ok ? { receiptsMsat: view.receiptsMsat + r.value.total_msat, blocks: Math.max(view.blocks, seq + 1) }
-      : !running && !provenUnpaid(r.error.code) ? { lostMinute: true } : {}) });
+      : !running && !provenUnpaid(r.error.code) && !knownPaid(r.error.code) ? { lostMinute: true } : {}) });
     if (!running) return;
     if (r.ok) { attempts = 0; passingAttempts = 0; void tick(); return; }
     const code = r.error.code;

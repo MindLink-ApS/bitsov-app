@@ -240,7 +240,8 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   and a lost minute stays pending. The ended card then runs the owner's check
   (`spend_reconcile`, the same read and abandon) once by itself. If that cannot
   settle it, the card keeps one line saying other payments wait, and the "Check
-  pending result" link.
+  pending result" link. A minute that came back paid (`failed_paid`,
+  `payment_settled_undelivered`) is a known result, not a lost one.
 - **A call the node already ended.** The minute cap, a minute that failed for
   good, an unpaid expiry and the ring deadline end the call at the caller's
   node with no hangup coming back. End still asks. The node refuses that hangup

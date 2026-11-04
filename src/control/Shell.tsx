@@ -9,7 +9,7 @@ import { FirstSpendSheet, type FirstSpendChoice } from './FirstSpendSheet';
 import { createAmountDraft } from './amountDraft';
 import { t as tr, possessive, languagePref, setLanguagePref, type LanguagePref } from '../i18n';
 import { CallRepairs } from './CallRepairs';
-import { provenUnpaid } from './paymentOutcome';
+import { knownPaid, provenUnpaid } from './paymentOutcome';
 import { AddDevice } from '../onboarding/AddDevice';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
 import { ConnectionCard, nextLastCall, type NodeAnswer, type StunSource, type TrackedCall } from './ConnectionCard';
@@ -4672,13 +4672,24 @@ function InCallPay(props: {
   const minuteLost = () => props.view.callId === props.callId && props.view.phase === 'ended'
     && props.view.minutes?.lostMinute === true && !minuteChecked()
     && (props.view.close === null || props.view.close.status === 'refused');
-  createEffect(on(minuteLost, (lost) => { if (lost) void props.actions.reconcile(); }));
-  // A successful check from anywhere has settled it, as for an unknown payment below.
-  createEffect(on(() => props.reconciliation, (checked) => {
-    if (!checked || !minuteLost()) return;
+  const minuteKnown = (text: string) => {
+    if (!minuteLost()) return;
     setMinuteChecked(true);
-    setResult({ state: 'checked', text: checked.text });
-  }, { defer: true }));
+    setResult({ state: 'checked', text });
+  };
+  // The call's view updates about once a second after it ends; this runs for one
+  // of those only. A failed check stays failed until the owner asks again.
+  let minuteCheckStarted = false;
+  createEffect(() => {
+    if (!minuteLost() || minuteCheckStarted) return;
+    minuteCheckStarted = true;
+    void props.actions.reconcile().then((outcome) => {
+      // A paid result is a known one too, and the check has already accounted it.
+      if (!outcome.ok && knownPaid(outcome.error.code)) minuteKnown(outcome.error.message);
+    });
+  });
+  // A successful check from anywhere has settled it, as for an unknown payment below.
+  createEffect(on(() => props.reconciliation, (checked) => { if (checked) minuteKnown(checked.text); }, { defer: true }));
   // A new unit or mapping requires a new amount; never reinterpret a visible draft.
   createEffect(on(destination, () => setAmount(''), { defer: true }));
   createEffect(() => { if (!live()) { setExpanded(false); setAmount(''); } });
@@ -4742,7 +4753,7 @@ function InCallPay(props: {
     <Show when={result()}>{(r) => <p class={r().state === 'failed' ? 'err-note' : 'hint'} role="status" data-call-pay-status={r().state}>{r().text}</p>}</Show>
     <Show when={minuteLost()}><p class="err-note" role="alert" data-call-lost-minute>{tr('caLostMinuteWarning')}</p></Show>
     <Show when={props.pending || result()?.state === 'unknown' || minuteLost()}>
-      <Reconcile actions={props.actions} hasPending onChecked={(text) => {
+      <Reconcile actions={props.actions} hasPending onPaidResult={minuteKnown} onChecked={(text) => {
         if (result()?.state === 'unknown') setResult({ state: 'checked', text });
       }} />
     </Show>
@@ -7063,7 +7074,7 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
 }
 
 /** Read-only: match an unknown outcome to the node's own records. Never re-sends. */
-function Reconcile(props: { actions: Actions; hasPending?: boolean; onChecked?: (text: string) => void }) {
+function Reconcile(props: { actions: Actions; hasPending?: boolean; onChecked?: (text: string) => void; onPaidResult?: (text: string) => void }) {
   const [result, setResult] = createSignal<string | null>(null);
   const [checking, setChecking] = createSignal(false);
   usePairingActivity(checking);
@@ -7084,6 +7095,7 @@ function Reconcile(props: { actions: Actions; hasPending?: boolean; onChecked?: 
       setResult(outcome.ok ? outcome.value : outcome.error.message);
       setUndelivered(!outcome.ok && outcome.error.code === 'undelivered_pending' ? outcome.error.pending_id ?? null : null);
       if (outcome.ok) props.onChecked?.(outcome.value);
+      else if (knownPaid(outcome.error.code)) props.onPaidResult?.(outcome.error.message);
     } finally { setChecking(false); }
   };
   const stop = async () => {

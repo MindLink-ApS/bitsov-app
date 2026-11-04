@@ -700,9 +700,13 @@ export function createCallEngine(deps: CallDeps) {
     minutes = null;
     teardown();
     healedRefusal = null;
+    // Ending at the host starts now, though it waits for local teardown: a result
+    // that arrives meanwhile is End's to answer, so the card says it is closing.
+    const closingNow = endAtHost && !!deps.endCall && ids.some((id) => !closing.has(id));
     // A stop that already ended the call stays said; one still in its grace does not.
     set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null,
-      stopped: view.stopped?.endsAt === null ? view.stopped : null });
+      stopped: view.stopped?.endsAt === null ? view.stopped : null,
+      ...(closingNow ? { close: { status: 'closing' as const, message: null } } : {}) });
     if (session) { if (view.outgoing) session.finish(); else session.dispose(); }
     const recorded = record && peer ? Promise.all(operations.map(([operationId, wireCallId]) => closeAdmission(operationId, peer, wireCallId))) : Promise.resolve();
     if (endAtHost && ids.length) void recorded.then(() => closeAdmissions(ids, callId));

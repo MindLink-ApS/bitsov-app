@@ -22,3 +22,10 @@ const PROVEN_UNPAID = new Set([
   'call_hangup_above_message_max',
 ]);
 export const provenUnpaid = (code: string) => PROVEN_UNPAID.has(code);
+
+/**
+ * Host error codes that name a known result: the node reports the payment made,
+ * and the app has it on its books. Failed for the owner, but not unknown.
+ */
+const PAID_RESULT = new Set(['payment_settled_undelivered', 'failed_paid', 'undelivered_pending']);
+export const knownPaid = (code: string) => PAID_RESULT.has(code);
