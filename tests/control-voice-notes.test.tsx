@@ -5,6 +5,7 @@ import type { PairingView } from '../src/onboarding/pairing';
 import type { BudgetView, SpendView } from '../src/control/types';
 import {
   duration,
+  fileNameOf,
   isVoiceNote,
   pickRecordType,
   sendType,
@@ -55,6 +56,18 @@ const deps = (over: Partial<RecorderDeps> = {}): RecorderDeps => ({
   MediaRecorder: FakeRecorder as unknown as typeof MediaRecorder,
   now: () => Date.UTC(2026, 8, 29, 12, 0, 0),
   ...over,
+});
+
+describe('file names', () => {
+  it('reads the name from a stored file record, never the payload', () => {
+    const rec = JSON.stringify({ filename: 'a/b/clip.webm', mime_type: 'audio/webm', data_b64: 'QUJD' });
+    expect(fileNameOf(rec)).toBe('clip.webm');
+    expect(fileNameOf('{"data_b64":"QUJD"}')).toBeNull();
+    expect(fileNameOf('{broken')).toBe('{broken');
+    expect(fileNameOf('[file: brief.txt]')).toBe('brief.txt');
+    expect(fileNameOf('brief.txt')).toBe('brief.txt');
+    expect(isVoiceNote(200, JSON.stringify({ filename: 'voice-note-1.webm', data_b64: 'QUJD' }))).toBe(true);
+  });
 });
 
 describe('voice note helpers', () => {
@@ -275,6 +288,28 @@ describe('voice notes in the composer and thread', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(host.used('file_send')).toHaveLength(1);
     expect($('[data-voice-preview]')).not.toBeNull();
+  });
+
+  it('plays a stored file record as a voice row and shows other files by name only', async () => {
+    const at = Date.now() - 60_000;
+    const payload = (filename: string, mime: string) => JSON.stringify({ filename, mime_type: mime, size_bytes: 9000, data_b64: 'QUJD'.repeat(400) });
+    const FILE_ID = 'd'.repeat(64);
+    stubHost({
+      messages_list: (args) => (args!.peer === A
+        ? [
+            { id: IN_ID, kind: 200, sender: A, recipient: OWN, timestamp: at, plaintext: payload('voice-note-20260929-120000.webm', 'audio/webm'), payment_amount_msat: 3000 },
+            { id: FILE_ID, kind: 200, sender: A, recipient: OWN, timestamp: at + 1, plaintext: payload('brief.txt', 'text/plain'), payment_amount_msat: 3000 },
+            { id: 'f'.repeat(64), kind: 200, sender: OWN, recipient: A, timestamp: at + 2, plaintext: payload('voice-note-20260929-120100.webm', 'audio/webm'), payment_amount_msat: 3000 },
+            { id: '9'.repeat(64), kind: 200, sender: OWN, recipient: A, timestamp: at + 3, plaintext: payload('sent.txt', 'text/plain'), payment_amount_msat: 3000 },
+          ]
+        : []),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] [data-voice-play]`)).not.toBeNull());
+    expect(text(`[data-message="${FILE_ID}"] .file-name`)).toBe('brief.txt');
+    expect($(`[data-message="${'f'.repeat(64)}"] [data-voice-play]`)).not.toBeNull();
+    expect(text(`[data-message="${'9'.repeat(64)}"] .file-name`)).toBe('sent.txt');
+    expect(mount.textContent).not.toMatch(/data_b64|QUJD/);
   });
 
   it('plays a received voice note inline after one read-only fetch; other files stay plain', async () => {

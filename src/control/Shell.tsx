@@ -3399,7 +3399,7 @@ function MessageView(props: {
               <Show
                 when={!props.out && props.fileFetch && props.fileSave}
                 fallback={
-                  <Show when={props.voiceUrl && isVoiceNote(props.m.kind, props.m.plaintext)} fallback={<span class="file-name">{props.m.plaintext ?? tr('extraFile')}</span>}>
+                  <Show when={props.voiceUrl && isVoiceNote(props.m.kind, props.m.plaintext)} fallback={<span class="file-name">{fileNameOf(props.m.plaintext) ?? tr('extraFile')}</span>}>
                     <VoiceNote id={props.m.id} name={fileNameOf(props.m.plaintext) ?? tr('fileNoun')} load={props.voiceUrl!} />
                   </Show>
                 }
@@ -5542,7 +5542,8 @@ function Composer(props: {
    */
   const [approvalPending, setApprovalPending] = createSignal(false);
   const approvedPlain = (ok: boolean, waiting = false) => {
-    if (!ok || mode() !== 'message' || !untrack(draft).trim()) return;
+    // A chosen file waits for the next press just as a typed message does.
+    if (!ok || !untrack(() => (mode() === 'message' ? draft().trim() !== '' : mode() === 'file' && file() !== null))) return;
     if (waiting) { setApprovalPending(true); setNote(tr('uiWaitingForYourApprovalAtTheNode')); return; }
     setNote(tr('uiApprovedPressSendToSendIt'));
   };
