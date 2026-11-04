@@ -223,6 +223,20 @@ describe('jitter buffer', () => {
     expect(jb.pull().jump).toBe(false);
   });
 
+  it('flags a skip that only crosses absent slots', () => {
+    const jb = new JitterBuffer<Float32Array>();
+    for (let seq = 5; seq < 8; seq++) jb.insert(seq, frame(seq));
+    for (let seq = 5; seq < 8; seq++) expect(jb.pull().jump).toBe(false);
+    // The newest frame arrives first and trims the window past empty slots 8..14.
+    jb.insert(20, frame(20));
+    for (const seq of [17, 15, 19, 16, 18]) jb.insert(seq, frame(seq));
+    expect(jb.stats().skipped).toBe(0);
+    const next = jb.pull();
+    expect(value(next)).toBe(15);
+    expect(next.jump).toBe(true);
+    expect(jb.pull().jump).toBe(false);
+  });
+
   describe('TCP stall simulation (120 ms every 5 s, 60 s)', () => {
     const stalls = { seconds: 60, stallEveryMs: 5000, stallMs: 120 };
 

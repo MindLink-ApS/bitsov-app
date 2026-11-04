@@ -173,10 +173,9 @@ export class JitterBuffer<T> {
   /** Drop frames from the playhead until at most `keep` frames remain ahead. */
   private trim(keep: number) {
     while (this.depth() > keep) {
-      if (this.frames.delete(this.playhead)) {
-        this.counters.skipped++;
-        this.jumped = true;
-      }
+      if (this.frames.delete(this.playhead)) this.counters.skipped++;
+      // Crossing an absent slot breaks waveform continuity just the same.
+      this.jumped = true;
       this.playhead = nextSeq(this.playhead);
     }
   }
