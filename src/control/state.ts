@@ -202,6 +202,7 @@ export function asActionError(e: unknown): ActionError {
     // Host refusals with their own plain words, in the app's language.
     const out: ActionError = { code, message: code === 'not_ready' ? MONEY_NOT_READY
       : code === 'grant_messaging' ? tr('caGrantMessagingPayment')
+      : code === 'call_price_unknown' ? tr('caCallPriceUnreadNothingPaid')
       : code === 'call_hangup_unpayable' ? tr('caCallHangupUnpayable')
       : code === 'call_hangup_above_message_max' ? tr('caCallHangupAboveMessageMax') : String(message) };
     if (typeof pending_id === 'string' && pending_id) out.pending_id = pending_id;

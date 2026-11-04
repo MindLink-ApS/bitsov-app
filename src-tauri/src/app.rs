@@ -5086,6 +5086,9 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // came while this minute waited here issues nothing.
     if path == "/messages/compose" && body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK)) {
         if let Some(refused) = block_consent_refusal(state, &node_id, &body) { return Err(refused); }
+        if minute_past_journaled_hold(state, &journal, &node_id, &body, max_msat)? {
+            return Err(ActionError::new(MINUTE_PAST_HOLD, MINUTE_PAST_HOLD_WORDS));
+        }
     }
     // Call admission guards precede the generic pending fence, under the same
     // money lock as dispatch. Concurrent calls wait for the first receipt.
@@ -7648,6 +7651,32 @@ fn block_consent_refusal(state: &NodeState, node_id: &str, body: &serde_json::Va
         "Confirm your node's hold for this call before its first minute is paid. Nothing was paid."))
 }
 
+const MINUTE_PAST_HOLD: &str = "call_minutes_above_hold";
+const MINUTE_PAST_HOLD_WORDS: &str = "The next minute of this call would go past the hold you agreed to. Nothing was paid for it.";
+
+/// `money_post_with`, under the money lock, for a call block: the ceilings of this
+/// call's minutes in the journal, plus this one, pass the hold the owner confirmed.
+/// An attempt the node proved unpaid uses none of it; one whose outcome is not known
+/// yet does. A journal that cannot be read pays nothing.
+fn minute_past_journaled_hold(state: &NodeState, journal: &Journal, node_id: &str, body: &serde_json::Value, cap: u64) -> Result<bool, ActionError> {
+    let (peer, call_id) = block_identity(body);
+    let limit = state.call_consents.lock().unwrap().find(node_id, &peer, &call_id)
+        .and_then(|c| Some(c.confirmed_msat?.min(c.consent.max_hold_msat)));
+    let Some(limit) = limit else { return Ok(true) };
+    let records = journal.call_operations_for(node_id, Some(&peer), Some(&call_id))?;
+    let journaled = records.iter().filter(|r| r.kind == "call_block" && r.state != spend_journal::OperationState::Unpaid)
+        .try_fold(cap, |sum, r| sum.checked_add(r.cap_msat));
+    Ok(journaled.is_none_or(|most| most > limit))
+}
+
+/// Refuse the call's further minutes for good, then hang up, as for a hold above
+/// the consent. Pays no minute.
+async fn end_call_past_hold(state: &NodeState, consent: &CallConsent) -> ActionError {
+    state.call_consents.lock().unwrap().refuse(&consent.node_id, &consent.peer, &consent.call_id, MINUTE_PAST_HOLD, MINUTE_PAST_HOLD_WORDS);
+    let ended = hang_up_unpaid_call(state, &consent.node_id, &consent.peer, &consent.call_id).await;
+    ActionError::new(MINUTE_PAST_HOLD, format!("{MINUTE_PAST_HOLD_WORDS} {ended}"))
+}
+
 /// M6 A2 `call_hold`: the node's reservation for an outgoing call, checked
 /// against the owner's consent (see `checked_call_hold`). With
 /// `confirm_reserved_msat` the owner confirms the hold the card showed; it
@@ -7700,6 +7729,12 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
         let cap = hold.per_block_msat.checked_add(hold.per_block_fee_msat)
             .ok_or_else(|| ActionError::invalid("the call block amount is out of range"))?;
         let fee = hold.per_block_fee_msat;
+        // What the node has spent of this hold leaves room for this whole minute.
+        // The journal's own count is checked under the money lock, in `money_post_with`.
+        let limit = hold.reserved_msat.min(consent.consent.max_hold_msat);
+        if hold.spent_msat.checked_add(cap).is_none_or(|most| most > limit) {
+            return Err(end_call_past_hold(state, &consent).await);
+        }
         // As paid, a minute is its price plus the routing fee the node pinned
         // on the hold (none on a usable direct channel). That whole payment
         // must fit the grant's call limit, or nothing is sent.
@@ -7737,7 +7772,10 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
         };
         // Refused or ended while this minute was prepared: nothing is sent.
         consent_payable(state, &consent, hold.reserved_msat)?;
-        let text = money_post(state, auth, "/messages/compose", body, cap, Some(charge)).await?;
+        let text = match money_post(state, auth, "/messages/compose", body, cap, Some(charge)).await {
+            Err(error) if error.code == MINUTE_PAST_HOLD => return Err(end_call_past_hold(state, &consent).await),
+            sent => sent?,
+        };
         let reply: act::SendReply = text.decode("/messages/compose")?;
         Ok(act::CallReceipt {
             operation_id: reply.operation_id.clone(),
@@ -7830,18 +7868,26 @@ async fn do_call_signal_bounded(
             "Upgrade your node before making calls: it cannot track call payments and admission safely. Nothing was paid."));
     }
     let quote = read_call_quote(state, &target).await.map_err(ActionError::node)?;
+    let unsupported = || ActionError::new(
+        "call_unsupported", "Their node does not take calls yet (no call price advertised). Nothing was paid.");
+    let no_live_price = || ActionError::new("call_price_unknown",
+        "Their node gave no live call price, so this was not sent. Nothing was sent or paid.");
     let (principal, fee) = if kind == act::KIND_CALL_OFFER {
-        let offer = quote.offer_msat.ok_or_else(|| ActionError::new(
-            "call_unsupported", "Their node does not take calls yet (no call price advertised). Nothing was paid."))?;
-        (offer, quote.offer_max_routing_fee_msat)
-    } else {
+        (quote.offer_msat.ok_or_else(unsupported)?, quote.offer_max_routing_fee_msat)
+    } else if quote.offer_msat.is_some() {
         (quote.signal_msat, quote.signal_max_routing_fee_msat)
+    } else {
+        // Without their live answer the quote's signal price is only this node's
+        // own tariff, which says nothing about what this signal would cost.
+        return Err(no_live_price());
     };
-    ceiling(principal + fee, max_msat)?;
+    let cost = principal.checked_add(fee).ok_or_else(no_live_price)?;
+    let hangup = quote.signal_msat.checked_add(quote.signal_max_routing_fee_msat).ok_or_else(no_live_price)?;
+    ceiling(cost, max_msat)?;
     if kind == act::KIND_CALL_OFFER {
         // Admission plus one hangup: check the ceiling shown for the whole
         // call, not just this offer. money_post still rechecks the paid step.
-        let total = quote.call_total_msat.expect("an offer has a call total");
+        let total = quote.call_total_msat.ok_or_else(unsupported)?;
         // The node caps the offer and each minute by the call per-payment
         // limit (a relation envelope's per-act maximum on a relation grant),
         // never by the 6-sat message cap; their sum is checked against the
@@ -7850,8 +7896,7 @@ async fn do_call_signal_bounded(
         // hold or payment, a minute whose ceiling does not fit. The routing
         // allowance stays in the hold and the budget checks.
         let minute = minutes.map_or(0, |m| m.block_msat);
-        let hangup = quote.signal_msat.saturating_add(quote.signal_max_routing_fee_msat);
-        let per_payment = principal.saturating_add(fee).max(minute);
+        let per_payment = cost.max(minute);
         let checked = check_node_grant_with_envelope_ids(state, "/messages/compose", &body, total, Some(caps.envelope_ids), grant::PaymentCap::CallTotal).await
             .and_then(|g| match g.as_ref().map(|g| g.check_call(per_payment, Some(&target), now_ms())) {
                 Some(Err(error)) => Err(error),
@@ -7891,7 +7936,7 @@ async fn do_call_signal_bounded(
         }
     }
     if kind == act::KIND_CALL_OFFER {
-        body["host_hangup_cap_msat"] = serde_json::json!(quote.signal_msat + quote.signal_max_routing_fee_msat);
+        body["host_hangup_cap_msat"] = serde_json::json!(hangup);
     }
     body["max_total_msat"] = serde_json::json!(max_msat);
     body["max_routing_fee_msat"] = serde_json::json!(minutes.map_or(fee, |m| fee.min(m.block_max_routing_fee_msat)));
@@ -8055,6 +8100,17 @@ async fn end_call_admission(state: &NodeState, call_id: &str, max_msat: Option<u
             Ok(receipt) => receipt.operation_id.ok_or_else(|| spend_journal::unknown("The node did not identify the hangup operation."))?,
             Err(error) if matches!(error.code, "hangup_in_flight" | "call_not_live" | "call_not_found") => {
                 error.operation_id.ok_or_else(|| spend_journal::unknown("The hangup operation has no identity."))?
+            }
+            // No hangup can be priced, so this never reached the node, which is how
+            // End learns a call is over. Ask it: a call it has ended needs no hangup.
+            Err(error) if error.code == "call_price_unknown" => {
+                let over = read_call_status(state, &offer.peer, call_id).await.is_ok_and(|status| status.is_none_or(|s| s.state == "ended"));
+                let _money = state.money.lock().await;
+                if !over || state.node_id.lock().unwrap().as_deref() != Some(offer.node_id.as_str()) { return Err(error); }
+                let journal = locked_spend_journal(state)?;
+                journal.observe_call(&offer, true)?;
+                return journal.operation_record(&offer.op_id)?.map(Into::into)
+                    .ok_or_else(|| spend_journal::unknown("Missing call offer."));
             }
             Err(error) => return Err(error),
         };
@@ -15915,6 +15971,239 @@ mod control_act_tests {
     fn offer_op(node: &Fake) -> String {
         spend_journal(&node.state).unwrap().call_operations_for(OWN, None, Some(CALL_ID)).unwrap()
             .into_iter().find(|r| r.kind == "call_offer").unwrap().op_id
+    }
+
+    /// The caller's node partway through a call, in rc21's `GET /calls` shape: each
+    /// minute sent moves `next_block_seq` on. `spent` is what it reports for that
+    /// sequence. `closing` is rc21's closing reserve, which it keeps in the hold on
+    /// top of the minutes; `direct` is its zero-fee hold over a direct channel.
+    struct PacedHold { per_block: u64, fee: u64, minutes: u64, closing: u64, direct: bool, spent: fn(u64, u64) -> u64 }
+
+    impl PacedHold {
+        fn reserved(&self) -> u64 { (self.per_block + self.fee) * self.minutes + self.closing }
+
+        fn routes(self) -> (Routes, Arc<std::sync::atomic::AtomicU64>, u64) {
+            use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+            let (inner, _) = ledger_call_routes();
+            let next = Arc::new(AtomicU64::new(0));
+            let seen = next.clone();
+            let reserved = self.reserved();
+            (Arc::new(move |m, p, b| {
+                if p.starts_with("/calls?") {
+                    let seq = seen.load(SeqCst);
+                    let spent = (self.spent)(seq, self.per_block + self.fee);
+                    let mut hold = serde_json::json!({"max_call_minutes": self.minutes, "reserved_msat": reserved, "spent_msat": spent,
+                        "remaining_msat": reserved.saturating_sub(spent), "per_block_msat": self.per_block, "per_block_fee_msat": self.fee,
+                        "released_msat": 0, "closed": false});
+                    if self.direct { hold["direct"] = true.into(); }
+                    return (200, serde_json::json!([{"id": CALL_ID, "state": "live", "direction": "outgoing", "unresolved_paid_admission": false,
+                        "created": null, "op_id": null, "paid_until_ms": 1_790_000_000_000u64, "next_block_seq": seq,
+                        "next_block_due_ms": 1_790_000_000_000u64, "reservation": hold}]).to_string());
+                }
+                if p == "/messages/compose" && serde_json::from_str::<serde_json::Value>(b).unwrap()["kind"] == 404 {
+                    seen.fetch_add(1, SeqCst);
+                }
+                inner(m, p, b)
+            }), next, reserved)
+        }
+    }
+
+    /// As the node reports it once every earlier minute has settled at its whole ceiling.
+    const SPENT_AT_CEILING: fn(u64, u64) -> u64 = |seq, cap| seq * cap;
+
+    async fn paced_call(routes: Routes, reserved: u64) -> Fake {
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+        remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
+        do_call_hold(&node.state, A, CALL_ID, Some(reserved)).await.unwrap();
+        node
+    }
+
+    /// A call runs to its hold: every minute the node's cap allows is paid, at the
+    /// exact boundary too, routed and direct, with rc21's closing reserve and without.
+    /// The next one is refused, nothing is paid for it, and the call is hung up.
+    #[tokio::test]
+    async fn a2_a_call_is_paid_to_its_hold_and_refused_one_minute_past_it() {
+        for (case, per_block, fee, closing, direct) in [
+            ("routed, the hold exactly its minutes", 8_000, 2_000, 0, false),
+            ("routed, rc21 closing reserve", 8_000, 2_000, 6_000, false),
+            ("direct, the hold exactly its minutes", 8_000, 0, 0, true),
+            ("direct, rc21 closing reserve", 8_000, 0, 1_000, true),
+        ] {
+            let (routes, _, reserved) = PacedHold { per_block, fee, minutes: 5, closing, direct, spent: SPENT_AT_CEILING }.routes();
+            let node = paced_call(routes, reserved).await;
+            for seq in 0..5 {
+                do_call_block(&node.state, A, CALL_ID, seq).await.unwrap_or_else(|e| panic!("{case}: minute {seq}: {}", e.message));
+            }
+            assert_eq!(minutes_sent(&node), 5, "{case}");
+            let error = do_call_block(&node.state, A, CALL_ID, 5).await.unwrap_err();
+            assert_eq!(error.code, "call_minutes_above_hold", "{case}");
+            assert!(error.message.contains("Nothing was paid for it"), "{case}: {}", error.message);
+            assert_eq!(minutes_sent(&node), 5, "{case}: nothing paid past the hold");
+            assert_eq!(compose_kinds(&node).last(), Some(&403), "{case}: the call is hung up");
+            assert_eq!(do_call_block(&node.state, A, CALL_ID, 5).await.unwrap_err().code, "call_minutes_above_hold", "{case}: refused for good");
+        }
+    }
+
+    /// The node's own figure stops a minute even when this app's journal has room.
+    #[tokio::test]
+    async fn a2_a_minute_past_the_nodes_spent_figure_is_refused() {
+        for spent in [|_, cap| 5 * cap - 1, |_, _| u64::MAX] as [fn(u64, u64) -> u64; 2] {
+            let (routes, _, reserved) = PacedHold { per_block: 8_000, fee: 2_000, minutes: 5, closing: 0, direct: false, spent }.routes();
+            let node = paced_call(routes, reserved).await;
+            assert_eq!(do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err().code, "call_minutes_above_hold");
+            assert_eq!(minutes_sent(&node), 0);
+            assert_eq!(compose_kinds(&node).last(), Some(&403));
+        }
+    }
+
+    /// The journal stops a minute when the node's figure lags behind what was sent.
+    #[tokio::test]
+    async fn a2_journaled_minutes_stop_a_call_when_the_nodes_figure_lags() {
+        let (routes, _, reserved) = PacedHold { per_block: 8_000, fee: 2_000, minutes: 2, closing: 0, direct: false, spent: |_, _| 0 }.routes();
+        let node = paced_call(routes, reserved).await;
+        do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+        do_call_block(&node.state, A, CALL_ID, 1).await.unwrap();
+        assert_eq!(do_call_block(&node.state, A, CALL_ID, 2).await.unwrap_err().code, "call_minutes_above_hold");
+        assert_eq!(minutes_sent(&node), 2);
+    }
+
+    /// A minute the node proved unpaid uses none of the hold: the last minute of a
+    /// call is still paid after it was refused and tried again.
+    #[tokio::test]
+    async fn a2_a_proven_unpaid_attempt_does_not_count_against_the_hold() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let (inner, _, reserved) = PacedHold { per_block: 8_000, fee: 2_000, minutes: 1, closing: 0, direct: false, spent: SPENT_AT_CEILING }.routes();
+        let refusing = Arc::new(AtomicBool::new(true));
+        let refuse = refusing.clone();
+        let node = paced_call(Arc::new(move |m, p, b| {
+            if p == "/messages/compose" && serde_json::from_str::<serde_json::Value>(b).unwrap()["kind"] == 404 && refuse.swap(false, SeqCst) {
+                return (400, serde_json::json!({"error": "not dispatched; nothing was paid", "code": "not_dispatched"}).to_string());
+            }
+            inner(m, p, b)
+        }), reserved).await;
+        let refused = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+        assert_eq!(refused.code, "not_dispatched", "{}", refused.message);
+        assert_eq!(minute_records(&node)[0].state, spend_journal::OperationState::Unpaid);
+        do_call_block(&node.state, A, CALL_ID, 0).await.expect("the one minute of the hold is still paid");
+    }
+
+    /// Two presses of the last minute that both read the node before either was
+    /// sent: the second finds the first in the journal under the money lock.
+    #[test]
+    fn a2_the_journal_is_read_under_the_money_lock() {
+        let rt = race_runtime();
+        let (routes, _, reserved) = PacedHold { per_block: 8_000, fee: 2_000, minutes: 1, closing: 0, direct: false, spent: |_, _| 0 }.routes();
+        let node = rt.block_on(paced_call(routes, reserved));
+        let state = &node.state;
+        let (arrived, release) = pause_points::arm(&state.api_base, "after_lock");
+        let (first, second) = std::thread::scope(|s| {
+            let first = s.spawn(|| rt.block_on(do_call_block(state, A, CALL_ID, 0)));
+            rt.block_on(arrived.notified());
+            let second = s.spawn(|| rt.block_on(do_call_block(state, A, CALL_ID, 0)));
+            std::thread::sleep(Duration::from_millis(150));
+            release.notify_one();
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        first.unwrap();
+        assert_eq!(second.unwrap_err().code, "call_minutes_above_hold");
+        assert_eq!(minutes_sent(&node), 1);
+    }
+
+    /// No live call price: answer, ICE and hangup are refused, not priced from this
+    /// node's own tariff. Nothing is journaled, so nothing is fenced.
+    #[tokio::test]
+    async fn a_signal_without_a_live_call_price_is_refused_and_pays_nothing() {
+        for kind in [401u16, 402, 403] {
+            let node = fake(AuthMode::Local, call_routes(None));
+            approve_calls(&node).await;
+            let error = do_call_signal(&node.state, A, kind, OFFER, 15_000).await.unwrap_err();
+            assert_eq!(error.code, "call_price_unknown", "{kind}: {}", error.message);
+            assert!(error.message.contains("Nothing was sent or paid"), "{kind}: {}", error.message);
+            assert!(compose_kinds(&node).is_empty(), "{kind}");
+            assert!(pending(&node).is_none(), "{kind}");
+        }
+    }
+
+    /// End with their price unreadable pays nothing, and End works once it is back.
+    #[tokio::test]
+    async fn ending_a_call_without_a_live_price_pays_nothing_and_can_be_tried_again() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let (inner, _) = ledger_call_routes();
+        let unreadable = Arc::new(AtomicBool::new(false));
+        let u = unreadable.clone();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == format!("/pricing/peers/{A}/call") && u.load(SeqCst) {
+                return (400, r#"{"error":"their node did not answer with a call price; nothing was paid","code":400,"reason":"call_price_unknown"}"#.into());
+            }
+            inner(m, p, b)
+        }));
+        approve_calls(&node).await;
+        do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap();
+        unreadable.store(true, SeqCst);
+        let error = do_op_end_call(&node.state, CALL_ID).await.unwrap_err();
+        assert_eq!(error.code, "call_price_unknown", "{}", error.message);
+        assert_eq!(compose_kinds(&node), [400]);
+        assert!(pending(&node).is_none(), "no fence");
+        unreadable.store(false, SeqCst);
+        do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_eq!(compose_kinds(&node), [400, 403]);
+    }
+
+    /// Their price stays unreadable, and the node shows the call ended or no longer
+    /// lists it: End closes with nothing sent, and the contact can be called again.
+    /// While the node still runs the call, End stays refused.
+    #[tokio::test]
+    async fn end_without_a_live_price_closes_once_the_node_shows_the_call_over() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        for gone in ["ended", "unlisted"] {
+            let (inner, _) = minutes_routes("live", serde_json::Value::Null);
+            let (unreadable, over) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+            let (u, o) = (unreadable.clone(), over.clone());
+            let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                if p == format!("/pricing/peers/{A}/call") && u.load(SeqCst) {
+                    return (400, r#"{"error":"their node did not answer with a call price; nothing was paid","code":400,"reason":"call_price_unknown"}"#.into());
+                }
+                if p.starts_with("/calls?") && o.load(SeqCst) {
+                    return (200, if gone == "unlisted" { "[]".to_string() } else {
+                        serde_json::json!([{"id": CALL_ID, "state": "ended", "direction": "outgoing", "unresolved_paid_admission": false, "created": null,
+                            "op_id": null, "paid_until_ms": null, "next_block_seq": 0, "next_block_due_ms": null}]).to_string() });
+                }
+                inner(m, p, b)
+            }));
+            approve_calls(&node).await;
+            let offer = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap().operation_id.unwrap();
+            unreadable.store(true, SeqCst);
+            assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap_err().code, "call_price_unknown", "{gone}");
+            over.store(true, SeqCst);
+            assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap().op_id, offer, "{gone}");
+            assert_eq!(compose_kinds(&node), [400], "{gone}: nothing was sent");
+            unreadable.store(false, SeqCst);
+            do_call_signal(&node.state, A, 400, &OFFER.replace(CALL_ID, REDIAL_ID), 15_000).await.expect("the admission is closed");
+        }
+    }
+
+    /// A live price whose all-in total overflows or passes what the renderer can
+    /// hold is no price: no offer, answer or hangup goes out, and nothing panics.
+    #[tokio::test]
+    async fn a_call_price_out_of_range_places_answers_and_hangs_up_nothing() {
+        for (offer, signal) in [(u64::MAX, 50), (u64::MAX - 5_000, 50), (50, u64::MAX), (50, u64::MAX - 5_000),
+            (control::MAX_SAFE_MSAT, 50), (50, control::MAX_SAFE_MSAT)] {
+            for kind in [400u16, 401, 403] {
+                let (inner, _) = ledger_call_routes();
+                let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                    if p == format!("/pricing/peers/{A}/call") {
+                        return (200, serde_json::json!({"peer_id": A, "offer_msat": offer, "signal_msat": signal}).to_string());
+                    }
+                    inner(m, p, b)
+                }));
+                approve_calls(&node).await;
+                let error = do_call_signal(&node.state, A, kind, OFFER, 15_000).await.unwrap_err();
+                assert!(matches!(error.code, "call_unsupported" | "call_price_unknown"), "{offer} {signal} {kind}: {} {}", error.code, error.message);
+                assert!(compose_kinds(&node).is_empty(), "{offer} {signal} {kind}");
+            }
+        }
     }
 
     /// A hangup signal refused while it is prepared, before the money lock and

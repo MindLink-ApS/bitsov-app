@@ -7,7 +7,7 @@ import { render } from 'solid-js/web';
 import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
-import type { BudgetView, CallQuote, CallReceipt, LiveEvent, Message, SpendView, OpView } from '../src/control/types';
+import type { ActionError, BudgetView, CallQuote, CallReceipt, LiveEvent, Message, SpendView, OpView } from '../src/control/types';
 import { closeOutcome, CONNECT_TIMEOUT_MS, createCallEngine, mediaError, NO_MEDIA_DEVICES, RECONNECT_GRACE_MS, isCallKind, newCallId, parseSignal, RING_MS, stunServer, type CallDeps, type CallView } from '../src/control/call';
 
 const OWN = '1'.repeat(64);
@@ -94,6 +94,73 @@ function engine(over: Partial<CallDeps> = {}) {
 
 const msg = (kind: number, body: Record<string, unknown>, sender = A): Message => ({
   id: `in-${kind}-${Math.random()}`, kind, sender, recipient: OWN, timestamp: 0, plaintext: JSON.stringify({ v: 1, call_id: ID, ...body }), payment_amount_msat: 1000,
+});
+
+describe('answering and declining within the price shown', () => {
+  const live = (value: CallQuote) => async () => ({ ok: true as const, value });
+  const REFUSED: [string, CallDeps['quote']][] = [
+    ['their signal price rose', live({ ...QUOTE, signal_msat: 1_001 })],
+    ['their routing ceiling rose', live({ ...QUOTE, signal_max_routing_fee_msat: 5_001 })],
+    ['the price cannot be held exactly', live({ ...QUOTE, signal_msat: Number.MAX_SAFE_INTEGER })],
+    ['their node gave no live price', live({ ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null })],
+    ['the read failed', async () => ({ ok: false as const, error: { code: 'node', message: 'Could not read it' } as ActionError })],
+  ];
+
+  it.each(REFUSED)('Accept pays nothing when %s, and says so', async (_case, quote) => {
+    const { e, sent, last } = engine({ quote });
+    await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    await e.accept(QUOTE);
+    expect(sent).toHaveLength(0);
+    expect(last()).toMatchObject({ phase: 'ended', paidMsat: 0, pendingCount: 0, unknownCount: 0 });
+    expect(last().error).toMatch(/nothing was paid/i);
+  });
+
+  it.each(REFUSED)('Decline pays nothing when %s, and says so', async (_case, quote) => {
+    const { e, sent, last } = engine({ quote });
+    await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    await e.decline(QUOTE);
+    expect(sent).toHaveLength(0);
+    expect(last()).toMatchObject({ phase: 'ended', reason: 'declined', paidMsat: 0, pendingCount: 0, unknownCount: 0 });
+    expect(last().error).toMatch(/nothing was paid/i);
+  });
+
+  it('pays the live price when it is at or below the one shown, on either button', async () => {
+    for (const [value, max] of [[QUOTE, 6_000], [{ ...QUOTE, signal_msat: 500, signal_max_routing_fee_msat: 4_000 }, 4_500]] as const) {
+      const accepting = engine({ quote: live(value) });
+      await accepting.e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+      await accepting.e.accept(QUOTE);
+      expect(accepting.sent.map((s) => [s.kind, s.max])).toEqual([[401, max]]);
+      const declining = engine({ quote: live(value) });
+      await declining.e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+      await declining.e.decline(QUOTE);
+      expect(declining.sent.map((s) => [s.kind, s.max])).toEqual([[403, max]]);
+    }
+  });
+
+  it('a waiting Accept pressed while the engine is starting another call says why nothing happened', async () => {
+    let allow: (yes: boolean) => void = () => {};
+    let gate = false;
+    const waitingViews: CallView[][] = [];
+    const { e, sent } = engine({
+      authorize: () => (gate ? new Promise<boolean>((resolve) => { allow = resolve; }) : Promise.resolve(true)),
+      onWaiting: (calls) => waitingViews.push(calls),
+    });
+    await e.place(A, 'audio', QUOTE);
+    await e.receive(msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'second' }), OWN);
+    await e.hangup();
+    await vi.waitFor(() => expect(e.view().close?.status ?? 'closed').toBe('closed'));
+    gate = true;
+    const placing = e.place(A, 'audio', QUOTE);
+    const before = sent.length;
+    await e.acceptWaiting(`${A}:${'f'.repeat(32)}`, QUOTE);
+    expect(sent.length).toBe(before);
+    expect(waitingViews[waitingViews.length - 1][0]).toMatchObject({ phase: 'incoming', error: expect.stringMatching(/another call is waiting|finish/i) });
+    gate = false;
+    allow(false);
+    await placing;
+    await e.acceptWaiting(`${A}:${'f'.repeat(32)}`, QUOTE);
+    expect(sent.slice(before).map((s) => s.kind)).toEqual([401]);
+  });
 });
 
 describe('call refusal recovery', () => {
@@ -207,7 +274,7 @@ describe('call unknown outcomes', () => {
       return receipt(kind, 6_000);
     } });
     await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
-    const accepting = e.accept();
+    const accepting = e.accept(QUOTE);
     await vi.waitFor(() => expect(land).toBeDefined());
     await e.hangup();
     // The paid hangup settled; the answer is still in flight.
@@ -224,7 +291,7 @@ describe('call unknown outcomes', () => {
       provenUnpaid: (code) => code === 'spend_refused',
     });
     await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
-    const declining = e.decline();
+    const declining = e.decline(QUOTE);
     await vi.waitFor(() => expect(land).toBeDefined());
     expect(last()).toMatchObject({ phase: 'ended', reason: 'declined', pendingCount: 1, pendingMsat: 6_000 });
     land({ ok: false, error: { code: 'spend_refused', message: 'refused' } });
@@ -237,13 +304,13 @@ describe('call unknown outcomes', () => {
   it('declining: a quote that never resolves never ends the call; once quoted, the hangup is pending in the first ended view', async () => {
     const stuck = engine({ quote: () => new Promise(() => {}) });
     await stuck.e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
-    void stuck.e.decline();
+    void stuck.e.decline(QUOTE);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(stuck.views.some((v) => v.phase === 'ended')).toBe(false);
 
     const { e, views, sent } = engine({ signal: () => new Promise(() => {}) });
     await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
-    void e.decline();
+    void e.decline(QUOTE);
     await vi.advanceTimersByTimeAsync(0);
     const ended = views.filter((v) => v.phase === 'ended');
     expect(ended.length).toBeGreaterThan(0);
@@ -265,7 +332,7 @@ describe('call unknown outcomes', () => {
     let land!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
     const { e, last } = engine({ signal: () => new Promise((resolve) => { land = resolve; }) });
     await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
-    const declining = e.decline();
+    const declining = e.decline(QUOTE);
     await vi.waitFor(() => expect(land).toBeDefined());
     e.dismiss();
     expect(last()).toMatchObject({ phase: 'ended', pendingCount: 1 });
@@ -314,7 +381,7 @@ describe('call restart negotiation', () => {
       target.e.receive(msg(signal.kind, signal.body, sender), own);
     await caller.e.place(A, 'video', QUOTE);
     await deliver(callee, caller.sent[0], OWN, A);
-    await callee.e.accept();
+    await callee.e.accept(QUOTE);
     await deliver(caller, callee.sent[0], A, OWN);
     const [a, b] = FakePc.made;
     a.connect(); b.connect();
@@ -386,7 +453,7 @@ describe('call restart negotiation', () => {
       target.e.receive(msg(signal.kind, signal.body, sender), own);
     await caller.e.place(A, 'audio', QUOTE);
     await deliver(callee, caller.sent[0], OWN, A);
-    await callee.e.accept();
+    await callee.e.accept(QUOTE);
     await deliver(caller, callee.sent[0], A, OWN);
     const [a, b] = FakePc.made;
     a.connect(); b.connect();
@@ -464,7 +531,7 @@ describe('call restart negotiation', () => {
   it('a callee-only failure requests one restart and caller ignores duplicate requests', async () => {
     const incoming = engine();
     await incoming.e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
-    await incoming.e.accept();
+    await incoming.e.accept(QUOTE);
     const pc = FakePc.made[0]; pc.connect(); pc.state('failed'); pc.state('failed');
     await vi.advanceTimersByTimeAsync(0);
     expect(incoming.sent.filter(s => s.kind === 402)).toHaveLength(1);
@@ -491,7 +558,7 @@ describe('call restart negotiation', () => {
       return { ok: true, value: { total_msat: 6000 } as CallReceipt };
     } });
     await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
-    const accepting = e.accept();
+    const accepting = e.accept(QUOTE);
     await vi.advanceTimersByTimeAsync(0);
     FakePc.made[0].connect();
     await e.receive(msg(400, { call_id: 'e'.repeat(32), media: 'audio', sdp: `restart\r\na=x-bitsov-restart-of:${ID}\r\n` }), OWN);
@@ -568,7 +635,7 @@ describe('call restart negotiation', () => {
     let allowed = true;
     const { e } = engine({ authorize: async () => allowed });
     await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
-    await e.accept();
+    await e.accept(QUOTE);
     const pc = FakePc.made[0]; pc.connect();
     allowed = false;
     await e.receive(msg(400, { call_id: 'e'.repeat(32), media: 'audio', sdp: `restart\r\na=x-bitsov-restart-of:${ID}\r\n` }), OWN);
@@ -712,7 +779,7 @@ describe('call lifecycle hardening', () => {
     for (const [name, message] of [['NotAllowedError', /permission.*denied/i], ['NotFoundError', /no.*microphone.*camera/i], ['NotReadableError', /in use|busy/i]]) {
       const { e, sent } = engine({ getUserMedia: async () => { throw new DOMException('capture failed', String(name)); } });
       if (direction === 'incoming') await e.receive(msg(400, { media: 'video', sdp: 'offer' }), OWN);
-      await (direction === 'incoming' ? e.accept() : e.place(A, 'video', QUOTE));
+      await (direction === 'incoming' ? e.accept(QUOTE) : e.place(A, 'video', QUOTE));
       expect(e.view()).toMatchObject({ phase: 'ended', state: 'ended', error: expect.stringMatching(message) });
       expect(sent).toEqual([]);
       e.dismiss();
@@ -740,7 +807,7 @@ describe('call lifecycle hardening', () => {
     let release!: (s: MediaStream) => void;
     const { e, sent } = engine({ getUserMedia: () => new Promise(resolve => { release = resolve; }) });
     await e.receive(msg(400, { media: 'video', sdp: 'offer' }), OWN);
-    const accepting = e.accept();
+    const accepting = e.accept(QUOTE);
     await vi.advanceTimersByTimeAsync(0);
     const ending = e.hangup();
     expect(e.view().phase).toBe('ended');
@@ -789,7 +856,7 @@ describe('call lifecycle hardening', () => {
     let quoted!: (r: Awaited<ReturnType<CallDeps['quote']>>) => void;
     const { e, sent } = engine({ quote: () => new Promise(resolve => { quoted = resolve; }) });
     await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
-    const declining = e.decline();
+    const declining = e.decline(QUOTE);
     e.endLocal();
     await e.receive(msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'new' }, 'b'.repeat(64)), OWN);
     quoted({ ok: true, value: QUOTE });
@@ -803,7 +870,7 @@ describe('call lifecycle hardening', () => {
     let quoted!: (r: Awaited<ReturnType<CallDeps['quote']>>) => void;
     const { e, sent, media } = engine({ quote: () => new Promise(resolve => { quoted = resolve; }) });
     await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
-    const accepting = e.accept();
+    const accepting = e.accept(QUOTE);
     await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS);
     expect(e.view().state).toBe('ended');
     quoted({ ok: true, value: QUOTE });
@@ -863,7 +930,7 @@ describe('call lifecycle hardening', () => {
     let finish!: (r: Awaited<ReturnType<CallDeps['signal']>>) => void;
     const { e } = engine({ signal: (_p, kind) => kind === 401 ? new Promise(resolve => { finish = resolve; }) : Promise.resolve({ ok: true, value: { total_msat: 1 } as CallReceipt }) });
     await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
-    const accepting = e.accept();
+    const accepting = e.accept(QUOTE);
     await vi.advanceTimersByTimeAsync(0);
     await e.hangup();
     await e.receive(msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'new' }), OWN);
@@ -1062,7 +1129,7 @@ describe('call engine', () => {
     let release!: (s: MediaStream) => void;
     const { e, sent } = engine({ getUserMedia: () => new Promise((resolve) => { release = resolve; }) });
     if (direction === 'incoming') await e.receive(msg(400, { media: 'video', sdp: 'offer' }), OWN);
-    const pending = direction === 'outgoing' ? e.place(A, 'video', QUOTE) : e.accept();
+    const pending = direction === 'outgoing' ? e.place(A, 'video', QUOTE) : e.accept(QUOTE);
     await vi.advanceTimersByTimeAsync(15_000);
     expect(e.view()).toMatchObject({ phase: 'ended', paidMsat: 0, error: expect.stringContaining('Camera/microphone not available — check System Settings → Privacy') });
     await pending;
@@ -1149,7 +1216,7 @@ describe('call engine', () => {
     const { e, sent, media, last } = engine();
     await e.receive(msg(400, { media: 'video', sdp: 'v=0 offer' }), OWN);
     expect(last()).toMatchObject({ phase: 'incoming', peer: A, media: 'video', outgoing: false });
-    await Promise.all([e.accept(), e.accept()]);
+    await Promise.all([e.accept(QUOTE), e.accept(QUOTE)]);
     expect(sent).toEqual([{ peer: A, kind: 401, body: { v: 1, call_id: ID, sdp: 'v=0 answer' }, max: 6_000 }]);
     expect(FakePc.made[0].remote).toEqual({ type: 'offer', sdp: 'v=0 offer' });
     FakePc.made[0].connect();
@@ -1174,7 +1241,7 @@ describe('call engine', () => {
   it('declining pays one hangup so the caller stops ringing', async () => {
     const { e, sent, last } = engine();
     await e.receive(msg(400, { media: 'audio', sdp: 'v=0 offer' }), OWN);
-    await e.decline();
+    await e.decline(QUOTE);
     expect(sent.map((s) => [s.kind, s.body.reason])).toEqual([[403, 'declined']]);
     expect(last()).toMatchObject({ phase: 'ended', reason: 'declined' });
   });
@@ -1292,13 +1359,13 @@ describe('H2: every end of our call asks the host to end its admission (op_end_c
   it('as the callee nothing is ours to end: decline and hang-up pay their hangup as before', async () => {
     const declined = withEnd();
     await declined.e.receive(msg(400, { media: 'audio', sdp: 'v=0 offer' }), OWN);
-    await declined.e.decline();
+    await declined.e.decline(QUOTE);
     expect(declined.sent.map((x) => [x.kind, x.body.reason])).toEqual([[403, 'declined']]);
     expect(declined.endCall).not.toHaveBeenCalled();
     FakePc.made = [];
     const answered = withEnd();
     await answered.e.receive(msg(400, { media: 'audio', sdp: 'v=0 offer' }), OWN);
-    await answered.e.accept();
+    await answered.e.accept(QUOTE);
     FakePc.made[0].connect();
     await answered.e.hangup();
     expect(answered.sent.map((x) => x.kind)).toEqual([401, 403]);
@@ -1852,7 +1919,7 @@ describe('call engine: review #74 fixes', () => {
     FakePc.made = [];
     const b = engine();
     await b.e.receive(msg(400, { media: 'audio', sdp: 'v=0 offer' }), OWN);
-    await b.e.accept();
+    await b.e.accept(QUOTE);
     expect(b.last().phase).toBe('connecting');
     vi.advanceTimersByTime(CONNECT_TIMEOUT_MS);
     expect(b.last()).toMatchObject({ phase: 'ended', reason: 'failed' });
@@ -2591,7 +2658,7 @@ describe('calls in the shell', () => {
     })));
     watch.observe(mount, { subtree: true, childList: true, attributes: true, characterData: true });
     host.emitLive({ type: 'message', room_id: null, message: { id: 'live-offer', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: 'v=0 offer' }), payment_amount_msat: 10_000 } });
-    await vi.waitFor(() => expect($('[data-call-decline]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-decline]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-decline]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     await vi.waitFor(() => expect(land).toBeDefined());
@@ -2708,6 +2775,7 @@ describe('calls in the shell', () => {
     expect(audio).toBeDefined();
     expect(audio.src).toMatch(/incoming-ring\.wav/);
     expect($('[data-incoming-announcement]')?.textContent).toContain('Maya');
+    if (outcome === 'answer' || outcome === 'decline') await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(false));
     if (outcome === 'answer') $<HTMLButtonElement>('[data-call-accept]')!.click();
     if (outcome === 'decline') $<HTMLButtonElement>('[data-call-decline]')!.click();
     if (outcome === 'cancel') host.emitLive({ type: 'message', room_id: null, message: msg(403, { reason: 'hangup' }) });
@@ -2838,13 +2906,81 @@ describe('calls in the shell', () => {
     expect(host.used('call_signal')).toHaveLength(0);
   });
 
+  const incoming = (host: ReturnType<typeof stubHost>, id = ID) => host.emitLive({ type: 'message', room_id: null, message: { id: `live-${id}`, kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: id, media: 'audio', sdp: 'v=0' }), payment_amount_msat: 1000 } });
+
+  it('Accept and Decline wait for the price, then show it as a ceiling', async () => {
+    let read = (_q: CallQuote) => {};
+    let answer: Reply = () => QUOTE;
+    const host = stubHost({ messages_list: () => [], call_quote: (args) => answer(args) });
+    await openShell();
+    answer = () => new Promise<CallQuote>((resolve) => { read = resolve; });
+    incoming(host);
+    await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
+    expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(true);
+    expect($<HTMLButtonElement>('[data-call-decline]')!.disabled).toBe(true);
+    read(QUOTE);
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(false));
+    expect($<HTMLButtonElement>('[data-call-decline]')!.disabled).toBe(false);
+    expect(text('[data-call-accept]')).toBe('Accept · up to 6 sats');
+    expect(text('[data-call-decline]')).toBe('Decline · up to 6 sats');
+  });
+
+  it.each([
+    ['the read fails', () => { throw { code: 'node', message: 'Could not read it' }; }],
+    ['their node gives no live price', () => ({ ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null })],
+  ] as [string, Reply][])('when %s the buttons stay off and the card says why', async (_case, reply) => {
+    let answer: Reply = () => QUOTE;
+    const host = stubHost({ messages_list: () => [], call_quote: (args) => answer(args) });
+    await openShell();
+    answer = reply;
+    incoming(host);
+    await vi.waitFor(() => expect($('[data-call-answer-price]')).not.toBeNull());
+    expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(true);
+    expect($<HTMLButtonElement>('[data-call-decline]')!.disabled).toBe(true);
+    expect(text('[data-call-accept]')).toBe('Accept');
+    expect(text('[data-call-answer-price]')).toMatch(/nothing can be paid/i);
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it.each([
+    ['Accept', '[data-call-accept]', 'a dearer price', () => ({ ...QUOTE, signal_msat: 2_000 })],
+    ['Decline', '[data-call-decline]', 'a dearer price', () => ({ ...QUOTE, signal_msat: 2_000 })],
+    ['Accept', '[data-call-accept]', 'a failed read', () => { throw { code: 'node', message: 'Could not read it' }; }],
+    ['Decline', '[data-call-decline]', 'a failed read', () => { throw { code: 'node', message: 'Could not read it' }; }],
+  ] as [string, string, string, Reply][])('%s showing 6 sats: on %s no call_signal goes out and the card says nothing was paid', async (_button, selector, _case, second) => {
+    let answer: Reply = () => QUOTE;
+    const host = stubHost({ messages_list: () => [], call_quote: (args) => answer(args) });
+    await openShell();
+    incoming(host);
+    await vi.waitFor(() => expect(text('[data-call-accept]')).toBe('Accept · up to 6 sats'));
+    answer = second;
+    $<HTMLButtonElement>(selector)!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(text('[data-call-ended]')).toMatch(/nothing was paid/i);
+  });
+
+  it('a waiting card pays nothing above the price it shows', async () => {
+    let answer: Reply = () => QUOTE;
+    const host = payHost({ call_quote: (args) => answer(args) }); await liveCall();
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'second-offer' }) });
+    await vi.waitFor(() => expect(text('[data-waiting-calls] [data-call-accept]')).toBe('Accept · up to 6 sats'));
+    $<HTMLButtonElement>('[data-call-panel="live"] [data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!.disabled).toBe(false));
+    answer = () => ({ ...QUOTE, signal_msat: 2_000 });
+    $<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(/nothing was paid/i));
+    expect(host.used('call_signal').some((c) => c.args?.kind === 401)).toBe(false);
+  });
+
   it('rings on a live offer with the answer price, and never adds call signals to the thread', async () => {
     const host = stubHost({ messages_list: () => [] });
     await openShell();
     host.emitLive({ type: 'message', room_id: null, message: { id: 'live-offer', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: 'v=0 offer' }), payment_amount_msat: 10_000 } });
     await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
     expect(text('[data-call-title]')).toBe('Incoming call');
-    await vi.waitFor(() => expect(text('[data-call-accept]')).toBe('Accept · 6 sats'));
+    await vi.waitFor(() => expect(text('[data-call-accept]')).toBe('Accept · up to 6 sats'));
     expect($('[data-message="live-offer"]')).toBeNull();
     $<HTMLButtonElement>('[data-call-accept]')!.click();
     await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
@@ -2878,7 +3014,7 @@ describe('calls in the shell', () => {
     const host = stubHost({ messages_list: () => [] });
     await openShell();
     host.emitLive({ type: 'message', room_id: null, message: { ...msg(400, { media: 'audio', sdp: 'offer' }), timestamp: Date.now() } });
-    await vi.waitFor(() => expect($('[data-call-accept]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-accept]')!.click();
     await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
     const pc = FakePc.made[0]; pc.connect();
@@ -2902,7 +3038,7 @@ describe('calls in the shell', () => {
     const host = stubHost({ messages_list: () => [] });
     await openShell();
     host.emitLive({ type: 'message', room_id: null, message: { ...msg(400, { media: 'video', sdp: 'offer' }), timestamp: Date.now() } });
-    await vi.waitFor(() => expect($('[data-call-accept]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-accept]')!.click();
     await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
     const pc = FakePc.made[0]; pc.connect();
@@ -2929,7 +3065,7 @@ describe('calls in the shell', () => {
     });
     await openShell();
     host.emitLive({ type: 'message', room_id: null, message: { ...msg(400, { media: 'audio', sdp: 'offer' }), timestamp: Date.now() } });
-    await vi.waitFor(() => expect($('[data-call-accept]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-accept]')!.click();
     await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
     const pc = FakePc.made[0]; pc.connect();
@@ -2946,7 +3082,7 @@ describe('calls in the shell', () => {
     const host = stubHost({ messages_list: () => [] });
     await openShell();
     host.emitLive({ type: 'message', room_id: null, message: { ...msg(400, { media: 'video', sdp: 'offer' }), timestamp: Date.now() } });
-    await vi.waitFor(() => expect($('[data-call-accept]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-accept]')!.click();
     await vi.waitFor(() => expect({ sent: host.used('call_signal').length, ended: text('[data-call-ended]') }).toEqual({ sent: 1, ended: '' }));
     const pc = FakePc.made[0]; pc.connect();
@@ -3002,7 +3138,7 @@ describe('calls in the shell', () => {
     const host = stubHost({ messages_list: () => [] });
     await openShell();
     host.emitLive({ type: 'message', room_id: null, message: { id: 'o', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: 'v=0 offer' }), payment_amount_msat: 10_000 } });
-    await vi.waitFor(() => expect($('[data-call-accept]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-accept]')!.click();
     await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
     FakePc.made[0].connect();
@@ -3031,7 +3167,7 @@ describe('calls in the shell', () => {
     const host = stubHost({ messages_list: () => [] });
     await openShell();
     host.emitLive({ type: 'message', room_id: null, message: { id: 'o', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: 'v=0 offer' }), payment_amount_msat: 10_000 } });
-    await vi.waitFor(() => expect($('[data-call-accept]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-accept]')!.click();
     await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
     FakePc.made[0].connect();
@@ -3550,7 +3686,7 @@ describe('iOS Live call audio and background video', () => {
     await flushAudio();
     expect(e.view().phase).toBe('incoming');
     expect(audioSession).not.toHaveBeenCalled();
-    await e.accept();
+    await e.accept(QUOTE);
     await flushAudio();
     expect(e.view().phase).toBe('connecting');
     expect(audioSession).not.toHaveBeenCalled();

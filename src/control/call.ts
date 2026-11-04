@@ -144,6 +144,19 @@ export function newCallId(random: (a: Uint8Array) => Uint8Array = (a) => crypto.
 export const callCost = (q: CallQuote) => q.call_total_msat;
 /** What one answer/ICE/hangup costs at most, all-in. */
 export const signalCost = (q: CallQuote) => q.signal_msat + q.signal_max_routing_fee_msat;
+/**
+ * The most an answer or hangup can cost under this quote, or null: without their
+ * live answer the signal price is only this node's tariff, and an amount this app
+ * cannot hold exactly is no amount.
+ */
+export const answerCost = (q: CallQuote): number | null =>
+  q.offer_msat === null || !Number.isSafeInteger(signalCost(q)) ? null : signalCost(q);
+/** Why a press pays nothing: the live price is missing or above what the button showed, price or routing ceiling. */
+const answerRefusal = (shown: CallQuote, live: Outcome<CallQuote>): string | null => {
+  if (!live.ok || answerCost(live.value) === null) return tr('caCallPriceUnreadNothingPaid');
+  return live.value.signal_msat > shown.signal_msat || live.value.signal_max_routing_fee_msat > shown.signal_max_routing_fee_msat
+    ? tr('caCallPriceRoseNothingPaid') : null;
+};
 
 /**
  * The grant's limit on each call payment, as the host reports it: the signed
@@ -403,7 +416,8 @@ export function createCallEngine(deps: CallDeps) {
   const waiting = new Map<string, {
     view: () => CallView;
     receive: (m: Message, ownId: string) => Promise<void>;
-    decline: () => Promise<void>;
+    decline: (shown: CallQuote) => Promise<void>;
+    note: (message: string) => void;
     dismiss: () => void;
     endLocal: () => void;
     takeIncoming: () => IncomingOffer | null;
@@ -1067,8 +1081,8 @@ export function createCallEngine(deps: CallDeps) {
     }
   };
 
-  /** Accept the ringing call: one paid answer. */
-  const accept = () => guarded(async () => {
+  /** Accept the ringing call: one paid answer, at most the price `shown` on the button. */
+  const accept = (shown: CallQuote) => guarded(async () => {
     if (view.phase !== 'incoming' || !offerSdp) return;
     const callId = view.callId;
     if (deps.authorize && !await deps.authorize()) return;
@@ -1078,7 +1092,8 @@ export function createCallEngine(deps: CallDeps) {
     awaitConnect(callId!);
     const q = await deps.quote(view.peer!);
     if (view.callId !== callId || !active()) return;
-    if (!q.ok) { end(null, q.error.message); return; }
+    const refused = answerRefusal(shown, q);
+    if (refused !== null || !q.ok) { end(null, refused); return; }
     quote = q.value;
     let conn: RTCPeerConnection;
     try {
@@ -1108,8 +1123,11 @@ export function createCallEngine(deps: CallDeps) {
   const api = {
     view: () => view,
     /** Move an untouched waiting offer to the normal answer path after media is free. */
-    acceptWaiting: async (id: string) => {
-      if (active() || busy || deps.busy?.() || view.pendingCount || view.unknownCount || (view.close && view.close.status !== 'closed')) return;
+    acceptWaiting: async (id: string, shown: CallQuote) => {
+      if (active() || busy || deps.busy?.() || view.pendingCount || view.unknownCount || (view.close && view.close.status !== 'closed')) {
+        waiting.get(id)?.note(tr('incomingWaiting'));
+        return;
+      }
       const offer = waiting.get(id)?.takeIncoming();
       if (!offer) return;
       quote = null;
@@ -1120,7 +1138,7 @@ export function createCallEngine(deps: CallDeps) {
       const media: CallMedia = deps.routed ? 'audio' : offer.media;
       set({ ...IDLE, phase: 'incoming', peer: offer.peer, callId: offer.callId, media, camera: media === 'video' });
       ringTimer = setTimeout(() => { if (view.callId === offer.callId && view.phase === 'incoming') end('timeout'); }, Math.max(0, RING_MS - (deps.now() - incomingAt)));
-      await accept();
+      await accept(shown);
     },
     /** Transfer without a hangup or missed record; only a pending offer is movable. */
     takeIncoming: (): IncomingOffer | null => {
@@ -1130,7 +1148,9 @@ export function createCallEngine(deps: CallDeps) {
       set(IDLE);
       return offer;
     },
-    declineWaiting: (id: string) => waiting.get(id)?.decline(),
+    declineWaiting: (id: string, shown: CallQuote) => waiting.get(id)?.decline(shown),
+    /** Why a press on this waiting card did nothing yet. */
+    note: (message: string) => { if (view.phase === 'incoming') set({ error: message }); },
     dismissWaiting: (id: string) => { waiting.get(id)?.dismiss(); },
 
     /** Place a call. The price was shown before this is called. */
@@ -1249,8 +1269,8 @@ export function createCallEngine(deps: CallDeps) {
     /** M6 A2: the owner confirms the node's hold for this outgoing call (as the card shows it). */
     confirmMinutes: async () => { if (view.outgoing && active()) await minutes?.confirm(); },
 
-    /** Decline a ringing call: one paid hangup, so the caller stops ringing. */
-    decline: () => guarded(async () => {
+    /** Decline a ringing call: one paid hangup, at most the price `shown` on the button, so the caller stops ringing. */
+    decline: (shown: CallQuote) => guarded(async () => {
       if (view.phase !== 'incoming') return;
       set({ silenced: true });
       const owner = { peer: view.peer, callId: view.callId };
@@ -1258,15 +1278,15 @@ export function createCallEngine(deps: CallDeps) {
       const generation = mediaGeneration;
       const q = await deps.quote(owner.peer!);
       if (mediaGeneration !== generation || view.callId !== owner.callId || view.phase !== 'incoming') return;
-      if (q.ok) owe(signalCost(q.value));
+      const refused = answerRefusal(shown, q);
+      if (refused !== null || !q.ok) { end('declined', refused); return; }
+      owe(signalCost(q.value));
       end('declined');
-      if (q.ok) {
-        try {
-          const r = await pay(CALL_HANGUP, { reason: 'declined' }, signalCost(q.value), id, owner, true);
-          if (!r.ok && view.callId === owner.callId) set({ error: r.error.message });
-        } catch (error) {
-          if (view.callId === owner.callId) set({ error: asActionError(error).message });
-        }
+      try {
+        const r = await pay(CALL_HANGUP, { reason: 'declined' }, signalCost(q.value), id, owner, true);
+        if (!r.ok && view.callId === owner.callId) set({ error: r.error.message });
+      } catch (error) {
+        if (view.callId === owner.callId) set({ error: asActionError(error).message });
       }
     }),
 

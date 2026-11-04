@@ -485,6 +485,8 @@ export type ActionError = {
     // `call_hangup_unpayable`: a lower signed limit the owner could raise;
     // `call_hangup_above_message_max`: above the most any message payment may carry.
     | 'call_hangup_unpayable' | 'call_hangup_above_message_max'
+    // No live price for an answer or hangup; a minute past the agreed hold. Nothing paid.
+    | 'call_price_unknown' | 'call_minutes_above_hold'
     | 'invalid'
     | 'node';
   message: string;
