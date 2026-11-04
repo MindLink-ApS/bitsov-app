@@ -22,6 +22,10 @@ export const controlEn = {
 
   "caCallHistoryReadInterrupted": "Call history read interrupted",
   "caCouldNotLoadContacts": "We could not load your contacts.",
+  "caChatNotReadYet": "These messages could not be read yet. They show once your box is ready.",
+  "caRoomsAfterBoxAnswers": "Rooms show here once your box answers.",
+  "caPorchAfterBoxAnswers": "Contacts’ cards and pages show here once your box answers.",
+  "caActivityNotComplete": "Some of your history could not be read, so this list and its totals may be incomplete.",
   "caOnThis": "On this {0}",
   "caNothingWasSent": "Nothing was sent.",
   "caThisAnswerWasNotSaved": "This answer was not saved. {0}",
@@ -1184,6 +1188,10 @@ export const controlDa: Record<keyof typeof controlEn, string> = {
 
   "caCallHistoryReadInterrupted": "Læsning af opkaldshistorikken blev afbrudt",
   "caCouldNotLoadContacts": "Vi kunne ikke hente dine kontakter.",
+  "caChatNotReadYet": "Beskederne kunne ikke hentes endnu. De vises, når din boks er klar.",
+  "caRoomsAfterBoxAnswers": "Rum vises her, når din boks svarer.",
+  "caPorchAfterBoxAnswers": "Kontakters kort og sider vises her, når din boks svarer.",
+  "caActivityNotComplete": "Noget af din historik kunne ikke hentes, så listen og dens totaler kan være ufuldstændige.",
   "caOnThis": "På denne {0}",
   "caNothingWasSent": "Der blev ikke sendt noget.",
   "caThisAnswerWasNotSaved": "Dette svar blev ikke gemt. {0}",

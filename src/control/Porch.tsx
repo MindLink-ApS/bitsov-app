@@ -17,6 +17,8 @@ type Props = {
   peers: Peer[];
   /** This node answers and makes porch reads (`porch_quote_v1`, or legacy `porch_read_v1`). */
   nodeReads: boolean;
+  /** The node and contacts have answered, so what is missing is known. */
+  known?: boolean;
   moneyBlocked: boolean;
   spend: SpendView | null;
   spendGate: JSX.Element;
@@ -123,6 +125,7 @@ export function PorchPanel(props: Props) {
       <h2>{tr('uiPorch')}</h2>
       <p class="hint">
         {tr('caReadAContactSProfileCardOrPagesStraight')}</p>
+      <Show when={props.known !== false} fallback={<p class="hint" role="status" data-porch-waiting>{tr('caPorchAfterBoxAnswers')}</p>}>
       <Show
         when={props.nodeReads}
         fallback={
@@ -157,6 +160,7 @@ export function PorchPanel(props: Props) {
             </For>
           </ul>
         </Show>
+      </Show>
       </Show>
       <Show when={props.moneyBlocked}>
         <p class="hint" data-porch-blocked>{tr('extraPaymentsAreNotReadyYet')}</p>
