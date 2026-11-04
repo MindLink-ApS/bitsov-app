@@ -18,6 +18,13 @@ const hostRefusals = () => rust('src-tauri/src').flatMap((f) => {
 // Composed elsewhere, or not sentences a person reads as they are: named here so a new refusal cannot slip by.
 const NOT_LISTED = new Set(['{} {}', 'private owner approval receipts are not supported on this platform', '{} {} not a connected peer, so the node would skip them without telling you. Rooms send only when every member is connected.']);
 
+/** Plain-text host errors a person can read: sentences, as opposed to lowercase diagnostics. */
+const plainErrors = () => ['src-tauri/src/app.rs', 'src-tauri/src/remote_owner.rs', 'src-tauri/src/remote_owner/recovery.rs'].flatMap((f) => {
+  const source = readFileSync(f, 'utf8').split('#[cfg(test)]')[0];
+  return [...source.matchAll(/(?:Err\(\s*(?:format!\(\s*)?|map_err\(\|[a-z_]+\|\s*(?:format!\(\s*)?|\.ok_or(?:_else\(\|\|)?\(?\s*(?:format!\(\s*)?)"([A-Z][^"]{14,})"/g)]
+    .map((m) => m[1].replace(/\\\s*\n\s*/g, '').replace(/\{[a-z_]*\}/g, '{}'));
+});
+
 afterEach(() => setLanguagePref('en'));
 
 describe('host refusals in Danish', () => {
@@ -27,6 +34,10 @@ describe('host refusals in Danish', () => {
       // The two the renderer already words itself (`asActionError`).
       && !/^(Hanging up this call|Money is not ready|This permission covers)/.test(m));
     expect(missing).toEqual([]);
+  });
+  it('has Danish for the sentences in the host\'s setup and repair errors', () => {
+    const known = new Set(HOST_COPY_DA.map(([en]) => en));
+    expect([...new Set(plainErrors())].filter((m) => !known.has(m))).toEqual([]);
   });
   it('keeps every value, and says nothing happened wherever the host does', () => {
     for (const [en, da] of HOST_COPY_DA) {
