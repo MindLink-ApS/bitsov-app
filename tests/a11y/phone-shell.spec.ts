@@ -25,6 +25,20 @@ for (const lang of ['en', 'da']) {
     const bounds = await tabs.boundingBox();
     expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(852);
   });
+  test(`${lang}: a tall composer stays inside the screen and its end can be reached`, async ({ page }) => {
+    await page.setViewportSize({ width: 402, height: 874 });
+    await page.goto(`${preview}?scene=list&lang=${lang}`);
+    await page.locator('[data-phone-list] [data-track^="peer:"]').first().click();
+    await page.waitForSelector('[data-composer-bar]');
+    // As tall as the first-contact limits get, without needing a real first contact.
+    await page.evaluate(() => { const tall = document.createElement('div'); tall.style.cssText = 'height:900px;flex:none'; document.querySelector('.composer')!.prepend(tall); });
+    const end = await page.locator('.composer').evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+      return { bottom: el.getBoundingClientRect().bottom, bar: el.querySelector('[data-composer-bar]')!.getBoundingClientRect().bottom };
+    });
+    expect(end.bottom).toBeLessThanOrEqual(874);
+    expect(end.bar).toBeLessThanOrEqual(874);
+  });
   test(`${lang}: first-spend is in the top layer above the tabs, with edge Back blocked`, async ({ page }) => {
     await page.goto(`${preview}?scene=first-spend&lang=${lang}`);
     await expect(page.locator('[data-first-spend-scrim]')).toBeVisible();
