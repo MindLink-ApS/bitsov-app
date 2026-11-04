@@ -1,6 +1,6 @@
 /** What video may cost on the node's caps, and the step-down ladder. */
 import { describe, expect, it } from 'vitest';
-import { BAD_WINDOWS, NODE_CAPS, PAUSE_MS, RESERVED_BYTES, RESERVED_MESSAGES, STEP_UP_AFTER_MS, TIER_DEFAULT, TIER_HIGH, VideoRateController, pacerLimits, stepsFor, tierForLimits } from '../src/control/videoRate';
+import { AFTER_STEP_HOLD_MS, BAD_WINDOWS, DELAY_BAD_MS, DELAY_SEVERE_MS, DRAIN_PAUSE_MS, NODE_CAPS, PAUSE_MS, RESERVED_BYTES, RESERVED_MESSAGES, STEP_UP_AFTER_MS, TIER_DEFAULT, TIER_HIGH, VideoRateController, pacerLimits, stepsFor, tierForLimits } from '../src/control/videoRate';
 import { FRAGMENT_HEADER_BYTES, INNER_HEADER_BYTES, MAX_FRAGMENT_DATA, MAX_INNER_BYTES } from '../src/control/videoFrame';
 import { callVideoFlag } from '../vite.config';
 import { nodeRoutedAudio, nodeRoutedVideo } from '../src/control/callFlags';
@@ -98,6 +98,37 @@ describe('the ladder', () => {
     // A window with no frames at all says nothing.
     const quiet = new VideoRateController(TIER_DEFAULT, 0);
     for (let t = 1; t < 5; t++) expect(quiet.onReport(0, 0, t).changed).toBe(false);
+  });
+
+  it('steps down on a queue building on the path, even with nothing lost', () => {
+    const rate = new VideoRateController(TIER_DEFAULT, 0);
+    expect(rate.onReport(15, 0, 1_000, DELAY_BAD_MS - 1).changed).toBe(false);
+    expect(rate.onReport(15, 0, 2_000, DELAY_BAD_MS).changed).toBe(false);
+    expect(rate.onReport(15, 0, 3_000, DELAY_BAD_MS).changed).toBe(true);
+    expect(size(rate)).toBe('320x240@10');
+    // The old queue still shows while it drains: no second step for that.
+    expect(rate.onReport(10, 0, 3_000 + AFTER_STEP_HOLD_MS - 1, DELAY_BAD_MS * 2).changed).toBe(false);
+    expect(rate.onReport(10, 0, 3_000 + AFTER_STEP_HOLD_MS - 1, DELAY_BAD_MS * 2).changed).toBe(false);
+    expect(size(rate)).toBe('320x240@10');
+  });
+
+  it('stops at once on a deep queue, lets it drain, then comes back at the lowest step', () => {
+    const rate = new VideoRateController(TIER_DEFAULT, 0);
+    expect(rate.onReport(15, 0, 1_000, DELAY_SEVERE_MS)).toMatchObject({ changed: true, paused: true, step: null });
+    expect(rate.tick(1_000 + DRAIN_PAUSE_MS - 1).paused).toBe(true);
+    expect(rate.tick(1_000 + DRAIN_PAUSE_MS)).toMatchObject({ changed: true, paused: false });
+    expect(size(rate)).toBe('240x180@7');
+  });
+
+  it('a queue that sends it back down makes it wait longer before climbing again', () => {
+    const rate = new VideoRateController(TIER_DEFAULT, 0);
+    rate.onReport(15, 0, 0, DELAY_BAD_MS);
+    rate.onReport(15, 0, 1, DELAY_BAD_MS);
+    expect(size(rate)).toBe('320x240@10');
+    // Two bad windows doubled the wait twice: 15 s is no longer enough.
+    expect(rate.tick(1 + STEP_UP_AFTER_MS).changed).toBe(false);
+    expect(rate.tick(1 + STEP_UP_AFTER_MS * 4).changed).toBe(true);
+    expect(size(rate)).toBe('320x240@15');
   });
 
   it('never goes above what the lower of the two sides asks for', () => {

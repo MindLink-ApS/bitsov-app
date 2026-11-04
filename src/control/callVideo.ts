@@ -11,9 +11,10 @@
  * ignores. Each direction uses H.264 if both sides can, otherwise VP8.
  *
  * A receiver that lost a frame shows the last good picture and asks for a key
- * frame until one comes. A sender whose host queue backs up skips frames and
- * steps down; below the lowest step video pauses and audio carries on. Nothing
- * that goes wrong here ends the call.
+ * frame until one comes. A sender whose host queue backs up, or whose receiver
+ * reports loss or a queue building on the path, skips frames and steps down;
+ * below the lowest step video pauses and audio carries on. Nothing that goes
+ * wrong here ends the call.
  */
 import {
   CODEC_H264, CODEC_VP8, Reassembler, VIDEO_FRAGMENT, VIDEO_HELLO, VIDEO_KEY_REQUEST, VIDEO_REPORT, VIDEO_STATE,
@@ -43,6 +44,8 @@ const DECODER_QUEUE_MAX = 8;
 export const AUDIO_PLAYOUT_DELAY_MS = 70;
 /** Longest a decoded picture is held back to line up with the audio. */
 const MAX_HOLD_MS = 150;
+/** Report windows the lowest arrival delay is remembered over: a minute. */
+const DELAY_FLOOR_WINDOWS = 60;
 /** Decoded pictures waiting for their time; past this the oldest goes undrawn. */
 const MAX_RENDER_QUEUE = 8;
 /** Frames the arrival-delay floor is measured over. */
@@ -192,6 +195,8 @@ export function createCallVideo(deps: CallVideoDeps): CallVideo {
   let offsets: number[] = [];
   const renderQueue: Rendering[] = [];
   let renderTimer: ReturnType<typeof setTimeout> | undefined;
+  let windowDelay = Infinity;
+  const delayFloors: number[] = [];
   let lastLost = 0;
   let lastComplete = 0;
 
@@ -454,6 +459,7 @@ export function createCallVideo(deps: CallVideoDeps): CallVideo {
       askForKey(now());
       return;
     }
+    windowDelay = Math.min(windowDelay, frame.arrivedAt - frame.captureMs);
     offsets.push(frame.arrivedAt - frame.captureMs);
     if (offsets.length > OFFSET_WINDOW) offsets = offsets.slice(-OFFSET_WINDOW);
     try {
@@ -463,6 +469,20 @@ export function createCallVideo(deps: CallVideoDeps): CallVideo {
       reassembler.reset();
       askForKey(now());
     }
+  };
+
+  /**
+   * The last window's lowest arrival delay above the lowest of the last minute.
+   * Frames that come late without being lost say a queue is building somewhere
+   * on the path, in TCP buffers no one can reorder, and audio waits in it too.
+   */
+  const takeQueueDelay = () => {
+    const low = windowDelay;
+    windowDelay = Infinity;
+    if (low === Infinity) return 0;
+    delayFloors.push(low);
+    if (delayFloors.length > DELAY_FLOOR_WINDOWS) delayFloors.shift();
+    return low - Math.min(...delayFloors);
   };
 
   const onHousekeeping = () => {
@@ -476,7 +496,8 @@ export function createCallVideo(deps: CallVideoDeps): CallVideo {
 
   const sendReport = () => {
     const seen = reassembler.stats();
-    sendControl(VIDEO_REPORT, reportBody({ complete: seen.complete - lastComplete, lost: seen.lost - lastLost, waitingForKey: seen.waitingForKey }));
+    const delayMs = takeQueueDelay();
+    sendControl(VIDEO_REPORT, reportBody({ complete: seen.complete - lastComplete, lost: seen.lost - lastLost, waitingForKey: seen.waitingForKey, delayMs }));
     lastComplete = seen.complete;
     lastLost = seen.lost;
   };
@@ -517,7 +538,7 @@ export function createCallVideo(deps: CallVideoDeps): CallVideo {
         return;
       case VIDEO_REPORT: {
         const report = parseReport(inner.body);
-        if (report) apply(rate.onReport(report.complete, report.lost, at));
+        if (report) apply(rate.onReport(report.complete, report.lost, at, report.delayMs));
         return;
       }
       case VIDEO_STATE: {
@@ -588,6 +609,8 @@ export function createCallVideo(deps: CallVideoDeps): CallVideo {
       apply(rate.setTier(Math.min(tier, peerTier) as VideoTier, now()));
     },
     linkReset: () => {
+      delayFloors.length = 0;
+      windowDelay = Infinity;
       reassembler.reset();
       lastKeyRequestAt = -Infinity;
       wantKey = true;

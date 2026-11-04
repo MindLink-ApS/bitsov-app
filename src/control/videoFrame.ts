@@ -68,7 +68,8 @@ export type Fragment = {
 export type EncodedFrame = { frameId: number; key: boolean; codec: VideoCodecId; captureMs: number; data: Uint8Array };
 
 export type VideoHello = { decodes: number; tier: number };
-export type VideoReport = { complete: number; lost: number; waitingForKey: boolean };
+/** `delayMs`: how far the last second's lowest arrival delay sits above the lowest in the last minute: a queue building on the path. */
+export type VideoReport = { complete: number; lost: number; waitingForKey: boolean; delayMs: number };
 export type VideoState = { camera: boolean; paused: boolean };
 
 const u32 = (value: number) => value >>> 0;
@@ -156,18 +157,19 @@ export const helloBody = (hello: VideoHello) => Uint8Array.of(hello.decodes & 0x
 export const parseHello = (body: Uint8Array): VideoHello | null => (body.length >= 2 ? { decodes: body[0], tier: body[1] } : null);
 
 export function reportBody(report: VideoReport): Uint8Array {
-  const out = new Uint8Array(5);
+  const out = new Uint8Array(7);
   const view = new DataView(out.buffer);
   view.setUint16(0, Math.min(report.complete, 0xffff), false);
   view.setUint16(2, Math.min(report.lost, 0xffff), false);
   out[4] = report.waitingForKey ? 1 : 0;
+  view.setUint16(5, Math.min(Math.max(0, Math.round(report.delayMs)), 0xffff), false);
   return out;
 }
 
 export function parseReport(body: Uint8Array): VideoReport | null {
-  if (body.length < 5) return null;
+  if (body.length < 7) return null;
   const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
-  return { complete: view.getUint16(0, false), lost: view.getUint16(2, false), waitingForKey: body[4] === 1 };
+  return { complete: view.getUint16(0, false), lost: view.getUint16(2, false), waitingForKey: body[4] === 1, delayMs: view.getUint16(5, false) };
 }
 
 export const stateBody = (state: VideoState) => Uint8Array.of((state.camera ? 1 : 0) | (state.paused ? 2 : 0));

@@ -8,7 +8,7 @@ import { encodeFrame } from '../src/control/mediaFrame';
 import { createCallVideo, chooseVideoCodec, KEY_MIN_INTERVAL_MS, type CallVideo, type VideoSource } from '../src/control/callVideo';
 import {
   CODEC_H264, CODEC_VP8, MAX_FRAGMENT_DATA, VIDEO_FRAGMENT, VIDEO_HELLO, VIDEO_KEY_REQUEST, VIDEO_REPORT, VIDEO_STATE,
-  encodeInner, helloBody, parseFragment, parseInner, parseHello, parseState, reportBody, stateBody,
+  encodeInner, helloBody, parseFragment, parseInner, parseHello, parseReport, parseState, reportBody, stateBody,
 } from '../src/control/videoFrame';
 import { DEPTH_HIGH } from '../src/control/videoRate';
 
@@ -336,7 +336,7 @@ describe('when video cannot keep up', () => {
     const t = await ready();
     t.video.feed(peerHello());
     await vi.advanceTimersByTimeAsync(200);
-    const report = (complete: number, lost: number) => frameOf(encodeInner(VIDEO_REPORT, 1, reportBody({ complete, lost, waitingForKey: lost > 0 })));
+    const report = (complete: number, lost: number) => frameOf(encodeInner(VIDEO_REPORT, 1, reportBody({ complete, lost, waitingForKey: lost > 0, delayMs: 0 })));
     t.video.feed(report(10, 2));
     expect(world.encoders[0].config?.framerate).toBe(15);
     t.video.feed(report(10, 2));
@@ -352,13 +352,18 @@ describe('when video cannot keep up', () => {
     const t = await ready();
     t.video.feed(peerHello());
     await vi.advanceTimersByTimeAsync(200);
-    const bad = frameOf(encodeInner(VIDEO_REPORT, 1, reportBody({ complete: 5, lost: 5, waitingForKey: true })));
-    for (let i = 0; i < 6; i++) t.video.feed(bad);
+    const bad = frameOf(encodeInner(VIDEO_REPORT, 1, reportBody({ complete: 5, lost: 5, waitingForKey: true, delayMs: 0 })));
+    // Reports count again once the hold after each step has passed.
+    for (let i = 0; i < 6; i++) {
+      t.video.feed(bad);
+      t.video.feed(bad);
+      await vi.advanceTimersByTimeAsync(3_100);
+    }
     expect(t.video.status().sendingPaused).toBe(true);
     const lastState = ofType(t.sent, VIDEO_STATE).pop()!;
     expect(parseState(parseInner(lastState)!.body)).toEqual({ camera: true, paused: true });
     const grabs = t.src.grabs;
-    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(2_000);
     expect(t.src.grabs).toBe(grabs);
     await vi.advanceTimersByTimeAsync(20_000);
     expect(t.video.status().sendingPaused).toBe(false);
@@ -429,6 +434,43 @@ function makeKeyFragment() {
   view.setUint32(10, 123);
   return encodeInner(VIDEO_FRAGMENT, 0, body);
 }
+
+describe('a queue building on the path', () => {
+  it('the receiver reports how far arrivals sit above their floor, and the sender acts on it', async () => {
+    const a = await ready({ src: null });
+    a.video.feed(peerHello());
+    // Frames captured now, arriving 40 ms later: that is the floor.
+    const arrive = (id: number, late: number) => {
+      const captured = (Date.now() - late) % 0x1_0000_0000;
+      a.video.feed(frameOf(fragmentFor(id, id === 0, captured)));
+    };
+    let id = 0;
+    for (let i = 0; i < 15; i++) { arrive(id++, 40); await vi.advanceTimersByTimeAsync(66); }
+    await vi.advanceTimersByTimeAsync(100);
+    const delays = () => ofType(a.sent, VIDEO_REPORT).map((p) => parseReport(parseInner(p)!.body)!.delayMs);
+    expect(delays()[delays().length - 1]).toBe(0);
+    // Then 300 ms later than that, for a whole window.
+    for (let i = 0; i < 16; i++) { arrive(id++, 340); await vi.advanceTimersByTimeAsync(66); }
+    expect(Math.max(...delays())).toBe(300);
+    // One late frame in a window doesn't count: the window's lowest does.
+    for (let i = 0; i < 16; i++) { arrive(id++, i === 3 ? 900 : 40); await vi.advanceTimersByTimeAsync(66); }
+    expect(delays()[delays().length - 1]).toBe(0);
+  });
+
+  it('a report of a deep queue stops the camera sending at once, and the card hears', async () => {
+    const t = await ready();
+    t.video.feed(peerHello());
+    await vi.advanceTimersByTimeAsync(200);
+    t.video.feed(frameOf(encodeInner(VIDEO_REPORT, 1, reportBody({ complete: 15, lost: 0, waitingForKey: false, delayMs: 1_000 }))));
+    expect(t.video.status().sendingPaused).toBe(true);
+    const grabs = t.src.grabs;
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(t.src.grabs).toBe(grabs);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(t.video.status().sendingPaused).toBe(false);
+    expect(world.encoders[0].config).toMatchObject({ width: 240, height: 180, framerate: 7 });
+  });
+});
 
 describe('lining up with the audio', () => {
   it('holds each picture for the audio delay, draws every one in order, whatever the frame rate', async () => {

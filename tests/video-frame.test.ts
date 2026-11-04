@@ -25,11 +25,11 @@ describe('video payload layout', () => {
 
   it('round trips every control body', () => {
     expect(parseHello(helloBody({ decodes: 3, tier: 1 }))).toEqual({ decodes: 3, tier: 1 });
-    expect(parseReport(reportBody({ complete: 15, lost: 2, waitingForKey: true }))).toEqual({ complete: 15, lost: 2, waitingForKey: true });
-    expect(parseReport(reportBody({ complete: 1e6, lost: 0, waitingForKey: false }))?.complete).toBe(0xffff);
+    expect(parseReport(reportBody({ complete: 15, lost: 2, waitingForKey: true, delayMs: 300 }))).toEqual({ complete: 15, lost: 2, waitingForKey: true, delayMs: 300 });
+    expect(parseReport(reportBody({ complete: 1e6, lost: 0, waitingForKey: false, delayMs: 1e6 }))).toMatchObject({ complete: 0xffff, delayMs: 0xffff });
     expect(parseState(stateBody({ camera: false, paused: true }))).toEqual({ camera: false, paused: true });
     expect(parseHello(new Uint8Array(1))).toBeNull();
-    expect(parseReport(new Uint8Array(4))).toBeNull();
+    expect(parseReport(new Uint8Array(6))).toBeNull();
     expect(parseState(new Uint8Array(0))).toBeNull();
     for (const type of [VIDEO_FRAGMENT, VIDEO_HELLO, VIDEO_KEY_REQUEST, VIDEO_REPORT, VIDEO_STATE]) {
       const inner = parseInner(encodeInner(type, 7, Uint8Array.of(9)));

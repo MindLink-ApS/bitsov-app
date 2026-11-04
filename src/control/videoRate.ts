@@ -64,6 +64,18 @@ export const BAD_WINDOWS = 2;
 export const STEP_UP_AFTER_MS = 15_000;
 /** How long a pause lasts before trying the lowest step again. */
 export const PAUSE_MS = 20_000;
+/** A queue this deep on the path, in report windows in a row, means video is more than it can carry. */
+export const DELAY_BAD_MS = 250;
+/**
+ * A queue this deep is already costing the audio, which waits behind it in the
+ * links' TCP buffers. Video stops at once while it drains, then tries the lowest step.
+ */
+export const DELAY_SEVERE_MS = 800;
+export const DRAIN_PAUSE_MS = 5_000;
+/** After a step down the path still shows the old queue: reports wait this long before counting again. */
+export const AFTER_STEP_HOLD_MS = 3_000;
+/** The wait before climbing doubles each time a queue sends it back down, up to this. */
+export const STEP_UP_MAX_MS = 120_000;
 
 export type RateDecision = { step: VideoStep | null; changed: boolean; paused: boolean };
 
@@ -78,6 +90,8 @@ export class VideoRateController {
   private badWindows = 0;
   private cleanSince: number;
   private pausedUntil = 0;
+  private holdUntil = 0;
+  private stepUpAfter = STEP_UP_AFTER_MS;
   private steps: readonly VideoStep[];
 
   constructor(tier: VideoTier, now: number) {
@@ -109,6 +123,7 @@ export class VideoRateController {
   private down(now: number): RateDecision {
     this.badWindows = 0;
     this.cleanSince = now;
+    this.holdUntil = now + AFTER_STEP_HOLD_MS;
     if (this.index + 1 < this.steps.length) {
       this.index++;
       return { step: this.steps[this.index], changed: true, paused: false };
@@ -124,11 +139,23 @@ export class VideoRateController {
   }
 
   /** One report window from the receiver. */
-  onReport(complete: number, lost: number, now: number): RateDecision {
+  onReport(complete: number, lost: number, now: number, delayMs = 0): RateDecision {
     const total = complete + lost;
-    const bad = lost > 0 && total > 0 && lost / total >= LOSS_BAD;
     if (this.paused) return { step: null, changed: false, paused: true };
+    if (now < this.holdUntil) return { step: this.steps[this.index], changed: false, paused: false };
+    if (delayMs >= DELAY_SEVERE_MS) {
+      this.backOff();
+      this.index = this.steps.length - 1;
+      this.paused = true;
+      this.pausedUntil = now + DRAIN_PAUSE_MS;
+      this.holdUntil = this.pausedUntil + AFTER_STEP_HOLD_MS;
+      this.badWindows = 0;
+      return { step: null, changed: true, paused: true };
+    }
+    const queued = delayMs >= DELAY_BAD_MS;
+    const bad = queued || (lost > 0 && total > 0 && lost / total >= LOSS_BAD);
     if (bad) {
+      if (queued) this.backOff();
       this.badWindows++;
       this.cleanSince = now;
       if (this.badWindows >= BAD_WINDOWS) return this.down(now);
@@ -136,6 +163,10 @@ export class VideoRateController {
     }
     this.badWindows = 0;
     return this.tick(now);
+  }
+
+  private backOff() {
+    this.stepUpAfter = Math.min(this.stepUpAfter * 2, STEP_UP_MAX_MS);
   }
 
   /** Time passes: maybe resume from a pause or step back up. */
@@ -146,7 +177,7 @@ export class VideoRateController {
       this.cleanSince = now;
       return { step: this.steps[this.index], changed: true, paused: false };
     }
-    if (this.index > 0 && now - this.cleanSince >= STEP_UP_AFTER_MS) {
+    if (this.index > 0 && now - this.cleanSince >= this.stepUpAfter) {
       this.index--;
       this.cleanSince = now;
       return { step: this.steps[this.index], changed: true, paused: false };

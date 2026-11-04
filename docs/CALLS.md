@@ -143,15 +143,20 @@ audio call on a build with the flag on is the same.
   receiver asks for a key frame until one arrives; the sender answers at most once a
   second. Key frames at the start, on request and after a step change, never on a timer.
 - **When it can't keep up.** Frames are skipped when the encoder or the host queue
-  backs up. A backlog lasting a second, or two report windows with 5% of frames lost,
-  steps down: 320x240 at 15, then 10, then 240x180 at 7, then video pauses and the card
-  says the sound carries on. It tries again after 20 s, and climbs after 15 clean
-  seconds. Nothing video does can end the call.
+  backs up. Most of a slow link's queue sits in TCP buffers between the nodes, where
+  no one can put audio first, so the receiver also reports how far arrivals sit above
+  their lowest of the last minute. Two report windows at 250 ms, a host backlog lasting a
+  second, or two windows with 5% of frames lost step down: 320x240 at 15, then 10, then
+  240x180 at 7, then video pauses and the card says the sound carries on. At 800 ms
+  video stops at once for 5 s while the queue drains, then tries the lowest step. A
+  pause at the bottom retries after 20 s. It climbs after 15 clean seconds, longer each
+  time a queue sends it back. Nothing video does can end the call.
 - **Sync.** Pictures are held to about the audio's playout delay, at most 150 ms,
   measured from the lowest recent arrival delay. Audio carries no timestamp.
 - **Not covered.** No real camera has been through this. Measured on one Mac's WKWebView
-  only: iOS, Android and Windows webviews are untested. No price exists for video: a
-  call costs the audio minute price, because a node can't tell them apart.
+  only, over regtest nodes on loopback: iOS, Android and Windows webviews and the paired
+  remote tunnel are untested. No price exists for video: a call costs the audio minute
+  price, because a node can't tell them apart.
 - **Checks.** `npm test -- tests/video-frame.test.ts tests/video-rate.test.ts
   tests/call-video.test.ts tests/node-routed-video.test.ts tests/call-video-flag.test.tsx`,
   `cargo test control::media`.
