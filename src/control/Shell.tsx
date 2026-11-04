@@ -3669,7 +3669,6 @@ function CallPanel(props: {
   openCallSettings?: () => void;
 }) {
   const [tick, setTick] = createSignal(Date.now());
-  const [answer, setAnswer] = createSignal<number | null>(null);
   const [again, setAgain] = createSignal<CallQuote | null>(null);
   const [againError, setAgainError] = createSignal<string | null>(null);
   createEffect(on(() => props.view.callId, () => { setAgain(null); setAgainError(null); }));
@@ -3698,14 +3697,9 @@ function CallPanel(props: {
     const t = setInterval(() => setTick(Date.now()), 1000);
     onCleanup(() => clearInterval(t));
   });
-  createEffect(on(() => (props.view.phase === 'incoming' ? props.view.peer : null), (peer) => {
-    setAnswer(null);
-    if (peer) void props.quote(peer).then((r) => { if (r.ok) setAnswer(signalCost(r.value)); });
-  }));
   const v = () => props.view;
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
-  // A ceiling, not what it will cost: the routing fee is usually far less.
-  const price = (m: number | null) => (m === null ? '' : ` · ${tr('caUpToAmount', fmtAmount(m))}`);
+  // No amount on Accept or Decline: they read the price again when pressed, so a figure here could not be kept.
   /** The M6 paid-minutes line is on the card (same condition as its render below). */
   const minutesShown = () => !!(props.routed && v().outgoing && v().minutes);
   return (
@@ -3818,8 +3812,8 @@ function CallPanel(props: {
         <div class="call-actions">
           <Switch>
             <Match when={v().phase === 'incoming'}>
-              <button type="button" class="primary soft money" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced} onClick={() => props.accept()}>{tr('uiAccept')}{price(answer())}</button>
-              <button type="button" class="soft" data-call-decline disabled={props.blocked || props.view.silenced} onClick={() => props.decline()}>{tr('uiDecline')}{price(answer())}</button>
+              <button type="button" class="primary soft money" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced} onClick={() => props.accept()}>{tr('uiAccept')}</button>
+              <button type="button" class="soft" data-call-decline disabled={props.blocked || props.view.silenced} onClick={() => props.decline()}>{tr('uiDecline')}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
               <Show when={v().stuck}>

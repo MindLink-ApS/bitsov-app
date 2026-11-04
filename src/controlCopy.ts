@@ -22,7 +22,6 @@ export const controlEn = {
 
   "caCallHistoryReadInterrupted": "Call history read interrupted",
   "caCouldNotLoadContacts": "We could not load your contacts.",
-  "caUpToAmount": "up to {0}",
   "caOnThis": "On this {0}",
   "caNothingWasSent": "Nothing was sent.",
   "caThisAnswerWasNotSaved": "This answer was not saved. {0}",
@@ -1185,7 +1184,6 @@ export const controlDa: Record<keyof typeof controlEn, string> = {
 
   "caCallHistoryReadInterrupted": "Læsning af opkaldshistorikken blev afbrudt",
   "caCouldNotLoadContacts": "Vi kunne ikke hente dine kontakter.",
-  "caUpToAmount": "højst {0}",
   "caOnThis": "På denne {0}",
   "caNothingWasSent": "Der blev ikke sendt noget.",
   "caThisAnswerWasNotSaved": "Dette svar blev ikke gemt. {0}",
