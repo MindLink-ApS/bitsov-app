@@ -20,7 +20,9 @@
  * a direct path to the peer app: the connection state follows the node link.
  */
 import type { CallAudio, MediaTransport } from './callAudio';
+import type { CallVideo, VideoTransport } from './callVideo';
 import type { MediaBridge, MediaLink } from './mediaBridge';
+import { isVideoFrame } from './videoFrame';
 
 export const NODE_ROUTED_MARKER = 'a=x-bitsov-media:node-routed-v1';
 const CALL_ATTRIBUTE = 'a=x-bitsov-call:';
@@ -55,6 +57,12 @@ export type NodeRoutedDeps = {
   bridge: MediaBridge;
   /** Builds the audio engine; it calls `onFatal` when it can no longer carry audio. */
   audio: (stream: MediaStream, transport: MediaTransport, onFatal: () => void) => CallAudio;
+  /**
+   * A video call also opens the video path on the same socket (flag
+   * `VITE_CALL_VIDEO`). Absent, or `null` from `build` on an audio call, and
+   * the call is an audio call in every byte. Nothing video does can end a call.
+   */
+  video?: { build: (transport: VideoTransport, track: MediaStreamTrack | null) => CallVideo | null; camera: (engine: CallVideo, track: MediaStreamTrack | null) => void };
   /**
    * The node media session for `callId` opened, or closed for good (fatal
    * audio, the node ended the link, the reconnect grace ran out, or the call
@@ -103,6 +111,8 @@ export class NodeRoutedConnection {
 
   private stream: MediaStream | null = null;
   private audio: CallAudio | null = null;
+  private video: CallVideo | null = null;
+  private videoTrack: MediaStreamTrack | null = null;
   private opened = false;
   private closed = false;
   private wasOpen = false;
@@ -123,7 +133,17 @@ export class NodeRoutedConnection {
   /** The engine's mic stream; the sender stub keeps its camera code harmless. */
   addTrack(track: MediaStreamTrack, stream?: MediaStream): RTCRtpSender {
     this.stream = stream ?? this.stream;
+    if (track.kind === 'video' && this.deps.video) {
+      this.videoTrack = track;
+      // Camera off and on come back through the engine's sender; the video engine follows.
+      return { track, replaceTrack: async (next: MediaStreamTrack | null) => this.setVideoTrack(next) } as unknown as RTCRtpSender;
+    }
     return { track, replaceTrack: async () => undefined } as unknown as RTCRtpSender;
+  }
+
+  private setVideoTrack(track: MediaStreamTrack | null) {
+    this.videoTrack = track;
+    if (this.video) this.deps.video?.camera(this.video, track);
   }
 
   async createOffer(_options?: RTCOfferOptions): Promise<RTCSessionDescriptionInit> {
@@ -178,12 +198,19 @@ export class NodeRoutedConnection {
     const audio = this.audio;
     this.audio = null;
     void audio?.close();
+    this.closeVideo();
     if (this.opened) {
       void this.deps.bridge.close();
       this.endSession();
     }
     this.connectionState = 'closed';
     this.iceConnectionState = 'closed';
+  }
+
+  private closeVideo() {
+    const video = this.video;
+    this.video = null;
+    video?.close();
   }
 
   private setState(state: RTCPeerConnectionState) {
@@ -212,7 +239,20 @@ export class NodeRoutedConnection {
       // No audio graph (no AudioContext, worklet refused): a silent "live" call is worse than an ended one.
       () => { if (this.audio === audio) this.audioFailed(); },
     );
-    const open = () => this.deps.bridge.open(callId, peer, (frame) => { if (audio && this.audio === audio) audio.feed(frame); }, (link) => this.onLink(link))
+    const sendVideo = this.deps.bridge.sendVideo;
+    const video = this.deps.video && sendVideo ? this.deps.video.build({ send: (payload) => sendVideo(payload) }, this.videoTrack) : null;
+    this.video = video;
+    const onFrame = (frame: Uint8Array) => {
+      if (video && isVideoFrame(frame)) {
+        if (this.video === video) video.feed(frame);
+        return;
+      }
+      if (audio && this.audio === audio) audio.feed(frame);
+    };
+    const onLink = (link: MediaLink) => this.onLink(link);
+    const open = () => (video
+      ? this.deps.bridge.open(callId, peer, onFrame, onLink, true)
+      : this.deps.bridge.open(callId, peer, onFrame, onLink))
       .catch(() => this.onLink({ link: 'ended', detail: 'media_link_refused' }));
     const admitted = this.deps.admitted;
     if (!admitted) { void open(); return; }
@@ -263,6 +303,7 @@ export class NodeRoutedConnection {
     this.audioReady = false;
     this.linkOpen = false;
     void audio?.close();
+    this.closeVideo();
     void this.deps.bridge.close();
     this.setState('closed');
     this.endSession();
@@ -275,11 +316,13 @@ export class NodeRoutedConnection {
         clearTimeout(this.graceTimer);
         this.graceTimer = undefined;
         this.linkOpen = true;
+        if (link.limits) this.video?.setNodeLimits(link.limits);
         this.maybeConnected();
         break;
       }
       case 'closed':
         this.linkOpen = false;
+        this.video?.linkReset();
         // The host reconnects on its own; the call stays live meanwhile.
         if (this.wasOpen && this.graceTimer === undefined) {
           this.graceTimer = setTimeout(() => { this.graceTimer = undefined; this.setState('closed'); this.endSession(); }, this.deps.linkGraceMs ?? LINK_GRACE_MS);

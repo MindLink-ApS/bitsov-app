@@ -53,7 +53,8 @@ import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
 import { callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, isCallTrafficKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { CallReportCopy } from './CallReportCopy';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
-import { nodeRoutedAudio } from './callFlags';
+import { nodeRoutedAudio, nodeRoutedVideo } from './callFlags';
+import { AUDIO_PLAYOUT_DELAY_MS, createCallVideo, trackVideoSource, type VideoStatus } from './callVideo';
 import { createNodeRoutedConnection } from './nodeRoutedConnection';
 import { waitUntilPaid, type MinutesDeps, type MinutesView } from './callMinutes';
 import { hostMediaBridge, unavailableMediaBridge } from './mediaBridge';
@@ -1407,6 +1408,10 @@ export function ControlCenter(props: Props) {
   // -> peer app through the host-owned media socket; app-to-app WebRTC media
   // is unreachable while the flag is on (its code stays for the lab profile).
   const routedCalls = nodeRoutedAudio();
+  // Node-routed video: off unless the build says otherwise. It goes the same way as the audio.
+  const routedVideo = nodeRoutedVideo();
+  const [callVideoCanvas, setCallVideoCanvas] = createSignal<HTMLCanvasElement | null>(null);
+  const [callVideoStatus, setCallVideoStatus] = createSignal<VideoStatus | null>(null);
   // M6 A2: the caller pays the call's minutes (one kind-404 block per 60 s,
   // drawn from the reservation its node made with the offer) from the
   // callee's answer on; both sides read the node's call status. The host
@@ -1428,6 +1433,7 @@ export function ControlCenter(props: Props) {
   } : undefined;
   const calls = createCallEngine({
     routed: routedCalls,
+    routedVideo,
     minutes: callMinutes,
     audioSession: appPlatform() === 'ios' ? (live) => invoke<void>('call_audio_session', { live }) : undefined,
     // A locked or backgrounded phone silences the microphone while the call would go on being paid.
@@ -1465,6 +1471,16 @@ export function ControlCenter(props: Props) {
           audio: (stream, transport, onFatal) => createCallAudio({ stream, transport, onError: onFatal,
             // Phones: a microphone the OS silenced counts towards ending the call.
             ...(isMobilePlatform() ? { onSilence: (silent: boolean) => calls.micSilent(silent) } : {}) }),
+          video: routedVideo ? {
+            build: (transport, track) => {
+              if (callView().media !== 'video') return null;
+              const canvas = document.createElement('canvas');
+              setCallVideoCanvas(canvas);
+              setCallVideoStatus(null);
+              return createCallVideo({ transport, canvas, source: track ? trackVideoSource(track) : null, onStatus: setCallVideoStatus, audioDelayMs: () => AUDIO_PLAYOUT_DELAY_MS });
+            },
+            camera: (engine, track) => engine.setSource(track ? trackVideoSource(track) : null),
+          } : undefined,
           admitted: callMinutes ? (callId, peer, closed) => waitUntilPaid(callMinutes.status, peer, callId, () => Date.now(), closed) : undefined,
           // A media session that closed for good ends its call, so no further minute is paid.
           onSession: (event) => { if (event.state === 'closed') calls.mediaClosed(event.callId); },
@@ -2484,6 +2500,8 @@ export function ControlCenter(props: Props) {
         routed={routedCalls}
         view={callView()}
         streams={callStreams()}
+        videoCanvas={routedVideo ? callVideoCanvas() : null}
+        videoStatus={routedVideo ? callVideoStatus() : null}
         nameOf={nameOf}
         quote={actions.callQuote}
         accept={() => { if (!moneyBlocked()) void calls.accept(); }}
@@ -3531,6 +3549,12 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z" /></svg>
         <Show when={props.callbackMedia}>{tr('incomingCallBack')}</Show>
       </button>
+      {/* Node-routed video, when this build has it: the same price and the same path as the audio. */}
+      <Show when={!props.callbackMedia && nodeRoutedVideo()}>
+      <button type="button" class="soft call-button icon-btn" data-call="video" disabled={off()} title={title()} aria-haspopup="dialog" aria-expanded={armed() === 'video'} onClick={() => arm('video')} aria-label={tr('uiVideoCall')}>
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="12" height="12" rx="2" /><path d="m15 10 6-3v10l-6-3z" /></svg>
+      </button>
+      </Show>
       {/* Video and meetings are app-to-app media: hidden while calls are node-routed (M6). */}
       <Show when={!props.callbackMedia && !nodeRoutedAudio()}>
       <button type="button" class="soft call-button icon-btn" data-call="video" disabled={off()} title={title()} aria-haspopup="dialog" aria-expanded={armed() === 'video'} onClick={() => arm('video')} aria-label={tr('uiVideoCall98', props.name, cost() !== null ? tr('uiUpTo', fmtAmount(cost()!)) : '')}>
@@ -3561,6 +3585,16 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
 }
 
 /** The call panel's title: the same word as the pill. */
+/** What the card says about the far picture, when there is something to say. */
+function videoStatusLine(status: VideoStatus | null | undefined): string | null {
+  if (!status) return null;
+  if (status.failed) return tr('caVideoUnavailable');
+  if (status.peerVideo === false) return tr('caVideoPeerNoVideo');
+  if (status.sendingPaused || status.peerPaused) return tr('caVideoPaused');
+  if (!status.peerCamera) return tr('caVideoPeerCameraOff');
+  return null;
+}
+
 const CALL_TITLE = CALL_STATE_WORD;
 const END_REASON: Record<string, string> = {
   get hangup() { return tr('callHungUp'); }, get declined() { return tr('callDeclined'); },
@@ -3650,6 +3684,9 @@ function CallPanel(props: {
   routed?: boolean;
   view: CallView;
   streams: { local: MediaStream | null; remote: MediaStream | null };
+  /** Node-routed video: where the far picture is drawn, and what to say about it. */
+  videoCanvas?: HTMLCanvasElement | null;
+  videoStatus?: VideoStatus | null;
   nameOf: (id: string) => string;
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
   accept: () => void;
@@ -3733,9 +3770,14 @@ function CallPanel(props: {
         </Show>
         <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting')}>
           <div class="call-videos">
-            <MediaView stream={props.streams.remote} video muted={false} kind="remote" />
+            <Show when={props.videoCanvas} fallback={<MediaView stream={props.streams.remote} video muted={false} kind="remote" />}>
+              {(canvas) => { canvas().classList.add('call-video', 'remote'); canvas().dataset.callMedia = 'remote'; return <>{canvas()}</>; }}
+            </Show>
             <MediaView stream={props.streams.local} video muted kind="local" />
           </div>
+        </Show>
+        <Show when={props.routed && v().media === 'video' && videoStatusLine(props.videoStatus)}>
+          {(line) => <p class="hint" role="status" data-call-video-status>{line()}</p>}
         </Show>
         <Show when={v().media === 'audio'}>
           <MediaView stream={props.streams.remote} video={false} muted={false} kind="remote" />
@@ -3853,7 +3895,7 @@ function CallPanel(props: {
         </div>
         {/* M6: the honest label for a node-routed call, from ringing until it ends. It stays visible until the apps encrypt end to end. */}
         <Show when={props.routed && v().phase !== 'idle' && v().phase !== 'ended'}>
-          <p class="hint" data-call-route="node">{tr('caNodeRoutedCallLabel')}</p>
+          <p class="hint" data-call-route="node">{v().media === 'video' ? tr('caNodeRoutedVideoLabel') : tr('caNodeRoutedCallLabel')}</p>
         </Show>
         {/* A short card while the call lasts: the longer notes wait behind Details (display only; same texts and amounts). */}
         <Show when={v().phase !== 'ended' && (!props.routed || v().phase !== 'idle')}>

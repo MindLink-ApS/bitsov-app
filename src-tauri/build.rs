@@ -125,6 +125,7 @@ fn main() {
             "call_hold",
             "call_media_open",
             "call_media_send",
+            "call_media_video_send",
             "call_media_close",
             "porch_quote",
             "porch_read",

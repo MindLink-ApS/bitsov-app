@@ -14,16 +14,20 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 
 export type MediaLinkState = 'connecting' | 'open' | 'closed' | 'ended';
-export type MediaLink = { link: MediaLinkState; detail: string | null };
+/** What the node allows per direction, per second. Only on the `open` of a video session. */
+export type MediaNodeLimits = { messages: number; bytes: number };
+export type MediaLink = { link: MediaLinkState; detail: string | null; limits?: MediaNodeLimits };
 
 export type MediaBridge = {
   /** Open the host socket for `callId` with `peer`, the call's counterparty (the node admits only that pair). */
-  open: (callId: string, peer: string, onFrame: (frame: Uint8Array) => void, onLink: (link: MediaLink) => void) => Promise<void>;
+  open: (callId: string, peer: string, onFrame: (frame: Uint8Array) => void, onLink: (link: MediaLink) => void, video?: boolean) => Promise<void>;
   send: (payload: Uint8Array) => void;
+  /** One video payload; resolves to how many fragments wait in the host. Only on a socket opened with `video`. */
+  sendVideo?: (payload: Uint8Array) => Promise<number>;
   close: () => Promise<void>;
 };
 
-type ChannelMessage = ArrayBuffer | Uint8Array | number[] | string | { link?: unknown; detail?: unknown };
+type ChannelMessage = ArrayBuffer | Uint8Array | number[] | string | { link?: unknown; detail?: unknown; limits?: unknown };
 
 const LINK_STATES: readonly string[] = ['connecting', 'open', 'closed', 'ended'];
 
@@ -34,9 +38,11 @@ export function parseLinkMessage(message: unknown): MediaLink | null {
     try { value = JSON.parse(message); } catch { return null; }
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const { link, detail } = value as { link?: unknown; detail?: unknown };
+  const { link, detail, limits } = value as { link?: unknown; detail?: unknown; limits?: { messages?: unknown; bytes?: unknown } };
   if (typeof link !== 'string' || !LINK_STATES.includes(link)) return null;
-  return { link: link as MediaLinkState, detail: typeof detail === 'string' ? detail : null };
+  const parsed: MediaLink = { link: link as MediaLinkState, detail: typeof detail === 'string' ? detail : null };
+  if (limits && typeof limits.messages === 'number' && typeof limits.bytes === 'number') parsed.limits = { messages: limits.messages, bytes: limits.bytes };
+  return parsed;
 }
 
 /** A binary channel message: an ArrayBuffer on desktop, a byte array on some mobile IPC paths. */
@@ -53,7 +59,7 @@ export function frameBytes(message: ArrayBuffer | Uint8Array | number[]): Uint8A
 export function hostMediaBridge(): MediaBridge {
   let current: Channel<ChannelMessage> | null = null;
   return {
-    open: async (callId, peer, onFrame, onLink) => {
+    open: async (callId, peer, onFrame, onLink, video) => {
       const channel = new Channel<ChannelMessage>();
       channel.onmessage = (message) => {
         if (current !== channel) return;
@@ -62,12 +68,15 @@ export function hostMediaBridge(): MediaBridge {
         if (link) onLink(link);
       };
       current = channel;
-      await invoke<void>('call_media_open', { call_id: callId, peer, on_frame: channel });
+      await invoke<void>('call_media_open', video
+        ? { call_id: callId, peer, on_frame: channel, video: true }
+        : { call_id: callId, peer, on_frame: channel });
     },
     send: (payload) => {
       if (!current) return;
       void invoke<void>('call_media_send', payload).catch(() => undefined);
     },
+    sendVideo: (payload) => (current ? invoke<number>('call_media_video_send', payload).catch(() => 0) : Promise.resolve(0)),
     close: async () => {
       if (!current) return;
       current = null;

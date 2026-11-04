@@ -88,7 +88,7 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   (`mediaClosed`), so its minutes stop being paid.
 - **Audio only.** With the flag on a call is placed as audio and an incoming
   video offer rings and is answered as audio: the camera is never captured
-  or sent.
+  or sent. The separate video flag below is what changes this.
 - **Checks.** `npm test -- tests/g711.test.ts tests/media-frame.test.ts
   tests/jitter-buffer.test.ts tests/node-routed-connection.test.ts
   tests/call-audio-failure.test.ts tests/call-media-flag.test.tsx` (codec
@@ -101,6 +101,60 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   headless: they prove the wiring, not audio quality, device capture, or a
   node that serves the route. Two-device acceptance against a node with the
   media route is separate evidence.
+
+## Node-routed video (build flag, off by default)
+
+`VITE_CALL_VIDEO=node` (parent build process; anything else is off) lets a
+node-routed call carry the camera. It goes the same way as the audio, on the same
+socket: app, own node, peer node, peer app. **Both nodes can read this video**, and
+the card says so in Danish and English for as long as the call lasts. No app-to-app
+media, no encryption claim. With the flag off nothing here runs: no video button, a
+video offer is answered as audio, and every byte on the socket is what it was. An
+audio call on a build with the flag on is the same.
+
+- **Wire format** (`src/control/videoFrame.ts`). A video payload is
+  `type u8 | stream_seq u32 BE | len u16 BE | body | zero padding`: the layout the
+  sealed format keeps inside its ciphertext, in the clear for now. Inner size stops at
+  3,968 bytes, which leaves the sealed form's 22 bytes of the node's 4,096 and meets its
+  128-byte padding, so sealing wraps these bytes with no format break. `0x20` is one
+  fragment (`frame_id u32, index u16, count u16, flags u8, codec u8, capture_ms u32`,
+  then data); `0x38` the codecs this app decodes and its tier; `0x39` asks for a key
+  frame; `0x3A` the receiver's report each second; `0x3B` camera state. `0x10`, `0x11`,
+  `0x30` and `0x32` stay reserved. `parsePayload` answers null for all of these, so
+  an app without video ignores them and its jitter buffer never sees them.
+- **Negotiation.** In band. Nothing is captured for sending or sent until the
+  peer's `0x38` says what it decodes. Each direction uses H.264 Baseline with in-band
+  parameter sets if the far side decodes it, otherwise VP8. WebCodecs only; a webview
+  without it says so on the card and the sound carries on.
+- **Host** (`src-tauri/src/control/media.rs`). `call_media_open` with `video` adds a
+  `VideoPath` to the session; `call_media_video_send` feeds it and answers how many
+  fragments wait. Video has its own queues, its own `seq` counter (audio's stays gapless
+  for its jitter buffer) and a token-bucket pacer, and only leaves while no audio frame
+  waits. Downward, audio is handed over first. Without `video` the session is the audio
+  session it always was.
+- **What fits** (`src/control/videoRate.ts`). The node keeps 60 packets and 12 KiB a
+  second for packets of 512 bytes or less, which is all audio. At its default 100 and
+  65,536 that leaves 40 and 53,248, and the pacer uses 85% of it: 320x240 at 15 fps, 280
+  kbit/s. With `[calls] media_max_frames_per_second = 160` and
+  `media_max_bytes_per_second = 262144` on a node, its handshake says so and that app
+  offers 640x360 at 30 fps, 1.2 Mbit/s. A call uses the lower tier of the two sides, so a
+  node left at the defaults, or one that says nothing, keeps both sides at 320x240.
+- **Loss.** A frame missing for 200 ms counts as lost: the last picture stays, and the
+  receiver asks for a key frame until one arrives; the sender answers at most once a
+  second. Key frames at the start, on request and after a step change, never on a timer.
+- **When it can't keep up.** Frames are skipped when the encoder or the host queue
+  backs up. A backlog lasting a second, or two report windows with 5% of frames lost,
+  steps down: 320x240 at 15, then 10, then 240x180 at 7, then video pauses and the card
+  says the sound carries on. It tries again after 20 s, and climbs after 15 clean
+  seconds. Nothing video does can end the call.
+- **Sync.** Pictures are held to about the audio's playout delay, at most 150 ms,
+  measured from the lowest recent arrival delay. Audio carries no timestamp.
+- **Not covered.** No real camera has been through this. Measured on one Mac's WKWebView
+  only: iOS, Android and Windows webviews are untested. No price exists for video: a
+  call costs the audio minute price, because a node can't tell them apart.
+- **Checks.** `npm test -- tests/video-frame.test.ts tests/video-rate.test.ts
+  tests/call-video.test.ts tests/node-routed-video.test.ts tests/call-video-flag.test.tsx`,
+  `cargo test control::media`.
 
 ## M6 A2: paid minutes
 
