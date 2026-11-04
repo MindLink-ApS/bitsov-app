@@ -164,5 +164,7 @@ export function blobUrl(dataB64: string, mime: string): string {
   const bin = atob(dataB64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return URL.createObjectURL(new Blob([bytes], { type: mime }));
+  // A voice note's WebM can be stored as video/webm; it is sound and plays as sound.
+  const type = mime.trim().toLowerCase().startsWith('video/webm') ? 'audio/webm' : mime;
+  return URL.createObjectURL(new Blob([bytes], { type }));
 }

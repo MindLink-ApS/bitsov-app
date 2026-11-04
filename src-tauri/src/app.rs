@@ -7250,7 +7250,7 @@ async fn do_voice_note_fetch(state: &NodeState, message_id: &str) -> Result<act:
     let row = found.ok_or_else(|| act::VOICE_NOT_STORED.to_string())?;
     let id = control::room_id(&row).map_err(|_| "the node returned an unexpected file id".to_string())?;
     let blob: act::FileBlob = get_json(state, &format!("/files/{id}")).await?;
-    if !act::is_voice_mime(&blob.mime_type) {
+    if !act::is_voice_file(&blob.filename, &blob.mime_type) {
         return Err(act::NOT_A_VOICE_NOTE.into());
     }
     Ok(blob)

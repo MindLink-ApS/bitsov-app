@@ -6272,7 +6272,7 @@ function Composer(props: {
   createEffect(() => { if (props.moneyBlocked || props.budgetStale || !line().open) setReview(null); });
 
   const disabled = () =>
-    (mode() === 'message' && !draft().trim()) || props.moneyBlocked || (spends() && !!props.budgetStale) || busy() || contactWaiting() || (mode() === 'message' && priceProblem() !== null) ||
+    (mode() === 'message' && !draft().trim()) || (mode() === 'file' && !file()) || props.moneyBlocked || (spends() && !!props.budgetStale) || busy() || contactWaiting() || (mode() === 'message' && priceProblem() !== null) ||
     (needsTouch() ? false : viaBudget()
       ? ['waiting', 'contact_used', 'total_used', 'grant_limited', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok' || stand().kind === 'off') && !ready())
       : spends() && !line().open
@@ -6282,6 +6282,7 @@ function Composer(props: {
   const disabledReason = (): string | null => {
     if (!disabled()) return null;
     if (mode() === 'message' && !draft().trim()) return tr('uiTypeAMessageFirst');
+    if (mode() === 'file' && !file()) return tr('uiChooseAFileFor', props.name);
     if (props.moneyBlocked) return tr('firstSpendOffline');
     if (spends() && props.budgetStale) return tr('firstSpendChecking');
     if (busy()) return tr('firstSpendBusy');
@@ -6328,7 +6329,16 @@ function Composer(props: {
         data-file-input
         onChange={(e) => {
           composerRevision++;
-          setFile(e.currentTarget.files?.[0] ?? null);
+          const picked = e.currentTarget.files?.[0] ?? null;
+          // Said at once, before any price or Send: this file can never go.
+          if (picked && picked.size > FILE_MAX_BYTES) {
+            e.currentTarget.value = '';
+            setFile(null);
+            setNote(tr('uiThatFileIsOver14MB', picked.name));
+            return;
+          }
+          setNote(null);
+          setFile(picked);
         }}
         aria-label={tr('uiFileToSend')}
       />
@@ -6337,7 +6347,7 @@ function Composer(props: {
         <Match when={mode() === 'file'}>
           <div class="composer-panel file-panel" data-composer-panel="file">
             <div class="panel-head">
-              <strong>{tr('uiSendAFile')}</strong>
+              <strong>{voiceFile() ? tr('uiSendAVoiceNote') : tr('uiSendAFile')}</strong>
               <button type="button" class="link" data-composer-close aria-label={tr('uiClose')} onClick={closePanel}>✕</button>
             </div>
             <div class="composer-main">
@@ -6496,6 +6506,7 @@ function Composer(props: {
         <TouchApproval peer={target()} name={props.name} priceMsat={shown().msat} actions={props.actions} />
       </Show>
       <div class="composer-main signal-bar" data-composer-bar>
+        <div class="composer-emoji-wrap">
         <button
           ref={emojiBtn}
           type="button"
@@ -6507,8 +6518,37 @@ function Composer(props: {
           disabled={mode() !== 'message'}
           onClick={() => setEmojiOpen((v) => !v)}
         >
-          🙂
+          <svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M8.5 14.5c.9 1.3 2.1 2 3.5 2s2.6-.7 3.5-2" /><path d="M9 9.5v.01M15 9.5v.01" /></svg>
         </button>
+      <Show when={emojiOpen()}>
+        <div class="emoji-picker" data-emoji-picker role="group" aria-label={tr('uiEmoji')}>
+          <For each={[...EMOJIS]}>
+            {(e) => (
+              <button
+                type="button"
+                class="emoji-pick"
+                data-emoji-pick={e}
+                onClick={() => {
+                  const el = draftInput;
+                  const start = el?.selectionStart ?? draft().length;
+                  const end = el?.selectionEnd ?? start;
+                  const { next, caret } = insertEmoji(draft(), e, start, end);
+                  composerRevision++;
+                  setDraft(next);
+                  setEmojiOpen(false);
+                  queueMicrotask(() => {
+                    el?.focus();
+                    el?.setSelectionRange(caret, caret);
+                  });
+                }}
+              >
+                {e}
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
+        </div>
         <textarea
           ref={(el) => { draftInput = el; }}
           rows={1}
@@ -6536,7 +6576,7 @@ function Composer(props: {
             disabled={starting() || busy()}
             onClick={() => void (recording() ? stopRecording() : startVoice())}
           >
-            {recording() ? `■ ${duration(recordedMs())}` : '🎙'}
+            {recording() ? `■ ${duration(recordedMs())}` : <svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3" /></svg>}
           </button>
           <div class="composer-plus-wrap">
             <button
@@ -6653,34 +6693,6 @@ function Composer(props: {
         </Show>
       </details>
       </div>
-      <Show when={emojiOpen()}>
-        <div class="emoji-picker" data-emoji-picker role="group" aria-label={tr('uiEmoji')}>
-          <For each={[...EMOJIS]}>
-            {(e) => (
-              <button
-                type="button"
-                class="emoji-pick"
-                data-emoji-pick={e}
-                onClick={() => {
-                  const el = draftInput;
-                  const start = el?.selectionStart ?? draft().length;
-                  const end = el?.selectionEnd ?? start;
-                  const { next, caret } = insertEmoji(draft(), e, start, end);
-                  composerRevision++;
-                  setDraft(next);
-                  setEmojiOpen(false);
-                  queueMicrotask(() => {
-                    el?.focus();
-                    el?.setSelectionRange(caret, caret);
-                  });
-                }}
-              >
-                {e}
-              </button>
-            )}
-          </For>
-        </div>
-      </Show>
 
       <Show when={mode() === 'message' && readmitPrice()}>
         {(p) => (
