@@ -18,12 +18,17 @@ const hostRefusals = () => rust('src-tauri/src').flatMap((f) => {
 // Composed elsewhere, or not sentences a person reads as they are: named here so a new refusal cannot slip by.
 const NOT_LISTED = new Set(['{} {}', 'private owner approval receipts are not supported on this platform', '{} {} not a connected peer, so the node would skip them without telling you. Rooms send only when every member is connected.']);
 
-/** Plain-text host errors a person can read: sentences, as opposed to lowercase diagnostics. */
+/**
+ * Every whole sentence in the host's setup and main files, however it is returned:
+ * `Err`, a closure body or a match arm. A sentence here starts with a capital and ends with a full stop.
+ */
 const plainErrors = () => ['src-tauri/src/app.rs', 'src-tauri/src/remote_owner.rs', 'src-tauri/src/remote_owner/recovery.rs'].flatMap((f) => {
   const source = readFileSync(f, 'utf8').split('#[cfg(test)]')[0];
-  return [...source.matchAll(/(?:Err\(\s*(?:format!\(\s*)?|map_err\(\|[a-z_]+\|\s*(?:format!\(\s*)?|\.ok_or(?:_else\(\|\|)?\(?\s*(?:format!\(\s*)?)"([A-Z][^"]{14,})"/g)]
-    .map((m) => m[1].replace(/\\\s*\n\s*/g, '').replace(/\{[a-z_]*\}/g, '{}'));
+  return [...source.matchAll(/"([A-Z][^"\n]{14,}[.!?])"/g)]
+    .map((m) => m[1].replace(/\{[a-z_:?]*\}/g, '{}'));
 });
+// Not read as they stand: the renderer words these itself (`asActionError`), or they aren't refusals a person sees.
+const NOT_SENTENCES = /^(Hanging up this call|Money is not ready|This permission covers|Send a message first|No pending spend)|konsensus /;
 
 afterEach(() => setLanguagePref('en'));
 
@@ -37,14 +42,16 @@ describe('host refusals in Danish', () => {
   });
   it('has Danish for the sentences in the host\'s setup and repair errors', () => {
     const known = new Set(HOST_COPY_DA.map(([en]) => en));
-    expect([...new Set(plainErrors())].filter((m) => !known.has(m))).toEqual([]);
+    expect([...new Set(plainErrors())].filter((m) => !known.has(m) && !NOT_SENTENCES.test(m))).toEqual([]);
   });
   it('keeps every value, and says nothing happened wherever the host does', () => {
     for (const [en, da] of HOST_COPY_DA) {
       const slots = en.split('{}').length - 1;
       for (let i = 0; i < slots; i++) expect(da, en).toContain(`{${i}}`);
       expect(da, en).not.toMatch(new RegExp(`\\{${slots}\\}`));
-      if (/nothing (more |new )?was|no minute was/i.test(en)) expect(da, en).toMatch(/intet/i);
+      // Says only what is sure: finalizing can commit before this check, so it names the saved key alone.
+      if (en.endsWith('Nothing was re-pinned.')) expect(da, en).toContain('gemte nøgle blev ikke ændret');
+      else if (/nothing (more |new )?was|no minute was/i.test(en)) expect(da, en).toMatch(/intet/i);
       expect(da, en).not.toBe(en);
     }
   });
