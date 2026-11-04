@@ -7977,62 +7977,49 @@ async fn do_op_end_call_with_limit(state: &NodeState, call_id: &str, max_msat: O
 /// A live call ends at its paid time plus ten seconds of grace, and a minute buys
 /// at most eighty seconds from the moment it is paid.
 const END_WAIT_POLL: Duration = if cfg!(test) { Duration::from_millis(10) } else { Duration::from_secs(2) };
-const END_WAIT_MAX: Duration = if cfg!(test) { Duration::from_millis(500) } else { Duration::from_secs(100) };
+const END_WAIT_MAX: Duration = if cfg!(test) { Duration::from_secs(5) } else { Duration::from_secs(100) };
 
 /// The owner's End. A hangup refused before any payment (the callee is offline,
 /// say) cannot reach anyone yet, and no spend is pending for it. The node ends
 /// the call by itself when its paid time runs out, so End waits for that, asking
-/// the node and holding no lock, then asks once more: the node's "no live call"
-/// is the evidence that closes the admission. Nothing is paid while it waits. A
-/// read that fails, or a call still open when the wait runs out (a read in
-/// progress included), leaves the refusal as the answer, and "Try ending it
-/// again" stays on the card.
+/// the node and holding no lock. The node showing the call ended is the evidence
+/// that closes the admission, so End writes that down and asks for nothing more.
+/// A further request could only be refused, by the node or by anything that
+/// changed meanwhile (a pause, an approval or budget gone), and none of those is a
+/// reason to keep a call open that is over. Nothing is sent or paid, and no other
+/// pending result is touched. A read that fails, or a call still open when the wait
+/// runs out (a read in progress included), leaves the refusal as the answer, and
+/// "Try ending it again" stays on the card.
 async fn do_op_end_call_when_node_ends(state: &NodeState, call_id: &str, max_msat: Option<u64>) -> Result<spend_journal::OpView, ActionError> {
     let refused = do_op_end_call_with_limit(state, call_id, max_msat).await;
     let Err(error) = &refused else { return refused };
     if error.code != "not_dispatched" { return refused; }
-    let Some(peer) = refused_hangup_peer(state, error.operation_id.as_deref()).await else { return refused };
+    let Some(offer) = refused_hangup_admission(state, error.operation_id.as_deref()).await else { return refused };
     let deadline = tokio::time::Instant::now() + END_WAIT_MAX;
     loop {
-        match tokio::time::timeout_at(deadline, read_call_status(state, &peer, call_id)).await {
+        match tokio::time::timeout_at(deadline, read_call_status(state, &offer.peer, call_id)).await {
             Ok(Ok(Some(status))) if status.state != "ended" => {}
             Ok(Ok(_)) => break,
             Ok(Err(_)) | Err(_) => return refused,
         }
         tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + END_WAIT_POLL)).await;
     }
-    let closing = do_op_end_call_with_limit(state, call_id, max_msat).await;
-    match &closing {
-        // The approval ran out during the wait, so that request never left the
-        // host. It was only asking for the node's word, and the node has given
-        // it: it shows this call ended. No approval is needed to write that down.
-        Err(error) if matches!(error.code, "spend_expired" | "spend_locked" | "budget_needed") => {
-            record_call_ended_by_node(state, call_id).await?;
-            do_op_end_call_with_limit(state, call_id, max_msat).await
-        }
-        _ => closing,
+    // Under the same identity that read the call: another node's word closes nothing.
+    if state.node_id.lock().unwrap().as_deref() != Some(offer.node_id.as_str()) { return refused; }
+    {
+        let _money = state.money.lock().await;
+        locked_spend_journal(state)?.observe_call(&offer, true)?;
     }
+    do_op_end_call_with_limit(state, call_id, max_msat).await
 }
 
-/// The node shows this call ended: its admission is closed, as for their hangup.
-/// Sends nothing and settles nothing.
-async fn record_call_ended_by_node(state: &NodeState, call_id: &str) -> Result<(), ActionError> {
+/// The admission End's refused hangup belonged to, from the host's own record.
+async fn refused_hangup_admission(state: &NodeState, operation_id: Option<&str>) -> Option<spend_journal::OperationRecord> {
     let _money = state.money.lock().await;
-    let journal = locked_spend_journal(state)?;
-    let node_id = state.node_id.lock().unwrap().clone()
-        .ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
-    let records = journal.call_operations_for(&node_id, None, Some(call_id))?;
-    let offer = records.iter().filter(|r| r.call_id.as_deref() == Some(call_id) && matches!(r.kind.as_str(), "call_offer" | "call_recovery"))
-        .max_by_key(|r| (r.created_ms, &r.op_id))
-        .ok_or_else(|| ActionError::new("call_not_found", "No outgoing admission is recorded for this call."))?;
-    journal.observe_call(offer, true)
-}
-
-/// Whose call End's refused hangup belonged to, from the host's own record.
-async fn refused_hangup_peer(state: &NodeState, operation_id: Option<&str>) -> Option<String> {
-    let _money = state.money.lock().await;
-    let record = locked_spend_journal(state).ok()?.operation_record(operation_id?).ok()??;
-    (record.kind == "call_hangup").then_some(record.peer)
+    let journal = locked_spend_journal(state).ok()?;
+    let hangup = journal.operation_record(operation_id?).ok()??;
+    if hangup.kind != "call_hangup" { return None; }
+    journal.operation_record(hangup.parent_op.as_deref()?).ok()?
 }
 
 /// No new minute of this call is issued, for this node identity. Takes no
@@ -18476,9 +18463,8 @@ mod control_act_tests {
         assert_eq!((record["kind"].as_str(), record["state"].as_str()), (Some("call_block"), Some("unpaid")));
 
         let end = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.expect("End closes");
-        assert_eq!((end.kind.as_str(), end.state), ("call_hangup", spend_journal::OperationState::Unpaid));
-        assert_eq!(ledger_record(&node, &end.op_id)["reason"], "call_not_live");
-        assert_eq!(hangups(&node), 2, "the refused hangup, then the one the node answers with no live call");
+        assert_eq!(end.op_id, offer, "the admission, closed");
+        assert_eq!(hangups(&node), 1, "the refused hangup, and nothing more once the node shows the call ended");
         assert!(!admission_is_open(&node, &offer));
         assert!(pending(&node).is_none());
         assert_eq!(budget_now(&node.state).unsettled_msat, 0);
@@ -18669,6 +18655,107 @@ mod control_act_tests {
         assert_eq!(paid.lock().unwrap().pays, pays, "nothing was paid");
         assert!(!admission_is_open(&node, &offer));
         assert!(pending(&node).is_none());
+    }
+
+    /// A node that takes End's first hangup as offline, then ends the call when told.
+    /// `broken`: reads and quotes End's last request would need have stopped answering.
+    fn node_ending_after_an_offline_hangup(ended: Arc<AtomicBool>, broken: Arc<AtomicBool>) -> (Routes, Arc<Mutex<OpsNode>>) {
+        let (routes, paid) = node_ending_the_call(ended.clone());
+        (Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p == "/messages/compose" && body["kind"] == 403 && !ended.load(Ordering::SeqCst) {
+                return recipient_offline_reply(&body);
+            }
+            if broken.load(Ordering::SeqCst) && (p == "/status" || p.starts_with("/pricing") || p.starts_with("/pair")) {
+                return (500, "{}".into());
+            }
+            routes(m, p, b)
+        }), paid)
+    }
+
+    /// End's hangup was refused as offline and it is reading the call.
+    async fn until_end_is_waiting(node: &Fake, reads_before: usize) {
+        let reads = |node: &Fake| node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        for _ in 0..400 {
+            if hangups(node) > 0 && reads(node) > reads_before { return; }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!("End never began to wait");
+    }
+
+    /// Once the node shows the call ended, the admission closes whatever became of
+    /// the owner's authority meanwhile. Each of these would refuse a further request
+    /// before it leaves the host, and none of them is a reason to keep the call open.
+    #[tokio::test]
+    async fn the_nodes_word_closes_the_admission_whatever_refuses_a_further_request() {
+        for case in ["paused", "approval off", "contact left the book", "contact budget used up", "daily total used up", "quote unreadable", "connection waiting"] {
+            let ended = Arc::new(AtomicBool::new(false));
+            let broken = Arc::new(AtomicBool::new(false));
+            let (routes, paid) = node_ending_after_an_offline_hangup(ended.clone(), broken.clone());
+            let node = minute_ready(routes).await;
+            let offer = offer_op(&node);
+            let pays = paid.lock().unwrap().pays;
+            let before = node.targets().iter().filter(|t| t.contains("/calls?")).count();
+            let (end, ()) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+                until_end_is_waiting(&node, before).await;
+                match case {
+                    "paused" => with_book(&node.state, true, |b| { b.paused = true; Ok(()) }).unwrap(),
+                    "approval off" => node.state.autopay.lock().unwrap().lock(),
+                    "contact left the book" => with_book(&node.state, true, |b| b.set_limit(A, false, 0)).unwrap(),
+                    "contact budget used up" => with_book(&node.state, true, |b| b.set_limit(A, false, 1)).unwrap(),
+                    "daily total used up" => with_book(&node.state, true, |b| { b.set_ceiling(1); Ok(()) }).unwrap(),
+                    "quote unreadable" => broken.store(true, Ordering::SeqCst),
+                    "connection waiting" => node.state.remote_retry.failed(&remote_access::RemoteError::DeviceUnavailable),
+                    _ => unreachable!(),
+                }
+                ended.store(true, Ordering::SeqCst);
+            });
+            let end = end.unwrap_or_else(|error| panic!("{case}: End closes: {}", error.code));
+            assert_eq!(end.op_id, offer, "{case}: the admission, closed");
+            assert!(!admission_is_open(&node, &offer), "{case}");
+            assert_eq!(hangups(&node), 1, "{case}: nothing more was asked of the node");
+            assert_eq!(paid.lock().unwrap().pays, pays, "{case}: nothing was paid");
+            assert!(pending(&node).is_none(), "{case}");
+        }
+    }
+
+    /// Another send's unknown result, from while End waited, stays exactly as it was.
+    #[tokio::test]
+    async fn closing_on_the_nodes_word_leaves_another_sends_pending_result_alone() {
+        let ended = Arc::new(AtomicBool::new(false));
+        let (routes, paid) = node_ending_after_an_offline_hangup(ended.clone(), Arc::new(AtomicBool::new(false)));
+        let lose = Arc::new(AtomicBool::new(false));
+        let losing = lose.clone();
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if losing.load(Ordering::SeqCst) && p == "/messages/compose" && body["kind"] != 403 {
+                return (502, r#"{"error":"no answer"}"#.into());
+            }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let pays = paid.lock().unwrap().pays;
+        let before = node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let (end, sent) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+            until_end_is_waiting(&node, before).await;
+            lose.store(true, Ordering::SeqCst);
+            let sent = do_message_send(&node.state, A, false, "hi", 7000, None).await;
+            ended.store(true, Ordering::SeqCst);
+            sent
+        });
+        assert_eq!(sent.unwrap_err().code, "spend_unknown");
+        let held = pending(&node).expect("the message's result stays pending");
+        let unsettled = budget_now(&node.state).unsettled_msat;
+        assert!(unsettled > 0);
+        let end = end.expect("End closes");
+        assert_eq!(end.op_id, offer);
+        assert!(!admission_is_open(&node, &offer));
+        let after = pending(&node).expect("still pending");
+        assert_eq!((after.id, after.operation_id.clone()), (held.id, held.operation_id.clone()));
+        assert_eq!(ledger_record(&node, held.operation_id.as_deref().unwrap())["state"], "unknown");
+        assert_eq!(budget_now(&node.state).unsettled_msat, unsettled);
+        assert_eq!(hangups(&node), 1);
+        assert_eq!(paid.lock().unwrap().pays, pays);
     }
 
     /// Their word is needed: an approval that runs out on a call the node still
