@@ -21,7 +21,7 @@ const minutes = (patch: Partial<MinutesView> = {}): MinutesView => ({
   agreedBlockMsat: 1000, reservationMaxMsat: 240_000,
   reservation: { reserved_msat: 60_000, spent_msat: 5_050, remaining_msat: 0, per_block_msat: 1000, per_block_fee_msat: 10, max_call_minutes: 60, released_msat: 54_950, closed: true },
   confirmed: true, confirming: false, holdError: null, paidUntilMs: ENDED_AT, blocks: 5, receiptsMsat: 5_050,
-  paying: false, lostMinute: false, stop: null, settled: true, final: true, ...patch,
+  paying: false, lostMinute: false, undeliveredMinute: false, stop: null, settled: true, final: true, ...patch,
 });
 const ended = (patch: Partial<CallView> = {}): CallView => ({
   ...IDLE, phase: 'ended', state: 'ended', peer: PEER, callId: CALL_ID, media: 'audio', outgoing: true,

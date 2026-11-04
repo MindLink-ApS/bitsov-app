@@ -9,7 +9,7 @@ import { FirstSpendSheet, type FirstSpendChoice } from './FirstSpendSheet';
 import { createAmountDraft } from './amountDraft';
 import { t as tr, possessive, languagePref, setLanguagePref, type LanguagePref } from '../i18n';
 import { CallRepairs } from './CallRepairs';
-import { knownPaid, provenUnpaid } from './paymentOutcome';
+import { checkFacts, type PaymentFacts, provenUnpaid } from './paymentOutcome';
 import { AddDevice } from '../onboarding/AddDevice';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
 import { ConnectionCard, nextLastCall, type NodeAnswer, type StunSource, type TrackedCall } from './ConnectionCard';
@@ -556,7 +556,9 @@ export function ControlCenter(props: Props) {
   const [pendingRevision, setPendingRevision] = createSignal(0);
   const [reconciled, setReconciled] = createSignal(0);
   let paymentGeneration = 0;
-  const [lastReconciliation, setLastReconciliation] = createSignal<{ text: string } | null>(null);
+  // A check or dismissal, from any card, that settled what a payment is. `pendingId`:
+  // the record the host still holds for it, which only stopping retries or End releases.
+  const [lastReconciliation, setLastReconciliation] = createSignal<Reconciliation | null>(null);
   const [artifacts, setArtifacts] = createStore<Record<string, Artifact[]>>({});
   // Rooms (room.ts): what each room send did this session, by room id; the New room picker.
   const [roomSends, setRoomSends] = createStore<Record<string, RoomSend[]>>({});
@@ -1657,9 +1659,10 @@ export function ControlCenter(props: Props) {
       if (generation !== paymentGeneration || revision !== pendingRevision()) {
         return { ok: false, error: { code: 'spend_unknown', message: tr('caANewerPaymentStartedCheckPendingResultAgain') } };
       }
-      if (r.ok) {
-        setReconciled((v) => v + 1);
-        setLastReconciliation({ text: r.value });
+      const facts = checkFacts(r);
+      if (facts.paymentKnown) {
+        if (facts.fenceCleared) setReconciled((v) => v + 1);
+        setLastReconciliation({ ...facts, text: r.ok ? r.value : r.error.message, pendingId: r.ok ? null : r.error.pending_id ?? null });
         void loadBudget();
         void loadWallet();
       }
@@ -1875,6 +1878,8 @@ export function ControlCenter(props: Props) {
       void loadBudget();
       if (r.ok) {
         setPendingRevision((v) => v + 1);
+        setReconciled((v) => v + 1);
+        setLastReconciliation({ paymentKnown: true, fenceCleared: true, text: r.value, pendingId: null });
         // Every card for that record ends, wherever it was stopped from.
         for (const key of Object.keys(artifacts)) {
           for (const a of artifacts[key] ?? []) {
@@ -4626,10 +4631,12 @@ function AmountField(props: { data: 'pay' | 'request'; label: string; value: str
   );
 }
 
+type Reconciliation = PaymentFacts & { text: string; pendingId: string | null };
+
 /** A direct payment owned by one call card; never enters the call engine. */
 function InCallPay(props: {
   callId: string;
-  reconciliation: { text: string } | null;
+  reconciliation: Reconciliation | null;
   view: CallView;
   nameOf: (id: string) => string;
   lightningId: string | null;
@@ -4661,35 +4668,39 @@ function InCallPay(props: {
   // check. Only a new check clears an existing unknown; old checks cannot clear
   // a later payment, and a failed check never changes this signal.
   createEffect(on(() => props.reconciliation, checked => {
-    if (checked && result()?.state === 'unknown') setResult({ state: 'checked', text: checked.text });
+    if (checked?.fenceCleared && result()?.state === 'unknown') setResult({ state: 'checked', text: checked.text });
   }, { defer: true }));
   usePairingActivity(() => expanded() || busy() || approving());
   // Their hangup ended the call while a minute was being paid, and nothing was
-  // ended at the host for it: its pending result holds every paid action. The
-  // same read-only check as the link below runs once by itself, and the line and
-  // the link stay only if it could not settle the result. End answers for itself.
-  const [minuteChecked, setMinuteChecked] = createSignal(false);
-  const minuteLost = () => props.view.callId === props.callId && props.view.phase === 'ended'
-    && props.view.minutes?.lostMinute === true && !minuteChecked()
+  // ended at the host for it: its pending record holds every paid action. The
+  // same check as the link below runs once by itself. The line and an action stay
+  // until the host has let go of that record. End answers for itself.
+  const [minuteSettled, setMinuteSettled] = createSignal(false);
+  // The pending record to stop retrying: the check found the minute paid, not delivered.
+  const [minuteStopId, setMinuteStopId] = createSignal<string | null>(null);
+  const minuteOpen = () => props.view.callId === props.callId && props.view.phase === 'ended'
+    && (props.view.minutes?.lostMinute === true || props.view.minutes?.undeliveredMinute === true) && !minuteSettled()
     && (props.view.close === null || props.view.close.status === 'refused');
-  const minuteKnown = (text: string) => {
-    if (!minuteLost()) return;
-    setMinuteChecked(true);
+  const minuteUndelivered = () => minuteStopId() !== null || props.view.minutes?.undeliveredMinute === true;
+  const minuteClosed = (text: string) => {
+    if (!minuteOpen()) return;
+    setMinuteSettled(true);
     setResult({ state: 'checked', text });
   };
   // The call's view updates about once a second after it ends; this runs for one
   // of those only. A failed check stays failed until the owner asks again.
   let minuteCheckStarted = false;
   createEffect(() => {
-    if (!minuteLost() || minuteCheckStarted) return;
+    if (!minuteOpen() || minuteCheckStarted) return;
     minuteCheckStarted = true;
-    void props.actions.reconcile().then((outcome) => {
-      // A paid result is a known one too, and the check has already accounted it.
-      if (!outcome.ok && knownPaid(outcome.error.code)) minuteKnown(outcome.error.message);
-    });
+    void props.actions.reconcile();
   });
-  // A successful check from anywhere has settled it, as for an unknown payment below.
-  createEffect(on(() => props.reconciliation, (checked) => { if (checked) minuteKnown(checked.text); }, { defer: true }));
+  // Any card's check or dismissal counts here. The line goes only when the host has
+  // let go of the record: a payment known and still held keeps it, with its action.
+  createEffect(on(() => props.reconciliation, (checked) => {
+    if (checked?.fenceCleared) minuteClosed(checked.text);
+    else if (checked?.pendingId) setMinuteStopId(checked.pendingId);
+  }, { defer: true }));
   // A new unit or mapping requires a new amount; never reinterpret a visible draft.
   createEffect(on(destination, () => setAmount(''), { defer: true }));
   createEffect(() => { if (!live()) { setExpanded(false); setAmount(''); } });
@@ -4751,9 +4762,9 @@ function InCallPay(props: {
     </Show>
     <Show when={busy()}><p class="hint" role="status" data-call-pay-status="sending">{tr('uiSendingPayment')}</p></Show>
     <Show when={result()}>{(r) => <p class={r().state === 'failed' ? 'err-note' : 'hint'} role="status" data-call-pay-status={r().state}>{r().text}</p>}</Show>
-    <Show when={minuteLost()}><p class="err-note" role="alert" data-call-lost-minute>{tr('caLostMinuteWarning')}</p></Show>
-    <Show when={props.pending || result()?.state === 'unknown' || minuteLost()}>
-      <Reconcile actions={props.actions} hasPending onPaidResult={minuteKnown} onChecked={(text) => {
+    <Show when={minuteOpen()}><p class="err-note" role="alert" data-call-lost-minute>{tr(minuteUndelivered() ? 'caUndeliveredMinuteWarning' : 'caLostMinuteWarning')}</p></Show>
+    <Show when={props.pending || result()?.state === 'unknown' || minuteOpen()}>
+      <Reconcile actions={props.actions} hasPending={!(minuteOpen() && minuteStopId())} stopId={minuteOpen() ? minuteStopId() : null} onGone={minuteClosed} onChecked={(text) => {
         if (result()?.state === 'unknown') setResult({ state: 'checked', text });
       }} />
     </Show>
@@ -7074,13 +7085,14 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
 }
 
 /** Read-only: match an unknown outcome to the node's own records. Never re-sends. */
-function Reconcile(props: { actions: Actions; hasPending?: boolean; onChecked?: (text: string) => void; onPaidResult?: (text: string) => void }) {
+function Reconcile(props: { actions: Actions; hasPending?: boolean; onChecked?: (text: string) => void; onGone?: (text: string) => void; stopId?: string | null }) {
   const [result, setResult] = createSignal<string | null>(null);
   const [checking, setChecking] = createSignal(false);
   usePairingActivity(checking);
   // Paid, not delivered: the owner may stop retrying (it dispatches nothing).
   // The record the check showed: Stop retrying names it, never whatever is pending later.
   const [undelivered, setUndelivered] = createSignal<string | null>(null);
+  const stopId = () => undelivered() ?? props.stopId ?? null;
   createEffect(on(props.actions.pendingRevision, () => {
     setUndelivered(null);
     setResult(null);
@@ -7095,16 +7107,17 @@ function Reconcile(props: { actions: Actions; hasPending?: boolean; onChecked?: 
       setResult(outcome.ok ? outcome.value : outcome.error.message);
       setUndelivered(!outcome.ok && outcome.error.code === 'undelivered_pending' ? outcome.error.pending_id ?? null : null);
       if (outcome.ok) props.onChecked?.(outcome.value);
-      else if (knownPaid(outcome.error.code)) props.onPaidResult?.(outcome.error.message);
     } finally { setChecking(false); }
   };
   const stop = async () => {
     if (checking()) return;
     setChecking(true);
     try {
-      const outcome = await props.actions.stopRetrying(null, undelivered());
+      const outcome = await props.actions.stopRetrying(null, stopId());
       setResult(outcome.ok ? outcome.value : outcome.error.message);
       setUndelivered(null);
+      // Already gone: the host no longer holds that record.
+      if (!outcome.ok && outcome.error.code === 'retry_unavailable') props.onGone?.(outcome.error.message);
     } finally { setChecking(false); }
   };
   return (
@@ -7114,7 +7127,7 @@ function Reconcile(props: { actions: Actions; hasPending?: boolean; onChecked?: 
           {tr('uiCheckPendingResult390')}
         </button>
       </Show>
-      <Show when={undelivered()}>
+      <Show when={stopId()}>
         <button type="button" class="link" data-stop-retrying disabled={checking()} onClick={() => void stop()}>
           {tr('uiStopRetrying')}
         </button>

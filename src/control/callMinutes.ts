@@ -21,7 +21,7 @@
  * unknown, and reports every reason it stops.
  */
 import { t as tr } from '../i18n';
-import { knownPaid, provenUnpaid } from './paymentOutcome';
+import { provenUnpaid, sendFacts } from './paymentOutcome';
 import { asActionError } from './state';
 import type { ActionError, CallReceipt, CallReservation, CallStatus } from './types';
 
@@ -114,6 +114,8 @@ export type MinutesView = {
    * admission by itself), so its pending result holds every paid action until checked.
    */
   lostMinute: boolean;
+  /** The same, with the minute paid and not delivered: known money, and still pending at the host. */
+  undeliveredMinute: boolean;
   stop: MinutesStop | null;
   /** The call ended and the node closed the reservation (or no longer lists the call). */
   settled: boolean;
@@ -164,7 +166,7 @@ export function createCallMinutes(opts: {
   let view: MinutesView = {
     agreedBlockMsat: opts.agreedBlockMsat, reservationMaxMsat: opts.reservationMaxMsat,
     reservation: null, confirmed: false, confirming: false, holdError: null,
-    paidUntilMs: null, blocks: 0, receiptsMsat: 0, paying: false, lostMinute: false, stop: null, settled: false, final: false,
+    paidUntilMs: null, blocks: 0, receiptsMsat: 0, paying: false, lostMinute: false, undeliveredMinute: false, stop: null, settled: false, final: false,
   };
   /** Paying blocks (between answer and end). */
   let running = false;
@@ -267,7 +269,8 @@ export function createCallMinutes(opts: {
     inFlight = false;
     // A receipt is counted even if the call ended meanwhile: it was paid.
     emit({ paying: false, ...(r.ok ? { receiptsMsat: view.receiptsMsat + r.value.total_msat, blocks: Math.max(view.blocks, seq + 1) }
-      : !running && !provenUnpaid(r.error.code) && !knownPaid(r.error.code) ? { lostMinute: true } : {}) });
+      : running || sendFacts(r.error.code).fenceCleared ? {}
+      : sendFacts(r.error.code).paymentKnown ? { undeliveredMinute: true } : { lostMinute: true }) });
     if (!running) return;
     if (r.ok) { attempts = 0; passingAttempts = 0; void tick(); return; }
     const code = r.error.code;
