@@ -3223,6 +3223,28 @@ describe('calls in the shell', () => {
     expect($('[data-call-close]')).toBeNull();
   });
 
+  it('a refused call and a cancelled call each leave one quiet line in the chat, with no amount', async () => {
+    let refuse = true;
+    stubHost({ call_signal: (args) => {
+      if (refuse) throw { code: 'call_needs_node_upgrade', message: 'Upgrade your node before making calls. Nothing was paid.' };
+      return { message_id: 'sig', kind: args!.kind, amount_msat: 1000, total_msat: 6000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+    } });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect(text('[data-call-log="not_through"]')).toMatch(/^The call did not go through/));
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel]')).toBeNull());
+    expect(mount.querySelectorAll('[data-call-log]')).toHaveLength(1);
+    refuse = false;
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-hangup]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-call-log]')).toHaveLength(2));
+    for (const line of mount.querySelectorAll('[data-call-log]')) expect(line.textContent).not.toMatch(/sat|paid|betalt/i);
+  });
+
   it('the STUN server is an owner setting, validated, with a note that it contacts that server', async () => {
     stubHost();
     await openShell();

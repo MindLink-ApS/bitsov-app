@@ -1,5 +1,6 @@
 import { IncomingCallAlerts } from './IncomingCallAlerts';
 import { createMissedCalls } from './missedCalls';
+import { callLogEntry, createCallLog } from './callLog';
 import { createPhoneLayout, createPhoneNavigationGuard, PhoneTabs, type PhoneTab } from './PhoneShell';
 import { MediaView } from './CallMedia';
 import { createMessageNotifications, NotificationSettings } from './messageNotifications';
@@ -666,6 +667,8 @@ export function ControlCenter(props: Props) {
 
   const ownId = () => props.ownId ?? overview()?.node_id ?? '';
   const missedCalls = createMissedCalls(ownId);
+  const callLog = createCallLog(ownId);
+  let loggedView: CallView = CALL_IDLE;
   const peerById = createMemo(() => new Map(peers().map((p) => [p.node_id.toLowerCase(), p])));
   const caps = createMemo(() => organismCaps(overview()), undefined, { equals: (a, b) => a.energy === b.energy && a.membrane === b.membrane });
   /** First contacts at the door this session (never added to peers), newest first. */
@@ -1472,6 +1475,9 @@ export function ControlCenter(props: Props) {
       : (config) => new RTCPeerConnection(config),
     now: () => Date.now(),
     onView: view => {
+      const logged = callLogEntry(loggedView, view, Date.now());
+      loggedView = view;
+      if (logged) callLog.add(logged);
       setCallView(view);
       if (view.phase === 'incoming' && !view.silenced && view.callId && view.peer) notifications?.call(`${view.peer}:${view.callId}`, nameOf(view.peer), () => isIncoming(view.peer!, view.callId!), () => revealIncoming(view.callId!, view.peer!));
     },
@@ -2252,7 +2258,7 @@ export function ControlCenter(props: Props) {
                     doorstep={t().kind === 'peer' ? doorstep[(t() as { id: string }).id] : undefined}
                     members={t().kind === 'room' ? members[(t() as { id: string }).id] ?? null : null}
                     messages={threads.t[trackKey(t())] ?? []}
-                    artifacts={[...(artifacts[trackKey(t())] ?? []), ...missedCalls.records().filter(r => t().kind === 'peer' && `peer:${r.peer}` === trackKey(t()))]}
+                    artifacts={[...(artifacts[trackKey(t())] ?? []), ...[...missedCalls.records(), ...callLog.records()].filter(r => t().kind === 'peer' && `peer:${r.peer.toLowerCase()}` === trackKey(t()).toLowerCase())]}
                     fresh={threads.fresh}
                     seenEntrances={seenEntrances}
                     deliveries={deliveries}
@@ -4307,6 +4313,19 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
   );
 }
 
+const callLogText = (outcome: Extract<Artifact, { type: 'call-log' }>['outcome'], durationMs?: number): string => {
+  switch (outcome) {
+    case 'connected': return tr('caLogConnected', duration(durationMs ?? 0));
+    case 'no_answer': return tr('caLogNoAnswer');
+    case 'declined': return tr('caLogDeclined');
+    case 'busy': return tr('caLogBusy');
+    case 'ended_early': return tr('caLogEndedEarly');
+    case 'not_through': return tr('caLogNotThrough');
+    case 'you_declined': return tr('caLogYouDeclined');
+    case 'failed': return tr('caLogFailed');
+  }
+};
+
 function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>; onStop?: (pendingId: string | null) => Promise<unknown>; onRestore?: (id: string) => void; onDiscard?: (id: string) => void }) {
   return (
     <Switch>
@@ -4318,6 +4337,15 @@ function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: 
             <time class="stamp" datetime={new Date(call().at).toISOString()}>{clock(call().at)}</time>
             <Show when={props.callActions}>{actions => <CallButtons peer={call().peer} name={props.nameOf(call().peer)}
               blocked={props.moneyBlocked} actions={actions()} callbackMedia={call().media} />}</Show>
+          </article>;
+        }}
+      </Match>
+      <Match when={props.a.type === 'call-log' && props.a}>
+        {a => {
+          const call = () => a() as Extract<Artifact, { type: 'call-log' }>;
+          return <article class="call-log" data-call-log={call().outcome} data-call-log-direction={call().direction}>
+            <span class="call-log-text">{callLogText(call().outcome, call().durationMs)}</span>
+            <time class="stamp" datetime={new Date(call().at).toISOString()}>{clock(call().at)}</time>
           </article>;
         }}
       </Match>
