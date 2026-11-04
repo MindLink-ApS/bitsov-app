@@ -5486,6 +5486,14 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         if let Some(id) = &charged { close_charge(state, id, Some(accounted), pending.target.as_ref())?; }
         return Err(ActionError::undelivered(paid, retry_safe).for_pending(&pending.id));
     }
+    // A minute only: their node is catching up, and this node's own reply says the
+    // attempt holds no payment. A later try is a new operation.
+    if fresh_attempt && block
+        && operation_id.as_deref().is_some_and(|id| act::peer_not_ready_unpaid(status.as_u16(), &text, id)) {
+        abandon(&journal)?;
+        release(state)?;
+        return Err(ActionError::new("peer_not_ready", act::PEER_NOT_READY_MINUTE));
+    }
     if !status.is_success() {
         if op_error.as_ref().is_some_and(|e| spend_journal::outcome(e.state.as_deref().unwrap_or_default()) == spend_journal::Outcome::PaymentUnknown) {
             return Err(ActionError::new("payment_unknown", act::PAYMENT_UNKNOWN).for_pending(&pending.id));
@@ -17247,6 +17255,101 @@ mod control_act_tests {
             assert_eq!(paid.lock().unwrap().pays, 2);
             assert!(pending(&node).is_none());
         }
+    }
+
+    /// Node rc21's reply when the callee's node refuses a minute's invoice because it
+    /// is catching up, captured from its own handlers: nothing left the wallet.
+    fn callee_catching_up_reply(id: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"accepted": false, "code": "peer_not_ready", "error": "recipient is not ready to receive payments: not_synced",
+            "max_routing_fee_msat": 5000, "operation_id": id, "payment_hash": null, "reason": "not_synced", "retry_allowed": true, "state": "released"})
+    }
+
+    /// A passing refusal, proven by the node's own reply: no fence, so the scheduler
+    /// tries again, and that try is a new operation, paid once.
+    #[tokio::test]
+    async fn a2_a_minute_refused_by_a_callee_catching_up_is_proven_unpaid_and_tried_again() {
+        let refusing = Arc::new(AtomicBool::new(true));
+        let refuse = refusing.clone();
+        let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p == "/messages/compose" && body["kind"] == 404 && refuse.load(Ordering::SeqCst) {
+                return (503, callee_catching_up_reply(&body["operation_id"]).to_string());
+            }
+            routes(m, p, b)
+        })).await;
+        let (spent, pays) = (budget_now(&node.state).spent_msat, paid.lock().unwrap().pays);
+
+        let error = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+        assert_eq!(error.code, "peer_not_ready", "{}", error.message);
+        assert!(error.message.contains("Nothing was paid"), "{}", error.message);
+        assert!(pending(&node).is_none(), "no fence");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        assert_eq!(budget_now(&node.state).spent_msat, spent, "nothing was charged");
+        let first = error.operation_id.clone().unwrap();
+        let record = ledger_record(&node, &first);
+        assert_eq!((record["kind"].as_str(), record["state"].as_str()), (Some("call_block"), Some("unpaid")));
+        assert!(!node.targets().iter().any(|t| t.starts_with("GET /messages/operations/")), "no check was needed");
+
+        refusing.store(false, Ordering::SeqCst);
+        let receipt = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+        assert_ne!(receipt.operation_id.as_deref(), Some(first.as_str()), "a new operation");
+        assert_eq!(paid.lock().unwrap().pays, pays + 1, "paid once");
+    }
+
+    /// The whole of the reply must prove it. Short of that, the same refusal stays
+    /// unknown and the fence holds. `prepared` is what rc21 answers while an earlier
+    /// admission is in its journal, and it can hide a paid admission from this reply.
+    #[tokio::test]
+    async fn a2_a_catching_up_reply_short_of_the_proof_stays_unknown() {
+        type Change = fn(&mut serde_json::Value);
+        let changes: [(&str, u16, Change); 10] = [
+            ("prepared", 503, |v| v["state"] = "prepared".into()),
+            ("paying", 503, |v| v["state"] = "paying".into()),
+            ("payment_unknown", 503, |v| v["state"] = "payment_unknown".into()),
+            ("no state", 503, |v| { v.as_object_mut().unwrap().remove("state"); }),
+            ("hash", 503, |v| v["payment_hash"] = OP_HASH.into()),
+            ("no hash field", 503, |v| { v.as_object_mut().unwrap().remove("payment_hash"); }),
+            ("another operation", 503, |v| v["operation_id"] = "00000000-0000-4000-8000-000000000000".into()),
+            ("no retry", 503, |v| v["retry_allowed"] = false.into()),
+            ("amount", 503, |v| v["amount_msat"] = 1000.into()),
+            ("another status", 502, |_| {}),
+        ];
+        for (name, status, change) in changes {
+            let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+            let node = minute_ready(Arc::new(move |m, p, b| {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+                if p == "/messages/compose" && body["kind"] == 404 {
+                    let mut reply = callee_catching_up_reply(&body["operation_id"]);
+                    change(&mut reply);
+                    return (status, reply.to_string());
+                }
+                routes(m, p, b)
+            })).await;
+            let pays = paid.lock().unwrap().pays;
+            let error = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+            assert!(matches!(error.code, "spend_unknown" | "payment_unknown"), "{name}: {}", error.code);
+            assert!(pending(&node).is_some(), "{name}: the fence holds");
+            assert!(budget_now(&node.state).unsettled_msat > 0, "{name}: the reservation stays held");
+            assert_eq!(paid.lock().unwrap().pays, pays, "{name}");
+        }
+    }
+
+    /// This reading is for a minute. Other sends keep what they had.
+    #[tokio::test]
+    async fn a_catching_up_reply_to_another_send_is_unchanged() {
+        let (routes, _) = ops_node();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap();
+                return (503, callee_catching_up_reply(&body["operation_id"]).to_string());
+            }
+            routes(m, p, b)
+        }));
+        approve_calls(&node).await;
+        let error = do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert!(pending(&node).is_some());
     }
 
     #[tokio::test]

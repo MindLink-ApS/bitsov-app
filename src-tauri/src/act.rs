@@ -295,6 +295,24 @@ pub fn reports_no_payment(reply: &serde_json::Value) -> bool {
     matches!(reply.get("state").map(serde_json::Value::as_str), None | Some(Some("prepared" | "released")))
 }
 
+/// The callee's node refused the minute's invoice because it is catching up, and
+/// the caller's node records this attempt as holding no payment: `released`, no
+/// hash, nothing settled, retry allowed, for this operation. Node compose writes
+/// `released` with no hash only after `proven_unpaid`. Any other state keeps its
+/// doubt: `prepared` can hold a paid admission and the reply would not show it.
+pub fn peer_not_ready_unpaid(status: u16, body: &str, operation_id: &str) -> bool {
+    if status != 503 { return false; }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return false };
+    let zero_or_absent = |field: &str| v.get(field).is_none_or(|value| value.is_null() || value == 0);
+    v["code"] == "peer_not_ready" && v["operation_id"] == operation_id && v["state"] == "released"
+        && v.get("payment_hash").is_some_and(serde_json::Value::is_null)
+        && v["retry_allowed"] == true && v["accepted"] == false
+        && zero_or_absent("amount_msat") && zero_or_absent("readmission_msat") && zero_or_absent("fee_paid_msat")
+}
+
+/// The same refusal in plain words. It passes by itself, and the scheduler retries it.
+pub const PEER_NOT_READY_MINUTE: &str = "Their node is catching up and could not take this minute yet. Nothing was paid for it.";
+
 /// Genome `room_binding_v1` compose refusals (`reason` on a `not_dispatched`),
 /// in plain words. The node's own `error` is for developers and is not shown.
 fn room_refusal_words(reason: &str) -> Option<&'static str> {
