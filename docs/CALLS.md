@@ -211,7 +211,12 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   is left connected: their node's hangup `unpaid`; the node showing the call
   ended after its paid time and grace (`unpaid`) or for another reason; a
   minute refused before paying (`payment_failed`: tried again up to 4 times
-  only when the node proved it did not dispatch it); a minute whose outcome
+  when the node proved it did not dispatch it; a passing refusal, `not_ready`,
+  `peer_not_ready`, a rate breaker or a channel read that failed, is tried again
+  every 2 seconds while paid time and grace remain, at most 15 times, each try a
+  new operation); a budget with no room for the next minute (`budget_limit`,
+  `budget_exhausted` or `ceiling_exhausted`: a limit the owner set, so the call
+  ends at once with its own reason); a minute whose outcome
   is unknown (`payment_unknown`: never paid again on top of it); their node
   asking more per minute (`price_changed`); a hold the host refused
   (`hold_refused`: no reservation, or above the consent; the host hung up).
