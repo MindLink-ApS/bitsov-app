@@ -1089,7 +1089,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
         available: true,
         state: 'pending',
         fingerprint: '3F9A-12C4-77B0-E51D',
-        owner_action: 'konsensus device approve --op 7c2e91d04b5a3f6e8d1c0b2a --config /Users/you/bitsov/konsensus.toml',
+        owner_action: 'konsensus device approve --op 7c2e91d04b5a3f6e8d1c0b2a --config bitsov/konsensus.toml',
         expires_at_ms: Date.now() + 15 * 60_000,
       };
       return ok(device);
