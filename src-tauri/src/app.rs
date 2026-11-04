@@ -19505,6 +19505,41 @@ mod control_act_tests {
         assert_eq!(do_file_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_TOO_LARGE);
     }
 
+    /// What a file's send leaves in the budget. A node that reports the actual fee
+    /// (`fee_paid_msat`) counts price plus that fee against it. Without it, as on
+    /// rc21, the whole routing ceiling keeps counting: absence is not zero.
+    #[tokio::test]
+    async fn a_file_send_debits_its_reported_fee_and_keeps_the_ceiling_without_one() {
+        for (fee_paid, proven, debited, fee_unknown) in [(Some(400u64), 1_400u64, 1_400u64, false), (Some(0), 1_000, 1_000, false), (None, 1_000, 6_000, true)] {
+            let inner = happy();
+            let routes: Routes = Arc::new(move |m, p, b| {
+                if p == format!("/files/{FILE_ID}/send") {
+                    let mut reply = serde_json::json!({"max_routing_fee_msat": 5000, "message_id": "f1", "delivered": true, "amount_msat": 1000});
+                    if let Some(fee) = fee_paid { reply["fee_paid_msat"] = fee.into(); }
+                    return (200, reply.to_string());
+                }
+                if p == format!("/payments/price/{}", act::KIND_FILE_REF) {
+                    return (200, serde_json::json!({"kind": act::KIND_FILE_REF, "price_msat": 1000}).to_string());
+                }
+                inner(m, p, b)
+            });
+            let node = fake(AuthMode::Local, routes);
+            do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
+            with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+            let before = budget_now(&node.state);
+            let receipt = do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 6_000, None).await.unwrap();
+            assert_eq!(receipt.amount_msat, 1_000, "the principal, as the message shows it");
+            assert_eq!(receipt.fee_paid_msat, fee_paid);
+            let view = budget_now(&node.state);
+            assert_eq!(view.spent_msat - before.spent_msat, proven, "{fee_paid:?}: what is known to be paid");
+            assert_eq!(view.accounted_msat - before.accounted_msat, debited, "{fee_paid:?}: what counts against the budget");
+            assert_eq!(view.unsettled_msat, 0, "{fee_paid:?}");
+            assert_eq!(book(&node).last().map(|(_, msat, settled)| (*msat, *settled)), Some((debited, true)), "{fee_paid:?}");
+            assert_eq!(view.rows.iter().find(|r| r.target == A).unwrap().fee_unknown, fee_unknown, "{fee_paid:?}");
+            assert!(pending(&node).is_none(), "{fee_paid:?}");
+        }
+    }
+
     #[tokio::test]
     async fn a_file_is_uploaded_then_sent_to_one_peer() {
         let node = fake(AuthMode::Local, happy());

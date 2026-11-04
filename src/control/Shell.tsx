@@ -5444,7 +5444,9 @@ function Composer(props: {
       return canContinue('grant') ? tr('uiApproveSend') : tr('uiSend');
     }
     const s = shown();
-    const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
+    const figure = s.msat === null ? '' : `${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
+    // A file's figure is a ceiling: its price plus the most routing can cost.
+    const price = figure && ` · ${mode() === 'file' ? tr('uiFileUpTo', figure) : figure}`;
     return { message: tr('uiSend'), pay: tr('uiPay'), request: tr('uiCreateInvoice'), file: tr('uiSendFile') }[mode()] + (mode() === 'request' ? '' : price);
   };
 
