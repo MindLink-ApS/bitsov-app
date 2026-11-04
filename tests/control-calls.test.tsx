@@ -3226,6 +3226,28 @@ describe('calls in the shell', () => {
     expect($('[data-call-close]')).toBeNull();
   });
 
+  it('the full call screen says when payments are not ready, since it covers the app\'s own notice', async () => {
+    stubHost({ message_send: () => { throw { code: 'not_ready', message: 'Money is not ready yet.' }; } });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-immersive]')).not.toBeNull());
+    expect($('[data-call-money-notice]')).toBeNull();
+    // A refusal from anywhere makes payments not ready: here a message sent with the call stepped aside.
+    $<HTMLButtonElement>('[data-call-compact]')!.click();
+    await vi.waitFor(() => expect($('[data-call-immersive]')).toBeNull());
+    expect($('[data-call-money-notice]')).toBeNull();
+    const box = $<HTMLTextAreaElement>('[data-composer] textarea')!;
+    box.value = 'hi';
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-send]')!.click();
+    await vi.waitFor(() => expect($('[data-money-notice]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-compact]')!.click();
+    await vi.waitFor(() => expect($('[data-call-immersive]')).not.toBeNull());
+    expect(text('[data-call-money-notice]')).toBe(text('[data-money-notice]'));
+  });
+
   it('an outgoing call takes the whole window with its tone, keeps its money lines, and can step aside for the chat', async () => {
     const played: { src: string; paused: boolean }[] = [];
     vi.stubGlobal('Audio', class { src: string; loop = false; volume = 1; paused = true; currentTime = 0; constructor(src: string) { this.src = src; played.push(this); } play() { this.paused = false; return Promise.resolve(); } pause() { this.paused = true; } });

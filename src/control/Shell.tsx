@@ -2483,6 +2483,7 @@ export function ControlCenter(props: Props) {
         }</Show>}
         blocked={moneyBlocked()}
         routed={routedCalls}
+        moneyNotice={moneyBlocked() ? `${!live() ? tr('waitingConnection') : tr('moneyNotReady')} ${tr('moneyReadinessScope')}` : null}
         view={callView()}
         streams={callStreams()}
         nameOf={nameOf}
@@ -3651,6 +3652,8 @@ function CallPanel(props: {
   approvalOpen: boolean;
   approval: JSX.Element;
   blocked: boolean;
+  /** Payments are not ready. The full screen covers the app's own notice, so it says this itself. */
+  moneyNotice?: string | null;
   /** M6: audio goes through both nodes; no direct connection, STUN or recovery notes. */
   routed?: boolean;
   view: CallView;
@@ -3808,6 +3811,9 @@ function CallPanel(props: {
               {close().status === 'closing' ? tr('uiEndingTheCallAtYourNode') : close().message}
             </p>
           )}
+        </Show>
+        <Show when={immersive() && props.moneyNotice}>
+          <p class="hint" role="status" data-call-money-notice>{props.moneyNotice}</p>
         </Show>
         <Show when={v().muted && v().phase !== 'ended'}>
           <p class="call-muted-note" role="status" data-call-muted>{tr('caCallMutedNote')}</p>
