@@ -729,6 +729,7 @@ export function ControlCenter(props: Props) {
     // The first page is the room's current read; an earlier page never changes what the room says about being empty.
     const read = <T,>(run: () => Promise<T>, apply: (v: T) => void) =>
       before === null ? readThread(trackKey({ kind: 'bound', id }), run, apply) : attempt('thread', run, apply);
+    if (before !== null) setErrors('thread', undefined);
     void read(() => source.roomThread(id, before ?? undefined, ROOM_PAGE), (page) => {
       foldRooms(page, false);
       const oldest = page.length ? Math.min(...page.map((m) => m.timestamp)) : before;
@@ -2207,6 +2208,7 @@ export function ControlCenter(props: Props) {
                       deliveries={deliveries}
                       earlier={roomPages[room().id]?.more === true}
                       loadingEarlier={roomPages[room().id]?.loading === true}
+                      earlierFailed={!!errors.thread}
                       read={threadRead[trackKey(t())] ?? 'pending'}
                       error={threadError[trackKey(t())]}
                       onEarlier={() => loadRoomPage(room().id, roomPages[room().id]?.before ?? null)}
@@ -2410,7 +2412,7 @@ export function ControlCenter(props: Props) {
               onScan={mobileQrScannerAvailable() ? scanPairingLink : cameraQrScannerAvailable() ? scanPairingLinkWithCamera : undefined}
               mobile={isMobilePlatform()}
               phone={isMobilePlatform()}
-            /> : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
+            /> : undefined} overview={overview()} link={link()} peers={peers()} peersKnown={peersLoaded() && !errors.peers} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
           </Match>
           <Match when={tab() === 'devices'}>
             {/* The host offers Add a device only to a remote node (add_device::supported checks remote mode). */}
@@ -2519,7 +2521,7 @@ export function ControlCenter(props: Props) {
       />
       </Show>
       <Show when={roomPlan() && props.active}>
-        <NewRoomPanel contacts={roomContacts()} nodeRooms={nodeRooms()} onCreate={(picks) => void createRoom(picks)} onCancel={() => setRoomPlan(false)} />
+        <NewRoomPanel contacts={roomContacts()} contactsPending={!peersLoaded()} contactsError={!!errors.peers} nodeRooms={nodeRooms()} onCreate={(picks) => void createRoom(picks)} onCancel={() => setRoomPlan(false)} />
       </Show>
       <Show when={props.active && walletTab()}>
         {(tab) => (
@@ -4180,12 +4182,17 @@ function VoiceNote(props: { id: string; name: string; load: (messageId: string) 
   const [busy, setBusy] = createSignal(false);
   // Why it cannot play: the file is gone, or it is not audio despite its name.
   const [missing, setMissing] = createSignal<'gone' | 'not_audio' | null>(null);
+  // A read that failed for any other reason can simply be tried again.
+  const [failed, setFailed] = createSignal(false);
   const open = async () => {
     setBusy(true);
+    setFailed(false);
     try {
       setUrl(await props.load(props.id));
     } catch (e) {
-      setMissing(String(e).includes(NOT_A_VOICE_NOTE) ? 'not_audio' : 'gone');
+      if (String(e).includes(NOT_A_VOICE_NOTE)) setMissing('not_audio');
+      else if (/not stored/.test(String(e))) setMissing('gone');
+      else setFailed(true);
     } finally {
       setBusy(false);
     }
@@ -4198,7 +4205,7 @@ function VoiceNote(props: { id: string; name: string; load: (messageId: string) 
           <button type="button" class="voice-play" data-voice-play disabled={busy() || missing() !== null} onClick={() => void open()}>
             {missing() === 'not_audio'
               ? tr('caFileNotAudioNotPlayed', props.name)
-              : missing() === 'gone' ? tr('caVoiceNoteNotStoredOnThisDevice') : busy() ? tr('chatLoading') : tr('caVoiceNote')}
+              : missing() === 'gone' ? tr('caVoiceNoteNotStoredOnThisDevice') : busy() ? tr('chatLoading') : failed() ? tr('caVoiceNoteTryAgain') : tr('caVoiceNote')}
           </button>
         }
       >
@@ -8182,7 +8189,7 @@ function NewTrack(props: {
 
 // ---- context panels ---------------------------------------------------------
 
-function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Element; onForgetRemote?: () => Promise<void>; pairAnother?: JSX.Element; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
+function NodePanel(props: { peersKnown?: boolean; connection?: JSX.Element; deviceApprovals?: JSX.Element; onForgetRemote?: () => Promise<void>; pairAnother?: JSX.Element; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
   const fresh = () => freshness(props.overview?.read_at ?? null, props.now);
   const linkText = () =>
     props.link === 'open' ? tr('callLive') : props.link === 'connecting' ? tr('callConnecting') : props.link === 'closed' ? tr('caReconnecting') : tr('caWaiting');
@@ -8240,7 +8247,7 @@ function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Elem
         <SoftError message={props.error!} onReconnect={props.onReconnect} />
       </Show>
       <h3>{tr('caPeers')}</h3>
-      <For each={props.peers} fallback={<p class="hint">{tr('caYourNodeHasNoPeersYet')}</p>}>
+      <For each={props.peers} fallback={<p class="hint">{props.peersKnown === false ? tr('caPeersNotKnownYet') : tr('caYourNodeHasNoPeersYet')}</p>}>
         {(p) => (
           <div class="row" style={{ 'justify-content': 'space-between', 'font-size': 'var(--t-sm)' }}>
             <span class="row" style={{ gap: 'var(--s-2)', 'min-width': 0 }}>

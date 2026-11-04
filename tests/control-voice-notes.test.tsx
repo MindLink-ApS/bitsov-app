@@ -297,6 +297,24 @@ describe('voice notes in the composer and thread', () => {
     expect(host.used('voice_note_fetch').map((c) => c.args)).toEqual([{ message_id: IN_ID }]);
   });
 
+  it('a voice note that failed to load for another reason can be tried again', async () => {
+    let fail = true;
+    stubHost({
+      messages_list: (args) => (args!.peer === A
+        ? [{ id: IN_ID, kind: 200, sender: A, recipient: OWN, timestamp: Date.now() - 1000, plaintext: '[file: voice-note-20260929-120000.webm]', payment_amount_msat: 3000 }]
+        : []),
+      voice_note_fetch: () => fail ? Promise.reject('connection dropped') : ({ filename: 'voice-note-20260929-120000.webm', mime_type: 'audio/webm', size_bytes: 2, data_b64: 'aGk=' }),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($(`[data-message="${IN_ID}"] [data-voice-play]`)).not.toBeNull());
+    $<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.click();
+    await vi.waitFor(() => expect(text(`[data-message="${IN_ID}"] [data-voice-play]`)).toMatch(/could not load/));
+    expect($<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.disabled).toBe(false);
+    fail = false;
+    $<HTMLButtonElement>(`[data-message="${IN_ID}"] [data-voice-play]`)!.click();
+    await vi.waitFor(() => expect(text(`[data-message="${IN_ID}"] [data-voice-play]`)).not.toMatch(/could not load/));
+  });
+
   it('names a voice note this device does not hold', async () => {
     stubHost({
       messages_list: (args) => (args!.peer === A

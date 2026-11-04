@@ -163,14 +163,18 @@ export function WalletPage(props: {
 
   // Invoices we issued: read whether they were paid while this page is open.
   let reading = false;
+  const [invoiceUnread, setInvoiceUnread] = createSignal(false);
   const readInvoices = async () => {
     if (reading) return;
     reading = true;
+    let failed = false;
     try {
       for (const a of openInvoices(loggedActivity(), Date.now()).slice(0, 10)) {
         const status = await props.reads.invoiceStatus(a.bolt11!).catch(() => null);
+        failed = failed || !status;
         if (status) updateInvoice(a.id, status);
       }
+      setInvoiceUnread(failed);
     } finally {
       reading = false;
     }
@@ -312,7 +316,7 @@ export function WalletPage(props: {
             <ChannelsView wallet={props.wallet} nameOf={props.nameOf} />
           </Match>
           <Match when={props.tab === 'receive'}>
-            <ReceiveView moneyBlocked={props.moneyBlocked} actions={props.actions} reads={props.reads} now={props.now} />
+            <ReceiveView moneyBlocked={props.moneyBlocked} actions={props.actions} reads={props.reads} now={props.now} invoiceUnread={invoiceUnread()} />
           </Match>
           <Match when={props.tab === 'send'}>
             <SendView moneyBlocked={props.moneyBlocked} spend={props.spend} spendGate={props.spendGate} now={props.now} actions={props.actions} />
@@ -485,7 +489,7 @@ function ChannelsView(props: { wallet: WalletOverview | null; nameOf: (id: strin
 
 // ---- receive -----------------------------------------------------------------
 
-function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; reads: WalletReads; now: number }) {
+function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; reads: WalletReads; now: number; invoiceUnread?: boolean }) {
   const [how, setHow] = createSignal<'lightning' | 'onchain'>('lightning');
   const [amount, setAmount, amountCleared] = createAmountDraft();
   const [note, setNote] = createSignal('');
@@ -495,11 +499,13 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
   const [invoice, setInvoice] = createSignal<InvoiceView | null>(null);
   const [address, setAddress] = createSignal<FundingAddress | null>(null);
   const [addressError, setAddressError] = createSignal<string | null>(null);
+  const [addressRetry, setAddressRetry] = createSignal(0);
   const msat = () => typedMsat(amount());
 
   // A new amount or note is a new request: the shown invoice was for the old one.
   createEffect(on([amount, note, how], () => { setInvoice(null); setError(null); }, { defer: true }));
   createEffect(() => {
+    addressRetry();
     if (how() !== 'onchain' || address() || props.moneyBlocked) return;
     void props.reads.fundingAddress().then(
       (a) => { setAddress(a); setAddressError(null); },
@@ -552,7 +558,7 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
               fallback={
                 <Show when={!props.moneyBlocked} fallback={<p class="hint">{t('receiveNotReady')}</p>}>
                   <Show when={addressError()} fallback={<DelayedSpinner />}>
-                    <div data-receive-error><SoftError message={addressError()!} summary={t('receiveNoAddress')} /></div>
+                    <div data-receive-error><SoftError message={addressError()!} summary={t('receiveNoAddress')} onReconnect={() => { setAddressError(null); setAddressRetry(n => n + 1); }} /></div>
                   </Show>
                 </Show>
               }
@@ -592,6 +598,7 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
                 <SettledPayment direction="received" msat={received()?.msat ?? null} />
               </Show>
               <span class="wallet-status" classList={{ ok: received()?.status === 'paid' }} data-receive-state>{status()}</span>
+              <Show when={props.invoiceUnread && received()?.status !== 'paid'}><p class="hint" role="status" data-receive-unread>{tr('caInvoiceNotChecked')}</p></Show>
               <code class="address" data-bolt11>{inv().bolt11}</code>
               <div class="row wallet-request-actions">
                 <CopyButton text={inv().bolt11} label={t('receiveCopyInvoice')} />

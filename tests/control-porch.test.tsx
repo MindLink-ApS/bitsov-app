@@ -175,6 +175,14 @@ describe('PorchPanel', () => {
     expect($('[data-porch-none]')!.textContent).toContain('porch_read_v1');
   });
 
+  it('says the price is unknown when a card quote fails, not an endless wait', async () => {
+    const s = stub(() => page('/index.md', 'markdown', ''));
+    s.source.porchQuote = async () => { throw { code: 'node', message: 'no quote' }; };
+    mount(s);
+    await tick();
+    expect($(`[data-porch-peer="${MAYA}"]`)!.textContent).toContain('Unknown');
+  });
+
   it('quotes each chosen path before offering payment, and keeps sub-sat fees separate', async () => {
     const s = stub(() => page('/notes.txt', 'text', 'hello'), [card(MAYA, true)]);
     s.source.porchQuote = async (peer, path) => {
