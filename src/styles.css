@@ -1917,6 +1917,11 @@ html .call-panel[data-call-immersive][data-call-panel] {
 .call-bar-who strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .call-bar-who span { color: var(--muted); font-size: var(--t-sm); font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) { .call-avatar[data-ringing]::before, .call-avatar[data-ringing]::after { animation: none; opacity: .5; transform: scale(1.25); } }
+/* The bar stays at the bottom: what scrolls into view stops above it. A low screen gives the avatar less room. */
+html .call-panel[data-call-immersive][data-call-panel] { scroll-padding-bottom: 120px; }
+@media (max-height: 480px) {
+  .call-panel[data-call-immersive] > .call-avatar { width: 56px; height: 56px; font-size: 24px; margin-top: var(--s-4); margin-bottom: var(--s-1); }
+}
 @media (max-width: 480px) {
   .call-panel[data-call-immersive] .call-bar-who { flex-basis: 100%; }
   html .call-panel[data-call-immersive] .call-actions { flex-direction: row; flex-wrap: wrap; align-items: stretch; }

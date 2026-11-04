@@ -3680,7 +3680,9 @@ function CallPanel(props: {
   const [answer, setAnswer] = createSignal<number | null>(null);
   const [again, setAgain] = createSignal<CallQuote | null>(null);
   const [againError, setAgainError] = createSignal<string | null>(null);
-  createEffect(on(() => props.view.callId, () => { setAgain(null); setAgainError(null); }));
+  // Memos: every update to the same call (mute, a minute's status) must not look like a new call.
+  const callKey = createMemo(() => props.view.callId);
+  createEffect(on(callKey, () => { setAgain(null); setAgainError(null); }));
   const offerAgain = async () => {
     const call = props.view.callId;
     const peer = props.view.peer;
@@ -3718,9 +3720,9 @@ function CallPanel(props: {
   // An outgoing call takes the whole window until it ends, and can step aside for the chat.
   // A waiting call, an approval and the incoming card keep the floating card.
   const [compact, setCompact] = createSignal(false);
-  createEffect(on(() => props.view.callId, () => setCompact(false)));
+  createEffect(on(callKey, () => setCompact(false)));
   const fullCall = () => !props.waiting && !props.approvalOpen && v().outgoing && ['calling', 'ringing', 'connecting', 'live', 'reconnecting'].includes(v().phase);
-  const immersive = () => fullCall() && !compact();
+  const immersive = createMemo(() => fullCall() && !compact());
   const ringingOut = () => v().phase === 'calling' || v().phase === 'ringing';
   const hasDuration = () => (v().phase === 'live' || v().phase === 'reconnecting') && v().liveAt !== null;
   // The full screen hides everything but itself and any waiting call, so focus stays on what can be seen.
@@ -3767,7 +3769,8 @@ function CallPanel(props: {
         {props.approval}
         {/* Across networks a call needs a STUN server: said where it matters, while a call is being set up or has failed to connect. */}
         <Show when={!props.routed && (['calling', 'ringing', 'connecting'].includes(v().phase) || (v().phase === 'ended' && (v().reason === 'failed' || v().reason === 'timeout')))}>
-          <CallNetworkNote onOpenSettings={props.openCallSettings} />
+          {/* Settings opens under the full screen, so the call steps aside first. */}
+          <CallNetworkNote onOpenSettings={props.openCallSettings && (() => { setCompact(true); props.openCallSettings!(); })} />
         </Show>
         {/* While reconnecting: what is happening, and when the call ends if it does not come back (display only). */}
         <Show when={v().phase === 'reconnecting'}>
