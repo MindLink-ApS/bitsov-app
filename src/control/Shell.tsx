@@ -5465,6 +5465,14 @@ function Composer(props: {
     return tr('uiSend');
   };
   /** Pay / Request / File panels close back to the single message bar. */
+  /** The file went: back to the message box, ready to type. A failed send never comes here, so it keeps its file. */
+  const fileGone = () => {
+    setFile(null);
+    if (fileInput) fileInput.value = '';
+    setMode('message');
+    // The Send button just pressed is gone. Not on a phone, where focus would open the keyboard unasked.
+    if (!isMobilePlatform()) queueMicrotask(() => draftInput?.focus());
+  };
   const closePanel = () => {
     composerRevision++;
     if (mode() === 'file') {
@@ -6028,8 +6036,7 @@ function Composer(props: {
       // An optimistic message cleared the box at the press; whatever is there now is newer.
       if ((r.ok || paidUndelivered(r)) && composerRevision === submittedRevision && !bubble) {
         if (submittedMode === 'file') {
-          setFile(null);
-          if (fileInput) fileInput.value = '';
+          fileGone();
         } else {
           setDraft('');
           setDrafted(false);
@@ -6213,10 +6220,8 @@ function Composer(props: {
         break;
       case 'file':
         r = await props.actions.file(t, file()!, shown().msat!);
-        if (r.ok && unchanged()) {
-          setFile(null);
-          if (fileInput) fileInput.value = '';
-        } else if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
+        if (r.ok && unchanged()) fileGone();
+        else if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
         break;
     }
     setBusy(false);
