@@ -143,11 +143,14 @@ it('does not suppress the Hub confirm focus outline', () => {
   expect(css).not.toMatch(/\.hub-channel-confirm:focus\s*\{[^}]*outline:\s*(?:none|0)/);
 });
 
-it('an incoming call focuses the call panel once, without refocusing', async () => {
+it('an incoming call focuses the call panel once, without refocusing when the answer price arrives', async () => {
   const source = sampleSource({ firstLiveMs: 1e9 });
   let emit!: (event: LiveEvent) => void;
   source.onLive = async (handler) => { emit = handler; return () => {}; };
+  const quote = await source.callQuote('a'.repeat(64));
+  let resolveQuote!: (value: typeof quote) => void;
   await shell(source);
+  source.callQuote = () => new Promise((resolve) => { resolveQuote = resolve; });
   $('[data-composer] textarea').focus();
   emit({ type: 'message', room_id: null, message: {
     id: 'incoming-focus', kind: 400, sender: 'a'.repeat(64), recipient: SAMPLE_OWN_ID,
@@ -158,6 +161,7 @@ it('an incoming call focuses the call panel once, without refocusing', async () 
   expect($('[data-call-panel="incoming"]')).not.toBeNull();
   expect(document.activeElement).toBe($('[data-call-panel="incoming"]'));
   $('[data-composer] textarea').focus();
+  resolveQuote(quote);
   await tick();
   expect(document.activeElement).toBe($('[data-composer] textarea'));
 });

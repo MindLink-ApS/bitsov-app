@@ -369,6 +369,10 @@ label.field input {
 .attach.soft { width: 34px; height: 34px; border-radius: 50%; border: none; background: var(--raised); color: var(--ink); font-size: var(--t-lg); line-height: 1; flex: none; }
 .attach.soft:hover { background: var(--line-strong); color: var(--ink); }
 .file-chip { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); padding: 6px 8px; }
+.composer-main.file-row { flex-wrap: wrap; }
+.composer-main.file-row .file-chip { flex: 1 1 10rem; min-width: 0; }
+.composer-main.file-row .file-chip .file-name { overflow-wrap: anywhere; }
+.composer .composer-main.file-row .primary { flex: 0 1 auto; max-width: 100%; margin-left: auto; white-space: normal; }
 .composer-bar { display: flex; align-items: center; gap: var(--s-3); width: min(var(--chat-max), 100%); }
 .composer-bar.cost-only { padding: 0 4px; }
 .composer > .approval { width: min(var(--chat-max), 100%); align-self: center; }

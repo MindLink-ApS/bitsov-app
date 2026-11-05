@@ -912,19 +912,25 @@ pub struct PeerCallPrice {
 }
 
 /// The call price the owner sees. `None` offer: their node did not answer
-/// (older genome, offline, or not listed). Principals are floored to the
-/// smallest payment the app makes, as every other send is.
+/// (older genome, offline, or not listed), or its price is out of range; the
+/// signal price is then only this node's own tariff, and no signal is paid on
+/// it. Principals are floored to the smallest payment the app makes, as every
+/// other send is.
 pub fn call_quote(live: Option<&PeerCallPrice>, own_signal_msat: u64) -> CallQuote {
     let floor = |m: u64| m.max(crate::act::MIN_PAYMENT_MSAT);
-    let offer = live.map(|p| floor(p.offer_msat));
     let signal = floor(live.map_or(own_signal_msat, |p| p.signal_msat));
     let fee = crate::act::routing_fee;
+    // An all-in amount that overflows, or that the renderer cannot hold exactly,
+    // is no price: such a quote places, answers and hangs up nothing.
+    let sum = |a: u64, b: u64| a.checked_add(b).filter(|total| *total <= MAX_SAFE_MSAT);
+    let total = live.map(|p| floor(p.offer_msat)).and_then(|offer| sum(sum(offer, fee(offer))?, sum(signal, fee(signal))?));
+    let offer = live.map(|p| floor(p.offer_msat)).filter(|_| total.is_some());
     CallQuote {
         offer_msat: offer,
         offer_max_routing_fee_msat: offer.map(fee).unwrap_or(0),
         signal_msat: signal,
         signal_max_routing_fee_msat: fee(signal),
-        call_total_msat: offer.map(|o| o + fee(o) + signal + fee(signal)),
+        call_total_msat: total,
         block_msat: None,
         block_max_routing_fee_msat: 0,
         reservation_max_msat: None,
@@ -1347,6 +1353,19 @@ mod tests {
         assert_eq!((none.offer_msat, none.call_total_msat, none.signal_msat), (None, None, 2_000));
         let big = call_quote(Some(&PeerCallPrice { offer_msat: 2_000_000, signal_msat: 50 }), 50);
         assert_eq!(big.offer_max_routing_fee_msat, 10_000);
+    }
+
+    #[test]
+    fn a_call_total_that_overflows_or_passes_the_renderers_range_is_no_price() {
+        let quote = |offer_msat, signal_msat| call_quote(Some(&PeerCallPrice { offer_msat, signal_msat }), 50);
+        for q in [quote(u64::MAX, 50), quote(u64::MAX - 5_000, 50), quote(50, u64::MAX), quote(50, u64::MAX - 5_000),
+            quote(MAX_SAFE_MSAT, 50), quote(50, MAX_SAFE_MSAT)] {
+            assert_eq!((q.offer_msat, q.call_total_msat), (None, None), "{q:?}");
+        }
+        // The last amount that fits: offer + its fee + signal + its fee, exactly.
+        let exact = MAX_SAFE_MSAT - 10_000 - 6_000;
+        assert_eq!(quote(exact, 50).call_total_msat, Some(MAX_SAFE_MSAT));
+        assert_eq!(quote(exact + 1, 50).call_total_msat, None);
     }
 
     #[test]
