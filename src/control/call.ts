@@ -18,7 +18,7 @@ import { provenUnpaid } from './paymentOutcome';
 import { asActionError, messagePerPaymentMax } from './state';
 import { amount } from './format';
 import { createCallMinutes, type CallMinutes, type MinutesDeps, type MinutesView } from './callMinutes';
-import { SEAL_ENDED, SEAL_REFUSED } from './nodeRoutedConnection';
+import { SEAL_ENDED, SEAL_NOT_AGREED, SEAL_REFUSED } from './nodeRoutedConnection';
 import type { ActionError, CallQuote, CallReceipt, Message, MinutesConsent, NodeGrantSummary, OpView } from './types';
 
 export const CALL_OFFER = 400;
@@ -1510,9 +1510,11 @@ export function createCallEngine(deps: CallDeps) {
               answerInFlight = false;
               if (view.phase === 'reconnecting') void restart(conn);
             }
-          } catch {
+          } catch (error) {
             // Not a connectivity failure (no relay would help): no 'failed' reason, only the words.
-            if (pc === conn) end(null, tr('caTheirAnswerCouldNotBeUsed'));
+            // A sealing call whose answer could not be sealed says so, and names no side as the cause.
+            const name = error && typeof error === 'object' && 'name' in error ? error.name : '';
+            if (pc === conn) end(null, name === SEAL_NOT_AGREED || name === SEAL_REFUSED ? tr('caCallSealNotAgreed') : tr('caTheirAnswerCouldNotBeUsed'));
           }
           return;
         }

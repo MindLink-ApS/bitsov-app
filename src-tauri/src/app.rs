@@ -307,6 +307,7 @@ struct NodeState {
     media: Mutex<Option<MediaSession>>,
     /// The call whose key exchange is under way, until its media opens or the
     /// call goes away. Memory only: a restart loses it, and the call ends.
+    #[cfg(feature = "call-seal")]
     call_seal: Mutex<Option<PreparedSeal>>,
     /// M6 A2: the paid minutes the owner agreed to for each outgoing call,
     /// taken with its offer. Memory only and bounded: a call whose consent is
@@ -679,6 +680,7 @@ impl NodeState {
             trust_write: Mutex::new(()),
             approvals_restored: AtomicBool::new(false),
             media: Mutex::new(None),
+            #[cfg(feature = "call-seal")]
             call_seal: Mutex::new(None),
             call_consents: Mutex::new(CallConsents::default()),
             node_grant: Mutex::new(None),
@@ -10440,7 +10442,7 @@ async fn media_bridge<R: tauri::Runtime>(
     peer: String,
     uplink: Arc<control::media::FrameQueue>,
     stop: Arc<AtomicBool>,
-    mut seal: Option<Box<control::call_seal::SealedMedia>>,
+    mut seal: Option<Box<control::media::SealedMedia>>,
     channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) {
     let state = app.state::<NodeState>();
@@ -10482,9 +10484,29 @@ async fn media_bridge<R: tauri::Runtime>(
 /// (`{"link": …, "detail": …}`). One session at a time: opening replaces the
 /// previous one. No payment and no admission change here: the node admits the
 /// socket only for a `(peer, call_id)` it already knows, under the owner's token.
-/// `sealed`: the renderer expects this call's finished key exchange to be here.
-/// Without one the socket does not open, so a call never goes out in the clear
-/// by mistake. Without `sealed` and with no exchange, this is today's session.
+#[cfg(not(feature = "call-seal"))]
+#[tauri::command(rename_all = "snake_case")]
+async fn call_media_open(
+    window: WebviewWindow<impl tauri::Runtime>,
+    app: AppHandle<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    call_id: String,
+    peer: String,
+    on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let call_id = control::media::call_id(&call_id)?;
+    let peer = control::media::peer_id(&peer)?;
+    start_media_session(app, state.inner(), call_id, peer, None, on_frame);
+    Ok(())
+}
+
+/// The same, in a call-seal build. `sealed`: the renderer expects this call's
+/// finished key exchange to be here. Without one the socket does not open, so a
+/// call never goes out in the clear by mistake. Without `sealed` and with no
+/// exchange, this is today's session.
+#[cfg(feature = "call-seal")]
 #[tauri::command(rename_all = "snake_case")]
 async fn call_media_open(
     window: WebviewWindow<impl tauri::Runtime>,
@@ -10499,16 +10521,27 @@ async fn call_media_open(
     drop(window);
     let call_id = control::media::call_id(&call_id)?;
     let peer = control::media::peer_id(&peer)?;
-    let prepared = state.call_seal.lock().unwrap().take();
-    let seal = seal_for_media(prepared, &call_id, sealed.unwrap_or(false)).map_err(|end| end.code().to_string())?;
-    let uplink = Arc::new(control::media::FrameQueue::new(control::media::QUEUE_FRAMES));
-    let stop = Arc::new(AtomicBool::new(false));
-    stop_media_session(state.inner());
-    *state.media.lock().unwrap() = Some(MediaSession { call_id: call_id.clone(), uplink: uplink.clone(), stop: stop.clone() });
-    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, stop, seal, on_frame));
+    let seal = seal_for_media(state.call_seal.lock().unwrap().take(), &call_id, sealed.unwrap_or(false)).map_err(|end| end.code().to_string())?;
+    start_media_session(app, state.inner(), call_id, peer, seal, on_frame);
     Ok(())
 }
 
+fn start_media_session<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    state: &NodeState,
+    call_id: String,
+    peer: String,
+    seal: Option<Box<control::media::SealedMedia>>,
+    on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+) {
+    let uplink = Arc::new(control::media::FrameQueue::new(control::media::QUEUE_FRAMES));
+    let stop = Arc::new(AtomicBool::new(false));
+    stop_media_session(state);
+    *state.media.lock().unwrap() = Some(MediaSession { call_id: call_id.clone(), uplink: uplink.clone(), stop: stop.clone() });
+    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, stop, seal, on_frame));
+}
+
+#[cfg(feature = "call-seal")]
 /// One call's key exchange on its way to the media socket.
 enum PreparedSeal {
     /// The offer went out; the caller still holds its secret.
@@ -10517,6 +10550,7 @@ enum PreparedSeal {
     Ready { call_id: String, media: Box<control::call_seal::SealedMedia> },
 }
 
+#[cfg(feature = "call-seal")]
 /// What a media session for `call_id` starts with. A key exchange for another
 /// call is dropped here, which wipes it.
 fn seal_for_media(
@@ -10534,14 +10568,15 @@ fn seal_for_media(
     }
 }
 
+#[cfg(feature = "call-seal")]
 /// This node's id and the peer's, in the order the call has them.
 fn seal_parties(state: &NodeState, call_id: &str, peer: &str, own_is_caller: bool) -> Result<control::call_seal::Parties, control::call_seal::SealError> {
     use control::call_seal::{Parties, SealError};
-    if !control::call_seal::enabled() { return Err(SealError::Disabled); }
     let own = state.node_id.lock().unwrap().clone().ok_or(SealError::BadIdentity)?;
     if own_is_caller { Parties::new(call_id, &own, peer) } else { Parties::new(call_id, peer, &own) }
 }
 
+#[cfg(feature = "call-seal")]
 /// Caller: a fresh key for this call, and the attribute its offer carries.
 /// Public values only leave the host. No node request and no payment here.
 #[tauri::command(rename_all = "snake_case")]
@@ -10554,6 +10589,7 @@ fn call_seal_offer(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, 
     Ok(attribute)
 }
 
+#[cfg(feature = "call-seal")]
 /// Callee: the answer's attribute for an offer that carries one, or `None`
 /// when the offer says it cannot seal. A wrong attribute is an error: the call
 /// ends, and never goes on in the clear.
@@ -10575,13 +10611,13 @@ fn call_seal_answer(window: WebviewWindow<impl tauri::Runtime>, state: State<'_,
     }
 }
 
+#[cfg(feature = "call-seal")]
 /// Caller: process the answer's attribute. `true` when the call is sealed,
 /// `false` when the peer says it cannot seal, which the app shows.
 #[tauri::command(rename_all = "snake_case")]
 fn call_seal_accept(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>, call_id: String, answer: String) -> Result<bool, String> {
     reject_sealed_window(&window)?;
     use control::call_seal::SealError;
-    if !control::call_seal::enabled() { return Err(SealError::Disabled.code().to_string()); }
     let call_id = control::media::call_id(&call_id)?;
     let mut slot = state.call_seal.lock().unwrap();
     let offer = match slot.take() {
@@ -10598,6 +10634,7 @@ fn call_seal_accept(window: WebviewWindow<impl tauri::Runtime>, state: State<'_,
     }
 }
 
+#[cfg(feature = "call-seal")]
 /// The call this exchange was for went away, or the peer's answer had no
 /// attribute. Drops what is held for this call, which wipes it. Idempotent.
 #[tauri::command(rename_all = "snake_case")]
@@ -10934,10 +10971,6 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             call_media_open,
             call_media_send,
             call_media_close,
-            call_seal_offer,
-            call_seal_answer,
-            call_seal_accept,
-            call_seal_cancel,
             porch_quote,
             porch_read,
             porch_cards,
@@ -10950,6 +10983,8 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             ai_local_select,
             ai_local_clear
             ];
+            #[cfg(feature = "call-seal")]
+            let handler = with_call_seal_commands(handler);
             #[cfg(target_os = "ios")]
             let handler = guard_ios_startup(handler);
             handler
@@ -11236,7 +11271,39 @@ mod device_sign_error_tests {
     }
 }
 
-#[cfg(test)]
+/// The four key-exchange commands, only in a call-seal build. Everything else
+/// goes to the app's handler unchanged.
+#[cfg(feature = "call-seal")]
+fn with_call_seal_commands<R: tauri::Runtime>(
+    app: impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
+    let seal: fn(tauri::ipc::Invoke<R>) -> bool = tauri::generate_handler![call_seal_offer, call_seal_answer, call_seal_accept, call_seal_cancel];
+    move |invoke| {
+        if matches!(invoke.message.command(), "call_seal_offer" | "call_seal_answer" | "call_seal_accept" | "call_seal_cancel") {
+            seal(invoke)
+        } else {
+            app(invoke)
+        }
+    }
+}
+
+#[cfg(all(test, not(feature = "call-seal")))]
+mod no_call_seal_tests {
+    /// Without the feature, the generated permission and capability sets know
+    /// nothing of the seal: there is no command to grant or to call.
+    #[test]
+    fn a_build_without_call_seal_has_no_seal_command_permission_or_capability() {
+        // This build's own output, not the shared gen/schemas a later build may overwrite.
+        let acl = include_str!(concat!(env!("OUT_DIR"), "/acl-manifests.json"));
+        let capabilities = include_str!(concat!(env!("OUT_DIR"), "/capabilities.json"));
+        for text in [acl, capabilities] {
+            assert!(!text.contains("call_seal") && !text.contains("call-seal"));
+        }
+        assert!(acl.contains("call_media_open"), "the ACL file is the app's");
+    }
+}
+
+#[cfg(all(test, feature = "call-seal"))]
 mod call_seal_open_tests {
     use super::*;
     use control::call_seal::{CallerOffer, Parties, SealError};
@@ -11283,14 +11350,6 @@ mod call_seal_open_tests {
         assert!(seal_for_media(Some(offered(OTHER)), CALL, false).unwrap().is_none());
     }
 
-    #[test]
-    fn with_the_flag_off_the_host_makes_no_key_exchange() {
-        if control::call_seal::enabled() { return; }
-        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
-        *state.node_id.lock().unwrap() = Some("a1".repeat(32));
-        assert_eq!(seal_parties(&state, CALL, &"b2".repeat(32), true).err(), Some(SealError::Disabled));
-        assert_eq!(seal_parties(&state, CALL, &"b2".repeat(32), false).err(), Some(SealError::Disabled));
-    }
 }
 
 #[cfg(test)]
@@ -25549,11 +25608,6 @@ mod assistant_acl_tests {
                 "call_media_open",
                 "call_media_send",
                 "call_media_close",
-                // Call sealing, behind its build flag: public values only leave the host.
-                "call_seal_offer",
-                "call_seal_answer",
-                "call_seal_accept",
-                "call_seal_cancel",
                 "porch_quote",
                 "porch_read",
                 "porch_cards",
@@ -25812,7 +25866,7 @@ mod assistant_acl_tests {
         }
 
         let build_rs = fs::read_to_string(manifest_dir().join("build.rs")).expect("build.rs");
-        let manifest = quoted_list(&build_rs, ".commands(&[");
+        let manifest = quoted_list(&build_rs, "const APP_COMMANDS: &[&str] = &[");
         assert_eq!(
             commands.iter().cloned().collect::<BTreeSet<_>>(),
             manifest.iter().cloned().collect::<BTreeSet<_>>(),

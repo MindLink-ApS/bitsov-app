@@ -53,47 +53,17 @@ pub const REPLAY_WINDOW: u32 = 1_024;
 pub const PREVIOUS_EPOCH_GRACE: Duration = Duration::from_secs(5);
 /// Prototype default: how many epochs ahead a packet may be tried.
 pub const FORWARD_EPOCHS: u8 = 2;
-/// Prototype default: no authentic packet for this long, while frames arrive, ends the call.
+/// Prototype default: no authentic packet for this long ends the call, whatever arrives.
 pub const NO_AUTHENTIC_LIMIT: Duration = Duration::from_secs(10);
 /// The caller repeats its reveal this often until a sealed frame authenticates.
 pub const REVEAL_INTERVAL: Duration = Duration::from_secs(1);
 /// The callee ends the call when no reveal has come this long after its link opened.
 pub const REVEAL_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The build flag: only the exact value `sealed` turns sealing on in the host.
-/// Same parent-process variable as `VITE_CALL_SEAL` in vite.config.ts.
-pub const fn flag_is_on(value: Option<&str>) -> bool {
-    match value {
-        Some(value) => {
-            let value = value.as_bytes();
-            let want = b"sealed";
-            if value.len() != want.len() {
-                return false;
-            }
-            let mut i = 0;
-            while i < want.len() {
-                if value[i] != want[i] {
-                    return false;
-                }
-                i += 1;
-            }
-            true
-        }
-        None => false,
-    }
-}
-
-/// Whether this build seals calls. Off by default.
-pub const fn enabled() -> bool {
-    flag_is_on(option_env!("VITE_CALL_SEAL"))
-}
-
 /// Why sealing refused or ended a call. Never a reason to send plaintext. The
 /// code is what the renderer receives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SealError {
-    /// The build flag is off.
-    Disabled,
     /// A call id or node id is not in its wire form.
     BadIdentity,
     /// An attribute is present and wrong: length, case, a field missing or repeated.
@@ -106,7 +76,7 @@ pub enum SealError {
     BadReveal,
     /// No reveal arrived in time.
     NoReveal,
-    /// Frames keep arriving and none authenticates.
+    /// No frame has authenticated for the limit, whether frames arrive or not.
     NoAuthenticFrames,
     /// The last epoch ran out; a key is never reused.
     Exhausted,
@@ -117,7 +87,6 @@ pub enum SealError {
 impl SealError {
     pub const fn code(self) -> &'static str {
         match self {
-            SealError::Disabled => "seal_disabled",
             SealError::BadIdentity => "seal_bad_identity",
             SealError::InvalidAttribute => "seal_invalid_attribute",
             SealError::LowOrderKey => "seal_low_order_key",
@@ -133,15 +102,25 @@ impl SealError {
 
 // ---- derivations -----------------------------------------------------------
 
-fn dk(context: &str, parts: &[&[u8]]) -> [u8; 32] {
+type Secret32 = Zeroizing<[u8; 32]>;
+
+
+/// BLAKE3 derive-key mode. The hasher's buffer holds its last input block, and
+/// for the root, the epoch keys and the send keys that input is secret: so the
+/// hasher and its result are wiped here, and only the zeroizing copy leaves.
+fn dk(context: &str, parts: &[&[u8]]) -> Secret32 {
+    use zeroize::Zeroize;
     let mut hasher = blake3::Hasher::new_derive_key(context);
     for part in parts {
         hasher.update(part);
     }
-    *hasher.finalize().as_bytes()
+    let mut hash = hasher.finalize();
+    let out = Zeroizing::new(*hash.as_bytes());
+    hash.zeroize();
+    hasher.zeroize();
+    out
 }
 
-type Secret32 = Zeroizing<[u8; 32]>;
 
 /// Call id and the two person node ids, caller first, in fixed-width form.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,7 +149,7 @@ impl Parties {
 /// Canonical commitment: covers the whole first message, so a changed `caps`
 /// or `sas` fails it.
 fn commitment(parties: &Parties, caller_caps: u32, sas: u8, a: &[u8; 32], nonce_c: &[u8; 16]) -> [u8; 32] {
-    dk(
+    *dk(
         "bitsov-e2e-commit-v1",
         &[&parties.call_id, &parties.caller_id, &parties.callee_id, &caller_caps.to_be_bytes(), &[sas], a, nonce_c],
     )
@@ -190,7 +169,7 @@ struct Exchange<'a> {
 }
 
 fn transcript(x: &Exchange<'_>) -> [u8; 32] {
-    dk(
+    *dk(
         "bitsov-e2e-transcript-v1",
         &[
             &[1u8],
@@ -217,16 +196,16 @@ struct KeySet {
 }
 
 fn derive_keys(dh: &[u8; 32], transcript: &[u8; 32]) -> KeySet {
-    let root: Secret32 = Zeroizing::new(dk("bitsov-e2e-root-v1", &[dh, transcript]));
+    let root = dk("bitsov-e2e-root-v1", &[dh, transcript]);
     KeySet {
-        send_caller: Zeroizing::new(dk("bitsov-e2e-send-caller-v1", &[root.as_ref()])),
-        send_callee: Zeroizing::new(dk("bitsov-e2e-send-callee-v1", &[root.as_ref()])),
-        sas_digest: dk("bitsov-e2e-sas-v1", &[root.as_ref()]),
+        send_caller: dk("bitsov-e2e-send-caller-v1", &[root.as_ref()]),
+        send_callee: dk("bitsov-e2e-send-callee-v1", &[root.as_ref()]),
+        sas_digest: *dk("bitsov-e2e-sas-v1", &[root.as_ref()]),
     }
 }
 
 fn next_epoch_key(key: &[u8; 32]) -> Secret32 {
-    Zeroizing::new(dk("bitsov-e2e-epoch-next-v1", &[key]))
+    dk("bitsov-e2e-epoch-next-v1", &[key])
 }
 
 /// DH with the rejection the protocol requires, before any key is installed.
@@ -590,8 +569,12 @@ pub struct SealedMedia {
     /// Reported once: see `take_first_authentic`.
     first_authentic_pending: bool,
     last_authentic: Option<Instant>,
-    last_rejected: Option<Instant>,
+    /// The first socket open of the call. Reconnects never move it.
     link_opened: Option<Instant>,
+    /// Counters of epoch-0 frames that came before the keys, below the window
+    /// size. They go into the replay window when the keys arrive, so a frame
+    /// held back by a node cannot be played after the reveal.
+    early_counters: Vec<u32>,
     counters: SealCounters,
 }
 
@@ -608,8 +591,8 @@ impl SealedMedia {
             authenticated: false,
             first_authentic_pending: false,
             last_authentic: None,
-            last_rejected: None,
             link_opened: None,
+            early_counters: Vec::new(),
             counters: SealCounters::default(),
         };
         if let Some(keys) = keys {
@@ -621,7 +604,11 @@ impl SealedMedia {
     fn install(&mut self, keys: KeySet, now: Instant) {
         let (send, read) = if self.is_caller { (keys.send_caller, keys.send_callee) } else { (keys.send_callee, keys.send_caller) };
         self.send = Some(SendState { epoch: 0, key: send, counter: 0, epoch_started: now });
-        self.read = Some(ReadState { current: ReadEpoch { epoch: 0, key: read, window: ReplayWindow::default() }, previous: None });
+        let mut window = ReplayWindow::default();
+        for counter in self.early_counters.drain(..) {
+            window.mark(counter);
+        }
+        self.read = Some(ReadState { current: ReadEpoch { epoch: 0, key: read, window }, previous: None });
         self.sas_digest = Some(keys.sas_digest);
     }
 
@@ -645,9 +632,10 @@ impl SealedMedia {
         std::mem::take(&mut self.first_authentic_pending)
     }
 
-    /// The socket opened (again): the reveal clock starts here.
+    /// The socket opened. The call's deadlines run from the first open: a
+    /// reconnect never moves them.
     pub fn link_opened(&mut self, now: Instant) {
-        self.link_opened = Some(now);
+        self.link_opened.get_or_insert(now);
     }
 
     /// Seal one renderer payload. `Ok(None)`: not sent, because the keys are
@@ -685,16 +673,15 @@ impl SealedMedia {
                 Ok(None)
             }
             _ => {
+                let _ = now;
                 self.counters.clear_refused += 1;
-                self.last_rejected = Some(now);
                 Ok(None)
             }
         }
     }
 
-    fn reject(&mut self, now: Instant) -> Option<Vec<u8>> {
+    fn reject(&mut self, _now: Instant) -> Option<Vec<u8>> {
         self.counters.rejected += 1;
-        self.last_rejected = Some(now);
         None
     }
 
@@ -707,6 +694,9 @@ impl SealedMedia {
         let call_id = self.call_id;
         let Some(read) = self.read.as_mut() else {
             self.counters.early += 1;
+            if epoch == 0 && counter < REPLAY_WINDOW && self.early_counters.len() < REPLAY_WINDOW as usize && !self.early_counters.contains(&counter) {
+                self.early_counters.push(counter);
+            }
             return None;
         };
         if read.previous.as_ref().is_some_and(|(_, until)| now >= *until) {
@@ -765,8 +755,8 @@ impl SealedMedia {
     fn reveal(&mut self, payload: &[u8], now: Instant) -> Result<(), SealError> {
         let Setup::Callee { parties, pending, accepted } = &mut self.setup else {
             // A caller is never sent one: treat it as any other unexpected clear frame.
+            let _ = now;
             self.counters.clear_refused += 1;
-            self.last_rejected = Some(now);
             return Ok(());
         };
         if payload.len() != REVEAL_BYTES {
@@ -810,14 +800,9 @@ impl SealedMedia {
                 return Err(SealError::NoReveal);
             }
         }
-        if let Some(rejected) = self.last_rejected {
-            let since = self.last_authentic.map_or(opened, |authentic| authentic.max(opened));
-            if rejected > since
-                && now.saturating_duration_since(since) >= NO_AUTHENTIC_LIMIT
-                && now.saturating_duration_since(rejected) < Duration::from_secs(1)
-            {
-                return Err(SealError::NoAuthenticFrames);
-            }
+        let since = self.last_authentic.unwrap_or(opened);
+        if now.saturating_duration_since(since) >= NO_AUTHENTIC_LIMIT {
+            return Err(SealError::NoAuthenticFrames);
         }
         if let Setup::Caller { reveal, last_sent } = &mut self.setup {
             let due = last_sent.is_none_or(|sent| now.saturating_duration_since(sent) >= REVEAL_INTERVAL);
@@ -889,7 +874,7 @@ mod tests {
         assert_eq!(commit, unhex::<32>("82fe1e10cf97b89fd49c5d190c6bfb6ceba9607360e45a3e1e2a999ed88baccf"));
         let t = transcript(&Exchange { parties: &p, caller_caps: 1, callee_caps: 1, sas: 1, commit: &commit, a: &a, b: &b, nonce_c: &nonce_c, nonce_e: &nonce_e });
         assert_eq!(t, unhex::<32>("f0df137fd0941c42a279fa5bd5b96bedf3f443d07d23c0de1e17d46f65969e6a"));
-        assert_eq!(dk("bitsov-e2e-root-v1", &[dh.as_bytes(), &t]), unhex::<32>("83a6036d746e4966bea97a6a6edd41d55062ccd7c8aab5409d1e7df88d478327"));
+        assert_eq!(*dk("bitsov-e2e-root-v1", &[dh.as_bytes(), &t]), unhex::<32>("83a6036d746e4966bea97a6a6edd41d55062ccd7c8aab5409d1e7df88d478327"));
         let keys = derive_keys(dh.as_bytes(), &t);
         assert_eq!(*keys.send_caller, unhex::<32>("4314183a3bf3ce45c872db94c11a0810d7f664f2f44985f4a2229b463e1bf2a3"));
         assert_eq!(*keys.send_callee, unhex::<32>("734e7008a567eed7da87dae5f67b85d5bc5c4d631684b2270ee8d87f47cf219a"));
@@ -1174,6 +1159,42 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_held_back_before_the_reveal_is_never_played_after_it() {
+        let (offer, line) = CallerOffer::new(parties()).unwrap();
+        let AnswerDecision::Seal { media, attribute } = answer_offer(parties(), &line).unwrap() else { panic!("no seal") };
+        let mut callee = *media;
+        let mut caller = offer.accept_answer(&attribute).unwrap().unwrap();
+        let now = Instant::now();
+        let Tick::Send(reveal) = caller.tick(now).unwrap() else { panic!("no reveal") };
+        // Sealed frames reach the callee before the reveal, and a node keeps copies.
+        let early: Vec<_> = (0..3).map(|i| caller.seal(&[0x02, i], now).unwrap().unwrap()).collect();
+        for frame in &early {
+            assert_eq!(callee.receive(frame, now), Ok(None));
+        }
+        assert_eq!(callee.counters().early, 3);
+        callee.receive(&reveal, now).unwrap();
+        for frame in &early {
+            assert_eq!(callee.receive(frame, now), Ok(None), "replayed after the reveal");
+        }
+        assert_eq!(callee.counters().rejected, 3);
+        let next = caller.seal(&[0x02, 9], now).unwrap().unwrap();
+        assert!(callee.receive(&next, now).unwrap().is_some(), "the next frame plays");
+        // A node cannot push the window far ahead with fake early counters.
+        let (offer, line) = CallerOffer::new(parties()).unwrap();
+        let AnswerDecision::Seal { media, attribute } = answer_offer(parties(), &line).unwrap() else { panic!("no seal") };
+        let mut callee = *media;
+        let mut caller = offer.accept_answer(&attribute).unwrap().unwrap();
+        let Tick::Send(reveal) = caller.tick(now).unwrap() else { panic!("no reveal") };
+        let mut fake = vec![TYPE_SEALED, 0];
+        fake.extend_from_slice(&5_000_000u32.to_be_bytes());
+        fake.extend_from_slice(&[0x11; 150]);
+        callee.receive(&fake, now).unwrap();
+        callee.receive(&reveal, now).unwrap();
+        let first = caller.seal(&[0x02, 1], now).unwrap().unwrap();
+        assert!(callee.receive(&first, now).unwrap().is_some());
+    }
+
+    #[test]
     fn the_callee_sends_nothing_before_the_reveal() {
         let (reveal, mut callee) = exchanged();
         let now = Instant::now();
@@ -1443,15 +1464,28 @@ mod tests {
     }
 
     #[test]
-    fn no_reveal_in_time_ends_the_call_and_a_new_link_restarts_the_clock() {
+    fn no_reveal_in_time_ends_the_call() {
         let (_, mut callee) = exchanged();
         let start = Instant::now();
         callee.link_opened(start);
         assert_eq!(callee.tick(start + REVEAL_TIMEOUT - Duration::from_millis(1)), Ok(Tick::Nothing));
         assert_eq!(callee.tick(start + REVEAL_TIMEOUT), Err(SealError::NoReveal));
-        let reopened = start + Duration::from_secs(4);
-        callee.link_opened(reopened);
-        assert_eq!(callee.tick(start + REVEAL_TIMEOUT), Ok(Tick::Nothing));
+    }
+
+    #[test]
+    fn a_reconnect_before_the_timeout_does_not_move_the_deadlines() {
+        let (_, mut callee) = exchanged();
+        let start = Instant::now();
+        callee.link_opened(start);
+        callee.link_opened(start + Duration::from_secs(4));
+        assert_eq!(callee.tick(start + REVEAL_TIMEOUT), Err(SealError::NoReveal), "reveal deadline");
+        let (mut caller, _) = pair();
+        let start = Instant::now();
+        caller.link_opened(start);
+        for second in [3, 6, 9] {
+            caller.link_opened(start + Duration::from_secs(second));
+        }
+        assert_eq!(caller.tick(start + NO_AUTHENTIC_LIMIT).err(), Some(SealError::NoAuthenticFrames), "authentication deadline");
     }
 
     #[test]
@@ -1469,17 +1503,19 @@ mod tests {
     }
 
     #[test]
-    fn a_silent_stall_does_not_end_the_call() {
+    fn a_quiet_gap_of_ten_seconds_ends_the_call_too() {
         let (mut caller, mut callee) = pair();
         let start = Instant::now();
         callee.link_opened(start);
         let frame = caller.seal(&[0x02, 1], start).unwrap().unwrap();
         callee.receive(&frame, start).unwrap();
-        // One bad frame, then silence for a minute: nothing is arriving.
-        let mut junk = vec![TYPE_SEALED, 0, 0, 0, 0, 9];
-        junk.extend_from_slice(&[0x11; 150]);
-        callee.receive(&junk, start + Duration::from_secs(1)).unwrap();
-        assert_eq!(callee.tick(start + Duration::from_secs(60)), Ok(Tick::Nothing));
+        // Nothing at all arrives after that: no rejected frame is needed.
+        assert_eq!(callee.tick(start + NO_AUTHENTIC_LIMIT - Duration::from_millis(1)), Ok(Tick::Nothing));
+        assert_eq!(callee.tick(start + NO_AUTHENTIC_LIMIT), Err(SealError::NoAuthenticFrames));
+        // And with nothing ever authentic.
+        let (mut caller, _) = pair();
+        let later = Instant::now() + NO_AUTHENTIC_LIMIT + Duration::from_millis(1);
+        assert_eq!(caller.tick(later), Err(SealError::NoAuthenticFrames));
     }
 
     #[test]
@@ -1496,16 +1532,5 @@ mod tests {
             callee.receive(&junk, now + Duration::from_millis(1)).unwrap();
             assert_eq!(callee.tick(now + Duration::from_millis(2)), Ok(Tick::Nothing));
         }
-    }
-
-    // ---- the flag ----------------------------------------------------------
-
-    #[test]
-    fn the_flag_takes_only_the_exact_value() {
-        assert!(flag_is_on(Some("sealed")));
-        for value in [None, Some(""), Some("1"), Some("true"), Some("Sealed"), Some("sealed "), Some("seale")] {
-            assert!(!flag_is_on(value), "{value:?}");
-        }
-        assert_eq!(enabled(), option_env!("VITE_CALL_SEAL") == Some("sealed"));
     }
 }

@@ -54,7 +54,7 @@ import { answerCost, callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEV
 import { CallReportCopy } from './CallReportCopy';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { nodeRoutedAudio, sealedAudio } from './callFlags';
-import { createNodeRoutedConnection, type SealState } from './nodeRoutedConnection';
+import { createNodeRoutedConnection, sealLabelScope, type SealState } from './nodeRoutedConnection';
 import { waitUntilPaid, type MinutesDeps, type MinutesView } from './callMinutes';
 import { hostCallSeal, hostMediaBridge, unavailableMediaBridge } from './mediaBridge';
 import { createCallAudio } from './callAudio';
@@ -1394,6 +1394,8 @@ export function ControlCenter(props: Props) {
   const [callView, setCallView] = createSignal<CallView>(CALL_IDLE);
   // Only ever set on a build with sealing on. Null: the plain label.
   const [callSeal, setCallSeal] = createSignal<SealState | null>(null);
+  // Each connection gets its own label setter; only the newest may change the label.
+  const nextSealLabel = sealLabelScope(setCallSeal);
   const [waitingCalls, setWaitingCalls] = createSignal<CallView[]>([]);
   const waitingPanels = new Map<string, HTMLElement>();
   const isIncoming = (peer: string, id: string) => [callView(), ...waitingCalls()].some(v => v.peer === peer && v.callId === id && v.phase === 'incoming' && !v.silenced);
@@ -1470,7 +1472,8 @@ export function ControlCenter(props: Props) {
           admitted: callMinutes ? (callId, peer, closed) => waitUntilPaid(callMinutes.status, peer, callId, () => Date.now(), closed) : undefined,
           // A media session that closed for good ends its call, so no further minute is paid.
           onSession: (event) => { if (event.state === 'closed') calls.mediaClosed(event.callId); },
-          ...(sealedAudio() && isTauri() ? { seal: hostCallSeal(), onSeal: setCallSeal } : {}),
+          // The literal flag lets a build without it drop the seal code entirely.
+          ...(import.meta.env.VITE_CALL_SEAL === 'sealed' && sealedAudio() && isTauri() ? { seal: hostCallSeal(), onSeal: nextSealLabel() } : {}),
         })
       : (config) => new RTCPeerConnection(config),
     now: () => Date.now(),

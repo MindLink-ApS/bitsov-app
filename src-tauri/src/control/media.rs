@@ -25,7 +25,46 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as Frame;
 
-use super::call_seal::{SealedMedia, Tick};
+#[cfg(feature = "call-seal")]
+pub use super::call_seal::{SealedMedia, Tick};
+#[cfg(not(feature = "call-seal"))]
+pub use no_seal::{SealedMedia, Tick};
+
+/// A build without the `call-seal` feature has no seal: this type has no
+/// values, so every seal branch below is unreachable and the session is
+/// exactly the one before sealing existed.
+#[cfg(not(feature = "call-seal"))]
+mod no_seal {
+    use std::time::Instant;
+    pub enum SealedMedia {}
+    pub enum Tick {
+        Nothing,
+        Send(Vec<u8>),
+    }
+    pub enum NoSeal {}
+    impl NoSeal {
+        pub fn code(self) -> &'static str {
+            match self {}
+        }
+    }
+    impl SealedMedia {
+        pub fn link_opened(&mut self, _: Instant) {
+            match *self {}
+        }
+        pub fn tick(&mut self, _: Instant) -> Result<Tick, NoSeal> {
+            match *self {}
+        }
+        pub fn receive(&mut self, _: &[u8], _: Instant) -> Result<Option<Vec<u8>>, NoSeal> {
+            match *self {}
+        }
+        pub fn seal(&mut self, _: &[u8], _: Instant) -> Result<Option<Vec<u8>>, NoSeal> {
+            match *self {}
+        }
+        pub fn take_first_authentic(&mut self) -> bool {
+            match *self {}
+        }
+    }
+}
 
 /// Big-endian `seq` prefix of every frame.
 pub const SEQ_BYTES: usize = 4;
@@ -1006,7 +1045,9 @@ mod tests {
         server.abort();
     }
 
-    // ---- sealed sessions ----------------------------------------------------
+    #[cfg(feature = "call-seal")]
+    mod sealed {
+    use super::*;
 
     use crate::control::call_seal::{self as seal, AnswerDecision, CallerOffer, Parties, SealCounters};
 
@@ -1092,7 +1133,8 @@ mod tests {
                     while let Some(frame) = downlink.try_pop() {
                         collected.lock().unwrap().push(MediaFrame::decode(&frame).unwrap());
                     }
-                    if collected.lock().unwrap().len() >= want_down || start.elapsed() > Duration::from_secs(20) {
+                    let ended = events.lock().unwrap().iter().any(|e| matches!(e, MediaLink::Ended(_)));
+                    if ended || collected.lock().unwrap().len() >= want_down || start.elapsed() > Duration::from_secs(20) {
                         stop.store(true, Ordering::SeqCst);
                         return;
                     }
@@ -1185,6 +1227,38 @@ mod tests {
         assert!(run.counters.held_back > 0);
     }
 
+    /// Accepts each socket and closes it after `hold`, again and again.
+    async fn flapping_node(listener: tokio::net::TcpListener, hold: Duration, opens: std::sync::Arc<AtomicU64>) {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            opens.fetch_add(1, Ordering::SeqCst);
+            let ws = tokio_tungstenite::accept_hdr_async(stream, |_: &Request, mut res: Response| {
+                res.headers_mut().insert("Sec-WebSocket-Protocol", "bitsov.v1".parse().unwrap());
+                Ok(res)
+            }).await;
+            if let Ok(mut ws) = ws {
+                tokio::time::sleep(hold).await;
+                let _ = ws.close(None).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnects_before_the_timeout_do_not_keep_a_call_waiting_for_its_reveal() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let opens = std::sync::Arc::new(AtomicU64::new(0));
+        let server = tokio::spawn(flapping_node(listener, Duration::from_millis(1_500), opens.clone()));
+        let api = format!("http://127.0.0.1:{port}/api/v1");
+        let (_, callee) = sealed_pair();
+        let started = std::time::Instant::now();
+        let run = run_sealed_side(api, callee, Vec::new(), 1).await;
+        server.abort();
+        assert!(opens.load(Ordering::SeqCst) >= 2, "it reconnected before the deadline");
+        assert_eq!(run.events.last(), Some(&MediaLink::Ended(Some("seal_no_reveal".into()))), "{:?}", run.events);
+        assert!(started.elapsed() < Duration::from_secs(12), "{:?}", started.elapsed());
+    }
+
     #[tokio::test]
     async fn a_socket_reconnect_keeps_the_keys_counters_and_replay_state() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1208,6 +1282,8 @@ mod tests {
         for pair in b.downlink.windows(2) {
             assert!(pair[1].seq > pair[0].seq, "the authenticated numbering carries on");
         }
+    }
+
     }
 
     #[tokio::test]

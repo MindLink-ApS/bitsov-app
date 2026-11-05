@@ -306,16 +306,14 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     expect($('[data-call-route="node"]')?.textContent).not.toMatch(/Both boxes can hear it/);
   });
 
-  it('with sealing on, a peer that cannot seal is shown, and the call is not labelled sealed', async () => {
+  it('with sealing on, an answer that cannot be sealed ends the call before any audio, and blames no side', async () => {
     const host = stubHost();
     await sealedRing(host, []);
-    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
-    expect(Object.keys(host.used('call_media_open')[0].args as object)).not.toContain('sealed');
-    expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('not_sealed');
-    expect($('[data-call-route="node"]')?.textContent).toMatch(/^Not sealed:.*Both boxes can hear it\.$/);
-    host.media({ link: 'open', detail: null });
-    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
-    expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('not_sealed');
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-ended]')?.textContent).toBe('This call could not be sealed, so it was ended. Nothing was said unsealed.');
+    expect(host.used('call_media_open')).toHaveLength(0);
+    expect(host.used('call_media_send')).toHaveLength(0);
+    expect(host.used('call_seal_cancel').length).toBeGreaterThan(0);
   });
 
   it('with sealing on, a call that cannot stay sealed ends and says so', async () => {

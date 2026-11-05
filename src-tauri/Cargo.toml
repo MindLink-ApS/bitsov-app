@@ -41,8 +41,8 @@ base64 = "0.22"
 zeroize = { version = "1", features = ["serde"] }
 snow = "0.9"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-# Call sealing (src/control/call_seal.rs). Same version the Noise tunnel already locks.
-chacha20poly1305 = "0.10"
+# Call sealing (src/control/call_seal.rs), only with the `call-seal` feature. Same version the Noise tunnel already locks.
+chacha20poly1305 = { version = "0.10", optional = true }
 # Decode BOLT 11 invoices exactly as the node's payment path does (genome
 # dac01c8 locks lightning-invoice 0.34.1 via ldk-node 0.7.0). Keep in lockstep.
 lightning-invoice = "=0.34.1"
@@ -89,6 +89,10 @@ sit-mock = ["dep:mock-node"]
 # `konsensus` via BITSOV_DEV_SIDECAR instead of the signature-verified sidecar.
 # A compile error in release builds. Never add this to `default`.
 dev-node = []
+# Sealed call audio, a test build only (src/control/call_seal.rs). Off by default.
+# Build with VITE_CALL_SEAL=sealed as well: build.rs refuses one without the other.
+# Without it, no seal command, permission, capability or direct dependency exists.
+call-seal = ["dep:chacha20poly1305", "blake3/zeroize", "x25519-dalek/zeroize"]
 
 [dependencies.mock-node]
 path = "crates/mock-node"

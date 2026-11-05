@@ -14,7 +14,9 @@ import {
   nodeRoutedSdp,
   NodeRoutedConnection,
   SEAL_ENDED,
+  SEAL_NOT_AGREED,
   SEAL_REFUSED,
+  sealLabelScope,
   type SealState,
 } from '../src/control/nodeRoutedConnection';
 import { callSealFlag } from '../vite.config';
@@ -23,6 +25,7 @@ import type { CallQuote } from '../src/control/types';
 
 const ID = '0123456789abcdef0123456789abcdef';
 const PEER = 'a'.repeat(64);
+const OTHER = 'fedcba9876543210fedcba9876543210';
 const OFFER_LINE = `a=x-bitsov-e2e:1 commit=${'ab'.repeat(32)} caps=00000001 sas=01`;
 const ANSWER_LINE = `a=x-bitsov-e2e:1 key=${'cd'.repeat(32)} nonce=${'ef'.repeat(16)} caps=00000001`;
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -184,25 +187,27 @@ describe('the caller', () => {
     expect(states).toEqual(['setting_up', 'sealed']);
   });
 
-  it('shows a peer that cannot seal, and opens the socket unsealed only then', async () => {
+  it('an answer without the attribute ends the call: nothing is sent unsealed', async () => {
     const { seal, calls } = fakeSeal();
     const { conn, b, states } = sealedConnection(seal);
     await conn.setLocalDescription(await conn.createOffer());
-    await conn.setRemoteDescription({ type: 'answer', sdp: nodeRoutedSdp('answer', ID) });
+    // An app that cannot seal, or a node that stripped the line: the same here.
+    await expect(conn.setRemoteDescription({ type: 'answer', sdp: nodeRoutedSdp('answer', ID) })).rejects.toMatchObject({ name: SEAL_NOT_AGREED });
     await tick();
-    expect(states).toEqual(['setting_up', 'not_sealed']);
     expect(calls).toEqual(['offer', 'cancel']);
-    expect(b.opened[0].sealed).toBeUndefined();
+    expect(b.opened).toHaveLength(0);
+    expect(b.sent).toHaveLength(0);
+    expect(states).toEqual(['setting_up']);
   });
 
-  it('shows the same when the answer says it lacks the capability', async () => {
+  it('an answer without the capability ends the call the same way', async () => {
     const { seal } = fakeSeal({ accept: async () => false });
     const { conn, b, states } = sealedConnection(seal);
     await conn.setLocalDescription(await conn.createOffer());
-    await conn.setRemoteDescription({ type: 'answer', sdp: sdpWith('answer', ANSWER_LINE) });
+    await expect(conn.setRemoteDescription({ type: 'answer', sdp: sdpWith('answer', ANSWER_LINE) })).rejects.toMatchObject({ name: SEAL_NOT_AGREED });
     await tick();
-    expect(states[states.length - 1]).toBe('not_sealed');
-    expect(b.opened[0].sealed).toBeUndefined();
+    expect(b.opened).toHaveLength(0);
+    expect(states).not.toContain('not_sealed');
   });
 
   it('refuses a wrong answer: no socket opens, never unsealed', async () => {
@@ -237,6 +242,86 @@ describe('the caller', () => {
     const { conn, states } = sealedConnection(seal);
     await expect(conn.createOffer()).rejects.toMatchObject({ name: SEAL_REFUSED });
     expect(states).toEqual([]);
+  });
+});
+
+/** A promise the test settles when it chooses. */
+function later<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((ok) => { resolve = ok; });
+  return { promise, resolve };
+}
+
+describe('a call replaced while the host was still answering', () => {
+  /** The shell's arrangement: one label, a setter per connection. */
+  function screen() {
+    const shown: (SealState | null)[] = [];
+    const next = sealLabelScope((state) => shown.push(state));
+    const current = () => shown[shown.length - 1];
+    return { next, current, shown };
+  }
+
+  it('a late offer completion leaves the replacement plain call’s label alone', async () => {
+    const label = screen();
+    const offer = later<string>();
+    const sealA = fakeSeal({ offer: () => offer.promise });
+    const a = new NodeRoutedConnection({ callId: () => ID, peer: () => PEER, bridge: fakeBridge().bridge, audio, seal: sealA.seal, onSeal: label.next() });
+    const offering = a.createOffer();
+    a.close();
+    // Call B: an incoming call from an app that cannot seal.
+    const b = new NodeRoutedConnection({ callId: () => OTHER, peer: () => PEER, bridge: fakeBridge().bridge, audio, seal: fakeSeal().seal, onSeal: label.next() });
+    await b.setRemoteDescription({ type: 'offer', sdp: nodeRoutedSdp('offer', OTHER) });
+    await b.createAnswer();
+    expect(label.current()).toBe('not_sealed');
+    offer.resolve(OFFER_LINE);
+    await expect(offering).rejects.toMatchObject({ name: SEAL_REFUSED });
+    expect(label.current()).toBe('not_sealed');
+    expect(sealA.calls).toContain('cancel');
+  });
+
+  it('a late answer completion is ignored the same way', async () => {
+    const label = screen();
+    const answer = later<string | null>();
+    const sealA = fakeSeal({ answer: () => answer.promise });
+    const a = new NodeRoutedConnection({ callId: () => ID, peer: () => PEER, bridge: fakeBridge().bridge, audio, seal: sealA.seal, onSeal: label.next() });
+    await a.setRemoteDescription({ type: 'offer', sdp: sdpWith('offer', OFFER_LINE) });
+    const answering = a.createAnswer();
+    a.close();
+    const b = new NodeRoutedConnection({ callId: () => OTHER, peer: () => PEER, bridge: fakeBridge().bridge, audio, seal: fakeSeal().seal, onSeal: label.next() });
+    await b.setRemoteDescription({ type: 'offer', sdp: nodeRoutedSdp('offer', OTHER) });
+    await b.createAnswer();
+    answer.resolve(ANSWER_LINE);
+    await expect(answering).rejects.toMatchObject({ name: SEAL_REFUSED });
+    expect(label.current()).toBe('not_sealed');
+  });
+
+  it('a late accept completion opens nothing and changes no label', async () => {
+    const label = screen();
+    const accept = later<boolean>();
+    const bridgeA = fakeBridge();
+    const sealA = fakeSeal({ accept: () => accept.promise });
+    const a = new NodeRoutedConnection({ callId: () => ID, peer: () => PEER, bridge: bridgeA.bridge, audio, seal: sealA.seal, onSeal: label.next() });
+    await a.setLocalDescription(await a.createOffer());
+    const accepting = a.setRemoteDescription({ type: 'answer', sdp: sdpWith('answer', ANSWER_LINE) });
+    a.close();
+    const b = new NodeRoutedConnection({ callId: () => OTHER, peer: () => PEER, bridge: fakeBridge().bridge, audio, seal: fakeSeal().seal, onSeal: label.next() });
+    await b.setRemoteDescription({ type: 'offer', sdp: nodeRoutedSdp('offer', OTHER) });
+    await b.createAnswer();
+    accept.resolve(true);
+    await expect(accepting).rejects.toMatchObject({ name: SEAL_REFUSED });
+    await tick();
+    expect(bridgeA.opened).toHaveLength(0);
+    expect(label.current()).toBe('not_sealed');
+  });
+
+  it('even a setter kept past its connection changes nothing once a newer one exists', () => {
+    const label = screen();
+    const old = label.next();
+    const fresh = label.next();
+    old('sealed');
+    expect(label.current()).toBe(null);
+    fresh('not_sealed');
+    expect(label.current()).toBe('not_sealed');
   });
 });
 
@@ -368,7 +453,7 @@ describe('the end of a sealed call', () => {
 });
 
 describe('the words', () => {
-  const KEYS = ['caCallSealSettingUp', 'caCallSealed', 'caCallNotSealed', 'caCallSealEnded', 'caCallSealRefused'] as const;
+  const KEYS = ['caCallSealSettingUp', 'caCallSealed', 'caCallNotSealed', 'caCallSealEnded', 'caCallSealRefused', 'caCallSealNotAgreed'] as const;
 
   it('claim no check and no review, in either language', () => {
     for (const language of ['en', 'da'] as const) {

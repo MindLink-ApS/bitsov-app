@@ -61,6 +61,8 @@ export type SealState = 'setting_up' | 'sealed' | 'not_sealed';
 
 /** The refusal `call.ts` shows when a key exchange is present and wrong. */
 export const SEAL_REFUSED = 'CallSealRefused';
+/** This side offered sealing and the answer did not agree: the call ends, nothing goes out unsealed. */
+export const SEAL_NOT_AGREED = 'CallSealNotAgreed';
 /** A host seal failure ends the link with a detail that starts like this. */
 const SEAL_DETAIL = /^seal_/;
 export const SEAL_ENDED = 'seal_ended';
@@ -71,6 +73,21 @@ function sealLines(sdp: string | null | undefined): string[] {
 }
 
 const sealRefused = () => Object.assign(new Error(), { name: SEAL_REFUSED });
+const sealNotAgreed = () => Object.assign(new Error(), { name: SEAL_NOT_AGREED });
+
+/**
+ * One label for the screen, many connections over time: each connection gets
+ * its own setter, and only the newest one may still change the label. A
+ * replaced call's late answer from the host is ignored.
+ */
+export function sealLabelScope(set: (state: SealState | null) => void) {
+  let generation = 0;
+  return () => {
+    const mine = ++generation;
+    set(null);
+    return (state: SealState) => { if (mine === generation) set(state); };
+  };
+}
 
 export type NodeRoutedDeps = {
   /** The wire call id of the call this connection serves (set by the engine before it opens media). */
@@ -170,6 +187,8 @@ export class NodeRoutedConnection {
     this.sealOffered = true;
     this.sealCallId = callId;
     const attribute = await seal.offer(callId, peer).catch(() => { throw sealRefused(); });
+    // Closed while the host worked: this call is over, so nothing of it may change any label.
+    if (this.closed) { void seal.cancel(callId); throw sealRefused(); }
     this.sealing = true;
     this.deps.onSeal?.('setting_up');
     return { type: 'offer', sdp: nodeRoutedSdp('offer', callId, attribute) };
@@ -190,6 +209,7 @@ export class NodeRoutedConnection {
     }
     this.sealCallId = callId;
     const attribute = await seal.answer(callId, peer, lines[0]).catch(() => { throw sealRefused(); });
+    if (this.closed) { void seal.cancel(callId); throw sealRefused(); }
     if (attribute === null) {
       this.deps.onSeal?.('not_sealed');
       return { type: 'answer', sdp: nodeRoutedSdp('answer', callId) };
@@ -220,17 +240,25 @@ export class NodeRoutedConnection {
     this.maybeOpen();
   }
 
-  /** The caller reads the answer. A wrong key exchange throws, and the call ends with nothing sent in the clear. */
+  /**
+   * The caller reads the answer. This side offered sealing, so an answer that
+   * does not agree (no attribute, or no capability) ends the call like a wrong
+   * one: nothing is sent unsealed, and no side is named as the cause.
+   */
   private async acceptAnswer(description: Description) {
     const seal = this.deps.seal!;
     const callId = this.deps.callId();
     const lines = sealLines(description.sdp);
     if (lines.length > 1 || !callId) throw sealRefused();
-    const sealed = lines.length === 1 ? await seal.accept(callId, lines[0]).catch(() => { throw sealRefused(); }) : false;
+    if (lines.length === 0) {
+      void seal.cancel(callId);
+      throw sealNotAgreed();
+    }
+    const sealed = await seal.accept(callId, lines[0]).catch(() => { throw sealRefused(); });
+    if (this.closed) { void seal.cancel(callId); throw sealRefused(); }
     if (!sealed) {
-      await seal.cancel(callId);
-      this.sealing = false;
-      this.deps.onSeal?.('not_sealed');
+      void seal.cancel(callId);
+      throw sealNotAgreed();
     }
   }
 
