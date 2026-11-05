@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { setLanguagePref } from '../src/i18n';
 import { HOST_COPY_DA, hostText } from '../src/control/hostCopy';
 import { asActionError } from '../src/control/state';
+import { softenError } from '../src/control/userFacing';
 
 const rust = (dir: string): string[] => readdirSync(dir).flatMap((n) => {
   const p = join(dir, n);
@@ -13,10 +14,12 @@ const rust = (dir: string): string[] => readdirSync(dir).flatMap((n) => {
 const hostRefusals = () => rust('src-tauri/src').flatMap((f) => {
   const source = readFileSync(f, 'utf8').split('#[cfg(test)]')[0];
   return [...source.matchAll(/ActionError::new\(\s*"[a-z_0-9]+"\s*,\s*(?:format!\(\s*)?"((?:[^"\\]|\\.)*)"/g)]
-    .map((m) => m[1].replace(/\\\s*\n\s*/g, '').replace(/\\"/g, '"').replace(/\{[a-z_]*\}/g, '{}'));
+    .map((m) => m[1].replace(/\\\s*\n\s*/g, '').replace(/\\"/g, '"').replace(/\{[a-z_]*\}/g, '{}'))
+    // The host fills in the singular or the plural, so both must be listed.
+    .flatMap((m) => m.startsWith('{} {} not a connected peer') ? [m.replace('{} {}', '{} member is'), m.replace('{} {}', '{} members are')] : [m]);
 });
 // Composed elsewhere, or not sentences a person reads as they are: named here so a new refusal cannot slip by.
-const NOT_LISTED = new Set(['{} {}', 'private owner approval receipts are not supported on this platform', '{} {} not a connected peer, so the node would skip them without telling you. Rooms send only when every member is connected.']);
+const NOT_LISTED = new Set(['{} {}', 'private owner approval receipts are not supported on this platform']);
 
 /**
  * Every whole sentence in the host's setup and main files, however it is returned:
@@ -55,14 +58,18 @@ describe('host refusals in Danish', () => {
       expect(da, en).not.toBe(en);
     }
   });
+  it('a money refusal keeps its warning in Danish, so nothing can replace it', () => {
+    const fill = (t: string) => t.replace(/\{\d*\}/g, '5');
+    for (const [en, da] of HOST_COPY_DA) if (softenError(fill(en)).money) expect(softenError(fill(da)).money, en).toBe(true);
+  });
   it('translates the exact refusal, with its values, only in Danish', () => {
     const refusal = 'This is more than the 50 sats per payment your node allows. Nothing was sent.';
     expect(hostText(refusal, 'en')).toBe(refusal);
     expect(hostText(refusal, 'da')).toBe('Det er mere end de 50 sats pr. betaling, din boks tillader. Intet blev sendt.');
   });
-  it('translates a known refusal inside another', () => {
+  it('keeps a node\'s own detail as it came, even when it reads like a known refusal', () => {
     expect(hostText('Outcome unknown; another spend is blocked until reconciled. Nothing was paid.', 'da'))
-      .toBe('Udfaldet er ukendt; nye betalinger er blokeret, indtil det er afklaret. Intet blev betalt.');
+      .toBe('Udfaldet er ukendt; nye betalinger er blokeret, indtil det er afklaret. Nothing was paid.');
   });
   it('leaves text it does not know exactly as the host wrote it', () => {
     expect(hostText('Nothing was paid. And something new.', 'da')).toBe('Nothing was paid. And something new.');
