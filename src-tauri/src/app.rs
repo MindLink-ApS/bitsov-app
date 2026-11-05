@@ -8297,6 +8297,9 @@ async fn do_file_send(
     let (auth, plan) = plan_message(state, &recipient, false, max_msat, first_contact_msat)?;
     no_pending_spend(state)?;
     let caps = require_price_caps(state, false).await?;
+    // The button promises "up to" this total. An older node may pay admission on
+    // top of a cap, so no file goes through one, as for a conversation's message.
+    require_conversation_ceiling(state, &recipient, &caps).await?;
     let body = act::file_upload_body(filename, mime_type, data_b64)?;
     let filename = body["filename"].as_str().unwrap_or_default().to_string();
     let quote: control::KindPrice = get_json(state, &control::price_path(act::KIND_FILE_REF)).await?;
@@ -19505,6 +19508,83 @@ mod control_act_tests {
         assert_eq!(do_file_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_TOO_LARGE);
     }
 
+    /// This node's caps are all-in, as its first-contact quote shows on a real node.
+    fn all_in_node(node: &Fake) {
+        *node.state.all_in_caps_node.lock().unwrap() = node.state.node_id.lock().unwrap().clone();
+    }
+
+    /// "Up to" on the file button is a promise. On an older node a cap does not hold
+    /// admission, so no file goes through it: nothing is uploaded, sent or debited.
+    #[tokio::test]
+    async fn a_file_goes_through_no_node_that_could_pay_admission_above_its_ceiling() {
+        for offers_quote in [false, true] {
+            let (node, _dir, g1) = g1_node(&["read", "receive"]);
+            if offers_quote {
+                *g1.first_contact.lock().unwrap() = Some((200, serde_json::json!({})));
+                *g1.quote.lock().unwrap() = Some(serde_json::json!({"recipient": A,
+                    "admission_msat": 10_000, "message_msat": 3_000, "total_msat": 13_000, "fresh": true, "quote_id": "legacy", "expires_at": 0}));
+            }
+            with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+            g1.grant.lock().unwrap()["per_recipient_msat"] = serde_json::json!({A: 50_000});
+            g1_approved(&node, 500_000).await;
+            let error = do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 8_000, None).await.unwrap_err();
+            assert_eq!(error.code, "price_cap_unavailable", "{}", error.message);
+            assert!(!node.posts().iter().any(|(p, _)| p.starts_with("/files")), "nothing uploaded or sent");
+            let view = budget_now(&node.state);
+            assert_eq!((view.spent_msat, view.accounted_msat, view.unsettled_msat), (0, 0, 0));
+        }
+    }
+
+    /// On a node whose caps are all-in, a reply that still carries separate admission
+    /// above the cap is not a normal receipt: it stays held and blocks the next spend.
+    #[tokio::test]
+    async fn a_file_reply_with_admission_above_its_ceiling_is_fenced() {
+        let inner = happy();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == format!("/files/{FILE_ID}/send") {
+                return (200, serde_json::json!({"message_id": "f1", "delivered": true, "amount_msat": 3000,
+                    "readmission_msat": 10_000, "max_routing_fee_msat": 5000, "fee_paid_msat": 375}).to_string());
+            }
+            inner(m, p, b)
+        }));
+        all_in_node(&node);
+        spend_advance(&node.state, true).await.unwrap();
+        let error = do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 8_000, None).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown", "{}", error.message);
+        assert!(error.message.contains("beyond the confirmed message cap"), "{}", error.message);
+        assert!(pending(&node).is_some_and(|p| p.over_budget), "held for the owner to check");
+    }
+
+    /// A node that shows its all-in contract in its first-contact quote passes, and
+    /// the probe needs running only once.
+    #[tokio::test]
+    async fn a_file_goes_through_once_the_node_shows_its_ceiling_is_all_in() {
+        let (routes, posted) = {
+            let inner = happy();
+            let posted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = posted.clone();
+            let routes: Routes = Arc::new(move |m, p, b| {
+                if p == "/status" {
+                    return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "first_contact_grant_v1"]}).to_string());
+                }
+                if p == "/messages/first-contact/quote" {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    return (200, serde_json::json!({"recipient": A, "admission_msat": 1500, "message_msat": 2000, "max_routing_fee_msat": 5000,
+                        "total_msat": 8500, "fresh": true, "quote_id": "q", "expires_at": 0}).to_string());
+                }
+                inner(m, p, b)
+            });
+            (routes, posted)
+        };
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 8_000, None).await.unwrap();
+        assert!(has_all_in_caps(&node.state));
+        do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 8_000, None).await.unwrap();
+        assert_eq!(posted.load(Ordering::SeqCst), 1, "probed once");
+        assert_eq!(node.posts().iter().filter(|(p, _)| p.ends_with("/send")).count(), 2);
+    }
+
     /// What a file's send leaves in the budget. A node that reports the actual fee
     /// (`fee_paid_msat`) counts price plus that fee against it. Without it, as on
     /// rc21, the whole routing ceiling keeps counting: absence is not zero.
@@ -19524,6 +19604,7 @@ mod control_act_tests {
                 inner(m, p, b)
             });
             let node = fake(AuthMode::Local, routes);
+            all_in_node(&node);
             do_budget_approve(&node.state, 500_000, budget::PresetId::Careful).await.unwrap();
             with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
             let before = budget_now(&node.state);
@@ -19543,6 +19624,7 @@ mod control_act_tests {
     #[tokio::test]
     async fn a_file_is_uploaded_then_sent_to_one_peer() {
         let node = fake(AuthMode::Local, happy());
+        all_in_node(&node);
         spend_advance(&node.state, true).await.unwrap();
         let receipt = do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 8000, None).await.unwrap();
         assert_eq!((receipt.filename.as_str(), receipt.size_bytes, receipt.amount_msat), ("hi.txt", 2, 3000));
@@ -19811,6 +19893,7 @@ mod control_act_tests {
     async fn budget_scope_manual_actions_count_and_refuse_before_dispatch() {
         for action in ["message", "room", "file"] {
             let node = fake(AuthMode::Local, happy());
+            all_in_node(&node);
             let s = &node.state;
             spend_advance(s, true).await.unwrap();
             with_book(s, true, |b| { b.set_ceiling(match action { "room" => 13000, "file" => 10000, _ => 9000 }); Ok(()) }).unwrap();
@@ -19836,6 +19919,7 @@ mod control_act_tests {
     #[tokio::test]
     async fn budget_scope_files_share_contact_limits_and_use_budget_like_messages() {
         let node = fake(AuthMode::Local, happy());
+        all_in_node(&node);
         let s = &node.state;
         let view = do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap();
         assert_eq!(view.autopay.state, budget::AutopayState::Open);
@@ -19852,6 +19936,7 @@ mod control_act_tests {
     #[tokio::test]
     async fn budget_scope_files_still_need_window_without_budget_approval() {
         let node = fake(AuthMode::Local, happy());
+        all_in_node(&node);
         let s = &node.state;
         assert_eq!(do_file_send(s, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "spend_locked");
         spend_advance(s, true).await.unwrap();
@@ -19866,6 +19951,7 @@ mod control_act_tests {
             happy()(m, p, b)
         });
         let node = fake(AuthMode::Local, routes);
+        all_in_node(&node);
         spend_advance(&node.state, true).await.unwrap();
         assert_eq!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "spend_unknown");
         assert_eq!(budget_now(&reopen(&node)).unsettled_msat, 8000);
@@ -19888,6 +19974,7 @@ mod control_act_tests {
             happy()(m, p, b)
         });
         let node = fake(AuthMode::Local, routes);
+        all_in_node(&node);
         *config.lock().unwrap() = node.state.config.lock().unwrap().clone();
         spend_advance(&node.state, true).await.unwrap();
         assert_eq!(do_file_send(&node.state, A, "a.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "ceiling_exhausted");
@@ -19899,6 +19986,7 @@ mod control_act_tests {
     #[tokio::test]
     async fn budget_scope_automatic_messages_and_files_share_global_total() {
         let node = fake(AuthMode::Local, happy());
+        all_in_node(&node);
         let s = &node.state;
         do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap();
         with_book(s, true, |b| {
@@ -20061,6 +20149,7 @@ mod control_act_tests {
             happy()(m, p, b)
         });
         let node = fake(AuthMode::Local, routes);
+        all_in_node(&node);
         spend_advance(&node.state, true).await.unwrap();
         let receipt = serde_json::to_value(do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 9000, None).await.unwrap()).unwrap();
         assert_eq!(receipt["readmission_msat"], 1000);
@@ -20490,6 +20579,7 @@ mod control_act_tests {
     #[tokio::test]
     async fn one_budget_approval_pays_messages_without_opening_the_window() {
         let node = fake(AuthMode::Local, happy());
+        all_in_node(&node);
         let s = &node.state;
         let view = do_budget_approve(s, 500_000, budget::PresetId::Careful).await.unwrap();
         assert_eq!(view.autopay.state, budget::AutopayState::Open);
@@ -23870,6 +23960,7 @@ mod control_act_tests {
             happy()(m,p,b)
         });
         let node = fake(AuthMode::Local, routes);
+        all_in_node(&node);
         spend_advance(&node.state, true).await.unwrap();
         assert_eq!(do_file_send(&node.state, A, "hi.txt", "text/plain", "aGk=", 8000, None).await.unwrap_err().code, "price_changed");
         assert_eq!(node.posts().len(), 1);
