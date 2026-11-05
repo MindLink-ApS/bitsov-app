@@ -32,8 +32,8 @@ const KEY_REQUEST_INTERVAL_MS = 500;
 const HOUSEKEEPING_MS = 100;
 /** A sender answers key frame requests at most this often. */
 export const KEY_MIN_INTERVAL_MS = 1_000;
-/** How long the host's queue must stay backed up before the ladder steps down. */
-export const BACKLOG_STEP_DOWN_MS = 1_000;
+/** How long the host's queue must stay backed up before the ladder steps down: longer than one key frame, and than the host holding video while audio catches up. */
+export const BACKLOG_STEP_DOWN_MS = 2_000;
 /** Hellos unanswered before the card says the other side takes no video. */
 const HELLOS_BEFORE_GIVING_UP = 5;
 /** Raw frames the encoder may have waiting before the next one is skipped. */

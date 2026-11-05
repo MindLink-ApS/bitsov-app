@@ -149,8 +149,8 @@ audio call on a build with the flag on is the same.
 - **When it can't keep up.** Frames are skipped when the encoder or the host queue
   backs up. Most of a slow link's queue sits in TCP buffers between the nodes, where
   no one can put audio first, so the receiver also reports how far arrivals sit above
-  their lowest of the last minute. Two report windows at 250 ms, a host backlog lasting a
-  second, or two windows with 5% of frames lost step down: 320x240 at 15, then 10, then
+  their lowest of the last minute. Two report windows at 250 ms, a host backlog lasting
+  2 s, or two windows with 5% of frames lost step down: 320x240 at 15, then 10, then
   240x180 at 7, then video pauses and the card says the sound carries on. At 800 ms
   video stops at once for 5 s while the queue drains, then tries the lowest step. A
   pause at the bottom retries after 20 s. It climbs after 15 clean seconds, longer each
