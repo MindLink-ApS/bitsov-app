@@ -472,7 +472,7 @@ export const HOST_COPY_DA: readonly (readonly [string, string])[] = [
   ['Invalid setup envelope.', 'Opsætningens kuvert er ugyldig.'],
   ['Could not remove the provisional setup envelope.', 'Kunne ikke fjerne opsætningens midlertidige kuvert.'],
   ['Enter the 18-character claim code provided by your node\'s owner or printed on a BitSov box\'s sticker.', 'Skriv den kode på 18 tegn, du har fået af boksens ejer, eller som står på mærkatet på en BitSov-boks.'],
-  ['The claim-code checksum did not match. Check the physical code.', 'Koden stemmer ikke. Tjek koden på mærkatet.'],
+  ['The claim-code checksum did not match. Check the physical code.', 'Koden stemmer ikke. Tjek den fysiske kode.'],
   ['This starter-bitcoin offer uses a version this app cannot read.', 'Dette tilbud om start-bitcoin bruger en version, appen ikke kan læse.'],
   ['The starter-bitcoin offer does not belong to this introduction.', 'Tilbuddet om start-bitcoin hører ikke til denne introduktion.'],
   ['The starter-bitcoin offer is for another Bitcoin network.', 'Tilbuddet om start-bitcoin er til et andet Bitcoin-netværk.'],
@@ -594,6 +594,8 @@ const HOST_WORDED: Readonly<Record<string, readonly number[]>> = {
   'Retry delivery paid nothing new. Delivering the message needs a new payment: its price, and admission again if the contact reconnected. Nothing was paid.{} Approve it to continue, or stop retrying.': [0],
   'You have used {} of {} for {} in the last 24 hours, and this costs {}. Raise the budget to send.': [2],
   'Your first paid message to {} needs your OK once. Nothing was sent.': [0],
+  // One of the repair's own fixed failures, or a system error, which has no Danish and stays as it came.
+  'Page-price update failed; your node remains stopped. {}': [0],
 };
 const compiled = HOST_COPY_DA.map(([en, da]) => ({ re: new RegExp(`^${escape(en).replace(/\\\{\\\}/g, '(.+?)')}$`, 's'), da, worded: HOST_WORDED[en] ?? [] }));
 
