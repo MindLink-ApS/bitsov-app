@@ -204,7 +204,8 @@ export function asActionError(e: unknown): ActionError {
       : code === 'grant_messaging' ? tr('caGrantMessagingPayment')
       : code === 'call_price_unknown' ? tr('caCallPriceUnreadNothingPaid')
       : code === 'call_hangup_unpayable' ? tr('caCallHangupUnpayable')
-      : code === 'call_hangup_above_message_max' ? tr('caCallHangupAboveMessageMax') : String(message) };
+      : code === 'call_hangup_above_message_max' ? tr('caCallHangupAboveMessageMax')
+      : code === 'call_unsupported' ? tr('caTheirNodeDoesNotTakeCallsYetNothingWas') : String(message) };
     if (typeof pending_id === 'string' && pending_id) out.pending_id = pending_id;
     if (typeof operation_id === 'string' && operation_id) out.operation_id = operation_id;
     // Owner approval refusals: only the node's known reasons, and an amount that is one.

@@ -471,7 +471,7 @@ export type ActionError = {
     | 'approval_rate_limited' | 'approval_invalid' | 'approval_unsaved' | 'approval_changed' | 'approval_self'
     // H2 call admissions: a new offer while an earlier one is still open; ending one the host never recorded;
     // a second hangup; the node refusing a call signal before payment.
-    | 'call_needs_node_upgrade'
+    | 'call_needs_node_upgrade' | 'call_unsupported'
     | 'call_admission_open' | 'call_not_found' | 'hangup_in_flight' | 'call_identity_changed'
     // M6 call minutes: the host or node refused a block or the call's reservation before paying.
     | 'call_block_not_due' | 'call_reservation_closed' | 'call_price_changed'
