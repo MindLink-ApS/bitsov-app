@@ -3,6 +3,13 @@
  * builds them. The same exact-match rule as `hostCopy`, which reads this list first.
  */
 export const HOST_COPY_MONEY_DA: readonly (readonly [string, string])[] = [
+  ['{} member is not a connected peer, so the node would skip them without telling you. Rooms send only when every member is connected.', '{0} medlem er ikke en forbundet kontakt, så boksen ville springe personen over uden at sige det. Rum sender kun, når alle medlemmer er forbundet.'],
+  ['{} members are not a connected peer, so the node would skip them without telling you. Rooms send only when every member is connected.', '{0} medlemmer er ikke forbundne kontakter, så boksen ville springe dem over uden at sige det. Rum sender kun, når alle medlemmer er forbundet.'],
+  ['Not sent - nothing was paid. There is no secure session with them yet. Message them once in their own chat first; a room never pays a first contact.', 'Ikke sendt – intet blev betalt. Der er ingen sikker forbindelse til dem endnu. Skriv først til dem én gang i deres egen chat; et rum betaler aldrig for en første kontakt.'],
+  ['Not sent - nothing was paid. Their node cannot take room messages right now: it is not connected, or it needs an update.', 'Ikke sendt – intet blev betalt. Deres boks kan ikke tage imod rumbeskeder lige nu: den er ikke forbundet, eller den skal opdateres.'],
+  ['Not sent - nothing was paid. This room\'s details did not check out at your node. Start a new room with the same people.', 'Ikke sendt – intet blev betalt. Rummets oplysninger stemte ikke på din boks. Start et nyt rum med de samme personer.'],
+  ['Not sent - nothing was paid. Your node is not in this room\'s member list.', 'Ikke sendt – intet blev betalt. Din boks er ikke på rummets medlemsliste.'],
+  ['Not sent - nothing was paid. They are not in this room\'s member list.', 'Ikke sendt – intet blev betalt. De er ikke på rummets medlemsliste.'],
   ['this contact', 'denne kontakt'],
   ['this room', 'dette rum'],
   ['Not sent - nothing was paid. Network fee would exceed your limit. ({})', 'Ikke sendt – intet blev betalt. Netværksgebyret ville overstige din grænse. ({0})'],
