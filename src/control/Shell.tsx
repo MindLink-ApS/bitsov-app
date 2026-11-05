@@ -50,7 +50,7 @@ import { custodyBadge, CustodyBadgeView } from './custody';
 import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
-import { callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, isCallTrafficKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { answerCost, callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, isCallTrafficKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { CallReportCopy } from './CallReportCopy';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { nodeRoutedAudio } from './callFlags';
@@ -1447,8 +1447,8 @@ export function ControlCenter(props: Props) {
     },
     grant: () => budget()?.node_grant ?? null,
     quote: (peer) => act(() => source.callQuote(peer)),
-    signal: async (peer, kind, plaintext, maxMsat, minutes) => {
-      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes));
+    signal: async (peer, kind, plaintext, maxMsat, minutes, maxHangupMsat) => {
+      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes, maxHangupMsat));
       if (!r.ok && (needsApproval(r.error) || r.error.code === 'spend_refused' || /token lacks.*spend|403/i.test(r.error.message))) setCallApproval(true);
       void loadBudget();
       void loadWallet();
@@ -1528,8 +1528,8 @@ export function ControlCenter(props: Props) {
   const nodeMeets = () => overview()?.capabilities?.includes('call_meeting_v1') === true;
   const meetings = createMeetingEngine({
     quote: (peer) => act(() => source.callQuote(peer)),
-    signal: async (peer, kind, plaintext, maxMsat) => {
-      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat));
+    signal: async (peer, kind, plaintext, maxMsat, minutes, maxHangupMsat) => {
+      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes, maxHangupMsat));
       void loadBudget();
       void loadWallet();
       return r;
@@ -2448,7 +2448,7 @@ export function ControlCenter(props: Props) {
           return <CallPanel waiting answerBlocked={!['idle', 'ended'].includes(callView().phase) || meetingOn() || callView().pendingCount > 0 || callView().unknownCount > 0 || (!!callView().close && callView().close!.status !== 'closed')} view={view()} payment={null} approval={null} approvalOpen={false}
             panelRef={el => { waitingPanels.set(key, el); }}
             blocked={moneyBlocked()} streams={{ local: null, remote: null }} nameOf={nameOf} quote={actions.callQuote}
-            accept={() => { if (!moneyBlocked()) void calls.acceptWaiting(key); }} decline={() => void calls.declineWaiting(key)} dismiss={() => calls.dismissWaiting(key)}
+            accept={(shown) => { if (!moneyBlocked()) void calls.acceptWaiting(key, shown); }} decline={(shown) => void calls.declineWaiting(key, shown)} ignore={() => calls.ignoreWaiting(key)} dismiss={() => calls.dismissWaiting(key)}
             hangup={() => {}} mute={() => {}} camera={() => {}} closeAgain={() => {}} endStuck={() => {}} callAgain={() => {}} />;
         }}</For>
       </div>
@@ -2486,8 +2486,9 @@ export function ControlCenter(props: Props) {
         streams={callStreams()}
         nameOf={nameOf}
         quote={actions.callQuote}
-        accept={() => { if (!moneyBlocked()) void calls.accept(); }}
-        decline={() => void calls.decline()}
+        accept={(shown) => { if (!moneyBlocked()) void calls.accept(shown); }}
+        decline={(shown) => void calls.decline(shown)}
+        ignore={() => calls.ignore()}
         hangup={() => void calls.hangup()}
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
@@ -3652,8 +3653,10 @@ function CallPanel(props: {
   streams: { local: MediaStream | null; remote: MediaStream | null };
   nameOf: (id: string) => string;
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
-  accept: () => void;
-  decline: () => void;
+  accept: (shown: CallQuote) => void;
+  decline: (shown: CallQuote) => void;
+  /** Stop ringing here: nothing sent or paid. */
+  ignore: () => void;
   hangup: () => void;
   mute: () => void;
   camera: () => void;
@@ -3669,7 +3672,9 @@ function CallPanel(props: {
   openCallSettings?: () => void;
 }) {
   const [tick, setTick] = createSignal(Date.now());
-  const [answer, setAnswer] = createSignal<number | null>(null);
+  /** The price on Accept and Decline: a press pays at most this, and neither works without it. */
+  const [shown, setShown] = createSignal<CallQuote | null>(null);
+  const [noPrice, setNoPrice] = createSignal(false);
   const [again, setAgain] = createSignal<CallQuote | null>(null);
   const [againError, setAgainError] = createSignal<string | null>(null);
   createEffect(on(() => props.view.callId, () => { setAgain(null); setAgainError(null); }));
@@ -3698,13 +3703,21 @@ function CallPanel(props: {
     const t = setInterval(() => setTick(Date.now()), 1000);
     onCleanup(() => clearInterval(t));
   });
-  createEffect(on(() => (props.view.phase === 'incoming' ? props.view.peer : null), (peer) => {
-    setAnswer(null);
-    if (peer) void props.quote(peer).then((r) => { if (r.ok) setAnswer(signalCost(r.value)); });
+  createEffect(on(() => (props.view.phase === 'incoming' ? props.view.callId : null), (callId) => {
+    setShown(null);
+    setNoPrice(false);
+    const peer = props.view.peer;
+    if (callId && peer) void props.quote(peer).then((r) => {
+      // A waiting card can be gone by now, and its view with it.
+      if ((props.view as CallView | undefined)?.callId !== callId) return;
+      if (r.ok && answerCost(r.value) !== null) setShown(r.value);
+      else setNoPrice(true);
+    });
   }));
   const v = () => props.view;
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
-  const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
+  // A ceiling, not what it will cost: the routing fee is usually far less.
+  const price = () => { const q = shown(); const m = q && answerCost(q); return m === null ? '' : ` · ${tr('caUpToAmount', fmtAmount(m))}`; };
   /** The M6 paid-minutes line is on the card (same condition as its render below). */
   const minutesShown = () => !!(props.routed && v().outgoing && v().minutes);
   return (
@@ -3718,6 +3731,7 @@ function CallPanel(props: {
           </Show>
         </header>
         <Show when={props.waiting && props.answerBlocked && v().phase === 'incoming'}><p class="hint">{tr('incomingWaiting')}</p></Show>
+        <Show when={noPrice() && v().phase === 'incoming'}><p class="hint" role="status" data-call-answer-price>{tr('caCallAnswerNoPrice')}</p></Show>
         {props.approval}
         {/* Across networks a call needs a STUN server: said where it matters, while a call is being set up or has failed to connect. */}
         <Show when={!props.routed && (['calling', 'ringing', 'connecting'].includes(v().phase) || (v().phase === 'ended' && (v().reason === 'failed' || v().reason === 'timeout')))}>
@@ -3817,8 +3831,9 @@ function CallPanel(props: {
         <div class="call-actions">
           <Switch>
             <Match when={v().phase === 'incoming'}>
-              <button type="button" class="primary soft money" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced} onClick={() => props.accept()}>{tr('uiAccept')}{price(answer())}</button>
-              <button type="button" class="soft" data-call-decline disabled={props.blocked || props.view.silenced} onClick={() => props.decline()}>{tr('uiDecline')}{price(answer())}</button>
+              <button type="button" class="primary soft money" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.accept(q); }}>{tr('uiAccept')}{price()}</button>
+              <button type="button" class="soft" data-call-decline disabled={props.blocked || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.decline(q); }}>{tr('uiDecline')}{price()}</button>
+              <button type="button" class="soft" data-call-ignore disabled={props.view.silenced} onClick={() => props.ignore()}>{tr('uiIgnore')}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
               <Show when={v().stuck}>
