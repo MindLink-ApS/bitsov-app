@@ -1,14 +1,16 @@
 import { language } from '../i18n';
+import { HOST_COPY_MONEY_DA } from './hostMoneyCopy';
 
 /**
  * Danish for the host's refusals, matched on the host's exact English text.
  * `{}` stands for a value the host filled in. Danish `{0}`, `{1}` take them in
- * order; a value that is itself a known refusal is translated too. Text not
+ * order, as they came. Text not
  * listed here stays as the host wrote it, so a sentence about money is never
  * guessed. English is always the host's own text.
  * `tests/host-copy.test.ts` checks this list against the host's source.
  */
 export const HOST_COPY_DA: readonly (readonly [string, string])[] = [
+  ...HOST_COPY_MONEY_DA,
   ['No app storage.', 'Appen har ikke sit lager klar.'],
   ['No node identity.', 'Din boks har ingen identitet endnu.'],
   ['Not authenticated.', 'Du er ikke logget ind.'],
@@ -494,7 +496,7 @@ export const HOST_COPY_DA: readonly (readonly [string, string])[] = [
   ['The box restarted or this setup expired. Open a new setup link.', 'Boksen er genstartet, eller opsætningen er udløbet. Åbn et nyt opsætningslink.'],
   ['The setup approval expired. Unlock your box with Touch ID to continue.', 'Godkendelsen af opsætningen er udløbet. Lås din boks op med Touch ID for at fortsætte.'],
   ['The setup connection was lost. Cancel the pending setup before trying again.', 'Forbindelsen til opsætningen blev afbrudt. Annuller den ventende opsætning, før du prøver igen.'],
-  ['Words differ. Setup was not approved. Cancel this attempt and check the physical claim code.', 'Ordene er forskellige. Opsætningen blev ikke godkendt. Annuller dette forsøg, og tjek koden på mærkatet.'],
+  ['Words differ. Setup was not approved. Cancel this attempt and check the physical claim code.', 'Ordene er forskellige. Opsætningen blev ikke godkendt. Annuller dette forsøg, og tjek den fysiske ejerskabskode.'],
   ['Your box may have unlocked. Check its connection before unlocking again.', 'Din boks kan være låst op. Tjek dens forbindelse, før du låser op igen.'],
   ['A daily total is between 1 and 100,000 sats.', 'Et dagligt beløb er mellem 1 og 100.000 sats.'],
   ['A delivery retry was sent and its result is unknown. Missing history does not prove failure; inspect the owner node. The app will not retry.', 'Et nyt leveringsforsøg blev sendt, og resultatet er ukendt. Manglende historik beviser ikke, at det mislykkedes; undersøg ejerens boks. Appen prøver ikke igen.'],
@@ -582,14 +584,51 @@ export const HOST_COPY_DA: readonly (readonly [string, string])[] = [
 ];
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const compiled = HOST_COPY_DA.map(([en, da]) => ({ re: new RegExp(`^${escape(en).replace(/\\\{\\\}/g, '(.+?)')}$`, 's'), da }));
+/**
+ * The values the host itself words: a refusal inside a refusal, or who it is about.
+ * Any other value is the node's or a figure, and stays exactly as it came, even if it reads like a known refusal.
+ */
+const HOST_WORDED: Readonly<Record<string, readonly number[]>> = {
+  'This call needs up to {}. {} The owner would need to approve enough remaining budget for that ceiling. Nothing was sent or paid.': [1],
+  'This call needs up to {} per payment. {} The owner would need to approve at least {} per payment. Nothing was sent or paid.': [1],
+  'Retry delivery paid nothing new. Delivering the message needs a new payment: its price, and admission again if the contact reconnected. Nothing was paid.{} Approve it to continue, or stop retrying.': [0],
+  'You have used {} of {} for {} in the last 24 hours, and this costs {}. Raise the budget to send.': [2],
+  'Your first paid message to {} needs your OK once. Nothing was sent.': [0],
+};
+const compiled = HOST_COPY_DA.map(([en, da]) => ({ re: new RegExp(`^${escape(en).replace(/\\\{\\\}/g, '(.+?)')}$`, 's'), da, worded: HOST_WORDED[en] ?? [] }));
+
+/** The Danish for exactly this text, or null. A value is kept as it came, around any Danish for it. */
+function exact(message: string, depth: number): string | null {
+  for (const { re, da, worded } of compiled) {
+    const m = re.exec(message);
+    if (m) return da.replace(/\{(\d+)\}/g, (_, i: string) => {
+      const value = m[Number(i) + 1] ?? '';
+      if (!worded.includes(Number(i))) return value;
+      const lead = /^\s*/.exec(value)![0];
+      return lead + danish(value.slice(lead.length), depth + 1);
+    });
+  }
+  return null;
+}
+/** Sentences the host joins: only when every part is known, so a message is never half translated. */
+function joined(message: string, depth: number): string | null {
+  if (depth > 2) return null;
+  for (const at of message.matchAll(/[.!?] +/g)) {
+    const end = at.index + at[0].length;
+    const left = exact(message.slice(0, at.index + 1), depth);
+    if (left === null) continue;
+    const rest = message.slice(end);
+    const right = exact(rest, depth) ?? joined(rest, depth + 1);
+    if (right !== null) return `${left} ${right}`;
+  }
+  return null;
+}
+function danish(message: string, depth: number): string {
+  if (depth > 2) return message;
+  return exact(message, depth) ?? joined(message, depth) ?? message;
+}
 
 /** The refusal in the app's language: Danish where the host's exact text is known, otherwise as the host wrote it. */
-export function hostText(message: string, lang: string = language(), depth = 0): string {
-  if (lang !== 'da' || depth > 1) return message;
-  for (const { re, da } of compiled) {
-    const m = re.exec(message);
-    if (m) return da.replace(/\{(\d+)\}/g, (_, i: string) => hostText(m[Number(i) + 1] ?? '', lang, depth + 1));
-  }
-  return message;
+export function hostText(message: string, lang: string = language()): string {
+  return lang === 'da' ? danish(message, 0) : message;
 }
