@@ -6818,9 +6818,11 @@ async fn resume_admission_send(state: &NodeState, pending_id: &str, peer: &str, 
         let mut approval = state.autopay.lock().unwrap();
         (approval.ceiling(now_ms()), approval.generation())
     };
+    let mut accounted = None;
     let auth = with_book(state, true, |book| {
         let index = book.ledger.iter().rposition(|e| e.id == pending.charge_id())
             .ok_or_else(|| spend_journal::unknown("Missing admission budget entry."))?;
+        accounted = Some((book.ledger[index].msat, book.ledger[index].settled));
         // This is a replacement, not a second charge. Exclude only its own
         // entry while planning; every other liability still counts.
         let mut projected = book.clone();
@@ -6834,14 +6836,30 @@ async fn resume_admission_send(state: &NodeState, pending_id: &str, peer: &str, 
     })?;
     // Consume permission durably before exactly one POST. A lost answer must
     // be checked again; saved accounting is never authority to resume.
+    let before = pending.clone();
     pending.admission_resume = false;
     pending.non_dispatch_proven = false;
     pending.dispatched_at = Some(spend_journal::timestamp_ms());
     journal.save(&pending)?;
     journal.record_outcome(&pending, spend_journal::OperationState::Dispatching, None)?;
-    refuse_if_connection_busy(state)?;
-    refuse_if_paused(state)?;
-    check_auth(state, auth)?;
+    if cfg!(test) { pause_points::at(&state.api_base, "before_resume_decision").await; }
+    // Refused here, nothing was sent: the resume keeps its permission and its
+    // accounting. Saving the permission also puts its history back.
+    if let Err(refused) = refuse_if_connection_busy(state)
+        .and_then(|()| refuse_if_paused(state))
+        .and_then(|()| check_auth(state, auth)) {
+        journal.save(&before)?;
+        if let Some((msat, settled)) = accounted {
+            with_book(state, true, |book| {
+                if let Some(entry) = book.ledger.iter_mut().rev().find(|e| e.id == before.charge_id()) {
+                    entry.msat = msat;
+                    entry.settled = settled;
+                }
+                Ok(())
+            })?;
+        }
+        return Err(refused);
+    }
     body["operation_id"] = serde_json::json!(id);
     let response = state.http.post(format!("{}/messages/compose", state.api_base))
         .bearer_auth(token).json(&body).timeout(state.spend_timeout).send().await
@@ -12440,6 +12458,66 @@ mod control_act_tests {
         do_message_send(&node.state, A, false, "gm", 14000, None).await.expect("the same resume goes out");
         assert_eq!(compose_bodies(&node).len(), posts + 1, "one POST");
         assert_eq!(compose_bodies(&node).last().unwrap()["operation_id"], id.as_str(), "under the same operation");
+    }
+
+    /// A stamp, a cooldown or a pause that begins after the resume's first check is
+    /// met by its last one, once the permission is already consumed. Nothing is sent,
+    /// and the permission, the record and the accounting all go back as they were.
+    /// The same resume then goes out once, under the same operation.
+    #[tokio::test]
+    async fn a_resume_refused_at_its_last_check_keeps_its_permission() {
+        for case in ["stamp", "cooldown", "paused"] {
+            let (inner, _) = ops_node();
+            let answering = Arc::new(AtomicBool::new(false));
+            let answer = answering.clone();
+            let node = fake(AuthMode::Local, Arc::new(move |m, path, body| {
+                if path == "/messages/compose" && !answer.load(Ordering::SeqCst) { return (500, "{}".into()); }
+                if let Some(id) = path.strip_prefix("/messages/operations/") {
+                    let mut reply: serde_json::Value = serde_json::from_str(&op_reply(id, "prepared")).unwrap();
+                    reply["amount_msat"] = serde_json::json!(2000);
+                    reply["message_id"] = serde_json::json!("");
+                    return (200, reply.to_string());
+                }
+                inner(m, path, body)
+            }));
+            let id = uncertain_send(&node).await;
+            do_spend_reconcile(&node.state).await.unwrap();
+            let held = pending(&node).unwrap();
+            assert!(held.admission_resume, "{case}");
+            let (record, entries, posts) = (ledger_record(&node, &id), book(&node), compose_bodies(&node).len());
+
+            let (arrived, release) = pause_points::arm(&node.state.api_base, "before_resume_decision");
+            let (refused, ()) = tokio::join!(do_message_send(&node.state, A, false, "gm", 14000, None), async {
+                arrived.notified().await;
+                let saved = spend_journal::read_pending(journal_file(&node).parent().unwrap()).unwrap().unwrap();
+                assert!(!saved.admission_resume, "{case}: consumed by now");
+                match case {
+                    "stamp" => node.state.remote_retry.stamp_for_test(Duration::from_secs(60)),
+                    "cooldown" => node.state.remote_retry.failed(&remote_access::RemoteError::RateLimited(60)),
+                    _ => { do_budget_pause(&node.state).unwrap(); }
+                }
+                release.notify_one();
+            });
+            let error = refused.unwrap_err();
+            assert_eq!(error.code, if case == "paused" { "budget_paused" } else { "not_ready" }, "{case}: {}", error.message);
+            assert_eq!(compose_bodies(&node).len(), posts, "{case}: nothing was sent");
+            let after = pending(&node).unwrap();
+            assert!(after.admission_resume, "{case}: the permission is back");
+            assert_eq!((after.non_dispatch_proven, after.dispatched_at), (held.non_dispatch_proven, held.dispatched_at), "{case}");
+            assert_eq!(ledger_record(&node, &id), record, "{case}: the record as it was");
+            assert_eq!(book(&node), entries, "{case}: the accounting as it was");
+
+            // Not fenced: the same resume is what the next send does, once clear.
+            node.state.remote_retry.reset_for_replacement();
+            if case == "paused" {
+                do_budget_resume(&node.state).await.unwrap();
+                with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+            }
+            answering.store(true, Ordering::SeqCst);
+            do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_or_else(|e| panic!("{case}: {}", e.message));
+            assert_eq!(compose_bodies(&node).len(), posts + 1, "{case}: one POST");
+            assert_eq!(compose_bodies(&node).last().unwrap()["operation_id"], id.as_str(), "{case}: the same operation");
+        }
     }
 
     /// A direct-payment replay also waits out the stamp: it reaches neither the proxy's
