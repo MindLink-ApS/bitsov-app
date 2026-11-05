@@ -333,7 +333,7 @@ export const HOST_COPY_DA: readonly (readonly [string, string])[] = [
   ['The box restarted or this setup expired. Open a new setup link.', 'Boksen er genstartet, eller opsætningen er udløbet. Åbn et nyt opsætningslink.'],
   ['The setup approval expired. Unlock your box with Touch ID to continue.', 'Godkendelsen af opsætningen er udløbet. Lås din boks op med Touch ID for at fortsætte.'],
   ['The setup connection was lost. Cancel the pending setup before trying again.', 'Forbindelsen til opsætningen blev afbrudt. Annuller den ventende opsætning, før du prøver igen.'],
-  ['Words differ. Setup was not approved. Cancel this attempt and check the physical claim code.', 'Ordene er forskellige. Opsætningen blev ikke godkendt. Annuller dette forsøg, og tjek koden på mærkatet.'],
+  ['Words differ. Setup was not approved. Cancel this attempt and check the physical claim code.', 'Ordene er forskellige. Opsætningen blev ikke godkendt. Annuller dette forsøg, og tjek den fysiske ejerskabskode.'],
   ['Your box may have unlocked. Check its connection before unlocking again.', 'Din boks kan være låst op. Tjek dens forbindelse, før du låser op igen.'],
   ['A daily total is between 1 and 100,000 sats.', 'Et dagligt beløb er mellem 1 og 100.000 sats.'],
   ['A delivery retry was sent and its result is unknown. Missing history does not prove failure; inspect the owner node. The app will not retry.', 'Et nyt leveringsforsøg blev sendt, og resultatet er ukendt. Manglende historik beviser ikke, at det mislykkedes; undersøg ejerens boks. Appen prøver ikke igen.'],
