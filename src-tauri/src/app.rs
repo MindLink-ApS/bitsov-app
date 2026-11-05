@@ -12371,9 +12371,10 @@ mod control_act_tests {
     async fn through_stamped_proxy(node: &mut Fake) -> (remote_access::RemoteProxy, [tempfile::TempDir; 2]) {
         let (app_dir, store) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = probe.local_addr().unwrap();
+        let port = probe.local_addr().unwrap().port();
         drop(probe);
-        let api_base = format!("http://{address}/api/v1");
+        assert_ne!(port, 3141, "tests must never hold the node port");
+        let api_base = format!("http://127.0.0.1:{port}/api/v1");
         let descriptor = remote_access::parse_pairing_link(&super::remote_connect_tests::ticket("127.0.0.1:9".into(), false)).unwrap();
         let key = Arc::new(ClientKey::load_or_create(store.path()).unwrap());
         node.state.remote_retry.stamp_for_test(Duration::from_secs(60));
