@@ -131,9 +131,10 @@ audio call on a build with the flag on is the same.
   fragments wait. Video has its own queues, its own `seq` counter (audio's stays gapless
   for its jitter buffer) and a token-bucket pacer, and only leaves while no audio frame
   waits. The node closes the socket past its budget, so the host counts everything sent
-  in the last second and video stays inside 85% of what the node allows, and off the
-  socket for 1.2 s when audio is catching up after a stall. Downward, audio is handed
-  over first. Without `video` the session is the audio
+  in the last second and video stays inside 85% of what the node allows. When audio is
+  so far behind after a stall that it could pass that with the next second's frames,
+  video stays off the socket for 1.2 s and what queued meanwhile is dropped; the far side
+  asks for a key frame. Downward, audio is handed over first. Without `video` the session is the audio
   session it always was.
 - **What fits** (`src/control/videoRate.ts`). The node keeps 60 packets and 12 KiB a
   second for packets of 512 bytes or less, which is all audio. At its default 100 and

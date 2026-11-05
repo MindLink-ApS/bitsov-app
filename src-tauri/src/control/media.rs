@@ -316,11 +316,11 @@ pub struct VideoPath {
     next_seq: AtomicU32,
     wake: tokio::sync::Notify,
     window: Mutex<SentWindow>,
-    held_until: Mutex<tokio::time::Instant>,
+    held_until: Mutex<Option<tokio::time::Instant>>,
 }
 
-/// Audio frames queued behind the one going out that mean audio is catching up after a stall.
-const AUDIO_BACKLOG_FRAMES: usize = 2;
+/// Audio frames a second: what the next second will add to a window at the node.
+const AUDIO_FRAMES_PER_SECOND: usize = 50;
 /// How long video stays off the socket once audio is catching up: long enough
 /// for the node's one-second window to hold the backlog and the next second's audio.
 const AUDIO_CATCH_UP: Duration = Duration::from_millis(1200);
@@ -329,8 +329,9 @@ const AUDIO_CATCH_UP: Duration = Duration::from_millis(1200);
 /// closes the socket past its budget, so when audio is catching up after a stall,
 /// video waits rather than push the second over.
 struct SentWindow {
-    sent: VecDeque<(tokio::time::Instant, usize)>,
+    sent: VecDeque<(tokio::time::Instant, usize, bool)>,
     bytes: usize,
+    video: usize,
     max_messages: usize,
     max_bytes: usize,
 }
@@ -338,23 +339,32 @@ struct SentWindow {
 impl SentWindow {
     fn new(node_messages: u32, node_bytes: u32) -> Self {
         let share = |cap: u32| (u64::from(cap) * PACER_PERCENT / 100) as usize;
-        Self { sent: VecDeque::new(), bytes: 0, max_messages: share(node_messages), max_bytes: share(node_bytes) }
+        Self { sent: VecDeque::new(), bytes: 0, video: 0, max_messages: share(node_messages), max_bytes: share(node_bytes) }
     }
 
     fn forget_old(&mut self, now: tokio::time::Instant) {
-        while let Some(&(at, size)) = self.sent.front() {
+        while let Some(&(at, size, is_video)) = self.sent.front() {
             if now.saturating_duration_since(at) < Duration::from_secs(1) {
                 break;
             }
             self.sent.pop_front();
             self.bytes -= size;
+            self.video -= usize::from(is_video);
         }
     }
 
-    fn note(&mut self, size: usize, now: tokio::time::Instant) {
+    fn note(&mut self, size: usize, is_video: bool, now: tokio::time::Instant) {
         self.forget_old(now);
-        self.sent.push_back((now, size));
+        self.sent.push_back((now, size, is_video));
         self.bytes += size;
+        self.video += usize::from(is_video);
+    }
+
+    /// Whether this much audio waiting, the next second's audio and the video
+    /// just sent could land in one window at the node and pass the margin.
+    fn audio_backlog_is_too_much(&mut self, backlog: usize, now: tokio::time::Instant) -> bool {
+        self.forget_old(now);
+        backlog + AUDIO_FRAMES_PER_SECOND + self.video >= self.max_messages
     }
 
     /// Whether one more full frame would stay inside the margin.
@@ -380,7 +390,7 @@ impl VideoPath {
             next_seq: AtomicU32::new(0),
             wake: tokio::sync::Notify::new(),
             window: Mutex::new(SentWindow::new(DEFAULT_NODE_MESSAGES, DEFAULT_NODE_BYTES)),
-            held_until: Mutex::new(tokio::time::Instant::now()),
+            held_until: Mutex::new(None),
         }
     }
 
@@ -447,19 +457,34 @@ impl VideoPath {
         }
     }
 
-    fn note_sent(&self, size: usize) {
-        self.window.lock().unwrap().note(size, tokio::time::Instant::now());
+    fn note_sent(&self, size: usize, is_video: bool) {
+        self.window.lock().unwrap().note(size, is_video, tokio::time::Instant::now());
     }
 
     fn has_room(&self) -> bool {
         let now = tokio::time::Instant::now();
-        now >= *self.held_until.lock().unwrap() && self.window.lock().unwrap().has_room(now)
+        {
+            let mut held = self.held_until.lock().unwrap();
+            match *held {
+                Some(until) if now < until => return false,
+                Some(_) => {
+                    // What queued meanwhile is too old to show. The far side asks for a key frame.
+                    *held = None;
+                    self.fragments.clear();
+                }
+                None => {}
+            }
+        }
+        self.window.lock().unwrap().has_room(now)
     }
 
     /// Audio is catching up: what it sends now and in the next second counts in the
     /// same window at the node, so video stays off until that window has passed.
-    fn hold_for_audio(&self) {
-        *self.held_until.lock().unwrap() = tokio::time::Instant::now() + AUDIO_CATCH_UP;
+    fn audio_waiting(&self, backlog: usize) {
+        let now = tokio::time::Instant::now();
+        if self.window.lock().unwrap().audio_backlog_is_too_much(backlog, now) {
+            *self.held_until.lock().unwrap() = Some(now + AUDIO_CATCH_UP);
+        }
     }
 
     /// Video's own `seq`, so audio's never has a gap.
@@ -645,10 +670,8 @@ pub async fn run_media_session_with_video(
                 let Ok(bytes) = frame.encode() else { continue };
                 *next_seq = next_seq.wrapping_add(1);
                 if let Some(video) = video {
-                    video.note_sent(bytes.len());
-                    if uplink.len() >= AUDIO_BACKLOG_FRAMES {
-                        video.hold_for_audio();
-                    }
+                    video.note_sent(bytes.len(), false);
+                    video.audio_waiting(uplink.len());
                 }
                 tokio::time::timeout(Duration::from_secs(5), socket.send(Frame::Binary(bytes.into())))
                     .await
@@ -660,7 +683,7 @@ pub async fn run_media_session_with_video(
                 let Some(video) = video else { continue };
                 let frame = MediaFrame { seq: video.take_seq(), payload };
                 let Ok(bytes) = frame.encode() else { continue };
-                video.note_sent(bytes.len());
+                video.note_sent(bytes.len(), true);
                 tokio::time::timeout(Duration::from_secs(5), socket.send(Frame::Binary(bytes.into())))
                     .await
                     .map_err(|_| dropped("the media socket stalled"))?
@@ -1059,18 +1082,45 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(30)).await;
             }
             for i in 0..30u8 {
-                path.push(vec![0x20, i]).unwrap();
+                path.push(vec![0x20, 0xEE, i]).unwrap();
             }
             tokio::time::sleep(Duration::from_millis(400)).await;
             let at_400ms = seen.lock().unwrap().iter().filter(|f: &&MediaFrame| is_video_payload(&f.payload)).count();
             assert_eq!(at_400ms, 0, "the next second's audio still has to fit this window");
-            // Once that window has passed, what waited goes.
-            tokio::time::sleep(Duration::from_millis(1_500)).await;
+            // Once that window has passed, fresh video goes and what queued meanwhile does not.
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            for i in 0..5u8 {
+                path.push(vec![0x20, 0x01, i]).unwrap();
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
             stop.store(true, Ordering::SeqCst);
         };
         let (result, ()) = tokio::join!(session, drive);
         assert_eq!(result, Err(SessionEnd::Stopped));
-        assert!(seen.lock().unwrap().iter().filter(|f| is_video_payload(&f.payload)).count() > 10, "video went on once there was room");
+        let video: Vec<Vec<u8>> = seen.lock().unwrap().iter().filter(|f| is_video_payload(&f.payload)).map(|f| f.payload.clone()).collect();
+        assert!(!video.is_empty(), "fresh video went on");
+        assert!(video.iter().all(|p| p[1] == 0x01), "stale video stayed behind: {video:?}");
+    }
+
+    #[test]
+    fn a_small_audio_backlog_costs_video_nothing() {
+        let start = tokio::time::Instant::now();
+        let mut window = SentWindow::new(DEFAULT_NODE_MESSAGES, DEFAULT_NODE_BYTES);
+        for _ in 0..15 {
+            window.note(2000, true, start);
+        }
+        // Everyday jitter: a few frames.
+        assert!(!window.audio_backlog_is_too_much(5, start));
+        // 300 ms behind still fits, 400 ms doesn't, at 15 video frames a second.
+        assert!(!window.audio_backlog_is_too_much(15, start));
+        assert!(window.audio_backlog_is_too_much(20, start));
+        // At a higher node limit the same backlog is no danger.
+        let mut wide = SentWindow::new(160, 262_144);
+        for _ in 0..30 {
+            wide.note(4000, true, start);
+        }
+        assert!(!wide.audio_backlog_is_too_much(40, start));
     }
 
     #[tokio::test]
@@ -1079,16 +1129,16 @@ mod tests {
         let mut window = SentWindow::new(DEFAULT_NODE_MESSAGES, DEFAULT_NODE_BYTES);
         let start = tokio::time::Instant::now();
         for i in 0..84u64 {
-            window.note(100, start + Duration::from_millis(i));
+            window.note(100, false, start + Duration::from_millis(i));
         }
         assert!(window.has_room(start + Duration::from_millis(84)));
-        window.note(100, start + Duration::from_millis(84));
+        window.note(100, false, start + Duration::from_millis(84));
         assert!(!window.has_room(start + Duration::from_millis(85)), "85 of 100 is the margin");
         assert!(window.has_room(start + Duration::from_millis(1002)), "a second on, the first ones are forgotten");
         // Bytes count too.
         let mut window = SentWindow::new(DEFAULT_NODE_MESSAGES, DEFAULT_NODE_BYTES);
         for _ in 0..13 {
-            window.note(4100, start);
+            window.note(4100, true, start);
         }
         assert!(!window.has_room(start), "13 full frames leave no room for a 14th");
     }
