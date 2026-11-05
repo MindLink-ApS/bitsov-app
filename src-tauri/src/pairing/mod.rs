@@ -35,11 +35,6 @@ pub const RECORD_FILE: &str = "pairing.json";
 /// 600 s (`PAIRED_TOKEN_VALIDITY_SECS`).
 pub const REFRESH_MARGIN_SECS: i64 = 120;
 
-/// A call's media socket keeps the token it opened with, and the node closes it
-/// when that token expires. So a socket opens with at least this much token life,
-/// which covers a call of about ten minutes.
-pub const MEDIA_TOKEN_MIN_LEFT_SECS: i64 = 540;
-
 /// Why pairing did not produce a session.
 #[derive(Debug)]
 pub enum PairError {
@@ -110,11 +105,6 @@ impl PairedSession {
     /// True once the token is inside the refresh margin (or past expiry).
     pub fn needs_refresh(&self, now: i64) -> bool {
         now >= self.expires_at - REFRESH_MARGIN_SECS
-    }
-
-    /// True when the token has less than a media socket needs to open with.
-    pub fn too_short_for_media(&self, now: i64) -> bool {
-        self.expires_at - now < MEDIA_TOKEN_MIN_LEFT_SECS
     }
 }
 
@@ -415,6 +405,16 @@ async fn refresh_with_mode(
     session.expires_at = issued.expires_at;
     session.scopes = issued.scopes;
     Ok(())
+}
+
+/// A new token for one purpose. The session and its renewal stay as they are.
+pub(crate) async fn extra_token(
+    session_client_id: &str,
+    client: &PairingClient,
+    key: &ClientKey,
+    local: bool,
+) -> Result<String, PairError> {
+    Ok(client.token(key, session_client_id, local).await?.token)
 }
 
 /// Refresh when inside [`REFRESH_MARGIN_SECS`] of expiry. Returns whether a
