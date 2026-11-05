@@ -118,6 +118,21 @@ describe('received files and emoji in the thread', () => {
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
 
+  it('names an oversized response without claiming the file is over the cap', async () => {
+    stubHost({
+      messages_list: () => [
+        { id: BIG_ID, kind: 200, sender: A, recipient: OWN, timestamp: Date.now() - 500, plaintext: '[file: long-name.bin]', payment_amount_msat: 3000 },
+      ],
+      file_save: () => { throw 'response too large to load safely'; },
+    });
+    await openShell();
+    await vi.waitFor(() => expect($(`[data-received-file="${BIG_ID}"] [data-file-save]`)).not.toBeNull());
+    $<HTMLButtonElement>(`[data-received-file="${BIG_ID}"] [data-file-save]`)!.click();
+    await vi.waitFor(() => expect(text(`[data-received-file="${BIG_ID}"] [data-file-meta]`)).toBe('Too large to load safely · not saved'));
+    expect(text(`[data-received-file="${BIG_ID}"] [data-file-meta]`)).not.toMatch(/1\.4 MB/);
+    expect($(`[data-received-file="${BIG_ID}"] [data-file-save]`)).toBeNull();
+  });
+
   it('shows size and type, saves via the host, and previews only safe image mimes as data URLs', async () => {
     const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
     const host = stubHost({

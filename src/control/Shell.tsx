@@ -4070,6 +4070,8 @@ function MeetingPanel(props: {
 /** Host error for a message whose file is not audio (act.rs NOT_A_VOICE_NOTE). */
 const NOT_A_VOICE_NOTE = 'not a voice note';
 const FILE_TOO_LARGE = 'file over 1.4 MB';
+/** The response passed the read limit; the file's own size is unknown (act.rs). */
+const FILE_RESPONSE_TOO_LARGE = 'response too large to load safely';
 const FILE_NOT_STORED = 'not stored';
 
 /** One native save dialog across all bubbles (host also guards). */
@@ -4086,7 +4088,7 @@ function ReceivedFile(props: {
   save: (messageId: string) => Promise<FileSaveResult>;
 }) {
   const [meta, setMeta] = createSignal<FileMeta | null>(null);
-  const [err, setErr] = createSignal<'gone' | 'large' | 'save' | null>(null);
+  const [err, setErr] = createSignal<'gone' | 'large' | 'response' | 'save' | null>(null);
   const [busy, setBusy] = createSignal(false);
   const [saved, setSaved] = createSignal(false);
   const [preview, setPreview] = createSignal<string | null>(null);
@@ -4104,6 +4106,7 @@ function ReceivedFile(props: {
     } catch (e) {
       const s = String(e);
       if (s.includes(FILE_TOO_LARGE)) setErr('large');
+      else if (s.includes(FILE_RESPONSE_TOO_LARGE)) setErr('response');
       else if (s.includes(FILE_NOT_STORED)) setErr('gone');
       // Other preview failures leave Save available.
     } finally {
@@ -4114,7 +4117,7 @@ function ReceivedFile(props: {
   onMount(() => { void loadPreview(); });
 
   const onSave = async () => {
-    if (err() === 'large' || err() === 'gone' || busy() || saveDialogOpen) return;
+    if (err() === 'large' || err() === 'response' || err() === 'gone' || busy() || saveDialogOpen) return;
     saveDialogOpen = true;
     setBusy(true);
     try {
@@ -4127,6 +4130,7 @@ function ReceivedFile(props: {
     } catch (e) {
       const s = String(e);
       if (s.includes(FILE_TOO_LARGE)) setErr('large');
+      else if (s.includes(FILE_RESPONSE_TOO_LARGE)) setErr('response');
       else if (s.includes(FILE_NOT_STORED)) setErr('gone');
       else setErr('save');
     } finally {
@@ -4147,16 +4151,16 @@ function ReceivedFile(props: {
         <img class="file-preview" data-file-preview src={preview()!} alt="" />
       </Show>
       <p class="file-meta" data-file-meta>
-        <Show when={err() === 'large'} fallback={
+        <Show when={err() === 'large' || err() === 'response'} fallback={
           <Show when={meta()} fallback={busy() ? '…' : ''}>
             {(b) => <>{kb(b().size_bytes)} · {shortMime(b().mime_type)}</>}
           </Show>
         }>
-          {tr('caOver14MBNotSaved')}</Show>
+          {err() === 'large' ? tr('caOver14MBNotSaved') : tr('caResponseTooLargeNotSaved')}</Show>
         <Show when={err() === 'gone'}>{' '}{tr('caNotStored')}</Show>
         <Show when={err() === 'save'}>{' '}{tr('caCouldNotSave')}</Show>
       </p>
-      <Show when={err() !== 'large' && err() !== 'gone'}>
+      <Show when={err() !== 'large' && err() !== 'response' && err() !== 'gone'}>
         <button type="button" class="link" data-file-save disabled={busy() || saved()} onClick={() => void onSave()}>
           {saved() ? tr('caSaved641') : busy() ? '…' : tr('extraSave')}
         </button>
@@ -4179,14 +4183,14 @@ function VoiceNote(props: { id: string; name: string; load: (messageId: string) 
   const [url, setUrl] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
   // Why it cannot play: the file is gone, too large, or not audio despite its name.
-  const [missing, setMissing] = createSignal<'gone' | 'large' | 'not_audio' | null>(null);
+  const [missing, setMissing] = createSignal<'gone' | 'large' | 'response' | 'not_audio' | null>(null);
   const open = async () => {
     setBusy(true);
     try {
       setUrl(await props.load(props.id));
     } catch (e) {
       const s = String(e);
-      setMissing(s.includes(NOT_A_VOICE_NOTE) ? 'not_audio' : s.includes(FILE_TOO_LARGE) ? 'large' : 'gone');
+      setMissing(s.includes(NOT_A_VOICE_NOTE) ? 'not_audio' : s.includes(FILE_TOO_LARGE) ? 'large' : s.includes(FILE_RESPONSE_TOO_LARGE) ? 'response' : 'gone');
     } finally {
       setBusy(false);
     }
@@ -4200,6 +4204,7 @@ function VoiceNote(props: { id: string; name: string; load: (messageId: string) 
             {missing() === 'not_audio'
               ? tr('caFileNotAudioNotPlayed', props.name)
               : missing() === 'large' ? tr('caVoiceNoteOver14MB')
+              : missing() === 'response' ? tr('caVoiceNoteResponseTooLarge')
               : missing() === 'gone' ? tr('caVoiceNoteNotStoredOnThisDevice') : busy() ? tr('chatLoading') : tr('caVoiceNote')}
           </button>
         }

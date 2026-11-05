@@ -1491,6 +1491,9 @@ pub const VOICE_NOT_STORED: &str = "voice note not stored on this node";
 pub const FILE_NOT_STORED: &str = "file not stored on this node";
 /// Received file over the app's 1.4 MB send/receive cap.
 pub const FILE_TOO_LARGE: &str = "file over 1.4 MB";
+/// The whole response passed [`FILE_BODY_MAX`], so the file inside was never
+/// parsed: its own size is unknown, and may be within the cap.
+pub const FILE_RESPONSE_TOO_LARGE: &str = "response too large to load safely";
 
 /// What a message's stored file is, by its type (never its name).
 #[derive(Debug, PartialEq, Eq)]

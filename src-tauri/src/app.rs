@@ -7262,7 +7262,7 @@ async fn read_file_blob(state: &NodeState, id: &str) -> Result<act::FileBlob, St
             }
         }
         if response.content_length().is_some_and(|n| n > act::FILE_BODY_MAX as u64) {
-            return Err(act::FILE_TOO_LARGE.into());
+            return Err(act::FILE_RESPONSE_TOO_LARGE.into());
         }
         let mut body = Vec::new();
         while let Some(chunk) = response
@@ -7271,7 +7271,7 @@ async fn read_file_blob(state: &NodeState, id: &str) -> Result<act::FileBlob, St
             .map_err(|e| format!("{path} response read failed: {e}"))?
         {
             if body.len() + chunk.len() > act::FILE_BODY_MAX {
-                return Err(act::FILE_TOO_LARGE.into());
+                return Err(act::FILE_RESPONSE_TOO_LARGE.into());
             }
             body.extend_from_slice(&chunk);
         }
@@ -19570,7 +19570,7 @@ mod control_act_tests {
             // A body past the read limit, whatever it says about itself.
             let huge = "A".repeat(act::FILE_BODY_MAX + 1);
             let node = one_voice_note(&mid, voice_blob(mime, 2, &huge));
-            assert_eq!(do_voice_note_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_TOO_LARGE);
+            assert_eq!(do_voice_note_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_RESPONSE_TOO_LARGE);
             assert!(node.posts().is_empty(), "playback must never POST");
         }
     }
@@ -19627,7 +19627,7 @@ mod control_act_tests {
         assert_eq!(do_voice_note_fetch(&state, &mid).await.unwrap().data_b64, "aGk=");
         // No length and a body that never ends: the read stops and the node is cut off.
         let (state, written, _dir) = voice_note_without_length(&mid, String::new(), true);
-        assert_eq!(do_voice_note_fetch(&state, &mid).await.unwrap_err(), act::FILE_TOO_LARGE);
+        assert_eq!(do_voice_note_fetch(&state, &mid).await.unwrap_err(), act::FILE_RESPONSE_TOO_LARGE);
         // Waits on the runtime: the connection only closes while its task can run.
         let mut waited = 0;
         let total = loop {
@@ -19641,6 +19641,22 @@ mod control_act_tests {
             }
         };
         assert!(total < ENDLESS_STOP, "the reader kept going to {total} bytes");
+    }
+
+    #[tokio::test]
+    async fn a_file_within_the_cap_in_an_oversized_response_is_not_called_over_the_cap() {
+        let mid = "cd".repeat(32);
+        // A file at the cap, and a peer's long name that takes the response past the limit.
+        let at_cap = format!("{}=", "A".repeat(1_866_667));
+        let name = format!("voice-note-{}.webm", "a".repeat(act::FILE_BODY_MAX - at_cap.len()));
+        let blob = serde_json::json!({
+            "filename": name, "mime_type": "video/webm",
+            "size_bytes": act::FILE_MAX_BYTES as u64, "data_b64": at_cap
+        }).to_string();
+        assert!(blob.len() > act::FILE_BODY_MAX);
+        let node = one_voice_note(&mid, blob);
+        assert_eq!(do_voice_note_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_RESPONSE_TOO_LARGE);
+        assert_eq!(do_file_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_RESPONSE_TOO_LARGE);
     }
 
     #[tokio::test]
