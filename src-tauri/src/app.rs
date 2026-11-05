@@ -2222,6 +2222,21 @@ async fn ensure_fresh_token(state: &NodeState) {
     }
 }
 
+/// Before a media socket opens: a stricter check than `ensure_fresh_token`, since
+/// the socket lives on the token it opens with. If this fails, the socket opens on
+/// the old token and is re-opened when that one expires, as before.
+async fn ensure_media_token(state: &NodeState) {
+    let due = matches!(
+        &*state.auth.lock().unwrap(),
+        AuthMode::Paired(session) if session.too_short_for_media(now_unix())
+    );
+    if due {
+        if let Err(e) = refresh_paired(state).await {
+            eprintln!("[pairing] token refresh before media failed: {e}");
+        }
+    }
+}
+
 /// Re-auth in the mode already established: paired stays paired, and only a
 /// node already found to lack pairing routes is re-minted via `/auth/local`.
 async fn reauthenticate(state: &NodeState) -> Result<(), String> {
@@ -10390,7 +10405,7 @@ async fn media_bridge<R: tauri::Runtime>(
     let link = control::media::run_media_link(
         || async {
             if !*state.ready.lock().unwrap() { return Ok(None); }
-            ensure_fresh_token(&state).await;
+            ensure_media_token(&state).await;
             let Some(token) = state.token.lock().unwrap().clone() else { return Ok(None); };
             let url = control::media::media_url(&state.api_base, &call_id, &peer)?;
             Ok(Some((url, token, state.remote_proxy_auth.to_string())))
@@ -16335,6 +16350,52 @@ mod control_act_tests {
         assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap_err().code, "call_price_unknown");
         assert_eq!(do_call_block(&node.state, A, CALL_ID, 1).await.unwrap_err().code, "call_not_live");
         assert_eq!(compose_kinds(&node), [400, 404], "one minute before End, none after, and no hangup");
+    }
+
+    /// A media socket lives on the token it opens with. Under nine minutes left, a
+    /// new token is fetched once; with more, none. A failed fetch keeps the old one.
+    #[tokio::test]
+    async fn a_media_socket_opens_on_a_token_with_nine_minutes_left() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+        for (left, mints, new_token) in [(300, 1, true), (539, 1, true), (540, 0, false), (590, 0, false)] {
+            let far = now_unix() + 600;
+            let minted = Arc::new(AtomicUsize::new(0));
+            let seen = minted.clone();
+            let (node, _dir) = paired_fake(Arc::new(move |_, p, _| {
+                if p.starts_with("/pair/challenge") { return (200, serde_json::json!({"challenge": "bitsov-pair-token-v1:00ff"}).to_string()); }
+                if p == "/pair/token" {
+                    seen.fetch_add(1, SeqCst);
+                    return (200, serde_json::json!({"token": "tok.new", "expires_at": far, "scopes": ["read", "receive", "spend"]}).to_string());
+                }
+                (404, r#"{"error":"route","code":404}"#.into())
+            }));
+            if let AuthMode::Paired(session) = &mut *node.state.auth.lock().unwrap() { session.expires_at = now_unix() + left; }
+            let before = node.state.token.lock().unwrap().clone();
+            ensure_media_token(&node.state).await;
+            assert_eq!(minted.load(SeqCst), mints, "{left} s left");
+            let after = node.state.token.lock().unwrap().clone();
+            assert_eq!(after == before, !new_token, "{left} s left");
+            if new_token {
+                assert_eq!(after.as_deref(), Some("tok.new"));
+                // A re-open on the new token fetches nothing more.
+                ensure_media_token(&node.state).await;
+                assert_eq!(minted.load(SeqCst), 1, "{left} s left, re-open");
+            }
+        }
+
+        // The node does not answer the fetch: the socket still opens, on the old token.
+        let failing = Arc::new(AtomicBool::new(false));
+        let tried = failing.clone();
+        let (node, _dir) = paired_fake(Arc::new(move |_, p, _| {
+            if p.starts_with("/pair/challenge") { tried.store(true, SeqCst); }
+            (500, r#"{"error":"down","code":500}"#.into())
+        }));
+        if let AuthMode::Paired(session) = &mut *node.state.auth.lock().unwrap() { session.expires_at = now_unix() + 300; }
+        let before = node.state.token.lock().unwrap().clone();
+        assert!(before.is_some());
+        ensure_media_token(&node.state).await;
+        assert!(failing.load(SeqCst), "it asked");
+        assert_eq!(*node.state.token.lock().unwrap(), before, "carries on with the old token");
     }
 
     /// A hangup signal refused while it is prepared, before the money lock and
