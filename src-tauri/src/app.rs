@@ -2222,6 +2222,33 @@ async fn ensure_fresh_token(state: &NodeState) {
     }
 }
 
+/// The token a media socket opens with. The node closes the socket when this token
+/// expires, so each open gets a token of its own, with its full life. It is not
+/// stored: the live feed and every request keep the shared token and its renewal.
+/// Without one, the socket opens on the shared token and re-opens when that expires.
+async fn media_token(state: &NodeState) -> Option<String> {
+    if let Some(token) = own_media_token(state).await { return Some(token); }
+    ensure_fresh_token(state).await;
+    state.token.lock().unwrap().clone()
+}
+
+async fn own_media_token(state: &NodeState) -> Option<String> {
+    if hold_refused(state) { return None; }
+    let (generation, client_id, ctx) = {
+        let generation = state.remote_connect_generation.borrow();
+        let client_id = match &*state.auth.lock().unwrap() {
+            AuthMode::Paired(session) => session.client_id.clone(),
+            _ => return None,
+        };
+        (*generation, client_id, state.pairing.lock().unwrap().clone()?)
+    };
+    let local = !state.remote_mode.load(Ordering::SeqCst);
+    let token = pairing::extra_token(&client_id, &ctx.client, &ctx.key, local).await
+        .map_err(|e| eprintln!("[pairing] token for media failed: {e}")).ok()?;
+    // Issued by a connection that has since been replaced: never used.
+    (*state.remote_connect_generation.borrow() == generation).then_some(token)
+}
+
 /// Re-auth in the mode already established: paired stays paired, and only a
 /// node already found to lack pairing routes is re-minted via `/auth/local`.
 async fn reauthenticate(state: &NodeState) -> Result<(), String> {
@@ -10420,8 +10447,7 @@ async fn media_bridge<R: tauri::Runtime>(
     let link = control::media::run_media_link(
         || async {
             if !*state.ready.lock().unwrap() { return Ok(None); }
-            ensure_fresh_token(&state).await;
-            let Some(token) = state.token.lock().unwrap().clone() else { return Ok(None); };
+            let Some(token) = media_token(&state).await else { return Ok(None); };
             let url = control::media::media_url(&state.api_base, &call_id, &peer)?;
             Ok(Some((url, token, state.remote_proxy_auth.to_string())))
         },
@@ -16604,6 +16630,89 @@ mod control_act_tests {
         assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap_err().code, "call_price_unknown");
         assert_eq!(do_call_block(&node.state, A, CALL_ID, 1).await.unwrap_err().code, "call_not_live");
         assert_eq!(compose_kinds(&node), [400, 404], "one minute before End, none after, and no hangup");
+    }
+
+    /// Node routes that issue a new token on each exchange and count them.
+    fn minting_routes(minted: Arc<std::sync::atomic::AtomicUsize>) -> Routes {
+        Arc::new(move |_, p, _| {
+            if p.starts_with("/pair/challenge") { return (200, serde_json::json!({"challenge": "bitsov-pair-token-v1:00ff"}).to_string()); }
+            if p == "/pair/token" {
+                let n = minted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                return (200, serde_json::json!({"token": format!("tok.media{n}"), "expires_at": now_unix() + 600, "scopes": ["read", "receive", "spend"]}).to_string());
+            }
+            (404, r#"{"error":"route","code":404}"#.into())
+        })
+    }
+
+    /// Each media open gets a token of its own, whatever the shared token's age. The
+    /// shared token and session stay as they were, so the live feed and every
+    /// request keep their renewal.
+    #[tokio::test]
+    async fn a_media_socket_gets_its_own_token_and_the_shared_one_stays() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        for left in [300, 590, 599] {
+            let minted = Arc::new(AtomicUsize::new(0));
+            let (node, _dir) = paired_fake(minting_routes(minted.clone()));
+            let expires_at = now_unix() + left;
+            if let AuthMode::Paired(session) = &mut *node.state.auth.lock().unwrap() { session.expires_at = expires_at; }
+            *node.state.token.lock().unwrap() = Some("tok.1".into());
+            assert_eq!(media_token(&node.state).await.as_deref(), Some("tok.media1"), "{left} s left");
+            assert_eq!(media_token(&node.state).await.as_deref(), Some("tok.media2"), "{left} s left, a re-open");
+            assert_eq!(minted.load(SeqCst), 2, "{left} s left");
+            assert_eq!(node.state.token.lock().unwrap().as_deref(), Some("tok.1"), "{left} s left");
+            let auth = node.state.auth.lock().unwrap();
+            let AuthMode::Paired(session) = &*auth else { panic!("still paired") };
+            assert_eq!((session.token.as_str(), session.expires_at), ("tok.1", expires_at), "{left} s left");
+        }
+    }
+
+    /// No token of its own: the socket opens on the shared one, as before.
+    #[tokio::test]
+    async fn a_media_socket_falls_back_to_the_shared_token() {
+        // The node does not answer the exchange.
+        let (node, _dir) = paired_fake(Arc::new(|_, _, _| (500, r#"{"error":"down","code":500}"#.into())));
+        *node.state.token.lock().unwrap() = Some("tok.1".into());
+        assert_eq!(media_token(&node.state).await.as_deref(), Some("tok.1"));
+        // An owner session has no pairing to ask.
+        let minted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let node = fake(AuthMode::Local, minting_routes(minted.clone()));
+        *node.state.token.lock().unwrap() = Some("tok.local".into());
+        assert_eq!(media_token(&node.state).await.as_deref(), Some("tok.local"));
+        assert_eq!(minted.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // A shared token inside its renewal margin is renewed by the usual route.
+        let minted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let inner = minting_routes(minted.clone());
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (node, _dir) = paired_fake(Arc::new(move |m, p, b| {
+            if p == "/pair/token" && first.swap(false, std::sync::atomic::Ordering::SeqCst) { return (500, r#"{"error":"down","code":500}"#.into()); }
+            inner(m, p, b)
+        }));
+        if let AuthMode::Paired(session) = &mut *node.state.auth.lock().unwrap() { session.expires_at = now_unix() + 60; }
+        assert_eq!(media_token(&node.state).await.as_deref(), Some("tok.media1"));
+        assert_eq!(node.state.token.lock().unwrap().as_deref(), Some("tok.media1"), "that renewal is the shared token's");
+    }
+
+    /// A token issued across a change of connection is not used.
+    #[tokio::test]
+    async fn a_media_token_from_a_replaced_connection_is_not_used() {
+        let (arrived, proceed) = (Arc::new(tokio::sync::Notify::new()), Arc::new(std::sync::Barrier::new(2)));
+        let (a, p) = (arrived.clone(), proceed.clone());
+        let (node, _dir) = paired_fake(Arc::new(move |_, path, _| {
+            if path.starts_with("/pair/challenge") { return (200, serde_json::json!({"challenge": "bitsov-pair-token-v1:00ff"}).to_string()); }
+            if path == "/pair/token" {
+                a.notify_one();
+                p.wait();
+                return (200, serde_json::json!({"token": "tok.stale", "expires_at": now_unix() + 600, "scopes": ["read"]}).to_string());
+            }
+            (404, r#"{"error":"route","code":404}"#.into())
+        }));
+        *node.state.token.lock().unwrap() = Some("tok.1".into());
+        let (token, ()) = tokio::join!(media_token(&node.state), async {
+            arrived.notified().await;
+            node.state.remote_connect_generation.send_modify(|g| *g += 1);
+            proceed.wait();
+        });
+        assert_eq!(token.as_deref(), Some("tok.1"));
     }
 
     /// A hangup signal refused while it is prepared, before the money lock and

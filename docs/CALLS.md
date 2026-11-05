@@ -24,7 +24,9 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   the `bitsov.jwt.<token>` subprotocol the node reads first (never in the URL).
   The node admits the socket only for a `(peer, call_id)` it knows, under a
   paired token with `spend`; the host reconnects with backoff while the call
-  lasts and stops on a refusal. The renderer opens no socket and sees no
+  lasts and stops on a refusal. The node closes the socket when the token it
+  opened with expires, so each open gets a new token of its own, which the host
+  does not keep. Without one, it opens on the shared token. The renderer opens no socket and sees no
   token; the CSP keeps `connect-src 'self' ipc:` only. Three main-window
   commands: `call_media_open(call_id, peer, on_frame)`,
   `call_media_send(raw payload)`, `call_media_close()`. Frames reach the
