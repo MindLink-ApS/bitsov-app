@@ -70,6 +70,9 @@ function stubHost() {
     call_media_open: () => null,
     call_media_send: () => null,
     call_media_close: () => null,
+    call_seal_offer: () => `a=x-bitsov-e2e:1 commit=${'ab'.repeat(32)} caps=00000001 sas=01`,
+    call_seal_accept: () => true,
+    call_seal_cancel: () => null,
     'plugin:event|listen': () => 1,
     'plugin:event|unlisten': () => null,
   };
@@ -258,6 +261,72 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await vi.waitFor(() => expect(host.used('call_media_close').length).toBeGreaterThan(0));
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     await vi.waitFor(() => expect(FakeAudioContext.made[0].closed).toBe(true));
+  });
+
+  it('with sealing off, no seal command runs and the label and the offer are as they were', async () => {
+    const host = stubHost();
+    await routedLive(host);
+    for (const cmd of ['call_seal_offer', 'call_seal_answer', 'call_seal_accept', 'call_seal_cancel']) expect(host.used(cmd)).toHaveLength(0);
+    expect($('[data-call-route="node"]')?.textContent).toBe('The call goes through your box and theirs. Both boxes can hear it.');
+    expect($('[data-call-route="node"]')?.hasAttribute('data-call-seal')).toBe(false);
+    const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
+    expect(JSON.parse((offer.args as { plaintext: string }).plaintext).sdp).not.toContain('x-bitsov-e2e');
+    expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer']);
+  });
+
+  /** Rings Maya on a sealing build and delivers an answer with these extra SDP lines. */
+  async function sealedRing(host: ReturnType<typeof stubHost>, answerLines: string[]) {
+    vi.stubEnv('VITE_CALL_SEAL', 'sealed');
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('setting_up');
+    const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
+    const { call_id: callId, sdp } = JSON.parse((offer.args as { plaintext: string }).plaintext) as { call_id: string; sdp: string };
+    expect(sdp).toContain('a=x-bitsov-e2e:1 commit=');
+    const answer = nodeRoutedSdp('answer', callId) + answerLines.map((line) => `${line}\r\n`).join('');
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, sdp: answer }), payment_msat: null, status: 'delivered' } });
+    return callId;
+  }
+
+  it('with sealing on, the label says sealed only after the host reports an authenticated frame', async () => {
+    const host = stubHost();
+    const callId = await sealedRing(host, [`a=x-bitsov-e2e:1 key=${'cd'.repeat(32)} nonce=${'ef'.repeat(16)} caps=00000001`]);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
+    expect(host.used('call_media_open')[0].args).toMatchObject({ call_id: callId, peer: A, sealed: true });
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('setting_up');
+    expect($('[data-call-route="node"]')?.textContent).toBe('Sealing this call. Nothing goes out unsealed.');
+    host.media({ link: 'sealed', detail: null });
+    await vi.waitFor(() => expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('sealed'));
+    expect($('[data-call-route="node"]')?.textContent).toMatch(/unless one of them is attacking the call/);
+    expect($('[data-call-route="node"]')?.textContent).not.toMatch(/Both boxes can hear it/);
+  });
+
+  it('with sealing on, a peer that cannot seal is shown, and the call is not labelled sealed', async () => {
+    const host = stubHost();
+    await sealedRing(host, []);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
+    expect(Object.keys(host.used('call_media_open')[0].args as object)).not.toContain('sealed');
+    expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('not_sealed');
+    expect($('[data-call-route="node"]')?.textContent).toMatch(/^Not sealed:.*Both boxes can hear it\.$/);
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('not_sealed');
+  });
+
+  it('with sealing on, a call that cannot stay sealed ends and says so', async () => {
+    const host = stubHost();
+    await sealedRing(host, [`a=x-bitsov-e2e:1 key=${'cd'.repeat(32)} nonce=${'ef'.repeat(16)} caps=00000001`]);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    host.media({ link: 'ended', detail: 'seal_no_authentic_frames' });
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-ended]')?.textContent).toBe('The call could not stay sealed, so it ended. Nothing was sent unsealed. A minute already issued may still settle.');
   });
 
   it('a node refusal on the media socket ends the call instead of leaving it ringing', async () => {

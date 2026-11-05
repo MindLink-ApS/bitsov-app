@@ -18,6 +18,7 @@ import { provenUnpaid } from './paymentOutcome';
 import { asActionError, messagePerPaymentMax } from './state';
 import { amount } from './format';
 import { createCallMinutes, type CallMinutes, type MinutesDeps, type MinutesView } from './callMinutes';
+import { SEAL_ENDED, SEAL_REFUSED } from './nodeRoutedConnection';
 import type { ActionError, CallQuote, CallReceipt, Message, MinutesConsent, NodeGrantSummary, OpView } from './types';
 
 export const CALL_OFFER = 400;
@@ -43,6 +44,7 @@ const permissionPlace = (platform: AppPlatform) =>
 export function mediaError(error: unknown, media: CallMedia, platform: AppPlatform = appPlatform()): string {
   const name = error && typeof error === 'object' && 'name' in error ? error.name : '';
   const devices = media === 'video' ? tr('caMicrophoneOrCamera') : tr('caMicrophone');
+  if (name === SEAL_REFUSED) return tr('caCallSealRefused');
   if (name === NO_MEDIA_DEVICES) return media === 'video' ? tr('caThisBuildCannotUseTheMicrophoneOrCameraYet') : tr('caThisBuildCannotUseTheMicrophoneYet');
   if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
     return tr('caPermissionToUseTheWasDeniedAllowAccessIn', devices, permissionPlace(platform));
@@ -841,6 +843,7 @@ export function createCallEngine(deps: CallDeps) {
       } else if (state === 'closed') {
         // M6: the node admits call audio only once the first minute is paid.
         if (deps.routed && (conn as { endDetail?: string | null }).endDetail === NOT_PAID) end('unpaid', tr('caMinutesNotPaidInTime'));
+        else if (deps.routed && (conn as { endDetail?: string | null }).endDetail === SEAL_ENDED) end('failed', tr('caCallSealEnded'));
         else end('failed', deps.routed ? tr('caTheNodeMediaLinkClosed') : tr('caTheDirectConnectionClosed'));
       }
     };

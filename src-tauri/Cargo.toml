@@ -41,6 +41,8 @@ base64 = "0.22"
 zeroize = { version = "1", features = ["serde"] }
 snow = "0.9"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+# Call sealing (src/control/call_seal.rs). Same version the Noise tunnel already locks.
+chacha20poly1305 = "0.10"
 # Decode BOLT 11 invoices exactly as the node's payment path does (genome
 # dac01c8 locks lightning-invoice 0.34.1 via ldk-node 0.7.0). Keep in lockstep.
 lightning-invoice = "=0.34.1"

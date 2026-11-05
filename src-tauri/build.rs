@@ -1,6 +1,7 @@
 fn main() {
     // Same parent-process flag as vite.config.ts; only the exact value "1" opts in.
     println!("cargo:rerun-if-env-changed=VITE_STARTER_BALANCE");
+    println!("cargo:rerun-if-env-changed=VITE_CALL_SEAL");
     println!("cargo:rerun-if-changed=capabilities");
     println!("cargo:rerun-if-changed=mobile-capabilities");
 
@@ -126,6 +127,10 @@ fn main() {
             "call_media_open",
             "call_media_send",
             "call_media_close",
+            "call_seal_offer",
+            "call_seal_answer",
+            "call_seal_accept",
+            "call_seal_cancel",
             "porch_quote",
             "porch_read",
             "porch_cards",

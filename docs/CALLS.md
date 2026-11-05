@@ -104,6 +104,41 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   node that serves the route. Two-device acceptance against a node with the
   media route is separate evidence.
 
+## Sealed audio, first proof (off by default)
+
+Behind a build flag: `VITE_CALL_SEAL=sealed`, read by both `vite.config.ts` and
+`src-tauri/build.rs`. Any other value, or none, is today's call: the same SDP, the
+same frames and the same host commands, held by tests that also pass on the code
+before sealing existed.
+
+With it on, the host (`src-tauri/src/control/call_seal.rs`) seals audio between the
+two apps. The node changes nothing: it forwards opaque frames, and metering,
+admission and price never read them.
+
+- **Key agreement.** The offer carries a hash commitment, the answer carries the
+  callee's ephemeral X25519 key, and the first media frames reveal the caller's
+  key. Public values only pass through the renderer and the nodes. No key derives
+  from the node, its seed or a stored secret, and each call starts fresh.
+- **Frames.** `0x11 | epoch | counter | ciphertext | tag`, ChaCha20-Poly1305, one key
+  per direction, the inside padded to a multiple of 128 bytes. The host hands the
+  renderer the plain frame, numbered by the authenticated `stream_seq`. Anything in
+  the clear, or failing its tag, on a sealed call reaches nothing.
+- **What it authenticates.** Each frame comes from whoever holds the key from this
+  one exchange, for this call, direction, epoch and counter.
+- **What it does not.** Who that is. A node that swaps both keys sits in the middle
+  and reads everything, with "sealed" on both screens. Only comparing the words
+  catches that, and no screen shows the words yet. The node ids come from the node.
+  Nothing here has had an outside review.
+- **The other app cannot seal.** No attribute, or no capability bit: the call goes on
+  as today and the label says "Not sealed". A node can cause this by stripping the
+  offer's attribute; nothing warns yet that a contact was sealed before.
+- **Never in the clear by surprise.** A wrong attribute, a bad or missing reveal, a low-order
+  key, 10 s of frames with none authentic, or the last epoch running out ends the
+  call with a reason. The label says "sealed" only after a frame from the far side
+  authenticates.
+- **Not built:** the words on screen, remembering a contact, "only private calls",
+  video in the seal, messages.
+
 ## M6 A2: paid minutes
 
 Node contract: genome M6 N1 (kind 404 `CALL_BLOCK`, 60-second blocks priced by

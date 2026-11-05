@@ -53,10 +53,10 @@ import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
 import { answerCost, callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, isCallTrafficKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { CallReportCopy } from './CallReportCopy';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
-import { nodeRoutedAudio } from './callFlags';
-import { createNodeRoutedConnection } from './nodeRoutedConnection';
+import { nodeRoutedAudio, sealedAudio } from './callFlags';
+import { createNodeRoutedConnection, type SealState } from './nodeRoutedConnection';
 import { waitUntilPaid, type MinutesDeps, type MinutesView } from './callMinutes';
-import { hostMediaBridge, unavailableMediaBridge } from './mediaBridge';
+import { hostCallSeal, hostMediaBridge, unavailableMediaBridge } from './mediaBridge';
 import { createCallAudio } from './callAudio';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
 import { NewRoomPanel, RoomThread, type RoomSend, type ThreadRead } from './RoomPanel';
@@ -1392,6 +1392,8 @@ export function ControlCenter(props: Props) {
 
   // Calls: media is peer to peer in this webview; each signal is one paid send.
   const [callView, setCallView] = createSignal<CallView>(CALL_IDLE);
+  // Only ever set on a build with sealing on. Null: the plain label.
+  const [callSeal, setCallSeal] = createSignal<SealState | null>(null);
   const [waitingCalls, setWaitingCalls] = createSignal<CallView[]>([]);
   const waitingPanels = new Map<string, HTMLElement>();
   const isIncoming = (peer: string, id: string) => [callView(), ...waitingCalls()].some(v => v.peer === peer && v.callId === id && v.phase === 'incoming' && !v.silenced);
@@ -1468,11 +1470,13 @@ export function ControlCenter(props: Props) {
           admitted: callMinutes ? (callId, peer, closed) => waitUntilPaid(callMinutes.status, peer, callId, () => Date.now(), closed) : undefined,
           // A media session that closed for good ends its call, so no further minute is paid.
           onSession: (event) => { if (event.state === 'closed') calls.mediaClosed(event.callId); },
+          ...(sealedAudio() && isTauri() ? { seal: hostCallSeal(), onSeal: setCallSeal } : {}),
         })
       : (config) => new RTCPeerConnection(config),
     now: () => Date.now(),
     onView: view => {
       setCallView(view);
+      if (view.phase === 'idle' || view.phase === 'ended') setCallSeal(null);
       if (view.phase === 'incoming' && !view.silenced && view.callId && view.peer) notifications?.call(`${view.peer}:${view.callId}`, nameOf(view.peer), () => isIncoming(view.peer!, view.callId!), () => revealIncoming(view.callId!, view.peer!));
     },
     onMissed: call => missedCalls.add(call, openKey() === `peer:${call.peer}` && document.hasFocus() && !contextOpen() && walletTab() === null),
@@ -2482,6 +2486,7 @@ export function ControlCenter(props: Props) {
         }</Show>}
         blocked={moneyBlocked()}
         routed={routedCalls}
+        seal={callSeal()}
         view={callView()}
         streams={callStreams()}
         nameOf={nameOf}
@@ -3638,6 +3643,16 @@ function CallMinutesLine(props: { minutes: MinutesView; ended: boolean; confirm?
   );
 }
 
+/** The route label's words. They claim only what this call's key exchange has shown. */
+function sealLabel(state: SealState | null) {
+  switch (state) {
+    case 'setting_up': return 'caCallSealSettingUp' as const;
+    case 'sealed': return 'caCallSealed' as const;
+    case 'not_sealed': return 'caCallNotSealed' as const;
+    default: return 'caNodeRoutedCallLabel' as const;
+  }
+}
+
 /** The call card: incoming (accept/decline with price), ringing, live (mute, camera, duration, hang up), ended. */
 function CallPanel(props: {
   waiting?: boolean;
@@ -3649,6 +3664,7 @@ function CallPanel(props: {
   blocked: boolean;
   /** M6: audio goes through both nodes; no direct connection, STUN or recovery notes. */
   routed?: boolean;
+  seal?: SealState | null;
   view: CallView;
   streams: { local: MediaStream | null; remote: MediaStream | null };
   nameOf: (id: string) => string;
@@ -3868,7 +3884,7 @@ function CallPanel(props: {
         </div>
         {/* M6: the honest label for a node-routed call, from ringing until it ends. It stays visible until the apps encrypt end to end. */}
         <Show when={props.routed && v().phase !== 'idle' && v().phase !== 'ended'}>
-          <p class="hint" data-call-route="node">{tr('caNodeRoutedCallLabel')}</p>
+          <p class="hint" data-call-route="node" data-call-seal={props.seal ?? undefined}>{tr(sealLabel(props.seal ?? null))}</p>
         </Show>
         {/* A short card while the call lasts: the longer notes wait behind Details (display only; same texts and amounts). */}
         <Show when={v().phase !== 'ended' && (!props.routed || v().phase !== 'idle')}>
