@@ -1,4 +1,5 @@
 import { language } from '../i18n';
+import { HOST_COPY_MONEY_DA } from './hostMoneyCopy';
 
 /**
  * Danish for the host's refusals, matched on the host's exact English text.
@@ -9,6 +10,7 @@ import { language } from '../i18n';
  * `tests/host-copy.test.ts` checks this list against the host's source.
  */
 export const HOST_COPY_DA: readonly (readonly [string, string])[] = [
+  ...HOST_COPY_MONEY_DA,
   ['No app storage.', 'Appen har ikke sit lager klar.'],
   ['No node identity.', 'Din boks har ingen identitet endnu.'],
   ['Not authenticated.', 'Du er ikke logget ind.'],
@@ -177,12 +179,37 @@ export const HOST_COPY_DA: readonly (readonly [string, string])[] = [
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const compiled = HOST_COPY_DA.map(([en, da]) => ({ re: new RegExp(`^${escape(en).replace(/\\\{\\\}/g, '(.+?)')}$`, 's'), da }));
 
-/** The refusal in the app's language: Danish where the host's exact text is known, otherwise as the host wrote it. */
-export function hostText(message: string, lang: string = language(), depth = 0): string {
-  if (lang !== 'da' || depth > 1) return message;
+/** The Danish for exactly this text, or null. A value is kept as it came, around any Danish for it. */
+function exact(message: string, depth: number): string | null {
   for (const { re, da } of compiled) {
     const m = re.exec(message);
-    if (m) return da.replace(/\{(\d+)\}/g, (_, i: string) => hostText(m[Number(i) + 1] ?? '', lang, depth + 1));
+    if (m) return da.replace(/\{(\d+)\}/g, (_, i: string) => {
+      const value = m[Number(i) + 1] ?? '';
+      const lead = /^\s*/.exec(value)![0];
+      return lead + danish(value.slice(lead.length), depth + 1);
+    });
   }
-  return message;
+  return null;
+}
+/** Sentences the host joins: only when every part is known, so a message is never half translated. */
+function joined(message: string, depth: number): string | null {
+  if (depth > 2) return null;
+  for (const at of message.matchAll(/[.!?] +/g)) {
+    const end = at.index + at[0].length;
+    const left = exact(message.slice(0, at.index + 1), depth);
+    if (left === null) continue;
+    const rest = message.slice(end);
+    const right = exact(rest, depth) ?? joined(rest, depth + 1);
+    if (right !== null) return `${left} ${right}`;
+  }
+  return null;
+}
+function danish(message: string, depth: number): string {
+  if (depth > 2) return message;
+  return exact(message, depth) ?? joined(message, depth) ?? message;
+}
+
+/** The refusal in the app's language: Danish where the host's exact text is known, otherwise as the host wrote it. */
+export function hostText(message: string, lang: string = language()): string {
+  return lang === 'da' ? danish(message, 0) : message;
 }
