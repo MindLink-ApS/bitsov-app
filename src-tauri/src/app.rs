@@ -4837,6 +4837,16 @@ fn refuse_if_connection_waiting(state: &NodeState) -> Result<(), ActionError> {
     Ok(())
 }
 
+/// For a repeat of a request the node may already hold: an admission resume or a
+/// direct-payment replay. Neither can read a proxy refusal as proven unpaid, so
+/// each also waits out a dial's anti-burst stamp rather than meet that refusal.
+fn refuse_if_connection_busy(state: &NodeState) -> Result<(), ActionError> {
+    if state.remote_retry.remaining().is_some() {
+        return Err(ActionError::new("not_ready", "Waiting for the connection. Your node will retry automatically."));
+    }
+    Ok(())
+}
+
 fn check_auth(state: &NodeState, auth: Auth) -> Result<(), ActionError> {
     match auth {
         Auth::Window(g) => state.spend.lock().unwrap().check_generation(g, now_ms()),
@@ -5809,7 +5819,7 @@ async fn replay_direct_payment(state: &NodeState, journal: &Journal, pending: &m
 /// budget book at its full bound; and only while payments are not paused.
 /// The refusal, if not.
 fn replay_refusal(state: &NodeState, journal: &Journal, pending: &spend_journal::Pending) -> Option<ActionError> {
-    if let Err(refused) = refuse_if_paused(state).and_then(|()| refuse_if_connection_waiting(state)) {
+    if let Err(refused) = refuse_if_paused(state).and_then(|()| refuse_if_connection_busy(state)) {
         return Some(refused);
     }
     let current = match journal.pending() { Ok(current) => current, Err(error) => return Some(error) };
@@ -6795,7 +6805,7 @@ async fn resume_admission_send(state: &NodeState, pending_id: &str, peer: &str, 
     if !matches_request(&body) {
         return Err(spend_journal::unknown("Only the same message and request can resume its paid admission."));
     }
-    refuse_if_connection_waiting(state)?;
+    refuse_if_connection_busy(state)?;
     refuse_if_paused(state)?;
     ensure_fresh_token(state).await;
     let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
@@ -6829,7 +6839,7 @@ async fn resume_admission_send(state: &NodeState, pending_id: &str, peer: &str, 
     pending.dispatched_at = Some(spend_journal::timestamp_ms());
     journal.save(&pending)?;
     journal.record_outcome(&pending, spend_journal::OperationState::Dispatching, None)?;
-    refuse_if_connection_waiting(state)?;
+    refuse_if_connection_busy(state)?;
     refuse_if_paused(state)?;
     check_auth(state, auth)?;
     body["operation_id"] = serde_json::json!(id);
@@ -12331,9 +12341,9 @@ mod control_act_tests {
         assert_eq!(budget_now(&node.state).unsettled_msat, 0, "the reservation is released");
     }
 
-    /// A healthy dial in flight is not a cooldown. A minute sent while one is held
-    /// goes out once, under one journaled operation, and is paid once. So does a
-    /// message, on either side of the dial finishing.
+    /// The gate lets a minute past a healthy dial: it goes out once, under one journaled
+    /// operation, and is paid once. The dial is held at `RemoteRetry` and this fake
+    /// node is reached directly, so waiting behind the dial in the proxy isn't covered.
     #[tokio::test]
     async fn a_minute_sent_during_a_healthy_dial_is_posted_once_under_one_operation() {
         let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
@@ -12354,6 +12364,107 @@ mod control_act_tests {
         assert_eq!(minute_records(&node).len(), 1, "one journaled operation");
         assert_eq!(paid.lock().unwrap().pays, pays + 1, "paid once");
         assert!(pending(&node).is_none());
+    }
+
+    /// This node's requests now go through a real proxy that shows a dial's stamp and
+    /// has no tunnel, so it answers `remote_retry_wait` before forwarding anything.
+    async fn through_stamped_proxy(node: &mut Fake) -> (remote_access::RemoteProxy, [tempfile::TempDir; 2]) {
+        let (app_dir, store) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe);
+        let api_base = format!("http://{address}/api/v1");
+        let descriptor = remote_access::parse_pairing_link(&super::remote_connect_tests::ticket("127.0.0.1:9".into(), false)).unwrap();
+        let key = Arc::new(ClientKey::load_or_create(store.path()).unwrap());
+        node.state.remote_retry.stamp_for_test(Duration::from_secs(60));
+        let proxy = remote_access::start_proxy(&api_base, app_dir.path(), descriptor, key, "test", store.path().to_path_buf(),
+            node.state.remote_proxy_auth.clone(), node.state.remote_retry.clone()).await.unwrap();
+        node.state.api_base = api_base;
+        assert!(!node.state.remote_retry.cooling_down());
+        (proxy, [app_dir, store])
+    }
+
+    /// A new send meeting the proxy's refusal during the stamp is proven unpaid: no
+    /// fence, nothing reserved, and it can be tried again.
+    #[tokio::test]
+    async fn a_send_during_the_stamp_is_proven_unpaid_through_the_proxy() {
+        let (routes, _) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let mut node = minute_ready(routes).await;
+        let window = approval_generation(&node.state);
+        let auth = window.map_or_else(|_| Auth::Budget(node.state.autopay.lock().unwrap().generation()), Auth::Window);
+        let sent = compose_kinds(&node);
+        let _proxy = through_stamped_proxy(&mut node).await;
+        let error = money_post_with(&node.state, auth, "/messages/compose", act::call_block_body(A, CALL_ID, 0).unwrap(), 10_000, None, None).await.unwrap_err();
+        assert_eq!(error.code, "not_dispatched", "{}", error.message);
+        assert!(pending(&node).is_none(), "no fence");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0, "nothing stays reserved");
+        assert_eq!(compose_kinds(&node), sent, "nothing reached the node");
+    }
+
+    /// An admission resume can't read a proxy refusal as unpaid, so during the stamp it
+    /// stops at the gate: its permission stays and no false unknown blocks later
+    /// payments. Once the connection is clear, the same resume goes out.
+    #[tokio::test]
+    async fn an_admission_resume_waits_out_the_stamp_and_keeps_its_permission() {
+        let (inner, _) = ops_node();
+        let answering = Arc::new(AtomicBool::new(false));
+        let answer = answering.clone();
+        let mut node = fake(AuthMode::Local, Arc::new(move |m, path, body| {
+            if path == "/messages/compose" && !answer.load(Ordering::SeqCst) { return (500, "{}".into()); }
+            if let Some(id) = path.strip_prefix("/messages/operations/") {
+                let mut reply: serde_json::Value = serde_json::from_str(&op_reply(id, "prepared")).unwrap();
+                reply["amount_msat"] = serde_json::json!(2000);
+                reply["message_id"] = serde_json::json!("");
+                return (200, reply.to_string());
+            }
+            inner(m, path, body)
+        }));
+        let id = uncertain_send(&node).await;
+        do_spend_reconcile(&node.state).await.unwrap();
+        assert!(pending(&node).unwrap().admission_resume);
+        let (posts, direct_base) = (compose_bodies(&node).len(), node.state.api_base.clone());
+
+        let proxy = through_stamped_proxy(&mut node).await;
+        let error = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        assert_eq!(error.code, "not_ready", "{}", error.message);
+        let held = pending(&node).unwrap();
+        assert!(held.admission_resume, "the permission stays");
+        assert_eq!(held.operation_id.as_deref(), Some(id.as_str()));
+        assert_eq!(compose_bodies(&node).len(), posts, "nothing was sent");
+
+        drop(proxy);
+        node.state.remote_retry.reset_for_replacement();
+        node.state.api_base = direct_base;
+        answering.store(true, Ordering::SeqCst);
+        do_message_send(&node.state, A, false, "gm", 14000, None).await.expect("the same resume goes out");
+        assert_eq!(compose_bodies(&node).len(), posts + 1, "one POST");
+        assert_eq!(compose_bodies(&node).last().unwrap()["operation_id"], id.as_str(), "under the same operation");
+    }
+
+    /// A direct-payment replay also waits out the stamp: it reaches neither the proxy's
+    /// refusal nor the wallet, and the pending record stays as it was.
+    #[tokio::test]
+    async fn a_direct_payment_replay_waits_out_the_stamp() {
+        let (inner, _) = idempotent_keysend_node("in_flight");
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+                    "spend_budget_grant_v1", "direct_payment_operations_v1"]}).to_string());
+            }
+            if p == "/payments/keysend" { return inner(m, p, b); }
+            (0, String::new())
+        });
+        let (mut node, _dir, _g1) = g1_node_with(&["read", "receive"], Some(first));
+        g1_approved(&node, 500_000).await;
+        spend_advance(&node.state, true).await.unwrap();
+        let pk = format!("03{}", "cd".repeat(32));
+        do_payment_keysend(&node.state, &pk, 5000, None, 10000).await.unwrap();
+        let held = pending(&node).expect("the payment is in flight");
+        let _proxy = through_stamped_proxy(&mut node).await;
+        let error = do_spend_reconcile(&node.state).await.unwrap_err();
+        assert_eq!(error.code, "not_ready", "{}", error.message);
+        assert_eq!(keysend_bodies(&node).len(), 1, "not repeated");
+        assert_eq!(pending(&node).unwrap().operation_id, held.operation_id);
     }
 
     #[tokio::test]

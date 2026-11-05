@@ -4,7 +4,7 @@ use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-fn ticket(endpoint: String, first_run: bool) -> String {
+pub(super) fn ticket(endpoint: String, first_run: bool) -> String {
     ticket_for(endpoint, first_run, 42)
 }
 

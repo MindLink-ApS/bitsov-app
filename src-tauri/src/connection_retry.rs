@@ -117,6 +117,13 @@ impl RemoteRetry {
         self.state.lock().unwrap().retrying
     }
 
+    /// A dial's anti-burst stamp with no dial behind it, as a cancelled dial leaves,
+    /// for as long as a test needs it.
+    #[cfg(test)]
+    pub fn stamp_for_test(&self, lasting: Duration) {
+        self.state.lock().unwrap().next = Some(tokio::time::Instant::now() + lasting);
+    }
+
     /// A failure set the deadline: the node's rate limit, an unavailable handshake,
     /// or a re-dial during a failure streak. Every dial also stamps `next` for a
     /// second against bursts, so `remaining` alone says nothing about the connection:
