@@ -5431,6 +5431,14 @@ function Composer(props: {
     }
   };
 
+  /** The cost on the button. A file's figure is a ceiling: its price plus the most routing can cost. */
+  const labelPrice = () => {
+    const s = shown();
+    if (s.msat === null) return '';
+    const figure = `${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
+    return ` · ${mode() === 'file' ? tr('uiFileUpTo', figure) : figure}`;
+  };
+
   const label = () => {
     if (paying()) return tr('uiPaying');
     if (deviceWait()) return tr('uiWaitingForYourOtherDevice');
@@ -5439,8 +5447,7 @@ function Composer(props: {
       return isMobilePlatform() ? tr('uiApproveWithBiometrics') : tr('uiApproveWithTouchID');
     }
     if (viaBudget()) {
-      const s = shown();
-      const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
+      const price = labelPrice();
       switch (stand().kind) {
         case 'paused': return tr('uiResumePayments');
         case 'waiting': return tr('uiWaitingForApproval');
@@ -5458,8 +5465,7 @@ function Composer(props: {
       if (props.spend?.state === 'unavailable') return tr('uiSpendingUnavailable');
       return canContinue('grant') ? tr('uiApproveSend') : tr('uiSend');
     }
-    const s = shown();
-    const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
+    const price = labelPrice();
     return { message: tr('uiSend'), pay: tr('uiPay'), request: tr('uiCreateInvoice'), file: tr('uiSendFile') }[mode()] + (mode() === 'request' ? '' : price);
   };
 
@@ -6355,7 +6361,7 @@ function Composer(props: {
               <strong>{tr('uiSendAFile')}</strong>
               <button type="button" class="link" data-composer-close aria-label={tr('uiClose')} onClick={closePanel}>✕</button>
             </div>
-            <div class="composer-main">
+            <div class="composer-main file-row">
               <button
                 type="button"
                 class="attach soft icon-btn"
