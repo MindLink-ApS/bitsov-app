@@ -4178,14 +4178,15 @@ function shortMime(mime: string): string {
 function VoiceNote(props: { id: string; name: string; load: (messageId: string) => Promise<string> }) {
   const [url, setUrl] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
-  // Why it cannot play: the file is gone, or it is not audio despite its name.
-  const [missing, setMissing] = createSignal<'gone' | 'not_audio' | null>(null);
+  // Why it cannot play: the file is gone, too large, or not audio despite its name.
+  const [missing, setMissing] = createSignal<'gone' | 'large' | 'not_audio' | null>(null);
   const open = async () => {
     setBusy(true);
     try {
       setUrl(await props.load(props.id));
     } catch (e) {
-      setMissing(String(e).includes(NOT_A_VOICE_NOTE) ? 'not_audio' : 'gone');
+      const s = String(e);
+      setMissing(s.includes(NOT_A_VOICE_NOTE) ? 'not_audio' : s.includes(FILE_TOO_LARGE) ? 'large' : 'gone');
     } finally {
       setBusy(false);
     }
@@ -4198,6 +4199,7 @@ function VoiceNote(props: { id: string; name: string; load: (messageId: string) 
           <button type="button" class="voice-play" data-voice-play disabled={busy() || missing() !== null} onClick={() => void open()}>
             {missing() === 'not_audio'
               ? tr('caFileNotAudioNotPlayed', props.name)
+              : missing() === 'large' ? tr('caVoiceNoteOver14MB')
               : missing() === 'gone' ? tr('caVoiceNoteNotStoredOnThisDevice') : busy() ? tr('chatLoading') : tr('caVoiceNote')}
           </button>
         }

@@ -56,6 +56,9 @@ pub const MAX_PAYMENT_MSAT: u64 = 100_000_000_000;
 /// The node accepts 4 MiB per file, but axum's default 2 MB request limit caps
 /// the base64 JSON body first. Stay under it rather than meet a bare 413.
 pub const FILE_MAX_BYTES: usize = 1_400_000;
+/// Most of a stored-file response read into memory: the largest allowed file in
+/// base64, plus room for its JSON fields.
+pub const FILE_BODY_MAX: usize = FILE_MAX_BYTES / 3 * 4 + 4 + 64 * 1024;
 
 /// `compose` refuses plaintext over 1 MiB.
 pub const PLAINTEXT_MAX_BYTES: usize = 1 << 20;
