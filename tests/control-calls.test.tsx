@@ -168,6 +168,18 @@ describe('answering and declining within the price shown', () => {
     expect(last().phase).toBe('idle');
   });
 
+  it('an offer carries the hangup ceiling shown with it, and no other signal does', async () => {
+    const hangups: [number, number | undefined][] = [];
+    const { e } = engine({ signal: async (_peer, kind, _plaintext, max, _minutes, maxHangup) => {
+      hangups.push([kind, maxHangup]);
+      return { ok: true, value: { message_id: 'm', kind, amount_msat: max, total_msat: max, max_routing_fee_msat: 0, delivered: true, accepted: true, sent_at_ms: 0 } };
+    } });
+    await e.place(A, 'audio', { ...QUOTE, signal_msat: 1_500, signal_max_routing_fee_msat: 5_000 });
+    await e.hangup();
+    expect(hangups[0]).toEqual([400, 6_500]);
+    expect(hangups.slice(1).every(([kind, maxHangup]) => kind !== 400 && maxHangup === undefined)).toBe(true);
+  });
+
   it('a waiting Accept pressed while the engine is starting another call says why nothing happened', async () => {
     let allow: (yes: boolean) => void = () => {};
     let gate = false;
@@ -2629,7 +2641,7 @@ describe('calls in the shell', () => {
     ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     expect(host.used('call_signal')).toHaveLength(1);
-    expect(host.used('call_signal')[0].args).toMatchObject({ kind: 400, max_msat: 15_000 });
+    expect(host.used('call_signal')[0].args).toMatchObject({ kind: 400, max_msat: 15_000, max_hangup_msat: 6_000 });
   });
 
   it('shows a bounded node timeout in the shell and releases media', async () => {

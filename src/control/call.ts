@@ -338,7 +338,8 @@ export type CallDeps = {
   /** Latest grant read by the shell; the host rechecks it before paying. */
   grant?: () => NodeGrantSummary | null;
   /** `minutes`: only on a node-routed offer, the minutes agreed before Ring (kept by the host). */
-  signal: (peer: string, kind: number, plaintext: string, maxMsat: number, minutes?: MinutesConsent) => Promise<Outcome<CallReceipt>>;
+  /** `maxHangupMsat`, on an offer: the most its hangup was shown to cost. The host saves no higher ceiling for End. */
+  signal: (peer: string, kind: number, plaintext: string, maxMsat: number, minutes?: MinutesConsent, maxHangupMsat?: number) => Promise<Outcome<CallReceipt>>;
   getUserMedia: (c: MediaStreamConstraints) => Promise<MediaStream>;
   peerConnection: (config: RTCConfiguration) => RTCPeerConnection;
   now: () => number;
@@ -871,7 +872,7 @@ export function createCallEngine(deps: CallDeps) {
     view = { ...view, pendingCount: view.pendingCount + 1, pendingMsat: view.pendingMsat + maxMsat };
   };
 
-  const pay = async (kind: number, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number, targetId = wireId ?? view.callId, owner = { peer: view.peer, callId: view.callId }, owed = false, minutes?: MinutesConsent) => {
+  const pay = async (kind: number, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number, targetId = wireId ?? view.callId, owner = { peer: view.peer, callId: view.callId }, owed = false, minutes?: MinutesConsent, maxHangupMsat?: number) => {
     const { peer, callId } = owner;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<Outcome<CallReceipt>>((resolve) => {
@@ -901,7 +902,7 @@ export function createCallEngine(deps: CallDeps) {
     let r: Outcome<CallReceipt>;
     try {
       const signal = Promise.resolve().then(() => deps.signal(peer!, kind,
-        JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat, ...(minutes ? [minutes] : [])))
+        JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat, minutes, maxHangupMsat))
         .catch((error): Outcome<CallReceipt> => ({ ok: false, error: asActionError(error) })).then(result => {
         const operationId = result.ok ? result.value.operation_id
           : result.error.operation_id;
@@ -996,7 +997,7 @@ export function createCallEngine(deps: CallDeps) {
       restartAnswerPending = true;
       own.push(id);
       const sdp = `${conn.localDescription!.sdp.trimEnd()}\r\n${RESTART_ATTRIBUTE}${view.callId}\r\n`;
-      const r = await pay(CALL_OFFER, { media: view.media, sdp }, q.offer_msat + q.offer_max_routing_fee_msat, id);
+      const r = await pay(CALL_OFFER, { media: view.media, sdp }, q.offer_msat + q.offer_max_routing_fee_msat, id, undefined, false, undefined, signalCost(q));
       if (pc !== conn) return;
       if (r.ok) {
         wireId = id;
@@ -1226,7 +1227,7 @@ export function createCallEngine(deps: CallDeps) {
       if (cancelled === callId || view.callId !== callId || !active()) return;
       // From here the host may hold this admission: every end asks it to close it.
       own.push(callId);
-      const r = await pay(CALL_OFFER, { media, sdp: conn.localDescription!.sdp }, q.offer_msat + q.offer_max_routing_fee_msat, undefined, undefined, false, consent);
+      const r = await pay(CALL_OFFER, { media, sdp: conn.localDescription!.sdp }, q.offer_msat + q.offer_max_routing_fee_msat, undefined, undefined, false, consent, signalCost(q));
       // Cancelled while the offer was in flight: the mic is already off; the host ends it if it was paid.
       if (cancelled === callId || view.callId !== callId || !active()) return;
       if (!r.ok && r.error.code === 'call_needs_node_upgrade') {

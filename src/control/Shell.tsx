@@ -1447,8 +1447,8 @@ export function ControlCenter(props: Props) {
     },
     grant: () => budget()?.node_grant ?? null,
     quote: (peer) => act(() => source.callQuote(peer)),
-    signal: async (peer, kind, plaintext, maxMsat, minutes) => {
-      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes));
+    signal: async (peer, kind, plaintext, maxMsat, minutes, maxHangupMsat) => {
+      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes, maxHangupMsat));
       if (!r.ok && (needsApproval(r.error) || r.error.code === 'spend_refused' || /token lacks.*spend|403/i.test(r.error.message))) setCallApproval(true);
       void loadBudget();
       void loadWallet();
@@ -1528,8 +1528,8 @@ export function ControlCenter(props: Props) {
   const nodeMeets = () => overview()?.capabilities?.includes('call_meeting_v1') === true;
   const meetings = createMeetingEngine({
     quote: (peer) => act(() => source.callQuote(peer)),
-    signal: async (peer, kind, plaintext, maxMsat) => {
-      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat));
+    signal: async (peer, kind, plaintext, maxMsat, minutes, maxHangupMsat) => {
+      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes, maxHangupMsat));
       void loadBudget();
       void loadWallet();
       return r;

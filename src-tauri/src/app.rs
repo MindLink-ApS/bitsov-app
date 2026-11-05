@@ -7397,14 +7397,14 @@ async fn sweep_call_consents(state: &NodeState) {
 /// reservation from its node, so such a call is refused before anything is
 /// paid rather than rung and then ended unpaid.
 async fn do_call_offer_with_minutes(
-    state: &NodeState, peer: &str, plaintext: &str, max_msat: u64, consent: control::MinutesConsent,
+    state: &NodeState, peer: &str, plaintext: &str, max_msat: u64, consent: control::MinutesConsent, shown_hangup: Option<u64>,
 ) -> Result<act::CallReceipt, ActionError> {
     let consent = consent.validated().map_err(ActionError::invalid)?;
     if !minutes_payable(state) {
         return Err(ActionError::new("call_minutes_unpayable",
             "This app is signed in to your node as its owner, not paired with a spending grant. Your node then keeps no reservation for a call's minutes, so the app cannot pay them. Pair the app with a spending grant to make calls. Nothing was paid."));
     }
-    offer_within_consent(state, peer, plaintext, max_msat, consent).await
+    offer_within_consent(state, peer, plaintext, max_msat, consent, shown_hangup).await
 }
 
 /// The offer's admission, bound to the consent. The node makes the call's
@@ -7424,7 +7424,7 @@ async fn do_call_offer_with_minutes(
 /// An offer that did not go through ends the call's consent for good: its
 /// terms can never be admitted later, under these or wider ones.
 async fn offer_within_consent(
-    state: &NodeState, peer: &str, plaintext: &str, max_msat: u64, consent: control::MinutesConsent,
+    state: &NodeState, peer: &str, plaintext: &str, max_msat: u64, consent: control::MinutesConsent, shown_hangup: Option<u64>,
 ) -> Result<act::CallReceipt, ActionError> {
     let consent = consent.validated().map_err(ActionError::invalid)?;
     let target = control::node_id(peer).map_err(ActionError::invalid)?;
@@ -7455,7 +7455,7 @@ async fn offer_within_consent(
             return Err(ActionError::new("call_price_changed",
                 "Their per-minute price is no longer the one you agreed to. Nothing was sent or paid; check the price and call again."));
         }
-        do_call_signal_bounded(state, &target, act::KIND_CALL_OFFER, plaintext, max_msat, None, Some(&consent)).await
+        do_call_signal_bounded(state, &target, act::KIND_CALL_OFFER, plaintext, max_msat, None, Some(&consent), shown_hangup).await
     }.await;
     {
         let mut kept = state.call_consents.lock().unwrap();
@@ -7811,7 +7811,7 @@ async fn do_call_signal_for_admission(
     state: &NodeState, peer: &str, kind: u16, plaintext: &str, max_msat: u64,
     admission: Option<&spend_journal::OperationRecord>,
 ) -> Result<act::CallReceipt, ActionError> {
-    do_call_signal_bounded(state, peer, kind, plaintext, max_msat, admission, None).await
+    do_call_signal_bounded(state, peer, kind, plaintext, max_msat, admission, None, None).await
 }
 
 /// `minutes`: an offer under the minutes the owner agreed to. Its routing
@@ -7819,12 +7819,17 @@ async fn do_call_signal_for_admission(
 /// takes the offer's routing ceiling as every block's, never wider), and it
 /// carries the consent's ceilings for the node to enforce before it holds
 /// anything (genome N3 `max_block_msat`, `max_hold_msat`).
+///
+/// `shown_hangup`: the most the owner was shown this call's hangup can cost. An
+/// offer whose hangup now costs more is refused before anything is sent, so the
+/// ceiling saved for End is never above what was shown.
+#[allow(clippy::too_many_arguments)]
 async fn do_call_signal_bounded(
     state: &NodeState, peer: &str, kind: u16, plaintext: &str, max_msat: u64,
-    admission: Option<&spend_journal::OperationRecord>, minutes: Option<&control::MinutesConsent>,
+    admission: Option<&spend_journal::OperationRecord>, minutes: Option<&control::MinutesConsent>, shown_hangup: Option<u64>,
 ) -> Result<act::CallReceipt, ActionError> {
-    if minutes.is_some() && kind != act::KIND_CALL_OFFER {
-        return Err(ActionError::invalid("agreed minutes go with an offer only"));
+    if (minutes.is_some() || shown_hangup.is_some()) && kind != act::KIND_CALL_OFFER {
+        return Err(ActionError::invalid("agreed minutes and a shown hangup ceiling go with an offer only"));
     }
     // A hangup ends the call's minutes as it begins, whatever its outcome.
     if kind == act::KIND_CALL_HANGUP {
@@ -7884,6 +7889,7 @@ async fn do_call_signal_bounded(
     let cost = principal.checked_add(fee).ok_or_else(no_live_price)?;
     let hangup = quote.signal_msat.checked_add(quote.signal_max_routing_fee_msat).ok_or_else(no_live_price)?;
     ceiling(cost, max_msat)?;
+    if let Some(shown) = shown_hangup { ceiling(hangup, shown)?; }
     if kind == act::KIND_CALL_OFFER {
         // Admission plus one hangup: check the ceiling shown for the whole
         // call, not just this offer. money_post still rechecks the paid step.
@@ -9639,14 +9645,27 @@ async fn call_signal(
     plaintext: String,
     max_msat: u64,
     minutes: Option<control::MinutesConsent>,
+    max_hangup_msat: Option<u64>,
 ) -> Result<act::CallReceipt, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
+    do_renderer_call_signal(state.inner(), &peer, kind, &plaintext, max_msat, minutes, max_hangup_msat).await
+}
+
+/// One call signal as the renderer asks for it. Every offer names the hangup
+/// ceiling it was shown with: without one it is refused, and nothing is sent.
+async fn do_renderer_call_signal(
+    state: &NodeState, peer: &str, kind: u16, plaintext: &str, max_msat: u64,
+    minutes: Option<control::MinutesConsent>, max_hangup_msat: Option<u64>,
+) -> Result<act::CallReceipt, ActionError> {
+    if kind == act::KIND_CALL_OFFER && max_hangup_msat.is_none() {
+        return Err(ActionError::invalid("an offer names the hangup ceiling shown"));
+    }
     match minutes {
         // M6 A2: a node-routed offer carries the minutes agreed before Ring.
-        Some(consent) if kind == act::KIND_CALL_OFFER => do_call_offer_with_minutes(state.inner(), &peer, &plaintext, max_msat, consent).await,
+        Some(consent) if kind == act::KIND_CALL_OFFER => do_call_offer_with_minutes(state, peer, plaintext, max_msat, consent, max_hangup_msat).await,
         Some(_) => Err(ActionError::invalid("only an offer carries agreed minutes")),
-        None => do_call_signal(state.inner(), &peer, kind, &plaintext, max_msat).await,
+        None => do_call_signal_bounded(state, peer, kind, plaintext, max_msat, None, None, max_hangup_msat).await,
     }
 }
 
@@ -15771,13 +15790,13 @@ mod control_act_tests {
         let (routes, _) = minutes_routes("live", serde_json::Value::Null);
         let node = fake(AuthMode::Local, routes);
         approve_calls(&node).await;
-        let err = do_call_offer_with_minutes(&node.state, A, OFFER, 15000, MINUTES).await.unwrap_err();
+        let err = do_call_offer_with_minutes(&node.state, A, OFFER, 15000, MINUTES, Some(SHOWN_HANGUP)).await.unwrap_err();
         assert_eq!(err.code, "call_minutes_unpayable");
         assert!(node.posts().is_empty(), "refused before anything was sent");
         assert!(call_consent(&node.state, A, CALL_ID).is_none());
         // A consent the quote could not have shown is refused the same way, before anything.
         let wide = control::MinutesConsent { max_hold_msat: MINUTES.max_hold_msat + 1, ..MINUTES };
-        assert_eq!(do_call_offer_with_minutes(&node.state, A, OFFER, 15000, wide).await.unwrap_err().code, "invalid");
+        assert_eq!(do_call_offer_with_minutes(&node.state, A, OFFER, 15000, wide, Some(SHOWN_HANGUP)).await.unwrap_err().code, "invalid");
         assert!(node.posts().is_empty());
     }
 
@@ -16204,6 +16223,115 @@ mod control_act_tests {
                 assert!(compose_kinds(&node).is_empty(), "{offer} {signal} {kind}");
             }
         }
+    }
+
+    /// The hangup ceiling the Ring confirm shows on the ledger call node: 1,000 msat
+    /// (a 50 msat price, floored) plus a 5,000 msat routing ceiling.
+    const SHOWN_HANGUP: u64 = 6_000;
+
+    /// Node routes whose live signal price (msat) can change while a call is placed.
+    fn signal_price_routes(price: Arc<std::sync::atomic::AtomicU64>) -> Routes {
+        let (inner, _) = ledger_call_routes();
+        Arc::new(move |m, p, b| {
+            if p == format!("/pricing/peers/{A}/call") {
+                return (200, serde_json::json!({"peer_id": A, "offer_msat": 10_000, "signal_msat": price.load(std::sync::atomic::Ordering::SeqCst)}).to_string());
+            }
+            inner(m, p, b)
+        })
+    }
+
+    /// The quote shows offer 15,000 and hangup 6,000; the signal price rises to 2,000
+    /// before the offer is handled. The offer alone would still pass and save 7,000
+    /// for End. It is refused with nothing sent, so End pays nothing above 6,000.
+    #[tokio::test]
+    async fn an_offer_is_refused_when_its_hangup_now_costs_more_than_was_shown() {
+        use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+        let price = Arc::new(AtomicU64::new(50));
+        let node = fake(AuthMode::Local, signal_price_routes(price.clone()));
+        approve_calls(&node).await;
+        let shown = read_call_quote(&node.state, A).await.unwrap();
+        assert_eq!((shown.offer_msat.unwrap() + shown.offer_max_routing_fee_msat, shown.signal_msat + shown.signal_max_routing_fee_msat), (15_000, SHOWN_HANGUP));
+        price.store(2_000, SeqCst);
+        let error = do_renderer_call_signal(&node.state, A, 400, OFFER, 15_000, None, Some(SHOWN_HANGUP)).await.unwrap_err();
+        assert_eq!(error.code, "price_changed", "{}", error.message);
+        assert!(compose_kinds(&node).is_empty(), "nothing was sent");
+        assert!(pending(&node).is_none());
+        assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap_err().code, "call_not_found", "no admission to end, nothing paid");
+        assert!(compose_kinds(&node).is_empty());
+    }
+
+    /// A normal call and End: the ceiling saved is the live one, never above what was
+    /// shown, and a rise after the offer pays nothing above it at End.
+    #[tokio::test]
+    async fn end_pays_no_more_than_the_hangup_ceiling_shown_when_the_call_was_placed() {
+        use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+        // Shown as dearer than it is live: the lower live ceiling is what End may pay.
+        for (shown, live_price, saved) in [(SHOWN_HANGUP, 50, 6_000), (7_000, 50, 6_000), (7_000, 2_000, 7_000)] {
+            let price = Arc::new(AtomicU64::new(live_price));
+            let node = fake(AuthMode::Local, signal_price_routes(price.clone()));
+            approve_calls(&node).await;
+            let offer = do_renderer_call_signal(&node.state, A, 400, OFFER, 15_000, None, Some(shown)).await.unwrap();
+            assert_eq!(ledger_record(&node, offer.operation_id.as_deref().unwrap())["hangup_cap_msat"].as_u64(), Some(saved), "{shown}");
+            do_op_end_call(&node.state, CALL_ID).await.unwrap();
+            assert_eq!(compose_bodies(&node)[1]["max_total_msat"], saved, "{shown}");
+        }
+        let price = Arc::new(AtomicU64::new(50));
+        let node = fake(AuthMode::Local, signal_price_routes(price.clone()));
+        approve_calls(&node).await;
+        do_renderer_call_signal(&node.state, A, 400, OFFER, 15_000, None, Some(SHOWN_HANGUP)).await.unwrap();
+        price.store(2_000, SeqCst);
+        assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap_err().code, "price_changed");
+        assert_eq!(compose_kinds(&node), [400], "no hangup above the ceiling shown");
+    }
+
+    /// The same check on a node-routed offer, with the minutes agreed before Ring.
+    #[tokio::test]
+    async fn an_offer_with_minutes_is_refused_when_its_hangup_now_costs_more_than_was_shown() {
+        use std::sync::atomic::AtomicU64;
+        let inner = signal_price_routes(Arc::new(AtomicU64::new(2_000)));
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == format!("/pricing/peers/{A}") {
+                return (200, serde_json::json!({"peer_id": A, "prices": {"kind:404": 10_000}, "age_secs": 5, "stale": false}).to_string());
+            }
+            inner(m, p, b)
+        }));
+        approve_calls(&node).await;
+        let error = offer_within_consent(&node.state, A, OFFER, 15_000, MINUTES, Some(SHOWN_HANGUP)).await.unwrap_err();
+        assert_eq!(error.code, "price_changed", "{}", error.message);
+        assert!(compose_kinds(&node).is_empty());
+    }
+
+    /// An offer that does not name the ceiling it was shown with goes nowhere, and no
+    /// other signal may name one.
+    #[tokio::test]
+    async fn the_renderer_must_name_the_hangup_ceiling_with_an_offer_and_only_then() {
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        assert_eq!(do_renderer_call_signal(&node.state, A, 400, OFFER, 15_000, None, None).await.unwrap_err().code, "invalid");
+        assert_eq!(do_renderer_call_signal(&node.state, A, 401, OFFER, 15_000, None, Some(SHOWN_HANGUP)).await.unwrap_err().code, "invalid");
+        assert!(compose_kinds(&node).is_empty());
+    }
+
+    /// End with their price unavailable: the hangup is refused, and no new minute of
+    /// the call is dispatched after it, even though the node still shows the call live.
+    #[tokio::test]
+    async fn end_with_the_price_unavailable_dispatches_no_new_minute_after_it() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let (inner, _, reserved) = PacedHold { per_block: 8_000, fee: 2_000, minutes: 5, closing: 0, direct: false, spent: SPENT_AT_CEILING }.routes();
+        let unreadable = Arc::new(AtomicBool::new(false));
+        let u = unreadable.clone();
+        let node = paced_call(Arc::new(move |m, p, b| {
+            if p == format!("/pricing/peers/{A}/call") && u.load(SeqCst) {
+                return (400, r#"{"error":"their node did not answer with a call price; nothing was paid","code":400,"reason":"call_price_unknown"}"#.into());
+            }
+            inner(m, p, b)
+        }), reserved).await;
+        do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+        unreadable.store(true, SeqCst);
+        assert_eq!(do_op_end_call(&node.state, CALL_ID).await.unwrap_err().code, "call_price_unknown");
+        assert_eq!(do_call_block(&node.state, A, CALL_ID, 1).await.unwrap_err().code, "call_not_live");
+        assert_eq!(compose_kinds(&node), [400, 404], "one minute before End, none after, and no hangup");
     }
 
     /// A hangup signal refused while it is prepared, before the money lock and
@@ -17199,7 +17327,7 @@ mod control_act_tests {
         let (routes, paid) = offer_routes(10_000, hold_json(12_000, 5_000, 60));
         let node = fake(AuthMode::Local, routes);
         approve_calls(&node).await;
-        offer_within_consent(&node.state, A, OFFER, 15000, MINUTES).await.unwrap();
+        offer_within_consent(&node.state, A, OFFER, 15000, MINUTES, Some(SHOWN_HANGUP)).await.unwrap();
         assert_eq!(compose_kinds(&node), [400, 403], "refused and hung up within the offer's admission, before any minute");
         assert!(matches!(consent_phase(&node), ConsentPhase::Refused { code: "call_hold_above_consent", .. }));
         assert!(call_consent(&node.state, A, CALL_ID).unwrap().pinned(), "its node still lists the hold open: kept, never evicted");
@@ -17213,7 +17341,7 @@ mod control_act_tests {
         assert_eq!(paid.lock().unwrap().pays, 2);
         // The same call id cannot be given new, wider terms afterwards.
         let wider = control::MinutesConsent { block_msat: 12_000, max_hold_msat: 240 * 17_000, ..MINUTES };
-        assert_eq!(offer_within_consent(&node.state, A, OFFER, 15000, wider).await.unwrap_err().code, "invalid");
+        assert_eq!(offer_within_consent(&node.state, A, OFFER, 15000, wider, Some(SHOWN_HANGUP)).await.unwrap_err().code, "invalid");
         assert_eq!(compose_kinds(&node), [400, 403]);
     }
 
@@ -17223,7 +17351,7 @@ mod control_act_tests {
         let (routes, paid) = offer_routes(10_001, hold_json(10_001, 5_000, 60));
         let node = fake(AuthMode::Local, routes);
         approve_calls(&node).await;
-        assert_eq!(offer_within_consent(&node.state, A, OFFER, 15000, MINUTES).await.unwrap_err().code, "call_price_changed");
+        assert_eq!(offer_within_consent(&node.state, A, OFFER, 15000, MINUTES, Some(SHOWN_HANGUP)).await.unwrap_err().code, "call_price_changed");
         assert!(compose_kinds(&node).is_empty());
         assert_eq!(paid.lock().unwrap().pays, 0);
         assert_eq!(consent_phase(&node), ConsentPhase::Ended);
@@ -17240,7 +17368,7 @@ mod control_act_tests {
         let (routes, _) = offer_routes(10_000, hold_json(10_000, 4_000, 60));
         let node = fake(AuthMode::Local, routes);
         approve_calls(&node).await;
-        offer_within_consent(&node.state, A, OFFER, 15000, agreed).await.unwrap();
+        offer_within_consent(&node.state, A, OFFER, 15000, agreed, Some(SHOWN_HANGUP)).await.unwrap();
         let offer = &compose_bodies(&node)[0];
         assert_eq!((offer["kind"].as_u64(), offer["max_routing_fee_msat"].as_u64()), (Some(400), Some(4_000)));
         // Genome N3: the node enforces the consent itself before it holds anything.
@@ -17271,10 +17399,10 @@ mod control_act_tests {
             // for the same call (same terms, or wider) all race its admission. Before the node
             // accepted this very offer, no hold listed under its call id is checked or admitted.
             let (offer, (block, confirm, again, rebind)) = tokio::join!(
-                offer_within_consent(&node.state, A, OFFER, 15000, MINUTES),
+                offer_within_consent(&node.state, A, OFFER, 15000, MINUTES, Some(SHOWN_HANGUP)),
                 during_call(&gate, async {
-                    let again = offer_within_consent(&node.state, A, OFFER, 15000, MINUTES).await;
-                    let rebind = offer_within_consent(&node.state, A, OFFER, 15000, wider).await;
+                    let again = offer_within_consent(&node.state, A, OFFER, 15000, MINUTES, Some(SHOWN_HANGUP)).await;
+                    let rebind = offer_within_consent(&node.state, A, OFFER, 15000, wider, Some(SHOWN_HANGUP)).await;
                     let block = do_call_block(&node.state, A, CALL_ID, 0).await;
                     let confirm = do_call_hold(&node.state, A, CALL_ID, Some(15_000 * 60)).await;
                     (block, confirm, again, rebind)
@@ -17548,7 +17676,7 @@ mod control_act_tests {
             routes(m, p, b)
         }));
         approve_calls(&node).await;
-        assert!(offer_within_consent(&node.state, A, OFFER, 15000, MINUTES).await.is_err());
+        assert!(offer_within_consent(&node.state, A, OFFER, 15000, MINUTES, Some(SHOWN_HANGUP)).await.is_err());
         let sent = compose_kinds(&node);
         assert!(!sent.is_empty() && sent.iter().all(|k| *k == 400));
         // The offer did not go through: its consent can never admit a hold, under these terms
@@ -17556,8 +17684,8 @@ mod control_act_tests {
         assert_eq!(consent_phase(&node), ConsentPhase::Ended);
         assert!(call_consent(&node.state, A, CALL_ID).unwrap().pinned());
         let wider = control::MinutesConsent { block_msat: 20_000, max_hold_msat: 240 * 25_000, ..MINUTES };
-        assert_eq!(offer_within_consent(&node.state, A, OFFER, 15000, wider).await.unwrap_err().code, "invalid");
-        assert_eq!(offer_within_consent(&node.state, A, OFFER, 15000, MINUTES).await.unwrap_err().code, "invalid");
+        assert_eq!(offer_within_consent(&node.state, A, OFFER, 15000, wider, Some(SHOWN_HANGUP)).await.unwrap_err().code, "invalid");
+        assert_eq!(offer_within_consent(&node.state, A, OFFER, 15000, MINUTES, Some(SHOWN_HANGUP)).await.unwrap_err().code, "invalid");
         assert_eq!(remember_call_consent(&node.state, A, CALL_ID, wider).unwrap_err().code, "invalid");
         assert_eq!(do_call_hold(&node.state, A, CALL_ID, Some(15_000 * 60)).await.unwrap_err().code, "call_not_live");
         assert_eq!(do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err().code, "call_not_live");
@@ -17580,7 +17708,7 @@ mod control_act_tests {
                 routes(m, p, b)
             }));
             approve_calls(&node).await;
-            let err = offer_within_consent(&node.state, A, OFFER, 15000, MINUTES).await.unwrap_err();
+            let err = offer_within_consent(&node.state, A, OFFER, 15000, MINUTES, Some(SHOWN_HANGUP)).await.unwrap_err();
             assert_eq!(err.code, code);
             assert!(err.message.contains("Nothing was sent, held or paid"), "{}", err.message);
             let offer = &compose_bodies(&node)[0];
@@ -17616,7 +17744,7 @@ mod control_act_tests {
                 routes(m, p, b)
             }));
             approve_calls(&node).await;
-            offer_within_consent(&node.state, A, OFFER, 15000, MINUTES).await.unwrap();
+            offer_within_consent(&node.state, A, OFFER, 15000, MINUTES, Some(SHOWN_HANGUP)).await.unwrap();
             assert!(matches!(consent_phase(&node), ConsentPhase::Refused { code: "call_hold_above_consent", .. }), "{hangup_fails}");
             let sent = compose_kinds(&node);
             assert_eq!(sent, [400, 403], "the offer and one hangup attempt");
@@ -17639,7 +17767,7 @@ mod control_act_tests {
             }
             // Wider rebinding, confirming the hold and paying a minute all stay refused.
             let wider = control::MinutesConsent { block_msat: 12_000, max_hold_msat: 240 * 17_000, ..MINUTES };
-            assert_eq!(offer_within_consent(&node.state, A, OFFER, 15000, wider).await.unwrap_err().code, "invalid");
+            assert_eq!(offer_within_consent(&node.state, A, OFFER, 15000, wider, Some(SHOWN_HANGUP)).await.unwrap_err().code, "invalid");
             assert_eq!(remember_call_consent(&node.state, A, CALL_ID, wider).unwrap_err().code, "invalid");
             assert_eq!(do_call_hold(&node.state, A, CALL_ID, Some(17_000 * 60)).await.unwrap_err().code, "call_hold_above_consent");
             for seq in [0, 1] {
@@ -19103,7 +19231,7 @@ mod control_act_tests {
         grant["per_call_max_msat"] = 21_000.into();
         *g1.grant.lock().unwrap() = grant;
         let minute = control::MinutesConsent { block_msat: 22_000, block_max_routing_fee_msat: 5_000, max_hold_msat: 240 * 27_000 };
-        let error = do_call_signal_bounded(&node.state, A, 400, OFFER, 15_000, None, Some(&minute)).await.unwrap_err();
+        let error = do_call_signal_bounded(&node.state, A, 400, OFFER, 15_000, None, Some(&minute), None).await.unwrap_err();
         assert_eq!(error.code, "grant_per_call");
         assert!(error.message.contains("22 sats per payment"), "{}", error.message);
         assert_eq!(composes(&node), 0);
@@ -19160,7 +19288,7 @@ mod control_act_tests {
             *g1.grant.lock().unwrap() = grant;
             // The routing allowance stays in the hold; only the price meets the limit.
             let minute = control::MinutesConsent { block_msat: block, block_max_routing_fee_msat: 5_000, max_hold_msat: 240 * (block + 5_000) };
-            let result = do_call_signal_bounded(&node.state, A, 400, OFFER, offer, None, Some(&minute)).await;
+            let result = do_call_signal_bounded(&node.state, A, 400, OFFER, offer, None, Some(&minute), None).await;
             if posts {
                 assert_eq!(composes(&node), 1, "{block}: {:?}", result.err());
             } else {
