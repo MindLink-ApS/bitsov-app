@@ -4828,8 +4828,10 @@ enum Auth {
 }
 
 /// A cooldown is a proven pre-dispatch refusal, before journal or reservation I/O.
+/// A dial in flight is not one: the request waits behind it, and if it fails the
+/// proxy answers that nothing was forwarded (`remote_retry_wait`).
 fn refuse_if_connection_waiting(state: &NodeState) -> Result<(), ActionError> {
-    if state.remote_retry.remaining().is_some() {
+    if state.remote_retry.cooling_down() {
         return Err(ActionError::new("not_ready", "Waiting for the connection. Your node will retry automatically."));
     }
     Ok(())
@@ -12275,6 +12277,83 @@ mod control_act_tests {
         let err = money_post_with(&node.state, Auth::Window(0), "/messages/compose", serde_json::json!({}), 7000, None, None).await.unwrap_err();
         assert_eq!(err.code, "not_ready");
         assert_eq!(std::fs::read(journal_file(&node)).unwrap(), b"not a journal");
+    }
+
+    /// Everything a real cooldown looks like still refuses before the journal.
+    #[tokio::test]
+    async fn a_failure_streak_refuses_money_before_journal_or_dispatch() {
+        for case in ["rate limited", "handshake unavailable", "re-dial"] {
+            let node = fake(AuthMode::Local, happy());
+            spend_advance(&node.state, true).await.unwrap();
+            let retry = &node.state.remote_retry;
+            let refused = async {
+                let error = do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err();
+                assert_eq!(error.code, "not_ready", "{case}");
+                assert!(node.posts().is_empty(), "{case}");
+                assert!(!journal_file(&node).exists(), "{case}");
+                assert!(book(&node).is_empty(), "{case}");
+            };
+            match case {
+                "rate limited" => { retry.failed(&remote_access::RemoteError::RateLimited(60)); refused.await; }
+                "handshake unavailable" => { retry.failed(&remote_access::RemoteError::HandshakeUnavailable); refused.await; }
+                _ => {
+                    // The streak's deadline has passed, and its next dial is in flight.
+                    retry.failed(&remote_access::RemoteError::HandshakeUnavailable);
+                    tokio::time::sleep(Duration::from_secs(retry.remaining().unwrap())).await;
+                    let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+                    let dial = retry.run(|| async { let _ = finished.await; Ok(()) });
+                    let (dialled, ()) = tokio::join!(dial, async {
+                        assert!(retry.remaining().is_some() && retry.is_retrying(), "{case}");
+                        refused.await;
+                        finish.send(()).unwrap();
+                    });
+                    dialled.unwrap();
+                }
+            }
+        }
+    }
+
+    /// A cooldown that begins after the journal entry is written still sends nothing,
+    /// and the entry is recorded as unpaid.
+    #[tokio::test]
+    async fn a_cooldown_that_starts_before_dispatch_abandons_the_send() {
+        let node = fake(AuthMode::Local, happy());
+        spend_advance(&node.state, true).await.unwrap();
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "before_dispatch");
+        let (sent, ()) = tokio::join!(do_message_send(&node.state, A, false, "hi", 7000, None), async {
+            arrived.notified().await;
+            node.state.remote_retry.failed(&remote_access::RemoteError::RateLimited(60));
+            release.notify_one();
+        });
+        assert_eq!(sent.unwrap_err().code, "not_ready");
+        assert!(node.posts().iter().all(|(p, _)| p != "/messages/compose"));
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0, "the reservation is released");
+    }
+
+    /// A healthy dial in flight is not a cooldown. A minute sent while one is held
+    /// goes out once, under one journaled operation, and is paid once. So does a
+    /// message, on either side of the dial finishing.
+    #[tokio::test]
+    async fn a_minute_sent_during_a_healthy_dial_is_posted_once_under_one_operation() {
+        let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let node = minute_ready(routes).await;
+        let pays = paid.lock().unwrap().pays;
+        let retry = &node.state.remote_retry;
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let dial = retry.run(|| async { let _ = finished.await; Ok(()) });
+        let (dialled, ()) = tokio::join!(dial, async {
+            assert_eq!(retry.remaining(), Some(1), "the anti-burst stamp is set");
+            assert!(!retry.is_retrying());
+            let receipt = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+            assert!(receipt.operation_id.is_some());
+            finish.send(()).unwrap();
+        });
+        dialled.unwrap();
+        assert_eq!(minutes_sent(&node), 1, "one POST");
+        assert_eq!(minute_records(&node).len(), 1, "one journaled operation");
+        assert_eq!(paid.lock().unwrap().pays, pays + 1, "paid once");
+        assert!(pending(&node).is_none());
     }
 
     #[tokio::test]

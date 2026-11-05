@@ -117,6 +117,15 @@ impl RemoteRetry {
         self.state.lock().unwrap().retrying
     }
 
+    /// A failure set the deadline: the node's rate limit, an unavailable handshake,
+    /// or a re-dial during a failure streak. Every dial also stamps `next` for a
+    /// second against bursts, so `remaining` alone says nothing about the connection:
+    /// a healthy dial in flight, or one its caller cancelled, is not a cooldown.
+    pub fn cooling_down(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.retrying && state.next.is_some_and(|next| next > tokio::time::Instant::now())
+    }
+
     pub fn failure_revision(&self) -> u64 {
         self.failure_revision
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -288,6 +297,71 @@ mod tests {
 mod remote_tests {
     use super::*;
     use crate::remote_access::RemoteError;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_is_a_cooldown_until_its_deadline_passes() {
+        for error in [RemoteError::RateLimited(60), RemoteError::HandshakeUnavailable] {
+            let retry = RemoteRetry::default();
+            assert!(!retry.cooling_down());
+            let _: Result<(), _> = retry.run(|| async { Err(error) }).await;
+            let wait = retry.remaining().unwrap();
+            assert!(retry.cooling_down());
+            tokio::time::advance(Duration::from_secs(wait)).await;
+            assert!(retry.remaining().is_none());
+            assert!(!retry.cooling_down(), "an expired deadline is no cooldown");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_redial_during_a_failure_streak_is_a_cooldown_until_it_succeeds() {
+        let retry = std::sync::Arc::new(RemoteRetry::default());
+        let _: Result<(), _> = retry.run(|| async { Err(RemoteError::HandshakeUnavailable) }).await;
+        tokio::time::advance(Duration::from_secs(retry.remaining().unwrap())).await;
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let dial = tokio::spawn({
+            let retry = retry.clone();
+            async move { retry.run(|| async { let _ = finished.await; Ok(()) }).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(retry.remaining().is_some(), "the dial is in flight");
+        assert!(retry.cooling_down(), "still inside the streak");
+        finish.send(()).unwrap();
+        dial.await.unwrap().unwrap();
+        assert!(!retry.cooling_down());
+        assert!(!retry.is_retrying());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_healthy_or_cancelled_dial_is_no_cooldown_and_still_stops_a_burst() {
+        let retry = std::sync::Arc::new(RemoteRetry::default());
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let dial = tokio::spawn({
+            let retry = retry.clone();
+            async move { retry.run(|| async { let _ = finished.await; Ok(()) }).await }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(retry.remaining(), Some(1), "the anti-burst stamp is set");
+        assert!(!retry.is_retrying());
+        assert!(!retry.cooling_down(), "a healthy dial in flight");
+        finish.send(()).unwrap();
+        dial.await.unwrap().unwrap();
+        assert!(!retry.cooling_down());
+
+        // Cancelled by its caller: not a cooldown, and the stamp still stops a burst.
+        let cancelled = tokio::spawn({
+            let retry = retry.clone();
+            async move { retry.run(|| std::future::pending::<Result<(), RemoteError>>()).await }
+        });
+        tokio::task::yield_now().await;
+        cancelled.abort();
+        let _ = cancelled.await;
+        assert_eq!(retry.remaining(), Some(1));
+        assert!(!retry.cooling_down());
+        let dialled = std::cell::Cell::new(false);
+        let next: Result<(), _> = retry.run(|| async { dialled.set(true); Ok(()) }).await;
+        assert!(matches!(next, Err(RemoteError::Waiting(1))));
+        assert!(!dialled.get());
+    }
     use std::cell::Cell;
 
     #[tokio::test(start_paused = true)]
