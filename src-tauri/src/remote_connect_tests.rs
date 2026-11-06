@@ -962,3 +962,42 @@ async fn queued_proxy_tunnels_do_not_dial_after_a_refusal() {
     state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
     task.abort();
 }
+
+// Startup and import queue on the recovery lock. The one that finds a session
+// already ready has nothing left to do: another token exchange would only spend
+// the node's rate limit.
+#[tokio::test]
+async fn a_queued_bootstrap_does_not_redo_a_ready_session() {
+    let app = app();
+    let state = app.state::<NodeState>();
+    let dir = tempfile::tempdir().unwrap();
+    let (control, task) = connected_controlled_box(&app, dir.path()).await;
+    let settled = control.counts();
+    let recovery = state.remote_recovery.lock().await;
+    let queued = connect_remote_at(&state, dir.path(), true);
+    tokio::pin!(queued);
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut queued).await.is_err(), "the bootstrap must queue");
+    drop(recovery);
+    tokio::time::timeout(Duration::from_secs(5), &mut queued).await.unwrap().unwrap();
+    assert_eq!(control.counts(), settled, "no new handshake or token request");
+    assert!(state.status_snapshot().ready);
+    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
+    task.abort();
+}
+
+// An attach cancelled after it published its proxy leaves auth unfinished. The
+// queued bootstrap finishes it, so the app does not sit waiting for a Reconnect.
+#[tokio::test]
+async fn a_queued_bootstrap_resumes_auth_left_unfinished_behind_a_proxy() {
+    let app = app();
+    let state = app.state::<NodeState>();
+    let dir = tempfile::tempdir().unwrap();
+    let (control, task) = connected_controlled_box(&app, dir.path()).await;
+    let settled = control.counts();
+    *state.ready.lock().unwrap() = false;
+    tokio::time::timeout(Duration::from_secs(5), connect_remote_at(&state, dir.path(), true)).await.unwrap().unwrap();
+    assert!(state.status_snapshot().ready, "the unfinished auth must complete");
+    assert!(control.counts().1 > settled.1, "the token exchange must run again");
+    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
+    task.abort();
+}

@@ -1969,7 +1969,9 @@ async fn connect_remote_with(state: &NodeState, app_data_dir: &Path, wait: bool,
                         }
                     }
                 }
-            } else {
+            } else if !wait || !*state.ready.lock().unwrap() {
+                // A queued bootstrap/import has nothing to do behind a ready session,
+                // but must finish auth that a cancelled attach left behind its proxy.
                 finish_remote_auth(state, app_data_dir).await;
             }
             Ok(())
