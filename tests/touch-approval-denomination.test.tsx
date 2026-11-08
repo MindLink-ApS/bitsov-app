@@ -27,7 +27,8 @@ describe('Touch ID approval terms', () => {
     const text = show();
     expect(mount.querySelector('[data-touch-budget]')?.textContent).toBe('200 sats');
     expect(mount.querySelector('[data-touch-per-act]')?.textContent).toBe('2 sats');
-    expect(text).toContain('Up to 200 sats a day');
+    expect(text).toContain('Up to 200 sats in total, at most');
+    expect(text).not.toContain('a day');
   });
 
   it('shows BTC with BTC, the same 200 sats that get signed', () => {

@@ -7273,7 +7273,7 @@ function BudgetBar(props: {
               <Show when={st().raiseTo}>
                 {(to) => (
                   <button type="button" class="primary small money" data-budget-raise-total disabled={props.actions.moneyBlocked()} onClick={() => void props.actions.approveBudget(to(), props.budget.preset)}>
-                    {tr('uiApprove')} {fmtAmount(to())} {tr('uiADay')}
+                    {tr('uiApprove')} {fmtAmount(to())} {tr('uiInTotalForUpTo24Hours')}
                   </button>
                 )}
               </Show>
