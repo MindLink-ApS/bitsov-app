@@ -10,7 +10,7 @@ const PINNED = {
   en: {
     firstSpendTitle: 'Let messages spend up to {0} in total, for up to 24 hours?',
     firstSpendTitleUnavailable: 'Choose a message budget for up to 24 hours',
-    firstSpendAllow: 'Allow {0} in total, up to 24 hours',
+    firstSpendAllow: 'Allow {0} in total',
     firstSpendMayStartNow: 'Allow may start payments immediately, up to {0} in total for up to 24 hours, or ask for a new owner approval.',
     firstSpendMayStartNowUnavailable: 'Allow may start payments immediately with your chosen total for up to 24 hours, or ask for a new owner approval.',
     firstSpendStartsNow: 'Starts now, up to {0} in total, for up to 24 hours.',
@@ -27,7 +27,7 @@ const PINNED = {
   da: {
     firstSpendTitle: 'Må beskeder bruge op til {0} i alt, i højst 24 timer?',
     firstSpendTitleUnavailable: 'Vælg et beskedbudget for højst 24 timer',
-    firstSpendAllow: 'Tillad {0} i alt, højst 24 timer',
+    firstSpendAllow: 'Tillad {0} i alt',
     firstSpendMayStartNow: 'Tillad kan starte betalinger med det samme, op til {0} i alt i højst 24 timer, eller bede om en ny godkendelse fra ejeren.',
     firstSpendMayStartNowUnavailable: 'Tillad kan starte betalinger med det samme med din valgte total i højst 24 timer eller bede om en ny godkendelse fra ejeren.',
     firstSpendStartsNow: 'Starter nu, op til {0} i alt, i højst 24 timer.',

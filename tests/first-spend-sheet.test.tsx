@@ -25,10 +25,10 @@ function setup(options: { presets?: BudgetPreset[]; reason?: string; max?: numbe
 
 describe.each(['en', 'da'] as const)('first spend sheet (%s)', (lang) => {
   const words = () => lang === 'en' ? {
-    title: 'Let messages spend up to 500 sats in total, for up to 24 hours?', allow: 'Allow 500 sats in total, up to 24 hours', other: 'Other options', cancel: 'Not now',
+    title: 'Let messages spend up to 500 sats in total, for up to 24 hours?', allow: 'Allow 500 sats in total', other: 'Other options', cancel: 'Not now',
     owner: 'Approve at your box', reason: 'Connect to your node before allowing payments.',
   } : {
-    title: 'Må beskeder bruge op til 500 sats i alt, i højst 24 timer?', allow: 'Tillad 500 sats i alt, højst 24 timer', other: 'Andre muligheder', cancel: 'Ikke nu',
+    title: 'Må beskeder bruge op til 500 sats i alt, i højst 24 timer?', allow: 'Tillad 500 sats i alt', other: 'Andre muligheder', cancel: 'Ikke nu',
     owner: 'Godkend på din boks', reason: 'Opret forbindelse til din node, før du tillader betalinger.',
   };
   it('defaults to one Allow action and keeps costs outside collapsed options', () => {
@@ -55,7 +55,7 @@ describe.each(['en', 'da'] as const)('first spend sheet (%s)', (lang) => {
     expect(text(summary)).toContain('Entry fee: 1 sat · message: 2 sats · routing fee at most: 5 sats · total at most: 8 sats');
     for (const [value, expected] of [['1250', '1 250 sats'], ['1250.5', '1 250 500 msat']]) {
       input.value = value; input.dispatchEvent(new Event('input', { bubbles: true }));
-      expect(text(summary)).toContain(lang === 'en' ? `Allow ${expected} in total, up to 24 hours` : `Tillad ${expected} i alt, højst 24 timer`);
+      expect(text(summary)).toContain(lang === 'en' ? `Allow ${expected} in total` : `Tillad ${expected} i alt`);
       expect(button('[data-first-spend-allow]').disabled).toBe(false);
       expect(sheet.scrollTop).toBe(212);
     }
