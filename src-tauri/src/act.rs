@@ -167,12 +167,26 @@ pub struct AdmissionView {
 }
 
 pub const MONEY_NOT_READY: &str = "Money is not ready yet. Your node will retry automatically.";
+pub const CHAIN_UNAVAILABLE: &str = "Your box can't see the Bitcoin chain right now; nothing was paid; try again later.";
+
+pub fn chain_unavailable_refusal(status: u16, body: &str) -> bool {
+    status == 503 && serde_json::from_str::<serde_json::Value>(body).ok()
+        .is_some_and(|v| v["code"] == "not_ready" && v["reason"] == "chain_unavailable")
+}
+
+pub fn readiness_error(status: u16, body: &str) -> ActionError {
+    if chain_unavailable_refusal(status, body) {
+        ActionError { reason: Some("chain_unavailable".into()), ..ActionError::new("not_ready", CHAIN_UNAVAILABLE) }
+    } else {
+        ActionError::new("not_ready", MONEY_NOT_READY)
+    }
+}
 
 /// Only this explicit pre-dispatch refusal may release a pending spend.
 /// A generic 503 (or a broken response) still has an unknown outcome.
 pub fn readiness_refusal(status: u16, body: &str) -> bool {
-    status == 503 && serde_json::from_str::<serde_json::Value>(body).ok()
-        .is_some_and(|v| v["code"] == "not_ready" && v["money_ready"] == false)
+    chain_unavailable_refusal(status, body) || (status == 503 && serde_json::from_str::<serde_json::Value>(body).ok()
+        .is_some_and(|v| v["code"] == "not_ready" && v["money_ready"] == false))
 }
 
 /// The node's #115 refusal and the local proxy's pre-forward failures prove
@@ -399,7 +413,8 @@ impl ActionError {
     }
     pub fn node(message: impl Into<String>) -> Self {
         let message = message.into();
-        if message == MONEY_NOT_READY { Self::new("not_ready", message) }
+        if message == "not_ready:chain_unavailable" { Self { reason: Some("chain_unavailable".into()), ..Self::new("not_ready", CHAIN_UNAVAILABLE) } }
+        else if message == MONEY_NOT_READY { Self::new("not_ready", message) }
         else { Self::new("node", message) }
     }
 }

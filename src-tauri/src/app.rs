@@ -117,7 +117,7 @@ mod owner_contact;
 /// this; only a debug `dev-node` build may move the port (`dev_node::api_base`).
 const API_BASE: &str = "http://127.0.0.1:3141/api/v1";
 
-/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc21`): the funding
+/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc22`): the funding
 /// state machine moves to this step once the node has observed the required deposit
 /// in its own wallet. Kept host-side so the renderer never re-implements the contract.
 const FUNDING_SEEN: &str = "funding-seen";
@@ -1975,7 +1975,9 @@ async fn connect_remote_with(state: &NodeState, app_data_dir: &Path, wait: bool,
                         }
                     }
                 }
-            } else {
+            } else if !wait || !*state.ready.lock().unwrap() {
+                // A queued bootstrap/import has nothing to do behind a ready session,
+                // but must finish auth that a cancelled attach left behind its proxy.
                 finish_remote_auth(state, app_data_dir).await;
             }
             Ok(())
@@ -2364,6 +2366,7 @@ async fn call_api(
 
 /// The node reports failures as `{"error": "..."}`; surface that, bounded.
 fn api_error(path: &str, status: reqwest::StatusCode, body: &str) -> String {
+    if act::chain_unavailable_refusal(status.as_u16(), body) { return "not_ready:chain_unavailable".into(); }
     if act::readiness_refusal(status.as_u16(), body) { return act::MONEY_NOT_READY.into(); }
     // Quote commands historically return strings. Preserve a canonical typed
     // marker instead of discarding the peer's structured readiness reason.
@@ -5379,7 +5382,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     if act::readiness_refusal(status.as_u16(), &text) {
         abandon(&journal)?;
         release(state)?;
-        return Err(ActionError::new("not_ready", act::MONEY_NOT_READY));
+        return Err(act::readiness_error(status.as_u16(), &text));
     }
     // A call refusal proves unpaid only for a fresh attempt (new operation id or
     // none). An existing kind-400 operation can return call_id_used after ring
@@ -6763,7 +6766,11 @@ async fn read_conversation_quote(state: &NodeState, peer: Option<&str>) -> Resul
             Ok(caps) => require_conversation_ceiling(state, peer, &caps).await,
             Err(error) => Err(error),
         };
-        quote.send_unavailable = ceiling.err().map(|e| e.message);
+        quote.send_unavailable = ceiling.err().map(|e| {
+            if e.code == "not_ready" && e.reason.as_deref() == Some("chain_unavailable") {
+                "not_ready:chain_unavailable".into()
+            } else { e.message }
+        });
     }
     Ok(quote)
 }
@@ -8336,7 +8343,7 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     let text = response.text().await.map_err(|_| spend_journal::unknown("The response was interrupted."))?;
     let code = status.as_u16();
     let nothing_paid = if act::readiness_refusal(code, &text) {
-        Some(ActionError::new("not_ready", act::MONEY_NOT_READY))
+        Some(act::readiness_error(code, &text))
     } else if act::not_dispatched_refusal(code, &text) {
         Some(ActionError::new("not_dispatched", act::not_dispatched_message(&text)))
     } else if let Some(refusal) = grant::refusal(code, &text) {
@@ -9021,7 +9028,8 @@ async fn do_relation_approve(
     budget_msat: Option<u64>,
     per_act_max_msat: Option<u64>,
 ) -> Result<act::SpendView, ActionError> {
-    // Contact defaults (research doc): 200 sats a day, the quoted price per act.
+    // Contact defaults (research doc): 200 sats in total for up to 24 hours,
+    // the quoted price per act.
     let budget_msat = budget_msat.unwrap_or(device::DEFAULT_BUDGET_MSAT);
     let per_act_max_msat = device::default_per_act(per_act_max_msat, budget_msat);
     if budget_paused(state)? {
@@ -12905,6 +12913,90 @@ mod control_act_tests {
         for body in [r#"{"code":"remote_transport_failed"}"#, r#"{"message":"remote_retry_wait"}"#, "unavailable"] {
             assert!(!act::not_dispatched_refusal(503, body));
         }
+    }
+
+    #[test]
+    fn chain_readiness_refusal_preserves_the_specific_reason() {
+        let body = r#"{"code":"not_ready","reason":"chain_unavailable","retry_allowed":true,"error":"upstream detail"}"#;
+        assert!(act::readiness_refusal(503, body));
+        assert_eq!(api_error("/messages/first-contact/quote", reqwest::StatusCode::SERVICE_UNAVAILABLE, body), "not_ready:chain_unavailable");
+        let error = ActionError::node(api_error("/messages/compose", reqwest::StatusCode::SERVICE_UNAVAILABLE, body));
+        assert_eq!(error.code, "not_ready");
+        assert_eq!(error.reason.as_deref(), Some("chain_unavailable"));
+        assert_eq!(error.message, "Your box can't see the Bitcoin chain right now; nothing was paid; try again later.");
+        for (status, text) in [
+            (500, body), (200, body),
+            (503, r#"{"code":"node","reason":"chain_unavailable"}"#),
+            (503, r#"{"code":"not_ready","reason":"chain_unavailable later"}"#),
+            (503, r#"{"error":"chain_unavailable"}"#),
+        ] {
+            assert!(!act::readiness_refusal(status, text));
+            assert_ne!(ActionError::node(api_error("/messages/compose", reqwest::StatusCode::from_u16(status).unwrap(), text)).reason.as_deref(), Some("chain_unavailable"));
+        }
+    }
+
+    #[tokio::test]
+    async fn chain_readiness_refusal_releases_only_the_refused_send() {
+        let node = fake(AuthMode::Local, compose_script(vec![
+            (503, serde_json::json!({"code":"not_ready","reason":"chain_unavailable","retry_allowed":true}).to_string()),
+            delivered("recovered", 2000),
+        ]));
+        spend_advance(&node.state, true).await.unwrap();
+        let error = do_message_send(&node.state, A, false, "hello", 7000, None).await.unwrap_err();
+        assert_eq!(error.code, "not_ready");
+        assert_eq!(error.reason.as_deref(), Some("chain_unavailable"));
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+        assert_eq!(node.posts().len(), 1);
+        do_message_send(&node.state, A, false, "hello", 7000, None).await.unwrap();
+        assert_eq!(node.posts().len(), 2);
+    }
+
+    #[test]
+    fn chain_readiness_refusal_does_not_resolve_an_earlier_payment() {
+        let body = r#"{"code":"not_ready","reason":"chain_unavailable"}"#;
+        let error = spend_journal::unknown(api_error("/messages/operations/existing", reqwest::StatusCode::SERVICE_UNAVAILABLE, body));
+        assert_eq!(error.code, "spend_unknown");
+        assert!(error.reason.is_none());
+        assert!(!error.message.contains("nothing was paid"));
+    }
+
+    #[tokio::test]
+    async fn chain_quote_probe_is_preserved_in_the_displayed_quote_and_send() {
+        let routes: Routes = Arc::new(|m, p, b| {
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities":["paid_send_caps_v1","first_contact_grant_v1"]}).to_string());
+            }
+            if p == "/messages/first-contact/quote" {
+                return (503, serde_json::json!({"code":"not_ready","reason":"chain_unavailable"}).to_string());
+            }
+            happy()(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        let quote = read_conversation_quote(&node.state, Some(A)).await.unwrap();
+        assert_eq!(quote.send_unavailable.as_deref(), Some("not_ready:chain_unavailable"));
+        let error = do_conversation_send(&node.state, A, false, "hello", 7000, None, None).await.unwrap_err();
+        assert_eq!(error.code, "not_ready");
+        assert_eq!(error.reason.as_deref(), Some("chain_unavailable"));
+        assert_eq!(composes(&node), 0);
+        assert_eq!(budget_now(&node.state).spent_msat, 0);
+    }
+
+    #[tokio::test]
+    async fn chain_readiness_refusal_keeps_the_previously_paid_retry() {
+        let node = fake(AuthMode::Local, compose_script(vec![
+            psi_502(2000, 0, 2000, PSI_TIMEOUT),
+            (503, serde_json::json!({"code":"not_ready","reason":"chain_unavailable"}).to_string()),
+            delivered("recovered", 0),
+        ]));
+        let record = psi_first(&node).await;
+        let accounted = book(&node);
+        let error = do_message_retry(&node.state, A, "gm", None).await.unwrap_err();
+        assert_eq!(error.reason.as_deref(), Some("chain_unavailable"));
+        assert_eq!(serde_json::to_value(pending(&node).unwrap()).unwrap(), serde_json::to_value(record).unwrap());
+        assert_eq!(book(&node), accounted);
+        assert_eq!(compose_bodies(&node).len(), 2);
+        assert_eq!(do_message_retry(&node.state, A, "gm", None).await.unwrap().message_id, "recovered");
     }
 
     #[test]

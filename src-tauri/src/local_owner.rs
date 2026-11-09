@@ -723,7 +723,7 @@ pub fn prepare_launch(
 /// relying on node serde defaults except where the constructor differs. No seed,
 /// marker, database or identity directory is created. Keep in sync with the node
 /// when promoting the gated sidecar pin (see docs/LOCAL_OWNER_CEREMONY.md).
-/// Mirrors rc21 init defaults, with a 10-minute call limit for the app budget.
+/// Mirrors rc22 init defaults, with a 10-minute call limit for the app budget.
 fn write_bootstrap_config(config: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
     let dir = std::fs::canonicalize(config.parent().ok_or("missing config directory")?)?;
@@ -748,7 +748,7 @@ fn write_bootstrap_config(config: &Path) -> Result<(), Box<dyn std::error::Error
         "storage": {"backend": "sqlite", "path": dir.join("konsensus.db")},
         "backup": {"scb_dir": dir.join("backups")},
         "api": {"audit_log_path": dir.join("audit.jsonl"), "operator_probes_enabled": false},
-        // rc21 init defaults; cap call duration to the app budget.
+        // rc22 init defaults; cap call duration to the app budget.
         "pricing": {"call_block_msat": 10_000},
         "calls": {"max_call_minutes": 10},
         "pairing": {"second_device_claim_v1": true, "second_device_enrollment": false},
