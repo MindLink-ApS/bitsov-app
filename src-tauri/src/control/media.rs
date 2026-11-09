@@ -51,6 +51,9 @@ mod no_seal {
         pub fn link_opened(&mut self, _: Instant) {
             match *self {}
         }
+        pub fn deadline(&self) -> Option<(Instant, &'static str)> {
+            match *self {}
+        }
         pub fn tick(&mut self, _: Instant) -> Result<Tick, NoSeal> {
             match *self {}
         }
@@ -320,6 +323,23 @@ pub struct SealLink<'a> {
 /// How often a sealed session looks at its timers. No effect on any other call.
 const SEAL_TICK: Duration = Duration::from_millis(250);
 
+/// Bound reconnect work by the call's existing deadline, without moving it or
+/// consuming a reveal that cannot be sent while the socket is closed.
+async fn wait_with_seal_deadline<F: std::future::Future>(
+    deadline: Option<(std::time::Instant, &'static str)>,
+    future: F,
+) -> Result<F::Output, &'static str> {
+    match deadline {
+        Some((at, code)) => {
+            if std::time::Instant::now() >= at {
+                return Err(code);
+            }
+            tokio::time::timeout_at(at.into(), future).await.map_err(|_| code)
+        }
+        None => Ok(future.await),
+    }
+}
+
 /// [`run_media_session`], with the call's seal when it has one. With `None`
 /// every byte up and down is what it was before sealing existed. With a seal,
 /// nothing leaves but sealed frames and the reveal, and nothing reaches
@@ -352,8 +372,11 @@ pub async fn run_media_session_with_seal(
                 .map_err(|_| dropped("the local proxy credential is invalid"))?,
         );
     }
-    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(request))
+    let seal_deadline = seal.as_ref().and_then(|link| link.media.deadline());
+    let (mut socket, _) = wait_with_seal_deadline(seal_deadline,
+        tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(request)))
         .await
+        .map_err(SessionEnd::SealEnded)?
         .map_err(|_| dropped("the media handshake timed out"))?
         .map_err(|e| match e {
             tokio_tungstenite::tungstenite::Error::Http(response) => {
@@ -377,7 +400,7 @@ pub async fn run_media_session_with_seal(
         // The reveal goes out before any sealed frame the far side could not open yet.
         let now = std::time::Instant::now();
         seal.media.link_opened(now);
-        if let Ok(Tick::Send(payload)) = seal.media.tick(now) {
+        if let Tick::Send(payload) = seal.media.tick(now).map_err(|end| SessionEnd::SealEnded(end.code()))? {
             let frame = MediaFrame { seq: *next_seq, payload };
             if let Ok(bytes) = frame.encode() {
                 *next_seq = next_seq.wrapping_add(1);
@@ -523,10 +546,20 @@ pub async fn run_media_link_with_seal<F, Fut>(
             emit(MediaLink::Ended(None));
             return;
         }
-        let connection = prepare().await;
+        let connection = match wait_with_seal_deadline(seal.as_deref().and_then(SealedMedia::deadline), prepare()).await {
+            Ok(connection) => connection,
+            Err(code) => {
+                emit(MediaLink::Ended(Some(code.to_string())));
+                return;
+            }
+        };
         let detail = match connection {
             Ok(None) => {
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                if let Err(code) = wait_with_seal_deadline(seal.as_deref().and_then(SealedMedia::deadline),
+                    tokio::time::sleep(Duration::from_millis(250))).await {
+                    emit(MediaLink::Ended(Some(code.to_string())));
+                    return;
+                }
                 continue;
             }
             Ok(Some((url, token, credential))) => {
@@ -570,7 +603,11 @@ pub async fn run_media_link_with_seal<F, Fut>(
             Err(error) => Some(error),
         };
         emit(MediaLink::Closed(detail));
-        tokio::time::sleep(super::backoff(attempt)).await;
+        if let Err(code) = wait_with_seal_deadline(seal.as_deref().and_then(SealedMedia::deadline),
+            tokio::time::sleep(super::backoff(attempt))).await {
+            emit(MediaLink::Ended(Some(code.to_string())));
+            return;
+        }
         attempt = attempt.saturating_add(1);
     }
 }
@@ -1059,6 +1096,66 @@ mod tests {
         let AnswerDecision::Seal { media, attribute } = seal::answer_offer(Parties::new(SEAL_CALL, &caller, &callee).unwrap(), &line).unwrap() else { panic!("no seal") };
         (offer.accept_answer(&attribute).unwrap().unwrap(), *media)
     }
+
+    async fn reconnect_deadline(mode: &str) {
+        for side in ["callee", "caller", "authenticated"] {
+            let (mut a, mut b) = sealed_pair();
+            let limit = if side == "callee" { seal::REVEAL_TIMEOUT } else { seal::NO_AUTHENTIC_LIMIT };
+            let now = std::time::Instant::now() - limit + Duration::from_millis(300);
+            if side == "authenticated" {
+                let Tick::Send(reveal) = a.tick(now).unwrap() else { panic!("no reveal") };
+                b.receive(&reveal, now).unwrap();
+                let frame = a.seal(&[0x02, 1], now).unwrap().unwrap();
+                assert!(b.receive(&frame, now).unwrap().is_some());
+            }
+            let mut media = if side == "caller" { a } else { b };
+            // The first socket has already opened and dropped; little time remains.
+            media.link_opened(if side == "authenticated" { now - Duration::from_secs(20) } else { now });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://127.0.0.1:{}/media", listener.local_addr().unwrap().port());
+            let server = tokio::spawn(async move {
+                let (_socket, _) = listener.accept().await.unwrap();
+                std::future::pending::<()>().await;
+            });
+            let uplink = FrameQueue::new(QUEUE_FRAMES);
+            let downlink = FrameQueue::new(QUEUE_FRAMES);
+            uplink.push(vec![0x02, 7]);
+            let events = Mutex::new(Vec::new());
+            let emit = |event| events.lock().unwrap().push(event);
+            let result = tokio::time::timeout(Duration::from_millis(900), run_media_link_with_seal(
+                || {
+                    let url = url.clone();
+                    async move {
+                        match mode {
+                            "prepare" => std::future::pending().await,
+                            "not_ready" => Ok(None),
+                            "backoff" => Err("unavailable".to_string()),
+                            "handshake" => Ok(Some((url, "tok".to_string(), "proxy".to_string()))),
+                            _ => unreachable!(),
+                        }
+                    }
+                }, &uplink, &downlink, Some(&mut media), &emit, &|| false,
+            )).await;
+            server.abort();
+            assert!(result.is_ok(), "sealed reconnect exceeded its deadline: {mode}, {side}");
+            let code = if side == "callee" { "seal_no_reveal" } else { "seal_no_authentic_frames" };
+            assert_eq!(events.lock().unwrap().last(), Some(&MediaLink::Ended(Some(code.into()))));
+            assert!(downlink.is_empty());
+            assert_eq!(media.counters().sealed_out, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_deadline_interrupts_pending_prepare() { reconnect_deadline("prepare").await; }
+
+    #[tokio::test]
+    async fn reconnect_deadline_interrupts_not_ready_polling() { reconnect_deadline("not_ready").await; }
+
+    #[tokio::test]
+    async fn reconnect_deadline_interrupts_backoff() { reconnect_deadline("backoff").await; }
+
+    #[tokio::test]
+    async fn reconnect_deadline_interrupts_pending_handshake() { reconnect_deadline("handshake").await; }
 
     /// Two hosts' sockets on a stand-in node: forwards each binary message
     /// opaquely to the other socket and records it. `drop_after`: close the

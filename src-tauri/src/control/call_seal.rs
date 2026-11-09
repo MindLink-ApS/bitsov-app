@@ -82,6 +82,8 @@ pub enum SealError {
     Exhausted,
     /// The media link was asked to open with no finished exchange for this call.
     NotReady,
+    /// An early frame cannot be remembered in the bounded replay window.
+    EarlyFrameOutOfWindow,
 }
 
 impl SealError {
@@ -96,6 +98,7 @@ impl SealError {
             SealError::NoAuthenticFrames => "seal_no_authentic_frames",
             SealError::Exhausted => "seal_exhausted",
             SealError::NotReady => "seal_not_ready",
+            SealError::EarlyFrameOutOfWindow => "seal_early_frame_out_of_window",
         }
     }
 }
@@ -192,7 +195,7 @@ fn transcript(x: &Exchange<'_>) -> [u8; 32] {
 struct KeySet {
     send_caller: Secret32,
     send_callee: Secret32,
-    sas_digest: [u8; 32],
+    sas_digest: Secret32,
 }
 
 fn derive_keys(dh: &[u8; 32], transcript: &[u8; 32]) -> KeySet {
@@ -200,7 +203,7 @@ fn derive_keys(dh: &[u8; 32], transcript: &[u8; 32]) -> KeySet {
     KeySet {
         send_caller: dk("bitsov-e2e-send-caller-v1", &[root.as_ref()]),
         send_callee: dk("bitsov-e2e-send-callee-v1", &[root.as_ref()]),
-        sas_digest: *dk("bitsov-e2e-sas-v1", &[root.as_ref()]),
+        sas_digest: dk("bitsov-e2e-sas-v1", &[root.as_ref()]),
     }
 }
 
@@ -561,7 +564,7 @@ pub struct SealedMedia {
     setup: Setup,
     send: Option<SendState>,
     read: Option<ReadState>,
-    sas_digest: Option<[u8; 32]>,
+    sas_digest: Option<Secret32>,
     is_caller: bool,
     stream_seq: u32,
     /// A frame from the peer has authenticated on this call.
@@ -615,7 +618,13 @@ impl SealedMedia {
     /// The call's four words, once this side has the keys. No screen shows
     /// them yet; they exist so that a later slice can, and so tests can compare.
     pub fn words(&self) -> Option<[&'static str; 4]> {
-        self.sas_digest.map(|digest| crate::sas::words(&blake3::Hash::from_bytes(digest)))
+        use zeroize::Zeroize;
+        self.sas_digest.as_ref().map(|digest| {
+            let mut hash = blake3::Hash::from_bytes(**digest);
+            let words = crate::sas::words(&hash);
+            hash.zeroize();
+            words
+        })
     }
 
     pub fn counters(&self) -> SealCounters {
@@ -667,7 +676,18 @@ impl SealedMedia {
     /// in the clear, or failing the tag, changes no state and reaches nothing.
     pub fn receive(&mut self, payload: &[u8], now: Instant) -> Result<Option<Vec<u8>>, SealError> {
         match payload.first() {
-            Some(&TYPE_SEALED) => Ok(self.open(payload, now)),
+            Some(&TYPE_SEALED) => {
+                if self.read.is_none() && payload.len() >= SEALED_HEADER_BYTES + TAG_BYTES {
+                    let counter = u32::from_be_bytes([payload[2], payload[3], payload[4], payload[5]]);
+                    // Before the reveal the header cannot be authenticated. Do not
+                    // advance the window or retain an unbounded set of counters.
+                    if payload[1] != 0 || counter >= REPLAY_WINDOW {
+                        self.counters.early += 1;
+                        return Err(SealError::EarlyFrameOutOfWindow);
+                    }
+                }
+                Ok(self.open(payload, now))
+            }
             Some(&TYPE_REVEAL) => {
                 self.reveal(payload, now)?;
                 Ok(None)
@@ -791,6 +811,15 @@ impl SealedMedia {
         Ok(())
     }
 
+    /// The next call deadline, including while its socket is reconnecting.
+    pub fn deadline(&self) -> Option<(Instant, &'static str)> {
+        let opened = self.link_opened?;
+        if let Setup::Callee { pending: Some(_), .. } = &self.setup {
+            return Some((opened + REVEAL_TIMEOUT, SealError::NoReveal.code()));
+        }
+        Some((self.last_authentic.unwrap_or(opened) + NO_AUTHENTIC_LIMIT, SealError::NoAuthenticFrames.code()))
+    }
+
     /// Timers, about four times a second while the link is open. A reveal to
     /// send, or the reason the call must end.
     pub fn tick(&mut self, now: Instant) -> Result<Tick, SealError> {
@@ -879,9 +908,9 @@ mod tests {
         assert_eq!(*keys.send_caller, unhex::<32>("4314183a3bf3ce45c872db94c11a0810d7f664f2f44985f4a2229b463e1bf2a3"));
         assert_eq!(*keys.send_callee, unhex::<32>("734e7008a567eed7da87dae5f67b85d5bc5c4d631684b2270ee8d87f47cf219a"));
         assert_eq!(*next_epoch_key(&keys.send_caller), unhex::<32>("71fbf316536f280ddcc0ad5dc953c0363ab6b8000a1affcf274df634a6ed746a"));
-        assert_eq!(keys.sas_digest, unhex::<32>("5b54a1cf34721f9828ad911feb48073e1fc01b84460575b8d1f8ad8921e91500"));
+        assert_eq!(*keys.sas_digest, unhex::<32>("5b54a1cf34721f9828ad911feb48073e1fc01b84460575b8d1f8ad8921e91500"));
         let list = bip39::Language::English.word_list();
-        let words = crate::sas::words(&blake3::Hash::from_bytes(keys.sas_digest));
+        let words = crate::sas::words(&blake3::Hash::from_bytes(*keys.sas_digest));
         assert_eq!(words, [list[730], list[1320], list[926], list[839]]);
         let inner = inner_for(&[0x01, 0xde, 0xad, 0xbe], 7).unwrap();
         let mut want_inner = vec![0u8; 128];
@@ -1034,6 +1063,38 @@ mod tests {
     }
 
     #[test]
+    fn early_frames_outside_the_counter_window_end_the_sealed_call() {
+        for (epoch, counter) in [(0, 1_024u32), (0, 5_000_000), (1, 0), (255, u32::MAX)] {
+            let (_, mut callee) = exchanged();
+            let mut frame = vec![TYPE_SEALED, epoch];
+            frame.extend_from_slice(&counter.to_be_bytes());
+            frame.extend_from_slice(&[0; TAG_BYTES]);
+            assert_eq!(callee.receive(&frame, Instant::now()).map_err(|e| e.code()),
+                Err("seal_early_frame_out_of_window"), "epoch {epoch}, counter {counter}");
+            assert!(callee.early_counters.is_empty());
+            assert!(callee.send.is_none() && callee.read.is_none());
+        }
+    }
+
+    #[test]
+    fn a_full_early_counter_window_refuses_the_next_frame_without_buffering_it() {
+        let (offer, line) = CallerOffer::new(parties()).unwrap();
+        let AnswerDecision::Seal { media, attribute } = answer_offer(parties(), &line).unwrap() else { panic!("no seal") };
+        let mut callee = *media;
+        let mut caller = offer.accept_answer(&attribute).unwrap().unwrap();
+        let now = Instant::now();
+        for _ in 0..1_024 {
+            let frame = caller.seal(&[0x02, 1], now).unwrap().unwrap();
+            assert_eq!(callee.receive(&frame, now), Ok(None));
+            assert_eq!(callee.receive(&frame, now), Ok(None), "duplicates need no extra space");
+        }
+        assert_eq!(callee.early_counters.len(), 1_024);
+        let frame = caller.seal(&[0x02, 2], now).unwrap().unwrap();
+        assert_eq!(callee.receive(&frame, now).map_err(|e| e.code()), Err("seal_early_frame_out_of_window"));
+        assert_eq!(callee.early_counters.len(), 1_024);
+    }
+
+    #[test]
     fn a_changed_reveal_fails_the_commitment_and_ends_setup() {
         for at in [1, 32, 33, 48] {
             let (mut reveal, mut callee) = exchanged();
@@ -1179,19 +1240,6 @@ mod tests {
         assert_eq!(callee.counters().rejected, 3);
         let next = caller.seal(&[0x02, 9], now).unwrap().unwrap();
         assert!(callee.receive(&next, now).unwrap().is_some(), "the next frame plays");
-        // A node cannot push the window far ahead with fake early counters.
-        let (offer, line) = CallerOffer::new(parties()).unwrap();
-        let AnswerDecision::Seal { media, attribute } = answer_offer(parties(), &line).unwrap() else { panic!("no seal") };
-        let mut callee = *media;
-        let mut caller = offer.accept_answer(&attribute).unwrap().unwrap();
-        let Tick::Send(reveal) = caller.tick(now).unwrap() else { panic!("no reveal") };
-        let mut fake = vec![TYPE_SEALED, 0];
-        fake.extend_from_slice(&5_000_000u32.to_be_bytes());
-        fake.extend_from_slice(&[0x11; 150]);
-        callee.receive(&fake, now).unwrap();
-        callee.receive(&reveal, now).unwrap();
-        let first = caller.seal(&[0x02, 1], now).unwrap().unwrap();
-        assert!(callee.receive(&first, now).unwrap().is_some());
     }
 
     #[test]
