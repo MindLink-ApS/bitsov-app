@@ -16,6 +16,7 @@ fn main() {
     // and define each permission twice. This pattern matches no extra files.
     let manifest = tauri_build::AppManifest::new()
         .commands(&[
+            "privacy_policy_open",
             "node_status",
             "node_unlock",
             "node_unlock_password",

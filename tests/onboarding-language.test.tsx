@@ -1,4 +1,5 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
+import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
 import { render } from 'solid-js/web';
 import { setLanguagePref } from '../src/i18n';
 import { PairSteps } from '../src/onboarding/PairSteps';
@@ -7,7 +8,7 @@ import { INITIAL_PAIRING } from '../src/onboarding/pairing';
 import { LockedNode } from '../src/onboarding/LockedNode';
 
 let dispose: (() => void) | undefined;
-afterEach(() => { dispose?.(); document.body.replaceChildren(); setLanguagePref('system'); });
+afterEach(() => { dispose?.(); document.body.replaceChildren(); setLanguagePref('system'); clearMocks(); vi.unstubAllGlobals(); });
 const mount = (view: () => ReturnType<typeof PairSteps>) => {
   const root = document.createElement('div');
   document.body.append(root);
@@ -30,10 +31,14 @@ it('updates onboarding status labels when the language changes', () => {
   const root = mount(() => <Onboarding status={() => ({ ready: false, node_id: null, error: null })}
     pairing={() => INITIAL_PAIRING} trustAck={() => false} onRetry={() => {}} />);
   expect(root.querySelector('[data-step="node"]')?.textContent).toContain('now');
+  const privacy = root.querySelector<HTMLAnchorElement>('[data-privacy-policy]');
+  expect(privacy?.textContent).toBe('Privacy policy');
+  expect(privacy?.getAttribute('href')).toBe('#');
   setLanguagePref('da');
   expect(root.querySelector('[data-step="node"] .step-label')?.textContent).toBe('Start node');
   expect(root.querySelector('[data-step="node"] .step-status')?.textContent).toBe('nu');
   expect(root.querySelector('h1')?.textContent).toBe('Hvor skal din node køre?');
+  expect(privacy?.textContent).toBe('Privatlivspolitik');
 });
 it('localizes local ticket validation while preserving host errors', async () => {
   setLanguagePref('da');
@@ -46,6 +51,40 @@ it('localizes local ticket validation while preserving host errors', async () =>
   const message = 'Node rejected request {0}: device id å42';
   const locked = mount(() => <LockedNode onUnlock={async () => {}} hostError={message} />);
   expect(locked.querySelector('[role="alert"]')?.textContent).toBe(message);
+});
+
+it('opens the privacy policy through the host without supplying a destination', async () => {
+  const ipc = vi.fn().mockResolvedValue(undefined);
+  mockIPC(ipc);
+  const root = mount(() => <Onboarding status={() => ({ ready: false, node_id: null, error: null })}
+    pairing={() => INITIAL_PAIRING} trustAck={() => false} onRetry={() => {}} />);
+  const link = root.querySelector<HTMLAnchorElement>('[data-privacy-policy]')!;
+  const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+  link.dispatchEvent(click);
+  expect(click.defaultPrevented).toBe(true);
+  await vi.waitFor(() => expect(ipc).toHaveBeenCalledOnce());
+  expect(ipc).toHaveBeenCalledWith('privacy_policy_open', {});
+  expect(root.querySelector('[role="alert"]')).toBeNull();
+});
+
+it('keeps onboarding open and offers a localized retry when the native policy opener fails', async () => {
+  setLanguagePref('en');
+  vi.stubGlobal('isTauri', true);
+  mockIPC(() => Promise.reject(new Error('native diagnostic')));
+  const root = mount(() => <Onboarding status={() => ({ ready: false, node_id: null, error: null })}
+    pairing={() => INITIAL_PAIRING} trustAck={() => false} onRetry={() => {}} />);
+  const link = root.querySelector<HTMLAnchorElement>('[data-privacy-policy]')!;
+  const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+  link.dispatchEvent(click);
+  expect(click.defaultPrevented).toBe(true);
+  await vi.waitFor(() => expect(root.querySelector('[role="alert"]')?.textContent).toContain('Could not open the privacy policy.'));
+  expect(root.textContent).not.toContain('native diagnostic');
+  setLanguagePref('da');
+  expect(root.querySelector('[role="alert"]')?.textContent).toContain('Kunne ikke åbne privatlivspolitikken.');
+  mockIPC(() => Promise.resolve());
+  link.click();
+  await vi.waitFor(() => expect(root.querySelector('[role="alert"]')).toBeNull());
+  expect(root.querySelector('.onboarding')).not.toBeNull();
 });
 
 it.each(['en', 'da'] as const)('shows honest, equal node choices in %s', lang => {

@@ -2918,6 +2918,15 @@ async fn pairing_link_take(
     Ok(None)
 }
 
+/// The main webview can open only this fixed, host-owned policy URL.
+#[tauri::command]
+async fn privacy_policy_open(window: WebviewWindow<impl tauri::Runtime>) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    use tauri_plugin_opener::OpenerExt;
+    window.app_handle().opener().open_url(crate::privacy_policy::URL, None::<&str>)
+        .map_err(|_| "Could not open the privacy policy.".to_string())
+}
+
 /// Open only fixed mobile recovery destinations, scoped to the main webview.
 #[tauri::command]
 async fn open_app_settings(window: WebviewWindow<impl tauri::Runtime>) -> Result<(), String> {
@@ -10681,7 +10690,8 @@ fn resume_ios_startup(app: &AppHandle) -> bool {
 
 /// Normal CS-1 / CS-2 desktop shell: NodeState, wallet commands, bootstrap.
 fn app_builder() -> tauri::Builder<tauri::Wry> {
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build());
     #[cfg(all(target_os = "macos", not(feature = "mobile")))]
     let builder = builder.plugin(tauri_plugin_notification::init());
     #[cfg(all(desktop, not(feature = "mobile")))]
@@ -10703,7 +10713,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
         .plugin(crate::phone_recovery::init())
         .plugin(tauri_plugin_barcode_scanner::init());
     // iOS device keys use the statically linked Apple enclave bridge;
-    // the QR scanner is the only mobile plugin. Pairing
+    // the QR scanner and URL opener use mobile plugins. Pairing
     // links arrive as `RunEvent::Opened` (see `run`), not through a plugin.
     #[cfg(target_os = "ios")]
     let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
@@ -10711,6 +10721,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
         .manage(AiState::default())
         .invoke_handler({
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+            privacy_policy_open,
             node_status,
             node_unlock,
             node_unlock_password,
@@ -25260,6 +25271,7 @@ mod assistant_acl_tests {
         assert_eq!(
             handler_commands(&source),
             [
+                "privacy_policy_open",
                 "node_status",
                 "node_unlock",
                 "node_unlock_password",

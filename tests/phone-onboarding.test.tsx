@@ -36,6 +36,9 @@ it('starts with one action and a collapsed paste route, without a secret input',
   expect(document.querySelector('details')?.open).toBe(false);
   expect(button('Paste link')).toBeTruthy();
   expect(document.querySelector('input, textarea')).toBeNull();
+  const privacy = document.querySelector<HTMLAnchorElement>('[data-privacy-policy]');
+  expect(privacy?.textContent).toBe('Privacy policy');
+  expect(privacy?.getAttribute('href')).toBe('#');
 });
 it('auto-connects a scan, displays ordered words and only the owner can approve', async () => {
   const [status, setStatus] = createSignal<NodeStatus>({ ready: false, node_id: null, error: null });

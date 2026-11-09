@@ -5,6 +5,7 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "allow-privacy-policy-open",
     "barcode-scanner:allow-scan",
     "barcode-scanner:allow-cancel",
     "allow-open-app-settings",

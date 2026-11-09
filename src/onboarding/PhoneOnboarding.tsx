@@ -1,4 +1,5 @@
 import { language, systemLanguage } from '../i18n';
+import { PrivacyPolicyLink } from '../PrivacyPolicyLink';
 import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show } from 'solid-js';
 import { appPlatform, type AppPlatform } from '../platform';
 import type { DeviceView } from '../control/types';
@@ -304,5 +305,6 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       <Show when={['connecting', 'words', 'fingerprint'].includes(screen())}><button type="button" disabled={busy()} onClick={() => void run(reset)}>{c().cancel}</button></Show>
     </details>
     <Show when={toast()}><p class="phone-toast" role="status">{toast()}</p></Show>
+    <PrivacyPolicyLink locale={props.locale} />
   </main>;
 }
