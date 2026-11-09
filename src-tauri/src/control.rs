@@ -203,9 +203,20 @@ pub struct LightningReadiness {
     pub events: Vec<ReadinessEvent>,
 }
 
+/// Chain source fields used by the public-service notice.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct ChainView {
+    #[serde(default)]
+    pub explorer_default: bool,
+    #[serde(default)]
+    pub trust_level: String,
+}
+
 /// `GET /status` — `HealthResponse`. The subset the Node panel shows.
 #[derive(Deserialize, Clone, Debug)]
 pub struct NodeStatusResponse {
+    #[serde(default)]
+    pub chain_view: Option<ChainView>,
     /// Node-reported network also works for remote paired clients.
     #[serde(default)]
     pub network: Option<String>,
@@ -558,6 +569,8 @@ pub struct WalletOverview {
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct NodeOverview {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_view: Option<ChainView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub money_ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness: Option<LightningReadiness>,
@@ -678,6 +691,7 @@ impl NodeOverview {
             _ => None,
         };
         Self {
+            chain_view: status.chain_view.filter(|view| view.trust_level == "third_party"),
             money_ready: status.money_ready,
             readiness: status.readiness,
             node_id: status.node_id,
@@ -751,7 +765,9 @@ pub fn price_quote(own: KindPrice, tables: &[PeerPrice], peer: Option<&str>) -> 
 /// is not evidence that the node lacks the contract.
 pub fn conversation_ceiling_evidence(proven: bool, probe: Result<(), String>) -> Result<(), crate::act::ActionError> {
     probe.map_err(|reason| {
-        if matches!(reason.as_str(), "peer_not_ready:chain_unavailable" | "peer_not_ready:not_synced") {
+        if reason == "not_ready:chain_unavailable" {
+            crate::act::ActionError::node(reason)
+        } else if matches!(reason.as_str(), "peer_not_ready:chain_unavailable" | "peer_not_ready:not_synced") {
             crate::act::ActionError::new("peer_not_ready", reason)
         } else {
             crate::act::ActionError::new("price_quote_unavailable", format!("Quote unavailable: {reason}"))
@@ -1315,6 +1331,13 @@ mod tests {
     }
 
     #[test]
+    fn chain_quote_probe_preserves_the_typed_refusal() {
+        let error = conversation_ceiling_evidence(false, Err("not_ready:chain_unavailable".into())).unwrap_err();
+        assert_eq!(error.code, "not_ready");
+        assert_eq!(error.reason.as_deref(), Some("chain_unavailable"));
+    }
+
+    #[test]
     fn conversation_ceiling_evidence_distinguishes_missing_contract_from_failed_quote() {
         for reason in ["No route or channel yet", "Peer offline", "Quote unavailable", "Owner approval required"] {
             let err = conversation_ceiling_evidence(false, Err(reason.into())).unwrap_err();
@@ -1446,6 +1469,25 @@ mod tests {
 
     fn link(state: LinkState, detail: Option<&str>) -> LiveEvent {
         LiveEvent::Link { state, detail: detail.map(str::to_string) }
+    }
+
+    #[test]
+    fn overview_projects_the_default_explorer_notice_without_endpoint_details() {
+        for default in [true, false] {
+            let status = serde_json::from_value(serde_json::json!({
+                "status":"ok", "node_id":"x", "network":"signet",
+                "chain_view":{"explorer_default":default, "trust_level":"third_party", "endpoint":"private-detail"}
+            })).unwrap();
+            let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
+            assert_eq!(projected["chain_view"]["explorer_default"], default);
+            assert_eq!(projected["chain_view"]["trust_level"], "third_party");
+            assert!(!projected.to_string().contains("private-detail"));
+        }
+        for view in [serde_json::Value::Null, serde_json::json!({"explorer_default":true,"trust_level":"unknown"})] {
+            let status = serde_json::from_value(serde_json::json!({"status":"ok", "node_id":"x", "chain_view":view})).unwrap();
+            let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
+            assert!(projected.get("chain_view").is_none());
+        }
     }
 
     #[test]

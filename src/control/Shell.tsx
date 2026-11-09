@@ -31,8 +31,9 @@ import { pollingSource } from './polling';
 import { deliveryPoller } from './deliveryPoll';
 import { readSpendPreset, saveSpendPreset } from './prefs';
 import { WelcomeHome } from './WelcomeHome';
+import { ChainNotice } from './ChainNotice';
 import { DelayedSpinner } from './DelayedSpinner';
-import { MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
+import { isChainUnavailable, MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
 import { batch, createEffect, createMemo, createResource, createSignal, createUniqueId, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
 import { createStore, produce, reconcile } from 'solid-js/store';
 import { qrSvg } from '../qr';
@@ -518,7 +519,7 @@ export function ControlCenter(props: Props) {
       const q = await source.priceQuote((t as { id: string }).id);
       if (read === quoteRead && track() && trackKey(track()!) === trackKey(t)) setQuote(q);
     } catch (error) {
-      if (read === quoteRead && track() && trackKey(track()!) === trackKey(t)) setQuoteError(peerNotReadyMessage(error, t.kind === 'peer' ? nameOf(t.id) : tr('caThisPeer')) ?? tr('caPriceUnavailableCouldNotReadPeerPrice'));
+      if (read === quoteRead && track() && trackKey(track()!) === trackKey(t)) setQuoteError(isChainUnavailable(error) ? tr('chainUnavailable') : peerNotReadyMessage(error, t.kind === 'peer' ? nameOf(t.id) : tr('caThisPeer')) ?? tr('caPriceUnavailableCouldNotReadPeerPrice'));
     }
   };
   const [roomQuote, setRoomQuote] = createSignal<RoomQuote | null>(null);
@@ -1384,7 +1385,7 @@ export function ControlCenter(props: Props) {
     if (!outcome.ok) foldMembrane((log) => membraneRefused(log, outcome.error, trackKey(t), Date.now()));
     // A message whose outcome is not proven unpaid always keeps a card with its words (`text`), whatever its code.
     const keeps = text !== undefined;
-    if (!outcome.ok && (keeps || (outcome.error.code !== 'not_ready' && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price' && outcome.error.code !== 'readmission_capped' && outcome.error.code !== 'readmission_quoted'))) {
+    if (!outcome.ok && (keeps || isChainUnavailable(outcome.error) || (outcome.error.code !== 'not_ready' && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price' && outcome.error.code !== 'readmission_capped' && outcome.error.code !== 'readmission_quoted'))) {
       addArtifact(t, { type: 'failed', action: FAILURE_LABEL[outcome.error.code] ?? action, error: outcome.error, ...(text !== undefined ? { text } : {}) });
     }
     return outcome;
@@ -1853,8 +1854,8 @@ export function ControlCenter(props: Props) {
         const paid = r.error.undelivered;
         update({ paid, admission: null, pendingId: r.error.pending_id ?? a.pendingId, note: tr('caStillNotDeliveredPaidForThisMessageSoFar', sats(paid.paid_msat), satUnit(paid.paid_msat)) });
       } else if (r.error.code === 'not_ready') {
-        // The shared notice owns this refusal; the paid card stays retryable.
-        update({ ownerApproval: null, note: null });
+        // The paid card stays retryable; a chain refusal names only this attempt.
+        update({ ownerApproval: null, note: isChainUnavailable(r.error) ? tr('chainUnavailableRetry') : null });
       } else if (r.error.code === 'retry_needs_admission') {
         // Stopped before paying: the price to approve, when the node could tell.
         update({ admission: r.error.admission ?? null, note: r.error.message });
@@ -2043,6 +2044,7 @@ export function ControlCenter(props: Props) {
             queueMicrotask(() => callPanel?.focus());
           }} />
           {props.offline}
+          <ChainNotice overview={overview()} />
           <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
             onEnded={() => { void loadBudget(); void loadWallet(); }} />
           <Show when={moneyBlocked()}><p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p></Show>
@@ -2098,6 +2100,7 @@ export function ControlCenter(props: Props) {
           <Show when={track()}><button type="button" class="link ios-back" data-ios-back="thread" onClick={phoneBack}><Show when={phoneShell()}><span aria-hidden="true">‹ </span></Show>{tr('uiBack')}</button></Show>
           <Show when={!phoneShell()}>
             {props.offline}
+            <ChainNotice overview={overview()} />
             <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
               onEnded={() => { void loadBudget(); void loadWallet(); }} />
           </Show>
@@ -5304,14 +5307,14 @@ function Composer(props: {
     if (!room()) {
       if (props.quoteError) return props.quoteError;
       if (!props.quote) return tr('uiPriceLoading');
-      if (props.quote.send_unavailable) return peerNotReadyMessage(props.quote.send_unavailable, props.name) ?? tr('uiPriceUnavailable', props.quote.send_unavailable);
+      if (props.quote.send_unavailable) return isChainUnavailable(props.quote.send_unavailable) ? tr('chainUnavailable') : peerNotReadyMessage(props.quote.send_unavailable, props.name) ?? tr('uiPriceUnavailable', props.quote.send_unavailable);
     }
     if (readmitPrice()) return Number.isSafeInteger(readmitPrice()!.total_msat) && readmitPrice()!.total_msat > 0 ? null : tr('uiPriceUnavailableInvalidPrice');
     if (room()) return props.cost ? null : tr('uiPriceLoading');
     if (doorWanted() && door()) {
       const d = door()!;
       if (d.loading) return tr('uiPriceLoading');
-      if (!d.quote) return peerNotReadyMessage(d.error, props.name) ?? tr('uiPriceUnavailableFirstContactQuoteUnavailable');
+      if (!d.quote) return isChainUnavailable(d.error) ? tr('chainUnavailable') : peerNotReadyMessage(d.error, props.name) ?? tr('uiPriceUnavailableFirstContactQuoteUnavailable');
       if (!Number.isSafeInteger(d.quote.total_msat) || d.quote.total_msat <= 0) return tr('uiPriceUnavailableInvalidPrice');
       if (d.quote.expires_at * 1000 <= props.now) return tr('uiPriceUnavailableFirstContactQuoteExpired');
       return null;
@@ -8215,6 +8218,7 @@ function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Elem
       {props.pairAnother}
       <HubTrustInfo level={3} />
       {props.connection}
+      <ChainNotice overview={props.overview} />
       <Show when={props.overview} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>
         {(o) => (
           <>
