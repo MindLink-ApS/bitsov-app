@@ -9017,7 +9017,8 @@ async fn do_relation_approve(
     budget_msat: Option<u64>,
     per_act_max_msat: Option<u64>,
 ) -> Result<act::SpendView, ActionError> {
-    // Contact defaults (research doc): 200 sats a day, the quoted price per act.
+    // Contact defaults (research doc): 200 sats in total for up to 24 hours,
+    // the quoted price per act.
     let budget_msat = budget_msat.unwrap_or(device::DEFAULT_BUDGET_MSAT);
     let per_act_max_msat = device::default_per_act(per_act_max_msat, budget_msat);
     if budget_paused(state)? {
