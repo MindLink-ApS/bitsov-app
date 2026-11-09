@@ -56,6 +56,7 @@ describe.each(['en', 'da'] as const)('first spend sheet (%s)', (lang) => {
     for (const [value, expected] of [['1250', '1 250 sats'], ['1250.5', '1 250 500 msat']]) {
       input.value = value; input.dispatchEvent(new Event('input', { bubbles: true }));
       expect(text(summary)).toContain(lang === 'en' ? `Allow ${expected} in total` : `Tillad ${expected} i alt`);
+      expect(text(summary)).toContain(lang === 'en' ? 'For up to 24 hours.' : 'I højst 24 timer.');
       expect(button('[data-first-spend-allow]').disabled).toBe(false);
       expect(sheet.scrollTop).toBe(212);
     }

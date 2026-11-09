@@ -7050,8 +7050,8 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
           {/* The petname is local; Touch ID names the same key, never a name. */}
           <strong>
             {tr('uiApprove')} {props.name} {tr('extraNode')} <code data-touch-peer>{shortId(props.peer)}</code>{tr('extraWith')} {mobile ? tr('biometrics') : tr('uiTouchID')}.
-          </strong> {tr('uiUpTo105')} <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT)}</span> {tr('extraADayAtMost')}{' '}
-          <span data-touch-per-act>{fmtAmount(perAct())}</span> {tr('extraPerMessageFor24Hours')}
+          </strong> {tr('uiUpTo105')} <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT)}</span> {tr('extraInTotalFor24HoursAtMost')}{' '}
+          <span data-touch-per-act>{fmtAmount(perAct())}</span> {tr('extraPerMessage')}
         </span>
       </p>
       <div class="quiet-detail" data-touch-detail>

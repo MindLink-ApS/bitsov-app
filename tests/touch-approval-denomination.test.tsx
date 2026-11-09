@@ -27,7 +27,7 @@ describe('Touch ID approval terms', () => {
     const text = show();
     expect(mount.querySelector('[data-touch-budget]')?.textContent).toBe('200 sats');
     expect(mount.querySelector('[data-touch-per-act]')?.textContent).toBe('2 sats');
-    expect(text).toContain('Up to 200 sats in total, at most');
+    expect(text).toContain('Up to 200 sats in total for up to 24 hours, at most 2 sats per message.');
     expect(text).not.toContain('a day');
   });
 
