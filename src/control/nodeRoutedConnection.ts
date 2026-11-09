@@ -20,15 +20,17 @@
  * a direct path to the peer app: the connection state follows the node link.
  */
 import type { CallAudio, MediaTransport } from './callAudio';
-import type { MediaBridge, MediaLink } from './mediaBridge';
+import type { CallSeal, MediaBridge, MediaLink } from './mediaBridge';
 
 export const NODE_ROUTED_MARKER = 'a=x-bitsov-media:node-routed-v1';
 const CALL_ATTRIBUTE = 'a=x-bitsov-call:';
+/** The key exchange's attribute. The host reads it; only public values ride here. */
+const SEAL_ATTRIBUTE = 'a=x-bitsov-e2e:';
 /** A closed node link may come back (the host reconnects); after this long the call ends. */
 export const LINK_GRACE_MS = 30_000;
 
 /** The placeholder description that tells an M6 app "meet me at the node". */
-export function nodeRoutedSdp(type: 'offer' | 'answer', callId: string | null): string {
+export function nodeRoutedSdp(type: 'offer' | 'answer', callId: string | null, sealAttribute?: string | null): string {
   return [
     'v=0',
     'o=bitsov 0 0 IN IP4 0.0.0.0',
@@ -37,6 +39,7 @@ export function nodeRoutedSdp(type: 'offer' | 'answer', callId: string | null): 
     'm=audio 9 UDP/TLS/RTP/SAVPF 0',
     'c=IN IP4 0.0.0.0',
     NODE_ROUTED_MARKER,
+    ...(sealAttribute ? [sealAttribute] : []),
     `${CALL_ATTRIBUTE}${callId ?? ''}`,
     `a=${type === 'offer' ? 'sendrecv' : 'sendrecv'}`,
   ].join('\r\n') + '\r\n';
@@ -46,6 +49,45 @@ export const isNodeRoutedSdp = (sdp: string | null | undefined) =>
   typeof sdp === 'string' && sdp.split(/\r?\n/).includes(NODE_ROUTED_MARKER);
 
 export type MediaSessionEvent = { callId: string; state: 'open' | 'closed'; at: number };
+
+/**
+ * What the call label may say, on a build with sealing on.
+ * `setting_up`: a key exchange is under way and nothing goes out in the clear.
+ * `sealed`: a frame from the far side authenticated under this call's keys.
+ * That says nothing about who is on the far side.
+ * `not_sealed`: the other app said it cannot seal, so both nodes can hear it.
+ */
+export type SealState = 'setting_up' | 'sealed' | 'not_sealed';
+
+/** The refusal `call.ts` shows when a key exchange is present and wrong. */
+export const SEAL_REFUSED = 'CallSealRefused';
+/** This side offered sealing and the answer did not agree: the call ends, nothing goes out unsealed. */
+export const SEAL_NOT_AGREED = 'CallSealNotAgreed';
+/** A host seal failure ends the link with a detail that starts like this. */
+const SEAL_DETAIL = /^seal_/;
+export const SEAL_ENDED = 'seal_ended';
+
+/** The attribute lines of a description. More than one is invalid. */
+function sealLines(sdp: string | null | undefined): string[] {
+  return typeof sdp === 'string' ? sdp.split(/\r?\n/).filter((line) => line.startsWith(SEAL_ATTRIBUTE)) : [];
+}
+
+const sealRefused = () => Object.assign(new Error(), { name: SEAL_REFUSED });
+const sealNotAgreed = () => Object.assign(new Error(), { name: SEAL_NOT_AGREED });
+
+/**
+ * One label for the screen, many connections over time: each connection gets
+ * its own setter, and only the newest one may still change the label. A
+ * replaced call's late answer from the host is ignored.
+ */
+export function sealLabelScope(set: (state: SealState | null) => void) {
+  let generation = 0;
+  return () => {
+    const mine = ++generation;
+    set(null);
+    return (state: SealState) => { if (mine === generation) set(state); };
+  };
+}
 
 export type NodeRoutedDeps = {
   /** The wire call id of the call this connection serves (set by the engine before it opens media). */
@@ -69,6 +111,10 @@ export type NodeRoutedDeps = {
    * ended or the window ran out. `closed` tells the wait to stop early.
    */
   admitted?: (callId: string, peer: string, closed: () => boolean) => Promise<boolean>;
+  /** Present only on a build with sealing on. Without it nothing here differs from a build without the code. */
+  seal?: CallSeal;
+  /** The label's input. Called only when `seal` is present. */
+  onSeal?: (state: SealState) => void;
   now?: () => number;
   linkGraceMs?: number;
 };
@@ -115,6 +161,12 @@ export class NodeRoutedConnection {
   private muted = false;
   private graceTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly now: () => number;
+  /** This connection made its offer or answer. Never a second: a seal does not restart. */
+  private sealOffered = false;
+  /** This connection has a key exchange, and its media socket must be sealed. */
+  private sealing = false;
+  /** The call id the host's key exchange is held under. */
+  private sealCallId: string | null = null;
 
   constructor(private readonly deps: NodeRoutedDeps) {
     this.now = deps.now ?? (() => Date.now());
@@ -127,11 +179,44 @@ export class NodeRoutedConnection {
   }
 
   async createOffer(_options?: RTCOfferOptions): Promise<RTCSessionDescriptionInit> {
-    return { type: 'offer', sdp: nodeRoutedSdp('offer', this.deps.callId()) };
+    const seal = this.deps.seal;
+    if (!seal) return { type: 'offer', sdp: nodeRoutedSdp('offer', this.deps.callId()) };
+    const callId = this.deps.callId();
+    const peer = this.deps.peer();
+    if (!callId || !peer || this.sealOffered) throw sealRefused();
+    this.sealOffered = true;
+    this.sealCallId = callId;
+    const attribute = await seal.offer(callId, peer).catch(() => { throw sealRefused(); });
+    // Closed while the host worked: this call is over, so nothing of it may change any label.
+    if (this.closed) { void seal.cancel(callId); throw sealRefused(); }
+    this.sealing = true;
+    this.deps.onSeal?.('setting_up');
+    return { type: 'offer', sdp: nodeRoutedSdp('offer', callId, attribute) };
   }
 
   async createAnswer(): Promise<RTCSessionDescriptionInit> {
-    return { type: 'answer', sdp: nodeRoutedSdp('answer', this.deps.callId()) };
+    const seal = this.deps.seal;
+    if (!seal) return { type: 'answer', sdp: nodeRoutedSdp('answer', this.deps.callId()) };
+    const callId = this.deps.callId();
+    const peer = this.deps.peer();
+    const lines = sealLines(this.remoteDescription?.sdp);
+    // One exchange per connection: a repeated or different offer never replaces it.
+    if (lines.length > 1 || !callId || !peer || this.sealOffered) throw sealRefused();
+    this.sealOffered = true;
+    if (lines.length === 0) {
+      this.deps.onSeal?.('not_sealed');
+      return { type: 'answer', sdp: nodeRoutedSdp('answer', callId) };
+    }
+    this.sealCallId = callId;
+    const attribute = await seal.answer(callId, peer, lines[0]).catch(() => { throw sealRefused(); });
+    if (this.closed) { void seal.cancel(callId); throw sealRefused(); }
+    if (attribute === null) {
+      this.deps.onSeal?.('not_sealed');
+      return { type: 'answer', sdp: nodeRoutedSdp('answer', callId) };
+    }
+    this.sealing = true;
+    this.deps.onSeal?.('setting_up');
+    return { type: 'answer', sdp: nodeRoutedSdp('answer', callId, attribute) };
   }
 
   async setLocalDescription(description: Description): Promise<void> {
@@ -150,8 +235,31 @@ export class NodeRoutedConnection {
       // Never shown: the engine says "their answer could not be used" in the owner's language.
       throw Object.assign(new Error(), { name: 'PeerMediaNotNodeRouted' });
     }
+    if (description.type === 'answer' && this.deps.seal && this.sealing) await this.acceptAnswer(description);
     this.remoteDescription = description;
     this.maybeOpen();
+  }
+
+  /**
+   * The caller reads the answer. This side offered sealing, so an answer that
+   * does not agree (no attribute, or no capability) ends the call like a wrong
+   * one: nothing is sent unsealed, and no side is named as the cause.
+   */
+  private async acceptAnswer(description: Description) {
+    const seal = this.deps.seal!;
+    const callId = this.deps.callId();
+    const lines = sealLines(description.sdp);
+    if (lines.length > 1 || !callId) throw sealRefused();
+    if (lines.length === 0) {
+      void seal.cancel(callId);
+      throw sealNotAgreed();
+    }
+    const sealed = await seal.accept(callId, lines[0]).catch(() => { throw sealRefused(); });
+    if (this.closed) { void seal.cancel(callId); throw sealRefused(); }
+    if (!sealed) {
+      void seal.cancel(callId);
+      throw sealNotAgreed();
+    }
   }
 
   /**
@@ -182,6 +290,7 @@ export class NodeRoutedConnection {
       void this.deps.bridge.close();
       this.endSession();
     }
+    if (this.deps.seal && this.sealCallId) void this.deps.seal.cancel(this.sealCallId);
     this.connectionState = 'closed';
     this.iceConnectionState = 'closed';
   }
@@ -212,7 +321,7 @@ export class NodeRoutedConnection {
       // No audio graph (no AudioContext, worklet refused): a silent "live" call is worse than an ended one.
       () => { if (this.audio === audio) this.audioFailed(); },
     );
-    const open = () => this.deps.bridge.open(callId, peer, (frame) => { if (audio && this.audio === audio) audio.feed(frame); }, (link) => this.onLink(link))
+    const open = () => this.deps.bridge.open(callId, peer, (frame) => { if (audio && this.audio === audio) audio.feed(frame); }, (link) => this.onLink(link), this.sealing || undefined)
       .catch(() => this.onLink({ link: 'ended', detail: 'media_link_refused' }));
     const admitted = this.deps.admitted;
     if (!admitted) { void open(); return; }
@@ -285,7 +394,12 @@ export class NodeRoutedConnection {
           this.graceTimer = setTimeout(() => { this.graceTimer = undefined; this.setState('closed'); this.endSession(); }, this.deps.linkGraceMs ?? LINK_GRACE_MS);
         }
         break;
+      case 'sealed':
+        this.deps.onSeal?.('sealed');
+        break;
       case 'ended':
+        // The call could not stay sealed: say so. It does not go on in the clear.
+        if (link.detail && SEAL_DETAIL.test(link.detail)) this.endDetail = SEAL_ENDED;
         // The node refused or dropped the media session for good.
         this.setState('closed');
         this.endSession();

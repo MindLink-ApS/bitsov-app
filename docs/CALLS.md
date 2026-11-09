@@ -104,6 +104,54 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   node that serves the route. Two-device acceptance against a node with the
   media route is separate evidence.
 
+## Sealed audio, first proof (off by default)
+
+A test build only. It takes two switches together: `VITE_CALL_SEAL=sealed` for the
+renderer and the host's `call-seal` Cargo feature (for example
+`VITE_CALL_SEAL=sealed npm run tauri build -- --features call-seal`).
+`src-tauri/build.rs` refuses a build with only one of them. Without both, the build
+is today's: the same SDP, the same frames and the same host commands. No seal
+command, permission or capability is generated, and no direct dependency is
+added. Tests that also pass on the code before sealing existed hold this. The seal
+tests themselves run only with the feature:
+`VITE_CALL_SEAL=sealed cargo test --features call-seal`.
+
+With it on, the host (`src-tauri/src/control/call_seal.rs`) seals audio between the
+two apps. The node changes nothing: it forwards opaque frames, and metering,
+admission and price never read them.
+
+- **Key agreement.** The offer carries a hash commitment, the answer carries the
+  callee's ephemeral X25519 key, and the first media frames reveal the caller's
+  key. Public values only pass through the renderer and the nodes. No key derives
+  from the node, its seed or a stored secret, and each call starts fresh.
+- **Frames.** `0x11 | epoch | counter | ciphertext | tag`, ChaCha20-Poly1305, one key
+  per direction, the inside padded to a multiple of 128 bytes. The host hands the
+  renderer the plain frame, numbered by the authenticated `stream_seq`. Anything in
+  the clear, or failing its tag, on a sealed call reaches nothing.
+- **What it authenticates.** Each frame comes from whoever holds the key from this
+  one exchange, for this call, direction, epoch and counter.
+- **What it does not.** Who that is. A node that swaps both keys sits in the middle
+  and reads everything, with "sealed" on both screens. Only comparing the words
+  catches that, and no screen shows the words yet. The node ids come from the node.
+  Nothing here has had an outside review.
+- **The answer cannot be sealed.** A sealing caller whose answer has no attribute, or
+  no capability bit, ends the call before any audio goes out. It says "This call
+  could not be sealed, so it was ended. Nothing was said unsealed." and names no
+  side, since an app that cannot seal and a node that stripped the line look the
+  same. So a sealing build cannot call an app that cannot seal. A callee answering
+  an offer without the attribute takes the call as today, labelled "Not sealed".
+- **Never in the clear by surprise.** A wrong attribute, a bad or missing reveal (5 s
+  from the call's first socket open), a low-order key, 10 s with no authentic frame
+  (from the first open or the last authentic frame, whether or not anything
+  arrives), or the last epoch running out ends the call with a reason. Reconnects
+  do not move these deadlines. The label says "sealed" only after a frame from the
+  far side authenticates, and only for the call on screen.
+- **Secrets in memory.** Key derivations wipe the hash state and its output;
+  `zeroize` is on for BLAKE3 and X25519 in this build. Moved copies, swap and
+  the webview's plain audio stay out of reach.
+- **Not built:** the words on screen, remembering a contact, "only private calls",
+  video in the seal, messages.
+
 ## M6 A2: paid minutes
 
 Node contract: genome M6 N1 (kind 404 `CALL_BLOCK`, 60-second blocks priced by

@@ -18,6 +18,7 @@ import { provenUnpaid } from './paymentOutcome';
 import { asActionError, messagePerPaymentMax } from './state';
 import { amount } from './format';
 import { createCallMinutes, type CallMinutes, type MinutesDeps, type MinutesView } from './callMinutes';
+import { SEAL_ENDED, SEAL_NOT_AGREED, SEAL_REFUSED } from './nodeRoutedConnection';
 import type { ActionError, CallQuote, CallReceipt, Message, MinutesConsent, NodeGrantSummary, OpView } from './types';
 
 export const CALL_OFFER = 400;
@@ -43,6 +44,7 @@ const permissionPlace = (platform: AppPlatform) =>
 export function mediaError(error: unknown, media: CallMedia, platform: AppPlatform = appPlatform()): string {
   const name = error && typeof error === 'object' && 'name' in error ? error.name : '';
   const devices = media === 'video' ? tr('caMicrophoneOrCamera') : tr('caMicrophone');
+  if (name === SEAL_REFUSED) return tr('caCallSealRefused');
   if (name === NO_MEDIA_DEVICES) return media === 'video' ? tr('caThisBuildCannotUseTheMicrophoneOrCameraYet') : tr('caThisBuildCannotUseTheMicrophoneYet');
   if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
     return tr('caPermissionToUseTheWasDeniedAllowAccessIn', devices, permissionPlace(platform));
@@ -841,6 +843,7 @@ export function createCallEngine(deps: CallDeps) {
       } else if (state === 'closed') {
         // M6: the node admits call audio only once the first minute is paid.
         if (deps.routed && (conn as { endDetail?: string | null }).endDetail === NOT_PAID) end('unpaid', tr('caMinutesNotPaidInTime'));
+        else if (deps.routed && (conn as { endDetail?: string | null }).endDetail === SEAL_ENDED) end('failed', tr('caCallSealEnded'));
         else end('failed', deps.routed ? tr('caTheNodeMediaLinkClosed') : tr('caTheDirectConnectionClosed'));
       }
     };
@@ -1507,9 +1510,11 @@ export function createCallEngine(deps: CallDeps) {
               answerInFlight = false;
               if (view.phase === 'reconnecting') void restart(conn);
             }
-          } catch {
+          } catch (error) {
             // Not a connectivity failure (no relay would help): no 'failed' reason, only the words.
-            if (pc === conn) end(null, tr('caTheirAnswerCouldNotBeUsed'));
+            // A sealing call whose answer could not be sealed says so, and names no side as the cause.
+            const name = error && typeof error === 'object' && 'name' in error ? error.name : '';
+            if (pc === conn) end(null, name === SEAL_NOT_AGREED || name === SEAL_REFUSED ? tr('caCallSealNotAgreed') : tr('caTheirAnswerCouldNotBeUsed'));
           }
           return;
         }
