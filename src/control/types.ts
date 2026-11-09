@@ -197,6 +197,7 @@ export type NodeReadiness = {
 };
 
 export type NodeOverview = {
+  chain_view?: { explorer_default?: boolean; trust_level: string } | null;
   money_ready?: boolean | null;
   readiness?: NodeReadiness | null;
   node_id: string;

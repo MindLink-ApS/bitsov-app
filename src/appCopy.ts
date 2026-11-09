@@ -878,6 +878,11 @@ export const appEn = {
   "walletInvoiceNote": "Invoice · {0}",
   "waitingConnection": "Waiting for the connection. Your node will retry automatically.",
   "moneyNotReady": "Money is not ready yet. Your node will retry automatically.",
+  "chainPublicService": "Your box reads the chain from a public service.",
+  "chainUseOwn": "See how to use your own",
+  "chainUseOwnGuide": "On the computer running your box, follow the node’s CHAIN-SOURCE.md guide to connect your own Bitcoin Core or Electrum service, then restart the node. A public service provides its own view of the chain. This app cannot change that setting.",
+  "chainUnavailable": "Your box can't see the Bitcoin chain right now; nothing was paid; try again later.",
+  "chainUnavailableRetry": "Your box can't see the Bitcoin chain right now; nothing new was paid; try again later.",
   "moneyReadinessScope": "Sending, paying, calls, first contact, files, rooms, channels and gifts will be available when it is ready."
 };
 
@@ -1759,5 +1764,10 @@ export const appDa: Record<keyof typeof appEn, string> = {
   "walletInvoiceNote": "Faktura · {0}",
   "waitingConnection": "Venter på forbindelsen. Din node prøver automatisk igen.",
   "moneyNotReady": "Betalinger er ikke klar endnu. Din node prøver automatisk igen.",
+  "chainPublicService": "Din boks læser kæden fra en offentlig tjeneste.",
+  "chainUseOwn": "Se, hvordan du bruger din egen",
+  "chainUseOwnGuide": "På computeren, der kører din boks, kan du følge nodens vejledning CHAIN-SOURCE.md for at tilslutte din egen Bitcoin Core eller Electrum-tjeneste og derefter genstarte noden. En offentlig tjeneste giver sit eget billede af kæden. Denne app kan ikke ændre den indstilling.",
+  "chainUnavailable": "Din boks kan ikke se Bitcoin-kæden lige nu; intet blev betalt; prøv igen senere.",
+  "chainUnavailableRetry": "Din boks kan ikke se Bitcoin-kæden lige nu; intet nyt blev betalt; prøv igen senere.",
   "moneyReadinessScope": "Afsendelse, betaling, opkald, første kontakt, filer, rum, kanaler og gaver bliver tilgængelige, når den er klar."
 };

@@ -1,6 +1,6 @@
 import { t as tr } from '../i18n';
 import { t, possessive } from '../i18n';
-import { MONEY_NOT_READY, readinessLine } from './readiness';
+import { isChainUnavailable, MONEY_NOT_READY, readinessLine } from './readiness';
 import { feeCeiling } from './format';
 // Control-center state as pure functions over plain data, so the rules are
 // testable without a window: which track a live message belongs to, how history
@@ -196,11 +196,12 @@ export function peerNotReadyMessage(error: unknown, name: string): string | null
 
 /** Any rejection from the host, as an action error. */
 export function asActionError(e: unknown): ActionError {
+  if (e === 'not_ready:chain_unavailable') return { code: 'not_ready', reason: 'chain_unavailable', message: tr('chainUnavailable') };
   if (e === MONEY_NOT_READY) return { code: 'not_ready', message: MONEY_NOT_READY };
   if (e && typeof e === 'object' && 'code' in e && 'message' in e) {
     const { code, message, undelivered, admission, pending_id, reason, remaining_msat, operation_id } = e as ActionError;
     // Host refusals with their own plain words, in the app's language.
-    const out: ActionError = { code, message: code === 'not_ready' ? MONEY_NOT_READY
+    const out: ActionError = { code, message: isChainUnavailable(e) ? tr('chainUnavailable') : code === 'not_ready' ? MONEY_NOT_READY
       : code === 'grant_messaging' ? tr('caGrantMessagingPayment')
       : code === 'call_price_unknown' ? tr('caCallPriceUnreadNothingPaid')
       : code === 'call_hangup_unpayable' ? tr('caCallHangupUnpayable')
@@ -209,7 +210,7 @@ export function asActionError(e: unknown): ActionError {
     if (typeof pending_id === 'string' && pending_id) out.pending_id = pending_id;
     if (typeof operation_id === 'string' && operation_id) out.operation_id = operation_id;
     // Owner approval refusals: only the node's known reasons, and an amount that is one.
-    if (typeof reason === 'string' && APPROVAL_OFF_REASONS.has(reason)) out.reason = reason;
+    if (isChainUnavailable(e) || (typeof reason === 'string' && APPROVAL_OFF_REASONS.has(reason))) out.reason = reason;
     if (msat(remaining_msat)) out.remaining_msat = remaining_msat;
     if (undelivered && msat(undelivered.paid_msat)) out.undelivered = { paid_msat: undelivered.paid_msat, retry: undelivered.retry === true };
     if (admission && msat(admission.admission_msat) && msat(admission.message_msat) && msat(admission.total_msat)
