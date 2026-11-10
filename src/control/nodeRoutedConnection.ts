@@ -80,12 +80,12 @@ const sealNotAgreed = () => Object.assign(new Error(), { name: SEAL_NOT_AGREED }
  * its own setter, and only the newest one may still change the label. A
  * replaced call's late answer from the host is ignored.
  */
-export function sealLabelScope(set: (state: SealState | null) => void) {
+export function sealLabelScope(set: (state: SealState | null, words?: string[]) => void) {
   let generation = 0;
   return () => {
     const mine = ++generation;
     set(null);
-    return (state: SealState) => { if (mine === generation) set(state); };
+    return (state: SealState, words?: string[]) => { if (mine === generation) set(state, words); };
   };
 }
 
@@ -114,7 +114,7 @@ export type NodeRoutedDeps = {
   /** Present only on a build with sealing on. Without it nothing here differs from a build without the code. */
   seal?: CallSeal;
   /** The label's input. Called only when `seal` is present. */
-  onSeal?: (state: SealState) => void;
+  onSeal?: (state: SealState, words?: string[]) => void;
   now?: () => number;
   linkGraceMs?: number;
 };
@@ -165,6 +165,7 @@ export class NodeRoutedConnection {
   private sealOffered = false;
   /** This connection has a key exchange, and its media socket must be sealed. */
   private sealing = false;
+  private sealAuthenticated = false;
   /** The call id the host's key exchange is held under. */
   private sealCallId: string | null = null;
 
@@ -395,7 +396,11 @@ export class NodeRoutedConnection {
         }
         break;
       case 'sealed':
+        this.sealAuthenticated = true;
         this.deps.onSeal?.('sealed');
+        break;
+      case 'sealed_words':
+        if (this.sealing && this.sealAuthenticated && this.connectionState !== 'closed') this.deps.onSeal?.('sealed', link.words);
         break;
       case 'ended':
         // The call could not stay sealed: say so. It does not go on in the clear.

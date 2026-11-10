@@ -13,8 +13,8 @@
  */
 import { Channel, invoke } from '@tauri-apps/api/core';
 
-export type MediaLinkState = 'connecting' | 'open' | 'closed' | 'ended' | 'sealed';
-export type MediaLink = { link: MediaLinkState; detail: string | null };
+export type MediaLinkState = 'connecting' | 'open' | 'closed' | 'ended' | 'sealed' | 'sealed_words';
+export type MediaLink = { link: MediaLinkState; detail: string | null; words?: string[] };
 
 export type MediaBridge = {
   /** Open the host socket for `callId` with `peer`, the call's counterparty (the node admits only that pair). */
@@ -25,7 +25,7 @@ export type MediaBridge = {
 
 type ChannelMessage = ArrayBuffer | Uint8Array | number[] | string | { link?: unknown; detail?: unknown };
 
-const LINK_STATES: readonly string[] = ['connecting', 'open', 'closed', 'ended', 'sealed'];
+const LINK_STATES: readonly string[] = ['connecting', 'open', 'closed', 'ended', 'sealed', 'sealed_words'];
 
 /** A link transition as the host sends it: a parsed object, or JSON text from an older host. */
 export function parseLinkMessage(message: unknown): MediaLink | null {
@@ -34,8 +34,12 @@ export function parseLinkMessage(message: unknown): MediaLink | null {
     try { value = JSON.parse(message); } catch { return null; }
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const { link, detail } = value as { link?: unknown; detail?: unknown };
+  const { link, detail, words } = value as { link?: unknown; detail?: unknown; words?: unknown };
   if (typeof link !== 'string' || !LINK_STATES.includes(link)) return null;
+  if (link === 'sealed_words') {
+    if (!Array.isArray(words) || words.length !== 4 || !words.every(word => typeof word === 'string' && word.length > 0)) return null;
+    return { link, detail: null, words };
+  }
   return { link: link as MediaLinkState, detail: typeof detail === 'string' ? detail : null };
 }
 

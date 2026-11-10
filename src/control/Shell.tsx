@@ -11,6 +11,7 @@ import { t as tr, possessive, languagePref, setLanguagePref, type LanguagePref }
 import { CallRepairs } from './CallRepairs';
 import { provenUnpaid } from './paymentOutcome';
 import { AddDevice } from '../onboarding/AddDevice';
+import { PairWords } from '../onboarding/PairWords';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
 import { ConnectionCard, nextLastCall, type NodeAnswer, type StunSource, type TrackedCall } from './ConnectionCard';
 import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
@@ -1395,8 +1396,12 @@ export function ControlCenter(props: Props) {
   const [callView, setCallView] = createSignal<CallView>(CALL_IDLE);
   // Only ever set on a build with sealing on. Null: the plain label.
   const [callSeal, setCallSeal] = createSignal<SealState | null>(null);
+  const [callWords, setCallWords] = createSignal<string[] | null>(null);
   // Each connection gets its own label setter; only the newest may change the label.
-  const nextSealLabel = sealLabelScope(setCallSeal);
+  const nextSealLabel = sealLabelScope((state, words) => {
+    setCallSeal(state);
+    setCallWords(words ?? null);
+  });
   const [waitingCalls, setWaitingCalls] = createSignal<CallView[]>([]);
   const waitingPanels = new Map<string, HTMLElement>();
   const isIncoming = (peer: string, id: string) => [callView(), ...waitingCalls()].some(v => v.peer === peer && v.callId === id && v.phase === 'incoming' && !v.silenced);
@@ -1479,8 +1484,8 @@ export function ControlCenter(props: Props) {
       : (config) => new RTCPeerConnection(config),
     now: () => Date.now(),
     onView: view => {
+      if (view.callId !== callView().callId || view.phase === 'idle' || view.phase === 'ended') nextSealLabel();
       setCallView(view);
-      if (view.phase === 'idle' || view.phase === 'ended') setCallSeal(null);
       if (view.phase === 'incoming' && !view.silenced && view.callId && view.peer) notifications?.call(`${view.peer}:${view.callId}`, nameOf(view.peer), () => isIncoming(view.peer!, view.callId!), () => revealIncoming(view.callId!, view.peer!));
     },
     onMissed: call => missedCalls.add(call, openKey() === `peer:${call.peer}` && document.hasFocus() && !contextOpen() && walletTab() === null),
@@ -2493,6 +2498,7 @@ export function ControlCenter(props: Props) {
         blocked={moneyBlocked()}
         routed={routedCalls}
         seal={callSeal()}
+        words={callWords()}
         view={callView()}
         streams={callStreams()}
         nameOf={nameOf}
@@ -3671,6 +3677,7 @@ function CallPanel(props: {
   /** M6: audio goes through both nodes; no direct connection, STUN or recovery notes. */
   routed?: boolean;
   seal?: SealState | null;
+  words?: string[] | null;
   view: CallView;
   streams: { local: MediaStream | null; remote: MediaStream | null };
   nameOf: (id: string) => string;
@@ -3891,6 +3898,12 @@ function CallPanel(props: {
         {/* M6: the honest label for a node-routed call, from ringing until it ends. It stays visible until the apps encrypt end to end. */}
         <Show when={props.routed && v().phase !== 'idle' && v().phase !== 'ended'}>
           <p class="hint" data-call-route="node" data-call-seal={props.seal ?? undefined}>{tr(sealLabel(props.seal ?? null))}</p>
+          <Show when={import.meta.env.VITE_CALL_SEAL === 'sealed' && props.seal === 'sealed' && props.words?.length === 4 && props.words}>
+            {(words) => <div data-call-words>
+              <PairWords words={words()} />
+              <p class="hint">{tr('caCallCompareWords')}</p>
+            </div>}
+          </Show>
         </Show>
         {/* A short card while the call lasts: the longer notes wait behind Details (display only; same texts and amounts). */}
         <Show when={v().phase !== 'ended' && (!props.routed || v().phase !== 'idle')}>
