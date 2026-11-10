@@ -73,8 +73,8 @@ not launch a window. See [remote-only development](docs/DEV_REMOTE_TEST.md)
 for storage isolation and pairing details.
 
 The default bundled-node package is a separate build path: it requires the
-pinned, signature-verified node sidecar. See [Mac packaging](docs/MAC_PACKAGE.md)
-and [the current node pin](docs/NODE_RC19_2_UPGRADE.md).
+pinned, signature-verified `v0.3.0-rc23` node sidecar. See
+[Mac packaging](docs/MAC_PACKAGE.md) and [the current node pin](src-tauri/bin/README.md).
 
 ## Preview builds
 

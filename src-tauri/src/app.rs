@@ -117,7 +117,7 @@ mod owner_contact;
 /// this; only a debug `dev-node` build may move the port (`dev_node::api_base`).
 const API_BASE: &str = "http://127.0.0.1:3141/api/v1";
 
-/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc22`): the funding
+/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc23`): the funding
 /// state machine moves to this step once the node has observed the required deposit
 /// in its own wallet. Kept host-side so the renderer never re-implements the contract.
 const FUNDING_SEEN: &str = "funding-seen";
@@ -14041,9 +14041,77 @@ mod control_act_tests {
     }
 
     #[tokio::test]
+    async fn rc23_handover_hold_releases_only_the_fresh_unpaid_send() {
+        let (inner, ops) = ops_node();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap();
+                return (400, serde_json::json!({
+                    "code": "not_dispatched", "reason": "session_handover",
+                    "error": "recipient session recovery handover is pending; retry shortly",
+                    "operation_id": body["operation_id"], "state": "prepared",
+                    "retry_allowed": true
+                }).to_string());
+            }
+            inner(m, p, b)
+        }));
+        spend_advance(&node.state, true).await.unwrap();
+        let error = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        assert_eq!(error.code, "not_dispatched");
+        assert_eq!(error.message, "Not sent - nothing was paid. recipient session recovery handover is pending; retry shortly");
+        let id = error.operation_id.unwrap();
+        assert_eq!(ledger_record(&node, &id)["state"], "unpaid");
+        assert!(pending(&node).is_none());
+        assert_eq!(budget_now(&node.state).spent_msat, 0);
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        assert_eq!(op_ids(&node), [Some(id)]);
+        assert_eq!(ops.lock().unwrap().pays, 0);
+    }
+
+    #[tokio::test]
+    async fn rc23_paid_handover_deferral_retains_payment_and_retries_the_same_operation() {
+        let (inner, ops) = ops_node();
+        ops.lock().unwrap().script = vec![("rejected_retryable", false)];
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            let reply = inner(m, p, b);
+            if p == "/messages/compose" {
+                let mut body: serde_json::Value = serde_json::from_str(&reply.1).unwrap();
+                if body["state"] == "rejected_retryable" {
+                    body["code"] = serde_json::json!(409);
+                    body["reason"] = serde_json::json!("session_handover");
+                    body["error"] = serde_json::json!("the existing payment is retained while the E2EE session recovers; retry this operation");
+                    return (409, body.to_string());
+                }
+            }
+            reply
+        }));
+        spend_advance(&node.state, true).await.unwrap();
+        let error = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert!(!error.message.contains("nothing was paid"));
+        let id = pending(&node).unwrap().operation_id.unwrap();
+        let restarted = reopen(&node);
+        let error = do_spend_reconcile(&restarted).await.unwrap_err();
+        assert_eq!(error.code, "undelivered_pending");
+        assert!(error.message.contains("2000 msat paid"));
+        assert_eq!(error.operation_id.as_deref(), Some(id.as_str()));
+        assert_eq!(ledger_record(&node, &id)["state"], "paid_undelivered");
+        assert_eq!(pending(&node).unwrap().undelivered.unwrap().paid_msat, 2000);
+        assert_eq!(op_ids(&node), [Some(id.clone())]);
+        spend_advance(&restarted, true).await.unwrap();
+        let receipt = do_message_retry(&restarted, A, "gm", None).await.unwrap();
+        assert_eq!((receipt.accepted, receipt.amount_msat), (true, 0));
+        assert_eq!(op_ids(&node), [Some(id.clone()), Some(id)]);
+        assert_eq!(compose_bodies(&node)[1]["max_total_msat"], 0);
+        assert_eq!(ops.lock().unwrap().pays, 1);
+        assert!(pending(&node).is_none());
+    }
+
+    #[tokio::test]
     async fn ledger_restart_reconciles_every_node_outcome_without_another_post() {
         for (node_state, recorded) in [("acked", "settled"), ("sent", "settled"),
-            ("paid", "paid_undelivered"), ("failed_paid", "failed_paid"),
+            ("paid", "paid_undelivered"), ("rejected_retryable", "paid_undelivered"),
+            ("stalled", "unknown"), ("deferred", "unknown"), ("failed_paid", "failed_paid"),
             ("prepared", "unpaid"), ("released", "unpaid"), ("payment_unknown", "unknown")] {
             let (node, _) = ops_fake(|n| n.script = vec![(node_state, true)]);
             spend_advance(&node.state, true).await.unwrap();
@@ -14195,22 +14263,24 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn unresolved_payment_stays_fenced_and_is_named_payment_unknown() {
-        let (node, ops) = ops_fake(|n| n.script = vec![("payment_unknown", true)]);
-        spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
-        let record = pending(&node).unwrap();
-        for _ in 0..2 {
-            let err = do_spend_reconcile(&reopen(&node)).await.unwrap_err();
-            assert_eq!(err.code, "payment_unknown");
-            assert_eq!(err.pending_id.as_deref(), Some(record.id.as_str()));
+        for state in ["payment_unknown", "deferred", "stalled"] {
+            let (node, ops) = ops_fake(|n| n.script = vec![(state, true)]);
+            spend_advance(&node.state, true).await.unwrap();
+            assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
+            let record = pending(&node).unwrap();
+            for _ in 0..2 {
+                let err = do_spend_reconcile(&reopen(&node)).await.unwrap_err();
+                assert_eq!(err.code, "payment_unknown");
+                assert_eq!(err.pending_id.as_deref(), Some(record.id.as_str()));
+            }
+            assert_eq!(serde_json::to_value(pending(&node).unwrap()).unwrap(), serde_json::to_value(&record).unwrap());
+            assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
+            assert_eq!(compose_bodies(&node).len(), 1);
+            // The node later resolves it: the same id reconciles, still no resend.
+            ops.lock().unwrap().ops.values_mut().for_each(|op| op.1 = "acked");
+            assert!(do_spend_reconcile(&node.state).await.unwrap().starts_with("Accepted"));
+            assert_eq!((compose_bodies(&node).len(), ops.lock().unwrap().pays), (1, 1));
         }
-        assert_eq!(serde_json::to_value(pending(&node).unwrap()).unwrap(), serde_json::to_value(&record).unwrap());
-        assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
-        assert_eq!(compose_bodies(&node).len(), 1);
-        // The node later resolves it: the same id reconciles, still no resend.
-        ops.lock().unwrap().ops.values_mut().for_each(|op| op.1 = "acked");
-        assert!(do_spend_reconcile(&node.state).await.unwrap().starts_with("Accepted"));
-        assert_eq!((compose_bodies(&node).len(), ops.lock().unwrap().pays), (1, 1));
     }
 
     // Set the durable wall-clock dispatch time without sleeping through the grace period.
