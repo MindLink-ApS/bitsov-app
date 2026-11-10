@@ -85,6 +85,21 @@ afterEach(() => {
   setLanguagePref('en');
 });
 
+describe('comparison word channel messages', () => {
+  it('keeps exactly four words in host order on the dedicated event', () => {
+    expect(parseLinkMessage({ link: 'sealed_words', words: ['zebra', 'acoustic', 'velvet', 'anchor'] })).toEqual({
+      link: 'sealed_words', detail: null, words: ['zebra', 'acoustic', 'velvet', 'anchor'],
+    });
+  });
+
+  it('rejects incomplete word events and excludes words from other link events', () => {
+    for (const words of [null, [], ['one'], ['one', 'two', 'three'], ['one', 'two', 'three', 'four', 'five'], ['one', 'two', 'three', 4], ['one', 'two', 'three', '']]) {
+      expect(parseLinkMessage({ link: 'sealed_words', words })).toBeNull();
+    }
+    expect(parseLinkMessage({ link: 'open', words: ['zebra', 'acoustic', 'velvet', 'anchor'] })).toEqual({ link: 'open', detail: null });
+  });
+});
+
 describe('the build flag', () => {
   it('is off unless the exact value is set, and never on the lab path', () => {
     expect(sealedAudio({})).toBe(false);

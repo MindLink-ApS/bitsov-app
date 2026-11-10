@@ -615,8 +615,7 @@ impl SealedMedia {
         self.sas_digest = Some(keys.sas_digest);
     }
 
-    /// The call's four words, once this side has the keys. No screen shows
-    /// them yet; they exist so that a later slice can, and so tests can compare.
+    /// The call's four words, once this side has the keys.
     pub fn words(&self) -> Option<[&'static str; 4]> {
         use zeroize::Zeroize;
         self.sas_digest.as_ref().map(|digest| {
@@ -939,6 +938,23 @@ mod tests {
         assert_eq!(*callee.send.as_ref().unwrap().key, unhex::<32>("734e7008a567eed7da87dae5f67b85d5bc5c4d631684b2270ee8d87f47cf219a"));
         assert_eq!(caller.words(), callee.words());
         assert!(caller.words().is_some());
+    }
+
+    #[test]
+    fn a_new_call_derives_new_comparison_words() {
+        let complete = |call_id: &str| {
+            let parties = Parties::new(call_id, &"a1".repeat(32), &"b2".repeat(32)).unwrap();
+            let (offer, line) = CallerOffer::with_secret(parties.clone(), StaticSecret::from([0x11; 32]), [0xc1; 16]);
+            let AnswerDecision::Seal { media, attribute } = answer_with_secret(parties, &line, StaticSecret::from([0x22; 32]), [0xe1; 16]).unwrap() else { panic!("no seal") };
+            let mut caller = offer.accept_answer(&attribute).unwrap().unwrap();
+            let mut callee = *media;
+            let now = Instant::now();
+            let Tick::Send(reveal) = caller.tick(now).unwrap() else { panic!("no reveal") };
+            callee.receive(&reveal, now).unwrap();
+            assert_eq!(caller.words(), callee.words());
+            caller.words().unwrap()
+        };
+        assert_ne!(complete("0123456789abcdef0123456789abcdef"), complete("fedcba9876543210fedcba9876543210"));
     }
 
     #[test]

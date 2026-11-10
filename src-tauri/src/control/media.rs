@@ -250,6 +250,17 @@ impl FrameQueue {
     }
 }
 
+#[cfg(feature = "call-seal")]
+#[derive(Clone, PartialEq, Eq)]
+pub struct SealWords([&'static str; 4]);
+
+#[cfg(feature = "call-seal")]
+impl std::fmt::Debug for SealWords {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SealWords { .. }")
+    }
+}
+
 /// Link transitions the renderer sees, as JSON text on the media channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MediaLink {
@@ -262,6 +273,8 @@ pub enum MediaLink {
     /// On a sealed call: the first frame from the peer authenticated. Never
     /// sent on any other call.
     Sealed,
+    #[cfg(feature = "call-seal")]
+    Words(SealWords),
 }
 
 impl MediaLink {
@@ -272,6 +285,8 @@ impl MediaLink {
             MediaLink::Closed(detail) => ("closed", detail.as_deref()),
             MediaLink::Ended(detail) => ("ended", detail.as_deref()),
             MediaLink::Sealed => ("sealed", None),
+            #[cfg(feature = "call-seal")]
+            MediaLink::Words(words) => return serde_json::json!({ "link": "sealed_words", "detail": null, "words": words.0 }).to_string(),
         };
         serde_json::json!({ "link": link, "detail": detail }).to_string()
     }
@@ -317,7 +332,7 @@ pub async fn run_media_session(
 /// first frame from the peer authenticated.
 pub struct SealLink<'a> {
     pub media: &'a mut SealedMedia,
-    pub on_first_authentic: &'a (dyn Fn() + Send + Sync),
+    pub on_first_authentic: &'a (dyn Fn(&SealedMedia) + Send + Sync),
 }
 
 /// How often a sealed session looks at its timers. No effect on any other call.
@@ -434,7 +449,7 @@ pub async fn run_media_session_with_seal(
                                 Err(end) => return Err(SessionEnd::SealEnded(end.code())),
                             }
                             if seal.media.take_first_authentic() {
-                                (seal.on_first_authentic)();
+                                (seal.on_first_authentic)(seal.media);
                             }
                         }
                     },
@@ -537,7 +552,16 @@ pub async fn run_media_link_with_seal<F, Fut>(
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<Option<(String, String, String)>, String>>,
 {
-    let on_first_authentic = || emit(MediaLink::Sealed);
+    let on_first_authentic = |_media: &SealedMedia| {
+        if stopping() { return; }
+        emit(MediaLink::Sealed);
+        #[cfg(feature = "call-seal")]
+        if _media.authenticated() {
+            if let Some(words) = _media.words() {
+                emit(MediaLink::Words(SealWords(words)));
+            }
+        }
+    };
     let mut next_seq = 0u32;
     let mut attempt = 0u32;
     let mut proxy_refusals = 0u32;
@@ -727,6 +751,18 @@ mod tests {
         assert_eq!(MediaLink::Closed(Some("x".into())).to_json(), r#"{"detail":"x","link":"closed"}"#);
         assert_eq!(MediaLink::Ended(None).to_json(), r#"{"detail":null,"link":"ended"}"#);
         assert_eq!(MediaLink::Connecting.to_json(), r#"{"detail":null,"link":"connecting"}"#);
+    }
+
+    #[cfg(feature = "call-seal")]
+    #[test]
+    fn comparison_words_reach_the_channel_in_order_but_not_diagnostics() {
+        let event = MediaLink::Words(SealWords(["zebra", "acoustic", "velvet", "anchor"]));
+        let message: serde_json::Value = serde_json::from_str(&event.to_json()).unwrap();
+        assert_eq!(message, serde_json::json!({ "link": "sealed_words", "detail": null, "words": ["zebra", "acoustic", "velvet", "anchor"] }));
+        let diagnostics = format!("{event:?}");
+        for word in ["zebra", "acoustic", "velvet", "anchor"] {
+            assert!(!diagnostics.contains(word));
+        }
     }
 
     /// A loopback stand-in for the node's media route: records the handshake,
@@ -1265,6 +1301,19 @@ mod tests {
         assert!(a.events.contains(&MediaLink::Sealed));
         assert!(b.events.contains(&MediaLink::Sealed));
         assert_eq!(a.events.iter().filter(|e| **e == MediaLink::Sealed).count(), 1);
+        for run in [&a, &b] {
+            let messages: Vec<serde_json::Value> = run.events.iter().map(|event| serde_json::from_str(&event.to_json()).unwrap()).collect();
+            let comparison: Vec<_> = messages.iter().filter(|message| message["link"] == "sealed_words").collect();
+            assert_eq!(comparison.len(), 1);
+            assert_eq!(comparison[0]["words"], serde_json::json!(run.words.unwrap()));
+            let sealed_at = messages.iter().position(|message| message["link"] == "sealed").unwrap();
+            let words_at = messages.iter().position(|message| message["link"] == "sealed_words").unwrap();
+            assert!(words_at > sealed_at);
+            let diagnostics = format!("{:?}", run.events);
+            for word in run.words.unwrap() {
+                assert!(!diagnostics.split(|c: char| !c.is_ascii_alphabetic()).any(|token| token == word));
+            }
+        }
         // The renderer gets the other side's plain frames, numbered from stream_seq.
         assert!(a.downlink.iter().all(|f| f.payload[..2] == [0x02, 0xB]));
         assert!(b.downlink.iter().all(|f| f.payload[..2] == [0x02, 0xA]));
@@ -1304,6 +1353,7 @@ mod tests {
         server.abort();
         assert_eq!(run.events.last(), Some(&MediaLink::Ended(Some("seal_bad_reveal".into()))));
         assert!(!run.events.contains(&MediaLink::Sealed));
+        assert!(run.events.iter().all(|event| !event.to_json().contains("words")));
         assert!(run.downlink.is_empty(), "the clear frame never reached the renderer");
         assert_eq!(run.counters.clear_refused, 1);
         assert!(seen.lock().unwrap().is_empty(), "the callee has no keys: it sent nothing");
