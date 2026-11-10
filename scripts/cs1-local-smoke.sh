@@ -17,12 +17,12 @@
 # edits. The node's init defaults are non-colliding and its migrations are embedded since
 # v0.3.0-rc6 (BitSov-bitsov #56/#57, fixed in #61).
 #
-# rc22 retains the #66 fix. This smoke tests fresh init defaults without the
+# rc23 retains the #66 fix. This smoke tests fresh init defaults without the
 # old rc6 endpoint overrides; existing operator data/config is never used.
 set -euo pipefail
 
 if [ -n "${CS1_SMOKE_ESPLORA_PRIMARY:-}${CS1_SMOKE_ESPLORA_FALLBACK:-}" ]; then
-  echo "SMOKE: FAIL - rc6 endpoint overrides are retired; unset CS1_SMOKE_ESPLORA_PRIMARY and CS1_SMOKE_ESPLORA_FALLBACK to test rc22 defaults." >&2
+  echo "SMOKE: FAIL - rc6 endpoint overrides are retired; unset CS1_SMOKE_ESPLORA_PRIMARY and CS1_SMOKE_ESPLORA_FALLBACK to test rc23 defaults." >&2
   exit 1
 fi
 
@@ -92,7 +92,7 @@ ensure_init() {
   echo "SMOKE: init sidecar node in $DATA_DIR"
   "$SIDECAR" init --dir "$DATA_DIR" --non-interactive --tier full >"$LOG_FILE" 2>&1
   if [ ! -s "$CONFIG" ] || [ ! -f "$DATA_DIR/NODE_INITIALIZED" ]; then
-    echo "SMOKE: FAIL - rc22 init did not create config and NODE_INITIALIZED" >&2
+    echo "SMOKE: FAIL - rc23 init did not create config and NODE_INITIALIZED" >&2
     sed -n '1,120p' "$LOG_FILE" >&2
     exit 1
   fi

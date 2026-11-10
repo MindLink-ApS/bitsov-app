@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 //   into the app config. Older pins can omit these fields too. New fields and
 //   changed defaults must fail until deliberately reviewed here. The three
 //   known rc7/owner-node web default differences are listed separately below.
-// Defaults validated against the signed rc22 binary. LAN setup
+// Defaults validated against the signed rc23 binary. LAN setup
 // limits are internal constants; grant breakers live in pairing records, not TOML.
 const OMITTED_DEFAULTS: &str = r#"
 disk_free_floor_bytes = 2147483648
@@ -112,6 +112,8 @@ rotation_count = 24
 listen_addr = "127.0.0.1:3141"
 rate_limit_rps = 60
 cors_enabled = true
+# rc23: the owner API stays loopback-only without an explicit opt-in.
+allow_non_loopback_bind = false
 
 [remote_access]
 
@@ -140,6 +142,10 @@ kits_per_day = 2
 enabled = false
 
 [calls]
+# rc23: inherited per-direction media limits; no bulk-lane dropping by default.
+media_max_frames_per_second = 100
+media_max_bytes_per_second = 65536
+media_drop_bulk_over_share = false
 "#;
 
 fn remove_documented_web_defaults(node: &mut toml::Value) {
