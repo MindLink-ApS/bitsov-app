@@ -15137,6 +15137,56 @@ mod control_act_tests {
         assert_eq!(ops.lock().unwrap().pays, 1);
     }
 
+    #[tokio::test]
+    async fn paid_undelivered_retry_keeps_the_payment_during_session_handover() {
+        for code in [serde_json::json!("session_handover"), serde_json::json!(409)] {
+            let (routes, ops) = ops_node();
+            { let mut n = ops.lock().unwrap(); n.script = vec![("paid", false)]; n.settled_incomplete = true; }
+            let count = std::sync::atomic::AtomicUsize::new(0);
+            let routes: Routes = Arc::new(move |m, p, b| {
+                if p == "/messages/compose" && matches!(count.fetch_add(1, Ordering::SeqCst), 1 | 2) {
+                    let body: serde_json::Value = serde_json::from_str(b).unwrap();
+                    return (409, serde_json::json!({
+                        "code": code, "reason": "session_handover",
+                        "error": "the existing payment is retained while the E2EE session recovers; retry this operation",
+                        "operation_id": body["operation_id"], "state": "rejected_retryable",
+                        "payment_hash": OP_HASH, "accepted": false, "retry_allowed": true,
+                    }).to_string());
+                }
+                routes(m, p, b)
+            });
+            let node = fake(AuthMode::Local, routes);
+            spend_advance(&node.state, true).await.unwrap();
+            let initial = do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err();
+            assert_eq!(initial.code, "payment_settled_undelivered");
+            let before = budget_now(&node.state);
+            for _ in 0..2 {
+                let error = do_message_retry(&node.state, A, "gm", None).await.unwrap_err();
+                assert_eq!(error.code, "payment_settled_undelivered");
+                assert_eq!(error.undelivered, Some(act::UndeliveredView { paid_msat: 2000, retry: true }));
+                assert_eq!(error.pending_id, initial.pending_id);
+                assert_eq!(error.operation_id, initial.operation_id);
+                let saved = pending(&node).unwrap();
+                let undelivered = saved.undelivered.unwrap();
+                assert!(undelivered.retry && !undelivered.in_flight);
+                assert_eq!(undelivered.paid_msat, 2000);
+                assert_eq!(ledger_record(&node, saved.operation_id.as_deref().unwrap())["state"], "paid_undelivered");
+                let after = budget_now(&node.state);
+                assert_eq!((after.spent_msat, after.unsettled_msat), (before.spent_msat, before.unsettled_msat));
+                assert_eq!(ops.lock().unwrap().pays, 1);
+            }
+            assert!(do_message_retry(&node.state, A, "gm", None).await.unwrap().accepted);
+            assert!(pending(&node).is_none());
+            assert_eq!(ops.lock().unwrap().pays, 1);
+            let bodies = compose_bodies(&node);
+            assert_eq!(bodies.len(), 4);
+            for body in &bodies[1..] {
+                assert_eq!(body["operation_id"], bodies[0]["operation_id"]);
+                assert_eq!(body["max_total_msat"], 0);
+            }
+        }
+    }
+
     /// The `nth` compose stays open at the node until the test releases it.
     /// `open_at_lookup` records, per `GET /messages/operations/{id}`, whether
     /// that compose was still open when the lookup arrived.
