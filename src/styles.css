@@ -1822,6 +1822,10 @@ html:is([data-platform='ios'], [data-platform='android']):has(.cc[data-phone-she
 html[data-platform='ios']:has(.cc[data-phone-shell='true']) .call-panel {
   bottom: calc(var(--keyboard-inset) + max(var(--s-6), var(--safe-area-bottom)) + var(--phone-tab-bar-h));
 }
+/* Queued cards scroll inside .waiting-calls; an edge offset would push their header out of the list. */
+html:is([data-platform='ios'], [data-platform='android']):has(.cc[data-phone-shell='true']) .waiting-calls .call-panel {
+  bottom: auto;
+}
 html:is([data-platform='ios'], [data-platform='android']):has(.cc[data-phone-shell='true']) :is(.meeting-panel, .call-panel[data-call-panel]) {
   max-height: calc(100dvh - max(var(--s-6), env(safe-area-inset-top, 0px)) - max(var(--s-6), env(safe-area-inset-bottom, 0px)) - var(--phone-tab-bar-h));
 }

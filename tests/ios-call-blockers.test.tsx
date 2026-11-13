@@ -102,6 +102,20 @@ it('lifts the call panel above the phone tab bar on iOS', () => {
   expect(panel.bottom).toContain(tabBar);
 });
 
+it.each(['ios', 'android'])('keeps a queued call card at its place in the waiting list on %s', (platform) => {
+  document.documentElement.dataset.platform = platform;
+  document.documentElement.style.setProperty('--s-1', '4px');
+  document.documentElement.style.setProperty('--s-6', '24px');
+  document.body.innerHTML = '<main class="cc" data-phone-shell="true"></main>'
+    + '<aside class="call-panel" data-call-panel="active"></aside>'
+    + '<div class="waiting-calls" data-waiting-calls><aside class="call-panel" data-call-panel="incoming"></aside></div>';
+  const [active, queued] = [...document.querySelectorAll('.call-panel')].map(el => getComputedStyle(el));
+  // The fixed panel is lifted above the tab bar; a queued card scrolls in its list, so a bottom
+  // offset would push its header above the list's top edge.
+  expect(active.bottom).toContain('calc(4px + 44px + max(4px, 34px))');
+  expect(queued.bottom).toBe('auto');
+});
+
 it('blocks Back for a pending spending approval loaded from the node on startup', async () => {
   const source = sampleSource();
   source.spendStatus = async () => ({ state: 'pending', basis: null, open_until_ms: null, window_ms: 600_000,
