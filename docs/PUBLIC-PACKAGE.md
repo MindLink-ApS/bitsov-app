@@ -40,7 +40,7 @@ reads a manifest yet. The node attaches `site`; the app never sends it.
 
 ### 1.2 The owner editor (`src/control/Discover.tsx`, `frontDoorMedia.ts`)
 
-- Name, tagline, about, avatar, up to 12 media items, one website link and a
+- Name, tagline, about, avatar, up to 12 media items, one web page link and a
   CV text box.
 - Images are resized in a canvas and re-encoded as JPEG; only a 64 px thumb
   or a 96 px avatar is inlined. Media go on the card **by hash only**; the
