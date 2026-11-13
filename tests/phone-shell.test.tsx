@@ -95,6 +95,8 @@ it('returns to the live call from Wallet when the on-call pill is tapped', async
     plaintext: JSON.stringify({ v: 1, call_id: '0123456789abcdef0123456789abcdef', media: 'audio', sdp: 'v=0 offer' }),
   } });
   await vi.waitFor(() => expect(document.querySelector('[data-call-panel="incoming"]')).not.toBeNull());
+  // Accept stays off until the call price has been read (main's Accept flow).
+  await vi.waitFor(() => expect(document.querySelector<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
   await click('[data-call-accept]');
   await vi.waitFor(() => expect(signal).toHaveBeenCalled());
   await vi.waitFor(() => expect(document.querySelector('[data-on-call], [data-call-panel="connecting"], [data-call-panel="live"]')).not.toBeNull());
