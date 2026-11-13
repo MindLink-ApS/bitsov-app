@@ -16,11 +16,11 @@ class ProductionPinTests(unittest.TestCase):
     def test_published_pins_are_complete_and_match_signed_release(self):
         # Literal entries authenticated from the published SHA256SUMS. Exercise
         # the production lookup, without the fixture's replacement pin table.
-        expected = """ebebac6106643a1cbdd3b074ef8cc4ae97ab8030e9db9f87ea2331e139db603a  bitsov-darwin-aarch64
-5f0021dfdd48c43d562c5466af27a03cd009b1290cf0c6e9e3ae7bb68167ce3d  bitsov-darwin-x86_64
-5579bde984273410e28dedc70e3b8a3152aab0637c95e105c6af0bcd65c14881  bitsov-linux-aarch64
-df59ed5649b10dc317cd9c9643109b4e14104d4475661f02cefa8b28d45dcf27  bitsov-linux-x86_64
-74905b8b6454722c15b3ddd8198c28551c5d70be83141bacad3608382fccb8d9  bitsov-windows-x86_64"""
+        expected = """0fbfd27ac928492548598f76a250449e60e9dc9ed863f9b889a014bd27e4725b  bitsov-darwin-aarch64
+dbca8de0eb226ba9f69b60c6988018d5440db92828adee6156be5e0bbabc6960  bitsov-darwin-x86_64
+f5b24311d4152e6158e2e67547baf15d2e21003f924168520bff427072f37ff3  bitsov-linux-aarch64
+18947d9725490f8514b46b31eeb722dccdc1a12aaa703081efdbcc5a9e179544  bitsov-linux-x86_64
+5b7c39ae20b5b24ca073f2200f2493f9e8c73309bd3d5bf1a45ed3ea2463c13c  bitsov-windows-x86_64"""
         result = subprocess.run([
             "bash", "-c",
             'source scripts/fetch-node-sidecar.sh; require_complete_checksum_pin; '
@@ -198,6 +198,25 @@ class SidecarTests(unittest.TestCase):
         empty = self.root / "empty-keyring"
         empty.mkdir(mode=0o700)
         self.env["GNUPGHOME"] = str(empty)
+        result = self.run_verify()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertFalse((empty / "private-keys-v1.d").exists())
+
+    def test_key_import_works_when_mkdir_cannot_set_permissions(self):
+        # Git Bash can create a private temporary directory, but `mkdir -m`
+        # fails on the Windows runner. Keep the real GPG/signature checks.
+        empty = self.root / "empty-keyring"
+        empty.mkdir(mode=0o700)
+        self.env["GNUPGHOME"] = str(empty)
+        mkdir = self.root / "fakebin/mkdir"
+        mkdir.write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = -m ]; then\n'
+            '  echo "mkdir: cannot change permissions" >&2\n'
+            '  exit 1\n'
+            'fi\n'
+            'exec /bin/mkdir "$@"\n')
+        mkdir.chmod(0o755)
         result = self.run_verify()
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertFalse((empty / "private-keys-v1.d").exists())

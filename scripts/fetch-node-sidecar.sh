@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Fetch + VERIFY the pinned, signed BitSov node binary and place it as the Tauri
 # sidecar for this host. The node binary is NEVER committed (Gate G1: bundled binary,
-# fetched + verified, not vendored). v0.3.0-rc19.2 targets Linux, macOS and Windows node
+# fetched + verified, not vendored). v0.3.0-rc23 targets Linux, macOS and Windows node
 # binaries, so all three hosts can produce a sidecar. Release assets carry no .exe suffix
 # on any host; only the installed Windows sidecar is renamed to .exe (Tauri's resolver).
-# rc19.2 is signed and published. Fetch requires release access and
+# rc23 is signed and published. Fetch requires release access and
 # both SHA256SUMS and SHA256SUMS.asc; missing assets fail closed. Nothing here publishes it.
 #
 # Verification is fail-closed, in two steps:
@@ -28,18 +28,18 @@
 # verify_release_signature against local test keys, including every refusal class above.
 set -euo pipefail
 
-TAG="v0.3.0-rc19.2"
+TAG="v0.3.0-rc23"
 REPO="MindLink-ApS/BitSov-bitsov"
 KEY_FPR="B299274C200301714DC6F51A7C2D6F8AC842EF6E"
 
-# Binary pins copied from the verified, signed rc19.2 SHA256SUMS.
-# Manifest sha256: 142cdd18c20352979bb318664551bbbef10b6e86b6708e14f4751e0c702c0fcb
+# Binary pins copied from the verified, signed rc23 SHA256SUMS.
+# Manifest sha256: e56cfcf28583d01d1d61f20d7dfcec39c83cad8f177432668c0e642cf2860f17
 # These are enforced pins, not illustrative hashes. No flag/environment bypass.
-EXPECTED_SHA256SUMS='ebebac6106643a1cbdd3b074ef8cc4ae97ab8030e9db9f87ea2331e139db603a  bitsov-darwin-aarch64
-5f0021dfdd48c43d562c5466af27a03cd009b1290cf0c6e9e3ae7bb68167ce3d  bitsov-darwin-x86_64
-5579bde984273410e28dedc70e3b8a3152aab0637c95e105c6af0bcd65c14881  bitsov-linux-aarch64
-df59ed5649b10dc317cd9c9643109b4e14104d4475661f02cefa8b28d45dcf27  bitsov-linux-x86_64
-74905b8b6454722c15b3ddd8198c28551c5d70be83141bacad3608382fccb8d9  bitsov-windows-x86_64'
+EXPECTED_SHA256SUMS='0fbfd27ac928492548598f76a250449e60e9dc9ed863f9b889a014bd27e4725b  bitsov-darwin-aarch64
+dbca8de0eb226ba9f69b60c6988018d5440db92828adee6156be5e0bbabc6960  bitsov-darwin-x86_64
+f5b24311d4152e6158e2e67547baf15d2e21003f924168520bff427072f37ff3  bitsov-linux-aarch64
+18947d9725490f8514b46b31eeb722dccdc1a12aaa703081efdbcc5a9e179544  bitsov-linux-x86_64
+5b7c39ae20b5b24ca073f2200f2493f9e8c73309bd3d5bf1a45ed3ea2463c13c  bitsov-windows-x86_64'
 
 pinned_checksum() {
   printf '%s\n' "$EXPECTED_SHA256SUMS" | awk -v asset="$1" '
@@ -114,8 +114,10 @@ download_verified_checksums() (
   echo "→ verifying GPG signature (pinned release key $KEY_FPR)"
   if ! gpg --batch --list-keys "$KEY_FPR" >/dev/null 2>&1; then
     echo "  pinned key not in the local keyring; importing RELEASE_KEY.asc from $REPO@main into a throwaway keyring"
-    export GNUPGHOME="$dir/gnupg"
-    mkdir -m 0700 "$GNUPGHOME" || return 1
+    # mktemp creates a private directory without a separate chmod operation,
+    # which `mkdir -m` cannot perform under Git Bash on Windows.
+    GNUPGHOME="$(mktemp -d "$dir/gnupg.XXXXXX")" || return 1
+    export GNUPGHOME
     gh api "repos/$REPO/contents/RELEASE_KEY.asc?ref=main" -H "Accept: application/vnd.github.raw" > "$dir/RELEASE_KEY.asc" \
       || { echo "  REFUSED: cannot obtain RELEASE_KEY.asc from $REPO@main" >&2; return 1; }
     gpg --batch --import "$dir/RELEASE_KEY.asc" >/dev/null 2>&1 \

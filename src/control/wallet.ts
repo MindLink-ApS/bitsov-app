@@ -6,7 +6,7 @@ import { t } from '../i18n';
  * host checks that already guard them; this file only shapes what is shown.
  */
 import { createRoot, createSignal } from 'solid-js';
-import { CALL_ANSWER, CALL_HANGUP, CALL_ICE, CALL_OFFER, isCallKind } from './call';
+import { CALL_ANSWER, CALL_HANGUP, CALL_ICE, CALL_OFFER, isCallKind, isCallTrafficKind } from './call';
 import { amount as fmtAmount } from './format';
 import type { Artifact, Channel, InvoiceStatus, Message, WalletOverview } from './types';
 
@@ -134,7 +134,7 @@ export function messageActivity(messages: Message[], own: string): Activity[] {
     .filter((m) => (m.payment_amount_msat ?? 0) > 0)
     .map((m): Activity => {
       const out = m.sender.toLowerCase() === me;
-      const kind: ActivityKind = isCallKind(m.kind) ? 'call' : m.kind === 200 ? 'file' : 'message';
+      const kind: ActivityKind = isCallTrafficKind(m.kind) ? 'call' : m.kind === 200 ? 'file' : 'message';
       return {
         id: `m:${m.id}`,
         at: m.timestamp,

@@ -8,20 +8,87 @@ trait KeyStore {
     fn add(&self, seed: &[u8; 32]) -> Result<(), PairError>;
 }
 
-#[cfg(target_os = "ios")]
-struct NativeStore<'a>(&'a Path);
-#[cfg(target_os = "ios")]
+#[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
+struct NativeStore<'a>(&'a Path, Option<&'a bitsov_ffi::client_keychain::AuthenticationContext>);
+#[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
 impl KeyStore for NativeStore<'_> {
     fn read(&self) -> Result<Option<Zeroizing<[u8; 32]>>, PairError> {
-        bitsov_ffi::client_keychain::read(self.0).map_err(PairError::Local)
+        bitsov_ffi::client_keychain::read_with_context(self.0, self.1).map_err(PairError::Local)
     }
     fn add(&self, seed: &[u8; 32]) -> Result<(), PairError> {
         bitsov_ffi::client_keychain::add(self.0, seed).map_err(PairError::Local)
     }
 }
-#[cfg(target_os = "ios")]
+#[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
 pub(super) fn load_native(dir: &Path) -> Result<ClientKey, PairError> {
-    load_or_create(dir, &NativeStore(dir))
+    load_native_with_context(dir, None)
+}
+
+#[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
+fn load_native_with_context(dir: &Path, context: Option<&bitsov_ffi::client_keychain::AuthenticationContext>) -> Result<ClientKey, PairError> {
+    load_selected(dir, &NativeStore(dir, context), at_rest::installed(),
+        bitsov_ffi::client_keychain::data_protection_available())
+}
+
+/// The packaged process exercises the production selector and identity store.
+/// Only the authentication context differs: headless reads fail instead of
+/// opening a prompt, including in an entitled bundle.
+#[cfg(all(not(test), target_os = "macos", not(feature = "mobile")))]
+pub(super) fn smoke_test() -> Result<&'static str, String> {
+    use bitsov_ffi::client_keychain as native;
+    let entitled = native::data_protection_available();
+    let path = if entitled { "data-protection-keychain" } else { "enclave-sealed-file" };
+    println!("identity storage smoke: path={path}");
+    crate::at_rest::install_macos();
+    let support = std::path::PathBuf::from(std::env::var_os("HOME").ok_or("missing home directory")?)
+        .join("Library/Application Support");
+    let temporary = tempfile::Builder::new().prefix("bitsov-storage-smoke-")
+        .tempdir_in(support).map_err(|e| e.to_string())?;
+    let directory = temporary.path().join("app-client");
+    let context = native::AuthenticationContext::new_headless("Test BitSov identity storage")?;
+    let roundtrip = (|| {
+        let first = load_native_with_context(&directory, Some(&context)).map_err(|e| e.to_string())?;
+        let expected = if entitled { MARKER } else { SEALED_KEY_FILE };
+        if !directory.join(expected).is_file() || directory.join(KEY_FILE).exists() {
+            return Err("identity was not published in the selected protected store".to_string());
+        }
+        println!("identity storage smoke: add OK");
+        let again = load_native_with_context(&directory, Some(&context)).map_err(|e| e.to_string())?;
+        if first.public_hex() != again.public_hex() {
+            return Err("identity changed during protected readback".to_string());
+        }
+        println!("identity storage smoke: read OK");
+        Ok(())
+    })();
+    // Also retire the exact throwaway item if add succeeded but read refused UI.
+    let deletion = if entitled { native::delete(&directory) } else { Ok(()) };
+    deletion?;
+    roundtrip?;
+    if entitled && native::read_with_context(&directory, Some(&context))?.is_some() {
+        return Err("throwaway Keychain identity survived deletion".into());
+    }
+    temporary.close().map_err(|e| e.to_string())?;
+    if directory.exists() { return Err("throwaway identity directory survived deletion".into()); }
+    println!("identity storage smoke: delete OK");
+    Ok(path)
+}
+
+// Backend selection is based on the running process's validated entitlement,
+// never on the result of an authenticated read or write.
+fn load_selected(dir: &Path, store: &dyn KeyStore, sealer: Option<&dyn Sealer>, entitled: bool) -> Result<ClientKey, PairError> {
+    if entitled { return load_or_create_with_sealer(dir, store, sealer); }
+    match std::fs::symlink_metadata(dir.join(MARKER)) {
+        Ok(_) => return Err(failure("this identity requires the original app's Keychain entitlement")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Err(_) => return Err(failure("cannot inspect client Keychain marker")),
+    }
+    struct Strict<'a>(&'a dyn Sealer);
+    impl Sealer for Strict<'_> {
+        fn seal(&self, purpose: &str, bytes: &[u8]) -> Result<Vec<u8>, String> { self.0.seal(purpose, bytes) }
+        fn open(&self, purpose: &str, bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> { self.0.open(purpose, bytes) }
+    }
+    let sealer = sealer.ok_or_else(|| failure("Secure Enclave storage is unavailable; try again"))?;
+    ClientKey::load_or_create_sealed(dir, &Strict(sealer))
 }
 
 fn failure(message: &str) -> PairError { PairError::Local(message.into()) }
@@ -74,13 +141,16 @@ fn wipe(dir: &Path, mut file: std::fs::File) -> Result<(), PairError> {
         .map_err(|_| failure("cannot sync client key cleanup"))
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn load_or_create(dir: &Path, store: &dyn KeyStore) -> Result<ClientKey, PairError> {
+    load_or_create_with_sealer(dir, store, None)
+}
+
+#[cfg(unix)]
+fn load_or_create_with_sealer(dir: &Path, store: &dyn KeyStore, sealer: Option<&dyn Sealer>) -> Result<ClientKey, PairError> {
     let _lock = SEALED_KEY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     restrict_dir(dir)?;
-    // iOS has never produced a sealed seed. Never silently replace one if a
-    // foreign store or future format appears here.
-    if sealed_file_exists(dir)? { return Err(failure("protected client key requires its original storage provider")); }
+    let sealed = sealed_file_exists(dir)?;
     let marker = dir.join(MARKER);
     let marked = match std::fs::symlink_metadata(&marker) {
         Ok(m) if m.is_file() => true,
@@ -97,13 +167,18 @@ fn load_or_create(dir: &Path, store: &dyn KeyStore) -> Result<ClientKey, PairErr
         let saved_key = ClientKey::from_seed(**saved.as_ref().expect("marked key checked above"));
         if public != saved_key.public_hex() { return Err(failure("client Keychain identity does not match the saved public identity")); }
     }
+    let sealed_seed = if sealed {
+        Some(super::sealed_seed(&dir.join(SEALED_KEY_FILE), sealer.ok_or_else(||
+            failure("protected client key requires its original storage provider"))?)?)
+    } else { None };
     let old = legacy(dir, if marked { saved.as_deref() } else { None })?;
     let seed = match saved {
         Some(seed) => seed,
         None => {
-            let seed = match &old {
-                Some((_, seed)) => seed.clone(),
-                None => {
+            let seed = match (&sealed_seed, &old) {
+                (Some(seed), _) => seed.clone(),
+                (None, Some((_, seed))) => seed.clone(),
+                (None, None) => {
                     let mut seed = Zeroizing::new([0; 32]);
                     getrandom::getrandom(&mut seed[..]).map_err(|_| failure("no randomness for client key"))?;
                     seed
@@ -118,6 +193,9 @@ fn load_or_create(dir: &Path, store: &dyn KeyStore) -> Result<ClientKey, PairErr
     if old.as_ref().is_some_and(|(_, old_seed)| **old_seed != *seed) {
         return Err(failure("legacy and Keychain client identities differ; neither was replaced"));
     }
+    if sealed_seed.as_ref().is_some_and(|old| **old != *seed) {
+        return Err(failure("sealed and Keychain client identities differ; neither was replaced"));
+    }
     let key = ClientKey::from_seed(*seed);
     if !marked {
         let mut temp = tempfile::NamedTempFile::new_in(dir).map_err(|_| failure("cannot create client Keychain marker"))?;
@@ -127,6 +205,10 @@ fn load_or_create(dir: &Path, store: &dyn KeyStore) -> Result<ClientKey, PairErr
     }
     std::fs::File::open(dir).and_then(|f| f.sync_all()).map_err(|_| failure("cannot sync client Keychain marker"))?;
     if let Some((file, _)) = old { wipe(dir, file)?; }
+    if sealed {
+        std::fs::remove_file(dir.join(SEALED_KEY_FILE)).map_err(|_| failure("cannot remove migrated sealed client key"))?;
+        std::fs::File::open(dir).and_then(|f| f.sync_all()).map_err(|_| failure("cannot sync sealed client key cleanup"))?;
+    }
     Ok(key)
 }
 
@@ -153,6 +235,65 @@ mod tests {
             if item.is_some() { return Err(PairError::Local("duplicate".into())); }
             *item = Some(Zeroizing::new(if self.corrupt_write { [9; 32] } else { *seed }));
             Ok(())
+        }
+    }
+    #[test]
+    fn unentitled_mac_creates_and_reloads_only_enclave_sealed_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let sealer = crate::at_rest::test_sealer::MemorySealer;
+        let unavailable = MemoryStore { read_error: true, write_error: true, ..Default::default() };
+        let first = load_selected(dir.path(), &unavailable, Some(&sealer), false).unwrap();
+        let again = load_selected(dir.path(), &unavailable, Some(&sealer), false).unwrap();
+        assert_eq!(first.public_hex(), again.public_hex());
+        assert!(dir.path().join(SEALED_KEY_FILE).is_file());
+        assert!(!dir.path().join(KEY_FILE).exists());
+        let store = MemoryStore::default();
+        let migrated = load_selected(dir.path(), &store, Some(&sealer), true).unwrap();
+        assert_eq!(first.public_hex(), migrated.public_hex());
+        assert!(!dir.path().join(SEALED_KEY_FILE).exists());
+        assert!(load_selected(dir.path(), &unavailable, Some(&sealer), false).is_err());
+    }
+    #[test]
+    fn unentitled_mac_never_falls_back_to_plaintext_or_replaces_a_sealed_identity() {
+        struct Failing;
+        impl Sealer for Failing {
+            fn seal(&self, _: &str, _: &[u8]) -> Result<Vec<u8>, String> { Err("unavailable".into()) }
+            fn open(&self, _: &str, _: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> { Err("unavailable".into()) }
+            fn allows_plaintext_fallback(&self) -> bool { true }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::default();
+        assert!(load_selected(dir.path(), &store, None, false).is_err());
+        assert!(load_selected(dir.path(), &store, Some(&Failing), false).is_err());
+        assert!(!dir.path().join(KEY_FILE).exists());
+        let sealer = crate::at_rest::test_sealer::MemorySealer;
+        let original = ClientKey::load_or_create_sealed(dir.path(), &sealer).unwrap();
+        assert!(load_selected(dir.path(), &store, Some(&Failing), false).is_err());
+        assert_eq!(load_selected(dir.path(), &store, Some(&sealer), false).unwrap().public_hex(), original.public_hex());
+    }
+    #[test]
+    fn sealed_migration_preserves_identity_and_removes_old_envelope() {
+        let dir = tempfile::tempdir().unwrap();
+        let sealer = crate::at_rest::test_sealer::MemorySealer;
+        let original = ClientKey::load_or_create_sealed(dir.path(), &sealer).unwrap();
+        let store = MemoryStore::default();
+        let key = load_or_create_with_sealer(dir.path(), &store, Some(&sealer)).unwrap();
+        assert_eq!(key.public_hex(), original.public_hex());
+        assert!(!dir.path().join(SEALED_KEY_FILE).exists());
+        assert_eq!(load_or_create(dir.path(), &store).unwrap().public_hex(), key.public_hex());
+    }
+    #[test]
+    fn failed_sealed_migration_preserves_envelope_and_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let sealer = crate::at_rest::test_sealer::MemorySealer;
+        ClientKey::load_or_create_sealed(dir.path(), &sealer).unwrap();
+        let before = std::fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap();
+        for store in [MemoryStore { read_error: true, ..Default::default() },
+            MemoryStore { write_error: true, ..Default::default() },
+            MemoryStore { corrupt_write: true, ..Default::default() }] {
+            assert!(load_or_create_with_sealer(dir.path(), &store, Some(&sealer)).is_err());
+            assert_eq!(std::fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap(), before);
+            assert!(!dir.path().join(KEY_FILE).exists());
         }
     }
     #[test]

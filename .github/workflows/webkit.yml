@@ -1,13 +1,15 @@
 name: WebKit
 
-# Atlas should make "WebKit (safe areas + type + keyboard)" required on main.
+# "WebKit (safe areas + type + keyboard)" is intended as a required check on main.
 # No workflow path filters: even non-UI PRs receive a successful check.
-# Use full-ci to force tests for changes outside the UI paths below.
+# Use full-ci to force tests for changes outside the UI paths below: add the label, then push
+# or close and reopen the PR. Label events do not start this workflow, so every run of the
+# required check has the same fixed job name and a label can never replace its result.
 # Gate regression scenarios: python3 scripts/test-webkit-gate.py
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened]
   push:
     branches: [main]
   merge_group:
@@ -17,12 +19,8 @@ permissions:
 
 jobs:
   webkit:
-    # A skipped unrelated-label job must not replace the required check result.
-    name: >-
-      ${{ github.event_name == 'pull_request' && github.event.action == 'labeled' &&
-          github.event.label.name != 'full-ci' && 'WebKit (ignored label)' ||
-          'WebKit (safe areas + type + keyboard)' }}
-    if: github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'full-ci'
+    # Fixed name: branch rules match the required check by this exact name.
+    name: WebKit (safe areas + type + keyboard)
     # Job scope keeps unrelated label events from cancelling active WebKit jobs.
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}
@@ -81,7 +79,7 @@ jobs:
           cache: npm
       - name: Install locked frontend dependencies
         if: steps.changes.outputs.run != 'false'
-        run: npm ci --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Install WebKit and Linux dependencies
         if: steps.changes.outputs.run != 'false'
         run: npx playwright install --with-deps webkit

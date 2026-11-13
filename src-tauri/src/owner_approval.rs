@@ -144,7 +144,7 @@ fn remote_client(state: &NodeState) -> Result<String, ActionError> {
     Ok(client)
 }
 
-fn registered_key(state: &NodeState) -> Result<(Vec<u8>, String), ActionError> {
+fn registered_key(state: &NodeState) -> Result<(DeviceSigningKey, String), ActionError> {
     let (blob, record) = local_key(state, &device_store(state)?)?
         .ok_or_else(|| device_error(device_key::DeviceKeyError::Invalid))?;
     Ok((blob, registered_key_id(&record)?))
@@ -323,6 +323,8 @@ fn checked_approval(view: &Value, client: &str, displayed: &str) -> Result<Strin
             "Let this app spend".into(),
             format!("Budget: up to {}", sats(budget_msat)),
             format!("Each payment: up to {}", sats(per_call_max_msat)),
+            // The node caps every non-call payment at 6 sats, whatever is signed.
+            format!("Messages: up to {} each", sats(per_call_max_msat.min(grant::MESSAGING_PER_CALL_MAX_MSAT))),
             format!("For: {}", span(window_secs)),
             recipient
                 .filter(|s| !s.is_empty())

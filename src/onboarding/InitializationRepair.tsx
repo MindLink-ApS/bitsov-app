@@ -1,5 +1,6 @@
 import { t } from '../i18n';
 import { createSignal, Show } from 'solid-js';
+import { onboardingDiagnostic } from './pairing';
 
 /** Shown only after the supervised node refuses its existing data directory. */
 export function InitializationRepair(props: { priceFloor?: boolean; repairing: boolean; onConfirm: () => Promise<void> }) {
@@ -17,21 +18,22 @@ export function InitializationRepair(props: { priceFloor?: boolean; repairing: b
   return <section class="panel disclosure" data-initialization-repair aria-busy={working()}>
     <h1>{t('obUpdateNeeded')}</h1>
     <Show when={props.priceFloor} fallback={<>
-    <p>This node found an existing identity without the NODE_INITIALIZED marker. Older versions, including v0.3.0-rc7, did not write this marker. An interrupted setup can also cause this.</p>
-    <p>With your permission, BitSov will ask the node to mark this data directory as initialized, then start it. The repair writes only the marker; it does not replace your identity. Starting the newer node may apply database migrations that cannot be undone by an older version. Keep a backup of your node data before continuing.</p>
-    <p>No repair runs unless you agree. After a successful repair, this prompt is no longer needed for this data directory.</p>
-    <details><summary>Repair command</summary><code>konsensus repair mark-initialized --config &lt;this node’s config&gt; --confirm</code></details>
+    <p>{t('obRepairExplanation')}</p>
+    <p>{t('obRepairConsent')}</p>
+    <p>{t('obRepairBackup')}</p>
+    <p>{t('obRepairOnlyWithConsent')}</p>
     </>}>
-      <p>Your node now charges at least 1 sat per page read; the old setting was 0.05 sat.</p>
-      <p>With your permission, BitSov will raise this page price to 1 sat, keep a backup of your settings, and start your node.</p>
+      <p>{t('obRepairPagePrice')}</p>
+      <p>{t('obRepairPagePriceConsent')}</p>
     </Show>
-    <Show when={error()}><p class="error" role="alert">{error()}</p></Show>
+    <p class="hint">{t('obRepairHelp')}</p>
+    <Show when={error()}><p class="error" role="alert">{onboardingDiagnostic(error()!, t('obRepairHelp'))}</p></Show>
     <Show when={!declined()} fallback={<>
       <p>{t('obNodeRemainsStopped')}</p>
       <button class="quiet" data-repair-review onClick={() => setDeclined(false)}>{t('obReviewUpdate')}</button>
     </>}>
-      <button class="primary" data-repair-consent disabled={working()} onClick={() => void confirm()}>{working() ? t('obUpdatingNode') : 'I agree — update and start my node'}</button>
-      <button class="quiet" data-repair-decline disabled={working()} onClick={() => setDeclined(true)}>Not now</button>
+      <button class="primary" data-repair-consent disabled={working()} onClick={() => void confirm()}>{working() ? t('obUpdatingNode') : t('obRepairAgree')}</button>
+      <button class="quiet" data-repair-decline disabled={working()} onClick={() => setDeclined(true)}>{t('obNotNow')}</button>
     </Show>
   </section>;
 }

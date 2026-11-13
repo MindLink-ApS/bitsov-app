@@ -141,8 +141,8 @@ describe('phone onboarding has no local-node step', () => {
         <Onboarding status={() => booting} pairing={() => starting} trustAck={() => false} onRetry={() => {}} phone={phone} />
       ), mount);
       const details = [...mount.querySelectorAll('details')];
-      // The phone renders its node choice as a plain block (no <details> at all); the computer still folds it.
-      if (!phone) expect(details.length).toBeGreaterThan(0);
+      // Neither device may hide the home-node choice behind a disclosure.
+      expect(mount.querySelector('[data-target="network"]')!.closest('details')).toBeNull();
       for (const d of details) {
         const summary = d.querySelector(':scope > summary');
         expect(summary, d.outerHTML.slice(0, 80)).not.toBeNull();
@@ -343,6 +343,50 @@ describe('pairing panel', () => {
     expect(el.querySelector('[data-pairing="paired"]')).toBeNull();
   });
 
+  it('a remote refusal offers only pairing again: no Try again, and scanning a new QR', async () => {
+    const onRetry = vi.fn();
+    const onScanRemote = vi.fn(async () => { throw new Error('cancelled'); });
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    const refused: PairingView = { ...failed, remote: true, refused: true,
+      reason: 'remote node refused pairing: authentication_failed: unknown client' };
+    dispose = render(() => (
+      <Onboarding status={() => booting} pairing={() => refused} trustAck={() => false}
+        onRetry={onRetry} onScanRemote={onScanRemote} phone />
+    ), mount);
+    const panel = mount.querySelector('[data-pairing="refused"]')!;
+    expect(panel).not.toBeNull();
+    expect(mount.querySelector('[data-pairing="failed"]')).toBeNull();
+    expect(panel.textContent).toContain('no longer accepts this app');
+    expect(panel.textContent).toContain('Add a device');
+    expect(panel.querySelector('[data-soft-reconnect]')).toBeNull();
+    const buttons = panel.querySelectorAll('button');
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0].textContent).toBe('Scan new QR code');
+    buttons[0].click();
+    await vi.waitFor(() => expect(onScanRemote).toHaveBeenCalledTimes(1));
+    expect(onRetry).not.toHaveBeenCalled();
+  });
+
+  it('a refusal without a scanner points at the paste field', () => {
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    const refused: PairingView = { ...failed, remote: true, refused: true };
+    dispose = render(() => (
+      <Onboarding status={() => booting} pairing={() => refused} trustAck={() => false} onRetry={() => {}} phone />
+    ), mount);
+    const action = mount.querySelector<HTMLButtonElement>('[data-pair-again]')!;
+    expect(action.textContent).toBe('Paste new pairing link');
+    action.click();
+    expect(document.activeElement?.id).toBe('remote-pairing-link');
+  });
+
+  it('a failure the node did not refuse keeps Try again', () => {
+    const el = show({ ...failed, remote: true, refused: false });
+    expect(el.querySelector('[data-pairing="refused"]')).toBeNull();
+    expect(el.querySelector('[data-pairing="failed"] [data-soft-reconnect]')).not.toBeNull();
+  });
+
   it('fallback explains the rc7 node and does not claim pairing scopes', () => {
     const el = show(fallback, ready);
     const panel = el.querySelector('[data-pairing="fallback"]')!;
@@ -397,7 +441,7 @@ describe('pairing panel', () => {
     // No <details> on a phone: WebKit would add its own OS-language summary ("Flere oplysninger").
     expect(mount.querySelector('details.node-target-advanced')).toBeNull();
     expect(mount.querySelector('.node-target-advanced summary')).toBeNull();
-    expect(mount.querySelector('div.node-target-advanced [data-target="network"]')).not.toBeNull();
+    expect(mount.querySelector('[data-target="network"]')).not.toBeNull();
     expect(mount.querySelector('[data-remote-access]')).not.toBeNull();
     expect(mount.textContent).not.toMatch(/Use this Mac instead|separate wallet|Keys on this Mac|this Mac must stay awake/);
   });
@@ -427,11 +471,12 @@ describe('pairing panel', () => {
     expect(mount.querySelector('[data-remote-access]')).not.toBeNull();
   });
 
-  it('on a computer nothing changes: This Mac stays the default and home stays under Advanced', () => {
+  it('a computer offers both node locations without an Advanced disclosure', () => {
     const el = show(starting, booting);
     expect(el.querySelector('[data-target="local"]')).not.toBeNull();
     expect(el.querySelector('h1')!.textContent).toBe('Where should your node run?');
-    expect(el.querySelector('details.node-target-advanced summary')!.textContent).toBe('Advanced: use a node you already run at home');
+    expect(el.querySelector('[data-target="network"] strong')!.textContent).toBe('A home node (Pi/Umbrel)');
+    expect(el.querySelector('[data-target="network"]')!.closest('details')).toBeNull();
   });
 
   it('an iPhone (phone set, no Android mobile flag) never shows the "Joining from another device?" link', () => {
@@ -445,21 +490,21 @@ describe('pairing panel', () => {
     expect(mount.querySelector('[data-join-from-device]')).toBeNull();
   });
 
-  it('defaults to This Mac, keeps home under collapsed Advanced, and hides test nodes', () => {
+  it('explains local-only use and lets an owner choose an existing home node directly', () => {
     const el = show(starting, booting);
     const local = el.querySelector<HTMLButtonElement>('[data-target="local"]')!;
     expect(local.getAttribute('aria-checked')).toBe('true');
     expect(local.textContent).toContain('awake and BitSov must stay open');
     // Said at the fork: a node on this Mac is for this Mac only (no box or sticker assumed).
-    expect(local.querySelector('[data-local-only]')!.textContent).toBe('Only this Mac can use it. To use BitSov on your phone too, choose a node you run on a computer or server that stays on.');
-    const advanced = el.querySelector<HTMLDetailsElement>('details.node-target-advanced')!;
-    expect(advanced).not.toBeNull();
-    expect(advanced.open).toBe(false);
-    expect(advanced.querySelector('[data-target="network"]')).not.toBeNull();
+    expect(local.querySelector('[data-local-only]')!.textContent).toBe('Only this Mac can use this node. A phone can join a home node or a separately configured Mac that stays on.');
+    const home = el.querySelector<HTMLButtonElement>('[data-target="network"]')!;
+    expect(home.parentElement).toBe(local.parentElement);
+    expect(home.closest('details')).toBeNull();
     expect(el.querySelector('[data-target="cloud"]')).toBeNull();
     expect(el.querySelector('[data-remote-access]')).toBeNull();
-    advanced.open = true;
-    advanced.querySelector<HTMLButtonElement>('[data-target="network"]')!.click();
+    home.click();
+    expect(home.getAttribute('aria-checked')).toBe('true');
+    expect(local.getAttribute('aria-checked')).toBe('false');
     expect(el.querySelector('[data-remote-access]')).not.toBeNull();
   });
 
@@ -468,8 +513,7 @@ describe('pairing panel', () => {
     const section = el.querySelector('.node-target-section')!;
     expect(section.classList.contains('compact')).toBe(true);
     // Compact: no fold to open, both choices are real radios in the same row.
-    const advanced = el.querySelector<HTMLDetailsElement>('details.node-target-advanced')!;
-    expect(advanced.open).toBe(true);
+    expect(section.querySelector('[data-target="network"]')!.closest('details')).toBeNull();
     expect([...section.querySelectorAll('[role="radio"]')].map((r) => r.getAttribute('data-target'))).toEqual(['local', 'network']);
     el.querySelector<HTMLButtonElement>('[data-target="network"]')!.click();
     const form = el.querySelector('[data-remote-access]')!;
@@ -787,10 +831,11 @@ describe('pairing panel', () => {
     expect(badge().classList.contains('hosted-by')).toBe(true);
   });
 
-  it('shows the host refusal for an expired ticket and saves nothing', async () => {
+  it('asks for a fresh link without the expired-ticket command and saves nothing', async () => {
     const message = "This pairing link expired 2 h ago. Run konsensus pair-ticket on your node for a new one, and check that this Mac's clock is right.";
     const el = await importWith(() => Promise.reject(message));
-    await vi.waitFor(() => expect(el.querySelector('[data-soft-summary]')?.textContent).toBe(message));
+    await vi.waitFor(() => expect(el.querySelector('[data-soft-summary]')?.textContent).toContain('new pairing link'));
+    expect(el.textContent).not.toContain('konsensus ');
     expect(el.querySelector('[data-import-result]')).toBeNull();
     expect(badge().textContent).toBe('Pairing link');
   });

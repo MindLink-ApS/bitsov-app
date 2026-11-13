@@ -6,7 +6,7 @@ import { defineConfig } from '@playwright/test';
 const port = 1423;
 export default defineConfig({
   testDir: 'tests/a11y',
-  testMatch: ['safe-areas*.spec.ts', 'dynamic-type.spec.ts', 'inputs.spec.ts'],
+  testMatch: ['safe-areas*.spec.ts', 'dynamic-type.spec.ts', 'inputs.spec.ts', 'chain-warnings.spec.ts'],
   forbidOnly: !!process.env.CI,
   workers: 1,
   retries: 0,
@@ -28,6 +28,8 @@ export default defineConfig({
     command: 'npm run dev -- --host 127.0.0.1',
     url: `http://127.0.0.1:${port}`,
     reuseExistingServer: false,
-    env: { BITSOV_VITE_PORT: String(port) },
+    // These a11y specs exercise the pre-M6 app-to-app call UI (video, meetings),
+    // which M6 builds hide; run the dev server in the kept lab profile.
+    env: { BITSOV_VITE_PORT: String(port), VITE_CALL_MEDIA: 'webrtc' },
   },
 });

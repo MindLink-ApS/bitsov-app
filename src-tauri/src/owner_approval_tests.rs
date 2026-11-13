@@ -91,7 +91,7 @@ fn changed_and_self_guards_precede_signing_and_preserve_exact_bytes() {
 #[test]
 fn prompt_matches_renderer_approval_reason() {
     assert_eq!(checked_approval(&view(), "owner", view()["approval_message"].as_str().unwrap()).unwrap(),
-        "Let this app spend · Budget: up to 1\u{202f}234\u{202f}567 msat · Each payment: up to 1 sat · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
+        "Let this app spend · Budget: up to 1\u{202f}234\u{202f}567 msat · Each payment: up to 1 sat · Messages: up to 1 sat each · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
     let mut v = view();
     v["request"] = json!({"kind":"first_contact","terms":{"recipient":"AB12-CD34","max_total_msat":1,"budget_msat":1000000}});
     assert_eq!(checked_approval(&v, "owner", v["approval_message"].as_str().unwrap()).unwrap(),
@@ -131,7 +131,7 @@ async fn pending_and_approve_refuse_local_before_network_or_key_access() {
 
 // This is the existing production signer with a fresh, explicitly no-prompt
 // enclave test key. No Tauri runtime or webview is constructed.
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[tokio::test]
 async fn existing_device_signer_returns_der_hex_verifiable_with_p256_sha256() {
     use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_ASN1};
@@ -139,7 +139,7 @@ async fn existing_device_signer_returns_der_hex_verifiable_with_p256_sha256() {
     let v = view();
     let message = v["approval_message"].as_str().unwrap();
     let signature = sign_checked(&v, "owner", message, |exact, reason| {
-        assert_eq!(reason, "Let this app spend · Budget: up to 1\u{202f}234\u{202f}567 msat · Each payment: up to 1 sat · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
+        assert_eq!(reason, "Let this app spend · Budget: up to 1\u{202f}234\u{202f}567 msat · Each payment: up to 1 sat · Messages: up to 1 sat each · For: 1 h · To: any contact, within the budget · Requested by app abcdef…123456");
         device_sign(blob, exact, reason)
     }).await.unwrap();
     assert!(signature
@@ -255,7 +255,7 @@ fn breaker_expiry_formats_calendar_boundaries_and_refuses_out_of_range() {
     assert_eq!(checked_approval(&v, "owner", &message).unwrap_err().code, "node");
 }
 
-#[cfg(all(target_os = "macos", not(feature = "mobile")))]
+#[cfg(all(target_os = "macos", not(feature = "mobile"), feature = "native-test-keys"))]
 #[test]
 fn registered_key_refuses_a_record_id_that_does_not_match_its_public_key() {
     let dir = tempfile::tempdir().unwrap();
@@ -466,7 +466,7 @@ async fn shared_terms_and_biometric_snapshots_preserve_signed_bytes() {
         assert_eq!(sats(msat), text);
         // Both native consent paths retain main's exact prompt bytes.
         assert_eq!(device::intent_reason("Maya", msat, msat).as_bytes(),
-            format!("approve paying up to {text} per day, at most {text} per message, to Maya").as_bytes());
+            format!("approve paying up to {text} in total for up to 24 hours, at most {text} per message, to Maya").as_bytes());
         let mut v = view();
         v["client_pubkey"] = json!("ab".repeat(32));
         v["request"] = json!({"kind":"first_contact", "terms":{"recipient":"a".repeat(64), "max_total_msat":msat, "budget_msat":msat}});

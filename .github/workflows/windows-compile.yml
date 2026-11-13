@@ -1,62 +1,53 @@
-name: Windows Compile
+name: Windows Preview
 
-# Split out of build.yml (job id, name and steps unchanged aside from the cache)
-# so its triggers can differ from the Build merge gate.
-#
-# Platform-gating regression check (app #132): Windows is compile-only, not a
-# supported runtime. Unix security checks stay intact; unsupported operations
-# fail closed.
-#
-# CI cost: windows-latest is billed at 2× Linux. This does not run on every
-# pull request or every push to main. It runs on the nightly schedule (default
-# branch), on `v*` tags, on workflow_dispatch, and on a PR when `full-ci` is
-# added or a full-ci PR gets a new commit (other labels do not rebuild). Required gates (Authority Check, Build) are unaffected.
+# Unsigned preview installer, not a supported release or a merge gate.
+# Keep the Windows runner limited to relevant PRs and explicit manual runs.
 on:
-  schedule:
-    - cron: '0 5 * * *'
   workflow_dispatch:
-  push:
-    tags: ['v*']
   pull_request:
     branches: [main]
-    types: [labeled, synchronize, reopened]
+    paths:
+      - 'src-tauri/**'
+      - 'src/**'
+      - 'public/**'
+      - 'third_party/fonts/**'
+      - 'index.html'
+      - 'assistant.html'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig*.json'
+      - 'vite.config.*'
+      - 'scripts/fetch-node-sidecar.sh'
+      - '.github/workflows/windows-compile.yml'
 
-# contents: read only. A full-ci pull request runs this job; do not grant
-# actions: write to that token.
+# PR code only receives a read-only token; no repository secrets are used.
 permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   windows-compile:
-    # app #16 review: a Unix-only import (`shared_child::unix`) and an ungated
-    # `send_signal` broke the Windows build, and Linux CI could not see it. The app
-    # ships a Windows sidecar target, so the code must at least COMPILE there. This
-    # cannot be checked from macOS — cross-compiling to MSVC needs a Windows C
-    # toolchain (`ring`'s build script fails) — so it is checked on a Windows runner.
-    #
-    # NOT a merge gate: Windows is not a supported target today (unsigned, untested
-    # package), and this job exists to catch platform-gating regressions, not to
-    # promise Windows support. Keep it out of branch protection.
-    name: Windows compile check (not a merge gate)
+    name: Windows preview (unsigned NSIS; not a merge gate)
     runs-on: windows-latest
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      startsWith(github.ref, 'refs/tags/v') ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci') &&
-       (github.event.action != 'labeled' || github.event.label.name == 'full-ci'))
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install frontend dependencies
+        run: npm ci --no-audit --no-fund
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri
-          shared-key: tauri-check-windows
+          shared-key: tauri-preview-windows
           cache-all-crates: "true"
           cache-workspace-crates: "true"
       - name: sccache
@@ -74,36 +65,47 @@ jobs:
           export SCCACHE_GHA_ENABLED=true
           export SCCACHE_IGNORE_SERVER_IO_ERROR=1
           if sccache --start-server; then
-            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> "$GITHUB_ENV"
-            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+            {
+              echo "SCCACHE_GHA_ENABLED=true"
+              echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
+              echo "RUSTC_WRAPPER=sccache"
+            } >> "$GITHUB_ENV"
           else
             echo "::warning::sccache unavailable; compiling without a cache"
           fi
-      - name: Placeholders for the tauri_build checks (sidecar + Windows icon)
+      - name: Fetch the signed sidecar and generate the Windows icon
         shell: bash
+        env:
+          # Automatic read-only token; no repository secret is configured.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
-          mkdir -p src-tauri/bin
-          : > "src-tauri/bin/konsensus-${TRIPLE}.exe"
-          # tauri-build needs icons/icon.ico to emit a Windows Resource file, and the
-          # repo has no Windows icon yet (app #18). This job checks that the RUST
-          # compiles on Windows, so a throwaway icon is generated here rather than
-          # committed — same pattern as the sidecar placeholder above. It is never
-          # part of a release artifact.
-          python3 - <<'PYICO'
-          import struct
-          png = open("src-tauri/icons/icon.png", "rb").read()
-          # ICO container with a single PNG-compressed 256x256 entry.
-          header = struct.pack("<HHH", 0, 1, 1)
-          entry = struct.pack("<BBBBHHII", 0, 0, 0, 0, 1, 32, len(png), 6 + 16)
-          open("src-tauri/icons/icon.ico", "wb").write(header + entry + png)
-          print("placeholder icon.ico written")
-          PYICO
-      - name: cargo check (src-tauri)
-        working-directory: src-tauri
-        run: cargo check --locked
+          bash scripts/fetch-node-sidecar.sh
+          npm run tauri -- icon src-tauri/icons/icon.png --output "$RUNNER_TEMP/preview-icons"
+          cp "$RUNNER_TEMP/preview-icons/icon.ico" src-tauri/icons/icon.ico
+      - name: Build unsigned NSIS preview
+        shell: bash
+        env:
+          # beforeBundleCommand re-verifies the public sidecar before packaging.
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          npm run tauri -- build --ci --no-sign --bundles nsis
+          --config '{"bundle":{"icon":["icons/icon.ico"]}}' -- --locked
+      - name: Name the preview installer
+        shell: pwsh
+        env:
+          PREVIEW_SHA: ${{ github.sha }}
+        run: |
+          $installers = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe)
+          if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer" }
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/preview" | Out-Null
+          Copy-Item $installers[0].FullName "$env:RUNNER_TEMP/preview/BitSov-preview-windows-x64-$env:PREVIEW_SHA-setup.exe"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bitsov-preview-windows-x64-${{ github.sha }}
+          path: ${{ runner.temp }}/preview/*-preview-*-setup.exe
+          if-no-files-found: error
+          retention-days: 3
       - name: sccache stats
         if: always()
         shell: bash

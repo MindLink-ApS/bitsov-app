@@ -10,10 +10,8 @@ ad-hoc signature, no Developer ID identity, and no notarization. It is not publi
 Gatekeeper warning. It is not a public download. The protocol pin stays
 `v0.3.0-rc19.2`. Windows packaging is out of scope.
 
-This follows [MAC_PACKAGE_PLAN.md](MAC_PACKAGE_PLAN.md) §1, §2, §4 and §5.
-It deviates from §3; see [Deviation](#deviation-release-excludes-the-assistant-page).
-The earlier rc6/rc7 spike evidence is in
-[MAC_PACKAGE_SPIKE.md](MAC_PACKAGE_SPIKE.md).
+See [the assistant-page packaging policy](#deviation-release-excludes-the-assistant-page)
+for the release bundle's frontend boundary.
 
 ## Keychain and Touch ID
 
@@ -41,6 +39,11 @@ Use a checkout that is not the tree your running app was built from.
 bash scripts/package-mac.sh            # .app only
 bash scripts/package-mac.sh --dmg      # .app and .dmg
 ```
+
+For a test build with sealed call audio, add `--call-seal` (with or without
+`--dmg`). It adds `--features call-seal` and sets
+`VITE_CALL_SEAL=sealed` for the build, matching the enabled CI configuration.
+Without this option, the build arguments and environment stay unchanged.
 
 What the script does:
 
@@ -273,10 +276,10 @@ bundle runs nightly (05:00 UTC, default branch), on `v*` tags, on
 `workflow_dispatch`, and on a pull request when `full-ci` is added. The
 label sticks: later pushes to that PR build again. Adding or removing any
 other label (for example `merge-ready`) does not start a build. There is no iOS simulator
-job; an iOS bundle would use these same triggers. Windows Compile uses the
-same schedule (2× Linux) to catch platform-gating regressions (app #132).
-Windows remains compile-only and is not a supported runtime or merge gate.
-Neither job is a required check.
+job; an iOS bundle would use these same triggers. The separate
+[Windows and Android previews](../README.md#preview-builds) use relevant
+pull requests and manual runs, with three-day artifacts. They remain
+unsupported previews. These packaging jobs are not required checks.
 
 - Runner: `macos-14` (arm64). Toolchain: Node 22 and stable Rust. Permissions:
   `contents: read` only. It uses `github.token` read-only for `gh release download`.
@@ -340,3 +343,34 @@ the optional Developer ID/notarization hooks.
 | Publishing | No release, tag, website download, or release metadata until a signed and notarized build exists. `/bitsov/app` stays a waitlist. |
 | PR #13 | `factory/mac-package-spike` stays open. A human decides whether to close it. |
 | Pin | `v0.3.0-rc19.2` (`04fe65e03aad949ade90c10c8e8ccf36daf2b0f6`); fetch and verify signed checksums before packaging. |
+
+Set `BITSOV_MAC_PROVISION_PROFILE` to the Developer ID provisioning profile
+authorized for the app and its private Keychain group. Packaging validates its
+team, signing certificate, application identity, groups, distribution scope, and
+expiry, and embeds it before final signing.
+Signed packages derive their private Keychain access group from the signing team
+and bundle identifier. Pairing identities and device-key blobs require owner
+presence and stay on this device. The first read migrates older storage only
+after a protected readback succeeds; an authentication or migration error stops
+access. The running app checks its application-identifier entitlement before
+selecting storage. Ad-hoc builds keep the existing Secure-Enclave-sealed client
+identity and enclave-wrapped device-key file; no plaintext fallback is allowed.
+Only an entitled build migrates those files, retaining the same identity.
+Keep the signing team and bundle identifier stable across releases: changing
+either can make previously migrated Keychain identities inaccessible.
+
+The Mac package workflow invokes the built executable with
+`--keychain-smoke-test` before archiving. This exits before Tauri or any window
+starts. It creates and reloads a throwaway client identity through the production
+storage selector: an enclave-sealed file for ad-hoc apps, or the user-presence
+data-protection Keychain for entitled apps. It prints the path and add/read/delete
+results and removes the exact temporary identity. Authentication UI is disabled;
+an entitled protected read that requires a prompt fails instead of opening one.
+Status polling uses only the public record and file metadata. Protected device
+material is read only for signing, on a blocking worker, with one authentication
+context shared by the read, migration readback, and enclave signature.
+
+Headless hardware tests can opt into `native-test-keys` in debug macOS builds.
+The feature is rejected for release and iOS builds; ordinary builds reject the
+prompt-free creation policy. Run the library tests with
+`cargo test --lib --features dev-node,local-owner-ceremony,native-test-keys`.

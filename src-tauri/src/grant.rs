@@ -45,6 +45,12 @@ pub const MIN_TTL_SECS: u64 = 60;
 /// Most per-recipient budgets one proposal may carry.
 pub const MAX_RECIPIENT_BUDGETS: usize = 256;
 
+/// The most any non-call payment (a message, file, room send or plain
+/// payment) may pay under a grant, whatever per-payment limit the owner
+/// signed. Mirrors the node: each such payment is capped at
+/// `min(per_call_max_msat, this)`. Calls are not bound by it.
+pub const MESSAGING_PER_CALL_MAX_MSAT: u64 = 6_000;
+
 /// `GET /pair/grant` → `grant`: the caller's live grant, as the node reports it.
 #[derive(Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct NodeGrant {
@@ -78,6 +84,21 @@ pub struct NodeGrant {
     pub envelope_id_by_recipient: Option<BTreeMap<String, Option<String>>>,
     /// Optional node breaker state, preserved unchanged for the renderer.
     pub breakers: Option<serde_json::Map<String, serde_json::Value>>,
+    /// The per-payment limit for each call payment, as the node reports it:
+    /// `Some(Some(msat))` the owner's signed value, `Some(None)` for a
+    /// relation grant (each envelope's per-act maximum binds instead),
+    /// `None` when an older node does not report it.
+    #[serde(default, deserialize_with = "reported")]
+    pub call_per_payment_max_msat: Option<Option<u64>>,
+    /// The node's effective cap on each non-call payment; `None` when an
+    /// older node does not report it (then `min(per_call_max_msat, 6 sats)`).
+    #[serde(default)]
+    pub message_per_payment_max_msat: Option<u64>,
+}
+
+/// A field the node reports, even as null, versus one it omits.
+fn reported<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<u64>>, D::Error> {
+    Option::<u64>::deserialize(d).map(Some)
 }
 
 /// Parse `GET /pair/grant`. Anything but the documented shape is an error: a
@@ -115,11 +136,53 @@ impl NodeGrant {
     /// node id of a single-peer message or file; rooms and payments pass None
     /// (the node checks each member or payee itself).
     pub fn check(&self, max_msat: u64, recipient: Option<&str>, now_ms: u64) -> Result<(), ActionError> {
+        self.check_under(PaymentCap::Grant, max_msat, recipient, now_ms)
+    }
+
+    /// As `check`, for one call payment (an offer, a signal or a call block).
+    /// The node caps each call payment by the call's own pinned per-block
+    /// ceiling, which the owner consented to, and by the call per-payment
+    /// limit (`per_payment_max(CallCeiling)`, or a relation envelope's per-act
+    /// maximum), never by the 6-sat messaging cap. Expiry, the total budget
+    /// and the recipient's budget always apply; the per-block ceiling is the
+    /// node's to enforce.
+    pub fn check_call(&self, max_msat: u64, recipient: Option<&str>, now_ms: u64) -> Result<(), ActionError> {
+        self.check_under(PaymentCap::CallCeiling, max_msat, recipient, now_ms)
+    }
+
+    /// The grant-wide per-payment maximum under `cap`. A non-call payment: the
+    /// node's reported message cap, else `min(per_call_max_msat, 6 sats)`. A
+    /// call payment: the node's reported call limit, else the signed
+    /// `per_call_max_msat` for an owner grant; a relation grant has none here
+    /// (each envelope's per-act maximum binds each payment, per recipient).
+    /// A sum of call payments (`CallTotal`) has none. An explicit payment
+    /// (`Payment`): the signed `per_call_max_msat`, never the message cap.
+    pub fn per_payment_max(&self, cap: PaymentCap) -> Option<u64> {
+        match cap {
+            PaymentCap::CallTotal => None,
+            PaymentCap::Payment => Some(self.per_call_max_msat),
+            PaymentCap::CallCeiling => match self.call_per_payment_max_msat {
+                Some(Some(max)) => Some(max),
+                _ if self.recipients_only => None,
+                _ => Some(self.per_call_max_msat),
+            },
+            PaymentCap::Grant => Some(self.message_per_payment_max_msat
+                .unwrap_or(self.per_call_max_msat.min(MESSAGING_PER_CALL_MAX_MSAT))),
+        }
+    }
+
+    pub fn check_under(&self, cap: PaymentCap, max_msat: u64, recipient: Option<&str>, now_ms: u64) -> Result<(), ActionError> {
         if !self.live(now_ms) {
             return Err(ended());
         }
-        if max_msat > self.per_call_max_msat {
-            return Err(per_call(self.per_call_max_msat));
+        // As the node: a relation grant is messaging authority and funds no
+        // explicit payment. (An owner-approved grant is too, but the grant
+        // view does not say so; the node's `messaging_grant` refusal does.)
+        if cap == PaymentCap::Payment && self.recipients_only {
+            return Err(messaging_grant());
+        }
+        if let Some(max) = self.per_payment_max(cap).filter(|max| max_msat > *max) {
+            return Err(per_call(max));
         }
         if max_msat > self.remaining_msat {
             return Err(total(self.remaining_msat));
@@ -134,9 +197,11 @@ impl NodeGrant {
                 if !self.has_envelope(r, now_ms) {
                     return Err(no_envelope());
                 }
-                // As the node: an envelope without a per-act maximum pays nothing.
+                // As the node: an envelope without a per-act maximum pays
+                // nothing. It bounds each payment on its own, never a sum of
+                // a call's separate payments (`CallTotal`).
                 let per_act = self.per_act_max_by_recipient.get(&r.to_ascii_lowercase()).copied().unwrap_or(0);
-                if max_msat > per_act {
+                if cap != PaymentCap::CallTotal && max_msat > per_act {
                     return Err(per_call(per_act));
                 }
             }
@@ -155,13 +220,39 @@ impl NodeGrant {
     }
 }
 
+/// Which per-payment maximum bounds a payment under the grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaymentCap {
+    /// One message, file, room or porch payment: the node's message cap, at
+    /// most 6 sats.
+    Grant,
+    /// One explicit payment (an invoice or a keysend): the signed
+    /// `per_call_max_msat`. The node exempts it from the message cap.
+    Payment,
+    /// One call payment: the call's own pinned per-block ceiling, enforced by
+    /// the node, plus the call per-payment limit (or a relation envelope's
+    /// per-act maximum).
+    CallCeiling,
+    /// A whole call's separate payments summed (offer plus hangup): expiry,
+    /// the total budget, the recipient's budget and the envelope only. Each
+    /// payment is checked on its own against [`PaymentCap::CallCeiling`] by
+    /// the caller.
+    CallTotal,
+}
+
 /// What the renderer is told about the node grant. No credentials or authority.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct GrantSummary {
     pub expires_at_ms: u64,
     pub budget_msat: u64,
     pub remaining_msat: u64,
+    /// The per-payment limit the owner signed.
     pub per_call_max_msat: u64,
+    /// The cap on each non-call payment (messages, files, rooms, payments).
+    pub message_per_payment_max_msat: u64,
+    /// The limit on each call payment; null for a relation grant, where each
+    /// envelope's per-act maximum binds instead.
+    pub call_per_payment_max_msat: Option<u64>,
     /// A relation grant: each contact with an envelope, and when it ends (ms).
     /// None for an owner console grant, which pays any contact within it.
     pub envelopes: Option<BTreeMap<String, u64>>,
@@ -185,6 +276,8 @@ impl From<&NodeGrant> for GrantSummary {
             budget_msat: g.budget_msat,
             remaining_msat: g.remaining_msat,
             per_call_max_msat: g.per_call_max_msat,
+            message_per_payment_max_msat: g.per_payment_max(PaymentCap::Grant).unwrap_or(0),
+            call_per_payment_max_msat: g.per_payment_max(PaymentCap::CallCeiling),
             envelopes: g.recipients_only.then(|| {
                 g.recipient_expires_at
                     .iter()
@@ -253,6 +346,7 @@ impl Refusal {
         let left = self.remaining_msat;
         match self.reason.as_str() {
             "no_grant" => ended(),
+            "messaging_grant" => messaging_grant(),
             "per_call" => per_call(known.map(|g| g.per_call_max_msat).unwrap_or(0)),
             "total" => total(left.or(known.map(|g| g.remaining_msat)).unwrap_or(0)),
             "recipient" => recipient_left(left.unwrap_or(0)),
@@ -263,6 +357,15 @@ impl Refusal {
             "first_contact" => ActionError::new(
                 "grant_first_contact",
                 "Your node needs your OK for this first contact, and it did not get it. Nothing was sent. Confirm the first message again.",
+            ),
+            // M6 N3: the call-sized reservation made when an offer goes out.
+            "call_liquidity_insufficient" => ActionError::new(
+                "call_liquidity_insufficient",
+                "Your node's channel cannot hold this call's reservation right now. Nothing was paid. Add outbound capacity, then call again.",
+            ),
+            "call_price_changed" => ActionError::new(
+                "call_price_changed",
+                "Their node now asks more per minute than this call reserved. Nothing more was paid.",
             ),
             "grant_paused" => ActionError::new(
                 "grant_paused",
@@ -293,6 +396,15 @@ impl Refusal {
     }
 }
 
+/// The node's `messaging_grant` refusal: messaging authority (a relation or
+/// owner-approved grant) never funds an explicit payment.
+pub fn messaging_grant() -> ActionError {
+    ActionError::new(
+        "grant_messaging",
+        "This permission covers messages and calls. Ask the owner to approve this payment separately. Nothing was paid.",
+    )
+}
+
 /// A relation grant without an envelope for this contact.
 pub fn no_envelope() -> ActionError {
     ActionError::new(
@@ -308,7 +420,8 @@ pub fn ended() -> ActionError {
     )
 }
 
-fn per_call(max_msat: u64) -> ActionError {
+/// A payment above the grant's per-payment maximum of `max_msat`.
+pub fn per_call(max_msat: u64) -> ActionError {
     ActionError::new(
         "grant_per_call",
         format!("This is more than the {} per payment your node allows. Nothing was sent.", amount(max_msat)),
@@ -480,6 +593,155 @@ mod tests {
         low.remaining_msat = 500;
         assert_eq!(low.check(1_000, None, now).unwrap_err().code, "grant_exhausted");
         assert_eq!(g.check(1, None, 2_000_000).unwrap_err().code, "grant_ended", "expiry is absolute");
+    }
+
+    #[test]
+    fn messages_are_capped_at_six_sats_and_calls_at_the_signed_limit() {
+        let now = 1_000_000;
+        // The owner signed 50 sats per payment; an older node reports neither cap.
+        let g = NodeGrant {
+            expires_at: 2_000,
+            budget_msat: 500_000,
+            remaining_msat: 500_000,
+            per_call_max_msat: 50_000,
+            ..Default::default()
+        };
+        assert_eq!(g.per_payment_max(PaymentCap::Grant), Some(MESSAGING_PER_CALL_MAX_MSAT));
+        assert_eq!(g.per_payment_max(PaymentCap::CallCeiling), Some(50_000));
+        assert_eq!(g.per_payment_max(PaymentCap::CallTotal), None, "a sum of payments is not one payment");
+        g.check(6_000, Some(A), now).unwrap();
+        let message = g.check(6_001, Some(A), now).unwrap_err();
+        assert_eq!(message.code, "grant_per_call");
+        assert!(message.message.contains("6 sats"), "{}", message.message);
+        g.check_call(50_000, Some(A), now).unwrap();
+        assert_eq!(g.check_call(50_001, Some(A), now).unwrap_err().code, "grant_per_call");
+        g.check_under(PaymentCap::CallTotal, 90_000, Some(A), now).unwrap();
+        // A signed limit under 6 sats binds messages and calls alike.
+        let small = NodeGrant { per_call_max_msat: 1_000, ..g.clone() };
+        assert_eq!(small.check(1_001, Some(A), now).unwrap_err().code, "grant_per_call");
+        let call = small.check_call(10_000, Some(A), now).unwrap_err();
+        assert_eq!(call.code, "grant_per_call");
+        assert!(call.message.contains("1 sat"), "{}", call.message);
+        // Exactly 6 sats is the owner's value like any other: it binds calls.
+        let six = NodeGrant { per_call_max_msat: MESSAGING_PER_CALL_MAX_MSAT, ..g.clone() };
+        assert_eq!(six.check_call(6_001, Some(A), now).unwrap_err().code, "grant_per_call");
+        // The node's reported caps win over the stored value.
+        let reported = NodeGrant { message_per_payment_max_msat: Some(2_000), call_per_payment_max_msat: Some(Some(30_000)), ..g.clone() };
+        assert_eq!(reported.check(2_001, Some(A), now).unwrap_err().code, "grant_per_call");
+        reported.check_call(30_000, Some(A), now).unwrap();
+        assert_eq!(reported.check_call(30_001, Some(A), now).unwrap_err().code, "grant_per_call");
+        let summary = GrantSummary::from(&reported);
+        assert_eq!((summary.message_per_payment_max_msat, summary.call_per_payment_max_msat), (2_000, Some(30_000)));
+        let summary = GrantSummary::from(&small);
+        assert_eq!((summary.message_per_payment_max_msat, summary.call_per_payment_max_msat), (1_000, Some(1_000)));
+        // A null call limit on an owner grant falls back to the signed value.
+        let null = NodeGrant { call_per_payment_max_msat: Some(None), ..g.clone() };
+        assert_eq!(null.per_payment_max(PaymentCap::CallCeiling), Some(50_000));
+        // Expiry, the total and the recipient's budget bind every cap.
+        for cap in [PaymentCap::Grant, PaymentCap::CallCeiling, PaymentCap::CallTotal] {
+            assert_eq!(g.check_under(cap, 1, Some(A), 2_000_000).unwrap_err().code, "grant_ended");
+            let low = NodeGrant { remaining_msat: 500, ..g.clone() };
+            assert_eq!(low.check_under(cap, 900, Some(A), now).unwrap_err().code, "grant_exhausted");
+            let budgeted = NodeGrant { per_recipient_msat: BTreeMap::from([(A.into(), 700)]), ..g.clone() };
+            assert_eq!(budgeted.check_under(cap, 900, Some(A), now).unwrap_err().code, "grant_recipient");
+        }
+    }
+
+    #[test]
+    fn an_explicit_payment_is_bounded_by_the_signed_limit_not_the_message_cap() {
+        let now = 1_000_000;
+        let g = NodeGrant {
+            expires_at: 2_000,
+            budget_msat: 500_000,
+            remaining_msat: 500_000,
+            per_call_max_msat: 50_000,
+            message_per_payment_max_msat: Some(MESSAGING_PER_CALL_MAX_MSAT),
+            ..Default::default()
+        };
+        assert_eq!(g.per_payment_max(PaymentCap::Payment), Some(50_000));
+        g.check_under(PaymentCap::Payment, 10_000, None, now).unwrap();
+        g.check_under(PaymentCap::Payment, 50_000, None, now).unwrap();
+        assert_eq!(g.check_under(PaymentCap::Payment, 50_001, None, now).unwrap_err().code, "grant_per_call");
+        assert_eq!(g.check(10_000, Some(A), now).unwrap_err().code, "grant_per_call", "a message keeps the 6-sat cap");
+        // An older node reports no message cap: the payment still uses the signed value.
+        let older = NodeGrant { message_per_payment_max_msat: None, ..g.clone() };
+        older.check_under(PaymentCap::Payment, 10_000, None, now).unwrap();
+        assert_eq!(older.check(6_001, Some(A), now).unwrap_err().code, "grant_per_call");
+        // Expiry and the budgets still bind.
+        assert_eq!(g.check_under(PaymentCap::Payment, 1, None, 2_000_000).unwrap_err().code, "grant_ended");
+        let low = NodeGrant { remaining_msat: 9_999, ..g.clone() };
+        assert_eq!(low.check_under(PaymentCap::Payment, 10_000, None, now).unwrap_err().code, "grant_exhausted");
+    }
+
+    #[test]
+    fn a_messaging_grant_never_funds_an_explicit_payment() {
+        let now = 1_000_000;
+        let relation = NodeGrant {
+            expires_at: 2_000,
+            budget_msat: 500_000,
+            remaining_msat: 500_000,
+            per_call_max_msat: 50_000,
+            recipients_only: true,
+            per_act_max_by_recipient: BTreeMap::from([(A.into(), 50_000)]),
+            recipient_expires_at: BTreeMap::from([(A.into(), 2_000)]),
+            ..Default::default()
+        };
+        let err = relation.check_under(PaymentCap::Payment, 1_000, Some(A), now).unwrap_err();
+        assert_eq!(err.code, "grant_messaging");
+        assert_eq!(err.message, "This permission covers messages and calls. Ask the owner to approve this payment separately. Nothing was paid.");
+        relation.check(1_000, Some(A), now).unwrap();
+        // The node's refusal for an owner-approved grant maps to the same words.
+        let refused = refusal(409, r#"{"code":"budget_exceeded","reason":"messaging_grant","remaining_msat":null}"#).unwrap();
+        assert!(!refused.ends_grant());
+        assert_eq!(refused.error(Some(&relation)), err);
+    }
+
+    #[test]
+    fn parses_the_reported_caps() {
+        let parsed = |field: &str| parse(&format!(r#"{{"grant":{{"expires_at":2000,"budget_msat":500000,"used_msat":0,"remaining_msat":500000,"per_call_max_msat":50000{field}}}}}"#)).unwrap().unwrap();
+        let old = parsed("");
+        assert_eq!((old.call_per_payment_max_msat, old.message_per_payment_max_msat), (None, None), "an older node omits them");
+        assert_eq!(parsed(r#","call_per_payment_max_msat":null"#).call_per_payment_max_msat, Some(None));
+        let new = parsed(r#","call_per_payment_max_msat":50000,"message_per_payment_max_msat":6000"#);
+        assert_eq!((new.call_per_payment_max_msat, new.message_per_payment_max_msat), (Some(Some(50_000)), Some(6_000)));
+    }
+
+    #[test]
+    fn a_relation_envelope_bounds_each_call_payment_not_their_sum() {
+        let now = 1_000_000;
+        let g = NodeGrant {
+            expires_at: 2_000,
+            budget_msat: 500_000,
+            remaining_msat: 500_000,
+            per_call_max_msat: 20_000,
+            recipients_only: true,
+            per_act_max_by_recipient: BTreeMap::from([(A.into(), 20_000)]),
+            recipient_expires_at: BTreeMap::from([(A.into(), 2_000)]),
+            call_per_payment_max_msat: Some(None),
+            ..Default::default()
+        };
+        assert_eq!(g.per_payment_max(PaymentCap::CallCeiling), None, "the envelope binds, per recipient");
+        assert_eq!(GrantSummary::from(&g).call_per_payment_max_msat, None);
+        // A 15-sat offer plus a 6-sat hangup under a 20-sat envelope: each
+        // payment fits it; only the budgets bound their 21-sat sum.
+        g.check_under(PaymentCap::CallTotal, 21_000, Some(A), now).unwrap();
+        g.check_call(15_000, Some(A), now).unwrap();
+        g.check_call(6_000, Some(A), now).unwrap();
+        assert_eq!(g.check_call(21_000, Some(A), now).unwrap_err().code, "grant_per_call", "one payment above the envelope");
+        // The sum still needs a live envelope and the budgets.
+        const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert_eq!(g.check_under(PaymentCap::CallTotal, 21_000, Some(B), now).unwrap_err().code, "grant_no_envelope");
+        let budgeted = NodeGrant { per_recipient_msat: BTreeMap::from([(A.into(), 20_000)]), ..g.clone() };
+        assert_eq!(budgeted.check_under(PaymentCap::CallTotal, 21_000, Some(A), now).unwrap_err().code, "grant_recipient");
+        // A message under the envelope keeps the 6-sat cap.
+        assert_eq!(g.check(6_001, Some(A), now).unwrap_err().code, "grant_per_call");
+    }
+
+    #[test]
+    fn call_reservation_refusals_are_named() {
+        let r = |reason: &str| refusal(409, &serde_json::json!({"code": "budget_exceeded", "reason": reason, "remaining_msat": null}).to_string()).unwrap();
+        assert_eq!(r("call_liquidity_insufficient").error(None).code, "call_liquidity_insufficient");
+        assert_eq!(r("call_price_changed").error(None).code, "call_price_changed");
     }
 
     #[test]

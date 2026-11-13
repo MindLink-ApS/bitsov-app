@@ -37,6 +37,10 @@ pub const KIND_FILE_REF: u16 = 200;
 /// The offer is the per-call admission, paid at the callee's `call_msat`.
 pub const KIND_CALL_OFFER: u16 = 400;
 pub const KIND_CALL_HANGUP: u16 = 403;
+/// M6 (genome kind 404 `CALL_BLOCK`): one paid 60-second interval of a
+/// node-routed call, priced by the callee and drawn from the call's
+/// reservation at the caller's node. Never sent through `call_signal`.
+pub const KIND_CALL_BLOCK: u16 = 404;
 /// A call signal carries SDP (genome caps it at 16 KiB) plus a small envelope.
 pub const CALL_SIGNAL_MAX_BYTES: usize = 17 * 1024;
 
@@ -163,12 +167,26 @@ pub struct AdmissionView {
 }
 
 pub const MONEY_NOT_READY: &str = "Money is not ready yet. Your node will retry automatically.";
+pub const CHAIN_UNAVAILABLE: &str = "Your box can't see the Bitcoin chain right now; nothing was paid; try again later.";
+
+pub fn chain_unavailable_refusal(status: u16, body: &str) -> bool {
+    status == 503 && serde_json::from_str::<serde_json::Value>(body).ok()
+        .is_some_and(|v| v["code"] == "not_ready" && v["reason"] == "chain_unavailable")
+}
+
+pub fn readiness_error(status: u16, body: &str) -> ActionError {
+    if chain_unavailable_refusal(status, body) {
+        ActionError { reason: Some("chain_unavailable".into()), ..ActionError::new("not_ready", CHAIN_UNAVAILABLE) }
+    } else {
+        ActionError::new("not_ready", MONEY_NOT_READY)
+    }
+}
 
 /// Only this explicit pre-dispatch refusal may release a pending spend.
 /// A generic 503 (or a broken response) still has an unknown outcome.
 pub fn readiness_refusal(status: u16, body: &str) -> bool {
-    status == 503 && serde_json::from_str::<serde_json::Value>(body).ok()
-        .is_some_and(|v| v["code"] == "not_ready" && v["money_ready"] == false)
+    chain_unavailable_refusal(status, body) || (status == 503 && serde_json::from_str::<serde_json::Value>(body).ok()
+        .is_some_and(|v| v["code"] == "not_ready" && v["money_ready"] == false))
 }
 
 /// The node's #115 refusal and the local proxy's pre-forward failures prove
@@ -253,6 +271,42 @@ pub fn not_dispatched_message(body: &str) -> String {
         Some(r) => format!("{NOT_DISPATCHED_MESSAGE} {r}"),
         None => NOT_DISPATCHED_MESSAGE.to_string(),
     }
+}
+
+/// Genome M6 N3: a call's spend reservation refused before anything was
+/// dispatched (`not_dispatched` with a call `reason`), in plain words. The
+/// consent refusals come from the ceilings an offer carries (`max_block_msat`,
+/// `max_hold_msat`): the node checked them before it held, paid or sent
+/// anything, so the offer was not sent and nothing is held for it.
+pub fn call_not_dispatched(body: &str) -> Option<ActionError> {
+    let v = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    match v["reason"].as_str()? {
+        "call_liquidity_unavailable" => Some(ActionError::new("call_liquidity_unavailable",
+            "Your node could not check whether its channel can hold this call's reservation. Nothing was paid. Try again shortly.")),
+        "call_price_above_consent" => Some(ActionError::new("call_offer_price_above_consent",
+            "Their node now asks more per minute than you agreed to, so your node did not place the call. Nothing was sent, held or paid. Check the price and call again.")),
+        "call_hold_above_consent" => Some(ActionError::new("call_offer_hold_above_consent",
+            "Your node would hold more for this call's minutes than you agreed to, so it did not place the call. Nothing was sent, held or paid.")),
+        _ => None,
+    }
+}
+
+/// The refusal of a call signal says the node runs no such call: the evidence
+/// that closes an admission (`spend_journal::hangup_closes`). Node rc21 sends
+/// only `call_not_live`; `call_not_found` reads the same.
+pub fn call_gone_reason(reply: &serde_json::Value) -> Option<&'static str> {
+    match reply["reason"].as_str()? {
+        "call_not_live" => Some("call_not_live"),
+        "call_not_found" => Some("call_not_found"),
+        _ => None,
+    }
+}
+
+/// The reply puts no payment on record: it names no operation state (refused
+/// before the operation existed), or one that holds none. Any other state, a
+/// null one included, is not proof of unpaid.
+pub fn reports_no_payment(reply: &serde_json::Value) -> bool {
+    matches!(reply.get("state").map(serde_json::Value::as_str), None | Some(Some("prepared" | "released")))
 }
 
 /// Genome `room_binding_v1` compose refusals (`reason` on a `not_dispatched`),
@@ -359,7 +413,8 @@ impl ActionError {
     }
     pub fn node(message: impl Into<String>) -> Self {
         let message = message.into();
-        if message == MONEY_NOT_READY { Self::new("not_ready", message) }
+        if message == "not_ready:chain_unavailable" { Self { reason: Some("chain_unavailable".into()), ..Self::new("not_ready", CHAIN_UNAVAILABLE) } }
+        else if message == MONEY_NOT_READY { Self::new("not_ready", message) }
         else { Self::new("node", message) }
     }
 }
@@ -746,6 +801,22 @@ pub fn call_body(recipient: &str, kind: u16, plaintext: &str) -> Result<serde_js
     Ok(json!({ "recipient": recipient, "is_room": false, "kind": kind, "plaintext": plaintext }))
 }
 
+/// `/messages/compose` body for one call block: exactly the genome's minimal
+/// payload (`call_id`, `seq`), built here, never from renderer text.
+pub fn call_block_body(recipient: &str, call_id: &str, seq: u32) -> Result<serde_json::Value, ActionError> {
+    let recipient = control::node_id(recipient).map_err(ActionError::invalid)?;
+    if !is_call_id(call_id) {
+        return Err(ActionError::invalid("invalid call id"));
+    }
+    let plaintext = json!({ "call_id": call_id, "seq": seq }).to_string();
+    Ok(json!({ "recipient": recipient, "is_room": false, "kind": KIND_CALL_BLOCK, "plaintext": plaintext }))
+}
+
+/// A wire call id: 32 lower-case hex characters.
+pub fn is_call_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
 /// What one paid call signal cost.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct CallReceipt {
@@ -824,9 +895,9 @@ pub const OPERATION_MISMATCH: &str = "Your node refused this retry: its text dif
 pub const PAYMENT_UNKNOWN: &str = "Payment unknown: your node has not resolved whether this message's payment went through. It will not pay for it again, and the app will not resend it. Check the pending result later.";
 pub const FAILED_PAID: &str = "Paid, and the recipient's node refused this message for good. The payment is not refundable. Do not send it again.";
 
-/// `502 payment_settled_send_incomplete` from compose: the node paid, the
-/// message did not go. The prior/current admission amounts are read from the
-/// node's reason when it gives them.
+/// Compose reports a payment whose message is not delivered. The amount is
+/// this attempt's new payment; a retained-payment handover adds nothing.
+/// Prior/current admission amounts are read from the node's reason when given.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettledIncomplete {
     pub amount_msat: u64,
@@ -842,8 +913,15 @@ pub struct SettledIncomplete {
 const RETRY_SAFE: [&str; 2] = ["will not pay admission again", "re-send the paid proof, not pay again"];
 
 pub fn settled_incomplete(status: u16, body: &str) -> Option<SettledIncomplete> {
-    if status != 502 { return None; }
+    if !matches!(status, 409 | 502) { return None; }
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    if status == 409 {
+        let handover = v["code"] == "session_handover" || (v["code"] == 409 && v["reason"] == "session_handover");
+        if !handover || !v["error"].as_str()?.contains("existing payment is retained") { return None; }
+        return Some(SettledIncomplete {
+            amount_msat: 0, prior_admission_msat: None, current_call_msat: None, retry_safe: v["retry_allowed"] == true,
+        });
+    }
     if v["code"] != "payment_settled_send_incomplete" { return None; }
     let amount_msat = v["amount_msat"].as_u64()?;
     let reason = v["error"].as_str().unwrap_or_default();
@@ -2010,6 +2088,56 @@ mod tests {
     }
 
     #[test]
+    fn a_reservation_the_node_could_not_check_is_named_not_generic() {
+        let e = call_not_dispatched(r#"{"error":"call outbound liquidity unavailable","code":"not_dispatched","reason":"call_liquidity_unavailable"}"#).unwrap();
+        assert_eq!(e.code, "call_liquidity_unavailable");
+        assert!(e.message.contains("Nothing was paid"));
+        assert!(call_not_dispatched(r#"{"error":"x","code":"not_dispatched","reason":"room_unknown"}"#).is_none());
+        // Genome N3 consent ceilings on the offer: named, and nothing was sent, held or paid.
+        for (reason, code) in [("call_price_above_consent", "call_offer_price_above_consent"), ("call_hold_above_consent", "call_offer_hold_above_consent")] {
+            let e = call_not_dispatched(&json!({"error": "developer detail", "code": "not_dispatched", "reason": reason}).to_string()).unwrap();
+            assert_eq!(e.code, code);
+            assert!(e.message.contains("you agreed to") && e.message.contains("Nothing was sent, held or paid"), "{}", e.message);
+            assert!(!e.message.contains("developer detail"), "the node's developer text is not shown");
+        }
+        assert!(call_not_dispatched("broken").is_none());
+    }
+
+    #[test]
+    fn a_call_is_gone_only_on_its_two_reasons_and_only_with_no_payment_on_record() {
+        for (reply, reason, unpaid) in [
+            // Node rc21: refused before the operation exists, so no state.
+            (json!({"code": "not_dispatched", "error": "no live call with that id", "reason": "call_not_live"}), Some("call_not_live"), true),
+            (json!({"code": "not_dispatched", "reason": "call_not_found"}), Some("call_not_found"), true),
+            (json!({"code": "not_dispatched", "reason": "call_not_live", "state": "prepared"}), Some("call_not_live"), true),
+            (json!({"code": "not_dispatched", "reason": "call_not_live", "state": "released"}), Some("call_not_live"), true),
+            (json!({"code": "not_dispatched", "reason": "call_not_live", "state": "paying"}), Some("call_not_live"), false),
+            (json!({"code": "not_dispatched", "reason": "call_not_live", "state": "payment_unknown"}), Some("call_not_live"), false),
+            (json!({"code": "not_dispatched", "reason": "call_not_live", "state": "paid"}), Some("call_not_live"), false),
+            (json!({"code": "not_dispatched", "reason": "call_not_live", "state": null}), Some("call_not_live"), false),
+            (json!({"code": "not_dispatched", "reason": "call_not_live", "state": 7}), Some("call_not_live"), false),
+            (json!({"code": "not_dispatched", "reason": "call_signal_in_flight"}), None, true),
+            (json!({"code": "not_dispatched", "reason": "call_id_used"}), None, true),
+            (json!({"code": "not_dispatched", "reason": 7}), None, true),
+            (json!({"code": "not_dispatched"}), None, true),
+        ] {
+            assert_eq!(call_gone_reason(&reply), reason, "{reply}");
+            assert_eq!(reports_no_payment(&reply), unpaid, "{reply}");
+        }
+    }
+
+    #[test]
+    fn a_call_block_body_is_the_minimal_genome_payload() {
+        let peer = "ab".repeat(32);
+        let call = "0123456789abcdef0123456789abcdef";
+        let body = call_block_body(&peer, call, 3).unwrap();
+        assert_eq!(body, json!({"recipient": peer, "is_room": false, "kind": 404, "plaintext": r#"{"call_id":"0123456789abcdef0123456789abcdef","seq":3}"#}));
+        assert!(call_block_body(&peer, &call.to_uppercase(), 0).is_err());
+        assert!(call_block_body(&peer, "0123", 0).is_err());
+        assert!(call_block_body(ROOM, call, 0).is_err());
+    }
+
+    #[test]
     fn only_audio_files_resolve_as_voice_notes() {
         let row = |id: &str, mime: &str, m: Option<&str>| FileRow { id: id.into(), mime_type: mime.into(), message_id: m.map(Into::into) };
         let rows = [
@@ -2094,6 +2222,40 @@ mod tests {
         assert!(settled_incomplete(502, r#"{"error":"no route","code":502}"#).is_none());
         assert!(settled_incomplete(502, r#"{"code":"payment_settled_send_incomplete"}"#).is_none(), "no amount, no mapping");
         assert!(settled_incomplete(502, "bad gateway").is_none());
+    }
+
+    #[test]
+    fn settled_incomplete_maps_session_handover_with_a_retained_payment() {
+        for (code, reason) in [(json!("session_handover"), json!(null)), (json!(409), json!("session_handover"))] {
+            let body = json!({
+                "code": code, "reason": reason,
+                "error": "the existing payment is retained while the E2EE session recovers; retry this operation",
+                "state": "rejected_retryable", "retry_allowed": true,
+            }).to_string();
+            assert_eq!(settled_incomplete(409, &body), Some(SettledIncomplete {
+                amount_msat: 0, prior_admission_msat: None, current_call_msat: None, retry_safe: true,
+            }));
+            for status in [400, 500, 502, 503] {
+                assert!(settled_incomplete(status, &body).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn settled_incomplete_keeps_other_conflicts_unknown() {
+        for body in [
+            json!({"code": "session_handover", "retry_allowed": true}),
+            json!({"code": "session_handover", "error": "session recovery pending", "retry_allowed": true}),
+            json!({"code": "operation_mismatch", "error": "the existing payment is retained", "retry_allowed": true}),
+            json!({"code": 409, "reason": "something_else", "error": "the existing payment is retained", "retry_allowed": true}),
+            json!({"code": "not_dispatched", "reason": "session_handover", "error": "session recovery pending"}),
+        ] {
+            assert!(settled_incomplete(409, &body.to_string()).is_none(), "{body}");
+        }
+        assert!(settled_incomplete(409, &psi(2000, 0, 2000, SESSION_TIMEOUT)).is_none());
+        assert!(settled_incomplete(409, "not json").is_none());
+        let no_retry = json!({"code": "session_handover", "error": "the existing payment is retained", "retry_allowed": false});
+        assert!(!settled_incomplete(409, &no_retry.to_string()).unwrap().retry_safe);
     }
 
     #[test]

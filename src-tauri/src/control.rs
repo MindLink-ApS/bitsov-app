@@ -203,9 +203,20 @@ pub struct LightningReadiness {
     pub events: Vec<ReadinessEvent>,
 }
 
+/// Chain source fields used by the public-service notice.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct ChainView {
+    #[serde(default)]
+    pub explorer_default: bool,
+    #[serde(default)]
+    pub trust_level: String,
+}
+
 /// `GET /status` — `HealthResponse`. The subset the Node panel shows.
 #[derive(Deserialize, Clone, Debug)]
 pub struct NodeStatusResponse {
+    #[serde(default)]
+    pub chain_view: Option<ChainView>,
     /// Node-reported network also works for remote paired clients.
     #[serde(default)]
     pub network: Option<String>,
@@ -239,9 +250,12 @@ pub struct NodeStatusResponse {
     /// UDP port of the node's own STUN responder (`[calls] stun_listen`); absent when off.
     #[serde(default)]
     pub stun_port: Option<u16>,
-    /// `stun:host:port` for it at the node's public host; absent without one.
+    /// `stun:host:port` for the own responder or the owner's configured server.
     #[serde(default)]
     pub stun_url: Option<String>,
+    /// Owner-only `/status`: `own`, `configured`, or absent without a server.
+    #[serde(default)]
+    pub stun_source: Option<String>,
     /// Where the node's seed lives (node REMOTE-SIGNER.md §2); absent before it.
     #[serde(default)]
     pub custody_mode: Option<String>,
@@ -445,6 +459,11 @@ pub struct MembraneTotals {
 mod refusals;
 use refusals::{NodePrePaymentRefusals, PrePaymentRefusals};
 
+/// M6 A1: the node-routed call media bridge (frames, queues, the media socket).
+#[cfg(feature = "call-seal")]
+pub mod call_seal;
+pub mod media;
+
 #[derive(Deserialize, Clone, Debug)]
 pub struct NodeMembrane {
     #[serde(default)]
@@ -552,6 +571,8 @@ pub struct WalletOverview {
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct NodeOverview {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_view: Option<ChainView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub money_ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness: Option<LightningReadiness>,
@@ -568,13 +589,16 @@ pub struct NodeOverview {
     pub chain_backend: Option<String>,
     /// Known capabilities only (see [`KNOWN_CAPABILITIES`]).
     pub capabilities: Vec<String>,
-    /// The node's own STUN responder, if it runs. Only ever *offered* in
-    /// Settings; the owner confirms before calls use it.
+    /// UDP port of the node's own responder, if running. A configured server
+    /// can use a different port or be available without an own responder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stun_port: Option<u16>,
-    /// Its URL, only when well-formed and naming the reported port.
+    /// Validated URL; only an own responder must name the reported port.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stun_url: Option<String>,
+    /// Known source from owner-only `/status`; absent on older nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stun_source: Option<&'static str>,
     /// Node-reported Bitcoin network, normalized for invoice comparison.
     /// Older local LDK nodes fall back to their host configuration.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -637,11 +661,17 @@ pub fn ldk_network_name(configured: &str) -> Option<&'static str> {
     }
 }
 
-/// The node's `stun_url`, kept only when it is a plain `stun:host:port` (no
-/// TURN, credentials or query; IPv6 in brackets) on the port the node reported.
-pub fn own_stun_url(url: Option<&str>, port: Option<u16>) -> Option<String> {
-    let (url, port) = (url?.trim(), port?);
-    let host = url.strip_prefix("stun:")?.strip_suffix(&format!(":{port}"))?;
+/// Owner status's plain `stun:host:port` (no TURN, credentials or query;
+/// IPv6 in brackets). Only `own` must match the node's responder port.
+pub fn node_stun_url(url: Option<&str>, port: Option<u16>, source: Option<&str>) -> Option<String> {
+    let url = url?.trim();
+    let (host, url_port) = url.strip_prefix("stun:")?.rsplit_once(':')?;
+    let parsed_port = url_port.parse::<u16>().ok().filter(|p| *p != 0)?;
+    match source? {
+        "own" if Some(parsed_port) == port && url_port == port?.to_string() => {},
+        "configured" => {},
+        _ => return None,
+    }
     let ok = match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
         Some(v6) => v6.parse::<std::net::Ipv6Addr>().is_ok(),
         None => {
@@ -657,7 +687,13 @@ pub fn own_stun_url(url: Option<&str>, port: Option<u16>) -> Option<String> {
 
 impl NodeOverview {
     pub fn from_status(status: NodeStatusResponse, read_at: u64) -> Self {
+        let stun_source = match status.stun_source.as_deref() {
+            Some("own") => Some("own"),
+            Some("configured") => Some("configured"),
+            _ => None,
+        };
         Self {
+            chain_view: status.chain_view.filter(|view| view.trust_level == "third_party"),
             money_ready: status.money_ready,
             readiness: status.readiness,
             node_id: status.node_id,
@@ -672,8 +708,9 @@ impl NodeOverview {
             lightning_backend: status.lightning_backend,
             chain_backend: status.chain_backend,
             capabilities: known_capabilities(&status.api_capabilities),
-            stun_url: own_stun_url(status.stun_url.as_deref(), status.stun_port),
+            stun_url: node_stun_url(status.stun_url.as_deref(), status.stun_port, stun_source),
             stun_port: status.stun_port,
+            stun_source,
             network: status.network.as_deref().and_then(ldk_network_name).map(str::to_string),
             // Provenance is applied by the caller (`verified_local_node`); raw
             // report only, so tests can project both sides.
@@ -730,7 +767,9 @@ pub fn price_quote(own: KindPrice, tables: &[PeerPrice], peer: Option<&str>) -> 
 /// is not evidence that the node lacks the contract.
 pub fn conversation_ceiling_evidence(proven: bool, probe: Result<(), String>) -> Result<(), crate::act::ActionError> {
     probe.map_err(|reason| {
-        if matches!(reason.as_str(), "peer_not_ready:chain_unavailable" | "peer_not_ready:not_synced") {
+        if reason == "not_ready:chain_unavailable" {
+            crate::act::ActionError::node(reason)
+        } else if matches!(reason.as_str(), "peer_not_ready:chain_unavailable" | "peer_not_ready:not_synced") {
             crate::act::ActionError::new("peer_not_ready", reason)
         } else {
             crate::act::ActionError::new("price_quote_unavailable", format!("Quote unavailable: {reason}"))
@@ -752,6 +791,135 @@ pub struct CallQuote {
     pub signal_max_routing_fee_msat: u64,
     /// Offer plus one hangup, all-in: what a call you place costs at most.
     pub call_total_msat: Option<u64>,
+    /// M6: one paid 60-second block (one minute of call) at the callee's
+    /// advertised kind-404 price. `None` when their node advertises none or
+    /// its table is stale or missing: then no node-routed call is placed.
+    pub block_msat: Option<u64>,
+    /// The routing allowance per block the caller's node may reserve: the
+    /// offer's routing ceiling, which the node applies to every block.
+    pub block_max_routing_fee_msat: u64,
+    /// The most the caller's node can hold for the call's minutes when it
+    /// sends the offer: 240 blocks (the node's hard cap on `max_call_minutes`),
+    /// each at `block_msat` plus its routing allowance. The node's own limit
+    /// is only visible on its reservation once the offer is out, so this is
+    /// the ceiling the owner agrees to before Ring; the host refuses to pay
+    /// any minute of a reservation above it and hangs up.
+    pub reservation_max_msat: Option<u64>,
+    /// Whether the caller's node keeps a call reservation for this session
+    /// (genome N3: only a paired app spending under a grant). Without one the
+    /// host pays no minutes, so a node-routed call is not placed at all.
+    pub minutes_payable: bool,
+}
+
+/// M6: a paid call runs in 60-second blocks, at most 240 (four hours).
+pub const CALL_MAX_BLOCKS: u64 = 240;
+/// The callee's per-kind block price in its advert, and the category it
+/// falls back to when the block price equals the realtime tariff.
+pub const CALL_BLOCK_PRICE_KEY: &str = "kind:404";
+pub const CATEGORY_REALTIME: &str = "realtime_signaling";
+
+/// Add the callee's per-minute block price (from its cached price advert,
+/// never paid here) and the most the caller's node will reserve for it.
+pub fn with_call_blocks(mut quote: CallQuote, table: Option<&PeerPrice>) -> CallQuote {
+    let block = advert_block_msat(table).filter(|_| quote.offer_msat.is_some());
+    let fee = quote.offer_max_routing_fee_msat;
+    // A ceiling the renderer cannot hold exactly (a JS number) or that
+    // overflows is no ceiling: such a quote places no node-routed call.
+    let max = block.and_then(|price| price.checked_add(fee))
+        .and_then(|per_block| per_block.checked_mul(CALL_MAX_BLOCKS))
+        .filter(|max| *max <= MAX_SAFE_MSAT);
+    quote.block_msat = block.filter(|_| max.is_some());
+    quote.block_max_routing_fee_msat = if quote.block_msat.is_some() { fee } else { 0 };
+    quote.reservation_max_msat = if quote.block_msat.is_some() { max } else { None };
+    quote
+}
+
+/// The callee's per-minute block price from its cached advert (the
+/// per-kind price, or the realtime tariff it equals). `None` when the advert
+/// is stale or missing or names no payable price.
+pub fn advert_block_msat(table: Option<&PeerPrice>) -> Option<u64> {
+    table.filter(|t| !t.stale)
+        .and_then(|t| t.prices.get(CALL_BLOCK_PRICE_KEY).or_else(|| t.prices.get(CATEGORY_REALTIME)).copied())
+        .filter(|price| *price > 0)
+        .map(|price| price.max(crate::act::MIN_PAYMENT_MSAT))
+}
+
+/// The largest amount the renderer holds exactly (`Number.MAX_SAFE_INTEGER`).
+pub const MAX_SAFE_MSAT: u64 = (1 << 53) - 1;
+
+/// M6: the paid minutes the owner agreed to before Ring, handed to the host
+/// with the offer and kept there for the call. The node's reservation is
+/// checked against it before any minute is paid; it never sets an amount.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MinutesConsent {
+    /// The per-minute price shown (`block_msat`).
+    pub block_msat: u64,
+    /// The routing allowance per minute shown (`block_max_routing_fee_msat`).
+    pub block_max_routing_fee_msat: u64,
+    /// The most the node may hold for the minutes, as shown (`reservation_max_msat`).
+    pub max_hold_msat: u64,
+}
+
+impl MinutesConsent {
+    /// Only a consent the quote could have shown: a payable per-minute price,
+    /// and a total no larger than 240 minutes at that price plus allowance.
+    pub fn validated(self) -> Result<Self, String> {
+        let per_block = self.block_msat.checked_add(self.block_max_routing_fee_msat)
+            .ok_or("the agreed per-minute price is out of range")?;
+        let most = per_block.checked_mul(CALL_MAX_BLOCKS).ok_or("the agreed hold is out of range")?;
+        if self.block_msat < crate::act::MIN_PAYMENT_MSAT || self.max_hold_msat < per_block
+            || self.max_hold_msat > most || self.max_hold_msat > MAX_SAFE_MSAT {
+            return Err("the agreed per-minute price or hold is out of range".into());
+        }
+        Ok(self)
+    }
+
+    /// The node's reservation is within what the owner agreed to: per-minute
+    /// price, routing allowance and the total held.
+    pub fn covers(&self, hold: &CallReservation) -> bool {
+        hold.per_block_msat <= self.block_msat
+            && hold.per_block_fee_msat <= self.block_max_routing_fee_msat
+            && hold.reserved_msat <= self.max_hold_msat
+    }
+}
+
+/// `GET /calls?peer=` (genome M6 N1/N3): one open call's paid interval and,
+/// for an outgoing call under a paired grant, its spend reservation. Read-only
+/// for the renderer's running cost and block schedule; never payment authority.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CallStatus {
+    pub id: String,
+    /// `reserved`, `ringing`, `live` or `ended`, aged by the node at read time.
+    pub state: String,
+    /// `outgoing` (this node offered) or `incoming`.
+    pub direction: String,
+    /// End of the last settled 60-second block (Unix ms); null before block zero.
+    #[serde(default)]
+    pub paid_until_ms: Option<u64>,
+    #[serde(default)]
+    pub next_block_seq: u32,
+    /// When the next block is due (Unix ms); null when ended or at the cap.
+    #[serde(default)]
+    pub next_block_due_ms: Option<u64>,
+    #[serde(default)]
+    pub reservation: Option<CallReservation>,
+}
+
+/// The node's call-sized hold (genome `CallSpendStatus`), all in msat.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CallReservation {
+    pub reserved_msat: u64,
+    /// Settled block principal plus known routing fees.
+    pub spent_msat: u64,
+    /// Still held, including unresolved payments; released funds excluded.
+    pub remaining_msat: u64,
+    pub per_block_msat: u64,
+    pub per_block_fee_msat: u64,
+    /// The paid-duration cap the node pinned on this hold (`[calls]
+    /// max_call_minutes`, 1-240). Required: a hold without it is not paid.
+    pub max_call_minutes: u16,
+    pub released_msat: u64,
+    pub closed: bool,
 }
 
 /// `GET /pricing/peers/:id/call`: the callee's live answer (genome asks it).
@@ -762,19 +930,29 @@ pub struct PeerCallPrice {
 }
 
 /// The call price the owner sees. `None` offer: their node did not answer
-/// (older genome, offline, or not listed). Principals are floored to the
-/// smallest payment the app makes, as every other send is.
+/// (older genome, offline, or not listed), or its price is out of range; the
+/// signal price is then only this node's own tariff, and no signal is paid on
+/// it. Principals are floored to the smallest payment the app makes, as every
+/// other send is.
 pub fn call_quote(live: Option<&PeerCallPrice>, own_signal_msat: u64) -> CallQuote {
     let floor = |m: u64| m.max(crate::act::MIN_PAYMENT_MSAT);
-    let offer = live.map(|p| floor(p.offer_msat));
     let signal = floor(live.map_or(own_signal_msat, |p| p.signal_msat));
     let fee = crate::act::routing_fee;
+    // An all-in amount that overflows, or that the renderer cannot hold exactly,
+    // is no price: such a quote places, answers and hangs up nothing.
+    let sum = |a: u64, b: u64| a.checked_add(b).filter(|total| *total <= MAX_SAFE_MSAT);
+    let total = live.map(|p| floor(p.offer_msat)).and_then(|offer| sum(sum(offer, fee(offer))?, sum(signal, fee(signal))?));
+    let offer = live.map(|p| floor(p.offer_msat)).filter(|_| total.is_some());
     CallQuote {
         offer_msat: offer,
         offer_max_routing_fee_msat: offer.map(fee).unwrap_or(0),
         signal_msat: signal,
         signal_max_routing_fee_msat: fee(signal),
-        call_total_msat: offer.map(|o| o + fee(o) + signal + fee(signal)),
+        call_total_msat: total,
+        block_msat: None,
+        block_max_routing_fee_msat: 0,
+        reservation_max_msat: None,
+        minutes_payable: false,
     }
 }
 
@@ -1155,6 +1333,13 @@ mod tests {
     }
 
     #[test]
+    fn chain_quote_probe_preserves_the_typed_refusal() {
+        let error = conversation_ceiling_evidence(false, Err("not_ready:chain_unavailable".into())).unwrap_err();
+        assert_eq!(error.code, "not_ready");
+        assert_eq!(error.reason.as_deref(), Some("chain_unavailable"));
+    }
+
+    #[test]
     fn conversation_ceiling_evidence_distinguishes_missing_contract_from_failed_quote() {
         for reason in ["No route or channel yet", "Peer offline", "Quote unavailable", "Owner approval required"] {
             let err = conversation_ceiling_evidence(false, Err(reason.into())).unwrap_err();
@@ -1195,11 +1380,116 @@ mod tests {
         assert_eq!(big.offer_max_routing_fee_msat, 10_000);
     }
 
+    #[test]
+    fn a_call_total_that_overflows_or_passes_the_renderers_range_is_no_price() {
+        let quote = |offer_msat, signal_msat| call_quote(Some(&PeerCallPrice { offer_msat, signal_msat }), 50);
+        for q in [quote(u64::MAX, 50), quote(u64::MAX - 5_000, 50), quote(50, u64::MAX), quote(50, u64::MAX - 5_000),
+            quote(MAX_SAFE_MSAT, 50), quote(50, MAX_SAFE_MSAT)] {
+            assert_eq!((q.offer_msat, q.call_total_msat), (None, None), "{q:?}");
+        }
+        // The last amount that fits: offer + its fee + signal + its fee, exactly.
+        let exact = MAX_SAFE_MSAT - 10_000 - 6_000;
+        assert_eq!(quote(exact, 50).call_total_msat, Some(MAX_SAFE_MSAT));
+        assert_eq!(quote(exact + 1, 50).call_total_msat, None);
+    }
+
+    #[test]
+    fn call_status_reads_the_node_reservation_fields_verbatim() {
+        let calls: Vec<CallStatus> = serde_json::from_value(serde_json::json!([
+            {"id": "0123456789abcdef0123456789abcdef", "state": "live", "direction": "outgoing", "unresolved_paid_admission": false,
+             "created": null, "op_id": null, "paid_until_ms": 1_790_000_060_000u64, "next_block_seq": 1, "next_block_due_ms": 1_790_000_040_000u64,
+             "reservation": {"max_call_minutes": 240, "reserved_msat": 6000, "spent_msat": 22, "remaining_msat": 5978, "per_block_msat": 20, "per_block_fee_msat": 5, "released_msat": 0, "closed": false}},
+            {"id": "1123456789abcdef0123456789abcdef", "state": "ringing", "direction": "incoming", "unresolved_paid_admission": true,
+             "created": null, "op_id": null, "paid_until_ms": null, "next_block_seq": 0, "next_block_due_ms": null},
+        ])).unwrap();
+        let hold = calls[0].reservation.as_ref().unwrap();
+        assert_eq!((hold.reserved_msat, hold.spent_msat, hold.remaining_msat, hold.per_block_msat), (6000, 22, 5978, 20));
+        assert_eq!((calls[0].next_block_seq, calls[0].paid_until_ms, hold.max_call_minutes), (1, Some(1_790_000_060_000), 240));
+        assert_eq!((calls[1].reservation.as_ref(), calls[1].next_block_due_ms), (None, None));
+        // A hold without its duration cap is not read as one: the host pays nothing for it.
+        let capless = serde_json::json!([{"id": "0123456789abcdef0123456789abcdef", "state": "live", "direction": "outgoing", "next_block_seq": 0,
+            "reservation": {"reserved_msat": 6000, "spent_msat": 0, "remaining_msat": 6000, "per_block_msat": 20, "per_block_fee_msat": 5, "released_msat": 0, "closed": false}}]);
+        assert!(serde_json::from_value::<Vec<CallStatus>>(capless).is_err());
+    }
+
+    #[test]
+    fn a_consent_holds_only_what_the_quote_showed_and_covers_only_holds_within_it() {
+        let shown = MinutesConsent { block_msat: 10_000, block_max_routing_fee_msat: 5_000, max_hold_msat: 240 * 15_000 };
+        assert_eq!(shown.validated(), Ok(shown));
+        for bad in [
+            MinutesConsent { max_hold_msat: 240 * 15_000 + 1, ..shown },
+            MinutesConsent { max_hold_msat: 14_999, ..shown },
+            MinutesConsent { block_msat: 999, ..shown },
+            MinutesConsent { block_msat: u64::MAX, ..shown },
+            MinutesConsent { block_msat: MAX_SAFE_MSAT, block_max_routing_fee_msat: 0, max_hold_msat: MAX_SAFE_MSAT + 1 },
+        ] {
+            assert!(bad.validated().is_err(), "{bad:?}");
+        }
+        let hold = |per_block: u64, fee: u64, minutes: u16| CallReservation {
+            reserved_msat: (per_block + fee) * u64::from(minutes), spent_msat: 0, remaining_msat: (per_block + fee) * u64::from(minutes),
+            per_block_msat: per_block, per_block_fee_msat: fee, max_call_minutes: minutes, released_msat: 0, closed: false,
+        };
+        assert!(shown.covers(&hold(10_000, 5_000, 240)));
+        assert!(shown.covers(&hold(9_000, 2_000, 60)));
+        assert!(!shown.covers(&hold(10_001, 5_000, 60)), "a higher per-minute price");
+        assert!(!shown.covers(&hold(10_000, 5_001, 60)), "a wider routing allowance");
+        let smaller = MinutesConsent { max_hold_msat: 60 * 15_000, ..shown };
+        assert!(smaller.covers(&hold(10_000, 5_000, 60)));
+        assert!(!smaller.covers(&hold(10_000, 5_000, 61)), "more held in total than agreed");
+    }
+
+    #[test]
+    fn a_minute_costs_the_callees_advertised_block_price_and_the_reservation_is_bounded() {
+        let live = PeerCallPrice { offer_msat: 10_000, signal_msat: 50 };
+        let table = |prices: &[(&str, u64)], stale: bool| PeerPrice {
+            peer_id: A.into(), prices: prices.iter().map(|(k, v)| (k.to_string(), *v)).collect(), age_secs: 1, stale,
+        };
+        let q = with_call_blocks(call_quote(Some(&live), 50), Some(&table(&[(CALL_BLOCK_PRICE_KEY, 10_000), (CATEGORY_REALTIME, 50)], false)));
+        assert_eq!((q.block_msat, q.block_max_routing_fee_msat), (Some(10_000), 5_000));
+        assert_eq!(q.reservation_max_msat, Some(240 * 15_000));
+        // Equal to the realtime tariff: the advert omits the per-kind key.
+        let realtime = with_call_blocks(call_quote(Some(&live), 50), Some(&table(&[(CATEGORY_REALTIME, 2_000)], false)));
+        assert_eq!(realtime.block_msat, Some(2_000));
+        // Stale or missing advert, or no offer price: no minute price, no call.
+        for q in [
+            with_call_blocks(call_quote(Some(&live), 50), Some(&table(&[(CALL_BLOCK_PRICE_KEY, 10_000)], true))),
+            with_call_blocks(call_quote(Some(&live), 50), None),
+            with_call_blocks(call_quote(None, 50), Some(&table(&[(CALL_BLOCK_PRICE_KEY, 10_000)], false))),
+        ] {
+            assert_eq!((q.block_msat, q.reservation_max_msat, q.block_max_routing_fee_msat), (None, None, 0));
+        }
+        // A maximum the renderer cannot hold exactly is no ceiling: no minute price, no call.
+        let huge = with_call_blocks(call_quote(Some(&live), 50), Some(&table(&[(CALL_BLOCK_PRICE_KEY, MAX_SAFE_MSAT / 200)], false)));
+        assert_eq!((huge.block_msat, huge.reservation_max_msat, huge.block_max_routing_fee_msat), (None, None, 0));
+        let overflow = with_call_blocks(call_quote(Some(&live), 50), Some(&table(&[(CALL_BLOCK_PRICE_KEY, u64::MAX)], false)));
+        assert_eq!((overflow.block_msat, overflow.reservation_max_msat), (None, None));
+        assert!(!q.minutes_payable, "the host sets it from the session, never the quote");
+    }
+
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const ROOM: &str = "0f8e2b7a-1c3d-4e5f-8a9b-0c1d2e3f4a5b";
 
     fn link(state: LinkState, detail: Option<&str>) -> LiveEvent {
         LiveEvent::Link { state, detail: detail.map(str::to_string) }
+    }
+
+    #[test]
+    fn overview_projects_the_default_explorer_notice_without_endpoint_details() {
+        for default in [true, false] {
+            let status = serde_json::from_value(serde_json::json!({
+                "status":"ok", "node_id":"x", "network":"signet",
+                "chain_view":{"explorer_default":default, "trust_level":"third_party", "endpoint":"private-detail"}
+            })).unwrap();
+            let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
+            assert_eq!(projected["chain_view"]["explorer_default"], default);
+            assert_eq!(projected["chain_view"]["trust_level"], "third_party");
+            assert!(!projected.to_string().contains("private-detail"));
+        }
+        for view in [serde_json::Value::Null, serde_json::json!({"explorer_default":true,"trust_level":"unknown"})] {
+            let status = serde_json::from_value(serde_json::json!({"status":"ok", "node_id":"x", "chain_view":view})).unwrap();
+            let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
+            assert!(projected.get("chain_view").is_none());
+        }
     }
 
     #[test]
@@ -1649,7 +1939,7 @@ mod tests {
     #[test]
     fn own_stun_is_projected_only_when_well_formed() {
         let read = |extra: &str| {
-            let s: NodeStatusResponse = serde_json::from_str(&format!(r#"{{"status":"ok","node_id":"x"{extra}}}"#)).unwrap();
+            let s: NodeStatusResponse = serde_json::from_str(&format!(r#"{{"status":"ok","node_id":"x","stun_source":"own"{extra}}}"#)).unwrap();
             serde_json::to_value(NodeOverview::from_status(s, 1)).unwrap()
         };
         let off = read("");
@@ -1658,12 +1948,53 @@ mod tests {
         assert_eq!(port_only["stun_port"], 3478);
         assert!(port_only.get("stun_url").is_none());
         assert_eq!(read(r#","stun_port":3478,"stun_url":"stun:node.example.org:3478""#)["stun_url"], "stun:node.example.org:3478");
+        assert_eq!(read(r#","stun_port":3478,"stun_url":"stun:node.example.org:3478""#)["stun_source"], "own");
         assert_eq!(read(r#","stun_port":3478,"stun_url":"stun:[2001:db8::1]:3478""#)["stun_url"], "stun:[2001:db8::1]:3478");
         for bad in ["turn:node.example.org:3478", "stun:node.example.org:9999", "stun:u:p@h:3478", "stun:h:3478?transport=tcp",
             "stun:-h:3478", "stun::3478", "stun:[not-v6]:3478", "stun:node.example.org"] {
             assert!(read(&format!(r#","stun_port":3478,"stun_url":"{bad}""#)).get("stun_url").is_none(), "{bad}");
         }
         assert!(read(r#","stun_url":"stun:node.example.org:3478""#).get("stun_url").is_none(), "URL without a port is ignored");
+    }
+
+    #[test]
+    fn configured_stun_keeps_its_address_and_port_without_an_own_responder() {
+        for port in [None, Some(3478), Some(5349)] {
+            for url in ["stun:chosen.example.org:5349", "stun:[2001:db8::1]:5349"] {
+                let status = serde_json::from_value(serde_json::json!({
+                    "status": "ok", "node_id": "x", "stun_source": "configured", "stun_url": url, "stun_port": port,
+                })).unwrap();
+                let view = serde_json::to_value(NodeOverview::from_status(status, 1)).unwrap();
+                assert_eq!(view["stun_url"], url);
+                assert_eq!(view["stun_source"], "configured");
+            }
+        }
+    }
+
+    #[test]
+    fn missing_null_or_unknown_stun_source_offers_no_stun() {
+        for source in [None, Some(serde_json::Value::Null), Some(serde_json::json!("unknown"))] {
+            let mut wire = serde_json::json!({
+                "status": "ok", "node_id": "x", "stun_port": 3478, "stun_url": "stun:node.example.org:3478",
+            });
+            if let Some(source) = source { wire["stun_source"] = source; }
+            let status = serde_json::from_value(wire).unwrap();
+            let view = serde_json::to_value(NodeOverview::from_status(status, 1)).unwrap();
+            assert!(view.get("stun_url").is_none());
+            assert!(view.get("stun_source").is_none());
+        }
+    }
+
+    #[test]
+    fn configured_stun_rejects_malformed_urls() {
+        for url in ["turn:chosen.example.org:5349", "stun:u:p@h:5349", "stun:h:5349?transport=tcp",
+            "stun:-h:5349", "stun::5349", "stun:[not-v6]:5349", "stun:chosen.example.org", "stun:h:0", "stun:h:65536"] {
+            let status = serde_json::from_value(serde_json::json!({
+                "status": "ok", "node_id": "x", "stun_source": "configured", "stun_url": url,
+            })).unwrap();
+            let view = serde_json::to_value(NodeOverview::from_status(status, 1)).unwrap();
+            assert!(view.get("stun_url").is_none(), "{url}");
+        }
     }
 
     #[test]

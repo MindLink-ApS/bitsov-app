@@ -2,7 +2,7 @@ name: Mac Package
 
 # Ad-hoc signed Apple Silicon BitSov.app (+ .dmg) as a short-lived CI artifact
 # (docs/MAC_PACKAGE.md). No secrets, Developer ID, notarization or release.
-# The built app is never opened or executed here.
+# The built executable runs only its headless storage smoke mode.
 #
 # NOT a merge gate: keep this job OUT of the required status checks. Like the
 # Build workflow's `sidecar` job it depends on network and on the genome's
@@ -57,21 +57,21 @@ jobs:
       # scripts/fetch-node-sidecar.sh reads the pinned public release with gh.
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: GnuPG for the sidecar signature check
         run: command -v gpg || brew install gnupg
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       # Release profile, separate from the Linux dev-test cache. Path crates
       # (ffi, mock-node) are included; there is no vendor/ tree today.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri
           shared-key: tauri-release-macos
@@ -100,7 +100,7 @@ jobs:
             echo "::warning::sccache unavailable; compiling without a cache"
           fi
 
-      - name: Fetch and re-verify every sidecar against rc19.2 (G1)
+      - name: Fetch and re-verify every sidecar against rc23 (G1)
         run: |
           bash scripts/fetch-node-sidecar.sh
           bash scripts/fetch-node-sidecar.sh --verify-only
@@ -110,6 +110,13 @@ jobs:
       # The offline bundle-checker unit tests run on Linux in Authority Check.
       - name: Package, sign ad-hoc and verify
         run: bash scripts/package-mac.sh --dmg --use-existing-sidecar
+
+      - name: Real Keychain smoke from the signed bundle (headless)
+        run: |
+          set -euo pipefail
+          app=src-tauri/target/release/bundle/macos/BitSov.app
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+          "$app/Contents/MacOS/$executable" --keychain-smoke-test
 
       - name: Zip the .app
         run: |
@@ -124,7 +131,7 @@ jobs:
           cp src-tauri/target/release/bundle/dmg/*.dmg "$RUNNER_TEMP/out/"
           ls -l "$RUNNER_TEMP/out"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: bitsov-unsigned-macos-arm64-${{ github.sha }}
           path: ${{ runner.temp }}/out/

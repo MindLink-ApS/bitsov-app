@@ -90,9 +90,30 @@ pub struct Pending {
     /// Original compose fee cap, preserving omission for first-contact sends.
     #[serde(default)]
     pub compose_fee_msat: Option<u64>,
+    /// The node whose status, read for this very send, showed that a payment it
+    /// reports failed is really over (the host's `final_failure_node`). Today's
+    /// status cannot say what wrote a row, so a later `released` proves this
+    /// payment failed only with this set. Older records have none: they stay fenced.
+    #[serde(default)]
+    pub failure_final_on: Option<String>,
     /// Initial ledger snapshot repairs a crash between the two atomic files.
     #[serde(default)]
     pub operation_record: Option<OperationRecord>,
+    /// A direct payment's idempotency key and the exact request it names,
+    /// saved before the first POST. Recovery repeats that request unchanged:
+    /// the node answers from its record and never pays one key twice.
+    #[serde(default)]
+    pub direct: Option<DirectRequest>,
+}
+
+/// `POST /payments/pay` or `/payments/keysend` under a client `request_id`
+/// (node capability `direct_payment_operations_v1`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectRequest {
+    pub request_id: String,
+    pub path: String,
+    /// The body as sent, `request_id` included: the node binds the key to it.
+    pub body: serde_json::Value,
 }
 
 impl Pending {
@@ -218,6 +239,8 @@ pub enum Outcome {
     Paid,
     /// `prepared` / `released`: candidate only; the caller must check payment
     /// evidence and confirm abandonment or wait out the legacy grace window.
+    /// A payment the wallet failed for good has its own proof, in the host's
+    /// `reports_failed_payment`.
     NothingPaid,
     /// `failed_paid`: paid, and refused for good.
     FailedPaid,
@@ -336,11 +359,12 @@ impl Journal {
             request_hash: blake3::hash(format!("{path}\n{body}").as_bytes()).to_hex().to_string(),
             max_msat, target: None, over_budget: false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false,
             peer: operation_id.as_ref().and(body["recipient"].as_str()).map(str::to_string),
-            operation_id, dispatched_at: None, op, resumable: false, non_dispatch_proven: false, admission_resume: false, compose_fee_msat: body["max_routing_fee_msat"].as_u64(), operation_record: None,
+            operation_id, dispatched_at: None, op, resumable: false, non_dispatch_proven: false, admission_resume: false, compose_fee_msat: body["max_routing_fee_msat"].as_u64(), failure_final_on: None, operation_record: None,
+            direct: None,
         };
         if let Some(id) = &pending.operation_id {
             let signal_kind = body["kind"].as_u64().unwrap_or(0);
-            let payload = if (400..=403).contains(&signal_kind) {
+            let payload = if (400..=404).contains(&signal_kind) {
                 body["plaintext"].as_str().and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
             } else { None };
             // Persist only protocol identifiers, never arbitrary caller-supplied strings.
@@ -353,6 +377,7 @@ impl Journal {
             let kind = match signal_kind {
                 400 if recovery.is_some() => "call_recovery",
                 400 => "call_offer", 401 => "call_answer", 402 => "call_ice", 403 => "call_hangup",
+                404 => "call_block",
                 _ if body["plaintext"].as_str().is_some_and(crate::act::is_room_chat) => "room_leg",
                 _ => "message",
             };
@@ -1545,7 +1570,7 @@ mod tests {
     #[test]
     fn reconciliation_needs_exact_terminal_outgoing_evidence() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, non_dispatch_proven: false, admission_resume: false, compose_fee_msat: None, operation_record: None };
+            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, failure_final_on: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, non_dispatch_proven: false, admission_resume: false, compose_fee_msat: None, operation_record: None, direct: None };
         assert_eq!(terminal(&p, &[]), None);
         assert_eq!(terminal(&p, &[json!({"payment_hash":"other", "amount_msat":2000, "direction":"outgoing", "status":"settled"})]), None);
         for status in ["pending", "inflight", "expired", "unknown"] {
@@ -1561,7 +1586,7 @@ mod tests {
     #[test]
     fn message_reconciliation_rejects_other_sender_and_recipient() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, non_dispatch_proven: false, admission_resume: false, compose_fee_msat: None, operation_record: None };
+            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, failure_final_on: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, non_dispatch_proven: false, admission_resume: false, compose_fee_msat: None, operation_record: None, direct: None };
         let mut row = json!({"id":"abc", "sender":"other", "recipient":"peer", "payment_amount_msat":2000});
         assert_eq!(terminal(&p, &[row.clone()]), None);
         row["sender"] = json!("node");

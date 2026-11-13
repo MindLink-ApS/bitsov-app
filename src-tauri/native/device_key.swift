@@ -59,7 +59,7 @@ public func bitsov_dk_biometry() -> Int32 {
 ///
 /// policy 1: `.privateKeyUsage` + `.biometryCurrentSet` (Touch ID on every
 ///           signature; the key dies if the enrolled fingers change).
-/// policy 0: `.privateKeyUsage` only. Signs without a prompt. Tests only.
+/// policy 0 is rejected except in an explicit debug-only hardware test build.
 ///
 /// Writes the device-bound blob to `out_blob` (length in `out_blob_len`) and the
 /// 65-byte X9.63 uncompressed public key to `out_pub`. Creation never prompts.
@@ -88,10 +88,10 @@ private func createKey(
     let flags: SecAccessControlCreateFlags
     switch policy {
     case 1: flags = [.privateKeyUsage, .biometryCurrentSet]
-    #if os(iOS) || BITSOV_IOS_TEST_POLICY
-    case 0: return errBadArgument
-    #else
+    #if BITSOV_TEST_DEVICE_KEYS && os(macOS)
     case 0: flags = [.privateKeyUsage]
+    #else
+    case 0: return errBadArgument
     #endif
     default: return errBadArgument
     }
@@ -164,7 +164,7 @@ public func bitsov_dk_sign(
     return autoreleasepool { signMessage(blob, blobLen, msg, msgLen, reason, outSig, sigCap, outSigLen) }
 }
 
-private func signMessage(
+func signMessage(
     _ blob: UnsafePointer<UInt8>?,
     _ blobLen: Int,
     _ msg: UnsafePointer<UInt8>?,
@@ -198,7 +198,7 @@ private func signMessage(
             dataRepresentation: blobData, authenticationContext: context
         )
     } catch {
-        return errInvalidBlob
+        return statusForKeyLoadingError(error)
     }
 
     let signature: P256.Signing.ECDSASignature
@@ -217,6 +217,10 @@ private func signMessage(
 
 private func statusForSigningError(_ error: Error) -> Int32 {
     let ns = error as NSError
+    if ns.domain == NSOSStatusErrorDomain,
+       [Int(errSecUserCanceled), Int(errSecAuthFailed)].contains(ns.code) {
+        return errCancelled
+    }
     if ns.domain == LAErrorDomain || error is LAError {
         // No Touch ID to ask is not the owner saying no: point to the fallback.
         switch ns.code {
@@ -233,6 +237,13 @@ private func statusForSigningError(_ error: Error) -> Int32 {
         return errCancelled
     }
     return errOther
+}
+
+// Restoring an enclave key can itself request authentication. A cancelled
+// restore must not be reported as invalid key material (which the app retires).
+func statusForKeyLoadingError(_ error: Error) -> Int32 {
+    let status = statusForSigningError(error)
+    return status == errOther ? errInvalidBlob : status
 }
 
 #if os(macOS)
@@ -601,13 +612,34 @@ private struct SetupApproval {
 private let setupApprovalLock = NSLock()
 private var setupApproval: SetupApproval?
 
+// A setup first-unlock read must reuse the already approved context without UI.
+// The signing operation still consumes and validates the full key/node/client
+// binding and deadline below before authorizing any signature.
+func setupReadContext() -> LAContext {
+    setupApprovalLock.lock()
+    defer { setupApprovalLock.unlock() }
+    let context = setupApproval.flatMap {
+        ProcessInfo.processInfo.systemUptime < $0.deadline ? $0.context : nil
+    } ?? LAContext()
+    context.interactionNotAllowed = true
+    return context
+}
+
+func invalidateUnlessSetupContext(_ context: LAContext) {
+    setupApprovalLock.lock()
+    let retained = setupApproval?.context === context
+    setupApprovalLock.unlock()
+    if !retained { context.invalidate() }
+}
+
 @_cdecl("bitsov_dk_sign_setup")
 public func bitsov_dk_sign_setup(
     _ blob: UnsafePointer<UInt8>?, _ blobLen: Int,
     _ msg: UnsafePointer<UInt8>?, _ msgLen: Int,
     _ reason: UnsafePointer<CChar>?, _ finish: Int32,
     _ outSig: UnsafeMutablePointer<UInt8>?, _ sigCap: Int,
-    _ outSigLen: UnsafeMutablePointer<Int>?
+    _ outSigLen: UnsafeMutablePointer<Int>?,
+    _ handle: UnsafeMutableRawPointer? = nil
 ) -> Int32 {
     return autoreleasepool {
         guard let blob = blob, let msg = msg, blobLen > 0, msgLen > 0,
@@ -632,13 +664,21 @@ public func bitsov_dk_sign_setup(
                 prior.context.invalidate()
                 return errCancelled
             }
+            if let handle = handle {
+                guard Unmanaged<LAContext>.fromOpaque(handle).takeUnretainedValue() === prior.context else {
+                    prior.context.invalidate()
+                    return errCancelled
+                }
+            }
             context = prior.context
             // Reuse must never show another prompt. The owner can explicitly
             // unlock through the ordinary flow if this context became invalid.
             context.interactionNotAllowed = true
         } else {
             previous?.context.invalidate()
-            context = LAContext()
+            if let handle = handle {
+                context = Unmanaged<LAContext>.fromOpaque(handle).takeUnretainedValue()
+            } else { context = LAContext() }
         }
         let status = signMessage(blob, blobLen, msg, msgLen, reason, outSig, sigCap, outSigLen, context)
         if finish == 0 && status == okStatus {

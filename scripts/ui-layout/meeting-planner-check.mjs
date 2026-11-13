@@ -49,7 +49,7 @@ let base = process.env.BITSOV_LAYOUT_URL;
 if (!base) {
   const port = String(14000 + Math.floor(Math.random() * 900));
   server = spawn(join(root, 'node_modules', '.bin', 'vite'), [], {
-    cwd: root, env: { ...process.env, BITSOV_VITE_PORT: port }, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: root, env: { ...process.env, BITSOV_VITE_PORT: port, VITE_CALL_MEDIA: 'webrtc' }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   base = `http://localhost:${port}`;
   await new Promise((ok, fail) => {

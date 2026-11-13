@@ -1,5 +1,10 @@
 # App on a node you already run (DEV ONLY)
 
+**Signet-only beta:** configure your node's Lightning backend and chain
+providers for signet before starting it. Check the network in the app before
+testing payments. Use test coins only; this debug mode does not enforce the
+network selection. See [signet configuration](DEV_NODE_FROM_MAIN.md).
+
 Use this when the owner already runs `konsensus start … --owner-control` on this Mac
 and wants the desktop app on that node, instead of the app starting its own sidecar.
 

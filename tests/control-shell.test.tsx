@@ -351,7 +351,7 @@ describe('control center shell', () => {
       node_overview: () => ({
         node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 2, pending_deliveries: 0, lightning_available: true,
         block_height: 860123, uptime_secs: 60, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
-        stun_port: 3478, stun_url: 'stun:mynode.example.org:3478', onion: 'abcdefghijklmnop.onion',
+        stun_source: 'own', stun_port: 3478, stun_url: 'stun:mynode.example.org:3478', onion: 'abcdefghijklmnop.onion',
       }),
     });
     let copied = '';
@@ -367,7 +367,7 @@ describe('control center shell', () => {
     click('[data-tab="node"]');
     await waitFor(() => expect(mount.querySelector('[data-connection-card]')).not.toBeNull());
     await waitFor(() => expect(mount.querySelector('[data-connection-line="2"]')!.textContent).toMatch(/^Last status check: .+ · \d+ ms \(this app ↔ its host\)$/));
-    expect(mount.querySelector('[data-connection-line="3"]')!.textContent).toBe('Calls · STUN: your node');
+    expect(mount.querySelector('[data-connection-line="3"]')!.textContent).toBe('Calls · STUN: your own node');
     click('[data-connection-copy]');
     await waitFor(() => expect(copied).toContain('BitSov connection'));
     for (const secret of [OWN, A, B, TICKET, 'SECRETTICKET', TOKEN, '203.0.113.7', '127.0.0.1', '9735', '9736', 'mynode.example.org', '3478', 'abcdefghijklmnop', '.onion']) {
@@ -406,7 +406,8 @@ describe('control center shell', () => {
 
     await waitFor(() => expect(mount.querySelector('[data-touch-approval]')).not.toBeNull());
     const box = mount.querySelector('[data-touch-approval]')!.textContent!;
-    expect(box).toContain('200 sats a day');
+    expect(box).toContain('200 sats in total');
+    expect(box).not.toContain('a day');
     expect(box).toContain('at most 2 sats per message');
     expect(mount.querySelector('[data-touch-peer]')?.textContent).toBe(`${A.slice(0, 8)}…${A.slice(-8)}`);
     // Petname plus the short key, visible on the line; never the node's claimed label.
@@ -997,7 +998,8 @@ describe('control center shell', () => {
     await waitFor(() => expect(mount.querySelector('[data-device-settings-hint="off"]')?.textContent).toContain('Touch ID approvals are off.'));
     click('[data-device-settings-link]');
     await waitFor(() => expect(mount.querySelector('[data-device-off="seed_not_encrypted"]')).not.toBeNull());
-    expect(mount.querySelector('[data-device-off]')?.textContent).toContain('Encrypt your recovery phrase to enable Touch ID approvals');
+    expect(mount.querySelector('[data-device-off]')?.textContent).toContain('Ask whoever set up the box for help');
+    expect(mount.querySelector('[data-device-off]')?.textContent).not.toContain('konsensus ');
     expect(mount.querySelector('[data-device-register]')).toBeNull();
     expect(mount.querySelector('[data-touch-approval]')).toBeNull();
   });
@@ -1274,8 +1276,8 @@ describe('control center shell', () => {
     });
   });
 
-  it('shows the one-time owner command for this Mac, and a pending request can be cancelled', async () => {
-    const cmd = 'konsensus device approve --op dd01 --config /Users/owner/node/konsensus.toml';
+  it('shows plain owner approval guidance for this Mac, and a pending request can be cancelled', async () => {
+    const cmd = 'konsensus device approve --op dd01 --config node.toml';
     const { calls } = stubHost({
       pairing_status: () => ({ ...paired, remote: true }),
       device_key_status: () => ({ available: true, state: 'pending', fingerprint: '3F9A-12C4', owner_action: cmd, expires_at_ms: Date.now() + 600_000 }),
@@ -1292,7 +1294,8 @@ describe('control center shell', () => {
     await waitFor(() => expect(mount.querySelector('[data-device-settings-hint="pending"]')).not.toBeNull());
     expect(mount.querySelector('[data-spend] [data-device-owner-action]')).toBeNull();
     click('[data-device-settings-link]');
-    await waitFor(() => expect(mount.querySelector('[data-device-owner-action]')?.textContent).toBe(cmd));
+    await waitFor(() => expect(mount.querySelector('[data-pending-approval]')?.textContent).toContain('Ask whoever set up the box to help approve this device'));
+    expect(mount.querySelector('[data-pending-approval]')?.textContent).not.toContain('konsensus ');
     expect(mount.querySelector('[data-device-fingerprint]')?.textContent).toBe('3F9A-12C4');
     click('[data-device-cancel]');
     await waitFor(() => expect(calls.some((c) => c.cmd === 'device_key_cancel')).toBe(true));

@@ -8,7 +8,9 @@ use std::time::Instant;
 const PASSWORD: &str = "owner-process-canary-6f98b212e2c9440a";
 const PHRASE: &str =
     "abandon ability able about above absent absorb abstract absurd abuse access accident";
-const CHILD: &str = "local_owner::process_tests::host_child";
+// Names as libtest lists them in the lib test binary: `local_owner` is a module of `app`.
+const CHILD: &str = "app::local_owner::process_tests::host_child";
+const FIXTURE_CHILD: &str = "app::local_owner::process_tests::node_fixture_child";
 
 fn leak(bytes: &[u8], secrets: &[&str]) -> Option<usize> {
     for (i, secret) in secrets.iter().enumerate() {
@@ -88,6 +90,17 @@ fn run_host(binary: Option<&Path>) {
         status.success(),
         "host process failed at {location}; diagnostics suppressed to protect canaries"
     );
+    // `--exact` with a name libtest does not list runs nothing and exits 0.
+    assert!(ran_one_test(&logs), "host child test did not run");
+}
+
+/// The child's libtest summary shows that exactly one test ran and passed.
+fn ran_one_test(output: &[u8]) -> bool {
+    let output = String::from_utf8_lossy(output);
+    output.lines().any(|line| line == "running 1 test")
+        && output
+            .lines()
+            .any(|line| line.starts_with("test result: ok. 1 passed;"))
 }
 
 #[test]
@@ -246,11 +259,7 @@ async fn fixture_lifecycle(root: &Path, dir: &Path) {
     *state.token.lock().unwrap() = Some("test".into());
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
-        .args([
-            "--exact",
-            "local_owner::process_tests::node_fixture_child",
-            "--nocapture",
-        ])
+        .args(["--exact", FIXTURE_CHILD, "--nocapture"])
         .env("BITSOV_OWNER_FIXTURE_ADDR", address.to_string());
     let mut node = launch(
         command,
@@ -280,6 +289,8 @@ async fn fixture_lifecycle(root: &Path, dir: &Path) {
     .unwrap();
     assert!(node.child.wait().unwrap().success());
     node.stop();
+    let fixture_out = std::fs::read(root.join("node-0-out.log")).unwrap();
+    assert!(ran_one_test(&fixture_out), "node fixture test did not run");
     let mut secrets = vec![PASSWORD];
     secrets.extend(pending.mnemonic.split_whitespace());
     scan_files(root, &secrets);
