@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 // Intentional differences, exhaustively listed:
 // - The scratch roots differ. Only storage.path, backup.scb_dir and
 //   api.audit_log_path are rebased; their relative filenames must still match.
+// - The app caps calls at 10 minutes for its budget; node init defaults to 60.
 // - init creates mnemonic.txt; owner bootstrap reserves identity/mnemonic.txt
 //   without creating an identity. Finalize later changes that path to .enc.
 // - The app omits the following serde defaults. Check their literal values
@@ -12,7 +13,7 @@ use std::process::{Command, Stdio};
 //   into the app config. Older pins can omit these fields too. New fields and
 //   changed defaults must fail until deliberately reviewed here. The three
 //   known rc7/owner-node web default differences are listed separately below.
-// Defaults last reviewed for rc14; rc19.2 signed-binary validation is pending. LAN setup
+// Defaults validated against the signed rc23 binary. LAN setup
 // limits are internal constants; grant breakers live in pairing records, not TOML.
 const OMITTED_DEFAULTS: &str = r#"
 disk_free_floor_bytes = 2147483648
@@ -111,6 +112,8 @@ rotation_count = 24
 listen_addr = "127.0.0.1:3141"
 rate_limit_rps = 60
 cors_enabled = true
+# rc23: the owner API stays loopback-only without an explicit opt-in.
+allow_non_loopback_bind = false
 
 [remote_access]
 
@@ -139,6 +142,10 @@ kits_per_day = 2
 enabled = false
 
 [calls]
+# rc23: inherited per-direction media limits; no bulk-lane dropping by default.
+media_max_frames_per_second = 100
+media_max_bytes_per_second = 65536
+media_drop_bulk_over_share = false
 "#;
 
 fn remove_documented_web_defaults(node: &mut toml::Value) {
@@ -235,6 +242,16 @@ fn unknown_lsps2_fields_remain_for_the_drift_comparison() {
 }
 
 #[test]
+fn bootstrap_config_caps_calls_to_app_budget() {
+    let scratch = tempfile::tempdir().unwrap();
+    let config = scratch.path().join("konsensus.toml");
+    write_bootstrap_config(&config).unwrap();
+    let app: toml::Value =
+        toml::from_str(&std::fs::read_to_string(config).unwrap()).unwrap();
+    assert_eq!(app["calls"]["max_call_minutes"].as_integer(), Some(10));
+}
+
+#[test]
 fn bootstrap_config_matches_node_init() {
     let Some(binary) = super::process_tests::real_node_binary() else {
         return;
@@ -266,6 +283,10 @@ fn bootstrap_config_matches_node_init() {
     };
     let mut app = read(&app_config);
     let mut node = read(&node_dir.join("konsensus.toml"));
+    // Check both reviewed limits before normalizing this intentional difference.
+    assert_eq!(app["calls"]["max_call_minutes"].as_integer(), Some(10));
+    assert_eq!(node["calls"]["max_call_minutes"].as_integer(), Some(60));
+    node["calls"]["max_call_minutes"] = 10.into();
     normalize_paths(&mut app, &app_dir, "identity/mnemonic.txt");
     normalize_paths(&mut node, &node_dir, "mnemonic.txt");
     remove_documented_web_defaults(&mut node);

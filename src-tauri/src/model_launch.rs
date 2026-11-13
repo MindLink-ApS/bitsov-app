@@ -9,9 +9,8 @@
 //! `proc_pidinfo` after `fork` can deadlock a process that already has other
 //! threads.
 //!
-//! App Sandbox remains the fallback named in
-//! `docs/spike/J0-MACOS-ISOLATION.md` §1 if Apple removes custom SBPL. It is
-//! not this path. See `bitsov_app::jarvis::sandbox`.
+//! App Sandbox would require a separate implementation if Apple removes custom
+//! SBPL. See `bitsov_app::jarvis::sandbox` for the current boundary.
 
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]

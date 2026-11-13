@@ -26,6 +26,15 @@ async fn noise_responder(listener: tokio::net::TcpListener) {
 }
 
 async fn noise_auth_reply(listener: tokio::net::TcpListener, accept: bool) -> remote_access::RemoteAuthRequest {
+    noise_auth_reply_with(&listener, accept).await
+}
+
+/// One refused enrollment on a listener that stays open for the next attempt.
+async fn noise_auth_reply_on(listener: &tokio::net::TcpListener) -> Option<String> {
+    noise_auth_reply_with(listener, false).await.client_pubkey
+}
+
+async fn noise_auth_reply_with(listener: &tokio::net::TcpListener, accept: bool) -> remote_access::RemoteAuthRequest {
     let (mut stream, _) = listener.accept().await.unwrap();
     let secret = [43; 32];
     let mut noise = snow::Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse().unwrap())
@@ -370,9 +379,19 @@ async fn rejected_import_does_not_cancel_an_established_proxy_recovery() {
     forgotten.unwrap();
     assert!(state.remote_proxy.lock().unwrap().is_some(), "Forget preserves the established transport");
     assert!(state.remote_retry.remaining().unwrap() >= 59);
-    // A bootstrap/import task queued behind a successful attach does not redo auth.
-    tokio::time::timeout(Duration::from_secs(5), connect_remote_at(&state, dir.path(), true))
-        .await.expect("duplicate bootstrap must not start another auth recovery").unwrap();
+    // Forget stopped that recovery before auth finished, so nothing is ready yet:
+    // a bootstrap queued now resumes the auth, still inside the same backoff, and
+    // Forget can stop it too. Behind a ready session it does nothing at all; see
+    // remote_connect_tests::a_queued_bootstrap_does_not_redo_a_ready_session.
+    let queued = connect_remote_at(&state, dir.path(), true);
+    tokio::pin!(queued);
+    assert!(tokio::time::timeout(Duration::from_secs(5), &mut queued).await.is_err(),
+        "a bootstrap with auth unfinished must wait out the backoff");
+    let (queued, forgotten) = tokio::join!(&mut queued, remote_access_forget_at(&state, dir.path()));
+    queued.unwrap();
+    forgotten.unwrap();
+    assert!(!state.status_snapshot().ready);
+    assert!(state.remote_retry.remaining().is_some(), "Forget keeps the backoff");
 }
 
 #[tokio::test]
@@ -463,4 +482,121 @@ async fn failed_ticket_save_without_previous_ticket_surfaces_pairing_guidance() 
     }).await.expect("failed save must not leave an idle app without guidance");
     assert!(state.status_snapshot().error.unwrap().contains("Pair this phone"));
     assert!(remote_access::load_persisted(dir.path()).unwrap().is_none());
+}
+
+// The client identity sits behind Face ID / Touch ID. Focus changes, foreground
+// resumes and the live feed's retries must never read it; a user action reads it
+// once per process and every later attempt reuses the key in memory.
+#[tokio::test]
+async fn background_reconnects_never_read_the_protected_client_identity() {
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let link = ticket(listener.local_addr().unwrap().to_string(), false);
+    remote_access::import_pairing_link(dir.path(), &link).unwrap();
+    // The session's first prompt was cancelled.
+    let store = dir.path().join(PAIRING_STORE_DIR);
+    assert!(client_key_with(&state, &store, Interaction::User, |_| Err(PairError::Local("cancelled".into()))).is_err());
+    // A focus change (the Face ID sheet closing) and the live feed's recovery.
+    tokio::time::timeout(Duration::from_secs(3), resume_remote_at(&state, dir.path())).await.unwrap().unwrap();
+    let descriptor = remote_access::load_persisted(dir.path()).unwrap().unwrap();
+    attach_remote_with(&state, dir.path(), descriptor, Interaction::Background).await;
+    assert!(state.client_key.lock().unwrap().is_none());
+    assert!(!dir.path().join(PAIRING_STORE_DIR).join(pairing::KEY_FILE).exists());
+    assert_eq!(state.status_snapshot().error.as_deref(), Some(CONFIRM_TO_RECONNECT));
+    assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
+}
+
+#[tokio::test]
+async fn one_user_read_serves_every_later_retry() {
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    remote_access::import_pairing_link(dir.path(), &ticket(address, false)).unwrap();
+    let server = tokio::spawn(async move {
+        let first = noise_auth_reply_on(&listener).await;
+        let second = noise_auth_reply_on(&listener).await;
+        (first, second)
+    });
+    // The user's Try again reads the identity (the one prompt).
+    tokio::time::timeout(Duration::from_secs(5), pairing_retry_at(&state, dir.path())).await.unwrap().unwrap();
+    let key = state.client_key.lock().unwrap().as_ref().map(|(_, key)| key.public_hex().to_string()).unwrap();
+    // Remove the stored identity: any further read would now create a new key.
+    std::fs::remove_file(dir.path().join(PAIRING_STORE_DIR).join(pairing::KEY_FILE)).unwrap();
+    // The node refused, so a focus change stays quiet; the next Try again
+    // uses the key in memory.
+    tokio::time::timeout(Duration::from_secs(5), resume_remote_at(&state, dir.path())).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), pairing_retry_at(&state, dir.path())).await.unwrap().unwrap();
+    let (first, second) = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+    assert!(first.is_some());
+    assert_eq!(first, second, "the same client identity authenticated both attempts");
+    assert_eq!(state.client_key.lock().unwrap().as_ref().map(|(_, key)| key.public_hex().to_string()).unwrap(), key);
+    assert!(!dir.path().join(PAIRING_STORE_DIR).join(pairing::KEY_FILE).exists(), "no second read or create");
+}
+
+// A node that answers "no" to the saved pairing (unknown or revoked client,
+// used ticket) keeps answering "no". Focus changes, foreground resumes and the
+// live feed must then stop dialling it, and the renderer must learn that only
+// pairing again helps. Only the owner's action dials again.
+#[tokio::test]
+async fn definitive_refusal_stops_automatic_reconnects_until_the_owner_acts() {
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    remote_access::import_pairing_link(dir.path(), &ticket(listener.local_addr().unwrap().to_string(), false)).unwrap();
+    let first = tokio::spawn(async move {
+        let request = noise_auth_reply_on(&listener).await;
+        (listener, request)
+    });
+    tokio::time::timeout(Duration::from_secs(5), pairing_retry_at(&state, dir.path())).await.unwrap().unwrap();
+    let (listener, request) = tokio::time::timeout(Duration::from_secs(5), first).await.unwrap().unwrap();
+    assert!(request.is_some());
+    let view = serde_json::to_value(state.pairing_snapshot()).unwrap();
+    assert_eq!(view["state"], "failed");
+    assert_eq!(view["refused"], true);
+    // A Face ID sheet closing, a return to the foreground, and the live feed.
+    for _ in 0..3 {
+        tokio::time::timeout(Duration::from_secs(3), resume_remote_at(&state, dir.path())).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(3), reconnect_remote_background(&state)).await.unwrap().unwrap();
+    }
+    assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err(), "no automatic dial after a refusal");
+    assert_eq!(state.pairing_snapshot().state, "failed");
+    assert!(state.pairing_snapshot().refused);
+    // The owner's Try again is an action: it dials once more.
+    let second = tokio::spawn(async move { noise_auth_reply_on(&listener).await });
+    tokio::time::timeout(Duration::from_secs(5), pairing_retry_at(&state, dir.path())).await.unwrap().unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(5), second).await.unwrap().unwrap().is_some());
+    assert!(state.pairing_snapshot().refused);
+    // Forget clears the refusal along with the saved link.
+    remote_access_forget_at(&state, dir.path()).await.unwrap();
+    assert!(!state.pairing_snapshot().refused);
+}
+
+#[tokio::test]
+async fn an_unreachable_node_is_not_a_refusal() {
+    let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+    for error in [
+        remote_access::RemoteError::HandshakeUnavailable,
+        remote_access::RemoteError::Transport("cannot read frame length: early eof".into()),
+        remote_access::RemoteError::RateLimited(5),
+        remote_access::RemoteError::Waiting(5),
+        remote_access::RemoteError::LocalNetwork,
+        remote_access::RemoteError::Local("cancelled".into()),
+        // The node refused a ticket, not the pairing this app already holds.
+        remote_access::RemoteError::AlreadyPaired,
+    ] {
+        assert!(!is_definitive_refusal(&error), "{error}");
+    }
+    assert!(is_definitive_refusal(&remote_access::RemoteError::Refused("authentication_failed: unknown client".into())));
+    assert!(is_definitive_refusal(&remote_access::RemoteError::Refused(remote_access::USED_TICKET_MESSAGE.into())));
+    for (step, status, definitive) in [("/pair/token", 404, true), ("/pair/challenge", 401, true), ("/pair/token", 403, true),
+        ("/pair/token", 429, false), ("/pair/token", 502, false), ("/identity", 404, false)] {
+        let error = PairError::Refused { step, status, reason: String::new() };
+        assert_eq!(is_definitive_token_refusal(&error), definitive, "{step} {status}");
+    }
+    assert!(!is_definitive_token_refusal(&PairError::Transport { step: "/pair/token", detail: "timed out".into() }));
+    // A transient failure leaves the automatic reconnect in place.
+    assert!(!state.pairing_snapshot().refused);
+    assert!(serde_json::to_value(state.pairing_snapshot()).unwrap().get("refused").is_none());
 }

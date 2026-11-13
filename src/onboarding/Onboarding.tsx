@@ -6,8 +6,7 @@ import { LocalNodeSwitch } from './LocalNodeSwitch';
 import { DeviceApprovals } from './DeviceApprovals';
 import { SoftError } from '../control/SoftError';
 import { createEffect, createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
-import { Dynamic } from 'solid-js/web';
-import { connectionErrorDetail, normalizePairingLink, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
+import { connectionErrorDetail, normalizePairingLink, onboardingDiagnostic, onboardingSteps, scopeList, type NodeStatus, type PairingView } from './pairing';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
 import { usePairingActivity } from '../pairingActivity';
@@ -78,7 +77,9 @@ export function Onboarding(props: {
   const phone = () => props.phone ?? props.mobile ?? isMobilePlatform();
   const mobileBiometrics = () => props.mobile ?? isMobilePlatform();
   const device = () => deviceWord() === 'iPad' ? 'iPad' : t('obPhone');
-  const [internalTarget, setInternalTarget] = createSignal<NodeTarget>(phone() ? 'network' : 'local');
+  const [internalTarget, setInternalTarget] = createSignal<NodeTarget>(
+    phone() || props.pairing().remote || props.initialPairingLink !== undefined ? 'network' : 'local',
+  );
   const target = () => props.selectedTarget ?? internalTarget();
   const setTarget = (t: NodeTarget) => {
     setInternalTarget(t);
@@ -187,6 +188,14 @@ export function Onboarding(props: {
     } finally { setScanning(false); }
   };
 
+  // After a refusal: scan (or paste) a new link from an owner device. The saved
+  // link stays until the new one is reviewed and saved.
+  const pairAgain = async () => {
+    if (busy()) return;
+    if (props.onScanRemote) return scanRemote();
+    document.getElementById(props.pairingInputId ?? 'remote-pairing-link')?.focus();
+  };
+
   const forgetRemote = async () => {
     if (busy()) return;
     setPreview(null);
@@ -248,7 +257,7 @@ export function Onboarding(props: {
         </header>
       </Show>
 
-      {/* Node location: this Mac first; compact once the node is up */}
+      {/* Both node locations are first-class choices; compact once the node is up. */}
       <div class="node-target-section" classList={{ compact: stage() !== 'node' }}>
         <h2 class="node-target-title" classList={{ 'sr-only': stage() === 'node' }}>{t('obNodeLocation')}</h2>
         <div class="node-target-grid" role="radiogroup" aria-label={t('obChooseLocation')}>
@@ -274,7 +283,7 @@ export function Onboarding(props: {
               <div class="target-head">
                 <strong>{t('obThisMac')}</strong>
                 <div class="row" style={{ width: 'auto', gap: 'var(--s-2)' }}>
-                  <span class="target-badge ok">{t('obKeysOnMac')}</span>
+                  <span class="target-badge">{t('obKeysOnMac')}</span>
                   <span class="target-radio-indicator" aria-hidden="true">✓</span>
                 </div>
               </div>
@@ -284,19 +293,6 @@ export function Onboarding(props: {
           </button>
           </Show>
 
-          {/* Joining from another owner device is a first-run path of its own: not hidden behind Advanced. */}
-          <Show when={!phone() && stage() === 'node' && target() === 'local'}>
-            <p class="hint" data-join-from-device>
-              {t('obJoiningAnotherDevice')}{' '}
-              <button type="button" class="link" data-join-open onClick={() => setTarget('network')}>{t('obScanPasteTicket')}</button>
-            </p>
-          </Show>
-          {/* Once the node is up the choice is compact: both locations show as pills, no fold. */}
-          {/* On a phone there is nothing to fold: a plain block. A <details> with no
-              <summary> makes WebKit add its own OS-language label ("Flere oplysninger"
-              on a Danish phone) and lets the only choice be collapsed. */}
-          <Dynamic component={phone() ? 'div' : 'details'} class="node-target-advanced" open={phone() ? undefined : target() !== 'local' || stage() !== 'node'}>
-            <Show when={!phone()}><summary>{t('obAdvancedHomeNode')}</summary></Show>
           {/* A home node uses a remote pairing link. */}
           <button
             type="button"
@@ -335,8 +331,6 @@ export function Onboarding(props: {
             </div>
           </button>
 
-          </Dynamic>
-
           <Show when={testNodes}>
           {/* Internal testing only; not a product path. */}
           <button
@@ -366,6 +360,14 @@ export function Onboarding(props: {
           </button>
           </Show>
         </div>
+        {/* Joining from another owner device is a first-run path of its own: directly accessible. */}
+        <Show when={!phone() && stage() === 'node' && target() === 'local'}>
+          <p class="hint" data-join-from-device>
+            {t('obJoiningAnotherDevice')}{' '}
+            <button type="button" class="link" data-join-open onClick={() => setTarget('network')}>{t('obScanPasteTicket')}</button>
+          </p>
+        </Show>
+
         <p class="hint connect-line">
           {props.pairing().remote ? t('obConnectsRemote') : phone() ? t('obDeviceNotConnected', device()) : t('obConnectsMac')}
           <Show when={!props.pairing().remote && target() !== 'local'}> {phone() ? t('obDeviceConnectsOnSave', device()) : t('obLinkNextStart')}</Show>
@@ -498,10 +500,28 @@ export function Onboarding(props: {
           </div>
         </Match>
 
+        {/* A definitive refusal: one way forward, and no Try again that cannot help. */}
+        <Match when={props.pairing().state === 'failed' && props.pairing().refused}>
+          <div class="panel pairing error" data-pairing="refused">
+            <h2>{t('obRefusedTitle')}</h2>
+            <p class="err-note" role="alert" data-refused-summary>{t('obRefusedLine')}</p>
+            <p class="hint">{props.onScanRemote ? t('obRefusedHow') : t('obRefusedHowPaste')}</p>
+            <button type="button" class="primary" data-pair-again disabled={busy()} onClick={() => void pairAgain()}>
+              {scanning() ? t('obScanning') : props.onScanRemote ? t('obScanNewQr') : t('obPasteNewLink')}
+            </button>
+            <Show when={props.pairing().reason}>{reason => (
+              <details class="quiet-detail" data-soft-detail>
+                <summary>{t('uiDetails')}</summary>
+                <p class="hint">{onboardingDiagnostic(reason(), t('obPairingLinkHelp'))}</p>
+              </details>
+            )}</Show>
+          </div>
+        </Match>
+
         <Match when={props.pairing().state === 'failed'}>
           <div class="panel pairing error" data-pairing="failed">
             <h2>{t('obPairingFailedTitle')}</h2>
-            <SoftError message={props.pairing().reason ?? t('obPairingFailed')} summary={t('obCouldNotPair')} detailNote={t('obNoFallback')} onReconnect={props.onRetry} />
+            <SoftError message={onboardingDiagnostic(props.pairing().reason ?? t('obPairingFailed'), t('obPairingLinkHelp'))} summary={t('obCouldNotPair')} detailNote={t('obNoFallback')} onReconnect={props.onRetry} />
           </div>
         </Match>
 
@@ -601,7 +621,7 @@ export function Onboarding(props: {
           )}
         </Show>
         <Show when={importError()}>
-          <SoftError message={importError()!} />
+          <SoftError message={onboardingDiagnostic(importError()!, t('obPairingLinkHelp'))} />
         </Show>
       </form>
       </Show>

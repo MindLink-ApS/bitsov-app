@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Executable authority gate for bitsov-app (CODEX_APP_AUTHORITY.md §G, machine form).
+# Source and build-readiness checks for bitsov-app.
 # Fails (non-zero) on any charter or build-readiness violation. Run in CI + before merge.
 set -uo pipefail
 fail=0

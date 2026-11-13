@@ -27,7 +27,7 @@ import os, pathlib, shutil, sys
 args = sys.argv[1:]
 fixture = pathlib.Path(os.environ["RELEASE_FIXTURE"])
 if args[:2] == ["release", "download"]:
-    assert args[2] == "v0.3.0-rc19.2", args
+    assert args[2] == "v0.3.0-rc23", args
     assert args[args.index("--repo") + 1] == "MindLink-ApS/BitSov-bitsov", args
     dest = pathlib.Path(args[args.index("--dir") + 1])
     for i, arg in enumerate(args):

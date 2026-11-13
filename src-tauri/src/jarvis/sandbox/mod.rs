@@ -5,9 +5,8 @@
 //! switch and without the LLM unix socket. The model talks to the broker only
 //! through the pipes the launcher puts on stdin and stdout.
 //!
-//! App Sandbox is the fallback the spike names if Apple removes custom SBPL
-//! (`docs/spike/J0-MACOS-ISOLATION.md` §1, "Rejected as primary"). It is not
-//! implemented. `network.client` cannot express "these pipes and no TCP", and
+//! App Sandbox would require a separate implementation if Apple removes custom
+//! SBPL. `network.client` cannot express "these pipes and no TCP", and
 //! the container would have to live under the home directory this profile denies.
 //!
 //! The spawn path is [`crate::model_launch`], compiled only for

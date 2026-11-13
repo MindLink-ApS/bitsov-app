@@ -12,9 +12,16 @@ export type AddView = {state:'unsupported'} | {state:'ready'; owner:boolean; sec
 export type JoinInput = {action:'status'|'poll'|'cancel'} | {action:'start'; claim_code:string} | {action:'start_second'};
 export type JoinView = {state:'idle'|'done'; second_device?:boolean} | {state:'waiting'; second_device?:boolean; words:string[]; expires_at:number};
 function errorText(error: unknown): string {
-  if (typeof error === 'string') return error;
-  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') return error.message;
-  return t('obNodeUnreachable');
+  const message = typeof error === 'string' ? error
+    : error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' ? error.message
+    : '';
+  if ((error && typeof error === 'object' && 'kind' in error && error.kind === 'claim_mismatch')
+    || message.startsWith('The comparison could not be verified.')) return t('obClaimMismatch');
+  if (/18-character claim code|claim-code checksum/.test(message)) return t('obClaimCodeInvalid');
+  // Older hosts can still return CLI recovery instructions. Keep those out of
+  // the device setup UI as well as the normal entry and ticket states.
+  if (/\bkonsensus\s/i.test(message)) return t('obDeviceSetupHelp');
+  return message || t('obNodeUnreachable');
 }
 
 /**
@@ -76,7 +83,7 @@ export function AddDevice(props: { api:(input:AddInput)=>Promise<AddView>; mobil
             ? t('obTicketExpired')
             : t('obTicketUsed')}</p>}>
             <p data-ticket-where>{t('obTicketWhere')}</p>
-            <Show when={!ticket()!.second_device}><p class="hint" data-ticket-claim-warning>{t('obClaimWarningBefore')}{' '}<code>konsensus claim-code --show</code>{t('obClaimStickerAfter')}</p></Show>
+            <Show when={!ticket()!.second_device}><p class="hint" data-ticket-claim-warning>{t('obClaimWarning')}</p></Show>
             <Show when={qr()} fallback={<p class="hint">{t('obTicketTooLarge')}</p>}>{q => <svg class="qr" viewBox={`0 0 ${q().extent} ${q().extent}`} shape-rendering="crispEdges" role="img" aria-label={t('obTicketQr')}>
               <rect width={q().extent} height={q().extent} fill="#fff" /><path d={q().path} fill="#000" />
             </svg>}</Show>
@@ -133,8 +140,9 @@ export function JoinDevice(props:{api:(input:JoinInput)=>Promise<JoinView>; mobi
       <Match when={view()?.state === 'idle'}>
         <Show when={(view() as {second_device?:boolean}).second_device} fallback={<>
         {/* New device: the ticket was scanned or pasted to get here; next the claim code. */}
+        {/* TODO(#346 A2): show the claim code in-app on an authenticated owner device once the node API supports it. */}
         <PairSteps secondDevice={secondDevice()} current={1} />
-        <p>{t('obClaimEntryBefore')}{' '}<code>konsensus claim-code --show</code>{t('obClaimEntryAfter')}</p>
+        <p>{t('obClaimEntry')}</p>
         <form onSubmit={event => { event.preventDefault(); const value = claim.value; claim.value = ''; void run({action:'start',claim_code:value}); }}>
           <label>{t('obClaimCode')}<input ref={claim} name="claim_code" type="password" autocomplete="off" spellcheck={false} required disabled={busy()} /></label>
           <button class="primary" disabled={busy()}>{busy() ? t('obPreparingComparison') : t('obShowComparison')}</button>

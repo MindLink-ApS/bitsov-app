@@ -193,7 +193,7 @@ describe('invisible payments in the composer and the context panel', () => {
     sendOnly();
     expect($('[data-first-spend-sheet]')).not.toBeNull();
     expect(text('[data-first-spend-sheet] h2')).toBe(lang === 'en'
-      ? 'Let messages spend up to 500 sats a day?' : 'Må beskeder bruge op til 500 sats om dagen?');
+      ? 'Let messages spend up to 500 sats in total, for up to 24 hours?' : 'Må beskeder bruge op til 500 sats i alt, i højst 24 timer?');
     expect(host.used('budget_approve')).toHaveLength(0);
     expect(host.used('message_send')).toHaveLength(0);
     expect($('[data-first-spend-cost]')?.closest('details')).toBeNull();
@@ -279,7 +279,7 @@ describe('invisible payments in the composer and the context panel', () => {
       });
       await openShell(); setLanguagePref(lang);
       type('[data-composer] textarea', 'hello'); sendOnly();
-      expect(text('[data-first-spend-sheet]')).toContain(lang === 'en' ? 'Your daily approval ended.' : 'Din døgn-godkendelse udløb.');
+      expect(text('[data-first-spend-sheet]')).toContain(lang === 'en' ? 'Your 24-hour approval ended.' : 'Din godkendelse på 24 timer er udløbet.');
       expect(text('[data-budget-lapse]')).toContain(lang === 'en'
         ? (lapse === 'lost' ? 'Your node can no longer approve' : 'Your last request lapsed')
         : (lapse === 'lost' ? 'Din node kan ikke længere godkende' : 'Din sidste anmodning udløb'));
@@ -1430,6 +1430,16 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('budget_approve')[0].args).toEqual({ ceiling_msat: 1_000_000, preset: 'careful' });
   });
 
+  it.each(['en', 'da'] as const)('the used-up total offers an approval for a total and a window, not a daily amount (%s)', async (lang) => {
+    stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }], { spent_msat: 499_000 }));
+    await openShell(); setLanguagePref(lang);
+    type('[data-composer] textarea', 'hi');
+    await waitFor(() => expect($('[data-budget-used="total"] [data-budget-raise-total]')).not.toBeNull());
+    const label = text('[data-budget-used="total"] [data-budget-raise-total]').replace(/\s+/g, ' ');
+    expect(label).toBe(lang === 'en' ? 'Approve 1 000 sats in total, for up to 24 hours' : 'Godkend 1 000 sats i alt, i højst 24 timer');
+    expect(label).not.toMatch(/a day|pr\. døgn|om dagen/);
+  });
+
   it('shows the running tally in the context panel and pauses everything in one tap', async () => {
     // Resume is deferred: nothing may be sent until it clears.
     let release!: () => void;
@@ -1640,6 +1650,43 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(text('[data-node-grant]')).toBe('Your finite node grant allows 396 sats of 400 sats more, at most 50 sats per payment, for 30 min.');
   });
 
+  it.each([
+    ['en', 'Your finite node grant allows 500 sats of 500 sats more, at most 6 sats per message payment, 50 sats per call payment, for 30 min.'],
+    ['da', 'pr. beskedbetaling, 50 sats pr. opkaldsbetaling, i'],
+  ] as const)('shows the message cap and the call limit when the message cap is lower (%s)', async (lang, line) => {
+    const until = Date.now() + 30 * 60_000;
+    stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }], {
+      node_grant: { expires_at_ms: until, budget_msat: 500_000, remaining_msat: 500_000, per_call_max_msat: 50_000, message_per_payment_max_msat: 6_000, call_per_payment_max_msat: 50_000 },
+    }));
+    await openShell(); setLanguagePref(lang);
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    await waitFor(() => expect($('[data-node-grant]')).not.toBeNull());
+    expect(text('[data-node-grant]')).toContain(line);
+    setLanguagePref('en');
+  });
+
+  it('keeps the plain line for a relation grant, whose envelopes bound each contact', async () => {
+    const until = Date.now() + 30 * 60_000;
+    stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }], {
+      node_grant: { expires_at_ms: until, budget_msat: 500_000, remaining_msat: 500_000, per_call_max_msat: 50_000, message_per_payment_max_msat: 6_000, call_per_payment_max_msat: null, envelopes: { [MAYA]: until } },
+    }));
+    await openShell();
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    await waitFor(() => expect($('[data-node-grant]')).not.toBeNull());
+    expect(text('[data-node-grant]')).toBe('Your finite node grant allows 500 sats of 500 sats more, at most 50 sats per payment, for 30 min.');
+  });
+
+  it('keeps the plain per-payment line when the message cap equals the call limit', async () => {
+    const until = Date.now() + 30 * 60_000;
+    stubHost(open([{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 0 }], {
+      node_grant: { expires_at_ms: until, budget_msat: 500_000, remaining_msat: 500_000, per_call_max_msat: 6_000, message_per_payment_max_msat: 6_000, call_per_payment_max_msat: 6_000 },
+    }));
+    await openShell();
+    $<HTMLButtonElement>('[data-tab="budget"]')!.click();
+    await waitFor(() => expect($('[data-node-grant]')).not.toBeNull());
+    expect(text('[data-node-grant]')).toBe('Your finite node grant allows 500 sats of 500 sats more, at most 6 sats per payment, for 30 min.');
+  });
+
   it('labels invoice/keysend tally rows without offering contact-budget edits', async () => {
     stubHost(open([
       { target: 'app:invoice-payments', room: false, limit_msat: null, spent_msat: 1000 },
@@ -1819,7 +1866,7 @@ describe('invisible payments in the composer and the context panel', () => {
     const backInBox = () => box() === 'gm Maya' && text('[data-composer-note]') === 'This first contact needs its own approval. Press Send to ask for it.';
     const keptUnsent = () => [...mount.querySelectorAll('[data-unsent]')].some((card) =>
       card.textContent!.includes('gm Maya') &&
-      /The price changed while it waited for approval\.|This first contact needs its own approval/.test(card.querySelector('[data-unsent-reason]')?.textContent ?? ''));
+      /The amount changed while it waited for approval\.|This first contact needs its own approval/.test(card.querySelector('[data-unsent-reason]')?.textContent ?? ''));
     await waitFor(() => expect(backInBox() || keptUnsent()).toBe(true), { timeout: 8000 });
     expect($('[data-sending]')).toBeNull();
     await nextRead(host);

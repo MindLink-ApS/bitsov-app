@@ -18,11 +18,23 @@ pub async fn probe(state: &NodeState) -> Result<bool, String> {
         .unwrap()
         .clone()
         .ok_or("Pairing is unavailable.")?;
-    let connection = state
+    // With a saved box pin this is an authenticated handshake, so polling can
+    // be the first to meet a revoked pairing. Record that refusal before it
+    // becomes a string. A non-200 lock status below shares the `Refused`
+    // variant but says nothing about the pairing: it never stops reconnects.
+    let connection = match state
         .remote_retry
-        .run(|| LockedConnection::connect(&descriptor, &ctx.key, PAIRING_CLIENT_NAME))
+        .run_unless_refused(|| LockedConnection::connect(&descriptor, &ctx.key, PAIRING_CLIENT_NAME))
         .await
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(connection) => connection,
+        Err(error) => {
+            if error.is_definitive_refusal() && state.remote_retry.is_refused() {
+                refused_by_probe(state, &error);
+            }
+            return Err(error.to_string());
+        }
+    };
     if let Some(mut connection) = connection {
         let status = connection.status().await.map_err(|e| e.to_string())?;
         state.home_locked.store(true, Ordering::SeqCst);
@@ -64,6 +76,11 @@ pub async fn refresh(state: &NodeState) {
     if !state.remote_mode.load(Ordering::SeqCst)
         || state.remote_descriptor.lock().unwrap().is_none()
     {
+        return;
+    }
+    // The node refused this app's pairing: polling must neither dial nor
+    // repeat the token exchange until the owner acts.
+    if hold_refused(state) {
         return;
     }
     // Nothing clears `ready` when a home node reboots into locked mode (proxied
@@ -220,13 +237,13 @@ pub fn remember_available(state: &NodeState) -> bool {
 pub fn locked_view(state: &NodeState) -> (&'static str, Option<device::DeviceView>) {
     if !state.home_locked.load(Ordering::SeqCst) { return ("ready", None); }
     let ctx = state.pairing.lock().unwrap().clone();
-    let key = match ctx.map(|ctx| local_key(state, &ctx.store)).unwrap_or(Ok(None)) {
+    let key = match ctx.map(|ctx| local_device_record(state, &ctx.store)).unwrap_or(Ok(None)) {
         Ok(key) => key,
         // A transient bridge read cannot revoke enrollment. Keep the unlock
         // path available; an explicit attempt reports the retryable error.
         Err(_) => return (*state.home_unlock_state.lock().unwrap(), None),
     };
-    let Some((_, record)) = key else { return ("not-enrolled", None); };
+    let Some(record) = key else { return ("not-enrolled", None); };
     let view = device::DeviceView::of(true, Some(&record), false, now_ms());
     if view.state == device::DeviceState::Pending { return ("pending-approval", Some(view)); }
     if !record.registered { return ("not-enrolled", None); }
@@ -303,6 +320,7 @@ async fn unlock_with(
     let accepted = typed
         .as_ref()
         .map(|password| zeroize::Zeroizing::new(password.as_str().to_owned()));
+    let blob = password_device_blob(blob);
     let password = match typed {
         Some(password) => password,
         None => {
@@ -470,7 +488,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(target_os = "macos", desktop, not(feature = "mobile")))]
+    #[cfg(all(target_os = "macos", desktop, not(feature = "mobile"), feature = "native-test-keys"))]
     #[tokio::test]
     async fn remember_requires_local_key_and_owner_registration_before_keychain_write() {
         let state = NodeState::for_api("http://127.0.0.1:1/api/v1");

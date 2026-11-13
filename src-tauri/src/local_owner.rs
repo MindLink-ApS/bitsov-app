@@ -447,7 +447,7 @@ pub async fn finalize(
                 device::save_blob(&store, &blob).map_err(|e| e.message)?;
                 device::save_record(&store, &record).map_err(|e| e.message)?;
             }
-            (blob, record)
+            (device_signing_key(&store, &record, blob).map_err(|e| e.message)?, record)
         }
     };
     let proof = device_sign(
@@ -723,7 +723,7 @@ pub fn prepare_launch(
 /// relying on node serde defaults except where the constructor differs. No seed,
 /// marker, database or identity directory is created. Keep in sync with the node
 /// when promoting the gated sidecar pin (see docs/LOCAL_OWNER_CEREMONY.md).
-/// Last reviewed against rc14 (d55a88e); rc19.2 signed-binary drift check is pending.
+/// Mirrors rc23 init defaults, with a 10-minute call limit for the app budget.
 fn write_bootstrap_config(config: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
     let dir = std::fs::canonicalize(config.parent().ok_or("missing config directory")?)?;
@@ -747,7 +747,19 @@ fn write_bootstrap_config(config: &Path) -> Result<(), Box<dyn std::error::Error
         "payment_gate": {"verify_lightning_settlement": true},
         "storage": {"backend": "sqlite", "path": dir.join("konsensus.db")},
         "backup": {"scb_dir": dir.join("backups")},
-        "api": {"audit_log_path": dir.join("audit.jsonl"), "operator_probes_enabled": false}
+        "api": {"audit_log_path": dir.join("audit.jsonl"), "operator_probes_enabled": false},
+        // rc23 init defaults; cap call duration to the app budget.
+        "pricing": {"call_block_msat": 10_000},
+        "calls": {"max_call_minutes": 10},
+        "pairing": {"second_device_claim_v1": true, "second_device_enrollment": false},
+        "starter": {"enabled": false, "allow_mainnet": false, "hub_node_id": ""},
+        "starter_hub": {
+            "enabled": false, "allow_mainnet": false,
+            "capacity_sats": 100_000, "push_sats": 10_000,
+            "lifetime_budget_sats": 2_000_000, "max_opens_per_day": 20,
+            "max_concurrent_opens": 4, "max_funding_fee_sats": 2_000,
+            "funding_priority": "economy"
+        }
     });
     let text = toml::to_string_pretty(&value)?;
     let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;

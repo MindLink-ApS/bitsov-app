@@ -5,9 +5,10 @@
 # No publishing. This script never opens, launches or executes the built app
 # or the bundled node. Notarization is opt-in; nothing here binds a port.
 #
-# Usage: scripts/package-mac.sh [--dmg] [--use-existing-sidecar]
+# Usage: scripts/package-mac.sh [--dmg] [--call-seal] [--use-existing-sidecar]
 #   --dmg                   create a plain .dmg from the verified app
 #                           (no Finder layout or Applications shortcut)
+#   --call-seal             enable sealed call audio for a test build
 #   --use-existing-sidecar  bundle the sidecar already at
 #                           src-tauri/bin/konsensus-aarch64-apple-darwin instead
 #                           of fetching. Every sidecar is still re-verified
@@ -21,12 +22,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 WANT_DMG=0
+CALL_SEAL=0
 USE_EXISTING="${BITSOV_USE_EXISTING_SIDECAR:-0}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --dmg) WANT_DMG=1 ;;
+    --call-seal) CALL_SEAL=1 ;;
     --use-existing-sidecar) USE_EXISTING=1 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -45,6 +48,11 @@ DMG_DIR="src-tauri/target/release/bundle/dmg"
 # default independent of Tauri's APPLE_* environment variables.
 SIGNING_IDENTITY="${BITSOV_MAC_SIGNING_IDENTITY:--}"
 NOTARY_PROFILE="${BITSOV_MAC_NOTARY_PROFILE:-}"
+PROVISION_PROFILE="${BITSOV_MAC_PROVISION_PROFILE:-}"
+if [ "$SIGNING_IDENTITY" != - ] && [ ! -f "$PROVISION_PROFILE" ]; then
+  echo "A signed package requires BITSOV_MAC_PROVISION_PROFILE for private Keychain access." >&2
+  exit 2
+fi
 if [ -n "$NOTARY_PROFILE" ] && [ "$SIGNING_IDENTITY" = - ]; then
   echo "BITSOV_MAC_NOTARY_PROFILE requires a Developer ID signing identity." >&2
   exit 2
@@ -82,11 +90,16 @@ npm ci --ignore-scripts --no-audit --no-fund
 rm -rf src-tauri/target/release/bundle
 BUILD_LOG="src-tauri/target/package-mac.log"
 mkdir -p src-tauri/target
+BUILD_ARGS=(build --bundles app --no-sign --ci)
+if [ "$CALL_SEAL" = 1 ]; then
+  BUILD_ARGS+=(--features call-seal)
+  export VITE_CALL_SEAL=sealed
+fi
 # Tauri finishes sidecar placement, resources and Info.plist before returning.
 # Its release environment also excludes assistant.html from dist.
 # Pin the output path even if the caller sets a different Cargo target dir.
 CARGO_TARGET_DIR="$ROOT/src-tauri/target" CI=true TAURI_BUNDLER_DMG_IGNORE_CI=false \
-  npm run tauri -- build --bundles app --no-sign --ci -- --locked 2>&1 | tee "$BUILD_LOG"
+  npm run tauri -- "${BUILD_ARGS[@]}" -- --locked 2>&1 | tee "$BUILD_LOG"
 
 echo "== 3. static checks =="
 bash scripts/check-mac-bundle.sh --app "$APP" --sidecar "$SIDECAR" --dist dist
@@ -112,6 +125,24 @@ while IFS= read -r -d '' code; do
   fi
 done < <(find "$APP/Contents" -depth -print0)
 codesign "${APP_SIGN_ARGS[@]}" "$APP"
+
+if [ "$SIGNING_IDENTITY" != - ]; then
+  # Read the actual signing team, then seal a private Keychain access group.
+  # No team identifiers or machine-specific signing settings live in source.
+  TEAM_ID="$(codesign -dv --verbose=4 "$APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+  BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw -o - "$APP/Contents/Info.plist")"
+  KEYCHAIN_ENTITLEMENTS="src-tauri/target/mac-keychain-entitlements.plist"
+  PROFILE_PLIST="src-tauri/target/mac-provision-profile.plist"
+  security cms -D -i "$PROVISION_PROFILE" -o "$PROFILE_PLIST"
+  CERTIFICATE_PREFIX="src-tauri/target/mac-signing-certificate-"
+  rm -f "${CERTIFICATE_PREFIX}0"
+  codesign --display --extract-certificates "$CERTIFICATE_PREFIX" "$APP"
+  python3 scripts/mac-keychain-entitlements.py \
+    "${BITSOV_MAC_ENTITLEMENTS:-src-tauri/Entitlements.plist}" \
+    "$KEYCHAIN_ENTITLEMENTS" "$TEAM_ID" "$BUNDLE_ID" "$PROFILE_PLIST" "${CERTIFICATE_PREFIX}0"
+  cp "$PROVISION_PROFILE" "$APP/Contents/embedded.provisionprofile"
+  codesign "${SIGN_ARGS[@]}" --entitlements "$KEYCHAIN_ENTITLEMENTS" "$APP"
+fi
 
 verify_app() {
   # A linker signature on a standalone executable is not a bundle seal.

@@ -39,7 +39,9 @@ it('changes every provider card and the dismiss accessible name with the languag
   expect([...mount.querySelectorAll('h3')].map(el => el.textContent)).toEqual(['Din Lightning-udbyder', 'Hvad den ikke kan', 'Hvad den ser', 'Hvis den afviser', 'Mens din boks er låst', 'Gebyrer']);
   const paragraphs = [...mount.querySelectorAll('p')].map(el => el.textContent);
   expect(paragraphs).toHaveLength(7);
-  for (const [i, phrase] of ['Hubben er din Lightning-udbyder', 'Den kan ikke læse dine beskeder', 'Den opbevarer aldrig dine nøgler', 'Den ser de betalinger', 'Den kan afvise at route', 'Mens din hjemmeboks er låst', 'Gebyrer: routing'].entries()) expect(paragraphs[i]).toContain(phrase);
+  for (const [i, phrase] of ['Hubben er din Lightning-udbyder', 'Den kan ikke læse indholdet af dine beskeder', 'Den opbevarer aldrig dine nøgler', 'Den ser de betalinger', 'Den kan afvise at route', 'Mens din hjemmeboks er låst', 'Gebyrer: routing'].entries()) expect(paragraphs[i]).toContain(phrase);
+  expect(paragraphs[1]).toContain('mellem din node og modtagerens node');
+  expect(paragraphs[1]).toContain('Begge endenoder kan læse det');
   expect(paragraphs[5]).toContain('omkring et døgn');
   expect(paragraphs[5]).toContain('miste midler');
   setLanguagePref('en');
@@ -64,7 +66,7 @@ it.each(['en', 'da'] as const)('inflects names in the peer-not-ready message in 
   setLanguagePref(locale);
   for (const [name, da] of [['Rasmus', 'Rasmus’'], ['Maya', 'Mayas']]) {
     expect(t('uiSNodeDoesNotTakeCallsYet', possessive(name)))
-      .toBe(locale === 'da' ? `${da} node modtager ikke opkald endnu` : `${name}’s node does not take calls yet`);
+      .toBe(locale === 'da' ? `${da} boks oplyste ingen opkaldspris. De er måske offline, eller boksen tager måske ikke imod opkald endnu` : `${name}’s box gave no call price. They may be offline, or it may not take calls yet`);
     expect(peerNotReadyMessage({ code: 'peer_not_ready', reason: 'chain_unavailable' }, name))
       .toBe(locale === 'da' ? `${da} node er ikke klar til at modtage endnu (dens kædeforbindelse er nede)` : `${name}’s node isn't ready to receive yet (its chain connection is down)`);
   }

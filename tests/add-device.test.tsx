@@ -1,9 +1,10 @@
+import { setLanguagePref } from '../src/i18n';
 import { DeviceApprovals } from '../src/onboarding/DeviceApprovals';
 import { render } from 'solid-js/web';
 import { afterEach, expect, it, vi } from 'vitest';
 import { AddDevice, JoinDevice, type AddInput, type AddView, type JoinInput } from '../src/onboarding/AddDevice';
 let dispose: (() => void) | undefined;
-afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.useRealTimers(); });
+afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.useRealTimers(); setLanguagePref('system'); });
 const flush = async () => { for (let i = 0; i < 15; i++) await Promise.resolve(); };
 const words = ['noodle', 'gallery', 'demand', 'science'];
 function mount(ui: () => any) { const root = document.createElement('div'); document.body.append(root); dispose = render(ui, root); return root; }
@@ -34,8 +35,9 @@ it('shows the QR, polls for SAS and never approves without an explicit tap', asy
   expect(root.querySelector('svg[role="img"]')).not.toBeNull();
   expect(root.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('bitsov://pair/test');
   // Where to go on the new device, and the code it will ask for (no box or console jargon).
-  expect(root.querySelector('[data-ticket-where]')!.textContent).toContain('choose to connect to your node (on a computer: open “Advanced: use a node you already run at home”), then scan or paste this ticket');
-  expect(root.querySelector('[data-ticket-claim-warning]')!.textContent).toBe('The new device then asks for your node’s 18-character claim code. Have it ready: it is shown at your node’s owner console with konsensus claim-code --show, and a BitSov box also has it on its sticker.');
+  expect(root.querySelector('[data-ticket-where]')!.textContent).toContain('choose “A home node (Pi/Umbrel)” on a computer, then scan or paste this ticket');
+  expect(root.querySelector('[data-ticket-claim-warning]')!.textContent).toContain('18-character claim code');
+  expect(root.textContent).not.toContain('konsensus ');
   await vi.advanceTimersByTimeAsync(2000); await flush();
   expect([...root.querySelectorAll('[data-pair-word]')].map(e => e.textContent)).toEqual(words);
   expect(calls.some(c => c.action === 'approve')).toBe(false);
@@ -65,7 +67,8 @@ it('joining clears the claim code, shows SAS while waiting and polls enrollment'
     return input.action === 'poll' ? {state:'done'} : {state:'idle'};
   }} />); await flush();
   const input = root.querySelector<HTMLInputElement>('[name="claim_code"]')!;
-  expect(root.textContent).toContain('your node’s 18-character claim code: it is shown at your node’s owner console with konsensus claim-code --show, and a BitSov box also has it on its sticker.');
+  expect(root.textContent).toContain('18-character claim code');
+  expect(root.textContent).not.toContain('konsensus ');
   expect(root.textContent).not.toMatch(/setup printed/);
   expect(root.textContent).not.toMatch(/Box claim code|trusted console/);
   expect(input.closest('label')!.textContent).toBe('Claim code');
@@ -230,4 +233,43 @@ it.each(['waiting','done'] as const)('reopening a second-device join at %s never
   await flush();
   expect(root.textContent).not.toMatch(/claim code|claim-code|sticker/);
   expect(root.textContent).toContain('Prepare comparison words');
+});
+
+it.each(['en', 'da'] as const)('keeps claim entry and validation free of shell commands in %s', async lang => {
+  setLanguagePref(lang);
+  const root = mount(() => <JoinDevice api={async input => {
+    if (input.action === 'start') throw {kind:'device_pairing', message:'Enter the 18-character claim code shown with konsensus claim-code --show.'};
+    return {state:'idle'};
+  }} />);
+  await flush();
+  expect(root.textContent).not.toContain('konsensus ');
+  root.querySelector<HTMLInputElement>('[name="claim_code"]')!.value = 'typo';
+  root.querySelector('form')!.dispatchEvent(new Event('submit', {bubbles:true,cancelable:true}));
+  await flush();
+  expect(root.querySelector('[role="alert"]')!.textContent).toContain(lang === 'en' ? '18-character claim code' : 'ejerskabskoden på 18 tegn');
+  expect(root.textContent).not.toContain('konsensus ');
+  expect(root.querySelector<HTMLInputElement>('[name="claim_code"]')!.value).toBe('');
+});
+it('does not render shell instructions returned by an older node', async () => {
+  const root = mount(() => <AddDevice api={async () => { throw {message:'Run konsensus pair-ticket on your node.'}; }} />);
+  await flush();
+  expect(root.querySelector('[role="alert"]')).not.toBeNull();
+  expect(root.textContent).not.toContain('konsensus ');
+});
+
+it.each([['en', 'string'], ['en', 'object'], ['da', 'string'], ['da', 'object']] as const)('retains cancel-before-retry guidance for legacy claim mismatches in %s (%s)', async (lang, shape) => {
+  setLanguagePref(lang);
+  const root = mount(() => <JoinDevice api={async input => {
+    if (input.action === 'start') {
+      const message = "The comparison could not be verified. Check the 18-character claim code with konsensus claim-code --show. Cancel the pending setup before trying again.";
+      throw shape === 'string' ? message : {message};
+    }
+    return {state:'idle'};
+  }} />);
+  await flush();
+  root.querySelector<HTMLInputElement>('[name="claim_code"]')!.value = 'ABCD-EFGH-JKLM-NPQR-ST';
+  root.querySelector('form')!.dispatchEvent(new Event('submit', {bubbles:true,cancelable:true}));
+  await flush();
+  expect(root.querySelector('[role="alert"]')!.textContent).toContain(lang === 'en' ? 'Cancel the pending setup before trying again' : 'Annullér den igangværende opsætning');
+  expect(root.textContent).not.toContain('konsensus ');
 });

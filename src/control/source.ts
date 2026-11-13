@@ -40,6 +40,8 @@ import type {
   FileSaveResult,
   CallQuote,
   CallReceipt,
+  CallStatus,
+  MinutesConsent,
   InvoiceAmount,
   InvoiceStatus,
   InvoiceView,
@@ -161,7 +163,12 @@ export interface Source {
    * `recipient` (owner_device_approval_v1): `id` is the ApprovalView's grant_op and
    * the host reads /pair/first-contact-grant/{grant_op}?recipient=. Absent: today's id.
    */
-  firstContactStatus(id: string, recipient?: string): Promise<OwnerContactApproval>;
+  /**
+   * With `recipient`: the node's first-contact grant for this client's budget operation
+   * (`id`; empty = the current one), approved on another owner device or at the box console.
+   * `maxMsat` binds the exact cap the app asked to have approved.
+   */
+  firstContactStatus(id: string, recipient?: string, maxMsat?: number): Promise<OwnerContactApproval>;
   firstContactCancel(id: string): Promise<void>;
   wallet(): Promise<WalletOverview>;
   starterCurrent(nodeId: string): Promise<StarterStatus>;
@@ -257,8 +264,14 @@ export interface Source {
   callQuote(peer: string): Promise<CallQuote>;
   /** Validate the admission for local teardown without releasing it. */
   closeCallAdmission(operationId: string, peer: string, callId: string): Promise<void>;
-  /** One paid call signal (kinds 400-403) under the message budget rules. */
-  callSignal(peer: string, kind: number, plaintext: string, maxMsat: number): Promise<CallReceipt>;
+  /** One paid call signal (kinds 400-403) under the message budget rules; a node-routed offer carries the agreed minutes. */
+  callSignal(peer: string, kind: number, plaintext: string, maxMsat: number, minutes?: MinutesConsent, maxHangupMsat?: number): Promise<CallReceipt>;
+  /** M6: one call's paid interval and reservation at the node; null once the node no longer lists it. Read-only. */
+  callStatus(peer: string, callId: string): Promise<CallStatus | null>;
+  /** M6: pay block `seq` (one minute) of an outgoing call; the host takes the amount from the node's reservation. */
+  callBlock(peer: string, callId: string, seq: number): Promise<CallReceipt>;
+  /** M6: the host checks the node's hold against the agreed minutes (hangs up above them); with an amount, the owner confirms that hold. */
+  callHold(peer: string, callId: string, confirmReservedMsat: number | null): Promise<CallStatus>;
   // AI track: the host reads through its broker; a remote model gets only a body the owner saw
   aiRead(topic: AiTopic, sinceMs: number | null, assistant?: AssistantId): Promise<TopicRead>;
   aiLocalTurn(assistant: AssistantId, question: string, draftText: string): Promise<LocalTurn>;
@@ -356,7 +369,7 @@ export const hostSource: Source = {
   sponsorRequest: (text) => invoke<FundingAsk>('sponsor_request', { text }),
   sponsorRequestStatus: (paymentHash) => invoke<FundingStatus>('sponsor_request_status', { payment_hash: paymentHash }),
   firstContactRequest: (recipient, maxMsat, budgetMsat) => invoke<OwnerContactApproval | null>('first_contact_request', { recipient, max_msat: maxMsat, contact_budget_msat: budgetMsat ?? null }),
-  firstContactStatus: (id, recipient) => invoke<OwnerContactApproval>('first_contact_status', { id, recipient: recipient ?? null }),
+  firstContactStatus: (id, recipient, maxMsat) => invoke<OwnerContactApproval>('first_contact_status', { id, recipient: recipient ?? null, max_msat: maxMsat ?? null }),
   firstContactCancel: (id) => invoke<void>('first_contact_cancel', { id }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
   starterCurrent: (nodeId) => invoke<StarterStatus>('starter_current', { node_id: nodeId }),
@@ -413,7 +426,10 @@ export const hostSource: Source = {
   fileSave: (messageId) => invoke<FileSaveResult>('file_save', { message_id: messageId }),
   callQuote: (peer) => invoke<CallQuote>('call_quote', { peer }),
   closeCallAdmission: (operationId, peer, callId) => invoke<void>('op_close_call', { operation_id: operationId, peer, call_id: callId }),
-  callSignal: (peer, kind, plaintext, maxMsat) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat }),
+  callSignal: (peer, kind, plaintext, maxMsat, minutes, maxHangupMsat) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat, ...(minutes ? { minutes } : {}), ...(maxHangupMsat !== undefined ? { max_hangup_msat: maxHangupMsat } : {}) }),
+  callStatus: (peer, callId) => invoke<CallStatus | null>('call_status', { peer, call_id: callId }),
+  callBlock: (peer, callId, seq) => invoke<CallReceipt>('call_block', { peer, call_id: callId, seq }),
+  callHold: (peer, callId, confirmReservedMsat) => invoke<CallStatus>('call_hold', { peer, call_id: callId, ...(confirmReservedMsat === null ? {} : { confirm_reserved_msat: confirmReservedMsat }) }),
   aiRead: (topic, sinceMs, assistant) => invoke<TopicRead>('ai_read', { topic, since_ms: sinceMs, ...(assistant ? { assistant } : {}) }),
   aiLocalTurn: (assistant, question, draftText) => invoke<LocalTurn>('ai_read', { assistant, local_turn: { question, draft_text: draftText } }),
   aiWatchPoll: (assistant, sample, revision) => invoke<WatchUpdate | null>('ai_read', { assistant, watch: { sample, revision } }),

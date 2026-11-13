@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		0BE3E21E21376347E4DB9C66 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 69716815B3C62D25EC6DD7D9 /* Security.framework */; };
 		0FCBAA064DC53AA69B227166 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 0CC53DF2725D50FD1A0F3E05 /* assets */; };
+		7A1D0C5E2B3F4A6D8E9F0A11 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 7A1D0C5E2B3F4A6D8E9F0A12 /* InfoPlist.strings */; };
 		1827319EA1E50B2C15C90018 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 3C5137FE888BDB2E7B703786 /* LaunchScreen.storyboard */; };
 		303A174DFB2032DB03592F86 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 49C8F95C5BAEA3EA51D91AFE /* MetalKit.framework */; };
 		54B2EBB29455F7E781D5D502 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FBACB6D6696EAB0CB78662AC /* Assets.xcassets */; };
@@ -39,6 +40,7 @@
 		280670902486AF5BFBB05DF9 /* grant.rs */ = {isa = PBXFileReference; path = grant.rs; sourceTree = "<group>"; };
 		28F0B3A1D3A7A90E6B179CC8 /* profile.rs */ = {isa = PBXFileReference; path = profile.rs; sourceTree = "<group>"; };
 		2ABF0D7F0A473CE32740CAEA /* storage.rs */ = {isa = PBXFileReference; path = storage.rs; sourceTree = "<group>"; };
+		7A1D0C5E2B3F4A6D8E9F0A13 /* da */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = da; path = da.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		2BBC9029910DBFA8FCB0440E /* bitsov-app_iOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "bitsov-app_iOS.entitlements"; sourceTree = "<group>"; };
 		3313B9ED684C3801639C49CE /* act.rs */ = {isa = PBXFileReference; path = act.rs; sourceTree = "<group>"; };
 		3417FE0A2E974B2F286731B9 /* porch.rs */ = {isa = PBXFileReference; path = porch.rs; sourceTree = "<group>"; };
@@ -304,6 +306,7 @@
 			children = (
 				2BBC9029910DBFA8FCB0440E /* bitsov-app_iOS.entitlements */,
 				B209D31F6F56FF367D27F527 /* Info.plist */,
+				7A1D0C5E2B3F4A6D8E9F0A12 /* InfoPlist.strings */,
 			);
 			path = "bitsov-app_iOS";
 			sourceTree = "<group>";
@@ -423,6 +426,7 @@
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				Base,
+				da,
 				en,
 			);
 			mainGroup = F9F006245789B3C80F7C86B9;
@@ -445,6 +449,7 @@
 				54B2EBB29455F7E781D5D502 /* Assets.xcassets in Resources */,
 				1827319EA1E50B2C15C90018 /* LaunchScreen.storyboard in Resources */,
 				0FCBAA064DC53AA69B227166 /* assets in Resources */,
+				7A1D0C5E2B3F4A6D8E9F0A11 /* InfoPlist.strings in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -484,6 +489,17 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXVariantGroup section */
+		7A1D0C5E2B3F4A6D8E9F0A12 /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				7A1D0C5E2B3F4A6D8E9F0A13 /* da */,
+			);
+			name = InfoPlist.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
 		267817DB0BE5CD2DB6709D53 /* debug */ = {

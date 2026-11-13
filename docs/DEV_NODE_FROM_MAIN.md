@@ -1,126 +1,88 @@
-# Dev node from genome `main` (DEV ONLY)
+# Signet development node from node `main`
 
-> **Sidecar verification is bypassed on this path.** The product app runs only the
-> `konsensus` sidecar that `scripts/fetch-node-sidecar.sh` installs after checking the
-> pinned release's GPG signature and sha256. This path runs **any binary you point it
-> at**, with no signature, hash or version check. Use it only on your own machine, with a
-> binary you built yourself. It is not a release, and nothing here publishes one.
+This is an advanced debug workflow for a node binary you build yourself.
+**Sidecar signature and checksum verification are bypassed.** The override
+requires the non-default `dev-node` feature and is refused in release builds.
+Use a fresh signet identity and test coins only. Do not reuse an existing
+wallet or mainnet data directory.
 
-To use a node you already run, without the app starting one, see
-[DEV_EXTERNAL_NODE.md](DEV_EXTERNAL_NODE.md).
+For a node you already run, use [DEV_EXTERNAL_NODE.md](DEV_EXTERNAL_NODE.md).
+For a native build that needs no node source checkout or sidecar download,
+use [DEV_REMOTE_TEST.md](DEV_REMOTE_TEST.md).
 
-Use this path to test node changes beyond the bundled rc19.2 pin. Pairing and
-local owner bootstrap are now present in the pinned release too.
+## Build the node independently
 
-## What it is
+Install the node repository's Rust/build prerequisites and the app's
+[prerequisites](../README.md). From the app checkout, clone the public node
+source into a separate temporary directory; no sibling directory or GitHub
+CLI authentication is assumed:
 
-- `BITSOV_DEV_SIDECAR=<abs path>` runs that `konsensus` instead of `bin/konsensus-<triple>`.
-- `BITSOV_DEV_DATA_DIR=<abs path>` is the node and app data dir. You must set both or neither.
-  The host refuses the app data dirs (including the product dir
-  `~/Library/Application Support/tech.mindlink.bitsov`), `~/.konsensus`, and `$HOME`,
-  including every descendant. It resolves symlinks and `..` in filesystem order for
-  both the chosen path and protected paths, and rejects case aliases on macOS.
-  A new destination is checked through its existing ancestors and checked again
-  after creation. Missing HOME, dangling symlinks, and resolution errors are refused.
-- `npm run tauri:dev:mainnode` (`scripts/dev-node-from-main.sh`) prints a banner with the
-  binary's sha256, then runs `tauri dev --features dev-node` with
-  `src-tauri/tauri.dev-node.conf.json`. That file sets a separate identifier
-  (`tech.mindlink.bitsov.devnode`) and no `externalBin`, so the verified sidecar isn't
-  involved at all. The window title reads **"BitSov — DEV NODE (genome main, UNVERIFIED)"**.
-- **It can't reach a release build.** The override exists only in `debug_assertions` builds
-  with the non-default `dev-node` feature. Every other build compiles a stub that never
-  reads the environment. `dev-node` together with `--release` is a `compile_error!`, and
-  `scripts/test-dev-node-release-guard.sh` proves that by compiling the combination.
-  See `src-tauri/src/dev_node.rs`.
-
-## Tonight: fresh node → pair → funding QR
-
-The node is a **mainnet** node (LDK, `network = "bitcoin"`). Deposit only what you can
-afford to lose. Nobody here funds it for you.
-
-**1. Build the node from genome main** (about 5 minutes the first time):
-
-```bash
-cd ~/Desktop/BitSov-bitsov && git fetch origin
-git worktree add --detach /tmp/bitsov-node-main origin/main   # skip if it already exists
-cd /tmp/bitsov-node-main && git checkout --detach origin/main
-cargo build --release --locked --target aarch64-apple-darwin -p konsensus-node --bin konsensus
-shasum -a 256 target/aarch64-apple-darwin/release/konsensus
+```sh
+export BITSOV_NODE_SOURCE="$(mktemp -d /tmp/bitsov-node-source.XXXXXX)"
+git clone --branch main https://github.com/MindLink-ApS/BitSov-bitsov.git "$BITSOV_NODE_SOURCE"
+CARGO_TARGET_DIR="$BITSOV_NODE_SOURCE/target" \
+  cargo build --manifest-path "$BITSOV_NODE_SOURCE/Cargo.toml" \
+  --release --locked -p konsensus-node --bin konsensus
+export BITSOV_DEV_SIDECAR="$BITSOV_NODE_SOURCE/target/release/konsensus"
 ```
 
-**2. Get the app with this dev path.** The control center (#42) is on app `main`, so this
-branch alone is enough. Nothing is cherry-picked and nothing is pushed:
+Node `main` can change independently of the app's pinned release. Record the
+source commit and binary hash when reporting a compatibility problem.
 
-```bash
-cd ~/Desktop/bitsov-app && git fetch origin
-git worktree add --detach /tmp/bitsov-tonight origin/feat/dev-node-from-main
-cd /tmp/bitsov-tonight
-npm ci
+## Configure signet before starting anything
+
+The node's generated full-tier configuration can default to Bitcoin mainnet.
+`init` creates files; **do not run `start` or launch the app until the
+configuration below is set to signet**.
+
+```sh
+export BITSOV_DEV_DATA_DIR="$(mktemp -d /tmp/bitsov-signet.XXXXXX)"
+"$BITSOV_DEV_SIDECAR" init --dir "$BITSOV_DEV_DATA_DIR" --tier full --non-interactive
 ```
 
-After this PR merges, use `origin/main` instead. The AI track (#43) isn't needed for any
-step below. To try it too, add `git cherry-pick origin/main..origin/feat/control-center-ai`.
+Edit the existing `[lightning]` and `[chain]` sections in
+`$BITSOV_DEV_DATA_DIR/konsensus.toml`. Replace these fields in their existing
+sections, preserving the other generated fields and avoiding duplicate keys:
 
-**3. Start the app on a fresh node.** Create a private, durable directory outside
-your home. This macOS example uses `mktemp -d` (mode 0700) under `/Users/Shared`;
-record the printed path for subsequent starts. Don't use `/tmp`, because macOS
-clears it on reboot and a funded node's keys live in this dir:
+```toml
+[lightning]
+backend = "ldk"
+network = "signet"
+esplora_url = "https://mempool.space/signet/api"
+esplora_url_fallback = "https://mempool.space/signet/api"
 
-```bash
-cd /tmp/bitsov-tonight
-export BITSOV_DEV_DATA_DIR="$(mktemp -d /Users/Shared/bitsov-dev-node.XXXXXX)"
-printf 'Keep this dev data path: %s\n' "$BITSOV_DEV_DATA_DIR"
-BITSOV_DEV_SIDECAR=/tmp/bitsov-node-main/target/aarch64-apple-darwin/release/konsensus \
+[chain]
+backend = "esplora"
+api_url = "https://mempool.space/signet"
+esplora_url_fallback = "https://mempool.space/signet"
+```
+
+Both the Lightning wallet and chain provider must use signet, including their
+fallback endpoints. Keep the API bound to loopback. If the node's current
+schema differs, stop and follow its signet configuration documentation.
+The debug launcher does not enforce the network selection for you.
+
+The temporary data directory is for disposable testing and may be removed by
+the OS. If you need persistence, choose a private directory outside your home
+directory and outside the app's data directories; the host refuses protected
+paths and resolves filesystem aliases. Keep any recovery material offline.
+
+## Start and pair
+
+From the app checkout, in the same shell with both override variables set:
+
+```sh
+npm ci --ignore-scripts
 npm run tauri:dev:mainnode
 ```
 
-On first start the app runs `konsensus init` into that dir, which creates the identity,
-`konsensus.toml` and the `NODE_INITIALIZED` marker. It then starts the node on
-`127.0.0.1:3141`.
+The host uses the already initialized signet directory and starts your binary
+on loopback. Compare the pairing code with the node's terminal output, then
+confirm that the app reports **signet** before testing wallet or messaging
+actions. Stop if the network is different or unknown. Pairing grants
+read/receive access; spending requires a separate owner approval. See
+[pairing](ONBOARDING_PAIRING.md) for that boundary.
 
-**4. Pair.** This happens automatically on first start. The terminal prints
-`[node/out] bitsov pairing code for "<pair_id>": XXXX-XXXX`, and the window shows
-**"This app is paired"**, access **read + receive**, and the same code followed by
-"matches what your node printed". The code is a tripwire, not a lock (see
-`docs/ONBOARDING_PAIRING.md`).
-
-**5. Funding QR.** Read the local-trust notice, then click **"I understand — continue to
-funding"** → **Wallet** tab → **Deposit to your node** shows the QR and the `bc1…` address.
-The node re-checks its wallet every few seconds. The balance and "sats seen" update on
-their own.
-
-**6. Back up the recovery phrase before depositing.** The app never shows it. It is the
-plaintext file `$BITSOV_DEV_DATA_DIR/mnemonic.txt` (mode 0600). Copy it somewhere safe
-offline. Losing that dir without the phrase loses the funds.
-
-**Quit** with Cmd-Q. The app stops the node (SIGTERM, then SIGKILL after 30 s). Starting
-again with the same two variables reuses the node and the stored pairing.
-
-## Limits
-
-- **Sends:** the app refuses variable-price sends unless the node advertises
-  `paid_send_caps_v1` (and `room_terminal_outcomes_v1` for rooms). Genome `main` has both
-  since #80 (`f2f1769`), so a step 1 build from `main` can send.
-- **Spend:** a paired app gets `read + receive` only. This path starts the node with
-  `--owner-control`, so the node prints the owner's grant code on the terminal that ran
-  `npm run tauri:dev:mainnode`. Approve a budget in the app, then run the
-  `konsensus grant --op …` it shows (with `--config $BITSOV_DEV_DATA_DIR/konsensus.toml`)
-  and type that code (genome `docs/SPEND_BUDGET_GRANTS.md`).
-- **Live feed pill:** the first smoke run showed "Node up, live feed reconnecting" on an open
-  `/ws`. The fix is on #43 (the host replays the socket's link state when the shell
-  subscribes). Without #43 the pill can lag; the feed itself works.
-
-## Smoke run (2026-09-27, this Mac)
-
-Setup: genome `a59815d` (sha256 `6cf4c406f9d15deb48a108dabeda561e9713d1339260ec191882d9f656a47f1f`),
-app `feat/control-center-ai` `bd5a09f` with this change cherry-picked, and a throwaway data
-dir `/tmp/bitsov-e-smoke-node`. No seed was imported and no funds were sent. No messages
-were sent.
-
-Results:
-
-- **init and start:** OK. Paired, with scopes `read` + `receive`, and the short code matched
-  the node's stdout.
-- **Node view:** Healthy, node id `3f298626…086a49fe` (equal to `GET /identity`), 0 peers,
-  block height 968,850, ldk / esplora.
-- **Wallet:** 0 sats, 0 channels, and the deposit QR shown.
+Quit the app to stop its supervised node. Reusing the same two override
+variables reuses the identity and pairing. This workflow is not a release
+package or evidence of mainnet readiness.

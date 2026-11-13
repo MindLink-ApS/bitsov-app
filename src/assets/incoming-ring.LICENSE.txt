@@ -1,0 +1,4 @@
+Self-made two-note sine-wave ring, generated for BitSov (2026).
+No samples, recordings, or third-party material were used.
+Dedicated to the public domain under CC0 1.0.
+16 kHz mono PCM: two soft notes followed by silence, a three-second loop.

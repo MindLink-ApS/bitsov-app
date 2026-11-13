@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Exercise the real packaging script without builds, downloads, mounts or ports."""
+import datetime
 import json
+import plistlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -23,7 +25,8 @@ scenario = os.environ["SCENARIO"]
 with open(os.environ["TRACE"], "a") as f:
     f.write(json.dumps([name, args, os.environ.get("CI"),
                        os.environ.get("TAURI_BUNDLER_DMG_IGNORE_CI"),
-                       os.environ.get("CARGO_TARGET_DIR")]) + "\n")
+                       os.environ.get("CARGO_TARGET_DIR"),
+                       os.environ.get("VITE_CALL_SEAL")]) + "\n")
 app = pathlib.Path("src-tauri/target/release/bundle/macos/BitSov.app")
 dmg = pathlib.Path("src-tauri/target/release/bundle/dmg/BitSov_0.0.1_aarch64.dmg")
 if name == "uname":
@@ -31,8 +34,10 @@ if name == "uname":
 elif name == "npm":
     if args == ["ci", "--ignore-scripts", "--no-audit", "--no-fund"]:
         sys.exit(17 if scenario == "install-fail" else 0)
-    assert args == ["run", "tauri", "--", "build", "--bundles", "app",
-                    "--no-sign", "--ci", "--", "--locked"], args
+    assert args in (["run", "tauri", "--", "build", "--bundles", "app",
+                     "--no-sign", "--ci", "--", "--locked"],
+                    ["run", "tauri", "--", "build", "--bundles", "app",
+                     "--no-sign", "--ci", "--features", "call-seal", "--", "--locked"]), args
     assert not app.exists() and not dmg.exists(), "stale bundle survived"
     if scenario == "compile-fail":
         print("compilation failed", file=sys.stderr)
@@ -46,7 +51,7 @@ elif name == "npm":
     shutil.copy2("src-tauri/bin/konsensus-aarch64-apple-darwin", app / "Contents/MacOS/konsensus")
     (app / "Contents/Resources/icon.icns").write_bytes(b"icns")
     with (app / "Contents/Info.plist").open("wb") as f:
-        plistlib.dump({"LSMinimumSystemVersion": "11.0"}, f)
+        plistlib.dump({"LSMinimumSystemVersion": "11.0", "CFBundleIdentifier": "org.example.client"}, f)
     pathlib.Path("dist").mkdir(exist_ok=True)
     pathlib.Path("dist/index.html").write_text("release")
     if scenario == "invalid-app":
@@ -96,18 +101,28 @@ elif name == "codesign":
         target = pathlib.Path(args[-1])
         if target == app:
             if scenario != "missing-seal":
-                (app / "Contents/_CodeSignature").mkdir()
+                (app / "Contents/_CodeSignature").mkdir(exist_ok=True)
                 (app / "Contents/_CodeSignature/CodeResources").write_text("sealed resources")
         elif target.name == "konsensus":
             # Signing changes bytes: the source hash check must precede this.
             with target.open("ab") as f:
                 f.write(b"signature")
+    elif args == ["-dv", "--verbose=4", str(app)]:
+        print("TeamIdentifier=ABCDE12345", file=sys.stderr)
+    elif "--extract-certificates" in args:
+        prefix = args[args.index("--extract-certificates") + 1]
+        pathlib.Path(prefix + "0").write_bytes(b"synthetic certificate")
     elif "--verify" in args:
         assert "--deep" in args and "--strict" in args, args
         if scenario == "signature-invalid":
             sys.exit(41)
         assert (app / "Contents/_CodeSignature/CodeResources").is_file()
+        if os.environ.get("BITSOV_MAC_SIGNING_IDENTITY") != "-":
+            assert (app / "Contents/embedded.provisionprofile").is_file()
         pathlib.Path("verified-app").touch()
+elif name == "security":
+    assert args[:2] == ["cms", "-D"], args
+    pathlib.Path(args[args.index("-o") + 1]).write_bytes(pathlib.Path(args[args.index("-i") + 1]).read_bytes())
 elif name == "spctl":
     assert args == ["-a", "-vv", "-t", "exec", str(app)], args
     print("rejected (ad-hoc signature)", file=sys.stderr)
@@ -131,15 +146,25 @@ class PackagingTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.fixture.close()
 
-    def run_package(self, scenario, dmg=True, signing_env=None):
+    def run_package(self, scenario, dmg=True, signing_env=None, call_seal=False, call_seal_env=None):
         with tempfile.TemporaryDirectory(prefix="package mac test ") as tmp:
             root = Path(tmp)
             (root / "scripts").mkdir()
-            for name in ("package-mac.sh", "check-mac-bundle.sh"):
+            for name in ("package-mac.sh", "check-mac-bundle.sh", "mac-keychain-entitlements.py"):
                 shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
             fixture_env = self.fixture.prepare(root)
             (root / "src-tauri/bin").mkdir(parents=True)
             shutil.copy2(ROOT / "src-tauri/tauri.conf.json", root / "src-tauri/tauri.conf.json")
+            shutil.copy2(ROOT / "src-tauri/Entitlements.plist", root / "src-tauri/Entitlements.plist")
+            profile = {"TeamIdentifier": ["ABCDE12345"], "Platform": ["OSX"],
+                       "ExpirationDate": datetime.datetime(2099, 1, 1),
+                       "ProvisionsAllDevices": True, "DeveloperCertificates": [b"synthetic certificate"],
+                       "Entitlements": {"com.apple.application-identifier": "ABCDE12345.org.example.*",
+                                        "com.apple.developer.team-identifier": "ABCDE12345",
+                                        "keychain-access-groups": ["ABCDE12345.*"]}}
+            if scenario == "wrong-certificate":
+                profile["DeveloperCertificates"] = [b"another certificate"]
+            (root / "profile.provisionprofile").write_bytes(plistlib.dumps(profile))
             sidecar = root / "src-tauri/bin/konsensus-aarch64-apple-darwin"
             sidecar.write_bytes(b"stray binary" if scenario == "bad-sidecar" else PAYLOAD)
             sidecar.chmod(0o755)
@@ -152,7 +177,7 @@ class PackagingTests(unittest.TestCase):
             if scenario == "logging-fail":
                 (root / "src-tauri/target/package-mac.log").mkdir()
             fakebin = root / "fakebin"
-            for name in ("uname", "npm", "hdiutil", "plutil", "file", "otool", "codesign", "spctl", "ditto", "xcrun",
+            for name in ("uname", "npm", "hdiutil", "plutil", "file", "otool", "codesign", "spctl", "ditto", "xcrun", "security",
                          "open", "osascript", "vite", "curl", "cargo"):
                 tool = fakebin / name
                 tool.write_text(STUB)
@@ -161,14 +186,19 @@ class PackagingTests(unittest.TestCase):
             env = dict(fixture_env, TRACE=str(trace),
                        SCENARIO=scenario, CI="false", TAURI_BUNDLER_DMG_IGNORE_CI="true",
                        CARGO_TARGET_DIR=str(root / "wrong-target"))
-            env.update(BITSOV_MAC_SIGNING_IDENTITY="-", BITSOV_MAC_NOTARY_PROFILE="")
+            env.update(BITSOV_MAC_SIGNING_IDENTITY="-", BITSOV_MAC_NOTARY_PROFILE="",
+                       BITSOV_MAC_PROVISION_PROFILE="profile.provisionprofile")
+            env.pop("VITE_CALL_SEAL", None)
+            if call_seal_env is not None:
+                env["VITE_CALL_SEAL"] = call_seal_env
             env.update(signing_env or {})
             result = subprocess.run(
-                ["bash", "scripts/package-mac.sh", "--use-existing-sidecar"] + (["--dmg"] if dmg else []),
+                ["bash", "scripts/package-mac.sh", "--use-existing-sidecar"]
+                + (["--dmg"] if dmg else []) + (["--call-seal"] if call_seal else []),
                 cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             )
-            events = [json.loads(line) for line in trace.read_text().splitlines()]
-            self.assertTrue(all(e[0] in ("uname", "npm", "hdiutil", "plutil", "file", "otool", "codesign", "spctl", "ditto", "xcrun")
+            events = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
+            self.assertTrue(all(e[0] in ("uname", "npm", "hdiutil", "plutil", "file", "otool", "codesign", "spctl", "ditto", "xcrun", "security")
                                 for e in events), events)
             image = (root / DMG).read_text() if (root / DMG).exists() else None
             return result, events, image
@@ -232,6 +262,14 @@ class PackagingTests(unittest.TestCase):
         self.assertTrue(any(i > staple and e[0] == "codesign" and "--verify" in e[1]
                             for i, e in enumerate(events)))
 
+    def test_profile_and_certificate_refusals_stop_before_packaging(self):
+        for scenario, profile in [("success", ""), ("wrong-certificate", "profile.provisionprofile")]:
+            result, events, _ = self.run_package(scenario, signing_env={
+                "BITSOV_MAC_SIGNING_IDENTITY": "Developer ID Application: Test",
+                "BITSOV_MAC_PROVISION_PROFILE": profile})
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertFalse(any(e[0] == "hdiutil" for e in events))
+
     def test_notarization_cannot_succeed_with_adhoc_or_failed_submission(self):
         for scenario, identity in (("success", "-"), ("notary-fail", "Developer ID Application: Test")):
             with self.subTest(scenario=scenario):
@@ -252,6 +290,29 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIsNone(image)
         self.assertFalse(any(e[0] == "hdiutil" for e in events))
+
+    def test_call_seal_enables_both_build_flags(self):
+        for dmg in (False, True):
+            for caller_value in (None, "off"):
+                with self.subTest(dmg=dmg, caller_value=caller_value):
+                    result, events, image = self.run_package(
+                        "success", dmg=dmg, call_seal=True, call_seal_env=caller_value)
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    build = next(e for e in events if e[0] == "npm" and "build" in e[1])
+                    self.assertEqual(build[1], ["run", "tauri", "--", "build", "--bundles", "app",
+                                               "--no-sign", "--ci", "--features", "call-seal", "--", "--locked"])
+                    self.assertEqual(build[5], "sealed")
+                    self.assertEqual(image, "verified image" if dmg else None)
+
+    def test_default_build_preserves_arguments_and_call_seal_environment(self):
+        for caller_value in (None, "off"):
+            with self.subTest(caller_value=caller_value):
+                result, events, _ = self.run_package("success", call_seal_env=caller_value)
+                self.assertEqual(result.returncode, 0, result.stdout)
+                build = next(e for e in events if e[0] == "npm" and "build" in e[1])
+                self.assertEqual(build[1], ["run", "tauri", "--", "build", "--bundles", "app",
+                                           "--no-sign", "--ci", "--", "--locked"])
+                self.assertEqual(build[5], caller_value)
 
     def test_unrelated_failures_never_create_an_image(self):
         for scenario in ("install-fail", "compile-fail", "invalid-app", "other-bundle-fail",

@@ -407,6 +407,16 @@ async fn refresh_with_mode(
     Ok(())
 }
 
+/// A new token for one purpose. The session and its renewal stay as they are.
+pub(crate) async fn extra_token(
+    session_client_id: &str,
+    client: &PairingClient,
+    key: &ClientKey,
+    local: bool,
+) -> Result<String, PairError> {
+    Ok(client.token(key, session_client_id, local).await?.token)
+}
+
 /// Refresh when inside [`REFRESH_MARGIN_SECS`] of expiry. Returns whether a
 /// new token was minted.
 pub async fn refresh_if_needed(
@@ -446,6 +456,10 @@ pub struct PairingView {
     pub hosted_by: Option<String>,
     /// Durable disclosure acknowledgement for this node and connection mode.
     pub trust_acknowledged_node_id: Option<String>,
+    /// The node refused this app's saved pairing. Retrying the same link cannot
+    /// succeed, so nothing reconnects on its own; the owner pairs again.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub refused: bool,
 }
 
 impl PairingView {
@@ -460,6 +474,7 @@ impl PairingView {
             bootstrap: None,
             hosted_by: None,
             trust_acknowledged_node_id: None,
+            refused: false,
         }
     }
 

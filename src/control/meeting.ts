@@ -375,7 +375,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
     if (legs.includes(l)) publish();
   };
 
-  const pay = async (l: Leg, kind: number, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number, owedMsat?: number) => {
+  const pay = async (l: Leg, kind: number, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number, owedMsat?: number, maxHangupMsat?: number) => {
     // The tally only (display): pending from before the signal until it
     // settles, then paid (receipt, or the cap when paid without one), unknown
     // (anything not proven unpaid), or nothing. A leg of a meeting that is no
@@ -398,7 +398,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
     };
     let r: SignalOutcome;
     try {
-      r = await deps.signal(l.peer, kind, JSON.stringify({ v: 1, call_id: l.callId!, ...body }), maxMsat);
+      r = await deps.signal(l.peer, kind, JSON.stringify({ v: 1, call_id: l.callId!, ...body }), maxMsat, undefined, maxHangupMsat);
     } catch (error) {
       // A rejection after dispatch may still have paid: counted, then rethrown unchanged.
       tally(null, asActionError(error).code);
@@ -450,7 +450,7 @@ export function createMeetingEngine(deps: MeetingDeps) {
     if (e !== epoch || l.state !== 'placing') return;
     l.callId = (deps.newCallId ?? newCallId)();
     const r = await pay(l, CALL_OFFER, { media: view.media, sdp: conn.localDescription!.sdp, meeting: { id: view.id!, roster: view.roster } },
-      bound.offer_msat! + bound.offer_max_routing_fee_msat);
+      bound.offer_msat! + bound.offer_max_routing_fee_msat, undefined, signalCost(bound));
     // Left while the offer was in flight: the mic is already off; nothing more is sent.
     if (e !== epoch || l.state !== 'placing') {
       publish();
