@@ -140,4 +140,7 @@ export const HOST_COPY_MONEY_DA: readonly (readonly [string, string])[] = [
   ['Missing call offer.', 'Opkaldets tilbud mangler.'],
   ['Call audio dispatcher closed.', 'Opkaldets lydforbindelse er lukket.'],
   ['Not delivered - nothing new was paid.', 'Ikke leveret – intet nyt blev betalt.'],
+  ["Your box can't see the Bitcoin chain right now; nothing was paid; try again later.", 'Din boks kan ikke se Bitcoin-kæden lige nu; intet blev betalt; prøv igen senere.'],
+  ['The next minute of this call would go past the hold you agreed to. Nothing was paid for it.', 'Det næste minut af dette opkald ville gå ud over den reservation, du accepterede. Intet blev betalt for det.'],
+  ['Their node gave no live call price, so this was not sent. Nothing was sent or paid.', 'Deres boks gav ingen aktuel opkaldspris, så dette blev ikke sendt. Intet blev sendt eller betalt.'],
 ];
