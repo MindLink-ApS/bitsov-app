@@ -1,3 +1,4 @@
+import { setLanguagePref } from '../src/i18n';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
@@ -118,7 +119,7 @@ describe('EUT-1: file send, quiet copy, delivery tick', () => {
     const input = $<HTMLInputElement>('[data-file-input]')!;
     Object.defineProperty(input, 'files', { value: [new File(['hi'], 'brief.txt', { type: 'text/plain' })] });
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · 8 sats$/));
+    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · up to 8 sats$/));
     $<HTMLButtonElement>('[data-send]')!.click();
     await vi.waitFor(() => expect(host.used('file_send')).toHaveLength(1));
     expect(host.used('file_send')[0].args).toMatchObject({
@@ -129,6 +130,25 @@ describe('EUT-1: file send, quiet copy, delivery tick', () => {
     expect(mark.getAttribute('data-delivery')).toBe('accepted');
     expect(mark.textContent?.trim()).toBe('');
     expect(mark.getAttribute('aria-label')).toBe('Delivered');
+  });
+
+  it.each([
+    ['en', 'an approved contact', true, 'Send · up to 8 sats'],
+    ['en', 'a first contact', false, 'Send first file · up to 8 sats'],
+    ['da', 'an approved contact', true, 'Send · højst 8 sats'],
+    ['da', 'a first contact', false, 'Send første fil · højst 8 sats'],
+  ] as const)('%s: a budget-backed file button to %s shows its cost as a ceiling', async (lang, _case, approved, label) => {
+    setLanguagePref(lang);
+    stubHost(approved ? {} : { budget_status: () => ({ ...openBudget(), rows: [] }) });
+    try {
+      await openShell();
+      $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
+      const input = $<HTMLInputElement>('[data-file-input]')!;
+      Object.defineProperty(input, 'files', { value: [new File(['hi'], 'brief.txt', { type: 'text/plain' })] });
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      await vi.waitFor(() => expect(text('[data-send]')).toBe(label));
+      expect($('[data-send]')!.getAttribute('aria-label')).toBe(label);
+    } finally { setLanguagePref('en'); }
   });
 
   it('says what is next after an approval with a file chosen, then sends on the next press', async () => {

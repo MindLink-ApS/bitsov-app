@@ -287,7 +287,7 @@ describe('voice notes in the composer and thread', () => {
     await openShell();
     await recordClip();
     expect($('[data-composer]')!.getAttribute('data-mode')).toBe('file');
-    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · 8 sats$/));
+    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · up to 8 sats$/));
     const send = $<HTMLButtonElement>('[data-send]')!;
     send.click();
     send.click();
@@ -307,7 +307,7 @@ describe('voice notes in the composer and thread', () => {
     const host = stubHost({ file_send: () => Promise.reject({ code: 'budget_exhausted', message: 'Maya’s budget is used up.' }) });
     await openShell();
     await recordClip();
-    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · 8 sats$/));
+    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · up to 8 sats$/));
     $<HTMLButtonElement>('[data-send]')!.click();
     await vi.waitFor(() => expect(host.used('file_send')).toHaveLength(1));
     await new Promise((r) => setTimeout(r, 50));

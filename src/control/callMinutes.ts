@@ -65,7 +65,18 @@ export type MinutesDeps = {
 };
 
 /** The host refused the node's hold for this call (and hung up where it was above the consent): nothing is paid. */
-export const HOLD_REFUSED = new Set(['call_no_reservation', 'call_hold_above_consent', 'call_no_consent', 'call_reservation_closed']);
+export const HOLD_REFUSED = new Set(['call_no_reservation', 'call_hold_above_consent', 'call_no_consent', 'call_reservation_closed', 'call_minutes_above_hold']);
+
+/**
+ * The next minute, at its whole ceiling, stays within the hold the node keeps and
+ * the most the owner agreed to, by the node's spent figure and by the receipts this
+ * app holds (the higher). An amount this app cannot hold exactly does not fit.
+ */
+export function minuteFitsHold(hold: CallReservation, agreedMaxMsat: number | null, receiptsMsat: number): boolean {
+  const most = Math.max(hold.spent_msat, receiptsMsat) + hold.per_block_msat + hold.per_block_fee_msat;
+  const limit = Math.min(hold.reserved_msat, agreedMaxMsat ?? hold.reserved_msat);
+  return Number.isSafeInteger(most) && Number.isSafeInteger(limit) && most <= limit;
+}
 
 /**
  * Refused before anything was paid, for a reason that passes by itself: their
@@ -244,6 +255,7 @@ export function createCallMinutes(opts: {
     const wait = due + (status.next_block_seq > 0 ? DUE_MARGIN_MS : 0) - now();
     if (wait > 0) { schedule(Math.min(wait, STATUS_POLL_MS), () => void tick()); return; }
     if (!payable()) return;
+    if (hold && !minuteFitsHold(hold, view.reservationMaxMsat, view.receiptsMsat)) { stopWith('hold_refused', tr('caMinutesPastHold')); return; }
     await payBlock(status.next_block_seq);
   };
 
