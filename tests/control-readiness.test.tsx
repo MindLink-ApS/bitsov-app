@@ -168,6 +168,34 @@ describe('node money readiness', () => {
   });
 
   it.each([
+    ['en', 'Hanging up this call would cost more than your node grant allows per message payment, so it could not be ended. The owner would need to approve a larger per-payment limit. Nothing was sent or paid.'],
+    ['da', 'At lægge på i dette opkald ville koste mere, end din nodes tilladelse giver pr. beskedbetaling, så opkaldet ville ikke kunne afsluttes. Ejeren skal godkende en højere grænse pr. betaling. Intet blev sendt eller betalt.'],
+  ] as const)('the host refusing a call it could not end reads in the app language (%s), and nothing was paid', (lang, words) => {
+    setLanguagePref(lang);
+    try {
+      const error = asActionError({ code: 'call_hangup_unpayable', message: 'host words in English' });
+      expect(error).toEqual({ code: 'call_hangup_unpayable', message: words });
+      expect(provenUnpaid(error.code)).toBe(true);
+    } finally {
+      setLanguagePref('en');
+    }
+  });
+
+  it.each([
+    ['en', 'Hanging up this call would cost more than any message payment may carry, so it could not be ended. A larger per-payment limit would not change that. Nothing was sent or paid.'],
+    ['da', 'At lægge på i dette opkald ville koste mere, end en beskedbetaling højst må være, så opkaldet ville ikke kunne afsluttes. En højere grænse pr. betaling ville ikke ændre det. Intet blev sendt eller betalt.'],
+  ] as const)('a hangup above the message maximum reads in the app language (%s), asks for no larger limit, and nothing was paid', (lang, words) => {
+    setLanguagePref(lang);
+    try {
+      const error = asActionError({ code: 'call_hangup_above_message_max', message: 'host words in English' });
+      expect(error).toEqual({ code: 'call_hangup_above_message_max', message: words });
+      expect(provenUnpaid(error.code)).toBe(true);
+    } finally {
+      setLanguagePref('en');
+    }
+  });
+
+  it.each([
     ['en', 'This permission covers messages and calls. Ask the owner to approve this payment separately. Nothing was paid.'],
     ['da', 'Denne tilladelse dækker beskeder og opkald. Bed ejeren om at godkende denne betaling særskilt. Intet blev betalt.'],
   ] as const)('a messaging grant refusing a payment has its own plain words (%s), and nothing was paid', (lang, words) => {

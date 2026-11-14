@@ -25,6 +25,8 @@ const source = new Proxy(base, { get(target, key: keyof typeof base) {
   if (key === 'peers' && scene === 'contacts-error') return async () => { throw new Error('Contacts unavailable'); };
   if (key === 'opList' && scene === 'repair') return async () => ({ operations: [], skipped: 0, has_more: false, unresolved_calls: [{ index_id: 'c'.repeat(64), acknowledged: false, hangup_cap_msat: 5000 }] });
   if (key === 'onLive') return async (handler: any) => { handler({ type: 'link', state: scene === 'offline' ? 'closed' : 'open', detail: null }); return () => {}; };
+  if (key === 'budgetStatus' && scene === 'budget-open') return async () => { const value = await base.budgetStatus(); return { ...value, autopay: { state: 'open', open_until_ms: Date.now() + 3_600_000, ceiling_msat: value.ceiling_msat, basis: null }, rows: [] }; };
+  if (key === 'spendStatus' && scene === 'spend-open') return async () => ({ state: 'open', basis: null, open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 });
   if (key === 'starterCurrent') return async () => ({ state: 'not_requested', hub_configured: true });
   if (key === 'nodeOverview') return async () => { const value = await base.nodeOverview(); return { ...value, network: 'signet', capabilities: [...(value.capabilities ?? []), 'starter_channel_request_v1'] }; };
   if (typeof target[key] === 'function' && /send|approve|request|signal|pay|keysend|invoice$|accept|join|grant|resume|endCall/i.test(key) && !reads.has(key)) return forbid;

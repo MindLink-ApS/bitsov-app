@@ -24,7 +24,9 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   the `bitsov.jwt.<token>` subprotocol the node reads first (never in the URL).
   The node admits the socket only for a `(peer, call_id)` it knows, under a
   paired token with `spend`; the host reconnects with backoff while the call
-  lasts and stops on a refusal. The renderer opens no socket and sees no
+  lasts and stops on a refusal. The node closes the socket when the token it
+  opened with expires, so each open gets a new token of its own, which the host
+  does not keep. Without one, it opens on the shared token. The renderer opens no socket and sees no
   token; the CSP keeps `connect-src 'self' ipc:` only. Three main-window
   commands: `call_media_open(call_id, peer, on_frame)`,
   `call_media_send(raw payload)`, `call_media_close()`. Frames reach the
@@ -69,10 +71,17 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   answer could not be used", nothing more paid. If the node link drops, the
   host reconnects; after 30 s without it the call ends. The node's refusal of
   the socket (for example an unknown call) ends it at once.
-- **Label.** While a node-routed call is ringing, connecting or live the card
-  says *Encrypted between your node and theirs — both nodes can hear it* /
-  *Krypteret mellem din node og deres — begge noder kan høre opkaldet*. The
-  STUN, direct-recovery and relay notes are not shown.
+- **Label.** While a node-routed call is ringing, connecting or live the
+  card shows, outside the **Details** disclosure, *The call goes through your box and theirs. Both boxes can hear it.* /
+  *Opkaldet går gennem din boks og deres. Begge bokse kan høre det.* The audio is not end-to-end encrypted between the
+  apps: both nodes forward it. The line stays visible until the apps encrypt
+  end to end. The STUN,
+  direct-recovery and relay notes are not shown.
+- **Short card.** During a call the card shows the name, the timer, one cost
+  line (the paid minutes on an outgoing routed call), mute and hang up; the
+  longer notes sit behind **Details**. The in-call direct payment (*Pay*) is
+  not offered on a node-routed call; its receipts and pending-result check
+  stay on the card. Amounts and payment flows are unchanged.
 - **Payment for the node leg is slice A2** (below). The node admits the media
   socket only once the call's first minute is paid, so payment starts at the
   answer, not on `onSession` `open`. `onSession` `closed` fires once when an
@@ -94,6 +103,54 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   headless: they prove the wiring, not audio quality, device capture, or a
   node that serves the route. Two-device acceptance against a node with the
   media route is separate evidence.
+
+## Sealed audio, first proof (off by default)
+
+A test build only. It takes two switches together: `VITE_CALL_SEAL=sealed` for the
+renderer and the host's `call-seal` Cargo feature (for example
+`VITE_CALL_SEAL=sealed npm run tauri build -- --features call-seal`).
+`src-tauri/build.rs` refuses a build with only one of them. Without both, the build
+is today's: the same SDP, the same frames and the same host commands. No seal
+command, permission or capability is generated, and no direct dependency is
+added. Tests that also pass on the code before sealing existed hold this. The seal
+tests themselves run only with the feature:
+`VITE_CALL_SEAL=sealed cargo test --features call-seal`.
+
+With it on, the host (`src-tauri/src/control/call_seal.rs`) seals audio between the
+two apps. The node changes nothing: it forwards opaque frames, and metering,
+admission and price never read them.
+
+- **Key agreement.** The offer carries a hash commitment, the answer carries the
+  callee's ephemeral X25519 key, and the first media frames reveal the caller's
+  key. Public values only pass through the renderer and the nodes. No key derives
+  from the node, its seed or a stored secret, and each call starts fresh.
+- **Frames.** `0x11 | epoch | counter | ciphertext | tag`, ChaCha20-Poly1305, one key
+  per direction, the inside padded to a multiple of 128 bytes. The host hands the
+  renderer the plain frame, numbered by the authenticated `stream_seq`. Anything in
+  the clear, or failing its tag, on a sealed call reaches nothing.
+- **What it authenticates.** Each frame comes from whoever holds the key from this
+  one exchange, for this call, direction, epoch and counter.
+- **What it does not.** Who that is. A node that swaps both keys sits in the middle
+  and reads everything, with "sealed" on both screens. Only comparing the words
+  catches that, and no screen shows the words yet. The node ids come from the node.
+  Nothing here has had an outside review.
+- **The answer cannot be sealed.** A sealing caller whose answer has no attribute, or
+  no capability bit, ends the call before any audio goes out. It says "This call
+  could not be sealed, so it was ended. Nothing was said unsealed." and names no
+  side, since an app that cannot seal and a node that stripped the line look the
+  same. So a sealing build cannot call an app that cannot seal. A callee answering
+  an offer without the attribute takes the call as today, labelled "Not sealed".
+- **Never in the clear by surprise.** A wrong attribute, a bad or missing reveal (5 s
+  from the call's first socket open), a low-order key, 10 s with no authentic frame
+  (from the first open or the last authentic frame, whether or not anything
+  arrives), or the last epoch running out ends the call with a reason. Reconnects
+  do not move these deadlines. The label says "sealed" only after a frame from the
+  far side authenticates, and only for the call on screen.
+- **Secrets in memory.** Key derivations wipe the hash state and its output;
+  `zeroize` is on for BLAKE3 and X25519 in this build. Moved copies, swap and
+  the webview's plain audio stay out of reach.
+- **Not built:** the words on screen, remembering a contact, "only private calls",
+  video in the seal, messages.
 
 ## M6 A2: paid minutes
 
@@ -204,14 +261,62 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   is left connected: their node's hangup `unpaid`; the node showing the call
   ended after its paid time and grace (`unpaid`) or for another reason; a
   minute refused before paying (`payment_failed`: tried again up to 4 times
-  only when the node proved it did not dispatch it); a minute whose outcome
+  when the node proved it did not dispatch it; a passing refusal, `not_ready`,
+  `peer_not_ready`, a rate breaker or a channel read that failed, is tried again
+  every 2 seconds while paid time and grace remain, at most 15 times, each try a
+  new operation); a budget with no room for the next minute (`budget_limit`,
+  `budget_exhausted` or `ceiling_exhausted`: a limit the owner set, so the call
+  ends at once with its own reason); a minute whose outcome
   is unknown (`payment_unknown`: never paid again on top of it); their node
   asking more per minute (`price_changed`); a hold the host refused
   (`hold_refused`: no reservation, or above the consent; the host hung up).
-- **After the call.** Paying stops at once; the card reads the node for up
-  to 20 s until it closes the reservation and then says "Minutes: paid X.
-  Released back to your budget: Y." Until then it says what the node still
-  holds.
+- **Ending a paid call.** After End begins, no new minute is issued: End,
+  local teardown and a hangup (ours or theirs) revoke the call's consent at
+  once, waiting for nothing, and a minute reads that consent under the money
+  lock and again as its last step before the POST. At most one minute already
+  issued may settle; it holds the money lock until its outcome is recorded.
+  Anything later is refused by the node, from the call's own state and clock.
+  Once the money lock is free the hangup still goes through its preparation
+  and any pending-result check first, so it can be delayed or refused there.
+  A hangup that is sent goes under that lock, so the node sees it
+  after that minute. A client cannot unsend what it handed to the network, so
+  the app promises no more than this. A minute whose POST got no answer stays
+  pending with its outcome unknown, which fences the hangup, so End first asks
+  the node about it by operation id. Not paid and abandoned, or a known result
+  (accounted as that): End then hangs up. Still paying or unknown: End sends no
+  hangup, its error carries the pending id, the card says the result is not
+  known yet, and the node ends the call itself once its paid time runs out.
+  When the admission is already closed (a peer hangup), End does not reconcile,
+  and a lost minute stays pending until the owner's check.
+- **A call the node already ended.** The minute cap, a minute that failed for
+  good, an unpaid expiry and the ring deadline end the call at the caller's
+  node with no hangup coming back. End still asks. The node refuses that hangup
+  before anything is paid (`not_dispatched`, reason `call_not_live`), and that
+  refusal closes the admission, so the contact can be called again. A contact
+  left stuck by an earlier build recovers on its next End. Any other
+  `not_dispatched` of a hangup leaves the admission open: while the node's own
+  closing notice is being paid it answers `call_signal_in_flight`, and "Try
+  ending it again" then closes it. A minute the wallet tried and failed stays
+  pending first, as above, and no hangup goes out while that result is not
+  known. A minute's refusal stays `not_dispatched` even with this reason,
+  because the node also gives it to a minute that is early or out of order on
+  a live call.
+- **After the call.** The card reads the node for up to 20 s until it closes
+  the reservation and then says "Minutes: paid X. Released back to your
+  budget: Y." Until then it says what the node still holds.
+- **A minute whose payment failed.** The node answers the POST with
+  `payment_unknown`, and so does a lookup until its sweep (every 15 s). The
+  sweep moves the row to `released`, keeping the payment hash. That reply proves
+  the minute unpaid only if the status read for that send, recorded with it,
+  showed this node on LDK with abandonment (rc15 or later), and the node still
+  shows that. End or the owner's check then releases its reservation, the ledger
+  says unpaid, and its operation id is never posted again. End then sends the
+  hangup. A paired caller's node has already ended the call, so it refuses that
+  hangup before paying and End closes the admission. Without that record, from an
+  earlier build, an older node or another wallet, the reply keeps the fence, as
+  unknown: a row survives an upgrade unchanged, so today's status cannot say what
+  wrote it. The same holds for a message, an offer and a hangup whose payment
+  failed. A resend is a new operation.
 - **Not covered yet.** An owner session places no paid-minutes call (its
   node keeps no reservation, so the host would pay nothing). The node offers
   no pre-dial read of `max_call_minutes`; the Ring confirm shows the
@@ -236,7 +341,44 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   `a2_a_failed_offer_is_final_and_cannot_be_rebound_wider`,
   `a2_the_node_refuses_an_offer_above_the_consent_and_nothing_is_held_or_paid`,
   `a2_a_refused_call_whose_hold_is_still_open_stays_refused_under_table_pressure`,
-  `a2_consents_are_write_once_and_only_a_call_its_node_closed_is_evicted`;
+  `a2_consents_are_write_once_and_only_a_call_its_node_closed_is_evicted`,
+  `a2_end_revokes_minutes_before_a_failed_hangup_and_a_paused_minute_pays_nothing`,
+  `a2_a_minute_waiting_for_the_money_lock_pays_nothing_once_its_call_ends`,
+  `a2_a_minute_paused_at_each_await_is_never_sent_after_the_call_ends`,
+  `a2_a_hangup_refused_while_prepared_still_revokes_the_minutes`,
+  `a2_a_minute_revoked_first_is_never_sent_and_one_decided_first_goes_before_the_hangup`,
+  `a2_a_minute_racing_end_or_teardown_goes_before_the_hangup_or_not_at_all`,
+  `a2_a_refused_minutes_cleanup_holds_no_consent_lock_against_end`,
+  `a_failed_minute_clears_after_the_sweep_and_end_pays_the_hangup`,
+  `a_failed_minute_on_a_call_the_node_ended_leaves_no_fence_and_end_closes_it`,
+  `a_failed_offer_or_hangup_clears_the_same_way`,
+  `a_failed_message_clears_after_the_sweep_and_goes_again_as_a_new_operation`,
+  `every_other_reply_stays_fenced`,
+  `the_same_reply_from_another_wallet_or_an_older_node_stays_fenced`,
+  `a_failure_read_against_a_payment_on_record_stays_fenced`,
+  `checking_a_failed_payment_again_releases_and_accounts_nothing_more`,
+  `checking_a_failed_minute_again_after_a_crash_changes_nothing`,
+  `a_row_carried_across_an_upgrade_stays_fenced_pending_or_settled`,
+  `a_status_that_cannot_vouch_at_dispatch_leaves_the_send_fenced`,
+  `a_record_for_another_node_identity_does_not_count`,
+  `a_resend_under_the_same_id_counts_only_over_a_proven_unsent_attempt`,
+  `a_failed_payment_stuck_by_an_earlier_build_stays_fenced`,
+  `a2_end_reconciles_a_minute_the_node_swallowed_then_pays_the_hangup`,
+  `a2_end_with_its_minute_still_paying_reports_unknown_and_sends_no_hangup`,
+  `a2_end_accounts_a_minute_with_a_known_result_then_pays_the_hangup`,
+  `a2_end_needs_the_node_to_confirm_it_abandoned_a_swallowed_minute`,
+  `a2_end_leaves_another_calls_pending_minute_fenced`,
+  `end_closes_a_call_the_node_ended_at_its_minute_cap`,
+  `end_closes_a_call_the_node_ended_after_a_failed_minute`,
+  `end_closes_an_offer_nobody_answered`,
+  `end_closes_a_call_the_node_ended_after_resolving_its_lost_minute`,
+  `an_admission_stuck_by_an_older_build_recovers_on_its_next_end`,
+  `end_refused_for_another_reason_stays_refused_until_the_call_is_over`,
+  `end_stays_unknown_while_the_node_reports_a_hangup_payment_unresolved`,
+  `end_sends_no_hangup_while_a_failed_minute_is_unresolved`,
+  `a_minute_refused_not_dispatched_stays_not_dispatched`,
+  `a_fresh_call_signal_refused_not_dispatched_keeps_only_the_closing_reason`,
+  `a_resent_hangup_refused_not_dispatched_closes_nothing`;
   `control::tests::a_consent_holds_only_what_the_quote_showed_and_covers_only_holds_within_it`,
   `control::tests::a_minute_costs_the_callees_advertised_block_price_and_the_reservation_is_bounded`,
   `call_status_reads_the_node_reservation_fields_verbatim`,
@@ -244,6 +386,15 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   `act::tests::a_reservation_the_node_could_not_check_is_named_not_generic`,
   `grant::tests::call_reservation_refusals_are_named`. Headless: two-device
   acceptance against nodes with N1-N3 is separate evidence.
+
+### What a press and a minute may pay
+
+- **Accept and Decline** show the most one answer or hangup can cost, and stay off until that price is read. A press reads the price again and pays only if the live signal price and routing ceiling are each at or below what the button showed. Otherwise nothing is sent, and the card says nothing was paid.
+- **No live price.** Without their node's live answer, the only signal price is this node's own tariff. The host refuses an answer, ICE candidate or hangup on it (`call_price_unknown`). End can be tried again: it sends the hangup once the price is back, and closes with nothing sent once the node shows the call ended or no longer lists it. An incoming call whose price cannot be read cannot be answered or declined.
+- **Ignore** is always on the incoming card. It stops the ring on this device, sends and pays nothing, and leaves no missed-call record. The caller's ring times out as usual.
+- **Hangup ceiling.** Every offer carries the most its hangup was shown to cost (`max_hangup_msat`). If the live hangup costs more, the host refuses the offer before anything is sent. The ceiling it saves for End is the live one, so it is never above what was shown.
+- **Out of range.** A call total that overflows, or that is above what the renderer holds exactly (2^53 - 1 msat), is no price: no offer, answer or hangup.
+- **Minutes.** Before each minute, its whole ceiling is added to what the node reports spent, and to the ceilings of this call's minutes in the journal (attempts proven unpaid excluded). Above the smaller of the node's hold and the most the owner agreed to, the minute is refused (`call_minutes_above_hold`), nothing is paid for it and the call is hung up. Node rc21's hold is its minutes plus a closing reserve, so a call to its node's limit stays within it. The node's own cap on minutes still ends the call first.
 
 ## Pre-M6 lab path (`VITE_CALL_MEDIA=webrtc` only)
 

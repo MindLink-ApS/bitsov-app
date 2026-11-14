@@ -14,7 +14,7 @@
  */
 export type CallMediaPath = 'node' | 'webrtc';
 
-export type CallMediaEnv = { VITE_CALL_MEDIA?: string };
+export type CallMediaEnv = { VITE_CALL_MEDIA?: string; VITE_CALL_SEAL?: string };
 
 export function callMediaPath(env: CallMediaEnv = import.meta.env as CallMediaEnv): CallMediaPath {
   return env.VITE_CALL_MEDIA === 'webrtc' ? 'webrtc' : 'node';
@@ -22,3 +22,11 @@ export function callMediaPath(env: CallMediaEnv = import.meta.env as CallMediaEn
 
 /** Node-routed audio is the call path; app-to-app media, video and meetings are off. */
 export const nodeRoutedAudio = (env?: CallMediaEnv) => callMediaPath(env) === 'node';
+
+/**
+ * App-to-app sealing of node-routed audio, off by default: only the exact
+ * value `sealed` turns it on, and only on the node-routed path. With it off
+ * a call sends the same bytes as a build without the code.
+ */
+export const sealedAudio = (env: CallMediaEnv = import.meta.env as CallMediaEnv) =>
+  callMediaPath(env) === 'node' && env.VITE_CALL_SEAL === 'sealed';
