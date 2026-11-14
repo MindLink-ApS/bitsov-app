@@ -40,6 +40,11 @@ bash scripts/package-mac.sh            # .app only
 bash scripts/package-mac.sh --dmg      # .app and .dmg
 ```
 
+For a test build with sealed call audio, add `--call-seal` (with or without
+`--dmg`). It adds `--features call-seal` and sets
+`VITE_CALL_SEAL=sealed` for the build, matching the enabled CI configuration.
+Without this option, the build arguments and environment stay unchanged.
+
 What the script does:
 
 1. **Sidecar.** Deletes every `src-tauri/bin/konsensus-*`. Then it runs
