@@ -1,4 +1,6 @@
 import { setLanguagePref } from '../src/i18n';
+import { IDLE as CALL_IDLE } from '../src/control/call';
+import { callLogEntry, type CallLogRecord } from '../src/control/callLog';
 import { asActionError } from '../src/control/state';
 import { sampleSource } from '../src/control/sample';
 import { setStunPref, setDenom } from '../src/control/prefs';
@@ -3925,4 +3927,63 @@ it('keeps initial video capture off if it resolves after background and return',
   // The sender survives so an explicit later camera action can replace it.
   expect(FakePc.made[FakePc.made.length - 1].senders).toHaveLength(2);
   e.endLocal();
+});
+
+describe('an incoming call you accepted that never connects stays in the chat history', () => {
+  beforeEach(() => { FakePc.made = []; vi.useFakeTimers(); });
+  afterEach(() => vi.useRealTimers());
+  const logged = (over: Partial<CallDeps>) => {
+    let previous = CALL_IDLE;
+    const entries: Omit<CallLogRecord, 'id' | 'type'>[] = [];
+    const views: CallView[] = [];
+    const onMissed = vi.fn();
+    const { e } = engine({ ...over, onMissed, onView: (view) => {
+      const entry = callLogEntry(previous, view, 1_000);
+      previous = view;
+      views.push(view);
+      if (entry) entries.push(entry);
+    } });
+    return { e, entries, onMissed, views };
+  };
+  it.each([
+    ['their price went up after you saw it', 'not_through'],
+    ['your microphone was refused', 'not_through'],
+    ['it never connected in time', 'failed'],
+    ['you hung up while it connected', 'failed'],
+  ] as const)('%s: one entry, logged as %s, and never as missed', async (cause, outcome) => {
+    let release!: (r: Awaited<ReturnType<CallDeps['quote']>>) => void;
+    const over: Partial<CallDeps> = {};
+    if (cause.startsWith('their price')) over.quote = async () => ({ ok: true, value: { ...QUOTE, signal_msat: QUOTE.signal_msat + 1 } });
+    if (cause.startsWith('your microphone')) over.getUserMedia = async () => { throw { name: 'NotAllowedError' }; };
+    if (cause.startsWith('it never')) over.quote = () => new Promise((resolve) => { release = resolve; });
+    const { e, entries, onMissed, views } = logged(over);
+    try {
+      await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+      const accepting = e.accept(QUOTE);
+      if (cause.startsWith('it never')) {
+        await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS);
+        release({ ok: true, value: QUOTE });
+      }
+      await accepting;
+      if (cause.startsWith('you hung up')) await e.hangup();
+      expect(e.view()).toMatchObject({ phase: 'ended', outgoing: false, liveAt: null });
+      e.dismiss();
+      expect(onMissed).not.toHaveBeenCalled();
+      expect(entries, JSON.stringify(views.filter((v) => v.phase === 'ended').map((v) => [v.reason, v.error]))).toHaveLength(1);
+      expect(entries[0]).toMatchObject({ direction: 'in', outcome, peer: views[0].peer!.toLowerCase() });
+    } finally { e.endLocal(); }
+  });
+  it('a call still ringing keeps its own records: your decline here, a missed one in the missed list', async () => {
+    const declined = logged({});
+    await declined.e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    await declined.e.decline(QUOTE);
+    expect(declined.entries).toEqual([expect.objectContaining({ direction: 'in', outcome: 'you_declined' })]);
+    declined.e.endLocal();
+    const missed = logged({});
+    await missed.e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    await vi.advanceTimersByTimeAsync(RING_MS + 1);
+    expect(missed.onMissed).toHaveBeenCalledTimes(1);
+    expect(missed.entries).toEqual([]);
+    missed.e.endLocal();
+  });
 });

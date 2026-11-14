@@ -30,6 +30,12 @@ describe('what an ended call adds to the chat', () => {
     expect(callLogEntry(ringing, ended({ outgoing: false, reason: 'declined' }), 5)).toMatchObject({ outcome: 'you_declined', direction: 'in' });
     expect(callLogEntry(ringing, ended({ outgoing: false, reason: 'timeout' }), 5)).toBeNull();
   });
+  it('an incoming call you accepted logs how it ended, even if it never connected', () => {
+    const accepted = live({ outgoing: false, phase: 'connecting' });
+    expect(callLogEntry(accepted, ended({ outgoing: false, reason: null, error: 'No.' }), 5)).toMatchObject({ outcome: 'not_through', direction: 'in' });
+    expect(callLogEntry(accepted, ended({ outgoing: false, reason: 'failed' }), 5)).toMatchObject({ outcome: 'failed', direction: 'in' });
+    expect(callLogEntry(accepted, ended({ outgoing: false, reason: 'hangup' }), 5)).toMatchObject({ outcome: 'failed', direction: 'in' });
+  });
   it('a later update to an ended call adds nothing, and no entry names an amount', () => {
     const done = ended({ reason: 'timeout', paidMsat: 5000 });
     expect(callLogEntry(done, { ...done, pendingCount: 0 }, 5)).toBeNull();

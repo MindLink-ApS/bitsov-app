@@ -13,7 +13,8 @@ const KEEP = 500;
 /**
  * What an ended call adds to its chat, read from the call's own view. It says
  * what happened to the call and nothing about money: amounts belong to the
- * ledger. A missed incoming call has its own record (`missedCalls`).
+ * ledger. A missed incoming call has its own record (`missedCalls`); one you
+ * accepted that never connected is logged here.
  */
 export function callLogEntry(prev: CallView, next: CallView, now: number): Omit<CallLogRecord, 'id' | 'type'> | null {
   if (next.phase !== 'ended' || !next.peer) return null;
@@ -23,7 +24,12 @@ export function callLogEntry(prev: CallView, next: CallView, now: number): Omit<
   if (prev.phase === 'idle' || prev.phase === 'ended') return next.error ? { ...base, direction: 'out', outcome: 'not_through' } : null;
   const direction = prev.outgoing ? 'out' : 'in';
   if (prev.liveAt !== null) return { ...base, direction, outcome: 'connected', durationMs: Math.max(0, now - prev.liveAt) };
-  if (direction === 'in') return next.reason === 'declined' ? { ...base, direction, outcome: 'you_declined' } : null;
+  if (direction === 'in') {
+    // Still ringing: only your own decline; a missed call has its own record.
+    if (prev.phase === 'incoming') return next.reason === 'declined' ? { ...base, direction, outcome: 'you_declined' } : null;
+    // Accepted, then it never connected: a refusal said why, anything else could not connect.
+    return { ...base, direction, outcome: next.reason === null && next.error ? 'not_through' : 'failed' };
+  }
   if (next.reason === 'declined') return { ...base, direction, outcome: 'declined' };
   if (next.reason === 'busy') return { ...base, direction, outcome: 'busy' };
   if (next.reason === 'timeout') return { ...base, direction, outcome: 'no_answer' };
