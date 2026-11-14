@@ -108,6 +108,7 @@ export function FirstSpendSheet(props: {
         }}>
         <div class="first-spend-keyboard-summary money" data-first-spend-keyboard-summary>
           <strong data-first-spend-keyboard-daily>{daily() === null ? t('firstSpendAllowUnavailable') : t('firstSpendAllow', daily()!)}</strong>
+          <span data-first-spend-keyboard-window>{t('firstSpendWindow')}</span>
           <span data-first-spend-keyboard-cost>{props.costLine}</span>
         </div>
         <div class="first-spend-grabber" aria-hidden="true"

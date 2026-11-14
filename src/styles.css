@@ -200,6 +200,8 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .hint { font-size: var(--t-sm); color: var(--muted); line-height: var(--lh-body); max-width: 60ch; }
 .ok-note { font-size: var(--t-sm); color: var(--ok); }
 .err-note { font-size: var(--t-sm); color: var(--err); overflow-wrap: anywhere; }
+/* A refusal sits just above the box, where it can't fall off the bottom of a phone screen. */
+.composer > [data-composer-note] { order: -1; width: min(var(--chat-max), 100%); margin: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
@@ -367,6 +369,10 @@ label.field input {
 .attach.soft { width: 34px; height: 34px; border-radius: 50%; border: none; background: var(--raised); color: var(--ink); font-size: var(--t-lg); line-height: 1; flex: none; }
 .attach.soft:hover { background: var(--line-strong); color: var(--ink); }
 .file-chip { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); padding: 6px 8px; }
+.composer-main.file-row { flex-wrap: wrap; }
+.composer-main.file-row .file-chip { flex: 1 1 10rem; min-width: 0; }
+.composer-main.file-row .file-chip .file-name { overflow-wrap: anywhere; }
+.composer .composer-main.file-row .primary { flex: 0 1 auto; max-width: 100%; margin-left: auto; white-space: normal; }
 .composer-bar { display: flex; align-items: center; gap: var(--s-3); width: min(var(--chat-max), 100%); }
 .composer-bar.cost-only { padding: 0 4px; }
 .composer > .approval { width: min(var(--chat-max), 100%); align-self: center; }
@@ -1343,6 +1349,9 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .msg.sending .bubble { opacity: 0.72; animation: msg-send var(--d-mid) var(--ease-out); }
 /* Unsent: kept whole on its own track, plainly not delivered. */
 .msg.unsent .bubble { opacity: 0.72; border: 1px dashed var(--unknown-ink); background: transparent; }
+/* The reason can be long: it wraps inside the screen instead of running off the left edge. */
+.msg.unsent { max-width: 100%; min-width: 0; }
+.msg.unsent .stamp [data-unsent-reason] { white-space: normal; overflow-wrap: anywhere; min-width: 0; text-align: right; }
 .msg.unsent .unsent-actions { display: flex; gap: var(--s-3, 12px); justify-content: flex-end; }
 .artifact.failed .failed-text { margin: 4px 0 0; padding-left: 8px; border-left: 2px solid var(--unknown-ink); white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg.sending .stamp :is(.sats, .money-text) { color: var(--muted); }
