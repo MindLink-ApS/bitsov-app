@@ -1645,8 +1645,9 @@ html[data-platform='ios'] .composer {
 }
 /* A tall composer shrinks and scrolls inside the screen: flex: none pushed its end, and any limit there, off the bottom. */
 html[data-platform='ios'] .composer, .cc[data-phone-shell='true'] .composer { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
-/* A scrolling box would clip what opens above it, on Android as on iPhone. */
-:is(html[data-platform='ios'], .cc[data-phone-shell='true']) .composer:has(.emoji-picker, .composer-menu:not([hidden])) { overflow: visible; }
+/* A scrolling box would clip the + menu, which opens above it, on Android as on iPhone. The emoji
+   picker sits inside the composer, so the composer keeps scrolling while it is open. */
+:is(html[data-platform='ios'], .cc[data-phone-shell='true']) .composer:has(.composer-menu:not([hidden])) { overflow: visible; }
 html[data-platform='ios'] .composer-panel { max-height: calc(var(--visible-height, 100dvh) * .45); flex-shrink: 0; }
 .ios-back { display: none; }
 html[data-platform='ios'] .ios-back { display: inline-flex; align-items: center; min-height: 44px; flex-shrink: 0; padding: 0 var(--s-4); }

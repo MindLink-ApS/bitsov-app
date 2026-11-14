@@ -67,6 +67,30 @@ for (const lang of ['en', 'da']) {
       });
       expect(onTop).toBe(true);
     });
+    // The emoji picker sits inside the composer, so at the largest text size the composer
+    // must still scroll to reach it. Scrolled by hand and checked with a hit test, since a
+    // click scrolls on its own and would hide a box that cannot scroll.
+    test(`${lang}: at the largest text size the emoji picker scrolls into reach on ${platform}`, async ({ page }) => {
+      await page.goto(`${preview}?scene=budget-open&lang=${lang}`);
+      await page.locator('[data-phone-list] [data-track^="peer:"]').first().click();
+      await page.waitForSelector('[data-composer-bar]');
+      await page.evaluate((p) => {
+        document.documentElement.dataset.platform = p;
+        document.documentElement.style.fontSize = '53px';
+      }, platform);
+      await page.locator('[data-emoji]').click();
+      await page.waitForSelector('[data-emoji-picker]');
+      const reach = await page.locator('[data-emoji-pick]').last().evaluate((el) => {
+        // Scroll only the composer, by the distance that centres the last emoji in it.
+        const c = el.closest('.composer')! as HTMLElement;
+        const box = c.getBoundingClientRect();
+        c.scrollTop += el.getBoundingClientRect().top - (box.top + c.clientHeight / 2);
+        const r = el.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+        return { scrolls: getComputedStyle(c).overflowY !== 'visible', onTop: hit === el || el.contains(hit) };
+      });
+      expect(reach).toEqual({ scrolls: true, onTop: true });
+    });
   }
   test(`${lang}: first-spend is in the top layer above the tabs, with edge Back blocked`, async ({ page }) => {
     await page.goto(`${preview}?scene=first-spend&lang=${lang}`);
