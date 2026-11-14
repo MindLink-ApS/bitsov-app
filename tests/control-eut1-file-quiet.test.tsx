@@ -167,7 +167,7 @@ describe('EUT-1: file send, quiet copy, delivery tick', () => {
     await vi.waitFor(() => expect(host.used('budget_resume')).toHaveLength(1));
     await vi.waitFor(() => expect(mount.textContent).toMatch(/Approved\. Press Send to send it\./));
     expect(host.used('file_send')).toHaveLength(0);
-    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · 8 sats$/));
+    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · up to 8 sats$/));
     $<HTMLButtonElement>('[data-send]')!.click();
     await vi.waitFor(() => expect(host.used('file_send')).toHaveLength(1));
   });
