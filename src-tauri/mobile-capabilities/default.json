@@ -20,6 +20,7 @@
     "allow-local-owner-cancel",
     "allow-local-owner-finalize",
     "allow-local-owner-reconcile",
+    "allow-node-setup-local",
     "allow-node-repair-initialized",
     "allow-node-repair-price-floor",
     "allow-fund-state",

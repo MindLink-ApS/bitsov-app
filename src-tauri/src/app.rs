@@ -253,6 +253,13 @@ struct NodeState {
     /// Config/external_node are still empty while first-run init is awaiting.
     #[cfg(all(desktop, not(feature = "mobile")))]
     local_startup: AtomicBool,
+    /// A fresh profile: startup created nothing and waits for the owner to
+    /// choose this Mac (`node_setup_local`) or a node at home.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    local_setup_needed: AtomicBool,
+    /// Tests only: a scripted stand-in for the node binary.
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
+    test_sidecar: Mutex<Option<PathBuf>>,
     add_device: tokio::sync::Mutex<add_device::Setup>,
     /// Enrollment is complete only after token refresh and identity validation.
     second_join_complete: AtomicBool,
@@ -602,6 +609,10 @@ impl NodeState {
         );
         #[cfg(any(mobile, feature = "mobile"))]
         let (local_owner, owner_warning) = (false, None);
+        #[cfg(all(desktop, not(feature = "mobile")))]
+        let local_setup_needed = self.local_setup_needed.load(Ordering::SeqCst);
+        #[cfg(any(mobile, feature = "mobile"))]
+        let local_setup_needed = false;
         let (unlock_state, pending_device) = home_unlock::locked_view(self);
         Status {
             phone_setup: *self.phone_setup.lock().unwrap(),
@@ -613,6 +624,7 @@ impl NodeState {
             locked: self.home_locked.load(Ordering::SeqCst),
             local_owner,
             owner_warning,
+            local_setup_needed,
             initialization_repair: *self.initialization_repair.lock().unwrap(),
             retry_after_secs,
             // A transport cooldown pauses reads; it does not revoke pairing.
@@ -659,6 +671,10 @@ impl NodeState {
             remote_connect_generation: tokio::sync::watch::channel(0).0,
             #[cfg(all(desktop, not(feature = "mobile")))]
             local_startup: AtomicBool::new(false),
+            #[cfg(all(desktop, not(feature = "mobile")))]
+            local_setup_needed: AtomicBool::new(false),
+            #[cfg(all(test, desktop, not(feature = "mobile")))]
+            test_sidecar: Mutex::new(None),
             add_device: tokio::sync::Mutex::new(add_device::Setup::default()),
             second_join_complete: AtomicBool::new(false),
             #[cfg(all(desktop, not(feature = "mobile")))]
@@ -732,6 +748,8 @@ struct Status {
     locked: bool,
     local_owner: bool,
     owner_warning: Option<String>,
+    /// Nothing was created yet: onboarding asks where BitSov should run.
+    local_setup_needed: bool,
     initialization_repair: InitializationRepair,
     retry_after_secs: Option<u64>,
     ready: bool,
@@ -904,13 +922,35 @@ fn repair_price_floor_files(state: &NodeState, confirmed: bool) -> Result<PathBu
 // ---- node supervision -----------------------------------------------------
 
 /// First run only: `konsensus init` generates identity + config (tier full = fund-your-node).
+/// It creates the recovery phrase and wallet, so startup reaches it only for a
+/// dev node or after the owner chose this Mac (`local_setup_needed`).
 #[cfg(all(desktop, not(feature = "mobile")))]
 async fn init_node(
-    app: &AppHandle,
+    app: &AppHandle<impl tauri::Runtime>,
     data_dir: &Path,
     dev_sidecar: Option<&Path>,
 ) -> Result<(), String> {
-    app.state::<NodeState>().require_local_node()?;
+    let state = app.state::<NodeState>();
+    state.require_local_node()?;
+    let data_dir = data_dir.to_string_lossy();
+    let args = ["init", "--dir", &data_dir, "--non-interactive", "--tier", "full"];
+    // Tests run a scripted stand-in; never a real node.
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
+    let test_sidecar = state.test_sidecar.lock().unwrap().clone();
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
+    if let Some(program) = test_sidecar {
+        let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        let out = tauri::async_runtime::spawn_blocking(move || {
+            std::process::Command::new(program).args(args).output()
+        })
+        .await
+        .map_err(|e| format!("node init could not run: {e}"))?;
+        return match out {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => Err(format!("node init failed (exit {:?})", out.status.code())),
+            Err(e) => Err(format!("node init could not run: {e}")),
+        };
+    }
     let cmd = match dev_sidecar {
         Some(program) => app.shell().command(program),
         None => app
@@ -918,14 +958,7 @@ async fn init_node(
             .sidecar("konsensus")
             .map_err(|e| format!("cannot resolve node sidecar: {e}"))?,
     };
-    let cmd = cmd.args([
-            "init",
-            "--dir",
-            &data_dir.to_string_lossy(),
-            "--non-interactive",
-            "--tier",
-            "full",
-        ]);
+    let cmd = cmd.args(args);
     match cmd.output().await {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => Err(format!(
@@ -935,6 +968,47 @@ async fn init_node(
         )),
         Err(e) => Err(format!("node init could not run: {e}")),
     }
+}
+
+/// Recorded when the owner chose "set up a node on this Mac" in onboarding.
+/// Holds no key material: only that the choice was made.
+#[cfg(all(desktop, not(feature = "mobile")))]
+const LOCAL_SETUP_CONSENT: &str = "local-node-setup.json";
+
+/// A fresh desktop profile (no node config, no recorded choice) must wait for
+/// the owner: startup then neither runs `init` nor starts a node. An existing
+/// config is an existing install. A dev node is the developer's own choice.
+#[cfg(all(desktop, not(feature = "mobile")))]
+fn local_setup_needed(app_data_dir: &Path, config: &Path, dev_node: bool) -> Result<bool, String> {
+    if dev_node || config.try_exists().map_err(|_| "Cannot inspect the node config")? {
+        return Ok(false);
+    }
+    let consent = app_data_dir.join(LOCAL_SETUP_CONSENT);
+    Ok(!consent.try_exists().map_err(|_| "Cannot inspect the local node setup choice")?)
+}
+
+/// Durably record the owner's choice before anything is created.
+#[cfg(all(desktop, not(feature = "mobile")))]
+fn record_local_setup_consent(app_data_dir: &Path) -> Result<(), String> {
+    use std::io::Write;
+    let failed = |_| "Could not save your choice; nothing was created.".to_string();
+    std::fs::create_dir_all(app_data_dir).map_err(failed)?;
+    let chosen_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let body = serde_json::json!({ "version": 1, "local_node": true, "chosen_at": chosen_at });
+    let path = app_data_dir.join(LOCAL_SETUP_CONSENT);
+    let temp = app_data_dir.join(format!("{LOCAL_SETUP_CONSENT}.tmp"));
+    let mut file = std::fs::File::create(&temp).map_err(failed)?;
+    file.write_all(body.to_string().as_bytes()).map_err(failed)?;
+    file.sync_all().map_err(failed)?;
+    drop(file);
+    std::fs::rename(&temp, &path).map_err(failed)?;
+    if let Ok(dir) = std::fs::File::open(app_data_dir) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
 }
 
 /// Resolve the bundled sidecar exactly as `tauri-plugin-shell` does, so the path is
@@ -978,6 +1052,9 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
         Some(program) => program,
         None => sidecar_path(SIDECAR_BIN)?,
     };
+    // Tests run a scripted stand-in; never a real node.
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
+    let program = state.test_sidecar.lock().unwrap().clone().unwrap_or(program);
     let local_owner = state.owner.active.load(Ordering::SeqCst);
     let password = if local_owner {
         Some(local_owner::prepare_launch(config, owner_password::load)?)
@@ -1471,7 +1548,7 @@ fn refuse_external(state: &NodeState) -> Result<(), String> {
 /// initialised, started or supervised. App files go under the app's own data dir;
 /// the node's data dir is only read.
 #[cfg(all(desktop, not(feature = "mobile")))]
-async fn attach_external(app: &AppHandle, app_data_dir: &Path, node: dev_node::ExternalNode) {
+async fn attach_external(app: &AppHandle<impl tauri::Runtime>, app_data_dir: &Path, node: dev_node::ExternalNode) {
     let state = app.state::<NodeState>();
     eprintln!(
         "[dev-node] EXTERNAL node on {}, data dir {} (not started or stopped by the app)",
@@ -1698,16 +1775,21 @@ async fn bootstrap_node(app: AppHandle) {
 
 #[cfg(all(desktop, not(feature = "mobile"), unix))]
 async fn bootstrap_node(app: AppHandle) {
-    let state = app.state::<NodeState>();
-    struct StartupFinished<'a>(&'a AtomicBool);
-    impl Drop for StartupFinished<'_> {
-        fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
-    }
-    let _startup = StartupFinished(&state.local_startup);
     let app_data_dir: PathBuf = match app.path().app_data_dir() {
         Ok(d) => d,
-        Err(e) => return set_error(&state, format!("no app data dir: {e}")),
+        Err(e) => {
+            let state = app.state::<NodeState>();
+            state.local_startup.store(false, Ordering::SeqCst);
+            return set_error(&state, format!("no app data dir: {e}"));
+        }
     };
+    bootstrap_node_at(&app, app_data_dir).await
+}
+
+#[cfg(all(desktop, not(feature = "mobile"), unix))]
+async fn bootstrap_node_at(app: &AppHandle<impl tauri::Runtime>, app_data_dir: PathBuf) {
+    let state = app.state::<NodeState>();
+    let _startup = StartupFinished(&state.local_startup);
     match remote_access::load_persisted(&app_data_dir) {
         Ok(Some(_)) => {
             if let Err(error) = connect_remote_at(&state, &app_data_dir, true).await {
@@ -1728,12 +1810,12 @@ async fn bootstrap_node(app: AppHandle) {
     }
     // Release builds: always `Ok(None)` (see `dev_node`).
     match dev_node::resolve_external(&app_data_dir) {
-        Ok(Some(node)) => return attach_external(&app, &app_data_dir, node).await,
+        Ok(Some(node)) => return attach_external(app, &app_data_dir, node).await,
         Ok(None) => {}
         Err(e) => return set_error(&state, format!("external node: {e}")),
     }
     let (data_dir, dev_sidecar) = match dev_node::resolve(&app_data_dir) {
-        Ok(None) => (app_data_dir, None),
+        Ok(None) => (app_data_dir.clone(), None),
         Ok(Some(dev)) => {
             eprintln!(
                 "[dev-node] UNVERIFIED node binary {} on data dir {} (dev only, sidecar verification bypassed)",
@@ -1747,9 +1829,43 @@ async fn bootstrap_node(app: AppHandle) {
         }
         Err(e) => return set_error(&state, format!("dev node: {e}")),
     };
+    start_local_node(app, &app_data_dir, &data_dir, dev_sidecar, false).await
+}
+
+/// Clears `local_startup` on every exit from a local startup attempt.
+#[cfg(all(desktop, not(feature = "mobile")))]
+struct StartupFinished<'a>(&'a AtomicBool);
+#[cfg(all(desktop, not(feature = "mobile")))]
+impl Drop for StartupFinished<'_> {
+    fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
+}
+
+/// The local node: init on first run, then start, health and pairing.
+/// `chosen` is true only from `node_setup_local`, after the owner's explicit
+/// choice was recorded. Without it a fresh profile stops before anything is
+/// created and reports `local_setup_needed` for onboarding to show.
+#[cfg(all(desktop, not(feature = "mobile"), unix))]
+async fn start_local_node(
+    app: &AppHandle<impl tauri::Runtime>,
+    app_data_dir: &Path,
+    data_dir: &Path,
+    dev_sidecar: Option<PathBuf>,
+    chosen: bool,
+) {
+    let state = app.state::<NodeState>();
     *state.dev_sidecar.lock().unwrap() = dev_sidecar.clone();
-    let _ = std::fs::create_dir_all(&data_dir);
     let config = data_dir.join("konsensus.toml");
+    if !chosen {
+        match local_setup_needed(app_data_dir, &config, dev_sidecar.is_some()) {
+            Ok(false) => {}
+            Ok(true) => {
+                state.local_setup_needed.store(true, Ordering::SeqCst);
+                return;
+            }
+            Err(error) => return set_error(&state, error),
+        }
+    }
+    let _ = std::fs::create_dir_all(data_dir);
 
     let owner_enabled = match local_owner::launch_enabled(
         local_owner::enabled(dev_sidecar.is_some()), &config,
@@ -1759,20 +1875,20 @@ async fn bootstrap_node(app: AppHandle) {
     };
     state.owner.active.store(owner_enabled, Ordering::SeqCst);
     if !owner_enabled && !config.exists() {
-        if let Err(e) = init_node(&app, &data_dir, dev_sidecar.as_deref()).await {
+        if let Err(e) = init_node(app, data_dir, dev_sidecar.as_deref()).await {
             return set_error(&state, e);
         }
     }
 
     *state.config.lock().unwrap() = Some(config.clone());
 
-    if let Err(e) = spawn_node(&app, &config) {
+    if let Err(e) = spawn_node(app, &config) {
         return set_error(&state, e);
     }
     if let Err(e) = wait_for_health(&state).await {
         return set_error(&state, e);
     }
-    finish_auth(&state, &data_dir).await;
+    finish_auth(&state, data_dir).await;
 }
 
 /// A phone is a pure client: startup either attaches to the persisted, pinned
@@ -2823,6 +2939,87 @@ async fn node_repair_initialized(
     start_after_repair(&app, state.inner(), &config).await
 }
 
+/// The owner chose to run a new node on this Mac. The only path that creates a
+/// local node (recovery phrase and wallet) on a fresh profile: it records the
+/// choice, then runs the usual first-run init and start.
+#[tauri::command]
+#[cfg(all(desktop, not(feature = "mobile")))]
+async fn node_setup_local(
+    window: WebviewWindow<impl tauri::Runtime>,
+    app: AppHandle<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    confirmed: bool,
+) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let app_data_dir = app.path().app_data_dir().map_err(|e| format!("no app data dir: {e}"))?;
+    node_setup_local_at(&app, state.inner(), &app_data_dir, confirmed).await
+}
+
+#[cfg(all(desktop, not(feature = "mobile")))]
+async fn node_setup_local_at(
+    app: &AppHandle<impl tauri::Runtime>,
+    state: &NodeState,
+    app_data_dir: &Path,
+    confirmed: bool,
+) -> Result<(), String> {
+    if !confirmed {
+        return Err("Setting up a node on this Mac requires your explicit agreement.".into());
+    }
+    state.require_local_node()?;
+    {
+        // Serialized with remote link changes: a saved or live remote node wins.
+        let _change = state.remote_change.lock().await;
+        if state.remote_mode.load(Ordering::SeqCst)
+            || remote_access::load_persisted(app_data_dir).map_err(|e| e.to_string())?.is_some()
+        {
+            return Err("BitSov is set to use your node at home. Forget that link first.".into());
+        }
+        if state.local_startup.load(Ordering::SeqCst)
+            || !state.local_setup_needed.load(Ordering::SeqCst)
+        {
+            return Err("BitSov is not waiting for a node choice.".into());
+        }
+        record_local_setup_consent(app_data_dir)?;
+        state.local_startup.store(true, Ordering::SeqCst);
+        state.local_setup_needed.store(false, Ordering::SeqCst);
+        *state.error.lock().unwrap() = None;
+    }
+    #[cfg(unix)]
+    {
+        let _startup = StartupFinished(&state.local_startup);
+        start_local_node(app, app_data_dir, app_data_dir, None, true).await;
+        let error = state.error.lock().unwrap().clone();
+        match error {
+            Some(error) => {
+                // Init failed before a node existed: the same choice can be retried.
+                if state.config.lock().unwrap().is_none() {
+                    state.local_setup_needed.store(true, Ordering::SeqCst);
+                }
+                Err(error)
+            }
+            None => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = app;
+        state.local_startup.store(false, Ordering::SeqCst);
+        Err("BitSov is not supported on this platform".into())
+    }
+}
+
+#[cfg(any(mobile, feature = "mobile"))]
+#[tauri::command]
+async fn node_setup_local(
+    window: WebviewWindow<impl tauri::Runtime>,
+    confirmed: bool,
+) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    let _ = confirmed;
+    Err("A phone connects to your node; it cannot run one.".into())
+}
+
 #[tauri::command]
 #[cfg(all(desktop, not(feature = "mobile")))]
 async fn node_repair_price_floor(
@@ -3054,6 +3251,8 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     // A new link is the owner's action: it may dial even after a refusal.
     state.remote_retry.clear_refusal();
     state.remote_mode.store(true, Ordering::SeqCst);
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    state.local_setup_needed.store(false, Ordering::SeqCst);
     *state.error.lock().unwrap() = None;
     state.remote_retry.clear_connection_error();
     // Subscribe while holding remote_change: Forget must invalidate even a
@@ -10878,6 +11077,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             local_owner_cancel,
             local_owner_finalize,
             local_owner_reconcile,
+            node_setup_local,
             node_repair_initialized,
             node_repair_price_floor,
             fund_state,
@@ -25644,6 +25844,7 @@ mod assistant_acl_tests {
                 "local_owner_cancel",
                 "local_owner_finalize",
                 "local_owner_reconcile",
+                "node_setup_local",
                 "node_repair_initialized",
                 "node_repair_price_floor",
                 "fund_state",
@@ -26430,6 +26631,7 @@ mod assistant_acl_tests {
             .invoke_handler(tauri::generate_handler![
                 super::node_status,
                 super::node_unlock,
+                super::node_setup_local,
                 super::node_repair_initialized,
                 super::node_repair_price_floor,
                 super::fund_state,
@@ -26511,6 +26713,15 @@ mod assistant_acl_tests {
         for cmd in ["fund_state", "funding_address", "payments_balance"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
+
+        assert_handler_ran(
+            invoke(&main, "node_setup_local", serde_json::json!({ "confirmed": false })),
+            "explicit agreement",
+        );
+        assert_acl_denied(
+            invoke(&assistant, "node_setup_local", serde_json::json!({ "confirmed": true })),
+            "node_setup_local",
+        );
 
         assert_handler_ran(
             invoke(&main, "node_repair_initialized", serde_json::json!({ "confirmed": false })),
