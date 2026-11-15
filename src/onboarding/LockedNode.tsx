@@ -1,3 +1,4 @@
+import { hostText } from '../control/hostCopy';
 import { t } from '../i18n';
 import { usePairingActivity } from '../pairingActivity';
 import { createEffect, createSignal, Show } from 'solid-js';
@@ -181,7 +182,7 @@ export function RememberUnlock(props: {
       if (remember) { setUnlockRemembered(true); setSaved(true); }
       else props.onDone();
     } catch (e) {
-      setError(typeof e === 'string' ? e : t('obPasswordNotSaved'));
+      setError(typeof e === 'string' ? hostText(e) : t('obPasswordNotSaved'));
     } finally { setBusy(false); }
   };
   return <section class="panel" data-remember-unlock aria-live="polite">

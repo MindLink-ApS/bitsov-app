@@ -10,6 +10,7 @@ import { RemoteOwnerCeremony } from './onboarding/RemoteOwnerCeremony';
 import { LocalOwnerCeremony } from './onboarding/LocalOwnerCeremony';
 import { InitializationRepair } from './onboarding/InitializationRepair';
 import { OfflineNode } from './control/OfflineNode';
+import { hostText } from './control/hostCopy';
 import { softenError } from './control/userFacing';
 import { SoftError } from './control/SoftError';
 import { DelayedSpinner } from './control/DelayedSpinner';
@@ -663,7 +664,7 @@ function IdentityGate(props: {
         setSavingTrust(true);
         setError(null);
         try { await props.onContinue(); }
-        catch (e) { setError(String(e)); }
+        catch (e) { setError(hostText(String(e))); }
         finally { setSavingTrust(false); }
       }}>
         I understand — continue to funding
