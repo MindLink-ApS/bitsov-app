@@ -24,7 +24,9 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   the `bitsov.jwt.<token>` subprotocol the node reads first (never in the URL).
   The node admits the socket only for a `(peer, call_id)` it knows, under a
   paired token with `spend`; the host reconnects with backoff while the call
-  lasts and stops on a refusal. The renderer opens no socket and sees no
+  lasts and stops on a refusal. The node closes the socket when the token it
+  opened with expires, so each open gets a new token of its own, which the host
+  does not keep. Without one, it opens on the shared token. The renderer opens no socket and sees no
   token; the CSP keeps `connect-src 'self' ipc:` only. Three main-window
   commands: `call_media_open(call_id, peer, on_frame)`,
   `call_media_send(raw payload)`, `call_media_close()`. Frames reach the
@@ -110,7 +112,9 @@ socket: app, own node, peer node, peer app. **Both nodes can read this video**, 
 the card says so in Danish and English for as long as the call lasts. No app-to-app
 media, no encryption claim. With the flag off nothing here runs: no video button, a
 video offer is answered as audio, and every byte on the socket is what it was. An
-audio call on a build with the flag on is the same.
+audio call on a build with the flag on is the same. A build with sealing on
+(`VITE_CALL_SEAL=sealed`, below) has no video: video is never sealed, and the
+host refuses to open a sealed session with video.
 
 - **Wire format** (`src/control/videoFrame.ts`). A video payload is
   `type u8 | stream_seq u32 BE | len u16 BE | body | zero padding`: the layout the
@@ -164,6 +168,54 @@ audio call on a build with the flag on is the same.
 - **Checks.** `npm test -- tests/video-frame.test.ts tests/video-rate.test.ts
   tests/call-video.test.ts tests/node-routed-video.test.ts tests/call-video-flag.test.tsx`,
   `cargo test control::media`.
+
+## Sealed audio, first proof (off by default)
+
+A test build only. It takes two switches together: `VITE_CALL_SEAL=sealed` for the
+renderer and the host's `call-seal` Cargo feature (for example
+`VITE_CALL_SEAL=sealed npm run tauri build -- --features call-seal`).
+`src-tauri/build.rs` refuses a build with only one of them. Without both, the build
+is today's: the same SDP, the same frames and the same host commands. No seal
+command, permission or capability is generated, and no direct dependency is
+added. Tests that also pass on the code before sealing existed hold this. The seal
+tests themselves run only with the feature:
+`VITE_CALL_SEAL=sealed cargo test --features call-seal`.
+
+With it on, the host (`src-tauri/src/control/call_seal.rs`) seals audio between the
+two apps. The node changes nothing: it forwards opaque frames, and metering,
+admission and price never read them.
+
+- **Key agreement.** The offer carries a hash commitment, the answer carries the
+  callee's ephemeral X25519 key, and the first media frames reveal the caller's
+  key. Public values only pass through the renderer and the nodes. No key derives
+  from the node, its seed or a stored secret, and each call starts fresh.
+- **Frames.** `0x11 | epoch | counter | ciphertext | tag`, ChaCha20-Poly1305, one key
+  per direction, the inside padded to a multiple of 128 bytes. The host hands the
+  renderer the plain frame, numbered by the authenticated `stream_seq`. Anything in
+  the clear, or failing its tag, on a sealed call reaches nothing.
+- **What it authenticates.** Each frame comes from whoever holds the key from this
+  one exchange, for this call, direction, epoch and counter.
+- **What it does not.** Who that is. A node that swaps both keys sits in the middle
+  and reads everything, with "sealed" on both screens. Only comparing the words
+  catches that, and no screen shows the words yet. The node ids come from the node.
+  Nothing here has had an outside review.
+- **The answer cannot be sealed.** A sealing caller whose answer has no attribute, or
+  no capability bit, ends the call before any audio goes out. It says "This call
+  could not be sealed, so it was ended. Nothing was said unsealed." and names no
+  side, since an app that cannot seal and a node that stripped the line look the
+  same. So a sealing build cannot call an app that cannot seal. A callee answering
+  an offer without the attribute takes the call as today, labelled "Not sealed".
+- **Never in the clear by surprise.** A wrong attribute, a bad or missing reveal (5 s
+  from the call's first socket open), a low-order key, 10 s with no authentic frame
+  (from the first open or the last authentic frame, whether or not anything
+  arrives), or the last epoch running out ends the call with a reason. Reconnects
+  do not move these deadlines. The label says "sealed" only after a frame from the
+  far side authenticates, and only for the call on screen.
+- **Secrets in memory.** Key derivations wipe the hash state and its output;
+  `zeroize` is on for BLAKE3 and X25519 in this build. Moved copies, swap and
+  the webview's plain audio stay out of reach.
+- **Not built:** the words on screen, remembering a contact, "only private calls",
+  video in the seal, messages.
 
 ## M6 A2: paid minutes
 
@@ -399,6 +451,15 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   `act::tests::a_reservation_the_node_could_not_check_is_named_not_generic`,
   `grant::tests::call_reservation_refusals_are_named`. Headless: two-device
   acceptance against nodes with N1-N3 is separate evidence.
+
+### What a press and a minute may pay
+
+- **Accept and Decline** show the most one answer or hangup can cost, and stay off until that price is read. A press reads the price again and pays only if the live signal price and routing ceiling are each at or below what the button showed. Otherwise nothing is sent, and the card says nothing was paid.
+- **No live price.** Without their node's live answer, the only signal price is this node's own tariff. The host refuses an answer, ICE candidate or hangup on it (`call_price_unknown`). End can be tried again: it sends the hangup once the price is back, and closes with nothing sent once the node shows the call ended or no longer lists it. An incoming call whose price cannot be read cannot be answered or declined.
+- **Ignore** is always on the incoming card. It stops the ring on this device, sends and pays nothing, and leaves no missed-call record. The caller's ring times out as usual.
+- **Hangup ceiling.** Every offer carries the most its hangup was shown to cost (`max_hangup_msat`). If the live hangup costs more, the host refuses the offer before anything is sent. The ceiling it saves for End is the live one, so it is never above what was shown.
+- **Out of range.** A call total that overflows, or that is above what the renderer holds exactly (2^53 - 1 msat), is no price: no offer, answer or hangup.
+- **Minutes.** Before each minute, its whole ceiling is added to what the node reports spent, and to the ceilings of this call's minutes in the journal (attempts proven unpaid excluded). Above the smaller of the node's hold and the most the owner agreed to, the minute is refused (`call_minutes_above_hold`), nothing is paid for it and the call is hung up. Node rc21's hold is its minutes plus a closing reserve, so a call to its node's limit stays within it. The node's own cap on minutes still ends the call first.
 
 ## Pre-M6 lab path (`VITE_CALL_MEDIA=webrtc` only)
 

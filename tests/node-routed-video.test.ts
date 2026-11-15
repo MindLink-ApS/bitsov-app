@@ -89,7 +89,7 @@ describe('the link message', () => {
 });
 
 describe('a build without the video path', () => {
-  it('opens the socket with the same four arguments and feeds every frame to audio', async () => {
+  it('opens the socket with the audio call\'s arguments (no sealed, no video) and feeds every frame to audio', async () => {
     const b = bridge();
     const a = audioEngine();
     const conn = await connect({ b: b.b, audio: a.audio });
@@ -98,7 +98,9 @@ describe('a build without the video path', () => {
     await conn.addTrack(cameraTrack, stream).replaceTrack(null);
     await negotiate(conn);
     expect(b.opens.length).toBe(1);
-    expect(b.opens[0].length).toBe(4);
+    // The audio call's open: the same five arguments as a build without video, `sealed` unset.
+    expect(b.opens[0].length).toBe(5);
+    expect(b.opens[0][4]).toBeUndefined();
     expect(b.opens[0].slice(0, 2)).toEqual([ID, PEER]);
     b.frame(opusFrame);
     b.frame(videoFrame);
@@ -116,7 +118,8 @@ describe('an audio call on a build that has video', () => {
     const conn = await connect({ b: b.b, audio: a.audio, video: { build: () => null, camera: () => {} } });
     conn.addTrack(audioTrack, stream);
     await negotiate(conn);
-    expect(b.opens[0].length).toBe(4);
+    expect(b.opens[0].length).toBe(5);
+    expect(b.opens[0][4]).toBeUndefined();
     b.frame(opusFrame);
     expect(a.fed).toEqual([opusFrame]);
     expect(b.sentVideo).toEqual([]);
@@ -132,7 +135,8 @@ describe('a video call', () => {
     conn.addTrack(audioTrack, stream);
     conn.addTrack(cameraTrack, stream);
     await negotiate(conn);
-    expect(b.opens[0][4]).toBe(true);
+    expect(b.opens[0][4]).toBeUndefined();
+    expect(b.opens[0][5]).toBe(true);
     expect(v.state.tracks).toEqual([cameraTrack]);
     b.frame(opusFrame);
     b.frame(videoFrame);
@@ -202,6 +206,7 @@ describe('a video call', () => {
     conn.addTrack(audioTrack, stream);
     await negotiate(conn);
     expect(build).not.toHaveBeenCalled();
-    expect(b.opens[0].length).toBe(4);
+    expect(b.opens[0].length).toBe(5);
+    expect(b.opens[0][4]).toBeUndefined();
   });
 });

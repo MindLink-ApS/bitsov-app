@@ -407,6 +407,16 @@ async fn refresh_with_mode(
     Ok(())
 }
 
+/// A new token for one purpose. The session and its renewal stay as they are.
+pub(crate) async fn extra_token(
+    session_client_id: &str,
+    client: &PairingClient,
+    key: &ClientKey,
+    local: bool,
+) -> Result<String, PairError> {
+    Ok(client.token(key, session_client_id, local).await?.token)
+}
+
 /// Refresh when inside [`REFRESH_MARGIN_SECS`] of expiry. Returns whether a
 /// new token was minted.
 pub async fn refresh_if_needed(

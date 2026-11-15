@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { AFTER_STEP_HOLD_MS, BAD_WINDOWS, DELAY_BAD_MS, DELAY_SEVERE_MS, DRAIN_PAUSE_MS, NODE_CAPS, PAUSE_MS, RESERVED_BYTES, RESERVED_MESSAGES, STEP_UP_AFTER_MS, TIER_DEFAULT, TIER_HIGH, VideoRateController, pacerLimits, stepsFor, tierForLimits } from '../src/control/videoRate';
 import { FRAGMENT_HEADER_BYTES, INNER_HEADER_BYTES, MAX_FRAGMENT_DATA, MAX_INNER_BYTES } from '../src/control/videoFrame';
 import { callVideoFlag } from '../vite.config';
-import { nodeRoutedAudio, nodeRoutedVideo } from '../src/control/callFlags';
+import { nodeRoutedAudio, nodeRoutedVideo, sealedAudio } from '../src/control/callFlags';
 
 describe('the fit against the node caps', () => {
   it('stays inside what the node leaves after its reservation, at both tiers', () => {
@@ -44,6 +44,10 @@ describe('the flag', () => {
     expect(nodeRoutedVideo({ VITE_CALL_VIDEO: '1' })).toBe(false);
     expect(nodeRoutedVideo({ VITE_CALL_VIDEO: 'node' })).toBe(true);
     expect(nodeRoutedVideo({ VITE_CALL_VIDEO: 'node', VITE_CALL_MEDIA: 'webrtc' })).toBe(false);
+    // Video is never sealed: a build with sealing on has none, and its seal flag is unchanged.
+    expect(nodeRoutedVideo({ VITE_CALL_VIDEO: 'node', VITE_CALL_SEAL: 'sealed' })).toBe(false);
+    expect(nodeRoutedVideo({ VITE_CALL_VIDEO: 'node', VITE_CALL_SEAL: 'off' })).toBe(true);
+    expect(sealedAudio({ VITE_CALL_VIDEO: 'node', VITE_CALL_SEAL: 'sealed' })).toBe(true);
     expect(nodeRoutedAudio({ VITE_CALL_VIDEO: 'node' })).toBe(true);
     expect(callVideoFlag({})).toBe('off');
     expect(callVideoFlag({ VITE_CALL_VIDEO: 'yes' })).toBe('off');

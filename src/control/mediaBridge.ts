@@ -13,23 +13,27 @@
  */
 import { Channel, invoke } from '@tauri-apps/api/core';
 
-export type MediaLinkState = 'connecting' | 'open' | 'closed' | 'ended';
+export type MediaLinkState = 'connecting' | 'open' | 'closed' | 'ended' | 'sealed' | 'sealed_words';
 /** What the node allows per direction, per second. Only on the `open` of a video session. */
 export type MediaNodeLimits = { messages: number; bytes: number };
-export type MediaLink = { link: MediaLinkState; detail: string | null; limits?: MediaNodeLimits };
+export type MediaLink = { link: MediaLinkState; detail: string | null; limits?: MediaNodeLimits; words?: string[] };
 
 export type MediaBridge = {
-  /** Open the host socket for `callId` with `peer`, the call's counterparty (the node admits only that pair). */
-  open: (callId: string, peer: string, onFrame: (frame: Uint8Array) => void, onLink: (link: MediaLink) => void, video?: boolean) => Promise<void>;
+  /**
+   * Open the host socket for `callId` with `peer`, the call's counterparty (the node admits only that pair).
+   * `sealed`: this call's key exchange is done (sealing builds). `video`: open the video path too (video builds).
+   * Never both: video is never sealed.
+   */
+  open: (callId: string, peer: string, onFrame: (frame: Uint8Array) => void, onLink: (link: MediaLink) => void, sealed?: boolean, video?: boolean) => Promise<void>;
   send: (payload: Uint8Array) => void;
   /** One video payload; resolves to how many fragments wait in the host. Only on a socket opened with `video`. */
   sendVideo?: (payload: Uint8Array) => Promise<number>;
   close: () => Promise<void>;
 };
 
-type ChannelMessage = ArrayBuffer | Uint8Array | number[] | string | { link?: unknown; detail?: unknown; limits?: unknown };
+type ChannelMessage = ArrayBuffer | Uint8Array | number[] | string | { link?: unknown; detail?: unknown; limits?: unknown; words?: unknown };
 
-const LINK_STATES: readonly string[] = ['connecting', 'open', 'closed', 'ended'];
+const LINK_STATES: readonly string[] = ['connecting', 'open', 'closed', 'ended', 'sealed', 'sealed_words'];
 
 /** A link transition as the host sends it: a parsed object, or JSON text from an older host. */
 export function parseLinkMessage(message: unknown): MediaLink | null {
@@ -38,8 +42,12 @@ export function parseLinkMessage(message: unknown): MediaLink | null {
     try { value = JSON.parse(message); } catch { return null; }
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const { link, detail, limits } = value as { link?: unknown; detail?: unknown; limits?: { messages?: unknown; bytes?: unknown } };
+  const { link, detail, limits, words } = value as { link?: unknown; detail?: unknown; limits?: { messages?: unknown; bytes?: unknown }; words?: unknown };
   if (typeof link !== 'string' || !LINK_STATES.includes(link)) return null;
+  if (link === 'sealed_words') {
+    if (!Array.isArray(words) || words.length !== 4 || !words.every(word => typeof word === 'string' && word.length > 0)) return null;
+    return { link, detail: null, words };
+  }
   const parsed: MediaLink = { link: link as MediaLinkState, detail: typeof detail === 'string' ? detail : null };
   if (limits && typeof limits.messages === 'number' && typeof limits.bytes === 'number') parsed.limits = { messages: limits.messages, bytes: limits.bytes };
   return parsed;
@@ -59,7 +67,7 @@ export function frameBytes(message: ArrayBuffer | Uint8Array | number[]): Uint8A
 export function hostMediaBridge(): MediaBridge {
   let current: Channel<ChannelMessage> | null = null;
   return {
-    open: async (callId, peer, onFrame, onLink, video) => {
+    open: async (callId, peer, onFrame, onLink, sealed, video) => {
       const channel = new Channel<ChannelMessage>();
       channel.onmessage = (message) => {
         if (current !== channel) return;
@@ -68,9 +76,11 @@ export function hostMediaBridge(): MediaBridge {
         if (link) onLink(link);
       };
       current = channel;
-      await invoke<void>('call_media_open', video
-        ? { call_id: callId, peer, on_frame: channel, video: true }
-        : { call_id: callId, peer, on_frame: channel });
+      // Without `sealed` and `video` this is the same three arguments as a build without either.
+      const args: Record<string, unknown> = { call_id: callId, peer, on_frame: channel };
+      if (sealed) args.sealed = true;
+      if (video) args.video = true;
+      await invoke<void>('call_media_open', args);
     },
     send: (payload) => {
       if (!current) return;
@@ -82,6 +92,30 @@ export function hostMediaBridge(): MediaBridge {
       current = null;
       await invoke<void>('call_media_close').catch(() => undefined);
     },
+  };
+}
+
+/**
+ * The call's key exchange, which lives in the host: the renderer only carries
+ * the attributes, which hold public values. Keys never reach this side.
+ */
+export type CallSeal = {
+  /** Caller: the attribute line for the offer. */
+  offer: (callId: string, peer: string) => Promise<string>;
+  /** Callee: the attribute line for the answer, or null when the offer says it cannot seal. */
+  answer: (callId: string, peer: string, offer: string) => Promise<string | null>;
+  /** Caller: true when the call is sealed, false when the answer says it cannot seal. */
+  accept: (callId: string, answer: string) => Promise<boolean>;
+  /** Drop whatever the host holds for this call's exchange. */
+  cancel: (callId: string) => Promise<void>;
+};
+
+export function hostCallSeal(): CallSeal {
+  return {
+    offer: (callId, peer) => invoke<string>('call_seal_offer', { call_id: callId, peer }),
+    answer: (callId, peer, offer) => invoke<string | null>('call_seal_answer', { call_id: callId, peer, offer }),
+    accept: (callId, answer) => invoke<boolean>('call_seal_accept', { call_id: callId, answer }),
+    cancel: (callId) => invoke<void>('call_seal_cancel', { call_id: callId }).catch(() => undefined),
   };
 }
 
