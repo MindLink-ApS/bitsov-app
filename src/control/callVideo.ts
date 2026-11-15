@@ -160,6 +160,14 @@ export function chooseVideoCodec(encodes: number, peerDecodes: number): VideoCod
   return null;
 }
 
+const CAPTURE_WRAP = 0x1_0000_0000;
+
+/** How far `to` sits after `from` on the u32 millisecond ring, in [-2^31, 2^31). */
+function ringDelta(from: number, to: number): number {
+  const ahead = (((to - from) % CAPTURE_WRAP) + CAPTURE_WRAP) % CAPTURE_WRAP;
+  return ahead >= CAPTURE_WRAP / 2 ? ahead - CAPTURE_WRAP : ahead;
+}
+
 export function createCallVideo(deps: CallVideoDeps): CallVideo {
   const now = deps.now ?? (() => performance.timeOrigin + performance.now());
   /** This side's node, until its handshake says more. */
@@ -197,6 +205,8 @@ export function createCallVideo(deps: CallVideoDeps): CallVideo {
   let renderTimer: ReturnType<typeof setTimeout> | undefined;
   let windowDelay = Infinity;
   const delayFloors: number[] = [];
+  /** The peer's capture clock, unwrapped: the last capture time on this stream's continuous timeline. */
+  let lastCaptureMs: number | null = null;
   let lastLost = 0;
   let lastComplete = 0;
 
@@ -446,7 +456,18 @@ export function createCallVideo(deps: CallVideoDeps): CallVideo {
     }
   };
 
-  const decode = (frame: AssembledFrame) => {
+  /**
+   * Capture times travel as u32 milliseconds and wrap about every 49.7 days.
+   * Each one becomes the nearest time to the one before it with the same wire
+   * value; a stream's first lands next to its arrival, on the same wall clock.
+   */
+  const unwrapCapture = (wireMs: number, arrivedAt: number): number => {
+    lastCaptureMs = (lastCaptureMs ?? arrivedAt) + ringDelta(lastCaptureMs ?? arrivedAt, wireMs);
+    return lastCaptureMs;
+  };
+
+  const decode = (assembled: AssembledFrame) => {
+    const frame = { ...assembled, captureMs: unwrapCapture(assembled.captureMs, assembled.arrivedAt) };
     if (frame.key && (!decoder || decoderCodec !== frame.codec)) {
       if (decoder) try { decoder.close(); } catch { /* already closed */ }
       decoder = makeDecoder(frame.codec);
@@ -611,6 +632,7 @@ export function createCallVideo(deps: CallVideoDeps): CallVideo {
     linkReset: () => {
       delayFloors.length = 0;
       windowDelay = Infinity;
+      lastCaptureMs = null;
       reassembler.reset();
       lastKeyRequestAt = -Infinity;
       wantKey = true;

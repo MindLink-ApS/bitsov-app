@@ -472,6 +472,70 @@ describe('a queue building on the path', () => {
   });
 });
 
+describe('the capture clock wrapping', () => {
+  // Capture times travel as u32 milliseconds, so they wrap about every 49.7 days of wall clock.
+  const WRAP = 0x1_0000_0000;
+
+  it('constant transit across the wrap reports no added delay', async () => {
+    vi.setSystemTime(WRAP - 1_100);
+    const t = await ready({ src: null });
+    t.video.feed(peerHello());
+    t.video.feed(frameOf(fragmentFor(0, true, (Date.now() - 40) % WRAP)));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(150);
+    // Past the wrap: the wire value restarts near zero, the transit is still 40 ms.
+    expect((Date.now() - 40) % WRAP).toBeLessThan(1_000);
+    t.video.feed(frameOf(fragmentFor(1, false, (Date.now() - 40) % WRAP)));
+    await vi.advanceTimersByTimeAsync(850);
+    const delays = ofType(t.sent, VIDEO_REPORT).map((p) => parseReport(parseInner(p)!.body)!.delayMs);
+    expect(delays).toEqual([0, 0]);
+    expect(t.video.status().sendingPaused).toBe(false);
+  });
+
+  it('pictures across the wrap keep their order and their hold for the audio', async () => {
+    vi.setSystemTime(WRAP - 500);
+    const drawn: { captureMs: number; at: number }[] = [];
+    const c = canvas();
+    const video = createCallVideo({ transport: { send: () => 0 }, source: null, canvas: c.canvas, now: () => Date.now(), audioDelayMs: () => 70, onRender: (_f, captureMs, at) => drawn.push({ captureMs, at }) });
+    live.push(video);
+    await vi.advanceTimersByTimeAsync(0);
+    await video.ready;
+    video.feed(peerHello());
+    for (let id = 0; id < 30; id++) {
+      video.feed(frameOf(fragmentFor(id, id === 0, (Date.now() - 40) % WRAP)));
+      await vi.advanceTimersByTimeAsync(33);
+    }
+    await vi.advanceTimersByTimeAsync(200);
+    expect(drawn.length).toBe(30);
+    const timestamps = world.decoders[0].chunks.map((chunk) => chunk.timestamp);
+    for (let i = 1; i < timestamps.length; i++) expect(timestamps[i]).toBeGreaterThan(timestamps[i - 1]);
+    for (let i = 1; i < drawn.length; i++) expect(drawn[i].captureMs).toBeGreaterThan(drawn[i - 1].captureMs);
+    // Every picture, before and after the wrap, waits the audio delay and no longer.
+    for (const d of drawn) {
+      expect(d.at - d.captureMs).toBeGreaterThanOrEqual(40 + 70);
+      expect(d.at - d.captureMs).toBeLessThanOrEqual(40 + 71);
+    }
+  });
+
+  it('a link reset starts the timeline again without a jump', async () => {
+    vi.setSystemTime(WRAP - 1_100);
+    const t = await ready({ src: null });
+    t.video.feed(peerHello());
+    t.video.feed(frameOf(fragmentFor(0, true, (Date.now() - 40) % WRAP)));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(150);
+    t.video.linkReset();
+    t.video.feed(frameOf(fragmentFor(1, true, (Date.now() - 40) % WRAP)));
+    await vi.advanceTimersByTimeAsync(33);
+    t.video.feed(frameOf(fragmentFor(2, false, (Date.now() - 40) % WRAP)));
+    await vi.advanceTimersByTimeAsync(817);
+    const delays = ofType(t.sent, VIDEO_REPORT).map((p) => parseReport(parseInner(p)!.body)!.delayMs);
+    expect(delays).toEqual([0, 0]);
+    const timestamps = world.decoders[0].chunks.map((chunk) => chunk.timestamp);
+    for (let i = 1; i < timestamps.length; i++) expect(timestamps[i]).toBeGreaterThan(timestamps[i - 1]);
+  });
+});
+
 describe('lining up with the audio', () => {
   it('holds each picture for the audio delay, draws every one in order, whatever the frame rate', async () => {
     const drawn: { captureMs: number; at: number }[] = [];
