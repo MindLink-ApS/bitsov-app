@@ -2,6 +2,7 @@ import { createEffect, onCleanup } from 'solid-js';
 import { t } from '../i18n';
 import type { CallView } from './call';
 import ringUrl from '../assets/incoming-ring.wav';
+import ringbackUrl from '../assets/outgoing-ringback.wav';
 
 /** Local media playback uses the system output volume and mute setting. */
 export function IncomingCallAlerts(props: { view: CallView; waiting: CallView[]; nameOf: (peer: string) => string }) {
@@ -32,4 +33,22 @@ export function IncomingCallAlerts(props: { view: CallView; waiting: CallView[];
   return <span class="sr-only" role="alert" aria-live="assertive" aria-atomic="true" data-incoming-announcement>
     {incoming().map(v => t('notificationCall', props.nameOf(v.peer!))).join('. ')}
   </span>;
+}
+
+/** The tone a caller hears while a call goes out: 425 Hz, one second in five. Stops when it is answered or ends. */
+export function OutgoingRingback(props: { view: CallView }) {
+  let audio: HTMLAudioElement | null = null;
+  const stop = () => { if (audio) { audio.pause(); audio.currentTime = 0; audio = null; } };
+  const ringing = () => props.view.outgoing && (props.view.phase === 'calling' || props.view.phase === 'ringing');
+  createEffect(() => {
+    if (!ringing()) { stop(); return; }
+    if (audio) return;
+    audio = new Audio(ringbackUrl);
+    audio.loop = true;
+    audio.volume = 0.4;
+    // A denied autoplay never interrupts the call; the moving rings still show it is going out.
+    void audio.play().catch(() => {});
+  });
+  onCleanup(stop);
+  return null;
 }

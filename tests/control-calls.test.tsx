@@ -2343,8 +2343,11 @@ describe('calls in the shell', () => {
   it('in-call Pay preserves the amount when muting the same live call', async () => {
     payHost();
     await liveCall(); enterCallAmount('7');
+    expect($('[data-call-muted]')).toBeNull();
     $<HTMLButtonElement>('[data-call-mute]')!.click();
     expect($<HTMLButtonElement>('[data-call-mute]')!.getAttribute('aria-pressed')).toBe('true');
+    expect(text('[data-call-mute]')).toBe('Unmute');
+    expect(text('[data-call-muted]')).toBe("Your microphone is off. They can't hear you.");
     expect($<HTMLInputElement>('[data-in-call-pay] [data-pay-amount]')!.value).toBe('7');
     expect($<HTMLButtonElement>('[data-call-pay-confirm]')!.disabled).toBe(false);
   });
@@ -3091,7 +3094,7 @@ describe('calls in the shell', () => {
 
     $<HTMLButtonElement>('[data-call-mute]')!.click();
     await vi.waitFor(() => expect($('[data-call-mute]')!.getAttribute('aria-pressed')).toBe('true'));
-    expect(text('[data-call-mute]')).toBe('Mute');
+    expect(text('[data-call-mute]')).toBe('Unmute');
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     expect(host.used('call_signal').map((c) => c.args!.kind)).toEqual([401, 403]);
@@ -3450,6 +3453,55 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('Your node needs an update before paid calls work. Nothing was paid.'));
     expect(host.used('op_end_call')).toHaveLength(0);
     expect($('[data-call-close]')).toBeNull();
+  });
+
+  it('the full call screen says when payments are not ready, since it covers the app\'s own notice', async () => {
+    stubHost({ message_send: () => { throw { code: 'not_ready', message: 'Money is not ready yet.' }; } });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-immersive]')).not.toBeNull());
+    expect($('[data-call-money-notice]')).toBeNull();
+    // A refusal from anywhere makes payments not ready: here a message sent with the call stepped aside.
+    $<HTMLButtonElement>('[data-call-compact]')!.click();
+    await vi.waitFor(() => expect($('[data-call-immersive]')).toBeNull());
+    expect($('[data-call-money-notice]')).toBeNull();
+    const box = $<HTMLTextAreaElement>('[data-composer] textarea')!;
+    box.value = 'hi';
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-send]')!.click();
+    await vi.waitFor(() => expect($('[data-money-notice]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-compact]')!.click();
+    await vi.waitFor(() => expect($('[data-call-immersive]')).not.toBeNull());
+    expect(text('[data-call-money-notice]')).toBe(text('[data-money-notice]'));
+  });
+
+  it('an outgoing call takes the whole window with its tone, keeps its money lines, and can step aside for the chat', async () => {
+    const played: { src: string; paused: boolean }[] = [];
+    vi.stubGlobal('Audio', class { src: string; loop = false; volume = 1; paused = true; currentTime = 0; constructor(src: string) { this.src = src; played.push(this); } play() { this.paused = false; return Promise.resolve(); } pause() { this.paused = true; } });
+    stubHost();
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-immersive]')).not.toBeNull());
+    expect($('[data-call-avatar]')!.getAttribute('data-ringing')).toBe('');
+    expect(text('[data-call-hangup]')).toMatch(/^(Cancel|End)$/);
+    // What was paid stays on the full screen.
+    await vi.waitFor(() => expect($('[data-call-immersive] [data-call-paid]')).not.toBeNull());
+    await vi.waitFor(() => expect(played.filter(a => /ringback/.test(a.src) && !a.paused)).toHaveLength(1));
+    // Stepping aside keeps the call and its plain card.
+    $<HTMLButtonElement>('[data-call-compact]')!.click();
+    await vi.waitFor(() => expect($('[data-call-immersive]')).toBeNull());
+    expect($('[data-call-hangup]')).not.toBeNull();
+    $<HTMLButtonElement>('[data-call-compact]')!.click();
+    await vi.waitFor(() => expect($('[data-call-immersive]')).not.toBeNull());
+    // Hanging up stops the tone and returns to the ended card, which never takes the window.
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-immersive]')).toBeNull();
+    expect($('[data-call-compact]')).toBeNull();
+    expect(played.filter(a => /ringback/.test(a.src) && !a.paused)).toHaveLength(0);
   });
 
   it('the STUN server is an owner setting, validated, with a note that it contacts that server', async () => {

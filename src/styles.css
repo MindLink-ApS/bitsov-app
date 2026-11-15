@@ -1887,10 +1887,52 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
   position: fixed;
   top: max(var(--s-6), env(safe-area-inset-top, 0px));
   left: max(var(--s-6), env(safe-area-inset-left, 0px));
-  z-index: 51;
+  /* Above the full call screen (60): a second caller must stay reachable. */
+  z-index: 61;
   max-height: calc(100dvh - 48px);
   overflow-y: auto;
   display: grid;
   gap: var(--s-3);
 }
 .waiting-calls .call-panel { position: relative; right: auto; bottom: auto; }
+
+/* Outgoing call: the whole window, name at the top, one bar of actions at the bottom. */
+html .call-panel[data-call-immersive][data-call-panel] {
+  top: 0; right: 0; bottom: 0; left: 0; width: auto; max-width: none; max-height: none; z-index: 60; border: none; border-radius: 0; box-shadow: none; animation: none;
+  align-items: center; gap: var(--s-3); overflow-y: auto; isolation: isolate; background: var(--bg);
+  padding: max(var(--s-6), env(safe-area-inset-top, 0px)) max(var(--s-4), env(safe-area-inset-right, 0px)) 0 max(var(--s-4), env(safe-area-inset-left, 0px));
+}
+.call-panel[data-call-immersive] > * { width: min(480px, 100%); flex: none; }
+.call-backdrop { position: fixed; inset: -80px; z-index: -1; filter: blur(60px); opacity: .55; pointer-events: none;
+  background: radial-gradient(60% 50% at 30% 25%, hsl(var(--call-hue) 55% 45%), transparent 70%), radial-gradient(55% 55% at 72% 70%, hsl(calc(var(--call-hue) + 50) 50% 40%), transparent 70%); }
+.call-panel[data-call-immersive] > .call-avatar { width: 96px; flex: none; height: 96px; margin-top: max(var(--s-8, 48px), 8vh); margin-bottom: var(--s-4); position: relative; display: grid; place-items: center; border-radius: 50%; font-size: 40px; font-weight: 600; color: #fff; background: hsl(var(--call-hue) 45% 38%); }
+.call-avatar[data-ringing]::before, .call-avatar[data-ringing]::after { content: ''; position: absolute; inset: 0; border-radius: 50%; border: 2px solid hsl(var(--call-hue) 60% 62%); animation: call-ring-out 2.4s ease-out infinite; }
+.call-avatar[data-ringing]::after { animation-delay: 1.2s; }
+@keyframes call-ring-out { 0% { transform: scale(1); opacity: .8; } 100% { transform: scale(1.9); opacity: 0; } }
+.call-panel[data-call-immersive] header { flex-direction: column-reverse; align-items: center; gap: 2px; text-align: center; }
+.call-panel[data-call-immersive] header .who { flex: none; max-width: 100%; color: var(--ink); font-size: var(--t-xl, 1.4rem); font-weight: 600; }
+.call-panel[data-call-immersive] header strong { font-weight: 400; color: var(--muted); }
+.call-panel[data-call-immersive][data-call-panel="calling"] header strong::after, .call-panel[data-call-immersive][data-call-panel="ringing"] header strong::after { content: '…'; }
+.call-panel[data-call-immersive] .call-compact { position: absolute; top: max(var(--s-3), env(safe-area-inset-top, 0px)); right: max(var(--s-4), env(safe-area-inset-right, 0px)); width: auto; min-height: 44px; }
+.call-compact { align-self: flex-end; }
+.call-panel[data-call-immersive] .call-videos { position: fixed; inset: 0; width: auto; z-index: -1; border-radius: 0; aspect-ratio: auto; }
+.call-panel[data-call-immersive] .call-video.local { right: max(var(--s-4), env(safe-area-inset-right, 0px)); bottom: calc(96px + env(safe-area-inset-bottom, 0px)); width: min(28vw, 160px); border-radius: 12px; }
+.call-panel[data-call-immersive] .call-actions { order: 10; position: sticky; bottom: max(var(--s-4), env(safe-area-inset-bottom, 0px)); margin: auto 0 max(var(--s-4), env(safe-area-inset-bottom, 0px)); align-items: center; flex-wrap: wrap; padding: var(--s-2) var(--s-3); border-radius: 18px; border: 1px solid var(--line-strong); background: var(--surface); box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+.call-panel[data-call-immersive] .call-actions button { flex: none; min-height: 44px; }
+/* Muted must be plain from across the room, on the card and on the full screen. */
+.call-actions [data-call-mute][aria-pressed="true"] { background: var(--ink); color: var(--bg); font-weight: 600; }
+.call-muted-note { margin: 0; color: var(--ink); font-weight: 600; text-align: center; }
+.call-bar-who { flex: 1 1 96px; min-width: 0; display: flex; flex-direction: column; }
+.call-bar-who strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.call-bar-who span { color: var(--muted); font-size: var(--t-sm); font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) { .call-avatar[data-ringing]::before, .call-avatar[data-ringing]::after { animation: none; opacity: .5; transform: scale(1.25); } }
+/* The bar stays at the bottom: what scrolls into view stops above it. A low screen gives the avatar less room. */
+html .call-panel[data-call-immersive][data-call-panel] { scroll-padding-bottom: 120px; }
+@media (max-height: 480px) {
+  .call-panel[data-call-immersive] > .call-avatar { width: 56px; height: 56px; font-size: 24px; margin-top: var(--s-4); margin-bottom: var(--s-1); }
+}
+@media (max-width: 480px) {
+  .call-panel[data-call-immersive] .call-bar-who { flex-basis: 100%; }
+  html .call-panel[data-call-immersive] .call-actions { flex-direction: row; flex-wrap: wrap; align-items: stretch; }
+  html .call-panel[data-call-immersive] .call-actions button { flex: 1 1 40%; width: auto; height: auto; min-height: 48px; border-radius: 24px; }
+}

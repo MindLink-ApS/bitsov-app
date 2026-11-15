@@ -453,6 +453,36 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
   }
 
+  it('updates to the same call leave stepping aside and focus alone: mute and a minute\'s status', async () => {
+    const host = stubHost();
+    await routedLive(host);
+    expect($('[data-call-immersive]')).not.toBeNull();
+    $<HTMLButtonElement>('[data-call-compact]')!.click();
+    await vi.waitFor(() => expect($('[data-call-immersive]')).toBeNull());
+    const box = $<HTMLTextAreaElement>('[data-composer] textarea')!;
+    box.focus();
+    $<HTMLButtonElement>('[data-call-mute]')!.click();
+    await vi.waitFor(() => expect($('[data-call-mute]')!.getAttribute('aria-pressed')).toBe('true'));
+    await Promise.resolve();
+    expect($('[data-call-immersive]')).toBeNull();
+    expect(document.activeElement).toBe(box);
+    const polls = host.used('call_status').length;
+    await vi.waitFor(() => expect(host.used('call_status').length).toBeGreaterThan(polls), { timeout: 12_000 });
+    await new Promise((r) => setTimeout(r, 50));
+    expect($('[data-call-immersive]')).toBeNull();
+    expect(document.activeElement).toBe(box);
+    // Stepping back in moves focus in once; another update doesn't move it again.
+    $<HTMLButtonElement>('[data-call-compact]')!.click();
+    await vi.waitFor(() => expect($('[data-call-immersive]')).not.toBeNull());
+    const hangup = $<HTMLButtonElement>('[data-call-hangup]')!;
+    await new Promise((r) => setTimeout(r, 20));
+    hangup.focus();
+    $<HTMLButtonElement>('[data-call-mute]')!.click();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(document.activeElement).toBe(hangup);
+    expect($('[data-call-immersive]')).not.toBeNull();
+  }, 25_000);
+
   it('a short live card: no Pay button or Lightning-address note while the call lasts; the contact can be paid again after it ends', async () => {
     const host = stubHost();
     await routedLive(host, () => expect($('[data-call-pay]')).toBeNull());
@@ -463,6 +493,8 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     expect($('[data-call-panel] .who')?.textContent).toBe('Maya');
     expect($('[data-call-duration]')).not.toBeNull();
     expect($('[data-call-mute]')).not.toBeNull();
+    // Paid minutes are running: no greyed Pay on the card of a node-routed call.
+    expect($('[data-call-pay]')).toBeNull();
     expect($('[data-call-hangup]')).not.toBeNull();
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
