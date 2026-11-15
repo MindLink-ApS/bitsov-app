@@ -111,6 +111,7 @@
     "allow-call-hold",
     "allow-call-media-open",
     "allow-call-media-send",
+    "allow-call-media-video-send",
     "allow-call-media-close",
     "allow-porch-quote",
     "allow-porch-read",
