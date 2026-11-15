@@ -36,7 +36,7 @@ function stubHost() {
   setPetname(A, 'Maya');
   const calls: { cmd: string; args?: unknown }[] = [];
   const callbacks = new Map<number, (e: unknown) => void>();
-  let mediaIndex = 0;
+  const mediaIndices = new Map<number, number>();
   const spending: SpendView = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
   // M6 A2: the node reports the first minute paid, so it admits the media socket; ending the call closes the reservation.
   let ended = false;
@@ -60,7 +60,10 @@ function stubHost() {
     spend_status: () => spending,
     budget_status: () => null,
     call_quote: () => QUOTE,
-    call_signal: (args) => ({ message_id: 'sig', kind: (args as { kind: number }).kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }),
+    call_signal: (args) => {
+      if (args?.kind === 400) ended = false;
+      return { message_id: 'sig', kind: (args as { kind: number }).kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+    },
     call_status: (args) => status(args),
     call_hold: (args) => status(args),
     call_block: () => ({ message_id: 'blk', kind: 404, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: Date.now() }),
@@ -70,6 +73,9 @@ function stubHost() {
     call_media_open: () => null,
     call_media_send: () => null,
     call_media_close: () => null,
+    call_seal_offer: () => `a=x-bitsov-e2e:1 commit=${'ab'.repeat(32)} caps=00000001 sas=01`,
+    call_seal_accept: () => true,
+    call_seal_cancel: () => null,
     'plugin:event|listen': () => 1,
     'plugin:event|unlisten': () => null,
   };
@@ -91,11 +97,13 @@ function stubHost() {
     },
     /** Deliver a host media channel message in order (the renderer's Channel is the `on_frame` arg): link
      *  transitions arrive as parsed JSON objects, frames as ArrayBuffers, exactly as Tauri delivers them. */
-    media: (message: unknown) => {
+    media: (message: unknown, session = -1) => {
       const opens = calls.filter((c) => c.cmd === 'call_media_open');
-      const open = opens[opens.length - 1];
+      const open = opens[session < 0 ? opens.length + session : session];
       const channel = (open!.args as { on_frame: { id: number } }).on_frame;
-      callbacks.get(channel.id)!({ message, index: mediaIndex++ });
+      const index = mediaIndices.get(channel.id) ?? 0;
+      mediaIndices.set(channel.id, index + 1);
+      callbacks.get(channel.id)!({ message, index });
     },
   };
 }
@@ -258,6 +266,159 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await vi.waitFor(() => expect(host.used('call_media_close').length).toBeGreaterThan(0));
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     await vi.waitFor(() => expect(FakeAudioContext.made[0].closed).toBe(true));
+  });
+
+  it('with sealing off, no seal command runs and the label and the offer are as they were', async () => {
+    const host = stubHost();
+    await routedLive(host);
+    for (const cmd of ['call_seal_offer', 'call_seal_answer', 'call_seal_accept', 'call_seal_cancel']) expect(host.used(cmd)).toHaveLength(0);
+    expect($('[data-call-route="node"]')?.textContent).toBe('The call goes through your box and theirs. Both boxes can hear it.');
+    expect($('[data-call-route="node"]')?.hasAttribute('data-call-seal')).toBe(false);
+    const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
+    expect(JSON.parse((offer.args as { plaintext: string }).plaintext).sdp).not.toContain('x-bitsov-e2e');
+    expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer']);
+  });
+
+  /** Rings Maya on a sealing build and delivers an answer with these extra SDP lines. */
+  async function sealedRing(host: ReturnType<typeof stubHost>, answerLines: string[]) {
+    vi.stubEnv('VITE_CALL_SEAL', 'sealed');
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('setting_up');
+    const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
+    const { call_id: callId, sdp } = JSON.parse((offer.args as { plaintext: string }).plaintext) as { call_id: string; sdp: string };
+    expect(sdp).toContain('a=x-bitsov-e2e:1 commit=');
+    const answer = nodeRoutedSdp('answer', callId) + answerLines.map((line) => `${line}\r\n`).join('');
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, sdp: answer }), payment_msat: null, status: 'delivered' } });
+    return callId;
+  }
+
+  it('with sealing on, the label says sealed only after the host reports an authenticated frame', async () => {
+    const host = stubHost();
+    const callId = await sealedRing(host, [`a=x-bitsov-e2e:1 key=${'cd'.repeat(32)} nonce=${'ef'.repeat(16)} caps=00000001`]);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
+    expect(host.used('call_media_open')[0].args).toMatchObject({ call_id: callId, peer: A, sealed: true });
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('setting_up');
+    expect($('[data-call-route="node"]')?.textContent).toBe('Sealing this call. Nothing goes out unsealed.');
+    host.media({ link: 'sealed', detail: null });
+    await vi.waitFor(() => expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('sealed'));
+    expect($('[data-call-route="node"]')?.textContent).toMatch(/unless one of them is attacking the call/);
+    expect($('[data-call-route="node"]')?.textContent).not.toMatch(/Both boxes can hear it/);
+  });
+
+  it('with sealing on, an answer that cannot be sealed ends the call before any audio, and blames no side', async () => {
+    const host = stubHost();
+    await sealedRing(host, []);
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-ended]')?.textContent).toBe('This call could not be sealed, so it was ended. Nothing was said unsealed.');
+    expect(host.used('call_media_open')).toHaveLength(0);
+    expect(host.used('call_media_send')).toHaveLength(0);
+    expect(host.used('call_seal_cancel').length).toBeGreaterThan(0);
+    expect($('[data-call-words]')).toBeNull();
+  });
+
+  it('with sealing on, a call that cannot stay sealed ends and says so', async () => {
+    const host = stubHost();
+    await sealedRing(host, [`a=x-bitsov-e2e:1 key=${'cd'.repeat(32)} nonce=${'ef'.repeat(16)} caps=00000001`]);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    host.media({ link: 'ended', detail: 'seal_no_authentic_frames' });
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-ended]')?.textContent).toBe('The call could not stay sealed, so it ended. Nothing was sent unsealed. A minute already issued may still settle.');
+  });
+
+  const comparisonWords = () => [...mount.querySelectorAll('[data-call-words] [data-pair-word]')].map(el => el.textContent);
+  const sealAnswer = `a=x-bitsov-e2e:1 key=${'cd'.repeat(32)} nonce=${'ef'.repeat(16)} caps=00000001`;
+
+  it('shows exactly four comparison words in host order outside Details, without logging them or enabling video', async () => {
+    const logs = ['log', 'info', 'warn', 'error', 'debug', 'trace'].map(method => vi.spyOn(console, method as 'log').mockImplementation(() => {}));
+    const host = stubHost();
+    await sealedRing(host, [sealAnswer]);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect(comparisonWords()).toEqual([]);
+    host.media({ link: 'sealed_words', detail: null, words: ['zebra', 'acoustic', 'velvet', 'anchor'] });
+    expect(comparisonWords()).toEqual([]);
+    host.media({ link: 'sealed', detail: null });
+    host.media({ link: 'sealed_words', detail: null, words: ['zebra', 'acoustic', 'velvet', 'anchor'] });
+    await vi.waitFor(() => expect(comparisonWords()).toEqual(['zebra', 'acoustic', 'velvet', 'anchor']));
+    expect($('[data-call-words] ol')?.getAttribute('aria-label')).toBe('Comparison words');
+    expect($('[data-call-words]')?.closest('details')).toBeNull();
+    expect($('[data-call-words] p')?.textContent).toMatch(/compare all four words in order.*separate trusted channel.*before speaking privately/i);
+    expect($('[data-call="video"]')).toBeNull();
+    expect($('[data-call-camera]')).toBeNull();
+    const logged = JSON.stringify(logs.flatMap(log => log.mock.calls));
+    for (const word of ['zebra', 'acoustic', 'velvet', 'anchor']) expect(logged).not.toContain(word);
+  });
+
+  it('clears ended words, ignores an old channel, and shows the next call’s words only after its seal', async () => {
+    const host = stubHost();
+    const firstId = await sealedRing(host, [sealAnswer]);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
+    host.media({ link: 'open', detail: null });
+    host.media({ link: 'sealed', detail: null });
+    host.media({ link: 'sealed_words', detail: null, words: ['zebra', 'acoustic', 'velvet', 'anchor'] });
+    await vi.waitFor(() => expect(comparisonWords()).toHaveLength(4));
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(comparisonWords()).toEqual([]);
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    const offers = host.used('call_signal').filter(c => (c.args as { kind: number }).kind === 400);
+    const offer = offers[offers.length - 1];
+    const { call_id: secondId } = JSON.parse((offer.args as { plaintext: string }).plaintext);
+    expect(secondId).not.toBe(firstId);
+    expect(comparisonWords()).toEqual([]);
+    host.media({ link: 'sealed_words', detail: null, words: ['zebra', 'acoustic', 'velvet', 'anchor'] }, 0);
+    expect(comparisonWords()).toEqual([]);
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'next-answer', kind: 401, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: secondId, sdp: nodeRoutedSdp('answer', secondId, sealAnswer) }), payment_msat: null, status: 'delivered' } });
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(2));
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect(comparisonWords()).toEqual([]);
+    host.media({ link: 'sealed', detail: null });
+    host.media({ link: 'sealed_words', detail: null, words: ['yellow', 'orbit', 'timber', 'cactus'] });
+    await vi.waitFor(() => expect(comparisonWords()).toEqual(['yellow', 'orbit', 'timber', 'cactus']));
+    host.media({ link: 'ended', detail: 'seal_no_authentic_frames' });
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    host.media({ link: 'sealed_words', detail: null, words: ['yellow', 'orbit', 'timber', 'cactus'] });
+    expect(comparisonWords()).toEqual([]);
+  });
+
+  it('shows no words when sealing is off or fails, even if a channel carries words', async () => {
+    const host = stubHost();
+    await routedLive(host);
+    host.media({ link: 'sealed_words', detail: null, words: ['zebra', 'acoustic', 'velvet', 'anchor'] });
+    expect(comparisonWords()).toEqual([]);
+    host.media({ link: 'ended', detail: 'seal_bad_reveal' });
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(comparisonWords()).toEqual([]);
+  });
+
+  it('keeps the not-sealed label without words for an incoming call without sealing', async () => {
+    vi.stubEnv('VITE_CALL_SEAL', 'sealed');
+    const host = stubHost();
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'unsealed-offer', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_msat: null, status: 'delivered' } });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('not_sealed');
+    expect($('[data-call-route="node"]')?.textContent).toMatch(/^Not sealed:/);
+    host.media({ link: 'sealed_words', detail: null, words: ['zebra', 'acoustic', 'velvet', 'anchor'] });
+    expect(comparisonWords()).toEqual([]);
+    expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('not_sealed');
   });
 
   it('a node refusal on the media socket ends the call instead of leaving it ringing', async () => {

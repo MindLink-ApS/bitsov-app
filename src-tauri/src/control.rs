@@ -203,9 +203,20 @@ pub struct LightningReadiness {
     pub events: Vec<ReadinessEvent>,
 }
 
+/// Chain source fields used by the public-service notice.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct ChainView {
+    #[serde(default)]
+    pub explorer_default: bool,
+    #[serde(default)]
+    pub trust_level: String,
+}
+
 /// `GET /status` — `HealthResponse`. The subset the Node panel shows.
 #[derive(Deserialize, Clone, Debug)]
 pub struct NodeStatusResponse {
+    #[serde(default)]
+    pub chain_view: Option<ChainView>,
     /// Node-reported network also works for remote paired clients.
     #[serde(default)]
     pub network: Option<String>,
@@ -449,6 +460,8 @@ mod refusals;
 use refusals::{NodePrePaymentRefusals, PrePaymentRefusals};
 
 /// M6 A1: the node-routed call media bridge (frames, queues, the media socket).
+#[cfg(feature = "call-seal")]
+pub mod call_seal;
 pub mod media;
 
 #[derive(Deserialize, Clone, Debug)]
@@ -557,6 +570,8 @@ pub struct WalletOverview {
 /// `node_overview`.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct NodeOverview {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_view: Option<ChainView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub money_ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -678,6 +693,7 @@ impl NodeOverview {
             _ => None,
         };
         Self {
+            chain_view: status.chain_view.filter(|view| view.trust_level == "third_party"),
             money_ready: status.money_ready,
             readiness: status.readiness,
             node_id: status.node_id,
@@ -751,7 +767,9 @@ pub fn price_quote(own: KindPrice, tables: &[PeerPrice], peer: Option<&str>) -> 
 /// is not evidence that the node lacks the contract.
 pub fn conversation_ceiling_evidence(proven: bool, probe: Result<(), String>) -> Result<(), crate::act::ActionError> {
     probe.map_err(|reason| {
-        if matches!(reason.as_str(), "peer_not_ready:chain_unavailable" | "peer_not_ready:not_synced") {
+        if reason == "not_ready:chain_unavailable" {
+            crate::act::ActionError::node(reason)
+        } else if matches!(reason.as_str(), "peer_not_ready:chain_unavailable" | "peer_not_ready:not_synced") {
             crate::act::ActionError::new("peer_not_ready", reason)
         } else {
             crate::act::ActionError::new("price_quote_unavailable", format!("Quote unavailable: {reason}"))
@@ -912,19 +930,25 @@ pub struct PeerCallPrice {
 }
 
 /// The call price the owner sees. `None` offer: their node did not answer
-/// (older genome, offline, or not listed). Principals are floored to the
-/// smallest payment the app makes, as every other send is.
+/// (older genome, offline, or not listed), or its price is out of range; the
+/// signal price is then only this node's own tariff, and no signal is paid on
+/// it. Principals are floored to the smallest payment the app makes, as every
+/// other send is.
 pub fn call_quote(live: Option<&PeerCallPrice>, own_signal_msat: u64) -> CallQuote {
     let floor = |m: u64| m.max(crate::act::MIN_PAYMENT_MSAT);
-    let offer = live.map(|p| floor(p.offer_msat));
     let signal = floor(live.map_or(own_signal_msat, |p| p.signal_msat));
     let fee = crate::act::routing_fee;
+    // An all-in amount that overflows, or that the renderer cannot hold exactly,
+    // is no price: such a quote places, answers and hangs up nothing.
+    let sum = |a: u64, b: u64| a.checked_add(b).filter(|total| *total <= MAX_SAFE_MSAT);
+    let total = live.map(|p| floor(p.offer_msat)).and_then(|offer| sum(sum(offer, fee(offer))?, sum(signal, fee(signal))?));
+    let offer = live.map(|p| floor(p.offer_msat)).filter(|_| total.is_some());
     CallQuote {
         offer_msat: offer,
         offer_max_routing_fee_msat: offer.map(fee).unwrap_or(0),
         signal_msat: signal,
         signal_max_routing_fee_msat: fee(signal),
-        call_total_msat: offer.map(|o| o + fee(o) + signal + fee(signal)),
+        call_total_msat: total,
         block_msat: None,
         block_max_routing_fee_msat: 0,
         reservation_max_msat: None,
@@ -1309,6 +1333,13 @@ mod tests {
     }
 
     #[test]
+    fn chain_quote_probe_preserves_the_typed_refusal() {
+        let error = conversation_ceiling_evidence(false, Err("not_ready:chain_unavailable".into())).unwrap_err();
+        assert_eq!(error.code, "not_ready");
+        assert_eq!(error.reason.as_deref(), Some("chain_unavailable"));
+    }
+
+    #[test]
     fn conversation_ceiling_evidence_distinguishes_missing_contract_from_failed_quote() {
         for reason in ["No route or channel yet", "Peer offline", "Quote unavailable", "Owner approval required"] {
             let err = conversation_ceiling_evidence(false, Err(reason.into())).unwrap_err();
@@ -1347,6 +1378,19 @@ mod tests {
         assert_eq!((none.offer_msat, none.call_total_msat, none.signal_msat), (None, None, 2_000));
         let big = call_quote(Some(&PeerCallPrice { offer_msat: 2_000_000, signal_msat: 50 }), 50);
         assert_eq!(big.offer_max_routing_fee_msat, 10_000);
+    }
+
+    #[test]
+    fn a_call_total_that_overflows_or_passes_the_renderers_range_is_no_price() {
+        let quote = |offer_msat, signal_msat| call_quote(Some(&PeerCallPrice { offer_msat, signal_msat }), 50);
+        for q in [quote(u64::MAX, 50), quote(u64::MAX - 5_000, 50), quote(50, u64::MAX), quote(50, u64::MAX - 5_000),
+            quote(MAX_SAFE_MSAT, 50), quote(50, MAX_SAFE_MSAT)] {
+            assert_eq!((q.offer_msat, q.call_total_msat), (None, None), "{q:?}");
+        }
+        // The last amount that fits: offer + its fee + signal + its fee, exactly.
+        let exact = MAX_SAFE_MSAT - 10_000 - 6_000;
+        assert_eq!(quote(exact, 50).call_total_msat, Some(MAX_SAFE_MSAT));
+        assert_eq!(quote(exact + 1, 50).call_total_msat, None);
     }
 
     #[test]
@@ -1427,6 +1471,25 @@ mod tests {
 
     fn link(state: LinkState, detail: Option<&str>) -> LiveEvent {
         LiveEvent::Link { state, detail: detail.map(str::to_string) }
+    }
+
+    #[test]
+    fn overview_projects_the_default_explorer_notice_without_endpoint_details() {
+        for default in [true, false] {
+            let status = serde_json::from_value(serde_json::json!({
+                "status":"ok", "node_id":"x", "network":"signet",
+                "chain_view":{"explorer_default":default, "trust_level":"third_party", "endpoint":"private-detail"}
+            })).unwrap();
+            let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
+            assert_eq!(projected["chain_view"]["explorer_default"], default);
+            assert_eq!(projected["chain_view"]["trust_level"], "third_party");
+            assert!(!projected.to_string().contains("private-detail"));
+        }
+        for view in [serde_json::Value::Null, serde_json::json!({"explorer_default":true,"trust_level":"unknown"})] {
+            let status = serde_json::from_value(serde_json::json!({"status":"ok", "node_id":"x", "chain_view":view})).unwrap();
+            let projected = serde_json::to_value(NodeOverview::from_status(status, 123)).unwrap();
+            assert!(projected.get("chain_view").is_none());
+        }
     }
 
     #[test]
