@@ -29,7 +29,7 @@ const literalAllowlist: Record<string, readonly string[]> = {
   ],
   'src/App.tsx': [
     "Local trust — read this before you deposit",
-    "Your node is only reachable while this Mac is awake and BitSov is open.",
+    "Your box is only reachable while this Mac is awake and BitSov is open.",
     "This node trusts every program on this computer. Anything running under your user account can ask it for full access over",
     "— enough to spend what you deposit and read your history. Only fund a node on a machine you control.",
     "Your keys stay in the node. BitSov never shows you your recovery phrase and never copies it anywhere.",

@@ -97,7 +97,7 @@ async fn connect_clears_error_and_dials_without_restart() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let link = ticket(listener.local_addr().unwrap().to_string(), false);
     let server = tokio::spawn(noise_responder(listener));
-    *state.error.lock().unwrap() = Some("Pair this phone with your home node to continue.".into());
+    *state.error.lock().unwrap() = Some("Pair this phone with your box to continue.".into());
     let result = remote_access_connect_at(app.handle(), &state, dir.path(), &link).await.unwrap();
     assert!(!result.restart_required);
     assert!(state.status_snapshot().error.is_none());

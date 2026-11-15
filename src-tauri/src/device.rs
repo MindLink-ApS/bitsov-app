@@ -127,13 +127,13 @@ pub fn node_off_message(reason: &str) -> &'static str {
     return match reason {
         "seed_not_encrypted" => "Encrypt your recovery phrase to enable biometric approvals. On the node's computer: stop the node, run `konsensus seed encrypt --config <path>` once, then start it again and type the password.",
         "seed_password_not_typed" => "Restart your node and type its recovery-phrase password at start to enable biometric approvals (a password file or flag leaves them off).",
-        _ => "Biometric approvals are off on your node. Approve at the node instead.",
+        _ => "Biometric approvals are off on your box. Approve on your box instead.",
     };
     #[cfg(not(target_os = "android"))]
     match reason {
         "seed_not_encrypted" => "Encrypt your recovery phrase to enable Touch ID approvals. On the node's computer: stop the node, run `konsensus seed encrypt --config <path>` once, then start it again and type the password.",
         "seed_password_not_typed" => "Restart your node and type its recovery-phrase password at start to enable Touch ID approvals (a password file or flag leaves them off).",
-        _ => "Touch ID approvals are off on your node. Approve at the node instead.",
+        _ => "Touch ID approvals are off on your box. Approve on your box instead.",
     }
 }
 

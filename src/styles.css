@@ -1894,3 +1894,30 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
   gap: var(--s-3);
 }
 .waiting-calls .call-panel { position: relative; right: auto; bottom: auto; }
+
+/* Phone calls: a full-width card, the two money figures at a glance, and one big hang-up. */
+.call-meter { display: flex; gap: var(--s-4); margin: 0; }
+.call-meter > div { flex: 1; min-width: 0; }
+.call-meter dt { font-size: var(--t-xs); color: var(--muted); }
+.call-meter dd { margin: 2px 0 0; font-size: var(--t-lg); font-weight: 600; font-variant-numeric: tabular-nums; }
+html:is([data-platform='ios'], [data-platform='android']) .call-panel {
+  left: max(var(--s-4), var(--safe-area-left)); right: max(var(--s-4), var(--safe-area-right)); width: auto;
+}
+html:is([data-platform='ios'], [data-platform='android']) .call-panel header { flex-wrap: wrap; }
+html:is([data-platform='ios'], [data-platform='android']) .call-panel header strong { font-size: var(--t-lg); }
+html:is([data-platform='ios'], [data-platform='android']) .call-panel .duration { font-size: var(--t-lg); margin-left: auto; }
+html:is([data-platform='ios'], [data-platform='android']) .call-meter dd { font-size: 28px; }
+html:is([data-platform='ios'], [data-platform='android']) .call-panel .call-actions button { min-height: 52px; font-size: 17px; }
+html:is([data-platform='ios'], [data-platform='android']) .call-panel [data-call-hangup] {
+  order: 10; min-height: 60px; background: var(--err); border-color: var(--err); color: #fff; font-weight: 600; font-size: 19px;
+}
+.call-meter-note { display: block; font-size: var(--t-xs); font-weight: 400; color: var(--muted); }
+/* Phones: never print an owner shell command (konsensus …); it is run at the box's computer, not here. */
+html:is([data-platform='ios'], [data-platform='android']) [data-owner-action] { display: none; }
+/* Phones: the conversation keeps the room. The composer (with any consent or first-contact chips)
+   takes at most 45% of the visible height and scrolls inside it; why Send is off is said first. */
+html[data-platform='ios'] .composer { max-height: calc(var(--visible-height, 100dvh) * .45); }
+html:is([data-platform='ios'], [data-platform='android']) .composer > [data-send-disabled-reason] { order: -1; }
+html:is([data-platform='ios'], [data-platform='android']) .cc[data-phone-shell='true'] .composer { padding-bottom: max(var(--s-3), var(--safe-area-bottom, 0px)); }
+/* Phones: the STUN setting is a Mac/settings concern, not part of deciding to ring. */
+html:is([data-platform='ios'], [data-platform='android']) [data-call-stun-source] { display: none; }

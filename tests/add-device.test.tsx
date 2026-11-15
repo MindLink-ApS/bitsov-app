@@ -18,11 +18,11 @@ it('hides Add a device on older nodes and explains non-owner pairings', async ()
 });
 it('a node on this Mac says why it cannot add a phone; an older remote node says an update adds it', async () => {
   const root = mount(() => <AddDevice local api={async () => ({state:'unsupported'})} />); await flush();
-  expect(root.querySelector('[data-add-device-unsupported="local"]')!.textContent).toBe('This Mac runs its own node, and only this Mac can use it. To use BitSov on your phone as well, run your node on a computer or server that stays on (or one someone runs for you), and connect this Mac and your phone to it.');
-  expect(root.textContent).not.toMatch(/box|sticker|does not support/);
+  expect(root.querySelector('[data-add-device-unsupported="local"]')!.textContent).toBe('This Mac runs its own box, and only this Mac can use it. To use BitSov on your phone as well, run your box on a computer or server that stays on (or one someone runs for you), and connect this Mac and your phone to it.');
+  expect(root.textContent).not.toMatch(/sticker|does not support/);
   dispose?.();
   dispose = render(() => <AddDevice api={async () => ({state:'unsupported'})} />, root); await flush();
-  expect(root.querySelector('[data-add-device-unsupported="node"]')!.textContent).toBe('Your node does not offer adding devices yet. A newer version of your node adds it.');
+  expect(root.querySelector('[data-add-device-unsupported="node"]')!.textContent).toBe('Your box does not offer adding devices yet. A newer version of your box adds it.');
 });
 it('shows the QR, polls for SAS and never approves without an explicit tap', async () => {
   vi.useFakeTimers(); const calls: AddInput[] = [];
@@ -35,7 +35,7 @@ it('shows the QR, polls for SAS and never approves without an explicit tap', asy
   expect(root.querySelector('svg[role="img"]')).not.toBeNull();
   expect(root.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('bitsov://pair/test');
   // Where to go on the new device, and the code it will ask for (no box or console jargon).
-  expect(root.querySelector('[data-ticket-where]')!.textContent).toContain('choose “A home node (Pi/Umbrel)” on a computer, then scan or paste this ticket');
+  expect(root.querySelector('[data-ticket-where]')!.textContent).toContain('choose “A box at home (Pi/Umbrel)” on a computer, then scan or paste this ticket');
   expect(root.querySelector('[data-ticket-claim-warning]')!.textContent).toContain('18-character claim code');
   expect(root.textContent).not.toContain('konsensus ');
   await vi.advanceTimersByTimeAsync(2000); await flush();

@@ -129,7 +129,7 @@ describe('first run to the first assistant answer (mock)', () => {
 
     const label = root.querySelector<HTMLElement>('[data-testid="source-label"]');
     expect(label?.dataset.source).toBe('live');
-    expect(label?.textContent).toContain('From your node');
+    expect(label?.textContent).toContain('From your box');
     // Oldest route is the balance as-of (92 s): fresh under its 180 s bound.
     const header = root.querySelector<HTMLElement>('[data-testid="source-freshness"]');
     expect(header?.dataset.freshness).toBe('fresh');
@@ -154,7 +154,7 @@ describe('first run to the first assistant answer (mock)', () => {
     expect(source?.dataset.source).toBe('live');
     expect(source?.dataset.freshness).toBe('fresh');
     // q01 reads channels, read 12 s before the script was written.
-    expect(source?.textContent).toBe('From your node. Updated 12 s ago.');
+    expect(source?.textContent).toBe('From your box. Updated 12 s ago.');
     expect(document.activeElement).toBe(select);
 
     expect(assistantCalls).toEqual([]);

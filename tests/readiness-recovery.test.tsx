@@ -95,7 +95,7 @@ it.each([false, true])('funding-address refusal joins the shared readiness notic
   await vi.waitFor(() => expect(mount.querySelector('[data-tab="wallet"]')).not.toBeNull());
   mount.querySelector<HTMLButtonElement>('[data-tab="wallet"]')!.click();
   await vi.advanceTimersByTimeAsync(0);
-  expect(mount.textContent).toContain('Deposit to your node');
+  expect(mount.textContent).toContain('Deposit to your box');
   expect(mount.querySelectorAll('[data-money-notice]'), 'funding refusal must mark money unavailable immediately').toHaveLength(1);
   expect(mount.querySelector('[data-deposit-error]'), 'readiness must not appear as a second deposit failure').toBeNull();
   if (lastReady) expect(addressCalls).toBeGreaterThan(0);

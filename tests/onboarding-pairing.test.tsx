@@ -102,7 +102,7 @@ describe('phone onboarding has no local-node step', () => {
   afterEach(() => { dispose?.(); dispose = undefined; mount?.remove(); mount = undefined; });
   const nodeDown: NodeStatus = { ready: false, node_id: null, error: 'sidecar not available' };
 
-  it('a phone has no "Start node" step, so a local-node error never reads as a failed stage', () => {
+  it('a phone has no "Start din boks" step, so a local-node error never reads as a failed stage', () => {
     const steps = onboardingSteps(nodeDown, starting, false, true);
     expect(steps.map(s => s.id)).toEqual(['pair', 'identity', 'fund']);
     expect(steps.some(s => s.status === 'failed')).toBe(false);
@@ -116,7 +116,7 @@ describe('phone onboarding has no local-node step', () => {
     expect(onboardingStage(steps)).not.toBe('node');
   });
 
-  it('a computer keeps its "Start node" step and its failure', () => {
+  it('a computer keeps its "Start din boks" step and its failure', () => {
     const steps = onboardingSteps(nodeDown, starting, false);
     expect(steps[0]).toMatchObject({ id: 'node', status: 'failed' });
   });
@@ -179,16 +179,16 @@ describe('pairing panel', () => {
     const form = mount.querySelector<HTMLFormElement>('form')!;
     form.requestSubmit();
     await vi.waitFor(() => expect(mount!.querySelector('[data-pairing-preview]')).not.toBeNull());
-    const message = "This node isn't set up yet. Finish setup on a Mac, then add this phone.";
+    const message = "This box isn't set up yet. Finish setup on a Mac, then add this phone.";
     if (phone) {
       expect(mount.textContent).toContain(message);
-      expect(Array.from(form.querySelectorAll('button')).some(b => b.textContent === 'Use remote node')).toBe(false);
+      expect(Array.from(form.querySelectorAll('button')).some(b => b.textContent === 'Use this box')).toBe(false);
       form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
       await Promise.resolve();
       expect(save).not.toHaveBeenCalled();
     } else {
       expect(mount.textContent).not.toContain(message);
-      expect(form.querySelector('button[type="submit"]')?.textContent).toBe('Use remote node');
+      expect(form.querySelector('button[type="submit"]')?.textContent).toBe('Use this box');
     }
   });
 
@@ -204,7 +204,7 @@ describe('pairing panel', () => {
     await vi.waitFor(() => expect(mount!.querySelector('[data-pairing-preview]')).not.toBeNull());
     form.requestSubmit();
     await vi.waitFor(() => expect(mount!.querySelector('[data-import-result]')).not.toBeNull());
-    expect(mount.textContent).toContain('Connecting to your node…');
+    expect(mount.textContent).toContain('Connecting to your box…');
     expect(mount.textContent).not.toMatch(/Restart BitSov|next app start/);
   });
 
@@ -284,7 +284,7 @@ describe('pairing panel', () => {
 
   it('remote pending describes connecting instead of local file pairing', () => {
     const el = show({ ...pending, remote: true });
-    expect(el.textContent).toContain('Connecting to your node…');
+    expect(el.textContent).toContain('Connecting to your box…');
     expect(el.textContent).not.toContain('challenge the node wrote there');
     expect(el.querySelector('[data-pairing="failed"]')).toBeNull();
   });
@@ -292,7 +292,7 @@ describe('pairing panel', () => {
   it('pending shows progress and no code yet', () => {
     const el = show(pending);
     const panel = el.querySelector('[data-pairing="pending"]');
-    expect(panel?.textContent).toContain('Pairing this app with your node');
+    expect(panel?.textContent).toContain('Pairing this app with your box');
     expect(el.querySelector('[data-short-code]')).toBeNull();
   });
 
@@ -434,9 +434,9 @@ describe('pairing panel', () => {
         selectedTarget="network" onForgetRemote={async () => {}} onScanRemote={async () => 'bitsov://pair/x'} mobile />
     ), mount);
     expect(mount.querySelector('[data-target="local"]')).toBeNull();
-    expect(mount.querySelector('h1')!.textContent).toBe('Connect this phone to your node');
+    expect(mount.querySelector('h1')!.textContent).toBe('Connect this phone to your box');
     const node = mount.querySelector<HTMLButtonElement>('[data-target="network"]')!;
-    expect(node.textContent).toContain('Your node');
+    expect(node.textContent).toContain('Your box');
     expect(node.textContent).toContain('connect this phone');
     // No <details> on a phone: WebKit would add its own OS-language summary ("Flere oplysninger").
     expect(mount.querySelector('details.node-target-advanced')).toBeNull();
@@ -455,7 +455,7 @@ describe('pairing panel', () => {
         selectedTarget="network" onForgetRemote={async () => {}} phone />
     ), mount);
     expect(mount.querySelector('[data-target="local"]')).toBeNull();
-    expect(mount.querySelector('h1')!.textContent).toBe('Connect this phone to your node');
+    expect(mount.querySelector('h1')!.textContent).toBe('Connect this phone to your box');
     expect(mount.textContent).not.toMatch(/Use this Mac instead|Keys on this Mac/);
   });
 
@@ -474,8 +474,8 @@ describe('pairing panel', () => {
   it('a computer offers both node locations without an Advanced disclosure', () => {
     const el = show(starting, booting);
     expect(el.querySelector('[data-target="local"]')).not.toBeNull();
-    expect(el.querySelector('h1')!.textContent).toBe('Where should your node run?');
-    expect(el.querySelector('[data-target="network"] strong')!.textContent).toBe('A home node (Pi/Umbrel)');
+    expect(el.querySelector('h1')!.textContent).toBe('Where should your box run?');
+    expect(el.querySelector('[data-target="network"] strong')!.textContent).toBe('A box at home (Pi/Umbrel)');
     expect(el.querySelector('[data-target="network"]')!.closest('details')).toBeNull();
   });
 
@@ -496,7 +496,7 @@ describe('pairing panel', () => {
     expect(local.getAttribute('aria-checked')).toBe('true');
     expect(local.textContent).toContain('awake and BitSov must stay open');
     // Said at the fork: a node on this Mac is for this Mac only (no box or sticker assumed).
-    expect(local.querySelector('[data-local-only]')!.textContent).toBe('Only this Mac can use this node. A phone can join a home node or a separately configured Mac that stays on.');
+    expect(local.querySelector('[data-local-only]')!.textContent).toBe('Only this Mac can use this box. A phone can join a box at home or a separately configured Mac that stays on.');
     const home = el.querySelector<HTMLButtonElement>('[data-target="network"]')!;
     expect(home.parentElement).toBe(local.parentElement);
     expect(home.closest('details')).toBeNull();
@@ -551,7 +551,7 @@ describe('pairing panel', () => {
     expect(panel.textContent).not.toContain('Secure Enclave');
     expect(panel.textContent).not.toContain('Touch ID approves every payment');
     expect(panel.textContent).toContain('Loopback authenticated. Ordinary pairing is file-backed on this Mac.');
-    expect(el.textContent).toContain('This app connects to the node on this Mac.');
+    expect(el.textContent).toContain('This app connects to the box on this Mac.');
     expect(el.textContent).not.toContain('Touch ID on this Mac can approve a contact or budget.');
   });
 
@@ -589,7 +589,7 @@ describe('pairing panel', () => {
     const unenrolled = show(pending, booting, () => {}, null);
     const unenrolledPanel = unenrolled.querySelector('[data-pairing="pending"]')!;
     expect(unenrolledPanel.textContent).toContain(
-      'Establishing an authenticated pairing between this app and your node.',
+      'Establishing an authenticated pairing between this app and your box.',
     );
     expect(unenrolledPanel.textContent).not.toContain('Secure Enclave');
     expect(unenrolledPanel.textContent).not.toContain('Registering');
@@ -604,7 +604,7 @@ describe('pairing panel', () => {
     const enrolled = show(pending, booting, () => {}, enrolledDevice);
     const enrolledPanel = enrolled.querySelector('[data-pairing="pending"]')!;
     expect(enrolledPanel.textContent).toContain(
-      'Establishing an authenticated pairing between this app and your node.',
+      'Establishing an authenticated pairing between this app and your box.',
     );
     expect(enrolledPanel.textContent).toContain(
       'Touch ID approvals are already set up on this Mac; pairing does not create that key.',
@@ -706,7 +706,7 @@ describe('pairing panel', () => {
     expect(onImportRemote).not.toHaveBeenCalled();
     expect(mount.textContent).toContain('camera');
     await submitReview(mount.querySelector<HTMLFormElement>('[data-remote-access]')!);
-    await vi.waitFor(() => expect(mount!.textContent).toContain('Remote node home.example:4242 saved.'));
+    await vi.waitFor(() => expect(mount!.textContent).toContain('Your box home.example:4242 saved.'));
     expect(onScanRemote).toHaveBeenCalledTimes(1);
     expect(onImportRemote).toHaveBeenCalledWith(link);
     expect(mount.textContent).not.toContain(link);
@@ -774,7 +774,7 @@ describe('pairing panel', () => {
     input.value = 'bitsov://pair/pasted-ticket';
     input.dispatchEvent(new InputEvent('input', { bubbles: true }));
     await submitReview(mount.querySelector<HTMLFormElement>('[data-remote-access]')!);
-    await vi.waitFor(() => expect(mount!.textContent).toContain('Remote node home:4242 saved.'));
+    await vi.waitFor(() => expect(mount!.textContent).toContain('Your box home:4242 saved.'));
   });
 
   const importWith = async (result: () => Promise<unknown>, pairing: PairingView = starting) => {
@@ -795,20 +795,20 @@ describe('pairing panel', () => {
     const el = await importWith(async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', restart_required: true }));
     await vi.waitFor(() => expect(el.querySelector('[data-import-result]')).not.toBeNull());
     expect(el.querySelector('[data-import-result]')!.textContent).toBe(
-      'Remote node home:4242 saved. Node ID fingerprint: ab…cd. Restart BitSov to connect.',
+      'Your box home:4242 saved. Node ID fingerprint: ab…cd. Restart BitSov to connect.',
     );
     expect(el.querySelector('[data-hosted-by]')).toBeNull();
     expect(badge().textContent).toBe('Pairing link');
   });
 
   it('new ticket: shows "hosted by" in the confirmation and the home-node badge, then forget clears it', async () => {
-    const el = await importWith(async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', hosted_by: "Rasmus's Pi", restart_required: true }));
+    const el = await importWith(async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', hosted_by: "Home Pi", restart_required: true }));
     await vi.waitFor(() => expect(el.querySelector('[data-import-result]')).not.toBeNull());
     expect(el.querySelector('[data-import-result]')!.textContent).toBe(
-      "Remote node home:4242 (hosted by Rasmus's Pi) saved. Node ID fingerprint: ab…cd. Restart BitSov to connect.",
+      "Your box home:4242 (hosted by Home Pi) saved. Node ID fingerprint: ab…cd. Restart BitSov to connect.",
     );
-    expect(badge().textContent).toBe("Hosted by Rasmus's Pi");
-    expect(badge().getAttribute('title')).toBe("Hosted by Rasmus's Pi");
+    expect(badge().textContent).toBe("Hosted by Home Pi");
+    expect(badge().getAttribute('title')).toBe("Hosted by Home Pi");
     el.querySelector<HTMLButtonElement>('[data-use-local]')!.click();
     await vi.waitFor(() => expect(badge().textContent).toBe('Pairing link'));
   });
@@ -841,13 +841,13 @@ describe('pairing panel', () => {
   });
   it('shows one decision per stage and keeps every host step addressable', () => {
     const first = show(starting, booting);
-    expect(first.querySelector('[data-ob-head="node"] h1')?.textContent).toBe('Where should your node run?');
+    expect(first.querySelector('[data-ob-head="node"] h1')?.textContent).toBe('Where should your box run?');
     expect(first.querySelector('.node-target-section.compact')).toBeNull();
     expect([...first.querySelectorAll('[data-step]')].map((s) => s.getAttribute('data-step'))).toEqual(['node', 'pair', 'identity', 'fund']);
     // Three visible stage labels; pairing is announced but not a separate stage.
     const visible = [...first.querySelectorAll('.stepper .step-label:not(.sr-only)')].map((s) =>
       [...s.childNodes].filter((n) => !(n instanceof HTMLElement && n.classList.contains('sr-only'))).map((n) => n.textContent).join(''));
-    expect(visible).toEqual(['Your node', 'Your identity', 'Add sats (optional)']);
+    expect(visible).toEqual(['Your box', 'Your identity', 'Add sats (optional)']);
     dispose?.();
     mount?.remove();
 

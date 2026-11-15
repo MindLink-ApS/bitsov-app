@@ -164,12 +164,12 @@ describe('node money readiness', () => {
   });
 
   it('maps the node refusal to the common calm message', () => {
-    expect(asActionError({ code: 'not_ready', message: 'backend unavailable' }).message).toBe('Money is not ready yet. Your node will retry automatically.');
+    expect(asActionError({ code: 'not_ready', message: 'backend unavailable' }).message).toBe('Money is not ready yet. Your box will retry automatically.');
   });
 
   it.each([
-    ['en', 'Hanging up this call would cost more than your node grant allows per message payment, so it could not be ended. The owner would need to approve a larger per-payment limit. Nothing was sent or paid.'],
-    ['da', 'At lægge på i dette opkald ville koste mere, end din nodes tilladelse giver pr. beskedbetaling, så opkaldet ville ikke kunne afsluttes. Ejeren skal godkende en højere grænse pr. betaling. Intet blev sendt eller betalt.'],
+    ['en', 'Hanging up this call would cost more than your box grant allows per message payment, so it could not be ended. The owner would need to approve a larger per-payment limit. Nothing was sent or paid.'],
+    ['da', 'At lægge på i dette opkald ville koste mere, end din boks’ tilladelse giver pr. beskedbetaling, så opkaldet ville ikke kunne afsluttes. Ejeren skal godkende en højere grænse pr. betaling. Intet blev sendt eller betalt.'],
   ] as const)('the host refusing a call it could not end reads in the app language (%s), and nothing was paid', (lang, words) => {
     setLanguagePref(lang);
     try {
@@ -211,7 +211,7 @@ describe('node money readiness', () => {
 
   it('does not mistake an older node without the field for unavailable money', async () => {
     const source = sampleSource();
-    expect(nodePill({ ready: true, error: null, overview: await source.nodeOverview(), link: 'open', nowMs: Date.now() }).text).toBe('Connected to your node');
+    expect(nodePill({ ready: true, error: null, overview: await source.nodeOverview(), link: 'open', nowMs: Date.now() }).text).toBe('Connected to your box');
   });
 });
 
@@ -242,7 +242,7 @@ describe('shared money guard', () => {
     const refused = vi.fn();
     source.pay = vi.fn().mockRejectedValue({ code: 'not_ready', message: 'offline' });
     const guarded = readinessSource(() => source, () => false, refused);
-    await expect(guarded.pay('invoice', 1000, 6000)).rejects.toMatchObject({ code: 'not_ready', message: 'Money is not ready yet. Your node will retry automatically.' });
+    await expect(guarded.pay('invoice', 1000, 6000)).rejects.toMatchObject({ code: 'not_ready', message: 'Money is not ready yet. Your box will retry automatically.' });
     expect(refused).toHaveBeenCalledTimes(1);
     expect(source.pay).toHaveBeenCalledTimes(1);
   });

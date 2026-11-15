@@ -226,6 +226,7 @@ describe('control center shell', () => {
     start();
     await waitFor(() => expect(mount.querySelector('[data-gate="g6-local-trust"]')).not.toBeNull());
     expect(mount.querySelector('[data-first-run]')).not.toBeNull();
+    expect(mount.querySelector('[data-first-run]')!.classList.contains('phone-first-run')).toBe(false);
     expect(mount.querySelector('.rail')).not.toBeNull();
     expect(mount.querySelector('[data-panel="wallet"]')).toBeNull();
     expect(new Set(calls.map((c) => c.cmd))).toEqual(new Set(['node_status', 'pairing_status', 'device_key_status']));
@@ -342,7 +343,7 @@ describe('control center shell', () => {
     expect(host.calls.length).toBeGreaterThan(0);
   });
 
-  it('the connection card (Settings → Node): Copy details carries no id, address, onion, ticket or token, and Check now reads only the node status', async () => {
+  it('the connection card (Settings → Box): Copy details carries no id, address, onion, ticket or token, and Check now reads only the node status', async () => {
     const TICKET = 'bitsov://pair/SECRETTICKET123';
     const TOKEN = 'tok_9f8e7d6c5b4a3921';
     const host = stubHost({
@@ -367,7 +368,7 @@ describe('control center shell', () => {
     click('[data-tab="node"]');
     await waitFor(() => expect(mount.querySelector('[data-connection-card]')).not.toBeNull());
     await waitFor(() => expect(mount.querySelector('[data-connection-line="2"]')!.textContent).toMatch(/^Last status check: .+ · \d+ ms \(this app ↔ its host\)$/));
-    expect(mount.querySelector('[data-connection-line="3"]')!.textContent).toBe('Calls · STUN: your own node');
+    expect(mount.querySelector('[data-connection-line="3"]')!.textContent).toBe('Calls · STUN: your own box');
     click('[data-connection-copy]');
     await waitFor(() => expect(copied).toContain('BitSov connection'));
     for (const secret of [OWN, A, B, TICKET, 'SECRETTICKET', TOKEN, '203.0.113.7', '127.0.0.1', '9735', '9736', 'mynode.example.org', '3478', 'abcdefghijklmnop', '.onion']) {
@@ -994,7 +995,7 @@ describe('control center shell', () => {
     await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
 
-    // The spend bar only points to Settings → Node, where the reason is spelled out.
+    // The spend bar only points to Settings → Box, where the reason is spelled out.
     await waitFor(() => expect(mount.querySelector('[data-device-settings-hint="off"]')?.textContent).toContain('Touch ID approvals are off.'));
     click('[data-device-settings-link]');
     await waitFor(() => expect(mount.querySelector('[data-device-off="seed_not_encrypted"]')).not.toBeNull());
@@ -1074,18 +1075,18 @@ describe('control center shell', () => {
       [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
       await waitFor(() => expect(mount.querySelector('[data-approvals-badge]')).not.toBeNull());
       fail = true;
-      await waitFor(() => expect(mount.querySelector('[data-owner-sheet-status]')?.textContent).toContain('Your node refused'), { timeout: 15_000 });
+      await waitFor(() => expect(mount.querySelector('[data-owner-sheet-status]')?.textContent).toContain('Your box refused'), { timeout: 15_000 });
       expect(mount.querySelector('[data-owner-approval-sheet]')).toBeNull();
       click('[data-profile]');
       click('[data-open-settings]');
       click('[data-tab="node"]');
-      await waitFor(() => expect(mount.querySelector('[data-owner-approvals-error]')?.textContent).toContain('Your node refused'), { timeout: 15_000 });
+      await waitFor(() => expect(mount.querySelector('[data-owner-approvals-error]')?.textContent).toContain('Your box refused'), { timeout: 15_000 });
       expect(mount.querySelector('[data-approval-approve]')).toBeNull();
       expect(mount.querySelector('[data-owner-approvals-empty]')).toBeNull();
       expect(mount.querySelector('[data-approvals-badge]')).toBeNull();
     }, 25_000);
 
-    it('the very first discovery read failing in transport is said: "Couldn’t read your node’s approvals list"', async () => {
+    it('the very first discovery read failing in transport is said: "Couldn’t read your box’s approvals list"', async () => {
       stubHost({
         pairing_status: () => ({ ...paired, remote: true }),
         node_overview: overview(['owner_device_approval_v1']),
@@ -1101,7 +1102,7 @@ describe('control center shell', () => {
       click('[data-open-settings]');
       await waitFor(() => expect(mount.querySelector('[data-tab="node"]')).not.toBeNull());
       click('[data-tab="node"]');
-      await waitFor(() => expect(mount.querySelector('[data-owner-approvals-error]')?.textContent).toContain('Couldn’t read your node’s approvals list'));
+      await waitFor(() => expect(mount.querySelector('[data-owner-approvals-error]')?.textContent).toContain('Couldn’t read your box’s approvals list'));
       expect(mount.querySelector('[data-owner-approvals-error]')!.textContent).not.toContain('Nothing was approved');
       expect(mount.querySelector('[data-approval-approve]')).toBeNull();
     });
@@ -1206,7 +1207,7 @@ describe('control center shell', () => {
       const offer = mount.querySelector('[data-touch-id-first]')!;
       expect(offer).not.toBeNull();
       expect(offer.textContent).toContain('Approve on this Mac with Touch ID');
-      expect(offer.textContent).toContain('your node’s owner approves this Mac one time');
+      expect(offer.textContent).toContain('your box’s owner approves this Mac one time');
       const other = offer.querySelector<HTMLDetailsElement>('details[data-other-ways]')!;
       expect(other.open).toBe(false);
       expect(other.querySelector('[data-owner-action]')?.textContent).toBe('konsensus grant --op ab01');
@@ -1244,11 +1245,11 @@ describe('control center shell', () => {
     it('promises no command at the node only when the node says it can (owner_device_approval_v1)', async () => {
       await open(true, none);
       const today = mount.querySelector('[data-touch-id-first]')!.textContent!;
-      expect(today).toContain('Your node does not yet accept Touch ID approvals in place of its command');
+      expect(today).toContain('Your box does not yet accept Touch ID approvals in place of its command');
       expect(today).not.toContain('without a command at the node');
       dispose?.(); mount?.remove(); vi.unstubAllGlobals();
       await open(true, none, ['owner_device_approval_v1']);
-      await waitFor(() => expect(mount.querySelector('[data-touch-id-first]')!.textContent).toContain('one Touch ID tap approves a contact here, without a command at the node'));
+      await waitFor(() => expect(mount.querySelector('[data-touch-id-first]')!.textContent).toContain('one Touch ID tap approves a contact here, without a command at the box'));
     });
 
     it('a lapsed setup says "again", not "one time"', async () => {
@@ -1290,7 +1291,7 @@ describe('control center shell', () => {
     await waitFor(() => expect(mount.querySelector('[data-gate] + button, .primary')).not.toBeNull());
     [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
 
-    // The spend bar says it is waiting and links to Settings → Node, where the owner step lives.
+    // The spend bar says it is waiting and links to Settings → Box, where the owner step lives.
     await waitFor(() => expect(mount.querySelector('[data-device-settings-hint="pending"]')).not.toBeNull());
     expect(mount.querySelector('[data-spend] [data-device-owner-action]')).toBeNull();
     click('[data-device-settings-link]');
@@ -1374,7 +1375,7 @@ describe('control center shell', () => {
 
     // No link event is pushed by the test: the state comes only from the replay
     // the shell asks for after subscribing.
-    await waitFor(() => expect(mount.querySelector('.node-pill .what')?.textContent).toBe('Connected to your node'));
+    await waitFor(() => expect(mount.querySelector('.node-pill .what')?.textContent).toBe('Connected to your box'));
     expect(mount.querySelector('[data-pill]')?.getAttribute('data-pill')).toBe('ok');
     const listenAt = calls.findIndex((c) => c.cmd === 'plugin:event|listen');
     const replayAt = calls.findIndex((c) => c.cmd === 'live_link');
@@ -1397,7 +1398,7 @@ describe('control center shell', () => {
     expect(mount.querySelector('[data-intro-mine]')).toBeNull();
     expect(mount.querySelector('[data-intro-open]')).toBeNull();
     click('[data-track="ai"]');
-    await waitFor(() => expect(mount.querySelector('[data-ai-track]')?.textContent).toContain('Ask about your own node'));
+    await waitFor(() => expect(mount.querySelector('[data-ai-track]')?.textContent).toContain('Ask about your own box'));
     expect(mount.querySelector('[data-ai-policy]')?.textContent).toContain('Nothing leaves this computer');
   });
 });

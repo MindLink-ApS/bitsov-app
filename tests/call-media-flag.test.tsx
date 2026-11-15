@@ -172,7 +172,7 @@ describe('call media flag', () => {
     await engine.place(A, 'audio', QUOTE);
     conn!.connectionState = 'closed';
     conn!.onconnectionstatechange?.();
-    expect(views[views.length - 1]).toMatch(/through your node/);
+    expect(views[views.length - 1]).toMatch(/through your box/);
     expect(views[views.length - 1]).not.toMatch(/direct connection/);
   });
 });
@@ -434,7 +434,7 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
     host.media({ link: 'ended', detail: 'the node refused the media socket (403)' });
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect($('[data-call-ended]')?.textContent).toBe('The call audio link through your node closed.');
+    expect($('[data-call-ended]')?.textContent).toBe('The call audio link through your box closed.');
   });
 
   /** Rings Maya and brings the call live through the host media socket. */

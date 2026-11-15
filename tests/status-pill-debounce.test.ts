@@ -67,21 +67,21 @@ describe('status pill hysteresis', () => {
   });
 
   it('first load is unchanged: still connecting until the node answers', () => {
-    expect(pillFor(held).text).toBe('Connecting to remote node');
-    expect(pillFor(held, { remote: false }).text).toBe('Starting node');
+    expect(pillFor(held).text).toBe('Connecting to your box');
+    expect(pillFor(held, { remote: false }).text).toBe('Starting your box');
     poll(timeout);
-    expect(pillFor(held).text).toBe('Connecting to remote node');
+    expect(pillFor(held).text).toBe('Connecting to your box');
     poll({ ready: false, error: null });
-    expect(pillFor(held).text).toBe('Connecting to remote node');
+    expect(pillFor(held).text).toBe('Connecting to your box');
     poll(good);
-    expect(pillFor(held)).toEqual({ tone: 'ok', text: 'Connected to your node', live: true });
+    expect(pillFor(held)).toEqual({ tone: 'ok', text: 'Connected to your box', live: true });
   });
 
   it('one failed check leaves the pill OK', () => {
     poll(good);
     poll(timeout);
     expect(held.checks.misses).toBe(1);
-    expect(pillFor(held)).toEqual({ tone: 'ok', text: 'Connected to your node', live: true });
+    expect(pillFor(held)).toEqual({ tone: 'ok', text: 'Connected to your box', live: true });
     poll(good);
     poll(unreachable);
     poll(good);
@@ -105,18 +105,18 @@ describe('status pill hysteresis', () => {
     poll(timeout); // t + 4.5 s
     expect(pillFor(held).tone).toBe('ok');
     poll(timeout); // t + 6 s, fifth miss
-    expect(pillFor(held)).toEqual({ tone: 'warn', text: 'Node not answering', live: false });
+    expect(pillFor(held)).toEqual({ tone: 'warn', text: 'Your box isn’t answering', live: false });
     // Local seats use the same words for a confirmed silence.
-    expect(pillFor(held, { remote: false }).text).toBe('Node not answering');
+    expect(pillFor(held, { remote: false }).text).toBe('Your box isn’t answering');
   });
 
   it('one good check is OK again', () => {
     poll(good);
     for (let i = 0; i < 5; i++) poll(timeout);
-    expect(pillFor(held).text).toBe('Node not answering');
+    expect(pillFor(held).text).toBe('Your box isn’t answering');
     poll(good);
     expect(held.checks.misses).toBe(0);
-    expect(pillFor(held)).toEqual({ tone: 'ok', text: 'Connected to your node', live: true });
+    expect(pillFor(held)).toEqual({ tone: 'ok', text: 'Connected to your box', live: true });
     // The count starts over: a fresh single miss does not flip it back.
     poll(timeout);
     expect(pillFor(held).tone).toBe('ok');
@@ -127,11 +127,11 @@ describe('status pill hysteresis', () => {
     poll(good);
     held = pillStatusAfter(held, { ready: false, error: 'remote unavailable', locked: true }, false, Date.now());
     expect(held).toMatchObject({ ready: false, error: 'remote unavailable', quiet: false });
-    expect(pillFor(held).text).toBe('Remote connection unavailable');
+    expect(pillFor(held).text).toBe('No connection to your box');
 
     held = pillStatusAfter(INITIAL_PILL_STATUS, good, false, Date.now());
     held = pillStatusAfter(held, unreachable, true, Date.now());
-    expect(pillFor(held).text).toBe('Remote connection unavailable');
+    expect(pillFor(held).text).toBe('No connection to your box');
 
     held = pillStatusAfter(INITIAL_PILL_STATUS, good, false, Date.now());
     held = pillStatusAfter(held, { ready: false, error: 'remote timed out', retry_after_secs: 30 }, false, Date.now());
@@ -139,7 +139,7 @@ describe('status pill hysteresis', () => {
 
     held = pillStatusAfter(INITIAL_PILL_STATUS, good, false, Date.now());
     held = pillStatusAfter(held, { ready: false, error: 'sidecar exited' }, false, Date.now());
-    expect(pillFor(held, { remote: false })).toEqual({ tone: 'err', text: 'Node stopped', live: false });
+    expect(pillFor(held, { remote: false })).toEqual({ tone: 'err', text: 'Your box has stopped', live: false });
     // No time passed for any of these.
     expect(Date.now() - before).toBe(POLL_MS);
   });
@@ -147,7 +147,7 @@ describe('status pill hysteresis', () => {
   it('a host cooldown still wins in the pill', () => {
     poll(good);
     const pill = nodePill({ remote: true, retryAfterSecs: 12, ready: held.ready, error: held.error, quiet: held.quiet, statusChecked: true, overview: null, link: 'open', nowMs: Date.now() });
-    expect(pill.text).toBe('Remote connection · waiting 12 s');
+    expect(pill.text).toBe('Reconnecting to your box in 12 s');
   });
 
   it('a stale overview: 61 s does not flip the pill, 181 s does, a fresh read clears it', () => {
@@ -161,9 +161,9 @@ describe('status pill hysteresis', () => {
     vi.advanceTimersByTime(120_000 - POLL_MS);
     poll(good);
     expect(Date.now() - readAt).toBe(181_000);
-    expect(pillFor(held, { overviewAt: readAt })).toEqual({ tone: 'warn', text: 'Node not answering', live: false });
+    expect(pillFor(held, { overviewAt: readAt })).toEqual({ tone: 'warn', text: 'Your box isn’t answering', live: false });
     // A fresh overview read clears it.
-    expect(pillFor(held, { overviewAt: Date.now() })).toEqual({ tone: 'ok', text: 'Connected to your node', live: true });
+    expect(pillFor(held, { overviewAt: Date.now() })).toEqual({ tone: 'ok', text: 'Connected to your box', live: true });
   });
 
   it('a late overview read under the safety net does not say not answering while the node answers', () => {
@@ -173,6 +173,6 @@ describe('status pill hysteresis', () => {
     expect(pillFor(held, { overviewAt: Date.now() - 2 * 60_000 }).tone).toBe('ok');
     // Without the status poll's answer the overview's age still decides.
     expect(nodePill({ ready: true, error: null, overview: overview(Date.now() - 5 * 60_000), link: 'open', nowMs: Date.now() }).text)
-      .toBe('Node not answering');
+      .toBe('Your box isn’t answering');
   });
 });

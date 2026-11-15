@@ -26,7 +26,7 @@ it('preserves quoted versus estimated admission, fee ceilings, and approval in D
   });
   expect(admissionCopy({ ...price, quoted: false })).toEqual({
     body: 'Kræver cirka 4 sats mere, hvis adgang skal betales igen.',
-    detail: 'Denne beskeds 2 sats og cirka 1,5 sats, hvis der kræves adgang igen. Plus højst 0,5 sats i netværksgebyrer (4 sats i alt). Noden afviser før betaling, hvis den faktiske pris er højere.',
+    detail: 'Denne beskeds 2 sats og cirka 1,5 sats, hvis der kræves adgang igen. Plus højst 0,5 sats i netværksgebyrer (4 sats i alt). Boksen afviser før betaling, hvis den faktiske pris er højere.',
     action: 'Godkend højst 4 sats og prøv igen',
   });
 });

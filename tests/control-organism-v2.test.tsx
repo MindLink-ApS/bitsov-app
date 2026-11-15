@@ -205,7 +205,7 @@ describe('Body panel and stream on an N1/N2 node', () => {
     const slots = mount.querySelectorAll('[data-energy-bars] > span');
     expect(slots).toHaveLength(24);
     expect(mount.querySelectorAll('[data-bar-gap]').length).toBeGreaterThan(0);
-    expect($('[data-organ="metabolism"]')?.textContent).toContain('Node-wide');
+    expect($('[data-organ="metabolism"]')?.textContent).toContain('Box-wide');
     expect($('[data-organ="metabolism"]')?.textContent).not.toContain('need N1');
     // Dana's track was never opened; the node still counts her.
     expect($(`[data-energy-row="peer:${'d'.repeat(64)}"]`)).not.toBeNull();
@@ -215,7 +215,7 @@ describe('Body panel and stream on an N1/N2 node', () => {
     start();
     await vi.waitFor(() => expect($('[data-membrane-refused-by]')?.textContent).toContain('at your door: unpaid 2'));
     expect($('[data-membrane-n2]')).toBeNull();
-    expect($('[data-organ="membrane"]')?.textContent).toContain('named only when the node verified');
+    expect($('[data-organ="membrane"]')?.textContent).toContain('named only when the box verified');
   });
 
   it('lists a paid stranger at the door, apart from contacts, with a door card in the track', async () => {

@@ -50,8 +50,8 @@ const PINNED = {
 } as const;
 
 const RESTART = {
-  en: 'Your approval is held by your node: it survives a restart of the node or this app, and ends when the node’s grant ends, at most 24 hours after you approved.',
-  da: 'Din godkendelse ligger på din node: den overlever en genstart af noden eller appen og slutter, når nodens tilladelse slutter, højst 24 timer efter du godkendte.',
+  en: 'Your approval is held by your box: it survives a restart of the box or this app, and ends when the box’s grant ends, at most 24 hours after you approved.',
+  da: 'Din godkendelse ligger på din boks: den overlever en genstart af boksen eller appen og slutter, når boksens tilladelse slutter, højst 24 timer efter du godkendte.',
 } as const;
 
 // Wording the node does not enforce: a daily refill, and a lost approval on restart.

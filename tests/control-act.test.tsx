@@ -744,7 +744,7 @@ describe('acting from the track', () => {
 
   it('labels a paid, refused-for-good send and a changed-text retry refusal', async () => {
     const codes = [
-      { code: 'failed_paid', message: 'Paid, and the recipient\'s node refused this message for good. The payment is not refundable. Do not send it again.', label: 'Paid · refused by their node' },
+      { code: 'failed_paid', message: 'Paid, and the recipient\'s node refused this message for good. The payment is not refundable. Do not send it again.', label: 'Paid · refused by their box' },
       { code: 'operation_mismatch', message: 'Your node refused this retry: its text differs from the message it retries. Nothing was paid.', label: 'Message not sent' },
     ];
     let n = 0;

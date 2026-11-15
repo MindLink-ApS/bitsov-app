@@ -131,7 +131,7 @@ describe('received files and emoji in the thread', () => {
         if (id === BIG_ID) throw 'file over 1.4 MB';
         if (id === IMG_ID) return { filename: 'shot.png', mime_type: 'image/png', size_bytes: 68, data_b64: png };
         if (id === IN_ID) return { filename: 'brief.txt', mime_type: 'text/plain', size_bytes: 2, data_b64: 'aGk=' };
-        throw 'file not stored on this node';
+        throw 'file not stored on this box';
       },
       file_save: (args) => {
         const id = String(args!.message_id);

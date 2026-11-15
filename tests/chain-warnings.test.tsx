@@ -82,7 +82,7 @@ it('uses the chain wording only for the typed readiness reason', () => {
     code: 'not_ready', reason: 'chain_unavailable', message: "Your box can't see the Bitcoin chain right now; nothing was paid; try again later.",
   });
   for (const reason of [undefined, 'unknown', 'chain_unavailable later']) {
-    expect(asActionError({ code: 'not_ready', reason, message: 'chain_unavailable' }).message).toBe('Money is not ready yet. Your node will retry automatically.');
+    expect(asActionError({ code: 'not_ready', reason, message: 'chain_unavailable' }).message).toBe('Money is not ready yet. Your box will retry automatically.');
   }
   expect(asActionError({ code: 'node', reason: 'chain_unavailable', message: 'Unresolved result' }).message).toBe('Unresolved result');
 });

@@ -1,8 +1,8 @@
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, onTestFinished, expect, it, vi } from 'vitest';
 import { createSignal } from 'solid-js';
 import { OfflineNode } from '../src/control/OfflineNode';
 import { render } from 'solid-js/web';
-import { ControlCenter } from '../src/control/Shell';
+import { ControlCenter, setHidePhoneExtras } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID } from '../src/control/sample';
 import { visibleBackDestination } from '../src/ios/edgeBack';
 import type { LiveEvent } from '../src/control/types';
@@ -47,8 +47,16 @@ it.each(['iPhone', 'Android'])('starts %s on Chats, pushes a conversation and re
   expect(visible('[data-phone-list]')).toHaveLength(1);
   expect(visible('[data-composer]')).toHaveLength(0);
 });
-it('routes Wallet and You, retaining funding, sharing, settings, devices and every rail destination', async () => {
+it('M6 phones show messages and calls only: rooms, assistants, profiles and the porch are hidden by default', async () => {
   await mount();
+  for (const selector of ['[data-track="discover"]', '[data-track="porch"]', '[data-assistants]', '[data-room-new]']) expect(visible(selector), selector).toHaveLength(0);
+  expect(visible('[data-track="new"]').length).toBeGreaterThan(0);
+});
+it('routes Wallet and You, retaining funding, sharing, settings, devices and every rail destination', async () => {
+  // With the M6 phone flag lifted, every rail destination is back.
+  setHidePhoneExtras(false);
+  try { await mount(); } catch (e) { setHidePhoneExtras(true); throw e; }
+  onTestFinished(() => setHidePhoneExtras(true));
   for (const selector of ['[data-track="discover"]', '[data-track="porch"]', '[data-assistants]', '[data-room-new]', '[data-track="new"]']) expect(visible(selector).length, selector).toBeGreaterThan(0);
   await click('[data-phone-tab="wallet"]');
   expect(visible('[data-wallet-page]')).toHaveLength(1);

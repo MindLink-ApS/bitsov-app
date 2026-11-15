@@ -187,3 +187,15 @@ it.each(['pending', 'unavailable', 'expired'] as const)('an empty composer keeps
   expect($<HTMLButtonElement>('[data-send]').disabled).toBe(true);
   expect($('[data-send-disabled-reason]')?.textContent).toBe('Type a message first.');
 });
+it('says a price problem once: on the price line with its Retry, not again as the Send reason', async () => {
+  const { source } = setup();
+  source.priceQuote = async () => { throw { code: 'peer_not_ready', reason: 'chain_unavailable', message: 'peer_not_ready' }; };
+  await open(source); type('hello');
+  await vi.waitFor(() => expect($('[data-send-price]')?.textContent).toMatch(/isn't ready to receive yet/));
+  expect($<HTMLButtonElement>('[data-send]').disabled).toBe(true);
+  expect($('[data-price-retry]')).not.toBeNull();
+  expect(mount.querySelector('[data-send-disabled-reason]')).toBeNull();
+  expect($('[data-composer]').textContent!.match(/isn't ready to receive yet/g)).toHaveLength(1);
+  // Send still names its reason for assistive tech: the price line.
+  expect(document.getElementById($('[data-send]').getAttribute('aria-describedby')!)).toBe($('[data-send-price]'));
+});

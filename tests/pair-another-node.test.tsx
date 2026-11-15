@@ -36,12 +36,12 @@ async function reviewAndChoose() {
   const form = mount.querySelector<HTMLFormElement>('form[data-remote-access]')!;
   form.requestSubmit();
   await vi.waitFor(() => expect(mount.querySelector('[data-pairing-preview]')).not.toBeNull());
-  expect(mount.querySelector('form')!.textContent).toContain('Use remote node');
+  expect(mount.querySelector('form')!.textContent).toContain('Use this box');
   form.requestSubmit();
   await vi.waitFor(() => expect(mount.querySelector('[data-pair-another-confirm]')).not.toBeNull());
 }
 
-describe('Settings → Node: Pair another node', () => {
+describe('Settings → Box: Pair another node', () => {
   it.each([true, false, undefined])('shows the button only for a remote node (remote=%s)', async (remote) => {
     const source = sampleSource({ firstLiveMs: 1e9 });
     dispose = render(() => <ControlCenter source={source} active ready remote={remote} error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mountIn());
@@ -49,7 +49,7 @@ describe('Settings → Node: Pair another node', () => {
     (mount.querySelector('[data-tab="node"]') as HTMLButtonElement).click();
     await vi.waitFor(() => expect(mount.querySelector('[data-panel="node"]')).not.toBeNull());
     const button = mount.querySelector('[data-panel="node"] [data-pair-another-open]');
-    if (remote) expect(button?.textContent).toBe('Pair another node');
+    if (remote) expect(button?.textContent).toBe('Pair another box');
     else expect(button).toBeNull();
   });
 
@@ -89,7 +89,7 @@ describe('Settings → Node: Pair another node', () => {
     await reviewAndChoose();
     mount.querySelector<HTMLButtonElement>('[data-pair-another-confirm-yes]')!.click();
     await vi.waitFor(() => expect(replace).toHaveBeenCalledExactlyOnceWith(LINK));
-    await vi.waitFor(() => expect(mount.querySelector('[data-import-result]')?.textContent).toContain('Connecting to your node…'));
+    await vi.waitFor(() => expect(mount.querySelector('[data-import-result]')?.textContent).toContain('Connecting to your box…'));
     mount.querySelector<HTMLButtonElement>('[data-pair-another-close]')!.click();
     await vi.waitFor(() => expect(mount.querySelector('[data-pair-another-saved]')).not.toBeNull());
     expect(mount.querySelector<HTMLButtonElement>('[data-pair-another-open]')!.disabled).toBe(true);

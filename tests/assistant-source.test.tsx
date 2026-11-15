@@ -76,7 +76,7 @@ describe('assistant source label', () => {
     hostDefine(LIVE_ROWS_GLOBAL, LIVE_ROWS);
     const root = await mountPage();
     expect(label(root).dataset.source).toBe('live');
-    expect(label(root).textContent).toContain('From your node');
+    expect(label(root).textContent).toContain('From your box');
     expect(label(root).textContent).not.toContain('Mock');
     expect(shown(root)).toEqual(LIVE_ROWS);
     expect(network).toEqual([]);
@@ -84,9 +84,9 @@ describe('assistant source label', () => {
   });
 
   it.each([
-    ['not_paired', 'Not paired with a node'],
-    ['node_unreachable', 'Node unreachable'],
-    ['rc7_fallback', 'Your node version has no pairing'],
+    ['not_paired', 'Not paired with a box'],
+    ['node_unreachable', 'Box unreachable'],
+    ['rc7_fallback', 'Your box version has no pairing'],
   ])('shows mock rows labelled Sample data with reason %s', async (reason, text) => {
     hostDefine(SOURCE_GLOBAL, { kind: 'mock', reason });
     const root = await mountPage();

@@ -26,10 +26,10 @@ function setup(options: { presets?: BudgetPreset[]; reason?: string; max?: numbe
 describe.each(['en', 'da'] as const)('first spend sheet (%s)', (lang) => {
   const words = () => lang === 'en' ? {
     title: 'Let messages spend up to 500 sats in total, for up to 24 hours?', allow: 'Allow 500 sats in total', other: 'Other options', cancel: 'Not now',
-    owner: 'Approve at your box', reason: 'Connect to your node before allowing payments.',
+    owner: 'Approve in BitSov on your computer', reason: 'Connect to your box before allowing payments.',
   } : {
     title: 'Må beskeder bruge op til 500 sats i alt, i højst 24 timer?', allow: 'Tillad 500 sats i alt', other: 'Andre muligheder', cancel: 'Ikke nu',
-    owner: 'Godkend på din boks', reason: 'Opret forbindelse til din node, før du tillader betalinger.',
+    owner: 'Godkend i BitSov på din computer', reason: 'Opret forbindelse til din boks, før du tillader betalinger.',
   };
   it('defaults to one Allow action and keeps costs outside collapsed options', () => {
     setLanguagePref(lang); const { allow } = setup();

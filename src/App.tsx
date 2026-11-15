@@ -314,7 +314,7 @@ function AppScreen() {
     onDone={() => { setPhoneDone(true); void poll(); }} />;
   const firstRun = (
     <Show when={!phoneFlow() && !phoneTrustFlow() && (!onPhone || phoneSetup() !== null)}>
-    <div class="first-run" data-first-run>
+    <div class="first-run" data-first-run classList={{ 'phone-first-run': onPhone }}>
       {/* While the setup steps are hidden, the offline card is the page: its title is the page's h1. */}
       {offlineScreen(() => (setupHidden() ? 1 : 2))}
       <Show when={setupHidden()}>
@@ -376,6 +376,7 @@ function AppScreen() {
               <Show when={pairing().remote && pairing().bootstrap === 'bootstrap'} fallback={
                 <Show when={status().local_owner && pairing().bootstrap === 'bootstrap' && !pairing().remote}
                   fallback={<IdentityGate
+                  phone={onPhone}
                   source={source()}
                   nodeId={() => status().node_id}
                   remote={pairing().remote}
@@ -466,7 +467,7 @@ function AppScreen() {
         }
       }} onDone={() => { setRememberOffer(false); setRememberSaved(false); }} />
     </Show>
-    <Show when={phoneFlow()}><div hidden={!!status().locked}>{phoneOnboarding()}</div></Show>
+    <Show when={phoneFlow()}><div class="phone-flow-host" hidden={!!status().locked}>{phoneOnboarding()}</div></Show>
     <Show when={!status().locked} fallback={<LockedNode
       mobile={onPhone}
       platform={platform}
@@ -558,6 +559,8 @@ function PairingLinkOverlay(props: ParentProps<{ onClose: () => void }>) {
  * before there is money on this node, not after.
  */
 function IdentityGate(props: {
+  /** A phone reads the remote disclosure in its own language and plain words. */
+  phone?: boolean;
   source: Source;
   nodeId: () => string | null;
   remote: boolean;
@@ -628,11 +631,21 @@ function IdentityGate(props: {
       </details>
 
       <Show
+        when={!(props.phone && props.remote)}
+        fallback={
+          <section class="panel disclosure" data-gate="g6-remote-trust">
+            <h2>{t('obPhoneTrustTitle')}</h2>
+            <p>{t('obPhoneTrustLine')}</p>
+            <p>{t('obPhoneTrustKeys')}</p>
+          </section>
+        }
+      >
+      <Show
         when={props.remote}
         fallback={
           <section class="panel disclosure" data-gate="g6-local-trust">
             <h2>Local trust — read this before you deposit</h2>
-            <p>Your node is only reachable while this Mac is awake and BitSov is open.</p>
+            <p>Your box is only reachable while this Mac is awake and BitSov is open.</p>
             <p>
               This node trusts every program on this computer. Anything running under your user
               account can ask it for full access over <code>127.0.0.1</code> — enough to spend what
@@ -657,6 +670,7 @@ function IdentityGate(props: {
           </p>
         </section>
       </Show>
+      </Show>
 
       <Show when={!props.bootstrap}>
       <button class="primary" disabled={busy() || savingTrust()} onClick={async () => {
@@ -666,7 +680,7 @@ function IdentityGate(props: {
         catch (e) { setError(String(e)); }
         finally { setSavingTrust(false); }
       }}>
-        I understand — continue to funding
+        {props.phone ? t('obPhoneTrustContinue') : 'I understand — continue to funding'}
       </button>
       </Show>
 
@@ -679,7 +693,7 @@ function IdentityGate(props: {
         when={showRestore()}
         fallback={
           <button class="link" data-restore-open onClick={() => setShowRestore(true)}>
-            {t('obRestoreIdentity')}</button>
+            {props.phone ? t('obPhoneRestore') : t('obRestoreIdentity')}</button>
         }
       >
         <form class="panel restore" onSubmit={submitRestore}>

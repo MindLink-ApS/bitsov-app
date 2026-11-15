@@ -2,6 +2,7 @@ import { hostText } from './hostCopy';
 import { t as tr } from '../i18n';
 import { t, possessive } from '../i18n';
 import { isChainUnavailable, MONEY_NOT_READY, readinessLine } from './readiness';
+import { isMobilePlatform } from '../platform';
 import { feeCeiling } from './format';
 // Control-center state as pure functions over plain data, so the rules are
 // testable without a window: which track a live message belongs to, how history
@@ -41,11 +42,18 @@ export const trackKey = (t: TrackRef): string =>
  * Display name for a contact: the owner's local petname, else Unnamed contact plus a short id.
  * Remote profile names live in {@link claimedName} only — never as the rail title.
  */
+// Phones number unnamed contacts in the order they first appear this session (Ny kontakt, Ny kontakt 2, …).
+const unnamedOrder = new Map<string, number>();
 export const peerName = (peer: Peer | undefined, id: string): string => {
   contactRevision();
   const pet = petnameOf(id);
   if (pet) return pet;
-  return t('extraUnnamedContact', shortId(id));
+  if (!isMobilePlatform()) return t('extraUnnamedContact', shortId(id));
+  // A phone names an unnamed contact plainly; its id stays in the contact's details.
+  const key = id.toLowerCase();
+  if (!unnamedOrder.has(key)) unnamedOrder.set(key, unnamedOrder.size + 1);
+  const n = unnamedOrder.get(key)!;
+  return n === 1 ? t('caNewContact') : t('caNewContactN', n);
 };
 
 /** Remote-supplied name (peer label / profile card). Suggestion only — never truth. */
@@ -190,9 +198,9 @@ export function peerNotReadyMessage(error: unknown, name: string): string | null
   } else if (typeof error === 'string' && error.startsWith('peer_not_ready:')) {
     reason = error.slice('peer_not_ready:'.length);
   }
-  return reason === 'chain_unavailable' || reason === 'not_synced'
-    ? t('extraSNodeIsnTReadyToReceiveYet', possessive(name))
-    : null;
+  if (reason !== 'chain_unavailable' && reason !== 'not_synced') return null;
+  // Phones: no chain jargon, just that it is temporary.
+  return isMobilePlatform() ? t('caPeerNotReadyPhone', possessive(name)) : t('extraSNodeIsnTReadyToReceiveYet', possessive(name));
 }
 
 /** Any rejection from the host, as an action error. */
@@ -201,13 +209,15 @@ export function asActionError(e: unknown): ActionError {
   if (e === MONEY_NOT_READY) return { code: 'not_ready', message: MONEY_NOT_READY };
   if (e && typeof e === 'object' && 'code' in e && 'message' in e) {
     const { code, message, undelivered, admission, pending_id, reason, remaining_msat, operation_id } = e as ActionError;
+    // A raw node refusal with start flags (owner approvals off) is never shown as-is.
+    const plain = /owner_approval_unavailable/.test(String(message)) ? tr('caOwnerApprovalUnavailable') : hostText(String(message));
     // Host refusals with their own plain words, in the app's language.
     const out: ActionError = { code, message: isChainUnavailable(e) ? tr('chainUnavailable') : code === 'not_ready' ? MONEY_NOT_READY
       : code === 'grant_messaging' ? tr('caGrantMessagingPayment')
       : code === 'call_price_unknown' ? tr('caCallPriceUnreadNothingPaid')
       : code === 'call_hangup_unpayable' ? tr('caCallHangupUnpayable')
       : code === 'call_hangup_above_message_max' ? tr('caCallHangupAboveMessageMax')
-      : code === 'call_unsupported' ? tr('caTheirNodeDoesNotTakeCallsYetNothingWas') : hostText(String(message)) };
+      : code === 'call_unsupported' ? tr('caTheirNodeDoesNotTakeCallsYetNothingWas') : plain };
     if (typeof pending_id === 'string' && pending_id) out.pending_id = pending_id;
     if (typeof operation_id === 'string' && operation_id) out.operation_id = operation_id;
     // Owner approval refusals: only the node's known reasons, and an amount that is one.
@@ -515,7 +525,7 @@ export function nodePill(input: {
     return { tone: 'warn', text: t('uiNodeNotAnswering'), live: false };
   }
   if (input.overview.money_ready === false) return { tone: 'warn', text: readinessLine(input.overview, input.nowMs)!, live: input.link === 'open' };
-  if (input.overview.money_ready === true && input.link === 'open') return { tone: 'ok', text: t('uiLocalOKMoneyReady'), live: true };
+  if (input.overview.money_ready === true && input.link === 'open') return { tone: 'ok', text: isMobilePlatform() ? t('caPillReady') : t('uiLocalOKMoneyReady'), live: true };
   if (input.link === 'open') return { tone: 'ok', text: t('uiConnectedToYourNode'), live: true };
   return { tone: 'warn', text: t('uiNodeUpLiveFeedReconnecting'), live: false };
 }

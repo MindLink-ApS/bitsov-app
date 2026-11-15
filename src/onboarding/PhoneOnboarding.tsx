@@ -1,5 +1,5 @@
 import { language, systemLanguage } from '../i18n';
-import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { appPlatform, type AppPlatform } from '../platform';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
@@ -22,11 +22,40 @@ export type PhoneOnboardingProps = {
   incoming?: { link: string } | null; onConsumeLink?: () => void; onDone: () => void;
 };
 type Screen = 'start' | 'scanner' | 'connecting' | 'words' | 'fingerprint' | 'done' | 'error';
-type Failure = ConnectionError['kind'] | 'camera' | 'mismatch' | 'approval_expired' | 'unsupported';
-const kinds = new Set<Failure>(['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired', 'unsupported']);
+type Failure = ConnectionError['kind'] | 'camera' | 'mismatch' | 'approval_expired' | 'unsupported' | 'pairing_failed' | 'timeout' | 'stale' | 'refused' | 'biometry' | 'biometry_cancelled' | 'bad_link';
+const kinds = new Set<Failure>(['unclaimed', 'local_network', 'unreachable', 'busy', 'expired', 'clock', 'used', 'tailscale', 'claim_mismatch', 'other', 'camera', 'mismatch', 'approval_expired', 'unsupported', 'pairing_failed', 'timeout', 'stale', 'refused', 'biometry', 'biometry_cancelled', 'bad_link']);
+const LOOPBACK = /^(127\.|localhost\b|\[::1\])/i;
+/** Only a new link helps: an expired, used or malformed link, or a box that refused this app. */
+const staleKinds = new Set<Failure>(['expired', 'used', 'stale', 'bad_link', 'refused']);
+/** Without any progress for this long, "Connecting" becomes a plain failure with one action. */
+export const CONNECTING_TIMEOUT_MS = 30_000;
+/**
+ * The host's pairing outcome is free text; it only picks the copy, and never
+ * drops anything. `refused` is the host's typed answer: the box said no to this
+ * app's saved pairing (see `PairingView.refused`).
+ */
+function pairingFailure(reason: string | null, refused: boolean): { kind: Failure; detail: string } {
+  const detail = (reason ?? '').replace(/bitsov:\/\/pair\/[^\s]+/g, '[redacted]');
+  // The host's fixed copy for a spent or superseded one-time code (the box saw a code that did not match).
+  if (/ticket expired, was already used|pairing link expired/i.test(detail)) return { kind: 'stale', detail };
+  if (refused) return { kind: 'refused', detail };
+  const transport = /unreachable|could not be reached|timed out|connection refused|transport failed/i.test(detail);
+  return { kind: transport ? 'unreachable' : 'pairing_failed', detail };
+}
 function failure(error: unknown): { kind: Failure; detail: string } {
+  // Some host refusals arrive as plain text (the link preview): a bad or spent link is never "check the connection".
+  // An Error that carries a structured kind or code (the native scanner's, say) is handled below as before.
+  if (typeof error === 'string' || (error instanceof Error && !('kind' in error) && !('code' in error))) {
+    const text = (typeof error === 'string' ? error : error.message).replace(/bitsov:\/\/pair\/[^\s]+/g, '[redacted]');
+    if (/ticket expired, was already used|pairing link expired/i.test(text)) return { kind: 'stale', detail: text };
+    if (/invalid remote pairing link/i.test(text)) return { kind: 'bad_link', detail: text };
+    return { kind: 'other', detail: text };
+  }
   const outer = error && typeof error === 'object' ? error as Record<string, unknown> : {};
   if (outer.code === 'enrollment_restart') return { kind: 'approval_expired', detail: '' };
+  // The phone cannot use (or the person cancelled) Face ID, a fingerprint or a passcode: say that, not "can't connect".
+  if (outer.code === 'device_biometry' || outer.code === 'device_unavailable') return { kind: 'biometry', detail: '' };
+  if (outer.code === 'device_cancelled') return { kind: 'biometry_cancelled', detail: '' };
   const e = outer.connection_error && typeof outer.connection_error === 'object' ? outer.connection_error as Record<string, unknown> : outer;
   // Only structured, sanitized host diagnostics are accepted. Never echo scanner/clipboard errors.
   return { kind: kinds.has(e.kind as Failure) ? e.kind as Failure : 'other', detail: typeof e.detail === 'string' ? e.detail.replace(/bitsov:\/\/pair\/[^\s]+/g, '[redacted]') : '' };
@@ -50,15 +79,42 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   const [preview, setPreview] = createSignal<RemotePreviewView>();
   const [waiting, setWaiting] = createSignal<Extract<JoinView, { state: 'waiting' }>>();
   const [options, setOptions] = createSignal(false);
+  const [confirmForget, setConfirmForget] = createSignal(false);
+  const forgetId = createUniqueId();
+  let confirmBox: HTMLDivElement | undefined;
   let alive = true, generation = 0, joinGeneration = 0, joining = false, joinStarted = false;
   // Keep an uncommitted link only in memory until comparison or cancellation.
   let pendingLink = '', compared = false;
   let resumeSaved = true;
   let resume: 'camera' | 'connection' | undefined;
   let previousHostError: ConnectionError | null | undefined;
+  let previousPairingFailure: string | undefined;
   usePairingActivity(() => busy() || ['scanner', 'connecting', 'words', 'fingerprint'].includes(screen()));
   onCleanup(() => { alive = false; generation++; pendingLink = ''; if (pasteInput) pasteInput.value = ''; if (screen() === 'scanner') void props.cancelScan?.().catch(() => {}); });
   const fail = (e: unknown) => { joinGeneration++; setError(failure(e)); setScreen('error'); };
+  const stale = () => staleKinds.has(error()?.kind as Failure);
+  // A link the host says cannot pair ends this attempt, so the one action (a new
+  // link) can start the next. The saved box stays until a new link is reviewed
+  // and saved, or the owner forgets it: no error, typed or not, drops it. The
+  // host itself stops redialling after a refusal.
+  let retiring: Promise<void> | undefined;
+  const retireAttempt = () => {
+    if (retiring) return retiring;
+    // Cleared only once assigned: the body can finish before this line returns.
+    const done = endAttempt().finally(() => { if (retiring === done) retiring = undefined; });
+    return retiring = done;
+  };
+  const endAttempt = async () => {
+    // A bumped generation skips the in-flight connect's own cleanup, so clear its busy state here.
+    generation++; setBusy(false); resumeSaved = false; pendingLink = ''; compared = false;
+    try {
+      if (joinStarted || waiting() || props.device()?.state === 'pending') await props.join({ action: 'cancel' });
+    } catch { /* The message and its one action still stand. */ }
+    finally { joinStarted = false; setWaiting(undefined); setPreview(undefined); }
+  };
+  const hostFail = (e: unknown) => { fail(e); if (stale()) void retireAttempt(); };
+  // Retire an in-flight connect so its late result cannot leave the action disabled.
+  const stopWaiting = () => { generation++; pendingLink = ''; setBusy(false); };
   const receive = (v: JoinView) => {
     if (v.state === 'waiting') { setWaiting(v); setScreen('words'); }
     if (v.state === 'done') { setWaiting(undefined); setScreen('done'); }
@@ -77,7 +133,8 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       receive(v);
       if (v.state === 'idle' && (joinStarted || screen() === 'words')) { fail({ kind: 'approval_expired' }); return; }
       if (v.state === 'idle' && !joinStarted) {
-        if (v.second_device !== true) { fail({ kind: 'unsupported' }); return; }
+        // Already paired by a compared or saved (not second-device) link: nothing to enrol, so it is done.
+        if (v.second_device !== true) { if (compared || !preview()) setScreen('done'); else fail({ kind: 'unsupported' }); return; }
         joinStarted = true;
         const next = await props.beginJoin();
         if (alive && turn === generation && joinTurn === joinGeneration) {
@@ -88,16 +145,20 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     finally { joining = false; }
   };
   const connect = async (input: string) => {
-    if (!alive || busy() || waiting() || joinStarted || ['words', 'fingerprint', 'connecting'].includes(screen())) return;
+    if (!alive || busy() || (!retiring && (waiting() || joinStarted)) || ['words', 'fingerprint', 'connecting'].includes(screen())) return;
     let link: string;
-    try { link = normalizePairingLink(input); } catch { setToast(c().empty); return; }
+    try { link = normalizePairingLink(input); } catch { setToast(input.trim() ? c().notLink : c().empty); return; }
+    // A new link starts only after the old attempt has ended.
+    if (retiring) { await retiring; if (!alive || busy()) return; }
     resumeSaved = false; pendingLink = ''; compared = false;
     clearManualPaste();
     setBusy(true); setToast(''); setError(undefined); setOptions(false); setScreen('connecting');
     const turn = ++generation;
     joinStarted = false;
     try {
-      const view = await props.preview(link);
+      let view: RemotePreviewView;
+      // The preview only reads the link and dials nothing, so a generic refusal means the link itself is bad.
+      try { view = await props.preview(link); } catch (e) { const f = failure(e); throw f.kind === 'other' ? { kind: 'bad_link', detail: f.detail } : e; }
       if (!alive || turn !== generation) return;
       if (view.first_run) { fail({ kind: 'unclaimed' }); return; }
       setPreview(view);
@@ -138,19 +199,31 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     } finally { if (alive && turn === generation) setBusy(false); }
   };
   const paste = async () => {
-    if (!alive || busy() || waiting() || joinStarted) return;
+    // A retiring attempt no longer blocks a new link: connect waits for it to end.
+    if (!alive || busy() || (!retiring && (waiting() || joinStarted))) return;
     const turn = generation;
+    setToast('');
     try {
       const link = await navigator.clipboard.readText();
-      if (alive && turn === generation) await connect(link);
+      if (!alive || turn !== generation) return;
+      // Nothing came back (the paste prompt was dismissed): offer the field instead of a dead end.
+      if (!link.trim()) { setManualPaste(true); setToast(''); return; }
+      await connect(link);
     }
-    catch { if (alive && turn === generation) { setManualPaste(true); setOptions(true); setToast(''); } }
+    catch { if (alive && turn === generation) { setManualPaste(true); setToast(''); } }
   };
   const run = async (action: () => Promise<unknown>) => {
     if (busy()) return;
     setBusy(true);
     try { await action(); } catch (e) { if (alive) fail(e); }
     finally { if (alive) setBusy(false); }
+  };
+  const savedBox = () => props.pairing().remote || !!props.status().node_id;
+  const hasBox = () => savedBox() || !!preview();
+  const askForget = () => {
+    clearManualPaste(); setConfirmForget(true);
+    // Bring the whole confirmation into view, inside the safe areas.
+    queueMicrotask(() => confirmBox?.scrollIntoView?.({ block: 'nearest' }));
   };
   const reset = async () => {
     clearManualPaste();
@@ -169,23 +242,41 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
   };
   const recover = async () => {
     const kind = error()?.kind;
-    if (kind === 'camera' || kind === 'local_network') {
+    if (kind === 'biometry') {
+      resume = 'connection'; await props.openSettings();
+    } else if (kind === 'camera' || kind === 'local_network') {
       resume = kind === 'camera' ? 'camera' : 'connection';
       await props.openSettings();
     } else if (kind === 'tailscale') {
       resume = 'connection'; await props.openTailscale();
-    } else if (['expired', 'used', 'clock', 'approval_expired', 'unsupported'].includes(kind ?? '')) {
+    } else if (['expired', 'used', 'clock', 'approval_expired', 'unsupported', 'unclaimed'].includes(kind ?? '')) {
       await reset(); setBusy(false); await scan();
-    } else if (['unclaimed', 'mismatch', 'claim_mismatch'].includes(kind ?? '')) await reset();
+    } else if (['mismatch', 'claim_mismatch'].includes(kind ?? '')) await reset();
     else await retry();
   };
   createEffect(() => {
     const e = props.status().connection_error;
-    if (e && (e.kind !== previousHostError?.kind || e.detail !== previousHostError?.detail)) fail(e);
+    if (e && (e.kind !== previousHostError?.kind || e.detail !== previousHostError?.detail)) hostFail(e);
     previousHostError = e;
     if (resumeSaved && screen() === 'start' && props.pairing().remote && !e) { resumeSaved = false; setScreen('connecting'); }
+    // A failed pairing ends the wait. React to a new outcome only, so a stale
+    // failure cannot cut short the attempt that replaces it (the timeout covers that).
+    const p = props.pairing();
+    const pairingFailed = p.state === 'failed' ? `failed:${p.reason ?? ''}` : undefined;
+    if (pairingFailed && pairingFailed !== previousPairingFailure && ['connecting', 'words'].includes(untrack(screen))) {
+      stopWaiting(); hostFail(pairingFailure(p.reason, p.refused === true));
+    }
+    previousPairingFailure = pairingFailed;
     void progressJoin();
   });
+  // No progress for CONNECTING_TIMEOUT_MS: stop waiting and say so plainly.
+  createEffect(on(screen, current => {
+    if (current !== 'connecting') return;
+    const timer = window.setTimeout(() => {
+      if (alive && screen() === 'connecting') { stopWaiting(); fail({ kind: 'timeout', detail: '' }); }
+    }, CONNECTING_TIMEOUT_MS);
+    onCleanup(() => window.clearTimeout(timer));
+  }));
   createEffect(() => {
     const incoming = props.incoming;
     if (incoming && !busy() && !waiting() && !joinStarted && ['start', 'error'].includes(screen())) {
@@ -206,21 +297,34 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     document.addEventListener('visibilitychange', foreground);
     onCleanup(() => { window.clearInterval(timer); document.removeEventListener('visibilitychange', foreground); });
   });
+  const android = () => (props.platform ?? appPlatform()) === 'android';
+  // The host's fixed English diagnostics, said in the reader's language.
+  const hostDetail = (detail: string): string | undefined => ({
+    'The remote node could not be reached.': c().unreachableLine,
+    'The remote connection could not be established.': c().otherLine,
+    'The remote connection is busy. Try again shortly.': c().busyLine,
+  } as Record<string, string>)[detail];
   const errorCopy = () => {
     const t = c();
     switch (error()?.kind) {
       case 'unsupported': return [t.update, t.updateLine, t.newQr];
-      case 'unclaimed': return [t.unclaimed, t.unclaimedLine, t.restart];
+      case 'unclaimed': return [t.unclaimed, t.unclaimedLine, t.unclaimedAction];
       case 'local_network': return [t.localNetwork, (props.platform ?? appPlatform()) === 'android' ? t.nearbyLine : t.localNetworkLine, t.settings];
       case 'tailscale': return [t.unreachable, t.tailscaleLine, t.tailscale];
       case 'unreachable': return [t.unreachable, t.unreachableLine, t.retry];
       case 'approval_expired': return [t.approvalExpired, t.expiredLine, t.newQr];
-      case 'expired': case 'used': return [t.expired, t.expiredLine, t.newQr];
+      case 'expired': case 'used': case 'stale': return [t.stale, t.staleLine, t.pasteNew];
+      case 'refused': return [t.refused, t.staleLine, t.pasteNew];
+      case 'bad_link': return [t.badLink, t.badLinkLine, t.pasteNew];
       case 'clock': return [t.expired, t.clockLine, t.newQr];
       case 'camera': return [t.camera, (props.platform ?? appPlatform()) === 'android' ? t.androidCameraLine : t.cameraLine, t.settings];
       case 'mismatch': return [t.stopped, t.stoppedLine, t.restart];
       case 'claim_mismatch': return [t.claimMismatch, t.claimMismatchLine, t.restart];
       case 'busy': return [t.busy, t.busyLine, t.retry];
+      case 'pairing_failed': return [t.pairFailed, t.pairFailedLine, t.retry];
+      case 'biometry': return android() ? [t.androidBiometry, t.androidBiometryLine, t.settings] : [t.biometry, t.biometryLine, t.settings];
+      case 'biometry_cancelled': return android() ? [t.androidBiometryCancelled, t.biometryCancelledLine, t.retry] : [t.biometryCancelled, t.biometryCancelledLine, t.retry];
+      case 'timeout': return [t.timeout, t.timeoutLine, t.retry];
       default: return [t.other, t.otherLine, t.retry];
     }
   };
@@ -255,7 +359,11 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
     });
   }));
   return <main class="phone-onboarding" data-phone-onboarding={screen()} lang={c() === phoneCopy.da ? 'da' : 'en'}>
-    <div class="phone-progress" aria-hidden="true"><For each={[0, 1, 2]}>{n => <span classList={{ filled: n === 0 || n === 1 && ['words', 'fingerprint', 'done'].includes(screen()) || n === 2 && screen() === 'done' }} />}</For></div>
+    <ol class="phone-progress" aria-label={c().progress}><For each={[c().stepScan, c().stepCompare, c().stepDone]}>{(label, i) => {
+      const reached = () => i() === 0 || i() === 1 && ['words', 'fingerprint', 'done'].includes(screen()) || i() === 2 && screen() === 'done';
+      const current = () => reached() && (i() === 2 || !(i() === 0 ? ['words', 'fingerprint', 'done'] : ['done']).includes(screen()));
+      return <li classList={{ filled: reached() }} aria-current={current() ? 'step' : undefined}><span class="phone-progress-bar" aria-hidden="true" /><span class="phone-progress-label">{label}</span></li>;
+    }}</For></ol>
     <section data-phone-face>
       <h1 ref={heading} tabindex="-1" aria-describedby={lineId}>{face()[0]}</h1>
       <p id={lineId} class="phone-line">{face()[1]}</p>
@@ -267,22 +375,36 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
         <button type="button" class="quiet" disabled={busy()} onClick={() => void run(reset)}>{c().mismatch}</button>
       </Show>
       <Show when={screen() === 'start' || screen() === 'scanner'}><PrimaryAction disabledReason={busy() ? c().working : !props.scan ? c().unavailable : undefined} onClick={() => void scan()}>{c().scan}</PrimaryAction></Show>
-      <Show when={screen() === 'connecting'}><p class="phone-status" role="status">{c().working}</p></Show>
+      <Show when={screen() === 'connecting'}><p class="phone-waiting" role="status"><span class="phone-spinner" aria-hidden="true" />{c().working}</p>
+        {/* Connecting opens this app's protected pairing key; say why before iOS asks. */}
+        <Show when={(props.platform ?? appPlatform()) === 'ios'}><p class="why" data-faceid-why>{c().faceIdWhy}</p></Show>
+      </Show>
       <Show when={screen() === 'done'}><PrimaryAction onClick={props.onDone}>{c().open}</PrimaryAction></Show>
-      <Show when={screen() === 'error'}><PrimaryAction disabledReason={busy() ? c().working : undefined} onClick={() => void run(recover)}>{errorCopy()[2]}</PrimaryAction></Show>
-    </section>
-    <details class="phone-options" open={options()} onToggle={e => setOptions(e.currentTarget.open)}>
-      <summary>{c().options}</summary>
-      <button type="button" disabled={busy() || !!waiting() || joinStarted || ['words', 'connecting', 'fingerprint'].includes(screen())} onClick={() => void paste()}>{c().paste}</button>
-      <Show when={manualPaste()}><form onSubmit={e => {
+      <Show when={screen() === 'error'}><PrimaryAction disabledReason={busy() ? c().working : undefined} onClick={() => void (stale() ? paste() : run(recover))}>{errorCopy()[2]}</PrimaryAction></Show>
+      {/* A timeout, or a refused camera, still has a way in: paste the link instead. */}
+      <Show when={screen() === 'error' && (error()?.kind === 'timeout' || error()?.kind === 'camera')}>
+        <button type="button" class="phone-secondary" data-phone-paste disabled={busy()} onClick={() => void paste()}>{error()?.kind === 'camera' ? c().pasteInstead : c().pasteNew}</button>
+      </Show>
+      {/* Paste is the second first-class way in: one tap reads the clipboard (iOS asks to allow it). */}
+      <Show when={screen() === 'start' || screen() === 'scanner'}>
+        <button type="button" class="phone-secondary" data-phone-paste disabled={busy() || !!waiting() || joinStarted} onClick={() => void paste()}>{c().paste}</button>
+      </Show>
+      {/* WebKit freezes the page while its paste bubble is up, so the hint is said before the tap. */}
+      <Show when={screen() === 'start' && !manualPaste()}><p class="phone-hint" data-phone-paste-hint>{c().pasteHint}</p></Show>
+      {/* Said next to the action that caused it, not at the foot of the page. */}
+      <Show when={toast()}><p class="phone-toast" role="status">{toast()}</p></Show>
+      <Show when={manualPaste() && (screen() === 'start' || screen() === 'error')}><form class="phone-manual" onSubmit={e => {
         e.preventDefault();
         const link = pasteInput?.value ?? '';
         if (pasteInput) pasteInput.value = '';
         void connect(link);
       }}>
         <label>{c().manualPaste}<input ref={pasteInput} aria-label={c().link} type="password" autocomplete="off" autocapitalize="none" spellcheck={false} /></label>
-        <button type="submit" disabled={busy()}>{c().useLink}</button>
+        <button type="submit" class="phone-secondary" disabled={busy()}>{c().useLink}</button>
       </form></Show>
+    </section>
+    <details class="phone-options" open={options()} onToggle={e => setOptions(e.currentTarget.open)}>
+      <summary>{c().options}</summary>
       <Show when={screen() === 'scanner'}><button type="button" disabled={cancellingScan()} onClick={() => {
         if (cancellingScan()) return;
         setCancellingScan(true);
@@ -296,13 +418,27 @@ export function PhoneOnboarding(props: PhoneOnboardingProps) {
       <details><summary>{c().help}</summary><p>{c().helpLine}</p></details>
       <details><summary>{c().details}</summary><dl>
         <dt>{c().fingerprint}</dt><dd>{preview()?.node_id_fingerprint ?? props.status().node_id ?? '—'}</dd>
-        <dt>{c().endpoint}</dt><dd>{preview()?.endpoint ?? '—'}</dd>
+        {/* A loopback proxy address (127.0.0.1:…) means nothing to a person; show only a real address. */}
+        <Show when={preview()?.endpoint && !LOOPBACK.test(preview()!.endpoint)}><dt>{c().endpoint}</dt><dd>{preview()!.endpoint}</dd></Show>
         <dt>{c().hosted}</dt><dd>{preview()?.hosted_by ?? props.pairing().hosted_by ?? '—'}</dd>
-      </dl><Show when={error()?.detail}><p>{onboardingDiagnostic(error()!.detail, c().helpLine)}</p></Show>
-        <button type="button" disabled={busy()} onClick={() => void run(reset)}>{c().forget}</button>
+      </dl><Show when={error()?.detail}><p>{hostDetail(error()!.detail) ?? onboardingDiagnostic(error()!.detail, c().helpLine)}</p></Show>
       </details>
-      <Show when={['connecting', 'words', 'fingerprint'].includes(screen())}><button type="button" disabled={busy()} onClick={() => void run(reset)}>{c().cancel}</button></Show>
+      {/* Forgetting drops the saved box: one plain confirmation, never behind the help sections. */}
+      {/* Only when there is a box to forget. */}
+      <Show when={hasBox()}>
+      <Show when={confirmForget()} fallback={
+        <button type="button" data-phone-forget disabled={busy()} onClick={askForget}>{c().forget}</button>
+      }>
+        <div ref={confirmBox} class="phone-confirm" role="group" aria-labelledby={forgetId} data-phone-forget-confirm>
+          <p id={forgetId}>{c().forgetConfirm}</p>
+          {/* The safe choice is the strong one; forgetting is marked as the destructive one. */}
+          <button type="button" class="phone-primary-plain" disabled={busy()} onClick={() => setConfirmForget(false)}>{c().keepBox}</button>
+          <button type="button" class="phone-danger" disabled={busy()} onClick={() => { setConfirmForget(false); void run(reset); }}>{c().forgetYes}</button>
+        </div>
+      </Show>
+      </Show>
+      {/* Cancelling drops a saved box too, so it asks the same one question first. */}
+      <Show when={!confirmForget() && ['connecting', 'words', 'fingerprint'].includes(screen())}><button type="button" disabled={busy()} onClick={() => { if (savedBox()) askForget(); else void run(reset); }}>{c().cancel}</button></Show>
     </details>
-    <Show when={toast()}><p class="phone-toast" role="status">{toast()}</p></Show>
   </main>;
 }

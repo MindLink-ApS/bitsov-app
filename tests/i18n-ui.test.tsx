@@ -38,7 +38,7 @@ it('changes mounted settings, composer and wallet labels without a reload', asyn
   expect(find('[data-tab="general"]').textContent).toBe('General');
   expect(find('[data-theme-option="light"]').textContent).toBe('Light');
   expect(find(unnamed).textContent).toContain('Unnamed contact');
-  expect(find('[data-track="ai"] .name').textContent).toBe('Ask your node');
+  expect(find('[data-track="ai"] .name').textContent).toBe('Ask your box');
   expect(find('textarea').getAttribute('aria-label')).toBe('Message Maya');
   find('[data-settings-close]').click();
   find('[data-profile]').click(); find('[data-open-wallet]').click();

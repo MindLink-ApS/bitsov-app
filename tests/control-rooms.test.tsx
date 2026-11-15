@@ -363,7 +363,7 @@ describe('rooms in the shell', () => {
     click('[data-track="new"]');
     await vi.waitFor(() => expect($('[data-new-track]')).not.toBeNull());
     expect(mount.textContent).not.toMatch(/coming soon|not on the protocol/i);
-    expect(mount.textContent?.includes('This node does not support rooms yet.')).toBe(!supported);
+    expect(mount.textContent?.includes('This box does not support rooms yet.')).toBe(!supported);
     expect($('[data-room-new]') !== null).toBe(supported);
   });
 
@@ -371,7 +371,7 @@ describe('rooms in the shell', () => {
     stubHost({ node_overview: () => overview(['call_meeting_v1']) });
     await openShell();
     await vi.waitFor(() => expect($('[data-rooms-coming-soon]')).not.toBeNull());
-    expect(text('[data-rooms-coming-soon]')).toMatch(/This node does not support rooms yet/);
+    expect(text('[data-rooms-coming-soon]')).toMatch(/This box does not support rooms yet/);
     expect($('[data-room-new]')).toBeNull();
   });
 
@@ -570,8 +570,8 @@ describe('rooms in the shell', () => {
     click(`[data-track="bound:${AB.id}"]`);
     await vi.waitFor(() => expect($('[data-room-stream] [data-thread-loading]')).not.toBeNull());
     expect($('[data-room-stream] [data-thread-empty]')).toBeNull();
-    refuse({ code: 'node', message: 'Your node did not answer.' });
-    await vi.waitFor(() => expect(text('[data-room-stream] [data-thread-error]')).toBe('Your node did not answer.'));
+    refuse({ code: 'node', message: 'Your box did not answer.' });
+    await vi.waitFor(() => expect(text('[data-room-stream] [data-thread-error]')).toBe('Your box did not answer.'));
     expect($('[data-room-stream] [data-thread-empty]')).toBeNull();
     expect($('[data-room-stream] [data-thread-loading]')).toBeNull();
   });
@@ -644,7 +644,7 @@ describe('rooms in the shell', () => {
     const maya = host.used('message_send').findIndex((c) => c.args!.recipient === A);
     host.emitLive({ type: 'delivery', message_id: `r${maya + 1}`, status: 'rejected', reason: 'room_binding_invalid: invalid room binding: room id does not commit to this roster and salt' });
     await vi.waitFor(() => expect($(`[data-room-refused="${A}"]`)).not.toBeNull());
-    expect(text(`[data-room-refused="${A}"]`)).toBe('Maya: Their node could not match this room’s details, so it refused the message. It was paid; do not send it again.');
+    expect(text(`[data-room-refused="${A}"]`)).toBe('Maya: Their box could not match this room’s details, so it refused the message. It was paid; do not send it again.');
     expect($(`[data-room-refused="${B}"]`)).toBeNull();
   });
 

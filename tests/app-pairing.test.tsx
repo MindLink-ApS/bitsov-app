@@ -255,7 +255,7 @@ describe('app shell pairing wiring', () => {
     await vi.waitFor(() => expect(steps.hidden).toBe(true));
     // The offline card is the page: exactly one visible h1, its title.
     const visibleH1 = () => [...mount!.querySelectorAll('h1')].filter((h) => !h.closest('[hidden]')).map((h) => h.textContent);
-    expect(visibleH1()).toEqual(['Your node is offline']);
+    expect(visibleH1()).toEqual(['Your box is offline']);
     mount.querySelector<HTMLButtonElement>('[data-offline-change]')!.click();
     await vi.waitFor(() => expect(steps.hidden).toBe(false));
     expect(mount.querySelector('[data-ob-head]')).not.toBeNull();
@@ -263,7 +263,7 @@ describe('app shell pairing wiring', () => {
     expect(mount.querySelector('[data-node-offline]')).not.toBeNull();
     // With the setup steps back, the card steps down to h2 under the setup's own h1.
     await vi.waitFor(() => expect(mount!.querySelector('[data-node-offline] [data-offline-title]')!.tagName).toBe('H2'));
-    expect(visibleH1()).not.toContain('Your node is offline');
+    expect(visibleH1()).not.toContain('Your box is offline');
   });
 
   it('a box restarting after setup goes offline for a moment: the ceremony stays mounted, keeps polling, sends no cancel, and completes', async () => {
@@ -355,16 +355,16 @@ describe('app shell pairing wiring', () => {
     mount = document.createElement('div'); document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
     await vi.waitFor(() => expect(mount!.querySelector('[data-first-run]')?.textContent).toContain('42'));
-    expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('Your node is offline');
-    // A remote node is not assumed to be a box: any computer or server.
-    expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('the computer or server running your node');
-    expect(mount.querySelector('[data-node-offline]')?.textContent).not.toMatch(/\bbox\b/i);
+    expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('Your box is offline');
+    // "Box" is the user-facing word; where it runs can still be any computer or server.
+    expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('the computer or server running your box');
+    expect(mount.querySelector('[data-node-offline]')?.textContent).not.toMatch(/\bnode\b/i);
     // Only what is true from this device: new sends are blocked, earlier ones may still settle, and no "nothing is paid" claim.
-    expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('We can’t reach it right now. BitSov keeps trying. New messages can’t be sent until your node is back; ones already sent may still complete.');
+    expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('We can’t reach it right now. BitSov keeps trying. New messages can’t be sent until your box is back; ones already sent may still complete.');
     expect(mount.querySelector('[data-node-offline]')?.textContent).not.toMatch(/nothing is (sent or )?paid/i);
     expect(mount.querySelector('[data-node-offline]')?.textContent).toContain('Last seen: unknown');
     expect(mount.querySelector('[data-node-offline] button')?.textContent).toBe('Retry now');
-    expect(mount.textContent).not.toContain('Node stopped');
+    expect(mount.textContent).not.toContain('Your box has stopped');
     expect(mount.querySelector('[data-composer-bar]')).toBeNull();
   });
 
@@ -404,9 +404,9 @@ describe('app shell pairing wiring', () => {
         await vi.advanceTimersByTimeAsync(1500);
         expect(mount.querySelector('[data-composer-bar]')).toBe(composer);
         expect(mount.querySelector('[data-ob-head]')).toBeNull();
-        expect(mount.textContent).not.toContain('Node stopped');
+        expect(mount.textContent).not.toContain('Your box has stopped');
         if (remaining) {
-          expect(mount.textContent).toContain(`waiting ${remaining} s`);
+          expect(mount.textContent).toContain(`in ${remaining} s`);
           expect(mount.querySelector('[data-node-offline] time')).not.toBeNull();
         } else expect(mount.querySelector('[data-node-offline]')).toBeNull();
       }
@@ -548,7 +548,7 @@ describe('app shell pairing wiring', () => {
       expect(mount.querySelector('[data-gate="g6-local-trust"]')).toBeNull();
       expect(mount.querySelector('[data-step="identity"]')?.getAttribute('data-status')).toBe('done');
       expect(mount.querySelector('[data-step="fund"]')?.getAttribute('data-status')).toBe('active');
-      expect(mount.textContent).not.toContain('This app connects to the node on this Mac.');
+      expect(mount.textContent).not.toContain('This app connects to the box on this Mac.');
     } else {
       expect(panel.textContent).toContain('Loopback authenticated. Ordinary pairing is file-backed on this Mac.');
       expect(gate.textContent).toContain('This node trusts every program on this computer.');

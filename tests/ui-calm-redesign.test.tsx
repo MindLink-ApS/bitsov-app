@@ -133,7 +133,7 @@ describe('settings modal + theme', () => {
   it('marks Rooms as coming soon while still listing any existing sample rooms', async () => {
     start();
     await vi.waitFor(() => expect(mount.querySelector('[data-rooms-coming-soon]')).not.toBeNull());
-    expect(mount.querySelector('[data-rooms-coming-soon]')!.textContent).toMatch(/This node does not support rooms yet/);
+    expect(mount.querySelector('[data-rooms-coming-soon]')!.textContent).toMatch(/This box does not support rooms yet/);
   });
 
   it('moves focus into settings and closes on Escape', async () => {

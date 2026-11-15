@@ -257,7 +257,7 @@ describe('freshness summary and text', () => {
     const summary = summarize(freshness, 0);
     expect(summary.clockSkew).toBe(true);
     expect(freshnessText(summary)).toBe(
-      'Updated 2 s ago. Node clock is ahead of this computer.',
+      'Updated 2 s ago. Box clock is ahead of this computer.',
     );
   });
 
@@ -310,7 +310,7 @@ describe('source label freshness', () => {
     const node = freshnessOf(label);
     expect(node?.dataset.freshness).toBe('fresh');
     expect(node?.textContent).toBe('Updated 12 s ago.');
-    expect(label.textContent).toContain('From your node');
+    expect(label.textContent).toContain('From your box');
 
     clock += 5_000;
     vi.advanceTimersByTime(5_000);

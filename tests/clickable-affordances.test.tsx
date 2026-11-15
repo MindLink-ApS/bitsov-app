@@ -9,15 +9,15 @@ let dispose: (() => void) | undefined;
 let mount: HTMLElement;
 afterEach(() => { dispose?.(); mount?.remove(); });
 
-it('the node status pill reads as a button and opens Settings → Node', async () => {
+it('the node status pill reads as a button and opens Settings → Box', async () => {
   mount = document.createElement('div'); document.body.appendChild(mount);
   dispose = render(() => <ControlCenter source={sampleSource({ firstLiveMs: 1e9 })} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
   await vi.waitFor(() => expect(mount.querySelector('.node-pill .pill-chevron')).not.toBeNull());
   const pill = mount.querySelector<HTMLButtonElement>('.node-pill')!;
   expect(pill.getAttribute('aria-haspopup')).toBe('dialog');
-  expect(pill.title).toContain('open node settings');
+  expect(pill.title).toContain('open box settings');
   // The chevron adds no words to the status text.
-  expect(mount.querySelector('.node-pill .what')?.textContent).toBe('Connected to your node');
+  expect(mount.querySelector('.node-pill .what')?.textContent).toBe('Connected to your box');
   expect(pill.textContent).not.toMatch(/\d+\/\d+/);
   expect(mount.querySelector('.track-group h2')?.textContent).toBe('Contacts');
   pill.click();
