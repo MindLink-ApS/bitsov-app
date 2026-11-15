@@ -11,6 +11,7 @@ import { t as tr, possessive, languagePref, setLanguagePref, type LanguagePref }
 import { CallRepairs } from './CallRepairs';
 import { provenUnpaid } from './paymentOutcome';
 import { AddDevice } from '../onboarding/AddDevice';
+import { PairWords } from '../onboarding/PairWords';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
 import { ConnectionCard, nextLastCall, type NodeAnswer, type StunSource, type TrackedCall } from './ConnectionCard';
 import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
@@ -31,8 +32,9 @@ import { pollingSource } from './polling';
 import { deliveryPoller } from './deliveryPoll';
 import { readSpendPreset, saveSpendPreset } from './prefs';
 import { WelcomeHome } from './WelcomeHome';
+import { ChainNotice } from './ChainNotice';
 import { DelayedSpinner } from './DelayedSpinner';
-import { MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
+import { isChainUnavailable, MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
 import { batch, createEffect, createMemo, createResource, createSignal, createUniqueId, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
 import { createStore, produce, reconcile } from 'solid-js/store';
 import { qrSvg } from '../qr';
@@ -50,13 +52,13 @@ import { custodyBadge, CustodyBadgeView } from './custody';
 import { NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
-import { callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { answerCost, callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, isCallTrafficKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { CallReportCopy } from './CallReportCopy';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
-import { nodeRoutedAudio } from './callFlags';
-import { createNodeRoutedConnection } from './nodeRoutedConnection';
+import { nodeRoutedAudio, sealedAudio } from './callFlags';
+import { createNodeRoutedConnection, sealLabelScope, type SealState } from './nodeRoutedConnection';
 import { waitUntilPaid, type MinutesDeps, type MinutesView } from './callMinutes';
-import { hostMediaBridge, unavailableMediaBridge } from './mediaBridge';
+import { hostCallSeal, hostMediaBridge, unavailableMediaBridge } from './mediaBridge';
 import { createCallAudio } from './callAudio';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
 import { NewRoomPanel, RoomThread, type RoomSend, type ThreadRead } from './RoomPanel';
@@ -488,7 +490,7 @@ export function ControlCenter(props: Props) {
       if (readRevision[key] !== rev) return;
       const error = asActionError(e);
       setThreadRead(key, 'failed');
-      setThreadError(key, error.code === 'not_ready' ? undefined : typeof e === 'string' ? e : error.message);
+      setThreadError(key, error.code === 'not_ready' ? undefined : error.message);
       return;
     }
     // Messages an older read brought are still merged; only the current read sets the state.
@@ -518,7 +520,7 @@ export function ControlCenter(props: Props) {
       const q = await source.priceQuote((t as { id: string }).id);
       if (read === quoteRead && track() && trackKey(track()!) === trackKey(t)) setQuote(q);
     } catch (error) {
-      if (read === quoteRead && track() && trackKey(track()!) === trackKey(t)) setQuoteError(peerNotReadyMessage(error, t.kind === 'peer' ? nameOf(t.id) : tr('caThisPeer')) ?? tr('caPriceUnavailableCouldNotReadPeerPrice'));
+      if (read === quoteRead && track() && trackKey(track()!) === trackKey(t)) setQuoteError(isChainUnavailable(error) ? tr('chainUnavailable') : peerNotReadyMessage(error, t.kind === 'peer' ? nameOf(t.id) : tr('caThisPeer')) ?? tr('caPriceUnavailableCouldNotReadPeerPrice'));
     }
   };
   const [roomQuote, setRoomQuote] = createSignal<RoomQuote | null>(null);
@@ -845,7 +847,7 @@ export function ControlCenter(props: Props) {
       setBudgetConfirmed(false);
       const error = asActionError(e);
       setGrantUnknown(error.code === 'grant_unknown');
-      setErrors('budgetPoll', typeof e === 'string' ? e : error.message);
+      setErrors('budgetPoll', error.message);
     }
   };
   // Our own price with no peer: what a stranger pays at this node's door.
@@ -1384,7 +1386,7 @@ export function ControlCenter(props: Props) {
     if (!outcome.ok) foldMembrane((log) => membraneRefused(log, outcome.error, trackKey(t), Date.now()));
     // A message whose outcome is not proven unpaid always keeps a card with its words (`text`), whatever its code.
     const keeps = text !== undefined;
-    if (!outcome.ok && (keeps || (outcome.error.code !== 'not_ready' && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price' && outcome.error.code !== 'readmission_capped' && outcome.error.code !== 'readmission_quoted'))) {
+    if (!outcome.ok && (keeps || isChainUnavailable(outcome.error) || (outcome.error.code !== 'not_ready' && !needsApproval(outcome.error) && !isBudgetStop(outcome.error) && outboundKind(outcome.error) !== 'price' && outcome.error.code !== 'readmission_capped' && outcome.error.code !== 'readmission_quoted'))) {
       addArtifact(t, { type: 'failed', action: FAILURE_LABEL[outcome.error.code] ?? action, error: outcome.error, ...(text !== undefined ? { text } : {}) });
     }
     return outcome;
@@ -1392,6 +1394,14 @@ export function ControlCenter(props: Props) {
 
   // Calls: media is peer to peer in this webview; each signal is one paid send.
   const [callView, setCallView] = createSignal<CallView>(CALL_IDLE);
+  // Only ever set on a build with sealing on. Null: the plain label.
+  const [callSeal, setCallSeal] = createSignal<SealState | null>(null);
+  const [callWords, setCallWords] = createSignal<string[] | null>(null);
+  // Each connection gets its own label setter; only the newest may change the label.
+  const nextSealLabel = sealLabelScope((state, words) => {
+    setCallSeal(state);
+    setCallWords(words ?? null);
+  });
   const [waitingCalls, setWaitingCalls] = createSignal<CallView[]>([]);
   const waitingPanels = new Map<string, HTMLElement>();
   const isIncoming = (peer: string, id: string) => [callView(), ...waitingCalls()].some(v => v.peer === peer && v.callId === id && v.phase === 'incoming' && !v.silenced);
@@ -1447,8 +1457,8 @@ export function ControlCenter(props: Props) {
     },
     grant: () => budget()?.node_grant ?? null,
     quote: (peer) => act(() => source.callQuote(peer)),
-    signal: async (peer, kind, plaintext, maxMsat, minutes) => {
-      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes));
+    signal: async (peer, kind, plaintext, maxMsat, minutes, maxHangupMsat) => {
+      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes, maxHangupMsat));
       if (!r.ok && (needsApproval(r.error) || r.error.code === 'spend_refused' || /token lacks.*spend|403/i.test(r.error.message))) setCallApproval(true);
       void loadBudget();
       void loadWallet();
@@ -1468,10 +1478,13 @@ export function ControlCenter(props: Props) {
           admitted: callMinutes ? (callId, peer, closed) => waitUntilPaid(callMinutes.status, peer, callId, () => Date.now(), closed) : undefined,
           // A media session that closed for good ends its call, so no further minute is paid.
           onSession: (event) => { if (event.state === 'closed') calls.mediaClosed(event.callId); },
+          // The literal flag lets a build without it drop the seal code entirely.
+          ...(import.meta.env.VITE_CALL_SEAL === 'sealed' && sealedAudio() && isTauri() ? { seal: hostCallSeal(), onSeal: nextSealLabel() } : {}),
         })
       : (config) => new RTCPeerConnection(config),
     now: () => Date.now(),
     onView: view => {
+      if (view.callId !== callView().callId || view.phase === 'idle' || view.phase === 'ended') nextSealLabel();
       setCallView(view);
       if (view.phase === 'incoming' && !view.silenced && view.callId && view.peer) notifications?.call(`${view.peer}:${view.callId}`, nameOf(view.peer), () => isIncoming(view.peer!, view.callId!), () => revealIncoming(view.callId!, view.peer!));
     },
@@ -1528,8 +1541,8 @@ export function ControlCenter(props: Props) {
   const nodeMeets = () => overview()?.capabilities?.includes('call_meeting_v1') === true;
   const meetings = createMeetingEngine({
     quote: (peer) => act(() => source.callQuote(peer)),
-    signal: async (peer, kind, plaintext, maxMsat) => {
-      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat));
+    signal: async (peer, kind, plaintext, maxMsat, minutes, maxHangupMsat) => {
+      const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes, maxHangupMsat));
       void loadBudget();
       void loadWallet();
       return r;
@@ -1853,8 +1866,8 @@ export function ControlCenter(props: Props) {
         const paid = r.error.undelivered;
         update({ paid, admission: null, pendingId: r.error.pending_id ?? a.pendingId, note: tr('caStillNotDeliveredPaidForThisMessageSoFar', sats(paid.paid_msat), satUnit(paid.paid_msat)) });
       } else if (r.error.code === 'not_ready') {
-        // The shared notice owns this refusal; the paid card stays retryable.
-        update({ ownerApproval: null, note: null });
+        // The paid card stays retryable; a chain refusal names only this attempt.
+        update({ ownerApproval: null, note: isChainUnavailable(r.error) ? tr('chainUnavailableRetry') : null });
       } else if (r.error.code === 'retry_needs_admission') {
         // Stopped before paying: the price to approve, when the node could tell.
         update({ admission: r.error.admission ?? null, note: r.error.message });
@@ -2043,6 +2056,7 @@ export function ControlCenter(props: Props) {
             queueMicrotask(() => callPanel?.focus());
           }} />
           {props.offline}
+          <ChainNotice overview={overview()} />
           <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
             onEnded={() => { void loadBudget(); void loadWallet(); }} />
           <Show when={moneyBlocked()}><p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p></Show>
@@ -2098,6 +2112,7 @@ export function ControlCenter(props: Props) {
           <Show when={track()}><button type="button" class="link ios-back" data-ios-back="thread" onClick={phoneBack}><Show when={phoneShell()}><span aria-hidden="true">‹ </span></Show>{tr('uiBack')}</button></Show>
           <Show when={!phoneShell()}>
             {props.offline}
+            <ChainNotice overview={overview()} />
             <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
               onEnded={() => { void loadBudget(); void loadWallet(); }} />
           </Show>
@@ -2448,7 +2463,7 @@ export function ControlCenter(props: Props) {
           return <CallPanel waiting answerBlocked={!['idle', 'ended'].includes(callView().phase) || meetingOn() || callView().pendingCount > 0 || callView().unknownCount > 0 || (!!callView().close && callView().close!.status !== 'closed')} view={view()} payment={null} approval={null} approvalOpen={false}
             panelRef={el => { waitingPanels.set(key, el); }}
             blocked={moneyBlocked()} streams={{ local: null, remote: null }} nameOf={nameOf} quote={actions.callQuote}
-            accept={() => { if (!moneyBlocked()) void calls.acceptWaiting(key); }} decline={() => void calls.declineWaiting(key)} dismiss={() => calls.dismissWaiting(key)}
+            accept={(shown) => { if (!moneyBlocked()) void calls.acceptWaiting(key, shown); }} decline={(shown) => void calls.declineWaiting(key, shown)} ignore={() => calls.ignoreWaiting(key)} dismiss={() => calls.dismissWaiting(key)}
             hangup={() => {}} mute={() => {}} camera={() => {}} closeAgain={() => {}} endStuck={() => {}} callAgain={() => {}} />;
         }}</For>
       </div>
@@ -2482,12 +2497,15 @@ export function ControlCenter(props: Props) {
         }</Show>}
         blocked={moneyBlocked()}
         routed={routedCalls}
+        seal={callSeal()}
+        words={callWords()}
         view={callView()}
         streams={callStreams()}
         nameOf={nameOf}
         quote={actions.callQuote}
-        accept={() => { if (!moneyBlocked()) void calls.accept(); }}
-        decline={() => void calls.decline()}
+        accept={(shown) => { if (!moneyBlocked()) void calls.accept(shown); }}
+        decline={(shown) => void calls.decline(shown)}
+        ignore={() => calls.ignore()}
         hangup={() => void calls.hangup()}
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
@@ -3086,8 +3104,8 @@ function Conversation(props: {
       room: props.roomQuote,
       nowMs: props.now,
     });
-  // Protocol payloads belong to their own views, not the chat stream.
-  const items = createMemo(() => streamItems(props.messages.filter((m) => !isCallKind(m.kind) && !isPorchKind(m.kind) && !(props.track.kind === 'peer' && roomOf(m, props.ownId))), props.artifacts));
+  // Protocol payloads belong to their own views, not the chat stream (a call's minute blocks included).
+  const items = createMemo(() => streamItems(props.messages.filter((m) => !isCallTrafficKind(m.kind) && !isPorchKind(m.kind) && !(props.track.kind === 'peer' && roomOf(m, props.ownId))), props.artifacts));
   // Solid's For keys by identity. Primitive ids keep rows mounted when reads replace objects.
   const keyedItems = createMemo(() => new Map(items().map((item) => [
     item.type === 'message' ? `message:${item.message.id}` : `artifact:${item.artifact.id}`, item,
@@ -3656,6 +3674,16 @@ function CallMinutesLine(props: { minutes: MinutesView; ended: boolean; confirm?
   );
 }
 
+/** The route label's words. They claim only what this call's key exchange has shown. */
+function sealLabel(state: SealState | null) {
+  switch (state) {
+    case 'setting_up': return 'caCallSealSettingUp' as const;
+    case 'sealed': return 'caCallSealed' as const;
+    case 'not_sealed': return 'caCallNotSealed' as const;
+    default: return 'caNodeRoutedCallLabel' as const;
+  }
+}
+
 /** The call card: incoming (accept/decline with price), ringing, live (mute, camera, duration, hang up), ended. */
 function CallPanel(props: {
   waiting?: boolean;
@@ -3667,12 +3695,16 @@ function CallPanel(props: {
   blocked: boolean;
   /** M6: audio goes through both nodes; no direct connection, STUN or recovery notes. */
   routed?: boolean;
+  seal?: SealState | null;
+  words?: string[] | null;
   view: CallView;
   streams: { local: MediaStream | null; remote: MediaStream | null };
   nameOf: (id: string) => string;
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
-  accept: () => void;
-  decline: () => void;
+  accept: (shown: CallQuote) => void;
+  decline: (shown: CallQuote) => void;
+  /** Stop ringing here: nothing sent or paid. */
+  ignore: () => void;
   hangup: () => void;
   mute: () => void;
   camera: () => void;
@@ -3690,7 +3722,9 @@ function CallPanel(props: {
   openChat?: (peer: string) => void;
 }) {
   const [tick, setTick] = createSignal(Date.now());
-  const [answer, setAnswer] = createSignal<number | null>(null);
+  /** The price on Accept and Decline: a press pays at most this, and neither works without it. */
+  const [shown, setShown] = createSignal<CallQuote | null>(null);
+  const [noPrice, setNoPrice] = createSignal(false);
   const [again, setAgain] = createSignal<CallQuote | null>(null);
   const [againError, setAgainError] = createSignal<string | null>(null);
   createEffect(on(() => props.view.callId, () => { setAgain(null); setAgainError(null); }));
@@ -3719,15 +3753,23 @@ function CallPanel(props: {
     const t = setInterval(() => setTick(Date.now()), 1000);
     onCleanup(() => clearInterval(t));
   });
-  createEffect(on(() => (props.view.phase === 'incoming' ? props.view.peer : null), (peer) => {
-    setAnswer(null);
-    if (peer) void props.quote(peer).then((r) => { if (r.ok) setAnswer(signalCost(r.value)); });
+  createEffect(on(() => (props.view.phase === 'incoming' ? props.view.callId : null), (callId) => {
+    setShown(null);
+    setNoPrice(false);
+    const peer = props.view.peer;
+    if (callId && peer) void props.quote(peer).then((r) => {
+      // A waiting card can be gone by now, and its view with it.
+      if ((props.view as CallView | undefined)?.callId !== callId) return;
+      if (r.ok && answerCost(r.value) !== null) setShown(r.value);
+      else setNoPrice(true);
+    });
   }));
   const v = () => props.view;
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
   // The host refused before anything was created (`call_needs_contact`): no signal or media lines, one next step.
   const needsContact = () => v().phase === 'ended' && v().errorCode === 'call_needs_contact';
-  const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
+  // A ceiling, not what it will cost: the routing fee is usually far less.
+  const price = () => { const q = shown(); const m = q && answerCost(q); return m === null ? '' : ` · ${tr('caUpToAmount', fmtAmount(m))}`; };
   /** The M6 paid-minutes line is on the card (same condition as its render below). */
   const minutesShown = () => !!(props.routed && v().outgoing && v().minutes);
   return (
@@ -3741,6 +3783,7 @@ function CallPanel(props: {
           </Show>
         </header>
         <Show when={props.waiting && props.answerBlocked && v().phase === 'incoming'}><p class="hint">{tr('incomingWaiting')}</p></Show>
+        <Show when={noPrice() && v().phase === 'incoming'}><p class="hint" role="status" data-call-answer-price>{tr('caCallAnswerNoPrice')}</p></Show>
         {props.approval}
         {/* Across networks a call needs a STUN server: said where it matters, while a call is being set up or has failed to connect. */}
         <Show when={!props.routed && (['calling', 'ringing', 'connecting'].includes(v().phase) || (v().phase === 'ended' && (v().reason === 'failed' || v().reason === 'timeout')))}>
@@ -3842,8 +3885,9 @@ function CallPanel(props: {
         <div class="call-actions">
           <Switch>
             <Match when={v().phase === 'incoming'}>
-              <button type="button" class="primary soft money" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced} onClick={() => props.accept()}>{tr('uiAccept')}{price(answer())}</button>
-              <button type="button" class="soft" data-call-decline disabled={props.blocked || props.view.silenced} onClick={() => props.decline()}>{tr('uiDecline')}{price(answer())}</button>
+              <button type="button" class="primary soft money" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.accept(q); }}>{tr('uiAccept')}{price()}</button>
+              <button type="button" class="soft" data-call-decline disabled={props.blocked || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.decline(q); }}>{tr('uiDecline')}{price()}</button>
+              <button type="button" class="soft" data-call-ignore disabled={props.view.silenced} onClick={() => props.ignore()}>{tr('uiIgnore')}</button>
             </Match>
             <Match when={needsContact() && props.openChat && v().peer}>
               <button type="button" class="primary soft" data-call-message-first onClick={() => props.openChat!(v().peer!)}>{tr('caMessageFirst')}</button>
@@ -3881,7 +3925,13 @@ function CallPanel(props: {
         </div>
         {/* M6: the honest label for a node-routed call, from ringing until it ends. It stays visible until the apps encrypt end to end. */}
         <Show when={props.routed && v().phase !== 'idle' && v().phase !== 'ended'}>
-          <p class="hint" data-call-route="node">{tr('caNodeRoutedCallLabel')}</p>
+          <p class="hint" data-call-route="node" data-call-seal={props.seal ?? undefined}>{tr(sealLabel(props.seal ?? null))}</p>
+          <Show when={import.meta.env.VITE_CALL_SEAL === 'sealed' && props.seal === 'sealed' && props.words?.length === 4 && props.words}>
+            {(words) => <div data-call-words>
+              <PairWords words={words()} />
+              <p class="hint">{tr('caCallCompareWords')}</p>
+            </div>}
+          </Show>
         </Show>
         {/* A short card while the call lasts: the longer notes wait behind Details (display only; same texts and amounts). */}
         <Show when={v().phase !== 'ended' && (!props.routed || v().phase !== 'idle')}>
@@ -5318,14 +5368,14 @@ function Composer(props: {
     if (!room()) {
       if (props.quoteError) return props.quoteError;
       if (!props.quote) return tr('uiPriceLoading');
-      if (props.quote.send_unavailable) return peerNotReadyMessage(props.quote.send_unavailable, props.name) ?? tr('uiPriceUnavailable', props.quote.send_unavailable);
+      if (props.quote.send_unavailable) return isChainUnavailable(props.quote.send_unavailable) ? tr('chainUnavailable') : peerNotReadyMessage(props.quote.send_unavailable, props.name) ?? tr('uiPriceUnavailable', props.quote.send_unavailable);
     }
     if (readmitPrice()) return Number.isSafeInteger(readmitPrice()!.total_msat) && readmitPrice()!.total_msat > 0 ? null : tr('uiPriceUnavailableInvalidPrice');
     if (room()) return props.cost ? null : tr('uiPriceLoading');
     if (doorWanted() && door()) {
       const d = door()!;
       if (d.loading) return tr('uiPriceLoading');
-      if (!d.quote) return peerNotReadyMessage(d.error, props.name) ?? tr('uiPriceUnavailableFirstContactQuoteUnavailable');
+      if (!d.quote) return isChainUnavailable(d.error) ? tr('chainUnavailable') : peerNotReadyMessage(d.error, props.name) ?? tr('uiPriceUnavailableFirstContactQuoteUnavailable');
       if (!Number.isSafeInteger(d.quote.total_msat) || d.quote.total_msat <= 0) return tr('uiPriceUnavailableInvalidPrice');
       if (d.quote.expires_at * 1000 <= props.now) return tr('uiPriceUnavailableFirstContactQuoteExpired');
       return null;
@@ -5446,6 +5496,14 @@ function Composer(props: {
     }
   };
 
+  /** The cost on the button. A file's figure is a ceiling: its price plus the most routing can cost. */
+  const labelPrice = () => {
+    const s = shown();
+    if (s.msat === null) return '';
+    const figure = `${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
+    return ` · ${mode() === 'file' ? tr('uiFileUpTo', figure) : figure}`;
+  };
+
   const label = () => {
     if (paying()) return tr('uiPaying');
     if (deviceWait()) return tr('uiWaitingForYourOtherDevice');
@@ -5454,8 +5512,7 @@ function Composer(props: {
       return isMobilePlatform() ? tr('uiApproveWithBiometrics') : tr('uiApproveWithTouchID');
     }
     if (viaBudget()) {
-      const s = shown();
-      const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
+      const price = labelPrice();
       switch (stand().kind) {
         case 'paused': return tr('uiResumePayments');
         case 'waiting': return tr('uiWaitingForApproval');
@@ -5473,8 +5530,7 @@ function Composer(props: {
       if (props.spend?.state === 'unavailable') return tr('uiSpendingUnavailable');
       return canContinue('grant') ? tr('uiApproveSend') : tr('uiSend');
     }
-    const s = shown();
-    const price = s.msat === null ? '' : ` · ${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
+    const price = labelPrice();
     return { message: tr('uiSend'), pay: tr('uiPay'), request: tr('uiCreateInvoice'), file: tr('uiSendFile') }[mode()] + (mode() === 'request' ? '' : price);
   };
 
@@ -6376,7 +6432,7 @@ function Composer(props: {
               <strong>{tr('uiSendAFile')}</strong>
               <button type="button" class="link" data-composer-close aria-label={tr('uiClose')} onClick={closePanel}>✕</button>
             </div>
-            <div class="composer-main">
+            <div class="composer-main file-row">
               <button
                 type="button"
                 class="attach soft icon-btn"
@@ -6678,8 +6734,9 @@ function Composer(props: {
                   <span class="unit">{satUnit(shown().msat!)}</span>
                 </span>
               </Show>
-              {/* The price line already says a price problem (with Retry): not repeated as the cost basis. */}
-              <Show when={!(mode() === 'message' && priceProblem() && shown().basis === priceProblem())}>
+              {/* The price line already says a price problem (with Retry): not repeated as the cost basis.
+                  With no draft the price line is empty, so the basis is where the problem is said. */}
+              <Show when={!(mode() === 'message' && priceProblem() && shown().basis === priceProblem() && priceLine() === priceProblem())}>
                 <span class="basis" title={shown().basis}>{shown().basis}</span>
               </Show>
             </div>
@@ -7076,8 +7133,8 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
           {/* The petname is local; Touch ID names the same key, never a name. */}
           <strong>
             {tr('uiApprove')} {props.name} {tr('extraNode')} <code data-touch-peer>{shortId(props.peer)}</code>{tr('extraWith')} {mobile ? tr('biometrics') : tr('uiTouchID')}.
-          </strong> {tr('uiUpTo105')} <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT)}</span> {tr('extraADayAtMost')}{' '}
-          <span data-touch-per-act>{fmtAmount(perAct())}</span> {tr('extraPerMessageFor24Hours')}
+          </strong> {tr('uiUpTo105')} <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT)}</span> {tr('extraInTotalFor24HoursAtMost')}{' '}
+          <span data-touch-per-act>{fmtAmount(perAct())}</span> {tr('extraPerMessage')}
         </span>
       </p>
       <div class="quiet-detail" data-touch-detail>
@@ -7299,7 +7356,7 @@ function BudgetBar(props: {
               <Show when={st().raiseTo}>
                 {(to) => (
                   <button type="button" class="primary small money" data-budget-raise-total disabled={props.actions.moneyBlocked()} onClick={() => void props.actions.approveBudget(to(), props.budget.preset)}>
-                    {tr('uiApprove')} {fmtAmount(to())} {tr('uiADay')}
+                    {tr('uiApprove')} {fmtAmount(to())} {tr('uiInTotalForUpTo24Hours')}
                   </button>
                 )}
               </Show>
@@ -8245,6 +8302,7 @@ function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Elem
       {props.pairAnother}
       <HubTrustInfo level={3} />
       {props.connection}
+      <ChainNotice overview={props.overview} />
       <Show when={props.overview} fallback={<Show when={!props.error}><DelayedSpinner /></Show>}>
         {(o) => (
           <>

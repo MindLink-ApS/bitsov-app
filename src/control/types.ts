@@ -197,6 +197,7 @@ export type NodeReadiness = {
 };
 
 export type NodeOverview = {
+  chain_view?: { explorer_default?: boolean; trust_level: string } | null;
   money_ready?: boolean | null;
   readiness?: NodeReadiness | null;
   node_id: string;
@@ -471,7 +472,7 @@ export type ActionError = {
     | 'approval_rate_limited' | 'approval_invalid' | 'approval_unsaved' | 'approval_changed' | 'approval_self'
     // H2 call admissions: a new offer while an earlier one is still open; ending one the host never recorded;
     // a second hangup; the node refusing a call signal before payment.
-    | 'call_needs_node_upgrade'
+    | 'call_needs_node_upgrade' | 'call_unsupported'
     | 'call_admission_open' | 'call_not_found' | 'hangup_in_flight' | 'call_identity_changed'
     // M6 call minutes: the host or node refused a block or the call's reservation before paying.
     | 'call_block_not_due' | 'call_reservation_closed' | 'call_price_changed'
@@ -485,6 +486,8 @@ export type ActionError = {
     // `call_hangup_unpayable`: a lower signed limit the owner could raise;
     // `call_hangup_above_message_max`: above the most any message payment may carry.
     | 'call_hangup_unpayable' | 'call_hangup_above_message_max'
+    // No live price for an answer or hangup; a minute past the agreed hold. Nothing paid.
+    | 'call_price_unknown' | 'call_minutes_above_hold'
     | 'invalid'
     | 'node';
   message: string;
