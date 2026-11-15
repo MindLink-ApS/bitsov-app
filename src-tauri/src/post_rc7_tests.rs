@@ -759,3 +759,96 @@ async fn saving_a_home_node_link_stops_offering_a_node_on_this_mac() {
     assert!(!calls.exists());
     assert!(!local_setup_consent_path(&app_data).exists());
 }
+
+#[cfg(unix)]
+async fn paused_initial_setup_import(resume: bool) -> Result<RemoteImportView, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("app-data");
+    let entered = dir.path().join("init-entered");
+    let release = dir.path().join("init-release");
+    let program = dir.path().join("paused-node");
+    std::fs::write(&program, format!(r#"#!/bin/sh
+if [ "$1" = init ]; then
+  : > '{}'
+  while [ ! -f '{}' ]; do sleep 0.01; done
+  mkdir -p "$3"
+  : > "$3/konsensus.toml"
+  exit 0
+fi
+exit 1
+"#, entered.display(), release.display())).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let app = first_run_app(program);
+    let state = app.state::<NodeState>();
+    if resume {
+        record_local_setup_consent(&app_data).unwrap();
+    } else {
+        bootstrap_node_at(app.handle(), app_data.clone()).await;
+    }
+    let startup = async {
+        if resume {
+            bootstrap_node_at(app.handle(), app_data.clone()).await;
+        } else {
+            let _ = node_setup_local_at(app.handle(), &state, &app_data, true).await;
+        }
+    };
+    let import = async {
+        let started = tokio::time::timeout(Duration::from_secs(10), async {
+            while !entered.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await;
+        if started.is_err() {
+            std::fs::write(&release, b"").unwrap();
+            panic!("initialization did not reach the barrier");
+        }
+        let link = super::remote_connect_tests::ticket("127.0.0.1:5678".into(), false);
+        let result = tokio::time::timeout(Duration::from_secs(2),
+            remote_access_import_at(app.handle(), &state, &app_data, &link)).await;
+        std::fs::write(&release, b"").unwrap();
+        result.expect("import deadlocked behind initialization")
+    };
+    let (_, imported) = tokio::join!(startup, import);
+    assert!(app_data.join("konsensus.toml").exists(), "initialization must complete after release");
+    let saved = remote_access::load_persisted(&app_data).unwrap().is_some();
+    state.stop_for_restart(Duration::from_secs(2));
+    assert_eq!(saved, imported.is_ok(), "import result must match persistence");
+    imported
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_initial_setup_refuses_home_link() {
+    let imported = paused_initial_setup_import(false).await;
+    assert!(imported.unwrap_err().contains("setting up a node on this Mac"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resumed_initial_setup_refuses_home_link() {
+    let imported = paused_initial_setup_import(true).await;
+    assert!(imported.is_err(), "a home-node link was saved while the first initialization was paused");
+}
+
+/// Desktop import is serialized with local setup on `remote_change`: while the
+/// setup holds it, saving a home-node link waits instead of racing ahead.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_home_node_link_import_waits_for_the_setup_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("app-data");
+    let (program, _calls) = scripted_first_run_node(dir.path());
+    let app = first_run_app(program);
+    let state = app.state::<NodeState>();
+    let link = super::remote_connect_tests::ticket("127.0.0.1:5678".into(), false);
+    let held = state.remote_change.lock().await;
+    let waited = tokio::time::timeout(
+        Duration::from_millis(300),
+        remote_access_import_at(app.handle(), &state, &app_data, &link),
+    )
+    .await;
+    assert!(waited.is_err(), "import did not wait for the setup lock");
+    drop(held);
+    assert!(remote_access::load_persisted(&app_data).unwrap().is_none(), "nothing saved while it waited");
+}

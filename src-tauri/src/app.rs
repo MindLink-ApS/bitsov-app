@@ -1002,6 +1002,13 @@ fn local_setup_needed(app_data_dir: &Path, config: &Path, dev_node: bool) -> Res
     Ok(!consent.try_exists().map_err(|_| "Cannot inspect the local node setup choice")?)
 }
 
+/// A home-node link is live or saved for the next start. Unreadable counts as saved.
+#[cfg(all(desktop, not(feature = "mobile")))]
+fn home_link_chosen(state: &NodeState, app_data_dir: &Path) -> bool {
+    state.remote_mode.load(Ordering::SeqCst)
+        || remote_access::load_persisted(app_data_dir).map(|saved| saved.is_some()).unwrap_or(true)
+}
+
 /// Durably record the owner's choice before anything is created.
 #[cfg(all(desktop, not(feature = "mobile")))]
 fn record_local_setup_consent(app_data_dir: &Path) -> Result<(), String> {
@@ -1875,36 +1882,68 @@ async fn start_local_node(
         match local_setup_needed(app_data_dir, &config, dev_sidecar.is_some()) {
             Ok(false) => {}
             Ok(true) => {
-                state.local_setup_needed.store(true, Ordering::SeqCst);
+                // Serialized with home-node link import: never offer this Mac
+                // once a home-node link was saved.
+                let _change = state.remote_change.lock().await;
+                if !home_link_chosen(&state, app_data_dir) {
+                    state.local_setup_needed.store(true, Ordering::SeqCst);
+                }
                 return;
             }
             Err(error) => return set_error(&state, error),
         }
     }
+    // First initialization (no config yet), explicit or resumed after a recorded
+    // choice: claim it against a home-node link under `remote_change`, so a link
+    // cannot be saved while this Mac's first node is being created.
+    let first_init = !config.try_exists().unwrap_or(false);
+    if first_init {
+        let _change = state.remote_change.lock().await;
+        if home_link_chosen(&state, app_data_dir) {
+            state.local_setup_running.store(false, Ordering::SeqCst);
+            return set_error(&state, "BitSov is set to use your node at home. Forget that link first.");
+        }
+        state.local_setup_running.store(true, Ordering::SeqCst);
+    }
+    run_local_node(app, &state, data_dir, &config, dev_sidecar).await;
+    if first_init {
+        let _change = state.remote_change.lock().await;
+        state.local_setup_running.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(all(desktop, not(feature = "mobile"), unix))]
+async fn run_local_node(
+    app: &AppHandle<impl tauri::Runtime>,
+    state: &NodeState,
+    data_dir: &Path,
+    config: &Path,
+    dev_sidecar: Option<PathBuf>,
+) {
     let _ = std::fs::create_dir_all(data_dir);
 
     let owner_enabled = match local_owner::launch_enabled(
-        local_owner::enabled(dev_sidecar.is_some()), &config,
+        local_owner::enabled(dev_sidecar.is_some()), config,
     ) {
         Ok(enabled) => enabled,
-        Err(error) => return set_error(&state, error),
+        Err(error) => return set_error(state, error),
     };
     state.owner.active.store(owner_enabled, Ordering::SeqCst);
     if !owner_enabled && !config.exists() {
         if let Err(e) = init_node(app, data_dir, dev_sidecar.as_deref()).await {
-            return set_error(&state, e);
+            return set_error(state, e);
         }
     }
 
-    *state.config.lock().unwrap() = Some(config.clone());
+    *state.config.lock().unwrap() = Some(config.to_path_buf());
 
-    if let Err(e) = spawn_node(app, &config) {
-        return set_error(&state, e);
+    if let Err(e) = spawn_node(app, config) {
+        return set_error(state, e);
     }
-    if let Err(e) = wait_for_health(&state).await {
-        return set_error(&state, e);
+    if let Err(e) = wait_for_health(state).await {
+        return set_error(state, e);
     }
-    finish_auth(&state, data_dir).await;
+    finish_auth(state, data_dir).await;
 }
 
 /// A phone is a pure client: startup either attaches to the persisted, pinned
@@ -3006,14 +3045,19 @@ async fn node_setup_local_at(
     {
         let _startup = StartupFinished(&state.local_startup);
         start_local_node(app, app_data_dir, app_data_dir, None, true).await;
-        state.local_setup_running.store(false, Ordering::SeqCst);
         let error = state.error.lock().unwrap().clone();
+        // Settle completion under `remote_change`, so a home-node link import
+        // cannot interleave with re-offering this Mac.
+        let _change = state.remote_change.lock().await;
+        state.local_setup_running.store(false, Ordering::SeqCst);
         match error {
             Some(error) => {
                 // Setup failed before a node config existed on disk (the owner
-                // path fills `state.config` before it spawns): the same choice
-                // can be retried.
-                if !app_data_dir.join("konsensus.toml").try_exists().unwrap_or(true) {
+                // path fills `state.config` before it spawns), and no home-node
+                // link was saved meanwhile: the same choice can be retried.
+                if !app_data_dir.join("konsensus.toml").try_exists().unwrap_or(true)
+                    && !home_link_chosen(state, app_data_dir)
+                {
                     state.local_setup_needed.store(true, Ordering::SeqCst);
                 }
                 Err(error)
