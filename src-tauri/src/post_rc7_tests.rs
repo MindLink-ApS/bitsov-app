@@ -615,7 +615,7 @@ async fn fresh_profile_startup_creates_nothing_until_the_owner_chooses_this_mac(
         assert!(state.child.lock().unwrap().is_none(), "startup spawned a node");
         assert!(state.config.lock().unwrap().is_none());
         assert!(created_node_files(&app_data).is_empty(), "{:?}", created_node_files(&app_data));
-        assert!(!app_data.join(LOCAL_SETUP_CONSENT).exists());
+        assert!(!local_setup_consent_path(&app_data).exists());
         let status = state.status_snapshot();
         assert!(status.local_setup_needed, "onboarding must be asked to show the choice");
         assert_eq!(status.error, None, "a fresh profile is not an error");
@@ -627,13 +627,13 @@ async fn fresh_profile_startup_creates_nothing_until_the_owner_chooses_this_mac(
     let declined = node_setup_local_at(app.handle(), &state, &app_data, false).await;
     assert!(declined.unwrap_err().contains("explicit agreement"));
     assert!(!calls.exists());
-    assert!(!app_data.join(LOCAL_SETUP_CONSENT).exists());
+    assert!(!local_setup_consent_path(&app_data).exists());
     assert!(state.status_snapshot().local_setup_needed);
 
     // The explicit choice: recorded first, then the usual first-run init and start.
     let chosen = node_setup_local_at(app.handle(), &state, &app_data, true).await;
     assert!(chosen.is_err(), "the stand-in node never becomes healthy");
-    assert!(app_data.join(LOCAL_SETUP_CONSENT).exists());
+    assert!(local_setup_consent_path(&app_data).exists());
     let log = std::fs::read_to_string(&calls).unwrap();
     let lines: Vec<&str> = log.lines().collect();
     assert_eq!(lines.len(), 2, "{log}");
@@ -649,6 +649,28 @@ async fn fresh_profile_startup_creates_nothing_until_the_owner_chooses_this_mac(
     assert!(node_setup_local_at(app.handle(), &state, &app_data, true).await.is_err());
     assert_eq!(std::fs::read_to_string(&calls).unwrap(), log);
     state.stop_for_restart(Duration::from_secs(2));
+}
+
+/// The local owner flow creates its credential only for an empty node directory
+/// (`local_owner::may_create_password`). Recording the owner's choice must not
+/// make a fresh directory look used, or a fresh owner setup fails right after
+/// the owner said yes.
+#[test]
+fn recording_the_choice_keeps_a_fresh_node_directory_fresh_for_the_local_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().to_path_buf();
+    assert!(local_owner::may_create_password(&app_data).unwrap());
+    record_local_setup_consent(&app_data).unwrap();
+    assert!(local_setup_consent_path(&app_data).exists());
+    assert!(
+        local_owner::may_create_password(&app_data).unwrap(),
+        "the recorded choice made a fresh node directory look used"
+    );
+    // The recorded choice is still what lets startup proceed.
+    assert!(!local_setup_needed(&app_data, &app_data.join("konsensus.toml"), false).unwrap());
+    // Genuine node state still counts as used.
+    std::fs::write(app_data.join("node.db"), b"").unwrap();
+    assert!(!local_owner::may_create_password(&app_data).unwrap());
 }
 
 #[cfg(unix)]
@@ -667,7 +689,7 @@ async fn existing_install_and_recorded_choice_start_without_asking() {
     assert_eq!(log.lines().count(), 1, "{log}");
     assert!(log.starts_with("start --config "), "{log}");
     assert!(!state.status_snapshot().local_setup_needed);
-    assert!(!app_data.join(LOCAL_SETUP_CONSENT).exists());
+    assert!(!local_setup_consent_path(&app_data).exists());
     state.stop_for_restart(Duration::from_secs(2));
 
     // A recorded choice whose first run did not finish: init resumes at startup.
@@ -698,5 +720,5 @@ async fn local_setup_is_refused_once_a_remote_node_is_chosen() {
     let refused = node_setup_local_at(app.handle(), &state, &app_data, true).await;
     assert!(refused.unwrap_err().contains("node at home"));
     assert!(!calls.exists());
-    assert!(!app_data.join(LOCAL_SETUP_CONSENT).exists());
+    assert!(!local_setup_consent_path(&app_data).exists());
 }

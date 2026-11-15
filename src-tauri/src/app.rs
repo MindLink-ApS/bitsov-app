@@ -975,6 +975,14 @@ async fn init_node(
 #[cfg(all(desktop, not(feature = "mobile")))]
 const LOCAL_SETUP_CONSENT: &str = "local-node-setup.json";
 
+/// The recorded choice lives in the app's own directory, which node freshness
+/// checks already ignore (`local_owner::may_create_password`), so recording it
+/// never makes a fresh node directory look used.
+#[cfg(all(desktop, not(feature = "mobile")))]
+fn local_setup_consent_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(PAIRING_STORE_DIR).join(LOCAL_SETUP_CONSENT)
+}
+
 /// A fresh desktop profile (no node config, no recorded choice) must wait for
 /// the owner: startup then neither runs `init` nor starts a node. An existing
 /// config is an existing install. A dev node is the developer's own choice.
@@ -983,7 +991,7 @@ fn local_setup_needed(app_data_dir: &Path, config: &Path, dev_node: bool) -> Res
     if dev_node || config.try_exists().map_err(|_| "Cannot inspect the node config")? {
         return Ok(false);
     }
-    let consent = app_data_dir.join(LOCAL_SETUP_CONSENT);
+    let consent = local_setup_consent_path(app_data_dir);
     Ok(!consent.try_exists().map_err(|_| "Cannot inspect the local node setup choice")?)
 }
 
@@ -992,21 +1000,22 @@ fn local_setup_needed(app_data_dir: &Path, config: &Path, dev_node: bool) -> Res
 fn record_local_setup_consent(app_data_dir: &Path) -> Result<(), String> {
     use std::io::Write;
     let failed = |_| "Could not save your choice; nothing was created.".to_string();
-    std::fs::create_dir_all(app_data_dir).map_err(failed)?;
+    let path = local_setup_consent_path(app_data_dir);
+    let dir = path.parent().unwrap_or(app_data_dir).to_path_buf();
+    std::fs::create_dir_all(&dir).map_err(failed)?;
     let chosen_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let body = serde_json::json!({ "version": 1, "local_node": true, "chosen_at": chosen_at });
-    let path = app_data_dir.join(LOCAL_SETUP_CONSENT);
-    let temp = app_data_dir.join(format!("{LOCAL_SETUP_CONSENT}.tmp"));
+    let temp = dir.join(format!("{LOCAL_SETUP_CONSENT}.tmp"));
     let mut file = std::fs::File::create(&temp).map_err(failed)?;
     file.write_all(body.to_string().as_bytes()).map_err(failed)?;
     file.sync_all().map_err(failed)?;
     drop(file);
     std::fs::rename(&temp, &path).map_err(failed)?;
-    if let Ok(dir) = std::fs::File::open(app_data_dir) {
-        let _ = dir.sync_all();
+    if let Ok(handle) = std::fs::File::open(&dir) {
+        let _ = handle.sync_all();
     }
     Ok(())
 }
@@ -2992,8 +3001,10 @@ async fn node_setup_local_at(
         let error = state.error.lock().unwrap().clone();
         match error {
             Some(error) => {
-                // Init failed before a node existed: the same choice can be retried.
-                if state.config.lock().unwrap().is_none() {
+                // Setup failed before a node config existed on disk (the owner
+                // path fills `state.config` before it spawns): the same choice
+                // can be retried.
+                if !app_data_dir.join("konsensus.toml").try_exists().unwrap_or(true) {
                     state.local_setup_needed.store(true, Ordering::SeqCst);
                 }
                 Err(error)
