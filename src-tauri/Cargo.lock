@@ -93,6 +93,9 @@ name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "ashpd"
@@ -447,6 +450,7 @@ dependencies = [
  "bip39",
  "bitsov-ffi",
  "blake3",
+ "chacha20poly1305",
  "chrono",
  "ed25519-dalek",
  "futures-util",
@@ -505,6 +509,7 @@ dependencies = [
  "cfg-if",
  "constant_time_eq",
  "cpufeatures 0.3.0",
+ "zeroize",
 ]
 
 [[package]]

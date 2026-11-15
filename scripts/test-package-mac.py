@@ -25,7 +25,8 @@ scenario = os.environ["SCENARIO"]
 with open(os.environ["TRACE"], "a") as f:
     f.write(json.dumps([name, args, os.environ.get("CI"),
                        os.environ.get("TAURI_BUNDLER_DMG_IGNORE_CI"),
-                       os.environ.get("CARGO_TARGET_DIR")]) + "\n")
+                       os.environ.get("CARGO_TARGET_DIR"),
+                       os.environ.get("VITE_CALL_SEAL")]) + "\n")
 app = pathlib.Path("src-tauri/target/release/bundle/macos/BitSov.app")
 dmg = pathlib.Path("src-tauri/target/release/bundle/dmg/BitSov_0.0.1_aarch64.dmg")
 if name == "uname":
@@ -33,8 +34,10 @@ if name == "uname":
 elif name == "npm":
     if args == ["ci", "--ignore-scripts", "--no-audit", "--no-fund"]:
         sys.exit(17 if scenario == "install-fail" else 0)
-    assert args == ["run", "tauri", "--", "build", "--bundles", "app",
-                    "--no-sign", "--ci", "--", "--locked"], args
+    assert args in (["run", "tauri", "--", "build", "--bundles", "app",
+                     "--no-sign", "--ci", "--", "--locked"],
+                    ["run", "tauri", "--", "build", "--bundles", "app",
+                     "--no-sign", "--ci", "--features", "call-seal", "--", "--locked"]), args
     assert not app.exists() and not dmg.exists(), "stale bundle survived"
     if scenario == "compile-fail":
         print("compilation failed", file=sys.stderr)
@@ -143,7 +146,7 @@ class PackagingTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.fixture.close()
 
-    def run_package(self, scenario, dmg=True, signing_env=None):
+    def run_package(self, scenario, dmg=True, signing_env=None, call_seal=False, call_seal_env=None):
         with tempfile.TemporaryDirectory(prefix="package mac test ") as tmp:
             root = Path(tmp)
             (root / "scripts").mkdir()
@@ -185,12 +188,16 @@ class PackagingTests(unittest.TestCase):
                        CARGO_TARGET_DIR=str(root / "wrong-target"))
             env.update(BITSOV_MAC_SIGNING_IDENTITY="-", BITSOV_MAC_NOTARY_PROFILE="",
                        BITSOV_MAC_PROVISION_PROFILE="profile.provisionprofile")
+            env.pop("VITE_CALL_SEAL", None)
+            if call_seal_env is not None:
+                env["VITE_CALL_SEAL"] = call_seal_env
             env.update(signing_env or {})
             result = subprocess.run(
-                ["bash", "scripts/package-mac.sh", "--use-existing-sidecar"] + (["--dmg"] if dmg else []),
+                ["bash", "scripts/package-mac.sh", "--use-existing-sidecar"]
+                + (["--dmg"] if dmg else []) + (["--call-seal"] if call_seal else []),
                 cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             )
-            events = [json.loads(line) for line in trace.read_text().splitlines()]
+            events = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
             self.assertTrue(all(e[0] in ("uname", "npm", "hdiutil", "plutil", "file", "otool", "codesign", "spctl", "ditto", "xcrun", "security")
                                 for e in events), events)
             image = (root / DMG).read_text() if (root / DMG).exists() else None
@@ -283,6 +290,29 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIsNone(image)
         self.assertFalse(any(e[0] == "hdiutil" for e in events))
+
+    def test_call_seal_enables_both_build_flags(self):
+        for dmg in (False, True):
+            for caller_value in (None, "off"):
+                with self.subTest(dmg=dmg, caller_value=caller_value):
+                    result, events, image = self.run_package(
+                        "success", dmg=dmg, call_seal=True, call_seal_env=caller_value)
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    build = next(e for e in events if e[0] == "npm" and "build" in e[1])
+                    self.assertEqual(build[1], ["run", "tauri", "--", "build", "--bundles", "app",
+                                               "--no-sign", "--ci", "--features", "call-seal", "--", "--locked"])
+                    self.assertEqual(build[5], "sealed")
+                    self.assertEqual(image, "verified image" if dmg else None)
+
+    def test_default_build_preserves_arguments_and_call_seal_environment(self):
+        for caller_value in (None, "off"):
+            with self.subTest(caller_value=caller_value):
+                result, events, _ = self.run_package("success", call_seal_env=caller_value)
+                self.assertEqual(result.returncode, 0, result.stdout)
+                build = next(e for e in events if e[0] == "npm" and "build" in e[1])
+                self.assertEqual(build[1], ["run", "tauri", "--", "build", "--bundles", "app",
+                                           "--no-sign", "--ci", "--", "--locked"])
+                self.assertEqual(build[5], caller_value)
 
     def test_unrelated_failures_never_create_an_image(self):
         for scenario in ("install-fail", "compile-fail", "invalid-app", "other-bundle-fail",
