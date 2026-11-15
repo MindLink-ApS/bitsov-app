@@ -2294,6 +2294,23 @@ describe('calls in the shell', () => {
     expect(host.used('payment_keysend')).toHaveLength(2);
   });
 
+  it('a muted call says in words that they cannot hear you, in English and Danish, and the line goes on unmute', async () => {
+    payHost();
+    await liveCall();
+    expect($('[data-call-mic-off]')).toBeNull();
+    $<HTMLButtonElement>('[data-call-mute]')!.click();
+    await vi.waitFor(() => expect($('[data-call-mic-off]')).not.toBeNull());
+    expect(text('[data-call-mic-off]')).toBe('Your microphone is off. They cannot hear you. Press Mute again to talk.');
+    expect($('[data-call-camera-off]')).toBeNull();
+    try {
+      setLanguagePref('da');
+      expect(text('[data-call-mic-off]')).toBe('Din mikrofon er slukket. De kan ikke høre dig. Tryk Slå lyd fra igen for at tale.');
+      expect(text('[data-call-mute]')).toBe('Slå lyd fra');
+    } finally { setLanguagePref('en'); }
+    $<HTMLButtonElement>('[data-call-mute]')!.click();
+    await vi.waitFor(() => expect($('[data-call-mic-off]')).toBeNull());
+  });
+
   it.each(['unit', 'language'])('in-call Pay clears a rejected Danish draft on %s change', async change => {
     const host = payHost();
     await liveCall();
@@ -3124,6 +3141,28 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     expect($('[data-call-recovery-note]')).toBeNull();
     expect($('[data-call-reconnecting]')).toBeNull();
+  });
+
+  it('a video call with the camera off says they cannot see you, and the line goes when it is back on', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'srcObject', 'set').mockImplementation(() => {});
+    const host = stubHost({ messages_list: () => [] });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { ...msg(400, { media: 'video', sdp: 'offer' }), timestamp: Date.now() } });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    FakePc.made[0].connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect($('[data-call-camera-off]')).toBeNull();
+    $<HTMLButtonElement>('[data-call-camera]')!.click();
+    await vi.waitFor(() => expect($('[data-call-camera-off]')).not.toBeNull());
+    expect(text('[data-call-camera-off]')).toBe('Your camera is off. They cannot see you. Press Camera to turn it on.');
+    try {
+      setLanguagePref('da');
+      expect(text('[data-call-camera-off]')).toBe('Dit kamera er slukket. De kan ikke se dig. Tryk Kamera for at tænde det.');
+    } finally { setLanguagePref('en'); }
+    $<HTMLButtonElement>('[data-call-camera]')!.click();
+    await vi.waitFor(() => expect($('[data-call-camera-off]')).toBeNull());
   });
 
   it('Codex: a camera error, then a drop: the camera error is shown as it is, never as a recovery that could not start', async () => {
