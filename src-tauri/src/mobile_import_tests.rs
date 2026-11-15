@@ -379,9 +379,19 @@ async fn rejected_import_does_not_cancel_an_established_proxy_recovery() {
     forgotten.unwrap();
     assert!(state.remote_proxy.lock().unwrap().is_some(), "Forget preserves the established transport");
     assert!(state.remote_retry.remaining().unwrap() >= 59);
-    // A bootstrap/import task queued behind a successful attach does not redo auth.
-    tokio::time::timeout(Duration::from_secs(5), connect_remote_at(&state, dir.path(), true))
-        .await.expect("duplicate bootstrap must not start another auth recovery").unwrap();
+    // Forget stopped that recovery before auth finished, so nothing is ready yet:
+    // a bootstrap queued now resumes the auth, still inside the same backoff, and
+    // Forget can stop it too. Behind a ready session it does nothing at all; see
+    // remote_connect_tests::a_queued_bootstrap_does_not_redo_a_ready_session.
+    let queued = connect_remote_at(&state, dir.path(), true);
+    tokio::pin!(queued);
+    assert!(tokio::time::timeout(Duration::from_secs(5), &mut queued).await.is_err(),
+        "a bootstrap with auth unfinished must wait out the backoff");
+    let (queued, forgotten) = tokio::join!(&mut queued, remote_access_forget_at(&state, dir.path()));
+    queued.unwrap();
+    forgotten.unwrap();
+    assert!(!state.status_snapshot().ready);
+    assert!(state.remote_retry.remaining().is_some(), "Forget keeps the backoff");
 }
 
 #[tokio::test]
