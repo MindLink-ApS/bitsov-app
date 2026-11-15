@@ -531,6 +531,15 @@ describe('acting from the track', () => {
     expect(mount.querySelectorAll('[data-approval-steps] li')).toHaveLength(3);
     expect(text('[data-approval-steps]')).toContain('open Terminal');
     expect(text('[data-approval-who]')).toContain('Ask the person who set it up');
+    // The copy button copies exactly the line the steps say to paste.
+    let copied = '';
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (t: string) => { copied = t; } } });
+    const copy = $<HTMLButtonElement>('[data-approval-steps] [data-wallet-copy]');
+    expect(copy).not.toBeNull();
+    expect(copy!.textContent).toContain('Copy the line');
+    copy!.click();
+    await waitFor(() => expect(copied).toBe('konsensus grant --op ab12'));
+    await waitFor(() => expect(text('[data-approval-steps] [data-wallet-copy]')).toMatch(/^Copied/));
     expect($('[data-approval="pending"]')).not.toBeNull();
     expect(host.used('message_send')).toHaveLength(0);
     // The words wait in their bubble; the box is free.
