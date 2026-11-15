@@ -1,6 +1,6 @@
 # App release checklist
 
-**Signed pin:** rc23 is published, and all five binary pins come from its
+**Signed pin:** rc24 is published, and all five binary pins come from its
 verified signed `SHA256SUMS`. Fetch and pre-bundle verification enforce those pins.
 Runtime, packaging and hardware acceptance remain separate gates.
 The last written upgrade note is [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
@@ -8,7 +8,7 @@ The last written upgrade note is [rc19.2 release gates](NODE_RC19_2_UPGRADE.md).
 ## G1: only the pinned, verified node may be bundled
 
 - [ ] Confirm the pin in `scripts/fetch-node-sidecar.sh` (currently
-  `MindLink-ApS/BitSov-bitsov@v0.3.0-rc23`) and the release-key fingerprint.
+  `MindLink-ApS/BitSov-bitsov@v0.3.0-rc24`) and the release-key fingerprint.
   A pin change requires its own review; a locally built node is not a release asset.
 - [ ] Fetch via `bash scripts/fetch-node-sidecar.sh`, then run
   `bash scripts/fetch-node-sidecar.sh --verify-only`. This downloads the pinned
