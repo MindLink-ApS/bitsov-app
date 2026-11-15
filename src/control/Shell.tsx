@@ -490,7 +490,7 @@ export function ControlCenter(props: Props) {
       if (readRevision[key] !== rev) return;
       const error = asActionError(e);
       setThreadRead(key, 'failed');
-      setThreadError(key, error.code === 'not_ready' ? undefined : typeof e === 'string' ? e : error.message);
+      setThreadError(key, error.code === 'not_ready' ? undefined : error.message);
       return;
     }
     // Messages an older read brought are still merged; only the current read sets the state.
@@ -847,7 +847,7 @@ export function ControlCenter(props: Props) {
       setBudgetConfirmed(false);
       const error = asActionError(e);
       setGrantUnknown(error.code === 'grant_unknown');
-      setErrors('budgetPoll', typeof e === 'string' ? e : error.message);
+      setErrors('budgetPoll', error.message);
     }
   };
   // Our own price with no peer: what a stranger pays at this node's door.
