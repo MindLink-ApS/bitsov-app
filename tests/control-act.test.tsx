@@ -526,6 +526,20 @@ describe('acting from the track', () => {
     submit();
     await waitFor(() => expect(text('[data-owner-action]')).toBe('konsensus grant --op ab12'));
     expect(text('[data-approval="pending"]')).toContain('This app cannot approve it for you');
+    // Someone who has never used a terminal: where it happens, the steps, and who to ask.
+    expect(text('[data-approval="pending"]')).toContain('It can only be done on the computer the box runs on');
+    expect(mount.querySelectorAll('[data-approval-steps] li')).toHaveLength(3);
+    expect(text('[data-approval-steps]')).toContain('open Terminal');
+    expect(text('[data-approval-who]')).toContain('Ask the person who set it up');
+    // The copy button copies exactly the line the steps say to paste.
+    let copied = '';
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (t: string) => { copied = t; } } });
+    const copy = $<HTMLButtonElement>('[data-approval-steps] [data-wallet-copy]');
+    expect(copy).not.toBeNull();
+    expect(copy!.textContent).toContain('Copy the line');
+    copy!.click();
+    await waitFor(() => expect(copied).toBe('konsensus grant --op ab12'));
+    await waitFor(() => expect(text('[data-approval-steps] [data-wallet-copy]')).toMatch(/^Copied/));
     expect($('[data-approval="pending"]')).not.toBeNull();
     expect(host.used('message_send')).toHaveLength(0);
     // The words wait in their bubble; the box is free.
@@ -621,6 +635,21 @@ describe('acting from the track', () => {
     await waitFor(() => expect(text('[data-reconciliation]')).toContain('Previous action settled'));
     expect(host.used('message_send')).toHaveLength(1);
     expect(host.used('spend_reconcile')).toHaveLength(1);
+  });
+
+  it('says plainly when the check finds no payment waiting', async () => {
+    const host = stubHost({
+      message_send: () => { throw { code: 'spend_unknown', message: 'Outcome unknown; do not retry.' }; },
+      spend_reconcile: () => 'No pending spend.',
+    });
+    host.spend.v = openView();
+    await openShell();
+    type('[data-composer] textarea', 'hi');
+    submit();
+    await waitFor(() => expect($('[data-spend-reconcile]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-spend-reconcile]')!.click();
+    await waitFor(() => expect(text('[data-reconciliation]')).toMatch(/^No payment is waiting\./));
+    expect(text('[data-reconciliation]')).not.toContain('No pending spend');
   });
 
   // Exactly-once slice 3: the node's operation state, on the message card.
