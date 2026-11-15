@@ -2968,6 +2968,20 @@ describe('calls in the shell', () => {
     expect(text('[data-call-decline]')).toBe('Decline · up to 6 sats');
   });
 
+  it('the incoming card says in words what answering can cost: the answer, your own hangup, and nothing more but a reconnect', async () => {
+    const host = stubHost({ messages_list: () => [], call_quote: () => QUOTE });
+    await openShell();
+    incoming(host);
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(false));
+    expect(text('[data-call-accept]')).toBe('Accept · up to 6 sats');
+    expect(text('[data-call-answer-cost]')).toBe('Answering costs you at most 6 sats. Hanging up costs at most 6 sats more. The caller pays for the call itself. Ignore costs nothing. Only if the line drops and comes back can more payments of at most 6 sats each be made.');
+    try {
+      setLanguagePref('da');
+      expect(text('[data-call-answer-cost]')).toMatch(/^At svare koster dig højst 6 sats?\. At lægge på koster højst 6 sats? mere\. Den, der ringer, betaler selve opkaldet\. Ignorér koster intet\./);
+    } finally { setLanguagePref('en'); }
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
   it.each([
     ['the read fails', () => { throw { code: 'node', message: 'Could not read it' }; }],
     ['their node gives no live price', () => ({ ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null })],
@@ -2982,6 +2996,7 @@ describe('calls in the shell', () => {
     expect($<HTMLButtonElement>('[data-call-decline]')!.disabled).toBe(true);
     expect(text('[data-call-accept]')).toBe('Accept');
     expect(text('[data-call-answer-price]')).toMatch(/nothing can be paid/i);
+    expect($('[data-call-answer-cost]')).toBeNull();
     expect(host.used('call_signal')).toHaveLength(0);
   });
 
