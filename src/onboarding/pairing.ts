@@ -43,6 +43,8 @@ export type NodeStatus = {
   remember_offer?: boolean;
   local_owner?: boolean;
   owner_warning?: string | null;
+  /** Fresh Mac: nothing was created; the owner chooses where BitSov runs. */
+  local_setup_needed?: boolean;
   initialization_repair?: 'none' | 'required' | 'repairing' | 'price_floor_required' | 'price_floor_repairing';
   retry_after_secs?: number | null;
   ready: boolean;
