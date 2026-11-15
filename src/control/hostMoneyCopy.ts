@@ -14,6 +14,7 @@ export const HOST_COPY_MONEY_DA: readonly (readonly [string, string])[] = [
   ['this room', 'dette rum'],
   ['Not sent - nothing was paid. Network fee would exceed your limit. ({})', 'Ikke sendt – intet blev betalt. Netværksgebyret ville overstige din grænse. ({0})'],
   ['The all-in amount overflows.', 'Det samlede beløb er for stort til at kunne regnes.'],
+  ['Payment settled ({} msat paid), message not yet delivered.', 'Betalingen er gennemført ({0} msat betalt), beskeden er endnu ikke leveret.'],
   ['Do not send it again. Retry delivery pays nothing new: your node re-sends the proof it already paid for. If anything is still due (this message\'s price, or admission again after a reconnect), it stops before paying and asks you first, with the price.', 'Send den ikke igen. At prøve levering igen koster ikke noget nyt: din boks sender det bevis igen, den allerede har betalt for. Hvis der stadig skal betales noget (beskedens pris eller adgang igen efter en genforbindelse), stopper den før betaling og spørger dig først, med prisen.'],
   ['Do not send it again: that could pay twice. Check the pending result first.', 'Send den ikke igen: det kan betyde, at der betales to gange. Kontrollér det afventende resultat først.'],
   ['Retry delivery paid nothing new. Delivering the message needs a new payment: its price, and admission again if the contact reconnected. Nothing was paid.{} Approve it to continue, or stop retrying.', 'Det nye leveringsforsøg kostede ikke noget nyt. For at levere beskeden skal der betales igen: dens pris og adgang igen, hvis kontakten har forbundet igen. Intet blev betalt.{0} Godkend for at fortsætte, eller stop forsøgene.'],
@@ -140,4 +141,7 @@ export const HOST_COPY_MONEY_DA: readonly (readonly [string, string])[] = [
   ['Missing call offer.', 'Opkaldets tilbud mangler.'],
   ['Call audio dispatcher closed.', 'Opkaldets lydforbindelse er lukket.'],
   ['Not delivered - nothing new was paid.', 'Ikke leveret – intet nyt blev betalt.'],
+  ["Your box can't see the Bitcoin chain right now; nothing was paid; try again later.", 'Din boks kan ikke se Bitcoin-kæden lige nu; intet blev betalt; prøv igen senere.'],
+  ['The next minute of this call would go past the hold you agreed to. Nothing was paid for it.', 'Det næste minut af dette opkald ville gå ud over den reservation, du accepterede. Intet blev betalt for det.'],
+  ['Their node gave no live call price, so this was not sent. Nothing was sent or paid.', 'Deres boks gav ingen aktuel opkaldspris, så dette blev ikke sendt. Intet blev sendt eller betalt.'],
 ];

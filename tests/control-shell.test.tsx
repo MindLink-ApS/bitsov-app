@@ -406,7 +406,8 @@ describe('control center shell', () => {
 
     await waitFor(() => expect(mount.querySelector('[data-touch-approval]')).not.toBeNull());
     const box = mount.querySelector('[data-touch-approval]')!.textContent!;
-    expect(box).toContain('200 sats a day');
+    expect(box).toContain('200 sats in total');
+    expect(box).not.toContain('a day');
     expect(box).toContain('at most 2 sats per message');
     expect(mount.querySelector('[data-touch-peer]')?.textContent).toBe(`${A.slice(0, 8)}…${A.slice(-8)}`);
     // Petname plus the short key, visible on the line; never the node's claimed label.
