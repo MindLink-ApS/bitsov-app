@@ -1894,3 +1894,8 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
   gap: var(--s-3);
 }
 .waiting-calls .call-panel { position: relative; right: auto; bottom: auto; }
+
+/* A call in the chat: a quiet line of what happened, centred like a date. */
+.call-log { align-self: center; display: flex; align-items: baseline; gap: var(--s-2); margin: var(--s-2) 0; color: var(--muted); font-size: var(--t-sm); text-align: center; }
+.call-log[data-call-log="not_through"], .call-log[data-call-log="failed"] { color: var(--ink); }
+.call-log .stamp { margin: 0; }
