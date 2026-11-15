@@ -11,8 +11,11 @@
 //!   direct-payment hashes and all-in allowances (retained for replay detection). Nothing in
 //!   the file can spend: no token, no scope, no grant, no approval state.
 //! - **Not stored**: the owner's approval. [`Autopay`] lives in host memory for
-//!   at most [`BUDGET_WINDOW_MS`] and ends when the app quits. After a restart
-//!   the tally is still there, and sending automatically needs one new approval.
+//!   at most [`BUDGET_WINDOW_MS`]; the approval itself is the node's grant.
+//!   After a restart the app reads that grant back from the node, never from
+//!   this file, and resumes within its remaining total and its original expiry:
+//!   nothing is renewed, refilled or extended. On a node without spending
+//!   grants, sending automatically after a restart needs one new approval.
 //!
 //! # Limits, narrowest wins
 //!
