@@ -117,7 +117,7 @@ mod owner_contact;
 /// this; only a debug `dev-node` build may move the port (`dev_node::api_base`).
 const API_BASE: &str = "http://127.0.0.1:3141/api/v1";
 
-/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc23`): the funding
+/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc24`): the funding
 /// state machine moves to this step once the node has observed the required deposit
 /// in its own wallet. Kept host-side so the renderer never re-implements the contract.
 const FUNDING_SEEN: &str = "funding-seen";
@@ -10427,6 +10427,8 @@ struct MediaSession {
     #[allow(dead_code)]
     call_id: String,
     uplink: Arc<control::media::FrameQueue>,
+    /// The video path, on a video call only.
+    video: Option<Arc<control::media::VideoPath>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -10436,6 +10438,9 @@ fn stop_media_session(state: &NodeState) {
     if let Some(session) = state.media.lock().unwrap().take() {
         session.stop.store(true, Ordering::SeqCst);
         session.uplink.clear();
+        if let Some(video) = session.video {
+            video.clear();
+        }
     }
 }
 
@@ -10449,6 +10454,7 @@ async fn media_bridge<R: tauri::Runtime>(
     call_id: String,
     peer: String,
     uplink: Arc<control::media::FrameQueue>,
+    video: Option<Arc<control::media::VideoPath>>,
     stop: Arc<AtomicBool>,
     mut seal: Option<Box<control::media::SealedMedia>>,
     channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
@@ -10459,7 +10465,7 @@ async fn media_bridge<R: tauri::Runtime>(
     let emit = |link: control::media::MediaLink| {
         let _ = channel.send(tauri::ipc::InvokeResponseBody::Json(link.to_json()));
     };
-    let link = control::media::run_media_link_with_seal(
+    let link = control::media::run_media_link_full(
         || async {
             if !*state.ready.lock().unwrap() { return Ok(None); }
             let Some(token) = media_token(&state).await else { return Ok(None); };
@@ -10468,13 +10474,14 @@ async fn media_bridge<R: tauri::Runtime>(
         },
         &uplink,
         &downlink,
+        video.as_deref(),
         seal.as_deref_mut(),
         &emit,
         &stopping,
     );
     let drain = async {
         loop {
-            let frame = downlink.pop().await;
+            let frame = control::media::next_downlink(&downlink, video.as_deref()).await;
             if channel.send(tauri::ipc::InvokeResponseBody::Raw(frame)).is_err() { break; }
         }
     };
@@ -10492,6 +10499,8 @@ async fn media_bridge<R: tauri::Runtime>(
 /// (`{"link": …, "detail": …}`). One session at a time: opening replaces the
 /// previous one. No payment and no admission change here: the node admits the
 /// socket only for a `(peer, call_id)` it already knows, under the owner's token.
+/// `video` opens the video path on the same socket; a call without it is an
+/// audio session, unchanged.
 #[cfg(not(feature = "call-seal"))]
 #[tauri::command(rename_all = "snake_case")]
 async fn call_media_open(
@@ -10501,21 +10510,24 @@ async fn call_media_open(
     call_id: String,
     peer: String,
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    video: Option<bool>,
 ) -> Result<(), String> {
     reject_sealed_window(&window)?;
     drop(window);
     let call_id = control::media::call_id(&call_id)?;
     let peer = control::media::peer_id(&peer)?;
-    start_media_session(app, state.inner(), call_id, peer, None, on_frame);
+    start_media_session(app, state.inner(), call_id, peer, video.unwrap_or(false), None, on_frame);
     Ok(())
 }
 
 /// The same, in a call-seal build. `sealed`: the renderer expects this call's
 /// finished key exchange to be here. Without one the socket does not open, so a
 /// call never goes out in the clear by mistake. Without `sealed` and with no
-/// exchange, this is today's session.
+/// exchange, this is today's session. Video is never sealed, so a sealed call
+/// asking for `video` does not open: nothing goes out in the clear.
 #[cfg(feature = "call-seal")]
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 async fn call_media_open(
     window: WebviewWindow<impl tauri::Runtime>,
     app: AppHandle<impl tauri::Runtime>,
@@ -10524,13 +10536,18 @@ async fn call_media_open(
     peer: String,
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
     sealed: Option<bool>,
+    video: Option<bool>,
 ) -> Result<(), String> {
     reject_sealed_window(&window)?;
     drop(window);
     let call_id = control::media::call_id(&call_id)?;
     let peer = control::media::peer_id(&peer)?;
     let seal = seal_for_media(state.call_seal.lock().unwrap().take(), &call_id, sealed.unwrap_or(false)).map_err(|end| end.code().to_string())?;
-    start_media_session(app, state.inner(), call_id, peer, seal, on_frame);
+    let video = video.unwrap_or(false);
+    if video && seal.is_some() {
+        return Err(control::call_seal::SealError::NotReady.code().to_string());
+    }
+    start_media_session(app, state.inner(), call_id, peer, video, seal, on_frame);
     Ok(())
 }
 
@@ -10539,14 +10556,16 @@ fn start_media_session<R: tauri::Runtime>(
     state: &NodeState,
     call_id: String,
     peer: String,
+    video: bool,
     seal: Option<Box<control::media::SealedMedia>>,
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) {
     let uplink = Arc::new(control::media::FrameQueue::new(control::media::QUEUE_FRAMES));
+    let video = video.then(|| Arc::new(control::media::VideoPath::new()));
     let stop = Arc::new(AtomicBool::new(false));
     stop_media_session(state);
-    *state.media.lock().unwrap() = Some(MediaSession { call_id: call_id.clone(), uplink: uplink.clone(), stop: stop.clone() });
-    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, stop, seal, on_frame));
+    *state.media.lock().unwrap() = Some(MediaSession { call_id: call_id.clone(), uplink: uplink.clone(), video: video.clone(), stop: stop.clone() });
+    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, video, stop, seal, on_frame));
 }
 
 #[cfg(feature = "call-seal")]
@@ -10686,6 +10705,22 @@ fn call_media_send(
     let Some(session) = slot.as_ref() else { return Err("no media session is open".into()) };
     session.uplink.push(payload);
     Ok(())
+}
+
+/// One uplink video payload for the open media session (raw bytes). Answers
+/// how many fragments wait to leave, which the renderer reads as backpressure.
+#[tauri::command(rename_all = "snake_case")]
+fn call_media_video_send(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<usize, String> {
+    reject_sealed_window(&window)?;
+    let payload = media_payload(request.body())?;
+    let slot = state.media.lock().unwrap();
+    let Some(session) = slot.as_ref() else { return Err("no media session is open".into()) };
+    let Some(video) = session.video.as_ref() else { return Err("this media session carries no video".into()) };
+    video.push(payload)
 }
 
 /// Close the open media session (hangup or local teardown). Idempotent; only
@@ -10978,6 +11013,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             call_hold,
             call_media_open,
             call_media_send,
+            call_media_video_send,
             call_media_close,
             porch_quote,
             porch_read,
@@ -25749,6 +25785,7 @@ mod assistant_acl_tests {
                 // M6 A1: the host-owned node-routed media socket.
                 "call_media_open",
                 "call_media_send",
+                "call_media_video_send",
                 "call_media_close",
                 "porch_quote",
                 "porch_read",

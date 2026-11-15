@@ -16,11 +16,11 @@ class ProductionPinTests(unittest.TestCase):
     def test_published_pins_are_complete_and_match_signed_release(self):
         # Literal entries authenticated from the published SHA256SUMS. Exercise
         # the production lookup, without the fixture's replacement pin table.
-        expected = """0fbfd27ac928492548598f76a250449e60e9dc9ed863f9b889a014bd27e4725b  bitsov-darwin-aarch64
-dbca8de0eb226ba9f69b60c6988018d5440db92828adee6156be5e0bbabc6960  bitsov-darwin-x86_64
-f5b24311d4152e6158e2e67547baf15d2e21003f924168520bff427072f37ff3  bitsov-linux-aarch64
-18947d9725490f8514b46b31eeb722dccdc1a12aaa703081efdbcc5a9e179544  bitsov-linux-x86_64
-5b7c39ae20b5b24ca073f2200f2493f9e8c73309bd3d5bf1a45ed3ea2463c13c  bitsov-windows-x86_64"""
+        expected = """1c0cf1ac08d96460a91c1e820b17fead423cab623ded33b36823cee23db41937  bitsov-darwin-aarch64
+bcae78831d47f46233e5f5a028badc6498222740002ff30a2406dbfbbe76c2d4  bitsov-darwin-x86_64
+f82e16ab46b0d4395a5fd3b17d95b47f17d1c4597ec6ac6f3bada0829d63cdcb  bitsov-linux-aarch64
+6cb4c5961e86ed6575e616906de3664bbac6fb976ddb86b3005cb807e74f9536  bitsov-linux-x86_64
+c3770d102bd137bad045daf33eacfac04f259580586562e1f56356022bebcf68  bitsov-windows-x86_64"""
         result = subprocess.run([
             "bash", "-c",
             'source scripts/fetch-node-sidecar.sh; require_complete_checksum_pin; '
