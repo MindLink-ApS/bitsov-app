@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { setLanguagePref } from '../src/i18n';
 import { asActionError } from '../src/control/state';
 import { sampleSource } from '../src/control/sample';
@@ -3124,6 +3126,38 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     expect($('[data-call-recovery-note]')).toBeNull();
     expect($('[data-call-reconnecting]')).toBeNull();
+  });
+
+  it('your own picture is named, shown as in a mirror, and says "Camera off" instead of going black', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'srcObject', 'set').mockImplementation(() => {});
+    const host = stubHost({ messages_list: () => [] });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { ...msg(400, { media: 'video', sdp: 'offer' }), timestamp: Date.now() } });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    FakePc.made[0].connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    const self = $('[data-call-self]')!;
+    const video = self.querySelector('[data-call-media="local"]');
+    expect(video).not.toBeNull();
+    expect(self.hasAttribute('data-camera-off')).toBe(false);
+    expect(text('[data-call-self-label]')).toBe('You');
+    $<HTMLButtonElement>('[data-call-camera]')!.click();
+    await vi.waitFor(() => expect($('[data-call-self]')!.hasAttribute('data-camera-off')).toBe(true));
+    expect(text('[data-call-self-label]')).toBe('You · Camera off');
+    // The same element stays: turning the camera back on needs no new player.
+    expect($('[data-call-self] [data-call-media="local"]')).toBe(video);
+    try {
+      setLanguagePref('da');
+      expect(text('[data-call-self-label]')).toBe('Dig · Kamera slukket');
+    } finally { setLanguagePref('en'); }
+    $<HTMLButtonElement>('[data-call-camera]')!.click();
+    await vi.waitFor(() => expect($('[data-call-self]')!.hasAttribute('data-camera-off')).toBe(false));
+    expect(text('[data-call-self-label]')).toBe('You');
+    const css = readFileSync(join(__dirname, '../src/styles.css'), 'utf8');
+    expect(css).toMatch(/\.call-video\.local \{[^}]*transform: scaleX\(-1\)/);
+    expect(css).toMatch(/\.call-self\[data-camera-off\] \.call-video\.local \{ display: none; \}/);
   });
 
   it('Codex: a camera error, then a drop: the camera error is shown as it is, never as a recovery that could not start', async () => {
