@@ -257,6 +257,11 @@ struct NodeState {
     /// choose this Mac (`node_setup_local`) or a node at home.
     #[cfg(all(desktop, not(feature = "mobile")))]
     local_setup_needed: AtomicBool,
+    /// The owner chose this Mac and its first node is being set up. Set and
+    /// cleared by `node_setup_local` under `remote_change`; a home-node link
+    /// cannot be saved meanwhile.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    local_setup_running: AtomicBool,
     /// Tests only: a scripted stand-in for the node binary.
     #[cfg(all(test, desktop, not(feature = "mobile")))]
     test_sidecar: Mutex<Option<PathBuf>>,
@@ -673,6 +678,8 @@ impl NodeState {
             local_startup: AtomicBool::new(false),
             #[cfg(all(desktop, not(feature = "mobile")))]
             local_setup_needed: AtomicBool::new(false),
+            #[cfg(all(desktop, not(feature = "mobile")))]
+            local_setup_running: AtomicBool::new(false),
             #[cfg(all(test, desktop, not(feature = "mobile")))]
             test_sidecar: Mutex::new(None),
             add_device: tokio::sync::Mutex::new(add_device::Setup::default()),
@@ -2991,6 +2998,7 @@ async fn node_setup_local_at(
         }
         record_local_setup_consent(app_data_dir)?;
         state.local_startup.store(true, Ordering::SeqCst);
+        state.local_setup_running.store(true, Ordering::SeqCst);
         state.local_setup_needed.store(false, Ordering::SeqCst);
         *state.error.lock().unwrap() = None;
     }
@@ -2998,6 +3006,7 @@ async fn node_setup_local_at(
     {
         let _startup = StartupFinished(&state.local_startup);
         start_local_node(app, app_data_dir, app_data_dir, None, true).await;
+        state.local_setup_running.store(false, Ordering::SeqCst);
         let error = state.error.lock().unwrap().clone();
         match error {
             Some(error) => {
@@ -3298,6 +3307,14 @@ async fn remote_access_import_at<R: tauri::Runtime>(
     remote_access::preview_pairing_link(link.trim()).map_err(|error| error.to_string())?;
     #[cfg(any(mobile, feature = "mobile"))]
     let _change = state.remote_change.lock().await;
+    // Serialized with `node_setup_local`: while this Mac's first node is being
+    // set up, saving a home-node link would leave that node behind.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    let _change = state.remote_change.lock().await;
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    if state.local_setup_running.load(Ordering::SeqCst) {
+        return Err("BitSov is setting up a node on this Mac. Wait until it is ready before linking a node at home.".into());
+    }
     // Reject a live trust-boundary switch without cancelling its recovery.
     if state.remote_proxy.lock().unwrap().is_some() {
         return Err("remote access is already active; quit BitSov before replacing its pairing link".into());
@@ -3329,6 +3346,9 @@ async fn remote_access_import_at<R: tauri::Runtime>(
         spawn_remote_connect(_app, app_data_dir, true);
         return Ok(RemoteImportView { restart_required: false, ..result });
     }
+    // The owner chose a node at home: stop offering to create one here.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    state.local_setup_needed.store(false, Ordering::SeqCst);
     #[cfg(not(any(mobile, feature = "mobile")))]
     Ok(result)
 }

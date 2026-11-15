@@ -722,3 +722,40 @@ async fn local_setup_is_refused_once_a_remote_node_is_chosen() {
     assert!(!calls.exists());
     assert!(!local_setup_consent_path(&app_data).exists());
 }
+
+/// While this Mac's first node is being set up, a home-node link cannot be
+/// saved: the next launch would prefer that link and leave the new node behind.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_home_node_link_is_refused_while_this_macs_node_is_being_set_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("app-data");
+    let (program, _calls) = scripted_first_run_node(dir.path());
+    let app = first_run_app(program);
+    let state = app.state::<NodeState>();
+    bootstrap_node_at(app.handle(), app_data.clone()).await;
+    state.local_setup_running.store(true, Ordering::SeqCst);
+    let link = super::remote_connect_tests::ticket("127.0.0.1:5678".into(), false);
+    let refused = remote_access_import_at(app.handle(), &state, &app_data, &link).await;
+    assert!(refused.unwrap_err().contains("setting up a node on this Mac"));
+    assert!(remote_access::load_persisted(&app_data).unwrap().is_none(), "no home-node link was saved");
+}
+
+/// Saving a home-node link is the owner's choice of where the node runs, so
+/// the offer to create one on this Mac goes away.
+#[cfg(unix)]
+#[tokio::test]
+async fn saving_a_home_node_link_stops_offering_a_node_on_this_mac() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("app-data");
+    let (program, calls) = scripted_first_run_node(dir.path());
+    let app = first_run_app(program);
+    let state = app.state::<NodeState>();
+    bootstrap_node_at(app.handle(), app_data.clone()).await;
+    assert!(state.status_snapshot().local_setup_needed);
+    let link = super::remote_connect_tests::ticket("127.0.0.1:5678".into(), false);
+    remote_access_import_at(app.handle(), &state, &app_data, &link).await.unwrap();
+    assert!(!state.status_snapshot().local_setup_needed);
+    assert!(!calls.exists());
+    assert!(!local_setup_consent_path(&app_data).exists());
+}
