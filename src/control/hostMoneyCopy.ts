@@ -90,7 +90,7 @@ export const HOST_COPY_MONEY_DA: readonly (readonly [string, string])[] = [
   ['Payment evidence has no operation identity. Inspect the owner node.', 'Betalingsbeviset har intet handlings-id. Undersøg ejerens boks.'],
   ['The node exceeded its spending bound; inspect the owner node.', 'Boksen overskred sin forbrugsgrænse; undersøg ejerens boks.'],
   ['Previous action accounted for. Nothing was dispatched again.', 'Den forrige handling er registreret. Intet blev sendt af sted igen.'],
-  ['The payment record has no principal.', 'Betalingsposten har intet beløb.'],
+  ['The payment record has no principal.', 'Betalingsposten har intet hovedbeløb.'],
   ['The node reports payment beyond the confirmed bound. Funds may already have moved; do not retry.', 'Boksen melder en betaling ud over den bekræftede grænse. Penge kan allerede være betalt; prøv ikke igen.'],
   ['Previous action {}. Nothing was dispatched again.', 'Forrige handling: {0}. Intet blev sendt af sted igen.'],
   ['The saved payment request is not readable; inspect the owner node. Nothing was dispatched again.', 'Den gemte betalingsanmodning kan ikke læses; undersøg ejerens boks. Intet blev sendt af sted igen.'],
