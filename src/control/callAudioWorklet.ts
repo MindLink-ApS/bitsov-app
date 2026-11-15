@@ -5,8 +5,9 @@
  *
  * Capture: cuts the microphone into 20 ms frames and posts them to the main
  * thread, which encodes and sends. Playout: keeps the jitter buffer on the
- * audio thread (immune to main-thread timer throttling), conceals lost frames
- * by fading the last good one, and renders straight into the output.
+ * audio thread (immune to main-thread timer throttling), conceals gaps by
+ * fading the last good frame out, crossfades real audio back in, and renders
+ * straight into the output.
  */
 import { JitterBuffer } from './jitterBuffer';
 import { frameSamples } from './pcm';
@@ -47,25 +48,45 @@ class CaptureProcessor extends AudioWorkletProcessor {
   }
 }
 
-/** Conceal at most this many consecutive missing frames before going silent. */
+/** Conceal at most this many consecutive missing frames (60 ms) before going silent. */
 const CONCEAL_FRAMES = 3;
+/** Crossfade length where real audio resumes after a gap or a skip. */
+const FADE_SECONDS = 0.005;
 
+/**
+ * Playout renders 20 ms frames into 128-sample render quanta. Every buffer is
+ * allocated up front; `process()` and the frame path allocate nothing.
+ *
+ * Concealment never steps the waveform: it plays the last good frame
+ * mirrored (reversed, then forward, then reversed...), so each copy starts on
+ * the sample the previous one ended on, under a linear fade to silence over
+ * `CONCEAL_FRAMES`. When real audio comes back, or frames were skipped, the
+ * new frame is crossfaded in from what concealment would have played next
+ * (silence once it has faded out), so the resume is not a step either.
+ */
 class PlayoutProcessor extends AudioWorkletProcessor {
   private readonly size = frameSamples(sampleRate);
   private readonly jitter = new JitterBuffer<Float32Array>();
-  private current: Float32Array | null = null;
-  private offset = 0;
+  private readonly out = new Float32Array(this.size);
+  private readonly next = new Float32Array(this.size);
+  private readonly fade = Math.max(1, Math.min(this.size, Math.round(sampleRate * FADE_SECONDS)));
+  private readonly ramp = new Float32Array(this.fade);
+  private current: Float32Array = this.out;
+  private offset = this.size;
   private last: Float32Array | null = null;
-  private concealed = 0;
+  /** Frames since the last real one (capped just past `CONCEAL_FRAMES`). */
+  private concealed = CONCEAL_FRAMES + 1;
 
   constructor() {
     super();
+    for (let i = 0; i < this.fade; i++) this.ramp[i] = 0.5 - 0.5 * Math.cos((Math.PI * (i + 1)) / (this.fade + 1));
     this.port.onmessage = (event: MessageEvent<PlayoutMessage>) => {
       const message = event.data;
       switch (message.type) {
         case 'frame': this.jitter.insert(message.seq, message.pcm); break;
         case 'marker': this.jitter.insert(message.seq, null); break;
-        case 'reset': this.jitter.reset(); this.current = null; this.last = null; break;
+        // The old stream's tail fades out through concealment instead of cutting off.
+        case 'reset': this.jitter.reset(); break;
         case 'stats': {
           const report: PlayoutReport = { type: 'stats', stats: this.jitter.stats() };
           this.port.postMessage(report);
@@ -75,20 +96,46 @@ class PlayoutProcessor extends AudioWorkletProcessor {
     };
   }
 
+  /** Concealment frame `k` (1-based) after the last real frame, into `into`. */
+  private conceal(into: Float32Array, k: number) {
+    const last = this.last;
+    if (!last || k > CONCEAL_FRAMES || last.length !== this.size) {
+      into.fill(0);
+      return;
+    }
+    const n = this.size;
+    const total = CONCEAL_FRAMES * n;
+    const base = (k - 1) * n;
+    const reversed = k % 2 === 1;
+    for (let i = 0; i < n; i++) {
+      const gain = 1 - (base + i + 1) / total;
+      into[i] = (reversed ? last[n - 1 - i] : last[i]) * gain;
+    }
+  }
+
   private nextFrame(): Float32Array {
     const pulled = this.jitter.pull();
-    if (pulled.frame) {
-      this.last = pulled.frame;
+    const frame = pulled.frame;
+    if (frame) {
+      const resume = this.concealed > 0 || pulled.jump;
+      const missed = this.concealed;
       this.concealed = 0;
-      return pulled.frame;
+      if (!resume || frame.length !== this.size) {
+        this.last = frame;
+        return frame;
+      }
+      // What concealment would have played next is what the listener's ear
+      // is following; fade from it into the new frame.
+      this.conceal(this.next, missed + 1);
+      this.last = frame;
+      const out = this.out;
+      for (let i = 0; i < this.fade; i++) out[i] = frame[i] * this.ramp[i] + this.next[i] * (1 - this.ramp[i]);
+      for (let i = this.fade; i < this.size; i++) out[i] = frame[i];
+      return out;
     }
-    const out = new Float32Array(this.size);
-    if (pulled.reason === 'waiting' || !this.last || this.concealed >= CONCEAL_FRAMES) return out;
-    // Packet loss concealment: repeat the last good frame, fading it out.
-    this.concealed++;
-    const gain = 0.5 ** this.concealed;
-    for (let i = 0; i < this.size; i++) out[i] = this.last[i] * gain;
-    return out;
+    if (this.concealed <= CONCEAL_FRAMES) this.concealed++;
+    this.conceal(this.out, this.concealed);
+    return this.out;
   }
 
   process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
@@ -96,12 +143,13 @@ class PlayoutProcessor extends AudioWorkletProcessor {
     if (!output) return true;
     let written = 0;
     while (written < output.length) {
-      if (!this.current || this.offset >= this.current.length) {
+      if (this.offset >= this.current.length) {
         this.current = this.nextFrame();
         this.offset = 0;
       }
-      const take = Math.min(output.length - written, this.current.length - this.offset);
-      output.set(this.current.subarray(this.offset, this.offset + take), written);
+      const source = this.current;
+      const take = Math.min(output.length - written, source.length - this.offset);
+      for (let i = 0; i < take; i++) output[written + i] = source[this.offset + i];
       this.offset += take;
       written += take;
     }
