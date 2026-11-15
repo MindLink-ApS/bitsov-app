@@ -120,7 +120,7 @@ other people on one box stays out of scope until sealed messages exist.
 | **The person on the other end** | Not protected. They can record. | Not protected |
 | **A compromised app or OS on either device** | Not protected. Plaintext exists there. | Not protected |
 | **Metadata**: who, when, how long, sizes, price | Not protected. Both boxes need it for the cell and the money. | Not protected |
-| **Speech inferred from packet sizes** | Protected by padding (section 4). Without padding this is a real leak. | n/a |
+| **Speech inferred from packet sizes** | Reduced by padding (section 4), not removed: a frame over its bucket still shows, and whether talking and silence can be told apart is unproven until E5. Without padding this is a real leak. | n/a |
 | **Recorded now, broken later by a quantum computer** | Not protected in v1 (X25519) | Not protected in v1 |
 
 A box can always drop or delay frames and end a call. Encryption cannot change that.
@@ -208,8 +208,11 @@ Both sides then derive:
 **Why the commitment matters.** Without it, a box in the middle sees both public keys
 before choosing its own, so it can search for keys that make the two screens show the
 same words. Four words are 44 bits, and a collision search needs only about 2^22 tries
-[I]. With the commitment the box must choose before it has seen what it would need, so
-it gets one guess at 44 bits [I].
+[I]. With the commitment the box must fix its own key before it sees the other side's,
+so it can no longer search both ends at once. It can still search for a key whose words
+match the side it has already seen, which is a preimage search of about 2^44 tries [I].
+That bound holds only while all 44 displayed bits are compared: showing fewer bits
+lowers it (D3).
 
 **Cost.** Media opens only after the first minute settles (`app:docs/CALLS.md:195-198`,
 `node:crates/konsensus-core/src/payloads/call.rs:336-338`) [S], so a failed reveal has
@@ -300,8 +303,11 @@ No terminal, no settings, no key strings. The bar is a 70-year-old on their own.
 5. Ignoring the words is allowed. The call goes on and the label stays truthful.
 
 Four English words are read aloud across a Danish household [U]. The first real
-person test decides whether words or six digits work better. That is a display choice:
-the digest behind it does not change, so swapping costs nothing later (D3).
+person test decides whether words or digits work better. The digest behind it does not
+change, but the number of bits shown does: six digits are about 20 bits, far below the
+44 bits of four words, and the preimage bound in section 3.1 drops with it. Digits must
+therefore show at least 44 bits too (14 digits, about 46 bits), or the active-box claim must be
+restated for the shorter value (D3).
 
 A live voice clone could in theory read the right words while a box swaps keys. Word
 comparison assumes people recognise each other's voices [U].
@@ -372,8 +378,9 @@ Inside the ciphertext:       type u8 | stream_seq u32 BE | len u16 | data | zero
 - **Audio padding:** pad the inside to the next multiple of 128 bytes, so Opus at 24 kbit/s
   (`callAudio.ts:37`) [S] becomes one constant size in normal speech [I]. Peak frame sizes
   are [U] and must be measured. A frame over the bucket reveals one bit about that frame.
-  This also hides talking from silence at the size level; timing is constant at 50 frames
-  a second [I].
+  This reduces what sizes say about talking and silence; it does not remove it. Timing is
+  constant only if the app sends 50 frames a second in silence as well, which must be a
+  requirement next to the padding rule. Both are unproven until E5 [U].
 
 ### Can boxes still meter and cut off without reading content?
 
@@ -605,9 +612,9 @@ messages should not run at once.
 |---|---|---|---|
 | **D1** | Where sealing happens | **In the host, not the webview.** | One implementation on four webviews. The key never reaches JavaScript. |
 | **D2** | A peer cannot do sealed calls, or a box stripped the offer | **Allow with today's label by default, and warn if this contact was sealed before. Setting: "Only private calls", off by default.** Turn the default on once most contacts have upgraded. | Little policy, default the user can change. A hard refusal would break calls in the rollout week. |
-| **D3** | Words or digits | **Four words, the same as device join.** Test on a person, switch to six digits if it fails. | Nothing new to learn. The switch costs nothing later. |
+| **D3** | Words or digits | **Four words, the same as device join.** Test on a person; if words fail, switch to digits that still show about 44 bits. | Nothing new to learn. Fewer shown bits would weaken the active-box claim in section 3.1, so the switch keeps the bit count. |
 | **D4** | Must words be compared? | **Offered, never required.** The label stays truthful either way. | Forced ceremony gets clicked through, which is worse than an honest label. |
-| **D5** | Padding, at about 3 extra KB/s per direction | **Pad.** | Sealed but unpadded still leaks speech patterns to the box, which is the very thing being removed. |
+| **D5** | Padding, at about 3 extra KB/s per direction | **Pad, and send at a constant 50 frames a second in silence too.** | Sealed but unpadded still leaks speech patterns to the box. Padding reduces that leak; how much is unproven until E5. |
 | **D6** | Messages model | **Box-readable and plainly labelled until sealed calls are proven, then one key per owner (option A).** | Works with several devices and history, passes the 70-year-old bar. Accepts weaker forward secrecy, with rotation. |
 | **D7** | All devices lost | **Sealed content is gone. New messages work. No copy with the box or the seed, ever.** An optional owner export later. | Any box-held copy breaks `CHARTER.md:18-21`. Must be said before someone relies on it. |
 | **D8** | Video rate and price | **64 KiB/s at the audio minute price. 256 KiB/s as a later tier with a callee-set price, default 8 sats.** | Price what the box can see. Rate-proportional default, user-changeable. |
