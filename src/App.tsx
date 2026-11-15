@@ -333,6 +333,7 @@ function AppScreen() {
             onTargetChange={setSelectedTarget}
             trustAck={trustAck}
             onRetry={() => void retryPairing()}
+            onSetupLocal={async () => { try { await source().nodeSetupLocal(true); } finally { await poll(); } }}
             device={device}
             joinDevice={input => source().joinDevice(input)}
             onForgetRemote={() => source().remoteAccessForget()}
@@ -352,7 +353,7 @@ function AppScreen() {
               <Show
                 when={status().error && pairing().state !== 'failed' && !offline()}
                 fallback={
-                  <Show when={starting()}>
+                  <Show when={starting() && !status().local_setup_needed}>
                     <div class="state">
                       <DelayedSpinner />
                       {pairing().remote ? t('obConnectingNode') : t('obStartingNode')}
