@@ -35,6 +35,8 @@ function stubHost() {
   const calls: { cmd: string; args?: unknown }[] = [];
   const callbacks = new Map<number, (e: unknown) => void>();
   let mediaIndex = 0;
+  // A quote that never answers keeps an accepted call in connecting, before its video path is built.
+  let heldQuote: Promise<CallQuote> | null = null;
   const spending: SpendView = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
   // M6 A2: the node reports the first minute paid, so it admits the media socket; ending the call closes the reservation.
   let ended = false;
@@ -57,7 +59,7 @@ function stubHost() {
     fund_state: () => null,
     spend_status: () => spending,
     budget_status: () => null,
-    call_quote: () => QUOTE,
+    call_quote: () => heldQuote ?? QUOTE,
     call_signal: (args) => ({ message_id: 'sig', kind: (args as { kind: number }).kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }),
     call_status: (args) => status(args),
     call_hold: (args) => status(args),
@@ -82,6 +84,8 @@ function stubHost() {
   });
   vi.stubGlobal('__TAURI_EVENT_PLUGIN_INTERNALS__', { unregisterListener: () => {} });
   return {
+    holdQuotes: () => { heldQuote = new Promise<CallQuote>(() => {}); },
+    resetEnded: () => { ended = false; },
     used: (cmd: string) => calls.filter((c) => c.cmd === cmd),
     emitLive: (payload: unknown) => {
       const listen = calls.find((c) => c.cmd === 'plugin:event|listen');
@@ -264,6 +268,34 @@ describe('call video flag', () => {
       expect(constraintsSeen.every((c) => !c.video)).toBe(true);
       expect(host.used('call_media_video_send')).toHaveLength(0);
       expect($('[data-call-route="node"]')?.textContent).toBe('The call goes through your box and theirs. Both boxes can hear it.');
+    });
+
+
+    it('the next call shows neither the last call\'s picture nor its video status', async () => {
+      const host = stubHost();
+      const first = await placeVideo(host);
+      await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
+      host.media({ link: 'open', detail: null });
+      await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+      await vi.waitFor(() => expect($('[data-call-video-status]')).not.toBeNull());
+      const earlier = $<HTMLCanvasElement>('canvas[data-call-media="remote"]')!;
+      expect(earlier).not.toBeNull();
+      $<HTMLButtonElement>('[data-call-hangup]')!.click();
+      await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+      host.resetEnded();
+      const next = 'fedcba9876543210fedcba9876543210';
+      expect(next).not.toBe(first.call_id);
+      host.emitLive({ type: 'message', room_id: null, message: { id: 'next-offer', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: next, media: 'video', sdp: nodeRoutedSdp('offer', next) }), attachment: null, status: 'delivered' } });
+      await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
+      await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+      host.holdQuotes();
+      $<HTMLButtonElement>('[data-call-accept]')!.click();
+      await vi.waitFor(() => expect($('[data-call-panel="connecting"]')).not.toBeNull());
+      // The new call has no video path yet, so nothing of the last one may stand in for it.
+      expect(host.used('call_media_open')).toHaveLength(1);
+      expect($('canvas[data-call-media="remote"]')).not.toBe(earlier);
+      expect(earlier.isConnected).toBe(false);
+      expect($('[data-call-video-status]')).toBeNull();
     });
 
   });

@@ -1485,9 +1485,14 @@ export function ControlCenter(props: Props) {
             build: (transport, track) => {
               if (callView().media !== 'video') return null;
               const canvas = document.createElement('canvas');
+              const callId = callView().callId;
               setCallVideoCanvas(canvas);
               setCallVideoStatus(null);
-              return createCallVideo({ transport, canvas, source: track ? trackVideoSource(track) : null, onStatus: setCallVideoStatus, audioDelayMs: () => AUDIO_PLAYOUT_DELAY_MS });
+              // Only this call's engine speaks for the card: a late status from an earlier call is dropped.
+              const onStatus = (status: VideoStatus) => {
+                if (callVideoCanvas() === canvas && callView().callId === callId) setCallVideoStatus(status);
+              };
+              return createCallVideo({ transport, canvas, source: track ? trackVideoSource(track) : null, onStatus, audioDelayMs: () => AUDIO_PLAYOUT_DELAY_MS });
             },
             camera: (engine, track) => engine.setSource(track ? trackVideoSource(track) : null),
           } : undefined,
@@ -1500,7 +1505,12 @@ export function ControlCenter(props: Props) {
       : (config) => new RTCPeerConnection(config),
     now: () => Date.now(),
     onView: view => {
-      if (view.callId !== callView().callId || view.phase === 'idle' || view.phase === 'ended') nextSealLabel();
+      if (view.callId !== callView().callId || view.phase === 'idle' || view.phase === 'ended') {
+        nextSealLabel();
+        // The picture and its status belong to one call: none of it carries into the next.
+        setCallVideoCanvas(null);
+        setCallVideoStatus(null);
+      }
       setCallView(view);
       if (view.phase === 'incoming' && !view.silenced && view.callId && view.peer) notifications?.call(`${view.peer}:${view.callId}`, nameOf(view.peer), () => isIncoming(view.peer!, view.callId!), () => revealIncoming(view.callId!, view.peer!));
     },
