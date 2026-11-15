@@ -1913,10 +1913,10 @@ html .call-panel[data-call-immersive][data-call-panel] {
 .call-panel[data-call-immersive] header .who { flex: none; max-width: 100%; color: var(--ink); font-size: var(--t-xl, 1.4rem); font-weight: 600; }
 .call-panel[data-call-immersive] header strong { font-weight: 400; color: var(--muted); }
 .call-panel[data-call-immersive][data-call-panel="calling"] header strong::after, .call-panel[data-call-immersive][data-call-panel="ringing"] header strong::after { content: '…'; }
-.call-panel[data-call-immersive] .call-compact { position: absolute; top: max(var(--s-3), env(safe-area-inset-top, 0px)); right: var(--s-4); width: auto; min-height: 44px; }
+.call-panel[data-call-immersive] .call-compact { position: absolute; top: max(var(--s-3), env(safe-area-inset-top, 0px)); right: max(var(--s-4), env(safe-area-inset-right, 0px)); width: auto; min-height: 44px; }
 .call-compact { align-self: flex-end; }
 .call-panel[data-call-immersive] .call-videos { position: fixed; inset: 0; width: auto; z-index: -1; border-radius: 0; aspect-ratio: auto; }
-.call-panel[data-call-immersive] .call-video.local { right: var(--s-4); bottom: calc(96px + env(safe-area-inset-bottom, 0px)); width: min(28vw, 160px); border-radius: 12px; }
+.call-panel[data-call-immersive] .call-video.local { right: max(var(--s-4), env(safe-area-inset-right, 0px)); bottom: calc(96px + env(safe-area-inset-bottom, 0px)); width: min(28vw, 160px); border-radius: 12px; }
 .call-panel[data-call-immersive] .call-actions { order: 10; position: sticky; bottom: max(var(--s-4), env(safe-area-inset-bottom, 0px)); margin: auto 0 max(var(--s-4), env(safe-area-inset-bottom, 0px)); align-items: center; flex-wrap: wrap; padding: var(--s-2) var(--s-3); border-radius: 18px; border: 1px solid var(--line-strong); background: var(--surface); box-shadow: 0 8px 24px rgba(0,0,0,.28); }
 .call-panel[data-call-immersive] .call-actions button { flex: none; min-height: 44px; }
 /* Muted must be plain from across the room, on the card and on the full screen. */

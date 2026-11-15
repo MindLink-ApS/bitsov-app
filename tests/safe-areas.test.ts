@@ -41,3 +41,12 @@ it.each(['desktop', undefined])('does not apply device insets to %s', platform =
     expect(getComputedStyle(document.querySelector(selector)!).paddingBottom).not.toBe('34px');
   }
 });
+
+it('keeps the full-screen call’s corner controls clear of a side notch in landscape', () => {
+  // Absolute children ignore the panel's padded insets, so each one carries the right inset itself.
+  for (const selector of ['.call-panel[data-call-immersive] .call-compact', '.call-panel[data-call-immersive] .call-video.local']) {
+    const rule = css.split('\n').find((line) => line.startsWith(`${selector} {`));
+    expect(rule, selector).toBeDefined();
+    expect(rule, selector).toContain('right: max(var(--s-4), env(safe-area-inset-right, 0px))');
+  }
+});
