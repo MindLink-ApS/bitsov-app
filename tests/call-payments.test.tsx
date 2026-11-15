@@ -111,6 +111,52 @@ describe('paying the minutes of one outgoing call', () => {
     return { minutes, deps, views, stops, last, confirmed };
   }
 
+  it('a call is paid to its hold, at the exact boundary, and a minute past it is refused and ends the call', async () => {
+    const node = fakeNode({ now: () => Date.now(), minutes: 3 });
+    const s = session(node);
+    await s.confirmed();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(1);
+    for (let i = 0; i < 2; i++) await vi.advanceTimersByTimeAsync(60_000);
+    expect(s.deps.pay).toHaveBeenCalledTimes(3);
+    expect(s.stops).toEqual([]);
+    expect(node.reservation!.spent_msat).toBe(node.reservation!.reserved_msat);
+    // A node that still asks for a minute past the hold: nothing is paid for it.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(s.deps.pay).toHaveBeenCalledTimes(3);
+    expect(s.stops[0]?.code).toBe('hold_refused');
+    expect(s.stops[0]?.message).toMatch(/nothing was paid for it/i);
+  });
+
+  it('the sum of paid receipts stops a minute when the node’s spent figure lags', async () => {
+    const node = fakeNode({ now: () => Date.now(), minutes: 2 });
+    const settle = node.settle;
+    node.settle = (seq) => { settle(seq); node.reservation!.spent_msat = 0; };
+    const s = session(node);
+    await s.confirmed();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(s.deps.pay).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(s.deps.pay).toHaveBeenCalledTimes(2);
+    expect(s.stops[0]?.code).toBe('hold_refused');
+  });
+
+  it('a direct call (no routing fee), with its hold above the minutes, is not cut short', async () => {
+    const node = fakeNode({ now: () => Date.now(), minutes: 3 });
+    node.reservation = { ...node.reservation!, per_block_fee_msat: 0, reserved_msat: 3 * BLOCK + 1_000, remaining_msat: 3 * BLOCK + 1_000 };
+    const settle = node.settle;
+    node.settle = (seq) => { settle(seq); node.reservation!.spent_msat = (seq + 1) * BLOCK; };
+    const s = session(node, async (_peer, _call, seq) => { node.settle(seq); return ok({ ...receipt(seq), total_msat: BLOCK, max_routing_fee_msat: 0 }); });
+    await s.confirmed();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(1);
+    for (let i = 0; i < 2; i++) await vi.advanceTimersByTimeAsync(60_000);
+    expect(s.deps.pay).toHaveBeenCalledTimes(3);
+    expect(s.stops).toEqual([]);
+  });
+
   it('pays no minute before the owner confirms the node’s exact hold, then pays block 0', async () => {
     const node = fakeNode({ now: () => Date.now(), minutes: 60 });
     const s = session(node);
@@ -807,7 +853,7 @@ describe('node-routed calls carry audio only, and a dead media session stops the
     await e.engine.receive({ id: 'off', kind: 400, sender: A, recipient: OWN, timestamp: 0,
       plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'video', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 1 }, OWN);
     expect(e.last()).toMatchObject({ phase: 'incoming', media: 'audio', camera: false });
-    await e.engine.accept();
+    await e.engine.accept(QUOTE);
     expect(e.media).toEqual([{ audio: true, video: false }]);
     expect(e.signals.map((x) => x.kind)).toEqual([401]);
     expect(e.last().camera).toBe(false);

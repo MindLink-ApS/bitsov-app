@@ -167,12 +167,26 @@ pub struct AdmissionView {
 }
 
 pub const MONEY_NOT_READY: &str = "Money is not ready yet. Your node will retry automatically.";
+pub const CHAIN_UNAVAILABLE: &str = "Your box can't see the Bitcoin chain right now; nothing was paid; try again later.";
+
+pub fn chain_unavailable_refusal(status: u16, body: &str) -> bool {
+    status == 503 && serde_json::from_str::<serde_json::Value>(body).ok()
+        .is_some_and(|v| v["code"] == "not_ready" && v["reason"] == "chain_unavailable")
+}
+
+pub fn readiness_error(status: u16, body: &str) -> ActionError {
+    if chain_unavailable_refusal(status, body) {
+        ActionError { reason: Some("chain_unavailable".into()), ..ActionError::new("not_ready", CHAIN_UNAVAILABLE) }
+    } else {
+        ActionError::new("not_ready", MONEY_NOT_READY)
+    }
+}
 
 /// Only this explicit pre-dispatch refusal may release a pending spend.
 /// A generic 503 (or a broken response) still has an unknown outcome.
 pub fn readiness_refusal(status: u16, body: &str) -> bool {
-    status == 503 && serde_json::from_str::<serde_json::Value>(body).ok()
-        .is_some_and(|v| v["code"] == "not_ready" && v["money_ready"] == false)
+    chain_unavailable_refusal(status, body) || (status == 503 && serde_json::from_str::<serde_json::Value>(body).ok()
+        .is_some_and(|v| v["code"] == "not_ready" && v["money_ready"] == false))
 }
 
 /// The node's #115 refusal and the local proxy's pre-forward failures prove
@@ -429,7 +443,8 @@ impl ActionError {
     }
     pub fn node(message: impl Into<String>) -> Self {
         let message = message.into();
-        if message == MONEY_NOT_READY { Self::new("not_ready", message) }
+        if message == "not_ready:chain_unavailable" { Self { reason: Some("chain_unavailable".into()), ..Self::new("not_ready", CHAIN_UNAVAILABLE) } }
+        else if message == MONEY_NOT_READY { Self::new("not_ready", message) }
         else { Self::new("node", message) }
     }
 }
@@ -910,9 +925,9 @@ pub const OPERATION_MISMATCH: &str = "Your node refused this retry: its text dif
 pub const PAYMENT_UNKNOWN: &str = "Payment unknown: your node has not resolved whether this message's payment went through. It will not pay for it again, and the app will not resend it. Check the pending result later.";
 pub const FAILED_PAID: &str = "Paid, and the recipient's node refused this message for good. The payment is not refundable. Do not send it again.";
 
-/// `502 payment_settled_send_incomplete` from compose: the node paid, the
-/// message did not go. The prior/current admission amounts are read from the
-/// node's reason when it gives them.
+/// Compose reports a payment whose message is not delivered. The amount is
+/// this attempt's new payment; a retained-payment handover adds nothing.
+/// Prior/current admission amounts are read from the node's reason when given.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettledIncomplete {
     pub amount_msat: u64,
@@ -928,8 +943,15 @@ pub struct SettledIncomplete {
 const RETRY_SAFE: [&str; 2] = ["will not pay admission again", "re-send the paid proof, not pay again"];
 
 pub fn settled_incomplete(status: u16, body: &str) -> Option<SettledIncomplete> {
-    if status != 502 { return None; }
+    if !matches!(status, 409 | 502) { return None; }
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    if status == 409 {
+        let handover = v["code"] == "session_handover" || (v["code"] == 409 && v["reason"] == "session_handover");
+        if !handover || !v["error"].as_str()?.contains("existing payment is retained") { return None; }
+        return Some(SettledIncomplete {
+            amount_msat: 0, prior_admission_msat: None, current_call_msat: None, retry_safe: v["retry_allowed"] == true,
+        });
+    }
     if v["code"] != "payment_settled_send_incomplete" { return None; }
     let amount_msat = v["amount_msat"].as_u64()?;
     let reason = v["error"].as_str().unwrap_or_default();
@@ -2243,6 +2265,40 @@ mod tests {
         let other = serde_json::json!({"accepted": false, "code": 400, "error": "their node did not answer with a call price (not connected, or this connection is not admitted yet: send them a message first); nothing was paid",
             "operation_id": "x", "payment_hash": null, "reason": "call_price_unknown", "retry_allowed": true, "state": "released"}).to_string();
         assert!(released_refusal_message(&other).contains("did not answer with a call price"));
+    }
+
+    #[test]
+    fn settled_incomplete_maps_session_handover_with_a_retained_payment() {
+        for (code, reason) in [(json!("session_handover"), json!(null)), (json!(409), json!("session_handover"))] {
+            let body = json!({
+                "code": code, "reason": reason,
+                "error": "the existing payment is retained while the E2EE session recovers; retry this operation",
+                "state": "rejected_retryable", "retry_allowed": true,
+            }).to_string();
+            assert_eq!(settled_incomplete(409, &body), Some(SettledIncomplete {
+                amount_msat: 0, prior_admission_msat: None, current_call_msat: None, retry_safe: true,
+            }));
+            for status in [400, 500, 502, 503] {
+                assert!(settled_incomplete(status, &body).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn settled_incomplete_keeps_other_conflicts_unknown() {
+        for body in [
+            json!({"code": "session_handover", "retry_allowed": true}),
+            json!({"code": "session_handover", "error": "session recovery pending", "retry_allowed": true}),
+            json!({"code": "operation_mismatch", "error": "the existing payment is retained", "retry_allowed": true}),
+            json!({"code": 409, "reason": "something_else", "error": "the existing payment is retained", "retry_allowed": true}),
+            json!({"code": "not_dispatched", "reason": "session_handover", "error": "session recovery pending"}),
+        ] {
+            assert!(settled_incomplete(409, &body.to_string()).is_none(), "{body}");
+        }
+        assert!(settled_incomplete(409, &psi(2000, 0, 2000, SESSION_TIMEOUT)).is_none());
+        assert!(settled_incomplete(409, "not json").is_none());
+        let no_retry = json!({"code": "session_handover", "error": "the existing payment is retained", "retry_allowed": false});
+        assert!(!settled_incomplete(409, &no_retry.to_string()).unwrap().retry_safe);
     }
 
     #[test]
