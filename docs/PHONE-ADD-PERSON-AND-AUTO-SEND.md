@@ -19,7 +19,7 @@ Status: spec only. Nothing here is built. Both parts need a decision first: part
    - Approved: the action, with no amount. Creating and accepting an invite move no sats (`/invites`, `/invites/accept`), but both still need spending approved.
    - Waiting: what is being waited for.
    - Approval possible on this phone: the action that approves.
-   - Approval not possible on this phone: why, and the steps at the box, using the same steps and who-to-ask line as the approval card in #426.
+   - Approval not possible on this phone: why, and the steps at the box, using the same steps and who-to-ask line as the approval card in #426 (still a draft; if #426 changes before it lands, this follows it).
 3. **Accept invite** does the same. Pasting or scanning a link should work before any approval. It charges nothing, so it shows no price.
 
 ### What must not change
@@ -35,7 +35,7 @@ The node decides. The phone may not create or accept an invite without the appro
 
 ### What happens today
 
-The person presses Send, approves, and in some paths has to press Send again. #419 says so for a chosen file ("Approved. Press Send to send it."). On a phone the message can also stop with "the amount changed while it waited for approval", and has to be put back in the box.
+The person presses Send, approves, and in some paths has to press Send again. #419 says so for a chosen file ("Approved. Press Send to send it."). On a phone the message can also stop with "the amount changed while it waited for approval". It then becomes an Unsent card that the person has to send again; it is not put back into the box.
 
 ### The one rule
 
@@ -45,11 +45,14 @@ One press means one send, but only if the amount was shown and has not gone up. 
 
 - The all-in amount as an integer in msat, and **whether a number was on screen**. Today the button shows no amount with autopay off ("Send") or on biometric approval, so those presses have nothing to hold it to. **No number shown means no automatic send.**
 - The text, the recipient and the composer's mode.
-- For a file or voice note: a hash of its bytes.
+- For a file or voice note: the SHA-256 of its bytes.
 
 ### One cap
 
-There is one cap for the budget check and for `max_total_msat`: **min(msat at press, msat now)**. If the amount fell, it sends at the lower amount. It never sends above what was shown.
+There is one cap for the budget check and for `max_total_msat`: **min(msat at press, msat now)**. It never sends above what was shown.
+
+- **Same formula, lower amount:** it sends at the lower amount.
+- **The formula changed** (for example door → plain): it stops and asks again, even if the amount fell. This is the default until the money review decides otherwise (see the note under the test table).
 
 ### When it stops
 
@@ -59,13 +62,13 @@ Each stop keeps its own reason, so the person is told what happened. Nothing is 
 |---|---|
 | The amount now is above the amount at press | The amount changed; show the new one and wait for a press |
 | The formula changed, the quote expired or a new quote arrived | The amount has to be checked again |
-| The budget stand is `first`, the amount is above `first_contact_msat`, or the door quote is the cap | This first contact needs its own approval |
+| The budget stand is `first` (no budget row for this contact yet; `first_contact_msat` applies only then), or the door quote is the cap | This first contact needs its own approval |
 | The composer's mode changed, or the text or recipient changed | Cancelled; the draft is put back |
 | The approval lapsed or was cancelled | It lapsed |
 | An earlier send has an unknown result | Point to the pending check |
 | `readmission_quoted`, `grant_readmission`, `price_changed` or `price_cap_exceeded` | Stop with that refusal's own words; no second dispatch |
 
-**First contact fails closed.** A budget approval does not cover a true first contact, which is a separate owner approval. Today the continuation stops when the stand is `first`, and that stays. Note that `confirm_first_contact` succeeds without an approval when there is no re-admission quote, so the host does not stop this for us. Automatic send may follow only a contact approval for the same recipient and the same msat.
+**First contact fails closed.** A budget approval does not cover a true first contact, which is a separate owner approval. Today the continuation stops when the stand is `first`, and that stays. Note that `confirm_first_contact` succeeds without an approval when there is no re-admission quote, so the host does not stop this for us. For a true first contact (stand `first`, or a re-admission treated as first), automatic send may follow only a contact approval for the same recipient and the same msat. For a returning contact with a budget row (stand `ok`), a budget approval that covers the amount is enough, as in the first test row.
 
 **Mode changes cancel.** Any change of composer mode cancels the press and restores the draft. A send continues only with the same mode, recipient and text. Pay never rides on this continuation.
 
@@ -86,13 +89,14 @@ Each row states the amounts and the one result. A result is a single `max_total_
 | Amount rises, returning contact | 6,000 shown | 106,000 | plain → door | `first` | No POST |
 | Button shows no amount | 6,000 not shown | 6,000 | plain → plain | `off` | No POST |
 | True first contact | 106,000 shown | 106,000 | door → door | `first` | No POST until contact approval for the same recipient and msat |
-| Above `first_contact_msat` | shown | above the limit | any | any | No POST |
+| First contact above `first_contact_msat` | shown | above the limit | any | `first` | No POST until contact approval |
+| Returning contact above `first_contact_msat`, budget approved | 6,000 shown | 6,000 (above the first-contact limit) | plain → plain | `ok` | `max_total_msat` 6,000 (the first-contact limit does not apply once a budget row exists) |
 | Mode changes during the wait | 6,000 shown | 6,000 | plain → plain | `ok` | No POST, draft restored |
 | File re-quote higher | 8,000 shown | 9,000 | file | `ok` | No POST |
 | Unknown journal across a restart | 6,000 shown | n/a | plain | any | No POST, still blocked after restart |
 | Re-admission quote on the same press | 6,000 shown | quote 106,000 | plain | `ok` | First POST `max_total_msat` 6,000 refused; no second POST |
 
-The amounts are examples. The second row stops by the formula rule even though the amount fell: a decision for the money review, which may prefer to let a fall through.
+The amounts are examples. The second row stops by the formula rule even though the amount fell. That is the default here and in "One cap" above; the money review may decide to let a fall with a formula change through, and then both places change together.
 
 ### Why the amount moves
 
