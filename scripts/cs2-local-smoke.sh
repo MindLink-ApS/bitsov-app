@@ -12,7 +12,7 @@
 #   - no bearer token can reach the renderer (owner phrase UI is tested separately)
 #   - the funds UI sits behind an explicit local-trust disclosure (G6)
 #   - the recovery-phrase input is write-only and cleared on submit
-#   - the pinned onboarding contract (v0.3.0-rc21) is what the host calls
+#   - the pinned onboarding contract (v0.3.0-rc23) is what the host calls
 #   - the host starts konsensus.toml as `init` wrote it: no rc4/rc5 port or migrations splints
 #
 # Runs on any OS. Does not touch funding at runtime, rooms, messaging, mobile, calls,
@@ -166,7 +166,7 @@ chk "tier is \"full\" (fund-your-own-node)" \
   has '"tier":\s*"full"' "$HOST"
 chk "GET /onboarding/state polled for the funding step" \
   has '/onboarding/state' "$HOST"
-chk "pinned step literal funding-seen (v0.3.0-rc21)" \
+chk "pinned step literal funding-seen (v0.3.0-rc23)" \
   has 'funding-seen' "$HOST"
 chk "GET /payments/funding-address" \
   has '/payments/funding-address' "$HOST"

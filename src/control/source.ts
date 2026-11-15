@@ -265,7 +265,7 @@ export interface Source {
   /** Validate the admission for local teardown without releasing it. */
   closeCallAdmission(operationId: string, peer: string, callId: string): Promise<void>;
   /** One paid call signal (kinds 400-403) under the message budget rules; a node-routed offer carries the agreed minutes. */
-  callSignal(peer: string, kind: number, plaintext: string, maxMsat: number, minutes?: MinutesConsent): Promise<CallReceipt>;
+  callSignal(peer: string, kind: number, plaintext: string, maxMsat: number, minutes?: MinutesConsent, maxHangupMsat?: number): Promise<CallReceipt>;
   /** M6: one call's paid interval and reservation at the node; null once the node no longer lists it. Read-only. */
   callStatus(peer: string, callId: string): Promise<CallStatus | null>;
   /** M6: pay block `seq` (one minute) of an outgoing call; the host takes the amount from the node's reservation. */
@@ -426,7 +426,7 @@ export const hostSource: Source = {
   fileSave: (messageId) => invoke<FileSaveResult>('file_save', { message_id: messageId }),
   callQuote: (peer) => invoke<CallQuote>('call_quote', { peer }),
   closeCallAdmission: (operationId, peer, callId) => invoke<void>('op_close_call', { operation_id: operationId, peer, call_id: callId }),
-  callSignal: (peer, kind, plaintext, maxMsat, minutes) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat, ...(minutes ? { minutes } : {}) }),
+  callSignal: (peer, kind, plaintext, maxMsat, minutes, maxHangupMsat) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat, ...(minutes ? { minutes } : {}), ...(maxHangupMsat !== undefined ? { max_hangup_msat: maxHangupMsat } : {}) }),
   callStatus: (peer, callId) => invoke<CallStatus | null>('call_status', { peer, call_id: callId }),
   callBlock: (peer, callId, seq) => invoke<CallReceipt>('call_block', { peer, call_id: callId, seq }),
   callHold: (peer, callId, confirmReservedMsat) => invoke<CallStatus>('call_hold', { peer, call_id: callId, ...(confirmReservedMsat === null ? {} : { confirm_reserved_msat: confirmReservedMsat }) }),

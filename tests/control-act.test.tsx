@@ -443,7 +443,7 @@ describe('acting from the track', () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(sent).toEqual(['one', 'mid', 'mid2']);
     const reasons = () => [...mount.querySelectorAll('[data-unsent] [data-unsent-reason]')].map((e) => e.textContent ?? '');
-    await waitFor(() => expect(reasons().some((r) => r.includes('The message price changed before it was sent.'))).toBe(true));
+    await waitFor(() => expect(reasons().some((r) => r.includes('The amount on Send changed before it was sent.'))).toBe(true));
   }, 30_000);
 
   it('Approve & send (spending request): a successful Cancel request ends the wait; the window its request later arms never sends it', async () => {
@@ -1139,7 +1139,7 @@ describe('acting from the track', () => {
     const input = $<HTMLInputElement>('[data-file-input]')!;
     Object.defineProperty(input, 'files', { value: [new File(['hi'], 'hi.txt', { type: 'text/plain' })] });
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    await waitFor(() => expect(text('[data-send]')).toBe('Send file · 8 sats'));
+    await waitFor(() => expect(text('[data-send]')).toBe('Send file · up to 8 sats'));
     submit();
     await waitFor(() => expect(host.used('file_send')[0]?.args).toEqual({ recipient: A, filename: 'hi.txt', mime_type: 'text/plain', data_b64: 'aGk=', max_msat: 8000, first_contact_msat: null }));
     await waitFor(() => expect(text('[data-message="file-1"] .file-name')).toBe('hi.txt'));
