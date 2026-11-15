@@ -562,7 +562,7 @@ export function ControlCenter(props: Props) {
   const [roomSends, setRoomSends] = createStore<Record<string, RoomSend[]>>({});
   const [roomPlan, setRoomPlan] = createSignal(false);
   // Each bound room's thread read (`?room=`): the next page's cursor, and whether there is one.
-  const [roomPages, setRoomPages] = createStore<Record<string, { before: number | null; more: boolean; loading: boolean }>>({});
+  const [roomPages, setRoomPages] = createStore<Record<string, { before: number | null; more: boolean; loading: boolean; earlierFailed?: boolean }>>({});
   // An offline transition consumes undispatched retry approvals, even if their
   // request/status response arrives only after readiness has recovered.
   let retryApprovalRevision = 0;
@@ -727,13 +727,21 @@ export function ControlCenter(props: Props) {
     if (roomPages[id]?.loading) return;
     setRoomPages(id, { before, more: roomPages[id]?.more ?? false, loading: true });
     // The first page is the room's current read; an earlier page never changes what the room says about being empty.
+    // A failed earlier page is this room's alone: it shows only here, and the next good read of this room clears it.
+    const earlier = async <T,>(run: () => Promise<T>, apply: (v: T) => void) => {
+      try {
+        apply(await run());
+      } catch (e) {
+        if (asActionError(e).code !== 'not_ready') setRoomPages(id, 'earlierFailed', true);
+      }
+    };
     const read = <T,>(run: () => Promise<T>, apply: (v: T) => void) =>
-      before === null ? readThread(trackKey({ kind: 'bound', id }), run, apply) : attempt('thread', run, apply);
-    if (before !== null) setErrors('thread', undefined);
+      before === null ? readThread(trackKey({ kind: 'bound', id }), run, apply) : earlier(run, apply);
+    if (before !== null) setRoomPages(id, 'earlierFailed', false);
     void read(() => source.roomThread(id, before ?? undefined, ROOM_PAGE), (page) => {
       foldRooms(page, false);
       const oldest = page.length ? Math.min(...page.map((m) => m.timestamp)) : before;
-      setRoomPages(id, { before: oldest, more: page.length >= ROOM_PAGE, loading: false });
+      setRoomPages(id, { before: oldest, more: page.length >= ROOM_PAGE, loading: false, earlierFailed: false });
     }).finally(() => setRoomPages(id, 'loading', false));
   };
 
@@ -2208,7 +2216,7 @@ export function ControlCenter(props: Props) {
                       deliveries={deliveries}
                       earlier={roomPages[room().id]?.more === true}
                       loadingEarlier={roomPages[room().id]?.loading === true}
-                      earlierFailed={!!errors.thread}
+                      earlierFailed={roomPages[room().id]?.earlierFailed === true}
                       read={threadRead[trackKey(t())] ?? 'pending'}
                       error={threadError[trackKey(t())]}
                       onEarlier={() => loadRoomPage(room().id, roomPages[room().id]?.before ?? null)}
@@ -4191,7 +4199,7 @@ function VoiceNote(props: { id: string; name: string; load: (messageId: string) 
       setUrl(await props.load(props.id));
     } catch (e) {
       if (String(e).includes(NOT_A_VOICE_NOTE)) setMissing('not_audio');
-      else if (/not stored/.test(String(e))) setMissing('gone');
+      else if (String(e).includes(FILE_NOT_STORED)) setMissing('gone');
       else setFailed(true);
     } finally {
       setBusy(false);

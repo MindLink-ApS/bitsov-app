@@ -275,9 +275,6 @@ export function RoomThread(props: {
                                 </p>
                               )}
                             </For>
-                            <Show when={props.read === 'failed' && items().length > 0}>
-                              <p class="err-note" role="alert" data-room-read-note>{props.error ?? t('roomReadError')}</p>
-                            </Show>
                           </article>
                         );
                       }}
@@ -308,6 +305,10 @@ export function RoomThread(props: {
               );
             }}
           </For>
+          {/* A failed re-read with messages on screen says so once, after them, as the direct chat does. */}
+          <Show when={props.read === 'failed' && items().length > 0}>
+            <p class="err-note" role="alert" data-room-read-note>{props.error ?? t('roomReadError')}</p>
+          </Show>
         </div>
       </div>
 

@@ -306,7 +306,6 @@ export function FrontDoorCardView(props: { card: FrontDoor; now: number; shareQr
   );
 }
 
-/** My front door editor for the profile/settings modal. */
 /** Says whether the copy worked. */
 function CopyLink(props: { url: string }) {
   const [done, setDone] = createSignal<'copied' | 'failed' | null>(null);
@@ -319,6 +318,7 @@ function CopyLink(props: { url: string }) {
   })}>{done() === 'copied' ? tr('caLinkCopied') : done() === 'failed' ? tr('caLinkCopyFailed') : tr('caCopy')}</button>;
 }
 
+/** My front door editor for the profile/settings modal. */
 export function FrontDoorEditor(props: { source: Source; now: number }) {
   const [mine, setMine] = createSignal<FrontDoor | null>(null);
   const [err, setErr] = createSignal<string | null>(null);
@@ -334,11 +334,15 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
   const [sizeNote, setSizeNote] = createSignal<string | null>(null);
 
   const [loading, setLoading] = createSignal(true);
+  // Only the latest read may fill the editor or end its wait.
+  let loadRevision = 0;
   const load = () => {
+    const revision = ++loadRevision;
     setErr(null);
     setLoading(true);
-    props.source.frontDoorMine().finally(() => setLoading(false)).then(
+    props.source.frontDoorMine().finally(() => { if (revision === loadRevision) setLoading(false); }).then(
       (c) => {
+        if (revision !== loadRevision) return;
         setMine(c);
         setName(c.profile.display_name);
         setTagline(c.profile.tagline);
@@ -355,6 +359,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
         setMedia(c.media.map((m) => ({ ...m })));
       },
       (e) => {
+        if (revision !== loadRevision) return;
         setMine(null);
         const m = asActionError(e).message;
         if (!m.includes('front_door_missing')) setErr(m);

@@ -183,6 +183,28 @@ describe('PorchPanel', () => {
     expect($(`[data-porch-peer="${MAYA}"]`)!.textContent).toContain('Unknown');
   });
 
+  it('a page’s price is unknown until it is tapped and quoted, never a wait or a figure', async () => {
+    const s = stub(() => page('/notes.txt', 'text', 'hello'), [card(MAYA, true)]);
+    s.source.porchQuote = async (peer, path) => {
+      s.quotes.push([peer, path]);
+      return path === '/notes.txt' ? { principal_msat: 1000, max_routing_fee_msat: 1250, total_msat: 2250 } : QUOTE;
+    };
+    mount(s);
+    await tick();
+    click('[data-porch-held-open]');
+    const input = $<HTMLInputElement>('[data-porch-path]')!;
+    input.value = 'notes.txt';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await tick();
+    expect($('[data-porch-path-read]')!.textContent).toContain('Unknown');
+    expect($('[data-porch-path-read]')!.textContent).not.toContain('…');
+    expect(s.quotes.some(([, path]) => path === '/notes.txt')).toBe(false);
+    click('[data-porch-path-read]');
+    await tick();
+    expect($('[data-porch-path-read]')!.textContent).toContain('1 sat');
+    expect(s.reads).toEqual([]);
+  });
+
   it('quotes each chosen path before offering payment, and keeps sub-sat fees separate', async () => {
     const s = stub(() => page('/notes.txt', 'text', 'hello'), [card(MAYA, true)]);
     s.source.porchQuote = async (peer, path) => {

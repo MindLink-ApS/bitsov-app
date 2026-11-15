@@ -574,6 +574,119 @@ describe('rooms in the shell', () => {
     expect($('[data-room-stream] [data-thread-loading]')).toBeNull();
   });
 
+  it('a failed re-read with messages on screen says so once, after the list, not on every message', async () => {
+    const theirs = (i: number): Message => ({ id: `rr${i}`, kind: 0, sender: A, recipient: OWN, timestamp: 20_000 + i, plaintext: roomChatText(AB, i.toString(16).padStart(32, '0'), `hey ${i}`), payment_amount_msat: 2000 });
+    let n = 0;
+    stubHost({
+      room_thread: () => {
+        n += 1;
+        if (n === 1) return [theirs(1), theirs(2), theirs(3)];
+        throw { code: 'node', message: 'Your node did not answer.' };
+      },
+    });
+    await openShell();
+    rememberRoom(AB);
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"]`)).not.toBeNull());
+    click(`[data-track="bound:${AB.id}"]`);
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-room-stream] .msg.in')).toHaveLength(3));
+    expect($('[data-room-read-note]')).toBeNull();
+    click(`[data-track="peer:${A}"]`);
+    click(`[data-track="bound:${AB.id}"]`);
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-room-stream] [data-room-read-note]')).toHaveLength(1));
+    // The messages stay; the one note sits after them, outside every message.
+    expect(mount.querySelectorAll('[data-room-stream] .msg.in')).toHaveLength(3);
+    expect($('[data-room-stream] .msg [data-room-read-note]')).toBeNull();
+    expect(text('[data-room-read-note]')).toBe('Your node did not answer.');
+    expect($('[data-room-stream] [data-thread-error]')).toBeNull();
+    const notes = [...mount.querySelectorAll('[data-room-stream] .msg, [data-room-stream] [data-room-read-note]')];
+    expect(notes[notes.length - 1].hasAttribute('data-room-read-note')).toBe(true);
+  });
+
+  it('a failed Earlier page shows in its own room only, and that room’s next good read clears it', async () => {
+    const page = (room: RoomBinding, tag: string) => Array.from({ length: 50 }, (_, i): Message => ({
+      id: `${tag}${i}`, kind: 0, sender: A, recipient: OWN, timestamp: 30_000 + i, plaintext: roomChatText(room, (i + (tag === 'x' ? 0 : 100)).toString(16).padStart(32, '0'), `${tag} ${i}`), payment_amount_msat: 2000,
+    }));
+    let earlierFails = true;
+    stubHost({
+      room_thread: (args) => {
+        const room = args!.room === AB.id ? AB : ABD;
+        if (args!.before == null) return page(room, room === AB ? 'x' : 'y');
+        if (room === AB && earlierFails) throw { code: 'node', message: 'Your node did not answer.' };
+        return [];
+      },
+    });
+    await openShell();
+    rememberRoom(AB);
+    rememberRoom(ABD);
+    await vi.waitFor(() => expect($(`[data-track="bound:${ABD.id}"]`)).not.toBeNull());
+    click(`[data-track="bound:${AB.id}"]`);
+    await vi.waitFor(() => expect($('[data-room-earlier]')).not.toBeNull());
+    click('[data-room-earlier]');
+    await vi.waitFor(() => expect($('[data-room-earlier-failed]')).not.toBeNull());
+    expect(text('[data-room-earlier-failed]')).toMatch(/Earlier messages could not be read/);
+    // Another room with its own Earlier control does not show this room's failure.
+    click(`[data-track="bound:${ABD.id}"]`);
+    await vi.waitFor(() => expect(text('[data-room-title]')).toMatch(/Ana/));
+    await vi.waitFor(() => expect($('[data-room-earlier]')).not.toBeNull());
+    expect($('[data-room-earlier-failed]')).toBeNull();
+    // Back in the first room, its re-read succeeds: the failure is gone.
+    earlierFails = false;
+    click(`[data-track="bound:${AB.id}"]`);
+    await vi.waitFor(() => expect(text('[data-room-title]')).not.toMatch(/Ana/));
+    await vi.waitFor(() => expect($('[data-room-earlier]')).not.toBeNull());
+    await vi.waitFor(() => expect($('[data-room-earlier-failed]')).toBeNull());
+  });
+
+  it('a failed Earlier page that is tried again and read clears the note', async () => {
+    const page = Array.from({ length: 50 }, (_, i): Message => ({
+      id: `z${i}`, kind: 0, sender: A, recipient: OWN, timestamp: 40_000 + i, plaintext: roomChatText(AB, i.toString(16).padStart(32, '0'), `z ${i}`), payment_amount_msat: 2000,
+    }));
+    let earlier = 0;
+    stubHost({
+      room_thread: (args) => {
+        if (args!.before == null) return page;
+        earlier += 1;
+        if (earlier === 1) throw { code: 'node', message: 'Your node did not answer.' };
+        return page.slice(0, 50).map((m, i) => ({ ...m, id: `e${i}`, timestamp: 1_000 + i, plaintext: roomChatText(AB, (i + 200).toString(16).padStart(32, '0'), `e ${i}`) }));
+      },
+    });
+    await openShell();
+    rememberRoom(AB);
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"]`)).not.toBeNull());
+    click(`[data-track="bound:${AB.id}"]`);
+    await vi.waitFor(() => expect($('[data-room-earlier]')).not.toBeNull());
+    click('[data-room-earlier]');
+    await vi.waitFor(() => expect($('[data-room-earlier-failed]')).not.toBeNull());
+    click('[data-room-earlier]');
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-room-stream] .msg.in')).toHaveLength(100));
+    expect($('[data-room-earlier-failed]')).toBeNull();
+  });
+
+  it('New room says the contacts are loading while they are read, and that they could not be loaded when the read fails', async () => {
+    async function openBare() {
+      mount = document.createElement('div');
+      document.body.appendChild(mount);
+      dispose = render(() => <App />, mount);
+      await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
+      [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+      await vi.waitFor(() => expect($('[data-room-new]')).not.toBeNull());
+      click('[data-room-new]');
+      await vi.waitFor(() => expect($('[data-room-panel="new"]')).not.toBeNull());
+    }
+    stubHost({ peers_list: () => new Promise(() => {}) });
+    await openBare();
+    expect(text('[data-room-panel="new"] .meeting-legs')).toMatch(/Loading/);
+    expect(text('[data-room-panel="new"]')).not.toMatch(/could not load|No contacts/i);
+    dispose?.();
+    dispose = undefined;
+    mount.remove();
+    vi.unstubAllGlobals();
+
+    stubHost({ peers_list: () => { throw { code: 'node', message: 'Your node did not answer.' }; } });
+    await openBare();
+    await vi.waitFor(() => expect(text('[data-room-panel="new"] .meeting-legs')).toBe('We could not load your contacts.'));
+  });
+
   it('the thread is the node’s room thread (both directions, our copies as one message), paged by whole messages', async () => {
     const theirs = (i: number): Message => ({ id: `in${i}`, kind: 0, sender: A, recipient: OWN, timestamp: 10_000 + i, plaintext: roomChatText(AB, i.toString(16).padStart(32, '0'), `hi ${i}`), payment_amount_msat: 2000 });
     const ours: Message = {
