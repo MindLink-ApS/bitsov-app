@@ -10427,6 +10427,7 @@ struct MediaSession {
     #[allow(dead_code)]
     call_id: String,
     uplink: Arc<control::media::FrameQueue>,
+    downlink: Arc<control::media::FrameQueue>,
     stop: Arc<AtomicBool>,
 }
 
@@ -10449,12 +10450,12 @@ async fn media_bridge<R: tauri::Runtime>(
     call_id: String,
     peer: String,
     uplink: Arc<control::media::FrameQueue>,
+    downlink: Arc<control::media::FrameQueue>,
     stop: Arc<AtomicBool>,
     mut seal: Option<Box<control::media::SealedMedia>>,
     channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) {
     let state = app.state::<NodeState>();
-    let downlink = control::media::FrameQueue::new(control::media::QUEUE_FRAMES);
     let stopping = || stop.load(Ordering::SeqCst) || state.quitting.load(Ordering::SeqCst);
     let emit = |link: control::media::MediaLink| {
         let _ = channel.send(tauri::ipc::InvokeResponseBody::Json(link.to_json()));
@@ -10543,10 +10544,11 @@ fn start_media_session<R: tauri::Runtime>(
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) {
     let uplink = Arc::new(control::media::FrameQueue::new(control::media::QUEUE_FRAMES));
+    let downlink = Arc::new(control::media::FrameQueue::new(control::media::QUEUE_FRAMES));
     let stop = Arc::new(AtomicBool::new(false));
     stop_media_session(state);
-    *state.media.lock().unwrap() = Some(MediaSession { call_id: call_id.clone(), uplink: uplink.clone(), stop: stop.clone() });
-    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, stop, seal, on_frame));
+    *state.media.lock().unwrap() = Some(MediaSession { call_id: call_id.clone(), uplink: uplink.clone(), downlink: downlink.clone(), stop: stop.clone() });
+    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, downlink, stop, seal, on_frame));
 }
 
 #[cfg(feature = "call-seal")]
@@ -10686,6 +10688,20 @@ fn call_media_send(
     let Some(session) = slot.as_ref() else { return Err("no media session is open".into()) };
     session.uplink.push(payload);
     Ok(())
+}
+
+/// Running counts of frames the open media session's queues dropped as the
+/// oldest. A local read of two counters: no node request, payment or admission
+/// change, and nothing about the audio itself.
+#[tauri::command(rename_all = "snake_case")]
+fn call_media_stats(window: WebviewWindow<impl tauri::Runtime>, state: State<'_, NodeState>) -> Result<serde_json::Value, String> {
+    reject_sealed_window(&window)?;
+    let slot = state.media.lock().unwrap();
+    let Some(session) = slot.as_ref() else { return Err("no media session is open".into()) };
+    Ok(serde_json::json!({
+        "uplink_dropped": session.uplink.dropped(),
+        "downlink_dropped": session.downlink.dropped(),
+    }))
 }
 
 /// Close the open media session (hangup or local teardown). Idempotent; only
@@ -10979,6 +10995,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             call_media_open,
             call_media_send,
             call_media_close,
+            call_media_stats,
             porch_quote,
             porch_read,
             porch_cards,
@@ -25750,6 +25767,7 @@ mod assistant_acl_tests {
                 "call_media_open",
                 "call_media_send",
                 "call_media_close",
+                "call_media_stats",
                 "porch_quote",
                 "porch_read",
                 "porch_cards",

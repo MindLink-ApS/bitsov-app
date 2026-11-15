@@ -314,7 +314,7 @@ export class NodeRoutedConnection {
     let audio: CallAudio | null = null;
     // A fatal audio error mid-call (a codec that cannot recover, a crashed worklet) ends the call like a failed start.
     const onFatal = () => { if (audio && this.audio === audio) this.audioFailed(); };
-    audio = this.deps.audio(this.stream ?? emptyStream(), { send: (payload) => this.deps.bridge.send(payload) }, onFatal);
+    audio = this.deps.audio(this.stream ?? emptyStream(), { send: (payload) => this.deps.bridge.send(payload), queueStats: () => this.deps.bridge.stats?.() ?? Promise.resolve(null) }, onFatal);
     this.audio = audio;
     if (this.muted) audio.setMuted(true);
     audio.ready.then(

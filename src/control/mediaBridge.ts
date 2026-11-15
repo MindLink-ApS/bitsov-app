@@ -20,6 +20,8 @@ export type MediaBridge = {
   /** Open the host socket for `callId` with `peer`, the call's counterparty (the node admits only that pair). */
   open: (callId: string, peer: string, onFrame: (frame: Uint8Array) => void, onLink: (link: MediaLink) => void, sealed?: boolean) => Promise<void>;
   send: (payload: Uint8Array) => void;
+  /** Running counts of frames the host's queues dropped; null when there is no session or no answer. */
+  stats?: () => Promise<{ uplinkDropped: number; downlinkDropped: number } | null>;
   close: () => Promise<void>;
 };
 
@@ -41,6 +43,14 @@ export function parseLinkMessage(message: unknown): MediaLink | null {
     return { link, detail: null, words };
   }
   return { link: link as MediaLinkState, detail: typeof detail === 'string' ? detail : null };
+}
+
+/** The host's queue drop counts, or null when the answer is not two counts. */
+export function parseQueueStats(value: unknown): { uplinkDropped: number; downlinkDropped: number } | null {
+  if (!value || typeof value !== 'object') return null;
+  const { uplink_dropped: up, downlink_dropped: down } = value as { uplink_dropped?: unknown; downlink_dropped?: unknown };
+  const count = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
+  return count(up) && count(down) ? { uplinkDropped: up, downlinkDropped: down } : null;
 }
 
 /** A binary channel message: an ArrayBuffer on desktop, a byte array on some mobile IPC paths. */
@@ -71,6 +81,10 @@ export function hostMediaBridge(): MediaBridge {
     send: (payload) => {
       if (!current) return;
       void invoke<void>('call_media_send', payload).catch(() => undefined);
+    },
+    stats: async () => {
+      if (!current) return null;
+      try { return parseQueueStats(await invoke<unknown>('call_media_stats')); } catch { return null; }
     },
     close: async () => {
       if (!current) return;
@@ -109,6 +123,7 @@ export function unavailableMediaBridge(): MediaBridge {
   return {
     open: async (_callId, _peer, _onFrame, onLink) => { onLink({ link: 'ended', detail: 'no_host_media_bridge' }); },
     send: () => {},
+    stats: async () => null,
     close: async () => {},
   };
 }

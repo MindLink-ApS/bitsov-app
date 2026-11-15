@@ -11,6 +11,7 @@
  */
 import { version as packageVersion } from '../../package.json';
 import type { CallView } from './call';
+import { audioStatsLines, type AudioStatRow } from './callAudioStats';
 
 const UNKNOWN = 'unknown';
 const CALL_ID = /^[0-9a-f]{32}$/;
@@ -57,10 +58,12 @@ export type CallReportInput = {
   /** When this device showed the call as ended (app clock). */
   endedAt: number | null;
   version?: unknown;
+  /** Local per-5 s audio figures for this call, if the app kept any (numbers only). */
+  audioRows?: readonly AudioStatRow[];
 };
 
 /** The report, line by line, in a fixed order. Keys stay English so it lines up with the node's journal. */
-export function callReportLines({ view, routed, endedAt, version }: CallReportInput): string[] {
+export function callReportLines({ view, routed, endedAt, version, audioRows }: CallReportInput): string[] {
   const m = view.minutes;
   const hold = m?.reservation ?? null;
   const start = time(view.liveAt);
@@ -97,6 +100,7 @@ export function callReportLines({ view, routed, endedAt, version }: CallReportIn
     `still_held_msat: ${hold ? msat(hold.remaining_msat) : UNKNOWN}`,
     `reservation_closed: ${closed}`,
     `max_call_minutes: ${hold ? count(hold.max_call_minutes) : UNKNOWN}`,
+    ...audioStatsLines(audioRows ?? []),
   ];
 }
 

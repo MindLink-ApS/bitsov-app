@@ -112,6 +112,7 @@
     "allow-call-media-open",
     "allow-call-media-send",
     "allow-call-media-close",
+    "allow-call-media-stats",
     "allow-porch-quote",
     "allow-porch-read",
     "allow-porch-cards",
