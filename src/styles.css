@@ -1901,22 +1901,25 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
 .approval-steps code { display: block; margin: var(--s-1) 0; overflow-wrap: anywhere; }
 
 /* The Ring confirmation on phones: a sheet at the bottom of the screen, inside the safe area, never taller than it.
-   With large text it scrolls, and Cancel and Ring stay pinned at its foot, so the decision is always in reach. */
+   With large text it scrolls up and down only: every word wraps inside it, and Cancel and Ring stay pinned at its foot,
+   each on its own row when they do not fit side by side. Margins and padding are in px so large text keeps its width. */
 @media (max-width: 480px) {
   .call-confirm {
-    position: fixed; top: auto; left: max(var(--s-3), var(--safe-area-left, 0px)); right: max(var(--s-3), var(--safe-area-right, 0px));
-    bottom: max(var(--s-3), var(--safe-area-bottom, 0px)); width: auto; max-width: none; z-index: 55;
-    max-height: calc(100dvh - max(var(--s-3), var(--safe-area-top, 0px)) - max(var(--s-3), var(--safe-area-bottom, 0px)));
-    overflow-y: auto; overscroll-behavior: contain;
+    position: fixed; top: auto; left: max(12px, var(--safe-area-left, 0px)); right: max(12px, var(--safe-area-right, 0px));
+    bottom: max(12px, var(--safe-area-bottom, 0px)); width: auto; max-width: none; z-index: 55; padding: 12px;
+    max-height: calc(100dvh - max(12px, var(--safe-area-top, 0px)) - max(12px, var(--safe-area-bottom, 0px)));
+    overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; overflow-wrap: anywhere;
   }
-  .call-confirm-actions { position: sticky; bottom: calc(-1 * var(--s-3)); margin: 0 calc(-1 * var(--s-3)) calc(-1 * var(--s-3)); padding: var(--s-2) var(--s-3) var(--s-3); background: var(--surface); }
-  .call-confirm-actions button { flex: 1; min-height: 44px; }
+  .call-confirm > * { min-width: 0; max-width: 100%; }
+  .call-confirm-actions { position: sticky; bottom: -12px; margin: 0 -12px -12px; padding: 8px 12px 12px; background: var(--surface); flex-wrap: wrap; }
+  .call-confirm-actions button { flex: 1 1 auto; min-height: 44px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 }
 html:is([data-platform='ios'], [data-platform='android']) .call-confirm {
-  position: fixed; top: auto; left: max(var(--s-3), var(--safe-area-left)); right: max(var(--s-3), var(--safe-area-right));
-  bottom: max(var(--s-3), var(--safe-area-bottom)); width: auto; max-width: none; z-index: 55;
-  max-height: calc(100dvh - max(var(--s-3), var(--safe-area-top)) - max(var(--s-3), var(--safe-area-bottom)));
-  overflow-y: auto; overscroll-behavior: contain;
+  position: fixed; top: auto; left: max(12px, var(--safe-area-left)); right: max(12px, var(--safe-area-right));
+  bottom: max(12px, var(--safe-area-bottom)); width: auto; max-width: none; z-index: 55; padding: 12px;
+  max-height: calc(100dvh - max(12px, var(--safe-area-top)) - max(12px, var(--safe-area-bottom)));
+  overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; overflow-wrap: anywhere;
 }
-html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions { position: sticky; bottom: calc(-1 * var(--s-3)); margin: 0 calc(-1 * var(--s-3)) calc(-1 * var(--s-3)); padding: var(--s-2) var(--s-3) var(--s-3); background: var(--surface); }
-html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions button { flex: 1; min-height: 44px; }
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm > * { min-width: 0; max-width: 100%; }
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions { position: sticky; bottom: -12px; margin: 0 -12px -12px; padding: 8px 12px 12px; background: var(--surface); flex-wrap: wrap; }
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions button { flex: 1 1 auto; min-height: 44px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
