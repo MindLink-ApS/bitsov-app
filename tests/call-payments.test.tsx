@@ -979,7 +979,7 @@ const paired = { state: 'paired', scopes: ['read', 'receive', 'spend'], node_id:
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 
-function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number; endKeepsHold?: boolean; endLeavesUnresolved?: boolean } = {}) {
+function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number; endKeepsHold?: boolean; endLeavesUnresolved?: boolean } = {}) {
   resetContactsForTests();
   setPetname(A, 'Maya');
   const calls: { cmd: string; args?: unknown }[] = [];
@@ -994,7 +994,7 @@ function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?
     pairing_status: () => paired,
     node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: [] }),
-    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, meetings: true }],
+    peers_list: () => (opts.peers ?? [A]).map((node_id) => ({ node_id, addr: null, label: node_id === A ? 'Maya' : 'Other contact', connected: true, fingerprint: null, meetings: true })),
     rooms_list: () => [],
     messages_list: () => [],
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
@@ -1002,7 +1002,7 @@ function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?
     fund_state: () => null,
     spend_status: () => spending,
     budget_status: () => null,
-    call_quote: () => opts.quote ?? QUOTE,
+    call_quote: (args) => typeof opts.quote === 'function' ? opts.quote(args) : opts.quote ?? QUOTE,
     call_signal: (args) => {
       const kind = (args as { kind: number }).kind;
       if (kind === 400) {
@@ -1101,6 +1101,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
   }
   async function ringAndAnswer(host: ReturnType<typeof stubHost>) {
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     // The node's exact hold, shown once it rings: no minute is paid until the owner confirms it.
@@ -1112,10 +1113,138 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     return callId;
   }
 
+  it.each(['audio', 'video'] as const)('refreshes the minute price before enabling %s Ring and submits the displayed limits', async (media) => {
+    vi.stubEnv('VITE_CALL_VIDEO', 'node');
+    let reply: Reply = () => QUOTE;
+    const host = stubHost({ quote: (args) => reply(args) });
+    await openShell();
+    let finish!: (q: CallQuote) => void;
+    reply = () => new Promise<CallQuote>((resolve) => { finish = resolve; });
+    $<HTMLButtonElement>(`[data-call="${media}"]`)!.click();
+    const ring = $<HTMLButtonElement>(`[data-call-confirm="${media}"]`)!;
+    expect(ring.disabled).toBe(true);
+    expect($('[data-call-minute-price]')).toBeNull();
+    expect($('[data-call-reservation-max]')).toBeNull();
+    expect($('[data-call-confirm-box]')?.textContent).toContain('Reading their call price');
+    ring.click();
+    expect(host.used('call_signal')).toHaveLength(0);
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    finish({ ...QUOTE, block_msat: 20_000, block_max_routing_fee_msat: 6_000, reservation_max_msat: 6_240_000 });
+    await vi.waitFor(() => expect(ring.disabled).toBe(false));
+    expect($('[data-call-minute-price]')?.textContent).toBe('Then 20 sats a minute, plus up to 6 sats routing a minute, paid by your node while the call runs.');
+    expect($('[data-call-reservation-max]')?.textContent).toContain('6\u202f240 sats');
+    expect(host.used('call_signal')).toHaveLength(0);
+    ring.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    expect(host.used('call_signal')[0].args).toMatchObject({ peer: A, kind: 400,
+      minutes: { block_msat: 20_000, block_max_routing_fee_msat: 6_000, max_hold_msat: 6_240_000 } });
+    expect(host.used('call_block')).toHaveLength(0);
+  });
+
+  it('reads the minute price again every time the dialog opens', async () => {
+    let q = QUOTE;
+    const host = stubHost({ quote: () => q });
+    await openShell();
+    for (const price of [20_000, 30_000]) {
+      q = { ...QUOTE, block_msat: price, reservation_max_msat: 240 * (price + FEE) };
+      $<HTMLButtonElement>('[data-call="audio"]')!.click();
+      await vi.waitFor(() => expect($('[data-call-minute-price]')?.textContent).toContain(`${price / 1000} sats a minute`));
+      $<HTMLButtonElement>('[data-call-confirm-cancel]')!.click();
+    }
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+  });
+
+  it.each([
+    ['no minute price', { ...QUOTE, block_msat: null }],
+    ['no reservation', { ...QUOTE, minutes_payable: false }],
+    ['no offer price', { ...QUOTE, offer_msat: null, call_total_msat: null }],
+  ] as const)('cannot ring when the refreshed quote has %s', async (_reason, unavailable) => {
+    let q: CallQuote = QUOTE;
+    const host = stubHost({ quote: () => q });
+    await openShell();
+    q = unavailable;
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-confirm-box]')).toBeNull());
+    expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(true);
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+  });
+
+  it('a failed dialog price read hides the old amounts and cannot ring, then reopening retries', async () => {
+    let reply: Reply = () => QUOTE;
+    const host = stubHost({ quote: () => reply() });
+    await openShell();
+    reply = () => { throw { code: 'node', message: 'Call price is unavailable.' }; };
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-confirm-box]')?.textContent).toContain('Call price is unavailable.'));
+    expect($('[data-call-minute-price]')).toBeNull();
+    expect($('[data-call-reservation-max]')).toBeNull();
+    expect($<HTMLButtonElement>('[data-call-confirm="audio"]')!.disabled).toBe(true);
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    expect(host.used('call_signal')).toHaveLength(0);
+    $<HTMLButtonElement>('[data-call-confirm-cancel]')!.click();
+    reply = () => ({ ...QUOTE, block_msat: 30_000 });
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-minute-price]')?.textContent).toContain('30 sats a minute'));
+    expect($<HTMLButtonElement>('[data-call-confirm="audio"]')!.disabled).toBe(false);
+  });
+
+  it('a cancelled dialog read cannot replace the next dialog price or enable Ring', async () => {
+    const pending: ((q: CallQuote) => void)[] = [];
+    let reply: Reply = () => QUOTE;
+    const host = stubHost({ quote: () => reply() });
+    await openShell();
+    reply = () => new Promise<CallQuote>((resolve) => { pending.push(resolve); });
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    $<HTMLButtonElement>('[data-call-confirm-cancel]')!.click();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[0]({ ...QUOTE, block_msat: 20_000 });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect($<HTMLButtonElement>('[data-call-confirm="audio"]')!.disabled).toBe(true);
+    expect($('[data-call-minute-price]')).toBeNull();
+    pending[1]({ ...QUOTE, block_msat: 30_000 });
+    await vi.waitFor(() => expect($('[data-call-minute-price]')?.textContent).toContain('30 sats a minute'));
+    expect($<HTMLButtonElement>('[data-call-confirm="audio"]')!.disabled).toBe(false);
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it('an old contact read cannot overwrite the refreshed dialog after navigating away and back', async () => {
+    const other = 'b'.repeat(64);
+    let finish!: (q: CallQuote) => void;
+    let reads = 0;
+    const host = stubHost({ peers: [A, other], quote: (args) => {
+      if (args?.peer === A && ++reads === 1) return new Promise<CallQuote>((resolve) => { finish = resolve; });
+      return { ...QUOTE, block_msat: 30_000 };
+    } });
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    $<HTMLButtonElement>(`[data-track="peer:${other}"]`)!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>(`[data-track="peer:${A}"]`)!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    expect($('[data-call-minute-price]')?.textContent).toContain('30 sats a minute');
+    finish(QUOTE);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect($('[data-call-minute-price]')?.textContent).toContain('30 sats a minute');
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    expect(host.used('call_signal')[0].args).toMatchObject({ peer: A, kind: 400, minutes: { block_msat: 30_000 } });
+  });
+
   it('shows the per-minute price and the most the node will hold before Ring; nothing is dialled until Ring', async () => {
     const host = stubHost();
     await openShell();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     expect($('[data-call-minute-price]')?.textContent).toBe(`Then ${amount(BLOCK)} a minute, plus up to ${amount(FEE)} routing a minute, paid by your node while the call runs.`);
     expect($('[data-call-reservation-max]')?.textContent).toBe(`When it rings, your node holds the minutes under its own call limit. The call goes out with your limits: this per-minute price and a hold of at most ${amount(240 * (BLOCK + FEE))} (4 hours, the most a node allows). If their live price or the hold would be higher, your node does not ring them and nothing is paid. You see the exact hold and confirm it before the first minute is paid.`);
     expect(host.used('call_signal')).toHaveLength(0);
@@ -1130,6 +1259,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     setLanguagePref('da');
     await openShell();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     expect($('[data-call-minute-price]')?.textContent).toContain('pr. minut');
     expect($('[data-call-reservation-max]')?.textContent).toContain('ringer din node ikke op');
   });
@@ -1138,6 +1268,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     const host = stubHost({ minutes: 60 });
     await openShell();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
     await vi.waitFor(() => expect($('[data-call-hold]')).not.toBeNull());
     expect($('[data-call-hold]')!.textContent).toBe(
@@ -1154,6 +1285,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     setLanguagePref('da');
     await openShell();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
     await vi.waitFor(() => expect($('[data-call-hold]')).not.toBeNull());
     expect($('[data-call-hold]')!.textContent).toContain('højst 60 minutter (dens opkaldsgrænse)');
@@ -1164,6 +1296,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     const host = stubHost({ hold: () => { throw { code: 'call_hold_above_consent', message: ABOVE }; } });
     await openShell();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     expect($('[data-call-ended]')?.textContent).toBe(`Your node’s hold for this call does not match what you agreed to, so the call ended. ${ABOVE}`);
@@ -1268,6 +1401,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     const host = stubHost({ offer: () => { throw { code: 'call_liquidity_insufficient', message: 'Your node’s channel cannot hold this call’s reservation right now. Nothing was paid. Add outbound capacity, then call again.' }; } });
     await openShell();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     expect($('[data-call-ended]')?.textContent).toBe('Your node’s channel cannot hold this call’s reservation right now. Nothing was paid. Add outbound capacity, then call again.');
