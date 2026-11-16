@@ -32,6 +32,8 @@ function unpickable(c: RoomContact, nodeRooms: boolean): string | null {
 
 /** Pick 1 to 3 contacts. Creating a room is local and free: nothing is sent. */
 export function NewRoomPanel(props: {
+  contactsPending?: boolean;
+  contactsError?: boolean;
   contacts: RoomContact[];
   /** Our own node checks room bindings (`room_binding_v1` on /status). */
   nodeRooms: boolean;
@@ -46,7 +48,7 @@ export function NewRoomPanel(props: {
     <aside class="call-panel meeting-panel room-panel" data-room-panel="new" role="dialog" aria-label={tr('caNewRoom')}>
       <header><strong>{tr('caNewRoom')}</strong><span class="who">{tr('caYouAndUpTo')}{' '}{MAX_MEMBERS - 1}{' '}{tr('caContacts')}</span></header>
       <ul class="meeting-legs">
-        <For each={props.contacts} fallback={<li class="hint">{tr('caNoContactsYet')}</li>}>
+        <For each={props.contacts} fallback={<li class="hint">{props.contactsError ? tr('caCouldNotLoadContacts') : props.contactsPending ? tr('chatLoading') : tr('caNoContactsYet')}</li>}>
           {(c) => (
             <li>
               <label>
@@ -97,6 +99,8 @@ export function RoomThread(props: {
   read: ThreadRead;
   /** The read's error, shown instead of any "empty" claim when it failed. */
   error?: string;
+  /** An earlier page could not be read: the room's messages are all still here. */
+  earlierFailed?: boolean;
   room: LocalRoom;
   ownId: string;
   nameOf: (id: string) => string;
@@ -218,6 +222,7 @@ export function RoomThread(props: {
             <button type="button" class="link" data-room-earlier disabled={props.loadingEarlier} onClick={() => props.onEarlier()}>
               {props.loadingEarlier ? t('chatLoading') : t('chatEarlier')}
             </button>
+            <Show when={props.earlierFailed}><p class="err-note" role="status" data-room-earlier-failed>{tr('caRoomEarlierFailed')}</p></Show>
           </Show>
           <For each={[...keyedItems().keys()]} fallback={
             <Switch>
@@ -300,6 +305,10 @@ export function RoomThread(props: {
               );
             }}
           </For>
+          {/* A failed re-read with messages on screen says so once, after them, as the direct chat does. */}
+          <Show when={props.read === 'failed' && items().length > 0}>
+            <p class="err-note" role="alert" data-room-read-note>{props.error ?? t('roomReadError')}</p>
+          </Show>
         </div>
       </div>
 

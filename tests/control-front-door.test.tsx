@@ -53,6 +53,41 @@ describe('front door Discover and editor', () => {
     expect(knocked.length).toBe(64);
   });
 
+  it('reading a card and knocking each say they are under way, and stop saying so when done', async () => {
+    const source = sampleSource();
+    const read = source.frontDoorRead.bind(source);
+    let releaseRead!: () => void;
+    source.frontDoorRead = (link) => new Promise((resolve, reject) => { releaseRead = () => void read(link).then(resolve, reject); });
+    const open = source.frontDoorOpen.bind(source);
+    let releaseOpen!: () => void;
+    source.frontDoorOpen = (link, local) => new Promise((resolve, reject) => { releaseOpen = () => void open(link, local).then(resolve, reject); });
+    let knocked = '';
+    mount(() => <DiscoverPanel source={source} now={Date.now()} onKnocked={(c) => { knocked = c.node_id; }} />);
+    const paste = root.querySelector<HTMLTextAreaElement>('[data-discover-paste]')!;
+    paste.value = SAMPLE_PUBLIC_FRONT_DOOR_LINK;
+    paste.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(root.querySelector('[data-discover-reading]')).toBeNull();
+    root.querySelector<HTMLButtonElement>('[data-discover-read]')!.click();
+    await viWait();
+    expect(root.querySelector('[data-discover-reading]')?.textContent).toBe('Reading the card…');
+    expect(root.querySelector('[data-discover-knock]')).toBeNull();
+    releaseRead();
+    await viWait();
+    await viWait();
+    expect(root.querySelector('[data-discover-reading]')).toBeNull();
+    expect(root.querySelector('[data-discover-knocking]')).toBeNull();
+    root.querySelector<HTMLButtonElement>('[data-discover-knock]')!.click();
+    await viWait();
+    expect(root.querySelector('[data-discover-knocking]')?.textContent).toBe('Knocking…');
+    expect(root.querySelector<HTMLButtonElement>('[data-discover-knock]')!.disabled).toBe(true);
+    expect(knocked).toBe('');
+    releaseOpen();
+    await viWait();
+    await viWait();
+    expect(root.querySelector('[data-discover-knocking]')).toBeNull();
+    expect(knocked.length).toBe(64);
+  });
+
   it('expired card renders but blocks Knock', async () => {
     const source = sampleSource();
     mount(() => (
@@ -172,6 +207,38 @@ describe('front door Discover and editor', () => {
     expect(root.querySelector('[data-fd-seq]')?.textContent).toMatch(/seq 2/);
     expect(root.querySelector('[data-fd-qr]')).toBeTruthy();
     expect(root.querySelector('[data-fd-preview] [data-fd-qr]')).toBeNull();
+  });
+
+  it('My front door waits for its read before you can type, and a failed read offers a retry that reads it again', async () => {
+    const source = sampleSource();
+    const mine = source.frontDoorMine.bind(source);
+    let calls = 0;
+    let release!: () => void;
+    source.frontDoorMine = () => {
+      calls += 1;
+      if (calls === 1) return new Promise((_resolve, reject) => { release = () => reject({ code: 'node', message: 'Your node did not answer.' }); });
+      return mine();
+    };
+    mount(() => <FrontDoorEditor source={source} now={Date.now()} />);
+    await viWait();
+    const panel = root.querySelector<HTMLElement>('[data-panel="front-door"]')!;
+    expect(root.querySelector('[data-fd-loading]')).not.toBeNull();
+    expect(panel.hasAttribute('inert')).toBe(true);
+    expect(panel.getAttribute('aria-busy')).toBe('true');
+    release();
+    await viWait();
+    await viWait();
+    expect(root.querySelector('[data-fd-loading]')).toBeNull();
+    expect(panel.hasAttribute('inert')).toBe(false);
+    const retry = root.querySelector<HTMLButtonElement>('[data-soft-error="fd-edit-error"] [data-soft-reconnect]');
+    expect(retry).not.toBeNull();
+    retry!.click();
+    await viWait();
+    await viWait();
+    expect(calls).toBe(2);
+    expect(root.querySelector('[data-soft-error="fd-edit-error"]')).toBeNull();
+    expect(root.querySelector('[data-fd-loading]')).toBeNull();
+    expect(root.querySelector<HTMLInputElement>('[data-fd-edit-name]')).not.toBeNull();
   });
 
   it('shows the owner request with the node command when publishing needs front_door', async () => {
