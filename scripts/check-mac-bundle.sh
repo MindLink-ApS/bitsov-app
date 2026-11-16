@@ -5,7 +5,9 @@
 # its 50-question fixture. Reads files only: it never opens or executes the
 # bundle or anything inside it.
 #
-# Usage: scripts/check-mac-bundle.sh [--app PATH] [--sidecar PATH] [--dist PATH]
+# Usage: scripts/check-mac-bundle.sh [--arch arm64|x86_64] [--app PATH] [--sidecar PATH] [--dist PATH]
+#   --arch     require thin Mach-O executables of this architecture; select
+#              target-specific defaults (package-mac.sh always supplies it)
 #   --app      default src-tauri/target/release/bundle/macos/BitSov.app
 #   --sidecar  the fetched, signature-verified node; default
 #              src-tauri/bin/konsensus-aarch64-apple-darwin
@@ -19,17 +21,35 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fetch-node-sidecar.sh"
 
 APP="src-tauri/target/release/bundle/macos/BitSov.app"
-SIDECAR="src-tauri/bin/konsensus-aarch64-apple-darwin"
+SIDECAR=""
+ARCH=""
+APP_EXPLICIT=0
 DIST="dist"
 MIN_MACOS="11.0"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --app) APP="$2"; shift 2 ;;
+    --arch)
+      case "${2:-}" in
+        arm64|x86_64) ;;
+        *) echo "--arch requires arm64 or x86_64" >&2; exit 2 ;;
+      esac
+      ARCH="$2"; shift 2 ;;
+    --app) APP="$2"; APP_EXPLICIT=1; shift 2 ;;
     --sidecar) SIDECAR="$2"; shift 2 ;;
     --dist) DIST="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+case "$ARCH" in
+  arm64) TRIPLE="aarch64-apple-darwin" ;;
+  x86_64) TRIPLE="x86_64-apple-darwin" ;;
+  "") TRIPLE="aarch64-apple-darwin" ;;
+  *) echo "--arch must be arm64 or x86_64" >&2; exit 2 ;;
+esac
+SIDECAR="${SIDECAR:-src-tauri/bin/konsensus-$TRIPLE}"
+if [ -n "$ARCH" ] && [ "$APP_EXPLICIT" = 0 ]; then
+  APP="${CARGO_TARGET_DIR:-src-tauri/target}/$TRIPLE/release/bundle/macos/BitSov.app"
+fi
 
 MACOS="$APP/Contents/MacOS"
 PLIST="$APP/Contents/Info.plist"
@@ -72,6 +92,12 @@ plist_min_ok() {
 }
 
 sidecar_matches() { [ -f "$SIDECAR" ] && [ -f "$MACOS/konsensus" ] && cmp -s "$SIDECAR" "$MACOS/konsensus"; }
+native_executable() {
+  local description
+  description="$(file -b "$1")" || return 1
+  # Fat binaries and a different CPU must not pass a native package check.
+  [ "${description%%,*}" = "Mach-O 64-bit executable $ARCH" ]
+}
 no_sb_files() { [ -d "$APP" ] && [ -z "$(find "$APP" -name '*.sb' -print)" ]; }
 no_loose_page() { [ -d "$APP" ] && [ -z "$(find "$APP" -name 'assistant.html' -print)" ]; }
 dist_has_index() { [ -s "$DIST/index.html" ]; }
@@ -94,6 +120,10 @@ binary_clean() {
 echo "== mac bundle: $APP (node $TAG) =="
 chk "app executable is executable" test -f "$MACOS/bitsov-app" -a -x "$MACOS/bitsov-app"
 chk "bundled sidecar is executable" test -f "$MACOS/konsensus" -a -x "$MACOS/konsensus"
+if [ -n "$ARCH" ]; then
+  chk "app executable is native $ARCH" native_executable "$MACOS/bitsov-app"
+  chk "bundled sidecar is native $ARCH" native_executable "$MACOS/konsensus"
+fi
 chk "bundled sidecar matches the verified sidecar ($SIDECAR)" sidecar_matches
 chk "icon.icns is present" test -s "$APP/Contents/Resources/icon.icns"
 chk "Info.plist is well-formed" plist_lint
