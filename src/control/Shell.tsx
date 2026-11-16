@@ -1415,6 +1415,11 @@ export function ControlCenter(props: Props) {
   const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
   const [callApproval, setCallApproval] = createSignal(false);
   const [callApprovalPeer, setCallApprovalPeer] = createSignal<string>();
+  const [callBudgetRequest, setCallBudgetRequest] = createSignal<{ peer: string; opId: string } | null>(null);
+  const callBudgetPending = () => {
+    const request = callBudgetRequest();
+    return request !== null && request.peer === callApprovalPeer() && request.opId === spend()?.pending?.op_id;
+  };
   const [callApproving, setCallApproving] = createSignal(false);
   const canStillAnswer = () => [callView(), ...waitingCalls()].some(view => view.phase === 'incoming');
   const answerCallEnded = () => callView().phase === 'ended' && !callView().outgoing && !canStillAnswer();
@@ -1620,6 +1625,18 @@ export function ControlCenter(props: Props) {
   // A just-sent clip plays from its own bytes; a received one is read once.
   const voiceUrls = new Map<string, Promise<string>>();
   onCleanup(() => voiceUrls.forEach((u) => void u.then(URL.revokeObjectURL, () => undefined)));
+  let spendRequestRevision = 0;
+  let spendRequestsInFlight = 0;
+  // Overlapping approval actions can return the same node request without creating it.
+  const requestSpendApproval = async <T,>(run: () => Promise<T>) => {
+    const startedAlone = spendRequestsInFlight === 0;
+    const revision = ++spendRequestRevision;
+    spendRequestsInFlight += 1;
+    try {
+      const result = await act(run);
+      return { result, uncontested: startedAlone && revision === spendRequestRevision };
+    } finally { spendRequestsInFlight -= 1; }
+  };
   const actions: Actions = {
     remote: () => props.remote === true,
     localApproval: () => props.localApproval === true,
@@ -1649,8 +1666,24 @@ export function ControlCenter(props: Props) {
     approve: async (callPeer) => {
       clearContactApprovalError();
       setErrors('spend', undefined);
-      const r = await act(() => source.spendRequest(callPeer));
-      if (r.ok) setSpend(r.value);
+      let observedBefore = false;
+      let pendingBefore: string | undefined;
+      const { result: r, uncontested } = await requestSpendApproval(async () => {
+        if (callPeer) {
+          const before = await act(() => source.spendStatus());
+          observedBefore = before.ok;
+          if (before.ok) pendingBefore = before.value.pending?.op_id;
+        }
+        return source.spendRequest(callPeer);
+      });
+      if (r.ok) {
+        const pending = r.value.state === 'pending' ? r.value.pending : null;
+        if (pending?.op_id !== callBudgetRequest()?.opId) {
+          setCallBudgetRequest(callPeer && pending && observedBefore && uncontested && pending.op_id !== pendingBefore
+            ? { peer: callPeer, opId: pending.op_id } : null);
+        }
+        setSpend(r.value);
+      }
       else setErrors('spend', r.error.message);
       return approvalResult(r);
     },
@@ -1696,7 +1729,7 @@ export function ControlCenter(props: Props) {
     approveContact: async (peer, perActMsat) => {
       clearContactApprovalError();
       const revision = contactApprovalRevision;
-      const r = await act(() => source.relationApprove(peer, null, perActMsat));
+      const { result: r } = await requestSpendApproval(() => source.relationApprove(peer, null, perActMsat));
       if (r.ok) {
         setBudgetConfirmed(false);
         setSpend(r.value);
@@ -1739,7 +1772,7 @@ export function ControlCenter(props: Props) {
     approveBudget: async (ceilingMsat, preset) => {
       clearContactApprovalError();
       setErrors('budget', undefined);
-      const r = await act(() => source.budgetApprove(ceilingMsat, preset));
+      const { result: r } = await requestSpendApproval(() => source.budgetApprove(ceilingMsat, preset));
       if (r.ok) {
         setBudget(r.value);
         setErrors('budget', undefined);
@@ -1772,7 +1805,7 @@ export function ControlCenter(props: Props) {
     resume: async () => {
       clearContactApprovalError();
       setErrors('budget', undefined);
-      const r = await act(() => source.budgetResume());
+      const { result: r } = await requestSpendApproval(() => source.budgetResume());
       if (r.ok) {
         setBudget(r.value);
         setErrors('budget', undefined);
@@ -2532,7 +2565,7 @@ export function ControlCenter(props: Props) {
           <div data-call-approval>
             <strong>{tr(canStillAnswer() || answerCallEnded() ? 'caApproveSpendingBeforeAnswering' : 'caApproveSpendingBeforeCalling')}</strong>
             <p class="hint">{tr(answerCallEnded() ? 'caApproveAfterEndedCall' : 'caSpendingNeedsApprovalAfterApprovalPressCallOrAccept')}</p>
-            <Show when={callApprovalPeer() && spend()?.state === 'pending' && spend()?.pending}>
+            <Show when={callApprovalPeer() && spend()?.state === 'pending' && spend()?.pending && !callBudgetPending()}>
               <p class="hint" data-call-pending-budget-hint>{tr('caPendingRequestMayNotCoverCall')}</p>
             </Show>
             <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={{ ...actions, approve: () => actions.approve(callApprovalPeer()) }} stays={tr(answerCallEnded() ? 'caApproveAfterEndedCall' : 'caNothingIsPaidUntilYouPressCallOrAccept')} />
