@@ -379,6 +379,19 @@ describe('paying the minutes of one outgoing call', () => {
     setLanguagePref('system');
   });
 
+  it.each(['budget_exhausted', 'ceiling_exhausted'])('keeps the exact %s refusal when stopping the minutes', async code => {
+    const node = fakeNode({ now: () => Date.now() });
+    const message = 'You have used 42 sats of 50 sats for this contact in the last 24 hours, and this costs 10 sats. Raise the budget to send.';
+    const s = session(node, async () => fail(code, message));
+    await s.confirmed();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.last().stop).toMatchObject({ code: 'budget_limit', limit: { code, message } });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(s.deps.pay).toHaveBeenCalledTimes(1);
+    expect(node.reservation!.spent_msat).toBe(0);
+  });
+
   it('a minute whose result is unknown is never paid again on top of it', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const s = session(node, async () => fail('spend_unknown', 'The node did not return a complete response.'));
@@ -1245,6 +1258,30 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     expect($('[data-call-ended]')?.textContent).toBe('You have reached your budget, so the call ended. Nothing was paid for the next minute. Raise the budget to call again.');
     expect(host.used('call_block')).toHaveLength(1);
+  });
+
+  it.each([
+    ['budget_exhausted', 'You have used 42 sats of 50 sats for this contact in the last 24 hours, and this costs 10 sats. Raise the budget to send.',
+      'Change this contact’s rolling 24-hour limit in Budget, then call again.',
+      'Ret kontaktens grænse for de seneste 24 timer under Budget, og ring igen.'],
+    ['ceiling_exhausted', 'You have used 42 sats of your 50 sats app all-in payment limit (rolling 24 hours), and this costs 10 sats. Raise the limit to send.',
+      'Change the app’s rolling 24-hour total in Budget, then call again.',
+      'Ret appens samlede grænse for de seneste 24 timer under Budget, og ring igen.'],
+  ] as const)('the ended card identifies %s separately from a call hold or node grant', async (code, message, english, danish) => {
+    const host = stubHost({ block: () => { throw { code, message }; } });
+    await openShell();
+    await ringAndAnswer(host);
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    const detail = $(`[data-call-budget-limit="${code}"]`);
+    expect(detail?.textContent).toContain(message);
+    expect(detail?.textContent).toContain(english);
+    setLanguagePref('da');
+    expect(detail?.textContent).toContain(code === 'budget_exhausted'
+      ? 'Du har brugt 42 sats af 50 sats til denne kontakt'
+      : 'Du har brugt 42 sats af appens samlede betalingsgrænse på 50 sats');
+    expect(detail?.textContent).toContain(danish);
+    expect(host.used('call_block')).toHaveLength(1);
+    expect(host.used('call_media_open')).toHaveLength(0);
   });
 
   it('money not ready does not end the call: the shell holds the minute until the node reads ready, then it is paid once', async () => {

@@ -10,6 +10,7 @@ import { createAmountDraft } from './amountDraft';
 import { t as tr, possessive, languagePref, setLanguagePref, type LanguagePref } from '../i18n';
 import { CallRepairs } from './CallRepairs';
 import { provenUnpaid } from './paymentOutcome';
+import { hostText } from './hostCopy';
 import { AddDevice } from '../onboarding/AddDevice';
 import { PairWords } from '../onboarding/PairWords';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
@@ -3899,6 +3900,12 @@ function CallPanel(props: {
           <p class="hint" data-call-ended>{v().stuck
             ? tr('uiACallToIsStillClosingAtYour', who())
             : v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
+          <Show when={v().minutes?.stop?.limit}>
+            {(limit) => <p class="hint" data-call-budget-limit={limit().code}>
+              {hostText(limit().message)}{' '}
+              {tr(limit().code === 'budget_exhausted' ? 'caCallContactBudgetSettings' : 'caCallTotalBudgetSettings')}
+            </p>}
+          </Show>
           <Show when={v().reason === 'failed' && !props.routed}>
             {/* A connectivity failure only ('failed': the connection closed, was lost, or never connected); no relay exists yet. No money claim here. */}
             <p class="hint" data-call-no-relay>{tr('uiSomeNetworksNeedARelayToConnectA')}</p>
@@ -5294,6 +5301,17 @@ function Composer(props: {
   /** One contact, and this Mac approves with Touch ID. */
   const touchable = () => spends() && !room() && props.actions.device()?.state === 'registered';
   const budget = () => props.budget ?? null;
+  /** The book's rolling limits apply even when a separate spending window supplies authority. */
+  const appBudgetRemaining = () => {
+    const b = budget();
+    if (!b) return null;
+    const used = b.accounted_msat ?? b.spent_msat + b.unsettled_msat;
+    const ceiling = b.autopay.state === 'open' ? Math.min(b.ceiling_msat, b.autopay.ceiling_msat ?? 0) : b.ceiling_msat;
+    const row = b.rows.find(row => row.target.toLowerCase() === target().toLowerCase() && row.room === room());
+    const contact = row?.limit_msat == null ? null
+      : Math.max(0, row.limit_msat - (row.accounted_msat ?? row.spent_msat + (row.unsettled_msat ?? 0)));
+    return { total: Math.max(0, ceiling - used), contact };
+  };
   /** The current node grant covers this contact and the displayed send ceiling. */
   const liveGrantRemaining = (): number | null => {
     const b = budget();
@@ -5306,11 +5324,8 @@ function Composer(props: {
         messagePerPaymentMax(g) < cost || (g.envelopes && (g.envelopes[peer] ?? 0) <= now)) return null;
     let remaining = Math.min(g.remaining_msat, g.recipient_left_msat_by_recipient?.[peer] ?? Infinity);
     if (b.autopay.state === 'open') {
-      const used = b.accounted_msat ?? b.spent_msat + b.unsettled_msat;
-      const row = b.rows.find(row => row.target.toLowerCase() === peer && row.room === room());
-      remaining = Math.min(remaining, Math.max(0, Math.min(b.ceiling_msat, b.autopay.ceiling_msat ?? 0) - used));
-      if (row?.limit_msat != null)
-        remaining = Math.min(remaining, Math.max(0, row.limit_msat - (row.accounted_msat ?? row.spent_msat + (row.unsettled_msat ?? 0))));
+      const local = appBudgetRemaining()!;
+      remaining = Math.min(remaining, local.total, local.contact ?? Infinity);
     }
     return remaining >= cost ? remaining : null;
   };
@@ -6743,7 +6758,12 @@ function Composer(props: {
         <p id={sendReasonId} class="hint" data-send-disabled-reason>{disabledReason()}</p>
       </Show>
       <Show when={mode() === 'message' && liveGrantRemaining() !== null}>
-        <p class="hint" data-send-budget>{tr('sendBudgetRemaining', fmtAmount(liveGrantRemaining()!))}</p>
+        <p class="hint" data-send-budget>{tr(budget()?.autopay.state === 'open' ? 'sendBudgetRemaining' : 'caNodeGrantSeparateLimits', fmtAmount(liveGrantRemaining()!))}</p>
+        <Show when={budget()?.autopay.state !== 'open' ? appBudgetRemaining() : null}>
+          {(left) => <p class="hint" data-send-app-budget>{left().contact === null
+            ? tr('caAppTotalRemaining', fmtAmount(left().total))
+            : tr('caAppContactRemaining', fmtAmount(left().contact!), fmtAmount(left().total), tr(room() ? 'uiThisRoom' : 'caThisContact'))}</p>}
+        </Show>
       </Show>
       <div class="composer-meta">
       <Show when={mode() === 'message'}>

@@ -96,7 +96,12 @@ const LIMIT_REFUSAL = new Set(['budget_exhausted', 'ceiling_exhausted']);
  * node holds no reservation for the call, or more than the owner agreed to.
  */
 export type MinutesStopCode = 'unpaid' | 'node_ended' | 'payment_failed' | 'budget_limit' | 'payment_unknown' | 'price_changed' | 'hold_refused';
-export type MinutesStop = { code: MinutesStopCode; message: string };
+export type MinutesStop = {
+  code: MinutesStopCode;
+  message: string;
+  /** The separate app limit that refused the minute, including its accounted amount. */
+  limit?: Pick<ActionError, 'code' | 'message'>;
+};
 
 export type MinutesView = {
   /** The per-minute price the owner agreed to before dialling (their node's advert). */
@@ -213,13 +218,14 @@ export function createCallMinutes(opts: {
   };
 
   /** Stops while ringing (the hold was refused) or while paying; never after the call ended. */
-  const stopWith = (code: MinutesStopCode, detail: string | null = null) => {
+  const stopWith = (code: MinutesStopCode, detail: string | null = null, limit?: Pick<ActionError, 'code' | 'message'>) => {
     if (stopped || disposed || settling) return;
     stopped = true;
     running = false;
     clearTimeout(timer);
     timer = undefined;
-    const stop = { code, message: detail ? `${STOP_MESSAGE[code]()} ${detail}` : STOP_MESSAGE[code]() };
+    const stop: MinutesStop = { code, message: detail ? `${STOP_MESSAGE[code]()} ${detail}` : STOP_MESSAGE[code]() };
+    if (limit) stop.limit = { code: limit.code, message: limit.message };
     emit({ stop });
     opts.onStop(stop);
   };
@@ -291,7 +297,7 @@ export function createCallMinutes(opts: {
       stopWith(lapsed() ? 'unpaid' : 'node_ended');
       return;
     }
-    if (LIMIT_REFUSAL.has(code)) { stopWith('budget_limit'); return; }
+    if (LIMIT_REFUSAL.has(code)) { stopWith('budget_limit', null, r.error); return; }
     if (PASSING_REFUSAL.has(code)) {
       if (++passingAttempts < PASSING_MAX_ATTEMPTS && !lapsed()) { schedule(RETRY_MS, () => void tick()); return; }
       stopWith('payment_failed', r.error.message);
