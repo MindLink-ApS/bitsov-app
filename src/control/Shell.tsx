@@ -3909,6 +3909,11 @@ function CallPanel(props: {
         {props.payment}
         {/* M6 P3: after the call, the app's own record of it, to copy next to the node journal. Display only. */}
         <CallReportCopy view={v()} routed={!!props.routed} />
+        {/* Said in words, not only by the pressed look: what the other person gets while the microphone or camera is off. */}
+        <Show when={v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting'}>
+          <Show when={v().muted}><p class="hint" role="status" data-call-mic-off>{tr('uiMicOffNote')}</p></Show>
+          <Show when={v().media === 'video' && !v().camera}><p class="hint" role="status" data-call-camera-off>{tr('uiCameraOffNote')}</p></Show>
+        </Show>
         <div class="call-actions">
           <Switch>
             <Match when={v().phase === 'incoming'}>
