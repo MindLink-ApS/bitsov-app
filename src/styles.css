@@ -1025,7 +1025,8 @@ button.danger { background: var(--err); color: var(--err-ink); border: none; }
    Its short "You" label is capped so the tile never grows over their picture; the camera-off words below scale fully. */
 .call-self { position: absolute; right: 8px; bottom: 8px; width: 30%; max-width: calc(100% - 16px); aspect-ratio: 3 / 4; max-height: calc(100% - 16px); box-sizing: border-box; border-radius: 6px; border: 1px solid var(--line-strong); overflow: hidden; background: #222; }
 .call-video.local { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
-.call-self[data-camera-off] .call-video.local { display: none; }
+/* Hidden, not removed: WebKit can pause or drop a display:none player, and the same one is shown again when the camera returns. */
+.call-self[data-camera-off] .call-video.local { visibility: hidden; }
 .call-self-label { position: absolute; left: 4px; bottom: 4px; max-width: calc(100% - 8px); box-sizing: border-box; padding: 1px 6px; border-radius: 4px; background: rgba(0, 0, 0, .65); color: #fff; font-size: min(.8rem, 20px); line-height: 1.4; overflow-wrap: anywhere; }
 /* Camera off: the words are the tile, so it grows with them (large text included) within the video area. */
 .call-self[data-camera-off] { width: max-content; min-width: min(30%, calc(100% - 16px)); aspect-ratio: auto; overflow: auto; }

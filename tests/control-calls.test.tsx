@@ -3285,7 +3285,9 @@ describe('calls in the shell', () => {
     expect(text('[data-call-self-label]')).toBe('You');
     const css = readFileSync(join(__dirname, '../src/styles.css'), 'utf8');
     expect(css).toMatch(/\.call-video\.local \{[^}]*transform: scaleX\(-1\)/);
-    expect(css).toMatch(/\.call-self\[data-camera-off\] \.call-video\.local \{ display: none; \}/);
+    // Hidden, never display:none: WebKit may pause a removed player that is shown again.
+    expect(css).toMatch(/\.call-self\[data-camera-off\] \.call-video\.local \{ visibility: hidden; \}/);
+    expect(css).not.toMatch(/\.call-self\[data-camera-off\] \.call-video\.local \{[^}]*display: none/);
   });
 
   it('a video call with the camera off says they cannot see you, and the line goes when it is back on', async () => {

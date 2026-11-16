@@ -91,3 +91,26 @@ for (const width of [320, 393]) for (const lang of ['en', 'da'] as const) for (c
     }
   });
 }
+
+// Camera off and on again: the same player stays rendered (hidden, not removed),
+// so WebKit keeps it playing and the picture is back at once.
+test('own picture plays again after the camera was off', async ({ page }) => {
+  await page.setViewportSize({ width: 393, height: 852 });
+  await open(page, 'en', 16, 'portrait');
+  const state = () => page.evaluate(() => {
+    const video = document.querySelector<HTMLVideoElement>('.call-video.local')!;
+    const style = getComputedStyle(video);
+    return { display: style.display, visibility: style.visibility, paused: video.paused, time: video.currentTime };
+  });
+  await page.evaluate(() => document.querySelector('[data-call-self]')!.setAttribute('data-camera-off', ''));
+  const off = await state();
+  expect(off.display).not.toBe('none');
+  expect(off.visibility).toBe('hidden');
+  await page.waitForTimeout(400);
+  await page.evaluate(() => document.querySelector('[data-call-self]')!.removeAttribute('data-camera-off'));
+  const on = await state();
+  expect(on.visibility).toBe('visible');
+  expect(on.paused).toBe(false);
+  await page.waitForTimeout(300);
+  expect((await state()).time).toBeGreaterThan(on.time);
+});
