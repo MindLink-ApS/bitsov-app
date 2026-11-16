@@ -181,6 +181,7 @@ describe('call video flag', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="video"]')!.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call="video"]')!.click();
     await vi.waitFor(() => expect($('[data-call-confirm="video"]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="video"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="video"]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     return answer(host);
@@ -192,6 +193,7 @@ describe('call video flag', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     expect($('[data-call="video"]')).toBeNull();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     answer(host);
@@ -260,6 +262,7 @@ describe('call video flag', () => {
       await openShell();
       await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
       $<HTMLButtonElement>('[data-call="audio"]')!.click();
+      await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
       $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
       await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
       answer(host);
