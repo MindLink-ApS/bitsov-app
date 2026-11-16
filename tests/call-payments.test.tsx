@@ -1285,4 +1285,28 @@ describe('the shell: consent, running cost, stop states and summary', () => {
       `Minutes: paid ${amount(BLOCK + FEE)}. Released back to your budget: ${amount(239 * (BLOCK + FEE))}.`), { timeout: 4_000 });
     expect(host.used('call_block')).toHaveLength(1);
   }, 15_000);
+
+  it('a caller whose minutes were paid is never told media was not billed, live or after; the minutes are counted separately (EN and DA)', async () => {
+    const host = stubHost();
+    await openShell();
+    await ringAndAnswer(host);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1), { timeout: 3_000 });
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    await vi.waitFor(() => expect(host.used('call_block')).toHaveLength(1), { timeout: 4_000 });
+    // Live: the signal cap waits behind Details, and says the minutes are apart.
+    await vi.waitFor(() => expect($('[data-call-details] [data-call-paid]')).not.toBeNull());
+    expect($('[data-call-details] [data-call-paid]')!.textContent).toMatch(/\(includes maximum routing fees; settled amount may be lower\)\. The minutes are counted separately\.$/);
+    expect($('[data-call-panel]')!.textContent).not.toMatch(/not billed/i);
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-minutes="released"]')).not.toBeNull(), { timeout: 4_000 });
+    await vi.waitFor(() => expect($('[data-call-paid="settled"]')).not.toBeNull(), { timeout: 4_000 });
+    expect($('[data-call-paid="settled"]')!.textContent).toMatch(/^This call paid up to .+: each signal’s price plus its routing-fee cap; the exact fees are not reported\. The minutes are counted separately\.$/);
+    expect($('[data-call-panel]')!.textContent).not.toMatch(/not billed/i);
+    try {
+      setLanguagePref('da');
+      expect($('[data-call-paid="settled"]')!.textContent).toMatch(/de præcise gebyrer oplyses ikke\. Minutterne opgøres for sig\.$/);
+      expect($('[data-call-panel]')!.textContent).not.toMatch(/ikke faktureret/i);
+    } finally { setLanguagePref('en'); }
+  }, 15_000);
 });
