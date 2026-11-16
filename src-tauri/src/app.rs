@@ -11395,6 +11395,10 @@ fn assistant_mock_builder() -> tauri::Builder<tauri::Wry> {
         })
 }
 
+#[cfg(all(test, desktop, not(feature = "mobile"), unix))]
+#[path = "beta_network_tests.rs"]
+mod beta_network_tests;
+
 #[cfg(all(test, desktop, not(feature = "mobile")))]
 mod remote_test_profile_tests {
     use super::*;
