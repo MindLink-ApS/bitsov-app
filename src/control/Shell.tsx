@@ -3796,6 +3796,11 @@ function CallPanel(props: {
   const price = () => { const q = shown(); const m = q && answerCost(q); return m === null ? '' : ` · ${tr('caUpToAmount', fmtAmount(m))}`; };
   /** The M6 paid-minutes line is on the card (same condition as its render below). */
   const minutesShown = () => !!(props.routed && v().outgoing && v().minutes);
+  /** After the call: a minutes line is on the card (as `CallMinutesLine` renders one), so the signal summary may point to it. */
+  const minutesLineEnded = () => {
+    const m = v().minutes;
+    return minutesShown() && !!m && (m.reservation !== null || m.receiptsMsat > 0);
+  };
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
       <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[v().phase]} ${who()}`}>
@@ -3847,17 +3852,17 @@ function CallPanel(props: {
               <p class="hint" data-call-paid="pending">
                 {v().paidMsat > 0 ? tr('uiThisCallPaidUpToSoFar', fmtAmount(v().paidMsat)) : ''}
                 {v().unknownCount > 0 ? tr('uiCheckPendingResult', v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)) : ''}
-                {v().pendingCount === 1 ? tr('uiAPaymentForThisCallIsStillSettling') : tr('uiPaymentsForThisCallAreStillSettling', v().pendingCount)}{tr('uiUpTo126')} {fmtAmount(v().pendingMsat)}{tr('uiTheTotalUpdatesWhen')} {v().pendingCount === 1 ? tr('uiItFinishes') : tr('uiTheyFinish')}{minutesShown() ? tr('uiMinutesCountedApart') : tr('uiMediaWasNotBilled')}
+                {v().pendingCount === 1 ? tr('uiAPaymentForThisCallIsStillSettling') : tr('uiPaymentsForThisCallAreStillSettling', v().pendingCount)}{tr('uiUpTo126')} {fmtAmount(v().pendingMsat)}{tr('uiTheTotalUpdatesWhen')} {v().pendingCount === 1 ? tr('uiItFinishes') : tr('uiTheyFinish')}{minutesLineEnded() ? tr('uiMinutesCountedApart') : tr('uiMediaWasNotBilled')}
               </p>
             </Match>
             <Match when={v().unknownCount > 0}>
               <p class="hint" data-call-paid="unknown">
                 {v().paidMsat > 0 ? tr('uiThisCallPaidUpTo', fmtAmount(v().paidMsat)) : tr('uiNoPaymentFromThisCallIsConfirmed')}{' '}
-                {v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)} {tr('uiUpTo133')} {fmtAmount(v().paidMsat + v().unknownMsat)} {tr('uiInAllIf')} {v().unknownCount === 1 ? tr('itPronoun') : tr('theyPronoun')} {minutesShown() ? tr('uiWentThroughCheckPendingResultMinutesApart') : tr('uiWentThroughCheckPendingResultMediaWasNot')}
+                {v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)} {tr('uiUpTo133')} {fmtAmount(v().paidMsat + v().unknownMsat)} {tr('uiInAllIf')} {v().unknownCount === 1 ? tr('itPronoun') : tr('theyPronoun')} {minutesLineEnded() ? tr('uiWentThroughCheckPendingResultMinutesApart') : tr('uiWentThroughCheckPendingResultMediaWasNot')}
               </p>
             </Match>
             <Match when={v().paidMsat > 0}>
-              <p class="hint" data-call-paid="settled">{tr('uiThisCallPaidUpTo136')} {fmtAmount(v().paidMsat)}{minutesShown() ? tr('uiEachSignalSPricePlusItsRoutingFeeMinutesApart') : tr('uiEachSignalSPricePlusItsRoutingFee')}</p>
+              <p class="hint" data-call-paid="settled">{tr('uiThisCallPaidUpTo136')} {fmtAmount(v().paidMsat)}{minutesLineEnded() ? tr('uiEachSignalSPricePlusItsRoutingFeeMinutesApart') : tr('uiEachSignalSPricePlusItsRoutingFee')}</p>
             </Match>
             {/* A call that started (it has an id) and paid nothing; pre-flight refusals already say "Nothing was paid". */}
             <Match when={v().callId !== null}>

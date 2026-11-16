@@ -979,7 +979,8 @@ const paired = { state: 'paired', scopes: ['read', 'receive', 'spend'], node_id:
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 
-function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number } = {}) {
+function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number; retireOnEnd?: boolean } = {}) {
+  let retired = false;
   resetContactsForTests();
   setPetname(A, 'Maya');
   const calls: { cmd: string; args?: unknown }[] = [];
@@ -1012,7 +1013,8 @@ function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?
       }
       return { operation_id: `op-${kind}`, message_id: 'sig', kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
     },
-    call_status: (args) => (callId && (args as { call_id: string }).call_id === callId ? { ...node.status(), id: callId } : null),
+    // retireOnEnd: once ended, the node no longer lists the call.
+    call_status: (args) => (!retired && callId && (args as { call_id: string }).call_id === callId ? { ...node.status(), id: callId } : null),
     // The host's check of the node's hold (and the owner's confirmation of its exact total).
     call_hold: (args) => {
       if (opts.hold) return opts.hold(args);
@@ -1029,6 +1031,7 @@ function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?
     op_end_call: (args) => {
       if (!callId) throw { code: 'call_not_found', message: 'No outgoing admission is recorded for this call.' };
       node.close();
+      if (opts.retireOnEnd) retired = true;
       return { op_id: 'end', kind: 'call_hangup', peer: A, call_id: (args as { call_id: string }).call_id, state: 'settled', cap_msat: 6_000, paid_msat: 6_000, message_id: 'hangup' };
     },
     op_list: () => ({ operations: [], skipped: 0, has_more: false }),
@@ -1284,6 +1287,26 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await vi.waitFor(() => expect($('[data-call-minutes="released"]')?.textContent).toBe(
       `Minutes: paid ${amount(BLOCK + FEE)}. Released back to your budget: ${amount(239 * (BLOCK + FEE))}.`), { timeout: 4_000 });
     expect(host.used('call_block')).toHaveLength(1);
+  }, 15_000);
+
+  it('a call cancelled before an answer pays no minutes and shows no minutes line, so it keeps "media was not billed" (EN and DA)', async () => {
+    const host = stubHost({ retireOnEnd: true });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    await vi.waitFor(() => expect($('[data-call-paid="settled"]')).not.toBeNull(), { timeout: 4_000 });
+    // Let the node's last read land: it no longer lists the call.
+    await new Promise((r) => setTimeout(r, 1_500));
+    expect(host.used('call_block')).toHaveLength(0);
+    expect($('[data-call-minutes]')).toBeNull();
+    expect($('[data-call-paid="settled"]')!.textContent).toMatch(/the exact fees are not reported\. Media was not billed\.$/);
+    try {
+      setLanguagePref('da');
+      expect($('[data-call-paid="settled"]')!.textContent).toMatch(/de præcise gebyrer oplyses ikke\. Medier blev ikke faktureret\.$/);
+    } finally { setLanguagePref('en'); }
   }, 15_000);
 
   it('a caller whose minutes were paid is never told media was not billed, live or after; the minutes are counted separately (EN and DA)', async () => {
