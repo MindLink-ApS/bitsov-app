@@ -1415,6 +1415,11 @@ export function ControlCenter(props: Props) {
   const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
   const [callApproval, setCallApproval] = createSignal(false);
   const [callApprovalPeer, setCallApprovalPeer] = createSignal<string>();
+  let callApprovalRevision = 0;
+  const clearCallApprovalPeer = () => {
+    callApprovalRevision++;
+    setCallApprovalPeer(undefined);
+  };
   const [callApproving, setCallApproving] = createSignal(false);
   const [callBudgetSats, setCallBudgetSats] = createSignal<string | null>(null);
   const callBudgetMsat = () => {
@@ -1425,12 +1430,12 @@ export function ControlCenter(props: Props) {
   const answerCallEnded = () => callBudgetSats() === null && callView().phase === 'ended' && !callView().outgoing && !canStillAnswer();
   let callApprovalFrom: string | null = null;
   const closeCallApproval = () => {
-    if (!callApproval()) return;
     const key = callApprovalFrom;
     callApprovalFrom = null;
-    setCallApproval(false);
-    setCallApprovalPeer(undefined);
+    clearCallApprovalPeer();
     setCallBudgetSats(null);
+    if (!callApproval()) return;
+    setCallApproval(false);
     queueMicrotask(() => {
       const panel = (key && waitingPanels.get(key)) || callPanel;
       if (panel?.isConnected) (panel.querySelector<HTMLElement>('[data-call-accept]:not(:disabled)') ?? panel).focus();
@@ -1438,7 +1443,7 @@ export function ControlCenter(props: Props) {
   };
   const openCallApproval = (key: string | null = null) => {
     callApprovalFrom = key;
-    setCallApprovalPeer(undefined);
+    clearCallApprovalPeer();
     setCallBudgetSats(null);
     setCallApproval(true);
     queueMicrotask(() => (callPanel?.querySelector<HTMLElement>('[data-call-approve]') ?? callPanel)?.focus());
@@ -1455,8 +1460,22 @@ export function ControlCenter(props: Props) {
   }, { defer: true }));
   const showCallBudgetRequest = (amountMsat: number | null) => {
     callApprovalFrom = null;
+    clearCallApprovalPeer();
     setCallBudgetSats(amountMsat === null ? null : String(Math.ceil(amountMsat / 1000)));
     setCallApproval(amountMsat !== null);
+  };
+  const callApprovalBlocked = () => moneyBlocked() || callApproving() || callBudgetCovered()
+    || (callBudgetSats() !== null && callBudgetMsat() === undefined);
+  const approveCallSpending = async (): Promise<ApprovalResult> => {
+    const skipped: ApprovalResult = { ok: false, requestId: null, grantedOp: null, bindable: false, waiting: false };
+    if (callBudgetCovered()) { closeCallApproval(); return skipped; }
+    if (callApprovalBlocked()) return skipped;
+    setCallApproving(true);
+    try {
+      const result = await actions.approve(callBudgetMsat() ?? callApprovalPeer());
+      if (result.ok && spendLine(spend(), now()).open && !spend()?.pending) closeCallApproval();
+      return result;
+    } finally { setCallApproving(false); }
   };
   // M6 A1: the node is the cell. Call audio goes app -> own node -> peer node
   // -> peer app through the host-owned media socket; app-to-app WebRTC media
@@ -1495,7 +1514,8 @@ export function ControlCenter(props: Props) {
     stopWhenSilenced: isMobilePlatform(),
     closeAdmission: (operationId, peer, callId) => source.closeCallAdmission(operationId, peer, callId),
     authorize: async (peer) => {
-      setCallApprovalPeer(routedCalls ? peer : undefined);
+      clearCallApprovalPeer();
+      const revision = callApprovalRevision;
       setCallBudgetSats(null);
       const pairing = await act(() => source.pairingStatus());
       if (!pairing.ok) {
@@ -1505,6 +1525,7 @@ export function ControlCenter(props: Props) {
       }
       const allowed = (pairing.value.state === 'fallback' ||
         (pairing.value.state === 'paired' && pairing.value.scopes.includes('spend'))) && roomCanSpend();
+      if (revision === callApprovalRevision) setCallApprovalPeer(!allowed && routedCalls ? peer : undefined);
       setCallApproval(!allowed);
       return allowed;
     },
@@ -1558,7 +1579,7 @@ export function ControlCenter(props: Props) {
         setCallVideoCanvas(null);
         setCallVideoStatus(null);
       }
-      if (view.phase === 'incoming') setCallApprovalPeer(undefined);
+      if (view.phase === 'incoming') clearCallApprovalPeer();
       setCallView(view);
       if (view.phase === 'incoming' && !view.silenced && view.callId && view.peer) notifications?.call(`${view.peer}:${view.callId}`, nameOf(view.peer), () => isIncoming(view.peer!, view.callId!), () => revealIncoming(view.callId!, view.peer!));
     },
@@ -2551,7 +2572,7 @@ export function ControlCenter(props: Props) {
           <div data-call-approval>
             <strong>{tr(canStillAnswer() || answerCallEnded() ? 'caApproveSpendingBeforeAnswering' : 'caApproveSpendingBeforeCalling')}</strong>
             <p class="hint">{tr(answerCallEnded() ? 'caApproveAfterEndedCall' : 'caSpendingNeedsApprovalAfterApprovalPressCallOrAccept')}</p>
-            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={{ ...actions, approve: () => actions.approve(callBudgetMsat() ?? callApprovalPeer()) }} requestBudgetMsat={callBudgetMsat()} stays={tr(answerCallEnded() ? 'caApproveAfterEndedCall' : 'caNothingIsPaidUntilYouPressCallOrAccept')} />
+            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={{ ...actions, moneyBlocked: callApprovalBlocked, approve: approveCallSpending }} requestBudgetMsat={callBudgetMsat()} stays={tr(answerCallEnded() ? 'caApproveAfterEndedCall' : 'caNothingIsPaidUntilYouPressCallOrAccept')} />
             <Show when={!spend()?.pending && spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
               <Show when={callBudgetSats() !== null}>
                 <label>{tr('caBudgetToRequestSats')}
@@ -2559,14 +2580,7 @@ export function ControlCenter(props: Props) {
                 </label>
                 <p class="hint">{tr('caLargerBudgetNeedsOwner')}</p>
               </Show>
-              <button type="button" class="soft" data-call-approve data-call-budget-request={callBudgetSats() !== null ? '' : undefined} disabled={moneyBlocked() || callApproving() || callBudgetCovered() || (callBudgetSats() !== null && callBudgetMsat() === undefined)} onClick={async () => {
-                if (callBudgetCovered()) { closeCallApproval(); return; }
-                setCallApproving(true);
-                try {
-                  const result = await actions.approve(callBudgetMsat() ?? callApprovalPeer());
-                  if (result.ok && spendLine(spend(), now()).open && !spend()?.pending) closeCallApproval();
-                } finally { setCallApproving(false); }
-              }}>{tr(callBudgetSats() !== null ? 'caAskBiggerBudget' : 'uiApproveSpending')}</button>
+              <button type="button" class="soft" data-call-approve data-call-budget-request={callBudgetSats() !== null ? '' : undefined} disabled={callApprovalBlocked()} onClick={() => void approveCallSpending()}>{tr(callBudgetSats() !== null ? 'caAskBiggerBudget' : 'uiApproveSpending')}</button>
             </Show>
             <button type="button" class="soft" onClick={closeCallApproval}>{tr('uiClose')}</button>
           </div>
@@ -2597,7 +2611,7 @@ export function ControlCenter(props: Props) {
         hangup={() => void calls.hangup()}
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
-        dismiss={() => { setCallApproval(false); setCallBudgetSats(null); calls.dismiss(); }}
+        dismiss={() => { closeCallApproval(); calls.dismiss(); }}
         closeAgain={() => void calls.closeAgain()}
         endStuck={() => void calls.endStuck()}
         callAgain={(peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); }}

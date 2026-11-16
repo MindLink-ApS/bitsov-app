@@ -1182,6 +1182,77 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(host.used('call_signal')).toHaveLength(0);
     expect(host.used('call_block')).toHaveLength(0);
   });
+  it.each(['approve', 'ask-again'])('keeps an in-call %s request free of the initial Ring peer', async button => {
+    const host = stubHost({ block: () => {
+      host.setSpending({ state: 'expired', basis: null, open_until_ms: null, pending: null, window_ms: 600_000, lapse: 'lost' });
+      throw { code: 'spend_expired', message: 'Spending approval expired.' };
+    } });
+    await openShell();
+    await ringAndAnswer(host);
+    await vi.waitFor(() => expect($('[data-call-approval] [data-spend="expired"]')).not.toBeNull());
+    const signals = host.used('call_signal').length;
+    const blocks = host.used('call_block').length;
+    $<HTMLButtonElement>(button === 'approve' ? '[data-call-approve]' : '[data-call-approval] [data-spend-ask-again]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    expect(host.used('spend_request')[0].args).toEqual({});
+    expect(host.used('call_signal')).toHaveLength(signals);
+    expect(host.used('call_block')).toHaveLength(blocks);
+  });
+  it.each(['approve', 'ask-again'])('keeps incoming %s ordinary when it arrives during outgoing authorization', async button => {
+    const incomingPeer = 'b'.repeat(64);
+    const pairing = { ...paired, scopes: ['read', 'receive'] };
+    let reply: Reply = () => pairing;
+    const host = stubHost({
+      peers: [A, incomingPeer], pairing: args => reply(args),
+      spend: { state: 'expired', basis: null, open_until_ms: null, pending: null, window_ms: 600_000, lapse: 'lost' },
+    });
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    await openShell();
+    let finish!: (value: OnboardingPairingView) => void;
+    reply = () => new Promise<OnboardingPairingView>(resolve => { finish = resolve; });
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'incoming', kind: 400, sender: incomingPeer, recipient: OWN,
+      timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
+    reply = () => pairing;
+    finish(pairing);
+    await vi.waitFor(() => expect($('[data-call-approval]')).not.toBeNull());
+    $<HTMLButtonElement>(button === 'approve' ? '[data-call-approve]' : '[data-call-approval] [data-spend-ask-again]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    expect(host.used('spend_request')[0].args).toEqual({});
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+    expect(capture).not.toHaveBeenCalled();
+  });
+  it('keeps Ask again ordinary after dismissing a refused Ring and starting another call', async () => {
+    const grant: NodeGrantSummary = { budget_msat: 10_000, remaining_msat: 10_000, per_call_max_msat: 10_000,
+      expires_at_ms: Date.now() + 600_000, envelopes: null };
+    const host = stubHost({
+      grant,
+      block: () => {
+        host.setSpending({ state: 'expired', basis: null, open_until_ms: null, pending: null, window_ms: 600_000, lapse: 'lost' });
+        throw { code: 'spend_expired', message: 'Spending approval expired.' };
+      },
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-budget-sats]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    expect($('[data-call-approval]')).toBeNull();
+    Object.assign(grant, { budget_msat: 10_000_000, remaining_msat: 10_000_000, per_call_max_msat: 10_000_000 });
+    host.emitLive({ type: 'link', state: 'open' });
+    await ringAndAnswer(host);
+    await vi.waitFor(() => expect($('[data-call-approval] [data-spend-ask-again]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-approval] [data-spend-ask-again]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    expect(host.used('spend_request')[0].args).toEqual({});
+    expect(host.used('call_block')).toHaveLength(1);
+  });
   it('approves answering without requiring a reservation price from the caller', async () => {
     let quote = QUOTE;
     const host = stubHost({
@@ -1289,6 +1360,39 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     input.value = '500'; input.dispatchEvent(new Event('input', { bubbles: true }));
     expect(submit.disabled).toBe(false);
     expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it.each(['', '100001', '499'])('guards expired-window Ask again for replacement amount %j', async value => {
+    const host = stubHost({
+      quote: { ...QUOTE, offer_msat: 600_000, offer_max_routing_fee_msat: 0,
+        signal_msat: 1_000, signal_max_routing_fee_msat: 0, call_total_msat: 601_000 },
+      grant: { budget_msat: 500_000, remaining_msat: 499_000, per_call_max_msat: 500_000,
+        expires_at_ms: Date.now() + 600_000, envelopes: null },
+      spend: { state: 'expired', basis: null, open_until_ms: null, pending: null, window_ms: 600_000, lapse: 'lost' },
+    });
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-budget-sats]')).not.toBeNull());
+    const input = $<HTMLInputElement>('[data-call-budget-sats]')!;
+    input.value = value; input.dispatchEvent(new Event('input', { bubbles: true }));
+    const approve = $<HTMLButtonElement>('[data-call-approve]')!;
+    const askAgain = $<HTMLButtonElement>('[data-call-approval] [data-spend-ask-again]')!;
+    expect(approve.disabled).toBe(true);
+    expect(askAgain.disabled).toBe(true);
+    askAgain.click();
+    expect(host.used('spend_request')).toHaveLength(0);
+    input.value = '601'; input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(approve.disabled).toBe(false);
+    expect(askAgain.disabled).toBe(false);
+    askAgain.click();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    expect(host.used('spend_request')[0].args).toEqual({ budget_msat: 601_000 });
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+    expect(capture).not.toHaveBeenCalled();
   });
 
   it.each(['en', 'da'] as const)('an exhausted active grant offers a larger owner request without ringing again (%s)', async lang => {
