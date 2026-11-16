@@ -2,26 +2,37 @@
 use std::sync::OnceLock;
 
 const REMOTE_TEST_IDENTIFIER: &str = "tech.mindlink.bitsov.remotetest";
+const BETA_IDENTIFIER: &str = "tech.mindlink.bitsov.beta";
 static PROFILE: OnceLock<AppProfile> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AppProfile {
     remote_only: bool,
+    signet_only: bool,
 }
 
 impl AppProfile {
     pub(crate) fn for_identifier(identifier: &str) -> Self {
-        Self { remote_only: identifier == REMOTE_TEST_IDENTIFIER }
+        Self {
+            remote_only: identifier == REMOTE_TEST_IDENTIFIER,
+            signet_only: matches!(identifier, BETA_IDENTIFIER | REMOTE_TEST_IDENTIFIER),
+        }
     }
 
     pub(crate) fn remote_only(self) -> bool {
         self.remote_only
     }
 
+    pub(crate) fn signet_only(self) -> bool {
+        self.signet_only
+    }
+
     #[cfg(any(test, target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))]
     pub(crate) fn keychain_service(self, service: &str) -> String {
         if self.remote_only {
             format!("{REMOTE_TEST_IDENTIFIER}.{service}")
+        } else if self.signet_only {
+            format!("{BETA_IDENTIFIER}.{service}")
         } else {
             service.to_owned()
         }

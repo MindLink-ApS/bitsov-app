@@ -90,6 +90,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: >-
           npm run tauri -- build --ci --no-sign --bundles nsis
+          --config src-tauri/tauri.beta.conf.json
           --config '{"bundle":{"icon":["icons/icon.ico"]}}' -- --locked
       - name: Name the preview installer
         shell: pwsh
