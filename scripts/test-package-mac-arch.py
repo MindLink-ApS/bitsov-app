@@ -17,7 +17,11 @@ with open(os.environ["TRACE"], "a") as trace:
     trace.write(json.dumps([name, args, os.environ.get("CARGO_TARGET_DIR")]) + "\n")
 arch = os.environ["TEST_ARCH"]
 triple = os.environ["TEST_TRIPLE"]
-bundle = pathlib.Path(os.environ["TEST_OUTPUT"]) / triple / "release/bundle"
+implicit_arm64 = os.environ["TEST_IMPLICIT_ARM64"] == "1"
+bundle = pathlib.Path(os.environ["TEST_OUTPUT"])
+if not implicit_arm64:
+    bundle /= triple
+bundle /= "release/bundle"
 app = bundle / "macos/BitSov.app"
 dmg = bundle / ("dmg/BitSov_0.0.1_" + ("aarch64" if arch == "arm64" else "x86_64") + ".dmg")
 scenario = os.environ["TEST_SCENARIO"]
@@ -32,8 +36,11 @@ elif name == "sysctl":
 elif name == "npm":
     if args == ["ci", "--ignore-scripts", "--no-audit", "--no-fund"]:
         sys.exit(0)
-    assert args[:9] == ["run", "tauri", "--", "build", "--bundles", "app", "--no-sign", "--ci", "--target"], args
-    assert args[9] == triple and args[-2:] == ["--", "--locked"], args
+    if implicit_arm64:
+        assert args == ["run", "tauri", "--", "build", "--bundles", "app", "--no-sign", "--ci", "--", "--locked"], args
+    else:
+        assert args[:9] == ["run", "tauri", "--", "build", "--bundles", "app", "--no-sign", "--ci", "--target"], args
+        assert args[9] == triple and args[-2:] == ["--", "--locked"], args
     assert not app.exists() and not dmg.exists(), "stale target outputs survived"
     (app / "Contents/MacOS").mkdir(parents=True)
     (app / "Contents/Resources").mkdir()
@@ -92,7 +99,7 @@ class NativePackagingTests(unittest.TestCase):
         cls.fixture.close()
 
     def run_package(self, arch="x86_64", args=None, scenario="success", os_name="Darwin",
-                    custom_dir=False, fetch=False):
+                    custom_dir=False, fetch=False, implicit_arm64=False):
         with tempfile.TemporaryDirectory(prefix="native package ") as tmp:
             root = Path(tmp)
             env = self.fixture.prepare(root)
@@ -106,7 +113,11 @@ class NativePackagingTests(unittest.TestCase):
             sidecar.write_bytes(PAYLOADS["bitsov-darwin-aarch64"] if scenario == "wrong-asset" else PAYLOADS[asset])
             sidecar.chmod(0o755)
             output = root / "custom target" if custom_dir else Path("src-tauri/target")
-            bundle = root / output / triple / "release/bundle"
+            expected_output = Path("src-tauri/target") if implicit_arm64 else output
+            bundle = root / expected_output
+            if not implicit_arm64:
+                bundle /= triple
+            bundle /= "release/bundle"
             app = bundle / "macos/BitSov.app"
             dmg = bundle / ("dmg/BitSov_0.0.1_" + ("aarch64" if arch == "arm64" else "x86_64") + ".dmg")
             app.mkdir(parents=True)
@@ -123,7 +134,8 @@ class NativePackagingTests(unittest.TestCase):
                 tool.chmod(0o755)
             trace = root / "trace"
             env.update(TRACE=str(trace), TEST_ARCH=arch, TEST_TRIPLE=triple,
-                       TEST_OUTPUT=str(output), TEST_OS=os_name, TEST_SCENARIO=scenario,
+                       TEST_OUTPUT=str(expected_output), TEST_OS=os_name, TEST_SCENARIO=scenario,
+                       TEST_IMPLICIT_ARM64="1" if implicit_arm64 else "0",
                        BITSOV_MAC_SIGNING_IDENTITY="-", BITSOV_MAC_NOTARY_PROFILE="",
                        BITSOV_MAC_PROVISION_PROFILE="", BITSOV_USE_EXISTING_SIDECAR="0")
             env.pop("CARGO_TARGET_DIR", None)
@@ -137,6 +149,8 @@ class NativePackagingTests(unittest.TestCase):
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             events = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
             self.assertEqual(other.read_text(), "other build")
+            if implicit_arm64 and result.returncode == 0:
+                self.assertTrue((root / "src-tauri/target/package-mac.log").is_file())
             return result, events, dmg.read_text() if dmg.exists() else None, sidecar.read_bytes()
 
     def test_explicit_native_targets_and_custom_output_directories(self):
@@ -158,6 +172,29 @@ class NativePackagingTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout)
                 self.assertEqual(image, "verified image")
                 self.assertEqual(payload, PAYLOADS["bitsov-darwin-x86_64"])
+
+    def test_implicit_arm64_keeps_legacy_build_paths_and_native_checks(self):
+        for custom in (False, True):
+            for fetch in (False, True):
+                with self.subTest(custom=custom, fetch=fetch):
+                    result, events, image, payload = self.run_package(
+                        "arm64", args=[], custom_dir=custom, fetch=fetch, implicit_arm64=True)
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    self.assertEqual(image, "verified image")
+                    self.assertEqual(payload, PAYLOADS["bitsov-darwin-aarch64"])
+                    build = next(e for e in events if e[0] == "npm" and "build" in e[1])
+                    self.assertEqual(build[1], ["run", "tauri", "--", "build", "--bundles", "app",
+                                               "--no-sign", "--ci", "--", "--locked"])
+                    self.assertTrue(build[2].endswith("/src-tauri/target"), build)
+                    app = "src-tauri/target/release/bundle/macos/BitSov.app"
+                    inspected = [e[1] for e in events if e[0] == "file"]
+                    self.assertIn(["-b", app + "/Contents/MacOS/bitsov-app"], inspected)
+                    self.assertIn(["-b", app + "/Contents/MacOS/konsensus"], inspected)
+                    self.assertIn("PASS  app executable is native arm64", result.stdout)
+                    self.assertIn("PASS  bundled sidecar is native arm64", result.stdout)
+                    images = [e[1] for e in events if e[0] == "hdiutil"]
+                    self.assertEqual(images[-1], ["verify",
+                        "src-tauri/target/release/bundle/dmg/BitSov_0.0.1_aarch64.dmg"])
 
     def test_unsupported_hosts_targets_and_missing_arch_stop_before_build(self):
         for arch, os_name, args in (("x86_64", "Linux", ["--arch", "x86_64"]),

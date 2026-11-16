@@ -76,7 +76,9 @@ For a separate pre-signing check, use
 `bash scripts/check-mac-bundle.sh --arch x86_64` (or `arm64`). It selects the
 same target-specific app and source-sidecar defaults and honors
 `CARGO_TARGET_DIR`; `--app`, `--sidecar` and `--dist` can override paths.
-The original checker invocation without `--arch` keeps its legacy defaults.
+The checker requires `--arch`, including when all paths are supplied. For the
+implicit ARM package, also pass
+`--app src-tauri/target/release/bundle/macos/BitSov.app`.
 
 ### Manual Intel CI artifact
 
@@ -256,14 +258,17 @@ variables do not opt this script into signing/notarization: Tauri runs with
 
 ## Bundle checks
 
-`scripts/check-mac-bundle.sh [--app PATH] [--sidecar PATH] [--dist PATH]`
+`scripts/check-mac-bundle.sh --arch arm64|x86_64 [--app PATH] [--sidecar PATH] [--dist PATH]`
 runs on the **pre-signing** app and reads files only. Re-signing the sidecar
 changes its bytes, so use `codesign --verify --deep --strict` on the final app
-instead of rerunning the source-byte comparison. Any failure means exit 1 and `MAC BUNDLE CHECK: FAIL`.
+instead of rerunning the source-byte comparison. A failed bundle check means
+exit 1 and `MAC BUNDLE CHECK: FAIL`. Missing, empty or unsupported `--arch`
+means exit 2 before bundle inspection.
 
 | Check | Why |
 |---|---|
 | `Contents/MacOS/bitsov-app` and `Contents/MacOS/konsensus` are executable | The app and the bundled node exist |
+| Both executables are thin Mach-O files of the selected architecture | Wrong-architecture and universal binaries are refused |
 | `cmp` of the bundled `konsensus` against the verified sidecar | The output must contain the exact bytes accepted by the pre-bundle release check |
 | `Contents/Resources/icon.icns` is non-empty | Icon packaging (spike blocker) |
 | `Info.plist` lints (`plutil -lint`, or `plistlib` off macOS) | Well-formed bundle |
@@ -286,11 +291,15 @@ Binary markers:
 literal into every build.
 
 `scripts/test-check-mac-bundle.sh` tests the checker on fake bundle trees.
-It uses no network and builds nothing. It has 19 cases: the good tree passes,
+It uses no network and builds nothing. It has 20 cases: the good tree passes,
 and each of these fails: missing or mismatched sidecar, missing verified
 sidecar, missing or non-executable app, missing icon, malformed plist,
 10.13 minimum, a `*.sb` file, the assistant page or chunk in dist, missing
-dist, a loose `assistant.html`, and each of the four binary markers.
+dist, a loose `assistant.html`, and each of the four binary markers. Omitting
+`--arch` is refused even with an otherwise valid bundle and explicit paths.
+`scripts/test-package-mac-arch.py` also covers the implicit ARM build's
+arguments, fixed target root, bundle and image paths, and native checks with
+both fetched and existing sidecars, including a conflicting caller target root.
 Authority Check runs it on Linux, together with `shellcheck` on the three
 scripts. Mac Package runs it on macOS.
 
