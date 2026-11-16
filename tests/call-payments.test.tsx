@@ -979,7 +979,7 @@ const paired = { state: 'paired', scopes: ['read', 'receive', 'spend'], node_id:
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 
-function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number; endKeepsHold?: boolean; endLeavesUnresolved?: boolean } = {}) {
+function stubHost(opts: { quote?: CallQuote; grant?: NodeGrantSummary; offer?: Reply; block?: Reply; hold?: Reply; spendRequest?: Reply; minutes?: number; endKeepsHold?: boolean; endLeavesUnresolved?: boolean } = {}) {
   resetContactsForTests();
   setPetname(A, 'Maya');
   const calls: { cmd: string; args?: unknown }[] = [];
@@ -987,7 +987,7 @@ function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?
   let mediaIndex = 0;
   const node = fakeNode({ now: () => Date.now(), minutes: opts.minutes });
   let callId: string | null = null;
-  const spending: SpendView = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
+  let spending: SpendView = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
   const REPLIES: Record<string, Reply> = {
     node_status: () => ({ ready: true, node_id: OWN, error: null }),
     trust_acknowledge: () => true,
@@ -1001,7 +1001,17 @@ function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?
     payments_overview: () => ({ balance_msat: 1_000_000, lightning_outbound_msat: 500_000, channels: [] }),
     fund_state: () => null,
     spend_status: () => spending,
-    budget_status: () => null,
+    spend_request: (args) => {
+      opts.spendRequest?.(args);
+      return spending = { state: 'pending', basis: null, open_until_ms: null, window_ms: 600_000,
+        pending: { op_id: 'ab12', expires_at_ms: Date.now() + 600_000, owner_action: 'konsensus grant --op ab12', owner_can_grant: true } };
+    },
+    budget_status: () => opts.grant ? {
+      paused: false, autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null },
+      waiting_for_owner: false, preset: 'careful', ceiling_msat: 500_000, spent_msat: 0,
+      unsettled_msat: 0, rows: [], presets: [], window_ms: 86_400_000, max_daily_msat: 100_000_000,
+      node_grant: opts.grant,
+    } : null,
     call_quote: () => opts.quote ?? QUOTE,
     call_signal: (args) => {
       const kind = (args as { kind: number }).kind;
@@ -1111,6 +1121,68 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     host.emitLive({ type: 'message', room_id: null, message: { id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, sdp: nodeRoutedSdp('answer', callId) }), payment_amount_msat: 1000 } });
     return callId;
   }
+
+  it.each(['en', 'da'] as const)('a cached grant that is too small offers a request before any signal (%s)', async lang => {
+    const host = stubHost({
+      quote: { ...QUOTE, offer_msat: 600_000, offer_max_routing_fee_msat: 0, signal_msat: 1_000, signal_max_routing_fee_msat: 0, call_total_msat: 601_000 },
+      grant: { budget_msat: 500_000, remaining_msat: 499_000, per_call_max_msat: 500_000, expires_at_ms: Date.now() + 600_000, envelopes: null },
+    });
+    await openShell(); setLanguagePref(lang);
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($<HTMLInputElement>('[data-call-budget-sats]')?.value).toBe('601');
+    expect(host.used('call_signal')).toHaveLength(0);
+    $<HTMLButtonElement>('[data-call-budget-request]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval] [data-approval="pending"]')).not.toBeNull());
+    expect(host.used('spend_request').map(c => c.args)).toEqual([{ budget_msat: 601_000 }]);
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+  });
+
+  it.each(['en', 'da'] as const)('an exhausted active grant offers a larger owner request without ringing again (%s)', async lang => {
+    const host = stubHost({
+      quote: { ...QUOTE, offer_msat: 600_000, offer_max_routing_fee_msat: 0, signal_msat: 1_000, signal_max_routing_fee_msat: 0, call_total_msat: 601_000 },
+      offer: () => { throw { code: 'grant_exhausted', message: 'Your node\'s spend budget has 499 sats left, less than this costs. Nothing was sent. Ask for a new budget.' }; },
+    });
+    await openShell();
+    setLanguagePref(lang);
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    const input = $<HTMLInputElement>('[data-call-budget-sats]');
+    expect(input?.value).toBe('601');
+    expect($('[data-call-budget-request]')?.textContent).toBe(lang === 'en' ? 'Ask for a bigger budget' : 'Bed om et større budget');
+    expect(host.used('spend_request')).toHaveLength(0);
+    input!.value = '700'; input!.dispatchEvent(new Event('input', { bubbles: true }));
+    $<HTMLButtonElement>('[data-call-budget-request]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval] [data-approval="pending"]')).not.toBeNull());
+    expect(host.used('spend_request').map(c => c.args)).toEqual([{ budget_msat: 700_000 }]);
+    expect(host.used('call_signal')).toHaveLength(1);
+    expect(host.used('call_block')).toHaveLength(0);
+    expect($('[data-call-budget-request]')).toBeNull();
+  });
+
+  it('a failed larger-budget request keeps its amount available for retry', async () => {
+    let reject = true;
+    const host = stubHost({
+      offer: () => { throw { code: 'grant_exhausted', message: 'Not enough remaining budget.' }; },
+      spendRequest: () => { if (reject) throw { code: 'node', message: 'Request unavailable.' }; },
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($<HTMLInputElement>('[data-call-budget-sats]')?.value).toBe('21');
+    $<HTMLButtonElement>('[data-call-budget-request]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval]')?.textContent).toContain('Request unavailable.'));
+    expect($<HTMLInputElement>('[data-call-budget-sats]')?.value).toBe('21');
+    reject = false;
+    $<HTMLButtonElement>('[data-call-budget-request]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval] [data-approval="pending"]')).not.toBeNull());
+    expect(host.used('spend_request')).toHaveLength(2);
+    expect(host.used('call_signal')).toHaveLength(1);
+  });
 
   it('shows the per-minute price and the most the node will hold before Ring; nothing is dialled until Ring', async () => {
     const host = stubHost();

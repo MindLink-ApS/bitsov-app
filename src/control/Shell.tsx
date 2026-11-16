@@ -261,7 +261,7 @@ export type Actions = {
   spendScoped?: () => boolean;
   moneyBlocked: () => boolean;
   /** The request was made (open, or pending at the node), with the host's ids for it (#227). */
-  approve: () => Promise<ApprovalResult>;
+  approve: (budgetMsat?: number) => Promise<ApprovalResult>;
   lock: () => Promise<void>;
   /** Withdraw the pending request at the node. */
   cancelSpend: () => Promise<void>;
@@ -1414,6 +1414,15 @@ export function ControlCenter(props: Props) {
   const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
   const [callApproval, setCallApproval] = createSignal(false);
   const [callApproving, setCallApproving] = createSignal(false);
+  const [callBudgetSats, setCallBudgetSats] = createSignal<string | null>(null);
+  const callBudgetMsat = () => {
+    const sats = Number(callBudgetSats());
+    return Number.isSafeInteger(sats) && sats > 0 && sats <= 100_000 ? sats * 1000 : undefined;
+  };
+  const showCallBudgetRequest = (amountMsat: number | null) => {
+    setCallBudgetSats(amountMsat === null ? null : String(Math.ceil(amountMsat / 1000)));
+    setCallApproval(amountMsat !== null);
+  };
   // M6 A1: the node is the cell. Call audio goes app -> own node -> peer node
   // -> peer app through the host-owned media socket; app-to-app WebRTC media
   // is unreachable while the flag is on (its code stays for the lab profile).
@@ -1442,6 +1451,7 @@ export function ControlCenter(props: Props) {
     },
   } : undefined;
   const calls = createCallEngine({
+    onBudgetNeeded: showCallBudgetRequest,
     routed: routedCalls,
     routedVideo,
     minutes: callMinutes,
@@ -1450,6 +1460,7 @@ export function ControlCenter(props: Props) {
     stopWhenSilenced: isMobilePlatform(),
     closeAdmission: (operationId, peer, callId) => source.closeCallAdmission(operationId, peer, callId),
     authorize: async () => {
+      setCallBudgetSats(null);
       const pairing = await act(() => source.pairingStatus());
       if (!pairing.ok) {
         setErrors('spend', pairing.error.message);
@@ -1465,6 +1476,9 @@ export function ControlCenter(props: Props) {
     quote: (peer) => act(() => source.callQuote(peer)),
     signal: async (peer, kind, plaintext, maxMsat, minutes, maxHangupMsat) => {
       const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes, maxHangupMsat));
+      if (!r.ok && kind === 400 && r.error.code === 'grant_exhausted') {
+        showCallBudgetRequest(maxMsat + (maxHangupMsat ?? 0));
+      }
       if (!r.ok && (needsApproval(r.error) || r.error.code === 'spend_refused' || /token lacks.*spend|403/i.test(r.error.message))) setCallApproval(true);
       void loadBudget();
       void loadWallet();
@@ -1617,10 +1631,10 @@ export function ControlCenter(props: Props) {
     },
     fileFetch: (messageId) => source.fileFetch(messageId),
     fileSave: (messageId) => source.fileSave(messageId),
-    approve: async () => {
+    approve: async (budgetMsat) => {
       clearContactApprovalError();
       setErrors('spend', undefined);
-      const r = await act(() => source.spendRequest());
+      const r = await act(() => source.spendRequest(budgetMsat));
       if (r.ok) setSpend(r.value);
       else setErrors('spend', r.error.message);
       return approvalResult(r);
@@ -2501,12 +2515,18 @@ export function ControlCenter(props: Props) {
           <div data-call-approval>
             <strong>{tr('caApproveSpendingBeforeCalling')}</strong>
             <p class="hint">{tr('caSpendingNeedsApprovalAfterApprovalPressCallOrAccept')}</p>
-            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} stays={tr('caNothingIsPaidUntilYouPressCallOrAccept')} />
+            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} requestBudgetMsat={callBudgetMsat()} stays={tr('caNothingIsPaidUntilYouPressCallOrAccept')} />
             <Show when={spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
-              <button type="button" class="soft" data-call-approve disabled={moneyBlocked() || callApproving()} onClick={async () => {
+              <Show when={callBudgetSats() !== null}>
+                <label>{tr('caBudgetToRequestSats')}
+                  <input type="number" min="1" max="100000" step="1" data-call-budget-sats value={callBudgetSats() ?? ''} disabled={callApproving()} onInput={e => setCallBudgetSats(e.currentTarget.value)} />
+                </label>
+                <p class="hint">{tr('caLargerBudgetNeedsOwner')}</p>
+              </Show>
+              <button type="button" class="soft" data-call-approve data-call-budget-request={callBudgetSats() !== null ? '' : undefined} disabled={moneyBlocked() || callApproving() || (callBudgetSats() !== null && callBudgetMsat() === undefined)} onClick={async () => {
                 setCallApproving(true);
-                try { await actions.approve(); } finally { setCallApproving(false); }
-              }}>{tr('uiApproveSpending')}</button>
+                try { await actions.approve(callBudgetMsat()); } finally { setCallApproving(false); }
+              }}>{tr(callBudgetSats() !== null ? 'caAskBiggerBudget' : 'uiApproveSpending')}</button>
             </Show>
             <button type="button" class="soft" onClick={() => setCallApproval(false)}>{tr('uiClose')}</button>
           </div>
@@ -2537,7 +2557,7 @@ export function ControlCenter(props: Props) {
         hangup={() => void calls.hangup()}
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
-        dismiss={() => { setCallApproval(false); calls.dismiss(); }}
+        dismiss={() => { setCallApproval(false); setCallBudgetSats(null); calls.dismiss(); }}
         closeAgain={() => void calls.closeAgain()}
         endStuck={() => void calls.endStuck()}
         callAgain={(peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); }}
@@ -7040,7 +7060,7 @@ function NodeApprovalSteps(props: { command?: string | null }) {
   </>;
 }
 
-function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions; hasPending?: boolean; stays?: string }) {
+function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions; hasPending?: boolean; stays?: string; requestBudgetMsat?: number }) {
   const line = () => spendLine(props.spend, props.now);
   const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
   // One Ask again at a time: a double click must not print two requests at the node.
@@ -7050,7 +7070,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
     if (props.actions.moneyBlocked() || asking()) return;
     setAsking(true);
     try {
-      await props.actions.approve();
+      await props.actions.approve(props.requestBudgetMsat);
     } finally {
       setAsking(false);
     }

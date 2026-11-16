@@ -321,6 +321,8 @@ export const IDLE: CallView = {
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
 export type CallDeps = {
+  /** Display a replacement-budget request after a total-budget refusal. */
+  onBudgetNeeded?: (amountMsat: number | null) => void;
   /** M6: media goes through the node link (`nodeRoutedConnection.ts`), not a direct connection. Copy only. */
   routed?: boolean;
   /** Node-routed video is on (flag `VITE_CALL_VIDEO`): a routed call may carry the camera. */
@@ -1167,6 +1169,7 @@ export function createCallEngine(deps: CallDeps) {
       // M6: a node-routed call carries audio only (no camera is captured or offered), unless node-routed video is on.
       const media: CallMedia = deps.routed && !deps.routedVideo ? 'audio' : requested;
       if (active() || deps.busy?.()) return;
+      deps.onBudgetNeeded?.(null);
       if (q.offer_msat === null || q.call_total_msat === null) {
         set({ ...IDLE, phase: 'ended', peer, error: tr('caTheirNodeDoesNotTakeCallsYetNothingWas') });
         return;
@@ -1178,6 +1181,7 @@ export function createCallEngine(deps: CallDeps) {
       if (grant && q.call_total_msat > grant.remaining_msat) {
         set({ ...IDLE, phase: 'ended', peer, error:
           tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat), amount(grant.remaining_msat)) });
+        deps.onBudgetNeeded?.(q.call_total_msat);
         return;
       }
       const perPayment = grant ? callPerPaymentMax(grant) : null;
