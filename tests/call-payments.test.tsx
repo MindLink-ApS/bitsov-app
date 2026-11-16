@@ -1006,7 +1006,7 @@ const paired = { state: 'paired', scopes: ['read', 'receive', 'spend'], node_id:
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 
-function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number; endKeepsHold?: boolean; endLeavesUnresolved?: boolean; pairing?: Reply; spend?: SpendView; request?: Reply } = {}) {
+function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number; endKeepsHold?: boolean; endLeavesUnresolved?: boolean; pairing?: Reply; spend?: SpendView; request?: Reply; cancel?: Reply } = {}) {
   resetContactsForTests();
   setPetname(A, 'Maya');
   const calls: { cmd: string; args?: unknown }[] = [];
@@ -1029,6 +1029,7 @@ function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; offer?: R
     fund_state: () => null,
     spend_status: () => opts.spend ?? spending,
     spend_request: opts.request ?? (() => spending),
+    spend_cancel: opts.cancel ?? (() => spending),
     budget_status: () => null,
     call_quote: (args) => typeof opts.quote === 'function' ? opts.quote(args) : opts.quote ?? QUOTE,
     call_signal: (args) => {
@@ -1169,6 +1170,75 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
     expect(host.used('spend_request')[0].args).toEqual({});
     expect(capture).not.toHaveBeenCalled();
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+  });
+  it.each(['approve', 'ask-again'])('keeps the outgoing peer for %s after recovery needs approval', async (button) => {
+    let scopes = paired.scopes;
+    const spend: SpendView = { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000 };
+    const host = stubHost({ pairing: () => ({ ...paired, scopes }), spend });
+    await openShell();
+    const callId = await ringAndAnswer(host);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1), { timeout: 3_000 });
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    scopes = ['read', 'receive'];
+    Object.assign(spend, { state: 'expired', basis: null, open_until_ms: null, lapse: 'lost' });
+    const signals = host.used('call_signal').length;
+    const blocks = host.used('call_block').length;
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'restart', kind: 402, sender: A, recipient: OWN,
+      timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, candidate: '', sdp_mid: 'bitsov-restart-v1' }), payment_amount_msat: 1000 } });
+    await vi.waitFor(() => expect($('[data-call-approval]')).not.toBeNull());
+    $<HTMLButtonElement>(button === 'approve' ? '[data-call-approve]' : '[data-call-approval] [data-spend-ask-again]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    expect(host.used('spend_request')[0].args).toEqual({ call_peer: A });
+    expect(host.used('call_signal')).toHaveLength(signals);
+    expect(host.used('call_block')).toHaveLength(blocks);
+    expect(capture).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['en', 'A request already waiting for approval may not cover this call. If it was made before the call, cancel it, then request approval again here.'],
+    ['da', 'En anmodning, der allerede venter på godkendelse, dækker måske ikke dette opkald. Hvis den blev oprettet før opkaldet, skal du annullere den og bede om godkendelse igen her.'],
+  ] as const)('explains an earlier pending request before calling in %s', async (language, hint) => {
+    const spend: SpendView = { state: 'pending', basis: null, open_until_ms: null, window_ms: 600_000,
+      pending: { op_id: 'ordinary', expires_at_ms: Date.now() + 600_000, owner_action: 'Approve the waiting request at your node.', owner_can_grant: true } };
+    const host = stubHost({ pairing: () => ({ ...paired, scopes: ['read', 'receive'] }), spend,
+      cancel: () => { Object.assign(spend, { state: 'locked', pending: null }); return { ...spend }; } });
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    await openShell();
+    setLanguagePref(language);
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval]')).not.toBeNull());
+    expect($('[data-call-pending-budget-hint]')?.textContent).toBe(hint);
+    expect($('[data-call-approve]')).toBeNull();
+    expect(host.used('spend_request')).toHaveLength(0);
+    expect(host.used('spend_cancel')).toHaveLength(0);
+    $<HTMLButtonElement>('[data-call-approval] [data-spend-cancel]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approve]')).not.toBeNull());
+    expect(host.used('spend_cancel')).toHaveLength(1);
+    expect($('[data-call-pending-budget-hint]')).toBeNull();
+    $<HTMLButtonElement>('[data-call-approve]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    expect(host.used('spend_request')[0].args).toEqual({ call_peer: A });
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+    expect(capture).not.toHaveBeenCalled();
+  });
+  it('keeps an incoming pending approval free of outgoing budget guidance', async () => {
+    const host = stubHost({ pairing: () => ({ ...paired, scopes: ['read', 'receive'] }),
+      spend: { state: 'pending', basis: null, open_until_ms: null, window_ms: 600_000,
+        pending: { op_id: 'ordinary', expires_at_ms: Date.now() + 600_000, owner_action: 'Approve the waiting request at your node.', owner_can_grant: true } } });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'incoming', kind: 400, sender: A, recipient: OWN,
+      timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($('[data-call-spend-approve]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-spend-approve]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval] [data-approval="pending"]')).not.toBeNull());
+    expect($('[data-call-pending-budget-hint]')).toBeNull();
+    expect(host.used('spend_request')).toHaveLength(0);
     expect(host.used('call_signal')).toHaveLength(0);
     expect(host.used('call_block')).toHaveLength(0);
   });

@@ -1475,7 +1475,9 @@ export function ControlCenter(props: Props) {
     stopWhenSilenced: isMobilePlatform(),
     closeAdmission: (operationId, peer, callId) => source.closeCallAdmission(operationId, peer, callId),
     authorize: async (peer) => {
-      setCallApprovalPeer(routedCalls ? peer : undefined);
+      if (peer !== undefined || !callView().outgoing || ['idle', 'ended'].includes(callView().phase)) {
+        setCallApprovalPeer(routedCalls ? peer : undefined);
+      }
       const pairing = await act(() => source.pairingStatus());
       if (!pairing.ok) {
         setErrors('spend', pairing.error.message);
@@ -2530,6 +2532,9 @@ export function ControlCenter(props: Props) {
           <div data-call-approval>
             <strong>{tr(canStillAnswer() || answerCallEnded() ? 'caApproveSpendingBeforeAnswering' : 'caApproveSpendingBeforeCalling')}</strong>
             <p class="hint">{tr(answerCallEnded() ? 'caApproveAfterEndedCall' : 'caSpendingNeedsApprovalAfterApprovalPressCallOrAccept')}</p>
+            <Show when={callApprovalPeer() && spend()?.state === 'pending' && spend()?.pending}>
+              <p class="hint" data-call-pending-budget-hint>{tr('caPendingRequestMayNotCoverCall')}</p>
+            </Show>
             <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={{ ...actions, approve: () => actions.approve(callApprovalPeer()) }} stays={tr(answerCallEnded() ? 'caApproveAfterEndedCall' : 'caNothingIsPaidUntilYouPressCallOrAccept')} />
             <Show when={spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
               <button type="button" class="soft" data-call-approve disabled={moneyBlocked() || callApproving()} onClick={async () => {
