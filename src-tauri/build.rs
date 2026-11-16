@@ -35,6 +35,7 @@ fn main() {
             "local_owner_cancel",
             "local_owner_finalize",
             "local_owner_reconcile",
+            "node_setup_local",
             "node_repair_initialized",
             "node_repair_price_floor",
             "fund_state",

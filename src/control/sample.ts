@@ -803,6 +803,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     remoteAccessPreview: () => Promise.reject(tr('caRemoteAccessIsNotAvailableWithSampleData')),
     remoteAccessImport: () => Promise.reject(tr('caRemoteAccessIsNotAvailableWithSampleData')),
     remoteAccessReplace: () => Promise.reject(tr('caRemoteAccessIsNotAvailableWithSampleData')),
+    nodeSetupLocal: async () => {},
     nodeRepairInitialized: async () => {},
     nodeRepairPriceFloor: async () => {},
     identityRestore: () => Promise.reject(tr('caRestoreIsNotAvailableWithSampleData')),

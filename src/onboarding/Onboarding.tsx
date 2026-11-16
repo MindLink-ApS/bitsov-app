@@ -3,6 +3,7 @@ import { deviceWord, isMobilePlatform } from '../platform';
 import type { JoinInput, JoinView } from './AddDevice';
 import { BoxIllustration } from './BoxIllustration';
 import { LocalNodeSwitch } from './LocalNodeSwitch';
+import { LocalNodeSetup } from './LocalNodeSetup';
 import { DeviceApprovals } from './DeviceApprovals';
 import { SoftError } from '../control/SoftError';
 import { createEffect, createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
@@ -44,6 +45,8 @@ export function Onboarding(props: {
   pairing: () => PairingView;
   trustAck: () => boolean;
   onRetry: () => void;
+  /** Fresh Mac only: the owner's explicit choice to create a node here. */
+  onSetupLocal?: () => Promise<void>;
   selectedTarget?: NodeTarget;
   onTargetChange?: (target: NodeTarget) => void;
   device?: () => DeviceView | null;
@@ -382,6 +385,10 @@ export function Onboarding(props: {
       {/* "Use this Mac instead" means nothing on a phone. */}
       <Show when={!phone() && props.onForgetRemote && (props.pairing().remote || target() !== 'local' || remoteChoiceEdited())}>
         <LocalNodeSwitch onForget={forgetRemote} disabled={busy()} remoteRevision={remoteRevision()} />
+      </Show>
+
+      <Show when={!phone() && props.onSetupLocal && props.status().local_setup_needed && !props.pairing().remote && target() === 'local'}>
+        <LocalNodeSetup onConfirm={props.onSetupLocal!} />
       </Show>
 
       <Switch>
