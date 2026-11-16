@@ -3662,6 +3662,8 @@ function CallMinutesLine(props: { minutes: MinutesView; ended: boolean; confirm?
           <div data-call-minutes="confirm">
             <p class="hint" data-call-hold>{tr('uiMinutesHold', fmtAmount(h().reserved_msat), String(h().max_call_minutes), fmtAmount(h().per_block_msat), fmtAmount(h().per_block_fee_msat))}</p>
             <Show when={props.confirm}>
+              {/* The call only connects once the hold is confirmed: say so next to the button, in plain words. */}
+              <p class="hint" aria-live="polite" data-call-hold-needed>{tr('uiMinutesConfirmNeeded')}</p>
               <button type="button" class="primary money" data-call-minutes-confirm disabled={m().confirming} onClick={() => props.confirm?.()}>{tr('uiMinutesConfirmHold')}</button>
             </Show>
             <Show when={m().holdError}><p class="hint" role="status" data-call-hold-error>{m().holdError}</p></Show>
