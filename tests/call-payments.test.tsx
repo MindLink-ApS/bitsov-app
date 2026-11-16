@@ -979,7 +979,7 @@ const paired = { state: 'paired', scopes: ['read', 'receive', 'spend'], node_id:
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 
-function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number; retireOnEnd?: boolean } = {}) {
+function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number; retireOnEnd?: boolean; endKeepsHold?: boolean; endLeavesUnresolved?: boolean } = {}) {
   let retired = false;
   resetContactsForTests();
   setPetname(A, 'Maya');
@@ -1030,7 +1030,10 @@ function stubHost(opts: { quote?: CallQuote; offer?: Reply; block?: Reply; hold?
     },
     op_end_call: (args) => {
       if (!callId) throw { code: 'call_not_found', message: 'No outgoing admission is recorded for this call.' };
-      node.close();
+      // A node that is slow to release: the hold stays until the test closes it.
+      if (!opts.endKeepsHold) node.close();
+      // A minute whose payment is still unresolved stays in the closed hold.
+      if (opts.endLeavesUnresolved && node.reservation) { node.reservation.remaining_msat = BLOCK + FEE; node.reservation.released_msat -= BLOCK + FEE; }
       if (opts.retireOnEnd) retired = true;
       return { op_id: 'end', kind: 'call_hangup', peer: A, call_id: (args as { call_id: string }).call_id, state: 'settled', cap_msat: 6_000, paid_msat: 6_000, message_id: 'hangup' };
     },
@@ -1332,4 +1335,41 @@ describe('the shell: consent, running cost, stop states and summary', () => {
       expect($('[data-call-panel]')!.textContent).not.toMatch(/ikke faktureret/i);
     } finally { setLanguagePref('en'); }
   }, 15_000);
+
+  it('a closed hold that still holds an unresolved minute never says "nothing more is paid"', async () => {
+    const host = stubHost({ endLeavesUnresolved: true });
+    await openShell();
+    await ringAndAnswer(host);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1), { timeout: 3_000 });
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-minutes="released"]')).not.toBeNull(), { timeout: 4_000 });
+    await vi.waitFor(() => expect($('[data-call-close]')).toBeNull(), { timeout: 4_000 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect($('[data-call-nothing-more]')).toBeNull();
+  }, 15_000);
+
+  it('"nothing more is paid" waits for the node to release the minutes hold', async () => {
+    const host = stubHost({ endKeepsHold: true });
+    await openShell();
+    await ringAndAnswer(host);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1), { timeout: 3_000 });
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect($('[data-call-nothing-more]')).toBeNull();
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    // The node still holds minutes for this call: never "nothing more".
+    await vi.waitFor(() => expect($('[data-call-minutes="held"]')).not.toBeNull(), { timeout: 4_000 });
+    // The end is done at the host, but the node still holds minutes: still not "nothing more".
+    await vi.waitFor(() => expect($('[data-call-close]')).toBeNull(), { timeout: 4_000 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect($('[data-call-minutes="held"]')).not.toBeNull();
+    expect($('[data-call-nothing-more]')).toBeNull();
+    expect($('[data-call-nothing-more]')).toBeNull();
+    host.node.close();
+    await vi.waitFor(() => expect($('[data-call-minutes="released"]')).not.toBeNull(), { timeout: 8_000 });
+    await vi.waitFor(() => expect($('[data-call-nothing-more]')?.textContent).toBe('The call is over. Nothing more is paid for it.'), { timeout: 4_000 });
+  }, 20_000);
 });
