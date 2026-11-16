@@ -3813,6 +3813,10 @@ function CallPanel(props: {
         </header>
         <Show when={props.waiting && props.answerBlocked && v().phase === 'incoming'}><p class="hint">{tr('incomingWaiting')}</p></Show>
         <Show when={noPrice() && v().phase === 'incoming'}><p class="hint" role="status" data-call-answer-price>{tr('caCallAnswerNoPrice')}</p></Show>
+        {/* What answering can cost this owner, in words: the answer, their own hangup, and only a reconnect beyond that (each one signal, all-in). */}
+        <Show when={v().phase === 'incoming' && shown() ? answerCost(shown()!) : null}>
+          {(m) => <p class="hint" data-call-answer-cost>{tr('caCallAnswerCostNote', fmtAmount(m()))}</p>}
+        </Show>
         {props.approval}
         {/* Across networks a call needs a STUN server: said where it matters, while a call is being set up or has failed to connect. */}
         <Show when={!props.routed && (['calling', 'ringing', 'connecting'].includes(v().phase) || (v().phase === 'ended' && (v().reason === 'failed' || v().reason === 'timeout')))}>
@@ -3914,6 +3918,11 @@ function CallPanel(props: {
         {props.payment}
         {/* M6 P3: after the call, the app's own record of it, to copy next to the node journal. Display only. */}
         <CallReportCopy view={v()} routed={!!props.routed} />
+        {/* Said in words, not only by the pressed look: what the other person gets while the microphone or camera is off. */}
+        <Show when={v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting'}>
+          <Show when={v().muted}><p class="hint" role="status" data-call-mic-off>{tr('uiMicOffNote')}</p></Show>
+          <Show when={v().media === 'video' && !v().camera}><p class="hint" role="status" data-call-camera-off>{tr('uiCameraOffNote')}</p></Show>
+        </Show>
         <div class="call-actions">
           <Switch>
             <Match when={v().phase === 'incoming'}>
