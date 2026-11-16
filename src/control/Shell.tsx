@@ -3513,11 +3513,16 @@ const callStunLabel = () => effectiveStun()
 function CallButtons(props: { peer: string; name: string; blocked: boolean; actions: Actions; callbackMedia?: CallMedia }) {
   const [quote, setQuote] = createSignal<CallQuote | null>(null);
   const [why, setWhy] = createSignal<string | null>(null);
+  const [refreshing, setRefreshing] = createSignal(false);
+  let dialogRead = 0;
   createEffect(on(() => props.peer, (peer) => {
+    const read = ++dialogRead;
+    onCleanup(() => { dialogRead++; });
+    setRefreshing(false);
     setQuote(null);
     setWhy(null);
     void props.actions.callQuote(peer).then((r) => {
-      if (props.peer !== peer) return;
+      if (props.peer !== peer || read !== dialogRead) return;
       if (r.ok) setQuote(r.value);
       else setWhy(r.error.message);
     });
@@ -3535,7 +3540,8 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
     why() ?? (noMinutePrice() ? tr('caMinutesNoPrice') : noMinutesPaid() ? tr('caMinutesOwnerSession') : quote() && cost() === null ? tr('uiSNodeDoesNotTakeCallsYet', possessive(props.name)) : cost() !== null
       ? tr('uiUpToToRingTheirCallPricePlus', fmtAmount(cost()!), fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat), feeCeiling(quote()!.offer_max_routing_fee_msat), fmtAmount(signalCost(quote()!)), fmtAmount(callCost(quote()!)!), callStunLabel())
       : tr('uiReadingTheirCallPrice'));
-  const place = (media: CallMedia) => { const q = quote(); if (q && !off()) props.actions.placeCall(props.peer, media, q); };
+  const priceReady = () => !refreshing() && why() === null;
+  const place = (media: CallMedia) => { const q = quote(); if (q && !off() && priceReady()) props.actions.placeCall(props.peer, media, q); };
   // A call pays and rings someone, so one tap only asks: the call/video button
   // opens a small confirm with the price, and Ring places it. A mis-tap on the
   // header costs nothing.
@@ -3546,11 +3552,26 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   createEffect(() => { if (off()) setArmed(null); });
   const arm = (media: CallMedia) => {
     if (off()) return;
-    setArmed((m) => (m === media ? null : media));
-    if (armed()) queueMicrotask(() => ringBtn?.focus());
+    if (armed() === media) { disarm(false); return; }
+    setArmed(media);
+    if (nodeRoutedAudio()) {
+      // Re-read the minutes consent for each opening, including after a node restart.
+      const read = ++dialogRead;
+      setRefreshing(true);
+      setWhy(null);
+      void props.actions.callQuote(props.peer).then((r) => {
+        if (read !== dialogRead) return;
+        if (r.ok) setQuote(r.value);
+        else setWhy(r.error.message || tr('caCallPriceUnreadNothingPaid'));
+        setRefreshing(false);
+        queueMicrotask(() => { if (read === dialogRead && armed()) ringBtn?.focus(); });
+      });
+    } else queueMicrotask(() => ringBtn?.focus());
   };
   const disarm = (refocus = true) => {
     const media = armed();
+    dialogRead++;
+    setRefreshing(false);
     setArmed(null);
     if (refocus && media) wrap?.querySelector<HTMLButtonElement>(`[data-call="${media}"]`)?.focus();
   };
@@ -3597,13 +3618,14 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
           <div class="call-confirm" role="dialog" aria-label={`${callWord(media())} ${props.name}?`} data-call-confirm-box={media()}>
             <p class="call-confirm-text">
               <strong>{callWord(media())} {props.name}?</strong>
-              <Show when={cost() !== null}>{' '}<span class="hint">{tr('uiUpTo105')} {fmtAmount(cost()!)}{tr('uiNothingIsPaidUntilYouPressRing')}</span></Show>
+              <Show when={priceReady() && cost() !== null}>{' '}<span class="hint">{tr('uiUpTo105')} {fmtAmount(cost()!)}{tr('uiNothingIsPaidUntilYouPressRing')}</span></Show>
             </p>
-            <Show when={nodeRoutedAudio() && quote()?.block_msat != null ? quote() : null}>{(q) => <MinutesConsent quote={q()} />}</Show>
+            <Show when={!priceReady()}><p class="hint" role="status">{why() ?? tr('uiReadingTheirCallPrice')}</p></Show>
+            <Show when={priceReady() && nodeRoutedAudio() && quote()?.block_msat != null ? quote() : null}>{(q) => <MinutesConsent quote={q()} />}</Show>
             <p class="hint" data-call-stun-source>{callStunLabel()}</p>
             <div class="call-confirm-actions">
               <button type="button" class="soft" data-call-confirm-cancel onClick={() => disarm()}>{tr('uiCancel')}</button>
-              <button ref={ringBtn} type="button" class="primary soft money" data-call-confirm={media()} disabled={off()} onClick={() => { const m = media(); setArmed(null); place(m); }}>{tr('uiRing')}</button>
+              <button ref={ringBtn} type="button" class="primary soft money" data-call-confirm={media()} disabled={off() || !priceReady()} onClick={() => { if (off() || !priceReady()) return; const m = media(); setArmed(null); place(m); }}>{tr('uiRing')}</button>
             </div>
           </div>
         )}
