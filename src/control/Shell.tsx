@@ -3925,7 +3925,7 @@ function CallPanel(props: {
             : v().minutes?.stop?.limit?.code === 'ceiling_exhausted' ? tr('caCallEndedTotalLimit')
             : v().minutes?.stop?.limit?.code === 'grant_exhausted' ? tr('caCallEndedGrantLimit')
             : v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
-          <Show when={v().minutes?.stop?.limit}>
+          <Show when={!v().stuck ? v().minutes?.stop?.limit : null}>
             {(limit) => <p class="hint" data-call-budget-limit={limit().code}>
               {hostText(limit().message)}{' '}
               {limit().code === 'budget_exhausted' ? tr('caCallContactBudgetSettings')

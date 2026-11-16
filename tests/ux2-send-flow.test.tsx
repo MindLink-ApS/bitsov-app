@@ -8,7 +8,14 @@ import type { BudgetView, LiveEvent, SpendView } from '../src/control/types';
 const A = 'a'.repeat(64);
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
-afterEach(() => { dispose?.(); mount?.remove(); vi.useRealTimers(); vi.restoreAllMocks(); setLanguagePref('en'); });
+afterEach(() => {
+  dispose?.();
+  dispose = undefined;
+  mount?.remove();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  setLanguagePref('en');
+});
 const $ = <T extends HTMLElement = HTMLElement>(s: string) => mount.querySelector<T>(s)!;
 const type = (value: string) => { const area = $<HTMLTextAreaElement>('[data-composer] textarea'); area.value = value; area.dispatchEvent(new Event('input', { bubbles: true })); };
 function setup(granted = true) {
@@ -40,6 +47,9 @@ it.each(['en', 'da'] as const)('uses a live grant for Send and shows its remaind
   await vi.waitFor(() => expect($('[data-send]').textContent).toBe('Send'));
   expect($('[data-touch-approval]')).toBeNull();
   expect($('[data-send-budget]')?.textContent).toContain('199 sats');
+  expect($('[data-send-budget]')?.textContent).toBe(lang === 'en'
+    ? 'Node grant: 199 sats left. Separate app limits apply.'
+    : 'Boksens budget: 199 sats tilbage. Appens grænser gælder også.');
   $<HTMLButtonElement>('[data-send]').click();
   await vi.waitFor(() => expect(source.send).toHaveBeenCalledTimes(1));
   expect(source.relationApprove).not.toHaveBeenCalled();

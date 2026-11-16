@@ -16,6 +16,7 @@ import App from '../src/App';
 import { setLanguagePref } from '../src/i18n';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import { createCallEngine, parseSignal, SILENCED_GRACE_MS, type CallDeps, type CallView } from '../src/control/call';
+import * as callEngine from '../src/control/call';
 import {
   BLOCK_GRACE_MS, ENDED_CONFIRM_MS, MAX_ATTEMPTS, PASSING_MAX_ATTEMPTS, RETRY_MS, STATUS_POLL_MS,
   createCallMinutes, waitUntilPaid, type MinutesDeps, type MinutesStop, type MinutesView,
@@ -1107,10 +1108,10 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => micStream() } });
   });
   afterEach(() => {
-    setLanguagePref('en');
     dispose?.();
     dispose = undefined;
     mount?.remove();
+    setLanguagePref('en');
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -1450,18 +1451,21 @@ describe('the shell: consent, running cost, stop states and summary', () => {
       'This contact’s rolling 24-hour limit cannot cover the next minute, so the call ended. Nothing was paid for that minute.',
       'Kontaktens grænse for de seneste 24 timer kan ikke dække det næste minut, så opkaldet sluttede. Der blev ikke betalt for det minut.',
       'Change this contact’s rolling 24-hour limit in Budget, then call again.',
-      'Ret kontaktens grænse for de seneste 24 timer under Budget, og ring igen.'],
+      'Ret kontaktens grænse for de seneste 24 timer under Budget, og ring igen.',
+      'Du har brugt 42 sats af 50 sats til denne kontakt de seneste 24 timer, og dette koster 10 sats. Hæv budgettet for at sende.'],
     ['ceiling_exhausted', 'You have used 42 sats of your 50 sats app all-in payment limit (rolling 24 hours), and this costs 10 sats. Raise the limit to send.',
       'The app’s rolling 24-hour total limit cannot cover the next minute, so the call ended. Nothing was paid for that minute.',
       'Appens samlede grænse for de seneste 24 timer kan ikke dække det næste minut, så opkaldet sluttede. Der blev ikke betalt for det minut.',
       'Change the app’s rolling 24-hour total in Budget, then call again.',
-      'Ret appens samlede grænse for de seneste 24 timer under Budget, og ring igen.'],
+      'Ret appens samlede grænse for de seneste 24 timer under Budget, og ring igen.',
+      'Du har brugt 42 sats af appens samlede betalingsgrænse på 50 sats (seneste 24 timer), og dette koster 10 sats. Hæv grænsen for at sende.'],
     ['grant_exhausted', "Your node's spend budget has 8 sats left, less than this costs. Nothing was sent. Ask for a new budget.",
       'Your node grant cannot cover the next minute, so the call ended. Nothing was paid for that minute.',
       'Boksens forbrugsbudget kan ikke dække det næste minut, så opkaldet sluttede. Der blev ikke betalt for det minut.',
       'Ask the owner to approve a new node grant, then call again.',
-      'Bed ejeren godkende et nyt forbrugsbudget på boksen, og ring igen.'],
-  ] as const)('the ended card leads with the true %s limit in both languages', async (code, message, english, danish, englishAction, danishAction) => {
+      'Bed ejeren godkende et nyt forbrugsbudget på boksen, og ring igen.',
+      'Din boks’ forbrugsbudget har 8 sats tilbage, mindre end dette koster. Intet blev sendt. Bed om et nyt budget.'],
+  ] as const)('the ended card leads with the true %s limit in both languages', async (code, message, english, danish, englishAction, danishAction, danishMessage) => {
     const host = stubHost({ block: () => { throw { code, message }; } });
     await openShell();
     await ringAndAnswer(host);
@@ -1473,6 +1477,43 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     setLanguagePref('da');
     expect($('[data-call-ended]')?.textContent).toBe(danish);
     expect(detail?.textContent).toContain(danishAction);
+    expect(detail?.textContent).toBe(`${danishMessage} ${danishAction}`);
+    expect(host.used('call_block')).toHaveLength(1);
+    expect(host.used('call_media_open')).toHaveLength(0);
+  });
+
+  it.each([
+    ['budget_exhausted', 'You have used 42 sats of 50 sats for this contact in the last 24 hours, and this costs 10 sats. Raise the budget to send.'],
+    ['ceiling_exhausted', 'You have used 42 sats of your 50 sats app all-in payment limit (rolling 24 hours), and this costs 10 sats. Raise the limit to send.'],
+    ['grant_exhausted', "Your node's spend budget has 8 sats left, less than this costs. Nothing was sent. Ask for a new budget."],
+  ] as const)('a stuck closing call hides %s call-again guidance in both languages until it clears', async (code, message) => {
+    const original = callEngine.createCallEngine;
+    let latest: CallView | undefined;
+    let publish: CallDeps['onView'] = () => {};
+    vi.spyOn(callEngine, 'createCallEngine').mockImplementation(deps => {
+      publish = deps.onView;
+      return original({ ...deps, onView: view => {
+        latest = view;
+        deps.onView(view.minutes?.stop?.limit ? { ...view, stuck: { opId: 'closing-call' } } : view);
+      } });
+    });
+    const host = stubHost({ block: () => { throw { code, message }; } });
+    await openShell();
+    await ringAndAnswer(host);
+    await vi.waitFor(() => expect($('[data-call-end-stuck]')).not.toBeNull());
+    expect(latest?.minutes?.stop?.limit).toEqual({ code, message });
+    expect($('[data-call-ended]')?.textContent).toBe('A call to Maya is still closing at your node. Nothing was paid for this one. End it to call again.');
+    expect($('[data-call-budget-limit]')).toBeNull();
+    expect($('[data-call-again]')).toBeNull();
+    expect($('[data-call-end-stuck]')?.textContent).toBe('End that call');
+    setLanguagePref('da');
+    expect($('[data-call-ended]')?.textContent).toBe('Et opkald til Maya lukkes stadig på din node. Intet blev betalt for dette. Afslut det for at ringe igen.');
+    expect($('[data-call-budget-limit]')).toBeNull();
+    expect($('[data-call-again]')).toBeNull();
+    expect($('[data-call-end-stuck]')?.textContent).toBe('Afslut det opkald');
+    publish(latest!);
+    expect($(`[data-call-budget-limit="${code}"]`)).not.toBeNull();
+    expect($('[data-call-end-stuck]')).toBeNull();
     expect(host.used('call_block')).toHaveLength(1);
     expect(host.used('call_media_open')).toHaveLength(0);
   });
