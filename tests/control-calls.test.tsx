@@ -2950,6 +2950,29 @@ describe('calls in the shell', () => {
     expect($('[data-call-panel="live"]')).not.toBeNull();
   });
 
+  it('a contact refusal is proven unpaid: nothing is left unknown, and the waiting caller can be answered', async () => {
+    const refused = 'Calls go to contacts you have already paid. Send them a message first. Nothing was paid.';
+    const host = payHost({
+      call_signal: (args) => {
+        if (args!.kind === 401 && !String(args!.plaintext).includes('f'.repeat(32))) throw { code: 'call_needs_contact', message: refused };
+        return { message_id: 'sig', kind: args!.kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+      },
+    });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { media: 'audio', sdp: 'offer' }) });
+    await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'second-offer' }) });
+    await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-accept]')).not.toBeNull());
+    const first = () => [...mount.querySelectorAll<HTMLButtonElement>('[data-call-accept]')].find(b => !b.closest('[data-waiting-calls]'))!;
+    await vi.waitFor(() => expect(first().disabled).toBe(false));
+    first().click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-paid="unknown"]')).toBeNull();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal').some(c => c.args?.kind === 401 && String(c.args.plaintext).includes('f'.repeat(32)))).toBe(true));
+  });
+
   it('marks a missed call read when its open thread regains focus', async () => {
     vi.spyOn(document, 'hasFocus').mockReturnValue(false);
     const host = stubHost({ messages_list: () => [] }); await openShell();

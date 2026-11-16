@@ -379,6 +379,18 @@ describe('paying the minutes of one outgoing call', () => {
     setLanguagePref('system');
   });
 
+  it('a minute refused because they are not a contact is refused, not unknown: no pending result to check', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const s = session(node, async () => fail('call_needs_contact', 'Calls go to contacts you have already paid. Send them a message first. Nothing was paid.'));
+    await s.confirmed();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.stops.map((x) => x.code)).toEqual(['payment_failed']);
+    expect(s.stops[0].message).toContain('Nothing was paid');
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(s.deps.pay).toHaveBeenCalledTimes(1);
+  });
+
   it('a minute whose result is unknown is never paid again on top of it', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const s = session(node, async () => fail('spend_unknown', 'The node did not return a complete response.'));
