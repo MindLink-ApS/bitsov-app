@@ -3114,6 +3114,86 @@ describe('calls in the shell', () => {
     expect(host.used('call_signal')[0].args).toMatchObject({ kind: 401, max_msat: 6_000 });
   });
 
+  it.each(['approve', 'close'] as const)('returns to the waiting Accept after %s', async action => {
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    const host = stubHost({
+      messages_list: () => [],
+      budget_status: () => ({ ...openBudget(), autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null } }),
+      spend_request: spending,
+    });
+    await openShell();
+    incoming(host);
+    incoming(host, 'f'.repeat(32));
+    await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-spend-approve]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-waiting-calls] [data-call-spend-approve]')!.click();
+    host.emitLive({ type: 'message', room_id: null, message: msg(403, { reason: 'hangup' }) });
+    await vi.waitFor(() => expect(document.activeElement).toBe($('[data-call-approve]')));
+    if (action === 'approve') $<HTMLButtonElement>('[data-call-approve]')!.click();
+    else [...$('[data-call-approval]')!.querySelectorAll('button')].find(b => b.textContent === 'Close')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval-open]')).toBeNull());
+    expect($('[data-call-approval]')).toBeNull();
+    const accept = $<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!;
+    await vi.waitFor(() => expect(document.activeElement === accept).toBe(true));
+    expect(accept.disabled).toBe(false);
+    expect(host.used('spend_request')).toHaveLength(action === 'approve' ? 1 : 0);
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(capture).not.toHaveBeenCalled();
+    if (action === 'approve') {
+      accept.click();
+      await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+      expect(host.used('call_signal')[0].args).toMatchObject({ kind: 401, max_msat: 6_000 });
+      expect(JSON.parse(host.used('call_signal')[0].args!.plaintext as string).call_id).toBe('f'.repeat(32));
+    }
+  });
+
+  it.each(['pending', 'refused', 'unavailable'] as const)('keeps %s approval visible for a waiting call', async state => {
+    const host = stubHost({
+      messages_list: () => [],
+      budget_status: () => ({ ...openBudget(), autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null } }),
+      spend_request: () => {
+        if (state === 'refused') throw { code: 'spend_refused', message: 'Approval was refused. Nothing was paid.' };
+        if (state === 'unavailable') return { state: 'unavailable', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 };
+        return { state: 'pending', basis: null, open_until_ms: null, pending: { op_id: 'ab01', expires_at_ms: Date.now() + 600_000, owner_action: 'approve request', owner_can_grant: true }, window_ms: 600_000 };
+      },
+    });
+    await openShell();
+    incoming(host);
+    incoming(host, 'f'.repeat(32));
+    await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-spend-approve]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-waiting-calls] [data-call-spend-approve]')!.click();
+    $<HTMLButtonElement>('[data-call-approve]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    await vi.waitFor(() => expect(text('[data-call-approval]')).toContain(state === 'pending' ? 'Cancel request' : state === 'refused' ? 'Approval was refused' : 'cannot grant spending'));
+    expect($('[data-call-approval-open]')).not.toBeNull();
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it('returns to the waiting Accept when a pending approval opens on a later poll', async () => {
+    let approved = false;
+    const host = stubHost({
+      messages_list: () => [],
+      budget_status: () => ({ ...openBudget(), autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null } }),
+      spend_status: () => approved ? spending() : { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 },
+      spend_request: () => ({ state: 'pending', basis: null, open_until_ms: null,
+        pending: { op_id: 'ab01', expires_at_ms: Date.now() + 600_000, owner_action: 'approve request', owner_can_grant: true }, window_ms: 600_000 }),
+    });
+    vi.useFakeTimers();
+    await openShell();
+    incoming(host);
+    incoming(host, 'f'.repeat(32));
+    await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-spend-approve]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-waiting-calls] [data-call-spend-approve]')!.click();
+    host.emitLive({ type: 'message', room_id: null, message: msg(403, { reason: 'hangup' }) });
+    $<HTMLButtonElement>('[data-call-approve]')!.click();
+    await vi.waitFor(() => expect(text('[data-call-approval]')).toContain('Cancel request'));
+    approved = true;
+    await vi.advanceTimersByTimeAsync(3500);
+    expect($('[data-call-approval]')).toBeNull();
+    expect($('[data-call-approval-open]')).toBeNull();
+    expect(document.activeElement === $('[data-waiting-calls] [data-call-accept]')).toBe(true);
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
   it('an answer refused with grant_ended offers approval and asks for a new call without retrying the paid signal', async () => {
     const host = payHost({
       messages_list: () => [],

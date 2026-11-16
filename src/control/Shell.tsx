@@ -1416,10 +1416,26 @@ export function ControlCenter(props: Props) {
   const [callApproving, setCallApproving] = createSignal(false);
   const canStillAnswer = () => [callView(), ...waitingCalls()].some(view => view.phase === 'incoming');
   const answerCallEnded = () => callView().phase === 'ended' && !callView().outgoing && !canStillAnswer();
-  const openCallApproval = () => {
+  let callApprovalFrom: string | null = null;
+  const closeCallApproval = () => {
+    if (!callApproval()) return;
+    const key = callApprovalFrom;
+    callApprovalFrom = null;
+    setCallApproval(false);
+    queueMicrotask(() => {
+      const panel = (key && waitingPanels.get(key)) || callPanel;
+      if (panel?.isConnected) (panel.querySelector<HTMLElement>('[data-call-accept]:not(:disabled)') ?? panel).focus();
+    });
+  };
+  const openCallApproval = (key: string | null = null) => {
+    callApprovalFrom = key;
     setCallApproval(true);
     queueMicrotask(() => (callPanel?.querySelector<HTMLElement>('[data-call-approve]') ?? callPanel)?.focus());
   };
+  // A request approved at the node can open on a later status poll.
+  createEffect(on(() => spendLine(spend(), now()).open, (open, wasOpen) => {
+    if (open && wasOpen === false) closeCallApproval();
+  }, { defer: true }));
   // M6 A1: the node is the cell. Call audio goes app -> own node -> peer node
   // -> peer app through the host-owned media socket; app-to-app WebRTC media
   // is unreachable while the flag is on (its code stays for the lab profile).
@@ -2493,7 +2509,7 @@ export function ControlCenter(props: Props) {
           onCleanup(() => waitingPanels.delete(key));
           const view = () => waitingCalls().find(v => `${v.peer}:${v.callId}` === key)!;
           return <CallPanel waiting answerBlocked={!['idle', 'ended'].includes(callView().phase) || meetingOn() || callView().pendingCount > 0 || callView().unknownCount > 0 || (!!callView().close && callView().close!.status !== 'closed')} view={view()} payment={null} approval={null} approvalOpen={false}
-            spendingReady={roomCanSpend()} approveSpending={openCallApproval}
+            spendingReady={roomCanSpend()} approveSpending={() => openCallApproval(key)}
             panelRef={el => { waitingPanels.set(key, el); }}
             blocked={moneyBlocked()} streams={{ local: null, remote: null }} nameOf={nameOf} quote={actions.callQuote}
             accept={(shown) => { if (!moneyBlocked()) void calls.acceptWaiting(key, shown); }} decline={(shown) => void calls.declineWaiting(key, shown)} ignore={() => calls.ignoreWaiting(key)} dismiss={() => calls.dismissWaiting(key)}
@@ -2513,10 +2529,13 @@ export function ControlCenter(props: Props) {
             <Show when={spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
               <button type="button" class="soft" data-call-approve disabled={moneyBlocked() || callApproving()} onClick={async () => {
                 setCallApproving(true);
-                try { await actions.approve(); } finally { setCallApproving(false); }
+                try {
+                  const result = await actions.approve();
+                  if (result.ok && spendLine(spend(), now()).open) closeCallApproval();
+                } finally { setCallApproving(false); }
               }}>{tr('uiApproveSpending')}</button>
             </Show>
-            <button type="button" class="soft" onClick={() => setCallApproval(false)}>{tr('uiClose')}</button>
+            <button type="button" class="soft" onClick={closeCallApproval}>{tr('uiClose')}</button>
           </div>
         </Show>}
         payment={<Show when={callView().callId} keyed>{(callId) =>
