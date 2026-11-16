@@ -6641,9 +6641,18 @@ async fn spend_advance(state: &NodeState, ask: bool) -> Result<act::SpendView, A
     Ok(spend_advance_for(state, ask.then_some(Want::Window)).await?.view)
 }
 
-/// A call proposal covers the same reservation ceiling shown before Ring,
-/// plus the offer and closing signal. Approval still opens only a window.
-async fn do_spend_request(state: &NodeState, call_peer: Option<&str>) -> Result<act::SpendView, ActionError> {
+/// A call proposal covers the reservation and signals; an explicit replacement
+/// still needs the node owner's approval.
+async fn do_spend_request(state: &NodeState, budget_msat: Option<u64>, call_peer: Option<&str>) -> Result<act::SpendView, ActionError> {
+    if let Some(amount) = budget_msat {
+        if amount == 0 || amount > budget::MAX_DAILY_MSAT {
+            return Err(ActionError::invalid("the requested budget must be positive and within the app total limit"));
+        }
+        if !matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(_)) {
+            return Err(ActionError::invalid("this node does not support a replacement budget request"));
+        }
+        return Ok(spend_advance_with_proposal(state, Some(Want::Window), Some(amount), None).await?.view);
+    }
     let Some(peer) = call_peer else { return spend_advance(state, true).await };
     refuse_if_paused(state)?;
     let fence = approval_fence(state);
@@ -6653,7 +6662,7 @@ async fn do_spend_request(state: &NodeState, call_peer: Option<&str>) -> Result<
         .and_then(|(hold, signals)| hold.checked_add(signals))
         .filter(|total| *total <= control::MAX_SAFE_MSAT)
         .ok_or_else(|| ActionError::new("call_price_unknown", "The call price is unavailable. Read it again before requesting a call budget."))?;
-    Ok(spend_advance_with_minimum(state, Some(Want::Window), Some(minimum)).await?.view)
+    Ok(spend_advance_with_proposal(state, Some(Want::Window), None, Some(minimum)).await?.view)
 }
 
 /// Separate the current view from the window this invocation actually armed.
@@ -6666,10 +6675,10 @@ struct SpendAdvance {
 /// approval. On a paired node without `spend`, both go through one elevation
 /// request, and a grant opens only what was asked.
 async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<SpendAdvance, ActionError> {
-    spend_advance_with_minimum(state, want, None).await
+    spend_advance_with_proposal(state, want, None, None).await
 }
 
-async fn spend_advance_with_minimum(state: &NodeState, want: Option<Want>, minimum: Option<u64>) -> Result<SpendAdvance, ActionError> {
+async fn spend_advance_with_proposal(state: &NodeState, want: Option<Want>, budget_msat: Option<u64>, minimum: Option<u64>) -> Result<SpendAdvance, ActionError> {
     // The shell polls spend before budget at startup. Read current authority
     // before a saved request changes the pristine approval generations. The
     // request may already have been granted, with a much longer grant expiry.
@@ -6679,7 +6688,7 @@ async fn spend_advance_with_minimum(state: &NodeState, want: Option<Want>, minim
         do_budget_status(state).await?;
     }
     restore_spend_pending(state);
-    let out = spend_advance_for_inner(state, want, minimum).await;
+    let out = spend_advance_for_inner(state, want, budget_msat, minimum).await;
     save_spend_pending(state);
     out
 }
@@ -6708,21 +6717,21 @@ fn restore_spend_pending(state: &NodeState) {
     if state.approvals_restored.swap(true, Ordering::SeqCst) {
         return;
     }
-    // The node's current grant supersedes a saved elevation request. Do not
-    // restore stale pending state over the budget just reconciled from it.
-    if state.node_grant.lock().unwrap().as_ref().is_some_and(|g| g.live(now_ms())) {
-        return;
-    }
     let Some(path) = approvals_file(state) else { return };
     let Some(saved) = device::load_pending(&path, now_ms()) else { return };
+    // A grant completes only its own request. A distinct saved replacement
+    // still needs polling even while an older grant remains live.
+    if state.node_grant.lock().unwrap().as_ref()
+        .is_some_and(|g| g.live(now_ms()) && g.op_id == saved.op_id) {
+        return;
+    }
     let mut gate = state.spend.lock().unwrap();
-    let view = gate.view(now_ms());
-    if view.pending.is_none() && view.open_until_ms.is_none() {
-        gate.set_pending(saved);
+    if gate.pending().is_none() {
+        gate.set_replacement_pending(saved, now_ms());
     }
 }
 
-async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>, minimum: Option<u64>) -> Result<SpendAdvance, ActionError> {
+async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>, budget_msat: Option<u64>, minimum: Option<u64>) -> Result<SpendAdvance, ActionError> {
     if want.is_some() && budget_paused(state)? {
         return Err(ActionError::new("budget_paused", "Payments are paused. Resume them first."));
     }
@@ -6746,6 +6755,18 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>, minimum:
             spend: session.scopes.iter().any(|s| s == "spend"),
         },
     };
+    if let Some(amount) = budget_msat {
+        if !node_has_g1(state).await? {
+            return Err(ActionError::invalid("this node does not support a replacement budget request"));
+        }
+        // Recheck before posting: a completed grant can arrive before the
+        // renderer dismisses the form. Returning the view opens no authority.
+        let current = read_grant(state).await?;
+        if approval_fence(state) != fence { return Err(fence_broken()); }
+        if current.as_ref().is_some_and(|g| g.live(now_ms()) && g.remaining_msat >= amount) {
+            return Ok(SpendAdvance { view: state.spend.lock().unwrap().view(now_ms()), armed_granted_op: None });
+        }
+    }
     // A token that already claims `spend` opens only over a live G1 grant; with
     // none left on the node, ask again as if it had no `spend`.
     let mut held: Option<NodeGrant> = None;
@@ -6756,6 +6777,7 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>, minimum:
         // approval. Finish the pending request, including its original wants,
         // regardless of token scope.
         (Mode::Paired { .. }, _) if pending => Mode::Paired { spend: false },
+        (Mode::Paired { .. }, Some(_)) if budget_msat.is_some() => Mode::Paired { spend: false },
         (Mode::Paired { spend: true }, Some(_)) => match grant_for_open(state).await {
             Ok(g) => {
                 held = g;
@@ -6785,6 +6807,9 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>, minimum:
                 (gate.generation(), gate.pending().cloned())
             };
             let budget_generation = state.autopay.lock().unwrap().generation();
+            if budget_msat.is_some() && (generation, budget_generation) != fence {
+                return Err(fence_broken());
+            }
             if let Some(want) = want {
                 let mut wants = state.wants.lock().unwrap();
                 // A new request carries only this ask; a pending one gathers them.
@@ -6875,7 +6900,9 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>, minimum:
                 let mut ask = serde_json::json!({ "scopes": ["spend"] });
                 // A G1 node shows the owner a budget to approve; the owner's
                 // flags override it. Older nodes get the pre-G1 body.
-                if node_has_g1(state).await.unwrap_or(false) {
+                if let Some(amount) = budget_msat {
+                    ask["budget"] = grant::proposal(amount, act::SPEND_WINDOW_MS / 1000, &Default::default());
+                } else if node_has_g1(state).await.unwrap_or(false) {
                     if let Some(budget) = budget_proposal(state, want, minimum) {
                         ask["budget"] = budget;
                     }
@@ -6889,7 +6916,11 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>, minimum:
                 request_id = Some(pending.op_id.clone());
                 let mut gate = state.spend.lock().unwrap();
                 if gate.generation() == generation && pending.expires_at_ms > now_ms() {
-                    gate.set_pending(pending);
+                    if budget_msat.is_some() {
+                        gate.set_replacement_pending(pending, now_ms());
+                    } else {
+                        gate.set_pending(pending);
+                    }
                 }
             }
         }
@@ -8801,11 +8832,12 @@ async fn spend_status(
 async fn spend_request(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
+    budget_msat: Option<u64>,
     call_peer: Option<String>,
 ) -> Result<act::SpendView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    do_spend_request(state.inner(), call_peer.as_deref()).await
+    do_spend_request(state.inner(), budget_msat, call_peer.as_deref()).await
 }
 
 /// Close the spend window now.
@@ -8839,15 +8871,22 @@ async fn spend_cancel(
 }
 
 async fn do_spend_cancel(state: &NodeState) -> Result<act::SpendView, ActionError> {
-    let pending = state.spend.lock().unwrap().pending().cloned();
-    if let Some(p) = pending {
+    let (pending, generation) = {
+        let gate = state.spend.lock().unwrap();
+        (gate.pending().cloned(), gate.generation())
+    };
+    if let Some(p) = &pending {
         if let Ok(path) = act::elevation_status_path(&p.op_id) {
             withdraw_at_node(state, &path).await?;
         }
     }
     let view = {
         let mut gate = state.spend.lock().unwrap();
-        gate.lock();
+        if pending.is_some() && gate.generation() == generation && gate.pending() == pending.as_ref() {
+            gate.clear_pending();
+        } else {
+            gate.lock();
+        }
         *state.wants.lock().unwrap() = Wants::default();
         gate.view(now_ms())
     };
@@ -22405,6 +22444,74 @@ mod control_act_tests {
     }
 
     #[tokio::test]
+    async fn relaunch_preserves_a_saved_request_distinct_from_the_live_grant() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        let mut original = g1_grant(3600, 500_000, 499_000);
+        original["op_id"] = "cd34".into();
+        *g1.grant.lock().unwrap() = original.clone();
+        save_relaunch_pending(&node.state);
+        let path = approvals_file(&node.state).unwrap();
+        let saved = device::load_pending(&path, now_ms()).unwrap();
+        let restored = spend_advance(&node.state, false).await.unwrap();
+        assert_eq!(restored.pending, Some(saved.clone()));
+        assert_eq!(device::load_pending(&path, now_ms()), Some(saved));
+        assert_eq!(restored.state, act::SpendState::Pending);
+        assert!(node.targets().contains(&"GET /pair/elevation/ab12".into()));
+        assert!(node.posts().is_empty());
+        assert_eq!(composes(&node), 0);
+        assert_eq!(*g1.grant.lock().unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn replacement_pending_survives_relaunch_over_the_older_live_grant() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        let mut original = g1_grant(3600, 500_000, 499_000);
+        original["op_id"] = "cd34".into();
+        *g1.grant.lock().unwrap() = original.clone();
+        spend_advance(&node.state, true).await.unwrap();
+        let asked = do_spend_request(&node.state, Some(601_000), None).await.unwrap();
+        assert_eq!(asked.state, act::SpendState::Open);
+        assert_eq!(asked.pending.as_ref().unwrap().op_id, "ab12");
+
+        let restarted = reopen(&node);
+        if let AuthMode::Paired(session) = &*node.state.auth.lock().unwrap() {
+            *restarted.auth.lock().unwrap() = AuthMode::Paired(session.clone());
+        } else { panic!("expected a paired session"); }
+        *restarted.pairing.lock().unwrap() = node.state.pairing.lock().unwrap().clone();
+        let restored = spend_advance(&restarted, false).await.unwrap();
+        assert_eq!(restored.pending.as_ref().map(|p| p.op_id.as_str()), Some("ab12"));
+        assert_eq!(restored.state, act::SpendState::Pending);
+        assert_eq!(device::load_pending(&approvals_file(&restarted).unwrap(), now_ms()), asked.pending);
+        assert!(node.targets().contains(&"GET /pair/elevation/ab12".into()));
+        assert_eq!(*g1.grant.lock().unwrap(), original);
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count(), 1);
+        assert_eq!(restarted.spend.lock().unwrap().check(now_ms()).unwrap_err().code, "spend_locked");
+        assert_eq!(check_node_grant_with_envelope_ids(&restarted, "/messages/compose",
+            &serde_json::json!({"recipient": A}), 601_000, None, grant::PaymentCap::CallTotal).await.unwrap_err().code, "grant_exhausted");
+
+        *g1.grant.lock().unwrap() = g1_grant(3600, 601_000, 601_000);
+        let granted = spend_advance(&restarted, false).await.unwrap();
+        assert!(granted.pending.is_none());
+        assert!(!approvals_file(&restarted).unwrap().exists());
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count(), 1);
+        assert_eq!(composes(&node), 0);
+    }
+
+    #[tokio::test]
+    async fn replacement_request_does_not_repeat_a_budget_already_covered_by_a_live_grant() {
+        for (remaining, lifetime, posts) in [(601_000, 3600, 0), (600_999, 3600, 1), (601_000, -1, 1)] {
+            let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+            *g1.grant.lock().unwrap() = g1_grant(lifetime, 601_000, remaining);
+            do_budget_status(&node.state).await.unwrap();
+            let view = do_spend_request(&node.state, Some(601_000), None).await.unwrap();
+            assert_eq!(node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count(), posts);
+            assert_eq!(view.open_until_ms, None);
+            assert_eq!(view.pending.is_some(), posts == 1);
+            assert_eq!(composes(&node), 0);
+        }
+    }
+
+    #[tokio::test]
     async fn relaunch_reads_live_grant_before_restoring_a_saved_elevation() {
         for scopes in [vec!["read", "receive", "spend"], vec!["read", "receive"]] {
             let (node, _dir, g1) = g1_node(&scopes);
@@ -24885,7 +24992,7 @@ mod control_act_tests {
             let (node, _dir, _g1) = call_budget_node(Some(block));
             with_book(&node.state, true, |b| { b.ceiling_msat = ceiling; Ok(()) }).unwrap();
             let quote = read_call_quote_with_blocks(&node.state, A).await.unwrap();
-            let view = do_spend_request(&node.state, Some(A)).await.unwrap();
+            let view = do_spend_request(&node.state, None, Some(A)).await.unwrap();
             assert_eq!(view.state, act::SpendState::Pending);
             assert_eq!(node.posts(), vec![("/pair/elevation-request".into(), serde_json::json!({
                 "scopes": ["spend"], "budget": {"budget_msat": expected, "ttl_secs": 600},
@@ -24903,7 +25010,7 @@ mod control_act_tests {
         let (node, _dir, g1) = call_budget_node(Some(10_000));
         let grant = g1_grant(120, 400_000, 400_000);
         *g1.grant.lock().unwrap() = grant.clone();
-        do_spend_request(&node.state, Some(A)).await.unwrap();
+        do_spend_request(&node.state, None, Some(A)).await.unwrap();
         spend_advance(&node.state, false).await.unwrap();
         let view = spend_advance(&node.state, false).await.unwrap();
         assert_eq!((view.state, view.open_until_ms), (act::SpendState::Open, Some(grant["expires_at"].as_u64().unwrap() * 1000)));
@@ -24921,15 +25028,15 @@ mod control_act_tests {
     async fn call_budget_proposal_requires_a_safe_current_minute_price() {
         for block in [None, Some(0), Some(u64::MAX), Some(control::MAX_SAFE_MSAT / 240 - 5_000)] {
             let (node, _dir, _g1) = call_budget_node(block);
-            assert_eq!(do_spend_request(&node.state, Some(A)).await.unwrap_err().code, "call_price_unknown");
+            assert_eq!(do_spend_request(&node.state, None, Some(A)).await.unwrap_err().code, "call_price_unknown");
             assert!(node.posts().is_empty());
             assert_eq!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Locked);
         }
         let (node, _dir, _g1) = call_budget_node(Some(10_000));
-        assert!(do_spend_request(&node.state, Some("invalid")).await.is_err());
+        assert!(do_spend_request(&node.state, None, Some("invalid")).await.is_err());
         assert!(node.targets().is_empty());
         with_book(&node.state, true, |b| { b.paused = true; Ok(()) }).unwrap();
-        assert_eq!(do_spend_request(&node.state, Some(A)).await.unwrap_err().code, "budget_paused");
+        assert_eq!(do_spend_request(&node.state, None, Some(A)).await.unwrap_err().code, "budget_paused");
         assert!(node.targets().is_empty());
     }
 
@@ -24951,7 +25058,7 @@ mod control_act_tests {
             calls(m, p, b)
         });
         let node = fake(AuthMode::Local, routes);
-        let (result, ()) = tokio::join!(do_spend_request(&node.state, Some(A)), async {
+        let (result, ()) = tokio::join!(do_spend_request(&node.state, None, Some(A)), async {
             arrived.notified().await;
             node.state.spend.lock().unwrap().lock();
             release.send(()).unwrap();
@@ -24959,6 +25066,190 @@ mod control_act_tests {
         assert_eq!(result.unwrap_err().code, "budget_needed");
         assert_eq!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Locked);
         assert!(node.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_replaces_the_proposal_without_raising_active_authority() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        let original = g1_grant(3600, 500_000, 499_000);
+        *g1.grant.lock().unwrap() = original.clone();
+        spend_advance(&node.state, true).await.unwrap();
+        let requested = do_spend_request(&node.state, Some(601_000), None).await.unwrap();
+        assert_eq!(requested.state, act::SpendState::Open);
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count(), 1);
+        assert_eq!(node.posts().last().unwrap().1, serde_json::json!({
+            "scopes": ["spend"], "budget": {"budget_msat": 601_000, "ttl_secs": 600}
+        }));
+        assert_eq!(*g1.grant.lock().unwrap(), original);
+        assert_eq!(check_node_grant_with_envelope_ids(&node.state, "/messages/compose", &serde_json::json!({"recipient": A}), 601_000, None, grant::PaymentCap::CallTotal).await.unwrap_err().code, "grant_exhausted");
+        assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Open);
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count(), 1);
+        *g1.grant.lock().unwrap() = g1_grant(3600, 601_000, 601_000);
+        let approved = spend_advance(&node.state, false).await.unwrap();
+        assert_eq!(approved.state, act::SpendState::Open);
+        assert!(approved.pending.is_none());
+        check_node_grant(&node.state, "/messages/compose", &serde_json::json!({"recipient": A}), 601_000).await.unwrap();
+        assert_eq!(composes(&node), 0);
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_keeps_live_call_minutes_and_hangup_authorized() {
+        let (routes, _, reserved) = PacedHold { per_block: 10_000, fee: 5_000, minutes: 40,
+            closing: 0, direct: false, spent: SPENT_AT_CEILING }.routes();
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p == "/pair/elevation/ab12" {
+                return (200, serde_json::json!({"op_id": "ab12", "status": "pending"}).to_string());
+            }
+            if p.starts_with("/pair/") { return (0, String::new()); }
+            let (status, body) = routes(m, p, b);
+            if p == "/status" {
+                let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+                value["api_capabilities"].as_array_mut().unwrap().push(grant::CAPABILITY.into());
+                return (status, value.to_string());
+            }
+            (status, body)
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive", "spend"], Some(first));
+        let original = g1_grant(3600, 5_000_000, 5_000_000);
+        *g1.grant.lock().unwrap() = original.clone();
+        approve_calls(&node).await;
+        node.state.autopay.lock().unwrap().lock();
+        spend_advance(&node.state, true).await.unwrap();
+        do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap();
+        remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
+        do_call_hold(&node.state, A, CALL_ID, Some(reserved)).await.unwrap();
+        let before = node.state.spend.lock().unwrap().view(now_ms());
+        let generation = node.state.spend.lock().unwrap().generation();
+        let requested = do_spend_request(&node.state, Some(6_000_000), None).await.unwrap();
+        assert_eq!(requested.state, act::SpendState::Open);
+        assert_eq!(requested.open_until_ms, before.open_until_ms);
+        assert_eq!(requested.granted_op, before.granted_op);
+        assert_eq!(requested.armed_by_request, before.armed_by_request);
+        assert_eq!(requested.basis, before.basis);
+        assert!(requested.pending.is_some());
+        node.state.spend.lock().unwrap().check_generation(generation, now_ms()).unwrap();
+        assert_eq!(*g1.grant.lock().unwrap(), original);
+        assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Open);
+        assert_eq!(check_node_grant_with_envelope_ids(&node.state, "/messages/compose", &serde_json::json!({"recipient": A}),
+            6_000_000, None, grant::PaymentCap::CallTotal).await.unwrap_err().code, "grant_exhausted");
+        do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+        do_op_end_call(&node.state, CALL_ID).await.unwrap();
+        assert_eq!(compose_kinds(&node), [400, 404, 403]);
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        assert!(pending(&node).is_none());
+        assert!(node.state.spend.lock().unwrap().pending().is_some());
+        assert_eq!(node.state.spend.lock().unwrap().check(before.open_until_ms.unwrap()).unwrap_err().code, "spend_expired");
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_cancellation_preserves_the_existing_window() {
+        let (node, _dir, _) = g1_node(&["read", "receive", "spend"]);
+        let before = spend_advance(&node.state, true).await.unwrap();
+        let generation = node.state.spend.lock().unwrap().generation();
+        do_spend_request(&node.state, Some(601_000), None).await.unwrap();
+        let cancelled = do_spend_cancel(&node.state).await.unwrap();
+        assert_eq!(cancelled.state, act::SpendState::Open);
+        assert_eq!(cancelled.open_until_ms, before.open_until_ms);
+        assert_eq!(cancelled.granted_op, before.granted_op);
+        assert!(cancelled.pending.is_none());
+        node.state.spend.lock().unwrap().check_generation(generation, now_ms()).unwrap();
+        assert_eq!(check_node_grant_with_envelope_ids(&node.state, "/messages/compose", &serde_json::json!({"recipient": A}),
+            601_000, None, grant::PaymentCap::CallTotal).await.unwrap_err().code, "grant_exhausted");
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_cancel_does_not_keep_a_window_opened_by_a_racing_approval() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let (e, r) = (entered.clone(), release.clone());
+        let first: Routes = Arc::new(move |method, path, _| {
+            if method == "DELETE" && path == "/pair/elevation/ab12" {
+                e.store(true, Ordering::SeqCst);
+                while !r.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+                return (200, "{}".into());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, _) = g1_node_with(&["read", "receive", "spend"], Some(first));
+        spend_advance(&node.state, true).await.unwrap();
+        do_spend_request(&node.state, Some(601_000), None).await.unwrap();
+        let approve = async {
+            while !entered.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(1)).await; }
+            spend_advance(&node.state, false).await.unwrap();
+            let granted = spend_advance(&node.state, false).await.unwrap();
+            release.store(true, Ordering::SeqCst);
+            assert_eq!(granted.state, act::SpendState::Open);
+            assert!(granted.pending.is_none());
+        };
+        let (cancelled, ()) = tokio::join!(do_spend_cancel(&node.state), approve);
+        assert_eq!(cancelled.unwrap().state, act::SpendState::Locked);
+        assert_eq!(node.state.spend.lock().unwrap().check(now_ms()).unwrap_err().code, "spend_locked");
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_rejects_invalid_amounts_and_unsupported_nodes() {
+        let (node, _dir, _) = g1_node(&["read", "receive", "spend"]);
+        for amount in [0, budget::MAX_DAILY_MSAT + 1, u64::MAX] {
+            assert_eq!(do_spend_request(&node.state, Some(amount), None).await.unwrap_err().code, "invalid");
+        }
+        assert!(node.posts().is_empty());
+        let node = fake(AuthMode::Local, happy());
+        assert_eq!(do_spend_request(&node.state, Some(601_000), None).await.unwrap_err().code, "invalid");
+        assert!(node.posts().is_empty());
+        let (node, _dir) = paired_fake(happy());
+        assert_eq!(do_spend_request(&node.state, Some(601_000), None).await.unwrap_err().code, "invalid");
+        assert!(node.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_respects_pause_and_cancellation() {
+        let (node, _dir, _) = g1_node(&["read", "receive", "spend"]);
+        do_budget_pause(&node.state).unwrap();
+        assert_eq!(do_spend_request(&node.state, Some(601_000), None).await.unwrap_err().code, "budget_paused");
+        assert!(node.posts().is_empty());
+        let (node, _dir, _) = g1_node(&["read", "receive", "spend"]);
+        assert_eq!(do_spend_request(&node.state, Some(601_000), None).await.unwrap().state, act::SpendState::Pending);
+        do_spend_cancel(&node.state).await.unwrap();
+        assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Locked);
+        assert_eq!(composes(&node), 0);
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_cannot_outlive_cancel_during_capability_read() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let (e, r) = (entered.clone(), release.clone());
+        let first: Routes = Arc::new(move |_, path, _| {
+            if path == "/status" {
+                e.store(true, Ordering::SeqCst);
+                while !r.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+            }
+            (0, String::new())
+        });
+        let (node, _dir, _) = g1_node_with(&["read", "receive", "spend"], Some(first));
+        let cancel = async {
+            while !entered.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(1)).await; }
+            do_spend_cancel(&node.state).await.unwrap();
+            release.store(true, Ordering::SeqCst);
+        };
+        let (requested, ()) = tokio::join!(do_spend_request(&node.state, Some(601_000), None), cancel);
+        assert_eq!(requested.unwrap_err().code, "budget_needed");
+        assert!(node.posts().is_empty());
+        assert_eq!(spend_advance(&node.state, false).await.unwrap().state, act::SpendState::Locked);
+    }
+
+    #[tokio::test]
+    async fn larger_spend_request_preserves_the_amount_after_capability_verification() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let first: Routes = Arc::new(move |_, path, _| {
+            if path == "/status" && reads.fetch_add(1, Ordering::SeqCst) > 0 {
+                return (503, "status unavailable".into());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, _) = g1_node_with(&["read", "receive", "spend"], Some(first));
+        assert_eq!(do_spend_request(&node.state, Some(601_000), None).await.unwrap().state, act::SpendState::Pending);
+        assert_eq!(node.posts().last().unwrap().1["budget"]["budget_msat"], 601_000);
     }
 
     #[tokio::test]
