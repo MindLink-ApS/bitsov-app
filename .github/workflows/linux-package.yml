@@ -1,0 +1,109 @@
+name: Linux Package
+
+# Manual remote-only preview artifacts; no signing or release publishing.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux-package:
+    name: Linux x86_64 remote-only preview
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Free runner disk space
+        run: bash scripts/ci/free-disk-space.sh
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Tauri Linux prerequisites
+        timeout-minutes: 5
+        uses: ./.github/actions/tauri-prerequisites
+
+      - name: AppImage prerequisites
+        timeout-minutes: 5
+        run: sudo apt-get install -y --no-install-recommends squashfs-tools patchelf
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: src-tauri
+          shared-key: tauri-release-linux-x86_64-remote
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+
+      - name: Build remote-only bundles
+        run: >-
+          npm run tauri -- build --ci --no-sign
+          --target x86_64-unknown-linux-gnu --bundles appimage,deb
+          --config src-tauri/tauri.remote-only.conf.json -- --locked
+
+      - name: Inspect Linux bundles
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          release=src-tauri/target/x86_64-unknown-linux-gnu/release
+          appimages=("$release"/bundle/appimage/*.AppImage)
+          debs=("$release"/bundle/deb/*.deb)
+          test "${#appimages[@]}" -eq 1
+          test "${#debs[@]}" -eq 1
+          file "$release/bitsov-app" | tee "$RUNNER_TEMP/linux-executable.txt"
+          grep -Eq 'ELF 64-bit.*x86-64' "$RUNNER_TEMP/linux-executable.txt"
+          file "${appimages[0]}" | tee "$RUNNER_TEMP/linux-appimage.txt"
+          grep -Eq 'ELF 64-bit.*x86-64' "$RUNNER_TEMP/linux-appimage.txt"
+          test "$(dpkg-deb --field "${debs[0]}" Architecture)" = amd64
+          dpkg-deb --contents "${debs[0]}"
+          dpkg-deb --fsys-tarfile "${debs[0]}" | tar -tf - > "$RUNNER_TEMP/linux-deb-paths.txt"
+          grep -Eq '(^|/)usr/bin/bitsov-app$' "$RUNNER_TEMP/linux-deb-paths.txt"
+          if grep -Eq '(^|/)konsensus[^/]*(/|$)' "$RUNNER_TEMP/linux-deb-paths.txt"; then
+            echo '::error::Remote-only bundle contains a node executable'
+            exit 1
+          fi
+
+      - name: Collect preview artifacts
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          bundle=src-tauri/target/x86_64-unknown-linux-gnu/release/bundle
+          appimages=("$bundle"/appimage/*.AppImage)
+          debs=("$bundle"/deb/*.deb)
+          test "${#appimages[@]}" -eq 1
+          test "${#debs[@]}" -eq 1
+          mkdir -p "$RUNNER_TEMP/linux-preview"
+          cp "${appimages[0]}" "${debs[0]}" "$RUNNER_TEMP/linux-preview/"
+          cd "$RUNNER_TEMP/linux-preview"
+          sha256sum -- *.AppImage *.deb > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bitsov-preview-linux-x86_64-${{ github.sha }}
+          path: ${{ runner.temp }}/linux-preview/
+          if-no-files-found: error
+          retention-days: 7
