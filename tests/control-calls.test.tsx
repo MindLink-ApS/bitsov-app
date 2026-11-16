@@ -3173,6 +3173,36 @@ describe('calls in the shell', () => {
     expect($('[data-call-reconnecting]')).toBeNull();
   });
 
+  it('before Accept, a video call says your camera turns on and how to turn it off (EN and DA); an audio call does not', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'srcObject', 'set').mockImplementation(() => {});
+    const host = stubHost({ messages_list: () => [] });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { ...msg(400, { media: 'video', sdp: 'offer' }), timestamp: Date.now() } });
+    await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
+    expect(text('[data-call-camera-notice]')).toBe('This is a video call: your camera turns on when you press Accept. You can turn it off with Camera.');
+    try {
+      setLanguagePref('da');
+      expect(text('[data-call-camera-notice]')).toBe('Dette er et videoopkald: dit kamera tændes, når du trykker Acceptér. Du kan slukke det med Kamera.');
+      expect(text('[data-call-accept]')).toMatch(/^Acceptér/);
+    } finally { setLanguagePref('en'); }
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    expect(text('[data-call-accept]')).toMatch(/^Accept/);
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    FakePc.made[0].connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect($('[data-call-camera-notice]')).toBeNull();
+    expect(text('[data-call-camera]')).toBe('Camera');
+  });
+
+  it('an incoming audio call has no camera notice', async () => {
+    const host = stubHost({ messages_list: () => [] });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { ...msg(400, { media: 'audio', sdp: 'offer' }), timestamp: Date.now() } });
+    await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
+    expect($('[data-call-camera-notice]')).toBeNull();
+  });
+
   it('a video call with the camera off says they cannot see you, and the line goes when it is back on', async () => {
     vi.spyOn(HTMLMediaElement.prototype, 'srcObject', 'set').mockImplementation(() => {});
     const host = stubHost({ messages_list: () => [] });

@@ -3813,6 +3813,10 @@ function CallPanel(props: {
           {(m) => <p class="hint" data-call-answer-cost>{tr('caCallAnswerCostNote', fmtAmount(m()))}</p>}
         </Show>
         {props.approval}
+        {/* No surprise camera: before Accept, a video call says the camera comes on, and how to turn it off. */}
+        <Show when={v().phase === 'incoming' && v().media === 'video'}>
+          <p class="hint" data-call-camera-notice>{tr('uiIncomingVideoCameraNote')}</p>
+        </Show>
         {/* Across networks a call needs a STUN server: said where it matters, while a call is being set up or has failed to connect. */}
         <Show when={!props.routed && (['calling', 'ringing', 'connecting'].includes(v().phase) || (v().phase === 'ended' && (v().reason === 'failed' || v().reason === 'timeout')))}>
           <CallNetworkNote onOpenSettings={props.openCallSettings} />
