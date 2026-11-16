@@ -262,7 +262,7 @@ export type Actions = {
   spendScoped?: () => boolean;
   moneyBlocked: () => boolean;
   /** The request was made (open, or pending at the node), with the host's ids for it (#227). */
-  approve: () => Promise<ApprovalResult>;
+  approve: (callPeer?: string) => Promise<ApprovalResult>;
   lock: () => Promise<void>;
   /** Withdraw the pending request at the node. */
   cancelSpend: () => Promise<void>;
@@ -1414,6 +1414,7 @@ export function ControlCenter(props: Props) {
   };
   const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
   const [callApproval, setCallApproval] = createSignal(false);
+  const [callApprovalPeer, setCallApprovalPeer] = createSignal<string>();
   const [callApproving, setCallApproving] = createSignal(false);
   const canStillAnswer = () => [callView(), ...waitingCalls()].some(view => view.phase === 'incoming');
   const answerCallEnded = () => callView().phase === 'ended' && !callView().outgoing && !canStillAnswer();
@@ -1430,6 +1431,7 @@ export function ControlCenter(props: Props) {
   };
   const openCallApproval = (key: string | null = null) => {
     callApprovalFrom = key;
+    setCallApprovalPeer(undefined);
     setCallApproval(true);
     queueMicrotask(() => (callPanel?.querySelector<HTMLElement>('[data-call-approve]') ?? callPanel)?.focus());
   };
@@ -1472,7 +1474,8 @@ export function ControlCenter(props: Props) {
     // A locked or backgrounded phone silences the microphone while the call would go on being paid.
     stopWhenSilenced: isMobilePlatform(),
     closeAdmission: (operationId, peer, callId) => source.closeCallAdmission(operationId, peer, callId),
-    authorize: async () => {
+    authorize: async (peer) => {
+      setCallApprovalPeer(routedCalls ? peer : undefined);
       const pairing = await act(() => source.pairingStatus());
       if (!pairing.ok) {
         setErrors('spend', pairing.error.message);
@@ -1534,6 +1537,7 @@ export function ControlCenter(props: Props) {
         setCallVideoCanvas(null);
         setCallVideoStatus(null);
       }
+      if (view.phase === 'incoming') setCallApprovalPeer(undefined);
       setCallView(view);
       if (view.phase === 'incoming' && !view.silenced && view.callId && view.peer) notifications?.call(`${view.peer}:${view.callId}`, nameOf(view.peer), () => isIncoming(view.peer!, view.callId!), () => revealIncoming(view.callId!, view.peer!));
     },
@@ -1640,10 +1644,10 @@ export function ControlCenter(props: Props) {
     },
     fileFetch: (messageId) => source.fileFetch(messageId),
     fileSave: (messageId) => source.fileSave(messageId),
-    approve: async () => {
+    approve: async (callPeer) => {
       clearContactApprovalError();
       setErrors('spend', undefined);
-      const r = await act(() => source.spendRequest());
+      const r = await act(() => source.spendRequest(callPeer));
       if (r.ok) setSpend(r.value);
       else setErrors('spend', r.error.message);
       return approvalResult(r);
@@ -2526,12 +2530,12 @@ export function ControlCenter(props: Props) {
           <div data-call-approval>
             <strong>{tr(canStillAnswer() || answerCallEnded() ? 'caApproveSpendingBeforeAnswering' : 'caApproveSpendingBeforeCalling')}</strong>
             <p class="hint">{tr(answerCallEnded() ? 'caApproveAfterEndedCall' : 'caSpendingNeedsApprovalAfterApprovalPressCallOrAccept')}</p>
-            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} stays={tr(answerCallEnded() ? 'caApproveAfterEndedCall' : 'caNothingIsPaidUntilYouPressCallOrAccept')} />
+            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={{ ...actions, approve: () => actions.approve(callApprovalPeer()) }} stays={tr(answerCallEnded() ? 'caApproveAfterEndedCall' : 'caNothingIsPaidUntilYouPressCallOrAccept')} />
             <Show when={spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
               <button type="button" class="soft" data-call-approve disabled={moneyBlocked() || callApproving()} onClick={async () => {
                 setCallApproving(true);
                 try {
-                  const result = await actions.approve();
+                  const result = await actions.approve(callApprovalPeer());
                   if (result.ok && spendLine(spend(), now()).open) closeCallApproval();
                 } finally { setCallApproving(false); }
               }}>{tr('uiApproveSpending')}</button>

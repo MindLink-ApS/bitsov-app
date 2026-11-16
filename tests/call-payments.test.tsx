@@ -1006,7 +1006,7 @@ const paired = { state: 'paired', scopes: ['read', 'receive', 'spend'], node_id:
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 
-function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number; endKeepsHold?: boolean; endLeavesUnresolved?: boolean } = {}) {
+function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number; endKeepsHold?: boolean; endLeavesUnresolved?: boolean; pairing?: Reply; spend?: SpendView; request?: Reply } = {}) {
   resetContactsForTests();
   setPetname(A, 'Maya');
   const calls: { cmd: string; args?: unknown }[] = [];
@@ -1018,7 +1018,7 @@ function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; offer?: R
   const REPLIES: Record<string, Reply> = {
     node_status: () => ({ ready: true, node_id: OWN, error: null }),
     trust_acknowledge: () => true,
-    pairing_status: () => paired,
+    pairing_status: opts.pairing ?? (() => paired),
     node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
       lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: [] }),
     peers_list: () => (opts.peers ?? [A]).map((node_id) => ({ node_id, addr: null, label: node_id === A ? 'Maya' : 'Other contact', connected: true, fingerprint: null, meetings: true })),
@@ -1027,7 +1027,8 @@ function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; offer?: R
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 2000, peer_age_secs: 30, max_routing_fee_msat: 0, peer_stale: false }),
     payments_overview: () => ({ balance_msat: 1_000_000, lightning_outbound_msat: 500_000, channels: [] }),
     fund_state: () => null,
-    spend_status: () => spending,
+    spend_status: () => opts.spend ?? spending,
+    spend_request: opts.request ?? (() => spending),
     budget_status: () => null,
     call_quote: (args) => typeof opts.quote === 'function' ? opts.quote(args) : opts.quote ?? QUOTE,
     call_signal: (args) => {
@@ -1126,6 +1127,71 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
   }
+  it.each([['audio', 'approve'], ['video', 'approve'], ['audio', 'ask-again'], ['video', 'ask-again']])('requests a call-specific budget for %s through %s without sending a call', async (media, button) => {
+    vi.stubEnv('VITE_CALL_VIDEO', 'node');
+    const host = stubHost({
+      pairing: () => ({ ...paired, scopes: ['read', 'receive'] }),
+      spend: { state: 'expired', basis: null, open_until_ms: null, pending: null, window_ms: 600_000, lapse: 'lost' },
+    });
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    await openShell();
+    $<HTMLButtonElement>(`[data-call="${media}"]`)!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>(`[data-call-confirm="${media}"]`)?.disabled).toBe(false));
+    $<HTMLButtonElement>(`[data-call-confirm="${media}"]`)!.click();
+    await vi.waitFor(() => expect($('[data-call-approval]')).not.toBeNull());
+    $<HTMLButtonElement>(button === 'approve' ? '[data-call-approve]' : '[data-call-approval] [data-spend-ask-again]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    expect(host.used('spend_request')[0].args).toEqual({ call_peer: A });
+    expect(capture).not.toHaveBeenCalled();
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+  });
+  it.each([['approve', 'reopened'], ['ask-again', 'reopened'], ['approve', 'left open'], ['ask-again', 'left open']])('keeps incoming approval ordinary through %s with the outgoing panel %s', async (button, panel) => {
+    const incomingPeer = 'b'.repeat(64);
+    const host = stubHost({
+      peers: [A, incomingPeer],
+      pairing: () => ({ ...paired, scopes: ['read', 'receive'] }),
+      spend: { state: 'expired', basis: null, open_until_ms: null, pending: null, window_ms: 600_000, lapse: 'lost' },
+    });
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval]')).not.toBeNull());
+    if (panel === 'reopened') [...$('[data-call-approval]')!.querySelectorAll('button')].find(b => b.textContent === 'Close')!.click();
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'incoming', kind: 400, sender: incomingPeer, recipient: OWN,
+      timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($('[data-call-spend-approve]')).not.toBeNull());
+    if (panel === 'reopened') $<HTMLButtonElement>('[data-call-spend-approve]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval]')).not.toBeNull());
+    $<HTMLButtonElement>(button === 'approve' ? '[data-call-approve]' : '[data-call-approval] [data-spend-ask-again]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    expect(host.used('spend_request')[0].args).toEqual({});
+    expect(capture).not.toHaveBeenCalled();
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+  });
+  it('approves answering without requiring a reservation price from the caller', async () => {
+    let quote = QUOTE;
+    const host = stubHost({
+      quote: () => quote,
+      pairing: () => ({ ...paired, scopes: ['read', 'receive'] }),
+      spend: { state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 },
+    });
+    await openShell();
+    quote = { ...QUOTE, block_msat: null, reservation_max_msat: null };
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'incoming', kind: 400, sender: A, recipient: OWN,
+      timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-approve]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    expect(host.used('spend_request')[0].args).toEqual({});
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+  });
   async function ringAndAnswer(host: ReturnType<typeof stubHost>) {
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));

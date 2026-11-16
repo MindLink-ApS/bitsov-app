@@ -6626,11 +6626,11 @@ async fn check_node_grant_with_envelope_ids(state: &NodeState, path: &str, body:
 }
 
 /// The G1 `budget` proposal for an elevation request. Only a suggestion.
-fn budget_proposal(state: &NodeState, want: Want) -> Option<serde_json::Value> {
+fn budget_proposal(state: &NodeState, want: Want, minimum: Option<u64>) -> Option<serde_json::Value> {
     let book = with_book(state, false, |b| Ok(b.clone())).ok()?;
     Some(match want {
         Want::Budget(ceiling) => grant::proposal(ceiling, grant::MAX_TTL_SECS, &book.contacts),
-        Want::Window => grant::proposal(book.ceiling_msat, act::SPEND_WINDOW_MS / 1000, &Default::default()),
+        Want::Window => grant::proposal(book.ceiling_msat.max(minimum.unwrap_or(0)), act::SPEND_WINDOW_MS / 1000, &Default::default()),
     })
 }
 
@@ -6639,6 +6639,21 @@ fn budget_proposal(state: &NodeState, want: Want) -> Option<serde_json::Value> {
 /// or asks the node for one. Without `ask`, only polls a pending request.
 async fn spend_advance(state: &NodeState, ask: bool) -> Result<act::SpendView, ActionError> {
     Ok(spend_advance_for(state, ask.then_some(Want::Window)).await?.view)
+}
+
+/// A call proposal covers the same reservation ceiling shown before Ring,
+/// plus the offer and closing signal. Approval still opens only a window.
+async fn do_spend_request(state: &NodeState, call_peer: Option<&str>) -> Result<act::SpendView, ActionError> {
+    let Some(peer) = call_peer else { return spend_advance(state, true).await };
+    refuse_if_paused(state)?;
+    let fence = approval_fence(state);
+    let quote = read_call_quote_with_blocks(state, peer).await.map_err(ActionError::node)?;
+    if approval_fence(state) != fence { return Err(fence_broken()); }
+    let minimum = quote.reservation_max_msat.zip(quote.call_total_msat)
+        .and_then(|(hold, signals)| hold.checked_add(signals))
+        .filter(|total| *total <= control::MAX_SAFE_MSAT)
+        .ok_or_else(|| ActionError::new("call_price_unknown", "The call price is unavailable. Read it again before requesting a call budget."))?;
+    Ok(spend_advance_with_minimum(state, Some(Want::Window), Some(minimum)).await?.view)
 }
 
 /// Separate the current view from the window this invocation actually armed.
@@ -6651,6 +6666,10 @@ struct SpendAdvance {
 /// approval. On a paired node without `spend`, both go through one elevation
 /// request, and a grant opens only what was asked.
 async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<SpendAdvance, ActionError> {
+    spend_advance_with_minimum(state, want, None).await
+}
+
+async fn spend_advance_with_minimum(state: &NodeState, want: Option<Want>, minimum: Option<u64>) -> Result<SpendAdvance, ActionError> {
     // The shell polls spend before budget at startup. Read current authority
     // before a saved request changes the pristine approval generations. The
     // request may already have been granted, with a much longer grant expiry.
@@ -6660,7 +6679,7 @@ async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<Spen
         do_budget_status(state).await?;
     }
     restore_spend_pending(state);
-    let out = spend_advance_for_inner(state, want).await;
+    let out = spend_advance_for_inner(state, want, minimum).await;
     save_spend_pending(state);
     out
 }
@@ -6703,7 +6722,7 @@ fn restore_spend_pending(state: &NodeState) {
     }
 }
 
-async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Result<SpendAdvance, ActionError> {
+async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>, minimum: Option<u64>) -> Result<SpendAdvance, ActionError> {
     if want.is_some() && budget_paused(state)? {
         return Err(ActionError::new("budget_paused", "Payments are paused. Resume them first."));
     }
@@ -6857,7 +6876,7 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
                 // A G1 node shows the owner a budget to approve; the owner's
                 // flags override it. Older nodes get the pre-G1 body.
                 if node_has_g1(state).await.unwrap_or(false) {
-                    if let Some(budget) = budget_proposal(state, want) {
+                    if let Some(budget) = budget_proposal(state, want, minimum) {
                         ask["budget"] = budget;
                     }
                 }
@@ -8782,10 +8801,11 @@ async fn spend_status(
 async fn spend_request(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
+    call_peer: Option<String>,
 ) -> Result<act::SpendView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    spend_advance(state.inner(), true).await
+    do_spend_request(state.inner(), call_peer.as_deref()).await
 }
 
 /// Close the spend window now.
@@ -24809,6 +24829,136 @@ mod control_act_tests {
         let view = spend_advance(&node.state, false).await.unwrap();
         let expires = g1.grant.lock().unwrap()["expires_at"].as_u64().unwrap() * 1000;
         assert_eq!((view.state, view.open_until_ms), (act::SpendState::Open, Some(expires)));
+    }
+
+    fn call_budget_node(block: Option<u64>) -> (Fake, tempfile::TempDir, G1) {
+        let routes = call_routes(Some(10_000));
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p == format!("/pricing/peers/{A}") {
+                return (200, serde_json::json!({"peer_id": A, "prices": {"kind:404": block}, "age_secs": 1, "stale": false}).to_string());
+            }
+            if p == format!("/pricing/peers/{A}/call") || p == "/payments/price/401" {
+                return routes(m, p, b);
+            }
+            (0, String::new())
+        });
+        g1_node_with(&["read", "receive"], Some(first))
+    }
+
+    #[test]
+    fn call_budget_proposal_command_covers_one_reservation() {
+        let (node, _dir, _g1) = call_budget_node(Some(10_000));
+        let seen = node.seen.clone();
+        let app = tauri::test::mock_builder()
+            .manage(node.state)
+            .invoke_handler(tauri::generate_handler![super::spend_request])
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+        let origin = if cfg!(windows) { format!("{}://tauri.localhost", "http") } else { "tauri://localhost".into() };
+        let reply = tauri::test::get_ipc_response(&window, tauri::webview::InvokeRequest {
+            cmd: "spend_request".into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: origin.parse().unwrap(),
+            body: tauri::ipc::InvokeBody::Json(serde_json::json!({"call_peer": A})),
+            headers: Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.into(),
+        }).unwrap();
+        let view: serde_json::Value = reply.deserialize().unwrap();
+        assert_eq!(view["state"], "pending");
+        let seen = seen.lock().unwrap();
+        let (_, _, _, body) = seen.iter().find(|(method, path, _, _)|
+            method == "POST" && path == "/api/v1/pair/elevation-request").unwrap();
+        let asked: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(asked["budget"], serde_json::json!({"budget_msat": 3_621_000, "ttl_secs": 600}));
+        assert!(!seen.iter().any(|(method, path, _, _)| method == "POST" && path.contains("/messages/")));
+    }
+
+    #[tokio::test]
+    async fn call_budget_proposal_covers_the_reservation_and_signals() {
+        for (block, ceiling, expected) in [
+            (1_000, 500_000, 1_461_000),
+            (10_000, 500_000, 3_621_000),
+            (20_000, 500_000, 6_021_000),
+            (10_000, 8_000_000, 8_000_000),
+        ] {
+            let (node, _dir, _g1) = call_budget_node(Some(block));
+            with_book(&node.state, true, |b| { b.ceiling_msat = ceiling; Ok(()) }).unwrap();
+            let quote = read_call_quote_with_blocks(&node.state, A).await.unwrap();
+            let view = do_spend_request(&node.state, Some(A)).await.unwrap();
+            assert_eq!(view.state, act::SpendState::Pending);
+            assert_eq!(node.posts(), vec![("/pair/elevation-request".into(), serde_json::json!({
+                "scopes": ["spend"], "budget": {"budget_msat": expected, "ttl_secs": 600},
+            }))]);
+            assert!(expected >= quote.reservation_max_msat.unwrap() + quote.call_total_msat.unwrap());
+            assert_eq!(with_book(&node.state, false, |b| Ok(b.ceiling_msat)).unwrap(), ceiling);
+            assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
+            assert_eq!(budget_now(&node.state).spent_msat, 0);
+            assert!(pending(&node).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn call_budget_proposal_keeps_the_owners_smaller_grant_and_expiry() {
+        let (node, _dir, g1) = call_budget_node(Some(10_000));
+        let grant = g1_grant(120, 400_000, 400_000);
+        *g1.grant.lock().unwrap() = grant.clone();
+        do_spend_request(&node.state, Some(A)).await.unwrap();
+        spend_advance(&node.state, false).await.unwrap();
+        let view = spend_advance(&node.state, false).await.unwrap();
+        assert_eq!((view.state, view.open_until_ms), (act::SpendState::Open, Some(grant["expires_at"].as_u64().unwrap() * 1000)));
+        assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
+        let error = check_node_grant_with_envelope_ids(&node.state, "/messages/compose",
+            &serde_json::json!({"recipient": A}), 601_000, None, grant::PaymentCap::CallTotal).await.unwrap_err();
+        assert_eq!(error.code, "grant_exhausted");
+        assert_eq!(*g1.grant.lock().unwrap(), grant);
+        assert_eq!(node.posts().iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
+            ["/pair/elevation-request", "/pair/token"]);
+        assert_eq!(budget_now(&node.state).spent_msat, 0);
+    }
+
+    #[tokio::test]
+    async fn call_budget_proposal_requires_a_safe_current_minute_price() {
+        for block in [None, Some(0), Some(u64::MAX), Some(control::MAX_SAFE_MSAT / 240 - 5_000)] {
+            let (node, _dir, _g1) = call_budget_node(block);
+            assert_eq!(do_spend_request(&node.state, Some(A)).await.unwrap_err().code, "call_price_unknown");
+            assert!(node.posts().is_empty());
+            assert_eq!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Locked);
+        }
+        let (node, _dir, _g1) = call_budget_node(Some(10_000));
+        assert!(do_spend_request(&node.state, Some("invalid")).await.is_err());
+        assert!(node.targets().is_empty());
+        with_book(&node.state, true, |b| { b.paused = true; Ok(()) }).unwrap();
+        assert_eq!(do_spend_request(&node.state, Some(A)).await.unwrap_err().code, "budget_paused");
+        assert!(node.targets().is_empty());
+    }
+
+    #[tokio::test]
+    async fn call_budget_proposal_cannot_reopen_after_lock_during_the_quote() {
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let a = arrived.clone();
+        let (release, wait) = std::sync::mpsc::channel();
+        let wait = Mutex::new(wait);
+        let calls = call_routes(Some(10_000));
+        let routes: Routes = Arc::new(move |m, p, b| {
+            if p == "/payments/price/401" {
+                a.notify_one();
+                wait.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            if p == format!("/pricing/peers/{A}") {
+                return (200, serde_json::json!({"peer_id": A, "prices": {"kind:404": 10_000}, "age_secs": 1, "stale": false}).to_string());
+            }
+            calls(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        let (result, ()) = tokio::join!(do_spend_request(&node.state, Some(A)), async {
+            arrived.notified().await;
+            node.state.spend.lock().unwrap().lock();
+            release.send(()).unwrap();
+        });
+        assert_eq!(result.unwrap_err().code, "budget_needed");
+        assert_eq!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Locked);
+        assert!(node.posts().is_empty());
     }
 
     #[tokio::test]

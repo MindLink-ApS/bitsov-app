@@ -189,7 +189,7 @@ export interface Source {
   // actions: spending ones are refused by the host outside the owner's spend window
   spendStatus(): Promise<SpendView>;
   /** The owner's one tap: open the short spend window, or ask the node for spend. */
-  spendRequest(): Promise<SpendView>;
+  spendRequest(callPeer?: string): Promise<SpendView>;
   spendLock(): Promise<SpendView>;
   /** Withdraw the pending request at the node, then forget it. */
   spendCancel(): Promise<SpendView>;
@@ -383,7 +383,9 @@ export const hostSource: Source = {
   liveLink: () => invoke<LinkState | null>('live_link'),
   // Keep request_id and granted_op exactly as returned by the host.
   spendStatus: () => invoke<SpendView>('spend_status'),
-  spendRequest: () => invoke<SpendView>('spend_request'),
+  spendRequest: (callPeer) => callPeer === undefined
+    ? invoke<SpendView>('spend_request')
+    : invoke<SpendView>('spend_request', { call_peer: callPeer }),
   spendLock: () => invoke<SpendView>('spend_lock'),
   spendCancel: () => invoke<SpendView>('spend_cancel'),
   addDevice: input => invoke<AddView>('add_device', { input }),

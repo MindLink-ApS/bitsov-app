@@ -337,7 +337,7 @@ export type CallDeps = {
   /** Report local teardown by exact admission. Host keeps cleanup pending. No send. */
   closeAdmission?: (operationId: string, peer: string, callId: string) => Promise<void>;
   /** Check current spend permission and show the shell’s approval path before capture. */
-  authorize?: () => Promise<boolean>;
+  authorize?: (reservationPeer?: string) => Promise<boolean>;
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
   /** Latest grant read by the shell; the host rechecks it before paying. */
   grant?: () => NodeGrantSummary | null;
@@ -1206,7 +1206,7 @@ export function createCallEngine(deps: CallDeps) {
       }
       const consent: MinutesConsent | undefined = deps.minutes && block !== null && most !== null
         ? { block_msat: block, block_max_routing_fee_msat: q.block_max_routing_fee_msat ?? 0, max_hold_msat: most } : undefined;
-      if (deps.authorize && !await deps.authorize()) return;
+      if (deps.authorize && !await deps.authorize(peer)) return;
       if (generation !== mediaGeneration || active() || deps.busy?.()) return;
       quote = q;
       const callId = (deps.newCallId ?? newCallId)();
