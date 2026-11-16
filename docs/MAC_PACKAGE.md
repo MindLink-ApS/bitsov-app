@@ -329,6 +329,79 @@ and the remaining release requirements.
 The app starts a local node on port 3141 and uses the normal application data
 directory. Do not run it next to another BitSov app instance.
 
+## Intel Mac tester install (signet only)
+
+Use an Intel (`x86_64`) Mac and a **signet node only** for this preview.
+Intel packaging is proposed in [#482](https://github.com/MindLink-ApS/bitsov-app/pull/482);
+until a successful **Mac Package Intel** run supplies the artifact below, there
+is no Intel download to install from these instructions. The existing arm64
+artifact is for Apple Silicon. Intel runtime compatibility and the minimum
+supported macOS version still need validation on physical hardware.
+
+1. **Check for T2 before installing.** In Terminal, run this read-only command:
+
+   ```bash
+   system_profiler SPiBridgeDataType
+   ```
+
+   Look for **Apple T2 Security Chip**. If it is absent or the result is
+   unclear, stop and report the hardware result before trying to pair. The
+   current ad-hoc app requires a Secure Enclave for pairing; an Intel Mac
+   without T2 cannot use that pairing path. T2 presence does not establish
+   that the app works on that Mac, and does not mean Touch ID is available.
+
+2. **Download the Intel artifact.** In this repository's **Actions → Mac
+   Package Intel**, open the successful run for the intended source commit.
+   Under **Summary → Artifacts**, download
+   `bitsov-unsigned-macos-x86_64-<full-source-sha>`, matching the run's full
+   commit SHA. The proposed artifact is retained for seven days and contains
+   `BitSov-unsigned-macos-x86_64.app.zip`, an `_x86_64.dmg`, `build-info.txt`
+   and `SHA256SUMS`. If it is missing or expired, request a new artifact;
+   do not substitute the arm64 build.
+
+3. **Unzip and install.** Open the downloaded artifact ZIP in Finder. In the
+   extracted folder, check that `build-info.txt` names the intended source
+   SHA and `x86_64-apple-darwin` target. In Terminal, change to that folder
+   and verify its files before continuing:
+
+   ```bash
+   shasum -a 256 -c SHA256SUMS
+   ```
+
+   Stop if any checksum differs. Unzip
+   `BitSov-unsigned-macos-x86_64.app.zip`, then drag the extracted
+   `BitSov.app` into `/Applications`. Quit any other BitSov instance first;
+   this app uses the normal application data directory. Use a separate macOS
+   test account if this Mac already has a BitSov installation you need to keep.
+
+4. **Clear quarantine for this copy.** The preview is ad-hoc signed, despite
+   the `unsigned` filename, and is not notarized. Only for the app obtained
+   from the intended repository run, remove its download quarantine:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/BitSov.app
+   ```
+
+   This removes Gatekeeper's quarantine check for this copy. It does not
+   establish trust in an unknown download. If the command is refused or
+   macOS still blocks the app, stop and report the message.
+
+5. **First launch and signet check.** Open `/Applications/BitSov.app` in
+   Finder. Follow the [signet pairing instructions](../README.md#pair-with-your-own-signet-node)
+   with the designated node. Confirm it is on signet before any test payment.
+   After pairing,
+   send and receive a message, then send and receive a signet payment with
+   the node owner available to approve. These are tester checks to perform,
+   not established Intel acceptance results.
+
+On a T2 Mac, missing or unavailable Touch ID is separate from pairing storage.
+After successful pairing, receiving messages and payments does not require
+Touch ID. For sending or paying when approval is needed, **approve at the
+node**: ask the node owner to approve the requested spending window or budget,
+then retry in the app. In-app Touch ID approvals and Touch ID-based
+“Remember on this Mac” are unavailable without working Touch ID. Node-side
+approval does not provide a pairing fallback for a Mac without T2.
+
 ## HUMAN
 
 These remain release-operator responsibilities; the default CI does not enable
