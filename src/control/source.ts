@@ -95,6 +95,8 @@ export interface Source {
   nodeUnlockPassword(password: string): Promise<void>;
   /** Android: save (fingerprint-protected) or discard the password the node just accepted. */
   nodeUnlockRemember(remember: boolean): Promise<void>;
+  /** Fresh Mac only: the owner's explicit choice to create a node (recovery phrase and wallet) here. */
+  nodeSetupLocal(confirmed: boolean): Promise<void>;
   nodeRepairInitialized(confirmed: boolean): Promise<void>;
   nodeRepairPriceFloor(confirmed: boolean): Promise<void>;
   pairingStatus(): Promise<PairingView>;
@@ -319,6 +321,7 @@ export const hostSource: Source = {
     }
   },
   remoteAccessReplace: (link) => invoke<RemoteImportView>('remote_access_connect', { link }),
+  nodeSetupLocal: (confirmed) => invoke<void>('node_setup_local', { confirmed }),
   nodeRepairInitialized: (confirmed) => invoke<void>('node_repair_initialized', { confirmed }),
   nodeRepairPriceFloor: (confirmed) => invoke<void>('node_repair_price_floor', { confirmed }),
   identityRestore: (mnemonic) => invoke<RestoreOutcome>('identity_restore', { mnemonic }),

@@ -10,7 +10,7 @@ import App from '../src/App';
 import type { PairingView } from '../src/onboarding/pairing';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import type { ActionError, BudgetView, CallQuote, CallReceipt, LiveEvent, Message, SpendView, OpView } from '../src/control/types';
-import { closeOutcome, CONNECT_TIMEOUT_MS, createCallEngine, mediaError, NO_MEDIA_DEVICES, RECONNECT_GRACE_MS, isCallKind, newCallId, parseSignal, RING_MS, stunServer, type CallDeps, type CallView } from '../src/control/call';
+import { closeOutcome, CONNECT_TIMEOUT_MS, createCallEngine, mediaError, NO_MEDIA_DEVICES, RECONNECT_GRACE_MS, isCallKind, newCallId, parseSignal, RING_MS, signalCost, stunServer, type CallDeps, type CallView } from '../src/control/call';
 
 const OWN = '1'.repeat(64);
 const A = 'a'.repeat(64);
@@ -612,6 +612,21 @@ describe('call restart negotiation', () => {
     await accepting;
     expect(e.view().state).toBe('reconnecting');
     e.endLocal();
+  });
+
+  it('the incoming card\'s words hold: a callee\'s reconnect try is paid even when the line never comes back, each payment at most one signal', async () => {
+    const { e, sent } = engine();
+    await e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    await e.accept(QUOTE);
+    const pc = FakePc.made[0]; pc.connect(); pc.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(e.view().state).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS);
+    expect(e.view().state).toBe('ended');
+    // Answer, then the paid reconnect request; the line never came back.
+    expect(sent.map(s => s.kind)).toEqual([401, 402]);
+    expect(sent[1].body).toMatchObject({ sdp_mid: 'bitsov-restart-v1' });
+    for (const s of sent) expect(s.max).toBeLessThanOrEqual(signalCost(QUOTE));
   });
 
   it('retains a callee restart request while the initial answer is still being applied', async () => {
@@ -2296,6 +2311,23 @@ describe('calls in the shell', () => {
     expect(host.used('payment_keysend')).toHaveLength(2);
   });
 
+  it('a muted call says in words that they cannot hear you, in English and Danish, and the line goes on unmute', async () => {
+    payHost();
+    await liveCall();
+    expect($('[data-call-mic-off]')).toBeNull();
+    $<HTMLButtonElement>('[data-call-mute]')!.click();
+    await vi.waitFor(() => expect($('[data-call-mic-off]')).not.toBeNull());
+    expect(text('[data-call-mic-off]')).toBe('Your microphone is off. They cannot hear you. Press Mute again to talk.');
+    expect($('[data-call-camera-off]')).toBeNull();
+    try {
+      setLanguagePref('da');
+      expect(text('[data-call-mic-off]')).toBe('Din mikrofon er slukket. De kan ikke høre dig. Tryk Slå lyd fra igen for at tale.');
+      expect(text('[data-call-mute]')).toBe('Slå lyd fra');
+    } finally { setLanguagePref('en'); }
+    $<HTMLButtonElement>('[data-call-mute]')!.click();
+    await vi.waitFor(() => expect($('[data-call-mic-off]')).toBeNull());
+  });
+
   it.each(['unit', 'language'])('in-call Pay clears a rejected Danish draft on %s change', async change => {
     const host = payHost();
     await liveCall();
@@ -2970,6 +3002,20 @@ describe('calls in the shell', () => {
     expect(text('[data-call-decline]')).toBe('Decline · up to 6 sats');
   });
 
+  it('the incoming card says in words what answering can cost: the answer, your own hangup, and nothing more but a reconnect', async () => {
+    const host = stubHost({ messages_list: () => [], call_quote: () => QUOTE });
+    await openShell();
+    incoming(host);
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(false));
+    expect(text('[data-call-accept]')).toBe('Accept · up to 6 sats');
+    expect(text('[data-call-answer-cost]')).toBe('Answering costs you at most 6 sats. Hanging up costs at most 6 sats more. The caller pays for the call itself. Ignore costs nothing. If the connection drops, trying to reconnect can add payments of at most 6 sats each, even if it fails.');
+    try {
+      setLanguagePref('da');
+      expect(text('[data-call-answer-cost]')).toBe('At svare koster dig højst 6 sats. At lægge på koster højst 6 sats mere. Den, der ringer, betaler selve opkaldet. Ignorér koster intet. Hvis forbindelsen falder ud, kan forsøg på at forbinde igen medføre flere betalinger på højst 6 sats hver, også hvis det ikke lykkes.');
+    } finally { setLanguagePref('en'); }
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
   it.each([
     ['the read fails', () => { throw { code: 'node', message: 'Could not read it' }; }],
     ['their node gives no live price', () => ({ ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null })],
@@ -2984,6 +3030,7 @@ describe('calls in the shell', () => {
     expect($<HTMLButtonElement>('[data-call-decline]')!.disabled).toBe(true);
     expect(text('[data-call-accept]')).toBe('Accept');
     expect(text('[data-call-answer-price]')).toMatch(/nothing can be paid/i);
+    expect($('[data-call-answer-cost]')).toBeNull();
     expect(host.used('call_signal')).toHaveLength(0);
   });
 
@@ -3158,6 +3205,28 @@ describe('calls in the shell', () => {
     const css = readFileSync(join(__dirname, '../src/styles.css'), 'utf8');
     expect(css).toMatch(/\.call-video\.local \{[^}]*transform: scaleX\(-1\)/);
     expect(css).toMatch(/\.call-self\[data-camera-off\] \.call-video\.local \{ display: none; \}/);
+  });
+
+  it('a video call with the camera off says they cannot see you, and the line goes when it is back on', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'srcObject', 'set').mockImplementation(() => {});
+    const host = stubHost({ messages_list: () => [] });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { ...msg(400, { media: 'video', sdp: 'offer' }), timestamp: Date.now() } });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
+    FakePc.made[0].connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect($('[data-call-camera-off]')).toBeNull();
+    $<HTMLButtonElement>('[data-call-camera]')!.click();
+    await vi.waitFor(() => expect($('[data-call-camera-off]')).not.toBeNull());
+    expect(text('[data-call-camera-off]')).toBe('Your camera is off. They cannot see you. Press Camera to turn it on.');
+    try {
+      setLanguagePref('da');
+      expect(text('[data-call-camera-off]')).toBe('Dit kamera er slukket. De kan ikke se dig. Tryk Kamera for at tænde det.');
+    } finally { setLanguagePref('en'); }
+    $<HTMLButtonElement>('[data-call-camera]')!.click();
+    await vi.waitFor(() => expect($('[data-call-camera-off]')).toBeNull());
   });
 
   it('Codex: a camera error, then a drop: the camera error is shown as it is, never as a recovery that could not start', async () => {
