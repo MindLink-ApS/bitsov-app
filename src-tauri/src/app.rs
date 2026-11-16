@@ -17026,6 +17026,50 @@ mod control_act_tests {
         node
     }
 
+    #[tokio::test]
+    async fn a2_call_minutes_respect_the_separate_contact_and_app_limits_with_grant_left() {
+        for contact_limit in [true, false] {
+            let (routes, next, reserved) = PacedHold {
+                per_block: 10_000, fee: 0, minutes: 60, closing: 1_000, direct: true, spent: SPENT_AT_CEILING,
+            }.routes();
+            assert_eq!(reserved, 601_000);
+            let node = paced_call(routes, reserved).await;
+            *node.state.node_grant.lock().unwrap() = Some(serde_json::from_value(g1_grant(3600, 5_000_000, 4_368_000)).unwrap());
+            with_book(&node.state, true, |b| {
+                b.ceiling_msat = if contact_limit { 5_000_000 } else { 50_000 };
+                b.set_limit(A, false, 50_000)?;
+                let earlier = if contact_limit { 38_000 } else { 28_000 };
+                b.reserve("earlier", A, false, earlier, now_ms());
+                b.settle("earlier", earlier, now_ms());
+                if !contact_limit {
+                    b.reserve("other-payment", budget::INVOICE_PAYMENTS, false, 10_000, now_ms());
+                    b.settle("other-payment", 10_000, now_ms());
+                }
+                Ok(())
+            }).unwrap();
+            // The offer cost 2 sats; the next minute's 10-sat ceiling fits exactly.
+            do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+            let view = budget_view(&node.state).unwrap();
+            assert_eq!(view.accounted_msat, 42_000);
+            assert_eq!(view.unsettled_msat, 0);
+            assert_eq!(view.node_grant.unwrap().remaining_msat, 4_368_000);
+            let refused = do_call_block(&node.state, A, CALL_ID, 1).await.unwrap_err();
+            assert_eq!(refused.code, if contact_limit { "budget_exhausted" } else { "ceiling_exhausted" });
+            assert!(refused.message.contains("42 sats"));
+            assert!(refused.message.contains("50 sats"));
+            assert_eq!(minutes_sent(&node), 1);
+            assert_eq!(next.load(Ordering::SeqCst), 1);
+            // Raising only the limiting budget allows the next minute, at its exact ceiling.
+            with_book(&node.state, true, |b| {
+                if contact_limit { b.set_limit(A, false, 52_000)?; } else { b.ceiling_msat = 52_000; }
+                Ok(())
+            }).unwrap();
+            do_call_block(&node.state, A, CALL_ID, 1).await.unwrap();
+            assert_eq!(minutes_sent(&node), 2);
+            assert_eq!(next.load(Ordering::SeqCst), 2);
+        }
+    }
+
     /// A call runs to its hold: every minute the node's cap allows is paid, at the
     /// exact boundary too, routed and direct, with rc21's closing reserve and without.
     /// The next one is refused, nothing is paid for it, and the call is hung up.
