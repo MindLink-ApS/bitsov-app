@@ -10,6 +10,7 @@ import { createAmountDraft } from './amountDraft';
 import { t as tr, possessive, languagePref, setLanguagePref, type LanguagePref } from '../i18n';
 import { CallRepairs } from './CallRepairs';
 import { provenUnpaid } from './paymentOutcome';
+import { hostText } from './hostCopy';
 import { AddDevice } from '../onboarding/AddDevice';
 import { PairWords } from '../onboarding/PairWords';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
@@ -1419,7 +1420,32 @@ export function ControlCenter(props: Props) {
     const sats = Number(callBudgetSats());
     return Number.isSafeInteger(sats) && sats > 0 && sats <= 100_000 ? sats * 1000 : undefined;
   };
+  const canStillAnswer = () => [callView(), ...waitingCalls()].some(view => view.phase === 'incoming');
+  const answerCallEnded = () => callBudgetSats() === null && callView().phase === 'ended' && !callView().outgoing && !canStillAnswer();
+  let callApprovalFrom: string | null = null;
+  const closeCallApproval = () => {
+    if (!callApproval()) return;
+    const key = callApprovalFrom;
+    callApprovalFrom = null;
+    setCallApproval(false);
+    setCallBudgetSats(null);
+    queueMicrotask(() => {
+      const panel = (key && waitingPanels.get(key)) || callPanel;
+      if (panel?.isConnected) (panel.querySelector<HTMLElement>('[data-call-accept]:not(:disabled)') ?? panel).focus();
+    });
+  };
+  const openCallApproval = (key: string | null = null) => {
+    callApprovalFrom = key;
+    setCallBudgetSats(null);
+    setCallApproval(true);
+    queueMicrotask(() => (callPanel?.querySelector<HTMLElement>('[data-call-approve]') ?? callPanel)?.focus());
+  };
+  // A request approved at the node can open on a later status poll.
+  createEffect(on(() => spendLine(spend(), now()).open, (open, wasOpen) => {
+    if (open && wasOpen === false && !spend()?.pending) closeCallApproval();
+  }, { defer: true }));
   const showCallBudgetRequest = (amountMsat: number | null) => {
+    callApprovalFrom = null;
     setCallBudgetSats(amountMsat === null ? null : String(Math.ceil(amountMsat / 1000)));
     setCallApproval(amountMsat !== null);
   };
@@ -1476,7 +1502,7 @@ export function ControlCenter(props: Props) {
     quote: (peer) => act(() => source.callQuote(peer)),
     signal: async (peer, kind, plaintext, maxMsat, minutes, maxHangupMsat) => {
       const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes, maxHangupMsat));
-      if (!r.ok && (needsApproval(r.error) || r.error.code === 'spend_refused' || /token lacks.*spend|403/i.test(r.error.message))) setCallApproval(true);
+      if (!r.ok && (needsApproval(r.error) || r.error.code === 'grant_ended' || r.error.code === 'spend_refused' || /token lacks.*spend|403/i.test(r.error.message))) setCallApproval(true);
       void loadBudget();
       void loadWallet();
       return r;
@@ -2498,6 +2524,7 @@ export function ControlCenter(props: Props) {
           onCleanup(() => waitingPanels.delete(key));
           const view = () => waitingCalls().find(v => `${v.peer}:${v.callId}` === key)!;
           return <CallPanel waiting answerBlocked={!['idle', 'ended'].includes(callView().phase) || meetingOn() || callView().pendingCount > 0 || callView().unknownCount > 0 || (!!callView().close && callView().close!.status !== 'closed')} view={view()} payment={null} approval={null} approvalOpen={false}
+            spendingReady={roomCanSpend()} approveSpending={() => openCallApproval(key)}
             panelRef={el => { waitingPanels.set(key, el); }}
             blocked={moneyBlocked()} streams={{ local: null, remote: null }} nameOf={nameOf} quote={actions.callQuote}
             accept={(shown) => { if (!moneyBlocked()) void calls.acceptWaiting(key, shown); }} decline={(shown) => void calls.declineWaiting(key, shown)} ignore={() => calls.ignoreWaiting(key)} dismiss={() => calls.dismissWaiting(key)}
@@ -2506,13 +2533,14 @@ export function ControlCenter(props: Props) {
       </div>
       <CallPanel
         panelRef={el => { callPanel = el; }}
+        spendingReady={roomCanSpend()} approveSpending={openCallApproval}
         openCallSettings={() => { setTab('general'); setContextOpen(true); }}
         approvalOpen={callApproval()}
         approval={<Show when={callApproval()}>
           <div data-call-approval>
-            <strong>{tr('caApproveSpendingBeforeCalling')}</strong>
-            <p class="hint">{tr('caSpendingNeedsApprovalAfterApprovalPressCallOrAccept')}</p>
-            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} requestBudgetMsat={callBudgetMsat()} stays={tr('caNothingIsPaidUntilYouPressCallOrAccept')} />
+            <strong>{tr(canStillAnswer() || answerCallEnded() ? 'caApproveSpendingBeforeAnswering' : 'caApproveSpendingBeforeCalling')}</strong>
+            <p class="hint">{tr(answerCallEnded() ? 'caApproveAfterEndedCall' : 'caSpendingNeedsApprovalAfterApprovalPressCallOrAccept')}</p>
+            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} requestBudgetMsat={callBudgetMsat()} stays={tr(answerCallEnded() ? 'caApproveAfterEndedCall' : 'caNothingIsPaidUntilYouPressCallOrAccept')} />
             <Show when={!spend()?.pending && spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
               <Show when={callBudgetSats() !== null}>
                 <label>{tr('caBudgetToRequestSats')}
@@ -2522,10 +2550,13 @@ export function ControlCenter(props: Props) {
               </Show>
               <button type="button" class="soft" data-call-approve data-call-budget-request={callBudgetSats() !== null ? '' : undefined} disabled={moneyBlocked() || callApproving() || (callBudgetSats() !== null && callBudgetMsat() === undefined)} onClick={async () => {
                 setCallApproving(true);
-                try { await actions.approve(callBudgetMsat()); } finally { setCallApproving(false); }
+                try {
+                  const result = await actions.approve(callBudgetMsat());
+                  if (result.ok && spendLine(spend(), now()).open && !spend()?.pending) closeCallApproval();
+                } finally { setCallApproving(false); }
               }}>{tr(callBudgetSats() !== null ? 'caAskBiggerBudget' : 'uiApproveSpending')}</button>
             </Show>
-            <button type="button" class="soft" onClick={() => setCallApproval(false)}>{tr('uiClose')}</button>
+            <button type="button" class="soft" onClick={closeCallApproval}>{tr('uiClose')}</button>
           </div>
         </Show>}
         payment={<Show when={callView().callId} keyed>{(callId) =>
@@ -3756,6 +3787,8 @@ function CallPanel(props: {
   panelRef: (el: HTMLElement) => void;
   approvalOpen: boolean;
   approval: JSX.Element;
+  spendingReady?: boolean;
+  approveSpending?: () => void;
   blocked: boolean;
   /** M6: audio goes through both nodes; no direct connection, STUN or recovery notes. */
   routed?: boolean;
@@ -3852,7 +3885,7 @@ function CallPanel(props: {
   };
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
-      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={v().phase} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[v().phase]} ${who()}`}>
+      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={v().phase} data-call-approval-open={props.approvalOpen ? '' : undefined} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[v().phase]} ${who()}`}>
         <header>
           <strong data-call-title aria-live="polite">{CALL_TITLE[v().phase]}{v().media === 'video' ? tr('uiVideo') : ''}</strong>
           <span class="who">{who()}</span>
@@ -3865,6 +3898,12 @@ function CallPanel(props: {
         {/* What answering can cost this owner, in words: the answer, their own hangup, and only a reconnect beyond that (each one signal, all-in). */}
         <Show when={v().phase === 'incoming' && shown() ? answerCost(shown()!) : null}>
           {(m) => <p class="hint" data-call-answer-cost>{tr('caCallAnswerCostNote', fmtAmount(m()))}</p>}
+        </Show>
+        <Show when={v().phase === 'incoming' && props.spendingReady === false}>
+          <p class="hint" role="status" data-call-spend-needed>
+            {tr('caAnswerNeedsSpendingApproval')}{' '}
+            <button type="button" class="link" data-call-spend-approve disabled={props.blocked || v().silenced} onClick={() => props.approveSpending?.()}>{tr('uiApproveSpending')}</button>
+          </p>
         </Show>
         {props.approval}
         {/* No surprise camera: before Accept, a video call says the camera comes on, and how to turn it off. */}
@@ -3937,7 +3976,18 @@ function CallPanel(props: {
         <Show when={v().phase === 'ended'}>
           <p class="hint" data-call-ended>{v().stuck
             ? tr('uiACallToIsStillClosingAtYour', who())
+            : v().minutes?.stop?.limit?.code === 'budget_exhausted' ? tr('caCallEndedContactLimit')
+            : v().minutes?.stop?.limit?.code === 'ceiling_exhausted' ? tr('caCallEndedTotalLimit')
+            : v().minutes?.stop?.limit?.code === 'grant_exhausted' ? tr('caCallEndedGrantLimit')
             : v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
+          <Show when={v().minutes?.stop?.limit}>
+            {(limit) => <p class="hint" data-call-budget-limit={limit().code}>
+              {hostText(limit().message)}{' '}
+              {limit().code === 'budget_exhausted' ? tr('caCallContactBudgetSettings')
+                : limit().code === 'ceiling_exhausted' ? tr('caCallTotalBudgetSettings')
+                : limit().code === 'grant_exhausted' ? tr('caCallNodeGrantApproval') : ''}
+            </p>}
+          </Show>
           <Show when={v().reason === 'failed' && !props.routed}>
             {/* A connectivity failure only ('failed': the connection closed, was lost, or never connected); no relay exists yet. No money claim here. */}
             <p class="hint" data-call-no-relay>{tr('uiSomeNetworksNeedARelayToConnectA')}</p>
@@ -5333,6 +5383,17 @@ function Composer(props: {
   /** One contact, and this Mac approves with Touch ID. */
   const touchable = () => spends() && !room() && props.actions.device()?.state === 'registered';
   const budget = () => props.budget ?? null;
+  /** The book's rolling limits apply even when a separate spending window supplies authority. */
+  const appBudgetRemaining = () => {
+    const b = budget();
+    if (!b) return null;
+    const used = b.accounted_msat ?? b.spent_msat + b.unsettled_msat;
+    const ceiling = b.autopay.state === 'open' ? Math.min(b.ceiling_msat, b.autopay.ceiling_msat ?? 0) : b.ceiling_msat;
+    const row = b.rows.find(row => row.target.toLowerCase() === target().toLowerCase() && row.room === room());
+    const contact = row?.limit_msat == null ? null
+      : Math.max(0, row.limit_msat - (row.accounted_msat ?? row.spent_msat + (row.unsettled_msat ?? 0)));
+    return { total: Math.max(0, ceiling - used), contact };
+  };
   /** The current node grant covers this contact and the displayed send ceiling. */
   const liveGrantRemaining = (): number | null => {
     const b = budget();
@@ -5345,11 +5406,8 @@ function Composer(props: {
         messagePerPaymentMax(g) < cost || (g.envelopes && (g.envelopes[peer] ?? 0) <= now)) return null;
     let remaining = Math.min(g.remaining_msat, g.recipient_left_msat_by_recipient?.[peer] ?? Infinity);
     if (b.autopay.state === 'open') {
-      const used = b.accounted_msat ?? b.spent_msat + b.unsettled_msat;
-      const row = b.rows.find(row => row.target.toLowerCase() === peer && row.room === room());
-      remaining = Math.min(remaining, Math.max(0, Math.min(b.ceiling_msat, b.autopay.ceiling_msat ?? 0) - used));
-      if (row?.limit_msat != null)
-        remaining = Math.min(remaining, Math.max(0, row.limit_msat - (row.accounted_msat ?? row.spent_msat + (row.unsettled_msat ?? 0))));
+      const local = appBudgetRemaining()!;
+      remaining = Math.min(remaining, local.total, local.contact ?? Infinity);
     }
     return remaining >= cost ? remaining : null;
   };
@@ -6782,7 +6840,12 @@ function Composer(props: {
         <p id={sendReasonId} class="hint" data-send-disabled-reason>{disabledReason()}</p>
       </Show>
       <Show when={mode() === 'message' && liveGrantRemaining() !== null}>
-        <p class="hint" data-send-budget>{tr('sendBudgetRemaining', fmtAmount(liveGrantRemaining()!))}</p>
+        <p class="hint" data-send-budget>{tr(budget()?.autopay.state === 'open' ? 'sendBudgetRemaining' : 'caNodeGrantSeparateLimits', fmtAmount(liveGrantRemaining()!))}</p>
+        <Show when={budget()?.autopay.state !== 'open' ? appBudgetRemaining() : null}>
+          {(left) => <p class="hint" data-send-app-budget>{left().contact === null
+            ? tr('caAppTotalRemaining', fmtAmount(left().total))
+            : tr('caAppContactRemaining', fmtAmount(left().contact!), fmtAmount(left().total), tr(room() ? 'uiThisRoom' : 'caThisContact'))}</p>}
+        </Show>
       </Show>
       <div class="composer-meta">
       <Show when={mode() === 'message'}>
