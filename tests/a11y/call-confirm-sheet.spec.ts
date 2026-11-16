@@ -116,7 +116,12 @@ for (const platform of PLATFORMS) for (const phone of PHONES) for (const lang of
 }
 
 // The real shell (sample data): the sheet is placed by the app's own layout, not a fixture.
-for (const platform of ['ios', 'android'] as const) for (const phone of PHONES) for (const root of [17, 53]) {
+// Root sizes are the ones each platform really reaches. iOS Dynamic Type raises the root (U2b: 17px at Large,
+// 53px at AX5). Android keeps the 16px rem basis and WebView enlarges text by text zoom, so it never runs at
+// a 53px root; 17px and 32px cover its range here. A forced 53px root on Android widens the shell's top bar past
+// a 320px screen before this sheet opens (on main as well), a separate shell issue outside this change.
+const APP_ROOTS = { ios: [17, 53], android: [17, 32] } as const;
+for (const platform of ['ios', 'android'] as const) for (const phone of PHONES) for (const root of APP_ROOTS[platform]) {
   test(`app: Call opens a confirmation with Cancel and Ring in reach: ${platform}, ${phone.width}x${phone.height}, ${root}px text`, async ({ page }) => {
     await page.setViewportSize({ width: phone.width, height: phone.height });
     await page.goto('/?sample');
@@ -124,11 +129,8 @@ for (const platform of ['ios', 'android'] as const) for (const phone of PHONES) 
     await page.addStyleTag({ content: withInsets(phone) });
     await page.addStyleTag({ content: `html[data-platform='${platform}'] { font-size: ${root}px; } *, *::before, *::after { animation: none !important; transition: none !important; }` });
     await page.evaluate(() => document.fonts.ready);
-    // A page already wider than the screen makes mobile Chromium widen its layout viewport, which moves every
-    // fixed overlay with it. That is the shell's own overflow (the top bar at AX5 on Android), not this sheet.
-    const widened = await page.evaluate((w) => innerWidth > w, phone.width);
-    test.info().annotations.push({ type: 'layout-viewport', description: widened ? 'widened by page overflow before the sheet opens' : 'screen width' });
-    test.skip(widened, 'page wider than the screen before the sheet opens (shell top bar); tracked separately');
+    // The page fits the screen before the sheet opens, so the sheet is measured against the screen itself.
+    expect(await page.evaluate(() => innerWidth)).toBe(phone.width);
     const call = page.locator('[data-call="audio"]');
     await expect(call).toBeEnabled({ timeout: 15_000 });
     await call.click();
