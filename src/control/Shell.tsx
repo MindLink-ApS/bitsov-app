@@ -3849,7 +3849,11 @@ function CallPanel(props: {
             <Show when={props.videoCanvas} fallback={<MediaView stream={props.streams.remote} video muted={false} kind="remote" />}>
               {(canvas) => { canvas().classList.add('call-video', 'remote'); canvas().dataset.callMedia = 'remote'; return <>{canvas()}</>; }}
             </Show>
-            <MediaView stream={props.streams.local} video muted kind="local" />
+            {/* Your own picture, named and shown as in a mirror; with the camera off it says so instead of going black. */}
+            <div class="call-self" data-call-self data-camera-off={v().camera ? undefined : ''}>
+              <MediaView stream={props.streams.local} video muted kind="local" />
+              <span class="call-self-label" data-call-self-label>{v().camera ? tr('uiYou') : `${tr('uiYou')} · ${tr('uiCallSelfCameraOff')}`}</span>
+            </div>
           </div>
         </Show>
         <Show when={props.routed && v().media === 'video' && videoStatusLine(props.videoStatus)}>
