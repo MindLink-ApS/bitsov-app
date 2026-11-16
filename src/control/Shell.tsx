@@ -3899,11 +3899,16 @@ function CallPanel(props: {
         <Show when={v().phase === 'ended'}>
           <p class="hint" data-call-ended>{v().stuck
             ? tr('uiACallToIsStillClosingAtYour', who())
+            : v().minutes?.stop?.limit?.code === 'budget_exhausted' ? tr('caCallEndedContactLimit')
+            : v().minutes?.stop?.limit?.code === 'ceiling_exhausted' ? tr('caCallEndedTotalLimit')
+            : v().minutes?.stop?.limit?.code === 'grant_exhausted' ? tr('caCallEndedGrantLimit')
             : v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
           <Show when={v().minutes?.stop?.limit}>
             {(limit) => <p class="hint" data-call-budget-limit={limit().code}>
               {hostText(limit().message)}{' '}
-              {tr(limit().code === 'budget_exhausted' ? 'caCallContactBudgetSettings' : 'caCallTotalBudgetSettings')}
+              {limit().code === 'budget_exhausted' ? tr('caCallContactBudgetSettings')
+                : limit().code === 'ceiling_exhausted' ? tr('caCallTotalBudgetSettings')
+                : limit().code === 'grant_exhausted' ? tr('caCallNodeGrantApproval') : ''}
             </p>}
           </Show>
           <Show when={v().reason === 'failed' && !props.routed}>

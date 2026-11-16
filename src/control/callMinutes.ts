@@ -99,7 +99,7 @@ export type MinutesStopCode = 'unpaid' | 'node_ended' | 'payment_failed' | 'budg
 export type MinutesStop = {
   code: MinutesStopCode;
   message: string;
-  /** The separate app limit that refused the minute, including its accounted amount. */
+  /** The node grant or separate app limit that refused the minute, including its accounted amount. */
   limit?: Pick<ActionError, 'code' | 'message'>;
 };
 
@@ -308,7 +308,7 @@ export function createCallMinutes(opts: {
       const retryable = code === 'not_dispatched' || code === 'call_block_not_due';
       attempts++;
       if (retryable && attempts < MAX_ATTEMPTS && !lapsed()) { schedule(RETRY_MS, () => void tick()); return; }
-      stopWith('payment_failed', r.error.message);
+      stopWith('payment_failed', r.error.message, code === 'grant_exhausted' ? r.error : undefined);
       return;
     }
     // Paid or not is unknown: never pay again on top of it.
