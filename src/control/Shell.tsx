@@ -1476,9 +1476,6 @@ export function ControlCenter(props: Props) {
     quote: (peer) => act(() => source.callQuote(peer)),
     signal: async (peer, kind, plaintext, maxMsat, minutes, maxHangupMsat) => {
       const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes, maxHangupMsat));
-      if (!r.ok && kind === 400 && r.error.code === 'grant_exhausted') {
-        showCallBudgetRequest(maxMsat + (maxHangupMsat ?? 0));
-      }
       if (!r.ok && (needsApproval(r.error) || r.error.code === 'spend_refused' || /token lacks.*spend|403/i.test(r.error.message))) setCallApproval(true);
       void loadBudget();
       void loadWallet();
@@ -2516,7 +2513,7 @@ export function ControlCenter(props: Props) {
             <strong>{tr('caApproveSpendingBeforeCalling')}</strong>
             <p class="hint">{tr('caSpendingNeedsApprovalAfterApprovalPressCallOrAccept')}</p>
             <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} requestBudgetMsat={callBudgetMsat()} stays={tr('caNothingIsPaidUntilYouPressCallOrAccept')} />
-            <Show when={spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
+            <Show when={!spend()?.pending && spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
               <Show when={callBudgetSats() !== null}>
                 <label>{tr('caBudgetToRequestSats')}
                   <input type="number" min="1" max="100000" step="1" data-call-budget-sats value={callBudgetSats() ?? ''} disabled={callApproving()} onInput={e => setCallBudgetSats(e.currentTarget.value)} />
@@ -7100,7 +7097,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
   return (
     <div class="spend" data-spend={props.spend?.state ?? 'unknown'}>
       <Switch>
-        <Match when={props.spend?.state === 'open' && line().open}>
+        <Match when={props.spend?.state === 'open' && !props.spend.pending && line().open}>
           <details class="quiet-detail passive-status" data-spend-status>
             <summary aria-label={tr('uiSpendingStatus')} title={tr('uiSpendingStatus')}>ⓘ</summary>
             <p class="spend-line">
@@ -7117,7 +7114,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
             </details>
           </details>
         </Match>
-        <Match when={props.spend?.state === 'pending' && props.spend.pending}>
+        <Match when={(props.spend?.state === 'pending' || (props.spend?.state === 'open' && props.spend.pending?.owner_can_grant)) && props.spend.pending}>
           {(p) => (
             <TouchIdFirst actions={props.actions} stays={<p class="hint" data-touch-id-stays-text="spend">
               {props.stays ?? spendWaitDefault()}{' '}
@@ -7138,7 +7135,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
             </TouchIdFirst>
           )}
         </Match>
-        <Match when={props.spend?.state === 'unavailable' && props.spend.pending}>
+        <Match when={(props.spend?.state === 'unavailable' || (props.spend?.state === 'open' && props.spend.pending?.owner_can_grant === false)) && props.spend.pending}>
           {(p) => (
             <div class="approval" data-approval="unavailable">
               <p>

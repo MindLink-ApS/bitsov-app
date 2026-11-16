@@ -979,7 +979,7 @@ const paired = { state: 'paired', scopes: ['read', 'receive', 'spend'], node_id:
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 
-function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; grant?: NodeGrantSummary; offer?: Reply; block?: Reply; hold?: Reply; spendRequest?: Reply; minutes?: number; endKeepsHold?: boolean; endLeavesUnresolved?: boolean } = {}) {
+function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; grant?: NodeGrantSummary; offer?: Reply; block?: Reply; hold?: Reply; spendRequest?: Reply; ownerCanGrant?: boolean; minutes?: number; endKeepsHold?: boolean; endLeavesUnresolved?: boolean } = {}) {
   resetContactsForTests();
   setPetname(A, 'Maya');
   const calls: { cmd: string; args?: unknown }[] = [];
@@ -1003,8 +1003,8 @@ function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; grant?: N
     spend_status: () => spending,
     spend_request: (args) => {
       opts.spendRequest?.(args);
-      return spending = { state: 'pending', basis: null, open_until_ms: null, window_ms: 600_000,
-        pending: { op_id: 'ab12', expires_at_ms: Date.now() + 600_000, owner_action: 'konsensus grant --op ab12', owner_can_grant: true } };
+      return spending = { ...(args?.budget_msat ? spending : { state: 'pending', basis: null, open_until_ms: null, window_ms: 600_000 }),
+        pending: { op_id: 'ab12', expires_at_ms: Date.now() + 600_000, owner_action: 'konsensus grant --op ab12', owner_can_grant: opts.ownerCanGrant ?? true } };
     },
     budget_status: () => opts.grant ? {
       paused: false, autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null },
@@ -1164,6 +1164,25 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(host.used('call_signal')).toHaveLength(1);
     expect(host.used('call_block')).toHaveLength(0);
     expect($('[data-call-budget-request]')).toBeNull();
+  });
+
+  it.each(['en', 'da'] as const)('an unavailable replacement keeps the existing window without offering approval instructions (%s)', async lang => {
+    const host = stubHost({
+      ownerCanGrant: false,
+      offer: () => { throw { code: 'grant_exhausted', message: 'Not enough remaining budget.' }; },
+    });
+    await openShell(); setLanguagePref(lang);
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-budget-request]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-budget-request]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval] [data-approval="unavailable"]')).not.toBeNull());
+    expect($('[data-call-approval] [data-approval="pending"]')).toBeNull();
+    expect($('[data-call-budget-request]')).toBeNull();
+    expect($('[data-call-approval] [data-spend="open"]')).not.toBeNull();
+    expect(host.used('spend_request').map(c => c.args)).toEqual([{ budget_msat: 21_000 }]);
+    expect(host.used('call_signal')).toHaveLength(1);
   });
 
   it('a failed larger-budget request keeps its amount available for retry', async () => {

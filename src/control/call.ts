@@ -1253,6 +1253,7 @@ export function createCallEngine(deps: CallDeps) {
         return;
       }
       if (!r.ok) {
+        if (r.error.code === 'grant_exhausted') deps.onBudgetNeeded?.(q.call_total_msat);
         end(null, session ? callRefusal(r.error) : r.error.message);
         return;
       }
