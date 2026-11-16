@@ -261,7 +261,7 @@ export type Actions = {
   spendScoped?: () => boolean;
   moneyBlocked: () => boolean;
   /** The request was made (open, or pending at the node), with the host's ids for it (#227). */
-  approve: () => Promise<ApprovalResult>;
+  approve: (callPeer?: string) => Promise<ApprovalResult>;
   lock: () => Promise<void>;
   /** Withdraw the pending request at the node. */
   cancelSpend: () => Promise<void>;
@@ -1413,6 +1413,7 @@ export function ControlCenter(props: Props) {
   };
   const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
   const [callApproval, setCallApproval] = createSignal(false);
+  const [callApprovalPeer, setCallApprovalPeer] = createSignal<string>();
   const [callApproving, setCallApproving] = createSignal(false);
   // M6 A1: the node is the cell. Call audio goes app -> own node -> peer node
   // -> peer app through the host-owned media socket; app-to-app WebRTC media
@@ -1449,7 +1450,8 @@ export function ControlCenter(props: Props) {
     // A locked or backgrounded phone silences the microphone while the call would go on being paid.
     stopWhenSilenced: isMobilePlatform(),
     closeAdmission: (operationId, peer, callId) => source.closeCallAdmission(operationId, peer, callId),
-    authorize: async () => {
+    authorize: async (peer) => {
+      setCallApprovalPeer(routedCalls ? peer : undefined);
       const pairing = await act(() => source.pairingStatus());
       if (!pairing.ok) {
         setErrors('spend', pairing.error.message);
@@ -1617,10 +1619,10 @@ export function ControlCenter(props: Props) {
     },
     fileFetch: (messageId) => source.fileFetch(messageId),
     fileSave: (messageId) => source.fileSave(messageId),
-    approve: async () => {
+    approve: async (callPeer) => {
       clearContactApprovalError();
       setErrors('spend', undefined);
-      const r = await act(() => source.spendRequest());
+      const r = await act(() => source.spendRequest(callPeer));
       if (r.ok) setSpend(r.value);
       else setErrors('spend', r.error.message);
       return approvalResult(r);
@@ -2501,11 +2503,11 @@ export function ControlCenter(props: Props) {
           <div data-call-approval>
             <strong>{tr('caApproveSpendingBeforeCalling')}</strong>
             <p class="hint">{tr('caSpendingNeedsApprovalAfterApprovalPressCallOrAccept')}</p>
-            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} stays={tr('caNothingIsPaidUntilYouPressCallOrAccept')} />
+            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={{ ...actions, approve: () => actions.approve(callApprovalPeer()) }} stays={tr('caNothingIsPaidUntilYouPressCallOrAccept')} />
             <Show when={spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
               <button type="button" class="soft" data-call-approve disabled={moneyBlocked() || callApproving()} onClick={async () => {
                 setCallApproving(true);
-                try { await actions.approve(); } finally { setCallApproving(false); }
+                try { await actions.approve(callApprovalPeer()); } finally { setCallApproving(false); }
               }}>{tr('uiApproveSpending')}</button>
             </Show>
             <button type="button" class="soft" onClick={() => setCallApproval(false)}>{tr('uiClose')}</button>
