@@ -1899,3 +1899,24 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
 .approval-steps { margin: var(--s-2) 0; padding-left: 1.4em; list-style: decimal; }
 .approval-steps > li + li { margin-top: var(--s-2); }
 .approval-steps code { display: block; margin: var(--s-1) 0; overflow-wrap: anywhere; }
+
+/* The Ring confirmation on phones: a sheet at the bottom of the screen, inside the safe area, never taller than it.
+   With large text it scrolls, and Cancel and Ring stay pinned at its foot, so the decision is always in reach. */
+@media (max-width: 480px) {
+  .call-confirm {
+    position: fixed; top: auto; left: max(var(--s-3), var(--safe-area-left, 0px)); right: max(var(--s-3), var(--safe-area-right, 0px));
+    bottom: max(var(--s-3), var(--safe-area-bottom, 0px)); width: auto; max-width: none; z-index: 55;
+    max-height: calc(100dvh - max(var(--s-3), var(--safe-area-top, 0px)) - max(var(--s-3), var(--safe-area-bottom, 0px)));
+    overflow-y: auto; overscroll-behavior: contain;
+  }
+  .call-confirm-actions { position: sticky; bottom: calc(-1 * var(--s-3)); margin: 0 calc(-1 * var(--s-3)) calc(-1 * var(--s-3)); padding: var(--s-2) var(--s-3) var(--s-3); background: var(--surface); }
+  .call-confirm-actions button { flex: 1; min-height: 44px; }
+}
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm {
+  position: fixed; top: auto; left: max(var(--s-3), var(--safe-area-left)); right: max(var(--s-3), var(--safe-area-right));
+  bottom: max(var(--s-3), var(--safe-area-bottom)); width: auto; max-width: none; z-index: 55;
+  max-height: calc(100dvh - max(var(--s-3), var(--safe-area-top)) - max(var(--s-3), var(--safe-area-bottom)));
+  overflow-y: auto; overscroll-behavior: contain;
+}
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions { position: sticky; bottom: calc(-1 * var(--s-3)); margin: 0 calc(-1 * var(--s-3)) calc(-1 * var(--s-3)); padding: var(--s-2) var(--s-3) var(--s-3); background: var(--surface); }
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions button { flex: 1; min-height: 44px; }

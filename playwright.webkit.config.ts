@@ -6,7 +6,7 @@ import { defineConfig } from '@playwright/test';
 const port = 1423;
 export default defineConfig({
   testDir: 'tests/a11y',
-  testMatch: ['safe-areas*.spec.ts', 'dynamic-type.spec.ts', 'inputs.spec.ts', 'chain-warnings.spec.ts'],
+  testMatch: ['safe-areas*.spec.ts', 'dynamic-type.spec.ts', 'inputs.spec.ts', 'chain-warnings.spec.ts', 'call-confirm-sheet.spec.ts'],
   forbidOnly: !!process.env.CI,
   workers: 1,
   retries: 0,
