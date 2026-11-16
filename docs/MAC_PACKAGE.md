@@ -329,7 +329,13 @@ and the remaining release requirements.
 The app starts a local node on port 3141 and uses the normal application data
 directory. Do not run it next to another BitSov app instance.
 
-## Intel Mac tester install (signet only)
+## Intel Mac tester install (not ready yet)
+
+> **Do not install this build yet.** This package bundles a node and starts
+> it on first launch (see above). The bundled node release creates a
+> **mainnet** configuration by default, and this app does not yet force or
+> check signet. Wait until a beta build is pinned to signet before following
+> these steps. Until then, these steps are a draft for that build.
 
 Use an Intel (`x86_64`) Mac and a **signet node only** for this preview.
 Intel packaging is proposed in [#482](https://github.com/MindLink-ApS/bitsov-app/pull/482);
@@ -389,6 +395,10 @@ supported macOS version still need validation on physical hardware.
 5. **First launch and signet check.** Open `/Applications/BitSov.app` in
    Finder. Follow the [signet pairing instructions](../README.md#pair-with-your-own-signet-node)
    with the designated node. Confirm it is on signet before any test payment.
+   The app does not show the node's network today. Ask the node owner to
+   confirm that the node's `konsensus.toml` contains `network = "signet"`,
+   or that its `/status` response reports `"network": "signet"`. Do not
+   continue if they cannot confirm it.
    After pairing,
    send and receive a message, then send and receive a signet payment with
    the node owner available to approve. These are tester checks to perform,
