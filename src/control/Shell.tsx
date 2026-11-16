@@ -3540,7 +3540,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
     why() ?? (noMinutePrice() ? tr('caMinutesNoPrice') : noMinutesPaid() ? tr('caMinutesOwnerSession') : quote() && cost() === null ? tr('uiSNodeDoesNotTakeCallsYet', possessive(props.name)) : cost() !== null
       ? tr('uiUpToToRingTheirCallPricePlus', fmtAmount(cost()!), fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat), feeCeiling(quote()!.offer_max_routing_fee_msat), fmtAmount(signalCost(quote()!)), fmtAmount(callCost(quote()!)!), callStunLabel())
       : tr('uiReadingTheirCallPrice'));
-  const priceReady = () => !refreshing() && !why();
+  const priceReady = () => !refreshing() && why() === null;
   const place = (media: CallMedia) => { const q = quote(); if (q && !off() && priceReady()) props.actions.placeCall(props.peer, media, q); };
   // A call pays and rings someone, so one tap only asks: the call/video button
   // opens a small confirm with the price, and Ring places it. A mis-tap on the
@@ -3562,7 +3562,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
       void props.actions.callQuote(props.peer).then((r) => {
         if (read !== dialogRead) return;
         if (r.ok) setQuote(r.value);
-        else setWhy(r.error.message);
+        else setWhy(r.error.message || tr('caCallPriceUnreadNothingPaid'));
         setRefreshing(false);
         queueMicrotask(() => { if (read === dialogRead && armed()) ringBtn?.focus(); });
       });

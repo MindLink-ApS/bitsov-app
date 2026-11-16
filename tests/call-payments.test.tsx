@@ -1211,6 +1211,21 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(host.used('call_signal')).toHaveLength(0);
   });
 
+  it('a price read with an empty error cannot reuse the cached consent', async () => {
+    let reply: Reply = () => QUOTE;
+    const host = stubHost({ quote: () => reply() });
+    await openShell();
+    reply = () => { throw { code: 'node', message: '' }; };
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect(host.used('call_quote')).toHaveLength(2));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect($<HTMLButtonElement>('[data-call-confirm="audio"]')!.disabled).toBe(true);
+    expect($('[data-call-minute-price]')).toBeNull();
+    expect($('[data-call-confirm-box] [role="status"]')?.textContent).toBeTruthy();
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
   it('an old contact read cannot overwrite the refreshed dialog after navigating away and back', async () => {
     const other = 'b'.repeat(64);
     let finish!: (q: CallQuote) => void;
