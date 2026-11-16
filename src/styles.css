@@ -1903,6 +1903,7 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
   gap: var(--s-3);
 }
 .waiting-calls .call-panel { position: relative; right: auto; bottom: auto; }
+.call-panel[data-call-approval-open] { z-index: 52; max-height: calc(100dvh - 48px); overflow-y: auto; }
 
 /* The node's approval, step by step. */
 .approval-steps { margin: var(--s-2) 0; padding-left: 1.4em; list-style: decimal; }

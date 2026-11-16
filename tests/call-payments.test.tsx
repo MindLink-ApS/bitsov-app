@@ -16,6 +16,7 @@ import App from '../src/App';
 import { setLanguagePref } from '../src/i18n';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import { createCallEngine, parseSignal, SILENCED_GRACE_MS, type CallDeps, type CallView } from '../src/control/call';
+import * as callEngine from '../src/control/call';
 import {
   BLOCK_GRACE_MS, ENDED_CONFIRM_MS, MAX_ATTEMPTS, PASSING_MAX_ATTEMPTS, RETRY_MS, STATUS_POLL_MS,
   createCallMinutes, waitUntilPaid, type MinutesDeps, type MinutesStop, type MinutesView,
@@ -377,6 +378,32 @@ describe('paying the minutes of one outgoing call', () => {
       }
     }
     setLanguagePref('system');
+  });
+
+  it.each(['budget_exhausted', 'ceiling_exhausted'])('keeps the exact %s refusal when stopping the minutes', async code => {
+    const node = fakeNode({ now: () => Date.now() });
+    const message = 'You have used 42 sats of 50 sats for this contact in the last 24 hours, and this costs 10 sats. Raise the budget to send.';
+    const s = session(node, async () => fail(code, message));
+    await s.confirmed();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.last().stop).toMatchObject({ code: 'budget_limit', limit: { code, message } });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(s.deps.pay).toHaveBeenCalledTimes(1);
+    expect(node.reservation!.spent_msat).toBe(0);
+  });
+
+  it('keeps an exhausted node grant for display without changing the payment failure or retrying', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const message = "Your node's spend budget has 8 sats left, less than this costs. Nothing was sent. Ask for a new budget.";
+    const s = session(node, async () => fail('grant_exhausted', message));
+    await s.confirmed();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.last().stop).toMatchObject({ code: 'payment_failed', limit: { code: 'grant_exhausted', message } });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(s.deps.pay).toHaveBeenCalledTimes(1);
+    expect(node.reservation!.spent_msat).toBe(0);
   });
 
   it('a minute whose result is unknown is never paid again on top of it', async () => {
@@ -1082,10 +1109,10 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => micStream() } });
   });
   afterEach(() => {
-    setLanguagePref('en');
     dispose?.();
     dispose = undefined;
     mount?.remove();
+    setLanguagePref('en');
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -1115,6 +1142,32 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     $<HTMLButtonElement>(button === 'approve' ? '[data-call-approve]' : '[data-call-approval] [data-spend-ask-again]')!.click();
     await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
     expect(host.used('spend_request')[0].args).toEqual({ call_peer: A });
+    expect(capture).not.toHaveBeenCalled();
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+  });
+  it.each([['approve', 'reopened'], ['ask-again', 'reopened'], ['approve', 'left open'], ['ask-again', 'left open']])('keeps incoming approval ordinary through %s with the outgoing panel %s', async (button, panel) => {
+    const incomingPeer = 'b'.repeat(64);
+    const host = stubHost({
+      peers: [A, incomingPeer],
+      pairing: () => ({ ...paired, scopes: ['read', 'receive'] }),
+      spend: { state: 'expired', basis: null, open_until_ms: null, pending: null, window_ms: 600_000, lapse: 'lost' },
+    });
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval]')).not.toBeNull());
+    if (panel === 'reopened') [...$('[data-call-approval]')!.querySelectorAll('button')].find(b => b.textContent === 'Close')!.click();
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'incoming', kind: 400, sender: incomingPeer, recipient: OWN,
+      timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($('[data-call-spend-approve]')).not.toBeNull());
+    if (panel === 'reopened') $<HTMLButtonElement>('[data-call-spend-approve]')!.click();
+    await vi.waitFor(() => expect($('[data-call-approval]')).not.toBeNull());
+    $<HTMLButtonElement>(button === 'approve' ? '[data-call-approve]' : '[data-call-approval] [data-spend-ask-again]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    expect(host.used('spend_request')[0].args).toEqual({});
     expect(capture).not.toHaveBeenCalled();
     expect(host.used('call_signal')).toHaveLength(0);
     expect(host.used('call_block')).toHaveLength(0);
@@ -1431,8 +1484,104 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await openShell();
     await ringAndAnswer(host);
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect($('[data-call-ended]')?.textContent).toBe('You have reached your budget, so the call ended. Nothing was paid for the next minute. Raise the budget to call again.');
+    expect($('[data-call-ended]')?.textContent).toBe('This contact’s rolling 24-hour limit cannot cover the next minute, so the call ended. Nothing was paid for that minute.');
     expect(host.used('call_block')).toHaveLength(1);
+  });
+
+  it.each([
+    ['budget_exhausted', 'You have used 42 sats of 50 sats for this contact in the last 24 hours, and this costs 10 sats. Raise the budget to send.',
+      'Change this contact’s rolling 24-hour limit in Budget, then call again.',
+      'Ret kontaktens grænse for de seneste 24 timer under Budget, og ring igen.'],
+    ['ceiling_exhausted', 'You have used 42 sats of your 50 sats app all-in payment limit (rolling 24 hours), and this costs 10 sats. Raise the limit to send.',
+      'Change the app’s rolling 24-hour total in Budget, then call again.',
+      'Ret appens samlede grænse for de seneste 24 timer under Budget, og ring igen.'],
+  ] as const)('the ended card identifies %s separately from a call hold or node grant', async (code, message, english, danish) => {
+    const host = stubHost({ block: () => { throw { code, message }; } });
+    await openShell();
+    await ringAndAnswer(host);
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    const detail = $(`[data-call-budget-limit="${code}"]`);
+    expect(detail?.textContent).toContain(message);
+    expect(detail?.textContent).toContain(english);
+    setLanguagePref('da');
+    expect(detail?.textContent).toContain(code === 'budget_exhausted'
+      ? 'Du har brugt 42 sats af 50 sats til denne kontakt'
+      : 'Du har brugt 42 sats af appens samlede betalingsgrænse på 50 sats');
+    expect(detail?.textContent).toContain(danish);
+    expect(host.used('call_block')).toHaveLength(1);
+    expect(host.used('call_media_open')).toHaveLength(0);
+  });
+
+  it.each([
+    ['budget_exhausted', 'You have used 42 sats of 50 sats for this contact in the last 24 hours, and this costs 10 sats. Raise the budget to send.',
+      'This contact’s rolling 24-hour limit cannot cover the next minute, so the call ended. Nothing was paid for that minute.',
+      'Kontaktens grænse for de seneste 24 timer kan ikke dække det næste minut, så opkaldet sluttede. Der blev ikke betalt for det minut.',
+      'Change this contact’s rolling 24-hour limit in Budget, then call again.',
+      'Ret kontaktens grænse for de seneste 24 timer under Budget, og ring igen.',
+      'Du har brugt 42 sats af 50 sats til denne kontakt de seneste 24 timer, og dette koster 10 sats. Hæv budgettet for at sende.'],
+    ['ceiling_exhausted', 'You have used 42 sats of your 50 sats app all-in payment limit (rolling 24 hours), and this costs 10 sats. Raise the limit to send.',
+      'The app’s rolling 24-hour total limit cannot cover the next minute, so the call ended. Nothing was paid for that minute.',
+      'Appens samlede grænse for de seneste 24 timer kan ikke dække det næste minut, så opkaldet sluttede. Der blev ikke betalt for det minut.',
+      'Change the app’s rolling 24-hour total in Budget, then call again.',
+      'Ret appens samlede grænse for de seneste 24 timer under Budget, og ring igen.',
+      'Du har brugt 42 sats af appens samlede betalingsgrænse på 50 sats (seneste 24 timer), og dette koster 10 sats. Hæv grænsen for at sende.'],
+    ['grant_exhausted', "Your node's spend budget has 8 sats left, less than this costs. Nothing was sent. Ask for a new budget.",
+      'Your node grant cannot cover the next minute, so the call ended. Nothing was paid for that minute.',
+      'Boksens forbrugsbudget kan ikke dække det næste minut, så opkaldet sluttede. Der blev ikke betalt for det minut.',
+      'Ask the owner to approve a new node grant, then call again.',
+      'Bed ejeren godkende et nyt forbrugsbudget på boksen, og ring igen.',
+      'Din boks’ forbrugsbudget har 8 sats tilbage, mindre end dette koster. Intet blev sendt. Bed om et nyt budget.'],
+  ] as const)('the ended card leads with the true %s limit in both languages', async (code, message, english, danish, englishAction, danishAction, danishMessage) => {
+    const host = stubHost({ block: () => { throw { code, message }; } });
+    await openShell();
+    await ringAndAnswer(host);
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-ended]')?.textContent).toBe(english);
+    const detail = $(`[data-call-budget-limit="${code}"]`);
+    expect(detail?.textContent).toContain(message);
+    expect(detail?.textContent).toContain(englishAction);
+    setLanguagePref('da');
+    expect($('[data-call-ended]')?.textContent).toBe(danish);
+    expect(detail?.textContent).toContain(danishAction);
+    expect(detail?.textContent).toBe(`${danishMessage} ${danishAction}`);
+    expect(host.used('call_block')).toHaveLength(1);
+    expect(host.used('call_media_open')).toHaveLength(0);
+  });
+
+  it.each([
+    ['budget_exhausted', 'You have used 42 sats of 50 sats for this contact in the last 24 hours, and this costs 10 sats. Raise the budget to send.'],
+    ['ceiling_exhausted', 'You have used 42 sats of your 50 sats app all-in payment limit (rolling 24 hours), and this costs 10 sats. Raise the limit to send.'],
+    ['grant_exhausted', "Your node's spend budget has 8 sats left, less than this costs. Nothing was sent. Ask for a new budget."],
+  ] as const)('a stuck closing call hides %s call-again guidance in both languages until it clears', async (code, message) => {
+    const original = callEngine.createCallEngine;
+    let latest: CallView | undefined;
+    let publish: CallDeps['onView'] = () => {};
+    vi.spyOn(callEngine, 'createCallEngine').mockImplementation(deps => {
+      publish = deps.onView;
+      return original({ ...deps, onView: view => {
+        latest = view;
+        deps.onView(view.minutes?.stop?.limit ? { ...view, stuck: { opId: 'closing-call' } } : view);
+      } });
+    });
+    const host = stubHost({ block: () => { throw { code, message }; } });
+    await openShell();
+    await ringAndAnswer(host);
+    await vi.waitFor(() => expect($('[data-call-end-stuck]')).not.toBeNull());
+    expect(latest?.minutes?.stop?.limit).toEqual({ code, message });
+    expect($('[data-call-ended]')?.textContent).toBe('A call to Maya is still closing at your node. Nothing was paid for this one. End it to call again.');
+    expect($('[data-call-budget-limit]')).toBeNull();
+    expect($('[data-call-again]')).toBeNull();
+    expect($('[data-call-end-stuck]')?.textContent).toBe('End that call');
+    setLanguagePref('da');
+    expect($('[data-call-ended]')?.textContent).toBe('Et opkald til Maya lukkes stadig på din node. Intet blev betalt for dette. Afslut det for at ringe igen.');
+    expect($('[data-call-budget-limit]')).toBeNull();
+    expect($('[data-call-again]')).toBeNull();
+    expect($('[data-call-end-stuck]')?.textContent).toBe('Afslut det opkald');
+    publish(latest!);
+    expect($(`[data-call-budget-limit="${code}"]`)).not.toBeNull();
+    expect($('[data-call-end-stuck]')).toBeNull();
+    expect(host.used('call_block')).toHaveLength(1);
+    expect(host.used('call_media_open')).toHaveLength(0);
   });
 
   it('money not ready does not end the call: the shell holds the minute until the node reads ready, then it is paid once', async () => {
