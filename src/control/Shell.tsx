@@ -3796,13 +3796,20 @@ function CallPanel(props: {
   const price = () => { const q = shown(); const m = q && answerCost(q); return m === null ? '' : ` · ${tr('caUpToAmount', fmtAmount(m))}`; };
   /** The M6 paid-minutes line is on the card (same condition as its render below). */
   const minutesShown = () => !!(props.routed && v().outgoing && v().minutes);
-  /** The ended call can cost nothing more: no payment in flight or unknown, no admission left open, no minutes hold left. */
+  /**
+   * The ended call can cost nothing more, on positive evidence only: no signal payment in flight or unknown,
+   * the host confirmed it ended every admission (`closed`; not yet started, closing, refused or unknown never count),
+   * and any minutes hold is closed at the node with nothing left in it (unresolved minute payments stay in `remaining_msat`).
+   * Without that evidence (a peer-closed call, minutes with no reservation) the card says nothing rather than too much.
+   */
   const nothingMore = () => {
     const c = v();
     if (c.phase !== 'ended' || c.callId === null || c.stuck || c.pendingCount > 0 || c.unknownCount > 0) return false;
-    if (c.close !== null && c.close.status !== 'closed') return false;
+    if (c.close?.status !== 'closed') return false;
     const m = c.minutes;
-    return !m || (m.settled && !m.paying);
+    if (!m) return true;
+    const hold = m.reservation;
+    return !m.paying && !!hold && hold.closed && hold.remaining_msat === 0;
   };
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>

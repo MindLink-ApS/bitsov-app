@@ -2315,6 +2315,26 @@ describe('calls in the shell', () => {
     } finally { setLanguagePref('en'); }
   });
 
+  it('before the host has started ending the call (its closure still being recorded), never "nothing more is paid"', async () => {
+    const host = stubHost({
+      call_signal: (args) => ({ operation_id: args!.kind === 400 ? 'offer-op' : null, message_id: 'sig', kind: args!.kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }),
+      op_close_call: () => new Promise(() => {}),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    vi.useFakeTimers();
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    await vi.advanceTimersByTimeAsync(RING_MS + 1);
+    vi.useRealTimers();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    await vi.waitFor(() => expect(host.used('op_close_call')).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 300));
+    // The closure is still being recorded, so the paid end has not started.
+    expect(host.used('op_end_call')).toHaveLength(0);
+    expect($('[data-call-nothing-more]')).toBeNull();
+  });
+
   it('a refused end at the host never says "nothing more is paid"', async () => {
     stubHost({ op_end_call: () => { throw { code: 'call_end_refused', message: 'The node did not end it.' }; } });
     await liveCall();
