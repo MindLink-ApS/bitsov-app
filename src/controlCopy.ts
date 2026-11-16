@@ -1,3 +1,5 @@
+import { isMacOS } from './platform';
+
 /** Display copy for the control and assistant surfaces. Interpolated values stay verbatim. */
 export const controlEn = {
   "caDirectionSent": "sent",
@@ -28,7 +30,7 @@ export const controlEn = {
   "caDraftOnlyNothingWasSentOrChanged": "Draft only — nothing was sent or changed.",
   "caThisAssistantIsReadOnlyItCannotSendSpend": "This assistant is read-only. It cannot send, spend or prepare drafts.",
   "caThisAssistantIsReadOnlyTryOneOfThe": "{0} This assistant is read-only. Try one of the suggestions.",
-  "caQuestionsAndAnswersStaySealedOnThisMacKeeps": " Questions and answers stay sealed on this Mac. Keeps the latest 100 turns.",
+  "caQuestionsAndAnswersStaySealedOnThisMacKeeps": isMacOS() ? " Questions and answers stay sealed on this Mac. Keeps the latest 100 turns." : " Questions and answers stay sealed on this computer. Keeps the latest 100 turns.",
   "caForget": "Forget",
   "caWatchesWhileThisAppIsOpen": "Watches · while this app is open",
   "caLocalRulesUseExistingStatusAndCountsNoModel": "Local rules use existing status and counts. No model, extra network reads, drafts or actions. Keeps the latest 100 notices.",
@@ -257,6 +259,7 @@ export const controlEn = {
   "caReconnecting": "Reconnecting",
   "caOverTheNetworkANodeYouRunElsewhere": "over the network (a node you run elsewhere)",
   "caOnThisMac": "on this Mac",
+  "caOnThisLocalComputer": "on this computer",
   "caYourNodeIsLocked": "your node is locked",
   "caMsThisAppItsHost": "{0} · {1} ms (this app ↔ its host)",
   "caYourNodeNotAnsweringSince": "your node not answering since {0}",
@@ -997,7 +1000,7 @@ export const controlEn = {
   "caPaymentsArePausedResumeThemFirst": "Payments are paused. Resume them first.",
   "caApprovalsFromYourDevicesAreNotAvailableInSample": "Approvals from your devices are not available in sample data.",
   "caNoSuchRequestInSampleData": "No such request in sample data.",
-  "caSetUpTouchIDApprovalsFirst": "Set up Touch ID approvals first.",
+  "caSetUpTouchIDApprovalsFirst": isMacOS() ? "Set up Touch ID approvals first." : "Set up device approvals first.",
   "caADailyTotalIsBetween1And100000": "A daily total is between 1 and 100,000 sats.",
   "caThatIsAboveYourApprovedDailyTotalOfRaise": "That is above your approved daily total of {0}. Raise the total first.",
   "caNoPendingSpend": "No pending spend.",
@@ -1226,7 +1229,7 @@ export const controlDa: Record<keyof typeof controlEn, string> = {
   "caDraftOnlyNothingWasSentOrChanged": "Kun et udkast — intet blev sendt eller ændret.",
   "caThisAssistantIsReadOnlyItCannotSendSpend": "Denne assistent kan kun læse. Den kan ikke sende, betale eller lave udkast.",
   "caThisAssistantIsReadOnlyTryOneOfThe": "{0} Denne assistent kan kun læse. Prøv et af forslagene.",
-  "caQuestionsAndAnswersStaySealedOnThisMacKeeps": " Spørgsmål og svar bliver på denne Mac og er beskyttet. De seneste 100 samtalerunder gemmes.",
+  "caQuestionsAndAnswersStaySealedOnThisMacKeeps": isMacOS() ? " Spørgsmål og svar bliver på denne Mac og er beskyttet. De seneste 100 samtalerunder gemmes." : " Spørgsmål og svar bliver på denne computer og er beskyttet. De seneste 100 samtalerunder gemmes.",
   "caForget": "Glem",
   "caWatchesWhileThisAppIsOpen": "Overvågning · mens appen er åben",
   "caLocalRulesUseExistingStatusAndCountsNoModel": "Lokale regler bruger den status og de antal, der allerede er læst. Ingen model, ekstra netværkskald, udkast eller handlinger. De seneste 100 notitser gemmes.",
@@ -1455,6 +1458,7 @@ export const controlDa: Record<keyof typeof controlEn, string> = {
   "caReconnecting": "Genopretter forbindelse",
   "caOverTheNetworkANodeYouRunElsewhere": "via netværket (en node, du kører et andet sted)",
   "caOnThisMac": "på denne Mac",
+  "caOnThisLocalComputer": "på denne computer",
   "caYourNodeIsLocked": "din node er låst",
   "caMsThisAppItsHost": "{0} · {1} ms (denne app ↔ dens vært)",
   "caYourNodeNotAnsweringSince": "din node har ikke svaret siden {0}",
@@ -2195,7 +2199,7 @@ export const controlDa: Record<keyof typeof controlEn, string> = {
   "caPaymentsArePausedResumeThemFirst": "Betalinger er sat på pause. Genoptag dem først.",
   "caApprovalsFromYourDevicesAreNotAvailableInSample": "Godkendelser fra dine enheder er ikke tilgængelige i eksempeldata.",
   "caNoSuchRequestInSampleData": "Ingen sådan anmodning i eksempeldata.",
-  "caSetUpTouchIDApprovalsFirst": "Sæt godkendelser med Touch ID op først.",
+  "caSetUpTouchIDApprovalsFirst": isMacOS() ? "Sæt godkendelser med Touch ID op først." : "Sæt enhedsgodkendelser op først.",
   "caADailyTotalIsBetween1And100000": "En daglig total er mellem 1 og 100.000 sats.",
   "caThatIsAboveYourApprovedDailyTotalOfRaise": "Det er over din godkendte daglige total på {0}. Hæv totalen først.",
   "caNoPendingSpend": "Ingen afventende betaling.",
