@@ -570,6 +570,10 @@ impl NodeState {
 
     fn refuse_network(&self, refusal: crate::network_policy::NetworkRefusal) -> String {
         let mut epoch = self.network_auth_epoch.lock().unwrap();
+        self.refuse_network_at_epoch(&mut epoch, refusal)
+    }
+
+    fn refuse_network_at_epoch(&self, epoch: &mut u64, refusal: crate::network_policy::NetworkRefusal) -> String {
         *epoch = epoch.wrapping_add(1);
         *self.network_refusal.lock().unwrap() = refusal;
         *self.ready.lock().unwrap() = false;
@@ -2172,6 +2176,28 @@ async fn require_signet_report(state: &NodeState, bootstrap: bool) -> Result<u64
     Ok(epoch)
 }
 
+// Candidate checks use the supplied credential without refreshing or retrying.
+async fn require_signet_candidate_report(state: &NodeState, token: &str) -> Result<(), crate::network_policy::NetworkRefusal> {
+    if !state.signet_only { return Ok(()); }
+    let report = async {
+        state.http.get(format!("{}/status", state.api_base))
+            .bearer_auth(token)
+            .timeout(Duration::from_secs(5))
+            .send().await?.error_for_status()?
+            .json::<control::NodeStatusResponse>().await
+    }.await.map_err(|_| crate::network_policy::NetworkRefusal::Unknown)?;
+    let network = control::NodeOverview::from_status(report, now_ms()).network;
+    crate::network_policy::NetworkRefusal::reported(network.as_deref())
+}
+
+// The caller holds the current connection and epoch through publication.
+fn accept_signet_candidate_report(state: &NodeState, epoch: &mut u64, report: Result<(), crate::network_policy::NetworkRefusal>) -> Result<(), String> {
+    if !state.signet_only { return Ok(()); }
+    report.map_err(|refusal| state.refuse_network_at_epoch(epoch, refusal))?;
+    *state.network_refusal.lock().unwrap() = crate::network_policy::NetworkRefusal::None;
+    Ok(())
+}
+
 /// Retry transport outages without restarting the proxy or discarding durable
 /// pairing. A long node cooldown outlives the HTTP client's startup timeout.
 async fn finish_remote_auth(state: &NodeState, data_dir: &Path) {
@@ -2500,11 +2526,21 @@ async fn refresh_paired(state: &NodeState) -> Result<(), String> {
     } else {
         pairing::refresh(&mut session, &ctx.client, &ctx.key).await
     };
+    let network_report = if state.signet_only && result.is_ok() {
+        {
+            let current = state.remote_connect_generation.borrow();
+            if *current != generation { return Err("the remote connection changed".into()); }
+            let authority = state.network_auth_epoch.lock().unwrap();
+            if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
+            check_first_run_session(state, &session)?;
+        }
+        require_signet_candidate_report(state, &session.token).await
+    } else { Ok(()) };
     // A buffered old-node reply cannot restore credentials after replacement
     // or Forget. Keep this guard through publication so invalidation is atomic.
     let current = state.remote_connect_generation.borrow();
     if *current != generation { return Err("the remote connection changed".into()); }
-    let authority = state.network_auth_epoch.lock().unwrap();
+    let mut authority = state.network_auth_epoch.lock().unwrap();
     if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
     if let Err(error) = result {
         let message = error.to_string();
@@ -2527,6 +2563,7 @@ async fn refresh_paired(state: &NodeState) -> Result<(), String> {
         return Err(message);
     }
     check_first_run_session(state, &session)?;
+    accept_signet_candidate_report(state, &mut authority, network_report)?;
     *state.token.lock().unwrap() = Some(session.token.clone());
     *state.auth.lock().unwrap() = AuthMode::Paired(session);
     let node = state.node_id.lock().unwrap().clone();
@@ -2595,6 +2632,7 @@ async fn reauthenticate(state: &NodeState) -> Result<(), String> {
 /// Reached only on a node without pairing routes (rc7); see `authenticate`.
 async fn mint_token(state: &NodeState) -> Result<(), String> {
     let network_epoch = *state.network_auth_epoch.lock().unwrap();
+    let generation = state.signet_only.then(|| *state.remote_connect_generation.borrow());
     let token = state
         .http
         .post(format!("{}/auth/local", state.api_base))
@@ -2609,8 +2647,16 @@ async fn mint_token(state: &NodeState) -> Result<(), String> {
         .and_then(|t| t.as_str())
         .map(str::to_owned)
         .ok_or_else(|| "auth/local returned no token".to_string())?;
-    let authority = state.network_auth_epoch.lock().unwrap();
+    let network_report = if state.signet_only {
+        require_signet_candidate_report(state, &token).await
+    } else { Ok(()) };
+    let current = generation.map(|_| state.remote_connect_generation.borrow());
+    if current.as_ref().is_some_and(|current| Some(**current) != generation) {
+        return Err("the remote connection changed".into());
+    }
+    let mut authority = state.network_auth_epoch.lock().unwrap();
     if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
+    accept_signet_candidate_report(state, &mut authority, network_report)?;
     *state.token.lock().unwrap() = Some(token);
     Ok(())
 }
