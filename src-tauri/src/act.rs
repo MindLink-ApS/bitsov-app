@@ -309,6 +309,21 @@ pub fn reports_no_payment(reply: &serde_json::Value) -> bool {
     matches!(reply.get("state").map(serde_json::Value::as_str), None | Some(Some("prepared" | "released")))
 }
 
+/// The callee's node refused the minute's invoice because it is catching up, and
+/// the caller's node records this attempt as holding no payment: `released`, no
+/// hash, nothing settled, retry allowed, for this operation. Node compose writes
+/// `released` with no hash only after `proven_unpaid`. Any other state keeps its
+/// doubt: `prepared` can hold a paid admission and the reply would not show it.
+pub fn peer_not_ready_unpaid(status: u16, body: &str, operation_id: &str) -> bool {
+    if status != 503 { return false; }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return false };
+    let zero_or_absent = |field: &str| v.get(field).is_none_or(|value| value.is_null() || value == 0);
+    v["code"] == "peer_not_ready" && v["operation_id"] == operation_id && v["state"] == "released"
+        && v.get("payment_hash").is_some_and(serde_json::Value::is_null)
+        && v["retry_allowed"] == true && v["accepted"] == false
+        && zero_or_absent("amount_msat") && zero_or_absent("readmission_msat") && zero_or_absent("fee_paid_msat")
+}
+
 /// The node's own record that this attempt paid nothing: its reply to the POST
 /// names this operation as `released` with no payment hash and nothing settled.
 /// Node compose writes that only when the attempt failed and `proven_unpaid`
@@ -327,6 +342,9 @@ pub fn released_without_payment(body: &str, operation_id: &str) -> bool {
         && v["retry_allowed"] == true && v["accepted"] == false
         && zero_or_absent("amount_msat") && zero_or_absent("readmission_msat") && zero_or_absent("fee_paid_msat")
 }
+
+/// The same refusal in plain words. It passes by itself, and the scheduler retries it.
+pub const PEER_NOT_READY_MINUTE: &str = "Their node is catching up and could not take this minute yet. Nothing was paid for it.";
 
 /// The owner's words for a recipient the node could not reach. The node's own
 /// wording promises a queue, but a released operation is not sent later.

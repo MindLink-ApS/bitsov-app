@@ -353,6 +353,12 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   known yet, and the node ends the call itself once its paid time runs out.
   When the admission is already closed (a peer hangup), End does not reconcile,
   and a lost minute stays pending until the owner's check.
+- **A callee catching up.** Their node refuses a minute's invoice while it syncs:
+  503 `peer_not_ready`. When the caller's node also records that attempt as
+  `released` with no hash and nothing settled, the host reads it as proven unpaid,
+  so there is no fence and the scheduler tries again as a passing refusal. Any
+  other state stays unknown. The same proof on any other send, or with another
+  status, is read as below for a callee gone offline: `not_dispatched`, no fence.
 - **A call the node already ended.** The minute cap, a minute that failed for
   good, an unpaid expiry and the ring deadline end the call at the caller's
   node with no hangup coming back. End still asks. The node refuses that hangup
