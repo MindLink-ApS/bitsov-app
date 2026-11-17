@@ -3,6 +3,7 @@ import { render } from 'solid-js/web';
 import { Onboarding, onboardingStage } from '../src/onboarding/Onboarding';
 import { onboardingSteps, type NodeStatus, type PairingView } from '../src/onboarding/pairing';
 import type { DeviceView } from '../src/control/types';
+import { setLanguagePref } from '../src/i18n';
 
 const starting: PairingView = {
   state: 'starting',
@@ -246,6 +247,53 @@ describe('pairing panel', () => {
     expect(save).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['en', 'Use a bitsov://pair/ pairing ticket from your node.'],
+    ['da', 'Brug et bitsov://pair/-parringslink fra din node.'],
+  ] as const)('a wrong-format link shows the %s format message itself, with no Error: prefix', async (locale, message) => {
+    setLanguagePref(locale);
+    const preview = vi.fn();
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <Onboarding status={() => booting} pairing={() => starting}
+      trustAck={() => false} onRetry={() => {}} selectedTarget="network"
+      onPreviewRemote={preview} onImportRemote={vi.fn()} />, mount);
+    const input = mount.querySelector<HTMLInputElement>('input')!;
+    input.value = 'https://example.com/not-a-ticket';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    const form = mount.querySelector<HTMLFormElement>('form')!;
+    form.requestSubmit();
+    await vi.waitFor(() => expect(form.querySelector('[data-soft-summary]')).not.toBeNull());
+    expect(form.querySelector('[data-soft-summary]')!.textContent).toBe(message);
+    expect(form.querySelector('[data-soft-detail]')).toBeNull();
+    expect(form.textContent).not.toContain('Error:');
+    expect(preview).not.toHaveBeenCalled();
+  });
+
+  it.each(['en', 'da'] as const)('a wrong-format prefilled link shows the %s format message directly', async locale => {
+    setLanguagePref(locale);
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <Onboarding status={() => booting} pairing={() => starting}
+      trustAck={() => false} onRetry={() => {}} selectedTarget="network"
+      onPreviewRemote={vi.fn()} onImportRemote={vi.fn()} initialPairingLink="bitsov://invite/abc" />, mount);
+    await vi.waitFor(() => expect(mount!.querySelector('[data-soft-summary]')).not.toBeNull());
+    expect(mount.querySelector('[data-soft-summary]')!.textContent).toBe(locale === 'da'
+      ? 'Brug et bitsov://pair/-parringslink fra din node.'
+      : 'Use a bitsov://pair/ pairing ticket from your node.');
+    expect(mount.textContent).not.toContain('Error:');
+  });
+
+  it('an unexpected preview failure keeps the generic summary, and Details has no Error: prefix', async () => {
+    mount = document.createElement('div'); document.body.appendChild(mount);
+    dispose = render(() => <Onboarding status={() => booting} pairing={() => starting}
+      trustAck={() => false} onRetry={() => {}} selectedTarget="network"
+      initialPairingLink="bitsov://pair/ok"
+      onPreviewRemote={async () => { throw new Error('preview_failed: socket closed'); }} onImportRemote={vi.fn()} />, mount);
+    mount.querySelector<HTMLFormElement>('form')!.requestSubmit();
+    await vi.waitFor(() => expect(mount!.querySelector('[data-soft-summary]')).not.toBeNull());
+    expect(mount.querySelector('[data-soft-summary]')!.textContent).toBe('That could not be completed. Open Details for more information.');
+    expect(mount.querySelector('[data-soft-detail] .hint')!.textContent).toBe('preview_failed: socket closed');
+  });
+
   const submitReview = async (form: HTMLFormElement) => {
     form.requestSubmit();
     await vi.waitFor(() => expect(form.querySelector('[data-pairing-preview], [data-soft-summary]')).not.toBeNull());
@@ -253,6 +301,7 @@ describe('pairing panel', () => {
   };
 
   afterEach(() => {
+    setLanguagePref('en');
     dispose?.();
     dispose = undefined;
     mount?.remove();
