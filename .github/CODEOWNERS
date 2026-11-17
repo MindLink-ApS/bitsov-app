@@ -1,0 +1,24 @@
+# Code owners for the desktop and mobile app.
+# Everything has an owner; the paths below are the verifier, release and money surfaces
+# where a change needs the maintainer's eye.
+*                                   @RaslaTL19
+
+.github/**                          @RaslaTL19
+.github/CODEOWNERS                  @RaslaTL19
+scripts/authority-check.sh          @RaslaTL19
+scripts/ci/**                       @RaslaTL19
+scripts/fetch-node-sidecar.sh       @RaslaTL19
+package-lock.json                   @RaslaTL19
+third_party/**                      @RaslaTL19
+src-tauri/Cargo.lock                @RaslaTL19
+src-tauri/tauri.conf.json           @RaslaTL19
+src-tauri/src/budget.rs             @RaslaTL19
+src-tauri/src/grant.rs              @RaslaTL19
+src-tauri/src/delegation.rs         @RaslaTL19
+src-tauri/src/owner_approval*.rs    @RaslaTL19
+src-tauri/src/phone_recovery.rs     @RaslaTL19
+src-tauri/src/apple_key_material.rs @RaslaTL19
+src-tauri/src/home_keychain.rs      @RaslaTL19
+src-tauri/src/home_unlock.rs        @RaslaTL19
+src-tauri/src/device_key*.rs        @RaslaTL19
+src-tauri/src/at_rest*              @RaslaTL19

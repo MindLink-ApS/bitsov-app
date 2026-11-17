@@ -37,3 +37,11 @@ it('passes a grant id or explicit null through an open spend view', async () => 
     expect(await hostSource.spendStatus()).toEqual(reply);
   }
 });
+
+it('passes the call contact to the host when requesting a call budget', async () => {
+  const peer = 'ab'.repeat(32);
+  const reply = await sampleSource().spendStatus();
+  invoke.mockResolvedValueOnce(reply);
+  expect(await hostSource.spendRequest(peer)).toEqual(reply);
+  expect(invoke).toHaveBeenCalledWith('spend_request', { call_peer: peer });
+});

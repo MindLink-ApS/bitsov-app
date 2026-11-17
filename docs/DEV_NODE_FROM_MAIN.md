@@ -31,13 +31,15 @@ source commit and binary hash when reporting a compatibility problem.
 
 ## Configure signet before starting anything
 
-The node's generated full-tier configuration can default to Bitcoin mainnet.
-`init` creates files; **do not run `start` or launch the app until the
-configuration below is set to signet**.
+Current node `main` accepts an explicit initialization network. Older pinned
+releases can default to Bitcoin mainnet and do not accept that option. Use the
+explicit signet option with a compatible binary; an older binary must refuse
+the command. **Do not run `start` or launch the app until the configuration
+below is set to signet**.
 
 ```sh
 export BITSOV_DEV_DATA_DIR="$(mktemp -d /tmp/bitsov-signet.XXXXXX)"
-"$BITSOV_DEV_SIDECAR" init --dir "$BITSOV_DEV_DATA_DIR" --tier full --non-interactive
+"$BITSOV_DEV_SIDECAR" init --dir "$BITSOV_DEV_DATA_DIR" --tier full --non-interactive --network signet
 ```
 
 Edit the existing `[lightning]` and `[chain]` sections in

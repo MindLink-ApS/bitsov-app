@@ -66,7 +66,7 @@ it.each(['en', 'da'] as const)('inflects names in the peer-not-ready message in 
   setLanguagePref(locale);
   for (const [name, da] of [['Rasmus', 'Rasmus’'], ['Maya', 'Mayas']]) {
     expect(t('uiSNodeDoesNotTakeCallsYet', possessive(name)))
-      .toBe(locale === 'da' ? `${da} node modtager ikke opkald endnu` : `${name}’s node does not take calls yet`);
+      .toBe(locale === 'da' ? `${da} boks oplyste ingen opkaldspris. De er måske offline, eller boksen tager måske ikke imod opkald endnu` : `${name}’s box gave no call price. They may be offline, or it may not take calls yet`);
     expect(peerNotReadyMessage({ code: 'peer_not_ready', reason: 'chain_unavailable' }, name))
       .toBe(locale === 'da' ? `${da} node er ikke klar til at modtage endnu (dens kædeforbindelse er nede)` : `${name}’s node isn't ready to receive yet (its chain connection is down)`);
   }

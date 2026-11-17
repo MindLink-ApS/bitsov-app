@@ -209,6 +209,7 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
+          npx vitest run
 
       # Tauri v2 Linux prerequisites. `cargo check` still runs the gtk/webkit -sys build
       # scripts, which resolve these via pkg-config.
@@ -291,6 +292,39 @@ jobs:
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
+
+  call-seal:
+    name: Call seal enabled (build + lib tests)
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VITE_CALL_SEAL: sealed
+      TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Free disk space
+        run: bash scripts/ci/free-disk-space.sh
+      - name: Tauri Linux prerequisites
+        timeout-minutes: 5
+        uses: ./.github/actions/tauri-prerequisites
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: src-tauri
+          shared-key: tauri-call-seal
+          cache-all-crates: "true"
+          cache-workspace-crates: "true"
+      # Keep the default Build job's flag-off tests and byte goldens as well.
+      - name: Rust — compile and test sealed calls
+        working-directory: src-tauri
+        run: |
+          cargo check --locked --features call-seal
+          cargo test --locked --features call-seal --lib
 
   starter-balance:
     name: Starter balance enabled (build + tests)
@@ -420,7 +454,7 @@ jobs:
 
       # Runs on sidecar changes, including edits to fetch-node-sidecar.sh's TAG.
       # Explicit discovery makes a missing verified binary FAIL rather than SKIP.
-      # rc21 supplies both init and the two-phase owner API.
+      # rc24 supplies both init and the two-phase owner API.
       - name: Bootstrap config matches the pinned node's full-tier init
         working-directory: src-tauri
         env:
@@ -434,7 +468,7 @@ jobs:
             app::local_owner::config_tests::bootstrap_config_matches_node_init -- --exact --nocapture 2>&1 | tee /tmp/owner-test.log
           grep -q "running 1 test" /tmp/owner-test.log || { echo "::error::expected exactly 1 test to run"; exit 1; }
 
-      - name: rc21 owner create, finalize and restart lifecycle (verified sidecar)
+      - name: rc24 owner create, finalize and restart lifecycle (verified sidecar)
         working-directory: src-tauri
         env:
           BITSOV_OWNER_TEST_BINARY: ${{ github.workspace }}/src-tauri/bin/konsensus-x86_64-unknown-linux-gnu
@@ -460,10 +494,10 @@ jobs:
 
       # rc7 fixes #66 at the node: fresh init writes the provider pair and the
       # probe validates fee data. Test those defaults with NO endpoint override.
-      - name: CS-1 smoke — boot rc21 from untouched init defaults, durable identity
+      - name: CS-1 smoke — boot rc24 from untouched init defaults, durable identity
         run: bash scripts/cs1-local-smoke.sh
 
-      - name: CS-2 smoke — rc21 host bindings
+      - name: CS-2 smoke — rc24 host bindings
         run: bash scripts/cs2-local-smoke.sh
 
       - name: sccache stats

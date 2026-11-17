@@ -2,26 +2,37 @@
 use std::sync::OnceLock;
 
 const REMOTE_TEST_IDENTIFIER: &str = "tech.mindlink.bitsov.remotetest";
+const BETA_IDENTIFIER: &str = "tech.mindlink.bitsov.beta";
 static PROFILE: OnceLock<AppProfile> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AppProfile {
     remote_only: bool,
+    signet_only: bool,
 }
 
 impl AppProfile {
     pub(crate) fn for_identifier(identifier: &str) -> Self {
-        Self { remote_only: identifier == REMOTE_TEST_IDENTIFIER }
+        Self {
+            remote_only: identifier == REMOTE_TEST_IDENTIFIER,
+            signet_only: matches!(identifier, BETA_IDENTIFIER | REMOTE_TEST_IDENTIFIER),
+        }
     }
 
     pub(crate) fn remote_only(self) -> bool {
         self.remote_only
     }
 
+    pub(crate) fn signet_only(self) -> bool {
+        self.signet_only
+    }
+
     #[cfg(any(test, target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))]
     pub(crate) fn keychain_service(self, service: &str) -> String {
         if self.remote_only {
             format!("{REMOTE_TEST_IDENTIFIER}.{service}")
+        } else if self.signet_only {
+            format!("{BETA_IDENTIFIER}.{service}")
         } else {
             service.to_owned()
         }
@@ -45,6 +56,23 @@ pub(crate) fn current() -> Result<AppProfile, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn password_services_use_the_exact_profile_namespace() {
+        let service = "bitsov.node.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.seed-password";
+        for (identifier, expected) in [
+            ("tech.mindlink.bitsov", "bitsov.node.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.seed-password"),
+            ("tech.mindlink.bitsov.remotetest", "tech.mindlink.bitsov.remotetest.bitsov.node.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.seed-password"),
+            ("tech.mindlink.bitsov.beta", "tech.mindlink.bitsov.beta.bitsov.node.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.seed-password"),
+        ] {
+            let profile = AppProfile::for_identifier(identifier);
+            assert_eq!(profile.keychain_service(service).as_bytes(), expected.as_bytes());
+            assert_eq!(profile.keychain_service(&format!("{service}.wrapped-v1")), format!("{expected}.wrapped-v1"));
+        }
+        for identifier in ["tech.mindlink.bitsov.beta.extra", "TECH.MINDLINK.BITSOV.BETA", "tech.mindlink.bitsov.other"] {
+            assert_eq!(AppProfile::for_identifier(identifier).keychain_service(service), service);
+        }
+    }
 
     #[test]
     fn production_keychain_services_remain_byte_for_byte_unchanged() {

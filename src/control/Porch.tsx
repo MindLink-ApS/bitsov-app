@@ -17,6 +17,10 @@ type Props = {
   peers: Peer[];
   /** This node answers and makes porch reads (`porch_quote_v1`, or legacy `porch_read_v1`). */
   nodeReads: boolean;
+  /** The node and contacts have answered, so what is missing is known. */
+  known?: boolean;
+  /** The last contacts read failed, so the list may be missing contacts. */
+  peersFailed?: boolean;
   moneyBlocked: boolean;
   spend: SpendView | null;
   spendGate: JSX.Element;
@@ -123,6 +127,7 @@ export function PorchPanel(props: Props) {
       <h2>{tr('uiPorch')}</h2>
       <p class="hint">
         {tr('caReadAContactSProfileCardOrPagesStraight')}</p>
+      <Show when={props.known !== false} fallback={<p class="hint" role="status" data-porch-waiting>{tr('caPorchAfterBoxAnswers')}</p>}>
       <Show
         when={props.nodeReads}
         fallback={
@@ -130,11 +135,16 @@ export function PorchPanel(props: Props) {
             {tr('caYourNodeDoesNotMakePorchReadsYetUpdate')}</p>
         }
       >
+        <Show when={props.peersFailed}>
+          <p class="err-note" role="status" data-porch-peers-failed>{tr('caCouldNotLoadContacts')}</p>
+        </Show>
         <Show
           when={readable().length > 0}
           fallback={
-            <p class="hint" data-porch-none>
-              {tr('caNoConnectedContactOffersPorchReadsRightNowContacts')}</p>
+            <Show when={!props.peersFailed}>
+              <p class="hint" data-porch-none>
+                {tr('caNoConnectedContactOffersPorchReadsRightNowContacts')}</p>
+            </Show>
           }
         >
           <ul class="porch-peers" data-porch-peers>
@@ -157,6 +167,7 @@ export function PorchPanel(props: Props) {
             </For>
           </ul>
         </Show>
+      </Show>
       </Show>
       <Show when={props.moneyBlocked}>
         <p class="hint" data-porch-blocked>{tr('extraPaymentsAreNotReadyYet')}</p>

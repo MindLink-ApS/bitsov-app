@@ -25,6 +25,73 @@ for (const lang of ['en', 'da']) {
     const bounds = await tabs.boundingBox();
     expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(852);
   });
+  test(`${lang}: a long reason on an unsent message stays on screen`, async ({ page }) => {
+    await page.goto(`${preview}?scene=list&lang=${lang}`);
+    await page.locator('[data-phone-list] [data-track^="peer:"]').first().click();
+    await page.waitForSelector('[data-stream]');
+    const box = await page.evaluate(() => {
+      const card = document.createElement('article');
+      card.className = 'msg out unsent';
+      card.innerHTML = '<div class="bubble">hi</div><div class="stamp"><span class="sats" data-unsent-reason>Ikke sendt · intet betalt · Beløbet ændrede sig under ventetiden på godkendelse, og endnu mere tekst.</span></div>';
+      document.querySelector('[data-stream]')!.append(card);
+      const r = card.querySelector('[data-unsent-reason]')!.getBoundingClientRect();
+      return { left: r.left, right: r.right, width: window.innerWidth };
+    });
+    expect(box.left).toBeGreaterThanOrEqual(0);
+    expect(box.right).toBeLessThanOrEqual(box.width);
+  });
+  test(`${lang}: a tall composer stays inside the screen and its end can be reached`, async ({ page }) => {
+    await page.setViewportSize({ width: 402, height: 874 });
+    await page.goto(`${preview}?scene=list&lang=${lang}`);
+    await page.locator('[data-phone-list] [data-track^="peer:"]').first().click();
+    await page.waitForSelector('[data-composer-bar]');
+    // As tall as the first-contact limits get, without needing a real first contact.
+    await page.evaluate(() => { const tall = document.createElement('div'); tall.style.cssText = 'height:900px;flex:none'; document.querySelector('.composer')!.prepend(tall); });
+    const end = await page.locator('.composer').evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+      return { bottom: el.getBoundingClientRect().bottom, bar: el.querySelector('[data-composer-bar]')!.getBoundingClientRect().bottom };
+    });
+    expect(end.bottom).toBeLessThanOrEqual(874);
+    expect(end.bar).toBeLessThanOrEqual(874);
+  });
+  for (const platform of ['ios', 'android']) {
+    test(`${lang}: the + menu is not clipped by the composer on ${platform}`, async ({ page }) => {
+      await page.goto(`${preview}?scene=list&lang=${lang}`);
+      await page.locator('[data-phone-list] [data-track^="peer:"]').first().click();
+      await page.waitForSelector('[data-composer-bar]');
+      await page.evaluate((p) => { document.documentElement.dataset.platform = p; }, platform);
+      await page.locator('[data-composer-plus]').click();
+      const onTop = await page.locator('[data-composer-mode="pay"]').evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) === el;
+      });
+      expect(onTop).toBe(true);
+    });
+    // The emoji picker sits inside the composer, so at the largest text size the composer
+    // must still scroll to reach it. Scrolled by hand and checked with a hit test, since a
+    // click scrolls on its own and would hide a box that cannot scroll.
+    test(`${lang}: at the largest text size the emoji picker scrolls into reach on ${platform}`, async ({ page }) => {
+      await page.goto(`${preview}?scene=budget-open&lang=${lang}`);
+      await page.locator('[data-phone-list] [data-track^="peer:"]').first().click();
+      await page.waitForSelector('[data-composer-bar]');
+      await page.evaluate((p) => {
+        document.documentElement.dataset.platform = p;
+        document.documentElement.style.fontSize = '53px';
+      }, platform);
+      await page.locator('[data-emoji]').click();
+      await page.waitForSelector('[data-emoji-picker]');
+      const reach = await page.locator('[data-emoji-pick]').last().evaluate((el) => {
+        // Scroll only the composer, by the distance that centres the last emoji in it.
+        const c = el.closest('.composer')! as HTMLElement;
+        const box = c.getBoundingClientRect();
+        c.scrollTop += el.getBoundingClientRect().top - (box.top + c.clientHeight / 2);
+        const r = el.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+        return { scrolls: getComputedStyle(c).overflowY !== 'visible', onTop: hit === el || el.contains(hit) };
+      });
+      expect(reach).toEqual({ scrolls: true, onTop: true });
+    });
+  }
   test(`${lang}: first-spend is in the top layer above the tabs, with edge Back blocked`, async ({ page }) => {
     await page.goto(`${preview}?scene=first-spend&lang=${lang}`);
     await expect(page.locator('[data-first-spend-scrim]')).toBeVisible();
@@ -136,3 +203,30 @@ test('pending node approval blocks both navigation paths, including attribute tr
   await expect(page.locator('[data-composer]')).toBeVisible();
   await expect(page.locator('[data-phone-you]')).toHaveCount(0);
 });
+
+// The file button's longer label reflows inside the composer at phone widths,
+// in both languages and denominations, instead of being clipped by its panel.
+for (const [scene, lang, denom, width] of ['budget-open', 'spend-open'].flatMap((scene) => ['en', 'da'].flatMap((lang) => ['sats', 'btc'].flatMap((denom) =>
+  [320, 360, 375, 390, 480].map((width) => [scene, lang, denom, width] as const))))) {
+      test(`${scene} ${lang} ${denom} ${width}: the file button stays inside its row`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 800 });
+        await page.addInitScript((value) => localStorage.setItem('bitsov.denom', value), denom);
+        await page.goto(`${preview}?scene=${scene}&lang=${lang}`);
+        await page.locator('[data-track^="peer:"]').first().click();
+        await page.locator('[data-composer-mode="file"]').evaluate((el: HTMLElement) => el.click());
+        await page.locator('[data-file-input]').setInputFiles({ name: 'hi.txt', mimeType: 'text/plain', buffer: Buffer.from('hi') });
+        const send = page.locator('[data-composer] [data-send]');
+        await expect(send).toBeVisible();
+        const row = page.locator('[data-composer] .composer-main.file-row');
+        const panel = page.locator('[data-composer]');
+        await expect(send).toContainText(lang === 'da' ? 'højst' : 'up to');
+        await page.waitForTimeout(400); // The phone shell's slide has settled.
+        const [button, box, outer] = [(await send.boundingBox())!, (await row.boundingBox())!, (await panel.boundingBox())!];
+        // Half a pixel for sub-pixel rounding between browsers.
+        expect(button.x + button.width).toBeLessThanOrEqual(box.x + box.width + 0.5);
+        expect(button.x).toBeGreaterThanOrEqual(box.x - 0.5);
+        expect(box.x + box.width).toBeLessThanOrEqual(outer.x + outer.width + 0.5);
+        expect(outer.x + outer.width).toBeLessThanOrEqual(width + 0.5);
+        expect(await send.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+      });
+}

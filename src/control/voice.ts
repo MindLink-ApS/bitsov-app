@@ -49,11 +49,34 @@ export function voiceFileName(atMs: number, type: string): string {
   return `voice-note-${stamp}.${type === 'audio/mp4' ? 'm4a' : 'webm'}`;
 }
 
-/** The file name a kind-200 message names: the plaintext itself, or the node's `[file: name]`. */
+/**
+ * The file name a kind-200 message names: the plaintext itself, the node's
+ * `[file: name]`, or the file record some messages carry as JSON
+ * (`{"filename": ..., "data_b64": ...}`). The payload itself is never a name.
+ */
 export function fileNameOf(plaintext: string | null): string | null {
   if (plaintext === null) return null;
-  const m = /^\[file: (.+)\]$/.exec(plaintext.trim());
-  return m ? m[1] : plaintext.trim() || null;
+  const text = plaintext.trim();
+  if (text.startsWith('{')) {
+    try {
+      const v: unknown = JSON.parse(text);
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        const o = v as Record<string, unknown>;
+        const n = [o.filename, o.name, o.file_name].find((x): x is string => typeof x === 'string' && x.trim() !== '');
+        return n ? baseName(n) : null;
+      }
+    } catch {
+      // A truncated or malformed file record: its text is payload, never a name.
+      return null;
+    }
+  }
+  const m = /^\[file: (.+)\]$/.exec(text);
+  return baseName(m ? m[1] : text);
+}
+
+/** A name without any directory part, or null when the last component is empty. */
+function baseName(n: string): string | null {
+  return n.trim().split(/[\\/]/).pop()?.trim() || null;
 }
 
 /** A kind-200 message whose file this app recorded as a voice note. */
