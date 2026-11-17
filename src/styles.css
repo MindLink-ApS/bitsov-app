@@ -706,6 +706,9 @@ html[data-theme='light'] .target-badge.honest { color: #6b4c00; }
  * Where an answer came from is always printed under it. Orange stays for sats
  * and the one action; a preview of what would leave is plain mono on ink. */
 .ai-providers-bar { width: 100%; display: flex; justify-content: center; padding: var(--s-2) var(--s-4); background: var(--bg); border-bottom: 1px solid var(--line); flex: none; z-index: 2; }
+/* The assistant's role line wraps; its Forget button keeps its width and its word on one line. */
+.ai-providers-bar:has([data-assistant-forget]) { align-items: center; gap: var(--s-3); }
+.ai-providers-bar [data-assistant-forget] { flex: none; white-space: nowrap; }
 .ai-watches { display: block; }
 .ai-watches summary { cursor: pointer; }
 .ai-watch-notices { display: block; max-height: 12rem; overflow-y: auto; }

@@ -374,3 +374,22 @@ for (const [scene, lang, denom, width] of ['budget-open', 'spend-open'].flatMap(
         expect(await send.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
       });
 }
+
+for (const lang of ['en', 'da']) {
+  for (const width of [360, 393]) {
+    test(`${lang} ${width}: the assistant's Forget button keeps its word on one line`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 740 });
+      await page.goto(`${preview}?scene=list&lang=${lang}`);
+      await page.locator('[data-phone-list] [data-track="assistant:node"]').click();
+      const forget = page.locator('[data-assistant-forget]');
+      await expect(forget).toBeVisible();
+      const lines = await forget.evaluate((el) => {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size;
+      });
+      expect(lines).toBe(1);
+      expect(await forget.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+    });
+  }
+}
