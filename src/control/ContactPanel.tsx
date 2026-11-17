@@ -23,27 +23,17 @@ import {
 } from './petnames';
 import { claimedName } from './state';
 import { onEscape } from './escapeStack';
+import { inertOutside } from './modalInert';
 import type { Peer } from './types';
 
-/** Call panels float above every panel and live regions must keep announcing: never made inert. */
-const STAYS_LIVE = '.call-panel, [data-waiting-calls], [aria-live], [role="status"], [role="alert"], .settings-scrim';
-
 /**
- * The panel covers the whole window, but `aria-modal` alone does not stop Tab
- * or a screen reader from reaching the chat behind it. Make everything outside
- * the panel inert while it is open; return a function that undoes exactly that.
+ * Stays fully usable behind the panel. A call can start or ring while the contact
+ * sheet is open, and answering, hanging up or approving a call payment must never
+ * wait for the sheet to close, so call panels and the waiting-calls stack are not
+ * made inert. The scrim is the panel's own click-to-close layer. Live regions are
+ * handled by inertOutside: they keep announcing, their controls go inert.
  */
-function inertOutside(panel: HTMLElement): () => void {
-  const made: HTMLElement[] = [];
-  for (let node: HTMLElement = panel; node.parentElement && node !== document.body; node = node.parentElement) {
-    for (const sibling of Array.from(node.parentElement.children)) {
-      if (sibling === node || !(sibling instanceof HTMLElement) || sibling.inert || sibling.matches(STAYS_LIVE)) continue;
-      sibling.inert = true;
-      made.push(sibling);
-    }
-  }
-  return () => { for (const el of made) el.inert = false; };
-}
+const STAYS_USABLE = '.call-panel, [data-waiting-calls], .settings-scrim';
 
 export function ContactPanel(props: {
   open: boolean;
@@ -125,7 +115,7 @@ export function ContactPanel(props: {
       if (opener && opener.isConnected && panel?.contains(document.activeElement)) opener.focus();
     });
     // Registered last so it runs first on close: the opener is usable again before focus returns.
-    if (panel) onCleanup(inertOutside(panel));
+    if (panel) onCleanup(inertOutside(panel, STAYS_USABLE));
   });
   return (
     <>
