@@ -431,6 +431,124 @@ describe('voice notes in the composer and thread', () => {
     }
   });
 
+  describe('Attach while recording, with a stop that finishes late', () => {
+    let releaseStop: (() => void) | null;
+    let opened: HTMLInputElement[];
+    let spy: { mockRestore: () => void };
+
+    beforeEach(() => {
+      releaseStop = null;
+      opened = [];
+      class SlowRecorder extends FakeRecorder {
+        stop() {
+          this.state = 'inactive';
+          void new Promise<void>((r) => { releaseStop = r; }).then(() => {
+            this.ondataavailable?.({ data: FakeRecorder.clip() });
+            this.onstop?.();
+          });
+        }
+      }
+      vi.stubGlobal('MediaRecorder', SlowRecorder);
+      const click = HTMLInputElement.prototype.click;
+      spy = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (this: HTMLInputElement) {
+        if (this.type === 'file') opened.push(this);
+        else click.call(this);
+      });
+    });
+
+    afterEach(() => { spy.mockRestore(); });
+
+    async function attachWhileRecording() {
+      await openShell();
+      $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+      await vi.waitFor(() => expect($('[data-voice-record="stop"]')).not.toBeNull());
+      $<HTMLButtonElement>('[data-composer-plus]')!.click();
+      $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
+      // The chooser opens in the same press, before the clip is final.
+      expect(opened).toHaveLength(1);
+      await vi.waitFor(() => expect(releaseStop).not.toBeNull());
+    }
+
+    function pick(name: string) {
+      const input = $<HTMLInputElement>('[data-file-input]')!;
+      Object.defineProperty(input, 'files', { configurable: true, value: [new File(['hi'], name, { type: 'text/plain' })] });
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    async function finishStop() {
+      releaseStop!();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    it('keeps the file picked in the chooser', async () => {
+      const host = stubHost();
+      await attachWhileRecording();
+      pick('brief.txt');
+      await finishStop();
+      expect($('[data-voice-preview]')).toBeNull();
+      expect(text('[data-file-chip] .file-name')).toBe('brief.txt');
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('file');
+      expect(host.used('file_send')).toHaveLength(0);
+    });
+
+    it('keeps a removed attachment removed', async () => {
+      const host = stubHost();
+      await attachWhileRecording();
+      pick('brief.txt');
+      [...$('[data-file-chip]')!.querySelectorAll<HTMLButtonElement>('button.link')].find((b) => b.textContent?.trim() === 'Remove')!.click();
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('message');
+      await finishStop();
+      expect($('[data-voice-preview]')).toBeNull();
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('message');
+      expect(host.used('file_send')).toHaveLength(0);
+    });
+
+    it('keeps a closed panel closed', async () => {
+      const host = stubHost();
+      await attachWhileRecording();
+      $<HTMLButtonElement>('[data-composer-close]')!.click();
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('message');
+      await finishStop();
+      expect($('[data-voice-preview]')).toBeNull();
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('message');
+      expect(host.used('file_send')).toHaveLength(0);
+    });
+
+    it('still lands the clip as the unsent preview when nothing else changed', async () => {
+      const host = stubHost();
+      await attachWhileRecording();
+      await finishStop();
+      expect($('[data-voice-preview]')).not.toBeNull();
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('file');
+      expect(host.used('file_send')).toHaveLength(0);
+    });
+  });
+
+  it('recording lifecycle stays consistent when Attach is pressed early', async () => {
+    const host = stubHost();
+    let grant!: (s: MediaStream) => void;
+    const { stream, track } = fakeStream();
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: () => new Promise<MediaStream>((r) => { grant = r; }) } });
+    const click = HTMLInputElement.prototype.click;
+    const spy = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (this: HTMLInputElement) {
+      if (this.type !== 'file') click.call(this);
+    });
+    try {
+      await openShell();
+      $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+      await vi.waitFor(() => expect(grant).toBeDefined());
+      $<HTMLButtonElement>('[data-composer-plus]')!.click();
+      $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
+      grant(stream);
+      await vi.waitFor(() => expect(track.stop).toHaveBeenCalled());
+      expect(FakeRecorder.made.every((r) => r.state === 'inactive')).toBe(true);
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('file');
+      expect(host.used('file_send')).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('blur then hide while recording still keeps the clip as a preview', async () => {
     const host = stubHost();
     await openShell();
