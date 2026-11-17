@@ -19,6 +19,8 @@ type Props = {
   nodeReads: boolean;
   /** The node and contacts have answered, so what is missing is known. */
   known?: boolean;
+  /** The last contacts read failed, so the list may be missing contacts. */
+  peersFailed?: boolean;
   moneyBlocked: boolean;
   spend: SpendView | null;
   spendGate: JSX.Element;
@@ -136,8 +138,10 @@ export function PorchPanel(props: Props) {
         <Show
           when={readable().length > 0}
           fallback={
-            <p class="hint" data-porch-none>
-              {tr('caNoConnectedContactOffersPorchReadsRightNowContacts')}</p>
+            <Show when={!props.peersFailed} fallback={<p class="err-note" role="status" data-porch-peers-failed>{tr('caCouldNotLoadContacts')}</p>}>
+              <p class="hint" data-porch-none>
+                {tr('caNoConnectedContactOffersPorchReadsRightNowContacts')}</p>
+            </Show>
           }
         >
           <ul class="porch-peers" data-porch-peers>
