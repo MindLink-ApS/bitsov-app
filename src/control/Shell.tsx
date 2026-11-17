@@ -263,7 +263,7 @@ export type Actions = {
   spendScoped?: () => boolean;
   moneyBlocked: () => boolean;
   /** The request was made (open, or pending at the node), with the host's ids for it (#227). */
-  approve: (callPeer?: string) => Promise<ApprovalResult>;
+  approve: (callPeerOrBudget?: string | number) => Promise<ApprovalResult>;
   lock: () => Promise<void>;
   /** Withdraw the pending request at the node. */
   cancelSpend: () => Promise<void>;
@@ -1432,14 +1432,26 @@ export function ControlCenter(props: Props) {
   const [callStreams, setCallStreams] = createSignal<{ local: MediaStream | null; remote: MediaStream | null }>({ local: null, remote: null });
   const [callApproval, setCallApproval] = createSignal(false);
   const [callApprovalPeer, setCallApprovalPeer] = createSignal<string>();
+  let callApprovalRevision = 0;
+  const clearCallApprovalPeer = () => {
+    callApprovalRevision++;
+    setCallApprovalPeer(undefined);
+  };
   const [callApproving, setCallApproving] = createSignal(false);
+  const [callBudgetSats, setCallBudgetSats] = createSignal<string | null>(null);
+  const callBudgetMsat = () => {
+    const sats = Number(callBudgetSats());
+    return Number.isSafeInteger(sats) && sats > 0 && sats <= 100_000 ? sats * 1000 : undefined;
+  };
   const canStillAnswer = () => [callView(), ...waitingCalls()].some(view => view.phase === 'incoming');
-  const answerCallEnded = () => callView().phase === 'ended' && !callView().outgoing && !canStillAnswer();
+  const answerCallEnded = () => callBudgetSats() === null && callView().phase === 'ended' && !callView().outgoing && !canStillAnswer();
   let callApprovalFrom: string | null = null;
   const closeCallApproval = () => {
-    if (!callApproval()) return;
     const key = callApprovalFrom;
     callApprovalFrom = null;
+    clearCallApprovalPeer();
+    setCallBudgetSats(null);
+    if (!callApproval()) return;
     setCallApproval(false);
     queueMicrotask(() => {
       const panel = (key && waitingPanels.get(key)) || callPanel;
@@ -1448,14 +1460,40 @@ export function ControlCenter(props: Props) {
   };
   const openCallApproval = (key: string | null = null) => {
     callApprovalFrom = key;
-    setCallApprovalPeer(undefined);
+    clearCallApprovalPeer();
+    setCallBudgetSats(null);
     setCallApproval(true);
     queueMicrotask(() => (callPanel?.querySelector<HTMLElement>('[data-call-approve]') ?? callPanel)?.focus());
   };
-  // A request approved at the node can open on a later status poll.
-  createEffect(on(() => spendLine(spend(), now()).open, (open, wasOpen) => {
-    if (open && wasOpen === false) closeCallApproval();
+  const callBudgetCovered = () => {
+    const requested = callBudgetMsat();
+    const grant = budget()?.node_grant;
+    return requested !== undefined && !!grant && grant.expires_at_ms > Date.now()
+      && grant.remaining_msat >= requested;
+  };
+  // A replacement can finish while the original spend window remains open.
+  createEffect(on(() => [spendLine(spend(), now()).open, spend()?.pending?.op_id] as const, ([open, pending], previous) => {
+    if (open && !pending && previous && (!previous[0] || !!previous[1])) closeCallApproval();
   }, { defer: true }));
+  const showCallBudgetRequest = (amountMsat: number | null) => {
+    callApprovalFrom = null;
+    clearCallApprovalPeer();
+    setCallBudgetSats(amountMsat === null ? null : String(Math.ceil(amountMsat / 1000)));
+    setCallApproval(amountMsat !== null);
+  };
+  const callApprovalBlocked = () => moneyBlocked() || callApproving() || callBudgetCovered()
+    || (callBudgetSats() !== null && callBudgetMsat() === undefined);
+  const approveCallSpending = async (): Promise<ApprovalResult> => {
+    const skipped: ApprovalResult = { ok: false, requestId: null, grantedOp: null, bindable: false, waiting: false };
+    if (callBudgetCovered()) { closeCallApproval(); return skipped; }
+    if (callApprovalBlocked()) return skipped;
+    setCallApproving(true);
+    try {
+      const result = await actions.approve(callBudgetMsat() ?? callApprovalPeer());
+      if (result.ok && spendLine(spend(), now()).open && !spend()?.pending) closeCallApproval();
+      return result;
+    } finally { setCallApproving(false); }
+  };
   // M6 A1: the node is the cell. Call audio goes app -> own node -> peer node
   // -> peer app through the host-owned media socket; app-to-app WebRTC media
   // is unreachable while the flag is on (its code stays for the lab profile).
@@ -1484,6 +1522,7 @@ export function ControlCenter(props: Props) {
     },
   } : undefined;
   const calls = createCallEngine({
+    onBudgetNeeded: showCallBudgetRequest,
     routed: routedCalls,
     routedVideo,
     minutes: callMinutes,
@@ -1492,15 +1531,21 @@ export function ControlCenter(props: Props) {
     stopWhenSilenced: isMobilePlatform(),
     closeAdmission: (operationId, peer, callId) => source.closeCallAdmission(operationId, peer, callId),
     authorize: async (peer) => {
-      setCallApprovalPeer(routedCalls ? peer : undefined);
+      clearCallApprovalPeer();
+      const revision = callApprovalRevision;
+      setCallBudgetSats(null);
       const pairing = await act(() => source.pairingStatus());
       if (!pairing.ok) {
+        if (revision === callApprovalRevision) {
+          setCallApprovalPeer(routedCalls ? peer : undefined);
+        }
         setErrors('spend', pairing.error.message);
         setCallApproval(true);
         return false;
       }
       const allowed = (pairing.value.state === 'fallback' ||
         (pairing.value.state === 'paired' && pairing.value.scopes.includes('spend'))) && roomCanSpend();
+      if (revision === callApprovalRevision) setCallApprovalPeer(!allowed && routedCalls ? peer : undefined);
       setCallApproval(!allowed);
       return allowed;
     },
@@ -1554,7 +1599,7 @@ export function ControlCenter(props: Props) {
         setCallVideoCanvas(null);
         setCallVideoStatus(null);
       }
-      if (view.phase === 'incoming') setCallApprovalPeer(undefined);
+      if (view.phase === 'incoming') clearCallApprovalPeer();
       setCallView(view);
       if (view.phase === 'incoming' && !view.silenced && view.callId && view.peer) notifications?.call(`${view.peer}:${view.callId}`, nameOf(view.peer), () => isIncoming(view.peer!, view.callId!), () => revealIncoming(view.callId!, view.peer!));
     },
@@ -1663,10 +1708,10 @@ export function ControlCenter(props: Props) {
     },
     fileFetch: (messageId) => source.fileFetch(messageId),
     fileSave: (messageId) => source.fileSave(messageId),
-    approve: async (callPeer) => {
+    approve: async (callPeerOrBudget) => {
       clearContactApprovalError();
       setErrors('spend', undefined);
-      const r = await act(() => source.spendRequest(callPeer));
+      const r = await act(() => source.spendRequest(callPeerOrBudget));
       if (r.ok) setSpend(r.value);
       else setErrors('spend', r.error.message);
       return approvalResult(r);
@@ -2556,15 +2601,15 @@ export function ControlCenter(props: Props) {
           <div data-call-approval>
             <strong>{tr(canStillAnswer() || answerCallEnded() ? 'caApproveSpendingBeforeAnswering' : 'caApproveSpendingBeforeCalling')}</strong>
             <p class="hint">{tr(answerCallEnded() ? 'caApproveAfterEndedCall' : 'caSpendingNeedsApprovalAfterApprovalPressCallOrAccept')}</p>
-            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={{ ...actions, approve: () => actions.approve(callApprovalPeer()) }} stays={tr(answerCallEnded() ? 'caApproveAfterEndedCall' : 'caNothingIsPaidUntilYouPressCallOrAccept')} />
-            <Show when={spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
-              <button type="button" class="soft" data-call-approve disabled={moneyBlocked() || callApproving()} onClick={async () => {
-                setCallApproving(true);
-                try {
-                  const result = await actions.approve(callApprovalPeer());
-                  if (result.ok && spendLine(spend(), now()).open) closeCallApproval();
-                } finally { setCallApproving(false); }
-              }}>{tr('uiApproveSpending')}</button>
+            <SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={{ ...actions, moneyBlocked: callApprovalBlocked, approve: approveCallSpending }} requestBudgetMsat={callBudgetMsat()} stays={tr(answerCallEnded() ? 'caApproveAfterEndedCall' : 'caNothingIsPaidUntilYouPressCallOrAccept')} />
+            <Show when={!spend()?.pending && spend()?.state !== 'pending' && spend()?.state !== 'unavailable'}>
+              <Show when={callBudgetSats() !== null}>
+                <label>{tr('caBudgetToRequestSats')}
+                  <input type="number" min="1" max="100000" step="1" data-call-budget-sats value={callBudgetSats() ?? ''} disabled={callApproving()} onInput={e => setCallBudgetSats(e.currentTarget.value)} />
+                </label>
+                <p class="hint">{tr('caLargerBudgetNeedsOwner')}</p>
+              </Show>
+              <button type="button" class="soft" data-call-approve data-call-budget-request={callBudgetSats() !== null ? '' : undefined} disabled={callApprovalBlocked()} onClick={() => void approveCallSpending()}>{tr(callBudgetSats() !== null ? 'caAskBiggerBudget' : 'uiApproveSpending')}</button>
             </Show>
             <button type="button" class="soft" onClick={closeCallApproval}>{tr('uiClose')}</button>
           </div>
@@ -2595,7 +2640,7 @@ export function ControlCenter(props: Props) {
         hangup={() => void calls.hangup()}
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
-        dismiss={() => { setCallApproval(false); calls.dismiss(); }}
+        dismiss={() => { closeCallApproval(); calls.dismiss(); }}
         closeAgain={() => void calls.closeAgain()}
         endStuck={() => void calls.endStuck()}
         callAgain={(peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); }}
@@ -3762,6 +3807,8 @@ function CallMinutesLine(props: { minutes: MinutesView; ended: boolean; confirm?
           <div data-call-minutes="confirm">
             <p class="hint" data-call-hold>{tr('uiMinutesHold', fmtAmount(h().reserved_msat), String(h().max_call_minutes), fmtAmount(h().per_block_msat), fmtAmount(h().per_block_fee_msat))}</p>
             <Show when={props.confirm}>
+              {/* The call only connects once the hold is confirmed: say so next to the button, in plain words. */}
+              <p class="hint" aria-live="polite" data-call-hold-needed>{tr('uiMinutesConfirmNeeded')}</p>
               <button type="button" class="primary money" data-call-minutes-confirm disabled={m().confirming} onClick={() => props.confirm?.()}>{tr('uiMinutesConfirmHold')}</button>
             </Show>
             <Show when={m().holdError}><p class="hint" role="status" data-call-hold-error>{m().holdError}</p></Show>
@@ -4328,6 +4375,8 @@ function MeetingPanel(props: {
 /** Host error for a message whose file is not audio (act.rs NOT_A_VOICE_NOTE). */
 const NOT_A_VOICE_NOTE = 'not a voice note';
 const FILE_TOO_LARGE = 'file over 1.4 MB';
+/** The response passed the read limit; the file's own size is unknown (act.rs). */
+const FILE_RESPONSE_TOO_LARGE = 'response too large to load safely';
 const FILE_NOT_STORED = 'not stored';
 
 /** One native save dialog across all bubbles (host also guards). */
@@ -4344,7 +4393,7 @@ function ReceivedFile(props: {
   save: (messageId: string) => Promise<FileSaveResult>;
 }) {
   const [meta, setMeta] = createSignal<FileMeta | null>(null);
-  const [err, setErr] = createSignal<'gone' | 'large' | 'save' | null>(null);
+  const [err, setErr] = createSignal<'gone' | 'large' | 'response' | 'save' | null>(null);
   const [busy, setBusy] = createSignal(false);
   const [saved, setSaved] = createSignal(false);
   const [preview, setPreview] = createSignal<string | null>(null);
@@ -4362,6 +4411,7 @@ function ReceivedFile(props: {
     } catch (e) {
       const s = String(e);
       if (s.includes(FILE_TOO_LARGE)) setErr('large');
+      else if (s.includes(FILE_RESPONSE_TOO_LARGE)) setErr('response');
       else if (s.includes(FILE_NOT_STORED)) setErr('gone');
       // Other preview failures leave Save available.
     } finally {
@@ -4372,7 +4422,7 @@ function ReceivedFile(props: {
   onMount(() => { void loadPreview(); });
 
   const onSave = async () => {
-    if (err() === 'large' || err() === 'gone' || busy() || saveDialogOpen) return;
+    if (err() === 'large' || err() === 'response' || err() === 'gone' || busy() || saveDialogOpen) return;
     saveDialogOpen = true;
     setBusy(true);
     try {
@@ -4385,6 +4435,7 @@ function ReceivedFile(props: {
     } catch (e) {
       const s = String(e);
       if (s.includes(FILE_TOO_LARGE)) setErr('large');
+      else if (s.includes(FILE_RESPONSE_TOO_LARGE)) setErr('response');
       else if (s.includes(FILE_NOT_STORED)) setErr('gone');
       else setErr('save');
     } finally {
@@ -4405,16 +4456,16 @@ function ReceivedFile(props: {
         <img class="file-preview" data-file-preview src={preview()!} alt="" />
       </Show>
       <p class="file-meta" data-file-meta>
-        <Show when={err() === 'large'} fallback={
+        <Show when={err() === 'large' || err() === 'response'} fallback={
           <Show when={meta()} fallback={busy() ? '…' : ''}>
             {(b) => <>{kb(b().size_bytes)} · {shortMime(b().mime_type)}</>}
           </Show>
         }>
-          {tr('caOver14MBNotSaved')}</Show>
+          {err() === 'large' ? tr('caOver14MBNotSaved') : tr('caResponseTooLargeNotSaved')}</Show>
         <Show when={err() === 'gone'}>{' '}{tr('caNotStored')}</Show>
         <Show when={err() === 'save'}>{' '}{tr('caCouldNotSave')}</Show>
       </p>
-      <Show when={err() !== 'large' && err() !== 'gone'}>
+      <Show when={err() !== 'large' && err() !== 'response' && err() !== 'gone'}>
         <button type="button" class="link" data-file-save disabled={busy() || saved()} onClick={() => void onSave()}>
           {saved() ? tr('caSaved641') : busy() ? '…' : tr('extraSave')}
         </button>
@@ -4436,14 +4487,15 @@ function shortMime(mime: string): string {
 function VoiceNote(props: { id: string; name: string; load: (messageId: string) => Promise<string> }) {
   const [url, setUrl] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
-  // Why it cannot play: the file is gone, or it is not audio despite its name.
-  const [missing, setMissing] = createSignal<'gone' | 'not_audio' | null>(null);
+  // Why it cannot play: the file is gone, too large, or not audio despite its name.
+  const [missing, setMissing] = createSignal<'gone' | 'large' | 'response' | 'not_audio' | null>(null);
   const open = async () => {
     setBusy(true);
     try {
       setUrl(await props.load(props.id));
     } catch (e) {
-      setMissing(String(e).includes(NOT_A_VOICE_NOTE) ? 'not_audio' : 'gone');
+      const s = String(e);
+      setMissing(s.includes(NOT_A_VOICE_NOTE) ? 'not_audio' : s.includes(FILE_TOO_LARGE) ? 'large' : s.includes(FILE_RESPONSE_TOO_LARGE) ? 'response' : 'gone');
     } finally {
       setBusy(false);
     }
@@ -4456,6 +4508,8 @@ function VoiceNote(props: { id: string; name: string; load: (messageId: string) 
           <button type="button" class="voice-play" data-voice-play disabled={busy() || missing() !== null} onClick={() => void open()}>
             {missing() === 'not_audio'
               ? tr('caFileNotAudioNotPlayed', props.name)
+              : missing() === 'large' ? tr('caVoiceNoteOver14MB')
+              : missing() === 'response' ? tr('caVoiceNoteResponseTooLarge')
               : missing() === 'gone' ? tr('caVoiceNoteNotStoredOnThisDevice') : busy() ? tr('chatLoading') : tr('caVoiceNote')}
           </button>
         }
@@ -5040,6 +5094,51 @@ type PayReview =
   | { kind: 'invoice'; bolt11: string; msat: number; payee: string }
   | { kind: 'keysend'; pubkey: string; msat: number; memo: string };
 
+/**
+ * The + menu and the emoji picker are drawn fixed, outside the composer's scroll box, so a
+ * tall composer keeps scrolling while either is open and neither is clipped by it. Each sits
+ * above its button inside the visual viewport and follows the button while the composer,
+ * the chat or the viewport moves. While the button is scrolled out of the composer, the
+ * overlay waits at the composer's edge. Placement only: it never sends, pays or approves.
+ */
+function followAnchor(pop: HTMLElement, anchor: HTMLElement, align: 'start' | 'end'): () => void {
+  const gap = 8, edge = 8;
+  const place = () => {
+    if (!pop.isConnected || !anchor.isConnected) return;
+    const root = document.documentElement;
+    const layoutH = root.clientHeight || window.innerHeight, layoutW = root.clientWidth || window.innerWidth;
+    const vv = window.visualViewport;
+    const viewTop = Math.max(0, vv?.offsetTop ?? 0), viewLeft = Math.max(0, vv?.offsetLeft ?? 0);
+    const viewBottom = Math.min(layoutH, viewTop + (vv?.height ?? layoutH));
+    const viewRight = Math.min(layoutW, viewLeft + (vv?.width ?? layoutW));
+    const a = anchor.getBoundingClientRect();
+    const box = anchor.closest('.composer')?.getBoundingClientRect();
+    const top = Math.min(box ? Math.min(Math.max(a.top, box.top), box.bottom) : a.top, viewBottom);
+    pop.style.setProperty('--overlay-room', `${Math.max(0, top - gap - viewTop - edge)}px`);
+    pop.style.bottom = `${layoutH - (top - gap)}px`;
+    const w = pop.offsetWidth;
+    const want = align === 'start' ? a.left : a.right - w;
+    pop.style.left = `${Math.max(viewLeft + edge, Math.min(want, viewRight - edge - w))}px`;
+  };
+  place();
+  const vv = window.visualViewport;
+  document.addEventListener('scroll', place, { capture: true, passive: true });
+  window.addEventListener('resize', place);
+  vv?.addEventListener('resize', place);
+  vv?.addEventListener('scroll', place);
+  const composer = anchor.closest('.composer');
+  const ro = typeof ResizeObserver === 'function' && composer ? new ResizeObserver(place) : null;
+  if (ro && composer) ro.observe(composer);
+  return () => {
+    document.removeEventListener('scroll', place, { capture: true });
+    window.removeEventListener('resize', place);
+    vv?.removeEventListener('resize', place);
+    vv?.removeEventListener('scroll', place);
+    ro?.disconnect();
+    for (const name of ['--overlay-room', 'bottom', 'left']) pop.style.removeProperty(name);
+  };
+}
+
 function Composer(props: {
   admissionResume?: OpView;
   ownId: string;
@@ -5111,11 +5210,15 @@ function Composer(props: {
   let draftInput: HTMLTextAreaElement | undefined;
   const [emojiOpen, setEmojiOpen] = createSignal(false);
   let plusBtn: HTMLButtonElement | undefined;
+  let plusMenu: HTMLDivElement | undefined;
   let emojiBtn: HTMLButtonElement | undefined;
+  let emojiPicker: HTMLDivElement | undefined;
   createEffect(() => {
     if (!emojiOpen()) return;
-    // Escape closes the picker and returns focus to the emoji button; opening moves focus into it.
-    queueMicrotask(() => document.querySelector<HTMLElement>('[data-emoji-picker] [data-emoji-pick]')?.focus());
+    if (emojiPicker && emojiBtn) onCleanup(followAnchor(emojiPicker, emojiBtn, 'start'));
+    // Escape closes the picker and returns focus to the emoji button; opening moves focus into
+    // it without scrolling, since the picker is already placed where it can be seen.
+    queueMicrotask(() => emojiPicker?.querySelector<HTMLElement>('[data-emoji-pick]')?.focus({ preventScroll: true }));
     onCleanup(onEscape(() => { setEmojiOpen(false); emojiBtn?.focus(); }));
   });
   // voice note: recorded here, then sent exactly like a chosen file
@@ -5136,6 +5239,10 @@ function Composer(props: {
   // Bumped when the track changes or the composer goes away: a microphone
   // prompt answered after that must not start recording for another contact.
   let voiceGeneration = 0;
+  // Bumped by the owner's own attachment edits (a pick, Remove, Close). A clip
+  // that finishes after one of them must not replace or reopen that choice.
+  // Attach's own switch to the file panel is not an edit.
+  let attachmentEdit = 0;
   const dropRecording = () => {
     voiceGeneration++;
     const r = untrack(recording);
@@ -5174,9 +5281,10 @@ function Composer(props: {
     // Capture before await: a track switch bumps voiceGeneration and must not
     // land this clip as the new track's unsent preview.
     const generation = voiceGeneration;
+    const edit = attachmentEdit;
     setRecording(null);
     const clip = await r.rec.stop();
-    if (generation !== voiceGeneration) return;
+    if (generation !== voiceGeneration || edit !== attachmentEdit) return;
     composerRevision++;
     if (!clip) {
       setNote(tr('uiNothingWasRecorded'));
@@ -5778,7 +5886,17 @@ function Composer(props: {
     return tr('uiSend');
   };
   /** Pay / Request / File panels close back to the single message bar. */
+  /** The file went: back to the message box, ready to type. A failed send never comes here, so it keeps its file. */
+  const fileGone = () => {
+    attachmentEdit++;
+    setFile(null);
+    if (fileInput) fileInput.value = '';
+    setMode('message');
+    // The Send button just pressed is gone. Not on a phone, where focus would open the keyboard unasked.
+    if (!isMobilePlatform()) queueMicrotask(() => draftInput?.focus());
+  };
   const closePanel = () => {
+    attachmentEdit++;
     composerRevision++;
     if (mode() === 'file') {
       setFile(null);
@@ -5793,8 +5911,9 @@ function Composer(props: {
     const onDoc = (e: Event) => {
       if (!(e.target as Element | null)?.closest?.('.composer-plus-wrap')) setMenuOpen(false);
     };
+    if (plusMenu && plusBtn) onCleanup(followAnchor(plusMenu, plusBtn, 'end'));
     // Escape closes the Pay / Request / Attach menu and returns focus to +.
-    queueMicrotask(() => plusBtn?.parentElement?.querySelector<HTMLElement>('[role="menuitem"]')?.focus());
+    queueMicrotask(() => plusMenu?.querySelector<HTMLElement>('[role="menuitem"]')?.focus({ preventScroll: true }));
     document.addEventListener('click', onDoc);
     onCleanup(onEscape(() => { setMenuOpen(false); plusBtn?.focus(); }));
     onCleanup(() => document.removeEventListener('click', onDoc));
@@ -6342,8 +6461,7 @@ function Composer(props: {
       // An optimistic message cleared the box at the press; whatever is there now is newer.
       if ((r.ok || paidUndelivered(r)) && composerRevision === submittedRevision && !bubble) {
         if (submittedMode === 'file') {
-          setFile(null);
-          if (fileInput) fileInput.value = '';
+          fileGone();
         } else {
           setDraft('');
           setDrafted(false);
@@ -6527,10 +6645,8 @@ function Composer(props: {
         break;
       case 'file':
         r = await props.actions.file(t, file()!, shown().msat!);
-        if (r.ok && unchanged()) {
-          setFile(null);
-          if (fileInput) fileInput.value = '';
-        } else if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
+        if (r.ok && unchanged()) fileGone();
+        else if (!r.ok && unchanged() && isBudgetStop(r.error)) setNote(r.error.message);
         break;
     }
     setBusy(false);
@@ -6586,7 +6702,7 @@ function Composer(props: {
   createEffect(() => { if (props.moneyBlocked || props.budgetStale || !line().open) setReview(null); });
 
   const disabled = () =>
-    (mode() === 'message' && !draft().trim()) || props.moneyBlocked || (spends() && !!props.budgetStale) || busy() || contactWaiting() || (mode() === 'message' && priceProblem() !== null) ||
+    (mode() === 'message' && !draft().trim()) || (mode() === 'file' && !file()) || props.moneyBlocked || (spends() && !!props.budgetStale) || busy() || contactWaiting() || (mode() === 'message' && priceProblem() !== null) ||
     (needsTouch() ? false : viaBudget()
       ? ['waiting', 'contact_used', 'total_used', 'grant_limited', 'unknown'].includes(stand().kind) || ((stand().kind === 'first' || stand().kind === 'ok' || stand().kind === 'off') && !ready())
       : spends() && !line().open
@@ -6596,6 +6712,7 @@ function Composer(props: {
   const disabledReason = (): string | null => {
     if (!disabled()) return null;
     if (mode() === 'message' && !draft().trim()) return tr('uiTypeAMessageFirst');
+    if (mode() === 'file' && !file()) return tr('uiChooseAFileFor', props.name);
     if (props.moneyBlocked) return tr('firstSpendOffline');
     if (spends() && props.budgetStale) return tr('firstSpendChecking');
     if (busy()) return tr('firstSpendBusy');
@@ -6641,8 +6758,18 @@ function Composer(props: {
         tabindex="-1"
         data-file-input
         onChange={(e) => {
+          attachmentEdit++;
           composerRevision++;
-          setFile(e.currentTarget.files?.[0] ?? null);
+          const picked = e.currentTarget.files?.[0] ?? null;
+          // Said at once, before any price or Send: this file can never go.
+          if (picked && picked.size > FILE_MAX_BYTES) {
+            e.currentTarget.value = '';
+            setFile(null);
+            setNote(tr('uiThatFileIsOver14MB', picked.name));
+            return;
+          }
+          setNote(null);
+          setFile(picked);
         }}
         aria-label={tr('uiFileToSend')}
       />
@@ -6651,7 +6778,7 @@ function Composer(props: {
         <Match when={mode() === 'file'}>
           <div class="composer-panel file-panel" data-composer-panel="file">
             <div class="panel-head">
-              <strong>{tr('uiSendAFile')}</strong>
+              <strong>{voiceFile() ? tr('uiSendAVoiceNote') : tr('uiSendAFile')}</strong>
               <button type="button" class="link" data-composer-close aria-label={tr('uiClose')} onClick={closePanel}>✕</button>
             </div>
             <div class="composer-main file-row">
@@ -6810,6 +6937,7 @@ function Composer(props: {
         <TouchApproval peer={target()} name={props.name} priceMsat={shown().msat} actions={props.actions} />
       </Show>
       <div class="composer-main signal-bar" data-composer-bar>
+        <div class="composer-emoji-wrap">
         <button
           ref={emojiBtn}
           type="button"
@@ -6821,8 +6949,37 @@ function Composer(props: {
           disabled={mode() !== 'message'}
           onClick={() => setEmojiOpen((v) => !v)}
         >
-          🙂
+          <svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M8.5 14.5c.9 1.3 2.1 2 3.5 2s2.6-.7 3.5-2" /><path d="M9 9.5v.01M15 9.5v.01" /></svg>
         </button>
+      <Show when={emojiOpen()}>
+        <div ref={(el) => { emojiPicker = el; }} class="emoji-picker" data-emoji-picker role="group" aria-label={tr('uiEmoji')}>
+          <For each={[...EMOJIS]}>
+            {(e) => (
+              <button
+                type="button"
+                class="emoji-pick"
+                data-emoji-pick={e}
+                onClick={() => {
+                  const el = draftInput;
+                  const start = el?.selectionStart ?? draft().length;
+                  const end = el?.selectionEnd ?? start;
+                  const { next, caret } = insertEmoji(draft(), e, start, end);
+                  composerRevision++;
+                  setDraft(next);
+                  setEmojiOpen(false);
+                  queueMicrotask(() => {
+                    el?.focus();
+                    el?.setSelectionRange(caret, caret);
+                  });
+                }}
+              >
+                {e}
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
+        </div>
         <textarea
           ref={(el) => { draftInput = el; }}
           rows={1}
@@ -6850,7 +7007,7 @@ function Composer(props: {
             disabled={starting() || busy()}
             onClick={() => void (recording() ? stopRecording() : startVoice())}
           >
-            {recording() ? `■ ${duration(recordedMs())}` : '🎙'}
+            {recording() ? `■ ${duration(recordedMs())}` : <svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3" /></svg>}
           </button>
           <div class="composer-plus-wrap">
             <button
@@ -6866,7 +7023,7 @@ function Composer(props: {
             >
               +
             </button>
-            <div class="composer-menu" data-composer-menu role="menu" hidden={!menuOpen()}>
+            <div ref={(el) => { plusMenu = el; }} class="composer-menu" data-composer-menu role="menu" hidden={!menuOpen()}>
               <For each={modes().filter((m) => m !== 'message')}>
                 {(m) => (
                   <button
@@ -6877,6 +7034,12 @@ function Composer(props: {
                     data-attach={m === 'file' ? '' : undefined}
                     onClick={() => {
                       setMenuOpen(false);
+                      // The file panel takes the bar's place, Stop included. Settle the
+                      // recording first, as leaving the window does: the clip stays as the
+                      // unsent preview unless a pick, Remove or Close comes before it lands.
+                      // Not every chooser blurs the window, so this cannot be left to blur.
+                      // The chooser still opens in this same press.
+                      if (m === 'file') onLeave();
                       if (m === 'file') fileInput?.click();
                       // Reselecting the active mode is not an edit: it must not
                       // detach an in-flight send from the draft it will clear.
@@ -6973,34 +7136,6 @@ function Composer(props: {
         </Show>
       </details>
       </div>
-      <Show when={emojiOpen()}>
-        <div class="emoji-picker" data-emoji-picker role="group" aria-label={tr('uiEmoji')}>
-          <For each={[...EMOJIS]}>
-            {(e) => (
-              <button
-                type="button"
-                class="emoji-pick"
-                data-emoji-pick={e}
-                onClick={() => {
-                  const el = draftInput;
-                  const start = el?.selectionStart ?? draft().length;
-                  const end = el?.selectionEnd ?? start;
-                  const { next, caret } = insertEmoji(draft(), e, start, end);
-                  composerRevision++;
-                  setDraft(next);
-                  setEmojiOpen(false);
-                  queueMicrotask(() => {
-                    el?.focus();
-                    el?.setSelectionRange(caret, caret);
-                  });
-                }}
-              >
-                {e}
-              </button>
-            )}
-          </For>
-        </div>
-      </Show>
 
       <Show when={mode() === 'message' && readmitPrice()}>
         {(p) => (
@@ -7215,8 +7350,9 @@ function NodeApprovalSteps(props: { command?: string | null }) {
   </>;
 }
 
-function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions; hasPending?: boolean; stays?: string }) {
+function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions; hasPending?: boolean; stays?: string; requestBudgetMsat?: number }) {
   const line = () => spendLine(props.spend, props.now);
+  const stays = () => line().open ? tr('spendWaitReplacement') : props.stays ?? spendWaitDefault();
   const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
   // One Ask again at a time: a double click must not print two requests at the node.
   const [asking, setAsking] = createSignal(false);
@@ -7225,35 +7361,35 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
     if (props.actions.moneyBlocked() || asking()) return;
     setAsking(true);
     try {
-      await props.actions.approve();
+      await props.actions.approve(props.requestBudgetMsat);
     } finally {
       setAsking(false);
     }
   };
   return (
     <div class="spend" data-spend={props.spend?.state ?? 'unknown'}>
-      <Switch>
-        <Match when={props.spend?.state === 'open' && line().open}>
-          <details class="quiet-detail passive-status" data-spend-status>
-            <summary aria-label={tr('uiSpendingStatus')} title={tr('uiSpendingStatus')}>ⓘ</summary>
-            <p class="spend-line">
-              <span class="dot ok" /> {line().text}.{' '}
-              <button type="button" class="link" data-spend-lock onClick={() => void props.actions.lock()}>{tr('uiLockNow')}</button>
+      <Show when={line().open}>
+        <details class="quiet-detail passive-status" data-spend-status open={Boolean(props.spend?.pending)}>
+          <summary aria-label={tr('uiSpendingStatus')} title={tr('uiSpendingStatus')}>ⓘ</summary>
+          <p class="spend-line">
+            <span class="dot ok" /> {line().text}.{' '}
+            <button type="button" class="link" data-spend-lock onClick={() => void props.actions.lock()}>{tr('uiLockNow')}</button>
+          </p>
+          <details class="quiet-detail" data-spend-detail>
+            <summary>{tr('uiDetails')}</summary>
+            <p>
+              {props.spend?.basis === 'app_lock'
+                ? tr('uiThisNodeVersionDoesNotLimitAppTokens')
+                : tr('uiYourNodeSOwnerGrantIsInEffect')}
             </p>
-            <details class="quiet-detail" data-spend-detail>
-              <summary>{tr('uiDetails')}</summary>
-              <p>
-                {props.spend?.basis === 'app_lock'
-                  ? tr('uiThisNodeVersionDoesNotLimitAppTokens')
-                  : tr('uiYourNodeSOwnerGrantIsInEffect')}
-              </p>
-            </details>
           </details>
-        </Match>
-        <Match when={props.spend?.state === 'pending' && props.spend.pending}>
+        </details>
+      </Show>
+      <Switch>
+        <Match when={(props.spend?.state === 'pending' || (props.spend?.state === 'open' && props.spend.pending?.owner_can_grant)) && props.spend.pending}>
           {(p) => (
             <TouchIdFirst actions={props.actions} stays={<p class="hint" data-touch-id-stays-text="spend">
-              {props.stays ?? spendWaitDefault()}{' '}
+              {stays()}{' '}
               <button type="button" class="link" data-spend-cancel-visible onClick={() => void props.actions.cancelSpend()}>{tr('uiCancelRequest')}</button>
             </p>}>
             <div class="approval" data-approval="pending">
@@ -7263,6 +7399,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
               <NodeApprovalSteps command={p().owner_action} />
               <p class="hint">
                 {tr('uiThisAppCannotApproveItForYouThe')} {minutes(p().expires_at_ms)} {tr('uiMinYourDraftIsKept')}{' '}
+                <Show when={line().open}>{stays()}{' '}</Show>
                 <button type="button" class="link" data-spend-cancel onClick={() => void props.actions.cancelSpend()}>
                   {tr('uiCancelRequest')}
                 </button>
@@ -7271,11 +7408,11 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
             </TouchIdFirst>
           )}
         </Match>
-        <Match when={props.spend?.state === 'unavailable' && props.spend.pending}>
+        <Match when={(props.spend?.state === 'unavailable' || (props.spend?.state === 'open' && props.spend.pending?.owner_can_grant === false)) && props.spend.pending}>
           {(p) => (
             <div class="approval" data-approval="unavailable">
               <p>
-                <strong>{tr('uiThisNodeCannotGrantSpendingToTheApp')}</strong> {tr('uiReceivingStillWorksYourNodeSays')}
+                <strong>{tr(line().open ? 'spendReplacementUnavailable' : 'uiThisNodeCannotGrantSpendingToTheApp')}</strong> {tr('uiReceivingStillWorksYourNodeSays')}
               </p>
               <code class="address" data-owner-action>{p().owner_action}</code>
             </div>
@@ -7294,7 +7431,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
             </p>
           )}
         </Match>
-        <Match when={true}>
+        <Match when={!line().open}>
           <p class="spend-line">
             <span class="dot" /> {line().text}.{' '}
             {props.spend?.state === 'expired'

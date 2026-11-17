@@ -118,6 +118,21 @@ describe('received files and emoji in the thread', () => {
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
 
+  it('names an oversized response without claiming the file is over the cap', async () => {
+    stubHost({
+      messages_list: () => [
+        { id: BIG_ID, kind: 200, sender: A, recipient: OWN, timestamp: Date.now() - 500, plaintext: '[file: long-name.bin]', payment_amount_msat: 3000 },
+      ],
+      file_save: () => { throw 'response too large to load safely'; },
+    });
+    await openShell();
+    await vi.waitFor(() => expect($(`[data-received-file="${BIG_ID}"] [data-file-save]`)).not.toBeNull());
+    $<HTMLButtonElement>(`[data-received-file="${BIG_ID}"] [data-file-save]`)!.click();
+    await vi.waitFor(() => expect(text(`[data-received-file="${BIG_ID}"] [data-file-meta]`)).toBe('Too large to load safely · not saved'));
+    expect(text(`[data-received-file="${BIG_ID}"] [data-file-meta]`)).not.toMatch(/1\.4 MB/);
+    expect($(`[data-received-file="${BIG_ID}"] [data-file-save]`)).toBeNull();
+  });
+
   it('shows size and type, saves via the host, and previews only safe image mimes as data URLs', async () => {
     const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
     const host = stubHost({
@@ -195,6 +210,35 @@ describe('received files and emoji in the thread', () => {
     await vi.waitFor(() => expect(text(`[data-received-file="${IN_ID}"] [data-file-meta]`)).toMatch(/could not save/));
     expect($(`[data-received-file="${IN_ID}"] [data-file-save]`)).not.toBeNull();
     expect(host.used('file_fetch')).toHaveLength(0);
+  });
+
+  it('says an oversize file is too large when it is picked, without pricing or sending it', async () => {
+    const host = stubHost();
+    await openShell();
+    $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
+    const input = $<HTMLInputElement>('[data-file-input]')!;
+    const big = new File(['x'], 'holiday.heic', { type: 'image/heic' });
+    Object.defineProperty(big, 'size', { value: 2_000_000 });
+    Object.defineProperty(input, 'files', { configurable: true, value: [big] });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(text('[data-composer-note]')).toMatch(/holiday\.heic is over 1\.4 MB.*Nothing was sent or paid/));
+    expect($('[data-file-chip] .file-name')).toBeNull();
+    expect($<HTMLButtonElement>('[data-file-chip] ~ [data-send]')?.disabled ?? true).toBe(true);
+    expect(host.used('file_send')).toHaveLength(0);
+    // The panel stays open: a smaller file goes straight on, and the note clears.
+    Object.defineProperty(input, 'files', { configurable: true, value: [new File(['hi'], 'brief.txt', { type: 'text/plain' })] });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(text('[data-file-chip] .file-name')).toBe('brief.txt'));
+    expect($('[data-composer-note]')).toBeNull();
+  });
+
+  it('opens the emoji picker inside the message bar, beside its button', async () => {
+    stubHost();
+    await openShell();
+    $<HTMLButtonElement>('[data-emoji]')!.click();
+    await vi.waitFor(() => expect($('[data-emoji-picker]')).not.toBeNull());
+    expect($('[data-emoji-picker]')!.parentElement).toBe($('[data-emoji]')!.parentElement);
+    expect($('[data-emoji-picker]')!.closest('[data-composer-bar]')).not.toBeNull();
   });
 
   it('inserts a built-in emoji at the cursor in the composer', async () => {

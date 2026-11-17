@@ -56,6 +56,9 @@ pub const MAX_PAYMENT_MSAT: u64 = 100_000_000_000;
 /// The node accepts 4 MiB per file, but axum's default 2 MB request limit caps
 /// the base64 JSON body first. Stay under it rather than meet a bare 413.
 pub const FILE_MAX_BYTES: usize = 1_400_000;
+/// Most of a stored-file response read into memory: the largest allowed file in
+/// base64, plus room for its JSON fields.
+pub const FILE_BODY_MAX: usize = FILE_MAX_BYTES / 3 * 4 + 4 + 64 * 1024;
 
 /// `compose` refuses plaintext over 1 MiB.
 pub const PLAINTEXT_MAX_BYTES: usize = 1 << 20;
@@ -626,6 +629,17 @@ impl SpendGate {
         self.pending = Some(elevation);
     }
 
+    /// A replacement proposal does not change an existing window's authority
+    /// or invalidate actions already preparing under its generation.
+    pub fn set_replacement_pending(&mut self, elevation: Elevation, now_ms: u64) {
+        self.settle(now_ms);
+        if self.open.is_some() {
+            self.pending = Some(elevation);
+        } else {
+            self.set_pending(elevation);
+        }
+    }
+
     pub fn pending(&self) -> Option<&Elevation> {
         self.pending.as_ref()
     }
@@ -650,11 +664,12 @@ impl SpendGate {
         Ok(())
     }
 
-    /// The owner's grant arrived for something other than this window (a budget
-    /// approval): the request is answered, and the window stays closed.
+    /// Forget an answered or withdrawn request without changing an existing
+    /// window. A request on its own grants no window authority.
     pub fn clear_pending(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
         self.pending = None;
+        if self.open.is_some() { return; }
+        self.generation = self.generation.wrapping_add(1);
         self.armed_by_request = None;
         self.expired = false;
         self.lapse = None;
@@ -662,8 +677,9 @@ impl SpendGate {
 
     /// The owner's request lapsed on the node; the owner may ask again.
     pub fn pending_expired(&mut self, lapse: Lapse) {
-        self.generation = self.generation.wrapping_add(1);
         self.pending = None;
+        if self.open.is_some() { return; }
+        self.generation = self.generation.wrapping_add(1);
         self.armed_by_request = None;
         self.expired = true;
         self.lapse = Some(lapse);
@@ -684,10 +700,12 @@ impl SpendGate {
             if p.expires_at_ms <= now_ms {
                 // A request this node could never grant (a sidecar) offers no Ask again.
                 let lapse = p.owner_can_grant.then_some(Lapse::Expired);
-                self.generation = self.generation.wrapping_add(1);
                 self.pending = None;
-                self.expired = true;
-                self.lapse = lapse;
+                if self.open.is_none() {
+                    self.generation = self.generation.wrapping_add(1);
+                    self.expired = true;
+                    self.lapse = lapse;
+                }
             }
         }
     }
@@ -1532,6 +1550,22 @@ pub fn is_voice_mime(mime: &str) -> bool {
     mime.trim().to_ascii_lowercase().starts_with("audio/")
 }
 
+fn is_webm_container(mime: &str) -> bool {
+    mime.trim().to_ascii_lowercase().starts_with("video/webm")
+}
+
+/// A recorded voice note is WebM, and the stored type can come back as
+/// `video/webm` for the same audio-only file. That one shape still plays as
+/// sound; any other non-audio type, whatever its name, is not a voice note.
+pub fn is_voice_file(name: &str, mime: &str) -> bool {
+    if is_voice_mime(mime) {
+        return true;
+    }
+    let stem = name.strip_prefix("voice-note-").and_then(|n| n.strip_suffix(".webm"));
+    is_webm_container(mime)
+        && stem.is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+}
+
 /// `GET /files` windows, newest first. Genome's list takes only `limit`, so a
 /// lookup widens the window until it finds the message or the list ends.
 pub const FILE_LIST_WINDOWS: [usize; 3] = [50, 200, 1000];
@@ -1542,6 +1576,9 @@ pub const VOICE_NOT_STORED: &str = "voice note not stored on this node";
 pub const FILE_NOT_STORED: &str = "file not stored on this node";
 /// Received file over the app's 1.4 MB send/receive cap.
 pub const FILE_TOO_LARGE: &str = "file over 1.4 MB";
+/// The whole response passed [`FILE_BODY_MAX`], so the file inside was never
+/// parsed: its own size is unknown, and may be within the cap.
+pub const FILE_RESPONSE_TOO_LARGE: &str = "response too large to load safely";
 
 /// What a message's stored file is, by its type (never its name).
 #[derive(Debug, PartialEq, Eq)]
@@ -1570,7 +1607,8 @@ pub fn stored_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> StoredLooku
 /// Voice notes only: same lookup, then require an audio mime.
 pub fn voice_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> VoiceLookup<'a> {
     match stored_file_for(rows, message_id) {
-        StoredLookup::Found(r) if is_voice_mime(&r.mime_type) => VoiceLookup::Voice(r),
+        // The list has no name: `video/webm` goes on to the fetch, where `is_voice_file` reads it.
+        StoredLookup::Found(r) if is_voice_mime(&r.mime_type) || is_webm_container(&r.mime_type) => VoiceLookup::Voice(r),
         StoredLookup::Found(_) => VoiceLookup::NotVoice,
         StoredLookup::Missing => VoiceLookup::Missing,
     }
@@ -1780,6 +1818,31 @@ mod tests {
         assert!(!gate.matches_poll(generation, &other, 1));
         gate.lock();
         assert!(!gate.matches_poll(generation, &pending, 1));
+    }
+
+    #[test]
+    fn replacement_request_lapse_keeps_the_original_window_and_fence() {
+        for ending in ["clear", "expired", "lost", "deadline"] {
+            let mut gate = SpendGate::default();
+            gate.set_pending(Elevation { op_id: "ab12".into(), expires_at_ms: 1_900,
+                owner_action: "konsensus grant".into(), owner_can_grant: true });
+            gate.arm_pending_granted_until(1_000, 2_000, SpendBasis::NodeGrant, Some("cd34"));
+            let before = serde_json::to_value(gate.view(1_100)).unwrap();
+            let generation = gate.generation();
+            let pending = Elevation { op_id: "ef56".into(), expires_at_ms: 1_500,
+                owner_action: "konsensus grant".into(), owner_can_grant: true };
+            gate.set_replacement_pending(pending.clone(), 1_100);
+            match ending {
+                "clear" => gate.clear_pending(),
+                "expired" => gate.pending_expired(Lapse::Expired),
+                "lost" => gate.pending_expired(Lapse::Lost),
+                _ => { gate.view(1_500); }
+            }
+            assert_eq!(serde_json::to_value(gate.view(1_500)).unwrap(), before, "{ending}");
+            gate.check_generation(generation, 1_500).unwrap();
+            assert!(!gate.matches_poll(generation, &pending, 1_500));
+            assert_eq!(gate.check(2_000).unwrap_err().code, "spend_expired");
+        }
     }
 
     #[test]
@@ -2201,6 +2264,10 @@ mod tests {
         assert_eq!(voice_file_for(&rows, "cd"), VoiceLookup::Missing);
         assert!(is_voice_mime(" Audio/MP4"));
         assert!(!is_voice_mime("text/html"));
+        assert!(is_voice_file("voice-note-20261104-155255.webm", "video/webm"));
+        assert!(is_voice_file("anything.ogg", "audio/ogg"));
+        assert!(!is_voice_file("holiday.webm", "video/webm"));
+        assert!(!is_voice_file("voice-note-x.webm", "text/html"));
         assert_eq!(stored_file_for(&rows, "ab"), StoredLookup::Found(&rows[0]));
         assert_eq!(stored_file_for(&rows[1..], "ab"), StoredLookup::Found(&rows[1]));
         assert_eq!(stored_file_for(&rows, "zz"), StoredLookup::Missing);
