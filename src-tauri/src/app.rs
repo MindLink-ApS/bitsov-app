@@ -1772,6 +1772,13 @@ fn client_key_with(
 /// Report why the client identity could not be read or created.
 fn client_key_refused(state: &NodeState, error: PairError, interaction: Interaction) {
     match error {
+        // No Secure Enclave: a permanent, named refusal. Retrying cannot help.
+        PairError::SecureStorageUnavailable { identity_kept } => {
+            state.remote_retry.failed(&remote_access::RemoteError::SecureStorageUnavailable { identity_kept });
+            let error = PairError::SecureStorageUnavailable { identity_kept };
+            set_error(state, error.to_string());
+            *state.pairing_view.lock().unwrap() = PairingView::from_outcome(&Err(error));
+        }
         // No passcode: say so as its own kind, so the phone can open Settings.
         error if error.to_string() == remote_access::PASSCODE_REQUIRED => {
             state.remote_retry.failed(&remote_access::RemoteError::DeviceUnavailable);

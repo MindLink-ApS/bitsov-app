@@ -6,7 +6,6 @@ use zeroize::Zeroizing;
 
 pub(super) struct MacSealer {
     /// Non-prompting Secure Enclave probe; replaceable in tests.
-    #[allow(dead_code)]
     enclave: fn() -> bool,
 }
 
@@ -23,6 +22,10 @@ impl Sealer for MacSealer {
 
     fn open(&self, purpose: &str, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
         bitsov_ffi::pairing_sealer::open(purpose, sealed)
+    }
+
+    fn hardware_available(&self) -> bool {
+        (self.enclave)()
     }
 }
 

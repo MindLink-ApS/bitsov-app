@@ -34,10 +34,17 @@ fn load_native_with_context(dir: &Path, context: Option<&bitsov_ffi::client_keyc
 /// Only the authentication context differs: headless reads fail instead of
 /// opening a prompt, including in an entitled bundle.
 #[cfg(all(not(test), target_os = "macos", not(feature = "mobile")))]
-pub(super) fn smoke_test() -> Result<&'static str, String> {
+pub(super) fn smoke_test() -> Result<SmokeOutcome, String> {
     use bitsov_ffi::client_keychain as native;
     let entitled = native::data_protection_available();
-    let path = if entitled { "data-protection-keychain" } else { "enclave-sealed-file" };
+    let outcome = smoke_outcome(entitled, bitsov_ffi::device_key::enclave_available());
+    let path = match outcome {
+        SmokeOutcome::Path(path) => path,
+        SmokeOutcome::Refused(reason) => {
+            println!("identity storage smoke: path=refused reason={reason}");
+            return Ok(outcome);
+        }
+    };
     println!("identity storage smoke: path={path}");
     crate::at_rest::install_macos();
     let support = std::path::PathBuf::from(std::env::var_os("HOME").ok_or("missing home directory")?)
@@ -70,7 +77,7 @@ pub(super) fn smoke_test() -> Result<&'static str, String> {
     temporary.close().map_err(|e| e.to_string())?;
     if directory.exists() { return Err("throwaway identity directory survived deletion".into()); }
     println!("identity storage smoke: delete OK");
-    Ok(path)
+    Ok(outcome)
 }
 
 /// What the headless storage smoke reports. A refusal is an expected, named
@@ -88,15 +95,39 @@ impl SmokeOutcome {
 }
 
 /// Decided from (entitlement, enclave) alone, before any storage access.
-#[allow(dead_code)]
-fn smoke_outcome(entitled: bool, _enclave: bool) -> SmokeOutcome {
-    SmokeOutcome::Path(if entitled { "data-protection-keychain" } else { "enclave-sealed-file" })
+/// Entitled apps keep the seed in the Keychain, which needs no enclave.
+fn smoke_outcome(entitled: bool, enclave: bool) -> SmokeOutcome {
+    match (entitled, enclave) {
+        (true, _) => SmokeOutcome::Path("data-protection-keychain"),
+        (false, true) => SmokeOutcome::Path("enclave-sealed-file"),
+        (false, false) => SmokeOutcome::Refused("no-secure-enclave"),
+    }
+}
+
+/// An identity already on disk that only the enclave can open or seal.
+fn existing_identity(dir: &Path) -> Result<bool, PairError> {
+    for name in [SEALED_KEY_FILE, KEY_FILE] {
+        match std::fs::symlink_metadata(dir.join(name)) {
+            Ok(_) => return Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(failure("cannot inspect the protected client key")),
+        }
+    }
+    Ok(false)
 }
 
 // Backend selection is based on the running process's validated entitlement,
 // never on the result of an authenticated read or write.
+// Without a Secure Enclave nothing is sealed, opened, read from the Keychain or
+// written: an enclave-sealed identity stays byte-for-byte as it is.
 fn load_selected(dir: &Path, store: &dyn KeyStore, sealer: Option<&dyn Sealer>, entitled: bool) -> Result<ClientKey, PairError> {
-    if entitled { return load_or_create_with_sealer(dir, store, sealer); }
+    let no_enclave = sealer.is_some_and(|sealer| !sealer.hardware_available());
+    if entitled {
+        if no_enclave && std::fs::symlink_metadata(dir.join(SEALED_KEY_FILE)).is_ok() {
+            return Err(PairError::SecureStorageUnavailable { identity_kept: true });
+        }
+        return load_or_create_with_sealer(dir, store, sealer);
+    }
     match std::fs::symlink_metadata(dir.join(MARKER)) {
         Ok(_) => return Err(failure("this identity requires the original app's Keychain entitlement")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
@@ -108,6 +139,9 @@ fn load_selected(dir: &Path, store: &dyn KeyStore, sealer: Option<&dyn Sealer>, 
         fn open(&self, purpose: &str, bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> { self.0.open(purpose, bytes) }
     }
     let sealer = sealer.ok_or_else(|| failure("Secure Enclave storage is unavailable; try again"))?;
+    if no_enclave {
+        return Err(PairError::SecureStorageUnavailable { identity_kept: existing_identity(dir)? });
+    }
     ClientKey::load_or_create_sealed(dir, &Strict(sealer))
 }
 

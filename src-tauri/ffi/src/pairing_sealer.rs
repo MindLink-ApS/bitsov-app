@@ -37,6 +37,7 @@ impl std::fmt::Display for StorageError {
 
 fn storage_error(status: i32) -> StorageError {
     StorageError::Failed(match status {
+        -1 => return StorageError::SecureStorageUnavailable,
         -3 => "protected blob is invalid or belongs to another Mac; clear <app data dir>/app-client/ and pair again".into(),
         code => format!("Secure Enclave or Keychain storage is temporarily unavailable ({code}); try again"),
     })
@@ -99,7 +100,7 @@ mod tests {
         let purpose = "client-ed25519-seed-v1";
         let plain = [42; 32];
         if !crate::device_key::enclave_available() {
-            assert!(seal(purpose, &plain).unwrap_err().contains("try again"));
+            assert_eq!(try_seal(purpose, &plain).unwrap_err(), StorageError::SecureStorageUnavailable);
             return;
         }
         let sealed = seal(purpose, &plain).expect("prompt-free enclave seal");

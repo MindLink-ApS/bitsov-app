@@ -515,6 +515,8 @@ impl From<&RemoteError> for ConnectionError {
             RemoteError::DeviceUnavailable => (DeviceUnavailable, PASSCODE_REQUIRED_CODE.into()),
             RemoteError::Local(message) if message == PASSCODE_REQUIRED =>
                 (DeviceUnavailable, PASSCODE_REQUIRED_CODE.into()),
+            RemoteError::SecureStorageUnavailable { identity_kept } => (SecureStorageUnavailable,
+                if *identity_kept { SECURE_STORAGE_KEPT_CODE } else { SECURE_STORAGE_UNAVAILABLE_CODE }.into()),
             _ => (Other, CONNECTION_FAILED_CODE.into()),
         };
         // Peer text may echo authentication codes. Only fixed local copy crosses.
@@ -973,6 +975,9 @@ fn open_sealed_code(
             "protected storage is unavailable for this pairing link; try again on the original device".into(),
         ));
     };
+    if !sealer.hardware_available() {
+        return Err(RemoteError::SecureStorageUnavailable { identity_kept: true });
+    }
     if stored.code.is_some() {
         return Err(RemoteError::Local("the remote access descriptor is corrupt".into()));
     }
@@ -997,6 +1002,10 @@ fn persist_with(
     descriptor: &RemoteDescriptor,
     sealer: Option<&dyn Sealer>,
 ) -> Result<(), RemoteError> {
+    // A code that cannot be sealed is never written, not even to a tempfile.
+    if descriptor.code.is_some() && sealer.is_some_and(|sealer| !sealer.hardware_available()) {
+        return Err(RemoteError::SecureStorageUnavailable { identity_kept: false });
+    }
     let dir = path
         .parent()
         .ok_or_else(|| RemoteError::Local("remote config has no parent directory".into()))?;

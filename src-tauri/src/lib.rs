@@ -57,6 +57,10 @@ pub fn run() {
 
 /// Headless packaging check; call before initializing the application runtime.
 #[cfg(all(not(test), target_os = "macos", not(feature = "mobile")))]
-pub fn mac_keychain_smoke_test() -> Result<&'static str, String> {
+pub use pairing::key::SmokeOutcome;
+
+/// A Mac without a Secure Enclave is a named refusal (exit 3), not a failure.
+#[cfg(all(not(test), target_os = "macos", not(feature = "mobile")))]
+pub fn mac_keychain_smoke_test() -> Result<SmokeOutcome, String> {
     pairing::key::storage_smoke_test()
 }

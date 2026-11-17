@@ -51,10 +51,28 @@ jobs:
           cache-all-crates: 'true'
           cache-workspace-crates: 'true'
 
+      # Pure checks; the enclave probe is replaced, no Keychain or enclave use.
+      - name: Secure storage bridge checks
+        run: bash scripts/test-mac-secure-storage.sh
+
       # The native host selects bitsov-darwin-x86_64 from the signed manifest.
       # Every sidecar is authenticated again before bundling.
       - name: Package and verify the native Intel app
         run: bash scripts/package-mac.sh --arch x86_64 --dmg
+
+      # An Intel Mac without a Secure Enclave refuses by design (exit 3).
+      - name: Real Keychain smoke from the signed bundle (headless)
+        run: |
+          set -uo pipefail
+          app="$CARGO_TARGET_DIR/x86_64-apple-darwin/release/bundle/macos/BitSov.app"
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+          status=0
+          "$app/Contents/MacOS/$executable" --keychain-smoke-test || status=$?
+          case "$status" in
+            0) ;;
+            3) echo "::notice::identity storage refused: this Mac has no Secure Enclave" ;;
+            *) exit "$status" ;;
+          esac
 
       - name: Archive the verified app and record build inputs
         env:
