@@ -36,6 +36,7 @@ import { readSpendPreset, saveSpendPreset } from './prefs';
 import { WelcomeHome } from './WelcomeHome';
 import { ChainNotice } from './ChainNotice';
 import { DelayedSpinner } from './DelayedSpinner';
+import { StreamFrame, StreamNoteContext } from './StreamFrame';
 import { isChainUnavailable, MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
 import { batch, createEffect, createMemo, createResource, createSignal, createUniqueId, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
 import { createStore, produce, reconcile } from 'solid-js/store';
@@ -2149,6 +2150,12 @@ export function ControlCenter(props: Props) {
       onAddContact={() => setTrack({ kind: 'discover' })}
       onAddSats={() => openWallet('receive')} />;
 
+  // Desktop: the money notice floats over the message list (StreamFrame) when there is one, and
+  // sits in the column otherwise (start view, welcome, loading).
+  const moneyNotice = () => <p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p>;
+  const [streamFrames, setStreamFrames] = createSignal(0);
+  const streamNote = { show: () => moneyBlocked() && !phoneShell(), note: moneyNotice, frame: (d: 1 | -1) => setStreamFrames((n) => n + d) };
+
   return (
     <div class="cc" data-phone-shell={phoneShell() ? "true" : undefined} classList={{ 'no-context': !props.active }} data-mode={source.mode}
       data-swipe-call={!['idle', 'ended'].includes(callView().phase) || !['idle', 'ended'].includes(meetingView().phase)}>
@@ -2230,6 +2237,7 @@ export function ControlCenter(props: Props) {
       />
 
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
+        <StreamNoteContext.Provider value={streamNote}>
         <section class="track" aria-label={tr('caTrack')} hidden={phoneShell() && (phoneTab() !== 'chats' || track() === null)} inert={walletTab() !== null || contextOpen()}>
           <Show when={track()}><button type="button" class="link ios-back" data-ios-back="thread" onClick={phoneBack}><Show when={phoneShell()}><span aria-hidden="true">‹ </span></Show>{tr('uiBack')}</button></Show>
           <Show when={!phoneShell()}>
@@ -2241,10 +2249,8 @@ export function ControlCenter(props: Props) {
           <Show when={notifications && props.active && !contextOpen() && walletTab() === null}>
             <Show when={callView().phase !== 'idle' || waitingCalls().length > 0}><NotificationSettings notifications={notifications!} offer /></Show>
           </Show>
-          <Show when={moneyBlocked() && !phoneShell()}>
-            <div class="money-notice-float">
-              <p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p>
-            </div>
+          <Show when={moneyBlocked() && !phoneShell() && streamFrames() === 0}>
+            <div class="money-notice-float">{moneyNotice()}</div>
           </Show>
           <Show when={introNotice()}>
             {(n) => (
@@ -2427,6 +2433,7 @@ export function ControlCenter(props: Props) {
             )}
           </Show>
         </section>
+        </StreamNoteContext.Provider>
       </Show>
 
       <Show when={phoneShell()}>
@@ -3288,6 +3295,7 @@ function Conversation(props: {
           />
         )}
       </Show>
+      <StreamFrame>
       <div class="stream" ref={stream} data-stream>
         <div class="chat-column">
         <Show when={props.introduced}>
@@ -3384,6 +3392,7 @@ function Conversation(props: {
         </Show>
         </div>
       </div>
+      </StreamFrame>
 
       <Composer
         admissionResume={props.artifacts.flatMap((a) => a.type === 'restored' ? [a.op] : a.type === 'failed' && !a.confirmedBy && a.op ? [a.op] : [])

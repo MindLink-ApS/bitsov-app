@@ -235,3 +235,133 @@ test('1280x800: the money notice leaves the room leave-confirm usable', async ({
   await expect(page.locator('[data-room-leave-confirm]')).toHaveCount(0);
   await expect(page.locator('section.track [data-room-head]')).toBeVisible();
 });
+
+// The smallest desktop window (560 px tall, the window's minimum) with a named assistant's bars
+// open: the message list gets short. The notice must stay inside the list, and the composer must
+// stay in the window and take a click and typing.
+const assistantHost = () => {
+  const w = window as unknown as { __TAURI_INTERNALS__: { invoke: (c: string, a: Record<string, unknown>) => Promise<unknown> } };
+  const original = w.__TAURI_INTERNALS__.invoke;
+  w.__TAURI_INTERNALS__.invoke = (c, a) => {
+    if (c === 'ai_read' && a?.thread) return Promise.resolve({ revision: '1', turns: [], notices: [], disabled_watches: [] });
+    if (c === 'ai_read' && a?.watch) return Promise.resolve({ revision: '1', notices: [] });
+    if (c === 'ai_providers') return Promise.resolve([{ kind: 'local', label: 'Own', enabled: true, host: null, model: null, note: null, pays: { to: null, rail: 'none' }, data_leaves: null }]);
+    if (c === 'ai_local_status') return Promise.resolve({ running: false, kind: null, port: null, models: [], selected: null, selected_port: null, howto: 'No local model server is running.' });
+    return original(c, a);
+  };
+};
+const openAssistantBars = async (page: Page, height: number) => {
+  await page.setViewportSize({ width: 1280, height });
+  await page.addInitScript(host);
+  await page.addInitScript(assistantHost);
+  await page.goto('/');
+  await page.locator('button', { hasText: 'I understand' }).first().click();
+  await page.locator('[data-track^="assistant:"]').first().click();
+  await expect(page.locator('section.track [data-assistant-ready]')).toBeVisible();
+  // Watches and the local-server options open: the bars above the list are as tall as they get.
+  await page.locator('section.track [data-assistant-watches]').evaluate(el => { (el as HTMLDetailsElement).open = true; });
+  await page.locator('section.track .ai-own-details').evaluate(el => { (el as HTMLDetailsElement).open = true; });
+  await expect(page.locator('section.track .ai-own-details[open]')).toHaveCount(1);
+};
+// Every point on a grid over a box: true when the notice is what the pointer would hit there.
+const noticeHitsIn = (page: Page, sel: string) => page.locator(sel).first().evaluate(el => {
+  const r = el.getBoundingClientRect(), hits: string[] = [];
+  for (let i = 0; i <= 8; i++) for (let j = 0; j <= 4; j++) {
+    const x = r.left + 1 + (r.width - 2) * i / 8, y = r.top + 1 + (r.height - 2) * j / 4;
+    if (document.elementFromPoint(x, y)?.closest('[data-money-notice]')) hits.push(`${Math.round(x)},${Math.round(y)}`);
+  }
+  return hits;
+});
+const composerWorks = async (page: Page, height: number) => {
+  const composer = await box(page, 'section.track [data-ai-composer]');
+  expect(composer.top, 'the composer starts inside the window').toBeGreaterThanOrEqual(0);
+  expect(composer.bottom, 'the composer ends inside the window').toBeLessThanOrEqual(height);
+  expect(await noticeHitsIn(page, 'section.track [data-ai-composer]'), 'the notice covers no part of the composer').toEqual([]);
+  const input = page.locator('section.track [data-ai-composer] textarea');
+  await reachable(page, 'section.track [data-ai-composer] textarea');
+  const ib = await box(page, 'section.track [data-ai-composer] textarea');
+  // The question field's top edge, where the notice used to reach, is the field too.
+  expect(await page.evaluate(({ x, y }) => !!document.elementFromPoint(x, y)?.closest('textarea'), { x: (ib.left + ib.right) / 2, y: ib.top + 2 })).toBe(true);
+  await input.evaluate(el => (el as HTMLElement).blur());
+  const c = centre(ib);
+  await page.mouse.click(c.x, c.y);
+  await expect(input).toBeFocused();
+  await page.keyboard.type('hello');
+  await expect(input).toHaveValue('hello');
+};
+const noticeInsideStream = async (page: Page) => {
+  const n = await box(page, 'section.track [data-money-notice]');
+  const s = await box(page, 'section.track [data-stream]');
+  expect(n.height).toBeGreaterThan(0);
+  expect(n.top, 'notice top inside the list').toBeGreaterThanOrEqual(s.top);
+  expect(n.bottom, 'notice bottom inside the list').toBeLessThanOrEqual(s.bottom);
+  expect(n.left).toBeGreaterThanOrEqual(s.left);
+  expect(n.right).toBeLessThanOrEqual(s.right);
+  return { n, s };
+};
+
+test.describe('desktop pointer, short window', () => {
+  test.use({ isMobile: false, hasTouch: false });
+
+  test('1280x560: assistant bars open — the notice stays inside the list and the composer works', async ({ page }) => {
+    await openAssistantBars(page, 560);
+    const before = await box(page, 'section.track [data-stream]');
+    const composerBefore = await box(page, 'section.track [data-ai-composer]');
+    await showNotice(page);
+    // Showing it moves nothing.
+    expect(await box(page, 'section.track [data-stream]')).toEqual(before);
+    expect(await box(page, 'section.track [data-ai-composer]')).toEqual(composerBefore);
+    // The question field takes a pointer and typing, and the composer is whole in the window.
+    await composerWorks(page, 560);
+    // The notice lies wholly inside the message list, and paints on top there.
+    const { n } = await noticeInsideStream(page);
+    expect(await noticeOnTop(page, centre(n))).toBe(true);
+    // The bars above stay usable.
+    await reachable(page, 'section.track [data-assistant-watches] > summary');
+    await reachable(page, 'section.track [data-ai-providers] button');
+  });
+
+  test('a very short message list: the notice shrinks to fit inside it and every control stays reachable', async ({ page }) => {
+    await openAssistantBars(page, 800);
+    const notice = await showNotice(page);
+    const full = await box(page, 'section.track [data-money-notice]');
+    const card = () => notice.evaluate(el => {
+      const cs = getComputedStyle(el), f = document.querySelector('section.track [data-stream]')!.getBoundingClientRect(), r = el.getBoundingClientRect();
+      return { font: parseFloat(cs.fontSize), clamp: cs.getPropertyValue('-webkit-line-clamp'), scrollH: el.scrollHeight, clipped: r.top < f.top || r.bottom > f.bottom };
+    });
+    const fontFull = (await card()).font;
+    // 560 is the window's minimum; below it the list is at its floor (its own padding), as short as it gets.
+    for (const height of [560, 540, 500]) {
+      await page.setViewportSize({ width: 1280, height });
+      // Showing the notice moves nothing, at any height.
+      const shown = { s: await box(page, 'section.track [data-stream]'), c: await box(page, 'section.track [data-ai-composer]') };
+      await notice.evaluate(el => { (el.parentElement as HTMLElement).style.display = 'none'; });
+      expect({ s: await box(page, 'section.track [data-stream]'), c: await box(page, 'section.track [data-ai-composer]') }).toEqual(shown);
+      await notice.evaluate(el => { (el.parentElement as HTMLElement).style.display = ''; });
+      const { n, s } = await noticeInsideStream(page);
+      expect(s.height, `${height}: the list is short`).toBeLessThanOrEqual(60);
+      // It degrades to a compact card: smaller, one or two clamped lines, still legible, not clipped.
+      expect(n.height).toBeLessThan(full.height);
+      const c = await card();
+      expect(c.clipped).toBe(false);
+      expect(c.font).toBeGreaterThanOrEqual(11);
+      expect(c.font).toBeLessThan(fontFull);
+      expect(['1', '2']).toContain(c.clamp);
+      expect(n.height).toBeGreaterThanOrEqual(c.font);
+      await expect(notice).toHaveAttribute('role', 'status');
+      expect(await noticeOnTop(page, centre(n))).toBe(true);
+      // The pointer meets it nowhere outside the list.
+      for (const sel of ['section.track [data-ai-composer]', 'section.track [data-assistant-watches]', 'section.track .ai-own-details', 'section.track [data-ai-providers]', 'section.track > .track-head']) {
+        expect(await noticeHitsIn(page, sel), `${height}: the notice covers no part of ${sel}`).toEqual([]);
+      }
+      await reachable(page, 'section.track [data-assistant-watches] > summary');
+      await reachable(page, 'section.track [data-ai-providers] button');
+      await reachable(page, 'section.track [data-ai-composer] textarea');
+      // At the window's minimum the whole composer is in the window and takes typing.
+      if (height === 560) {
+        await composerWorks(page, 560);
+        await page.locator('section.track [data-ai-composer] textarea').fill('');
+      }
+    }
+  });
+});

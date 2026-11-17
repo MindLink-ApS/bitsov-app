@@ -955,16 +955,27 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 .money-notice { margin: 0; padding: var(--s-3) var(--s-6); background: var(--surface); border-bottom: 1px solid var(--line); }
 /* Above the app: payments coming and going must not push the whole window down and back. */
 header > .money-notice { position: fixed; top: max(var(--s-2), env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); width: max-content; max-width: min(560px, calc(100vw - 32px)); z-index: 40; border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,.28); }
-/* Desktop: the same card, floating over the top of the message list ([data-stream]) only.
-   `order` shows the zero-height holder right before the message list, after every bar above it
-   (header, provider bar, spend banner, leave confirm), without moving it in the DOM; it holds no
-   controls, so tab order is unchanged. With no message list (start view, welcome, loading) the
-   holder stays a plain line in the column: it may move content, but it never covers a control. */
+/* Desktop: the same card, floating over the top of the message list only. StreamFrame puts the
+   list and a note layer in one grid cell, so the layer is exactly the list's box: the card can
+   never reach the bars above it or the composer below it, whatever their height, and the frame
+   clips anything that still cannot fit. The layer lets the pointer through; only the card takes it.
+   With no message list (start view, welcome, loading) the card stays a plain line in the column:
+   it may move content, but it never covers a control. */
 .track > .money-notice-float { flex: none; }
-.track:has(> [data-stream]) > .money-notice-float { position: relative; height: 0; z-index: var(--z-chat-float); order: 1; }
-.track:has(> [data-stream]) > [data-stream],
-.track:has(> [data-stream]) > [data-stream] ~ * { order: 2; }
-.track:has(> [data-stream]) > .money-notice-float > .money-notice { position: absolute; top: var(--s-2); left: 50%; transform: translateX(-50%); width: max-content; max-width: min(560px, calc(100% - 32px)); border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+/* The frame takes the list's place in the column and keeps its floor: a list never got shorter
+   than its own vertical padding, so neither does the frame (iOS keyboard-open padding below). */
+.stream-frame { flex: 1; min-height: calc(2 * var(--s-6)); display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
+.stream-frame > * { grid-area: 1 / 1; }
+.stream-frame:has(> .stream-note-layer) { overflow: clip; }
+.stream-note-layer { position: relative; z-index: var(--z-chat-float); container: stream-note / size; display: flex; justify-content: center; align-items: flex-start; padding: var(--s-2) 16px; pointer-events: none; }
+.stream-note-layer > .money-notice { pointer-events: auto; width: max-content; max-width: min(560px, 100%); max-height: 100%; overflow-y: auto; border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+/* A short message list (small window, assistant bars open): a compact card, two lines, then one. */
+@container stream-note (max-height: 5rem) {
+  .stream-note-layer > .money-notice { padding: 2px var(--s-3); font-size: var(--t-xs); line-height: 1.35; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+}
+@container stream-note (max-height: 2.4rem) {
+  .stream-note-layer > .money-notice { -webkit-line-clamp: 1; }
+}
 .node-pill[data-pill="warn"] .what { white-space: normal; }
 
 /* Front door / Discover */
@@ -1698,6 +1709,7 @@ html[data-platform='ios'] .track > .ios-back { align-self: flex-start; }
   html[data-platform='ios'][data-keyboard-open='true'] .rail { display: none; }
   html[data-platform='ios'][data-keyboard-open='true'] .track-head { padding-block: var(--s-2); }
   html[data-platform='ios'][data-keyboard-open='true'] .stream { padding-block: var(--s-2); }
+  html[data-platform='ios'][data-keyboard-open='true'] .stream-frame { min-height: calc(2 * var(--s-2)); }
   html[data-platform='ios'][data-keyboard-open='true'] .composer { padding-block: var(--s-2); gap: var(--s-1); }
 }
 /* Clip onboarding's scroll region below the status bar, including while its
