@@ -339,7 +339,8 @@ test.describe('desktop pointer, short window', () => {
       expect({ s: await box(page, 'section.track [data-stream]'), c: await box(page, 'section.track [data-ai-composer]') }).toEqual(shown);
       await notice.evaluate(el => { (el.parentElement as HTMLElement).style.display = ''; });
       const { n, s } = await noticeInsideStream(page);
-      expect(s.height, `${height}: the list is short`).toBeLessThanOrEqual(60);
+      // Too short for the full card and its margins (fonts differ by platform, so no fixed px).
+      expect(s.height, `${height}: the list is shorter than the full card`).toBeLessThan(full.height + 16);
       // It degrades to a compact card: smaller, one or two clamped lines, still legible, not clipped.
       expect(n.height).toBeLessThan(full.height);
       const c = await card();
