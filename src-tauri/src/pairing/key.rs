@@ -66,6 +66,17 @@ impl ClientKey {
         }
     }
 
+    /// Preparation entry point; the production loader keeps its existing policy.
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn load_linux_candidate(dir: &Path, sealer: Option<&dyn Sealer>) -> Result<Self, PairError> {
+        let sealer = at_rest::linux::required(sealer).map_err(PairError::Local)?;
+        let key = Self::load_or_create_sealed(dir, &sealer)?;
+        match dir.join(KEY_FILE).symlink_metadata() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(key),
+            _ => Err(PairError::Local("client identity migration is incomplete".into())),
+        }
+    }
+
     fn load_or_create_plain(dir: &Path) -> Result<Self, PairError> {
         if sealed_file_exists(dir)? {
             return Err(PairError::Local(

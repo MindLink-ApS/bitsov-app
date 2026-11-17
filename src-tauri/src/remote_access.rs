@@ -3200,6 +3200,11 @@ mod tests {
         assert!(!text.contains("\"code\""));
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    mod linux_candidate_tests {
+        include!("remote_access/linux_candidate_tests.rs");
+    }
+
     fn sealed_fixture(seed: u8) -> (tempfile::TempDir, PathBuf, RemoteDescriptor, String) {
         let dir = tempfile::tempdir().unwrap();
         let node = SigningKey::from_bytes(&[seed; 32]);
@@ -5286,3 +5291,24 @@ mod onboarding_error_tests {
 #[cfg(test)]
 #[path = "remote_access/second_tests.rs"]
 pub(crate) mod second_tests;
+
+/// Preparation entry point; production persistence is unchanged.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn persist_linux_candidate(path: &Path, descriptor: &RemoteDescriptor, sealer: Option<&dyn Sealer>) -> Result<(), RemoteError> {
+    let sealer = at_rest::linux::required(sealer).map_err(RemoteError::Local)?;
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => { load_with(path, Some(&sealer))?; }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(RemoteError::Local(format!("cannot inspect remote descriptor: {error}"))),
+    }
+    persist_with(path, descriptor, Some(&sealer))
+}
+
+/// Preparation entry point; production loading is unchanged.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn load_linux_candidate(path: &Path, sealer: Option<&dyn Sealer>) -> Result<Option<RemoteDescriptor>, RemoteError> {
+    let sealer = at_rest::linux::required(sealer).map_err(RemoteError::Local)?;
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    load_with(path, Some(&sealer))
+}
