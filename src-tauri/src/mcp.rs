@@ -12,9 +12,14 @@
 //! allows, and a future caller must still send every write through the node.
 //!
 //! [`check`] answers one question: may this client make this request now,
-//! given what it already spent in the current budget window? Every path that
+//! given what it already spent under this grant? Every path that
 //! is not an explicit allow is a refusal, and refusals have stable codes
 //! ([`Refusal::code`]) for the audit log (design, section 5.7).
+//!
+//! **One budget per grant.** `budget_sats` covers the whole life of the grant
+//! (at most 24 h). There is no rolling window and no refill: once the budget
+//! is spent the client waits for the owner's renewal, which is a new grant
+//! with a new issue time and its own spend record.
 //!
 //! Checks run in a fixed order and the first refusal wins:
 //!
@@ -28,14 +33,15 @@
 //! 7. the scope is granted (`scope_not_granted`)
 //! 8. a read carries no amount and no recipient (`scope_escalation`)
 //! 9. a write runs only on a `recipients_only` grant (`not_recipients_only`)
-//! 10. the amount is a positive whole number of sats (`non_positive_amount`)
-//! 11. the recipient is named by the grant (`recipient_not_allowed`)
-//! 12. the amount is within the per-call cap, and a message within the node's
+//! 10. `pay` runs only when the node supports explicit pay to named
+//!     recipients ([`NodeCaps`], off by default) (`pay_not_supported_by_node`)
+//! 11. the amount is a positive whole number of sats (`non_positive_amount`)
+//! 12. the recipient is named by the grant (`recipient_not_allowed`)
+//! 13. the amount is within the per-call cap, and a message within the node's
 //!     6-sat cap (`over_per_call`)
-//! 13. the spend record belongs to this window or an earlier one
-//!     (`spend_record_invalid`)
-//! 14. spent + amount does not overflow (`overflow`)
-//! 15. spent + amount is within the window budget (`over_budget`)
+//! 14. the spend record belongs to this grant (`spend_record_invalid`)
+//! 15. spent + amount does not overflow (`overflow`)
+//! 16. spent + amount is within the grant's budget (`over_budget`)
 
 use std::collections::BTreeSet;
 
@@ -110,12 +116,12 @@ impl Scope {
 pub struct ClientGrant {
     pub client_id: ClientId,
     pub scopes: BTreeSet<Scope>,
-    /// Sats the client may spend inside one window.
+    /// Sats the client may spend over the whole life of this grant. Never
+    /// refilled: more needs a new grant from the owner.
     pub budget_sats: u64,
     /// Largest single write, in sats. Never above `budget_sats`.
     pub per_call_max_sats: u64,
-    /// Budget window length. Windows are anchored at `issued_at_ms`.
-    pub window_ms: u64,
+    /// Also identifies this grant's spend record (see [`GrantSpend`]).
     pub issued_at_ms: u64,
     /// Exclusive: the grant is dead at this instant.
     pub expires_at_ms: u64,
@@ -135,7 +141,6 @@ impl ClientGrant {
             scopes: BTreeSet::new(),
             budget_sats: 0,
             per_call_max_sats: 0,
-            window_ms: 0,
             issued_at_ms: 0,
             expires_at_ms: 0,
             revoked_at_ms: None,
@@ -146,7 +151,6 @@ impl ClientGrant {
 
     fn well_formed(&self) -> bool {
         !self.scopes.is_empty()
-            && self.window_ms > 0
             && self.budget_sats > 0
             && self.per_call_max_sats > 0
             && self.per_call_max_sats <= self.budget_sats
@@ -168,12 +172,22 @@ pub struct Request<'a> {
     pub sent_at_ms: u64,
 }
 
-/// What the caller has recorded as spent by this client in one window.
+/// What the caller has recorded as spent by this client under one grant.
+/// The caller's ledger is not trusted: a record that names another grant is
+/// refused, never read as a fresh zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WindowSpend {
-    /// Start of the window the record belongs to (see [`current_window_start`]).
-    pub window_start_ms: u64,
+pub struct GrantSpend {
+    /// `issued_at_ms` of the grant the record belongs to.
+    pub grant_issued_at_ms: u64,
     pub sats: u64,
+}
+
+/// What the node can do today. The checker never allows a call the node
+/// would refuse. `Default` is the node as it is now: no explicit pay on a
+/// `recipients_only` grant until that node feature exists and is proven.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NodeCaps {
+    pub node_supports_recipient_pay: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +207,7 @@ pub enum Refusal {
     ScopeNotGranted,
     ScopeEscalation,
     NotRecipientsOnly,
+    PayNotSupportedByNode,
     NonPositiveAmount,
     RecipientNotAllowed,
     OverPerCall,
@@ -202,7 +217,7 @@ pub enum Refusal {
 }
 
 impl Refusal {
-    pub const ALL: [Refusal; 15] = [
+    pub const ALL: [Refusal; 16] = [
         Refusal::MalformedGrant,
         Refusal::ClientMismatch,
         Refusal::Revoked,
@@ -212,6 +227,7 @@ impl Refusal {
         Refusal::ScopeNotGranted,
         Refusal::ScopeEscalation,
         Refusal::NotRecipientsOnly,
+        Refusal::PayNotSupportedByNode,
         Refusal::NonPositiveAmount,
         Refusal::RecipientNotAllowed,
         Refusal::OverPerCall,
@@ -232,6 +248,7 @@ impl Refusal {
             Refusal::ScopeNotGranted => "scope_not_granted",
             Refusal::ScopeEscalation => "scope_escalation",
             Refusal::NotRecipientsOnly => "not_recipients_only",
+            Refusal::PayNotSupportedByNode => "pay_not_supported_by_node",
             Refusal::NonPositiveAmount => "non_positive_amount",
             Refusal::RecipientNotAllowed => "recipient_not_allowed",
             Refusal::OverPerCall => "over_per_call",
@@ -242,27 +259,15 @@ impl Refusal {
     }
 }
 
-/// Start of the budget window that contains `now_ms`. Windows are
-/// `[issued + k * window, issued + (k + 1) * window)`. Before issue (inside
-/// the allowed skew) the first window applies. `None` for a zero window.
-pub fn current_window_start(grant: &ClientGrant, now_ms: u64) -> Option<u64> {
-    if grant.window_ms == 0 {
-        return None;
-    }
-    let since = now_ms.saturating_sub(grant.issued_at_ms);
-    // since - since % window <= since, so the sum never passes now_ms.
-    Some(grant.issued_at_ms + (since - since % grant.window_ms))
-}
-
 /// Pure, fail-closed authorization check. See the module docs for the order.
-pub fn check(grant: &ClientGrant, req: &Request<'_>, now_ms: u64, spent: WindowSpend) -> Decision {
-    match check_inner(grant, req, now_ms, spent) {
+pub fn check(grant: &ClientGrant, req: &Request<'_>, now_ms: u64, spent: GrantSpend, node: NodeCaps) -> Decision {
+    match check_inner(grant, req, now_ms, spent, node) {
         Ok(()) => Decision::Allow,
         Err(r) => Decision::Refuse(r),
     }
 }
 
-fn check_inner(grant: &ClientGrant, req: &Request<'_>, now_ms: u64, spent: WindowSpend) -> Result<(), Refusal> {
+fn check_inner(grant: &ClientGrant, req: &Request<'_>, now_ms: u64, spent: GrantSpend, node: NodeCaps) -> Result<(), Refusal> {
     if !grant.well_formed() {
         return Err(Refusal::MalformedGrant);
     }
@@ -295,6 +300,9 @@ fn check_inner(grant: &ClientGrant, req: &Request<'_>, now_ms: u64, spent: Windo
     if !grant.recipients_only {
         return Err(Refusal::NotRecipientsOnly);
     }
+    if scope == Scope::Pay && !node.node_supports_recipient_pay {
+        return Err(Refusal::PayNotSupportedByNode);
+    }
     let amount = u64::try_from(req.amount_sats).ok().filter(|a| *a > 0).ok_or(Refusal::NonPositiveAmount)?;
     match req.recipient {
         Some(r) if grant.recipients.contains(r) => {}
@@ -307,25 +315,14 @@ fn check_inner(grant: &ClientGrant, req: &Request<'_>, now_ms: u64, spent: Windo
     if amount > per_call {
         return Err(Refusal::OverPerCall);
     }
-    let window = current_window_start(grant, now_ms).ok_or(Refusal::MalformedGrant)?;
-    let counted = spent_in(grant, spent, window)?;
-    let total = counted.checked_add(amount).ok_or(Refusal::Overflow)?;
+    if spent.grant_issued_at_ms != grant.issued_at_ms {
+        return Err(Refusal::SpendRecordInvalid);
+    }
+    let total = spent.sats.checked_add(amount).ok_or(Refusal::Overflow)?;
     if total > grant.budget_sats {
         return Err(Refusal::OverBudget);
     }
     Ok(())
-}
-
-/// Sats that count against the current window. A record for this window
-/// counts in full; one for an earlier, aligned window has rolled over and
-/// counts zero. A record ahead of this window, before the grant, or off a
-/// window boundary is refused: the caller's ledger cannot be trusted.
-fn spent_in(grant: &ClientGrant, spent: WindowSpend, current: u64) -> Result<u64, Refusal> {
-    let start = spent.window_start_ms;
-    if start > current || start < grant.issued_at_ms || !(start - grant.issued_at_ms).is_multiple_of(grant.window_ms) {
-        return Err(Refusal::SpendRecordInvalid);
-    }
-    Ok(if start == current { spent.sats } else { 0 })
 }
 
 #[cfg(test)]

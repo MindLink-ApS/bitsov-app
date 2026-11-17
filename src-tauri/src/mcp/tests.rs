@@ -1,6 +1,6 @@
 //! Table-driven tests for the MCP client grant checker. Every refusal reason
-//! has at least one row; budget-window edges and overflow have their own
-//! tests. Nothing here touches a node, a socket or the Tauri runtime.
+//! has at least one row; the one-budget-per-grant rule, the node capability
+//! gate and overflow have their own tests. Nothing here touches a node, a socket or the Tauri runtime.
 
 use std::collections::BTreeSet;
 
@@ -18,7 +18,6 @@ fn grant() -> ClientGrant {
         scopes: [Scope::Read, Scope::Message, Scope::Pay].into_iter().collect(),
         budget_sats: 1_000,
         per_call_max_sats: 100,
-        window_ms: DAY,
         issued_at_ms: T0,
         expires_at_ms: T0 + DAY,
         revoked_at_ms: None,
@@ -35,9 +34,13 @@ fn read() -> Request<'static> {
     Request { client_id: "editor-agent", scope: "read", amount_sats: 0, recipient: None, sent_at_ms: T0 + HOUR }
 }
 
-fn spent(sats: u64) -> WindowSpend {
-    WindowSpend { window_start_ms: T0, sats }
+fn spent(sats: u64) -> GrantSpend {
+    GrantSpend { grant_issued_at_ms: T0, sats }
 }
+
+/// Node capabilities once N-2 exists. Rows that probe checks after the node
+/// gate use this; the gate itself has rows with [`NodeCaps::default`].
+const N2: NodeCaps = NodeCaps { node_supports_recipient_pay: true };
 
 const NOW: u64 = T0 + HOUR;
 
@@ -50,12 +53,18 @@ struct Row {
     grant: ClientGrant,
     req: Request<'static>,
     now: u64,
-    spent: WindowSpend,
+    spent: GrantSpend,
+    caps: NodeCaps,
     want: Decision,
 }
 
-fn row(name: &'static str, grant: ClientGrant, req: Request<'static>, now: u64, spent: WindowSpend, want: Decision) -> Row {
-    Row { name, grant, req, now, spent, want }
+fn row(name: &'static str, grant: ClientGrant, req: Request<'static>, now: u64, spent: GrantSpend, want: Decision) -> Row {
+    Row { name, grant, req, now, spent, caps: N2, want }
+}
+
+/// A row run against a node without N-2 (the default today).
+fn row_today(name: &'static str, grant: ClientGrant, req: Request<'static>, want: Decision) -> Row {
+    Row { name, grant, req, now: NOW, spent: spent(0), caps: NodeCaps::default(), want }
 }
 
 fn with(f: impl FnOnce(&mut ClientGrant)) -> ClientGrant {
@@ -78,7 +87,6 @@ fn table() -> Vec<Row> {
             Decision::Allow,
         ),
         // Malformed grants.
-        row("zero window", with(|g| g.window_ms = 0), read(), NOW, spent(0), refused(Refusal::MalformedGrant)),
         row("zero budget", with(|g| g.budget_sats = 0), read(), NOW, spent(0), refused(Refusal::MalformedGrant)),
         row("zero per-call max", with(|g| g.per_call_max_sats = 0), read(), NOW, spent(0), refused(Refusal::MalformedGrant)),
         row("per-call over budget", with(|g| g.per_call_max_sats = 1_001), read(), NOW, spent(0), refused(Refusal::MalformedGrant)),
@@ -165,7 +173,7 @@ fn table() -> Vec<Row> {
             grant(),
             Request { sent_at_ms: T0 - 1, ..read() },
             T0 - 1,
-            WindowSpend { window_start_ms: T0, sats: 0 },
+            spent(0),
             Decision::Allow,
         ),
         // Expiry is strict: no skew grace at the end.
@@ -230,6 +238,17 @@ fn table() -> Vec<Row> {
             spent(0),
             refused(Refusal::NotRecipientsOnly),
         ),
+        // Node capability gate (N-2). Today the node refuses an explicit pay on
+        // a recipients_only grant, so the host refuses it first.
+        row_today("pay without node support", grant(), pay(1), refused(Refusal::PayNotSupportedByNode)),
+        row_today("message without node support", grant(), Request { scope: "message", ..pay(1) }, Decision::Allow),
+        row_today("read without node support", grant(), read(), Decision::Allow),
+        row_today(
+            "pay on a grant that is not recipients_only, without node support",
+            with(|g| g.recipients_only = false),
+            pay(1),
+            refused(Refusal::NotRecipientsOnly),
+        ),
         // Amounts.
         row("zero amount", grant(), pay(0), NOW, spent(0), refused(Refusal::NonPositiveAmount)),
         row("negative amount", grant(), pay(-1), NOW, spent(0), refused(Refusal::NonPositiveAmount)),
@@ -270,32 +289,32 @@ fn table() -> Vec<Row> {
             spent(0),
             refused(Refusal::OverPerCall),
         ),
-        // Budget window.
+        // One budget for the whole grant.
         row("exactly at the limit", grant(), pay(100), NOW, spent(900), Decision::Allow),
         row("one over the limit", grant(), pay(100), NOW, spent(901), refused(Refusal::OverBudget)),
         row("already over the limit", grant(), pay(1), NOW, spent(1_000), refused(Refusal::OverBudget)),
         row(
-            "spend recorded for a future window",
+            "budget spent early is still spent in the last ms of the grant",
+            grant(),
+            Request { sent_at_ms: T0 + DAY - 1, ..pay(1) },
+            T0 + DAY - 1,
+            spent(1_000),
+            refused(Refusal::OverBudget),
+        ),
+        row(
+            "spend record from an earlier grant",
             grant(),
             pay(1),
             NOW,
-            WindowSpend { window_start_ms: T0 + DAY, sats: 0 },
+            GrantSpend { grant_issued_at_ms: T0 - DAY, sats: 0 },
             refused(Refusal::SpendRecordInvalid),
         ),
         row(
-            "spend record not on a window boundary",
+            "spend record from a later grant",
             grant(),
             pay(1),
             NOW,
-            WindowSpend { window_start_ms: T0 + 1, sats: 0 },
-            refused(Refusal::SpendRecordInvalid),
-        ),
-        row(
-            "spend record from before the grant",
-            grant(),
-            pay(1),
-            NOW,
-            WindowSpend { window_start_ms: T0 - DAY, sats: 0 },
+            GrantSpend { grant_issued_at_ms: T0 + 1, sats: 0 },
             refused(Refusal::SpendRecordInvalid),
         ),
         // Overflow.
@@ -308,7 +327,7 @@ fn table_rows_match() {
     let rows = table();
     let mut failures = Vec::new();
     for r in &rows {
-        let got = check(&r.grant, &r.req, r.now, r.spent);
+        let got = check(&r.grant, &r.req, r.now, r.spent, r.caps);
         if got != r.want {
             failures.push(format!("{}: want {:?}, got {:?}", r.name, r.want, got));
         }
@@ -361,36 +380,48 @@ fn client_id_parse_is_narrow() {
 }
 
 #[test]
-fn window_rolls_over_and_forgets_old_spend() {
-    let g = grant();
-    // A 1 h window inside a 24 h grant.
-    let g = ClientGrant { window_ms: HOUR, budget_sats: 100, per_call_max_sats: 100, ..g };
-    let last_ms_of_first = T0 + HOUR - 1;
-    let first_ms_of_second = T0 + HOUR;
-    let full = WindowSpend { window_start_ms: T0, sats: 100 };
+fn budget_never_refills_inside_one_grant() {
+    // A 24 h grant: one budget for its whole life, whatever the hour.
+    let g = ClientGrant { budget_sats: 100, per_call_max_sats: 100, ..grant() };
+    let full = spent(100);
     let at = |now: u64| Request { sent_at_ms: now, ..pay(1) };
-
-    assert_eq!(check(&g, &at(last_ms_of_first), last_ms_of_first, full), Decision::Refuse(Refusal::OverBudget));
-    // The stale record belongs to the previous window: it no longer counts.
-    assert_eq!(check(&g, &at(first_ms_of_second), first_ms_of_second, full), Decision::Allow);
-    // A full record for the new window refuses again.
-    let full_second = WindowSpend { window_start_ms: T0 + HOUR, sats: 100 };
-    assert_eq!(check(&g, &at(first_ms_of_second), first_ms_of_second, full_second), Decision::Refuse(Refusal::OverBudget));
-    // Rolling over never grants more than one window's budget in one call.
-    let big = Request { amount_sats: 101, ..at(first_ms_of_second) };
-    assert_eq!(check(&g, &big, first_ms_of_second, full), Decision::Refuse(Refusal::OverPerCall));
+    for now in [T0, T0 + HOUR - 1, T0 + HOUR, T0 + 2 * HOUR, T0 + 12 * HOUR, T0 + DAY - 1] {
+        assert_eq!(check(&g, &at(now), now, full, N2), Decision::Refuse(Refusal::OverBudget), "at +{} ms", now - T0);
+    }
+    // A record from an earlier grant is not a fresh budget: the ledger is
+    // refused rather than counted as zero.
+    let stale = GrantSpend { grant_issued_at_ms: T0 - DAY, sats: 100 };
+    assert_eq!(check(&g, &at(T0 + HOUR), T0 + HOUR, stale, N2), Decision::Refuse(Refusal::SpendRecordInvalid));
+    // Past expiry nothing is allowed, spent or not.
+    assert_eq!(check(&g, &at(T0 + DAY), T0 + DAY, spent(0), N2), Decision::Refuse(Refusal::Expired));
 }
 
 #[test]
-fn current_window_start_edges() {
-    let g = ClientGrant { window_ms: HOUR, ..grant() };
-    assert_eq!(current_window_start(&g, T0), Some(T0));
-    assert_eq!(current_window_start(&g, T0 + HOUR - 1), Some(T0));
-    assert_eq!(current_window_start(&g, T0 + HOUR), Some(T0 + HOUR));
-    // Inside the skew before issue the first window applies.
-    assert_eq!(current_window_start(&g, T0 - 1), Some(T0));
-    let g = ClientGrant { window_ms: 0, ..g };
-    assert_eq!(current_window_start(&g, T0), None);
+fn renewal_is_the_only_way_to_more_budget() {
+    let g = ClientGrant { budget_sats: 100, per_call_max_sats: 100, ..grant() };
+    let later = T0 + DAY;
+    let at = |now: u64| Request { sent_at_ms: now, ..pay(1) };
+    // The old grant is spent and then dead.
+    assert_eq!(check(&g, &at(later - 1), later - 1, spent(100), N2), Decision::Refuse(Refusal::OverBudget));
+    assert_eq!(check(&g, &at(later), later, spent(0), N2), Decision::Refuse(Refusal::Expired));
+    // The owner issues a new grant; its own fresh record starts at zero.
+    let renewed = ClientGrant { issued_at_ms: later, expires_at_ms: later + DAY, ..g.clone() };
+    let fresh = GrantSpend { grant_issued_at_ms: later, sats: 0 };
+    assert_eq!(check(&renewed, &at(later), later, fresh, N2), Decision::Allow);
+    // Carrying the old grant's record into the new one is refused, not reset.
+    assert_eq!(check(&renewed, &at(later), later, spent(100), N2), Decision::Refuse(Refusal::SpendRecordInvalid));
+}
+
+#[test]
+fn pay_refused_until_node_supports_recipient_pay() {
+    assert!(!NodeCaps::default().node_supports_recipient_pay, "N-2 must default to absent");
+    for amount in [1, 50, 100] {
+        assert_eq!(check(&grant(), &pay(amount), NOW, spent(0), NodeCaps::default()), Decision::Refuse(Refusal::PayNotSupportedByNode));
+        assert_eq!(check(&grant(), &pay(amount), NOW, spent(0), N2), Decision::Allow);
+    }
+    // The gate narrows pay only: message is unchanged without N-2.
+    let msg = Request { scope: "message", ..pay(1) };
+    assert_eq!(check(&grant(), &msg, NOW, spent(0), NodeCaps::default()), Decision::Allow);
 }
 
 /// Small deterministic generator, so the property tests need no new crate.
@@ -422,7 +453,6 @@ fn property_never_allows_more_than_the_budget() {
     for _ in 0..50_000 {
         let budget = rng.edgy();
         let per_call = rng.edgy();
-        let window = rng.edgy();
         let spent_sats = rng.edgy();
         let amount = rng.next() as i64;
         let issued = rng.edgy();
@@ -431,15 +461,14 @@ fn property_never_allows_more_than_the_budget() {
         let g = ClientGrant {
             budget_sats: budget,
             per_call_max_sats: per_call,
-            window_ms: window,
             issued_at_ms: issued,
             expires_at_ms: issued.wrapping_add(lifetime),
             ..grant()
         };
         let req = Request { amount_sats: amount, sent_at_ms: now, ..pay(0) };
-        let ws = WindowSpend { window_start_ms: current_window_start(&g, now).unwrap_or(0), sats: spent_sats };
+        let ws = GrantSpend { grant_issued_at_ms: issued, sats: spent_sats };
         // Must not panic, whatever the inputs.
-        let d = check(&g, &req, now, ws);
+        let d = check(&g, &req, now, ws, N2);
         if d == Decision::Allow {
             allowed += 1;
             assert!(amount > 0, "allowed non-positive amount {amount}");
@@ -455,31 +484,36 @@ fn property_never_allows_more_than_the_budget() {
 }
 
 #[test]
-fn property_allowed_spends_sum_within_budget_per_window() {
-    // Simulate a client spending as fast as it can across several windows:
-    // the sum allowed inside any one window never passes the budget.
+fn property_max_speed_client_gets_at_most_the_budget_per_grant() {
+    // Simulate a client spending as fast as it can for the whole 24 h life of
+    // one grant, with an honest ledger: the sum allowed over the grant never
+    // passes the budget, and the budget is used up early, not refilled.
     let mut rng = XorShift(0xDEAD_BEEF_CAFE_F00D);
-    let g = ClientGrant { window_ms: HOUR, budget_sats: 1_000, per_call_max_sats: 100, ..grant() };
-    let mut ws = WindowSpend { window_start_ms: T0, sats: 0 };
+    let g = ClientGrant { budget_sats: 1_000, per_call_max_sats: 100, ..grant() };
+    let mut ws = spent(0);
     let mut now = T0;
-    let mut per_window = std::collections::BTreeMap::<u64, u64>::new();
+    let mut calls = 0u32;
+    let mut allowed_after_first_hour = 0u64;
     while now < T0 + DAY {
         let amount = (rng.next() % 150) as i64;
-        let start = current_window_start(&g, now).unwrap();
-        if ws.window_start_ms != start {
-            ws = WindowSpend { window_start_ms: start, sats: 0 };
-        }
         let req = Request { amount_sats: amount, sent_at_ms: now, ..pay(0) };
-        if check(&g, &req, now, ws) == Decision::Allow {
+        if check(&g, &req, now, ws, N2) == Decision::Allow {
             ws.sats += amount as u64;
-            *per_window.entry(start).or_default() += amount as u64;
+            if now >= T0 + HOUR {
+                allowed_after_first_hour += amount as u64;
+            }
         }
+        calls += 1;
         now += rng.next() % 60_000;
     }
-    assert!(per_window.len() >= 20, "simulation should cross many windows");
-    for (start, sum) in per_window {
-        assert!(sum <= 1_000, "window {start} allowed {sum}");
-    }
+    assert!(calls > 1_000, "simulation should run the whole grant ({calls} calls)");
+    assert!(ws.sats <= 1_000, "whole grant allowed {} sats", ws.sats);
+    assert!(ws.sats >= 900, "an honest client should reach the budget ({} sats)", ws.sats);
+    assert_eq!(allowed_after_first_hour, 0, "budget refilled after the first hour");
+    // Only a renewal, a new grant with its own record, allows more.
+    let renewed = ClientGrant { issued_at_ms: T0 + DAY, expires_at_ms: T0 + 2 * DAY, ..g.clone() };
+    let req = Request { sent_at_ms: T0 + DAY, ..pay(1) };
+    assert_eq!(check(&renewed, &req, T0 + DAY, GrantSpend { grant_issued_at_ms: T0 + DAY, sats: 0 }, N2), Decision::Allow);
 }
 
 #[test]
@@ -492,7 +526,7 @@ fn property_unknown_scope_strings_always_refuse() {
             continue;
         }
         let req = Request { scope: &s, ..pay(1) };
-        assert_eq!(check(&grant(), &req, NOW, spent(0)), Decision::Refuse(Refusal::UnknownScope), "{s:?}");
+        assert_eq!(check(&grant(), &req, NOW, spent(0), N2), Decision::Refuse(Refusal::UnknownScope), "{s:?}");
     }
 }
 
@@ -502,7 +536,7 @@ fn default_is_refuse() {
     let g = ClientGrant::empty(ClientId::parse("editor-agent").unwrap());
     for scope in Scope::ALL {
         let req = Request { scope: scope.as_str(), ..pay(1) };
-        assert!(matches!(check(&g, &req, NOW, spent(0)), Decision::Refuse(_)), "{scope:?}");
+        assert!(matches!(check(&g, &req, NOW, spent(0), NodeCaps::default()), Decision::Refuse(_)), "{scope:?}");
     }
-    assert!(matches!(check(&g, &read(), NOW, spent(0)), Decision::Refuse(_)));
+    assert!(matches!(check(&g, &read(), NOW, spent(0), NodeCaps::default()), Decision::Refuse(_)));
 }
