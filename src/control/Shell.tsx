@@ -3708,7 +3708,12 @@ function MinutesConsent(props: { quote: CallQuote }) {
     <>
       <p class="hint" data-call-minute-price>{tr('uiCallMinutePrice', fmtAmount(props.quote.block_msat!), fmtAmount(props.quote.block_max_routing_fee_msat ?? 0))}</p>
       <Show when={props.quote.reservation_max_msat != null}>
-        <p class="hint" data-call-reservation-max>{tr('uiCallReservationMax', fmtAmount(props.quote.reservation_max_msat!))}</p>
+        {/* The short promise up front; the full rules (limits, 4 hours) stay one tap away, word for word. */}
+        <p class="hint" data-call-reservation-max>{tr('uiCallReservationShort', fmtAmount(props.quote.reservation_max_msat!))}</p>
+        <details class="quiet-detail" data-call-reservation-detail>
+          <summary>{tr('uiDetails')}</summary>
+          <p class="hint">{tr('uiCallReservationMax', fmtAmount(props.quote.reservation_max_msat!))}</p>
+        </details>
       </Show>
     </>
   );
