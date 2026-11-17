@@ -8607,9 +8607,9 @@ const END_WAIT_MAX: Duration = if cfg!(test) { Duration::from_secs(5) } else { D
 /// A further request could only be refused, by the node or by anything that
 /// changed meanwhile (a pause, an approval or budget gone), and none of those is a
 /// reason to keep a call open that is over. Nothing is sent or paid, and no other
-/// pending result is touched. A read that fails, or a call still open when the wait
-/// runs out (a read in progress included), leaves the refusal as the answer, and
-/// "Try ending it again" stays on the card.
+/// pending result is touched. A read that fails, a call still open when the wait
+/// runs out (a read in progress included), or another node made active meanwhile
+/// leaves the refusal as the answer, and "Try ending it again" stays on the card.
 async fn do_op_end_call_when_node_ends(state: &NodeState, call_id: &str, max_msat: Option<u64>) -> Result<spend_journal::OpView, ActionError> {
     let refused = do_op_end_call_with_limit(state, call_id, max_msat).await;
     let Err(error) = &refused else { return refused };
@@ -8617,6 +8617,11 @@ async fn do_op_end_call_when_node_ends(state: &NodeState, call_id: &str, max_msa
     let Some(offer) = refused_hangup_admission(state, error.operation_id.as_deref()).await else { return refused };
     let deadline = tokio::time::Instant::now() + END_WAIT_MAX;
     loop {
+        // A read begun at the deadline could only time out.
+        if tokio::time::Instant::now() >= deadline { return refused; }
+        // Only the call's own node can show it ended. Another node made active
+        // meanwhile ends the wait, the call not shown ended.
+        if state.node_id.lock().unwrap().as_deref() != Some(offer.node_id.as_str()) { return refused; }
         match tokio::time::timeout_at(deadline, read_call_status(state, &offer.peer, call_id)).await {
             Ok(Ok(Some(status))) if status.state != "ended" => {}
             Ok(Ok(_)) => break,
