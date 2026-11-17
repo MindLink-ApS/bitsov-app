@@ -20519,6 +20519,115 @@ mod control_act_tests {
         assert_eq!(hangups(&node), 1);
     }
 
+    /// No status read starts at or after the wait's deadline: a read begun there
+    /// could only time out. Here the node answers End's first read just short of
+    /// the deadline, so End's next turn falls on it, and the node's credential is
+    /// held elsewhere until well past it: a read begun then would wait for it.
+    #[test]
+    fn end_starts_no_status_read_at_its_deadline() {
+        let rt = race_runtime();
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let first = Arc::new(Mutex::new(None::<Instant>));
+        let waiting = Arc::new(AtomicBool::new(false));
+        let (read, on) = (first.clone(), waiting.clone());
+        let node = rt.block_on(minute_ready(Arc::new(move |m, p, b| {
+            if p.starts_with("/calls?") && on.load(Ordering::SeqCst) {
+                // The deadline is set before the first read arrives.
+                let at = *read.lock().unwrap().get_or_insert_with(Instant::now);
+                let answer = at + END_WAIT_MAX - Duration::from_millis(9);
+                std::thread::sleep(answer.saturating_duration_since(Instant::now() + Duration::from_millis(20)));
+                while Instant::now() < answer { std::hint::spin_loop(); }
+            }
+            routes(m, p, b)
+        })));
+        waiting.store(true, Ordering::SeqCst);
+        let held = Duration::from_secs(1);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let at = loop {
+                    if let Some(at) = *first.lock().unwrap() { break at; }
+                    std::thread::sleep(Duration::from_millis(1));
+                };
+                std::thread::sleep(Duration::from_millis(100));
+                let _token = node.state.token.lock().unwrap();
+                std::thread::sleep((at + END_WAIT_MAX + held).saturating_duration_since(Instant::now()));
+            });
+            let error = rt.block_on(do_op_end_call_when_node_ends(&node.state, CALL_ID, None)).unwrap_err();
+            let waited = first.lock().unwrap().expect("End read the call").elapsed();
+            assert_eq!(error.code, "not_dispatched");
+            assert!(waited < END_WAIT_MAX + held / 2, "a read began at the deadline: End returned {waited:?} after its first read");
+        });
+    }
+
+    /// Another node made active while End waits is never asked about this call.
+    #[tokio::test]
+    async fn end_asks_only_the_calls_own_node_while_it_waits() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let switched = Arc::new(AtomicBool::new(false));
+        let elsewhere = Arc::new(AtomicUsize::new(0));
+        let (on, asked) = (switched.clone(), elsewhere.clone());
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            if p.starts_with("/calls?") && on.load(Ordering::SeqCst) { asked.fetch_add(1, Ordering::SeqCst); }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let before = node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let (end, ()) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+            until_end_is_waiting(&node, before).await;
+            *node.state.node_id.lock().unwrap() = Some(C.into());
+            switched.store(true, Ordering::SeqCst);
+        });
+        assert_eq!(end.unwrap_err().code, "not_dispatched");
+        assert_eq!(elsewhere.load(Ordering::SeqCst), 0, "a status read went to the other node");
+        assert!(admission_is_open(&node, &offer));
+        assert_eq!(hangups(&node), 1);
+    }
+
+    /// A switch of the active node ends the wait with the refusal, at once. The
+    /// call is never shown closed: not even when the call's own node is active
+    /// again by the time the other node's "no such call" comes back.
+    #[tokio::test]
+    async fn a_node_switch_during_ends_wait_leaves_the_refusal() {
+        let (routes, paid) = node_with_callee_offline(usize::MAX);
+        let switched = Arc::new(AtomicBool::new(false));
+        let asked = Arc::new(AtomicBool::new(false));
+        let back = Arc::new(AtomicBool::new(false));
+        let (on, seen, again) = (switched.clone(), asked.clone(), back.clone());
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            if p.starts_with("/calls?") && on.load(Ordering::SeqCst) {
+                // The other node has no such call. Its answer arrives once the
+                // call's own node is active again.
+                seen.store(true, Ordering::SeqCst);
+                while !again.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+                return (200, "[]".into());
+            }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let pays = paid.lock().unwrap().pays;
+        let before = node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let started = Instant::now();
+        let (end, ()) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+            until_end_is_waiting(&node, before).await;
+            *node.state.node_id.lock().unwrap() = Some(C.into());
+            switched.store(true, Ordering::SeqCst);
+            for _ in 0..500 {
+                if asked.load(Ordering::SeqCst) { break; }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            switched.store(false, Ordering::SeqCst);
+            *node.state.node_id.lock().unwrap() = Some(OWN.into());
+            back.store(true, Ordering::SeqCst);
+        });
+        let error = end.expect_err("a switch never shows the call closed");
+        assert_eq!(error.code, "not_dispatched");
+        assert!(started.elapsed() < END_WAIT_MAX / 2, "the switch ended the wait: {:?}", started.elapsed());
+        assert!(admission_is_open(&node, &offer));
+        assert!(pending(&node).is_none());
+        assert_eq!(hangups(&node), 1);
+        assert_eq!(paid.lock().unwrap().pays, pays, "nothing was paid");
+    }
+
     /// The approval runs out while End waits. The node's own "ended" is enough to
     /// close the admission: nothing more is asked of it, and nothing is paid.
     #[tokio::test]
