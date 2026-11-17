@@ -583,6 +583,8 @@ function IdentityGate(props: {
   const [busy, setBusy] = createSignal(false);
   const [savingTrust, setSavingTrust] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  // A failed save of the G6 acknowledgement: plain summary, raw text only in Details.
+  const [trustError, setTrustError] = createSignal<string | null>(null);
   const [restored, setRestored] = createSignal<string | null>(null);
   usePairingActivity(() => showRestore() || busy() || savingTrust());
 
@@ -640,42 +642,32 @@ function IdentityGate(props: {
         when={props.remote}
         fallback={
           <section class="panel disclosure" data-gate="g6-local-trust">
-            <h2>Local trust — read this before you deposit</h2>
-            <p>Your node is only reachable while this Mac is awake and BitSov is open.</p>
+            <h2>{t('obLocalTrustTitle')}</h2>
+            <p>{t('obLocalTrustAwake')}</p>
             <p>
-              This node trusts every program on this computer. Anything running under your user
-              account can ask it for full access over <code>127.0.0.1</code> — enough to spend what
-              you deposit and read your history. Only fund a node on a machine you control.
+              {t('obLocalTrustProgramsBefore')} <code>127.0.0.1</code> {t('obLocalTrustProgramsAfter')}
             </p>
-            <p>
-              Your keys stay in the node. BitSov never shows you your recovery phrase and never
-              copies it anywhere.
-            </p>
+            <p>{t('obTrustKeysStay')}</p>
           </section>
         }
       >
         <section class="panel disclosure" data-gate="g6-remote-trust">
-          <h2>Remote trust — read this before you deposit</h2>
-          <p>
-            This node’s keys live on the remote machine. Anyone with access —
-            whoever can log in to that computer — can spend what you deposit. Only fund a node whose host you trust.
-          </p>
-          <p>
-            Your keys stay in the node. BitSov never shows you your recovery phrase and never
-            copies it anywhere.
-          </p>
+          <h2>{t('obRemoteTrustTitle')}</h2>
+          <p>{t('obRemoteTrustBody')}</p>
+          <p>{t('obTrustKeysStay')}</p>
         </section>
       </Show>
 
       <Show when={!props.bootstrap}>
-      <button class="primary" disabled={busy() || savingTrust()} onClick={async () => {
+      <button class="primary" data-trust-continue disabled={busy() || savingTrust()} onClick={async () => {
         setSavingTrust(true);
         setError(null);
+        setTrustError(null);
         try { await props.onContinue(); }
-        catch (e) { setError(String(e)); }
+        catch (e) { setTrustError(String(e)); }
         finally { setSavingTrust(false); }
       }}>
-        I understand — continue to funding
+        {t('obTrustContinue')}
       </button>
       </Show>
 
@@ -726,6 +718,9 @@ function IdentityGate(props: {
       </Show>
       </Show>
 
+      <Show when={trustError()}>
+        <SoftError message={trustError()!} summary={t('obTrustSaveRetry')} />
+      </Show>
       <Show when={displayError()}>
         <SoftError message={displayError()!} />
       </Show>
@@ -745,7 +740,8 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
   const [addressError, setAddressError] = createSignal<string | null>(null);
   const [amount, setAmount] = createSignal(String(DEFAULT_FUNDING_SATS));
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
+  // `summary` is the plain sentence for a host failure; the raw text stays behind Details.
+  const [error, setError] = createSignal<{ message: string; summary?: 'obFundStateFailed' | 'obFundStartFailed' } | null>(null);
 
   const refresh = async () => {
     if (!props.ready()) return;
@@ -766,7 +762,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
         }
       }
     } catch (e) {
-      setError(String(e));
+      setError({ message: String(e), summary: 'obFundStateFailed' });
     }
   };
 
@@ -786,7 +782,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
     if (props.moneyBlocked?.()) return;
     const value = Number(amount());
     if (!Number.isInteger(value) || value < 1 || value > 4_294_967_295) {
-      setError(t('obWholeSats'));
+      setError({ message: t('obWholeSats') });
       return;
     }
     setBusy(true);
@@ -795,7 +791,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
       setFund(await props.source.fundStart(value));
       await refresh();
     } catch (e) {
-      setError(isMoneyNotReady(e) ? null : String(e));
+      setError(isMoneyNotReady(e) ? null : { message: String(e), summary: 'obFundStartFailed' });
     } finally {
       setBusy(false);
     }
@@ -905,7 +901,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
 
 
       <Show when={error()}>
-        <SoftError message={error()!} />
+        <SoftError message={error()!.message} summary={error()!.summary ? t(error()!.summary!) : undefined} />
       </Show>
     </div>
   );

@@ -185,3 +185,43 @@ it.each(['message', 'pay', 'request', 'file'] as const)('cleans up successful %s
     vi.useRealTimers();
   }
 });
+
+it('a deposit-status read failure shows a plain message, with the raw error only behind Details', async () => {
+  vi.useFakeTimers();
+  const own = '1'.repeat(64);
+  const raw = 'Error: GET /onboarding/state returned 500: {"error":"internal"}';
+  const replies: Record<string, () => unknown> = {
+    node_status: () => ({ ready: true, node_id: own, error: null }),
+    trust_acknowledge: () => true,
+    pairing_status: () => ({ state: 'paired', scopes: ['read', 'receive'], short_code: null, code_from_node: true, reason: null, remote: false, bootstrap: null }),
+    node_overview: () => ({ money_ready: true, node_id: own, status: 'ok', version: 'api v2', connected_peers: 0, e2ee_sessions: 0, pending_deliveries: 0, lightning_available: true, block_height: null, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now() }),
+    peers_list: () => [], rooms_list: () => [],
+    payments_overview: () => ({ balance_msat: 0, lightning_outbound_msat: 0, channels: [] }),
+    spend_status: () => ({ state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 }),
+    'plugin:event|listen': () => 1,
+    'plugin:event|unlisten': () => null,
+  };
+  vi.stubGlobal('__TAURI_INTERNALS__', {
+    transformCallback: () => 1,
+    invoke: (cmd: string) => {
+      if (cmd === 'fund_state') return Promise.reject(raw);
+      const reply = replies[cmd];
+      return reply ? Promise.resolve(reply()) : Promise.reject(new Error(`unexpected ${cmd}`));
+    },
+  });
+  vi.stubGlobal('__TAURI_EVENT_PLUGIN_INTERNALS__', { unregisterListener: () => {} });
+  mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <App />, mount);
+  await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
+  [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+  await vi.waitFor(() => expect(mount.querySelector('[data-first-run]')).toBeNull());
+  await vi.waitFor(() => expect(mount.querySelector('[data-tab="wallet"]')).not.toBeNull());
+  mount.querySelector<HTMLButtonElement>('[data-tab="wallet"]')!.click();
+  await vi.advanceTimersByTimeAsync(0);
+  const receive = () => mount.querySelector('[data-panel="receive"]');
+  await vi.waitFor(() => expect(receive()?.querySelector('[data-soft-summary]')).toBeTruthy());
+  const summary = receive()!.querySelector('[data-soft-summary]')!.textContent!;
+  expect(summary).toBe('Could not read the deposit status from your node. BitSov tries again by itself every few seconds.');
+  expect(summary).not.toContain('500');
+  expect(receive()!.querySelector('[data-soft-detail]')?.textContent).toContain(raw);
+});
