@@ -5089,6 +5089,51 @@ type PayReview =
   | { kind: 'invoice'; bolt11: string; msat: number; payee: string }
   | { kind: 'keysend'; pubkey: string; msat: number; memo: string };
 
+/**
+ * The + menu and the emoji picker are drawn fixed, outside the composer's scroll box, so a
+ * tall composer keeps scrolling while either is open and neither is clipped by it. Each sits
+ * above its button inside the visual viewport and follows the button while the composer,
+ * the chat or the viewport moves. While the button is scrolled out of the composer, the
+ * overlay waits at the composer's edge. Placement only: it never sends, pays or approves.
+ */
+function followAnchor(pop: HTMLElement, anchor: HTMLElement, align: 'start' | 'end'): () => void {
+  const gap = 8, edge = 8;
+  const place = () => {
+    if (!pop.isConnected || !anchor.isConnected) return;
+    const root = document.documentElement;
+    const layoutH = root.clientHeight || window.innerHeight, layoutW = root.clientWidth || window.innerWidth;
+    const vv = window.visualViewport;
+    const viewTop = Math.max(0, vv?.offsetTop ?? 0), viewLeft = Math.max(0, vv?.offsetLeft ?? 0);
+    const viewBottom = Math.min(layoutH, viewTop + (vv?.height ?? layoutH));
+    const viewRight = Math.min(layoutW, viewLeft + (vv?.width ?? layoutW));
+    const a = anchor.getBoundingClientRect();
+    const box = anchor.closest('.composer')?.getBoundingClientRect();
+    const top = Math.min(box ? Math.min(Math.max(a.top, box.top), box.bottom) : a.top, viewBottom);
+    pop.style.setProperty('--overlay-room', `${Math.max(0, top - gap - viewTop - edge)}px`);
+    pop.style.bottom = `${layoutH - (top - gap)}px`;
+    const w = pop.offsetWidth;
+    const want = align === 'start' ? a.left : a.right - w;
+    pop.style.left = `${Math.max(viewLeft + edge, Math.min(want, viewRight - edge - w))}px`;
+  };
+  place();
+  const vv = window.visualViewport;
+  document.addEventListener('scroll', place, { capture: true, passive: true });
+  window.addEventListener('resize', place);
+  vv?.addEventListener('resize', place);
+  vv?.addEventListener('scroll', place);
+  const composer = anchor.closest('.composer');
+  const ro = typeof ResizeObserver === 'function' && composer ? new ResizeObserver(place) : null;
+  if (ro && composer) ro.observe(composer);
+  return () => {
+    document.removeEventListener('scroll', place, { capture: true });
+    window.removeEventListener('resize', place);
+    vv?.removeEventListener('resize', place);
+    vv?.removeEventListener('scroll', place);
+    ro?.disconnect();
+    for (const name of ['--overlay-room', 'bottom', 'left']) pop.style.removeProperty(name);
+  };
+}
+
 function Composer(props: {
   admissionResume?: OpView;
   ownId: string;
@@ -5160,11 +5205,15 @@ function Composer(props: {
   let draftInput: HTMLTextAreaElement | undefined;
   const [emojiOpen, setEmojiOpen] = createSignal(false);
   let plusBtn: HTMLButtonElement | undefined;
+  let plusMenu: HTMLDivElement | undefined;
   let emojiBtn: HTMLButtonElement | undefined;
+  let emojiPicker: HTMLDivElement | undefined;
   createEffect(() => {
     if (!emojiOpen()) return;
-    // Escape closes the picker and returns focus to the emoji button; opening moves focus into it.
-    queueMicrotask(() => document.querySelector<HTMLElement>('[data-emoji-picker] [data-emoji-pick]')?.focus());
+    if (emojiPicker && emojiBtn) onCleanup(followAnchor(emojiPicker, emojiBtn, 'start'));
+    // Escape closes the picker and returns focus to the emoji button; opening moves focus into
+    // it without scrolling, since the picker is already placed where it can be seen.
+    queueMicrotask(() => emojiPicker?.querySelector<HTMLElement>('[data-emoji-pick]')?.focus({ preventScroll: true }));
     onCleanup(onEscape(() => { setEmojiOpen(false); emojiBtn?.focus(); }));
   });
   // voice note: recorded here, then sent exactly like a chosen file
@@ -5850,8 +5899,9 @@ function Composer(props: {
     const onDoc = (e: Event) => {
       if (!(e.target as Element | null)?.closest?.('.composer-plus-wrap')) setMenuOpen(false);
     };
+    if (plusMenu && plusBtn) onCleanup(followAnchor(plusMenu, plusBtn, 'end'));
     // Escape closes the Pay / Request / Attach menu and returns focus to +.
-    queueMicrotask(() => plusBtn?.parentElement?.querySelector<HTMLElement>('[role="menuitem"]')?.focus());
+    queueMicrotask(() => plusMenu?.querySelector<HTMLElement>('[role="menuitem"]')?.focus({ preventScroll: true }));
     document.addEventListener('click', onDoc);
     onCleanup(onEscape(() => { setMenuOpen(false); plusBtn?.focus(); }));
     onCleanup(() => document.removeEventListener('click', onDoc));
@@ -6889,7 +6939,7 @@ function Composer(props: {
           <svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M8.5 14.5c.9 1.3 2.1 2 3.5 2s2.6-.7 3.5-2" /><path d="M9 9.5v.01M15 9.5v.01" /></svg>
         </button>
       <Show when={emojiOpen()}>
-        <div class="emoji-picker" data-emoji-picker role="group" aria-label={tr('uiEmoji')}>
+        <div ref={(el) => { emojiPicker = el; }} class="emoji-picker" data-emoji-picker role="group" aria-label={tr('uiEmoji')}>
           <For each={[...EMOJIS]}>
             {(e) => (
               <button
@@ -6960,7 +7010,7 @@ function Composer(props: {
             >
               +
             </button>
-            <div class="composer-menu" data-composer-menu role="menu" hidden={!menuOpen()}>
+            <div ref={(el) => { plusMenu = el; }} class="composer-menu" data-composer-menu role="menu" hidden={!menuOpen()}>
               <For each={modes().filter((m) => m !== 'message')}>
                 {(m) => (
                   <button

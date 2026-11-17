@@ -320,7 +320,8 @@ label.field input {
 .composer { border-top: 1px solid var(--line); padding: var(--s-3) var(--s-4) var(--s-4); display: flex; flex-direction: column; align-items: center; gap: var(--s-2); background: var(--bg); width: 100%; flex: none; z-index: 2; }
 .composer textarea { resize: none; min-height: 40px; max-height: 160px; border-radius: 18px; overflow-y: auto; }
 .composer-plus-wrap { position: relative; flex: none; display: flex; }
-.composer-menu { position: absolute; right: 0; bottom: calc(100% + 8px); min-width: 150px; display: flex; flex-direction: column; padding: 4px; background: var(--raised); border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,0.3); z-index: 5; }
+/* Fixed, outside the composer's scroll box; Shell places it above + (followAnchor). */
+.composer-menu { position: fixed; max-height: var(--overlay-room, none); overflow-y: auto; min-width: 150px; display: flex; flex-direction: column; padding: 4px; background: var(--raised); border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,0.3); z-index: 5; }
 .composer-menu[hidden] { display: none; }
 .composer-menu-item { border: none; background: transparent; color: var(--ink); text-align: left; padding: 8px 12px; border-radius: var(--r-chip); font-size: var(--t-sm); }
 .composer-menu-item:hover { background: var(--surface); }
@@ -336,7 +337,8 @@ label.field input {
 .file-panel .file-chip .file-name { min-width: 0; }
 /* The picker opens over the chat, not under the bar, so nothing moves. */
 .composer-emoji-wrap { position: relative; flex: none; display: flex; }
-.composer-emoji-wrap .emoji-picker { position: absolute; left: 0; bottom: calc(100% + 8px); margin: 0; width: 240px; max-width: calc(100vw - 32px); max-height: 40vh; overflow-y: auto; z-index: 5; box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+/* Fixed over the chat, outside the composer's scroll box; Shell places it above the emoji button. */
+.composer-emoji-wrap .emoji-picker { position: fixed; margin: 0; width: 240px; max-width: calc(100vw - 32px); max-height: min(40vh, var(--overlay-room, 40vh)); overflow-y: auto; z-index: 5; box-shadow: 0 8px 24px rgba(0,0,0,.28); }
 .composer-icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; display: block; }
 .passive-status { margin: 0; }
 .passive-status > summary { display: none; }
@@ -1666,8 +1668,7 @@ html[data-platform='ios'] .composer {
 }
 /* A tall composer shrinks and scrolls inside the screen: flex: none pushed its end, and any limit there, off the bottom. */
 html[data-platform='ios'] .composer, .cc[data-phone-shell='true'] .composer { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
-/* A scrolling box would clip what opens above it: the emoji picker and the + menu, on Android as on iPhone. */
-:is(html[data-platform='ios'], .cc[data-phone-shell='true']) .composer:has(.emoji-picker, .composer-menu:not([hidden])) { overflow: visible; }
+/* The + menu and the emoji picker are fixed overlays, so this box keeps scrolling while they are open. */
 html[data-platform='ios'] .composer-panel { max-height: calc(var(--visible-height, 100dvh) * .45); flex-shrink: 0; }
 .ios-back { display: none; }
 html[data-platform='ios'] .ios-back { display: inline-flex; align-items: center; min-height: 44px; flex-shrink: 0; padding: 0 var(--s-4); }
