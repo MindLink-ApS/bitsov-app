@@ -557,7 +557,7 @@ pub fn load(dir: &Path, node_id: &str) -> Result<Book, ActionError> {
             }
             Ok(book)
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Book::new(node_id)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && crate::pairing::key::nothing_at(&book_path(dir, node_id)) => Ok(Book::new(node_id)),
         Err(e) => Err(unreadable(e)),
     }
 }

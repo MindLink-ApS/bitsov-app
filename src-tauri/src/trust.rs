@@ -6,6 +6,7 @@ use std::path::Path;
 const FILE: &str = "trust-v1.json";
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Acknowledgement {
     node_id: String,
     remote: bool,
@@ -16,7 +17,7 @@ fn load(store: &Path) -> Result<Option<Acknowledgement>, String> {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map(Some)
             .map_err(|_| "Could not read trust acknowledgement.".into()),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == ErrorKind::NotFound && crate::pairing::key::nothing_at(&store.join(FILE)) => Ok(None),
         Err(_) => Err("Could not read trust acknowledgement.".into()),
     }
 }

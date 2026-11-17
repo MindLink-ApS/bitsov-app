@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::act::{ActionError, OperationContext::Active};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Pending {
     /// Durable per-send identity. Separate from the deterministic operation fingerprint.
     #[serde(default)]
@@ -169,6 +170,7 @@ pub fn operation(body: &serde_json::Value) -> String {
 pub enum OperationState { Dispatching, AdmissionResumable, Paid, Unpaid, PaidUndelivered, FailedPaid, Unknown, Settled, Closed }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OperationRecord {
     pub op_id: String,
     pub node_id: String,
@@ -279,7 +281,7 @@ pub fn unknown(detail: impl std::fmt::Display) -> ActionError {
 pub fn read_pending(dir: &Path) -> Result<Option<Pending>, ActionError> {
     match std::fs::read(dir.join("spend-pending.json")) {
         Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(unknown),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && absent(&dir.join("spend-pending.json")) => Ok(None),
         Err(e) => Err(unknown(e)),
     }
 }
@@ -697,6 +699,11 @@ pub struct UnresolvedCall {
     pub hangup_cap_msat: Option<u64>,
 }
 
+/// A dangling symlink reads as `NotFound` but is not an empty slot.
+fn absent(path: &Path) -> bool {
+    crate::pairing::key::nothing_at(path)
+}
+
 fn damaged_record() -> ActionError {
     // Do not log parser errors: they can contain bytes from a damaged record.
     eprintln!("spend ledger: required operation record or call index is missing, unreadable, or invalid");
@@ -710,7 +717,7 @@ fn read_operation(path: &Path, expected_id: Option<&str>) -> Result<Option<Opera
             if expected_id.is_some_and(|id| id != record.op_id) { return Err(damaged_record()); }
             Ok(Some(record))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && absent(path) => Ok(None),
         Err(_) => Err(damaged_record()),
     }
 }
@@ -773,9 +780,10 @@ pub fn list_operations(dir: &Path, node_id: &str, peer: Option<&str>, limit: usi
 /// Read an atomic index/record snapshot when a live signal arrives, before
 /// waiting on a dispatch. The snapshot grants no payment authority.
 pub fn read_call_admission(dir: &Path, node_id: &str, peer: &str, call: &str) -> Result<Option<OperationRecord>, ActionError> {
-    let entry: CallIndex = match std::fs::read(call_index_path(dir, node_id, peer, call)) {
+    let path = call_index_path(dir, node_id, peer, call);
+    let entry: CallIndex = match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| damaged_record())?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && absent(&path) => return Ok(None),
         Err(_) => return Err(damaged_record()),
     };
     if entry.op_id.len() != 36 || !entry.op_id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') {
@@ -885,6 +893,7 @@ fn write_call_membership(_dir: &Path, _record: &OperationRecord) -> Result<(), A
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CallIndex { op_id: String, created_ms: u64 }
 
 fn call_index_path(dir: &Path, node_id: &str, peer: &str, call: &str) -> PathBuf {
