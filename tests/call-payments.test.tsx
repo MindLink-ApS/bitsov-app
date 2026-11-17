@@ -1841,6 +1841,37 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(host.used('spend_dismiss_undelivered').map((c) => c.args)).toEqual([{ pending_id: 'rec-9' }]);
   });
 
+  it('a record stopped mid-call is not the ended card’s minute: their hangup on an unknown minute keeps the lost line and its check', async () => {
+    const MID_CALL = { ...ACCOUNTED, pending_id: 'msg-42' };
+    let lose: (error: unknown) => void = () => {};
+    let checks = 0;
+    const host = stubHost({
+      block: () => new Promise((_, reject) => { lose = reject; }),
+      reconcile: () => { if (++checks === 1) throw MID_CALL; throw STILL_UNKNOWN; },
+      dismiss: () => STOPPED,
+      budget: HELD_BUDGET,
+    });
+    await openShell();
+    const callId = await ringAndAnswer(host);
+    await vi.waitFor(() => expect(host.used('call_block')).toHaveLength(1));
+    // Mid-call: an earlier payment is paid, not delivered, and the owner stops retrying it.
+    await checkFromTheWallet();
+    await vi.waitFor(() => expect($('[data-wallet-page] [data-stop-retrying]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-wallet-page] [data-stop-retrying]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_dismiss_undelivered')).toHaveLength(1));
+    // Their hangup, then the minute in flight comes back unknown.
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'gone', kind: 403, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, reason: 'hangup' }), payment_amount_msat: 1000, admission_operation_id: 'op-400' } });
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    lose({ code: 'spend_unknown', message: 'The node did not return a complete response.' });
+    await vi.waitFor(() => expect(host.used('spend_reconcile')).toHaveLength(2));
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).not.toBeNull());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect($('[data-call-lost-minute]')!.textContent).toBe('The result of this call’s last minute is not known yet, so other payments wait until it is checked.');
+    expect(actions('data-spend-reconcile')).toHaveLength(1);
+    expect(actions('data-stop-retrying')).toHaveLength(0);
+    expect(host.used('spend_dismiss_undelivered').map((c) => c.args)).toEqual([{ pending_id: 'msg-42' }]);
+  });
+
   it('a check still out says nothing: the line and the link stay, and a failed one changes neither', async () => {
     let finish: (value: unknown) => void = () => {};
     const host = await peerHangsUpOnALostMinute(() => new Promise((_, reject) => { finish = reject; }));
