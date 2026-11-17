@@ -66,6 +66,8 @@ it.each([['en', true], ['en', false], ['da', true], ['da', false]] as const)('em
   setLanguagePref(lang); const { source } = setup(granted); await open(source);
   expect($<HTMLButtonElement>('[data-send]').disabled).toBe(true);
   expect($('[data-send-disabled-reason]')?.textContent).toBe(lang === 'da' ? 'Skriv en besked først.' : 'Type a message first.');
+  // Not shown before anyone has tried anything; a screen reader still hears why Send is off.
+  expect($('[data-send-disabled-reason]')?.classList.contains('sr-only')).toBe(true);
   $('[data-composer]').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   expect(source.relationApprove).not.toHaveBeenCalled();
   expect(source.send).not.toHaveBeenCalled();

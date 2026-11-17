@@ -2133,9 +2133,11 @@ export function ControlCenter(props: Props) {
         peers={peers()}
         peersPending={!peersLoaded()}
         peersError={errors.peers}
+        peersErrorInMain={!phoneShell() && !track() && !peersLoaded() && walletTab() === null}
         onReconnect={async () => { await props.onReconnect?.(); await loadPeers(); }}
         rooms={rooms()}
         nodeRooms={nodeRooms()}
+        nodeKnown={overview() !== null}
         boundRooms={localRooms()}
         boundName={boundName}
         onNewRoom={() => setRoomPlan(true)}
@@ -2303,6 +2305,8 @@ export function ControlCenter(props: Props) {
                     now={now()}
                     peers={peers()}
                     nodeReads={overview()?.capabilities?.some((c) => c === 'porch_quote_v1' || c === 'porch_read_v1') === true}
+                    known={overview() !== null && (peersLoaded() || !!errors.peers)}
+                    peersFailed={!!errors.peers}
                     moneyBlocked={moneyBlocked()}
                     spend={spend()}
                     spendGate={<SpendBar spend={spend()} error={errors.spend ?? errors.spendPoll} now={now()} actions={actions} />}
@@ -2618,6 +2622,8 @@ export function ControlCenter(props: Props) {
             now={now()}
             ownId={ownId()}
             histories={[...peers().map((p) => p.node_id.toLowerCase()), ...rooms().map((r) => r.id.toLowerCase())]}
+            historiesPending={!peersLoaded() && !errors.peers}
+            historiesIncomplete={!!errors.peers}
             threadMessages={Object.values(threads.t).flat()}
             nameOf={(id) => rooms().find((r) => r.id.toLowerCase() === id.toLowerCase())?.name ?? channelName(id)}
             actions={walletActions}
@@ -2786,6 +2792,10 @@ function Rail(props: {
   sample: boolean;
   peers: Peer[];
   peersPending?: boolean;
+  /** The main pane is already saying the contacts could not be read. */
+  peersErrorInMain?: boolean;
+  /** The node has answered, so what it does not offer is known. */
+  nodeKnown?: boolean;
   peersError?: string;
   onReconnect?: () => Promise<void>;
   rooms: Room[];
@@ -2867,12 +2877,12 @@ function Rail(props: {
       <div class="track-group">
         <h2>{tr('uiContacts')}</h2>
         <Show when={props.active} fallback={<p class="track-empty">{tr('uiAvailableAfterSetup')}</p>}>
-          <Show when={props.phone && props.peersError}>
+          <Show when={props.peersError && !props.peersErrorInMain}>
             <SoftError message={props.peersError!} summary={tr('caCouldNotLoadContacts')} onReconnect={props.onReconnect} />
           </Show>
           <For each={props.peers} fallback={
-            <Show when={!props.phone || (!props.peersPending && !props.peersError)} fallback={
-              <Show when={props.phone && props.peersPending && !props.peersError}><DelayedSpinner /></Show>
+            <Show when={!props.peersPending && !props.peersError} fallback={
+              <Show when={props.peersPending && !props.peersError}><DelayedSpinner /></Show>
             }><p class="track-empty">{tr('uiNoContactsYet')}</p></Show>
           }>
             {(p) =>
@@ -2888,7 +2898,7 @@ function Rail(props: {
           when={props.active && props.nodeRooms}
           fallback={
             <p class="track-empty" data-rooms-coming-soon>
-              {props.active ? tr('uiThisNodeDoesNotSupportRoomsYet') : tr('uiRoomAvailabilityIsCheckedAfterSetup')}
+              {!props.active ? tr('uiRoomAvailabilityIsCheckedAfterSetup') : props.nodeKnown === false ? tr('caRoomsAfterBoxAnswers') : tr('uiThisNodeDoesNotSupportRoomsYet')}
             </p>
           }
         >
@@ -3235,7 +3245,11 @@ function Conversation(props: {
           fallback={
             // Unknown stays unknown: while the history is being read nothing is said, and a failed
             // read shows only its error (below). Only a read that came back empty says "no messages".
-            <Show when={props.read === 'ok'} fallback={<Show when={props.read === 'pending'}><div class="empty-track" data-thread-loading><DelayedSpinner /></div></Show>}>
+            <Show when={props.read === 'ok'} fallback={<Switch>
+              <Match when={props.read === 'pending'}><div class="empty-track" data-thread-loading><DelayedSpinner /></div></Match>
+              {/* Refused while the node is getting ready: no error text comes with it, and a blank chat says nothing. */}
+              <Match when={props.read === 'failed' && !props.error}><p class="hint" role="status" data-thread-not-read>{tr('caChatNotReadYet')}</p></Match>
+            </Switch>}>
               <div class="empty-track" data-thread-empty={props.track.kind === 'room' ? 'room' : knownContact() ? 'known' : 'unknown'}>
                 <h2>{tr('chatEmpty')}</h2>
                 <Show when={props.track.kind === 'room'}>
@@ -6821,7 +6835,8 @@ function Composer(props: {
         </Show>
       </div>
       <Show when={disabledReason()}>
-        <p id={sendReasonId} class="hint" data-send-disabled-reason>{disabledReason()}</p>
+        {/* An empty box needs no telling before anyone has tried anything: only a screen reader hears why Send is off. */}
+        <p id={sendReasonId} class="hint" classList={{ 'sr-only': mode() === 'message' && !draft().trim() }} data-send-disabled-reason>{disabledReason()}</p>
       </Show>
       <Show when={mode() === 'message' && liveGrantRemaining() !== null}>
         <p class="hint" data-send-budget>{tr(budget()?.autopay.state === 'open' ? 'sendBudgetRemaining' : 'caNodeGrantSeparateLimits', fmtAmount(liveGrantRemaining()!))}</p>
