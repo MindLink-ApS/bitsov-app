@@ -3289,7 +3289,7 @@ function Conversation(props: {
                     )}
                   </Match>
                   <Match when={artifact()}>
-                    {(a) => <ArtifactView callActions={props.actions} moneyBlocked={props.moneyBlocked} a={a()} nameOf={props.nameOf} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} onRetry={(id, approved) => props.actions.retryDelivery(props.track, id, approved)} onStop={(pendingId) => props.actions.stopRetrying(props.track, pendingId)} onRestore={(id) => props.actions.restoreUnsent(props.track, id)} onDiscard={(id) => props.actions.discardUnsent(props.track, id)} />}
+                    {(a) => <ArtifactView callActions={props.actions} moneyBlocked={props.moneyBlocked} a={a()} nameOf={props.nameOf} offlineOf={(id) => props.peer?.node_id === id && props.peer.connected === false} delivery={a().type === 'file' ? props.deliveries[(a() as { receipt: { message_id: string } }).receipt.message_id] : undefined} onRetry={(id, approved) => props.actions.retryDelivery(props.track, id, approved)} onStop={(pendingId) => props.actions.stopRetrying(props.track, pendingId)} onRestore={(id) => props.actions.restoreUnsent(props.track, id)} onDiscard={(id) => props.actions.discardUnsent(props.track, id)} />}
                   </Match>
                 </Switch>
               </>
@@ -4521,7 +4521,7 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
   );
 }
 
-function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>; onStop?: (pendingId: string | null) => Promise<unknown>; onRestore?: (id: string) => void; onDiscard?: (id: string) => void }) {
+function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; /** The same offline signal the header call buttons get, so Call back re-reads the price when they are back. */ offlineOf?: (id: string) => boolean; onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>; onStop?: (pendingId: string | null) => Promise<unknown>; onRestore?: (id: string) => void; onDiscard?: (id: string) => void }) {
   return (
     <Switch>
       <Match when={props.a.type === 'missed-call' && props.a}>
@@ -4531,7 +4531,7 @@ function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: 
             <div class="bubble">{tr('incomingMissed')}</div>
             <time class="stamp" datetime={new Date(call().at).toISOString()}>{clock(call().at)}</time>
             <Show when={props.callActions}>{actions => <CallButtons peer={call().peer} name={props.nameOf(call().peer)}
-              blocked={props.moneyBlocked} actions={actions()} callbackMedia={call().media} />}</Show>
+              blocked={props.moneyBlocked} actions={actions()} callbackMedia={call().media} offline={props.offlineOf?.(call().peer) ?? false} />}</Show>
           </article>;
         }}
       </Match>
