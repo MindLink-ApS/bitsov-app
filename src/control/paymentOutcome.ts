@@ -22,3 +22,36 @@ const PROVEN_UNPAID = new Set([
   'call_hangup_above_message_max', 'call_price_unknown', 'call_minutes_above_hold',
 ]);
 export const provenUnpaid = (code: string) => PROVEN_UNPAID.has(code);
+
+/**
+ * What a result says, as two separate facts. A payment can be known while the
+ * host still holds its record, and that record blocks every other paid action.
+ * `paymentKnown`: paid or not is settled. `fenceCleared`: this result holds no
+ * record at the host, so it blocks nothing.
+ */
+export type PaymentFacts = { paymentKnown: boolean; fenceCleared: boolean };
+
+const CLEAR: PaymentFacts = { paymentKnown: true, fenceCleared: true };
+const HELD: PaymentFacts = { paymentKnown: true, fenceCleared: false };
+const UNKNOWN: PaymentFacts = { paymentKnown: false, fenceCleared: false };
+
+/** Paid and refused for good: the host accounts it and clears its record. */
+const PAID_AND_CLOSED = 'failed_paid';
+/** Paid, not delivered: the host keeps the record until a delivery, "Stop retrying" or End. */
+const PAID_AND_HELD = new Set(['payment_settled_undelivered', 'undelivered_pending']);
+
+/** The host's refusal of a send. A proven-unpaid refusal leaves no record that holds anything. */
+export function sendFacts(code: string): PaymentFacts {
+  if (provenUnpaid(code) || code === PAID_AND_CLOSED) return CLEAR;
+  return PAID_AND_HELD.has(code) ? HELD : UNKNOWN;
+}
+
+/**
+ * The answer to "Check pending result". Any success settles it; so does a payment
+ * the check found refused for good, though the host answers that with an error.
+ * Any other failure says nothing about the record, whatever its code.
+ */
+export function checkFacts(outcome: { ok: true } | { ok: false; error: { code: string } }): PaymentFacts {
+  if (outcome.ok || outcome.error.code === PAID_AND_CLOSED) return CLEAR;
+  return PAID_AND_HELD.has(outcome.error.code) ? HELD : UNKNOWN;
+}

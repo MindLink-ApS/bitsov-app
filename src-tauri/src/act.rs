@@ -309,6 +309,54 @@ pub fn reports_no_payment(reply: &serde_json::Value) -> bool {
     matches!(reply.get("state").map(serde_json::Value::as_str), None | Some(Some("prepared" | "released")))
 }
 
+/// The callee's node refused the minute's invoice because it is catching up, and
+/// the caller's node records this attempt as holding no payment: `released`, no
+/// hash, nothing settled, retry allowed, for this operation. Node compose writes
+/// `released` with no hash only after `proven_unpaid`. Any other state keeps its
+/// doubt: `prepared` can hold a paid admission and the reply would not show it.
+pub fn peer_not_ready_unpaid(status: u16, body: &str, operation_id: &str) -> bool {
+    if status != 503 { return false; }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return false };
+    let zero_or_absent = |field: &str| v.get(field).is_none_or(|value| value.is_null() || value == 0);
+    v["code"] == "peer_not_ready" && v["operation_id"] == operation_id && v["state"] == "released"
+        && v.get("payment_hash").is_some_and(serde_json::Value::is_null)
+        && v["retry_allowed"] == true && v["accepted"] == false
+        && zero_or_absent("amount_msat") && zero_or_absent("readmission_msat") && zero_or_absent("fee_paid_msat")
+}
+
+/// The node's own record that this attempt paid nothing: its reply to the POST
+/// names this operation as `released` with no payment hash and nothing settled.
+/// Node compose writes that only when the attempt failed and `proven_unpaid`
+/// holds: no wallet dispatch began (`dispatched` is set before the first wallet
+/// poll and cleared only for a proven non-dispatch), no admission is pending or
+/// recorded, the wallet knows none of its admission hashes. Its other writer, a
+/// payment the wallet failed for good, always keeps the hash. A released row is
+/// never paid on its own: recovery selects only paying, payment_unknown, paid,
+/// sent and rejected_retryable. Only a POST of the same id could pay it, and the
+/// app mints a new id for every later attempt.
+pub fn released_without_payment(body: &str, operation_id: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return false };
+    let zero_or_absent = |field: &str| v.get(field).is_none_or(|value| value.is_null() || value == 0);
+    v["operation_id"] == operation_id && v["state"] == "released"
+        && v.get("payment_hash").is_some_and(serde_json::Value::is_null)
+        && v["retry_allowed"] == true && v["accepted"] == false
+        && zero_or_absent("amount_msat") && zero_or_absent("readmission_msat") && zero_or_absent("fee_paid_msat")
+}
+
+/// The same refusal in plain words. It passes by itself, and the scheduler retries it.
+pub const PEER_NOT_READY_MINUTE: &str = "Their node is catching up and could not take this minute yet. Nothing was paid for it.";
+
+/// The owner's words for a recipient the node could not reach. The node's own
+/// wording promises a queue, but a released operation is not sent later.
+pub const RECIPIENT_OFFLINE: &str = "They’re offline. Nothing was sent or paid.";
+
+/// The owner's words for that refusal. Only the wording reads the node's text.
+pub fn released_refusal_message(body: &str) -> String {
+    let offline = serde_json::from_str::<serde_json::Value>(body).ok()
+        .is_some_and(|v| v["error"].as_str().is_some_and(|e| e.starts_with("Recipient is offline")));
+    if offline { RECIPIENT_OFFLINE.to_string() } else { not_dispatched_message(body) }
+}
+
 /// Genome `room_binding_v1` compose refusals (`reason` on a `not_dispatched`),
 /// in plain words. The node's own `error` is for developers and is not shown.
 fn room_refusal_words(reason: &str) -> Option<&'static str> {
@@ -2262,6 +2310,19 @@ mod tests {
         assert!(settled_incomplete(502, r#"{"error":"no route","code":502}"#).is_none());
         assert!(settled_incomplete(502, r#"{"code":"payment_settled_send_incomplete"}"#).is_none(), "no amount, no mapping");
         assert!(settled_incomplete(502, "bad gateway").is_none());
+    }
+
+    #[test]
+    fn a_recipient_offline_refusal_promises_no_queue() {
+        let reply = serde_json::json!({"accepted": false, "code": 400, "error": "Recipient is offline. Message will be queued and sent when they reconnect.",
+            "max_routing_fee_msat": 5000, "operation_id": "x", "payment_hash": null, "retry_allowed": true, "state": "released"}).to_string();
+        let words = released_refusal_message(&reply);
+        assert_eq!(words, "They\u{2019}re offline. Nothing was sent or paid.");
+        assert!(!words.contains("queue"), "{words}");
+        // Any other refusal keeps the node's own reason.
+        let other = serde_json::json!({"accepted": false, "code": 400, "error": "their node did not answer with a call price (not connected, or this connection is not admitted yet: send them a message first); nothing was paid",
+            "operation_id": "x", "payment_hash": null, "reason": "call_price_unknown", "retry_allowed": true, "state": "released"}).to_string();
+        assert!(released_refusal_message(&other).contains("did not answer with a call price"));
     }
 
     #[test]

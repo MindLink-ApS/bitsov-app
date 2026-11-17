@@ -181,6 +181,8 @@ mod tests {
 
 // Deliberate release lock. Update only together with the verified sidecar pin.
 pub const BUNDLED_NODE_SUPPORTS_LOCAL_OWNER: bool = true;
+// Update only together with a verified sidecar pin that supports init --network.
+pub const BUNDLED_NODE_SUPPORTS_INIT_NETWORK: bool = false;
 fn gate(build: bool, runtime: bool, dev_sidecar: bool, debug: bool) -> bool {
     build && runtime && (BUNDLED_NODE_SUPPORTS_LOCAL_OWNER || (debug && dev_sidecar))
 }
@@ -199,6 +201,8 @@ pub struct OwnerState {
     pub warning: Mutex<Option<String>>,
     operation: tokio::sync::Mutex<()>,
     pending: Mutex<Option<Metadata>>,
+    #[cfg(test)]
+    test_completion_dependencies: AtomicBool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Metadata {
@@ -595,15 +599,21 @@ async fn restart_and_verify(
     // Own only our child; do not use restore's legacy listener-adoption/kill path.
     *state.ready.lock().unwrap() = false;
     *state.token.lock().unwrap() = None;
-    let config = state
-        .config
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("The sidecar config is unavailable.")?;
-    state.stop_for_restart(NODE_SHUTDOWN_BUDGET);
-    spawn_node(app, &config)?;
-    wait_for_health(state).await?;
+    #[cfg(test)]
+    let substitute_dependencies = state.owner.test_completion_dependencies.load(Ordering::SeqCst);
+    #[cfg(not(test))]
+    let substitute_dependencies = false;
+    if !substitute_dependencies {
+        let config = state
+            .config
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("The sidecar config is unavailable.")?;
+        state.stop_for_restart(NODE_SHUTDOWN_BUDGET);
+        spawn_node(app, &config)?;
+        wait_for_health(state).await?;
+    }
     reauthenticate(state).await?;
     if bootstrap(state).await.is_ok_and(|b| b.state == "bootstrap") {
         return Err("The node did not commit an identity. Cancel and start a new ceremony.".into());
@@ -614,19 +624,35 @@ async fn restart_and_verify(
                 .into(),
         );
     }
-    if let Err(error) = verify_device(state).await {
+    let device = if substitute_dependencies { Ok(()) } else { verify_device(state).await };
+    if let Err(error) = device {
         *state.owner.warning.lock().unwrap() = Some(error.clone());
         return Err(error);
     }
     // Like finish_auth: a Mac without Touch ID (or an unsigned build) can't save
     // the biometric unlock item. The ceremony is already committed, so warn and
     // go live; only remote unlock of a home node stays unavailable.
-    let warning = home_unlock::migrate_local_password(state, expected).await.err();
+    let warning = if substitute_dependencies { None } else { home_unlock::migrate_local_password(state, expected).await.err() };
     *state.owner.warning.lock().unwrap() = warning;
-    mark_live(state, expected);
-    Ok(())
+    mark_live(state, expected).await
 }
-fn mark_live(state: &NodeState, expected: &str) {
+async fn mark_live(state: &NodeState, expected: &str) -> Result<(), String> {
+    let check = if state.signet_only {
+        let generation = *state.remote_connect_generation.borrow();
+        let epoch = *state.network_auth_epoch.lock().unwrap();
+        let token = state.token.lock().unwrap().clone().ok_or("the node is not authenticated yet")?;
+        Some((generation, epoch, require_signet_candidate_report(state, &token).await))
+    } else { None };
+    let current = check.as_ref().map(|_| state.remote_connect_generation.borrow());
+    let mut authority = check.as_ref().map(|_| state.network_auth_epoch.lock().unwrap());
+    if let Some((generation, epoch, report)) = check {
+        if current.as_ref().is_some_and(|current| **current != generation)
+            || authority.as_ref().is_some_and(|authority| **authority != epoch)
+        {
+            return Err("The connection changed during owner setup.".into());
+        }
+        accept_signet_candidate_report(state, authority.as_mut().unwrap(), report)?;
+    }
     let mut view = state.pairing_view.lock().unwrap();
     view.bootstrap = None;
     if let AuthMode::Paired(session) = &*state.auth.lock().unwrap() {
@@ -636,6 +662,7 @@ fn mark_live(state: &NodeState, expected: &str) {
     *state.ready.lock().unwrap() = true;
     *state.error.lock().unwrap() = None;
     *state.owner.pending.lock().unwrap() = None;
+    Ok(())
 }
 pub async fn verify_device(state: &NodeState) -> Result<(), String> {
     let store = device_store(state).map_err(|e| e.message)?;
@@ -701,6 +728,14 @@ pub fn prepare_launch(
     config: &Path,
     load: impl FnOnce(&Path, bool) -> Result<Zeroizing<Vec<u8>>, String>,
 ) -> Result<Zeroizing<Vec<u8>>, String> {
+    prepare_launch_for_network(config, "bitcoin", load)
+}
+
+pub fn prepare_launch_for_network(
+    config: &Path,
+    network: &str,
+    load: impl FnOnce(&Path, bool) -> Result<Zeroizing<Vec<u8>>, String>,
+) -> Result<Zeroizing<Vec<u8>>, String> {
     let dir = config.parent().ok_or("node data directory is unknown")?;
     let fresh = may_create_password(dir)?;
     // Save/read Keychain first: writing config makes this an existing installation.
@@ -712,7 +747,9 @@ pub fn prepare_launch(
         if !fresh {
             return Err("The existing node directory has no config. Restore its config before starting; owner setup will not replace existing node state.".into());
         }
-        write_bootstrap_config(config).map_err(|_| {
+        let write = if network == "bitcoin" { write_bootstrap_config(config) }
+            else { write_bootstrap_config_for_network(config, network) };
+        write.map_err(|_| {
             "Could not durably write the bootstrap config; the node was not started."
         })?;
     }
@@ -725,7 +762,16 @@ pub fn prepare_launch(
 /// when promoting the gated sidecar pin (see docs/LOCAL_OWNER_CEREMONY.md).
 /// Mirrors rc24 init defaults, with a 10-minute call limit for the app budget.
 fn write_bootstrap_config(config: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    write_bootstrap_config_for_network(config, "bitcoin")
+}
+
+pub(super) fn write_bootstrap_config_for_network(config: &Path, network: &str) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
+    let (esplora, fallback, chain, chain_fallback) = match network {
+        "bitcoin" => ("https://blockstream.info/api", "https://mempool.space/api", "https://blockstream.info", "https://mempool.space"),
+        "signet" => ("https://mempool.space/signet/api", "https://blockstream.info/signet/api", "https://mempool.space/signet", "https://blockstream.info/signet"),
+        _ => return Err("An explicit supported network is required for local setup.".into()),
+    };
     let dir = std::fs::canonicalize(config.parent().ok_or("missing config directory")?)?;
     let value = serde_json::json!({
         "tier": "full",
@@ -733,16 +779,16 @@ fn write_bootstrap_config(config: &Path) -> Result<(), Box<dyn std::error::Error
         "identity": {"mnemonic_file": dir.join("identity/mnemonic.txt")},
         "network": {"listen_addr": "0.0.0.0:9736", "tier": "T2"},
         "lightning": {
-            "backend": "ldk", "network": "bitcoin",
+            "backend": "ldk", "network": network,
             "max_channel_capacity_sats": 1_000_000,
             "max_total_channel_capacity_sats": 2_000_000,
-            "esplora_url": "https://blockstream.info/api",
-            "esplora_url_fallback": "https://mempool.space/api",
+            "esplora_url": esplora,
+            "esplora_url_fallback": fallback,
             "listening_address": "0.0.0.0:9735"
         },
         "chain": {
-            "backend": "esplora", "api_url": "https://blockstream.info",
-            "esplora_url_fallback": "https://mempool.space"
+            "backend": "esplora", "api_url": chain,
+            "esplora_url_fallback": chain_fallback
         },
         "payment_gate": {"verify_lightning_settlement": true},
         "storage": {"backend": "sqlite", "path": dir.join("konsensus.db")},
@@ -872,8 +918,8 @@ mod lifecycle_tests {
         state.remote_mode.store(true, Ordering::SeqCst);
         assert!(allow_legacy_device_change(&state).is_ok());
     }
-    #[test]
-    fn verified_live_identity_replaces_stale_bootstrap_view_and_scopes() {
+    #[tokio::test]
+    async fn verified_live_identity_replaces_stale_bootstrap_view_and_scopes() {
         let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
         state.pairing_view.lock().unwrap().bootstrap = Some("bootstrap".into());
         state.pairing_view.lock().unwrap().scopes = vec!["identity".into()];
@@ -883,7 +929,7 @@ mod lifecycle_tests {
             token: "test".into(),
             expires_at: i64::MAX,
         });
-        mark_live(&state, "expected");
+        mark_live(&state, "expected").await.unwrap();
         assert!(state.pairing_view.lock().unwrap().bootstrap.is_none());
         assert_eq!(
             state.pairing_view.lock().unwrap().scopes,
@@ -1008,3 +1054,7 @@ pub fn allow_legacy_device_change(state: &NodeState) -> Result<(), ActionError> 
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "local_owner/network_tests.rs"]
+mod network_tests;
