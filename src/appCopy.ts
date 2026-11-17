@@ -3,6 +3,11 @@ import { isMacOS } from './platform';
 /** First migrated app surfaces. Values are display copy, never protocol tokens.
  * {0}, {1}, … insert values verbatim (especially money and recipients). */
 export const appEn = {
+  obBetaMainnet: 'This test version of BitSov works only with signet test nodes. This node uses Bitcoin mainnet, so BitSov stopped before connecting. Nothing was changed on the node.',
+  obBetaUnknown: 'BitSov could not confirm that this node uses signet, so it stopped. Nothing was changed.',
+  obBetaLocalConfig: 'The node files in this test version are set up for Bitcoin mainnet. BitSov will not start them or change them.',
+  obBetaLocalUnavailable: 'This test version cannot create a node on this computer yet. Connect to a signet node instead.',
+  obBetaConnectSignet: 'Connect to a signet node',
   obClaimWarning: "The new device will ask for your node’s 18-character claim code. Ask the node’s owner for it, or find it on your BitSov box’s sticker.",
   obClaimEntry: "Enter your node’s 18-character claim code. Ask the node’s owner for it, or find it on your BitSov box’s sticker. A phone can be your first owner device. For later devices, compare the words and approve from an enrolled owner device.",
   obClaimCodeInvalid: "Check the 18-character claim code with your node’s owner or on your BitSov box’s sticker, then try again.",
@@ -898,6 +903,11 @@ export const appEn = {
 };
 
 export const appDa: Record<keyof typeof appEn, string> = {
+  obBetaMainnet: 'Denne testversion af BitSov virker kun med signet-testnoder. Noden bruger Bitcoin mainnet, så BitSov stoppede, før den forbandt. Der blev ikke ændret noget på noden.',
+  obBetaUnknown: 'BitSov kunne ikke bekræfte, at noden bruger signet, så den stoppede. Der blev ikke ændret noget.',
+  obBetaLocalConfig: 'Nodefilerne i denne testversion er sat op til Bitcoin mainnet. BitSov starter dem ikke og ændrer dem ikke.',
+  obBetaLocalUnavailable: 'Denne testversion kan endnu ikke oprette en node på denne computer. Forbind til en signet-node i stedet.',
+  obBetaConnectSignet: 'Forbind til en signet-node',
   obClaimWarning: "Den nye enhed vil bede om din nodes ejerskabskode på 18 tegn. Bed nodens ejer om koden, eller find den på mærkaten på din BitSov-boks.",
   obClaimEntry: "Indtast din nodes ejerskabskode på 18 tegn. Bed nodens ejer om koden, eller find den på mærkaten på din BitSov-boks. En telefon kan være din første ejerenhed. Når du tilføjer flere enheder, skal du sammenligne ordene og godkende fra en godkendt ejerenhed.",
   obClaimCodeInvalid: "Kontrollér ejerskabskoden på 18 tegn med nodens ejer eller på mærkaten på din BitSov-boks, og prøv igen.",

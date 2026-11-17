@@ -23,6 +23,8 @@ if not implicit_arm64:
     bundle /= triple
 bundle /= "release/bundle"
 app = bundle / "macos/BitSov.app"
+if os.environ.get("TEST_BETA") == "1":
+    app = bundle / "macos/BitSov Beta.app"
 dmg = bundle / ("dmg/BitSov_0.0.1_" + ("aarch64" if arch == "arm64" else "x86_64") + ".dmg")
 scenario = os.environ["TEST_SCENARIO"]
 if name == "uname":
@@ -36,6 +38,10 @@ elif name == "sysctl":
 elif name == "npm":
     if args == ["ci", "--ignore-scripts", "--no-audit", "--no-fund"]:
         sys.exit(0)
+    if os.environ.get("TEST_BETA") == "1":
+        config_index = args.index("--config")
+        assert args[config_index + 1] == "src-tauri/tauri.beta.conf.json", args
+        args = args[:config_index] + args[config_index + 2:]
     if implicit_arm64:
         assert args == ["run", "tauri", "--", "build", "--bundles", "app", "--no-sign", "--ci", "--", "--locked"], args
     else:
@@ -99,7 +105,7 @@ class NativePackagingTests(unittest.TestCase):
         cls.fixture.close()
 
     def run_package(self, arch="x86_64", args=None, scenario="success", os_name="Darwin",
-                    custom_dir=False, fetch=False, implicit_arm64=False):
+                    custom_dir=False, fetch=False, implicit_arm64=False, beta=False):
         with tempfile.TemporaryDirectory(prefix="native package ") as tmp:
             root = Path(tmp)
             env = self.fixture.prepare(root)
@@ -119,6 +125,8 @@ class NativePackagingTests(unittest.TestCase):
                 bundle /= triple
             bundle /= "release/bundle"
             app = bundle / "macos/BitSov.app"
+            if beta:
+                app = bundle / "macos/BitSov Beta.app"
             dmg = bundle / ("dmg/BitSov_0.0.1_" + ("aarch64" if arch == "arm64" else "x86_64") + ".dmg")
             app.mkdir(parents=True)
             dmg.parent.mkdir(parents=True)
@@ -136,6 +144,7 @@ class NativePackagingTests(unittest.TestCase):
             env.update(TRACE=str(trace), TEST_ARCH=arch, TEST_TRIPLE=triple,
                        TEST_OUTPUT=str(expected_output), TEST_OS=os_name, TEST_SCENARIO=scenario,
                        TEST_IMPLICIT_ARM64="1" if implicit_arm64 else "0",
+                       TEST_BETA="1" if beta else "0",
                        BITSOV_MAC_SIGNING_IDENTITY="-", BITSOV_MAC_NOTARY_PROFILE="",
                        BITSOV_MAC_PROVISION_PROFILE="", BITSOV_USE_EXISTING_SIDECAR="0")
             env.pop("CARGO_TARGET_DIR", None)
@@ -143,6 +152,8 @@ class NativePackagingTests(unittest.TestCase):
                 env["CARGO_TARGET_DIR"] = str(output)
             command = ["bash", "scripts/package-mac.sh", "--dmg"]
             command += args if args is not None else ["--arch", arch]
+            if beta:
+                command += ["--beta"]
             if not fetch:
                 command += ["--use-existing-sidecar"]
             result = subprocess.run(command, cwd=root, env=env, text=True,
@@ -152,6 +163,28 @@ class NativePackagingTests(unittest.TestCase):
             if implicit_arm64 and result.returncode == 0:
                 self.assertTrue((root / "src-tauri/target/package-mac.log").is_file())
             return result, events, dmg.read_text() if dmg.exists() else None, sidecar.read_bytes()
+
+    def test_beta_native_targets_keep_profile_and_bundle_routes(self):
+        for arch in ("arm64", "x86_64"):
+            for custom in (False, True):
+                with self.subTest(arch=arch, custom=custom):
+                    result, events, image, _ = self.run_package(arch, custom_dir=custom, beta=True)
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    self.assertEqual(image, "verified image")
+                    build = next(e for e in events if e[0] == "npm" and "build" in e[1])
+                    self.assertIn("--config", build[1])
+                    self.assertIn("src-tauri/tauri.beta.conf.json", build[1])
+                    self.assertIn("--target", build[1])
+                    signed = [e[1][-1] for e in events if e[0] == "codesign" and "--sign" in e[1]]
+                    self.assertTrue(any(p.endswith("/macos/BitSov Beta.app") for p in signed))
+
+    def test_beta_implicit_arm64_keeps_profile_and_legacy_output(self):
+        result, events, image, _ = self.run_package("arm64", args=[], implicit_arm64=True, beta=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(image, "verified image")
+        build = next(e for e in events if e[0] == "npm" and "build" in e[1])
+        self.assertIn("src-tauri/tauri.beta.conf.json", build[1])
+        self.assertNotIn("--target", build[1])
 
     def test_explicit_native_targets_and_custom_output_directories(self):
         for arch, triple in (("arm64", "aarch64-apple-darwin"), ("x86_64", "x86_64-apple-darwin")):

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "tech.mindlink.bitsov.beta",
+  "productName": "BitSov Beta",
+  "app": {
+    "windows": [{
+      "title": "BitSov BETA · SIGNET",
+      "width": 1280,
+      "height": 820,
+      "resizable": true,
+      "minWidth": 360,
+      "minHeight": 560
+    }]
+  }
+}

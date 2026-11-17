@@ -165,6 +165,11 @@ struct PairingCtx {
 struct NodeState {
     /// Fixed by the bundled identifier, never by an environment variable or pairing state.
     remote_only: bool,
+    signet_only: bool,
+    network_refusal: Mutex<crate::network_policy::NetworkRefusal>,
+    network_auth_epoch: Mutex<u64>,
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
+    test_init_network_support: Mutex<Option<bool>>,
     #[cfg(all(desktop, not(feature = "mobile")))]
     owner: local_owner::OwnerState,
     ready: Mutex<bool>,
@@ -546,7 +551,9 @@ impl Default for NodeState {
 impl NodeState {
     fn for_identifier(identifier: &str) -> Self {
         let mut state = Self::default();
-        state.remote_only = crate::profile::AppProfile::for_identifier(identifier).remote_only();
+        let profile = crate::profile::AppProfile::for_identifier(identifier);
+        state.remote_only = profile.remote_only();
+        state.signet_only = profile.signet_only();
         state.remote_mode.store(state.remote_only, Ordering::SeqCst);
         #[cfg(all(desktop, not(feature = "mobile")))]
         state.local_startup.store(!state.remote_only, Ordering::SeqCst);
@@ -557,6 +564,57 @@ impl NodeState {
     fn require_local_node(&self) -> Result<(), String> {
         if self.remote_only {
             return Err("BitSov Remote Test is remote pairing only; local nodes are disabled.".into());
+        }
+        Ok(())
+    }
+
+    fn refuse_network(&self, refusal: crate::network_policy::NetworkRefusal) -> String {
+        let mut epoch = self.network_auth_epoch.lock().unwrap();
+        *epoch = epoch.wrapping_add(1);
+        *self.network_refusal.lock().unwrap() = refusal;
+        *self.ready.lock().unwrap() = false;
+        *self.token.lock().unwrap() = None;
+        *self.auth.lock().unwrap() = AuthMode::Unauthenticated;
+        drop_grant(self);
+        let error = refusal.message().to_owned();
+        *self.pairing_view.lock().unwrap() = PairingView::from_outcome(&Err(PairError::Local(error.clone())));
+        set_error(self, error.clone());
+        error
+    }
+
+    fn reset_network_policy(&self) {
+        let mut epoch = self.network_auth_epoch.lock().unwrap();
+        *epoch = epoch.wrapping_add(1);
+        *self.network_refusal.lock().unwrap() = crate::network_policy::NetworkRefusal::None;
+    }
+
+    fn require_local_peer(&self) -> Result<(), String> {
+        if self.signet_only && !self.remote_mode.load(Ordering::SeqCst)
+            && self.external_node.lock().unwrap().is_none() && !verified_local_node(self)
+        {
+            return Err(self.refuse_network(crate::network_policy::NetworkRefusal::Unknown));
+        }
+        Ok(())
+    }
+
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    fn require_signet_config(&self, config: &Path) -> Result<(), String> {
+        if !self.signet_only { return Ok(()); }
+        crate::network_policy::check_config(config).map_err(|refusal| self.refuse_network(refusal))
+    }
+
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    fn init_network_supported(&self) -> bool {
+        #[cfg(all(test, desktop, not(feature = "mobile")))]
+        if let Some(supported) = *self.test_init_network_support.lock().unwrap() { return supported; }
+        local_owner::BUNDLED_NODE_SUPPORTS_INIT_NETWORK
+    }
+
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    fn require_local_setup(&self) -> Result<(), String> {
+        self.require_local_node()?;
+        if self.signet_only && !self.init_network_supported() {
+            return Err(self.refuse_network(crate::network_policy::NetworkRefusal::LocalUnavailable));
         }
         Ok(())
     }
@@ -631,6 +689,7 @@ impl NodeState {
             owner_warning,
             local_setup_needed,
             initialization_repair: *self.initialization_repair.lock().unwrap(),
+            network_refusal: *self.network_refusal.lock().unwrap(),
             retry_after_secs,
             // A transport cooldown pauses reads; it does not revoke pairing.
             ready: *self.ready.lock().unwrap(),
@@ -653,6 +712,11 @@ impl NodeState {
         );
         Self {
             remote_only: false,
+            signet_only: false,
+            network_refusal: Mutex::new(crate::network_policy::NetworkRefusal::None),
+            network_auth_epoch: Mutex::new(0),
+            #[cfg(all(test, desktop, not(feature = "mobile")))]
+            test_init_network_support: Mutex::new(None),
             api_base: api_base.into(),
             auth: Mutex::new(AuthMode::Unauthenticated),
             pairing: Mutex::new(None),
@@ -758,6 +822,7 @@ struct Status {
     /// Nothing was created yet: onboarding asks where BitSov should run.
     local_setup_needed: bool,
     initialization_repair: InitializationRepair,
+    network_refusal: crate::network_policy::NetworkRefusal,
     retry_after_secs: Option<u64>,
     ready: bool,
     node_id: Option<String>,
@@ -938,9 +1003,10 @@ async fn init_node(
     dev_sidecar: Option<&Path>,
 ) -> Result<(), String> {
     let state = app.state::<NodeState>();
-    state.require_local_node()?;
+    state.require_local_setup()?;
     let data_dir = data_dir.to_string_lossy();
-    let args = ["init", "--dir", &data_dir, "--non-interactive", "--tier", "full"];
+    let mut args = vec!["init", "--dir", &data_dir, "--non-interactive", "--tier", "full"];
+    if state.signet_only { args.extend(["--network", "signet"]); }
     // Tests run a scripted stand-in; never a real node.
     #[cfg(all(test, desktop, not(feature = "mobile")))]
     let test_sidecar = state.test_sidecar.lock().unwrap().clone();
@@ -1069,6 +1135,12 @@ fn sidecar_path(name: &str) -> Result<PathBuf, String> {
 #[cfg(all(desktop, not(feature = "mobile")))]
 fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(), String> {
     let state = app.state::<NodeState>();
+    let local_owner = state.owner.active.load(Ordering::SeqCst);
+    if state.signet_only && local_owner && !config.try_exists().unwrap_or(true) {
+        state.require_local_setup()?;
+    } else {
+        state.require_signet_config(config)?;
+    }
     let dev_sidecar = state.dev_sidecar.lock().unwrap().clone();
     let dev = dev_sidecar.is_some();
     let program = match dev_sidecar {
@@ -1078,10 +1150,14 @@ fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(),
     // Tests run a scripted stand-in; never a real node.
     #[cfg(all(test, desktop, not(feature = "mobile")))]
     let program = state.test_sidecar.lock().unwrap().clone().unwrap_or(program);
-    let local_owner = state.owner.active.load(Ordering::SeqCst);
     let password = if local_owner {
-        Some(local_owner::prepare_launch(config, owner_password::load)?)
+        Some(if state.signet_only {
+            local_owner::prepare_launch_for_network(config, "signet", owner_password::load)?
+        } else {
+            local_owner::prepare_launch(config, owner_password::load)?
+        })
     } else { None };
+    state.require_signet_config(config)?;
     let mut cmd = std::process::Command::new(&program);
     cmd.args(local_owner::start_args(config, dev, local_owner))
         .stdout(std::process::Stdio::piped())
@@ -1467,6 +1543,7 @@ async fn adopt_matching_identity(
     state: &NodeState,
     expected_node_id: &str,
 ) -> Result<bool, String> {
+    state.require_local_peer()?;
     if !health_ok(state).await {
         return Ok(false);
     }
@@ -1476,6 +1553,9 @@ async fn adopt_matching_identity(
         *state.token.lock().unwrap() = None;
         return Ok(false);
     }
+    let network_epoch = require_signet_report(state, false).await?;
+    let authority = state.network_auth_epoch.lock().unwrap();
+    if *authority != network_epoch { return Err("The connection changed during its network check.".into()); }
     *state.node_id.lock().unwrap() = Some(live);
     // The restored node is live. Reflect the refreshed token's scopes in the
     // view and leave bootstrap, otherwise the renderer can never finish setup.
@@ -1573,6 +1653,7 @@ fn refuse_external(state: &NodeState) -> Result<(), String> {
 #[cfg(all(desktop, not(feature = "mobile")))]
 async fn attach_external(app: &AppHandle<impl tauri::Runtime>, app_data_dir: &Path, node: dev_node::ExternalNode) {
     let state = app.state::<NodeState>();
+    if state.require_signet_config(&node.config).is_err() { return; }
     eprintln!(
         "[dev-node] EXTERNAL node on {}, data dir {} (not started or stopped by the app)",
         state.api_base,
@@ -1692,6 +1773,7 @@ async fn attach_remote_with(
     descriptor: remote_access::RemoteDescriptor,
     interaction: Interaction,
 ) {
+    state.reset_network_policy();
     #[cfg(any(mobile, feature = "mobile"))]
     if descriptor.bootstrap_box_key().is_some() && descriptor.node_id().is_empty() {
         *state.pairing_view.lock().unwrap() = PairingView::starting();
@@ -1793,7 +1875,29 @@ async fn attach_remote_with(
 /// wait for /health, pair (or fall back to /auth/local on rc7), and read /identity.
 #[cfg(all(desktop, not(feature = "mobile"), not(unix)))]
 async fn bootstrap_node(app: AppHandle) {
-    set_error(&app.state::<NodeState>(), "BitSov is not supported on this platform");
+    let state = app.state::<NodeState>();
+    if state.signet_only {
+        let dir = match app.path().app_data_dir() {
+            Ok(dir) => dir,
+            Err(error) => {
+                state.local_startup.store(false, Ordering::SeqCst);
+                return set_error(&state, format!("no app data dir: {error}"));
+            }
+        };
+        if let Err(error) = bootstrap_remote_desktop_at(&state, &dir).await { set_error(&state, error); }
+        return;
+    }
+    set_error(&state, "BitSov is not supported on this platform");
+}
+
+#[cfg(all(desktop, not(feature = "mobile"), any(not(unix), test)))]
+async fn bootstrap_remote_desktop_at(state: &NodeState, dir: &Path) -> Result<(), String> {
+    let _startup = StartupFinished(&state.local_startup);
+    connect_remote_at(state, dir, true).await?;
+    if !state.remote_only && state.remote_proxy.lock().unwrap().is_none() {
+        return Err(state.refuse_network(crate::network_policy::NetworkRefusal::LocalUnavailable));
+    }
+    Ok(())
 }
 
 #[cfg(all(desktop, not(feature = "mobile"), unix))]
@@ -1878,6 +1982,7 @@ async fn start_local_node(
     let state = app.state::<NodeState>();
     *state.dev_sidecar.lock().unwrap() = dev_sidecar.clone();
     let config = data_dir.join("konsensus.toml");
+    if !config.try_exists().unwrap_or(true) && state.require_local_setup().is_err() { return; }
     if !chosen {
         match local_setup_needed(app_data_dir, &config, dev_sidecar.is_some()) {
             Ok(false) => {}
@@ -1970,6 +2075,8 @@ async fn prepare_operation_history(data_dir: &Path) -> Result<(), ActionError> {
 /// Pair, then read /identity. A pairing failure stays in the pairing view (the
 /// onboarding screen shows it with a retry); it is not a node-start error.
 async fn finish_auth(state: &NodeState, data_dir: &Path) {
+    if state.signet_only { *state.ready.lock().unwrap() = false; }
+    if state.require_local_peer().is_err() { return; }
     if let Err(error) = prepare_operation_history(data_dir).await {
         return set_error(state, error.message);
     }
@@ -1979,6 +2086,10 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
     // The signed descriptor pins identity; provisional tokens can only enroll.
     // No identity/status probe or normal authority is granted before approval.
     if add_device::is_second_join(state) {
+        if state.signet_only {
+            state.refuse_network(crate::network_policy::NetworkRefusal::Unknown);
+            return;
+        }
         *state.node_id.lock().unwrap() = state.expected_remote_node_id.lock().unwrap().clone();
         *state.ready.lock().unwrap() = true;
         *state.error.lock().unwrap() = None;
@@ -1987,6 +2098,7 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
     // An identity-free node has no live /identity route. Keep it paired so
     // the user can restore through the bootstrap router.
     if state.pairing_view.lock().unwrap().bootstrap.is_some() {
+        let _ = require_signet_report(state, true).await;
         return;
     }
     match fetch_node_id(state).await {
@@ -2009,6 +2121,13 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
                     "remote node identity does not match the signed pairing descriptor",
                 );
             }
+            let network_epoch = match require_signet_report(state, false).await {
+                Ok(epoch) => epoch,
+                Err(_) => return,
+            };
+            {
+            let authority = state.network_auth_epoch.lock().unwrap();
+            if *authority != network_epoch { return; }
             if let Err(error) = home_unlock::remember_binding(state, &node_id) {
                 *state.token.lock().unwrap() = None;
                 *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
@@ -2021,6 +2140,7 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
             *state.node_id.lock().unwrap() = Some(node_id.clone());
             *state.error.lock().unwrap() = None;
             *state.ready.lock().unwrap() = true;
+            }
             #[cfg(all(desktop, not(feature = "mobile")))]
             if state.owner.active.load(Ordering::SeqCst) {
                 let warning = match local_owner::verify_device(state).await {
@@ -2032,6 +2152,24 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
         }
         Err(e) => set_error(state, e),
     }
+}
+
+async fn require_signet_report(state: &NodeState, bootstrap: bool) -> Result<u64, String> {
+    let epoch = *state.network_auth_epoch.lock().unwrap();
+    if !state.signet_only { return Ok(epoch); }
+    let report = if bootstrap {
+        get_json::<serde_json::Value>(state, "/bootstrap/state").await
+            .map(|value| value.get("network").and_then(|v| v.as_str()).map(str::to_owned))
+    } else {
+        read_node_overview(state).await.map(|overview| overview.network)
+    };
+    let result = report.map_err(|_| crate::network_policy::NetworkRefusal::Unknown)
+        .and_then(|network| crate::network_policy::NetworkRefusal::reported(network.as_deref()));
+    if let Err(refusal) = result { return Err(state.refuse_network(refusal)); }
+    let authority = state.network_auth_epoch.lock().unwrap();
+    if *authority != epoch { return Err("The connection changed during its network check.".into()); }
+    *state.network_refusal.lock().unwrap() = crate::network_policy::NetworkRefusal::None;
+    Ok(epoch)
 }
 
 /// Retry transport outages without restarting the proxy or discarding durable
@@ -2256,6 +2394,7 @@ fn check_first_run_session(state: &NodeState, session: &PairedSession) -> Result
 /// Pair with the node, reuse a stored pairing, or — only when `/pair/request`
 /// is 404 — mint via `/auth/local`. Records the outcome in the pairing view.
 async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> {
+    let network_epoch = *state.network_auth_epoch.lock().unwrap();
     let established_remote = state.remote_mode.load(Ordering::SeqCst)
         && matches!(*state.auth.lock().unwrap(), AuthMode::Paired(_));
     // Keep a warm session usable while reauthenticating. A transport failure is
@@ -2285,16 +2424,20 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
     match outcome {
         Ok(Established::Paired { session, .. }) => {
             check_first_run_session(state, &session)?;
-            *state.token.lock().unwrap() = Some(session.token.clone());
-            *state.auth.lock().unwrap() = AuthMode::Paired(session);
             let ctx = state.pairing.lock().unwrap().clone();
             if let Some(ctx) = ctx {
                 view.bootstrap = pairing::bootstrap_state(&ctx.client).await.ok().flatten();
             }
+            let authority = state.network_auth_epoch.lock().unwrap();
+            if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
+            *state.token.lock().unwrap() = Some(session.token.clone());
+            *state.auth.lock().unwrap() = AuthMode::Paired(session);
             *state.pairing_view.lock().unwrap() = view;
             Ok(())
         }
         Ok(Established::LocalFallback { token }) => {
+            let authority = state.network_auth_epoch.lock().unwrap();
+            if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
             *state.token.lock().unwrap() = Some(token);
             *state.auth.lock().unwrap() = AuthMode::Local;
             *state.pairing_view.lock().unwrap() = view;
@@ -2334,6 +2477,7 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
 
 /// Mint a fresh paired token and install it. No fallback on failure.
 async fn refresh_paired(state: &NodeState) -> Result<(), String> {
+    let network_epoch = *state.network_auth_epoch.lock().unwrap();
     if hold_refused(state) {
         return Err(remote_access::RemoteError::Refused(remote_access::REFUSED_PAIRING_MESSAGE.into()).to_string());
     }
@@ -2360,6 +2504,8 @@ async fn refresh_paired(state: &NodeState) -> Result<(), String> {
     // or Forget. Keep this guard through publication so invalidation is atomic.
     let current = state.remote_connect_generation.borrow();
     if *current != generation { return Err("the remote connection changed".into()); }
+    let authority = state.network_auth_epoch.lock().unwrap();
+    if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
     if let Err(error) = result {
         let message = error.to_string();
         if !remote && matches!(error, PairError::Refused { step: "/pair/challenge", status: 401, .. }) {
@@ -2448,6 +2594,7 @@ async fn reauthenticate(state: &NodeState) -> Result<(), String> {
 /// POST /auth/local (loopback, no signature) -> JWT, stored in the host state.
 /// Reached only on a node without pairing routes (rc7); see `authenticate`.
 async fn mint_token(state: &NodeState) -> Result<(), String> {
+    let network_epoch = *state.network_auth_epoch.lock().unwrap();
     let token = state
         .http
         .post(format!("{}/auth/local", state.api_base))
@@ -2462,6 +2609,8 @@ async fn mint_token(state: &NodeState) -> Result<(), String> {
         .and_then(|t| t.as_str())
         .map(str::to_owned)
         .ok_or_else(|| "auth/local returned no token".to_string())?;
+    let authority = state.network_auth_epoch.lock().unwrap();
+    if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
     *state.token.lock().unwrap() = Some(token);
     Ok(())
 }
@@ -3021,7 +3170,7 @@ async fn node_setup_local_at(
     if !confirmed {
         return Err("Setting up a node on this Mac requires your explicit agreement.".into());
     }
-    state.require_local_node()?;
+    state.require_local_setup()?;
     {
         // Serialized with remote link changes: a saved or live remote node wins.
         let _change = state.remote_change.lock().await;
@@ -3293,6 +3442,7 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     *state.front_door_ask.lock().unwrap() = None;
     // Config fallbacks describe the old node; the remint cooldown also gates
     // paired auth. Neither its policy/network nor its cooldown transfers.
+    state.reset_network_policy();
     *state.room_routing_policy.lock().unwrap() = None;
     *state.configured_network.lock().unwrap() = None;
     *state.last_remint.lock().unwrap() = None;
@@ -3764,7 +3914,7 @@ async fn read_node_overview(state: &NodeState) -> Result<control::NodeOverview, 
     overview.custody_mode =
         control::custody_mode(overview.custody_mode, verified_local_node(state));
     // Only while the node answering is the LDK node that config started.
-    if !network_reported && overview.lightning_backend.as_deref() == Some("ldk") {
+    if !state.signet_only && !network_reported && overview.lightning_backend.as_deref() == Some("ldk") {
         overview.network = state.configured_network.lock().unwrap().clone();
     }
     Ok(overview)
@@ -11394,6 +11544,10 @@ fn assistant_mock_builder() -> tauri::Builder<tauri::Wry> {
             Ok(())
         })
 }
+
+#[cfg(all(test, desktop, not(feature = "mobile"), unix))]
+#[path = "beta_network_tests.rs"]
+mod beta_network_tests;
 
 #[cfg(all(test, desktop, not(feature = "mobile")))]
 mod remote_test_profile_tests {

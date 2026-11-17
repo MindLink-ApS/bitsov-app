@@ -5,8 +5,9 @@
 # No publishing. This script never opens, launches or executes the built app
 # or the bundled node. Notarization is opt-in; nothing here binds a port.
 #
-# Usage: scripts/package-mac.sh [--arch arm64|x86_64] [--dmg] [--call-seal] [--use-existing-sidecar]
+# Usage: scripts/package-mac.sh [--arch arm64|x86_64] [--dmg] [--beta] [--call-seal] [--use-existing-sidecar]
 #   --arch                  native host architecture; cross builds are refused
+#   --beta                  use the separate signet-only beta profile
 #   --dmg                   create a plain .dmg from the verified app
 #                           (no Finder layout or Applications shortcut)
 #   --call-seal             enable sealed call audio for a test build
@@ -24,6 +25,7 @@ cd "$ROOT"
 
 WANT_DMG=0
 CALL_SEAL=0
+BETA=0
 ARCH=""
 TARGETED=0
 USE_EXISTING="${BITSOV_USE_EXISTING_SIDECAR:-0}"
@@ -37,6 +39,7 @@ while [ $# -gt 0 ]; do
       ARCH="$2"; TARGETED=1; shift ;;
     --dmg) WANT_DMG=1 ;;
     --call-seal) CALL_SEAL=1 ;;
+    --beta) BETA=1 ;;
     --use-existing-sidecar) USE_EXISTING=1 ;;
     -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -83,6 +86,9 @@ case "$TARGET_DIR" in
 esac
 SIDECAR="src-tauri/bin/konsensus-$TRIPLE"
 APP="$BUNDLE_DIR/macos/BitSov.app"
+if [ "$BETA" = 1 ]; then
+  APP="$BUNDLE_DIR/macos/BitSov Beta.app"
+fi
 DMG_DIR="$BUNDLE_DIR/dmg"
 
 # The certificate must already be imported/unlocked by the caller. Keep the
@@ -135,6 +141,9 @@ BUILD_ARGS=(build --bundles app --no-sign --ci)
 if [ "$TARGETED" = 1 ]; then
   BUILD_ARGS+=(--target "$TRIPLE")
   BUILD_LOG="$TARGET_DIR/package-mac-$TRIPLE.log"
+fi
+if [ "$BETA" = 1 ]; then
+  BUILD_ARGS+=(--config src-tauri/tauri.beta.conf.json)
 fi
 if [ "$CALL_SEAL" = 1 ]; then
   BUILD_ARGS+=(--features call-seal)
