@@ -20412,7 +20412,7 @@ mod control_act_tests {
             let pays = paid.lock().unwrap().pays;
             let error = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.unwrap_err();
             assert_eq!(error.code, "not_dispatched", "{unreadable}");
-            assert_eq!(error.message, "Not sent - nothing was paid. Recipient is offline.", "no queue is promised");
+            assert_eq!(error.message, act::RECIPIENT_OFFLINE, "no queue is promised");
             assert_eq!(hangups(&node), 1, "{unreadable}");
             assert!(admission_is_open(&node, &offer), "{unreadable}");
             assert!(pending(&node).is_none(), "{unreadable}");
@@ -20751,7 +20751,7 @@ mod control_act_tests {
         approve_calls(&node).await;
         let error = do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err();
         assert_eq!(error.code, "not_dispatched");
-        assert_eq!(error.message, "Not sent - nothing was paid. Recipient is offline.");
+        assert_eq!(error.message, act::RECIPIENT_OFFLINE);
         assert!(pending(&node).is_none());
         assert_eq!(budget_now(&node.state).unsettled_msat, 0);
         offline.store(false, Ordering::SeqCst);
