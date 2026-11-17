@@ -6007,6 +6007,24 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         if let Some(id) = &charged { close_charge(state, id, Some(accounted), pending.target.as_ref())?; }
         return Err(ActionError::undelivered(paid, retry_safe).for_pending(&pending.id));
     }
+    // A minute only: their node is catching up, and this node's own reply says the
+    // attempt holds no payment. A later try is a new operation.
+    if fresh_attempt && block
+        && operation_id.as_deref().is_some_and(|id| act::peer_not_ready_unpaid(status.as_u16(), &text, id)) {
+        // Release first: the record of the reservation goes only once the book
+        // no longer holds it.
+        release(state)?;
+        abandon(&journal)?;
+        return Err(ActionError::new("peer_not_ready", act::PEER_NOT_READY_MINUTE));
+    }
+    // The node answered this attempt with its own proof that nothing was paid
+    // (a recipient gone offline, no call price): nothing to wait for, no fence.
+    if fresh_attempt && !status.is_success()
+        && operation_id.as_deref().is_some_and(|id| act::released_without_payment(&text, id)) {
+        abandon(&journal)?;
+        release(state)?;
+        return Err(ActionError::new("not_dispatched", act::released_refusal_message(&text)));
+    }
     if !status.is_success() {
         if op_error.as_ref().is_some_and(|e| spend_journal::outcome(e.state.as_deref().unwrap_or_default()) == spend_journal::Outcome::PaymentUnknown) {
             return Err(ActionError::new("payment_unknown", act::PAYMENT_UNKNOWN).for_pending(&pending.id));
@@ -8575,6 +8593,55 @@ async fn do_op_end_call_with_limit(state: &NodeState, call_id: &str, max_msat: O
     end_call_admission(state, call_id, max_msat).await
 }
 
+/// How often, and for how long, End asks the node whether it has ended a call.
+/// A live call ends at its paid time plus ten seconds of grace, and a minute buys
+/// at most eighty seconds from the moment it is paid.
+const END_WAIT_POLL: Duration = if cfg!(test) { Duration::from_millis(10) } else { Duration::from_secs(2) };
+const END_WAIT_MAX: Duration = if cfg!(test) { Duration::from_secs(5) } else { Duration::from_secs(100) };
+
+/// The owner's End. A hangup refused before any payment (the callee is offline,
+/// say) cannot reach anyone yet, and no spend is pending for it. The node ends
+/// the call by itself when its paid time runs out, so End waits for that, asking
+/// the node and holding no lock. The node showing the call ended is the evidence
+/// that closes the admission, so End writes that down and asks for nothing more.
+/// A further request could only be refused, by the node or by anything that
+/// changed meanwhile (a pause, an approval or budget gone), and none of those is a
+/// reason to keep a call open that is over. Nothing is sent or paid, and no other
+/// pending result is touched. A read that fails, or a call still open when the wait
+/// runs out (a read in progress included), leaves the refusal as the answer, and
+/// "Try ending it again" stays on the card.
+async fn do_op_end_call_when_node_ends(state: &NodeState, call_id: &str, max_msat: Option<u64>) -> Result<spend_journal::OpView, ActionError> {
+    let refused = do_op_end_call_with_limit(state, call_id, max_msat).await;
+    let Err(error) = &refused else { return refused };
+    if error.code != "not_dispatched" { return refused; }
+    let Some(offer) = refused_hangup_admission(state, error.operation_id.as_deref()).await else { return refused };
+    let deadline = tokio::time::Instant::now() + END_WAIT_MAX;
+    loop {
+        match tokio::time::timeout_at(deadline, read_call_status(state, &offer.peer, call_id)).await {
+            Ok(Ok(Some(status))) if status.state != "ended" => {}
+            Ok(Ok(_)) => break,
+            Ok(Err(_)) | Err(_) => return refused,
+        }
+        tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + END_WAIT_POLL)).await;
+    }
+    // Under the same identity that read the call: another node's word closes nothing.
+    if state.node_id.lock().unwrap().as_deref() != Some(offer.node_id.as_str()) { return refused; }
+    {
+        let _money = state.money.lock().await;
+        locked_spend_journal(state)?.observe_call(&offer, true)?;
+    }
+    do_op_end_call_with_limit(state, call_id, max_msat).await
+}
+
+/// The admission End's refused hangup belonged to, from the host's own record.
+async fn refused_hangup_admission(state: &NodeState, operation_id: Option<&str>) -> Option<spend_journal::OperationRecord> {
+    let _money = state.money.lock().await;
+    let journal = locked_spend_journal(state).ok()?;
+    let hangup = journal.operation_record(operation_id?).ok()??;
+    if hangup.kind != "call_hangup" { return None; }
+    journal.operation_record(hangup.parent_op.as_deref()?).ok()?
+}
+
 /// No new minute of this call is issued, for this node identity. Takes no
 /// money lock and waits for nothing, so End, teardown and a hangup can call it
 /// the moment they begin. At most one minute already issued may still settle:
@@ -9742,10 +9809,7 @@ async fn op_end_call(
 ) -> Result<spend_journal::OpView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    match max_msat {
-        Some(limit) => do_op_end_call_with_limit(state.inner(), &call_id, Some(limit)).await,
-        None => do_op_end_call(state.inner(), &call_id).await,
-    }
+    do_op_end_call_when_node_ends(state.inner(), &call_id, max_msat).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -19000,6 +19064,141 @@ mod control_act_tests {
         }
     }
 
+    /// Node rc21's reply when the callee's node refuses a minute's invoice because it
+    /// is catching up, captured from its own handlers: nothing left the wallet.
+    fn callee_catching_up_reply(id: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"accepted": false, "code": "peer_not_ready", "error": "recipient is not ready to receive payments: not_synced",
+            "max_routing_fee_msat": 5000, "operation_id": id, "payment_hash": null, "reason": "not_synced", "retry_allowed": true, "state": "released"})
+    }
+
+    /// A passing refusal, proven by the node's own reply: no fence, so the scheduler
+    /// tries again, and that try is a new operation, paid once.
+    #[tokio::test]
+    async fn a2_a_minute_refused_by_a_callee_catching_up_is_proven_unpaid_and_tried_again() {
+        let refusing = Arc::new(AtomicBool::new(true));
+        let refuse = refusing.clone();
+        let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p == "/messages/compose" && body["kind"] == 404 && refuse.load(Ordering::SeqCst) {
+                return (503, callee_catching_up_reply(&body["operation_id"]).to_string());
+            }
+            routes(m, p, b)
+        })).await;
+        let (spent, pays) = (budget_now(&node.state).spent_msat, paid.lock().unwrap().pays);
+
+        let error = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+        assert_eq!(error.code, "peer_not_ready", "{}", error.message);
+        assert!(error.message.contains("Nothing was paid"), "{}", error.message);
+        assert!(pending(&node).is_none(), "no fence");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        assert_eq!(budget_now(&node.state).spent_msat, spent, "nothing was charged");
+        let first = error.operation_id.clone().unwrap();
+        let record = ledger_record(&node, &first);
+        assert_eq!((record["kind"].as_str(), record["state"].as_str()), (Some("call_block"), Some("unpaid")));
+        assert!(!node.targets().iter().any(|t| t.starts_with("GET /messages/operations/")), "no check was needed");
+
+        refusing.store(false, Ordering::SeqCst);
+        let receipt = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+        assert_ne!(receipt.operation_id.as_deref(), Some(first.as_str()), "a new operation");
+        assert_eq!(paid.lock().unwrap().pays, pays + 1, "paid once");
+    }
+
+    /// The book write that releases the minute's reservation fails. The record of
+    /// that reservation stays, so it can still be settled; it is never left held
+    /// in the book with nothing pointing at it.
+    #[tokio::test]
+    async fn a2_a_failed_release_on_a_callee_catching_up_keeps_the_record() {
+        let armed = Arc::new(Mutex::new(None::<PathBuf>));
+        let hook = armed.clone();
+        let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p == "/messages/compose" && body["kind"] == 404 {
+                if let Some(dir) = hook.lock().unwrap().take() {
+                    // A directory in the way of the book's atomic replacement.
+                    let p = spend_journal::read_pending(&dir).unwrap().unwrap();
+                    std::fs::create_dir(budget::book_path(&dir, &p.node_id).with_extension("json.tmp")).unwrap();
+                }
+                return (503, callee_catching_up_reply(&body["operation_id"]).to_string());
+            }
+            routes(m, p, b)
+        })).await;
+        let dir = journal_file(&node).parent().unwrap().to_path_buf();
+        *armed.lock().unwrap() = Some(dir.clone());
+        let pays = paid.lock().unwrap().pays;
+
+        let error = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+        assert!(armed.lock().unwrap().is_none(), "the fault was reached");
+        assert_ne!(error.code, "peer_not_ready", "{}", error.message);
+        assert!(budget_now(&node.state).unsettled_msat > 0, "the book still holds the reservation");
+        let held = pending(&node).expect("the reservation keeps its record");
+        assert!(held.budgeted);
+        assert!(book(&node).iter().any(|(id, _, settled)| id == held.charge_id() && !settled),
+            "the record names the held reservation");
+        assert_eq!(paid.lock().unwrap().pays, pays);
+        let book_tmp = budget::book_path(&dir, &held.node_id).with_extension("json.tmp");
+        std::fs::remove_dir(book_tmp).unwrap();
+    }
+
+    /// The whole of the reply must prove it. Short of that, the same refusal stays
+    /// unknown and the fence holds. `prepared` is what rc21 answers while an earlier
+    /// admission is in its journal, and it can hide a paid admission from this reply.
+    #[tokio::test]
+    async fn a2_a_catching_up_reply_short_of_the_proof_stays_unknown() {
+        type Change = fn(&mut serde_json::Value);
+        // The whole proof under another status is the general released reading
+        // (not dispatched, no fence), not this one; it is not listed here.
+        let changes: [(&str, u16, Change); 9] = [
+            ("prepared", 503, |v| v["state"] = "prepared".into()),
+            ("paying", 503, |v| v["state"] = "paying".into()),
+            ("payment_unknown", 503, |v| v["state"] = "payment_unknown".into()),
+            ("no state", 503, |v| { v.as_object_mut().unwrap().remove("state"); }),
+            ("hash", 503, |v| v["payment_hash"] = OP_HASH.into()),
+            ("no hash field", 503, |v| { v.as_object_mut().unwrap().remove("payment_hash"); }),
+            ("another operation", 503, |v| v["operation_id"] = "00000000-0000-4000-8000-000000000000".into()),
+            ("no retry", 503, |v| v["retry_allowed"] = false.into()),
+            ("amount", 503, |v| v["amount_msat"] = 1000.into()),
+        ];
+        for (name, status, change) in changes {
+            let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+            let node = minute_ready(Arc::new(move |m, p, b| {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+                if p == "/messages/compose" && body["kind"] == 404 {
+                    let mut reply = callee_catching_up_reply(&body["operation_id"]);
+                    change(&mut reply);
+                    return (status, reply.to_string());
+                }
+                routes(m, p, b)
+            })).await;
+            let pays = paid.lock().unwrap().pays;
+            let error = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+            assert!(matches!(error.code, "spend_unknown" | "payment_unknown"), "{name}: {}", error.code);
+            assert!(pending(&node).is_some(), "{name}: the fence holds");
+            assert!(budget_now(&node.state).unsettled_msat > 0, "{name}: the reservation stays held");
+            assert_eq!(paid.lock().unwrap().pays, pays, "{name}");
+        }
+    }
+
+    /// This reading is for a minute. Other sends keep what they had: the node's
+    /// released proof reads as not dispatched, with no fence, never as a minute
+    /// to try again.
+    #[tokio::test]
+    async fn a_catching_up_reply_to_another_send_is_unchanged() {
+        let (routes, _) = ops_node();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap();
+                return (503, callee_catching_up_reply(&body["operation_id"]).to_string());
+            }
+            routes(m, p, b)
+        }));
+        approve_calls(&node).await;
+        let error = do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err();
+        assert_eq!(error.code, "not_dispatched");
+        assert!(pending(&node).is_none());
+    }
+
     #[tokio::test]
     async fn a2_a_failed_offer_is_final_and_cannot_be_rebound_wider() {
         let (routes, _) = offer_routes(10_000, hold_json(10_000, 5_000, 60));
@@ -20099,6 +20298,467 @@ mod control_act_tests {
         do_call_signal(&node.state, A, 400, &redial, 15000).await.expect("the next offer is admitted");
         assert_eq!(paid.lock().unwrap().pays, pays + 1);
         assert!(pending(node).is_none());
+    }
+
+    /// Node rc21's reply to a hangup with the callee offline, as seen on a real
+    /// node: its compose found the recipient gone before anything was dispatched.
+    fn recipient_offline_reply(body: &serde_json::Value) -> (u16, String) {
+        (400, serde_json::json!({"accepted": false, "code": 400,
+            "error": "Recipient is offline. Message will be queued and sent when they reconnect.",
+            "max_routing_fee_msat": 5000, "operation_id": body["operation_id"], "payment_hash": null,
+            "retry_allowed": true, "state": "released"}).to_string())
+    }
+
+    /// The same for a minute: the callee's node did not answer with a call price.
+    /// Captured the same way, from rc21's own handlers.
+    fn no_call_price_reply(body: &serde_json::Value) -> (u16, String) {
+        (400, serde_json::json!({"accepted": false, "code": 400,
+            "error": "their node did not answer with a call price (not connected, or this connection is not admitted yet: send them a message first); nothing was paid",
+            "operation_id": body["operation_id"], "payment_hash": null, "reason": "call_price_unknown",
+            "retry_allowed": true, "state": "released"}).to_string())
+    }
+
+    /// The callee goes offline mid-call. Each minute and hangup is refused as
+    /// above. The node ends the call by itself after `reads` reads of its status.
+    fn node_with_callee_offline(reads: usize) -> (Routes, Arc<Mutex<OpsNode>>) {
+        let ended = Arc::new(AtomicBool::new(false));
+        let (routes, paid) = node_ending_the_call(ended.clone());
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p.starts_with("/calls?") && seen.fetch_add(1, Ordering::SeqCst) >= reads {
+                ended.store(true, Ordering::SeqCst);
+            }
+            if p == "/messages/compose" && !ended.load(Ordering::SeqCst) {
+                match body["kind"].as_u64() {
+                    Some(404) => return no_call_price_reply(&body),
+                    Some(403) => return recipient_offline_reply(&body),
+                    _ => {}
+                }
+            }
+            routes(m, p, b)
+        }), paid)
+    }
+
+    /// Callee offline mid-call: the minute and the hangup are proven unpaid by the
+    /// node's own reply, so nothing is fenced, nobody has to press "Check pending
+    /// result", and End closes once the node has ended the call by itself.
+    #[tokio::test]
+    async fn callee_offline_leaves_no_fence_and_end_closes_when_the_node_ends_the_call() {
+        let (routes, paid) = node_with_callee_offline(4);
+        let node = minute_ready(routes).await;
+        let offer = offer_op(&node);
+        let (spent, pays) = (budget_now(&node.state).spent_msat, paid.lock().unwrap().pays);
+
+        let minute = do_call_block(&node.state, A, CALL_ID, 0).await.unwrap_err();
+        assert_eq!(minute.code, "not_dispatched", "{}", minute.message);
+        assert!(minute.message.contains("nothing was paid"), "{}", minute.message);
+        assert!(pending(&node).is_none(), "a refused minute holds no fence");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        let record = ledger_record(&node, minute.operation_id.as_deref().unwrap());
+        assert_eq!((record["kind"].as_str(), record["state"].as_str()), (Some("call_block"), Some("unpaid")));
+
+        let end = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.expect("End closes");
+        assert_eq!(end.op_id, offer, "the admission, closed");
+        assert_eq!(hangups(&node), 1, "the refused hangup, and nothing more once the node shows the call ended");
+        assert!(!admission_is_open(&node, &offer));
+        assert!(pending(&node).is_none());
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        assert_eq!((budget_now(&node.state).spent_msat, paid.lock().unwrap().pays), (spent, pays), "nothing was paid");
+        assert!(!node.targets().iter().any(|t| t.starts_with("GET /messages/operations/") || t.ends_with("/abandon")),
+            "no check of a pending result was needed");
+
+        // Nothing stands in the way of the next paid action or the next call.
+        do_message_send(&node.state, A, false, "hi", 7000, None).await.expect("a message goes");
+        let redial = OFFER.replace(CALL_ID, REDIAL_ID);
+        do_call_signal(&node.state, A, 400, &redial, 15000).await.expect("the contact can be called again");
+    }
+
+    /// While End waits for the node, the fence is already gone: another paid action
+    /// goes out, and End holds no lock against it.
+    #[tokio::test]
+    async fn a_message_goes_out_while_end_waits_for_the_node() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let node = minute_ready(routes).await;
+        let reads = |node: &Fake| node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let before = reads(&node);
+        let (end, sent) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+            // End's hangup was refused and it is asking the node about the call.
+            for _ in 0..200 {
+                if hangups(&node) > 0 && reads(&node) > before { break; }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            do_message_send(&node.state, A, false, "hi", 7000, None).await
+        });
+        assert!(sent.is_ok(), "{sent:?}");
+        assert_eq!(end.unwrap_err().code, "not_dispatched", "a call still open stays refused");
+    }
+
+    /// The wait is bounded, and only a call the node shows ended ends it. A call
+    /// still open, or a status that cannot be read, leaves the refusal as the
+    /// answer: the admission stays open, and no second hangup was sent.
+    #[tokio::test]
+    async fn end_gives_up_waiting_with_the_refusal_when_the_node_shows_no_end() {
+        for unreadable in [false, true] {
+            let (routes, paid) = node_with_callee_offline(usize::MAX);
+            let reads = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let broken = reads.clone();
+            let node = minute_ready(Arc::new(move |m, p, b| {
+                if p.starts_with("/calls?") && broken.load(Ordering::SeqCst) { return (500, "{}".into()); }
+                routes(m, p, b)
+            })).await;
+            let offer = offer_op(&node);
+            reads.store(unreadable, Ordering::SeqCst);
+            let pays = paid.lock().unwrap().pays;
+            let error = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.unwrap_err();
+            assert_eq!(error.code, "not_dispatched", "{unreadable}");
+            assert_eq!(error.message, "Not sent - nothing was paid. Recipient is offline.", "no queue is promised");
+            assert_eq!(hangups(&node), 1, "{unreadable}");
+            assert!(admission_is_open(&node, &offer), "{unreadable}");
+            assert!(pending(&node).is_none(), "{unreadable}");
+            assert_eq!(paid.lock().unwrap().pays, pays, "{unreadable}");
+        }
+    }
+
+    /// Only a refusal End can outwait is waited for: any other answer is returned as
+    /// it was, at once, with no read of the call.
+    #[tokio::test]
+    async fn end_does_not_wait_on_an_unknown_outcome() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            if p == "/messages/compose" && serde_json::from_str::<serde_json::Value>(b).unwrap()["kind"] == 403 {
+                return (502, r#"{"error":"no answer"}"#.into());
+            }
+            routes(m, p, b)
+        })).await;
+        let reads = |node: &Fake| node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let before = reads(&node);
+        let error = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert!(pending(&node).is_some(), "the fence holds");
+        assert_eq!(hangups(&node), 1);
+        assert_eq!(reads(&node), before, "no wait, no read of the call");
+    }
+
+    /// Node rc21 while an admission an earlier operation paid to this contact is
+    /// still in its journal: the same refusal, but `prepared`, for a lookup too, and
+    /// its abandon refuses with the same view. Those bytes are also what it returns
+    /// for a row whose journal shows a dispatch or a settlement, so they prove
+    /// nothing here. The fence stays, nothing is marked unpaid, End does not wait,
+    /// and no second hangup goes out. A node able to prove it answers `released`.
+    #[tokio::test]
+    async fn a_prepared_refusal_the_node_will_not_abandon_stays_fenced() {
+        let can_abandon = Arc::new(AtomicBool::new(false));
+        let abandon_ok = can_abandon.clone();
+        let hangup_id = Arc::new(Mutex::new(String::new()));
+        let seen = hangup_id.clone();
+        let (routes, paid) = minutes_routes_with_abandon();
+        let view = |id: &str, state: &str| serde_json::json!({"accepted": false, "amount_msat": 0, "delivered": false, "max_routing_fee_msat": 5000,
+            "message_id": "e1c4388d928fb468514611fbebbf332bb2e9aba04e089b044f03db3759c871ab", "operation_id": id, "payment_hash": null,
+            "retry_allowed": true, "state": state}).to_string();
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p == "/messages/compose" && body["kind"] == 403 {
+                *seen.lock().unwrap() = body["operation_id"].as_str().unwrap().to_string();
+                return (400, serde_json::json!({"accepted": false, "code": 400,
+                    "error": "Recipient is offline. Message will be queued and sent when they reconnect.",
+                    "max_routing_fee_msat": 5000, "operation_id": body["operation_id"], "payment_hash": null,
+                    "retry_allowed": true, "state": "prepared"}).to_string());
+            }
+            let id = seen.lock().unwrap().clone();
+            if !id.is_empty() && p == format!("/messages/operations/{id}") { return (200, view(&id, "prepared")); }
+            if !id.is_empty() && p == format!("/messages/operations/{id}/abandon") {
+                return if abandon_ok.load(Ordering::SeqCst) { (200, view(&id, "abandoned")) } else { (409, view(&id, "prepared")) };
+            }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let pays = paid.lock().unwrap().pays;
+        let reads = |node: &Fake| node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let before = reads(&node);
+
+        let error = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert_eq!(reads(&node), before, "End does not wait on an unknown outcome");
+        let id = pending(&node).unwrap().operation_id.unwrap();
+        assert_eq!(ledger_record(&node, &id)["state"], "unknown");
+
+        // Neither End nor the owner's check can clear it while the node refuses.
+        let again = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.unwrap();
+        assert_eq!((again.op_id.as_str(), again.state), (id.as_str(), spend_journal::OperationState::Unknown));
+        assert_eq!(do_spend_reconcile(&node.state).await.unwrap_err().code, "payment_unknown");
+        assert_eq!(ledger_record(&node, &id)["state"], "unknown", "never marked unpaid");
+        assert_eq!(do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err().code, "spend_unknown", "the fence holds");
+        assert!(budget_now(&node.state).unsettled_msat > 0, "the reservation stays held");
+        assert_eq!(hangups(&node), 1);
+        assert_eq!(paid.lock().unwrap().pays, pays);
+        assert!(admission_is_open(&node, &offer));
+
+        // A node that can prove it: the same check clears it, and no one is stuck.
+        can_abandon.store(true, Ordering::SeqCst);
+        assert_eq!(do_spend_reconcile(&node.state).await.unwrap(), NOTHING_PAID);
+        assert_eq!(ledger_record(&node, &id)["state"], "unpaid");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+    }
+
+    /// A status read that does not come back cannot stretch the wait past its bound.
+    #[tokio::test]
+    async fn a_read_in_progress_cannot_extend_ends_wait() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let slow = Arc::new(AtomicBool::new(false));
+        let stuck = slow.clone();
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            if p.starts_with("/calls?") && stuck.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_secs(30)); }
+            routes(m, p, b)
+        })).await;
+        slow.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        let error = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.unwrap_err();
+        assert_eq!(error.code, "not_dispatched");
+        assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
+        assert_eq!(hangups(&node), 1);
+    }
+
+    /// The approval runs out while End waits. The node's own "ended" is enough to
+    /// close the admission: nothing more is asked of it, and nothing is paid.
+    #[tokio::test]
+    async fn end_closes_on_the_nodes_word_when_the_approval_runs_out_during_the_wait() {
+        let ended = Arc::new(AtomicBool::new(false));
+        let (routes, paid) = node_ending_the_call(ended.clone());
+        let over = ended.clone();
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p == "/messages/compose" && body["kind"] == 403 && !over.load(Ordering::SeqCst) {
+                return recipient_offline_reply(&body);
+            }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let pays = paid.lock().unwrap().pays;
+        let reads = |node: &Fake| node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let before = reads(&node);
+        let (end, ()) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+            for _ in 0..200 {
+                if hangups(&node) > 0 && reads(&node) > before { break; }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            node.state.autopay.lock().unwrap().lock();
+            ended.store(true, Ordering::SeqCst);
+        });
+        let end = end.expect("End closes");
+        assert_eq!(end.op_id, offer, "the admission, closed");
+        assert_eq!(hangups(&node), 1, "nothing more was asked of the node");
+        assert_eq!(paid.lock().unwrap().pays, pays, "nothing was paid");
+        assert!(!admission_is_open(&node, &offer));
+        assert!(pending(&node).is_none());
+    }
+
+    /// A node that takes End's first hangup as offline, then ends the call when told.
+    /// `broken`: reads and quotes End's last request would need have stopped answering.
+    fn node_ending_after_an_offline_hangup(ended: Arc<AtomicBool>, broken: Arc<AtomicBool>) -> (Routes, Arc<Mutex<OpsNode>>) {
+        let (routes, paid) = node_ending_the_call(ended.clone());
+        (Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if p == "/messages/compose" && body["kind"] == 403 && !ended.load(Ordering::SeqCst) {
+                return recipient_offline_reply(&body);
+            }
+            if broken.load(Ordering::SeqCst) && (p == "/status" || p.starts_with("/pricing") || p.starts_with("/pair")) {
+                return (500, "{}".into());
+            }
+            routes(m, p, b)
+        }), paid)
+    }
+
+    /// End's hangup was refused as offline and it is reading the call.
+    async fn until_end_is_waiting(node: &Fake, reads_before: usize) {
+        let reads = |node: &Fake| node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        for _ in 0..400 {
+            if hangups(node) > 0 && reads(node) > reads_before { return; }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!("End never began to wait");
+    }
+
+    /// Once the node shows the call ended, the admission closes whatever became of
+    /// the owner's authority meanwhile. Each of these would refuse a further request
+    /// before it leaves the host, and none of them is a reason to keep the call open.
+    #[tokio::test]
+    async fn the_nodes_word_closes_the_admission_whatever_refuses_a_further_request() {
+        for case in ["paused", "approval off", "contact left the book", "contact budget used up", "daily total used up", "quote unreadable", "connection waiting"] {
+            let ended = Arc::new(AtomicBool::new(false));
+            let broken = Arc::new(AtomicBool::new(false));
+            let (routes, paid) = node_ending_after_an_offline_hangup(ended.clone(), broken.clone());
+            let node = minute_ready(routes).await;
+            let offer = offer_op(&node);
+            let pays = paid.lock().unwrap().pays;
+            let before = node.targets().iter().filter(|t| t.contains("/calls?")).count();
+            let (end, ()) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+                until_end_is_waiting(&node, before).await;
+                match case {
+                    "paused" => with_book(&node.state, true, |b| { b.paused = true; Ok(()) }).unwrap(),
+                    "approval off" => node.state.autopay.lock().unwrap().lock(),
+                    "contact left the book" => with_book(&node.state, true, |b| b.set_limit(A, false, 0)).unwrap(),
+                    "contact budget used up" => with_book(&node.state, true, |b| b.set_limit(A, false, 1)).unwrap(),
+                    "daily total used up" => with_book(&node.state, true, |b| { b.set_ceiling(1); Ok(()) }).unwrap(),
+                    "quote unreadable" => broken.store(true, Ordering::SeqCst),
+                    "connection waiting" => node.state.remote_retry.failed(&remote_access::RemoteError::DeviceUnavailable),
+                    _ => unreachable!(),
+                }
+                ended.store(true, Ordering::SeqCst);
+            });
+            let end = end.unwrap_or_else(|error| panic!("{case}: End closes: {}", error.code));
+            assert_eq!(end.op_id, offer, "{case}: the admission, closed");
+            assert!(!admission_is_open(&node, &offer), "{case}");
+            assert_eq!(hangups(&node), 1, "{case}: nothing more was asked of the node");
+            assert_eq!(paid.lock().unwrap().pays, pays, "{case}: nothing was paid");
+            assert!(pending(&node).is_none(), "{case}");
+        }
+    }
+
+    /// Another send's unknown result, from while End waited, stays exactly as it was.
+    #[tokio::test]
+    async fn closing_on_the_nodes_word_leaves_another_sends_pending_result_alone() {
+        let ended = Arc::new(AtomicBool::new(false));
+        let (routes, paid) = node_ending_after_an_offline_hangup(ended.clone(), Arc::new(AtomicBool::new(false)));
+        let lose = Arc::new(AtomicBool::new(false));
+        let losing = lose.clone();
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+            if losing.load(Ordering::SeqCst) && p == "/messages/compose" && body["kind"] != 403 {
+                return (502, r#"{"error":"no answer"}"#.into());
+            }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let pays = paid.lock().unwrap().pays;
+        let before = node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let (end, sent) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+            until_end_is_waiting(&node, before).await;
+            lose.store(true, Ordering::SeqCst);
+            let sent = do_message_send(&node.state, A, false, "hi", 7000, None).await;
+            ended.store(true, Ordering::SeqCst);
+            sent
+        });
+        assert_eq!(sent.unwrap_err().code, "spend_unknown");
+        let held = pending(&node).expect("the message's result stays pending");
+        let unsettled = budget_now(&node.state).unsettled_msat;
+        assert!(unsettled > 0);
+        let end = end.expect("End closes");
+        assert_eq!(end.op_id, offer);
+        assert!(!admission_is_open(&node, &offer));
+        let after = pending(&node).expect("still pending");
+        assert_eq!((after.id, after.operation_id.clone()), (held.id, held.operation_id.clone()));
+        assert_eq!(ledger_record(&node, held.operation_id.as_deref().unwrap())["state"], "unknown");
+        assert_eq!(budget_now(&node.state).unsettled_msat, unsettled);
+        assert_eq!(hangups(&node), 1);
+        assert_eq!(paid.lock().unwrap().pays, pays);
+    }
+
+    /// Their word is needed: an approval that runs out on a call the node still
+    /// shows open closes nothing.
+    #[tokio::test]
+    async fn an_approval_running_out_closes_nothing_while_the_node_shows_the_call_open() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let node = minute_ready(routes).await;
+        let offer = offer_op(&node);
+        node.state.autopay.lock().unwrap().lock();
+        let error = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await.unwrap_err();
+        assert_ne!(error.code, "not_dispatched", "the approval is the refusal");
+        assert_eq!(hangups(&node), 0);
+        assert!(admission_is_open(&node, &offer));
+    }
+
+    /// The whole of the node's reply must say so. Anything else that could hold a
+    /// payment stays a fence: a hash, another state, another operation's id, a
+    /// retry refused, an amount, or a reply that is not this shape at all.
+    #[tokio::test]
+    async fn a_reply_short_of_the_nodes_proof_stays_unknown() {
+        type Change = fn(&mut serde_json::Value);
+        let changes: [(&str, Change); 11] = [
+            ("hash", |v| v["payment_hash"] = OP_HASH.into()),
+            ("no hash field", |v| { v.as_object_mut().unwrap().remove("payment_hash"); }),
+            ("prepared", |v| v["state"] = "prepared".into()),
+            ("paying", |v| v["state"] = "paying".into()),
+            ("payment_unknown", |v| v["state"] = "payment_unknown".into()),
+            ("no state", |v| { v.as_object_mut().unwrap().remove("state"); }),
+            ("another operation", |v| v["operation_id"] = "00000000-0000-4000-8000-000000000000".into()),
+            ("no retry", |v| v["retry_allowed"] = false.into()),
+            ("accepted", |v| v["accepted"] = true.into()),
+            ("amount", |v| v["amount_msat"] = 1000.into()),
+            ("admission", |v| v["readmission_msat"] = 1000.into()),
+        ];
+        for (name, change) in changes {
+            let (routes, paid) = ledger_call_routes();
+            let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+                let body: serde_json::Value = serde_json::from_str(b).unwrap_or_default();
+                if p == "/messages/compose" && body["kind"] == 403 {
+                    let mut reply: serde_json::Value = serde_json::from_str(&recipient_offline_reply(&body).1).unwrap();
+                    change(&mut reply);
+                    return (400, reply.to_string());
+                }
+                routes(m, p, b)
+            }));
+            approve_calls(&node).await;
+            do_call_signal(&node.state, A, 400, OFFER, 15000).await.unwrap();
+            let unsettled = budget_now(&node.state).unsettled_msat;
+            let pays = paid.lock().unwrap().pays;
+            let error = do_op_end_call(&node.state, CALL_ID).await.unwrap_err();
+            assert!(matches!(error.code, "spend_unknown" | "payment_unknown"), "{name}: {}", error.code);
+            assert!(pending(&node).is_some(), "{name}: the fence holds");
+            assert!(budget_now(&node.state).unsettled_msat > unsettled, "{name}: the reservation stays held");
+            assert_eq!(paid.lock().unwrap().pays, pays, "{name}");
+        }
+    }
+
+    /// The node's proof covers the id it names only when this POST was that id's
+    /// first: a retry of an id the node already holds stays with the check.
+    #[tokio::test]
+    async fn a_released_reply_to_a_reused_operation_id_stays_unknown() {
+        let (routes, ops) = ops_node();
+        let refuse = Arc::new(AtomicBool::new(false));
+        let refusing = refuse.clone();
+        ops.lock().unwrap().readmission_capped = true;
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" && refusing.load(Ordering::SeqCst) {
+                return recipient_offline_reply(&serde_json::from_str(b).unwrap());
+            }
+            routes(m, p, b)
+        }));
+        approve_calls(&node).await;
+        // Held resumable, under its id: sending this very message again reuses it.
+        assert_eq!(do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err().code, "readmission_capped");
+        let held = pending(&node).unwrap().operation_id.unwrap();
+        refuse.store(true, Ordering::SeqCst);
+        let error = do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown");
+        assert_eq!(error.operation_id.as_deref(), Some(held.as_str()));
+        assert!(pending(&node).is_some());
+    }
+
+    /// A message to a contact who is offline gets the same reply, for the same
+    /// reason. It must not fence every other paid action behind it.
+    #[tokio::test]
+    async fn a_message_to_an_offline_contact_leaves_no_fence() {
+        let (routes, paid) = ops_node();
+        let offline = Arc::new(AtomicBool::new(true));
+        let gone = offline.clone();
+        let node = fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/messages/compose" && gone.load(Ordering::SeqCst) {
+                return recipient_offline_reply(&serde_json::from_str(b).unwrap());
+            }
+            routes(m, p, b)
+        }));
+        approve_calls(&node).await;
+        let error = do_message_send(&node.state, A, false, "hi", 7000, None).await.unwrap_err();
+        assert_eq!(error.code, "not_dispatched");
+        assert_eq!(error.message, "Not sent - nothing was paid. Recipient is offline.");
+        assert!(pending(&node).is_none());
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        offline.store(false, Ordering::SeqCst);
+        do_message_send(&node.state, A, false, "hi", 7000, None).await.expect("sent as a new attempt");
+        assert_eq!(paid.lock().unwrap().pays, 1, "paid once");
+        let ids = op_ids(&node);
+        assert_ne!(ids[0], ids[1], "the refused id is never posted again");
     }
 
     #[tokio::test]

@@ -353,19 +353,53 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   known yet, and the node ends the call itself once its paid time runs out.
   When the admission is already closed (a peer hangup), End does not reconcile,
   and a lost minute stays pending until the owner's check.
+- **A callee catching up.** Their node refuses a minute's invoice while it syncs:
+  503 `peer_not_ready`. When the caller's node also records that attempt as
+  `released` with no hash and nothing settled, the host reads it as proven unpaid,
+  so there is no fence and the scheduler tries again as a passing refusal. Any
+  other state stays unknown. The same proof on any other send, or with another
+  status, is read as below for a callee gone offline: `not_dispatched`, no fence.
 - **A call the node already ended.** The minute cap, a minute that failed for
   good, an unpaid expiry and the ring deadline end the call at the caller's
   node with no hangup coming back. End still asks. The node refuses that hangup
   before anything is paid (`not_dispatched`, reason `call_not_live`), and that
   refusal closes the admission, so the contact can be called again. A contact
   left stuck by an earlier build recovers on its next End. Any other
-  `not_dispatched` of a hangup leaves the admission open: while the node's own
+  `not_dispatched` of a hangup leaves the admission open until the node ends the
+  call (see the next item): while the node's own
   closing notice is being paid it answers `call_signal_in_flight`, and "Try
   ending it again" then closes it. A minute the wallet tried and failed stays
   pending first, as above, and no hangup goes out while that result is not
   known. A minute's refusal stays `not_dispatched` even with this reason,
   because the node also gives it to a minute that is early or out of order on
   a live call.
+- **The callee goes offline mid-call.** The node refuses the minute (no call
+  price) and the hangup (recipient offline) before anything leaves the wallet,
+  and says so in its reply: `released`, no payment hash, nothing settled, retry
+  allowed, for this operation id. Compose writes that only after `proven_unpaid`,
+  and a released row is never paid unless the same id is posted again. So for an
+  attempt that was this id's first, the app reads it as `not_dispatched`, for
+  any paid send: nothing is fenced and no check is needed. A `prepared` row, a
+  hash, an amount, or a retry of an id the node already held stays unknown.
+
+  **Limit on node rc21.** While an earlier paid admission to this contact is in
+  the node's journal, as after a paid first contact, `proven_unpaid` also rejects
+  a send that paid nothing. The same refusal then says `prepared`, and abandon
+  refuses it. Those replies are the same ones the node gives when its journal
+  shows a payment, so the app cannot tell the two apart and keeps the fence, and
+  neither End nor "Check pending result" clears it. That needs a node that scopes
+  the proof to the operation's own evidence.
+
+  A minute refused as above is tried again as above. End then waits for the node,
+  reading the call and holding no lock, while other paid actions go out. The node
+  ends the call by itself at its paid time plus 10 seconds, at most about 90
+  seconds away. The node showing the call ended closes the admission: End records
+  that, as for their hangup, and asks for nothing more, so a pause, a lapsed
+  approval or a used-up budget during the wait cannot keep it open. It sends
+  nothing, and another send's pending result stays as it was. If the node shows no
+  end within 100 seconds, a read in progress included, or the read fails, the
+  refusal stays the answer and "Try ending it again" stays on the card. The same
+  wait covers a hangup the wallet refused before dispatch.
 - **After the call.** The card reads the node for up to 20 s until it closes
   the reservation and then says "Minutes: paid X. Released back to your
   budget: Y." Until then it says what the node still holds.
