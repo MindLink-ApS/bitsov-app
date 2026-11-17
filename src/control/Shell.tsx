@@ -7021,6 +7021,11 @@ function Composer(props: {
                     data-attach={m === 'file' ? '' : undefined}
                     onClick={() => {
                       setMenuOpen(false);
+                      // The file panel takes the bar's place, Stop included. Finish an active
+                      // recording first, as leaving the window does: the clip stays as the
+                      // unsent preview, and a file picked next replaces it. Not every chooser
+                      // blurs the window, so this cannot be left to blur.
+                      if (m === 'file' && recording()) void stopRecording();
                       if (m === 'file') fileInput?.click();
                       // Reselecting the active mode is not an edit: it must not
                       // detach an in-flight send from the draft it will clear.
