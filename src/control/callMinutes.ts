@@ -21,7 +21,7 @@
  * unknown, and reports every reason it stops.
  */
 import { t as tr } from '../i18n';
-import { provenUnpaid } from './paymentOutcome';
+import { provenUnpaid, sendFacts } from './paymentOutcome';
 import { asActionError } from './state';
 import type { ActionError, CallReceipt, CallReservation, CallStatus } from './types';
 
@@ -124,6 +124,16 @@ export type MinutesView = {
   receiptsMsat: number;
   /** A block payment is in flight. */
   paying: boolean;
+  /**
+   * The call ended while a minute was being paid, and that minute's result is not
+   * known (paid and proven unpaid are both known). Nothing was ended at the host for it (their hangup closes the
+   * admission by itself), so its pending result holds every paid action until checked.
+   */
+  lostMinute: boolean;
+  /** The same, with the minute paid and not delivered: known money, and still pending at the host. */
+  undeliveredMinute: boolean;
+  /** The pending record the host named for that undelivered minute, when it did. */
+  undeliveredPendingId: string | null;
   stop: MinutesStop | null;
   /** The call ended and the node closed the reservation (or no longer lists the call). */
   settled: boolean;
@@ -174,7 +184,7 @@ export function createCallMinutes(opts: {
   let view: MinutesView = {
     agreedBlockMsat: opts.agreedBlockMsat, reservationMaxMsat: opts.reservationMaxMsat,
     reservation: null, confirmed: false, confirming: false, holdError: null,
-    paidUntilMs: null, blocks: 0, receiptsMsat: 0, paying: false, stop: null, settled: false, final: false,
+    paidUntilMs: null, blocks: 0, receiptsMsat: 0, paying: false, lostMinute: false, undeliveredMinute: false, undeliveredPendingId: null, stop: null, settled: false, final: false,
   };
   /** Paying blocks (between answer and end). */
   let running = false;
@@ -278,7 +288,9 @@ export function createCallMinutes(opts: {
     try { r = await deps.pay(peer, callId, seq); } catch (error) { r = { ok: false, error: asActionError(error) }; }
     inFlight = false;
     // A receipt is counted even if the call ended meanwhile: it was paid.
-    emit({ paying: false, ...(r.ok ? { receiptsMsat: view.receiptsMsat + r.value.total_msat, blocks: Math.max(view.blocks, seq + 1) } : {}) });
+    emit({ paying: false, ...(r.ok ? { receiptsMsat: view.receiptsMsat + r.value.total_msat, blocks: Math.max(view.blocks, seq + 1) }
+      : running || sendFacts(r.error.code).fenceCleared ? {}
+      : sendFacts(r.error.code).paymentKnown ? { undeliveredMinute: true, undeliveredPendingId: r.error.pending_id ?? null } : { lostMinute: true }) });
     if (!running) return;
     if (r.ok) { attempts = 0; passingAttempts = 0; void tick(); return; }
     const code = r.error.code;

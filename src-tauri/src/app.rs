@@ -17935,6 +17935,29 @@ mod control_act_tests {
         assert!(at(format!("POST /messages/operations/{id}/abandon")) < last_compose, "abandoned before the hangup");
     }
 
+    /// Their hangup closes the admission, so no End comes for a minute lost to it.
+    /// The check the ended card runs by itself settles it, through the owner's
+    /// path: by operation id, nothing sent, and the fence is gone.
+    #[tokio::test]
+    async fn a2_the_check_settles_a_minute_lost_to_their_hangup_and_sends_nothing() {
+        let (routes, paid) = minutes_routes_with_abandon();
+        let mut node = minute_ready(routes).await;
+        lose_minute_reply(&mut node, &paid, None).await;
+        let id = pending(&node).unwrap().operation_id.unwrap();
+        observe_call_event(&node.state, &inbound_call_event(403, "hangup")).await;
+        assert_eq!(no_pending_spend(&node.state).unwrap_err().code, "spend_unknown", "the fence holds until checked");
+        let (composed, pays) = (compose_kinds(&node), paid.lock().unwrap().pays);
+
+        assert_eq!(do_spend_reconcile(&node.state).await.unwrap(), NOTHING_PAID);
+
+        assert_eq!(compose_kinds(&node), composed, "the check sends nothing");
+        assert_eq!(ledger_record(&node, &id)["state"], "unpaid");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        assert!(no_pending_spend(&node.state).is_ok());
+        do_message_send(&node.state, A, false, "hi", 7000, None).await.expect("a message goes");
+        assert_eq!(paid.lock().unwrap().pays, pays + 1, "only the message was paid");
+    }
+
     /// The node reports the minute still paying: End says the outcome is
     /// unknown, names the pending result and sends no hangup. Once the node
     /// knows the outcome, End accounts the minute and pays the hangup.
