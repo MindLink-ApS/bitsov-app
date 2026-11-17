@@ -73,6 +73,26 @@ pub(super) fn smoke_test() -> Result<&'static str, String> {
     Ok(path)
 }
 
+/// What the headless storage smoke reports. A refusal is an expected, named
+/// outcome (exit 3), not a failure of the protected store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmokeOutcome {
+    Path(&'static str),
+    Refused(&'static str),
+}
+
+impl SmokeOutcome {
+    pub fn exit_code(self) -> i32 {
+        match self { Self::Path(_) => 0, Self::Refused(_) => 3 }
+    }
+}
+
+/// Decided from (entitlement, enclave) alone, before any storage access.
+#[allow(dead_code)]
+fn smoke_outcome(entitled: bool, _enclave: bool) -> SmokeOutcome {
+    SmokeOutcome::Path(if entitled { "data-protection-keychain" } else { "enclave-sealed-file" })
+}
+
 // Backend selection is based on the running process's validated entitlement,
 // never on the result of an authenticated read or write.
 fn load_selected(dir: &Path, store: &dyn KeyStore, sealer: Option<&dyn Sealer>, entitled: bool) -> Result<ClientKey, PairError> {
@@ -237,6 +257,112 @@ mod tests {
             Ok(())
         }
     }
+    /// A Mac without an enclave: any native call would be a bug.
+    struct NoEnclaveSealer;
+    impl Sealer for NoEnclaveSealer {
+        fn seal(&self, _: &str, _: &[u8]) -> Result<Vec<u8>, String> { panic!("seal called without an enclave") }
+        fn open(&self, _: &str, _: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> { panic!("open called without an enclave") }
+        fn hardware_available(&self) -> bool { false }
+    }
+    /// The same Mac, as the native bridge answers if it is asked anyway.
+    struct NoEnclaveBridge;
+    impl Sealer for NoEnclaveBridge {
+        fn seal(&self, _: &str, _: &[u8]) -> Result<Vec<u8>, String> { Err("no Secure Enclave".into()) }
+        fn open(&self, _: &str, _: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> { Err("no Secure Enclave".into()) }
+        fn hardware_available(&self) -> bool { false }
+    }
+    fn entries(dir: &Path) -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        names.sort();
+        names
+    }
+    fn assert_names_no_cleanup(error: &PairError) {
+        let text = error.to_string().to_lowercase();
+        assert!(text.contains("secure enclave"), "{text}");
+        for word in ["clear", "delete", "try again", "temporarily"] { assert!(!text.contains(word), "{text}"); }
+    }
+    #[cfg(unix)]
+    fn identity_of(path: &Path) -> (Vec<u8>, std::time::SystemTime, u64) {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).unwrap();
+        (std::fs::read(path).unwrap(), meta.modified().unwrap(), meta.ino())
+    }
+
+    #[test]
+    fn unentitled_mac_without_enclave_refuses_fresh_identity_with_named_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore { read_error: true, write_error: true, ..Default::default() };
+        let error = load_selected(dir.path(), &store, Some(&NoEnclaveSealer), false).unwrap_err();
+        assert!(matches!(error, PairError::SecureStorageUnavailable { identity_kept: false }), "{error}");
+        assert_names_no_cleanup(&error);
+        assert!(entries(dir.path()).is_empty(), "nothing was written: {:?}", entries(dir.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unentitled_mac_without_enclave_keeps_an_existing_sealed_identity_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        ClientKey::load_or_create_sealed(dir.path(), &crate::at_rest::test_sealer::MemorySealer).unwrap();
+        let sealed = dir.path().join(SEALED_KEY_FILE);
+        let before = identity_of(&sealed);
+        let names = entries(dir.path());
+        let error = load_selected(dir.path(), &MemoryStore::default(), Some(&NoEnclaveSealer), false).unwrap_err();
+        assert!(matches!(error, PairError::SecureStorageUnavailable { identity_kept: true }), "{error}");
+        assert_names_no_cleanup(&error);
+        assert_eq!(identity_of(&sealed), before, "bytes, mtime and inode unchanged");
+        assert_eq!(entries(dir.path()), names);
+        assert!(!dir.path().join(KEY_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unentitled_mac_without_enclave_never_seals_or_wipes_a_legacy_plain_key() {
+        let dir = tempfile::tempdir().unwrap();
+        ClientKey::load_or_create_plain(dir.path()).unwrap();
+        let plain = dir.path().join(KEY_FILE);
+        let before = identity_of(&plain);
+        let error = load_selected(dir.path(), &MemoryStore::default(), Some(&NoEnclaveSealer), false).unwrap_err();
+        assert!(matches!(error, PairError::SecureStorageUnavailable { .. }), "{error}");
+        assert_names_no_cleanup(&error);
+        assert_eq!(identity_of(&plain), before);
+        assert!(!dir.path().join(SEALED_KEY_FILE).exists());
+        assert_eq!(entries(dir.path()), [std::ffi::OsString::from(KEY_FILE)]);
+    }
+
+    #[test]
+    fn entitled_mac_without_enclave_never_migrates_a_sealed_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        ClientKey::load_or_create_sealed(dir.path(), &crate::at_rest::test_sealer::MemorySealer).unwrap();
+        let before = std::fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap();
+        let store = MemoryStore::default();
+        assert!(load_selected(dir.path(), &store, Some(&NoEnclaveBridge), true).is_err());
+        assert!(store.seed.borrow().is_none(), "no Keychain item was written");
+        assert_eq!(std::fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap(), before);
+        assert!(!dir.path().join(MARKER).exists());
+        assert!(!dir.path().join(KEY_FILE).exists());
+    }
+
+    #[test]
+    fn entitled_mac_without_enclave_creates_keychain_identity_without_sealer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::default();
+        let key = load_selected(dir.path(), &store, Some(&NoEnclaveSealer), true).unwrap();
+        assert!(dir.path().join(MARKER).is_file());
+        assert!(!dir.path().join(SEALED_KEY_FILE).exists());
+        assert!(!dir.path().join(KEY_FILE).exists());
+        assert_eq!(load_selected(dir.path(), &store, Some(&NoEnclaveSealer), true).unwrap().public_hex(), key.public_hex());
+    }
+
+    #[test]
+    fn smoke_reports_no_enclave_with_exit_3() {
+        assert_eq!(smoke_outcome(false, false), SmokeOutcome::Refused("no-secure-enclave"));
+        assert_eq!(smoke_outcome(false, false).exit_code(), 3);
+        assert_eq!(smoke_outcome(false, true), SmokeOutcome::Path("enclave-sealed-file"));
+        assert_eq!(smoke_outcome(true, true), SmokeOutcome::Path("data-protection-keychain"));
+        assert_eq!(smoke_outcome(true, false), SmokeOutcome::Path("data-protection-keychain"));
+        assert_eq!(smoke_outcome(true, false).exit_code(), 0);
+    }
+
     #[test]
     fn unentitled_mac_creates_and_reloads_only_enclave_sealed_identity() {
         let dir = tempfile::tempdir().unwrap();

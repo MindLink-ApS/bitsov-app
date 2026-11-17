@@ -50,6 +50,10 @@ pub enum PairError {
     Malformed { step: &'static str, detail: String },
     /// Local file or key problem.
     Local(String),
+    /// This Mac has no Secure Enclave, so the identity cannot be stored or
+    /// opened safely. Permanent; nothing was written. `identity_kept`: an
+    /// existing identity was left untouched for the Mac it was made on.
+    SecureStorageUnavailable { identity_kept: bool },
     /// The node's printed short code differs from the one derived from the
     /// challenge file. Nothing was signed.
     Tripwire { printed: String, derived: String },
@@ -70,6 +74,11 @@ impl std::fmt::Display for PairError {
                 write!(f, "{step} returned an unexpected response: {detail}")
             }
             PairError::Local(message) => f.write_str(message),
+            PairError::SecureStorageUnavailable { identity_kept } => {
+                f.write_str(crate::remote_access::NO_SECURE_ENCLAVE)?;
+                if *identity_kept { f.write_str(crate::remote_access::IDENTITY_KEPT)?; }
+                Ok(())
+            }
             PairError::Tripwire { printed, derived } => write!(
                 f,
                 "pairing stopped: your node printed {printed}, but the challenge file gives \

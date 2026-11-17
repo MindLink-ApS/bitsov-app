@@ -1769,6 +1769,22 @@ fn client_key_with(
     Ok(key)
 }
 
+/// Report why the client identity could not be read or created.
+fn client_key_refused(state: &NodeState, error: PairError, interaction: Interaction) {
+    match error {
+        // No passcode: say so as its own kind, so the phone can open Settings.
+        error if error.to_string() == remote_access::PASSCODE_REQUIRED => {
+            state.remote_retry.failed(&remote_access::RemoteError::DeviceUnavailable);
+            set_error(state, error.to_string());
+        }
+        // A background attempt leaves any earlier, more specific error in place.
+        _ if interaction == Interaction::Background => {
+            if state.error.lock().unwrap().is_none() { set_error(state, CONFIRM_TO_RECONNECT); }
+        }
+        error => set_error(state, error.to_string()),
+    }
+}
+
 /// Remote mode is selected before every local-node resolution path. The only
 /// listener is the loopback Noise proxy; no sidecar is initialized or spawned.
 async fn attach_remote_with(
@@ -1791,17 +1807,7 @@ async fn attach_remote_with(
     let store = app_data_dir.join(PAIRING_STORE_DIR);
     let key = match client_key(state, &store, interaction) {
         Ok(key) => key,
-        // No passcode: say so as its own kind, so the phone can open Settings.
-        Err(error) if error.to_string() == remote_access::PASSCODE_REQUIRED => {
-            state.remote_retry.failed(&remote_access::RemoteError::DeviceUnavailable);
-            return set_error(&state, error.to_string());
-        }
-        // A background attempt leaves any earlier, more specific error in place.
-        Err(_) if interaction == Interaction::Background => {
-            if state.error.lock().unwrap().is_none() { set_error(state, CONFIRM_TO_RECONNECT); }
-            return;
-        }
-        Err(error) => return set_error(&state, error.to_string()),
+        Err(error) => return client_key_refused(state, error, interaction),
     };
     let ctx = Arc::new(PairingCtx {
         client: PairingClient::new(state.http.clone(), state.api_base.clone()),
@@ -28346,7 +28352,7 @@ mod remote_connect_tests;
 
 #[cfg(test)]
 mod client_key_prompt_tests {
-    use super::{client_key_with, Interaction, NodeState, CONFIRM_TO_RECONNECT};
+    use super::{client_key_refused, client_key_with, Interaction, NodeState, CONFIRM_TO_RECONNECT};
     use bitsov_app::pairing::{ClientKey, PairError};
     use std::cell::Cell;
 
@@ -28387,6 +28393,29 @@ mod client_key_prompt_tests {
         assert!(client_key_with(&state, store.path(), Interaction::Background, failing).is_err());
         assert!(client_key_with(&state, store.path(), Interaction::Background, failing).is_err());
         assert_eq!(reads.get(), 1, "a Face ID sheet's own focus change cannot chain a second prompt");
+    }
+
+    #[test]
+    fn missing_secure_storage_is_reported_as_its_own_kind() {
+        use bitsov_app::remote_access::ConnectionErrorKind;
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        let store = tempfile::tempdir().unwrap();
+        let missing = PairError::SecureStorageUnavailable { identity_kept: false };
+        let error = client_key_with(&state, store.path(), Interaction::User, |_| Err(missing)).unwrap_err();
+        client_key_refused(&state, error, Interaction::User);
+        let reported = |state: &NodeState| {
+            let status = state.status_snapshot();
+            (status.connection_error.map(|e| e.kind), status.error, state.pairing_snapshot().state)
+        };
+        let first = reported(&state);
+        assert_eq!(first.0, Some(ConnectionErrorKind::SecureStorageUnavailable));
+        assert_eq!(first.2, "failed");
+        let text = first.1.clone().expect("an error is shown");
+        assert!(text.contains("Secure Enclave") && !text.contains("try again"), "{text}");
+        // A background retry neither prompts nor overwrites the named cause.
+        let again = client_key_with(&state, store.path(), Interaction::Background, |_| panic!("no background read")).unwrap_err();
+        client_key_refused(&state, again, Interaction::Background);
+        assert_eq!(reported(&state), first);
     }
 
     #[test]
