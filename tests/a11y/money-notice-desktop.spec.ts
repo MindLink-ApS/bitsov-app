@@ -38,7 +38,31 @@ const layout = async (page: Page) => ({
   bar: await box(page, '[data-composer-bar]'),
 });
 
-test('1280x800: the money notice floats over the chat and does not push it down', async ({ page }) => {
+// What the browser paints on top at a point: true when it is the notice (or inside it).
+const noticeOnTop = (page: Page, p: { x: number; y: number }) =>
+  page.evaluate(({ x, y }) => !!document.elementFromPoint(x, y)?.closest('[data-money-notice]'), p);
+const centre = (b: Box) => ({ x: (b.left + b.right) / 2, y: b.top + b.height / 2 });
+// Behind a panel the chat is inert, and inert content is never hit-tested, so a plain
+// elementFromPoint cannot tell "covered" from "painted on top but inert". Lift inert just for
+// the probe, so the answer depends only on stacking order.
+const noticeOnTopIgnoringInert = (page: Page, p: { x: number; y: number }) =>
+  page.evaluate(({ x, y }) => {
+    const inert = [...document.querySelectorAll<HTMLElement>('[inert]')];
+    inert.forEach(el => { el.inert = false; });
+    try { return !!document.elementFromPoint(x, y)?.closest('[data-money-notice]'); }
+    finally { inert.forEach(el => { el.inert = true; }); }
+  }, p);
+// And what is actually painted: the region looks the same with the notice hidden.
+const noticePainted = async (page: Page, b: Box) => {
+  const clip = { x: b.left, y: b.top, width: b.right - b.left, height: b.height };
+  const shown = await page.screenshot({ clip, animations: 'disabled' });
+  await page.locator('section.track [data-money-notice]').evaluate(el => { (el as HTMLElement).style.visibility = 'hidden'; });
+  const hidden = await page.screenshot({ clip, animations: 'disabled' });
+  await page.locator('section.track [data-money-notice]').evaluate(el => { (el as HTMLElement).style.visibility = ''; });
+  return !shown.equals(hidden);
+};
+
+const openChat = async (page: Page) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.addInitScript(host);
   await page.goto('/');
@@ -46,11 +70,20 @@ test('1280x800: the money notice floats over the chat and does not push it down'
   await page.locator('[data-track^="peer:"]').first().click();
   await expect(page.locator('section.track > .track-head')).toBeVisible();
   await expect(page.locator('[data-money-notice]')).toHaveCount(0);
-  const before = await layout(page);
-
+};
+const showNotice = async (page: Page) => {
   await page.evaluate(() => { (window as unknown as Record<string, unknown>).__notReady = true; });
   const notice = page.locator('section.track [data-money-notice]');
   await expect(notice).toBeVisible({ timeout: 15_000 });
+  return notice;
+};
+
+test('1280x800: the money notice floats over the chat and does not push it down', async ({ page }) => {
+  await openChat(page);
+  const before = await layout(page);
+  const stream = await box(page, 'section.track [data-stream]');
+
+  const notice = await showNotice(page);
   await expect(notice).toHaveAttribute('role', 'status');
 
   // The chat, its header and the message box stay exactly where they were.
@@ -61,6 +94,16 @@ test('1280x800: the money notice floats over the chat and does not push it down'
   expect(overlaps(n, before.bar)).toBe(false);
   expect(n.left).toBeGreaterThanOrEqual(before.track.left);
   expect(n.right).toBeLessThanOrEqual(before.track.right);
+  // It is inside the window and fully over the message list, and it is what paints there.
+  expect(n.height).toBeGreaterThan(0);
+  expect(n.top).toBeGreaterThanOrEqual(0);
+  expect(n.bottom).toBeLessThanOrEqual(800);
+  expect(n.top).toBeGreaterThanOrEqual(stream.top);
+  expect(n.bottom).toBeLessThanOrEqual(stream.bottom);
+  expect(n.left).toBeGreaterThanOrEqual(stream.left);
+  expect(n.right).toBeLessThanOrEqual(stream.right);
+  expect(await box(page, 'section.track [data-stream]')).toEqual(stream);
+  expect(await noticeOnTop(page, centre(n))).toBe(true);
 
   // Header controls stay reachable by keyboard while it shows.
   const settings = page.locator('section.track > .track-head .context-toggle');
@@ -73,4 +116,37 @@ test('1280x800: the money notice floats over the chat and does not push it down'
   await page.evaluate(() => { (window as unknown as Record<string, unknown>).__notReady = false; });
   await expect(notice).toHaveCount(0, { timeout: 15_000 });
   expect(await layout(page)).toEqual(before);
+});
+
+test('1280x800: Settings and Wallet cover the money notice', async ({ page }) => {
+  await openChat(page);
+  const notice = await showNotice(page);
+  const nb = await box(page, 'section.track [data-money-notice]');
+  const at = centre(nb);
+  expect(await noticeOnTop(page, at)).toBe(true);
+  expect(await noticePainted(page, nb)).toBe(true);
+
+  // Settings: the panel, not the notice, is on top where the notice sits.
+  await page.getByRole('button', { name: 'You: wallet, profile and settings' }).click();
+  await page.locator('[data-open-settings]').click();
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('.settings-modal.open')!).opacity === '1');
+  await expect(notice).toHaveCount(1);
+  expect(await noticeOnTop(page, at)).toBe(false);
+  expect(await noticeOnTopIgnoringInert(page, at)).toBe(false);
+  expect(await noticePainted(page, nb)).toBe(false);
+  expect(await page.evaluate(({ x, y }) => !!document.elementFromPoint(x, y)?.closest('.settings-modal.open'), at)).toBe(true);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.settings-modal.open')).toHaveCount(0);
+  await expect.poll(() => noticeOnTop(page, at)).toBe(true);
+
+  // Wallet: same.
+  await page.getByRole('button', { name: 'You: wallet, profile and settings' }).click();
+  await page.locator('[data-open-wallet]').click();
+  await expect(page.locator('.wallet-page')).toBeVisible();
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('.wallet-page')!).opacity === '1');
+  await expect(notice).toHaveCount(1);
+  expect(await noticeOnTop(page, at)).toBe(false);
+  expect(await noticeOnTopIgnoringInert(page, at)).toBe(false);
+  expect(await noticePainted(page, nb)).toBe(false);
+  expect(await page.evaluate(({ x, y }) => !!document.elementFromPoint(x, y)?.closest('.wallet-page'), at)).toBe(true);
 });
