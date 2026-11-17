@@ -8,8 +8,8 @@ const host = () => {
   const R: Record<string, (a: Record<string, unknown>) => unknown> = {
     node_status: () => ({ ready: true, node_id: OWN, error: null }), trust_acknowledge: () => true,
     pairing_status: () => ({ state: 'paired', scopes: ['read', 'receive', 'spend'], short_code: 'ABCD-EFGH', code_from_node: true, reason: null, remote: false, bootstrap: null }),
-    node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0, lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: [], money_ready: !w.__notReady, readiness: null }),
-    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null }], rooms_list: () => [], messages_list: () => [],
+    node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0, lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: ['room_binding_v1'], money_ready: !w.__notReady, readiness: null }),
+    peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, rooms: true, session: true }], rooms_list: () => [], messages_list: () => [], room_thread: () => [],
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 1000, peer_age_secs: 30, max_routing_fee_msat: 5000, peer_stale: false }),
     payments_overview: () => ({ balance_msat: 1000000, lightning_outbound_msat: 500000, channels: [] }), fund_state: () => null,
     file_price: () => ({ principal_msat: 1000, max_routing_fee_msat: 5000, total_msat: 6000 }),
@@ -149,4 +149,85 @@ test('1280x800: Settings and Wallet cover the money notice', async ({ page }) =>
   expect(await noticeOnTopIgnoringInert(page, at)).toBe(false);
   expect(await noticePainted(page, nb)).toBe(false);
   expect(await page.evaluate(({ x, y }) => !!document.elementFromPoint(x, y)?.closest('.wallet-page'), at)).toBe(true);
+});
+
+// The notice may cover only the message list. Every other control in the track stays where the
+// pointer can reach it: the browser hit-tests the control itself at its centre, and a click lands.
+const reachable = async (page: Page, sel: string) => {
+  const control = page.locator(sel).first();
+  await expect(control).toBeVisible();
+  const c = centre(await box(page, sel));
+  expect(await page.evaluate(({ x, y, sel }) => {
+    const hit = document.elementFromPoint(x, y);
+    return !!hit && !hit.closest('[data-money-notice]') && !!hit.closest(sel);
+  }, { ...c, sel }), `${sel} is hit-tested at its centre`).toBe(true);
+  expect(overlaps(await box(page, 'section.track [data-money-notice]'), await box(page, sel)), `the notice does not overlap ${sel}`).toBe(false);
+  return control;
+};
+const openApp = async (page: Page) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.addInitScript(host);
+  await page.goto('/');
+  await page.locator('button', { hasText: 'I understand' }).first().click();
+};
+// Where there is a message list, the notice sits inside it.
+const insideStream = async (page: Page) => {
+  const n = await box(page, 'section.track [data-money-notice]');
+  const s = await box(page, 'section.track [data-stream]');
+  expect(n.top).toBeGreaterThanOrEqual(s.top);
+  expect(n.bottom).toBeLessThanOrEqual(s.bottom);
+  expect(await noticeOnTop(page, centre(n))).toBe(true);
+};
+
+test('1280x800: the money notice leaves the assistant provider bar usable', async ({ page }) => {
+  await openApp(page);
+  // Ask your node: the provider bar sits right under the chat header.
+  await page.locator('[data-track="ai"]').click();
+  await expect(page.locator('section.track [data-ai-providers] button').first()).toBeVisible();
+  const notice = await showNotice(page);
+  await expect(notice).toHaveAttribute('role', 'status');
+  const bar = await reachable(page, 'section.track [data-ai-providers] button');
+  await bar.click({ timeout: 5_000 });
+  await expect(bar).toHaveAttribute('aria-checked', 'true');
+  await insideStream(page);
+  // A named assistant: its bars (thread, watches, providers) all stay reachable too.
+  await page.locator('[data-track^="assistant:"]').first().click();
+  await expect(page.locator('section.track [data-assistant-role]')).toBeVisible();
+  await reachable(page, 'section.track [data-assistant-role]');
+  await reachable(page, 'section.track [data-assistant-forget]');
+  await reachable(page, 'section.track [data-assistant-watches] > summary');
+  await reachable(page, 'section.track [data-ai-providers] button');
+  await insideStream(page);
+});
+
+test('1280x800: on the start view (no message list) the money notice covers no control', async ({ page }) => {
+  await openApp(page);
+  await page.locator('[data-track="new"]').click();
+  await expect(page.locator('section.track .spend')).toBeVisible();
+  await expect(page.locator('section.track [data-stream]')).toHaveCount(0);
+  await showNotice(page);
+  const head = await box(page, 'section.track > .track-head');
+  expect(overlaps(await box(page, 'section.track [data-money-notice]'), head)).toBe(false);
+  await reachable(page, 'section.track .spend');
+  const status = await reachable(page, 'section.track [data-spend-status] > summary');
+  const open = await status.evaluate(el => (el.parentElement as HTMLDetailsElement).open);
+  await status.click({ timeout: 5_000 });
+  await expect.poll(() => status.evaluate(el => (el.parentElement as HTMLDetailsElement).open)).toBe(!open);
+});
+
+test('1280x800: the money notice leaves the room leave-confirm usable', async ({ page }) => {
+  await openApp(page);
+  await page.locator('[data-room-new]').click();
+  await page.locator('[data-room-pick]').first().check();
+  await page.locator('[data-room-create]').click();
+  await expect(page.locator('section.track [data-room-head]')).toBeVisible();
+  await page.locator('[data-room-leave]').click();
+  await expect(page.locator('[data-room-leave-confirm]')).toBeVisible();
+  await showNotice(page);
+  await reachable(page, '[data-room-leave-confirm] [data-room-leave-yes]');
+  const stay = await reachable(page, '[data-room-leave-confirm] [data-room-leave-no]');
+  await insideStream(page);
+  await stay.click({ timeout: 5_000 });
+  await expect(page.locator('[data-room-leave-confirm]')).toHaveCount(0);
+  await expect(page.locator('section.track [data-room-head]')).toBeVisible();
 });
