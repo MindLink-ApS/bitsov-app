@@ -1,0 +1,65 @@
+tier = "full"
+
+[api]
+audit_log_path = "NODE_DIRECTORY/audit.jsonl"
+operator_probes_enabled = false
+
+[backup]
+scb_dir = "NODE_DIRECTORY/backups"
+
+[calls]
+max_call_minutes = 10
+
+[chain]
+api_url = "https://blockstream.info"
+backend = "esplora"
+esplora_url_fallback = "https://mempool.space"
+
+[identity]
+mnemonic_file = "NODE_DIRECTORY/identity/mnemonic.txt"
+
+[lightning]
+backend = "ldk"
+esplora_url = "https://blockstream.info/api"
+esplora_url_fallback = "https://mempool.space/api"
+listening_address = "0.0.0.0:9735"
+max_channel_capacity_sats = 1000000
+max_total_channel_capacity_sats = 2000000
+network = "bitcoin"
+
+[network]
+listen_addr = "0.0.0.0:9736"
+tier = "T2"
+
+[pairing]
+second_device_claim_v1 = true
+second_device_enrollment = false
+
+[payment_gate]
+verify_lightning_settlement = true
+
+[pricing]
+call_block_msat = 10000
+
+[setup_page]
+port = 8080
+
+[starter]
+allow_mainnet = false
+enabled = false
+hub_node_id = ""
+
+[starter_hub]
+allow_mainnet = false
+capacity_sats = 100000
+enabled = false
+funding_priority = "economy"
+lifetime_budget_sats = 2000000
+max_concurrent_opens = 4
+max_funding_fee_sats = 2000
+max_opens_per_day = 20
+push_sats = 10000
+
+[storage]
+backend = "sqlite"
+path = "NODE_DIRECTORY/konsensus.db"
