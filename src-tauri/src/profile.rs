@@ -58,6 +58,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn password_services_use_the_exact_profile_namespace() {
+        let service = "bitsov.node.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.seed-password";
+        for (identifier, expected) in [
+            ("tech.mindlink.bitsov", "bitsov.node.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.seed-password"),
+            ("tech.mindlink.bitsov.remotetest", "tech.mindlink.bitsov.remotetest.bitsov.node.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.seed-password"),
+            ("tech.mindlink.bitsov.beta", "tech.mindlink.bitsov.beta.bitsov.node.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.seed-password"),
+        ] {
+            let profile = AppProfile::for_identifier(identifier);
+            assert_eq!(profile.keychain_service(service).as_bytes(), expected.as_bytes());
+            assert_eq!(profile.keychain_service(&format!("{service}.wrapped-v1")), format!("{expected}.wrapped-v1"));
+        }
+        for identifier in ["tech.mindlink.bitsov.beta.extra", "TECH.MINDLINK.BITSOV.BETA", "tech.mindlink.bitsov.other"] {
+            assert_eq!(AppProfile::for_identifier(identifier).keychain_service(service), service);
+        }
+    }
+
+    #[test]
     fn production_keychain_services_remain_byte_for_byte_unchanged() {
         for identifier in ["tech.mindlink.bitsov", "tech.mindlink.bitsov.dev", ""] {
             let profile = AppProfile::for_identifier(identifier);
