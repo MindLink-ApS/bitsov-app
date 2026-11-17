@@ -423,6 +423,7 @@ select { font: inherit; font-size: max(var(--input-font-min, 0px), var(--t-sm));
 /* The door card's local-address OK: box and words together, left-aligned. */
 .door-allow { display: flex; align-items: center; justify-content: flex-start; gap: var(--s-2); font-size: var(--t-sm); cursor: pointer; }
 .intro-notice { flex: none; margin: 0; padding: var(--s-2) var(--s-6); border-bottom: 1px solid var(--line); }
+.thread-read-status { flex: none; margin: 0; max-width: none; padding: var(--s-2) var(--s-6); border-bottom: 1px solid var(--line); }
 .door-allow input { width: auto; flex: none; margin: 0; padding: 0; accent-color: var(--accent); }
 .track > .spend .spend-line { display: block; }
 .track > .spend .spend-line .dot { display: inline-block; vertical-align: middle; margin-right: var(--s-1); }
@@ -909,7 +910,7 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
   .rail-foot { margin: 0; flex-direction: row; align-items: center; }
   .profile-avatar { width: auto; padding: 4px; }
   .node-pill { width: auto; flex: none; }
-  .stream, .composer, .track-head, .track > .spend, .intro-notice { padding-left: var(--s-4); padding-right: var(--s-4); }
+  .stream, .composer, .track-head, .track > .spend, .intro-notice, .thread-read-status { padding-left: var(--s-4); padding-right: var(--s-4); }
   .msg { max-width: 92%; }
   .cost { flex-wrap: wrap; row-gap: 0; }
   .cost .basis { flex-basis: 100%; }
