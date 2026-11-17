@@ -28,6 +28,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Test Linux bundle inspection
+        run: python3 scripts/ci/test-linux-package.py
+
       - name: Free runner disk space
         run: bash scripts/ci/free-disk-space.sh
 
@@ -62,7 +65,8 @@ jobs:
         run: >-
           npm run tauri -- build --ci --no-sign
           --target x86_64-unknown-linux-gnu --bundles appimage,deb
-          --config src-tauri/tauri.remote-only.conf.json -- --locked
+          --config src-tauri/tauri.remote-only.conf.json
+          --config '{"mainBinaryName":"bitsov-app"}' -- --locked
 
       - name: Inspect Linux bundles
         run: |
@@ -83,6 +87,14 @@ jobs:
           grep -Eq '(^|/)usr/bin/bitsov-app$' "$RUNNER_TEMP/linux-deb-paths.txt"
           if grep -Eq '(^|/)konsensus[^/]*(/|$)' "$RUNNER_TEMP/linux-deb-paths.txt"; then
             echo '::error::Remote-only bundle contains a node executable'
+            exit 1
+          fi
+          appimage=$(realpath "${appimages[0]}")
+          appimage_dir=$(mktemp -d "$RUNNER_TEMP/linux-appimage.XXXXXX")
+          (cd "$appimage_dir" && "$appimage" --appimage-extract > /dev/null)
+          find "$appimage_dir/squashfs-root" -print > "$RUNNER_TEMP/linux-appimage-paths.txt"
+          if grep -Eq '(^|/)konsensus[^/]*(/|$)' "$RUNNER_TEMP/linux-appimage-paths.txt"; then
+            echo '::error::Remote-only AppImage contains a node executable'
             exit 1
           fi
 
