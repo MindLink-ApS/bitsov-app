@@ -1737,6 +1737,25 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(host.used('spend_reconcile')).toHaveLength(1);
   }, 15_000);
 
+  it('a minute paid and not delivered offers stopping that record while the automatic check is still out', async () => {
+    let lose: (error: unknown) => void = () => {};
+    const host = stubHost({ block: () => new Promise((_, reject) => { lose = reject; }), reconcile: () => new Promise(() => {}), dismiss: () => STOPPED });
+    await openShell();
+    const callId = await ringAndAnswer(host);
+    await vi.waitFor(() => expect(host.used('call_block')).toHaveLength(1));
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'gone', kind: 403, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, reason: 'hangup' }), payment_amount_msat: 1000, admission_operation_id: 'op-400' } });
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    lose({ code: 'payment_settled_undelivered', message: 'Paid, not delivered.', pending_id: 'rec-9', undelivered: { paid_msat: 10_000, retry: false } });
+    await vi.waitFor(() => expect(host.used('spend_reconcile')).toHaveLength(1));
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).not.toBeNull());
+    expect($('[data-call-lost-minute]')!.textContent).toBe(UNDELIVERED_LINE);
+    expect(actions('data-stop-retrying')).toHaveLength(1);
+    expect(actions('data-spend-reconcile')).toHaveLength(0);
+    actions('data-stop-retrying')[0].click();
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).toBeNull());
+    expect(host.used('spend_dismiss_undelivered').map((c) => c.args)).toEqual([{ pending_id: 'rec-9' }]);
+  });
+
   it('the automatic check returning undelivered_pending keeps the line and the action: the record is still pending', async () => {
     const other = await peerHangsUpOnALostMinute(accountedThenStopped.reconcile);
     await vi.waitFor(() => expect(actions('data-stop-retrying')).toHaveLength(1));

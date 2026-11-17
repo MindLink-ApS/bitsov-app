@@ -4934,7 +4934,10 @@ function InCallPay(props: {
   const minuteOpen = () => props.view.callId === props.callId && props.view.phase === 'ended'
     && (props.view.minutes?.lostMinute === true || props.view.minutes?.undeliveredMinute === true) && !minuteSettled()
     && (props.view.close === null || props.view.close.status === 'refused');
-  const minuteUndelivered = () => minuteStopId() !== null || props.view.minutes?.undeliveredMinute === true;
+  // The record a check on this card showed, else the one the host named when the minute came back undelivered.
+  const minuteStop = () => minuteStopId() ?? props.view.minutes?.undeliveredPendingId ?? null;
+  // The line asks to stop retrying only when that action is on the card.
+  const minuteUndelivered = () => minuteStop() !== null;
   const minuteClosed = (text: string) => {
     if (!minuteOpen()) return;
     setMinuteSettled(true);
@@ -4950,10 +4953,15 @@ function InCallPay(props: {
   });
   // Any card's check or dismissal counts here. The line goes only when the host has
   // let go of the record: a payment known and still held keeps it, with its action.
+  // Only a record shown while the line is up is this minute's: one checked or
+  // stopped earlier in the call never is.
   createEffect(on(() => props.reconciliation, (checked) => {
-    if (checked?.fenceCleared) minuteClosed(checked.text);
-    else if (checked?.pendingId) setMinuteStopId(checked.pendingId);
+    if (checked?.fenceCleared) {
+      setMinuteStopId(null);
+      minuteClosed(checked.text);
+    } else if (checked?.pendingId && minuteOpen()) setMinuteStopId(checked.pendingId);
   }, { defer: true }));
+  createEffect(on(props.actions.pendingRevision, () => setMinuteStopId(null), { defer: true }));
   // A new unit or mapping requires a new amount; never reinterpret a visible draft.
   createEffect(on(destination, () => setAmount(''), { defer: true }));
   createEffect(() => { if (!live()) { setExpanded(false); setAmount(''); } });
@@ -5017,7 +5025,7 @@ function InCallPay(props: {
     <Show when={result()}>{(r) => <p class={r().state === 'failed' ? 'err-note' : 'hint'} role="status" data-call-pay-status={r().state}>{r().text}</p>}</Show>
     <Show when={minuteOpen()}><p class="err-note" role="alert" data-call-lost-minute>{tr(minuteUndelivered() ? 'caUndeliveredMinuteWarning' : 'caLostMinuteWarning')}</p></Show>
     <Show when={props.pending || result()?.state === 'unknown' || minuteOpen()}>
-      <Reconcile actions={props.actions} hasPending={!(minuteOpen() && minuteStopId())} stopId={minuteOpen() ? minuteStopId() : null} onGone={minuteClosed} onChecked={(text) => {
+      <Reconcile actions={props.actions} hasPending={!(minuteOpen() && minuteStop())} stopId={minuteOpen() ? minuteStop() : null} onGone={minuteClosed} onChecked={(text) => {
         if (result()?.state === 'unknown') setResult({ state: 'checked', text });
       }} />
     </Show>
