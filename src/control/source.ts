@@ -95,6 +95,8 @@ export interface Source {
   nodeUnlockPassword(password: string): Promise<void>;
   /** Android: save (fingerprint-protected) or discard the password the node just accepted. */
   nodeUnlockRemember(remember: boolean): Promise<void>;
+  /** Fresh Mac only: the owner's explicit choice to create a node (recovery phrase and wallet) here. */
+  nodeSetupLocal(confirmed: boolean): Promise<void>;
   nodeRepairInitialized(confirmed: boolean): Promise<void>;
   nodeRepairPriceFloor(confirmed: boolean): Promise<void>;
   pairingStatus(): Promise<PairingView>;
@@ -187,7 +189,7 @@ export interface Source {
   // actions: spending ones are refused by the host outside the owner's spend window
   spendStatus(): Promise<SpendView>;
   /** The owner's one tap: open the short spend window, or ask the node for spend. */
-  spendRequest(): Promise<SpendView>;
+  spendRequest(callPeerOrBudget?: string | number): Promise<SpendView>;
   spendLock(): Promise<SpendView>;
   /** Withdraw the pending request at the node, then forget it. */
   spendCancel(): Promise<SpendView>;
@@ -319,6 +321,7 @@ export const hostSource: Source = {
     }
   },
   remoteAccessReplace: (link) => invoke<RemoteImportView>('remote_access_connect', { link }),
+  nodeSetupLocal: (confirmed) => invoke<void>('node_setup_local', { confirmed }),
   nodeRepairInitialized: (confirmed) => invoke<void>('node_repair_initialized', { confirmed }),
   nodeRepairPriceFloor: (confirmed) => invoke<void>('node_repair_price_floor', { confirmed }),
   identityRestore: (mnemonic) => invoke<RestoreOutcome>('identity_restore', { mnemonic }),
@@ -380,7 +383,9 @@ export const hostSource: Source = {
   liveLink: () => invoke<LinkState | null>('live_link'),
   // Keep request_id and granted_op exactly as returned by the host.
   spendStatus: () => invoke<SpendView>('spend_status'),
-  spendRequest: () => invoke<SpendView>('spend_request'),
+  spendRequest: (proposal) => proposal === undefined
+    ? invoke<SpendView>('spend_request')
+    : invoke<SpendView>('spend_request', typeof proposal === 'string' ? { call_peer: proposal } : { budget_msat: proposal }),
   spendLock: () => invoke<SpendView>('spend_lock'),
   spendCancel: () => invoke<SpendView>('spend_cancel'),
   addDevice: input => invoke<AddView>('add_device', { input }),

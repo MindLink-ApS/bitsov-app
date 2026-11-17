@@ -74,7 +74,7 @@ const QR = (props: { value: string; label: string }) => {
   );
 };
 
-function CopyButton(props: { text: string; label: string }) {
+export function CopyButton(props: { text: string; label: string }) {
   // 'copied' only after the copy really worked; 'failed' says so instead.
   const [done, setDone] = createSignal<false | 'copied' | 'failed'>(false);
   let timer: number | undefined;
@@ -148,6 +148,10 @@ export function WalletPage(props: {
   ownId: string;
   /** Contacts and rooms whose node history the activity reads. */
   histories: string[];
+  /** Contacts are still being read, so the list of histories is not known yet. */
+  historiesPending?: boolean;
+  /** Contacts could not be read, so some histories are missing. */
+  historiesIncomplete?: boolean;
   /** Messages already loaded in threads (live ones included). */
   threadMessages: Message[];
   nameOf: (id: string) => string;
@@ -301,6 +305,8 @@ export function WalletPage(props: {
             <ActivityView
               ownId={props.ownId}
               histories={props.histories}
+              historiesPending={props.historiesPending}
+              historiesIncomplete={props.historiesIncomplete}
               threadMessages={props.threadMessages}
               nameOf={props.nameOf}
               messages={props.reads.messages}
@@ -309,7 +315,7 @@ export function WalletPage(props: {
             />
           </Match>
           <Match when={props.tab === 'channels'}>
-            <ChannelsView wallet={props.wallet} nameOf={props.nameOf} />
+            <ChannelsView wallet={props.wallet} nameOf={props.nameOf} error={props.walletError} onReconnect={props.onReconnect} />
           </Match>
           <Match when={props.tab === 'receive'}>
             <ReceiveView moneyBlocked={props.moneyBlocked} actions={props.actions} reads={props.reads} now={props.now} />
@@ -347,6 +353,10 @@ function ActivityView(props: {
   onReceive?: () => void;
   ownId: string;
   histories: string[];
+  /** Contacts are still being read, so the list of histories is not known yet. */
+  historiesPending?: boolean;
+  /** Contacts could not be read, so some histories are missing. */
+  historiesIncomplete?: boolean;
   threadMessages: Message[];
   nameOf: (id: string) => string;
   messages: (id: string) => Promise<Message[]>;
@@ -355,12 +365,18 @@ function ActivityView(props: {
   const [kind, setKind] = createSignal<KindFilter>('all');
   const [direction, setDirection] = createSignal<DirectionFilter>('all');
   const [read, setRead] = createSignal<Message[]>([]);
-  const [loading, setLoading] = createSignal(true);
+  const [reading, setLoading] = createSignal(true);
+  const loading = () => reading() || props.historiesPending === true;
+  // How many histories could not be read: "no payments" is only true when all of them were.
+  const [unread, setUnread] = createSignal(0);
+  const incomplete = () => unread() > 0 || props.historiesIncomplete === true;
   // The latest page of each contact's and room's history, read once per open.
   createEffect(on(() => props.histories.join(), () => {
     setLoading(true);
-    void Promise.all(props.histories.map((id) => props.messages(id).catch(() => [] as Message[]))).then((pages) => {
+    let failed = 0;
+    void Promise.all(props.histories.map((id) => props.messages(id).catch(() => { failed++; return [] as Message[]; }))).then((pages) => {
       setRead(pages.flat());
+      setUnread(failed);
       setLoading(false);
     });
   }));
@@ -385,6 +401,7 @@ function ActivityView(props: {
           </For>
         </div>
       </div>
+      <Show when={!loading() && incomplete()}><p class="err-note" role="status" data-activity-incomplete>{t('caActivityNotComplete')}</p></Show>
       <p class="wallet-totals" data-activity-totals>
         <span>{t('extraReceived')} <strong data-activity-in={totals().in}>{fmtAmount(totals().in)}</strong></span>
         <span>{t('extraSent')} <strong data-activity-out={totals().out}>{fmtAmount(totals().out)}</strong></span>
@@ -393,7 +410,7 @@ function ActivityView(props: {
         <ul class="wallet-list" data-activity-list>
           <For each={shown()} fallback={
             kind() === 'all' && direction() === 'all'
-              ? (
+              ? incomplete() ? null : (
                 <li class="empty hint" data-activity-empty="none">
                   {t('extraNoPaymentsYetPaymentsYouSendAndReceive')}
                   <Show when={props.onReceive}>
@@ -436,14 +453,14 @@ function ActivityView(props: {
 
 // ---- channels ----------------------------------------------------------------
 
-function ChannelsView(props: { wallet: WalletOverview | null; nameOf: (id: string) => string }) {
+function ChannelsView(props: { wallet: WalletOverview | null; nameOf: (id: string) => string; error?: string; onReconnect?: () => void | Promise<void> }) {
   const channels = () => sortedChannels(props.wallet?.channels ?? []);
   const open = () => channels().filter((c) => c.active);
   const canSend = () => open().reduce((s, c) => s + c.local_balance_msat, 0);
   const canReceive = () => open().reduce((s, c) => s + c.remote_balance_msat, 0);
   return (
     <section class="wallet-panel" data-wallet-channels>
-      <Show when={props.wallet} fallback={<DelayedSpinner />}>
+      <Show when={props.wallet} fallback={<Show when={!props.error} fallback={<SoftError message={props.error!} data="channels-read" onReconnect={props.onReconnect} />}><DelayedSpinner /></Show>}>
         <p class="wallet-totals" data-channels-summary>
           <span>{open().length}{' '}{tr('uiOf')}{' '}{channels().length}{' '}{tr('caOpen867')}</span>
           <span>{tr('caYouCanSend')}{' '}<strong>{fmtAmount(canSend())}</strong></span>

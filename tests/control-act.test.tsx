@@ -161,6 +161,70 @@ describe('acting from the track', () => {
     await waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
   };
 
+  it.each([
+    ['en', true, false], ['da', true, false],
+    ['en', true, true], ['da', true, true],
+    ['en', false, false], ['da', false, false],
+  ] as const)('keeps the open window and lock action visible with a replacement request (%s, grantable: %s, Touch ID offer: %s)', async (language, ownerCanGrant, touchId) => {
+    const host = stubHost({
+      pairing_status: () => ({ ...paired, remote: touchId }),
+      device_key_status: () => ({ available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }),
+    });
+    host.spend.v = {
+      ...openView(),
+      pending: { op_id: 'ef56', expires_at_ms: Date.now() + 900_000, owner_action: 'approve replacement', owner_can_grant: ownerCanGrant },
+    };
+    await openShell();
+    setLanguagePref(language);
+    const status = $<HTMLDetailsElement>('[data-spend="open"] [data-spend-status]');
+    expect(status).not.toBeNull();
+    expect(status!.open).toBe(true);
+    expect(status!.textContent).toContain(language === 'en' ? 'Spending approved,' : 'Betalinger godkendt,');
+    const lock = status!.querySelector<HTMLButtonElement>('[data-spend-lock]')!;
+    expect(lock.textContent).toBe(language === 'en' ? 'Lock now' : 'Lås nu');
+    expect(lock.disabled).toBe(false);
+    expect($(`[data-spend="open"] [data-approval="${ownerCanGrant ? 'pending' : 'unavailable'}"]`)).not.toBeNull();
+    if (ownerCanGrant) {
+      const hint = text(touchId ? '[data-touch-id-stays-text="spend"]' : '[data-approval="pending"]');
+      expect(hint).toContain(language === 'en' ? 'Cancelling this request does not close it.' : 'Annullering af denne anmodning lukker det ikke.');
+      expect(hint).not.toMatch(/Nothing is paid|Intet betales|Nothing is sent|Intet sendes/);
+      const cancel = $(touchId ? '[data-spend-cancel-visible]' : '[data-spend-cancel]')!;
+      expect(cancel.textContent).toContain(language === 'en' ? 'Cancel request' : 'Annuller anmodning');
+    } else {
+      expect(text('[data-approval="unavailable"]')).toContain(language === 'en'
+        ? 'This node cannot approve the replacement request.'
+        : 'Denne node kan ikke godkende erstatningsanmodningen.');
+    }
+    lock.click();
+    await waitFor(() => expect(host.used('spend_lock')).toHaveLength(1));
+    await waitFor(() => expect($('[data-spend="locked"]')).not.toBeNull());
+    expect(host.used('spend_cancel')).toHaveLength(0);
+    expect(host.used('spend_request')).toHaveLength(0);
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
+  it.each([false, true])('cancelling a replacement leaves the current window open (Touch ID offer: %s)', async touchId => {
+    const host = stubHost({
+      pairing_status: () => ({ ...paired, remote: touchId }),
+      device_key_status: () => ({ available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }),
+      spend_cancel: () => (host.spend.v = { ...host.spend.v, pending: null }),
+    });
+    host.spend.v = {
+      ...openView(),
+      pending: { op_id: 'ef56', expires_at_ms: Date.now() + 900_000, owner_action: 'approve replacement', owner_can_grant: true },
+    };
+    const openUntil = host.spend.v.open_until_ms;
+    await openShell();
+    expect(text(touchId ? '[data-touch-id-stays-text="spend"]' : '[data-approval="pending"]')).toContain('Cancelling this request does not close it.');
+    $<HTMLButtonElement>(touchId ? '[data-spend-cancel-visible]' : '[data-spend-cancel]')!.click();
+    await waitFor(() => expect(host.used('spend_cancel')).toHaveLength(1));
+    await waitFor(() => expect($('[data-approval="pending"]')).toBeNull());
+    expect($('[data-spend="open"] [data-spend-lock]')).not.toBeNull();
+    expect(host.spend.v.open_until_ms).toBe(openUntil);
+    expect(host.used('spend_lock')).toHaveLength(0);
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
   it('Approve & send: exactly one send, however many status reads follow the grant', async () => {
     const host = stubHost();
     await openShell();
@@ -526,6 +590,20 @@ describe('acting from the track', () => {
     submit();
     await waitFor(() => expect(text('[data-owner-action]')).toBe('konsensus grant --op ab12'));
     expect(text('[data-approval="pending"]')).toContain('This app cannot approve it for you');
+    // Someone who has never used a terminal: where it happens, the steps, and who to ask.
+    expect(text('[data-approval="pending"]')).toContain('It can only be done on the computer the box runs on');
+    expect(mount.querySelectorAll('[data-approval-steps] li')).toHaveLength(3);
+    expect(text('[data-approval-steps]')).toContain('open Terminal');
+    expect(text('[data-approval-who]')).toContain('Ask the person who set it up');
+    // The copy button copies exactly the line the steps say to paste.
+    let copied = '';
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (t: string) => { copied = t; } } });
+    const copy = $<HTMLButtonElement>('[data-approval-steps] [data-wallet-copy]');
+    expect(copy).not.toBeNull();
+    expect(copy!.textContent).toContain('Copy the line');
+    copy!.click();
+    await waitFor(() => expect(copied).toBe('konsensus grant --op ab12'));
+    await waitFor(() => expect(text('[data-approval-steps] [data-wallet-copy]')).toMatch(/^Copied/));
     expect($('[data-approval="pending"]')).not.toBeNull();
     expect(host.used('message_send')).toHaveLength(0);
     // The words wait in their bubble; the box is free.
@@ -621,6 +699,21 @@ describe('acting from the track', () => {
     await waitFor(() => expect(text('[data-reconciliation]')).toContain('Previous action settled'));
     expect(host.used('message_send')).toHaveLength(1);
     expect(host.used('spend_reconcile')).toHaveLength(1);
+  });
+
+  it('says plainly when the check finds no payment waiting', async () => {
+    const host = stubHost({
+      message_send: () => { throw { code: 'spend_unknown', message: 'Outcome unknown; do not retry.' }; },
+      spend_reconcile: () => 'No pending spend.',
+    });
+    host.spend.v = openView();
+    await openShell();
+    type('[data-composer] textarea', 'hi');
+    submit();
+    await waitFor(() => expect($('[data-spend-reconcile]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-spend-reconcile]')!.click();
+    await waitFor(() => expect(text('[data-reconciliation]')).toMatch(/^No payment is waiting\./));
+    expect(text('[data-reconciliation]')).not.toContain('No pending spend');
   });
 
   // Exactly-once slice 3: the node's operation state, on the message card.

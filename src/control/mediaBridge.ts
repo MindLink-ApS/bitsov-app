@@ -14,16 +14,24 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 
 export type MediaLinkState = 'connecting' | 'open' | 'closed' | 'ended' | 'sealed' | 'sealed_words';
-export type MediaLink = { link: MediaLinkState; detail: string | null; words?: string[] };
+/** What the node allows per direction, per second. Only on the `open` of a video session. */
+export type MediaNodeLimits = { messages: number; bytes: number };
+export type MediaLink = { link: MediaLinkState; detail: string | null; limits?: MediaNodeLimits; words?: string[] };
 
 export type MediaBridge = {
-  /** Open the host socket for `callId` with `peer`, the call's counterparty (the node admits only that pair). */
-  open: (callId: string, peer: string, onFrame: (frame: Uint8Array) => void, onLink: (link: MediaLink) => void, sealed?: boolean) => Promise<void>;
+  /**
+   * Open the host socket for `callId` with `peer`, the call's counterparty (the node admits only that pair).
+   * `sealed`: this call's key exchange is done (sealing builds). `video`: open the video path too (video builds).
+   * Never both: video is never sealed.
+   */
+  open: (callId: string, peer: string, onFrame: (frame: Uint8Array) => void, onLink: (link: MediaLink) => void, sealed?: boolean, video?: boolean) => Promise<void>;
   send: (payload: Uint8Array) => void;
+  /** One video payload; resolves to how many fragments wait in the host. Only on a socket opened with `video`. */
+  sendVideo?: (payload: Uint8Array) => Promise<number>;
   close: () => Promise<void>;
 };
 
-type ChannelMessage = ArrayBuffer | Uint8Array | number[] | string | { link?: unknown; detail?: unknown };
+type ChannelMessage = ArrayBuffer | Uint8Array | number[] | string | { link?: unknown; detail?: unknown; limits?: unknown; words?: unknown };
 
 const LINK_STATES: readonly string[] = ['connecting', 'open', 'closed', 'ended', 'sealed', 'sealed_words'];
 
@@ -34,13 +42,15 @@ export function parseLinkMessage(message: unknown): MediaLink | null {
     try { value = JSON.parse(message); } catch { return null; }
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const { link, detail, words } = value as { link?: unknown; detail?: unknown; words?: unknown };
+  const { link, detail, limits, words } = value as { link?: unknown; detail?: unknown; limits?: { messages?: unknown; bytes?: unknown }; words?: unknown };
   if (typeof link !== 'string' || !LINK_STATES.includes(link)) return null;
   if (link === 'sealed_words') {
     if (!Array.isArray(words) || words.length !== 4 || !words.every(word => typeof word === 'string' && word.length > 0)) return null;
     return { link, detail: null, words };
   }
-  return { link: link as MediaLinkState, detail: typeof detail === 'string' ? detail : null };
+  const parsed: MediaLink = { link: link as MediaLinkState, detail: typeof detail === 'string' ? detail : null };
+  if (limits && typeof limits.messages === 'number' && typeof limits.bytes === 'number') parsed.limits = { messages: limits.messages, bytes: limits.bytes };
+  return parsed;
 }
 
 /** A binary channel message: an ArrayBuffer on desktop, a byte array on some mobile IPC paths. */
@@ -57,7 +67,7 @@ export function frameBytes(message: ArrayBuffer | Uint8Array | number[]): Uint8A
 export function hostMediaBridge(): MediaBridge {
   let current: Channel<ChannelMessage> | null = null;
   return {
-    open: async (callId, peer, onFrame, onLink, sealed) => {
+    open: async (callId, peer, onFrame, onLink, sealed, video) => {
       const channel = new Channel<ChannelMessage>();
       channel.onmessage = (message) => {
         if (current !== channel) return;
@@ -66,12 +76,17 @@ export function hostMediaBridge(): MediaBridge {
         if (link) onLink(link);
       };
       current = channel;
-      await invoke<void>('call_media_open', sealed ? { call_id: callId, peer, on_frame: channel, sealed: true } : { call_id: callId, peer, on_frame: channel });
+      // Without `sealed` and `video` this is the same three arguments as a build without either.
+      const args: Record<string, unknown> = { call_id: callId, peer, on_frame: channel };
+      if (sealed) args.sealed = true;
+      if (video) args.video = true;
+      await invoke<void>('call_media_open', args);
     },
     send: (payload) => {
       if (!current) return;
       void invoke<void>('call_media_send', payload).catch(() => undefined);
     },
+    sendVideo: (payload) => (current ? invoke<number>('call_media_video_send', payload).catch(() => 0) : Promise.resolve(0)),
     close: async () => {
       if (!current) return;
       current = null;
