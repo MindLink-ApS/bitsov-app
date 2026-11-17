@@ -404,6 +404,33 @@ describe('voice notes in the composer and thread', () => {
     expect(host.used('file_send')).toHaveLength(0);
   });
 
+  it('Attach while recording, with a chooser that does not blur the window, finishes the clip first', async () => {
+    const host = stubHost();
+    // The chooser is intercepted: it opens, but the window never blurs (some platforms keep focus).
+    const opened: HTMLInputElement[] = [];
+    const click = HTMLInputElement.prototype.click;
+    const spy = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (this: HTMLInputElement) {
+      if (this.type === 'file') opened.push(this);
+      else click.call(this);
+    });
+    try {
+      await openShell();
+      $<HTMLButtonElement>('[data-voice-record="start"]')!.click();
+      await vi.waitFor(() => expect($('[data-voice-record="stop"]')).not.toBeNull());
+      $<HTMLButtonElement>('[data-composer-plus]')!.click();
+      $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
+      expect(opened).toHaveLength(1);
+      // File mode hides the message bar and its Stop: the recording must not outlive it.
+      expect(FakeRecorder.made[0].state).toBe('inactive');
+      await vi.waitFor(() => expect($('[data-voice-preview]')).not.toBeNull());
+      expect($('[data-voice-record="stop"]')).toBeNull();
+      expect($('[data-composer]')!.getAttribute('data-mode')).toBe('file');
+      expect(host.used('file_send')).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('blur then hide while recording still keeps the clip as a preview', async () => {
     const host = stubHost();
     await openShell();
