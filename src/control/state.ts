@@ -1,3 +1,4 @@
+import { hostText } from './hostCopy';
 import { t as tr } from '../i18n';
 import { t, possessive } from '../i18n';
 import { isChainUnavailable, MONEY_NOT_READY, readinessLine } from './readiness';
@@ -206,7 +207,7 @@ export function asActionError(e: unknown): ActionError {
       : code === 'call_price_unknown' ? tr('caCallPriceUnreadNothingPaid')
       : code === 'call_hangup_unpayable' ? tr('caCallHangupUnpayable')
       : code === 'call_hangup_above_message_max' ? tr('caCallHangupAboveMessageMax')
-      : code === 'call_unsupported' ? tr('caTheirNodeDoesNotTakeCallsYetNothingWas') : String(message) };
+      : code === 'call_unsupported' ? tr('caTheirNodeDoesNotTakeCallsYetNothingWas') : hostText(String(message)) };
     if (typeof pending_id === 'string' && pending_id) out.pending_id = pending_id;
     if (typeof operation_id === 'string' && operation_id) out.operation_id = operation_id;
     // Owner approval refusals: only the node's known reasons, and an amount that is one.
@@ -220,7 +221,7 @@ export function asActionError(e: unknown): ActionError {
     }
     return out;
   }
-  return { code: 'node', message: typeof e === 'string' ? e : String((e as Error)?.message ?? e) };
+  return { code: 'node', message: hostText(typeof e === 'string' ? e : String((e as Error)?.message ?? e)) };
 }
 
 const msat = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 0;

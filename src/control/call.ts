@@ -325,6 +325,8 @@ type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 export type CallDeps = {
   /** M6: media goes through the node link (`nodeRoutedConnection.ts`), not a direct connection. Copy only. */
   routed?: boolean;
+  /** Node-routed video is on (flag `VITE_CALL_VIDEO`): a routed call may carry the camera. */
+  routedVideo?: boolean;
   /**
    * M6 A2: paid minutes. When set, a call is placed only with the callee's
    * per-minute price in its quote and a session whose node keeps a call
@@ -337,7 +339,7 @@ export type CallDeps = {
   /** Report local teardown by exact admission. Host keeps cleanup pending. No send. */
   closeAdmission?: (operationId: string, peer: string, callId: string) => Promise<void>;
   /** Check current spend permission and show the shell’s approval path before capture. */
-  authorize?: () => Promise<boolean>;
+  authorize?: (reservationPeer?: string) => Promise<boolean>;
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
   /** Latest grant read by the shell; the host rechecks it before paying. */
   grant?: () => NodeGrantSummary | null;
@@ -1142,7 +1144,7 @@ export function createCallEngine(deps: CallDeps) {
       admissions.add(offer.callId);
       offerSdp = offer.sdp;
       incomingAt = offer.at;
-      const media: CallMedia = deps.routed ? 'audio' : offer.media;
+      const media: CallMedia = deps.routed && !deps.routedVideo ? 'audio' : offer.media;
       set({ ...IDLE, phase: 'incoming', peer: offer.peer, callId: offer.callId, media, camera: media === 'video' });
       ringTimer = setTimeout(() => { if (view.callId === offer.callId && view.phase === 'incoming') end('timeout'); }, Math.max(0, RING_MS - (deps.now() - incomingAt)));
       await accept(shown);
@@ -1164,8 +1166,8 @@ export function createCallEngine(deps: CallDeps) {
     /** Place a call. The price was shown before this is called. */
     place: (peer: string, requested: CallMedia, q: CallQuote) => guarded(async (claim) => {
       const generation = mediaGeneration;
-      // M6: a node-routed call carries audio only (no camera is captured or offered).
-      const media: CallMedia = deps.routed ? 'audio' : requested;
+      // M6: a node-routed call carries audio only (no camera is captured or offered), unless node-routed video is on.
+      const media: CallMedia = deps.routed && !deps.routedVideo ? 'audio' : requested;
       if (active() || deps.busy?.()) return;
       if (q.offer_msat === null || q.call_total_msat === null) {
         set({ ...IDLE, phase: 'ended', peer, error: tr('caTheirNodeDoesNotTakeCallsYetNothingWas') });
@@ -1206,7 +1208,7 @@ export function createCallEngine(deps: CallDeps) {
       }
       const consent: MinutesConsent | undefined = deps.minutes && block !== null && most !== null
         ? { block_msat: block, block_max_routing_fee_msat: q.block_max_routing_fee_msat ?? 0, max_hold_msat: most } : undefined;
-      if (deps.authorize && !await deps.authorize()) return;
+      if (deps.authorize && !await deps.authorize(peer)) return;
       if (generation !== mediaGeneration || active() || deps.busy?.()) return;
       quote = q;
       const callId = (deps.newCallId ?? newCallId)();
@@ -1487,7 +1489,8 @@ export function createCallEngine(deps: CallDeps) {
           {
             // M6: a node-routed call is audio only. A video offer is answered with audio:
             // the camera is never captured or sent, whatever the caller asked for.
-            const media: CallMedia = deps.routed ? 'audio' : s.media!;
+            // Only a build with node-routed video on takes the offer as it came.
+            const media: CallMedia = deps.routed && !deps.routedVideo ? 'audio' : s.media!;
             set({ ...IDLE, phase: 'incoming', peer, callId: s.call_id, media, camera: media === 'video' });
           }
           ringTimer = setTimeout(() => { if (view.callId === s.call_id && view.phase === 'incoming') end('timeout'); }, RING_MS);

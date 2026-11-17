@@ -24,7 +24,7 @@ const PINNED = {
     extraInTotalFor24HoursAtMost: 'in total for up to 24 hours, at most',
     extraPerMessage: 'per message.',
     firstSpendWindow: 'For up to 24 hours.',
-    uiOneApprovalLetsMessagesPayForTheNext: 'One approval lets messages pay up to your app all-in payment limit in total, for up to 24 hours. Run this on the node’s computer. It shows the terms and asks for the short code your node’s terminal shows:',
+    uiOneApprovalLetsMessagesPayForTheNext: 'One approval lets messages pay up to your app all-in payment limit in total, for up to 24 hours. It can only be done on the computer the box runs on.',
     caDailyApprovalEnded: '24-hour approval ended',
   },
   da: {
@@ -44,7 +44,7 @@ const PINNED = {
     extraInTotalFor24HoursAtMost: 'i alt i op til 24 timer, højst',
     extraPerMessage: 'pr. besked.',
     firstSpendWindow: 'I højst 24 timer.',
-    uiOneApprovalLetsMessagesPayForTheNext: 'Én godkendelse lader beskeder betale op til appens samlede betalingslimit i alt, i højst 24 timer. Kør dette på nodens computer. Det viser vilkårene og beder om den korte kode fra nodens terminal:',
+    uiOneApprovalLetsMessagesPayForTheNext: 'Én godkendelse lader beskeder betale op til appens samlede betalingslimit i alt, i højst 24 timer. Det kan kun gøres på den computer, boksen kører på.',
     caDailyApprovalEnded: 'Godkendelsen på 24 timer er udløbet',
   },
 } as const;
