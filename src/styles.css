@@ -200,6 +200,8 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .hint { font-size: var(--t-sm); color: var(--muted); line-height: var(--lh-body); max-width: 60ch; }
 .ok-note { font-size: var(--t-sm); color: var(--ok); }
 .err-note { font-size: var(--t-sm); color: var(--err); overflow-wrap: anywhere; }
+/* A refusal sits just above the box, where it can't fall off the bottom of a phone screen. */
+.composer > [data-composer-note] { order: -1; width: min(var(--chat-max), 100%); margin: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
@@ -367,6 +369,10 @@ label.field input {
 .attach.soft { width: 34px; height: 34px; border-radius: 50%; border: none; background: var(--raised); color: var(--ink); font-size: var(--t-lg); line-height: 1; flex: none; }
 .attach.soft:hover { background: var(--line-strong); color: var(--ink); }
 .file-chip { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); padding: 6px 8px; }
+.composer-main.file-row { flex-wrap: wrap; }
+.composer-main.file-row .file-chip { flex: 1 1 10rem; min-width: 0; }
+.composer-main.file-row .file-chip .file-name { overflow-wrap: anywhere; }
+.composer .composer-main.file-row .primary { flex: 0 1 auto; max-width: 100%; margin-left: auto; white-space: normal; }
 .composer-bar { display: flex; align-items: center; gap: var(--s-3); width: min(var(--chat-max), 100%); }
 .composer-bar.cost-only { padding: 0 4px; }
 .composer > .approval { width: min(var(--chat-max), 100%); align-self: center; }
@@ -1015,7 +1021,16 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 button.danger { background: var(--err); color: var(--err-ink); border: none; }
 .call-videos { position: relative; border-radius: 10px; overflow: hidden; background: #000; aspect-ratio: 4 / 3; }
 .call-video.remote { width: 100%; height: 100%; object-fit: cover; }
-.call-video.local { position: absolute; right: 8px; bottom: 8px; width: 30%; border-radius: 6px; border: 1px solid var(--line-strong); }
+/* Your own picture: a 3:4 box (30% wide) inside the video area whatever the camera's shape; the stream fills it (cover).
+   Its short "You" label is capped so the tile never grows over their picture; the camera-off words below scale fully. */
+.call-self { position: absolute; right: 8px; bottom: 8px; width: 30%; max-width: calc(100% - 16px); aspect-ratio: 3 / 4; max-height: calc(100% - 16px); box-sizing: border-box; border-radius: 6px; border: 1px solid var(--line-strong); overflow: hidden; background: #222; }
+.call-video.local { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+/* Hidden, not removed: WebKit can pause or drop a display:none player, and the same one is shown again when the camera returns. */
+.call-self[data-camera-off] .call-video.local { visibility: hidden; }
+.call-self-label { position: absolute; left: 4px; bottom: 4px; max-width: calc(100% - 8px); box-sizing: border-box; padding: 1px 6px; border-radius: 4px; background: rgba(0, 0, 0, .65); color: #fff; font-size: min(.8rem, 20px); line-height: 1.4; overflow-wrap: anywhere; }
+/* Camera off: the words are the tile, so it grows with them (large text included) within the video area. */
+.call-self[data-camera-off] { width: max-content; min-width: min(30%, calc(100% - 16px)); aspect-ratio: auto; overflow: auto; }
+.call-self[data-camera-off] .call-self-label { position: static; display: block; max-width: none; font-size: .8rem; padding: var(--s-2); background: none; text-align: center; }
 .meeting-panel .meeting-legs { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s-2); }
 .meeting-panel .meeting-legs label { display: flex; align-items: center; gap: var(--s-2); }
 .meeting-panel .muted { color: var(--muted); }
@@ -1343,6 +1358,9 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .msg.sending .bubble { opacity: 0.72; animation: msg-send var(--d-mid) var(--ease-out); }
 /* Unsent: kept whole on its own track, plainly not delivered. */
 .msg.unsent .bubble { opacity: 0.72; border: 1px dashed var(--unknown-ink); background: transparent; }
+/* The reason can be long: it wraps inside the screen instead of running off the left edge. */
+.msg.unsent { max-width: 100%; min-width: 0; }
+.msg.unsent .stamp [data-unsent-reason] { white-space: normal; overflow-wrap: anywhere; min-width: 0; text-align: right; }
 .msg.unsent .unsent-actions { display: flex; gap: var(--s-3, 12px); justify-content: flex-end; }
 .artifact.failed .failed-text { margin: 4px 0 0; padding-left: 8px; border-left: 2px solid var(--unknown-ink); white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg.sending .stamp :is(.sats, .money-text) { color: var(--muted); }
@@ -1885,3 +1903,9 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
   gap: var(--s-3);
 }
 .waiting-calls .call-panel { position: relative; right: auto; bottom: auto; }
+.call-panel[data-call-approval-open] { z-index: 52; max-height: calc(100dvh - 48px); overflow-y: auto; }
+
+/* The node's approval, step by step. */
+.approval-steps { margin: var(--s-2) 0; padding-left: 1.4em; list-style: decimal; }
+.approval-steps > li + li { margin-top: var(--s-2); }
+.approval-steps code { display: block; margin: var(--s-1) 0; overflow-wrap: anywhere; }

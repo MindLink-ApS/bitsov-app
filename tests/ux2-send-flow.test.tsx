@@ -8,7 +8,14 @@ import type { BudgetView, LiveEvent, SpendView } from '../src/control/types';
 const A = 'a'.repeat(64);
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
-afterEach(() => { dispose?.(); mount?.remove(); vi.useRealTimers(); vi.restoreAllMocks(); setLanguagePref('en'); });
+afterEach(() => {
+  dispose?.();
+  dispose = undefined;
+  mount?.remove();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  setLanguagePref('en');
+});
 const $ = <T extends HTMLElement = HTMLElement>(s: string) => mount.querySelector<T>(s)!;
 const type = (value: string) => { const area = $<HTMLTextAreaElement>('[data-composer] textarea'); area.value = value; area.dispatchEvent(new Event('input', { bubbles: true })); };
 function setup(granted = true) {
@@ -40,6 +47,9 @@ it.each(['en', 'da'] as const)('uses a live grant for Send and shows its remaind
   await vi.waitFor(() => expect($('[data-send]').textContent).toBe('Send'));
   expect($('[data-touch-approval]')).toBeNull();
   expect($('[data-send-budget]')?.textContent).toContain('199 sats');
+  expect($('[data-send-budget]')?.textContent).toBe(lang === 'en'
+    ? 'Node grant: 199 sats left. Separate app limits apply.'
+    : 'Boksens budget: 199 sats tilbage. Appens grænser gælder også.');
   $<HTMLButtonElement>('[data-send]').click();
   await vi.waitFor(() => expect(source.send).toHaveBeenCalledTimes(1));
   expect(source.relationApprove).not.toHaveBeenCalled();
@@ -164,6 +174,26 @@ it('shows the smaller live app/contact budget rather than overstating the node r
   });
   await open(source); type('hello');
   expect($('[data-send-budget]')?.textContent).toContain('43 sats');
+});
+it.each(['en', 'da'] as const)('names the node remainder and separate app limits without automatic approval in %s', async lang => {
+  setLanguagePref(lang);
+  const { source } = setup(); const read = source.budgetStatus;
+  source.budgetStatus = async () => {
+    const b = await read();
+    return { ...b, ceiling_msat: 5_000_000, spent_msat: 31_000, unsettled_msat: 0, accounted_msat: 42_000, fee_unknown: true,
+      node_grant: { ...b.node_grant!, budget_msat: 5_000_000, remaining_msat: 4_368_000 },
+      rows: [{ target: A, room: false, limit_msat: 50_000, spent_msat: 31_000, unsettled_msat: 0, accounted_msat: 42_000, fee_unknown: true }],
+    };
+  };
+  await open(source); type('hello');
+  expect($('[data-send-budget]')?.textContent).toBe(lang === 'en'
+    ? 'Node grant: 4\u202f368 sats left. Separate app limits apply.'
+    : 'Boksens budget: 4\u202f368 sats tilbage. Appens grænser gælder også.');
+  expect($('[data-send-app-budget]')?.textContent).toBe(lang === 'en'
+    ? 'App limits for the last 24 hours: 8 sats left for this contact; 4\u202f958 sats left in total. Change these limits in Budget.'
+    : 'Appens grænser for de seneste 24 timer: 8 sats tilbage til denne kontakt; 4\u202f958 sats tilbage i alt. Ret grænserne under Budget.');
+  expect(source.relationApprove).not.toHaveBeenCalled();
+  expect(source.send).not.toHaveBeenCalled();
 });
 it('clears the approval banner immediately while the post-approval budget read is pending', async () => {
   const { source } = setup(false); const read = source.budgetStatus; const approve = source.relationApprove;

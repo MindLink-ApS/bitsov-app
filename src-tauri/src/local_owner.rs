@@ -181,6 +181,8 @@ mod tests {
 
 // Deliberate release lock. Update only together with the verified sidecar pin.
 pub const BUNDLED_NODE_SUPPORTS_LOCAL_OWNER: bool = true;
+// Update only together with a verified sidecar pin that supports init --network.
+pub const BUNDLED_NODE_SUPPORTS_INIT_NETWORK: bool = false;
 fn gate(build: bool, runtime: bool, dev_sidecar: bool, debug: bool) -> bool {
     build && runtime && (BUNDLED_NODE_SUPPORTS_LOCAL_OWNER || (debug && dev_sidecar))
 }
@@ -701,6 +703,14 @@ pub fn prepare_launch(
     config: &Path,
     load: impl FnOnce(&Path, bool) -> Result<Zeroizing<Vec<u8>>, String>,
 ) -> Result<Zeroizing<Vec<u8>>, String> {
+    prepare_launch_for_network(config, "bitcoin", load)
+}
+
+pub fn prepare_launch_for_network(
+    config: &Path,
+    network: &str,
+    load: impl FnOnce(&Path, bool) -> Result<Zeroizing<Vec<u8>>, String>,
+) -> Result<Zeroizing<Vec<u8>>, String> {
     let dir = config.parent().ok_or("node data directory is unknown")?;
     let fresh = may_create_password(dir)?;
     // Save/read Keychain first: writing config makes this an existing installation.
@@ -712,7 +722,9 @@ pub fn prepare_launch(
         if !fresh {
             return Err("The existing node directory has no config. Restore its config before starting; owner setup will not replace existing node state.".into());
         }
-        write_bootstrap_config(config).map_err(|_| {
+        let write = if network == "bitcoin" { write_bootstrap_config(config) }
+            else { write_bootstrap_config_for_network(config, network) };
+        write.map_err(|_| {
             "Could not durably write the bootstrap config; the node was not started."
         })?;
     }
@@ -723,9 +735,18 @@ pub fn prepare_launch(
 /// relying on node serde defaults except where the constructor differs. No seed,
 /// marker, database or identity directory is created. Keep in sync with the node
 /// when promoting the gated sidecar pin (see docs/LOCAL_OWNER_CEREMONY.md).
-/// Mirrors rc21 init defaults, with a 10-minute call limit for the app budget.
+/// Mirrors rc24 init defaults, with a 10-minute call limit for the app budget.
 fn write_bootstrap_config(config: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    write_bootstrap_config_for_network(config, "bitcoin")
+}
+
+pub(super) fn write_bootstrap_config_for_network(config: &Path, network: &str) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
+    let (esplora, fallback, chain, chain_fallback) = match network {
+        "bitcoin" => ("https://blockstream.info/api", "https://mempool.space/api", "https://blockstream.info", "https://mempool.space"),
+        "signet" => ("https://mempool.space/signet/api", "https://blockstream.info/signet/api", "https://mempool.space/signet", "https://blockstream.info/signet"),
+        _ => return Err("An explicit supported network is required for local setup.".into()),
+    };
     let dir = std::fs::canonicalize(config.parent().ok_or("missing config directory")?)?;
     let value = serde_json::json!({
         "tier": "full",
@@ -733,22 +754,22 @@ fn write_bootstrap_config(config: &Path) -> Result<(), Box<dyn std::error::Error
         "identity": {"mnemonic_file": dir.join("identity/mnemonic.txt")},
         "network": {"listen_addr": "0.0.0.0:9736", "tier": "T2"},
         "lightning": {
-            "backend": "ldk", "network": "bitcoin",
+            "backend": "ldk", "network": network,
             "max_channel_capacity_sats": 1_000_000,
             "max_total_channel_capacity_sats": 2_000_000,
-            "esplora_url": "https://blockstream.info/api",
-            "esplora_url_fallback": "https://mempool.space/api",
+            "esplora_url": esplora,
+            "esplora_url_fallback": fallback,
             "listening_address": "0.0.0.0:9735"
         },
         "chain": {
-            "backend": "esplora", "api_url": "https://blockstream.info",
-            "esplora_url_fallback": "https://mempool.space"
+            "backend": "esplora", "api_url": chain,
+            "esplora_url_fallback": chain_fallback
         },
         "payment_gate": {"verify_lightning_settlement": true},
         "storage": {"backend": "sqlite", "path": dir.join("konsensus.db")},
         "backup": {"scb_dir": dir.join("backups")},
         "api": {"audit_log_path": dir.join("audit.jsonl"), "operator_probes_enabled": false},
-        // rc21 init defaults; cap call duration to the app budget.
+        // rc24 init defaults; cap call duration to the app budget.
         "pricing": {"call_block_msat": 10_000},
         "calls": {"max_call_minutes": 10},
         "pairing": {"second_device_claim_v1": true, "second_device_enrollment": false},
