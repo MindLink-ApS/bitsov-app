@@ -1519,6 +1519,9 @@ export function ControlCenter(props: Props) {
       setCallBudgetSats(null);
       const pairing = await act(() => source.pairingStatus());
       if (!pairing.ok) {
+        if (revision === callApprovalRevision) {
+          setCallApprovalPeer(routedCalls ? peer : undefined);
+        }
         setErrors('spend', pairing.error.message);
         setCallApproval(true);
         return false;
