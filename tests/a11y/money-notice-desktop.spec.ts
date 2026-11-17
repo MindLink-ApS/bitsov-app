@@ -13,7 +13,10 @@ const host = () => {
     price_quote: () => ({ kind: 0, own_msat: 1000, peer_msat: 1000, peer_age_secs: 30, max_routing_fee_msat: 5000, peer_stale: false }),
     payments_overview: () => ({ balance_msat: 1000000, lightning_outbound_msat: 500000, channels: [] }), fund_state: () => null,
     file_price: () => ({ principal_msat: 1000, max_routing_fee_msat: 5000, total_msat: 6000 }),
-    spend_status: () => ({ state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600000, pending: null, window_ms: 600000 }),
+    spend_status: () => w.__spendPending
+      ? { state: 'pending', lapse: null, basis: null, open_until_ms: null, window_ms: 600000, pending: { op_id: 'ab01', expires_at_ms: Date.now() + 600000, owner_action: 'approve ab01', owner_can_grant: true } }
+      : { state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600000, pending: null, window_ms: 600000 },
+    spend_cancel: () => { w.__spendPending = false; w.__spendCancelled = true; return { state: 'locked', lapse: null, basis: null, open_until_ms: null, pending: null, window_ms: 600000 }; },
     budget_status: () => ({ paused: false, waiting_for_owner: false, ceiling_msat: 500000, max_daily_msat: 100000000, spent_msat: 0, unsettled_msat: 0, preset: 'careful', presets: [{ id: 'careful', contact_msat: 50000, room_msat: 100000, ceiling_msat: 500000 }], rows: [{ target: A, room: false, limit_msat: 50000, spent_msat: 0 }], autopay: { state: 'open', open_until_ms: Date.now() + 86400000, ceiling_msat: 500000, basis: 'node_grant' }, window_ms: 600000, node_grant: null }),
     op_list: () => ({ operations: [], skipped: 0, has_more: false }), live_link: () => null,
     'plugin:event|listen': () => 1, 'plugin:event|unlisten': () => null,
@@ -201,6 +204,8 @@ test('1280x800: the money notice leaves the assistant provider bar usable', asyn
 });
 
 test('1280x800: on the start view (no message list) the money notice covers no control', async ({ page }) => {
+  // A spending request waits at the node, so the start view's spend banner carries a control.
+  await page.addInitScript(() => { (window as unknown as Record<string, unknown>).__spendPending = true; });
   await openApp(page);
   await page.locator('[data-track="new"]').click();
   await expect(page.locator('section.track .spend')).toBeVisible();
@@ -209,10 +214,9 @@ test('1280x800: on the start view (no message list) the money notice covers no c
   const head = await box(page, 'section.track > .track-head');
   expect(overlaps(await box(page, 'section.track [data-money-notice]'), head)).toBe(false);
   await reachable(page, 'section.track .spend');
-  const status = await reachable(page, 'section.track [data-spend-status] > summary');
-  const open = await status.evaluate(el => (el.parentElement as HTMLDetailsElement).open);
-  await status.click({ timeout: 5_000 });
-  await expect.poll(() => status.evaluate(el => (el.parentElement as HTMLDetailsElement).open)).toBe(!open);
+  const cancel = await reachable(page, 'section.track .spend :is([data-spend-cancel], [data-spend-cancel-visible])');
+  await cancel.click({ timeout: 5_000 });
+  await expect.poll(() => page.evaluate(() => (window as unknown as Record<string, unknown>).__spendCancelled === true)).toBe(true);
 });
 
 test('1280x800: the money notice leaves the room leave-confirm usable', async ({ page }) => {

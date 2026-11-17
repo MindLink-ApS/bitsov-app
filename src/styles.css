@@ -955,14 +955,16 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 .money-notice { margin: 0; padding: var(--s-3) var(--s-6); background: var(--surface); border-bottom: 1px solid var(--line); }
 /* Above the app: payments coming and going must not push the whole window down and back. */
 header > .money-notice { position: fixed; top: max(var(--s-2), env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); width: max-content; max-width: min(560px, calc(100vw - 32px)); z-index: 40; border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,.28); }
-/* Desktop: the same card, over the top of the message list just under the chat header.
-   The holder takes no height; `order` shows it after the header without moving it in the DOM,
-   and it holds no controls, so tab order is unchanged. */
-.track > .money-notice-float { position: relative; flex: none; height: 0; z-index: var(--z-chat-float); }
-.track > .track-head { order: 1; }
-.track:has(> .track-head) > .money-notice-float { order: 2; }
-.track > .track-head ~ * { order: 3; }
-.money-notice-float > .money-notice { position: absolute; top: var(--s-2); left: 50%; transform: translateX(-50%); width: max-content; max-width: min(560px, calc(100% - 32px)); border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+/* Desktop: the same card, floating over the top of the message list ([data-stream]) only.
+   `order` shows the zero-height holder right before the message list, after every bar above it
+   (header, provider bar, spend banner, leave confirm), without moving it in the DOM; it holds no
+   controls, so tab order is unchanged. With no message list (start view, welcome, loading) the
+   holder stays a plain line in the column: it may move content, but it never covers a control. */
+.track > .money-notice-float { flex: none; }
+.track:has(> [data-stream]) > .money-notice-float { position: relative; height: 0; z-index: var(--z-chat-float); order: 1; }
+.track:has(> [data-stream]) > [data-stream],
+.track:has(> [data-stream]) > [data-stream] ~ * { order: 2; }
+.track:has(> [data-stream]) > .money-notice-float > .money-notice { position: absolute; top: var(--s-2); left: 50%; transform: translateX(-50%); width: max-content; max-width: min(560px, calc(100% - 32px)); border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,.28); }
 .node-pill[data-pill="warn"] .what { white-space: normal; }
 
 /* Front door / Discover */
