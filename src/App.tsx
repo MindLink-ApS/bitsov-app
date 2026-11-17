@@ -121,9 +121,10 @@ function AppScreen() {
   const [pairing, setPairing] = createSignal<PairingView>(INITIAL_PAIRING);
   // A ready node can arrive before its pairing reply. Startup snapshots do not
   // establish the final mode, so wait for authentication before offering trust.
-  const showIdentityGate = () =>
+  const networkRefused = () => !!status().network_refusal && status().network_refusal !== 'none';
+  const showIdentityGate = () => !networkRefused() && (
     ((status().ready || pairing().bootstrap === 'bootstrap') && (pairing().state === 'paired' || pairing().state === 'fallback')) ||
-    restoring() || restoreError() !== null;
+    restoring() || restoreError() !== null);
   createEffect(() => {
     if (source().mode === 'node' && trustAck() && trustKey()) setSessionTrust(trustKey());
   });
@@ -333,6 +334,7 @@ function AppScreen() {
             onTargetChange={setSelectedTarget}
             trustAck={trustAck}
             onRetry={() => void retryPairing()}
+            onSetupLocal={async () => { try { await source().nodeSetupLocal(true); } finally { await poll(); } }}
             device={device}
             joinDevice={input => source().joinDevice(input)}
             onForgetRemote={() => source().remoteAccessForget()}
@@ -352,7 +354,7 @@ function AppScreen() {
               <Show
                 when={status().error && pairing().state !== 'failed' && !offline()}
                 fallback={
-                  <Show when={starting()}>
+                  <Show when={starting() && !status().local_setup_needed && !networkRefused()}>
                     <div class="state">
                       <DelayedSpinner />
                       {pairing().remote ? t('obConnectingNode') : t('obStartingNode')}
@@ -418,6 +420,13 @@ function AppScreen() {
   // pairing_status, nothing else.
   return (
     <>
+    <Show when={networkRefused()}>
+      <div class="panel" role="alert" data-network-refusal>
+        <p>{t(status().network_refusal === 'local_unavailable' ? 'obBetaLocalUnavailable'
+          : status().network_refusal === 'mainnet' ? (pairing().remote ? 'obBetaMainnet' : 'obBetaLocalConfig')
+          : 'obBetaUnknown')}</p>
+      </div>
+    </Show>
     <div class="pairing-link-layer" classList={{ reviewing: pairingRequest() !== null }}>
     <Show when={queuedPairing() && !phoneFlow() && !phoneTrustFlow() && (!onPhone || phoneSetup() !== null)}>
       <aside class="panel pairing-link-banner" data-pairing-link-banner role="status">

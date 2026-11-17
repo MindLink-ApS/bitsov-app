@@ -100,7 +100,7 @@ jobs:
             echo "::warning::sccache unavailable; compiling without a cache"
           fi
 
-      - name: Fetch and re-verify every sidecar against rc23 (G1)
+      - name: Fetch and re-verify every sidecar against rc24 (G1)
         run: |
           bash scripts/fetch-node-sidecar.sh
           bash scripts/fetch-node-sidecar.sh --verify-only
@@ -109,12 +109,12 @@ jobs:
       # beforeBundleCommand; this flag skips only the binary download.
       # The offline bundle-checker unit tests run on Linux in Authority Check.
       - name: Package, sign ad-hoc and verify
-        run: bash scripts/package-mac.sh --dmg --use-existing-sidecar
+        run: bash scripts/package-mac.sh --beta --dmg --use-existing-sidecar
 
       - name: Real Keychain smoke from the signed bundle (headless)
         run: |
           set -euo pipefail
-          app=src-tauri/target/release/bundle/macos/BitSov.app
+          app='src-tauri/target/release/bundle/macos/BitSov Beta.app'
           executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
           "$app/Contents/MacOS/$executable" --keychain-smoke-test
 
@@ -123,10 +123,11 @@ jobs:
           set -euo pipefail
           # The package script compares the authenticated sidecar BEFORE signing.
           # Re-signing changes its bytes; verify the sealed bundle before archiving.
-          test -s src-tauri/target/release/bundle/macos/BitSov.app/Contents/_CodeSignature/CodeResources
-          codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/macos/BitSov.app
+          app='src-tauri/target/release/bundle/macos/BitSov Beta.app'
+          test -s "$app/Contents/_CodeSignature/CodeResources"
+          codesign --verify --deep --strict --verbose=2 "$app"
           mkdir -p "$RUNNER_TEMP/out"
-          ditto -c -k --keepParent src-tauri/target/release/bundle/macos/BitSov.app \
+          ditto -c -k --keepParent "$app" \
             "$RUNNER_TEMP/out/BitSov-unsigned-macos-arm64.app.zip"
           cp src-tauri/target/release/bundle/dmg/*.dmg "$RUNNER_TEMP/out/"
           ls -l "$RUNNER_TEMP/out"

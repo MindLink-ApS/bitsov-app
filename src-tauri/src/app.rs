@@ -117,7 +117,7 @@ mod owner_contact;
 /// this; only a debug `dev-node` build may move the port (`dev_node::api_base`).
 const API_BASE: &str = "http://127.0.0.1:3141/api/v1";
 
-/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc23`): the funding
+/// Pinned onboarding contract (BitSov-bitsov `v0.3.0-rc24`): the funding
 /// state machine moves to this step once the node has observed the required deposit
 /// in its own wallet. Kept host-side so the renderer never re-implements the contract.
 const FUNDING_SEEN: &str = "funding-seen";
@@ -165,6 +165,11 @@ struct PairingCtx {
 struct NodeState {
     /// Fixed by the bundled identifier, never by an environment variable or pairing state.
     remote_only: bool,
+    signet_only: bool,
+    network_refusal: Mutex<crate::network_policy::NetworkRefusal>,
+    network_auth_epoch: Mutex<u64>,
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
+    test_init_network_support: Mutex<Option<bool>>,
     #[cfg(all(desktop, not(feature = "mobile")))]
     owner: local_owner::OwnerState,
     ready: Mutex<bool>,
@@ -253,6 +258,18 @@ struct NodeState {
     /// Config/external_node are still empty while first-run init is awaiting.
     #[cfg(all(desktop, not(feature = "mobile")))]
     local_startup: AtomicBool,
+    /// A fresh profile: startup created nothing and waits for the owner to
+    /// choose this Mac (`node_setup_local`) or a node at home.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    local_setup_needed: AtomicBool,
+    /// The owner chose this Mac and its first node is being set up. Set and
+    /// cleared by `node_setup_local` under `remote_change`; a home-node link
+    /// cannot be saved meanwhile.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    local_setup_running: AtomicBool,
+    /// Tests only: a scripted stand-in for the node binary.
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
+    test_sidecar: Mutex<Option<PathBuf>>,
     add_device: tokio::sync::Mutex<add_device::Setup>,
     /// Enrollment is complete only after token refresh and identity validation.
     second_join_complete: AtomicBool,
@@ -534,7 +551,9 @@ impl Default for NodeState {
 impl NodeState {
     fn for_identifier(identifier: &str) -> Self {
         let mut state = Self::default();
-        state.remote_only = crate::profile::AppProfile::for_identifier(identifier).remote_only();
+        let profile = crate::profile::AppProfile::for_identifier(identifier);
+        state.remote_only = profile.remote_only();
+        state.signet_only = profile.signet_only();
         state.remote_mode.store(state.remote_only, Ordering::SeqCst);
         #[cfg(all(desktop, not(feature = "mobile")))]
         state.local_startup.store(!state.remote_only, Ordering::SeqCst);
@@ -545,6 +564,57 @@ impl NodeState {
     fn require_local_node(&self) -> Result<(), String> {
         if self.remote_only {
             return Err("BitSov Remote Test is remote pairing only; local nodes are disabled.".into());
+        }
+        Ok(())
+    }
+
+    fn refuse_network(&self, refusal: crate::network_policy::NetworkRefusal) -> String {
+        let mut epoch = self.network_auth_epoch.lock().unwrap();
+        *epoch = epoch.wrapping_add(1);
+        *self.network_refusal.lock().unwrap() = refusal;
+        *self.ready.lock().unwrap() = false;
+        *self.token.lock().unwrap() = None;
+        *self.auth.lock().unwrap() = AuthMode::Unauthenticated;
+        drop_grant(self);
+        let error = refusal.message().to_owned();
+        *self.pairing_view.lock().unwrap() = PairingView::from_outcome(&Err(PairError::Local(error.clone())));
+        set_error(self, error.clone());
+        error
+    }
+
+    fn reset_network_policy(&self) {
+        let mut epoch = self.network_auth_epoch.lock().unwrap();
+        *epoch = epoch.wrapping_add(1);
+        *self.network_refusal.lock().unwrap() = crate::network_policy::NetworkRefusal::None;
+    }
+
+    fn require_local_peer(&self) -> Result<(), String> {
+        if self.signet_only && !self.remote_mode.load(Ordering::SeqCst)
+            && self.external_node.lock().unwrap().is_none() && !verified_local_node(self)
+        {
+            return Err(self.refuse_network(crate::network_policy::NetworkRefusal::Unknown));
+        }
+        Ok(())
+    }
+
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    fn require_signet_config(&self, config: &Path) -> Result<(), String> {
+        if !self.signet_only { return Ok(()); }
+        crate::network_policy::check_config(config).map_err(|refusal| self.refuse_network(refusal))
+    }
+
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    fn init_network_supported(&self) -> bool {
+        #[cfg(all(test, desktop, not(feature = "mobile")))]
+        if let Some(supported) = *self.test_init_network_support.lock().unwrap() { return supported; }
+        local_owner::BUNDLED_NODE_SUPPORTS_INIT_NETWORK
+    }
+
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    fn require_local_setup(&self) -> Result<(), String> {
+        self.require_local_node()?;
+        if self.signet_only && !self.init_network_supported() {
+            return Err(self.refuse_network(crate::network_policy::NetworkRefusal::LocalUnavailable));
         }
         Ok(())
     }
@@ -602,6 +672,10 @@ impl NodeState {
         );
         #[cfg(any(mobile, feature = "mobile"))]
         let (local_owner, owner_warning) = (false, None);
+        #[cfg(all(desktop, not(feature = "mobile")))]
+        let local_setup_needed = self.local_setup_needed.load(Ordering::SeqCst);
+        #[cfg(any(mobile, feature = "mobile"))]
+        let local_setup_needed = false;
         let (unlock_state, pending_device) = home_unlock::locked_view(self);
         Status {
             phone_setup: *self.phone_setup.lock().unwrap(),
@@ -613,7 +687,9 @@ impl NodeState {
             locked: self.home_locked.load(Ordering::SeqCst),
             local_owner,
             owner_warning,
+            local_setup_needed,
             initialization_repair: *self.initialization_repair.lock().unwrap(),
+            network_refusal: *self.network_refusal.lock().unwrap(),
             retry_after_secs,
             // A transport cooldown pauses reads; it does not revoke pairing.
             ready: *self.ready.lock().unwrap(),
@@ -636,6 +712,11 @@ impl NodeState {
         );
         Self {
             remote_only: false,
+            signet_only: false,
+            network_refusal: Mutex::new(crate::network_policy::NetworkRefusal::None),
+            network_auth_epoch: Mutex::new(0),
+            #[cfg(all(test, desktop, not(feature = "mobile")))]
+            test_init_network_support: Mutex::new(None),
             api_base: api_base.into(),
             auth: Mutex::new(AuthMode::Unauthenticated),
             pairing: Mutex::new(None),
@@ -659,6 +740,12 @@ impl NodeState {
             remote_connect_generation: tokio::sync::watch::channel(0).0,
             #[cfg(all(desktop, not(feature = "mobile")))]
             local_startup: AtomicBool::new(false),
+            #[cfg(all(desktop, not(feature = "mobile")))]
+            local_setup_needed: AtomicBool::new(false),
+            #[cfg(all(desktop, not(feature = "mobile")))]
+            local_setup_running: AtomicBool::new(false),
+            #[cfg(all(test, desktop, not(feature = "mobile")))]
+            test_sidecar: Mutex::new(None),
             add_device: tokio::sync::Mutex::new(add_device::Setup::default()),
             second_join_complete: AtomicBool::new(false),
             #[cfg(all(desktop, not(feature = "mobile")))]
@@ -732,7 +819,10 @@ struct Status {
     locked: bool,
     local_owner: bool,
     owner_warning: Option<String>,
+    /// Nothing was created yet: onboarding asks where BitSov should run.
+    local_setup_needed: bool,
     initialization_repair: InitializationRepair,
+    network_refusal: crate::network_policy::NetworkRefusal,
     retry_after_secs: Option<u64>,
     ready: bool,
     node_id: Option<String>,
@@ -904,13 +994,36 @@ fn repair_price_floor_files(state: &NodeState, confirmed: bool) -> Result<PathBu
 // ---- node supervision -----------------------------------------------------
 
 /// First run only: `konsensus init` generates identity + config (tier full = fund-your-node).
+/// It creates the recovery phrase and wallet, so startup reaches it only for a
+/// dev node or after the owner chose this Mac (`local_setup_needed`).
 #[cfg(all(desktop, not(feature = "mobile")))]
 async fn init_node(
-    app: &AppHandle,
+    app: &AppHandle<impl tauri::Runtime>,
     data_dir: &Path,
     dev_sidecar: Option<&Path>,
 ) -> Result<(), String> {
-    app.state::<NodeState>().require_local_node()?;
+    let state = app.state::<NodeState>();
+    state.require_local_setup()?;
+    let data_dir = data_dir.to_string_lossy();
+    let mut args = vec!["init", "--dir", &data_dir, "--non-interactive", "--tier", "full"];
+    if state.signet_only { args.extend(["--network", "signet"]); }
+    // Tests run a scripted stand-in; never a real node.
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
+    let test_sidecar = state.test_sidecar.lock().unwrap().clone();
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
+    if let Some(program) = test_sidecar {
+        let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        let out = tauri::async_runtime::spawn_blocking(move || {
+            std::process::Command::new(program).args(args).output()
+        })
+        .await
+        .map_err(|e| format!("node init could not run: {e}"))?;
+        return match out {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => Err(format!("node init failed (exit {:?})", out.status.code())),
+            Err(e) => Err(format!("node init could not run: {e}")),
+        };
+    }
     let cmd = match dev_sidecar {
         Some(program) => app.shell().command(program),
         None => app
@@ -918,14 +1031,7 @@ async fn init_node(
             .sidecar("konsensus")
             .map_err(|e| format!("cannot resolve node sidecar: {e}"))?,
     };
-    let cmd = cmd.args([
-            "init",
-            "--dir",
-            &data_dir.to_string_lossy(),
-            "--non-interactive",
-            "--tier",
-            "full",
-        ]);
+    let cmd = cmd.args(args);
     match cmd.output().await {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => Err(format!(
@@ -935,6 +1041,63 @@ async fn init_node(
         )),
         Err(e) => Err(format!("node init could not run: {e}")),
     }
+}
+
+/// Recorded when the owner chose "set up a node on this Mac" in onboarding.
+/// Holds no key material: only that the choice was made.
+#[cfg(all(desktop, not(feature = "mobile")))]
+const LOCAL_SETUP_CONSENT: &str = "local-node-setup.json";
+
+/// The recorded choice lives in the app's own directory, which node freshness
+/// checks already ignore (`local_owner::may_create_password`), so recording it
+/// never makes a fresh node directory look used.
+#[cfg(all(desktop, not(feature = "mobile")))]
+fn local_setup_consent_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(PAIRING_STORE_DIR).join(LOCAL_SETUP_CONSENT)
+}
+
+/// A fresh desktop profile (no node config, no recorded choice) must wait for
+/// the owner: startup then neither runs `init` nor starts a node. An existing
+/// config is an existing install. A dev node is the developer's own choice.
+#[cfg(all(desktop, not(feature = "mobile")))]
+fn local_setup_needed(app_data_dir: &Path, config: &Path, dev_node: bool) -> Result<bool, String> {
+    if dev_node || config.try_exists().map_err(|_| "Cannot inspect the node config")? {
+        return Ok(false);
+    }
+    let consent = local_setup_consent_path(app_data_dir);
+    Ok(!consent.try_exists().map_err(|_| "Cannot inspect the local node setup choice")?)
+}
+
+/// A home-node link is live or saved for the next start. Unreadable counts as saved.
+#[cfg(all(desktop, not(feature = "mobile")))]
+fn home_link_chosen(state: &NodeState, app_data_dir: &Path) -> bool {
+    state.remote_mode.load(Ordering::SeqCst)
+        || remote_access::load_persisted(app_data_dir).map(|saved| saved.is_some()).unwrap_or(true)
+}
+
+/// Durably record the owner's choice before anything is created.
+#[cfg(all(desktop, not(feature = "mobile")))]
+fn record_local_setup_consent(app_data_dir: &Path) -> Result<(), String> {
+    use std::io::Write;
+    let failed = |_| "Could not save your choice; nothing was created.".to_string();
+    let path = local_setup_consent_path(app_data_dir);
+    let dir = path.parent().unwrap_or(app_data_dir).to_path_buf();
+    std::fs::create_dir_all(&dir).map_err(failed)?;
+    let chosen_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let body = serde_json::json!({ "version": 1, "local_node": true, "chosen_at": chosen_at });
+    let temp = dir.join(format!("{LOCAL_SETUP_CONSENT}.tmp"));
+    let mut file = std::fs::File::create(&temp).map_err(failed)?;
+    file.write_all(body.to_string().as_bytes()).map_err(failed)?;
+    file.sync_all().map_err(failed)?;
+    drop(file);
+    std::fs::rename(&temp, &path).map_err(failed)?;
+    if let Ok(handle) = std::fs::File::open(&dir) {
+        let _ = handle.sync_all();
+    }
+    Ok(())
 }
 
 /// Resolve the bundled sidecar exactly as `tauri-plugin-shell` does, so the path is
@@ -972,16 +1135,29 @@ fn sidecar_path(name: &str) -> Result<PathBuf, String> {
 #[cfg(all(desktop, not(feature = "mobile")))]
 fn spawn_node(app: &AppHandle<impl tauri::Runtime>, config: &Path) -> Result<(), String> {
     let state = app.state::<NodeState>();
+    let local_owner = state.owner.active.load(Ordering::SeqCst);
+    if state.signet_only && local_owner && !config.try_exists().unwrap_or(true) {
+        state.require_local_setup()?;
+    } else {
+        state.require_signet_config(config)?;
+    }
     let dev_sidecar = state.dev_sidecar.lock().unwrap().clone();
     let dev = dev_sidecar.is_some();
     let program = match dev_sidecar {
         Some(program) => program,
         None => sidecar_path(SIDECAR_BIN)?,
     };
-    let local_owner = state.owner.active.load(Ordering::SeqCst);
+    // Tests run a scripted stand-in; never a real node.
+    #[cfg(all(test, desktop, not(feature = "mobile")))]
+    let program = state.test_sidecar.lock().unwrap().clone().unwrap_or(program);
     let password = if local_owner {
-        Some(local_owner::prepare_launch(config, owner_password::load)?)
+        Some(if state.signet_only {
+            local_owner::prepare_launch_for_network(config, "signet", owner_password::load)?
+        } else {
+            local_owner::prepare_launch(config, owner_password::load)?
+        })
     } else { None };
+    state.require_signet_config(config)?;
     let mut cmd = std::process::Command::new(&program);
     cmd.args(local_owner::start_args(config, dev, local_owner))
         .stdout(std::process::Stdio::piped())
@@ -1367,6 +1543,7 @@ async fn adopt_matching_identity(
     state: &NodeState,
     expected_node_id: &str,
 ) -> Result<bool, String> {
+    state.require_local_peer()?;
     if !health_ok(state).await {
         return Ok(false);
     }
@@ -1376,6 +1553,9 @@ async fn adopt_matching_identity(
         *state.token.lock().unwrap() = None;
         return Ok(false);
     }
+    let network_epoch = require_signet_report(state, false).await?;
+    let authority = state.network_auth_epoch.lock().unwrap();
+    if *authority != network_epoch { return Err("The connection changed during its network check.".into()); }
     *state.node_id.lock().unwrap() = Some(live);
     // The restored node is live. Reflect the refreshed token's scopes in the
     // view and leave bootstrap, otherwise the renderer can never finish setup.
@@ -1471,8 +1651,9 @@ fn refuse_external(state: &NodeState) -> Result<(), String> {
 /// initialised, started or supervised. App files go under the app's own data dir;
 /// the node's data dir is only read.
 #[cfg(all(desktop, not(feature = "mobile")))]
-async fn attach_external(app: &AppHandle, app_data_dir: &Path, node: dev_node::ExternalNode) {
+async fn attach_external(app: &AppHandle<impl tauri::Runtime>, app_data_dir: &Path, node: dev_node::ExternalNode) {
     let state = app.state::<NodeState>();
+    if state.require_signet_config(&node.config).is_err() { return; }
     eprintln!(
         "[dev-node] EXTERNAL node on {}, data dir {} (not started or stopped by the app)",
         state.api_base,
@@ -1592,6 +1773,7 @@ async fn attach_remote_with(
     descriptor: remote_access::RemoteDescriptor,
     interaction: Interaction,
 ) {
+    state.reset_network_policy();
     #[cfg(any(mobile, feature = "mobile"))]
     if descriptor.bootstrap_box_key().is_some() && descriptor.node_id().is_empty() {
         *state.pairing_view.lock().unwrap() = PairingView::starting();
@@ -1693,21 +1875,48 @@ async fn attach_remote_with(
 /// wait for /health, pair (or fall back to /auth/local on rc7), and read /identity.
 #[cfg(all(desktop, not(feature = "mobile"), not(unix)))]
 async fn bootstrap_node(app: AppHandle) {
-    set_error(&app.state::<NodeState>(), "BitSov is not supported on this platform");
+    let state = app.state::<NodeState>();
+    if state.signet_only {
+        let dir = match app.path().app_data_dir() {
+            Ok(dir) => dir,
+            Err(error) => {
+                state.local_startup.store(false, Ordering::SeqCst);
+                return set_error(&state, format!("no app data dir: {error}"));
+            }
+        };
+        if let Err(error) = bootstrap_remote_desktop_at(&state, &dir).await { set_error(&state, error); }
+        return;
+    }
+    set_error(&state, "BitSov is not supported on this platform");
+}
+
+#[cfg(all(desktop, not(feature = "mobile"), any(not(unix), test)))]
+async fn bootstrap_remote_desktop_at(state: &NodeState, dir: &Path) -> Result<(), String> {
+    let _startup = StartupFinished(&state.local_startup);
+    connect_remote_at(state, dir, true).await?;
+    if !state.remote_only && state.remote_proxy.lock().unwrap().is_none() {
+        return Err(state.refuse_network(crate::network_policy::NetworkRefusal::LocalUnavailable));
+    }
+    Ok(())
 }
 
 #[cfg(all(desktop, not(feature = "mobile"), unix))]
 async fn bootstrap_node(app: AppHandle) {
-    let state = app.state::<NodeState>();
-    struct StartupFinished<'a>(&'a AtomicBool);
-    impl Drop for StartupFinished<'_> {
-        fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
-    }
-    let _startup = StartupFinished(&state.local_startup);
     let app_data_dir: PathBuf = match app.path().app_data_dir() {
         Ok(d) => d,
-        Err(e) => return set_error(&state, format!("no app data dir: {e}")),
+        Err(e) => {
+            let state = app.state::<NodeState>();
+            state.local_startup.store(false, Ordering::SeqCst);
+            return set_error(&state, format!("no app data dir: {e}"));
+        }
     };
+    bootstrap_node_at(&app, app_data_dir).await
+}
+
+#[cfg(all(desktop, not(feature = "mobile"), unix))]
+async fn bootstrap_node_at(app: &AppHandle<impl tauri::Runtime>, app_data_dir: PathBuf) {
+    let state = app.state::<NodeState>();
+    let _startup = StartupFinished(&state.local_startup);
     match remote_access::load_persisted(&app_data_dir) {
         Ok(Some(_)) => {
             if let Err(error) = connect_remote_at(&state, &app_data_dir, true).await {
@@ -1728,12 +1937,12 @@ async fn bootstrap_node(app: AppHandle) {
     }
     // Release builds: always `Ok(None)` (see `dev_node`).
     match dev_node::resolve_external(&app_data_dir) {
-        Ok(Some(node)) => return attach_external(&app, &app_data_dir, node).await,
+        Ok(Some(node)) => return attach_external(app, &app_data_dir, node).await,
         Ok(None) => {}
         Err(e) => return set_error(&state, format!("external node: {e}")),
     }
     let (data_dir, dev_sidecar) = match dev_node::resolve(&app_data_dir) {
-        Ok(None) => (app_data_dir, None),
+        Ok(None) => (app_data_dir.clone(), None),
         Ok(Some(dev)) => {
             eprintln!(
                 "[dev-node] UNVERIFIED node binary {} on data dir {} (dev only, sidecar verification bypassed)",
@@ -1747,32 +1956,99 @@ async fn bootstrap_node(app: AppHandle) {
         }
         Err(e) => return set_error(&state, format!("dev node: {e}")),
     };
+    start_local_node(app, &app_data_dir, &data_dir, dev_sidecar, false).await
+}
+
+/// Clears `local_startup` on every exit from a local startup attempt.
+#[cfg(all(desktop, not(feature = "mobile")))]
+struct StartupFinished<'a>(&'a AtomicBool);
+#[cfg(all(desktop, not(feature = "mobile")))]
+impl Drop for StartupFinished<'_> {
+    fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
+}
+
+/// The local node: init on first run, then start, health and pairing.
+/// `chosen` is true only from `node_setup_local`, after the owner's explicit
+/// choice was recorded. Without it a fresh profile stops before anything is
+/// created and reports `local_setup_needed` for onboarding to show.
+#[cfg(all(desktop, not(feature = "mobile"), unix))]
+async fn start_local_node(
+    app: &AppHandle<impl tauri::Runtime>,
+    app_data_dir: &Path,
+    data_dir: &Path,
+    dev_sidecar: Option<PathBuf>,
+    chosen: bool,
+) {
+    let state = app.state::<NodeState>();
     *state.dev_sidecar.lock().unwrap() = dev_sidecar.clone();
-    let _ = std::fs::create_dir_all(&data_dir);
     let config = data_dir.join("konsensus.toml");
+    if !config.try_exists().unwrap_or(true) && state.require_local_setup().is_err() { return; }
+    if !chosen {
+        match local_setup_needed(app_data_dir, &config, dev_sidecar.is_some()) {
+            Ok(false) => {}
+            Ok(true) => {
+                // Serialized with home-node link import: never offer this Mac
+                // once a home-node link was saved.
+                let _change = state.remote_change.lock().await;
+                if !home_link_chosen(&state, app_data_dir) {
+                    state.local_setup_needed.store(true, Ordering::SeqCst);
+                }
+                return;
+            }
+            Err(error) => return set_error(&state, error),
+        }
+    }
+    // First initialization (no config yet), explicit or resumed after a recorded
+    // choice: claim it against a home-node link under `remote_change`, so a link
+    // cannot be saved while this Mac's first node is being created.
+    let first_init = !config.try_exists().unwrap_or(false);
+    if first_init {
+        let _change = state.remote_change.lock().await;
+        if home_link_chosen(&state, app_data_dir) {
+            state.local_setup_running.store(false, Ordering::SeqCst);
+            return set_error(&state, "BitSov is set to use your node at home. Forget that link first.");
+        }
+        state.local_setup_running.store(true, Ordering::SeqCst);
+    }
+    run_local_node(app, &state, data_dir, &config, dev_sidecar).await;
+    if first_init {
+        let _change = state.remote_change.lock().await;
+        state.local_setup_running.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(all(desktop, not(feature = "mobile"), unix))]
+async fn run_local_node(
+    app: &AppHandle<impl tauri::Runtime>,
+    state: &NodeState,
+    data_dir: &Path,
+    config: &Path,
+    dev_sidecar: Option<PathBuf>,
+) {
+    let _ = std::fs::create_dir_all(data_dir);
 
     let owner_enabled = match local_owner::launch_enabled(
-        local_owner::enabled(dev_sidecar.is_some()), &config,
+        local_owner::enabled(dev_sidecar.is_some()), config,
     ) {
         Ok(enabled) => enabled,
-        Err(error) => return set_error(&state, error),
+        Err(error) => return set_error(state, error),
     };
     state.owner.active.store(owner_enabled, Ordering::SeqCst);
     if !owner_enabled && !config.exists() {
-        if let Err(e) = init_node(&app, &data_dir, dev_sidecar.as_deref()).await {
-            return set_error(&state, e);
+        if let Err(e) = init_node(app, data_dir, dev_sidecar.as_deref()).await {
+            return set_error(state, e);
         }
     }
 
-    *state.config.lock().unwrap() = Some(config.clone());
+    *state.config.lock().unwrap() = Some(config.to_path_buf());
 
-    if let Err(e) = spawn_node(&app, &config) {
-        return set_error(&state, e);
+    if let Err(e) = spawn_node(app, config) {
+        return set_error(state, e);
     }
-    if let Err(e) = wait_for_health(&state).await {
-        return set_error(&state, e);
+    if let Err(e) = wait_for_health(state).await {
+        return set_error(state, e);
     }
-    finish_auth(&state, &data_dir).await;
+    finish_auth(state, data_dir).await;
 }
 
 /// A phone is a pure client: startup either attaches to the persisted, pinned
@@ -1799,6 +2075,8 @@ async fn prepare_operation_history(data_dir: &Path) -> Result<(), ActionError> {
 /// Pair, then read /identity. A pairing failure stays in the pairing view (the
 /// onboarding screen shows it with a retry); it is not a node-start error.
 async fn finish_auth(state: &NodeState, data_dir: &Path) {
+    if state.signet_only { *state.ready.lock().unwrap() = false; }
+    if state.require_local_peer().is_err() { return; }
     if let Err(error) = prepare_operation_history(data_dir).await {
         return set_error(state, error.message);
     }
@@ -1808,6 +2086,10 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
     // The signed descriptor pins identity; provisional tokens can only enroll.
     // No identity/status probe or normal authority is granted before approval.
     if add_device::is_second_join(state) {
+        if state.signet_only {
+            state.refuse_network(crate::network_policy::NetworkRefusal::Unknown);
+            return;
+        }
         *state.node_id.lock().unwrap() = state.expected_remote_node_id.lock().unwrap().clone();
         *state.ready.lock().unwrap() = true;
         *state.error.lock().unwrap() = None;
@@ -1816,6 +2098,7 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
     // An identity-free node has no live /identity route. Keep it paired so
     // the user can restore through the bootstrap router.
     if state.pairing_view.lock().unwrap().bootstrap.is_some() {
+        let _ = require_signet_report(state, true).await;
         return;
     }
     match fetch_node_id(state).await {
@@ -1838,6 +2121,13 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
                     "remote node identity does not match the signed pairing descriptor",
                 );
             }
+            let network_epoch = match require_signet_report(state, false).await {
+                Ok(epoch) => epoch,
+                Err(_) => return,
+            };
+            {
+            let authority = state.network_auth_epoch.lock().unwrap();
+            if *authority != network_epoch { return; }
             if let Err(error) = home_unlock::remember_binding(state, &node_id) {
                 *state.token.lock().unwrap() = None;
                 *state.auth.lock().unwrap() = AuthMode::Unauthenticated;
@@ -1850,6 +2140,7 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
             *state.node_id.lock().unwrap() = Some(node_id.clone());
             *state.error.lock().unwrap() = None;
             *state.ready.lock().unwrap() = true;
+            }
             #[cfg(all(desktop, not(feature = "mobile")))]
             if state.owner.active.load(Ordering::SeqCst) {
                 let warning = match local_owner::verify_device(state).await {
@@ -1861,6 +2152,24 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
         }
         Err(e) => set_error(state, e),
     }
+}
+
+async fn require_signet_report(state: &NodeState, bootstrap: bool) -> Result<u64, String> {
+    let epoch = *state.network_auth_epoch.lock().unwrap();
+    if !state.signet_only { return Ok(epoch); }
+    let report = if bootstrap {
+        get_json::<serde_json::Value>(state, "/bootstrap/state").await
+            .map(|value| value.get("network").and_then(|v| v.as_str()).map(str::to_owned))
+    } else {
+        read_node_overview(state).await.map(|overview| overview.network)
+    };
+    let result = report.map_err(|_| crate::network_policy::NetworkRefusal::Unknown)
+        .and_then(|network| crate::network_policy::NetworkRefusal::reported(network.as_deref()));
+    if let Err(refusal) = result { return Err(state.refuse_network(refusal)); }
+    let authority = state.network_auth_epoch.lock().unwrap();
+    if *authority != epoch { return Err("The connection changed during its network check.".into()); }
+    *state.network_refusal.lock().unwrap() = crate::network_policy::NetworkRefusal::None;
+    Ok(epoch)
 }
 
 /// Retry transport outages without restarting the proxy or discarding durable
@@ -2085,6 +2394,7 @@ fn check_first_run_session(state: &NodeState, session: &PairedSession) -> Result
 /// Pair with the node, reuse a stored pairing, or — only when `/pair/request`
 /// is 404 — mint via `/auth/local`. Records the outcome in the pairing view.
 async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> {
+    let network_epoch = *state.network_auth_epoch.lock().unwrap();
     let established_remote = state.remote_mode.load(Ordering::SeqCst)
         && matches!(*state.auth.lock().unwrap(), AuthMode::Paired(_));
     // Keep a warm session usable while reauthenticating. A transport failure is
@@ -2114,16 +2424,20 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
     match outcome {
         Ok(Established::Paired { session, .. }) => {
             check_first_run_session(state, &session)?;
-            *state.token.lock().unwrap() = Some(session.token.clone());
-            *state.auth.lock().unwrap() = AuthMode::Paired(session);
             let ctx = state.pairing.lock().unwrap().clone();
             if let Some(ctx) = ctx {
                 view.bootstrap = pairing::bootstrap_state(&ctx.client).await.ok().flatten();
             }
+            let authority = state.network_auth_epoch.lock().unwrap();
+            if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
+            *state.token.lock().unwrap() = Some(session.token.clone());
+            *state.auth.lock().unwrap() = AuthMode::Paired(session);
             *state.pairing_view.lock().unwrap() = view;
             Ok(())
         }
         Ok(Established::LocalFallback { token }) => {
+            let authority = state.network_auth_epoch.lock().unwrap();
+            if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
             *state.token.lock().unwrap() = Some(token);
             *state.auth.lock().unwrap() = AuthMode::Local;
             *state.pairing_view.lock().unwrap() = view;
@@ -2163,6 +2477,7 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
 
 /// Mint a fresh paired token and install it. No fallback on failure.
 async fn refresh_paired(state: &NodeState) -> Result<(), String> {
+    let network_epoch = *state.network_auth_epoch.lock().unwrap();
     if hold_refused(state) {
         return Err(remote_access::RemoteError::Refused(remote_access::REFUSED_PAIRING_MESSAGE.into()).to_string());
     }
@@ -2189,6 +2504,8 @@ async fn refresh_paired(state: &NodeState) -> Result<(), String> {
     // or Forget. Keep this guard through publication so invalidation is atomic.
     let current = state.remote_connect_generation.borrow();
     if *current != generation { return Err("the remote connection changed".into()); }
+    let authority = state.network_auth_epoch.lock().unwrap();
+    if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
     if let Err(error) = result {
         let message = error.to_string();
         if !remote && matches!(error, PairError::Refused { step: "/pair/challenge", status: 401, .. }) {
@@ -2277,6 +2594,7 @@ async fn reauthenticate(state: &NodeState) -> Result<(), String> {
 /// POST /auth/local (loopback, no signature) -> JWT, stored in the host state.
 /// Reached only on a node without pairing routes (rc7); see `authenticate`.
 async fn mint_token(state: &NodeState) -> Result<(), String> {
+    let network_epoch = *state.network_auth_epoch.lock().unwrap();
     let token = state
         .http
         .post(format!("{}/auth/local", state.api_base))
@@ -2291,6 +2609,8 @@ async fn mint_token(state: &NodeState) -> Result<(), String> {
         .and_then(|t| t.as_str())
         .map(str::to_owned)
         .ok_or_else(|| "auth/local returned no token".to_string())?;
+    let authority = state.network_auth_epoch.lock().unwrap();
+    if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
     *state.token.lock().unwrap() = Some(token);
     Ok(())
 }
@@ -2823,6 +3143,96 @@ async fn node_repair_initialized(
     start_after_repair(&app, state.inner(), &config).await
 }
 
+/// The owner chose to run a new node on this Mac. The only path that creates a
+/// local node (recovery phrase and wallet) on a fresh profile: it records the
+/// choice, then runs the usual first-run init and start.
+#[tauri::command]
+#[cfg(all(desktop, not(feature = "mobile")))]
+async fn node_setup_local(
+    window: WebviewWindow<impl tauri::Runtime>,
+    app: AppHandle<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    confirmed: bool,
+) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let app_data_dir = app.path().app_data_dir().map_err(|e| format!("no app data dir: {e}"))?;
+    node_setup_local_at(&app, state.inner(), &app_data_dir, confirmed).await
+}
+
+#[cfg(all(desktop, not(feature = "mobile")))]
+async fn node_setup_local_at(
+    app: &AppHandle<impl tauri::Runtime>,
+    state: &NodeState,
+    app_data_dir: &Path,
+    confirmed: bool,
+) -> Result<(), String> {
+    if !confirmed {
+        return Err("Setting up a node on this Mac requires your explicit agreement.".into());
+    }
+    state.require_local_setup()?;
+    {
+        // Serialized with remote link changes: a saved or live remote node wins.
+        let _change = state.remote_change.lock().await;
+        if state.remote_mode.load(Ordering::SeqCst)
+            || remote_access::load_persisted(app_data_dir).map_err(|e| e.to_string())?.is_some()
+        {
+            return Err("BitSov is set to use your node at home. Forget that link first.".into());
+        }
+        if state.local_startup.load(Ordering::SeqCst)
+            || !state.local_setup_needed.load(Ordering::SeqCst)
+        {
+            return Err("BitSov is not waiting for a node choice.".into());
+        }
+        record_local_setup_consent(app_data_dir)?;
+        state.local_startup.store(true, Ordering::SeqCst);
+        state.local_setup_running.store(true, Ordering::SeqCst);
+        state.local_setup_needed.store(false, Ordering::SeqCst);
+        *state.error.lock().unwrap() = None;
+    }
+    #[cfg(unix)]
+    {
+        let _startup = StartupFinished(&state.local_startup);
+        start_local_node(app, app_data_dir, app_data_dir, None, true).await;
+        let error = state.error.lock().unwrap().clone();
+        // Settle completion under `remote_change`, so a home-node link import
+        // cannot interleave with re-offering this Mac.
+        let _change = state.remote_change.lock().await;
+        state.local_setup_running.store(false, Ordering::SeqCst);
+        match error {
+            Some(error) => {
+                // Setup failed before a node config existed on disk (the owner
+                // path fills `state.config` before it spawns), and no home-node
+                // link was saved meanwhile: the same choice can be retried.
+                if !app_data_dir.join("konsensus.toml").try_exists().unwrap_or(true)
+                    && !home_link_chosen(state, app_data_dir)
+                {
+                    state.local_setup_needed.store(true, Ordering::SeqCst);
+                }
+                Err(error)
+            }
+            None => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = app;
+        state.local_startup.store(false, Ordering::SeqCst);
+        Err("BitSov is not supported on this platform".into())
+    }
+}
+
+#[cfg(any(mobile, feature = "mobile"))]
+#[tauri::command]
+async fn node_setup_local(
+    window: WebviewWindow<impl tauri::Runtime>,
+    confirmed: bool,
+) -> Result<(), String> {
+    reject_sealed_window(&window)?;
+    let _ = confirmed;
+    Err("A phone connects to your node; it cannot run one.".into())
+}
+
 #[tauri::command]
 #[cfg(all(desktop, not(feature = "mobile")))]
 async fn node_repair_price_floor(
@@ -3032,6 +3442,7 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     *state.front_door_ask.lock().unwrap() = None;
     // Config fallbacks describe the old node; the remint cooldown also gates
     // paired auth. Neither its policy/network nor its cooldown transfers.
+    state.reset_network_policy();
     *state.room_routing_policy.lock().unwrap() = None;
     *state.configured_network.lock().unwrap() = None;
     *state.last_remint.lock().unwrap() = None;
@@ -3054,6 +3465,8 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     // A new link is the owner's action: it may dial even after a refusal.
     state.remote_retry.clear_refusal();
     state.remote_mode.store(true, Ordering::SeqCst);
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    state.local_setup_needed.store(false, Ordering::SeqCst);
     *state.error.lock().unwrap() = None;
     state.remote_retry.clear_connection_error();
     // Subscribe while holding remote_change: Forget must invalidate even a
@@ -3088,6 +3501,14 @@ async fn remote_access_import_at<R: tauri::Runtime>(
     remote_access::preview_pairing_link(link.trim()).map_err(|error| error.to_string())?;
     #[cfg(any(mobile, feature = "mobile"))]
     let _change = state.remote_change.lock().await;
+    // Serialized with `node_setup_local`: while this Mac's first node is being
+    // set up, saving a home-node link would leave that node behind.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    let _change = state.remote_change.lock().await;
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    if state.local_setup_running.load(Ordering::SeqCst) {
+        return Err("BitSov is setting up a node on this Mac. Wait until it is ready before linking a node at home.".into());
+    }
     // Reject a live trust-boundary switch without cancelling its recovery.
     if state.remote_proxy.lock().unwrap().is_some() {
         return Err("remote access is already active; quit BitSov before replacing its pairing link".into());
@@ -3119,6 +3540,9 @@ async fn remote_access_import_at<R: tauri::Runtime>(
         spawn_remote_connect(_app, app_data_dir, true);
         return Ok(RemoteImportView { restart_required: false, ..result });
     }
+    // The owner chose a node at home: stop offering to create one here.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    state.local_setup_needed.store(false, Ordering::SeqCst);
     #[cfg(not(any(mobile, feature = "mobile")))]
     Ok(result)
 }
@@ -3490,7 +3914,7 @@ async fn read_node_overview(state: &NodeState) -> Result<control::NodeOverview, 
     overview.custody_mode =
         control::custody_mode(overview.custody_mode, verified_local_node(state));
     // Only while the node answering is the LDK node that config started.
-    if !network_reported && overview.lightning_backend.as_deref() == Some("ldk") {
+    if !state.signet_only && !network_reported && overview.lightning_backend.as_deref() == Some("ldk") {
         overview.network = state.configured_network.lock().unwrap().clone();
     }
     Ok(overview)
@@ -6360,11 +6784,11 @@ async fn check_node_grant_with_envelope_ids(state: &NodeState, path: &str, body:
 }
 
 /// The G1 `budget` proposal for an elevation request. Only a suggestion.
-fn budget_proposal(state: &NodeState, want: Want) -> Option<serde_json::Value> {
+fn budget_proposal(state: &NodeState, want: Want, minimum: Option<u64>) -> Option<serde_json::Value> {
     let book = with_book(state, false, |b| Ok(b.clone())).ok()?;
     Some(match want {
         Want::Budget(ceiling) => grant::proposal(ceiling, grant::MAX_TTL_SECS, &book.contacts),
-        Want::Window => grant::proposal(book.ceiling_msat, act::SPEND_WINDOW_MS / 1000, &Default::default()),
+        Want::Window => grant::proposal(book.ceiling_msat.max(minimum.unwrap_or(0)), act::SPEND_WINDOW_MS / 1000, &Default::default()),
     })
 }
 
@@ -6373,6 +6797,21 @@ fn budget_proposal(state: &NodeState, want: Want) -> Option<serde_json::Value> {
 /// or asks the node for one. Without `ask`, only polls a pending request.
 async fn spend_advance(state: &NodeState, ask: bool) -> Result<act::SpendView, ActionError> {
     Ok(spend_advance_for(state, ask.then_some(Want::Window)).await?.view)
+}
+
+/// A call proposal covers the same reservation ceiling shown before Ring,
+/// plus the offer and closing signal. Approval still opens only a window.
+async fn do_spend_request(state: &NodeState, call_peer: Option<&str>) -> Result<act::SpendView, ActionError> {
+    let Some(peer) = call_peer else { return spend_advance(state, true).await };
+    refuse_if_paused(state)?;
+    let fence = approval_fence(state);
+    let quote = read_call_quote_with_blocks(state, peer).await.map_err(ActionError::node)?;
+    if approval_fence(state) != fence { return Err(fence_broken()); }
+    let minimum = quote.reservation_max_msat.zip(quote.call_total_msat)
+        .and_then(|(hold, signals)| hold.checked_add(signals))
+        .filter(|total| *total <= control::MAX_SAFE_MSAT)
+        .ok_or_else(|| ActionError::new("call_price_unknown", "The call price is unavailable. Read it again before requesting a call budget."))?;
+    Ok(spend_advance_with_minimum(state, Some(Want::Window), Some(minimum)).await?.view)
 }
 
 /// Separate the current view from the window this invocation actually armed.
@@ -6385,6 +6824,10 @@ struct SpendAdvance {
 /// approval. On a paired node without `spend`, both go through one elevation
 /// request, and a grant opens only what was asked.
 async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<SpendAdvance, ActionError> {
+    spend_advance_with_minimum(state, want, None).await
+}
+
+async fn spend_advance_with_minimum(state: &NodeState, want: Option<Want>, minimum: Option<u64>) -> Result<SpendAdvance, ActionError> {
     // The shell polls spend before budget at startup. Read current authority
     // before a saved request changes the pristine approval generations. The
     // request may already have been granted, with a much longer grant expiry.
@@ -6394,7 +6837,7 @@ async fn spend_advance_for(state: &NodeState, want: Option<Want>) -> Result<Spen
         do_budget_status(state).await?;
     }
     restore_spend_pending(state);
-    let out = spend_advance_for_inner(state, want).await;
+    let out = spend_advance_for_inner(state, want, minimum).await;
     save_spend_pending(state);
     out
 }
@@ -6437,7 +6880,7 @@ fn restore_spend_pending(state: &NodeState) {
     }
 }
 
-async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Result<SpendAdvance, ActionError> {
+async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>, minimum: Option<u64>) -> Result<SpendAdvance, ActionError> {
     if want.is_some() && budget_paused(state)? {
         return Err(ActionError::new("budget_paused", "Payments are paused. Resume them first."));
     }
@@ -6591,7 +7034,7 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>) -> Resul
                 // A G1 node shows the owner a budget to approve; the owner's
                 // flags override it. Older nodes get the pre-G1 body.
                 if node_has_g1(state).await.unwrap_or(false) {
-                    if let Some(budget) = budget_proposal(state, want) {
+                    if let Some(budget) = budget_proposal(state, want, minimum) {
                         ask["budget"] = budget;
                     }
                 }
@@ -8565,10 +9008,11 @@ async fn spend_status(
 async fn spend_request(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
+    call_peer: Option<String>,
 ) -> Result<act::SpendView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    spend_advance(state.inner(), true).await
+    do_spend_request(state.inner(), call_peer.as_deref()).await
 }
 
 /// Close the spend window now.
@@ -10481,6 +10925,8 @@ struct MediaSession {
     #[allow(dead_code)]
     call_id: String,
     uplink: Arc<control::media::FrameQueue>,
+    /// The video path, on a video call only.
+    video: Option<Arc<control::media::VideoPath>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -10490,6 +10936,9 @@ fn stop_media_session(state: &NodeState) {
     if let Some(session) = state.media.lock().unwrap().take() {
         session.stop.store(true, Ordering::SeqCst);
         session.uplink.clear();
+        if let Some(video) = session.video {
+            video.clear();
+        }
     }
 }
 
@@ -10503,6 +10952,7 @@ async fn media_bridge<R: tauri::Runtime>(
     call_id: String,
     peer: String,
     uplink: Arc<control::media::FrameQueue>,
+    video: Option<Arc<control::media::VideoPath>>,
     stop: Arc<AtomicBool>,
     mut seal: Option<Box<control::media::SealedMedia>>,
     channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
@@ -10513,7 +10963,7 @@ async fn media_bridge<R: tauri::Runtime>(
     let emit = |link: control::media::MediaLink| {
         let _ = channel.send(tauri::ipc::InvokeResponseBody::Json(link.to_json()));
     };
-    let link = control::media::run_media_link_with_seal(
+    let link = control::media::run_media_link_full(
         || async {
             if !*state.ready.lock().unwrap() { return Ok(None); }
             let Some(token) = media_token(&state).await else { return Ok(None); };
@@ -10522,13 +10972,14 @@ async fn media_bridge<R: tauri::Runtime>(
         },
         &uplink,
         &downlink,
+        video.as_deref(),
         seal.as_deref_mut(),
         &emit,
         &stopping,
     );
     let drain = async {
         loop {
-            let frame = downlink.pop().await;
+            let frame = control::media::next_downlink(&downlink, video.as_deref()).await;
             if channel.send(tauri::ipc::InvokeResponseBody::Raw(frame)).is_err() { break; }
         }
     };
@@ -10546,6 +10997,8 @@ async fn media_bridge<R: tauri::Runtime>(
 /// (`{"link": …, "detail": …}`). One session at a time: opening replaces the
 /// previous one. No payment and no admission change here: the node admits the
 /// socket only for a `(peer, call_id)` it already knows, under the owner's token.
+/// `video` opens the video path on the same socket; a call without it is an
+/// audio session, unchanged.
 #[cfg(not(feature = "call-seal"))]
 #[tauri::command(rename_all = "snake_case")]
 async fn call_media_open(
@@ -10555,21 +11008,24 @@ async fn call_media_open(
     call_id: String,
     peer: String,
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    video: Option<bool>,
 ) -> Result<(), String> {
     reject_sealed_window(&window)?;
     drop(window);
     let call_id = control::media::call_id(&call_id)?;
     let peer = control::media::peer_id(&peer)?;
-    start_media_session(app, state.inner(), call_id, peer, None, on_frame);
+    start_media_session(app, state.inner(), call_id, peer, video.unwrap_or(false), None, on_frame);
     Ok(())
 }
 
 /// The same, in a call-seal build. `sealed`: the renderer expects this call's
 /// finished key exchange to be here. Without one the socket does not open, so a
 /// call never goes out in the clear by mistake. Without `sealed` and with no
-/// exchange, this is today's session.
+/// exchange, this is today's session. Video is never sealed, so a sealed call
+/// asking for `video` does not open: nothing goes out in the clear.
 #[cfg(feature = "call-seal")]
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 async fn call_media_open(
     window: WebviewWindow<impl tauri::Runtime>,
     app: AppHandle<impl tauri::Runtime>,
@@ -10578,13 +11034,18 @@ async fn call_media_open(
     peer: String,
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
     sealed: Option<bool>,
+    video: Option<bool>,
 ) -> Result<(), String> {
     reject_sealed_window(&window)?;
     drop(window);
     let call_id = control::media::call_id(&call_id)?;
     let peer = control::media::peer_id(&peer)?;
     let seal = seal_for_media(state.call_seal.lock().unwrap().take(), &call_id, sealed.unwrap_or(false)).map_err(|end| end.code().to_string())?;
-    start_media_session(app, state.inner(), call_id, peer, seal, on_frame);
+    let video = video.unwrap_or(false);
+    if video && seal.is_some() {
+        return Err(control::call_seal::SealError::NotReady.code().to_string());
+    }
+    start_media_session(app, state.inner(), call_id, peer, video, seal, on_frame);
     Ok(())
 }
 
@@ -10593,14 +11054,16 @@ fn start_media_session<R: tauri::Runtime>(
     state: &NodeState,
     call_id: String,
     peer: String,
+    video: bool,
     seal: Option<Box<control::media::SealedMedia>>,
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) {
     let uplink = Arc::new(control::media::FrameQueue::new(control::media::QUEUE_FRAMES));
+    let video = video.then(|| Arc::new(control::media::VideoPath::new()));
     let stop = Arc::new(AtomicBool::new(false));
     stop_media_session(state);
-    *state.media.lock().unwrap() = Some(MediaSession { call_id: call_id.clone(), uplink: uplink.clone(), stop: stop.clone() });
-    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, stop, seal, on_frame));
+    *state.media.lock().unwrap() = Some(MediaSession { call_id: call_id.clone(), uplink: uplink.clone(), video: video.clone(), stop: stop.clone() });
+    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, video, stop, seal, on_frame));
 }
 
 #[cfg(feature = "call-seal")]
@@ -10740,6 +11203,22 @@ fn call_media_send(
     let Some(session) = slot.as_ref() else { return Err("no media session is open".into()) };
     session.uplink.push(payload);
     Ok(())
+}
+
+/// One uplink video payload for the open media session (raw bytes). Answers
+/// how many fragments wait to leave, which the renderer reads as backpressure.
+#[tauri::command(rename_all = "snake_case")]
+fn call_media_video_send(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<usize, String> {
+    reject_sealed_window(&window)?;
+    let payload = media_payload(request.body())?;
+    let slot = state.media.lock().unwrap();
+    let Some(session) = slot.as_ref() else { return Err("no media session is open".into()) };
+    let Some(video) = session.video.as_ref() else { return Err("this media session carries no video".into()) };
+    video.push(payload)
 }
 
 /// Close the open media session (hangup or local teardown). Idempotent; only
@@ -10932,6 +11411,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             local_owner_cancel,
             local_owner_finalize,
             local_owner_reconcile,
+            node_setup_local,
             node_repair_initialized,
             node_repair_price_floor,
             fund_state,
@@ -11032,6 +11512,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             call_hold,
             call_media_open,
             call_media_send,
+            call_media_video_send,
             call_media_close,
             porch_quote,
             porch_read,
@@ -11117,6 +11598,10 @@ fn assistant_mock_builder() -> tauri::Builder<tauri::Wry> {
             Ok(())
         })
 }
+
+#[cfg(all(test, desktop, not(feature = "mobile"), unix))]
+#[path = "beta_network_tests.rs"]
+mod beta_network_tests;
 
 #[cfg(all(test, desktop, not(feature = "mobile")))]
 mod remote_test_profile_tests {
@@ -16767,6 +17252,50 @@ mod control_act_tests {
         remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
         do_call_hold(&node.state, A, CALL_ID, Some(reserved)).await.unwrap();
         node
+    }
+
+    #[tokio::test]
+    async fn a2_call_minutes_respect_the_separate_contact_and_app_limits_with_grant_left() {
+        for contact_limit in [true, false] {
+            let (routes, next, reserved) = PacedHold {
+                per_block: 10_000, fee: 0, minutes: 60, closing: 1_000, direct: true, spent: SPENT_AT_CEILING,
+            }.routes();
+            assert_eq!(reserved, 601_000);
+            let node = paced_call(routes, reserved).await;
+            *node.state.node_grant.lock().unwrap() = Some(serde_json::from_value(g1_grant(3600, 5_000_000, 4_368_000)).unwrap());
+            with_book(&node.state, true, |b| {
+                b.ceiling_msat = if contact_limit { 5_000_000 } else { 50_000 };
+                b.set_limit(A, false, 50_000)?;
+                let earlier = if contact_limit { 38_000 } else { 28_000 };
+                b.reserve("earlier", A, false, earlier, now_ms());
+                b.settle("earlier", earlier, now_ms());
+                if !contact_limit {
+                    b.reserve("other-payment", budget::INVOICE_PAYMENTS, false, 10_000, now_ms());
+                    b.settle("other-payment", 10_000, now_ms());
+                }
+                Ok(())
+            }).unwrap();
+            // The offer cost 2 sats; the next minute's 10-sat ceiling fits exactly.
+            do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+            let view = budget_view(&node.state).unwrap();
+            assert_eq!(view.accounted_msat, 42_000);
+            assert_eq!(view.unsettled_msat, 0);
+            assert_eq!(view.node_grant.unwrap().remaining_msat, 4_368_000);
+            let refused = do_call_block(&node.state, A, CALL_ID, 1).await.unwrap_err();
+            assert_eq!(refused.code, if contact_limit { "budget_exhausted" } else { "ceiling_exhausted" });
+            assert!(refused.message.contains("42 sats"));
+            assert!(refused.message.contains("50 sats"));
+            assert_eq!(minutes_sent(&node), 1);
+            assert_eq!(next.load(Ordering::SeqCst), 1);
+            // Raising only the limiting budget allows the next minute, at its exact ceiling.
+            with_book(&node.state, true, |b| {
+                if contact_limit { b.set_limit(A, false, 52_000)?; } else { b.ceiling_msat = 52_000; }
+                Ok(())
+            }).unwrap();
+            do_call_block(&node.state, A, CALL_ID, 1).await.unwrap();
+            assert_eq!(minutes_sent(&node), 2);
+            assert_eq!(next.load(Ordering::SeqCst), 2);
+        }
     }
 
     /// A call runs to its hold: every minute the node's cap allows is paid, at the
@@ -24971,6 +25500,136 @@ mod control_act_tests {
         assert_eq!((view.state, view.open_until_ms), (act::SpendState::Open, Some(expires)));
     }
 
+    fn call_budget_node(block: Option<u64>) -> (Fake, tempfile::TempDir, G1) {
+        let routes = call_routes(Some(10_000));
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p == format!("/pricing/peers/{A}") {
+                return (200, serde_json::json!({"peer_id": A, "prices": {"kind:404": block}, "age_secs": 1, "stale": false}).to_string());
+            }
+            if p == format!("/pricing/peers/{A}/call") || p == "/payments/price/401" {
+                return routes(m, p, b);
+            }
+            (0, String::new())
+        });
+        g1_node_with(&["read", "receive"], Some(first))
+    }
+
+    #[test]
+    fn call_budget_proposal_command_covers_one_reservation() {
+        let (node, _dir, _g1) = call_budget_node(Some(10_000));
+        let seen = node.seen.clone();
+        let app = tauri::test::mock_builder()
+            .manage(node.state)
+            .invoke_handler(tauri::generate_handler![super::spend_request])
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+        let origin = if cfg!(windows) { format!("{}://tauri.localhost", "http") } else { "tauri://localhost".into() };
+        let reply = tauri::test::get_ipc_response(&window, tauri::webview::InvokeRequest {
+            cmd: "spend_request".into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: origin.parse().unwrap(),
+            body: tauri::ipc::InvokeBody::Json(serde_json::json!({"call_peer": A})),
+            headers: Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.into(),
+        }).unwrap();
+        let view: serde_json::Value = reply.deserialize().unwrap();
+        assert_eq!(view["state"], "pending");
+        let seen = seen.lock().unwrap();
+        let (_, _, _, body) = seen.iter().find(|(method, path, _, _)|
+            method == "POST" && path == "/api/v1/pair/elevation-request").unwrap();
+        let asked: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(asked["budget"], serde_json::json!({"budget_msat": 3_621_000, "ttl_secs": 600}));
+        assert!(!seen.iter().any(|(method, path, _, _)| method == "POST" && path.contains("/messages/")));
+    }
+
+    #[tokio::test]
+    async fn call_budget_proposal_covers_the_reservation_and_signals() {
+        for (block, ceiling, expected) in [
+            (1_000, 500_000, 1_461_000),
+            (10_000, 500_000, 3_621_000),
+            (20_000, 500_000, 6_021_000),
+            (10_000, 8_000_000, 8_000_000),
+        ] {
+            let (node, _dir, _g1) = call_budget_node(Some(block));
+            with_book(&node.state, true, |b| { b.ceiling_msat = ceiling; Ok(()) }).unwrap();
+            let quote = read_call_quote_with_blocks(&node.state, A).await.unwrap();
+            let view = do_spend_request(&node.state, Some(A)).await.unwrap();
+            assert_eq!(view.state, act::SpendState::Pending);
+            assert_eq!(node.posts(), vec![("/pair/elevation-request".into(), serde_json::json!({
+                "scopes": ["spend"], "budget": {"budget_msat": expected, "ttl_secs": 600},
+            }))]);
+            assert!(expected >= quote.reservation_max_msat.unwrap() + quote.call_total_msat.unwrap());
+            assert_eq!(with_book(&node.state, false, |b| Ok(b.ceiling_msat)).unwrap(), ceiling);
+            assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
+            assert_eq!(budget_now(&node.state).spent_msat, 0);
+            assert!(pending(&node).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn call_budget_proposal_keeps_the_owners_smaller_grant_and_expiry() {
+        let (node, _dir, g1) = call_budget_node(Some(10_000));
+        let grant = g1_grant(120, 400_000, 400_000);
+        *g1.grant.lock().unwrap() = grant.clone();
+        do_spend_request(&node.state, Some(A)).await.unwrap();
+        spend_advance(&node.state, false).await.unwrap();
+        let view = spend_advance(&node.state, false).await.unwrap();
+        assert_eq!((view.state, view.open_until_ms), (act::SpendState::Open, Some(grant["expires_at"].as_u64().unwrap() * 1000)));
+        assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
+        let error = check_node_grant_with_envelope_ids(&node.state, "/messages/compose",
+            &serde_json::json!({"recipient": A}), 601_000, None, grant::PaymentCap::CallTotal).await.unwrap_err();
+        assert_eq!(error.code, "grant_exhausted");
+        assert_eq!(*g1.grant.lock().unwrap(), grant);
+        assert_eq!(node.posts().iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
+            ["/pair/elevation-request", "/pair/token"]);
+        assert_eq!(budget_now(&node.state).spent_msat, 0);
+    }
+
+    #[tokio::test]
+    async fn call_budget_proposal_requires_a_safe_current_minute_price() {
+        for block in [None, Some(0), Some(u64::MAX), Some(control::MAX_SAFE_MSAT / 240 - 5_000)] {
+            let (node, _dir, _g1) = call_budget_node(block);
+            assert_eq!(do_spend_request(&node.state, Some(A)).await.unwrap_err().code, "call_price_unknown");
+            assert!(node.posts().is_empty());
+            assert_eq!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Locked);
+        }
+        let (node, _dir, _g1) = call_budget_node(Some(10_000));
+        assert!(do_spend_request(&node.state, Some("invalid")).await.is_err());
+        assert!(node.targets().is_empty());
+        with_book(&node.state, true, |b| { b.paused = true; Ok(()) }).unwrap();
+        assert_eq!(do_spend_request(&node.state, Some(A)).await.unwrap_err().code, "budget_paused");
+        assert!(node.targets().is_empty());
+    }
+
+    #[tokio::test]
+    async fn call_budget_proposal_cannot_reopen_after_lock_during_the_quote() {
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let a = arrived.clone();
+        let (release, wait) = std::sync::mpsc::channel();
+        let wait = Mutex::new(wait);
+        let calls = call_routes(Some(10_000));
+        let routes: Routes = Arc::new(move |m, p, b| {
+            if p == "/payments/price/401" {
+                a.notify_one();
+                wait.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            if p == format!("/pricing/peers/{A}") {
+                return (200, serde_json::json!({"peer_id": A, "prices": {"kind:404": 10_000}, "age_secs": 1, "stale": false}).to_string());
+            }
+            calls(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        let (result, ()) = tokio::join!(do_spend_request(&node.state, Some(A)), async {
+            arrived.notified().await;
+            node.state.spend.lock().unwrap().lock();
+            release.send(()).unwrap();
+        });
+        assert_eq!(result.unwrap_err().code, "budget_needed");
+        assert_eq!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Locked);
+        assert!(node.posts().is_empty());
+    }
+
     #[tokio::test]
     async fn g1_an_explicit_payment_is_bounded_by_the_signed_limit_not_the_message_cap() {
         let (node, _dir, g1) = g1_node(&["read", "receive"]);
@@ -26159,6 +26818,7 @@ mod assistant_acl_tests {
                 "local_owner_cancel",
                 "local_owner_finalize",
                 "local_owner_reconcile",
+                "node_setup_local",
                 "node_repair_initialized",
                 "node_repair_price_floor",
                 "fund_state",
@@ -26264,6 +26924,7 @@ mod assistant_acl_tests {
                 // M6 A1: the host-owned node-routed media socket.
                 "call_media_open",
                 "call_media_send",
+                "call_media_video_send",
                 "call_media_close",
                 "porch_quote",
                 "porch_read",
@@ -26945,6 +27606,7 @@ mod assistant_acl_tests {
             .invoke_handler(tauri::generate_handler![
                 super::node_status,
                 super::node_unlock,
+                super::node_setup_local,
                 super::node_repair_initialized,
                 super::node_repair_price_floor,
                 super::fund_state,
@@ -27026,6 +27688,15 @@ mod assistant_acl_tests {
         for cmd in ["fund_state", "funding_address", "payments_balance"] {
             assert_acl_denied(invoke(&assistant, cmd, serde_json::json!({})), cmd);
         }
+
+        assert_handler_ran(
+            invoke(&main, "node_setup_local", serde_json::json!({ "confirmed": false })),
+            "explicit agreement",
+        );
+        assert_acl_denied(
+            invoke(&assistant, "node_setup_local", serde_json::json!({ "confirmed": true })),
+            "node_setup_local",
+        );
 
         assert_handler_ran(
             invoke(&main, "node_repair_initialized", serde_json::json!({ "confirmed": false })),

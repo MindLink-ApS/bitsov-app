@@ -74,7 +74,7 @@ const QR = (props: { value: string; label: string }) => {
   );
 };
 
-function CopyButton(props: { text: string; label: string }) {
+export function CopyButton(props: { text: string; label: string }) {
   // 'copied' only after the copy really worked; 'failed' says so instead.
   const [done, setDone] = createSignal<false | 'copied' | 'failed'>(false);
   let timer: number | undefined;

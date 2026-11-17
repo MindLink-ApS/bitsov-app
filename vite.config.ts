@@ -111,6 +111,12 @@ export function callMediaFlag(env: Record<string, string | undefined>): 'node' |
   return env.VITE_CALL_MEDIA === 'webrtc' ? 'webrtc' : 'node';
 }
 
+// Node-routed call video stays off unless the exact value "node" is set.
+// Same parent-process rule as the flags above.
+export function callVideoFlag(env: Record<string, string | undefined>): 'node' | 'off' {
+  return env.VITE_CALL_VIDEO === 'node' ? 'node' : 'off';
+}
+
 // Call sealing stays off unless the exact value "sealed" is set. Same
 // parent-process rule as the flags above; src-tauri/build.rs reads it too.
 export function callSealFlag(env: Record<string, string | undefined>): 'sealed' | 'off' {
@@ -177,6 +183,7 @@ export default defineConfig({
   define: {
     'import.meta.env.VITE_STARTER_BALANCE': JSON.stringify(starterBalanceFlag(process.env)),
     'import.meta.env.VITE_CALL_MEDIA': JSON.stringify(callMediaFlag(process.env)),
+    'import.meta.env.VITE_CALL_VIDEO': JSON.stringify(callVideoFlag(process.env)),
     'import.meta.env.VITE_CALL_SEAL': JSON.stringify(callSealFlag(process.env)),
     __APP_COMMIT__: JSON.stringify(appCommit(process.env)),
     __APP_VERSION__: JSON.stringify(appVersion()),
