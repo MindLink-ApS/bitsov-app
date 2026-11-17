@@ -766,6 +766,26 @@ describe('the call engine with paid minutes', () => {
     setLanguagePref('system');
   });
 
+  it('the box refusing the call for this contact’s budget (grant_recipient) ends it in plain words (EN/DA), nothing held or paid', async () => {
+    const cases = [
+      ['en', 'Your box turned the call down: this contact’s budget on your box can’t hold the call. Nothing was paid. A bigger budget for this contact usually has to be approved on the box’s own computer.'],
+      ['da', 'Din boks afviste opkaldet: kontaktens budget på boksen kan ikke rumme opkaldet. Der er ikke betalt noget. Et større budget til kontakten skal som regel godkendes på boksens egen computer.'],
+    ] as const;
+    try {
+      for (const [lang, words] of cases) {
+        setLanguagePref(lang);
+        const hold = vi.fn();
+        const pay = vi.fn();
+        const e = engine({ status: vi.fn(async () => ok(null)), hold, pay },
+          async () => fail('grant_recipient', 'Your node’s budget for this recipient has 50 sats left, less than this costs. Nothing was sent.'));
+        await e.engine.place(A, 'audio', QUOTE);
+        expect(e.last()).toMatchObject({ phase: 'ended', error: words, paidMsat: 0 });
+        expect(hold).not.toHaveBeenCalled();
+        expect(pay).not.toHaveBeenCalled();
+      }
+    } finally { setLanguagePref('en'); }
+  });
+
   it('their node refusing the offer above the agreed price or hold ends the call in plain words (EN/DA), nothing sent, held or paid', async () => {
     const cases = [
       ['call_offer_price_above_consent', 'Their node now asks more per minute than you agreed to, so your node did not place the call. Nothing was sent, held or paid. Check the price and call again.',
@@ -1020,7 +1040,7 @@ const paired = { state: 'paired', scopes: ['read', 'receive', 'spend'], node_id:
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 
-function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number; endKeepsHold?: boolean; endLeavesUnresolved?: boolean; pairing?: Reply; spend?: SpendView; request?: Reply } = {}) {
+function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; offer?: Reply; block?: Reply; hold?: Reply; minutes?: number; endKeepsHold?: boolean; endLeavesUnresolved?: boolean; pairing?: Reply; spend?: SpendView; request?: Reply; budget?: Reply } = {}) {
   resetContactsForTests();
   setPetname(A, 'Maya');
   const calls: { cmd: string; args?: unknown }[] = [];
@@ -1043,7 +1063,7 @@ function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; offer?: R
     fund_state: () => null,
     spend_status: () => opts.spend ?? spending,
     spend_request: opts.request ?? (() => spending),
-    budget_status: () => null,
+    budget_status: opts.budget ?? (() => null),
     call_quote: (args) => typeof opts.quote === 'function' ? opts.quote(args) : opts.quote ?? QUOTE,
     call_signal: (args) => {
       const kind = (args as { kind: number }).kind;
@@ -1389,6 +1409,39 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect($('[data-call-reservation-max]')?.textContent).toBe(`Din node reserverer højst ${amount(240 * (BLOCK + FEE))} til minutterne og giver det ubrugte tilbage. Skulle den bruge mere, ringer den ikke op, og der betales intet. Du bekræfter, før det første minut betales.`);
     expect($('[data-call-reservation-detail] p')?.textContent).toContain('ringer din node ikke op');
   });
+
+  it('the contact-budget line shows only once the box’s call limit is known: none before any call, then with the 10-minute limit its reservation pinned', async () => {
+    const left = 50_000;
+    const host = stubHost({ minutes: 10, budget: () => ({
+      paused: false, waiting_for_owner: false, ceiling_msat: 500_000, max_daily_msat: 100_000_000, spent_msat: 0, unsettled_msat: 0,
+      preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }],
+      rows: [], autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null }, window_ms: 600_000,
+      node_grant: { expires_at_ms: Date.now() + 86_400_000, budget_msat: 5_000_000, remaining_msat: 5_000_000, per_call_max_msat: 5_000_000,
+        recipient_left_msat_by_recipient: { [A]: left } },
+    }) });
+    await openShell();
+    // The limit is unknown before any call: no warning, Ring enabled.
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    expect($('[data-call-reservation-max]')).not.toBeNull();
+    expect($('[data-call-contact-budget-short]')).toBeNull();
+    expect($<HTMLButtonElement>('[data-call-confirm="audio"]')!.disabled).toBe(false);
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    // The box pins its 10-minute limit on the reservation.
+    await vi.waitFor(() => expect($('[data-call-hold]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-dismiss]')?.disabled).toBe(false), { timeout: 4_000 });
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    const hold = 10 * (BLOCK + FEE) + QUOTE.offer_msat! + QUOTE.offer_max_routing_fee_msat + QUOTE.signal_msat + QUOTE.signal_max_routing_fee_msat;
+    expect($('[data-call-contact-budget-short]')?.textContent).toBe(
+      `Your box has only ${amount(left)} left for Maya right now. A call holds up to ${amount(hold)}, so your box will likely turn it down. A bigger budget for this contact usually has to be approved on the box’s own computer.`);
+    // Display only: Ring stays enabled; the box remains the authority.
+    expect($<HTMLButtonElement>('[data-call-confirm="audio"]')!.disabled).toBe(false);
+    expect(host.used('call_block')).toHaveLength(0);
+  }, 15_000);
 
   it('once it rings, the card shows the node’s exact hold under its own call limit (max_call_minutes) to confirm', async () => {
     const host = stubHost({ minutes: 60 });

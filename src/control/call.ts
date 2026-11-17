@@ -307,8 +307,10 @@ export function callRefusal(error: ActionError): string {
   if (error.code === 'call_offer_hold_above_consent') return tr('caMinutesOfferHoldAboveConsent');
   // Also what a node says while its Lightning link comes back after a restart: not only a lack of capacity.
   if (error.code === 'call_liquidity_insufficient') return tr('caMinutesLiquidityRefused');
+  // The box's budget for this contact could not hold the call's reservation: say what to do, plainly.
+  if (error.code === 'grant_recipient') return tr('caCallContactBudgetRefused');
   // The grant refusals name a per-payment limit; for a call it is the reservation that did not fit.
-  return ['grant_per_call', 'grant_exhausted', 'grant_recipient'].includes(error.code)
+  return ['grant_per_call', 'grant_exhausted'].includes(error.code)
     ? tr('caMinutesGrantRefused', error.message) : error.message;
 }
 

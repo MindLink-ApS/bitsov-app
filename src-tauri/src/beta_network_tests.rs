@@ -123,7 +123,7 @@ fn beta_never_writes_node_files() {
     }
 }
 
-struct StatusServer {
+pub(super) struct StatusServer {
     addr: std::net::SocketAddr,
     stopped: Arc<AtomicBool>,
 }
@@ -142,6 +142,65 @@ fn auth_fixture(network: Option<serde_json::Value>) -> (NodeState, tempfile::Tem
 type Pause = (Arc<AtomicBool>, Arc<tokio::sync::Notify>);
 
 fn auth_fixture_with_options(network: Option<serde_json::Value>, routes: mock_node::pairing::PairRoutes, pause: Option<Pause>) -> (NodeState, tempfile::TempDir, StatusServer) {
+    auth_fixture_controlled(network, routes, pause, Arc::new(ReportControl::default()))
+}
+
+#[derive(Clone)]
+pub(super) struct ReportReply {
+    pub network: Option<serde_json::Value>,
+    pub status: u16,
+    pub raw: Option<String>,
+}
+
+impl ReportReply {
+    pub fn network(network: Option<&str>) -> Self {
+        Self { network: network.map(serde_json::Value::from), status: 200, raw: None }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct ReportControl {
+    pub reply: Mutex<Option<ReportReply>>,
+    pub queue: Mutex<std::collections::VecDeque<ReportReply>>,
+    pub calls: Mutex<std::collections::BTreeMap<String, usize>>,
+    pub probe_401: AtomicBool,
+    pub require_latest: AtomicBool,
+    pub pause: Mutex<Option<Arc<ReportPause>>>,
+}
+
+impl ReportControl {
+    pub fn count(&self, path: &str) -> usize {
+        *self.calls.lock().unwrap().get(path).unwrap_or(&0)
+    }
+}
+
+#[derive(Default)]
+pub(super) struct ReportPause {
+    pub arrived: tokio::sync::Notify,
+    released: Mutex<bool>,
+    wake: std::sync::Condvar,
+}
+
+impl ReportPause {
+    pub fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.wake.notify_one();
+    }
+
+    fn wait(&self) {
+        self.arrived.notify_one();
+        let (released, timeout) = self.wake.wait_timeout_while(
+            self.released.lock().unwrap(), Duration::from_secs(5), |released| !*released,
+        ).unwrap();
+        assert!(*released && !timeout.timed_out(), "report barrier was not released");
+    }
+}
+
+pub(super) fn auth_fixture_controlled(network: Option<serde_json::Value>, routes: mock_node::pairing::PairRoutes, pause: Option<Pause>, control: Arc<ReportControl>) -> (NodeState, tempfile::TempDir, StatusServer) {
+    auth_fixture_controlled_for_identifier(BETA, network, routes, pause, control)
+}
+
+pub(super) fn auth_fixture_controlled_for_identifier(identifier: &str, network: Option<serde_json::Value>, routes: mock_node::pairing::PairRoutes, pause: Option<Pause>, control: Arc<ReportControl>) -> (NodeState, tempfile::TempDir, StatusServer) {
     use std::io::{BufRead, Read, Write};
     let dir = tempfile::tempdir().unwrap();
     let node = test_support::mock(dir.path(), routes, now_unix());
@@ -150,12 +209,13 @@ fn auth_fixture_with_options(network: Option<serde_json::Value>, routes: mock_no
     assert_ne!(addr.port(), 3141);
     let stopped = Arc::new(AtomicBool::new(false));
     let stop = stopped.clone();
-    let mut state = NodeState::for_identifier(BETA);
+    let mut state = NodeState::for_identifier(identifier);
     state.api_base = format!("http://localhost:{}/api/v1", addr.port());
     *state.external_node.lock().unwrap() = Some(dir.path().to_path_buf());
     let codes = state.printed_codes.clone();
     std::thread::spawn(move || {
         let mut forwarded = 0;
+        let mut latest_issued = None;
         for stream in listener.incoming() {
             if stop.load(Ordering::SeqCst) { break; }
             let mut reader = std::io::BufReader::new(stream.unwrap());
@@ -184,12 +244,28 @@ fn auth_fixture_with_options(network: Option<serde_json::Value>, routes: mock_no
                     }
                 }
             }
-            let (status, mut body) = if parts[1] == "/api/v1/status" {
+            let path = parts[1].split('?').next().unwrap().trim_start_matches("/api/v1");
+            *control.calls.lock().unwrap().entry(path.to_owned()).or_default() += 1;
+            let (status, mut body) = if path == "/status" {
+                let reply = control.queue.lock().unwrap().pop_front()
+                    .or_else(|| control.reply.lock().unwrap().clone())
+                    .unwrap_or(ReportReply { network: network.clone(), status: 200, raw: None });
                 let mut status = serde_json::json!({"status":"ok", "node_id":mock_node::NODE_ID, "lightning_backend":"ldk"});
-                if let Some(network) = &network { status["network"] = network.clone(); }
-                (200, status.to_string())
+                if let Some(network) = &reply.network { status["network"] = network.clone(); }
+                let barrier = control.pause.lock().unwrap().take();
+                if let Some(barrier) = barrier { barrier.wait(); }
+                let code = if control.require_latest.load(Ordering::SeqCst) && auth != latest_issued { 401 } else { reply.status };
+                (code, reply.raw.unwrap_or_else(|| status.to_string()))
+            } else if path == "/renewal-probe" {
+                if control.probe_401.swap(false, Ordering::SeqCst) || auth.is_none() {
+                    (401, "{}".into())
+                } else { (200, "{}".into()) }
             } else if parts[1] == "/api/v1/health" { (200, "{}".into()) }
             else { node.handle(&parts[0], &parts[1], auth.as_deref(), &body) };
+            if matches!(path, "/pair/token" | "/auth/local") && status == 200 {
+                latest_issued = serde_json::from_str::<serde_json::Value>(&body).ok()
+                    .and_then(|value| value.get("token").and_then(|token| token.as_str()).map(str::to_owned));
+            }
             if parts[1] == "/api/v1/bootstrap/state" && status == 200 {
                 if let Some(network) = &network {
                     let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -418,3 +494,6 @@ async fn beta_signet_bootstrap_replaces_an_old_refusal() {
     assert_eq!(state.pairing_snapshot().bootstrap.as_deref(), Some("bootstrap"));
     assert_eq!(serde_json::to_value(state.status_snapshot()).unwrap()["network_refusal"], "none");
 }
+
+#[path = "beta_network_renewal_tests.rs"]
+pub(super) mod renewal_tests;
