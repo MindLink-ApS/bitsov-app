@@ -7843,6 +7843,55 @@ async fn do_invite_redeem(state: &NodeState, invite: &str) -> Result<act::Redeem
     decode_act("/invites/accept", &text)
 }
 
+/// GET one stored file with a limit on what is read into memory: stops at
+/// [`act::FILE_BODY_MAX`] whatever the response declares, then checks the
+/// declared and decoded sizes. Read-only, and separate from [`call_api`], which
+/// keeps its behaviour for every other route.
+async fn read_file_blob(state: &NodeState, id: &str) -> Result<act::FileBlob, String> {
+    let path = format!("/files/{id}");
+    ensure_fresh_token(state).await;
+    let mut refreshed = false;
+    loop {
+        let token = state
+            .token
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "the node is not authenticated yet".to_string())?;
+        let mut response = state
+            .http
+            .get(format!("{}{path}", state.api_base))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("{path} request failed: {e}"))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED && !refreshed {
+            refreshed = true;
+            if remint_throttled(state).await.is_ok() {
+                continue;
+            }
+        }
+        if response.content_length().is_some_and(|n| n > act::FILE_BODY_MAX as u64) {
+            return Err(act::FILE_RESPONSE_TOO_LARGE.into());
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| format!("{path} response read failed: {e}"))?
+        {
+            if body.len() + chunk.len() > act::FILE_BODY_MAX {
+                return Err(act::FILE_RESPONSE_TOO_LARGE.into());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let blob: act::FileBlob = decode(&path, status, &String::from_utf8_lossy(&body))?;
+        act::blob_within_cap(&blob)?;
+        return Ok(blob);
+    }
+}
+
 /// A received voice note's bytes, for the inline player. Read-only: two GETs,
 /// never a payment. Anything that is not an audio file is refused.
 async fn do_voice_note_fetch(state: &NodeState, message_id: &str) -> Result<act::FileBlob, String> {
@@ -7860,8 +7909,8 @@ async fn do_voice_note_fetch(state: &NodeState, message_id: &str) -> Result<act:
     }
     let row = found.ok_or_else(|| act::VOICE_NOT_STORED.to_string())?;
     let id = control::room_id(&row).map_err(|_| "the node returned an unexpected file id".to_string())?;
-    let blob: act::FileBlob = get_json(state, &format!("/files/{id}")).await?;
-    if !act::is_voice_mime(&blob.mime_type) {
+    let blob = read_file_blob(state, &id).await?;
+    if !act::is_voice_file(&blob.filename, &blob.mime_type) {
         return Err(act::NOT_A_VOICE_NOTE.into());
     }
     Ok(blob)
@@ -7882,9 +7931,7 @@ async fn do_file_fetch(state: &NodeState, message_id: &str) -> Result<act::FileB
     }
     let row = found.ok_or_else(|| act::FILE_NOT_STORED.to_string())?;
     let id = control::room_id(&row).map_err(|_| "the node returned an unexpected file id".to_string())?;
-    let blob: act::FileBlob = get_json(state, &format!("/files/{id}")).await?;
-    act::blob_within_cap(&blob)?;
-    Ok(blob)
+    read_file_blob(state, &id).await
 }
 
 /// One native save dialog at a time (N6): a second Save click while the first
@@ -21956,6 +22003,133 @@ mod control_act_tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"hi");
         assert!(node.posts().is_empty(), "save must never POST");
         assert_eq!(do_file_fetch(&node.state, &"99".repeat(32)).await.unwrap_err(), act::FILE_NOT_STORED);
+    }
+
+    const VOICE_WEBM: &str = "voice-note-1.webm";
+
+    /// A node whose only stored file is one voice note, replying `blob`.
+    fn one_voice_note(mid: &str, blob: String) -> Fake {
+        let listed = serde_json::json!([{"id": FILE_ID, "mime_type": "video/webm", "message_id": mid}]);
+        fake(AuthMode::Local, Arc::new(move |_m, p, _b| {
+            let (route, _) = p.split_once('?').unwrap_or((p, ""));
+            match route {
+                "/files" => (200, listed.to_string()),
+                r if r == format!("/files/{FILE_ID}") => (200, blob.clone()),
+                _ => (404, r#"{"error":"route","code":404}"#.into()),
+            }
+        }))
+    }
+
+    fn voice_blob(mime: &str, size_bytes: u64, data_b64: &str) -> String {
+        serde_json::json!({"filename": VOICE_WEBM, "mime_type": mime, "size_bytes": size_bytes, "data_b64": data_b64}).to_string()
+    }
+
+    #[tokio::test]
+    async fn a_voice_note_is_held_to_the_file_cap_on_every_size() {
+        let mid = "cd".repeat(32);
+        // Exactly the cap plays: 1 400 000 bytes, one padding character.
+        let at_cap = format!("{}=", "A".repeat(1_866_667));
+        for mime in ["video/webm", "audio/webm"] {
+            let cap = act::FILE_MAX_BYTES as u64;
+            let node = one_voice_note(&mid, voice_blob(mime, cap, &at_cap));
+            assert_eq!(do_voice_note_fetch(&node.state, &mid).await.unwrap().size_bytes, cap);
+            // One byte declared over the cap, with a tiny payload.
+            let node = one_voice_note(&mid, voice_blob(mime, cap + 1, "aGk="));
+            assert_eq!(do_voice_note_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_TOO_LARGE);
+            // A small declared size over a payload above the cap.
+            let over = "A".repeat(1_866_668 + 4);
+            let node = one_voice_note(&mid, voice_blob(mime, 2, &over));
+            assert_eq!(do_voice_note_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_TOO_LARGE);
+            // A body past the read limit, whatever it says about itself.
+            let huge = "A".repeat(act::FILE_BODY_MAX + 1);
+            let node = one_voice_note(&mid, voice_blob(mime, 2, &huge));
+            assert_eq!(do_voice_note_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_RESPONSE_TOO_LARGE);
+            assert!(node.posts().is_empty(), "playback must never POST");
+        }
+    }
+
+    /// A node that lists one voice note and then answers its read with no
+    /// length at all: `body`, then, if `endless`, more until the reader leaves.
+    /// The returned channel reports how many bytes the node managed to write.
+    fn voice_note_without_length(mid: &str, body: String, endless: bool) -> (NodeState, std::sync::mpsc::Receiver<usize>, tempfile::TempDir) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert_ne!(port, 3141, "tests must never hold the node port");
+        let listed = serde_json::json!([{"id": FILE_ID, "mime_type": "video/webm", "message_id": mid}]).to_string();
+        let (sent, written) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() { continue; }
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).is_err() || header == "\r\n" || header.is_empty() { break; }
+                }
+                if line.contains("/files?") {
+                    let _ = write!(stream, "HTTP/1.1 200 X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{listed}", listed.len());
+                    continue;
+                }
+                let _ = write!(stream, "HTTP/1.1 200 X\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n");
+                let _ = stream.write_all(body.as_bytes());
+                let mut total = body.len();
+                let filler = [b'A'; 64 * 1024];
+                while endless && total < ENDLESS_STOP && stream.write_all(&filler).is_ok() {
+                    total += filler.len();
+                }
+                let _ = sent.send(total);
+            }
+        });
+        let state = NodeState::for_api(format!("http://127.0.0.1:{port}/api/v1"));
+        *state.token.lock().unwrap() = Some("tok.1".into());
+        *state.auth.lock().unwrap() = AuthMode::Local;
+        let dir = tempfile::tempdir().unwrap();
+        *state.config.lock().unwrap() = Some(dir.path().join("konsensus.toml"));
+        (state, written, dir)
+    }
+
+    /// The fake node gives up here so a broken limit fails the test, not the run.
+    const ENDLESS_STOP: usize = 64 * 1024 * 1024;
+
+    #[tokio::test]
+    async fn a_voice_note_with_no_length_is_read_only_up_to_the_limit() {
+        let mid = "cd".repeat(32);
+        // No length and a normal body: it still plays.
+        let (state, _written, _dir) = voice_note_without_length(&mid, voice_blob("video/webm", 2, "aGk="), false);
+        assert_eq!(do_voice_note_fetch(&state, &mid).await.unwrap().data_b64, "aGk=");
+        // No length and a body that never ends: the read stops and the node is cut off.
+        let (state, written, _dir) = voice_note_without_length(&mid, String::new(), true);
+        assert_eq!(do_voice_note_fetch(&state, &mid).await.unwrap_err(), act::FILE_RESPONSE_TOO_LARGE);
+        // Waits on the runtime: the connection only closes while its task can run.
+        let mut waited = 0;
+        let total = loop {
+            match written.try_recv() {
+                Ok(total) => break total,
+                Err(_) if waited < 400 => {
+                    waited += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("the node was never cut off: {e}"),
+            }
+        };
+        assert!(total < ENDLESS_STOP, "the reader kept going to {total} bytes");
+    }
+
+    #[tokio::test]
+    async fn a_file_within_the_cap_in_an_oversized_response_is_not_called_over_the_cap() {
+        let mid = "cd".repeat(32);
+        // A file at the cap, and a peer's long name that takes the response past the limit.
+        let at_cap = format!("{}=", "A".repeat(1_866_667));
+        let name = format!("voice-note-{}.webm", "a".repeat(act::FILE_BODY_MAX - at_cap.len()));
+        let blob = serde_json::json!({
+            "filename": name, "mime_type": "video/webm",
+            "size_bytes": act::FILE_MAX_BYTES as u64, "data_b64": at_cap
+        }).to_string();
+        assert!(blob.len() > act::FILE_BODY_MAX);
+        let node = one_voice_note(&mid, blob);
+        assert_eq!(do_voice_note_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_RESPONSE_TOO_LARGE);
+        assert_eq!(do_file_fetch(&node.state, &mid).await.unwrap_err(), act::FILE_RESPONSE_TOO_LARGE);
     }
 
     #[tokio::test]
