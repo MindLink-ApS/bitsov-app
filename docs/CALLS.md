@@ -24,7 +24,9 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   the `bitsov.jwt.<token>` subprotocol the node reads first (never in the URL).
   The node admits the socket only for a `(peer, call_id)` it knows, under a
   paired token with `spend`; the host reconnects with backoff while the call
-  lasts and stops on a refusal. The renderer opens no socket and sees no
+  lasts and stops on a refusal. The node closes the socket when the token it
+  opened with expires, so each open gets a new token of its own, which the host
+  does not keep. Without one, it opens on the shared token. The renderer opens no socket and sees no
   token; the CSP keeps `connect-src 'self' ipc:` only. Three main-window
   commands: `call_media_open(call_id, peer, on_frame)`,
   `call_media_send(raw payload)`, `call_media_close()`. Frames reach the
@@ -88,7 +90,7 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   (`mediaClosed`), so its minutes stop being paid.
 - **Audio only.** With the flag on a call is placed as audio and an incoming
   video offer rings and is answered as audio: the camera is never captured
-  or sent.
+  or sent. The separate video flag below is what changes this.
 - **Checks.** `npm test -- tests/g711.test.ts tests/media-frame.test.ts
   tests/jitter-buffer.test.ts tests/node-routed-connection.test.ts
   tests/call-audio-failure.test.ts tests/call-media-flag.test.tsx` (codec
@@ -101,6 +103,119 @@ is never the call path. Signalling (the four paid kinds 400–403) is unchanged.
   headless: they prove the wiring, not audio quality, device capture, or a
   node that serves the route. Two-device acceptance against a node with the
   media route is separate evidence.
+
+## Node-routed video (build flag, off by default)
+
+`VITE_CALL_VIDEO=node` (parent build process; anything else is off) lets a
+node-routed call carry the camera. It goes the same way as the audio, on the same
+socket: app, own node, peer node, peer app. **Both nodes can read this video**, and
+the card says so in Danish and English for as long as the call lasts. No app-to-app
+media, no encryption claim. With the flag off nothing here runs: no video button, a
+video offer is answered as audio, and every byte on the socket is what it was. An
+audio call on a build with the flag on is the same. A build with sealing on
+(`VITE_CALL_SEAL=sealed`, below) has no video: video is never sealed, and the
+host refuses to open a sealed session with video.
+
+- **Wire format** (`src/control/videoFrame.ts`). A video payload is
+  `type u8 | stream_seq u32 BE | len u16 BE | body | zero padding`: the layout the
+  sealed format keeps inside its ciphertext, in the clear for now. Inner size stops at
+  3,968 bytes, which leaves the sealed form's 22 bytes of the node's 4,096 and meets its
+  128-byte padding, so sealing wraps these bytes with no format break. `0x20` is one
+  fragment (`frame_id u32, index u16, count u16, flags u8, codec u8, capture_ms u32`,
+  then data); `0x38` the codecs this app decodes and its tier; `0x39` asks for a key
+  frame; `0x3A` the receiver's report each second; `0x3B` camera state. `0x10`, `0x11`,
+  `0x30` and `0x32` stay reserved. `parsePayload` answers null for all of these, so
+  an app without video ignores them and its jitter buffer never sees them.
+- **Negotiation.** In band. Nothing is captured for sending or sent until the
+  peer's `0x38` says what it decodes. Each direction uses H.264 Baseline with in-band
+  parameter sets if the far side decodes it, otherwise VP8. WebCodecs only; a webview
+  without it says so on the card and the sound carries on.
+- **Host** (`src-tauri/src/control/media.rs`). `call_media_open` with `video` adds a
+  `VideoPath` to the session; `call_media_video_send` feeds it and answers how many
+  fragments wait. Video has its own queues, its own `seq` counter (audio's stays gapless
+  for its jitter buffer) and a token-bucket pacer, and only leaves while no audio frame
+  waits. The node closes the socket past its budget, so the host counts everything sent
+  in the last second and video stays inside 85% of what the node allows. When audio is
+  so far behind after a stall that it could pass that with the next second's frames,
+  video stays off the socket for 1.2 s and what queued meanwhile is dropped; the far side
+  asks for a key frame. Downward, audio is handed over first. Without `video` the session is the audio
+  session it always was.
+- **What fits** (`src/control/videoRate.ts`). The node keeps 60 packets and 12 KiB a
+  second for packets of 512 bytes or less, which is all audio. At its default 100 and
+  65,536 that leaves 40 and 53,248, and the pacer uses 85% of it: 320x240 at 15 fps, 280
+  kbit/s. With `[calls] media_max_frames_per_second = 160` and
+  `media_max_bytes_per_second = 262144` on a node, its handshake says so and that app
+  offers 640x360 at 30 fps, 1.2 Mbit/s. A call uses the lower tier of the two sides, so a
+  node left at the defaults, or one that says nothing, keeps both sides at 320x240.
+- **Loss.** A frame missing for 200 ms counts as lost: the last picture stays, and the
+  receiver asks for a key frame until one arrives; the sender answers at most once a
+  second. Key frames at the start, on request and after a step change, never on a timer.
+- **When it can't keep up.** Frames are skipped when the encoder or the host queue
+  backs up. Most of a slow link's queue sits in TCP buffers between the nodes, where
+  no one can put audio first, so the receiver also reports how far arrivals sit above
+  their lowest of the last minute. Two report windows at 250 ms, a host backlog lasting
+  2 s, or two windows with 5% of frames lost step down: 320x240 at 15, then 10, then
+  240x180 at 7, then video pauses and the card says the sound carries on. At 800 ms
+  video stops at once for 5 s while the queue drains, then tries the lowest step. A
+  pause at the bottom retries after 20 s. It climbs after 15 clean seconds, longer each
+  time a queue sends it back. Nothing video does can end the call.
+- **Sync.** Pictures are held to about the audio's playout delay, at most 150 ms,
+  measured from the lowest recent arrival delay. Audio carries no timestamp.
+- **Not covered.** No real camera has been through this. Measured on one Mac's WKWebView
+  only, over regtest nodes on loopback: iOS, Android and Windows webviews and the paired
+  remote tunnel are untested. No price exists for video: a call costs the audio minute
+  price, because a node can't tell them apart.
+- **Checks.** `npm test -- tests/video-frame.test.ts tests/video-rate.test.ts
+  tests/call-video.test.ts tests/node-routed-video.test.ts tests/call-video-flag.test.tsx`,
+  `cargo test control::media`.
+
+## Sealed audio, first proof (off by default)
+
+A test build only. It takes two switches together: `VITE_CALL_SEAL=sealed` for the
+renderer and the host's `call-seal` Cargo feature (for example
+`VITE_CALL_SEAL=sealed npm run tauri build -- --features call-seal`).
+`src-tauri/build.rs` refuses a build with only one of them. Without both, the build
+is today's: the same SDP, the same frames and the same host commands. No seal
+command, permission or capability is generated, and no direct dependency is
+added. Tests that also pass on the code before sealing existed hold this. The seal
+tests themselves run only with the feature:
+`VITE_CALL_SEAL=sealed cargo test --features call-seal`.
+
+With it on, the host (`src-tauri/src/control/call_seal.rs`) seals audio between the
+two apps. The node changes nothing: it forwards opaque frames, and metering,
+admission and price never read them.
+
+- **Key agreement.** The offer carries a hash commitment, the answer carries the
+  callee's ephemeral X25519 key, and the first media frames reveal the caller's
+  key. Public values only pass through the renderer and the nodes. No key derives
+  from the node, its seed or a stored secret, and each call starts fresh.
+- **Frames.** `0x11 | epoch | counter | ciphertext | tag`, ChaCha20-Poly1305, one key
+  per direction, the inside padded to a multiple of 128 bytes. The host hands the
+  renderer the plain frame, numbered by the authenticated `stream_seq`. Anything in
+  the clear, or failing its tag, on a sealed call reaches nothing.
+- **What it authenticates.** Each frame comes from whoever holds the key from this
+  one exchange, for this call, direction, epoch and counter.
+- **What it does not.** Who that is. A node that swaps both keys sits in the middle
+  and reads everything, with "sealed" on both screens. Only comparing the words
+  catches that, and no screen shows the words yet. The node ids come from the node.
+  Nothing here has had an outside review.
+- **The answer cannot be sealed.** A sealing caller whose answer has no attribute, or
+  no capability bit, ends the call before any audio goes out. It says "This call
+  could not be sealed, so it was ended. Nothing was said unsealed." and names no
+  side, since an app that cannot seal and a node that stripped the line look the
+  same. So a sealing build cannot call an app that cannot seal. A callee answering
+  an offer without the attribute takes the call as today, labelled "Not sealed".
+- **Never in the clear by surprise.** A wrong attribute, a bad or missing reveal (5 s
+  from the call's first socket open), a low-order key, 10 s with no authentic frame
+  (from the first open or the last authentic frame, whether or not anything
+  arrives), or the last epoch running out ends the call with a reason. Reconnects
+  do not move these deadlines. The label says "sealed" only after a frame from the
+  far side authenticates, and only for the call on screen.
+- **Secrets in memory.** Key derivations wipe the hash state and its output;
+  `zeroize` is on for BLAKE3 and X25519 in this build. Moved copies, swap and
+  the webview's plain audio stay out of reach.
+- **Not built:** the words on screen, remembering a contact, "only private calls",
+  video in the seal, messages.
 
 ## M6 A2: paid minutes
 
@@ -251,13 +366,41 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   before anything is paid (`not_dispatched`, reason `call_not_live`), and that
   refusal closes the admission, so the contact can be called again. A contact
   left stuck by an earlier build recovers on its next End. Any other
-  `not_dispatched` of a hangup leaves the admission open: while the node's own
+  `not_dispatched` of a hangup leaves the admission open until the node ends the
+  call (see the next item): while the node's own
   closing notice is being paid it answers `call_signal_in_flight`, and "Try
   ending it again" then closes it. A minute the wallet tried and failed stays
   pending first, as above, and no hangup goes out while that result is not
   known. A minute's refusal stays `not_dispatched` even with this reason,
   because the node also gives it to a minute that is early or out of order on
   a live call.
+- **The callee goes offline mid-call.** The node refuses the minute (no call
+  price) and the hangup (recipient offline) before anything leaves the wallet,
+  and says so in its reply: `released`, no payment hash, nothing settled, retry
+  allowed, for this operation id. Compose writes that only after `proven_unpaid`,
+  and a released row is never paid unless the same id is posted again. So for an
+  attempt that was this id's first, the app reads it as `not_dispatched`, for
+  any paid send: nothing is fenced and no check is needed. A `prepared` row, a
+  hash, an amount, or a retry of an id the node already held stays unknown.
+
+  **Limit on node rc21.** While an earlier paid admission to this contact is in
+  the node's journal, as after a paid first contact, `proven_unpaid` also rejects
+  a send that paid nothing. The same refusal then says `prepared`, and abandon
+  refuses it. Those replies are the same ones the node gives when its journal
+  shows a payment, so the app cannot tell the two apart and keeps the fence, and
+  neither End nor "Check pending result" clears it. That needs a node that scopes
+  the proof to the operation's own evidence.
+
+  A minute refused as above is tried again as above. End then waits for the node,
+  reading the call and holding no lock, while other paid actions go out. The node
+  ends the call by itself at its paid time plus 10 seconds, at most about 90
+  seconds away. The node showing the call ended closes the admission: End records
+  that, as for their hangup, and asks for nothing more, so a pause, a lapsed
+  approval or a used-up budget during the wait cannot keep it open. It sends
+  nothing, and another send's pending result stays as it was. If the node shows no
+  end within 100 seconds, a read in progress included, or the read fails, the
+  refusal stays the answer and "Try ending it again" stays on the card. The same
+  wait covers a hangup the wallet refused before dispatch.
 - **After the call.** The card reads the node for up to 20 s until it closes
   the reservation and then says "Minutes: paid X. Released back to your
   budget: Y." Until then it says what the node still holds.
@@ -343,6 +486,15 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   `act::tests::a_reservation_the_node_could_not_check_is_named_not_generic`,
   `grant::tests::call_reservation_refusals_are_named`. Headless: two-device
   acceptance against nodes with N1-N3 is separate evidence.
+
+### What a press and a minute may pay
+
+- **Accept and Decline** show the most one answer or hangup can cost, and stay off until that price is read. A press reads the price again and pays only if the live signal price and routing ceiling are each at or below what the button showed. Otherwise nothing is sent, and the card says nothing was paid.
+- **No live price.** Without their node's live answer, the only signal price is this node's own tariff. The host refuses an answer, ICE candidate or hangup on it (`call_price_unknown`). End can be tried again: it sends the hangup once the price is back, and closes with nothing sent once the node shows the call ended or no longer lists it. An incoming call whose price cannot be read cannot be answered or declined.
+- **Ignore** is always on the incoming card. It stops the ring on this device, sends and pays nothing, and leaves no missed-call record. The caller's ring times out as usual.
+- **Hangup ceiling.** Every offer carries the most its hangup was shown to cost (`max_hangup_msat`). If the live hangup costs more, the host refuses the offer before anything is sent. The ceiling it saves for End is the live one, so it is never above what was shown.
+- **Out of range.** A call total that overflows, or that is above what the renderer holds exactly (2^53 - 1 msat), is no price: no offer, answer or hangup.
+- **Minutes.** Before each minute, its whole ceiling is added to what the node reports spent, and to the ceilings of this call's minutes in the journal (attempts proven unpaid excluded). Above the smaller of the node's hold and the most the owner agreed to, the minute is refused (`call_minutes_above_hold`), nothing is paid for it and the call is hung up. Node rc21's hold is its minutes plus a closing reserve, so a call to its node's limit stays within it. The node's own cap on minutes still ends the call first.
 
 ## Pre-M6 lab path (`VITE_CALL_MEDIA=webrtc` only)
 

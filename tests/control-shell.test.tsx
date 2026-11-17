@@ -406,7 +406,8 @@ describe('control center shell', () => {
 
     await waitFor(() => expect(mount.querySelector('[data-touch-approval]')).not.toBeNull());
     const box = mount.querySelector('[data-touch-approval]')!.textContent!;
-    expect(box).toContain('200 sats a day');
+    expect(box).toContain('200 sats in total');
+    expect(box).not.toContain('a day');
     expect(box).toContain('at most 2 sats per message');
     expect(mount.querySelector('[data-touch-peer]')?.textContent).toBe(`${A.slice(0, 8)}…${A.slice(-8)}`);
     // Petname plus the short key, visible on the line; never the node's claimed label.
@@ -1381,6 +1382,22 @@ describe('control center shell', () => {
     expect(replayAt).toBeGreaterThan(listenAt);
     click('[data-tab="node"]');
     await waitFor(() => expect(mount.querySelector('[data-link]')?.getAttribute('data-link')).toBe('open'));
+  });
+
+  it.each([[[], '[data-porch-node-off]'], [['porch_quote_v1'], '[data-porch-peers-failed]']] as const)('porch answers once the overview has, even when the contacts read failed (capabilities %j)', async (capabilities, shown) => {
+    stubHost({
+      node_overview: () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 0, e2ee_sessions: 0, pending_deliveries: 0,
+        lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities: [...capabilities] }),
+      peers_list: () => { throw { code: 'node', message: 'contacts read failed' }; },
+    });
+    start();
+    await waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await waitFor(() => expect(mount.querySelector('[data-track="porch"]')).not.toBeNull());
+    click('[data-track="porch"]');
+    await waitFor(() => expect(mount.querySelector(shown)).not.toBeNull());
+    expect(mount.querySelector('[data-porch-waiting]')).toBeNull();
+    expect(mount.querySelector('[data-porch-none]')).toBeNull();
   });
 
   it('runs on sample data with no host at all', async () => {

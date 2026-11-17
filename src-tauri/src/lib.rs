@@ -25,6 +25,7 @@ mod apple_key_material;
 pub mod pairing;
 mod trust;
 mod profile;
+mod network_policy;
 #[cfg(any(target_os = "ios", all(test, unix)))]
 mod ios_install;
 pub mod remote_access;

@@ -65,7 +65,18 @@ export type MinutesDeps = {
 };
 
 /** The host refused the node's hold for this call (and hung up where it was above the consent): nothing is paid. */
-export const HOLD_REFUSED = new Set(['call_no_reservation', 'call_hold_above_consent', 'call_no_consent', 'call_reservation_closed']);
+export const HOLD_REFUSED = new Set(['call_no_reservation', 'call_hold_above_consent', 'call_no_consent', 'call_reservation_closed', 'call_minutes_above_hold']);
+
+/**
+ * The next minute, at its whole ceiling, stays within the hold the node keeps and
+ * the most the owner agreed to, by the node's spent figure and by the receipts this
+ * app holds (the higher). An amount this app cannot hold exactly does not fit.
+ */
+export function minuteFitsHold(hold: CallReservation, agreedMaxMsat: number | null, receiptsMsat: number): boolean {
+  const most = Math.max(hold.spent_msat, receiptsMsat) + hold.per_block_msat + hold.per_block_fee_msat;
+  const limit = Math.min(hold.reserved_msat, agreedMaxMsat ?? hold.reserved_msat);
+  return Number.isSafeInteger(most) && Number.isSafeInteger(limit) && most <= limit;
+}
 
 /**
  * Refused before anything was paid, for a reason that passes by itself: their
@@ -85,7 +96,12 @@ const LIMIT_REFUSAL = new Set(['budget_exhausted', 'ceiling_exhausted']);
  * node holds no reservation for the call, or more than the owner agreed to.
  */
 export type MinutesStopCode = 'unpaid' | 'node_ended' | 'payment_failed' | 'budget_limit' | 'payment_unknown' | 'price_changed' | 'hold_refused';
-export type MinutesStop = { code: MinutesStopCode; message: string };
+export type MinutesStop = {
+  code: MinutesStopCode;
+  message: string;
+  /** The node grant or separate app limit that refused the minute, including its accounted amount. */
+  limit?: Pick<ActionError, 'code' | 'message'>;
+};
 
 export type MinutesView = {
   /** The per-minute price the owner agreed to before dialling (their node's advert). */
@@ -210,13 +226,14 @@ export function createCallMinutes(opts: {
   };
 
   /** Stops while ringing (the hold was refused) or while paying; never after the call ended. */
-  const stopWith = (code: MinutesStopCode, detail: string | null = null) => {
+  const stopWith = (code: MinutesStopCode, detail: string | null = null, limit?: Pick<ActionError, 'code' | 'message'>) => {
     if (stopped || disposed || settling) return;
     stopped = true;
     running = false;
     clearTimeout(timer);
     timer = undefined;
-    const stop = { code, message: detail ? `${STOP_MESSAGE[code]()} ${detail}` : STOP_MESSAGE[code]() };
+    const stop: MinutesStop = { code, message: detail ? `${STOP_MESSAGE[code]()} ${detail}` : STOP_MESSAGE[code]() };
+    if (limit) stop.limit = { code: limit.code, message: limit.message };
     emit({ stop });
     opts.onStop(stop);
   };
@@ -252,6 +269,7 @@ export function createCallMinutes(opts: {
     const wait = due + (status.next_block_seq > 0 ? DUE_MARGIN_MS : 0) - now();
     if (wait > 0) { schedule(Math.min(wait, STATUS_POLL_MS), () => void tick()); return; }
     if (!payable()) return;
+    if (hold && !minuteFitsHold(hold, view.reservationMaxMsat, view.receiptsMsat)) { stopWith('hold_refused', tr('caMinutesPastHold')); return; }
     await payBlock(status.next_block_seq);
   };
 
@@ -289,7 +307,7 @@ export function createCallMinutes(opts: {
       stopWith(lapsed() ? 'unpaid' : 'node_ended');
       return;
     }
-    if (LIMIT_REFUSAL.has(code)) { stopWith('budget_limit'); return; }
+    if (LIMIT_REFUSAL.has(code)) { stopWith('budget_limit', null, r.error); return; }
     if (PASSING_REFUSAL.has(code)) {
       if (++passingAttempts < PASSING_MAX_ATTEMPTS && !lapsed()) { schedule(RETRY_MS, () => void tick()); return; }
       stopWith('payment_failed', r.error.message);
@@ -300,7 +318,7 @@ export function createCallMinutes(opts: {
       const retryable = code === 'not_dispatched' || code === 'call_block_not_due';
       attempts++;
       if (retryable && attempts < MAX_ATTEMPTS && !lapsed()) { schedule(RETRY_MS, () => void tick()); return; }
-      stopWith('payment_failed', r.error.message);
+      stopWith('payment_failed', r.error.message, code === 'grant_exhausted' ? r.error : undefined);
       return;
     }
     // Paid or not is unknown: never pay again on top of it.

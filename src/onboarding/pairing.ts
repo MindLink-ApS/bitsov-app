@@ -31,6 +31,8 @@ export type ConnectionError = {
   detail: string;
 };
 
+export type NetworkRefusal = 'none' | 'mainnet' | 'unknown' | 'other' | 'local_unavailable';
+
 export type NodeStatus = {
   /** Host has inspected the saved descriptor; null means startup is unresolved. */
   phone_setup?: boolean | null;
@@ -43,7 +45,10 @@ export type NodeStatus = {
   remember_offer?: boolean;
   local_owner?: boolean;
   owner_warning?: string | null;
+  /** Fresh Mac: nothing was created; the owner chooses where BitSov runs. */
+  local_setup_needed?: boolean;
   initialization_repair?: 'none' | 'required' | 'repairing' | 'price_floor_required' | 'price_floor_repairing';
+  network_refusal?: NetworkRefusal;
   retry_after_secs?: number | null;
   ready: boolean;
   node_id: string | null;
