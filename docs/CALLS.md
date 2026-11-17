@@ -360,6 +360,12 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   add. Paid and not delivered (`payment_settled_undelivered`,
   `undelivered_pending`) stays pending at the host and holds other paid actions, so
   the card says that and offers "Stop retrying", which releases the record.
+- **A callee catching up.** Their node refuses a minute's invoice while it syncs:
+  503 `peer_not_ready`. When the caller's node also records that attempt as
+  `released` with no hash and nothing settled, the host reads it as proven unpaid,
+  so there is no fence and the scheduler tries again as a passing refusal. Any
+  other state stays unknown. The same proof on any other send, or with another
+  status, is read as below for a callee gone offline: `not_dispatched`, no fence.
 - **A call the node already ended.** The minute cap, a minute that failed for
   good, an unpaid expiry and the ring deadline end the call at the caller's
   node with no hangup coming back. End still asks. The node refuses that hangup
