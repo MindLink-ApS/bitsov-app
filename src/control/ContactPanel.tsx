@@ -25,6 +25,26 @@ import { claimedName } from './state';
 import { onEscape } from './escapeStack';
 import type { Peer } from './types';
 
+/** Call panels float above every panel and live regions must keep announcing: never made inert. */
+const STAYS_LIVE = '.call-panel, [data-waiting-calls], [aria-live], [role="status"], [role="alert"], .settings-scrim';
+
+/**
+ * The panel covers the whole window, but `aria-modal` alone does not stop Tab
+ * or a screen reader from reaching the chat behind it. Make everything outside
+ * the panel inert while it is open; return a function that undoes exactly that.
+ */
+function inertOutside(panel: HTMLElement): () => void {
+  const made: HTMLElement[] = [];
+  for (let node: HTMLElement = panel; node.parentElement && node !== document.body; node = node.parentElement) {
+    for (const sibling of Array.from(node.parentElement.children)) {
+      if (sibling === node || !(sibling instanceof HTMLElement) || sibling.inert || sibling.matches(STAYS_LIVE)) continue;
+      sibling.inert = true;
+      made.push(sibling);
+    }
+  }
+  return () => { for (const el of made) el.inert = false; };
+}
+
 export function ContactPanel(props: {
   open: boolean;
   peer: Peer;
@@ -104,6 +124,8 @@ export function ContactPanel(props: {
     onCleanup(() => {
       if (opener && opener.isConnected && panel?.contains(document.activeElement)) opener.focus();
     });
+    // Registered last so it runs first on close: the opener is usable again before focus returns.
+    if (panel) onCleanup(inertOutside(panel));
   });
   return (
     <>
