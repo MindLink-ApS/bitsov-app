@@ -209,6 +209,7 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
+          npx vitest run
 
       # Tauri v2 Linux prerequisites. `cargo check` still runs the gtk/webkit -sys build
       # scripts, which resolve these via pkg-config.
