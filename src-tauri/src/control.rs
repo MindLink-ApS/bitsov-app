@@ -259,6 +259,9 @@ pub struct NodeStatusResponse {
     /// Where the node's seed lives (node REMOTE-SIGNER.md §2); absent before it.
     #[serde(default)]
     pub custody_mode: Option<String>,
+    /// Owner `/status` `blvm_chat`. Absent on nodes that do not report it.
+    #[serde(default)]
+    pub blvm_chat: bool,
 }
 
 // ---- organism reads (O1 v2: genome N1 + N2) ----------------------------------
@@ -583,6 +586,10 @@ pub struct NodeOverview {
     pub e2ee_sessions: u64,
     pub pending_deliveries: u64,
     pub lightning_available: bool,
+    /// True only when this node reported `blvm_chat`. Omitted from the
+    /// projected overview when false, so an older node panel stays unchanged.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub blvm_chat: bool,
     pub block_height: Option<u64>,
     pub uptime_secs: u64,
     pub lightning_backend: Option<String>,
@@ -703,6 +710,7 @@ impl NodeOverview {
             e2ee_sessions: status.e2ee_sessions,
             pending_deliveries: status.pending_deliveries,
             lightning_available: status.lightning_available,
+            blvm_chat: status.blvm_chat,
             block_height: status.block_height,
             uptime_secs: status.uptime_secs,
             lightning_backend: status.lightning_backend,

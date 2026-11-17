@@ -1,3 +1,4 @@
+import type { BlvmChatRequest, BlvmChatSession } from './blvmChat';
 import type { StarterStatus } from './starter';
 import type { AddInput, AddView, JoinInput, JoinView } from '../onboarding/AddDevice';
 import type { WatchSample, WatchUpdate } from './watches';
@@ -111,6 +112,12 @@ export interface Source {
   fundState(): Promise<FundState | null>;
   fundStart(sats: number): Promise<FundState>;
   fundingAddress(): Promise<FundingAddress>;
+  /** `POST /blvm/chat-session/request`. Creates the payment request on this node. */
+  blvmChatRequest(amountSats: number, scriptPubkeyHex: string): Promise<BlvmChatRequest>;
+  /** `POST /blvm/chat-session`. One verify, then the row chat compose debits. */
+  blvmChatConfirm(recipient: string, paymentRequestId: string, txHash: string): Promise<BlvmChatSession>;
+  /** `GET /blvm/chat-session/:node_id`. */
+  blvmChatSession(recipient: string): Promise<BlvmChatSession>;
   // control center (read / receive only)
   nodeOverview(): Promise<NodeOverview>;
   peers(): Promise<Peer[]>;
@@ -328,6 +335,11 @@ export const hostSource: Source = {
   fundState: () => invoke<FundState | null>('fund_state'),
   fundStart: (sats) => invoke<FundState>('fund_start', { funding_amount_sats: sats }),
   fundingAddress: () => invoke<FundingAddress>('funding_address'),
+  blvmChatRequest: (amountSats, scriptPubkeyHex) => invoke<BlvmChatRequest>('blvm_chat_session_request', { amount_sats: amountSats, script_pubkey_hex: scriptPubkeyHex }),
+  blvmChatConfirm: (recipient, paymentRequestId, txHash) => invoke<BlvmChatSession>('blvm_chat_session_confirm', {
+    recipient, payment_request_id: paymentRequestId, tx_hash: txHash,
+  }),
+  blvmChatSession: (recipient) => invoke<BlvmChatSession>('blvm_chat_session', { recipient }),
   nodeOverview: () => invoke<NodeOverview>('node_overview'),
   peers: () => invoke<Peer[]>('peers_list'),
   rooms: () => invoke<Room[]>('rooms_list'),

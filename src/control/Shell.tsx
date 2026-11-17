@@ -170,6 +170,7 @@ import type {
   TrackRef,
   WalletOverview,
 } from './types';
+import { chatAmountError, chatRecipientError, chatRequestIdError, chatScriptError, chatTxError, type BlvmChatSession } from './blvmChat';
 
 /** How often each panel re-reads while the shell is open. Peers and balance have no live event. */
 const REFRESH_MS = { overview: 10_000, peers: 15_000, wallet: 20_000, rooms: 30_000, door: 30_000, energy: 30_000, membrane: 30_000, clock: 5_000, spend: 3_000 } as const;
@@ -2478,7 +2479,11 @@ export function ControlCenter(props: Props) {
               onScan={mobileQrScannerAvailable() ? scanPairingLink : cameraQrScannerAvailable() ? scanPairingLinkWithCamera : undefined}
               mobile={isMobilePlatform()}
               phone={isMobilePlatform()}
-            /> : undefined} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
+            /> : undefined} onChain={{
+              request: (amount, script) => source.blvmChatRequest(amount, script),
+              confirm: (recipient, paymentRequestId, txHash) => source.blvmChatConfirm(recipient, paymentRequestId, txHash),
+              read: (recipient) => source.blvmChatSession(recipient),
+            }} overview={overview()} link={link()} peers={peers()} now={now()} error={props.error ?? errors.overview ?? errors.peers} onReconnect={async () => { await props.onReconnect?.(); await loadOverview(); await loadPeers(); }} />
           </Match>
           <Match when={tab() === 'devices'}>
             {/* The host offers Add a device only to a remote node (add_device::supported checks remote mode). */}
@@ -8430,7 +8435,74 @@ function NewTrack(props: {
 
 // ---- context panels ---------------------------------------------------------
 
-function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Element; onForgetRemote?: () => Promise<void>; pairAnother?: JSX.Element; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
+function OnChainChat(props: {
+  request: (amountSats: number, scriptPubkeyHex: string) => Promise<{ payment_request_id: string }>;
+  confirm: (recipient: string, paymentRequestId: string, txHash: string) => Promise<BlvmChatSession>;
+  read: (recipient: string) => Promise<BlvmChatSession>;
+}) {
+  const [recipient, setRecipient] = createSignal('');
+  const [amount, setAmount] = createSignal('1');
+  const [script, setScript] = createSignal('');
+  const [tx, setTx] = createSignal('');
+  const [requestId, setRequestId] = createSignal<string | null>(null);
+  const [session, setSession] = createSignal<BlvmChatSession | null>(null);
+  const [error, setError] = createSignal<string | null>(null);
+  const [busy, setBusy] = createSignal(false);
+  const run = async (work: () => Promise<void>) => {
+    setError(null);
+    setBusy(true);
+    try { await work(); } catch (e) { setError(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
+  };
+  return (
+    <form class="panel" data-blvm-chat-open onSubmit={(e) => e.preventDefault()}>
+      <h3>{tr('caOnChainChatOpen')}</h3>
+      <p class="hint">{tr('caOnChainChatHint')}</p>
+      <input data-blvm-recipient value={recipient()} onInput={(e) => setRecipient(e.currentTarget.value)} aria-label={tr('caTheirNodeId')} placeholder={tr('caTheirNodeId64Hex')} />
+      <input data-blvm-amount inputmode="numeric" value={amount()} onInput={(e) => setAmount(e.currentTarget.value)} aria-label={tr('caOnChainAmount')} />
+      <input data-blvm-script value={script()} onInput={(e) => setScript(e.currentTarget.value)} aria-label={tr('caOnChainScript')} placeholder={tr('caOnChainScript')} />
+      <button type="button" class="primary" data-blvm-create disabled={busy()} onClick={() => void run(async () => {
+        const sats = Number(amount().trim());
+        const amountError = chatAmountError(sats);
+        const scriptError = chatScriptError(script());
+        if (amountError) throw new Error(amountError);
+        if (scriptError) throw new Error(scriptError);
+        const created = await props.request(sats, script().trim());
+        setRequestId(created.payment_request_id);
+        setSession(null);
+      })}>{tr('caOnChainCreate')}</button>
+      <Show when={requestId()}>
+        {(id) => <p class="id" data-blvm-request>{tr('caOnChainRequest')} {id()}</p>}
+      </Show>
+      <input data-blvm-tx value={tx()} onInput={(e) => setTx(e.currentTarget.value)} aria-label={tr('caOnChainTx')} placeholder={tr('caOnChainTx')} />
+      <span class="row" style={{ gap: 'var(--s-2)' }}>
+        <button type="button" data-blvm-store disabled={busy() || !requestId()} onClick={() => void run(async () => {
+          const id = requestId();
+          if (!id) return;
+          const recipientError = chatRecipientError(recipient());
+          const requestError = chatRequestIdError(id);
+          const txError = chatTxError(tx());
+          if (recipientError) throw new Error(recipientError);
+          if (requestError) throw new Error(requestError);
+          if (txError) throw new Error(txError);
+          setSession(await props.confirm(recipient().trim(), id.trim(), tx().trim()));
+        })}>{tr('caOnChainStore')}</button>
+        <button type="button" class="quiet" data-blvm-show disabled={busy()} onClick={() => void run(async () => {
+          const recipientError = chatRecipientError(recipient());
+          if (recipientError) throw new Error(recipientError);
+          setSession(await props.read(recipient().trim()));
+        })}>{tr('caOnChainShow')}</button>
+      </span>
+      <Show when={session()}>
+        {(row) => <p data-blvm-remaining>{tr('caOnChainRemaining')} {row().remaining_msat}</p>}
+      </Show>
+      <Show when={error()}>
+        {(message) => <p class="err-note" data-blvm-error>{message()}</p>}
+      </Show>
+    </form>
+  );
+}
+
+function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Element; onForgetRemote?: () => Promise<void>; pairAnother?: JSX.Element; onChain: { request: (amountSats: number, scriptPubkeyHex: string) => Promise<{ payment_request_id: string }>; confirm: (recipient: string, paymentRequestId: string, txHash: string) => Promise<BlvmChatSession>; read: (recipient: string) => Promise<BlvmChatSession> }; overview: NodeOverview | null; link: LinkState | null; peers: Peer[]; now: number; error?: string; onReconnect: () => Promise<void> }) {
   const fresh = () => freshness(props.overview?.read_at ?? null, props.now);
   const linkText = () =>
     props.link === 'open' ? tr('callLive') : props.link === 'connecting' ? tr('callConnecting') : props.link === 'closed' ? tr('caReconnecting') : tr('caWaiting');
@@ -8472,6 +8544,10 @@ function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Elem
             <dd class="sats">{o().block_height !== null ? satsWhole(o().block_height!, true) : tr('caUnknown')}</dd>
             <dt>{tr('receiveLightning')}</dt>
             <dd>{o().lightning_available ? o().lightning_backend ?? tr('caAvailable') : tr('caUnavailableExtra63')}</dd>
+            <Show when={o().blvm_chat}>
+              <dt>{tr('caOnChainChat')}</dt>
+              <dd data-blvm-chat>{tr('caAvailable')}</dd>
+            </Show>
             <dt>{tr('caChainSource')}</dt>
             <dd>{o().chain_backend ?? tr('caUnknown')}</dd>
             <dt>{tr('caUptime')}</dt>
@@ -8479,6 +8555,9 @@ function NodePanel(props: { connection?: JSX.Element; deviceApprovals?: JSX.Elem
             <VersionRows overview={o()} />
           </dl>
           <CopyVersions overview={o()} />
+          <Show when={o().blvm_chat}>
+            <OnChainChat request={props.onChain.request} confirm={props.onChain.confirm} read={props.onChain.read} />
+          </Show>
           </>
         )}
       </Show>

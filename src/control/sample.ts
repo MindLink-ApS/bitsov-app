@@ -819,6 +819,9 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       return ok(fund);
     },
     fundingAddress: () => ok({ address: SAMPLE_ADDRESS, network: 'sample', note: null }),
+    blvmChatRequest: () => Promise.reject(new Error(tr('caOnChainChatNeedsALiveNode'))),
+    blvmChatConfirm: () => Promise.reject(new Error(tr('caOnChainChatNeedsALiveNode'))),
+    blvmChatSession: () => Promise.reject(new Error(tr('caOnChainChatNeedsALiveNode'))),
     nodeOverview: () =>
       ok({
         node_id: SAMPLE_OWN_ID,

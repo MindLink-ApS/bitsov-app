@@ -3574,6 +3574,165 @@ async fn funding_address(
     decode("/payments/funding-address", status, &body)
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BlvmChatRequest {
+    payment_request_id: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BlvmChatSession {
+    recipient: String,
+    payment_request_id: String,
+    tx_hash: String,
+    amount_sats: u64,
+    debit_counter: u64,
+    spent_msat: u64,
+    remaining_msat: u64,
+}
+
+fn blvm_amount(amount_sats: u64) -> Result<(), String> {
+    if amount_sats == 0 || amount_sats > (i64::MAX as u64) / 1000 {
+        return Err("amount_sats is outside the chat session range".into());
+    }
+    Ok(())
+}
+
+fn blvm_script(script_pubkey_hex: &str) -> Result<String, String> {
+    let script = script_pubkey_hex.trim();
+    let bytes = hex::decode(script).map_err(|_| "script_pubkey_hex is not hex".to_string())?;
+    if bytes.is_empty() || bytes.len() > 10_000 {
+        return Err("script_pubkey_hex is outside the script length range".into());
+    }
+    Ok(script.to_string())
+}
+
+fn blvm_recipient(recipient: &str) -> Result<String, String> {
+    let recipient = recipient.trim();
+    let bytes = hex::decode(recipient).map_err(|_| "recipient is not a node id".to_string())?;
+    if bytes.len() != 32 {
+        return Err("recipient is not a node id".into());
+    }
+    Ok(recipient.to_string())
+}
+
+fn blvm_request_id(id: &str) -> Result<String, String> {
+    let id = id.trim();
+    if id.is_empty()
+        || id.len() > 128
+        || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("payment_request_id is invalid".into());
+    }
+    Ok(id.to_string())
+}
+
+fn blvm_tx(tx_hash: &str) -> Result<String, String> {
+    let tx_hash = tx_hash.trim();
+    let bytes = hex::decode(tx_hash).map_err(|_| "tx_hash must be 32 bytes".to_string())?;
+    if bytes.len() != 32 {
+        return Err("tx_hash must be 32 bytes".into());
+    }
+    Ok(tx_hash.to_string())
+}
+
+#[cfg(test)]
+mod blvm_chat_field_tests {
+    use super::{blvm_amount, blvm_recipient, blvm_request_id, blvm_script, blvm_tx};
+
+    #[test]
+    fn owner_fields_match_the_node_limits() {
+        assert!(blvm_amount(0).is_err());
+        assert!(blvm_amount(1).is_ok());
+        assert!(blvm_amount((i64::MAX as u64) / 1000).is_ok());
+        assert!(blvm_amount((i64::MAX as u64) / 1000 + 1).is_err());
+        assert!(blvm_script("zz").is_err());
+        assert_eq!(blvm_script(" 51 ").unwrap(), "51");
+        assert!(blvm_script(&"ab".repeat(10_001)).is_err());
+        assert!(blvm_recipient("ab").is_err());
+        assert_eq!(blvm_recipient(&"ab".repeat(32)).unwrap(), "ab".repeat(32));
+        assert!(blvm_request_id("").is_err());
+        assert!(blvm_request_id("req 1").is_err());
+        assert_eq!(blvm_request_id("req-1").unwrap(), "req-1");
+        assert!(blvm_tx("abcd").is_err());
+        assert_eq!(blvm_tx(&"cd".repeat(32)).unwrap(), "cd".repeat(32));
+    }
+}
+
+/// `POST /blvm/chat-session/request` — BIP70 outputs on this node.
+#[tauri::command(rename_all = "snake_case")]
+async fn blvm_chat_session_request(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    amount_sats: u64,
+    script_pubkey_hex: String,
+) -> Result<BlvmChatRequest, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    blvm_amount(amount_sats)?;
+    let script_pubkey_hex = blvm_script(&script_pubkey_hex)?;
+    let (status, body) = call_api(
+        state.inner(),
+        reqwest::Method::POST,
+        "/blvm/chat-session/request",
+        Some(serde_json::json!({
+            "amount_sats": amount_sats,
+            "script_pubkey_hex": script_pubkey_hex,
+        })),
+    )
+    .await?;
+    decode("/blvm/chat-session/request", status, &body)
+}
+
+/// `POST /blvm/chat-session` — one verify, then the row chat compose debits.
+#[tauri::command(rename_all = "snake_case")]
+async fn blvm_chat_session_confirm(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    recipient: String,
+    payment_request_id: String,
+    tx_hash: String,
+) -> Result<BlvmChatSession, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let recipient = blvm_recipient(&recipient)?;
+    let payment_request_id = blvm_request_id(&payment_request_id)?;
+    let tx_hash = blvm_tx(&tx_hash)?;
+    // Storing the prepaid row is a spend. The loopback token is read and receive
+    // only, so this uses the same spend window as a paid send.
+    let text = gated_post(
+        state.inner(),
+        "/blvm/chat-session",
+        serde_json::json!({
+            "recipient": recipient,
+            "payment_request_id": payment_request_id,
+            "tx_hash": tx_hash,
+        }),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    serde_json::from_str(&text).map_err(|e| format!("/blvm/chat-session decode failed: {e}"))
+}
+
+/// `GET /blvm/chat-session/:node_id`.
+#[tauri::command(rename_all = "snake_case")]
+async fn blvm_chat_session(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    recipient: String,
+) -> Result<BlvmChatSession, String> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    let recipient = blvm_recipient(&recipient)?;
+    let (status, body) = call_api(
+        state.inner(),
+        reqwest::Method::GET,
+        &format!("/blvm/chat-session/{recipient}"),
+        None,
+    )
+    .await?;
+    decode("/blvm/chat-session", status, &body)
+}
+
 /// `GET /payments/balance`.
 #[tauri::command(rename_all = "snake_case")]
 async fn payments_balance(
@@ -11214,6 +11373,9 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             fund_start,
             funding_address,
             payments_balance,
+            blvm_chat_session_request,
+            blvm_chat_session_confirm,
+            blvm_chat_session,
             identity_restore,
             pairing_status,
             trust_acknowledge,
@@ -26156,6 +26318,9 @@ mod assistant_acl_tests {
                 "fund_start",
                 "funding_address",
                 "payments_balance",
+                "blvm_chat_session_request",
+                "blvm_chat_session_confirm",
+                "blvm_chat_session",
                 "identity_restore",
                 "pairing_status",
                 "trust_acknowledge",

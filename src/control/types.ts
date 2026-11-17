@@ -207,6 +207,8 @@ export type NodeOverview = {
   e2ee_sessions: number;
   pending_deliveries: number;
   lightning_available: boolean;
+  /** Owner `/status` `blvm_chat`. Absent when this node cannot open an on-chain chat session. */
+  blvm_chat?: boolean;
   block_height: number | null;
   uptime_secs: number;
   lightning_backend: string | null;
