@@ -5,14 +5,15 @@
 # its 50-question fixture. Reads files only: it never opens or executes the
 # bundle or anything inside it.
 #
-# Usage: scripts/check-mac-bundle.sh [--arch arm64|x86_64] [--app PATH] [--sidecar PATH] [--dist PATH]
-#   --arch     require thin Mach-O executables of this architecture; select
-#              target-specific defaults (package-mac.sh always supplies it)
-#   --app      default src-tauri/target/release/bundle/macos/BitSov.app
+# Usage: scripts/check-mac-bundle.sh --arch arm64|x86_64 [--app PATH] [--sidecar PATH] [--dist PATH]
+#   --arch     required; check thin Mach-O executables of this architecture
+#              and select target-specific defaults
+#   --app      default <target-dir>/<triple>/release/bundle/macos/BitSov.app
 #   --sidecar  the fetched, signature-verified node; default
-#              src-tauri/bin/konsensus-aarch64-apple-darwin
+#              src-tauri/bin/konsensus-<triple>
 #   --dist     the frontend dist the release build embedded; default dist
 # Exit 0 and "MAC BUNDLE CHECK: PASS", or exit 1 and "MAC BUNDLE CHECK: FAIL".
+# Missing or invalid --arch is an argument error (exit 2).
 # The check functions below are invoked indirectly, through chk.
 # shellcheck disable=SC2329
 set -euo pipefail
@@ -43,11 +44,11 @@ done
 case "$ARCH" in
   arm64) TRIPLE="aarch64-apple-darwin" ;;
   x86_64) TRIPLE="x86_64-apple-darwin" ;;
-  "") TRIPLE="aarch64-apple-darwin" ;;
+  "") echo "--arch is required (arm64 or x86_64)" >&2; exit 2 ;;
   *) echo "--arch must be arm64 or x86_64" >&2; exit 2 ;;
 esac
 SIDECAR="${SIDECAR:-src-tauri/bin/konsensus-$TRIPLE}"
-if [ -n "$ARCH" ] && [ "$APP_EXPLICIT" = 0 ]; then
+if [ "$APP_EXPLICIT" = 0 ]; then
   APP="${CARGO_TARGET_DIR:-src-tauri/target}/$TRIPLE/release/bundle/macos/BitSov.app"
 fi
 
@@ -120,10 +121,8 @@ binary_clean() {
 echo "== mac bundle: $APP (node $TAG) =="
 chk "app executable is executable" test -f "$MACOS/bitsov-app" -a -x "$MACOS/bitsov-app"
 chk "bundled sidecar is executable" test -f "$MACOS/konsensus" -a -x "$MACOS/konsensus"
-if [ -n "$ARCH" ]; then
-  chk "app executable is native $ARCH" native_executable "$MACOS/bitsov-app"
-  chk "bundled sidecar is native $ARCH" native_executable "$MACOS/konsensus"
-fi
+chk "app executable is native $ARCH" native_executable "$MACOS/bitsov-app"
+chk "bundled sidecar is native $ARCH" native_executable "$MACOS/konsensus"
 chk "bundled sidecar matches the verified sidecar ($SIDECAR)" sidecar_matches
 chk "icon.icns is present" test -s "$APP/Contents/Resources/icon.icns"
 chk "Info.plist is well-formed" plist_lint
