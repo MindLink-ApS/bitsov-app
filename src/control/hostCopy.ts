@@ -145,6 +145,7 @@ export const HOST_COPY_DA: readonly (readonly [string, string])[] = [
   ['Not sent - nothing was paid: your node reports no payment for this message. Nothing was dispatched again.', 'Ikke sendt – intet blev betalt: din boks melder ingen betaling for denne besked. Intet blev sendt af sted igen.'],
   ['Not sent - nothing was paid: your node reports that the payment failed. Nothing was dispatched again. You can send it again.', 'Ikke sendt – intet blev betalt: din boks melder, at betalingen mislykkedes. Intet blev sendt af sted igen. Du kan sende den igen.'],
   ['Not sent - nothing was paid.', 'Ikke sendt – intet blev betalt.'],
+  ['Not sent - nothing was paid. Recipient is offline.', 'Ikke sendt – intet blev betalt. Modtageren er offline.'],
   ['Not sent - nothing was paid. {}', 'Ikke sendt – intet blev betalt. {0}'],
   ['There is no secure session with them yet. Message them once in their own chat first; a room never pays a first contact.', 'Der er ingen sikker forbindelse til dem endnu. Skriv først til dem én gang i deres egen chat; et rum betaler aldrig for en første kontakt.'],
   ['Their node cannot take room messages right now: it is not connected, or it needs an update.', 'Deres boks kan ikke tage imod rumbeskeder lige nu: den er ikke forbundet, eller den skal opdateres.'],
