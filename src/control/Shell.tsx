@@ -7262,6 +7262,7 @@ function NodeApprovalSteps(props: { command?: string | null }) {
 
 function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions; hasPending?: boolean; stays?: string; requestBudgetMsat?: number }) {
   const line = () => spendLine(props.spend, props.now);
+  const stays = () => line().open ? tr('spendWaitReplacement') : props.stays ?? spendWaitDefault();
   const minutes = (ms: number) => Math.max(1, Math.ceil((ms - props.now) / 60_000));
   // One Ask again at a time: a double click must not print two requests at the node.
   const [asking, setAsking] = createSignal(false);
@@ -7277,28 +7278,28 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
   };
   return (
     <div class="spend" data-spend={props.spend?.state ?? 'unknown'}>
-      <Switch>
-        <Match when={props.spend?.state === 'open' && !props.spend.pending && line().open}>
-          <details class="quiet-detail passive-status" data-spend-status>
-            <summary aria-label={tr('uiSpendingStatus')} title={tr('uiSpendingStatus')}>ⓘ</summary>
-            <p class="spend-line">
-              <span class="dot ok" /> {line().text}.{' '}
-              <button type="button" class="link" data-spend-lock onClick={() => void props.actions.lock()}>{tr('uiLockNow')}</button>
+      <Show when={line().open}>
+        <details class="quiet-detail passive-status" data-spend-status open={Boolean(props.spend?.pending)}>
+          <summary aria-label={tr('uiSpendingStatus')} title={tr('uiSpendingStatus')}>ⓘ</summary>
+          <p class="spend-line">
+            <span class="dot ok" /> {line().text}.{' '}
+            <button type="button" class="link" data-spend-lock onClick={() => void props.actions.lock()}>{tr('uiLockNow')}</button>
+          </p>
+          <details class="quiet-detail" data-spend-detail>
+            <summary>{tr('uiDetails')}</summary>
+            <p>
+              {props.spend?.basis === 'app_lock'
+                ? tr('uiThisNodeVersionDoesNotLimitAppTokens')
+                : tr('uiYourNodeSOwnerGrantIsInEffect')}
             </p>
-            <details class="quiet-detail" data-spend-detail>
-              <summary>{tr('uiDetails')}</summary>
-              <p>
-                {props.spend?.basis === 'app_lock'
-                  ? tr('uiThisNodeVersionDoesNotLimitAppTokens')
-                  : tr('uiYourNodeSOwnerGrantIsInEffect')}
-              </p>
-            </details>
           </details>
-        </Match>
+        </details>
+      </Show>
+      <Switch>
         <Match when={(props.spend?.state === 'pending' || (props.spend?.state === 'open' && props.spend.pending?.owner_can_grant)) && props.spend.pending}>
           {(p) => (
             <TouchIdFirst actions={props.actions} stays={<p class="hint" data-touch-id-stays-text="spend">
-              {props.stays ?? spendWaitDefault()}{' '}
+              {stays()}{' '}
               <button type="button" class="link" data-spend-cancel-visible onClick={() => void props.actions.cancelSpend()}>{tr('uiCancelRequest')}</button>
             </p>}>
             <div class="approval" data-approval="pending">
@@ -7308,6 +7309,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
               <NodeApprovalSteps command={p().owner_action} />
               <p class="hint">
                 {tr('uiThisAppCannotApproveItForYouThe')} {minutes(p().expires_at_ms)} {tr('uiMinYourDraftIsKept')}{' '}
+                <Show when={line().open}>{stays()}{' '}</Show>
                 <button type="button" class="link" data-spend-cancel onClick={() => void props.actions.cancelSpend()}>
                   {tr('uiCancelRequest')}
                 </button>
@@ -7320,7 +7322,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
           {(p) => (
             <div class="approval" data-approval="unavailable">
               <p>
-                <strong>{tr('uiThisNodeCannotGrantSpendingToTheApp')}</strong> {tr('uiReceivingStillWorksYourNodeSays')}
+                <strong>{tr(line().open ? 'spendReplacementUnavailable' : 'uiThisNodeCannotGrantSpendingToTheApp')}</strong> {tr('uiReceivingStillWorksYourNodeSays')}
               </p>
               <code class="address" data-owner-action>{p().owner_action}</code>
             </div>
@@ -7339,7 +7341,7 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
             </p>
           )}
         </Match>
-        <Match when={true}>
+        <Match when={!line().open}>
           <p class="spend-line">
             <span class="dot" /> {line().text}.{' '}
             {props.spend?.state === 'expired'
