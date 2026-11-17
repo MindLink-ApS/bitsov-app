@@ -1263,6 +1263,150 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
   }
+  it.each([
+    ['node', 'audio', 'approve', { call_peer: A }],
+    ['node', 'video', 'approve', { call_peer: A }],
+    ['node', 'audio', 'ask-again', { call_peer: A }],
+    ['node', 'video', 'ask-again', { call_peer: A }],
+    ['webrtc', 'audio', 'approve', {}],
+    ['webrtc', 'audio', 'ask-again', {}],
+  ] as const)('keeps the request context after a pairing read fails: %s %s %s',
+  async (route, media, button, expected) => {
+    vi.stubEnv('VITE_CALL_MEDIA', route);
+    vi.stubEnv('VITE_CALL_VIDEO', 'node');
+    let failNextPairing = false;
+    const host = stubHost({
+      pairing: () => {
+        if (failNextPairing) {
+          failNextPairing = false;
+          throw { code: 'read_failed', message: 'Pairing status is temporarily unavailable.' };
+        }
+        return { ...paired, scopes: ['read', 'receive'] };
+      },
+      spend: {
+        state: 'expired', basis: null, open_until_ms: null,
+        pending: null, window_ms: 600_000, lapse: 'lost',
+      },
+    });
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    await openShell();
+    $<HTMLButtonElement>('[data-call="' + media + '"]')!.click();
+    await vi.waitFor(() =>
+      expect($<HTMLButtonElement>('[data-call-confirm="' + media + '"]')?.disabled).toBe(false));
+    failNextPairing = true;
+    $<HTMLButtonElement>('[data-call-confirm="' + media + '"]')!.click();
+    await vi.waitFor(() =>
+      expect($('[data-call-approval]')?.textContent).toContain('Pairing status is temporarily unavailable.'));
+    expect(host.used('spend_request')).toHaveLength(0);
+    const selector = button === 'approve'
+      ? '[data-call-approve]'
+      : '[data-call-approval] [data-spend-ask-again]';
+    await vi.waitFor(() => expect($<HTMLButtonElement>(selector)?.disabled).toBe(false));
+    $<HTMLButtonElement>(selector)!.click();
+    await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+    expect(host.used('spend_request')[0].args).toEqual(expected);
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+    expect(capture).not.toHaveBeenCalled();
+  });
+
+  it.each(['approve', 'ask-again'] as const)(
+    'uses the later contact after closing a failed pairing check through %s',
+    async button => {
+      const other = 'b'.repeat(64);
+      let failNextPairing = false;
+      const host = stubHost({
+        peers: [A, other],
+        pairing: () => {
+          if (failNextPairing) {
+            failNextPairing = false;
+            throw { code: 'read_failed', message: 'Pairing status is temporarily unavailable.' };
+          }
+          return { ...paired, scopes: ['read', 'receive'] };
+        },
+        spend: {
+          state: 'expired', basis: null, open_until_ms: null,
+          pending: null, window_ms: 600_000, lapse: 'lost',
+        },
+      });
+      const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+      await openShell();
+      for (const peer of [A, other]) {
+        $<HTMLButtonElement>('[data-track="peer:' + peer + '"]')!.click();
+        await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')?.disabled).toBe(false));
+        $<HTMLButtonElement>('[data-call="audio"]')!.click();
+        await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+        failNextPairing = true;
+        $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+        await vi.waitFor(() =>
+          expect($('[data-call-approval]')?.textContent).toContain('Pairing status is temporarily unavailable.'));
+        if (peer === A) {
+          [...$('[data-call-approval]')!.querySelectorAll('button')]
+            .find(b => b.textContent === 'Close')!.click();
+          await vi.waitFor(() => expect($('[data-call-approval]')).toBeNull());
+        }
+      }
+      const selector = button === 'approve'
+        ? '[data-call-approve]'
+        : '[data-call-approval] [data-spend-ask-again]';
+      await vi.waitFor(() => expect($<HTMLButtonElement>(selector)?.disabled).toBe(false));
+      $<HTMLButtonElement>(selector)!.click();
+      await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+      expect(host.used('spend_request')[0].args).toEqual({ call_peer: other });
+      expect(host.used('call_signal')).toHaveLength(0);
+      expect(host.used('call_block')).toHaveLength(0);
+      expect(capture).not.toHaveBeenCalled();
+    });
+
+  it.each(['approve', 'ask-again'] as const)(
+    'keeps incoming approval ordinary after a delayed pairing failure through %s',
+    async button => {
+      const incomingPeer = 'b'.repeat(64);
+      const pairing = { ...paired, scopes: ['read', 'receive'] };
+      let reply: Reply = () => pairing;
+      const host = stubHost({
+        peers: [A, incomingPeer],
+        pairing: args => reply(args),
+        spend: {
+          state: 'expired', basis: null, open_until_ms: null,
+          pending: null, window_ms: 600_000, lapse: 'lost',
+        },
+      });
+      const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+      await openShell();
+      let rejectPairing!: (reason: unknown) => void;
+      reply = () => new Promise<OnboardingPairingView>((_resolve, reject) => {
+        rejectPairing = reject;
+      });
+      $<HTMLButtonElement>('[data-call="audio"]')!.click();
+      await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+      $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+      await vi.waitFor(() => expect(rejectPairing).toBeTypeOf('function'));
+      host.emitLive({
+        type: 'message', room_id: null,
+        message: {
+          id: 'incoming', kind: 400, sender: incomingPeer, recipient: OWN,
+          timestamp: Date.now(),
+          plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }),
+          payment_amount_msat: 10_000,
+        },
+      });
+      await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
+      reply = () => pairing;
+      rejectPairing({ code: 'read_failed', message: 'Pairing status is temporarily unavailable.' });
+      await vi.waitFor(() =>
+        expect($('[data-call-approval]')?.textContent).toContain('Pairing status is temporarily unavailable.'));
+      const selector = button === 'approve'
+        ? '[data-call-approve]'
+        : '[data-call-approval] [data-spend-ask-again]';
+      await vi.waitFor(() => expect($<HTMLButtonElement>(selector)?.disabled).toBe(false));
+      $<HTMLButtonElement>(selector)!.click();
+      await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
+      expect(host.used('spend_request')[0].args).toEqual({});
+      expect(host.used('call_signal')).toHaveLength(0);
+      expect(host.used('call_block')).toHaveLength(0);
+      expect(capture).not.toHaveBeenCalled();
+    });
   it.each([['audio', 'approve'], ['video', 'approve'], ['audio', 'ask-again'], ['video', 'ask-again']])('requests a call-specific budget for %s through %s without sending a call', async (media, button) => {
     vi.stubEnv('VITE_CALL_VIDEO', 'node');
     const host = stubHost({
