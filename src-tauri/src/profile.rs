@@ -3,19 +3,35 @@ use std::sync::OnceLock;
 
 const REMOTE_TEST_IDENTIFIER: &str = "tech.mindlink.bitsov.remotetest";
 const BETA_IDENTIFIER: &str = "tech.mindlink.bitsov.beta";
+/// Phone builds are test-network only until a mainnet decision exists.
+const MOBILE_BUILD: bool = cfg!(any(target_os = "ios", target_os = "android"));
 static PROFILE: OnceLock<AppProfile> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AppProfile {
     remote_only: bool,
     signet_only: bool,
+    beta_storage: bool,
+}
+
+/// Test-network policy for an identifier on this kind of build. Phone builds
+/// share the product identifier, so the platform decides for them.
+pub(crate) fn signet_only_for(identifier: &str, mobile: bool) -> bool {
+    mobile || matches!(identifier, BETA_IDENTIFIER | REMOTE_TEST_IDENTIFIER)
 }
 
 impl AppProfile {
     pub(crate) fn for_identifier(identifier: &str) -> Self {
+        Self::for_platform(identifier, MOBILE_BUILD)
+    }
+
+    pub(crate) fn for_platform(identifier: &str, mobile: bool) -> Self {
         Self {
             remote_only: identifier == REMOTE_TEST_IDENTIFIER,
-            signet_only: matches!(identifier, BETA_IDENTIFIER | REMOTE_TEST_IDENTIFIER),
+            signet_only: signet_only_for(identifier, mobile),
+            // Storage names follow the identifier only, so existing installs
+            // keep their keychain items whatever the network policy is.
+            beta_storage: identifier == BETA_IDENTIFIER,
         }
     }
 
@@ -31,7 +47,7 @@ impl AppProfile {
     pub(crate) fn keychain_service(self, service: &str) -> String {
         if self.remote_only {
             format!("{REMOTE_TEST_IDENTIFIER}.{service}")
-        } else if self.signet_only {
+        } else if self.beta_storage {
             format!("{BETA_IDENTIFIER}.{service}")
         } else {
             service.to_owned()
@@ -72,6 +88,43 @@ mod tests {
         for identifier in ["tech.mindlink.bitsov.beta.extra", "TECH.MINDLINK.BITSOV.BETA", "tech.mindlink.bitsov.other"] {
             assert_eq!(AppProfile::for_identifier(identifier).keychain_service(service), service);
         }
+    }
+
+    #[test]
+    fn phone_builds_are_signet_only_for_every_identifier() {
+        for identifier in ["tech.mindlink.bitsov", BETA_IDENTIFIER, REMOTE_TEST_IDENTIFIER, ""] {
+            assert!(signet_only_for(identifier, true), "{identifier}");
+            assert!(AppProfile::for_platform(identifier, true).signet_only(), "{identifier}");
+        }
+    }
+
+    #[test]
+    fn desktop_signet_policy_is_unchanged() {
+        assert!(!signet_only_for("tech.mindlink.bitsov", false));
+        assert!(!AppProfile::for_platform("tech.mindlink.bitsov", false).signet_only());
+        for identifier in [BETA_IDENTIFIER, REMOTE_TEST_IDENTIFIER] {
+            assert!(signet_only_for(identifier, false), "{identifier}");
+            assert!(AppProfile::for_platform(identifier, false).signet_only(), "{identifier}");
+        }
+        for identifier in ["tech.mindlink.bitsov.beta.extra", "TECH.MINDLINK.BITSOV.BETA", "tech.mindlink.bitsov.dev"] {
+            assert!(!signet_only_for(identifier, false), "{identifier}");
+        }
+    }
+
+    #[test]
+    fn host_builds_use_the_desktop_policy() {
+        assert!(!MOBILE_BUILD);
+        assert_eq!(AppProfile::for_identifier("tech.mindlink.bitsov"), AppProfile::for_platform("tech.mindlink.bitsov", false));
+    }
+
+    #[test]
+    fn phone_policy_keeps_storage_names() {
+        let service = "bitsov.node.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.seed-password";
+        let profile = AppProfile::for_platform("tech.mindlink.bitsov", true);
+        assert!(!profile.remote_only());
+        assert_eq!(profile.keychain_service(service).as_bytes(), service.as_bytes());
+        assert_eq!(AppProfile::for_platform(BETA_IDENTIFIER, true).keychain_service("s"), format!("{BETA_IDENTIFIER}.s"));
+        assert_eq!(AppProfile::for_platform(REMOTE_TEST_IDENTIFIER, true).keychain_service("s"), format!("{REMOTE_TEST_IDENTIFIER}.s"));
     }
 
     #[test]

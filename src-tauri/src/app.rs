@@ -550,8 +550,11 @@ impl Default for NodeState {
 
 impl NodeState {
     fn for_identifier(identifier: &str) -> Self {
+        Self::for_profile(crate::profile::AppProfile::for_identifier(identifier))
+    }
+
+    fn for_profile(profile: crate::profile::AppProfile) -> Self {
         let mut state = Self::default();
-        let profile = crate::profile::AppProfile::for_identifier(identifier);
         state.remote_only = profile.remote_only();
         state.signet_only = profile.signet_only();
         state.remote_mode.store(state.remote_only, Ordering::SeqCst);
@@ -11744,6 +11747,62 @@ fn assistant_mock_builder() -> tauri::Builder<tauri::Wry> {
 #[cfg(all(test, desktop, not(feature = "mobile"), unix))]
 #[path = "beta_network_tests.rs"]
 mod beta_network_tests;
+
+#[cfg(test)]
+mod phone_signet_gate_tests {
+    use super::*;
+    use crate::network_policy::NetworkRefusal;
+    use crate::profile::AppProfile;
+
+    fn phone_state() -> NodeState {
+        let mut state = NodeState::for_profile(AppProfile::for_platform("tech.mindlink.bitsov", true));
+        // Nothing listens here: any report read fails and must be refused.
+        state.api_base = "http://localhost:1/api/v1".into();
+        state
+    }
+
+    #[test]
+    fn phone_product_build_is_signet_only() {
+        assert!(phone_state().signet_only);
+        assert!(!NodeState::for_profile(AppProfile::for_platform("tech.mindlink.bitsov", false)).signet_only);
+    }
+
+    #[tokio::test]
+    async fn phone_report_gate_refuses_without_a_signet_report() {
+        let state = phone_state();
+        for bootstrap in [false, true] {
+            assert!(require_signet_report(&state, bootstrap).await.is_err(), "{bootstrap}");
+            assert_eq!(*state.network_refusal.lock().unwrap(), NetworkRefusal::Unknown);
+        }
+    }
+
+    #[tokio::test]
+    async fn phone_candidate_gate_refuses_without_a_signet_report() {
+        let state = phone_state();
+        assert_eq!(require_signet_candidate_report(&state, "token").await, Err(NetworkRefusal::Unknown));
+    }
+
+    #[test]
+    fn phone_candidate_acceptance_refuses_non_signet_reports() {
+        for refusal in [NetworkRefusal::Mainnet, NetworkRefusal::Unknown, NetworkRefusal::Other] {
+            let state = phone_state();
+            let mut epoch = *state.network_auth_epoch.lock().unwrap();
+            let before = epoch;
+            assert!(accept_signet_candidate_report(&state, &mut epoch, Err(refusal)).is_err(), "{refusal:?}");
+            assert_ne!(epoch, before);
+            assert_eq!(*state.network_refusal.lock().unwrap(), refusal);
+        }
+    }
+
+    #[test]
+    fn phone_local_peer_gate_refuses_an_unverified_local_node() {
+        let state = phone_state();
+        assert!(!state.remote_mode.load(Ordering::SeqCst));
+        assert!(state.require_local_peer().is_err());
+        state.remote_mode.store(true, Ordering::SeqCst);
+        assert!(state.require_local_peer().is_ok());
+    }
+}
 
 #[cfg(all(test, desktop, not(feature = "mobile")))]
 mod remote_test_profile_tests {
