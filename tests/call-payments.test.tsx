@@ -1949,6 +1949,23 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(host.used('call_block')).toHaveLength(0);
   });
 
+  it('next to Confirm hold, the card says the call connects only after you confirm (EN and DA); the line goes once confirmed', async () => {
+    const host = stubHost({ minutes: 60 });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-minutes-confirm]')).not.toBeNull());
+    expect($('[data-call-hold-needed]')?.textContent).toBe('Press Confirm hold now: the call connects only after you confirm. No minute is paid before.');
+    try {
+      setLanguagePref('da');
+      expect($('[data-call-hold-needed]')?.textContent).toBe('Tryk Bekræft reservation nu: opkaldet forbindes først, når du har bekræftet. Der betales intet minut før.');
+      expect($('[data-call-minutes-confirm]')?.textContent).toBe('Bekræft reservation');
+    } finally { setLanguagePref('en'); }
+    expect(host.used('call_block')).toHaveLength(0);
+    $<HTMLButtonElement>('[data-call-minutes-confirm]')!.click();
+    await vi.waitFor(() => expect($('[data-call-hold-needed]')).toBeNull());
+  });
+
   it('says the hold in Danish too, with the node’s call limit', async () => {
     stubHost({ minutes: 60 });
     setLanguagePref('da');
