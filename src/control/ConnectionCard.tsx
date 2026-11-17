@@ -1,4 +1,5 @@
 import { t as tr } from '../i18n';
+import { isMacOS } from '../platform';
 import { createSignal, Show } from 'solid-js';
 import { usePairingActivity } from '../pairingActivity';
 import type { LinkState } from './types';
@@ -48,7 +49,7 @@ const clock = (ms: number) => new Date(ms).toLocaleTimeString();
  * runs one status read; "Copy details" copies the same facts as text.
  */
 export function connectionSummary(props: { remote: boolean; link: LinkState | null; live: boolean; locked?: boolean; answer: NodeAnswer | null; stun: StunSource; lastCall: LastCall | null }): string[] {
-  const reach = props.remote ? tr('caOverTheNetworkANodeYouRunElsewhere') : tr('caOnThisMac');
+  const reach = props.remote ? tr('caOverTheNetworkANodeYouRunElsewhere') : tr(isMacOS() ? 'caOnThisMac' : 'caOnThisLocalComputer');
   const check = props.locked
     ? tr('caYourNodeIsLocked')
     : props.answer

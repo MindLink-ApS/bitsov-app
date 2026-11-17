@@ -7072,7 +7072,7 @@ const [touchIdOffersShown, setTouchIdOffersShown] = createSignal(0);
 function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: JSX.Element }) {
   const mobile = isMobilePlatform();
   const device = () => mobile ? (deviceWord() === 'phone' ? tr('phone') : deviceWord()) : tr('uiMac');
-  const tap = () => mobile ? tr('caBiometric') : tr('uiTouchID');
+  const tap = () => mobile ? tr('caBiometric') : tr('uiAuthenticatorName');
   const Offer = () => {
     setTouchIdOffersShown((n) => n + 1);
     onCleanup(() => setTouchIdOffersShown((n) => n - 1));
@@ -7087,11 +7087,11 @@ function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: J
           {/* Only promised where the node says it does it; otherwise, said as it is today. */}
           {props.actions.ownerDeviceApproval?.()
             ? tr('uiAfterThatOneTapApprovesAContactHere', tap())
-            : tr('uiYourNodeDoesNotYetAcceptApprovalsIn', mobile ? tr('caBiometric') : tr('uiTouchID'), tap())}
+            : tr('uiYourNodeDoesNotYetAcceptApprovalsIn', mobile ? tr('uiBiometricApprovals') : tr('uiAuthenticatorApprovals'), tap())}
         </p>
         <div class="form-actions">
           <button type="button" class="primary soft" data-touch-id-setup onClick={() => props.actions.openNodeSettings?.()}>
-            {tr('uiSetUp')} {mobile ? tr('caBiometric') : tr('uiTouchID')} {tr('uiApprovals')}
+            {tr('uiSetUp')} {mobile ? tr('uiBiometricApprovals') : tr('uiAuthenticatorApprovals')}
           </button>
         </div>
         <div data-touch-id-stays>{props.stays}</div>
@@ -7288,7 +7288,7 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
           <span aria-hidden="true">{expanded() ? '▾' : '▸'}</span> {tr('uiDetails')}
         </button>
         <p id={detailId} hidden={!expanded()}>
-          {mobile ? tr('extraTheBiometricPrompt') : tr('uiTouchID')} {tr('extraShowsTheSameAmountsForNode')} {shortId(props.peer)}{tr('extraYourNodeChecksEveryPaymentAgainstThemNothing')}
+          {mobile ? tr('extraTheBiometricPrompt') : tr('uiAuthenticatorPrompt')} {tr('extraShowsTheSameAmountsForNode')} {shortId(props.peer)}{tr('extraYourNodeChecksEveryPaymentAgainstThemNothing')}
         </p>
       </div>
     </div>
