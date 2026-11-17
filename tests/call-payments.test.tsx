@@ -418,6 +418,68 @@ describe('paying the minutes of one outgoing call', () => {
     expect(s.deps.pay).toHaveBeenCalledTimes(1);
   });
 
+  it('the call ends while a minute is being paid and its result is lost: the view says so, nothing is paid again', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    let answer: (r: Outcome<CallReceipt>) => void = () => {};
+    const s = session(node, () => new Promise((resolve) => { answer = resolve; }));
+    await s.confirmed();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.deps.pay).toHaveBeenCalledTimes(1);
+    s.minutes.finish();
+    answer(fail('spend_unknown', 'The node did not return a complete response.'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.last().lostMinute).toBe(true);
+    expect(s.stops).toEqual([]);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(s.deps.pay).toHaveBeenCalledTimes(1);
+  });
+
+  it('a minute that came back paid or proven unpaid after the call ended is not lost', async () => {
+    for (const reply of [ok(receipt(0)), fail('not_dispatched', 'Nothing was paid.'), fail('call_not_live', 'Nothing was paid.')]) {
+      const node = fakeNode({ now: () => Date.now() });
+      let answer: (r: Outcome<CallReceipt>) => void = () => {};
+      const s = session(node, () => new Promise((resolve) => { answer = resolve; }));
+      await s.confirmed();
+      s.minutes.start();
+      await vi.advanceTimersByTimeAsync(0);
+      s.minutes.finish();
+      answer(reply);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(s.last().lostMinute).toBe(false);
+      s.minutes.dispose();
+    }
+  });
+
+  it('a paid minute that comes back after the call ended is not unknown, through the whole settlement poll', async () => {
+    for (const [code, undelivered] of [['failed_paid', false], ['payment_settled_undelivered', true]] as const) {
+      const node = fakeNode({ now: () => Date.now() });
+      let answer: (r: Outcome<CallReceipt>) => void = () => {};
+      const s = session(node, () => new Promise((resolve) => { answer = resolve; }));
+      await s.confirmed();
+      s.minutes.start();
+      await vi.advanceTimersByTimeAsync(0);
+      s.minutes.finish();
+      answer(fail(code));
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(s.last().final, code).toBe(true);
+      expect(s.views.some((v) => v.lostMinute), code).toBe(false);
+      expect(s.last().undeliveredMinute, code).toBe(undelivered);
+      expect(s.stops, code).toEqual([]);
+      expect(s.deps.pay, code).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('an unknown minute while the call runs ends it through End, which checks that minute itself', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const s = session(node, async () => fail('spend_unknown', 'The node did not return a complete response.'));
+    await s.confirmed();
+    s.minutes.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.stops.map((x) => x.code)).toEqual(['payment_unknown']);
+    expect(s.last().lostMinute).toBe(false);
+  });
+
   it('Unpaid: the node ended the call after its paid time and grace ran out', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const s = session(node);
@@ -740,7 +802,6 @@ describe('the call engine with paid minutes', () => {
 
   it('a liquidity or grant refusal of the reservation ends the call with a plain reason, nothing paid', async () => {
     for (const [code, message, words] of [
-      ['call_liquidity_insufficient', 'Your node’s channel cannot hold this call’s reservation right now. Nothing was paid.', 'channel cannot hold'],
       ['grant_per_call', 'This is more than the 3,000 sats per payment your node allows. Nothing was sent.', 'reserves the call’s minutes when it rings'],
     ] as const) {
       const e = engine({ status: vi.fn(async () => ok(null)), hold: vi.fn(), pay: vi.fn() }, async () => fail(code, message));
@@ -750,6 +811,21 @@ describe('the call engine with paid minutes', () => {
       expect(e.last().error).toContain(message);
       expect(e.last().paidMsat).toBe(0);
     }
+  });
+
+  it('a liquidity refusal does not only ask for capacity: a node just restarted says the same, and waiting is enough', async () => {
+    for (const [language, wait, capacity] of [['en', 'wait a minute and call again', 'add outbound capacity'], ['da', 'vent et minut og ring igen', 'tilføj udgående kapacitet']] as const) {
+      setLanguagePref(language);
+      const e = engine({ status: vi.fn(async () => ok(null)), hold: vi.fn(), pay: vi.fn() },
+        async () => fail('call_liquidity_insufficient', 'Your node’s channel cannot hold this call’s reservation right now. Nothing was paid. Add outbound capacity, then call again.'));
+      await e.engine.place(A, 'audio', QUOTE);
+      expect(e.last().phase).toBe('ended');
+      expect(e.last().error).toContain(wait);
+      expect(e.last().error).toContain(capacity);
+      expect(e.last().error).not.toContain('Add outbound capacity, then');
+      expect(e.last().paidMsat).toBe(0);
+    }
+    setLanguagePref('system');
   });
 
   it('the box refusing the call for this contact’s budget (grant_recipient) ends it in plain words (EN/DA), nothing held or paid', async () => {
@@ -816,6 +892,34 @@ describe('the call engine with paid minutes', () => {
     await e.engine.receive({ id: 'end', kind: 403, sender: A, recipient: OWN, timestamp: 0, plaintext: JSON.stringify({ v: 1, call_id: ID, reason: 'unpaid' }), payment_amount_msat: 1, admission_operation_id: 'op-400' }, OWN);
     expect(e.last()).toMatchObject({ phase: 'ended', reason: 'unpaid' });
     e.engine.dismiss();
+  });
+
+  it('the first ended view of the owner’s hangup already says closing: a minute lost then is End’s to answer', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const e = engine(minutesOf(node, () => new Promise(() => {})));
+    await e.engine.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(e.last().minutes?.reservation).not.toBeNull());
+    await e.engine.confirmMinutes();
+    await answer(e);
+    void e.engine.hangup();
+    const ended = e.views.find((v) => v.phase === 'ended')!;
+    expect(ended.close).toEqual({ status: 'closing', message: null });
+    expect(e.ended).toEqual([]);
+    await vi.waitFor(() => expect(e.ended).toHaveLength(1));
+    await vi.waitFor(() => expect(e.last().close?.status).toBe('closed'));
+  });
+
+  it('their hangup ends nothing at the host, and the ended card says no closing', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const e = engine(minutesOf(node, () => new Promise(() => {})));
+    await e.engine.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(e.last().minutes?.reservation).not.toBeNull());
+    await e.engine.confirmMinutes();
+    await answer(e);
+    await e.engine.receive({ id: 'bye', kind: 403, sender: A, recipient: OWN, timestamp: 0, plaintext: JSON.stringify({ v: 1, call_id: ID, reason: 'hangup' }), payment_amount_msat: 1, admission_operation_id: 'op-400' }, OWN);
+    await vi.waitFor(() => expect(e.last().phase).toBe('ended'));
+    expect(e.last().close).toBeNull();
+    expect(e.ended).toEqual([]);
   });
 
   it('a stop while the call runs ends it at once, never left connected', async () => {
@@ -1026,7 +1130,7 @@ const paired = { state: 'paired', scopes: ['read', 'receive', 'spend'], node_id:
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 
-function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; grant?: NodeGrantSummary; offer?: Reply; block?: Reply; hold?: Reply; spendRequest?: Reply; ownerCanGrant?: boolean; minutes?: number; endKeepsHold?: boolean; endLeavesUnresolved?: boolean; pairing?: Reply; spend?: SpendView; request?: Reply; budget?: Reply } = {}) {
+function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; grant?: NodeGrantSummary; offer?: Reply; block?: Reply; hold?: Reply; spendRequest?: Reply; ownerCanGrant?: boolean; minutes?: number; endKeepsHold?: boolean; endLeavesUnresolved?: boolean; pairing?: Reply; spend?: SpendView; request?: Reply; reconcile?: Reply; dismiss?: Reply; budget?: Reply } = {}) {
   resetContactsForTests();
   setPetname(A, 'Maya');
   const calls: { cmd: string; args?: unknown }[] = [];
@@ -1091,6 +1195,8 @@ function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; grant?: N
       if (opts.endLeavesUnresolved && node.reservation) { node.reservation.remaining_msat = BLOCK + FEE; node.reservation.released_msat -= BLOCK + FEE; }
       return { op_id: 'end', kind: 'call_hangup', peer: A, call_id: (args as { call_id: string }).call_id, state: 'settled', cap_msat: 6_000, paid_msat: 6_000, message_id: 'hangup' };
     },
+    ...(opts.reconcile ? { spend_reconcile: opts.reconcile } : {}),
+    ...(opts.dismiss ? { spend_dismiss_undelivered: opts.dismiss } : {}),
     op_list: () => ({ operations: [], skipped: 0, has_more: false }),
     live_link: () => null,
     call_media_open: () => null,
@@ -1781,6 +1887,308 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await vi.waitFor(() => expect(host.used('call_media_close').length).toBeGreaterThan(0));
   });
 
+  /** Their hangup arrives while the first minute is being paid; then that minute's result comes back unknown. */
+  async function peerHangsUpOnALostMinute(reconcile: Reply, code = 'spend_unknown', dismiss?: Reply, budget?: Reply) {
+    let lose: (error: unknown) => void = () => {};
+    const host = stubHost({ block: () => new Promise((_, reject) => { lose = reject; }), reconcile, dismiss, budget });
+    await openShell();
+    const callId = await ringAndAnswer(host);
+    await vi.waitFor(() => expect(host.used('call_block')).toHaveLength(1));
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'gone', kind: 403, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, reason: 'hangup' }), payment_amount_msat: 1000, admission_operation_id: 'op-400' } });
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-lost-minute]')).toBeNull();
+    expect(host.used('spend_reconcile')).toHaveLength(0);
+    lose({ code, message: 'Outcome unknown; another spend is blocked until reconciled. The node did not return a complete response.' });
+    return host;
+  }
+  /** The node still holds the reservation, so the card goes on reading it about once a second. */
+  const THROUGH_THE_POLL = 2_500;
+  const FAILED_PAID = 'Paid, and the recipient’s node refused this message for good. The payment is not refundable. Do not send it again.';
+  const STILL_UNKNOWN = { code: 'payment_unknown', message: 'Payment unknown: the original send may still reach your node.' };
+  const NOTHING = 'Not sent - nothing was paid: your node reports no payment for this message. Nothing was dispatched again.';
+
+  it('a minute lost to their hangup: the ended card checks it once by itself, and a settled result needs nothing more', async () => {
+    const host = await peerHangsUpOnALostMinute(() => NOTHING);
+    await vi.waitFor(() => expect($('[data-call-pay-status="checked"]')?.textContent).toBe(NOTHING));
+    expect(host.used('spend_reconcile')).toHaveLength(1);
+    expect($('[data-call-lost-minute]')).toBeNull();
+    expect($('[data-call-panel="ended"] [data-spend-reconcile]')).toBeNull();
+    expect(host.used('call_block')).toHaveLength(1);
+    expect(host.used('op_end_call')).toHaveLength(0);
+  });
+
+  it('a minute lost to their hangup, still unknown: one plain line and one action on the card, and the action clears it', async () => {
+    let settled = false;
+    const host = await peerHangsUpOnALostMinute(() => { if (!settled) throw STILL_UNKNOWN; return NOTHING; });
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).not.toBeNull());
+    expect($('[data-call-lost-minute]')!.textContent).toBe('The result of this call’s last minute is not known yet, so other payments wait until it is checked.');
+    await vi.waitFor(() => expect(host.used('spend_reconcile')).toHaveLength(1));
+    const actions = () => mount.querySelectorAll<HTMLButtonElement>('[data-call-panel="ended"] [data-spend-reconcile]');
+    expect(actions()).toHaveLength(1);
+    expect(actions()[0].textContent).toBe('Check pending result');
+    settled = true;
+    actions()[0].click();
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).toBeNull());
+    expect(host.used('spend_reconcile')).toHaveLength(2);
+    await vi.waitFor(() => expect($('[data-call-pay-status="checked"]')?.textContent).toBe(NOTHING));
+    expect(actions()).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(1);
+    expect(host.used('op_end_call')).toHaveLength(0);
+  });
+
+  it('a check that failed is not run again by the card’s later updates', async () => {
+    const host = await peerHangsUpOnALostMinute(() => { throw STILL_UNKNOWN; });
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).not.toBeNull());
+    const reads = host.used('call_status').length;
+    await new Promise((resolve) => setTimeout(resolve, THROUGH_THE_POLL));
+    expect(host.used('call_status').length).toBeGreaterThan(reads);
+    expect(host.used('spend_reconcile')).toHaveLength(1);
+    expect($('[data-call-lost-minute]')).not.toBeNull();
+  }, 10_000);
+
+  it('a minute refused for good after their hangup is closed at the host: no line, no check, through the settlement poll', async () => {
+    const host = await peerHangsUpOnALostMinute(() => NOTHING, 'failed_paid');
+    await new Promise((resolve) => setTimeout(resolve, THROUGH_THE_POLL));
+    expect($('[data-call-lost-minute]')).toBeNull();
+    expect($('[data-call-panel="ended"] [data-spend-reconcile]')).toBeNull();
+    expect(host.used('spend_reconcile')).toHaveLength(0);
+  }, 10_000);
+
+  // The host's reply while a paid, undelivered record stays pending: every paid action waits.
+  const ACCOUNTED = { code: 'undelivered_pending', message: 'Accounted: 10000 msat paid, and the message is not delivered yet. Your node keeps resending it; nothing was dispatched again.', pending_id: 'rec-9' };
+  const STOPPED = 'Stopped retrying. 10000 msat was paid and the message was not delivered; nothing more will be paid for it.';
+  const UNDELIVERED_LINE = 'This call’s last minute was paid but not delivered, so other payments wait until you stop retrying it.';
+  const actions = (name: string) => mount.querySelectorAll<HTMLButtonElement>(`[data-call-panel="ended"] [${name}]`);
+
+  /** The record stays until the owner stops retrying: the line, one action, through the poll, and then nothing. */
+  async function stoppingClearsIt(host: ReturnType<typeof stubHost>) {
+    await vi.waitFor(() => expect(actions('data-stop-retrying')).toHaveLength(1));
+    expect($('[data-call-lost-minute]')!.textContent).toBe(UNDELIVERED_LINE);
+    expect(actions('data-spend-reconcile')).toHaveLength(0);
+    await new Promise((resolve) => setTimeout(resolve, THROUGH_THE_POLL));
+    expect($('[data-call-lost-minute]')!.textContent).toBe(UNDELIVERED_LINE);
+    expect(actions('data-stop-retrying')).toHaveLength(1);
+    actions('data-stop-retrying')[0].click();
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).toBeNull());
+    expect(host.used('spend_dismiss_undelivered').map((c) => c.args)).toEqual([{ pending_id: 'rec-9' }]);
+    await vi.waitFor(() => expect($('[data-call-pay-status="checked"]')?.textContent).toBe(STOPPED));
+    expect(actions('data-stop-retrying')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(1);
+    expect(host.used('op_end_call')).toHaveLength(0);
+  }
+  const accountedThenStopped = { reconcile: () => { throw ACCOUNTED; }, dismiss: () => STOPPED };
+
+  it('a minute paid and not delivered after their hangup: the card says so, and stopping retries clears it', async () => {
+    let lose: (error: unknown) => void = () => {};
+    const host = stubHost({ block: () => new Promise((_, reject) => { lose = reject; }), ...accountedThenStopped });
+    await openShell();
+    const callId = await ringAndAnswer(host);
+    await vi.waitFor(() => expect(host.used('call_block')).toHaveLength(1));
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'gone', kind: 403, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, reason: 'hangup' }), payment_amount_msat: 1000, admission_operation_id: 'op-400' } });
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    lose({ code: 'payment_settled_undelivered', message: 'Paid, not delivered.', pending_id: 'rec-9', undelivered: { paid_msat: 10_000, retry: false } });
+    await stoppingClearsIt(host);
+    expect(host.used('spend_reconcile')).toHaveLength(1);
+  }, 15_000);
+
+  it('a minute paid and not delivered offers stopping that record while the automatic check is still out', async () => {
+    let lose: (error: unknown) => void = () => {};
+    const host = stubHost({ block: () => new Promise((_, reject) => { lose = reject; }), reconcile: () => new Promise(() => {}), dismiss: () => STOPPED });
+    await openShell();
+    const callId = await ringAndAnswer(host);
+    await vi.waitFor(() => expect(host.used('call_block')).toHaveLength(1));
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'gone', kind: 403, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, reason: 'hangup' }), payment_amount_msat: 1000, admission_operation_id: 'op-400' } });
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    lose({ code: 'payment_settled_undelivered', message: 'Paid, not delivered.', pending_id: 'rec-9', undelivered: { paid_msat: 10_000, retry: false } });
+    await vi.waitFor(() => expect(host.used('spend_reconcile')).toHaveLength(1));
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).not.toBeNull());
+    expect($('[data-call-lost-minute]')!.textContent).toBe(UNDELIVERED_LINE);
+    expect(actions('data-stop-retrying')).toHaveLength(1);
+    expect(actions('data-spend-reconcile')).toHaveLength(0);
+    actions('data-stop-retrying')[0].click();
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).toBeNull());
+    expect(host.used('spend_dismiss_undelivered').map((c) => c.args)).toEqual([{ pending_id: 'rec-9' }]);
+  });
+
+  it('the automatic check returning undelivered_pending keeps the line and the action: the record is still pending', async () => {
+    const other = await peerHangsUpOnALostMinute(accountedThenStopped.reconcile);
+    await vi.waitFor(() => expect(actions('data-stop-retrying')).toHaveLength(1));
+    expect($('[data-call-lost-minute]')!.textContent).toBe(UNDELIVERED_LINE);
+    expect(actions('data-spend-reconcile')).toHaveLength(0);
+    expect(other.used('spend_reconcile')).toHaveLength(1);
+  });
+
+  it('the owner’s check returning undelivered_pending keeps the line and offers stopping retries', async () => {
+    let checks = 0;
+    const host = await peerHangsUpOnALostMinute(() => { if (++checks === 1) throw STILL_UNKNOWN; throw ACCOUNTED; }, 'spend_unknown', accountedThenStopped.dismiss);
+    await vi.waitFor(() => expect(host.used('spend_reconcile')).toHaveLength(1));
+    await vi.waitFor(() => expect(actions('data-spend-reconcile')).toHaveLength(1));
+    actions('data-spend-reconcile')[0].click();
+    await stoppingClearsIt(host);
+    expect(host.used('spend_reconcile')).toHaveLength(2);
+  }, 15_000);
+
+  it('stopping retries that is refused leaves the line and the action', async () => {
+    let refuse = true;
+    const host = await peerHangsUpOnALostMinute(accountedThenStopped.reconcile, 'spend_unknown', () => {
+      if (refuse) throw { code: 'money_busy', message: 'Another payment action is still running. Nothing was changed; try again in a moment.' };
+      return STOPPED;
+    });
+    await vi.waitFor(() => expect(actions('data-stop-retrying')).toHaveLength(1));
+    actions('data-stop-retrying')[0].click();
+    await vi.waitFor(() => expect(host.used('spend_dismiss_undelivered')).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect($('[data-call-lost-minute]')).not.toBeNull();
+    expect(actions('data-stop-retrying')).toHaveLength(1);
+    refuse = false;
+    actions('data-stop-retrying')[0].click();
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).toBeNull());
+  });
+
+  it('the automatic check finding the minute paid settles the line, with what it found', async () => {
+    const host = await peerHangsUpOnALostMinute(() => { throw { code: 'failed_paid', message: FAILED_PAID }; });
+    await vi.waitFor(() => expect($('[data-call-pay-status="checked"]')?.textContent).toBe(FAILED_PAID));
+    await new Promise((resolve) => setTimeout(resolve, THROUGH_THE_POLL));
+    expect($('[data-call-lost-minute]')).toBeNull();
+    expect($('[data-call-panel="ended"] [data-spend-reconcile]')).toBeNull();
+    expect(host.used('spend_reconcile')).toHaveLength(1);
+  }, 10_000);
+
+  it('the owner’s check finding the minute paid settles the line too', async () => {
+    let checks = 0;
+    const host = await peerHangsUpOnALostMinute(() => { if (++checks === 1) throw STILL_UNKNOWN; throw { code: 'failed_paid', message: FAILED_PAID }; });
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).not.toBeNull());
+    await vi.waitFor(() => expect(host.used('spend_reconcile')).toHaveLength(1));
+    $<HTMLButtonElement>('[data-call-panel="ended"] [data-spend-reconcile]')!.click();
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).toBeNull());
+    expect($('[data-call-pay-status="checked"]')?.textContent).toBe(FAILED_PAID);
+  });
+
+  it('a record already stopped from another card settles the line when stopping finds it gone', async () => {
+    const gone = 'That message is no longer waiting for delivery. Nothing was changed.';
+    await peerHangsUpOnALostMinute(accountedThenStopped.reconcile, 'spend_unknown', () => { throw { code: 'retry_unavailable', message: gone }; });
+    await vi.waitFor(() => expect(actions('data-stop-retrying')).toHaveLength(1));
+    actions('data-stop-retrying')[0].click();
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).toBeNull());
+    expect($('[data-call-pay-status="checked"]')?.textContent).toBe(gone);
+  });
+
+  /** The minute is held at the host, so the wallet offers the check too. */
+  const HELD_BUDGET: Reply = () => ({
+    paused: false, waiting_for_owner: false, ceiling_msat: 500_000, max_daily_msat: 100_000_000, spent_msat: 0, unsettled_msat: 10_000,
+    preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }],
+    rows: [{ target: A, room: false, limit_msat: 50_000, spent_msat: 0 }],
+    autopay: { state: 'open', open_until_ms: Date.now() + 86_400_000, ceiling_msat: 500_000, basis: 'node_grant' },
+    window_ms: 600_000, node_grant: null,
+  });
+  async function checkFromTheWallet() {
+    $<HTMLButtonElement>('[data-profile]')!.click();
+    $<HTMLButtonElement>('[data-open-wallet]')!.click();
+    await vi.waitFor(() => expect($('[data-wallet-tab="send"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-wallet-tab="send"]')!.click();
+    await vi.waitFor(() => expect($('[data-wallet-page] [data-spend-reconcile]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-wallet-page] [data-spend-reconcile]')!.click();
+  }
+
+  it('a check from the wallet finding the minute refused for good settles the ended card’s warning', async () => {
+    let checks = 0;
+    const host = await peerHangsUpOnALostMinute(() => { if (++checks === 1) throw STILL_UNKNOWN; throw { code: 'failed_paid', message: FAILED_PAID }; }, 'spend_unknown', undefined, HELD_BUDGET);
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).not.toBeNull());
+    await vi.waitFor(() => expect(host.used('spend_reconcile')).toHaveLength(1));
+    await checkFromTheWallet();
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).toBeNull());
+    expect($('[data-call-pay-status="checked"]')?.textContent).toBe(FAILED_PAID);
+  });
+
+  it('a check from the wallet finding the minute undelivered keeps the card’s warning, now with its action, and stopping from the wallet clears it', async () => {
+    let checks = 0;
+    const host = await peerHangsUpOnALostMinute(() => { if (++checks === 1) throw STILL_UNKNOWN; throw ACCOUNTED; }, 'spend_unknown', accountedThenStopped.dismiss, HELD_BUDGET);
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).not.toBeNull());
+    await vi.waitFor(() => expect(host.used('spend_reconcile')).toHaveLength(1));
+    await checkFromTheWallet();
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')!.textContent).toBe(UNDELIVERED_LINE));
+    expect(actions('data-stop-retrying')).toHaveLength(1);
+    await vi.waitFor(() => expect($('[data-wallet-page] [data-stop-retrying]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-wallet-page] [data-stop-retrying]')!.click();
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).toBeNull());
+    expect(host.used('spend_dismiss_undelivered').map((c) => c.args)).toEqual([{ pending_id: 'rec-9' }]);
+  });
+
+  it('a record stopped mid-call is not the ended card’s minute: their hangup on an unknown minute keeps the lost line and its check', async () => {
+    const MID_CALL = { ...ACCOUNTED, pending_id: 'msg-42' };
+    let lose: (error: unknown) => void = () => {};
+    let checks = 0;
+    const host = stubHost({
+      block: () => new Promise((_, reject) => { lose = reject; }),
+      reconcile: () => { if (++checks === 1) throw MID_CALL; throw STILL_UNKNOWN; },
+      dismiss: () => STOPPED,
+      budget: HELD_BUDGET,
+    });
+    await openShell();
+    const callId = await ringAndAnswer(host);
+    await vi.waitFor(() => expect(host.used('call_block')).toHaveLength(1));
+    // Mid-call: an earlier payment is paid, not delivered, and the owner stops retrying it.
+    await checkFromTheWallet();
+    await vi.waitFor(() => expect($('[data-wallet-page] [data-stop-retrying]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-wallet-page] [data-stop-retrying]')!.click();
+    await vi.waitFor(() => expect(host.used('spend_dismiss_undelivered')).toHaveLength(1));
+    // Their hangup, then the minute in flight comes back unknown.
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'gone', kind: 403, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, reason: 'hangup' }), payment_amount_msat: 1000, admission_operation_id: 'op-400' } });
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    lose({ code: 'spend_unknown', message: 'The node did not return a complete response.' });
+    await vi.waitFor(() => expect(host.used('spend_reconcile')).toHaveLength(2));
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).not.toBeNull());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect($('[data-call-lost-minute]')!.textContent).toBe('The result of this call’s last minute is not known yet, so other payments wait until it is checked.');
+    expect(actions('data-spend-reconcile')).toHaveLength(1);
+    expect(actions('data-stop-retrying')).toHaveLength(0);
+    expect(host.used('spend_dismiss_undelivered').map((c) => c.args)).toEqual([{ pending_id: 'msg-42' }]);
+  });
+
+  it('a check still out says nothing: the line and the link stay, and a failed one changes neither', async () => {
+    let finish: (value: unknown) => void = () => {};
+    const host = await peerHangsUpOnALostMinute(() => new Promise((_, reject) => { finish = reject; }));
+    await vi.waitFor(() => expect(host.used('spend_reconcile')).toHaveLength(1));
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).not.toBeNull());
+    expect(actions('data-spend-reconcile')).toHaveLength(1);
+    finish(STILL_UNKNOWN);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect($('[data-call-lost-minute]')).not.toBeNull();
+    expect(actions('data-spend-reconcile')).toHaveLength(1);
+    expect(actions('data-stop-retrying')).toHaveLength(0);
+  });
+
+  it('says the undelivered minute in Danish too', async () => {
+    setLanguagePref('da');
+    await peerHangsUpOnALostMinute(accountedThenStopped.reconcile);
+    await vi.waitFor(() => expect(actions('data-stop-retrying')).toHaveLength(1));
+    expect($('[data-call-lost-minute]')!.textContent).toBe('Opkaldets sidste minut blev betalt, men ikke leveret, så andre betalinger venter, til du stopper genforsøgene.');
+    expect(actions('data-stop-retrying')[0].textContent).toBe('Stop genforsøg');
+  });
+
+  it('says the lost minute in Danish too', async () => {
+    setLanguagePref('da');
+    await peerHangsUpOnALostMinute(() => { throw STILL_UNKNOWN; });
+    await vi.waitFor(() => expect($('[data-call-lost-minute]')).not.toBeNull());
+    expect($('[data-call-lost-minute]')!.textContent).toBe('Resultatet af opkaldets sidste minut kendes ikke endnu, så andre betalinger venter, til det er kontrolleret.');
+    expect($('[data-call-panel="ended"] [data-spend-reconcile]')!.textContent).toBe('Kontrollér afventende resultat');
+  });
+
+  it('a minute in flight when the owner hangs up: End answers for it, and the card adds no check of its own', async () => {
+    let lose: (error: unknown) => void = () => {};
+    const host = stubHost({ block: () => new Promise((_, reject) => { lose = reject; }), reconcile: () => NOTHING });
+    await openShell();
+    await ringAndAnswer(host);
+    await vi.waitFor(() => expect(host.used('call_block')).toHaveLength(1));
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect(host.used('op_end_call')).toHaveLength(1));
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    lose({ code: 'spend_unknown', message: 'The node did not return a complete response.' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect($('[data-call-lost-minute]')).toBeNull();
+    expect(host.used('spend_reconcile')).toHaveLength(0);
+  });
+
   it('payment_failed: a refused minute ends the call with a plain reason', async () => {
     const host = stubHost({ block: () => { throw { code: 'grant_paused', message: 'Your node paused spending after failed payments. Nothing was sent.' }; } });
     await openShell();
@@ -1919,7 +2327,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect($('[data-call-ended]')?.textContent).toBe('Your node’s channel cannot hold this call’s reservation right now. Nothing was paid. Add outbound capacity, then call again.');
+    expect($('[data-call-ended]')?.textContent).toBe('Your node’s channel cannot hold this call’s reservation right now. Nothing was paid. If your node just restarted, wait a minute and call again. If this keeps happening, add outbound capacity.');
     expect($('[data-call-paid="nothing"]')).not.toBeNull();
     expect(host.used('call_block')).toHaveLength(0);
   });

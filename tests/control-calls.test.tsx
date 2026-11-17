@@ -3622,6 +3622,76 @@ describe('calls in the shell', () => {
     expect(host.used('call_signal')).toHaveLength(0);
   });
 
+  it('an offline contact is offline, not a node that does not take calls, and back online their price is read again', async () => {
+    let connected = false;
+    const host = stubHost({
+      peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected, fingerprint: null }],
+      call_quote: () => connected ? QUOTE : ({ ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null }),
+    });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('title')).toBe('Maya is offline, so you can’t call them right now.'));
+    expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(true);
+    connected = true;
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false), { timeout: 20_000 });
+    expect($('[data-call="audio"]')!.getAttribute('title')).not.toMatch(/offline|does not take calls/);
+    expect(host.used('call_quote').length).toBeGreaterThan(1);
+  }, 30_000);
+
+  it('a missed call from an offline contact: Call back says offline, and once they are back it reads the price again and rings', async () => {
+    let connected = false;
+    const host = stubHost({
+      messages_list: () => [],
+      peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected, fingerprint: null }],
+      call_quote: () => connected ? QUOTE : ({ ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null }),
+    });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { media: 'audio', sdp: 'offer' }) });
+    host.emitLive({ type: 'message', room_id: null, message: msg(403, { reason: 'hangup' }) });
+    await vi.waitFor(() => expect($('[data-missed-call] [data-call-back]')).not.toBeNull());
+    await vi.waitFor(() => expect($('[data-call-back]')!.getAttribute('title')).toBe('Maya is offline, so you can’t call them right now.'));
+    expect($<HTMLButtonElement>('[data-call-back]')!.disabled).toBe(true);
+    connected = true;
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-back]')!.disabled).toBe(false), { timeout: 20_000 });
+    expect($('[data-call-back]')!.getAttribute('title')).not.toMatch(/offline|does not take calls/);
+    expect(host.used('call_quote').length).toBeGreaterThan(2);
+  }, 30_000);
+
+  it.each(['price', 'refusal'] as const)('a %s read while they were offline, answering after the read on their return, changes nothing', async (late) => {
+    const STALE = 'Their node did not answer in time.';
+    let connected = false;
+    let answerOffline: () => void = () => {};
+    const host = stubHost({
+      peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected, fingerprint: null }],
+      call_quote: () => {
+        if (connected) return QUOTE;
+        return new Promise((resolve, reject) => {
+          answerOffline = () => late === 'price'
+            ? resolve({ ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null })
+            : reject({ code: 'price_quote_unavailable', message: STALE });
+        });
+      },
+    });
+    await openShell();
+    await vi.waitFor(() => expect(host.used('call_quote').length).toBeGreaterThan(0));
+    connected = true;
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false), { timeout: 20_000 });
+    const online = $('[data-call="audio"]')!.getAttribute('title');
+    answerOffline();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false);
+    expect($('[data-call="audio"]')!.getAttribute('title')).toBe(online);
+  }, 30_000);
+
+  it('says an offline contact in Danish too', async () => {
+    stubHost({
+      peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: false, fingerprint: null }],
+      call_quote: () => ({ ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null }),
+    });
+    setLanguagePref('da');
+    await openShell();
+    await vi.waitFor(() => expect($('[data-call="audio"]')!.getAttribute('title')).toBe('Maya er offline, så du kan ikke ringe til dem lige nu.'));
+  });
+
   it('puts the cost in the accessible names and lets the caller cancel before paying', async () => {
     const host = stubHost();
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: () => new Promise<MediaStream>(() => {}) } });

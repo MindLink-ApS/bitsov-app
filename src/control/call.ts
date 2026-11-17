@@ -305,6 +305,8 @@ export function callRefusal(error: ActionError): string {
   // The node checked the offer against the minutes agreed before Ring (genome N3) and refused it.
   if (error.code === 'call_offer_price_above_consent') return tr('caMinutesOfferPriceAboveConsent');
   if (error.code === 'call_offer_hold_above_consent') return tr('caMinutesOfferHoldAboveConsent');
+  // Also what a node says while its Lightning link comes back after a restart: not only a lack of capacity.
+  if (error.code === 'call_liquidity_insufficient') return tr('caMinutesLiquidityRefused');
   // The box's budget for this contact could not hold the call's reservation: say what to do, plainly.
   if (error.code === 'grant_recipient') return tr('caCallContactBudgetRefused');
   // The grant refusals name a per-payment limit; for a call it is the reservation that did not fit.
@@ -724,9 +726,13 @@ export function createCallEngine(deps: CallDeps) {
     minutes = null;
     teardown();
     healedRefusal = null;
+    // Ending at the host starts now, though it waits for local teardown: a result
+    // that arrives meanwhile is End's to answer, so the card says it is closing.
+    const closingNow = endAtHost && !!deps.endCall && ids.some((id) => !closing.has(id));
     // A stop that already ended the call stays said; one still in its grace does not.
     set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null,
-      stopped: view.stopped?.endsAt === null ? view.stopped : null });
+      stopped: view.stopped?.endsAt === null ? view.stopped : null,
+      ...(closingNow ? { close: { status: 'closing' as const, message: null } } : {}) });
     if (session) { if (view.outgoing) session.finish(); else session.dispose(); }
     const recorded = record && peer ? Promise.all(operations.map(([operationId, wireCallId]) => closeAdmission(operationId, peer, wireCallId))) : Promise.resolve();
     if (endAtHost && ids.length) void recorded.then(() => closeAdmissions(ids, callId));
