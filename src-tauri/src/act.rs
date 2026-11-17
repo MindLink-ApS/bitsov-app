@@ -626,6 +626,17 @@ impl SpendGate {
         self.pending = Some(elevation);
     }
 
+    /// A replacement proposal does not change an existing window's authority
+    /// or invalidate actions already preparing under its generation.
+    pub fn set_replacement_pending(&mut self, elevation: Elevation, now_ms: u64) {
+        self.settle(now_ms);
+        if self.open.is_some() {
+            self.pending = Some(elevation);
+        } else {
+            self.set_pending(elevation);
+        }
+    }
+
     pub fn pending(&self) -> Option<&Elevation> {
         self.pending.as_ref()
     }
@@ -650,11 +661,12 @@ impl SpendGate {
         Ok(())
     }
 
-    /// The owner's grant arrived for something other than this window (a budget
-    /// approval): the request is answered, and the window stays closed.
+    /// Forget an answered or withdrawn request without changing an existing
+    /// window. A request on its own grants no window authority.
     pub fn clear_pending(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
         self.pending = None;
+        if self.open.is_some() { return; }
+        self.generation = self.generation.wrapping_add(1);
         self.armed_by_request = None;
         self.expired = false;
         self.lapse = None;
@@ -662,8 +674,9 @@ impl SpendGate {
 
     /// The owner's request lapsed on the node; the owner may ask again.
     pub fn pending_expired(&mut self, lapse: Lapse) {
-        self.generation = self.generation.wrapping_add(1);
         self.pending = None;
+        if self.open.is_some() { return; }
+        self.generation = self.generation.wrapping_add(1);
         self.armed_by_request = None;
         self.expired = true;
         self.lapse = Some(lapse);
@@ -684,10 +697,12 @@ impl SpendGate {
             if p.expires_at_ms <= now_ms {
                 // A request this node could never grant (a sidecar) offers no Ask again.
                 let lapse = p.owner_can_grant.then_some(Lapse::Expired);
-                self.generation = self.generation.wrapping_add(1);
                 self.pending = None;
-                self.expired = true;
-                self.lapse = lapse;
+                if self.open.is_none() {
+                    self.generation = self.generation.wrapping_add(1);
+                    self.expired = true;
+                    self.lapse = lapse;
+                }
             }
         }
     }
@@ -1780,6 +1795,31 @@ mod tests {
         assert!(!gate.matches_poll(generation, &other, 1));
         gate.lock();
         assert!(!gate.matches_poll(generation, &pending, 1));
+    }
+
+    #[test]
+    fn replacement_request_lapse_keeps_the_original_window_and_fence() {
+        for ending in ["clear", "expired", "lost", "deadline"] {
+            let mut gate = SpendGate::default();
+            gate.set_pending(Elevation { op_id: "ab12".into(), expires_at_ms: 1_900,
+                owner_action: "konsensus grant".into(), owner_can_grant: true });
+            gate.arm_pending_granted_until(1_000, 2_000, SpendBasis::NodeGrant, Some("cd34"));
+            let before = serde_json::to_value(gate.view(1_100)).unwrap();
+            let generation = gate.generation();
+            let pending = Elevation { op_id: "ef56".into(), expires_at_ms: 1_500,
+                owner_action: "konsensus grant".into(), owner_can_grant: true };
+            gate.set_replacement_pending(pending.clone(), 1_100);
+            match ending {
+                "clear" => gate.clear_pending(),
+                "expired" => gate.pending_expired(Lapse::Expired),
+                "lost" => gate.pending_expired(Lapse::Lost),
+                _ => { gate.view(1_500); }
+            }
+            assert_eq!(serde_json::to_value(gate.view(1_500)).unwrap(), before, "{ending}");
+            gate.check_generation(generation, 1_500).unwrap();
+            assert!(!gate.matches_poll(generation, &pending, 1_500));
+            assert_eq!(gate.check(2_000).unwrap_err().code, "spend_expired");
+        }
     }
 
     #[test]

@@ -2108,6 +2108,35 @@ describe('calls in the shell', () => {
     FakePc.made[0].connect();
     await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
   }
+
+  it.each(['en', 'da'] as const)('a refused recovery offer keeps budget replacement out of the live call (%s)', async lang => {
+    let offers = 0;
+    const host = payHost({ call_signal: (args) => {
+      if (args!.kind === 400 && ++offers === 2) throw { code: 'grant_exhausted', message: 'Recovery exceeds the remaining grant.' };
+      return { message_id: 'sig', kind: args!.kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+    } });
+    await liveCall();
+    setLanguagePref(lang);
+    const pc = FakePc.made[0];
+    const callId = JSON.parse(host.used('call_signal')[0].args!.plaintext as string).call_id;
+    host.emitLive({ type: 'message', room_id: null, message: msg(401, { call_id: callId, sdp: 'v=0 answer' }) });
+    await vi.waitFor(() => expect(pc.remote).not.toBeNull());
+    vi.useFakeTimers();
+    pc.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.used('call_signal').filter(c => c.args!.kind === 400)).toHaveLength(2);
+    expect(text('[data-call-panel="reconnecting"]')).toContain('Recovery exceeds the remaining grant.');
+    expect($('[data-call-budget-request]')).toBeNull();
+    expect($('[data-call-approval]')).toBeNull();
+    expect(host.used('spend_request')).toHaveLength(0);
+    pc.connect();
+    expect($('[data-call-panel="live"]')).not.toBeNull();
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.used('op_end_call')).toHaveLength(1);
+    expect($('[data-call-panel="ended"]')).not.toBeNull();
+    expect(host.used('spend_request')).toHaveLength(0);
+  });
   function enterCallAmount(value = '5') {
     $<HTMLButtonElement>('[data-call-pay]')!.click();
     const input = $<HTMLInputElement>('[data-in-call-pay] [data-pay-amount]')!;
