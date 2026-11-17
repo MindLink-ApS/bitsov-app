@@ -330,7 +330,7 @@ pub fn released_without_payment(body: &str, operation_id: &str) -> bool {
 
 /// The owner's words for a recipient the node could not reach. The node's own
 /// wording promises a queue, but a released operation is not sent later.
-pub const RECIPIENT_OFFLINE: &str = "They\u{2019}re offline. Nothing was sent or paid.";
+pub const RECIPIENT_OFFLINE: &str = "They’re offline. Nothing was sent or paid.";
 
 /// The owner's words for that refusal. Only the wording reads the node's text.
 pub fn released_refusal_message(body: &str) -> String {
