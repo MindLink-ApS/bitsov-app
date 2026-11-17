@@ -1466,6 +1466,10 @@ export function ControlCenter(props: Props) {
     setCallApproval(true);
     queueMicrotask(() => (callPanel?.querySelector<HTMLElement>('[data-call-approve]') ?? callPanel)?.focus());
   };
+  // The call card floats at the bottom right; while it shows, it sits above the open chat's composer,
+  // so hang-up (or Approve) is never painted over Send, + or the microphone.
+  const callCardShown = createMemo(() => callView().phase !== 'idle' || callApproval());
+  createEffect(() => { if (callCardShown()) onCleanup(keepCallCardOverComposer()); });
   const callBudgetCovered = () => {
     const requested = callBudgetMsat();
     const grant = budget()?.node_grant;
@@ -3741,7 +3745,19 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
       </Show>
       <Show when={armed()}>
         {(media) => (
-          <div class="call-confirm" role="dialog" aria-label={`${callWord(media())} ${props.name}?`} data-call-confirm-box={media()}>
+          <div class="call-confirm" role="dialog" aria-label={`${callWord(media())} ${props.name}?`} data-call-confirm-box={media()}
+            onKeyDown={(e) => {
+              // Tab and Shift-Tab stay inside the confirm and wrap, as in the other sheets: focus starts
+              // on Ring, the last control, and leaving the box closes it, so Cancel was out of reach.
+              // Each step is made here, since WebKit's own Tab order can skip buttons.
+              if (e.key !== 'Tab') return;
+              const controls = [...e.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), summary, a[href]')];
+              e.preventDefault();
+              if (controls.length === 0) return;
+              const at = controls.indexOf(document.activeElement as HTMLElement);
+              const next = at < 0 ? (e.shiftKey ? controls.length - 1 : 0) : (at + (e.shiftKey ? -1 : 1) + controls.length) % controls.length;
+              controls[next].focus();
+            }}>
             <p class="call-confirm-text">
               <strong>{callWord(media())} {props.name}?</strong>
               <Show when={priceReady() && cost() !== null}>{' '}<span class="hint">{tr('uiUpTo105')} {fmtAmount(cost()!)}{tr('uiNothingIsPaidUntilYouPressRing')}</span></Show>
@@ -5147,6 +5163,46 @@ function followAnchor(pop: HTMLElement, anchor: HTMLElement, align: 'start' | 'e
     vv?.removeEventListener('scroll', place);
     ro?.disconnect();
     for (const name of ['--overlay-room', 'bottom', 'left']) pop.style.removeProperty(name);
+  };
+}
+
+/**
+ * While the call card shows: how far up from the bottom of the window the open chat's composer
+ * starts, as `--call-composer-clear` on the page (0 with no composer), so the card's CSS can sit
+ * above it. Read again when the window, the composer or the open chat changes.
+ */
+function keepCallCardOverComposer(): () => void {
+  const root = document.documentElement;
+  let frame = 0;
+  let watched: Element | null = null;
+  const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(() => schedule()) : null;
+  const measure = () => {
+    frame = 0;
+    const composer = [...document.querySelectorAll('section.track .composer')].find((el) => el.getClientRects().length > 0) ?? null;
+    if (composer !== watched) {
+      if (watched) ro?.unobserve(watched);
+      if (composer) ro?.observe(composer);
+      watched = composer;
+    }
+    const layoutH = root.clientHeight || window.innerHeight;
+    const clear = composer ? Math.max(0, Math.ceil(layoutH - composer.getBoundingClientRect().top)) : 0;
+    root.style.setProperty('--call-composer-clear', `${clear}px`);
+  };
+  function schedule() { if (!frame) frame = requestAnimationFrame(measure); }
+  measure();
+  // A chat opened, closed or switched swaps or hides the composer: read again once per frame at most.
+  const mo = new MutationObserver(schedule);
+  mo.observe(document.querySelector('.cc') ?? document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'inert'] });
+  const vv = window.visualViewport;
+  window.addEventListener('resize', schedule);
+  vv?.addEventListener('resize', schedule);
+  return () => {
+    if (frame) cancelAnimationFrame(frame);
+    mo.disconnect();
+    ro?.disconnect();
+    window.removeEventListener('resize', schedule);
+    vv?.removeEventListener('resize', schedule);
+    root.style.removeProperty('--call-composer-clear');
   };
 }
 
