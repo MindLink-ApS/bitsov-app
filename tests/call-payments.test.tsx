@@ -802,7 +802,6 @@ describe('the call engine with paid minutes', () => {
 
   it('a liquidity or grant refusal of the reservation ends the call with a plain reason, nothing paid', async () => {
     for (const [code, message, words] of [
-      ['call_liquidity_insufficient', 'Your node’s channel cannot hold this call’s reservation right now. Nothing was paid.', 'channel cannot hold'],
       ['grant_per_call', 'This is more than the 3,000 sats per payment your node allows. Nothing was sent.', 'reserves the call’s minutes when it rings'],
     ] as const) {
       const e = engine({ status: vi.fn(async () => ok(null)), hold: vi.fn(), pay: vi.fn() }, async () => fail(code, message));
@@ -812,6 +811,21 @@ describe('the call engine with paid minutes', () => {
       expect(e.last().error).toContain(message);
       expect(e.last().paidMsat).toBe(0);
     }
+  });
+
+  it('a liquidity refusal does not only ask for capacity: a node just restarted says the same, and waiting is enough', async () => {
+    for (const [language, wait, capacity] of [['en', 'wait a minute and call again', 'add outbound capacity'], ['da', 'vent et minut og ring igen', 'tilføj udgående kapacitet']] as const) {
+      setLanguagePref(language);
+      const e = engine({ status: vi.fn(async () => ok(null)), hold: vi.fn(), pay: vi.fn() },
+        async () => fail('call_liquidity_insufficient', 'Your node’s channel cannot hold this call’s reservation right now. Nothing was paid. Add outbound capacity, then call again.'));
+      await e.engine.place(A, 'audio', QUOTE);
+      expect(e.last().phase).toBe('ended');
+      expect(e.last().error).toContain(wait);
+      expect(e.last().error).toContain(capacity);
+      expect(e.last().error).not.toContain('Add outbound capacity, then');
+      expect(e.last().paidMsat).toBe(0);
+    }
+    setLanguagePref('system');
   });
 
   it('the box refusing the call for this contact’s budget (grant_recipient) ends it in plain words (EN/DA), nothing held or paid', async () => {
@@ -2009,7 +2023,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect($('[data-call-ended]')?.textContent).toBe('Your node’s channel cannot hold this call’s reservation right now. Nothing was paid. Add outbound capacity, then call again.');
+    expect($('[data-call-ended]')?.textContent).toBe('Your node’s channel cannot hold this call’s reservation right now. Nothing was paid. If your node just restarted, wait a minute and call again. If this keeps happening, add outbound capacity.');
     expect($('[data-call-paid="nothing"]')).not.toBeNull();
     expect(host.used('call_block')).toHaveLength(0);
   });

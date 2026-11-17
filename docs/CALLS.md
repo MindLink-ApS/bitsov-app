@@ -386,7 +386,8 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   allowed, for this operation id. Compose writes that only after `proven_unpaid`,
   and a released row is never paid unless the same id is posted again. So for an
   attempt that was this id's first, the app reads it as `not_dispatched`, for
-  any paid send: nothing is fenced and no check is needed. A `prepared` row, a
+  any paid send: nothing is fenced and no check is needed, and the owner reads
+  "They’re offline. Nothing was sent or paid.", since nothing is queued. A `prepared` row, a
   hash, an amount, or a retry of an id the node already held stays unknown.
 
   **Limit on node rc21.** While an earlier paid admission to this contact is in
