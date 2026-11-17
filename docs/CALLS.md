@@ -352,7 +352,14 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   hangup, its error carries the pending id, the card says the result is not
   known yet, and the node ends the call itself once its paid time runs out.
   When the admission is already closed (a peer hangup), End does not reconcile,
-  and a lost minute stays pending until the owner's check.
+  and a lost minute stays pending. The ended card then runs the owner's check
+  (`spend_reconcile`, the same read and abandon) once by itself. If that cannot
+  settle it, the card keeps one line saying other payments wait, and the "Check
+  pending result" link. A minute that came back or checks as paid is not unknown.
+  `failed_paid` is accounted and its record cleared, so the card has nothing to
+  add. Paid and not delivered (`payment_settled_undelivered`,
+  `undelivered_pending`) stays pending at the host and holds other paid actions, so
+  the card says that and offers "Stop retrying", which releases the record.
 - **A callee catching up.** Their node refuses a minute's invoice while it syncs:
   503 `peer_not_ready`. When the caller's node also records that attempt as
   `released` with no hash and nothing settled, the host reads it as proven unpaid,
@@ -379,7 +386,8 @@ down per block, released on end, reported on `GET /api/v1/calls?peer=`).
   allowed, for this operation id. Compose writes that only after `proven_unpaid`,
   and a released row is never paid unless the same id is posted again. So for an
   attempt that was this id's first, the app reads it as `not_dispatched`, for
-  any paid send: nothing is fenced and no check is needed. A `prepared` row, a
+  any paid send: nothing is fenced and no check is needed, and the owner reads
+  "They’re offline. Nothing was sent or paid.", since nothing is queued. A `prepared` row, a
   hash, an amount, or a retry of an id the node already held stays unknown.
 
   **Limit on node rc21.** While an earlier paid admission to this contact is in

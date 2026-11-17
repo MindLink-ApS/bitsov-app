@@ -504,10 +504,16 @@ impl From<&RemoteError> for ConnectionError {
     }
 }
 
-// BSD sockets cannot definitively distinguish an iOS privacy denial from an
-// unavailable route. Preserve these classes without asserting permission was
-// denied; a timeout/refusal alone is not evidence of a privacy restriction.
-fn classify_connect_error(error: std::io::Error, ios: bool, endpoint: &str) -> RemoteError {
+/// Platforms that gate connections to local addresses behind a Local Network
+/// permission: iOS, and macOS 15 and later. On these a denial is reported as
+/// `LocalNetwork`, so the tester is pointed at the setting instead of a
+/// generic "unreachable".
+const LOCAL_NETWORK_PRIVACY: bool = cfg!(any(target_os = "ios", target_os = "macos"));
+
+// BSD sockets cannot definitively distinguish a Local Network privacy denial
+// from an unavailable route. Preserve these classes without asserting permission
+// was denied; a timeout/refusal alone is not evidence of a privacy restriction.
+fn classify_connect_error(error: std::io::Error, local_network_privacy: bool, endpoint: &str) -> RemoteError {
     use std::io::ErrorKind;
     let local = endpoint_parts(endpoint).is_ok_and(|(host, _)| {
         match host.parse::<std::net::IpAddr>() {
@@ -516,12 +522,17 @@ fn classify_connect_error(error: std::io::Error, ios: bool, endpoint: &str) -> R
             Err(_) => host.trim_end_matches('.').to_ascii_lowercase().ends_with(".local"),
         }
     });
-    if ios && local && matches!(error.kind(), ErrorKind::PermissionDenied | ErrorKind::NetworkDown
+    if local_network_privacy && local && matches!(error.kind(), ErrorKind::PermissionDenied | ErrorKind::NetworkDown
         | ErrorKind::NetworkUnreachable | ErrorKind::HostUnreachable) {
         RemoteError::LocalNetwork
     } else {
         RemoteError::HandshakeUnavailable
     }
+}
+
+/// A connect failure on this platform, classified as above.
+fn connect_error(error: std::io::Error, endpoint: &str) -> RemoteError {
+    classify_connect_error(error, LOCAL_NETWORK_PRIVACY, endpoint)
 }
 
 /// Exact UTF-8 string signed by the node for the pairing link.
@@ -2036,7 +2047,7 @@ async fn connect_bound(
             let target = endpoint;
             let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(target))
                 .await.map_err(|_| RemoteError::HandshakeUnavailable)?
-                .map_err(|error| classify_connect_error(error, cfg!(target_os = "ios"), endpoint))?;
+                .map_err(|error| connect_error(error, endpoint))?;
             let (noise, hash) = pinned_handshake_bound(&mut stream, descriptor, key).await?;
             Ok::<_, RemoteError>((stream, noise, hash))
         }.await;
@@ -5244,6 +5255,18 @@ mod onboarding_error_tests {
         for endpoint in ["box.local:3141", "[fe80::123]:3141", "[fd00::123]:3141", "10.0.0.2:3141"] {
             assert!(matches!(classify_connect_error(std::io::Error::from(std::io::ErrorKind::NetworkDown), true, endpoint), RemoteError::LocalNetwork));
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_macos_local_network_denial_points_at_the_setting() {
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::HostUnreachable] {
+            let error = connect_error(std::io::Error::from(kind), "10.0.0.2:9735");
+            assert!(matches!(error, RemoteError::LocalNetwork), "{kind:?}");
+            assert!(error.to_string().contains("Local Network permission"));
+        }
+        assert!(matches!(connect_error(std::io::Error::from(std::io::ErrorKind::TimedOut), "10.0.0.2:9735"), RemoteError::HandshakeUnavailable));
+        assert!(matches!(connect_error(std::io::Error::from(std::io::ErrorKind::HostUnreachable), "example.com:9735"), RemoteError::HandshakeUnavailable));
     }
 
     #[test]

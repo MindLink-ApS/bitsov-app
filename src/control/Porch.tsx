@@ -135,10 +135,13 @@ export function PorchPanel(props: Props) {
             {tr('caYourNodeDoesNotMakePorchReadsYetUpdate')}</p>
         }
       >
+        <Show when={props.peersFailed}>
+          <p class="err-note" role="status" data-porch-peers-failed>{tr('caCouldNotLoadContacts')}</p>
+        </Show>
         <Show
           when={readable().length > 0}
           fallback={
-            <Show when={!props.peersFailed} fallback={<p class="err-note" role="status" data-porch-peers-failed>{tr('caCouldNotLoadContacts')}</p>}>
+            <Show when={!props.peersFailed}>
               <p class="hint" data-porch-none>
                 {tr('caNoConnectedContactOffersPorchReadsRightNowContacts')}</p>
             </Show>
