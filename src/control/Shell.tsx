@@ -5234,6 +5234,10 @@ function Composer(props: {
   // Bumped when the track changes or the composer goes away: a microphone
   // prompt answered after that must not start recording for another contact.
   let voiceGeneration = 0;
+  // Bumped by the owner's own attachment edits (a pick, Remove, Close). A clip
+  // that finishes after one of them must not replace or reopen that choice.
+  // Attach's own switch to the file panel is not an edit.
+  let attachmentEdit = 0;
   const dropRecording = () => {
     voiceGeneration++;
     const r = untrack(recording);
@@ -5272,9 +5276,10 @@ function Composer(props: {
     // Capture before await: a track switch bumps voiceGeneration and must not
     // land this clip as the new track's unsent preview.
     const generation = voiceGeneration;
+    const edit = attachmentEdit;
     setRecording(null);
     const clip = await r.rec.stop();
-    if (generation !== voiceGeneration) return;
+    if (generation !== voiceGeneration || edit !== attachmentEdit) return;
     composerRevision++;
     if (!clip) {
       setNote(tr('uiNothingWasRecorded'));
@@ -5878,6 +5883,7 @@ function Composer(props: {
   /** Pay / Request / File panels close back to the single message bar. */
   /** The file went: back to the message box, ready to type. A failed send never comes here, so it keeps its file. */
   const fileGone = () => {
+    attachmentEdit++;
     setFile(null);
     if (fileInput) fileInput.value = '';
     setMode('message');
@@ -5885,6 +5891,7 @@ function Composer(props: {
     if (!isMobilePlatform()) queueMicrotask(() => draftInput?.focus());
   };
   const closePanel = () => {
+    attachmentEdit++;
     composerRevision++;
     if (mode() === 'file') {
       setFile(null);
@@ -6746,6 +6753,7 @@ function Composer(props: {
         tabindex="-1"
         data-file-input
         onChange={(e) => {
+          attachmentEdit++;
           composerRevision++;
           const picked = e.currentTarget.files?.[0] ?? null;
           // Said at once, before any price or Send: this file can never go.
@@ -7021,11 +7029,12 @@ function Composer(props: {
                     data-attach={m === 'file' ? '' : undefined}
                     onClick={() => {
                       setMenuOpen(false);
-                      // The file panel takes the bar's place, Stop included. Finish an active
+                      // The file panel takes the bar's place, Stop included. Settle the
                       // recording first, as leaving the window does: the clip stays as the
-                      // unsent preview, and a file picked next replaces it. Not every chooser
-                      // blurs the window, so this cannot be left to blur.
-                      if (m === 'file' && recording()) void stopRecording();
+                      // unsent preview unless a pick, Remove or Close comes before it lands.
+                      // Not every chooser blurs the window, so this cannot be left to blur.
+                      // The chooser still opens in this same press.
+                      if (m === 'file') onLeave();
                       if (m === 'file') fileInput?.click();
                       // Reselecting the active mode is not an edit: it must not
                       // detach an in-flight send from the draft it will clear.
