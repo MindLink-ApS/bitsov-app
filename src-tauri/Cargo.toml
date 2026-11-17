@@ -92,6 +92,9 @@ dev-node = []
 # Sealed call audio, a test build only (src/control/call_seal.rs). Off by default.
 # Build with VITE_CALL_SEAL=sealed as well: build.rs refuses one without the other.
 # Without it, no seal command, permission, capability or direct dependency exists.
+# Not wired (src/mcp.rs, docs/AI-MCP-DESIGN.md): MCP client grant checker only.
+# No command, listener or payment path uses it. Off by default.
+mcp-grant = []
 call-seal = ["dep:chacha20poly1305", "blake3/zeroize", "x25519-dalek/zeroize"]
 
 [dependencies.mock-node]
