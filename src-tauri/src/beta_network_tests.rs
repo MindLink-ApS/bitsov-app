@@ -602,8 +602,8 @@ fn bearer_recorder() -> (String, Arc<Mutex<Vec<Option<String>>>>) {
 
 /// A credential replaced right after a request passed its network check must
 /// not ride that check: the request carries the checked credential or nothing.
-#[test]
-fn beta_request_never_carries_a_credential_replaced_after_its_network_check() {
+#[tokio::test]
+async fn beta_request_never_carries_a_credential_replaced_after_its_network_check() {
     let (base, seen) = bearer_recorder();
     let mut state = NodeState::for_identifier(BETA);
     assert!(state.signet_only);
@@ -611,51 +611,67 @@ fn beta_request_never_carries_a_credential_replaced_after_its_network_check() {
     *state.token.lock().unwrap() = Some("tok.checked".into());
     let epoch = *state.network_auth_epoch.lock().unwrap();
     *state.network_verified.lock().unwrap() = Some(epoch);
-    let state = Arc::new(state);
-    let invoice = |state: Arc<NodeState>| std::thread::spawn(move || {
-        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
-            .block_on(call_api(&state, reqwest::Method::POST, "/payments/invoice", Some(serde_json::json!({}))))
-    });
 
-    // Hold the credential so the request stops after its check, before dispatch.
-    let held = state.token.lock().unwrap();
-    let request = invoice(state.clone());
-    std::thread::sleep(Duration::from_millis(300));
+    // Stop the request after its network check, before dispatch.
+    let (arrived, release) = pause_points::arm(&state.api_base, "after_network_check");
+    let request = call_api(&state, reqwest::Method::POST, "/payments/invoice", Some(serde_json::json!({})));
+    tokio::pin!(request);
+    tokio::select! {
+        _ = arrived.notified() => {},
+        result = &mut request => panic!("the request ended before its network check: {result:?}"),
+    }
     // A new sign-in publishes its credential as `authenticate` does: under the
     // network authority, the old check is cleared and the new credential set.
-    let (cleared, wait_cleared) = std::sync::mpsc::channel();
-    let (installed, wait_installed) = std::sync::mpsc::channel::<()>();
-    let replacement = {
-        let state = state.clone();
-        std::thread::spawn(move || {
-            let _authority = state.network_auth_epoch.lock().unwrap();
-            *state.network_verified.lock().unwrap() = None;
-            cleared.send(()).unwrap();
-            wait_installed.recv().unwrap();
-        })
-    };
-    let mut held = Some(held);
-    if wait_cleared.recv_timeout(Duration::from_millis(500)).is_ok() {
-        **held.as_mut().unwrap() = Some("tok.unchecked".into());
-        drop(held.take());
-    } else {
-        // The request holds the authority through dispatch; replace after it.
-        drop(held.take());
-        wait_cleared.recv().unwrap();
+    {
+        let _authority = state.network_auth_epoch.lock().unwrap();
+        *state.network_verified.lock().unwrap() = None;
         *state.token.lock().unwrap() = Some("tok.unchecked".into());
     }
-    installed.send(()).unwrap();
-    replacement.join().unwrap();
-    let _ = request.join().unwrap();
+    release.notify_one();
+    let _ = request.await;
     assert!(
         !seen.lock().unwrap().iter().any(|auth| auth.as_deref() == Some("tok.unchecked")),
         "a credential that never passed a network check reached the node",
     );
+    assert_eq!(*seen.lock().unwrap(), [Some("tok.checked".to_owned())], "the request carries the credential it checked");
 
     // The new credential is refused until its own check passes; nothing is sent.
     let sent = seen.lock().unwrap().len();
-    assert_eq!(invoice(state.clone()).join().unwrap(), Err(NETWORK_UNCHECKED.into()));
+    assert_eq!(
+        call_api(&state, reqwest::Method::POST, "/payments/invoice", Some(serde_json::json!({}))).await,
+        Err(NETWORK_UNCHECKED.into()),
+    );
     assert_eq!(seen.lock().unwrap().len(), sent);
+}
+
+/// A network report taken before a new sign-in cannot approve the new
+/// credential: it waits for its own identity and network checks.
+#[tokio::test]
+async fn beta_earlier_network_report_never_approves_a_replacement_credential() {
+    let control = Arc::new(ReportControl::default());
+    let (state, dir, _server) = auth_fixture_controlled(Some("signet".into()), mock_node::pairing::PairRoutes::Live, None, control.clone());
+
+    // The first sign-in's report is read, then held before it is accepted.
+    let (arrived, release) = pause_points::arm(&state.api_base, "before_report_accept");
+    let first = finish_auth(&state, dir.path());
+    tokio::pin!(first);
+    tokio::select! {
+        _ = arrived.notified() => {},
+        () = &mut first => panic!("the first sign-in finished before its report was accepted"),
+    }
+    assert_eq!(control.count("/status"), 1);
+    // A second sign-in publishes its credential while that report waits.
+    authenticate(&state, dir.path()).await.unwrap();
+    assert!(state.token.lock().unwrap().is_some());
+    release.notify_one();
+    first.await;
+
+    assert!(!state.status_snapshot().ready, "an earlier report made the new credential ready");
+    assert_no_wallet_dispatch(&state, &control).await;
+    // Its own report then approves it.
+    require_signet_report(&state, false).await.unwrap();
+    let _ = do_invoice_create(&state, 1_000, "", 3600).await;
+    assert_eq!(control.count("/payments/invoice"), 1);
 }
 
 #[path = "beta_network_renewal_tests.rs"]

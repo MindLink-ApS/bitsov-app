@@ -2122,6 +2122,7 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
     if authenticate(state, data_dir).await.is_err() {
         return;
     }
+    let credential_epoch = *state.network_auth_epoch.lock().unwrap();
     // The signed descriptor pins identity; provisional tokens can only enroll.
     // No identity/status probe or normal authority is granted before approval.
     if add_device::is_second_join(state) {
@@ -2160,7 +2161,7 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
                     "remote node identity does not match the signed pairing descriptor",
                 );
             }
-            let network_epoch = match require_signet_report(state, false).await {
+            let network_epoch = match require_signet_report_for(state, false, credential_epoch).await {
                 Ok(epoch) => epoch,
                 Err(_) => return,
             };
@@ -2198,9 +2199,21 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
 const NETWORK_CHECK_ROUTES: [&str; 3] = ["/identity", "/status", "/bootstrap/state"];
 const NETWORK_UNCHECKED: &str = "The node's network is not checked yet. Nothing was sent.";
 
+/// Called under the network authority as a new credential is published: no
+/// report or identity read taken for an earlier credential can approve it.
+fn new_credential_epoch(state: &NodeState, authority: &mut u64) {
+    if state.signet_only { *authority = authority.wrapping_add(1); }
+}
+
 async fn require_signet_report(state: &NodeState, bootstrap: bool) -> Result<u64, String> {
     let epoch = *state.network_auth_epoch.lock().unwrap();
-    if !state.signet_only { return Ok(epoch); }
+    require_signet_report_for(state, bootstrap, epoch).await
+}
+
+/// The report approves only the credential of `epoch`. A credential published
+/// after it waits for its own identity and network checks.
+async fn require_signet_report_for(state: &NodeState, bootstrap: bool, epoch: u64) -> Result<u64, String> {
+    if !state.signet_only { return Ok(*state.network_auth_epoch.lock().unwrap()); }
     let report = if bootstrap {
         get_json::<serde_json::Value>(state, "/bootstrap/state").await
             .map(|value| value.get("network").and_then(|v| v.as_str()).map(str::to_owned))
@@ -2210,6 +2223,7 @@ async fn require_signet_report(state: &NodeState, bootstrap: bool) -> Result<u64
     let result = report.map_err(|_| crate::network_policy::NetworkRefusal::Unknown)
         .and_then(|network| crate::network_policy::NetworkRefusal::reported(network.as_deref()));
     if let Err(refusal) = result { return Err(state.refuse_network(refusal)); }
+    if cfg!(test) { pause_points::at(&state.api_base, "before_report_accept").await; }
     let authority = state.network_auth_epoch.lock().unwrap();
     if *authority != epoch { return Err("The connection changed during its network check.".into()); }
     *state.network_refusal.lock().unwrap() = crate::network_policy::NetworkRefusal::None;
@@ -2495,9 +2509,10 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
             if let Some(ctx) = ctx {
                 view.bootstrap = pairing::bootstrap_state(&ctx.client).await.ok().flatten();
             }
-            let authority = state.network_auth_epoch.lock().unwrap();
+            let mut authority = state.network_auth_epoch.lock().unwrap();
             if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
             // A new credential is checked again before ordinary requests.
+            new_credential_epoch(state, &mut authority);
             *state.network_verified.lock().unwrap() = None;
             *state.token.lock().unwrap() = Some(session.token.clone());
             *state.auth.lock().unwrap() = AuthMode::Paired(session);
@@ -2505,8 +2520,9 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
             Ok(())
         }
         Ok(Established::LocalFallback { token }) => {
-            let authority = state.network_auth_epoch.lock().unwrap();
+            let mut authority = state.network_auth_epoch.lock().unwrap();
             if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
+            new_credential_epoch(state, &mut authority);
             *state.network_verified.lock().unwrap() = None;
             *state.token.lock().unwrap() = Some(token);
             *state.auth.lock().unwrap() = AuthMode::Local;
@@ -2744,6 +2760,7 @@ async fn call_api(
         let token = state
             .checked_token(&method, path)?
             .ok_or_else(|| "the node is not authenticated yet".to_string())?;
+        if cfg!(test) { pause_points::at(&state.api_base, "after_network_check").await; }
         let mut request = state
             .http
             .request(method.clone(), format!("{}{path}", state.api_base))
