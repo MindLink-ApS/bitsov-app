@@ -186,6 +186,32 @@ describe('the call video window', () => {
     });
   });
 
+  it.each(['data-call-move', 'data-call-resize', 'data-call-self'])('a %s drag still in progress when the call ends writes nothing afterwards', (handle) => {
+    const panel = stage();
+    const corner = $('[data-call-self]')!.getAttribute('data-corner');
+    const added = vi.spyOn(window, 'addEventListener');
+    const removed = vi.spyOn(window, 'removeEventListener');
+    $(`[${handle}]`)!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 500, clientY: 500, button: 0 }));
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: 400, clientY: 450 }));
+    // The call ends mid-drag: the video stage goes, the call window stays for the ended card.
+    dispose!();
+    dispose = null;
+    expect(panel.style.right).toBe('');
+    expect(panel.style.bottom).toBe('');
+    expect(panel.style.width).toBe('');
+    expect(panel.hasAttribute('data-call-window-moved')).toBe(false);
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: 300, clientY: 400 }));
+    window.dispatchEvent(new Event('resize'));
+    expect(panel.style.right).toBe('');
+    expect(panel.style.bottom).toBe('');
+    expect(panel.style.width).toBe('');
+    expect(panel.hasAttribute('data-call-window-moved')).toBe(false);
+    // Every window listener the stage added is gone again.
+    for (const [type, fn] of added.mock.calls) expect(removed.mock.calls.some(([t, f]) => t === type && f === fn)).toBe(true);
+    if (handle === 'data-call-self') expect(corner).toBe('br');
+    window.dispatchEvent(new MouseEvent('pointerup', {}));
+  });
+
   it('moves the call window by dragging its handle', () => {
     const panel = stage();
     const move = $('[data-call-move]')!;

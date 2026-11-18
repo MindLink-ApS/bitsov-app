@@ -45,6 +45,23 @@ export function CallVideoStage(props: {
   const [width, setWidth] = createSignal<number | null>(null);
   const [maxWidth, setMaxWidth] = createSignal(maxPanelWidth(window.innerWidth));
   let releaseEscape: (() => void) | null = null;
+  /** Set once the stage is gone (the call ended): no late drag or resize writes geometry again. */
+  let disposed = false;
+  /** Drags in progress: each removes its own window listeners. Ended all at once on dispose. */
+  const drags = new Set<() => void>();
+  const follow = (move: (m: PointerEvent) => void) => {
+    const guarded = (m: PointerEvent) => { if (!disposed) move(m); };
+    const up = () => {
+      window.removeEventListener('pointermove', guarded);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      drags.delete(up);
+    };
+    window.addEventListener('pointermove', guarded);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    drags.add(up);
+  };
 
   const leaveWindowFill = () => {
     releaseEscape?.();
@@ -85,6 +102,8 @@ export function CallVideoStage(props: {
     document.addEventListener('webkitfullscreenchange', fullscreenChanged);
   });
   onCleanup(() => {
+    disposed = true;
+    for (const end of [...drags]) end();
     document.removeEventListener('fullscreenchange', fullscreenChanged);
     document.removeEventListener('webkitfullscreenchange', fullscreenChanged);
     releaseEscape?.();
@@ -113,6 +132,7 @@ export function CallVideoStage(props: {
   };
   const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi));
   const moveTo = (right: number, bottom: number, width?: number) => {
+    if (disposed) return;
     const p = place();
     if (!p) return;
     const vw = window.innerWidth;
@@ -148,14 +168,7 @@ export function CallVideoStage(props: {
     const target = e.currentTarget as HTMLElement;
     try { target.setPointerCapture?.(e.pointerId); } catch { /* synthetic pointer */ }
     const move = (m: PointerEvent) => onMove(m.clientX - x0, m.clientY - y0, start);
-    const up = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-      window.removeEventListener('pointercancel', up);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-    window.addEventListener('pointercancel', up);
+    follow(move);
   };
   const arrows = (e: KeyboardEvent, by: (dx: number, dy: number) => void, step: number) => {
     const d = ({ ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] } as Record<string, number[]>)[e.key];
@@ -187,14 +200,7 @@ export function CallVideoStage(props: {
       const y = (m.clientY - box.top) / box.height;
       setCorner(`${y < 0.5 ? 't' : 'b'}${x < 0.5 ? 'l' : 'r'}` as SelfCorner);
     };
-    const up = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-      window.removeEventListener('pointercancel', up);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-    window.addEventListener('pointercancel', up);
+    follow(move);
   };
 
   return (
