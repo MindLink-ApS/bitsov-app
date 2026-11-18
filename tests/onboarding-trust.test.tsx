@@ -154,6 +154,24 @@ it('a Danish trust save failure shows the Danish message, not the raw error', as
   expect(gate()).not.toBeNull();
 });
 
+// The phrase is shown once in the setup ceremonies (RemoteOwnerCeremony, LocalOwnerCeremony)
+// and a typed restore phrase is forwarded to the node, so the disclosure must not promise
+// that BitSov never shows or copies it.
+const KEYS_EN = 'Your keys stay in the node. BitSov shows a new recovery phrase only once, during setup, so you can write it down. A phrase you type to restore goes straight to the node. The app keeps no copy.';
+const KEYS_DA = 'Dine nøgler bliver i noden. BitSov viser en ny gendannelsessætning kun én gang, under opsætningen, så du kan skrive den ned. En sætning, du skriver for at gendanne, går direkte til noden. Appen gemmer ingen kopi.';
+
+it.each([true, false])('the English G6 disclosure describes the one-time phrase display, not a never-shown promise (remote=%s)', async remote => {
+  setLanguagePref('en');
+  host(null, remote);
+  mount();
+  const selector = `[data-gate="g6-${remote ? 'remote' : 'local'}-trust"]`;
+  await vi.waitFor(() => expect(document.querySelector(selector)).not.toBeNull());
+  const text = document.querySelector(selector)!.textContent!.replace(/\s+/g, ' ');
+  expect(text).toContain(KEYS_EN);
+  expect(text).not.toContain('never shows you your recovery phrase');
+  expect(text).not.toContain('never copies it');
+});
+
 it.each([true, false])('renders the G6 disclosure and its button in Danish (remote=%s)', async remote => {
   setLanguagePref('da');
   host(null, remote);
@@ -171,7 +189,8 @@ it.each([true, false])('renders the G6 disclosure and its button in Danish (remo
     expect(text).toContain('Denne node stoler på alle programmer på denne computer. Alt, der kører under din brugerkonto, kan bede den om fuld adgang via 127.0.0.1 — nok til at bruge det, du indsætter, og læse din historik. Indsæt kun penge på en node på en maskine, du selv styrer.');
     expect(disclosure.querySelector('code')!.textContent).toBe('127.0.0.1');
   }
-  expect(text).toContain('Dine nøgler bliver i noden. BitSov viser dig aldrig din gendannelsessætning og kopierer den aldrig nogen steder hen.');
+  expect(text).toContain(KEYS_DA);
+  expect(text).not.toContain('viser dig aldrig');
   for (const english of ['read this before you deposit', 'Your keys stay in the node', 'Only fund a node']) expect(text).not.toContain(english);
   const buttons = [...document.querySelectorAll('button')].map(b => b.textContent?.trim());
   expect(buttons).toContain('Jeg forstår — fortsæt til indbetaling');

@@ -238,6 +238,31 @@ it.each([
 });
 
 it.each([
+  ['en', 'Could not read the deposit status from your node. BitSov will not check again by itself. Check that your node is running, then close and reopen BitSov.'],
+  ['da', 'Kunne ikke hente status for indbetalingen fra din node. BitSov tjekker ikke igen af sig selv. Tjek at din node kører, og luk og åbn så BitSov igen.'],
+] as const)('once the deposit is funded the poll stops, so a status-read failure gives a manual step, not a retry promise (%s)', async (lang, expected) => {
+  setLanguagePref(lang);
+  const raw = 'Error: GET /onboarding/state returned 500: {"error":"internal"}';
+  const funded = { current_step: 'funded', tier: 'full', funding_address: 'bcrt1qfunded', funding_amount_sats_required: 50_000, funding_amount_sats_received: 50_000, funding_evidence: null, funded: true };
+  let started = false;
+  const fundState = vi.fn(() => (started ? Promise.reject(raw) : Promise.resolve(null)));
+  const fundStart = vi.fn(() => { started = true; return Promise.resolve(funded); });
+  const receive = await openReceive({ fund_state: fundState, fund_start: fundStart });
+  await vi.waitFor(() => expect(receive()?.querySelector('[data-fund-start]')).toBeTruthy());
+  receive()!.querySelector<HTMLButtonElement>('[data-fund-start]')!.click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fundStart).toHaveBeenCalledTimes(1);
+  await vi.waitFor(() => expect(receive()?.querySelector('[data-soft-summary]')?.textContent).toBe(expected));
+  expect(receive()!.querySelector('.funded')).not.toBeNull();
+  // Later ticks do not read again for a funded deposit, so the manual step stays.
+  await vi.advanceTimersByTimeAsync(15_000);
+  const summary = receive()!.querySelector('[data-soft-summary]')!.textContent!;
+  expect(summary).toBe(expected);
+  expect(summary).not.toMatch(/every few seconds|få sekunders mellemrum/);
+  expect(receive()!.querySelector('[data-soft-detail]')?.textContent).toContain(raw);
+});
+
+it.each([
   ['en', 'Could not get a deposit address. Check that your node is running, then try again.'],
   ['da', 'Kunne ikke hente en indbetalingsadresse. Tjek at din node kører, og prøv så igen.'],
 ] as const)('a failed deposit start shows a plain message, never a deposit address (%s)', async (lang, expected) => {

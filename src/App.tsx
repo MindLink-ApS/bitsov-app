@@ -814,6 +814,14 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
     }
   };
 
+  // The interval above stops reading once the node reports funded, so a status
+  // failure in that state must not promise an automatic retry.
+  const errorSummary = () => {
+    const summary = error()?.summary;
+    if (!summary) return undefined;
+    return t(summary === 'obFundStateFailed' && fund()?.funded ? 'obFundStateStopped' : summary);
+  };
+
   const depositAddress = () => fund()?.funding_address ?? address()?.address ?? null;
   const qr = createMemo(() => {
     const value = depositAddress();
@@ -918,7 +926,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
 
 
       <Show when={error()}>
-        <SoftError message={error()!.message} summary={error()!.summary ? t(error()!.summary!) : undefined} />
+        <SoftError message={error()!.message} summary={errorSummary()} />
       </Show>
     </div>
   );
