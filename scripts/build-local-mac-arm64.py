@@ -91,30 +91,33 @@ def run(command, root, env, deadline):
             except subprocess.TimeoutExpired:
                 check_disk()
     finally:
-        signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED_SIGNALS)
         try:
-            if process is not None:
-                for sig in (signal.SIGTERM, signal.SIGKILL):
-                    try:
-                        os.killpg(process.pid, sig)
-                    except ProcessLookupError:
-                        break
-                    if sig == signal.SIGTERM:
-                        time.sleep(0.2)
-                        process.poll()
-                process.wait()
+            signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED_SIGNALS)
         finally:
-            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            try:
+                if process is not None:
+                    for sig in (signal.SIGTERM, signal.SIGKILL):
+                        try:
+                            os.killpg(process.pid, sig)
+                        except (ProcessLookupError, PermissionError):
+                            break
+                        if sig == signal.SIGTERM:
+                            time.sleep(0.2)
+                            process.poll()
+                    process.wait()
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 def install_handlers():
     def cancel(sig, _):
+        signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED_SIGNALS)
         raise SystemExit(128 + sig)
     def timeout(*_):
+        signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED_SIGNALS)
         raise RuntimeError("The 60-minute build deadline expired.")
-    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
         signal.signal(sig, cancel)
-    signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGALRM, timeout)
 
 
@@ -125,30 +128,39 @@ def supervise(action, seconds=MAX_SECONDS):
     sys.stderr.flush()
     pid = os.fork()
     if pid == 0:
-        code = 0
+        code = 1
         try:
             os.setsid()
             install_handlers()
             signal.alarm(seconds)
             signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
             action()
+            code = 0
         except BaseException as error:
-            print(f"Local packaging stopped: {error}", file=sys.stderr)
             code = error.code if isinstance(error, SystemExit) and isinstance(error.code, int) else 1
+            try:
+                print(f"Local packaging stopped: {error}", file=sys.stderr)
+            except BaseException:
+                pass
         finally:
-            sys.stdout.flush()
-            sys.stderr.flush()
+            for stream in (sys.stdout, sys.stderr):
+                try:
+                    stream.flush()
+                except BaseException:
+                    pass
             os._exit(code)
     try:
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         _, status = os.waitpid(pid, 0)
     except BaseException:
-        signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED_SIGNALS)
         try:
-            os.kill(pid, signal.SIGTERM)
-            os.waitpid(pid, 0)
-        except (ProcessLookupError, ChildProcessError):
-            pass
+            signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED_SIGNALS)
+        finally:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                os.waitpid(pid, 0)
+            except (ProcessLookupError, ChildProcessError):
+                pass
         raise
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
@@ -179,7 +191,8 @@ def check_inputs(root):
             raise RuntimeError("Remove local frontend environment files before packaging.")
     cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo")).expanduser().resolve()
     configs = [cargo_home / name for name in ("config", "config.toml")]
-    configs += [parent / ".cargo" / name for parent in (root, *root.parents)
+    cargo_root = root / "src-tauri"
+    configs += [parent / ".cargo" / name for parent in (cargo_root, *cargo_root.parents)
                 for name in ("config", "config.toml")]
     if any(path.exists() or path.is_symlink() for path in configs):
         raise RuntimeError("External Cargo configuration is unsupported for this local package.")
@@ -234,7 +247,7 @@ def verify_archive(archive, app):
 
 
 def build(root, target, output):
-    deadline = time.monotonic() + MAX_SECONDS
+    deadline = time.monotonic() + MAX_SECONDS - 5
     if output.exists():
         raise RuntimeError("The artifact directory must not already exist.")
     folded_root, folded_target, folded_output = [Path(str(path).casefold())
@@ -255,6 +268,7 @@ def build(root, target, output):
          "--target", TARGET, "--config", "src-tauri/tauri.remote-only.conf.json",
          "--", "--locked"], root, env, deadline)
     app = bundle / "macos/BitSov Remote Test.app"
+    check_inputs(root)
     check_source(root, commit)
     verify_bundle(app)
     metadata = {"commit": commit, "target": TARGET, "profile": "remote-only-signet",
@@ -281,6 +295,7 @@ def build(root, target, output):
             if sha256(staging / filename) != digest:
                 raise RuntimeError("Artifact checksum verification failed.")
         check_disk()
+        check_inputs(root)
         check_source(root, commit)
         if time.monotonic() >= deadline:
             raise RuntimeError("The 60-minute build deadline expired.")

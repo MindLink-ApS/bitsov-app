@@ -9,7 +9,7 @@ Commit the source changes first. Choose separate target and artifact directories
 outside the checkout, and an artifact directory that does not already exist:
 
 ```bash
-CARGO_TARGET_DIR="$PWD/../arm64-target" CARGO_BUILD_JOBS=2 \
+CARGO_TARGET_DIR="$PWD/../arm64-target" \
   python3 scripts/build-local-mac-arm64.py --output-dir ../arm64-artifacts
 ```
 
@@ -34,7 +34,8 @@ share one 60-minute budget. Run other local build tools separately.
 Source state is checked before and after compilation and before finalization.
 The wrapper uses a limited build environment and refuses local frontend
 environment files or external Cargo configuration without reading their contents.
-Use a fresh target bundle directory for retries after an incomplete package.
+Remove the previous target bundle before every packaging invocation, including
+after a successful package.
 
 The output directory contains:
 

@@ -110,7 +110,7 @@ class LocalArmBuild(unittest.TestCase):
         pidfile, marker = self.root / "descendant.pid", self.root / "survived"
         child = ("import os,pathlib,signal,sys,time; "
                  + ("signal.signal(signal.SIGTERM,signal.SIG_IGN); " if ignore_term else "")
-                 + "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(20); pathlib.Path(sys.argv[2]).touch()")
+                 + "p=pathlib.Path(sys.argv[1]); t=p.with_suffix('.tmp'); t.write_text(str(os.getpid())); t.replace(p); time.sleep(20); pathlib.Path(sys.argv[2]).touch()")
         parent = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',*sys.argv[1:]]); time.sleep(30)"
         return [sys.executable, "-c", parent, child, str(pidfile), str(marker)], pidfile, marker
 
@@ -245,14 +245,53 @@ class LocalArmBuild(unittest.TestCase):
         source.mkdir()
         config = self.root / ".cargo/config.toml"
         config.parent.mkdir()
-        config.touch()
+        config.touch(mode=0)
         with self.assertRaises(RuntimeError):
             self.builder.check_inputs(source)
         config.unlink()
-        (source / ".env.production.local").touch()
+        (source / ".env.production.local").touch(mode=0)
         with self.assertRaises(RuntimeError):
             self.builder.check_inputs(source)
 
+    def test_tauri_directory_cargo_config_is_refused(self):
+        source = self.root / "source"
+        config = source / "src-tauri/.cargo/config.toml"
+        config.parent.mkdir(parents=True)
+        config.touch(mode=0)
+        with self.assertRaises(RuntimeError):
+            self.builder.check_inputs(source)
+
+    def test_cancellation_during_cleanup_mask_change_still_stops_children(self):
+        command, pidfile, _ = self.group_command(True)
+        real_mask = signal.pthread_sigmask
+        original_mask = real_mask(signal.SIG_BLOCK, set())
+        blocks = 0
+        def interrupted_mask(how, mask):
+            nonlocal blocks
+            previous = real_mask(how, mask)
+            if how == signal.SIG_BLOCK:
+                blocks += 1
+                if blocks == 2:
+                    raise SystemExit(143)
+            return previous
+        try:
+            with self.resources(), patch.object(signal, "pthread_sigmask", side_effect=interrupted_mask), \
+                 self.assertRaises(SystemExit):
+                self.builder.run(command, self.root, os.environ.copy(), time.monotonic() + 3)
+            self.assertTrue(pidfile.exists())
+            self.assert_process_stopped(int(pidfile.read_text()))
+        finally:
+            real_mask(signal.SIG_SETMASK, original_mask)
+            if pidfile.exists():
+                try:
+                    group = os.getpgid(int(pidfile.read_text()))
+                    os.killpg(group, signal.SIGKILL)
+                    try:
+                        os.waitpid(group, 0)
+                    except ChildProcessError:
+                        pass
+                except ProcessLookupError:
+                    pass
     def test_changed_source_head_or_worktree_prevents_finalization(self):
         for values in ((" M edited",), ("", "b" * 40)):
             with self.subTest(values=values), patch.object(subprocess, "check_output", side_effect=values):
@@ -269,9 +308,8 @@ b=importlib.util.module_from_spec(spec); spec.loader.exec_module(b)
 b.os.getloadavg=lambda:(0,0,0)
 b.shutil.disk_usage=lambda _: (200*1024**3,0,120*1024**3)
 b.check_no_other_builds=lambda:None
-b.check_no_other_builds=lambda:None
 b.install_handlers()
-child="import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(__import__('os').getpid())); time.sleep(20); pathlib.Path(sys.argv[2]).touch()"
+child="import os,pathlib,sys,time; p=pathlib.Path(sys.argv[1]); p.with_name('worker.pid').write_text(str(os.getppid())); t=p.with_suffix('.tmp'); t.write_text(str(os.getpid())); t.replace(p); time.sleep(20); pathlib.Path(sys.argv[2]).touch()"
 with b.build_lock(pathlib.Path(sys.argv[4])):
     b.supervise(lambda: b.run([sys.executable,"-c",child,sys.argv[2],sys.argv[3]],pathlib.Path.cwd(),os.environ.copy(),time.monotonic()+30),int(sys.argv[5]))
 '''
@@ -311,9 +349,26 @@ with b.build_lock(pathlib.Path(sys.argv[4])):
             with self.builder.build_lock(lock):
                 self.fail("orphaned worker lost the build lock")
         self.assert_process_stopped(child)
-        with self.builder.build_lock(lock):
-            pass
+        deadline = time.monotonic() + 3
+        while True:
+            try:
+                with self.builder.build_lock(lock):
+                    break
+            except RuntimeError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.02)
         self.assertFalse(marker.exists())
+
+    def test_repeated_cancellation_of_worker_and_launcher_stops_build(self):
+        for _ in range(3):
+            process, child, marker, _ = self.start_supervisor()
+            worker = int((self.root / "worker.pid").read_text())
+            os.kill(worker, signal.SIGTERM)
+            process.send_signal(signal.SIGTERM)
+            self.assertNotEqual(process.wait(timeout=5), 0)
+            self.assert_process_stopped(child)
+            self.assertFalse(marker.exists())
 
     def test_source_ancestors_and_overlapping_output_directories_are_refused(self):
         source = self.root / "source"
