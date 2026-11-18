@@ -24,15 +24,16 @@ NODE_DIR="$(dirname "$(command -v node)")"
 SAFE_PATH="$T/bin:$NODE_DIR:/usr/bin:/bin"
 
 FAILS=0
+CASE=""
 run() { # <expected-exit> <expected-text> <args...>
   local want="$1" text="$2" got=0 out
   shift 2
   out="$(env PATH="$SAFE_PATH" XWIN_CACHE_DIR="$XWIN" BITSOV_TAURI_NSIS_CACHE="$NSIS" \
     bash "$SCRIPT" "$@" 2>&1)" || got=$?
   if [ "$got" != "$want" ] || ! printf '%s' "$out" | grep -qF -- "$text"; then
-    echo "FAIL: $* -> exit $got (want $want), output:"; echo "$out"; FAILS=$((FAILS + 1))
+    echo "FAIL: ${CASE:+$CASE: }$* -> exit $got (want $want), output:"; echo "$out"; FAILS=$((FAILS + 1))
   else
-    echo "ok: exit $got, $text"
+    echo "ok: ${CASE:+$CASE: }exit $got, $text"
   fi
 }
 overlay() { # <name> <node expression applied to config c>
@@ -71,20 +72,186 @@ run 3 "must replace the sidecar fetch" --out "$T/out" --runner xwin --source-sha
 printf '{ not json' > "$T/broken.json"
 run 3 "not valid JSON" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only --overlay "$T/broken.json"
 
-# A profile.rs that no longer maps the beta identifier to signet_only stops the build.
-cp "$T/root/src-tauri/src/profile.rs" "$T/profile.rs.bak"
-# Each mutation must really change the file, or the check would pass for nothing.
+# ---- profile.rs policy -------------------------------------------------------
+# The guard accepts only the exact signet policy of AppProfile::for_platform: the
+# shared helper form or the inline form. Every case starts from a pristine copy and
+# runs against both the beta and the remote-test overlay.
+PROFILE="$T/root/src-tauri/src/profile.rs"
+H="$T/profile.helper.rs"; I="$T/profile.inline.rs"
+cp "$PROFILE" "$H"
+REMOTE="$(overlay remotetest 'c.identifier="tech.mindlink.bitsov.remotetest"')"
+NL=$'\n'
+POLICY="no longer maps the beta identifiers"
+IDS="matches!(identifier, BETA_IDENTIFIER | REMOTE_TEST_IDENTIFIER)"
+BODY="mobile || $IDS"
+FIELD="signet_only: signet_only_for(identifier, mobile),"
+IFIELD="signet_only: $IDS,"
+SIG="pub(crate) fn signet_only_for(identifier: &str, mobile: bool) -> bool {"
+HELPER="$SIG$NL    $BODY$NL}"
+GOODHELPER="$SIG $BODY }"
+CTOR="pub(crate) fn for_platform(identifier: &str, mobile: bool) -> Self {"
+CTOR_END="beta_storage: identifier == BETA_IDENTIFIER,$NL        }"
+FWD="Self::for_platform(identifier, phone_build())"
+IMPL="impl AppProfile {"
+BETA_DECL='const BETA_IDENTIFIER: &str = "tech.mindlink.bitsov.beta";'
+REMOTE_DECL='const REMOTE_TEST_IDENTIFIER: &str = "tech.mindlink.bitsov.remotetest";'
+OFF="Self { remote_only: false, signet_only: false, beta_storage: false }"
+
+both() { # <expected-exit> <expected-text>: the beta overlay, then the remote-test overlay
+  run "$1" "$2" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+  run "$1" "$2" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only --overlay "$REMOTE"
+}
+# mutate <base> <case> <from> <to> [<from> <to>...]: copy <base> to profile.rs, replacing
+# each exact fragment, which must occur exactly once. A mutation that does not apply
+# is a failure and leaves the pristine file, so it is never counted as a refusal.
 mutate() {
-  sed "$1" "$T/profile.rs.bak" > "$T/root/src-tauri/src/profile.rs"
-  if cmp -s "$T/profile.rs.bak" "$T/root/src-tauri/src/profile.rs"; then
-    echo "FAIL: profile.rs mutation did not apply: $1"; FAILS=$((FAILS + 1))
+  local base="$1"
+  CASE="$2"; shift 2
+  if ! node - "$base" "$PROFILE" "$@" <<'JS' || cmp -s "$base" "$PROFILE"; then
+const fs = require("fs");
+const [base, out, ...pairs] = process.argv.slice(2);
+let s = fs.readFileSync(base, "utf8");
+for (let n = 0; n < pairs.length; n += 2) {
+  const count = s.split(pairs[n]).length - 1;
+  if (count !== 1 || n + 1 >= pairs.length) { console.error("fragment occurs " + count + " times: " + pairs[n]); process.exit(1); }
+  s = s.replace(pairs[n], () => pairs[n + 1]);
+}
+fs.writeFileSync(out, s);
+JS
+    echo "FAIL: $CASE: profile.rs mutation did not apply"; FAILS=$((FAILS + 1))
+    cp "$H" "$PROFILE"
   fi
 }
-mutate 's/matches!(identifier, BETA_IDENTIFIER | REMOTE_TEST_IDENTIFIER)/identifier == REMOTE_TEST_IDENTIFIER/'
-run 3 "no longer maps the beta identifiers" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
-mutate 's/signet_only: signet_only_for(identifier, mobile)/signet_only: false/'
-run 3 "no longer maps the beta identifiers" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
-cp "$T/profile.rs.bak" "$T/root/src-tauri/src/profile.rs"
+refuse() { mutate "$@"; both 3 "$POLICY"; }
+accept() { mutate "$@"; both 0 "check only: nothing built"; }
+
+# Positive controls.
+CASE=P01_current_helper; cp "$H" "$PROFILE"; both 0 "check only: nothing built"
+accept "$H" P02_inline "$FIELD" "$IFIELD"; cp "$PROFILE" "$I"
+accept "$H" P03_comments_between_tokens "$FIELD" "signet_only: /* beta ids */ signet_only_for(identifier, // phone$NL mobile)," \
+  "$BODY" "mobile /* phone */ || matches!(identifier, BETA_IDENTIFIER /* | other */ | REMOTE_TEST_IDENTIFIER)"
+accept "$H" P04_line_breaks "$FIELD" "signet_only:$NL            signet_only_for($NL                identifier,$NL                mobile$NL            ),"
+CASE=P05_crlf_tabs; awk '{ sub(/^ +/, "\t\t"); printf "%s\r\n", $0 }' "$H" > "$PROFILE"; both 0 "check only: nothing built"
+accept "$H" P06_misleading_text "$IMPL" "// signet_only: false,$NL/* $FIELD */${NL}const _NOTE: &str = \"signet_only: false, } { fn signet_only_for(\";${NL}fn _decoy<'a>(s: &'a str) -> (char, &'a str) { ('}', s) }$NL$IMPL"
+
+# N01-N09: the helper-mode field must be exactly the helper call.
+refuse "$H" N01_helper_suffix_mobile "$FIELD" "signet_only: signet_only_for(identifier, mobile) && mobile,"
+refuse "$H" N02_helper_suffix_false "$FIELD" "signet_only: signet_only_for(identifier, mobile) && false,"
+refuse "$H" N03_helper_or_false "$FIELD" "signet_only: signet_only_for(identifier, mobile) || false,"
+refuse "$H" N03_helper_eq_false "$FIELD" "signet_only: signet_only_for(identifier, mobile) == false,"
+refuse "$H" N04_helper_not "$FIELD" "signet_only: !signet_only_for(identifier, mobile),"
+refuse "$H" N04_helper_false_and "$FIELD" "signet_only: false && signet_only_for(identifier, mobile),"
+refuse "$H" N05_parens "$FIELD" "signet_only: (signet_only_for(identifier, mobile)),"
+refuse "$H" N05_parens_and_false "$FIELD" "signet_only: (signet_only_for(identifier, mobile) && false),"
+refuse "$H" N06_block "$FIELD" "signet_only: { signet_only_for(identifier, mobile); false },"
+refuse "$H" N06_if "$FIELD" "signet_only: if mobile { signet_only_for(identifier, mobile) } else { false },"
+refuse "$H" N07_arg_false "$FIELD" "signet_only: signet_only_for(identifier, false),"
+refuse "$H" N07_arg_true "$FIELD" "signet_only: signet_only_for(identifier, true),"
+refuse "$H" N07_arg_not_mobile "$FIELD" "signet_only: signet_only_for(identifier, !mobile),"
+refuse "$H" N07_arg_literal "$FIELD" 'signet_only: signet_only_for("tech.mindlink.bitsov.beta", mobile),'
+refuse "$H" N07_extra_arg "$FIELD" "signet_only: signet_only_for(identifier, mobile, mobile),"
+refuse "$H" N08_prefixed_name "$FIELD" "signet_only: other_signet_only_for(identifier, mobile),"
+refuse "$H" N08_qualified_name "$FIELD" "signet_only: other::signet_only_for(identifier, mobile),"
+refuse "$H" N08_field_name "$FIELD" "not_signet_only: signet_only_for(identifier, mobile),$NL            signet_only: false,"
+refuse "$H" N09_field_false "$FIELD" "signet_only: false,"
+refuse "$H" N09_field_removed "$FIELD" ""
+refuse "$H" N09_field_shorthand "$FIELD" "signet_only,"
+
+# N10-N12: the helper body must be exactly `mobile || matches!(...)`.
+refuse "$H" N10_no_beta "$BODY" "mobile || matches!(identifier, REMOTE_TEST_IDENTIFIER)"
+refuse "$H" N10_no_remote "$BODY" "mobile || matches!(identifier, BETA_IDENTIFIER)"
+refuse "$H" N11_and "$BODY" "mobile && $IDS"
+refuse "$H" N11_mobile_only "$BODY" "mobile"
+refuse "$H" N11_false "$BODY" "false"
+refuse "$H" N11_suffix_mobile "$BODY" "$BODY && mobile"
+refuse "$H" N11_suffix_false "$BODY" "$BODY && false"
+refuse "$H" N12_let_shadow "$BODY" "let mobile = false;$NL    $BODY"
+refuse "$H" N12_let_identifier "$BODY" "let identifier = \"\";$NL    $BODY"
+refuse "$H" N12_early_return "$BODY" "return false;$NL    $BODY"
+refuse "$H" N12_local_helper "$BODY" "fn signet_only_for(_: &str, _: bool) -> bool { false }$NL    $BODY"
+refuse "$H" N12_ctor_let "$CTOR" "$CTOR$NL        let mobile = false;"
+
+# N13-N15: the inline field must be exactly the matches! form.
+refuse "$I" N13_inline_suffix_mobile "$IFIELD" "signet_only: $IDS && mobile,"
+refuse "$I" N13_inline_suffix_false "$IFIELD" "signet_only: $IDS && false,"
+refuse "$I" N13_inline_not "$IFIELD" "signet_only: !$IDS,"
+refuse "$I" N14_inline_parens "$IFIELD" "signet_only: ($IDS),"
+refuse "$I" N14_inline_block "$IFIELD" "signet_only: { $IDS; false },"
+refuse "$I" N14_inline_false_or "$IFIELD" "signet_only: false || $IDS,"
+refuse "$I" N15_inline_no_remote "$IFIELD" "signet_only: matches!(identifier, BETA_IDENTIFIER),"
+refuse "$I" N15_inline_no_beta "$IFIELD" "signet_only: matches!(identifier, REMOTE_TEST_IDENTIFIER),"
+refuse "$I" N15_inline_extra_pattern "$IFIELD" 'signet_only: matches!(identifier, BETA_IDENTIFIER | REMOTE_TEST_IDENTIFIER | "tech.mindlink.bitsov"),'
+refuse "$I" N15_inline_scrutinee "$IFIELD" 'signet_only: matches!("tech.mindlink.bitsov.beta", BETA_IDENTIFIER | REMOTE_TEST_IDENTIFIER),'
+
+# N16-N18: comments and literals never supply the policy.
+refuse "$H" N16_line_comment_field "$FIELD" "signet_only: false,$NL            // $FIELD"
+refuse "$I" N16_line_comment_inline "$IFIELD" "signet_only: false, // $IFIELD"
+refuse "$H" N16_line_comment_helper "$HELPER" "// $GOODHELPER$NL${SIG}$NL    false$NL}"
+refuse "$H" N17_block_comment "$FIELD" "signet_only: false, /* $FIELD */"
+refuse "$H" N17_nested_comment "$FIELD" "signet_only: /* /* */ signet_only_for(identifier, mobile), */ false,"
+refuse "$H" N17_doc_comments "$HELPER" "/// $GOODHELPER$NL/** $GOODHELPER */$NL${SIG}$NL    mobile$NL}"
+refuse "$H" N18_string "$BODY" "mobile" "$FIELD" "signet_only: false," "$IMPL" "const _DECOY: &str = \"$FIELD $GOODHELPER\";$NL$IMPL"
+refuse "$H" N18_escaped_string "$BODY" "mobile" "$FIELD" "signet_only: false," "$IMPL" 'const _DECOY: &str = "\" \\ '"$FIELD $GOODHELPER"'";'"$NL$IMPL"
+refuse "$H" N18_raw_string "$BODY" "mobile" "$FIELD" "signet_only: false," "$IMPL" "const _DECOY: &str = r#\"say \"hi\" $FIELD $GOODHELPER\"#;$NL$IMPL"
+refuse "$H" N18_byte_string "$BODY" "mobile" "$FIELD" "signet_only: false," "$IMPL" "const _DECOY: &[u8] = b\"$FIELD $GOODHELPER\";$NL$IMPL"
+
+# N19-N20: copies outside the production items, a shadowed matches!, conditional or
+# duplicate policy items.
+refuse "$H" N19_test_module_helper "$BODY" "mobile" "$IMPL" "#[cfg(test)]${NL}mod decoy {$NL    $GOODHELPER$NL}$NL$IMPL"
+refuse "$H" N19_unused_constructor "$FIELD" "signet_only: false," "$IMPL" "fn _unused(identifier: &str, mobile: bool) -> AppProfile {$NL    AppProfile { remote_only: false, $FIELD beta_storage: false }$NL}$NL$IMPL"
+refuse "$H" N19_other_impl "$FIELD" "signet_only: false," "$IMPL" "mod decoy {$NL    use super::*;$NL    impl AppProfile {$NL        fn _x(identifier: &str, mobile: bool) -> Self { Self { remote_only: false, $FIELD beta_storage: false } }$NL    }$NL}$NL$IMPL"
+refuse "$H" N19_macro_tokens "$FIELD" "signet_only: false," "$IMPL" "macro_rules! decoy { () => { $FIELD } }$NL$IMPL"
+refuse "$H" N19_shadow_matches "$IMPL" "macro_rules! matches { (\$(\$t:tt)*) => { false } }$NL$IMPL"
+refuse "$H" N19_import_matches "$IMPL" "use crate::matches;$NL$IMPL"
+refuse "$H" N19_glob_import "$IMPL" "use crate::*;$NL$IMPL"
+refuse "$H" N19_macro_use "$IMPL" "#[macro_use]${NL}mod m {}$NL$IMPL"
+refuse "$H" N20_cfg_helpers "$HELPER" "#[cfg(not(windows))]$NL$GOODHELPER$NL#[cfg(windows)]$NL${SIG}$NL    mobile$NL}"
+refuse "$H" N20_cfg_helper "$HELPER" "#[cfg(not(windows))]$NL$HELPER"
+refuse "$H" N20_cfg_impl "$IMPL" "#[cfg(not(windows))]$NL$IMPL"
+refuse "$H" N20_duplicate_impl "$IMPL" "impl AppProfile {}$NL$IMPL"
+refuse "$H" N20_cfg_constructors "$CTOR" "#[cfg(windows)]$NL    pub(crate) fn for_platform(identifier: &str, mobile: bool) -> Self { $OFF }$NL    #[cfg(not(windows))]$NL    $CTOR"
+
+# N21-N22: the constructor returns the approved struct, and production uses it.
+refuse "$H" N21_early_return "$CTOR" "$CTOR$NL        return $OFF;"
+refuse "$H" N21_reassigned "$CTOR" "$CTOR$NL        let mut profile =" "$CTOR_END" "$CTOR_END;$NL        profile.signet_only = false;$NL        profile"
+refuse "$H" N21_struct_update "$CTOR_END" "beta_storage: identifier == BETA_IDENTIFIER,$NL            ..Self::for_identifier(\"\")$NL        }"
+refuse "$H" N22_forwarder_bypass "$FWD" "$OFF"
+refuse "$H" N22_forwarder_identifier "$FWD" 'Self::for_platform("tech.mindlink.bitsov", false)'
+
+# N23: the identifiers come from the one real top-level declaration.
+mutate "$H" N23_beta_in_comment "$BETA_DECL" "// $BETA_DECL"; both 3 "no longer defines BETA_IDENTIFIER"
+mutate "$H" N23_remote_in_raw_string "$REMOTE_DECL" "const _DECOY: &str = r#\"$REMOTE_DECL\"#;"; both 3 "no longer defines REMOTE_TEST_IDENTIFIER"
+mutate "$H" N23_beta_in_test_module "$BETA_DECL" "#[cfg(test)]${NL}mod decoy {$NL    $BETA_DECL$NL}"; both 3 "no longer defines BETA_IDENTIFIER"
+mutate "$H" N23_duplicate_beta "$BETA_DECL" "$BETA_DECL$NL$BETA_DECL"; both 3 "no longer defines BETA_IDENTIFIER"
+mutate "$H" N23_beta_unsupported "$BETA_DECL" "const BETA_IDENTIFIER: &str = concat!(\"tech.mindlink.bitsov\", \".beta\");$NL// $BETA_DECL"; both 3 "no longer defines BETA_IDENTIFIER"
+mutate "$H" N23_beta_escaped "$BETA_DECL" 'const BETA_IDENTIFIER: &str = "tech.mindlink.bitsov\x2ebeta";'; both 3 "no longer defines BETA_IDENTIFIER"
+mutate "$H" N23_local_const_shadow "$BODY" "$BETA_DECL$NL    $BODY"; both 3 "no longer defines BETA_IDENTIFIER"
+# A different well-formed identifier is an identity change, not a policy refusal.
+mutate "$H" N23_beta_renamed "$BETA_DECL" 'const BETA_IDENTIFIER: &str = "tech.mindlink.bitsov.beta2";'
+run 3 "is not signet-only" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+run 0 "check only: nothing built" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only --overlay "$REMOTE"
+
+# N24: anything that cannot be read safely refuses.
+refuse "$H" N24_no_delimiter "$FIELD" "signet_only: signet_only_for(identifier, mobile)"
+refuse "$H" N24_duplicate_field "$FIELD" "$FIELD$NL            $FIELD"
+refuse "$H" N24_unbalanced_brace "$BODY" "{ $BODY"
+refuse "$H" N24_unbalanced_paren "$BODY" "$BODY)"
+refuse "$H" N24_open_comment "$BETA_DECL" "/* $BETA_DECL"
+refuse "$H" N24_open_raw_string "$IMPL" "const _X: &str = r#\"abc\";$NL$IMPL"
+refuse "$H" N24_open_char "$IMPL" "const _X: char = '\\u{7d;$NL$IMPL"
+
+# N25: a mutation that does not apply, or would hit the wrong occurrence, fails the suite.
+for n25 in "absent:no such fragment" "ambiguous:signet_only_for(identifier"; do
+  before=$FAILS
+  mutate "$H" "N25_${n25%%:*}" "${n25#*:}" "x" >/dev/null 2>&1
+  if [ "$FAILS" = $((before + 1)) ] && cmp -s "$H" "$PROFILE"; then
+    FAILS=$before; echo "ok: N25_${n25%%:*} mutation rejected"
+  else
+    echo "FAIL: N25_${n25%%:*}: an unapplied mutation was not reported"; FAILS=$((before + 1))
+  fi
+done
+CASE=""
+cp "$H" "$PROFILE"
 
 # Arguments.
 run 2 "--out <dir> is required" --runner xwin --source-sha "$SHA" --check-only

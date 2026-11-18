@@ -60,23 +60,77 @@ const [overlayPath, profilePath] = process.argv.slice(2);
 const fail = (why) => { console.error(`build-windows-remote: refusing overlay: ${why}`); process.exit(3); };
 let config;
 try { config = JSON.parse(fs.readFileSync(overlayPath, "utf8")); } catch (e) { fail(`not valid JSON (${e.message})`); }
-const profile = fs.readFileSync(profilePath, "utf8");
+// profile.rs is read as tokens, so comments, literals and code outside the policy items
+// never count. This is a narrow check of the exact current source, not a Rust parser:
+// anything it does not recognise refuses the build.
+const POLICY = "profile.rs no longer maps the beta identifiers to signet_only";
+const kinds = [["s", /[bc]?r(#*)"[^]*?"\1/y], ["!", /[bc]?r#*"/y], ["s", /[bc]?"(?:[^"\\]|\\[^])*"/y],
+  ["c", /b?'(?:[^'\\\n]|\\(?:u\{[0-9a-fA-F]{1,6}\}|x[0-9a-fA-F]{2}|[^]))'/uy], ["l", /'[A-Za-z_]\w*/y],
+  ["i", /r#[A-Za-z_]\w*|[A-Za-z_]\w*/y], ["n", /[0-9]\w*/y], ["p", /::|->|=>|[=!<>]=|&&|\|\||\.\.[.=]?|[^"'\s]/y]];
+const lex = (src) => {
+  const toks = [];
+  for (let i = 0; i < src.length;) {
+    if (/\s/.test(src[i])) { i++; continue; }
+    if (src.startsWith("//", i)) { const eol = src.indexOf("\n", i); i = eol < 0 ? src.length : eol; continue; }
+    if (src.startsWith("/*", i)) { // block comments nest in Rust
+      let depth = 0;
+      do {
+        if (i >= src.length) fail(`${POLICY} (unterminated comment)`);
+        if (src.startsWith("/*", i)) { depth++; i += 2; } else if (src.startsWith("*/", i)) { depth--; i += 2; } else i++;
+      } while (depth > 0);
+      continue;
+    }
+    const hit = kinds.find(([, re]) => { re.lastIndex = i; return re.test(src); });
+    if (!hit || hit[0] === "!") fail(`${POLICY} (unterminated literal)`);
+    toks.push({ k: hit[0], v: src.slice(i, hit[1].lastIndex) });
+    i = hit[1].lastIndex;
+  }
+  return toks;
+};
+const T = lex(fs.readFileSync(profilePath, "utf8"));
+const open = [];
+T.forEach((t, n) => { // t.up: index of the innermost enclosing bracket, -1 at top level
+  t.up = open.length ? open[open.length - 1] : -1;
+  if (t.k !== "p") return;
+  if ("([{".includes(t.v)) open.push(n);
+  else if (")]}".includes(t.v) && (!open.length || T[open.pop()].v !== "([{"[")]}".indexOf(t.v)])) fail(`${POLICY} (unbalanced brackets)`);
+});
+if (open.length) fail(`${POLICY} (unbalanced brackets)`);
+// The one `fn`/`const`/`impl` definition of the name in `text`, anywhere in the file: it
+// must sit directly in `parent` (-1: top level), carry no attribute, and consist of
+// exactly the tokens of `text`. Returns the index after it, or -1.
+const item = (text, parent) => {
+  const want = lex(text);
+  const key = want.findIndex((t) => ["fn", "const", "impl"].includes(t.v));
+  const hits = T.flatMap((t, n) => (t.v === want[key].v && T[n + 1] && T[n + 1].v === want[key + 1].v ? [n - key] : []));
+  const s = hits[0];
+  if (hits.length !== 1 || s < 0 || T[s].up !== parent || (s > 0 && !";{}".includes(T[s - 1].v))) return -1;
+  return want.every((t, n) => T[s + n] && T[s + n].k === t.k && T[s + n].v === t.v) ? s + want.length : -1;
+};
 const constant = (name) => {
-  const m = profile.match(new RegExp(`const ${name}: &str = "([^"]+)";`));
-  if (!m) fail(`profile.rs no longer defines ${name}`);
-  return m[1];
+  const end = item(`const ${name}: &str =`, -1);
+  const lit = T[end], semi = T[end + 1];
+  if (end < 0 || !lit || lit.k !== "s" || !/^"[^"\\]*"$/.test(lit.v) || !semi || semi.v !== ";") fail(`profile.rs no longer defines ${name}`);
+  return lit.v.slice(1, -1);
 };
 const beta = constant("BETA_IDENTIFIER");
 const remote = constant("REMOTE_TEST_IDENTIFIER");
-// Either the inline form, or the shared policy function (desktop builds are not mobile,
-// so `mobile ||` cannot loosen it): both must keep the beta identifiers on signet.
-const ids = String.raw`matches!\(identifier,\s*BETA_IDENTIFIER\s*\|\s*REMOTE_TEST_IDENTIFIER\)`;
-const inline = new RegExp(String.raw`signet_only:\s*` + ids).test(profile);
-const viaFn = /signet_only:\s*signet_only_for\(identifier,/.test(profile)
-  && new RegExp(String.raw`fn signet_only_for\(identifier: &str, mobile: bool\) -> bool \{\s*mobile\s*\|\|\s*` + ids + String.raw`\s*\}`).test(profile);
-if (!inline && !viaFn) {
-  fail("profile.rs no longer maps the beta identifiers to signet_only");
-}
+// for_platform must build exactly this struct, with either the inline policy or the shared
+// helper (desktop builds are not mobile, so its `mobile ||` cannot loosen the beta ids).
+const ids = "matches!(identifier, BETA_IDENTIFIER | REMOTE_TEST_IDENTIFIER)";
+const ctor = (expr) => `pub(crate) fn for_platform(identifier: &str, mobile: bool) -> Self { Self {
+  remote_only: identifier == REMOTE_TEST_IDENTIFIER, signet_only: ${expr}, beta_storage: identifier == BETA_IDENTIFIER, } }`;
+const impl = item("impl AppProfile {", -1);
+const method = (text) => impl >= 0 && item(text, impl - 1) >= 0;
+const policy = method("pub(crate) fn for_identifier(identifier: &str) -> Self { Self::for_platform(identifier, phone_build()) }")
+  && (method(ctor(ids)) || (method(ctor("signet_only_for(identifier, mobile)"))
+    && item(`pub(crate) fn signet_only_for(identifier: &str, mobile: bool) -> bool { mobile || ${ids} }`, -1) >= 0));
+// `matches!` must be the standard macro: no macro definitions, macro imports, inner
+// attributes or top-level imports other than the current one.
+const plain = T.every((t, n) => !["macro_rules", "macro_use", "extern"].includes(t.v)
+  && !(t.v === "#" && T[n + 1] && T[n + 1].v === "!")
+  && (t.v !== "use" || t.up !== -1 || T.slice(n, n + 7).map((u) => u.v).join(" ") === "use std :: sync :: OnceLock ;"));
+if (!policy || !plain) fail(POLICY);
 const id = config.identifier;
 if (id !== beta && id !== remote) fail(`identifier ${JSON.stringify(id)} is not signet-only (expected ${beta} or ${remote})`);
 const bundle = config.bundle;
