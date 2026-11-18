@@ -1953,6 +1953,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     const host = stubHost({ minutes: 60 });
     await openShell();
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
     await vi.waitFor(() => expect($('[data-call-minutes-confirm]')).not.toBeNull());
     expect($('[data-call-hold-needed]')?.textContent).toBe('Press Confirm hold now: the call connects only after you confirm. No minute is paid before.');
