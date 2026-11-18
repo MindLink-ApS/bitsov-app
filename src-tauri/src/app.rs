@@ -326,8 +326,13 @@ struct NodeState {
     /// A pairing link was just imported: ask the node once for the day's
     /// budget as soon as this pairing is signed in (see `ask_budget_after_pairing`).
     budget_after_pairing: AtomicBool,
-    /// One budget ask at a time: a concurrent poll leaves it to the running one.
-    budget_ask_busy: AtomicBool,
+    /// Serializes creating an elevation request, for the automatic pairing ask
+    /// and every explicit ask alike: one POST at a time, each after a fresh
+    /// look at the pending request. Never held while waiting for `money`.
+    elevation_create: tokio::sync::Mutex<()>,
+    /// This node's call limit (`max_call_minutes`) as last seen on one of its
+    /// holds, for the call-window check before a paid offer or answer.
+    call_limit_seen: Mutex<Option<(String, u16)>>,
     /// Desktop: the file that carries the budget ask across the restart that
     /// follows an imported link, removed once the ask is sent or not needed.
     budget_ask_marker: Mutex<Option<PathBuf>>,
@@ -813,7 +818,8 @@ impl NodeState {
             trust_write: Mutex::new(()),
             approvals_restored: AtomicBool::new(false),
             budget_after_pairing: AtomicBool::new(false),
-            budget_ask_busy: AtomicBool::new(false),
+            elevation_create: tokio::sync::Mutex::new(()),
+            call_limit_seen: Mutex::new(None),
             budget_ask_marker: Mutex::new(None),
             media: Mutex::new(None),
             #[cfg(feature = "call-seal")]
@@ -1969,7 +1975,6 @@ async fn bootstrap_node_at(app: &AppHandle<impl tauri::Runtime>, app_data_dir: P
     let _startup = StartupFinished(&state.local_startup);
     match remote_access::load_persisted(&app_data_dir) {
         Ok(Some(_)) => {
-            restore_budget_ask(&state, &app_data_dir);
             if let Err(error) = connect_remote_at(&state, &app_data_dir, true).await {
                 set_error(&state, error);
             }
@@ -2368,7 +2373,11 @@ async fn connect_remote_with(state: &NodeState, app_data_dir: &Path, wait: bool,
                 state.phone_setup.lock().unwrap().get_or_insert_with(|| saved.as_ref().is_none_or(|d|
                     d.pending_phone_enrollment()));
                 match saved {
-                    Some(descriptor) => attach_remote_with(state, app_data_dir, descriptor, interaction).await,
+                    Some(descriptor) => {
+                        // Every startup with a saved link (desktop, phone, any OS) picks up an ask left due.
+                        restore_budget_ask(state, app_data_dir);
+                        attach_remote_with(state, app_data_dir, descriptor, interaction).await
+                    }
                     None => {
                         #[cfg(any(mobile, feature = "mobile"))]
                         {
@@ -3587,7 +3596,7 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     *state.error.lock().unwrap() = None;
     state.remote_retry.clear_connection_error();
     // The owner's one budget step comes right after this link, not at a call.
-    pairing_imported(state);
+    pairing_imported_at(state, dir);
     // Subscribe while holding remote_change: Forget must invalidate even a
     // spawned task that has not been polled yet.
     spawn_remote_connect(app, dir, true);
@@ -3656,7 +3665,7 @@ async fn remote_access_import_at<R: tauri::Runtime>(
     #[cfg(any(mobile, feature = "mobile"))]
     {
         *state.error.lock().unwrap() = None;
-        pairing_imported(state);
+        pairing_imported_at(state, app_data_dir);
         spawn_remote_connect(_app, app_data_dir, true);
         return Ok(RemoteImportView { restart_required: false, ..result });
     }
@@ -3709,7 +3718,9 @@ async fn remote_access_forget_at(state: &NodeState, app_data_dir: &Path) -> Resu
     remote_access::forget_persisted(app_data_dir).map_err(|error| error.to_string())?;
     state.budget_after_pairing.store(false, Ordering::SeqCst);
     *state.budget_ask_marker.lock().unwrap() = None;
-    remove_budget_ask(&budget_ask_path(app_data_dir));
+    if let Err(error) = remove_budget_ask(&budget_ask_path(app_data_dir)) {
+        eprintln!("[spend] could not clear the budget ask: {error}");
+    }
     state.remote_retry.clear_refusal();
     // Preserve established connections (Forget still selects the next startup).
     // An unfinished attach, however, must leave no stale remote onboarding state.
@@ -7210,6 +7221,16 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>, budget_m
 /// pending request when the window's generation is still `generation`.
 /// Returns the node's request id. Never obtains anything by itself.
 async fn post_elevation_request(state: &NodeState, want: Want, budget_msat: Option<u64>, minimum: Option<u64>, generation: u64) -> Result<Option<String>, ActionError> {
+    // One request at a time, shared with the automatic pairing ask; a request
+    // that appeared meanwhile is followed, not repeated (a replacement still asks).
+    let _create = state.elevation_create.lock().await;
+    if budget_msat.is_none() {
+        let live = state.spend.lock().unwrap().pending()
+            .filter(|p| p.expires_at_ms > now_ms()).map(|p| p.op_id.clone());
+        if let Some(op_id) = live {
+            return Ok(Some(op_id));
+        }
+    }
     let mut ask = serde_json::json!({ "scopes": ["spend"] });
     // A G1 node shows the owner a budget to approve; the owner's
     // flags override it. Older nodes get the pre-G1 body.
@@ -7220,6 +7241,12 @@ async fn post_elevation_request(state: &NodeState, want: Want, budget_msat: Opti
             ask["budget"] = budget;
         }
     }
+    dispatch_elevation_request(state, ask, budget_msat, generation).await
+}
+
+/// POST one prepared elevation request and track it when the window's
+/// generation is still `generation`. Callers hold `elevation_create`.
+async fn dispatch_elevation_request(state: &NodeState, ask: serde_json::Value, budget_msat: Option<u64>, generation: u64) -> Result<Option<String>, ActionError> {
     let (status, body) = call_api(state, reqwest::Method::POST, "/pair/elevation-request", Some(ask)).await?;
     if !status.is_success() {
         return Err(ActionError::node(api_error("/pair/elevation-request", status, &body)));
@@ -8436,6 +8463,7 @@ async fn end_call_past_hold(state: &NodeState, consent: &CallConsent) -> ActionE
 /// paid. Pays nothing itself (a refused hold is hung up).
 async fn do_call_hold(state: &NodeState, peer: &str, call_id: &str, confirm_reserved_msat: Option<u64>) -> Result<control::CallStatus, ActionError> {
     let (status, hold, consent) = checked_call_hold(state, peer, call_id).await?;
+    *state.call_limit_seen.lock().unwrap() = Some((consent.node_id.clone(), hold.max_call_minutes));
     if let Some(shown) = confirm_reserved_msat {
         if shown != hold.reserved_msat {
             return Err(ActionError::new("call_hold_changed",
@@ -8674,6 +8702,10 @@ async fn do_call_signal_bounded(
                 }
                 error
             })?;
+        // A node-routed call must fit inside the grant the node holds now.
+        if minutes.is_some() {
+            if let Some(g) = &checked { call_window_fits(state, g.expires_at_ms())?; }
+        }
         // A hangup is bounded like a message (the 6-sat cap). A call that
         // could not be ended is never started.
         if let Some(g) = checked {
@@ -9236,9 +9268,16 @@ fn budget_ask_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join(BUDGET_ASK_FILE)
 }
 
-/// Desktop import: the link is used on the next start, so the one budget ask
-/// waits in a file until then. It holds no secret, only that the ask is due.
-#[cfg_attr(any(mobile, feature = "mobile"), allow(dead_code))]
+/// A link was imported and is used now: the ask is due in this run and, until
+/// it is sent, in every later start too (the app may quit first).
+fn pairing_imported_at(state: &NodeState, app_data_dir: &Path) {
+    save_budget_ask(app_data_dir);
+    *state.budget_ask_marker.lock().unwrap() = Some(budget_ask_path(app_data_dir));
+    pairing_imported(state);
+}
+
+/// The ask waits in a file until it is sent. It holds no secret, only that
+/// the ask is due. Desktop Import writes it for the next start.
 fn save_budget_ask(app_data_dir: &Path) {
     if let Err(error) = std::fs::write(budget_ask_path(app_data_dir), b"1\n") {
         eprintln!("[spend] could not keep the budget ask for the next start: {error}");
@@ -9246,7 +9285,6 @@ fn save_budget_ask(app_data_dir: &Path) {
 }
 
 /// Startup with a saved link: an ask the import left for this start is due.
-#[cfg_attr(not(all(desktop, not(feature = "mobile"), unix)), allow(dead_code))]
 fn restore_budget_ask(state: &NodeState, app_data_dir: &Path) {
     let path = budget_ask_path(app_data_dir);
     if path.is_file() {
@@ -9255,20 +9293,27 @@ fn restore_budget_ask(state: &NodeState, app_data_dir: &Path) {
     }
 }
 
-fn remove_budget_ask(path: &Path) {
-    if let Err(error) = std::fs::remove_file(path) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            eprintln!("[spend] could not clear the budget ask: {error}");
-        }
+fn remove_budget_ask(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
     }
 }
 
-/// The ask was sent, or is not needed: never again for this link.
-fn budget_ask_done(state: &NodeState) {
-    state.budget_after_pairing.store(false, Ordering::SeqCst);
-    if let Some(path) = state.budget_ask_marker.lock().unwrap().take() {
-        remove_budget_ask(&path);
+/// The ask is sent now, or not needed: never again for this link. Its file
+/// goes first: if it cannot be removed, nothing is sent and the ask stays, so
+/// a later start can never repeat a request whose result was unclear.
+fn budget_ask_done(state: &NodeState) -> Result<(), ActionError> {
+    let path = state.budget_ask_marker.lock().unwrap().clone();
+    if let Some(path) = path {
+        remove_budget_ask(&path).map_err(|error| {
+            eprintln!("[spend] could not clear the budget ask: {error}");
+            ActionError::new("app_not_ready", "The app could not update its own files. Nothing was sent.")
+        })?;
+        *state.budget_ask_marker.lock().unwrap() = None;
     }
+    state.budget_after_pairing.store(false, Ordering::SeqCst);
+    Ok(())
 }
 
 /// One owner step up front: right after pairing, ask the node for the day's
@@ -9283,47 +9328,49 @@ async fn ask_budget_after_pairing(state: &NodeState) -> Result<(), ActionError> 
     if !state.budget_after_pairing.load(Ordering::SeqCst) {
         return Ok(());
     }
+    if !matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(_)) {
+        return Ok(());
+    }
+    if budget_paused(state)? {
+        return budget_ask_done(state);
+    }
+    // A saved request from an earlier run is followed, not repeated. This read
+    // may also refresh the session, so its scopes are read only after it.
+    if !state.approvals_restored.load(Ordering::SeqCst) {
+        do_budget_status(state).await?;
+    }
     let has_spend = match &*state.auth.lock().unwrap() {
         AuthMode::Paired(session) => session.scopes.iter().any(|s| s == "spend"),
         _ => return Ok(()),
     };
-    if state.budget_ask_busy.swap(true, Ordering::SeqCst) {
-        return Ok(());
+    if has_spend {
+        return budget_ask_done(state);
     }
-    struct Busy<'a>(&'a AtomicBool);
-    impl Drop for Busy<'_> {
-        fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
-    }
-    let _busy = Busy(&state.budget_ask_busy);
-    // Another poll may have finished the ask while this one waited.
+    restore_spend_pending(state);
+    // One request at a time, shared with every explicit ask. Busy: the next poll tries again.
+    let Ok(_create) = state.elevation_create.try_lock() else { return Ok(()) };
     if !state.budget_after_pairing.load(Ordering::SeqCst) {
         return Ok(());
     }
-    if has_spend || budget_paused(state)? {
-        budget_ask_done(state);
-        return Ok(());
-    }
-    // A saved request from an earlier run is followed, not repeated.
-    if !state.approvals_restored.load(Ordering::SeqCst) {
-        do_budget_status(state).await?;
-    }
-    restore_spend_pending(state);
     let generation = {
         let gate = state.spend.lock().unwrap();
         if gate.pending().is_some_and(|p| p.expires_at_ms > now_ms()) {
             drop(gate);
-            budget_ask_done(state);
-            return Ok(());
+            return budget_ask_done(state);
         }
         gate.generation()
     };
     // Pre-G1 nodes keep their old ask-at-use path.
     if !node_has_g1(state).await? {
-        budget_ask_done(state);
-        return Ok(());
+        return budget_ask_done(state);
     }
-    budget_ask_done(state);
-    post_elevation_request(state, Want::Window, None, None, generation).await?;
+    // The whole request is ready before the ask is spent: a failed read keeps it.
+    let budget = budget_proposal(state, Want::Window, None)
+        .ok_or_else(|| ActionError::new("app_not_ready", "The day’s budget could not be read yet. Nothing was sent."))?;
+    let ask = serde_json::json!({ "scopes": ["spend"], "budget": budget });
+    // Spent just before the POST: an unclear POST is never repeated.
+    budget_ask_done(state)?;
+    dispatch_elevation_request(state, ask, None, generation).await?;
     save_spend_pending(state);
     Ok(())
 }
@@ -10576,6 +10623,28 @@ async fn call_signal(
     do_renderer_call_signal(state.inner(), &peer, kind, &plaintext, max_msat, minutes, max_hangup_msat).await
 }
 
+/// The most minutes any node lets one call last (`[calls] max_call_minutes`).
+const CALL_LIMIT_MAX_MINUTES: u64 = 240;
+/// Room beyond the call limit, so an approval never ends in a call's last minute.
+const CALL_WINDOW_MARGIN_MS: u64 = 60_000;
+const CALL_WINDOW_SHORT: &str = "Your box’s approval ends before this call could end, and the call would stop there. Nothing was sent or paid. Ask the person who set up your box for a new approval.";
+
+/// A node-routed call lives only as long as the box approval. Refuse, before
+/// anything is sent or paid, a paid offer or answer whose freshly read grant
+/// ends before this node's call limit could (the most any node allows while
+/// that limit is not known yet).
+fn call_window_fits(state: &NodeState, grant_expires_at_ms: u64) -> Result<(), ActionError> {
+    let node = state.node_id.lock().unwrap().clone();
+    let limit = state.call_limit_seen.lock().unwrap().as_ref()
+        .filter(|(seen, _)| node.as_deref() == Some(seen.as_str()))
+        .map_or(CALL_LIMIT_MAX_MINUTES, |(_, minutes)| u64::from(*minutes).max(1));
+    let needed = now_ms().saturating_add(limit * 60_000 + CALL_WINDOW_MARGIN_MS);
+    if grant_expires_at_ms < needed {
+        return Err(ActionError::new("call_window_short", CALL_WINDOW_SHORT));
+    }
+    Ok(())
+}
+
 /// One call signal as the renderer asks for it. Every offer names the hangup
 /// ceiling it was shown with: without one it is refused, and nothing is sent.
 async fn do_renderer_call_signal(
@@ -10589,7 +10658,15 @@ async fn do_renderer_call_signal(
         // M6 A2: a node-routed offer carries the minutes agreed before Ring.
         Some(consent) if kind == act::KIND_CALL_OFFER => do_call_offer_with_minutes(state, peer, plaintext, max_msat, consent, max_hangup_msat).await,
         Some(_) => Err(ActionError::invalid("only an offer carries agreed minutes")),
-        None => do_call_signal_bounded(state, peer, kind, plaintext, max_msat, None, None, max_hangup_msat).await,
+        None => {
+            // An answer on a paired app: checked against the grant as the node has it now.
+            if kind == act::KIND_CALL_ANSWER && matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(_)) {
+                if let Some(grant) = read_grant(state).await? {
+                    call_window_fits(state, grant.expires_at_ms())?;
+                }
+            }
+            do_call_signal_bounded(state, peer, kind, plaintext, max_msat, None, None, max_hangup_msat).await
+        }
     }
 }
 
@@ -22128,6 +22205,32 @@ mod control_act_tests {
         g1_node_with(&["read", "receive"], Some(first))
     }
 
+    /// A node-routed Ring is checked against the grant the node holds now: a
+    /// grant that ends before the call could is refused, unsent and unpaid.
+    #[tokio::test]
+    async fn a_paid_ring_is_checked_against_the_grant_the_node_holds_now() {
+        for (secs, sent) in [(3_600, false), (86_400, true)] {
+            let (node, _dir, g1) = call_grant_node(1_000);
+            g1_approved(&node, 500_000).await;
+            with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+            let quote = read_call_quote(&node.state, A).await.unwrap();
+            let offer = quote.offer_msat.unwrap() + quote.offer_max_routing_fee_msat;
+            let mut grant = g1_grant(secs, 400_000, 400_000);
+            grant["per_call_max_msat"] = 10_000.into();
+            grant["call_per_payment_max_msat"] = 10_000.into();
+            grant["message_per_payment_max_msat"] = grant::MESSAGING_PER_CALL_MAX_MSAT.into();
+            *g1.grant.lock().unwrap() = grant;
+            let minute = control::MinutesConsent { block_msat: 10_000, block_max_routing_fee_msat: 5_000, max_hold_msat: 240 * 15_000 };
+            let result = do_call_signal_bounded(&node.state, A, 400, OFFER, offer, None, Some(&minute), None).await;
+            if sent {
+                assert_eq!(composes(&node), 1, "{secs}: {:?}", result.err());
+            } else {
+                assert_eq!(result.unwrap_err().code, "call_window_short", "{secs}");
+                assert_eq!(composes(&node), 0, "nothing sent or paid");
+            }
+        }
+    }
+
     /// A minute is compared at its price with the signed per-payment limit:
     /// the node pins no routing fee for a usable direct channel.
     #[tokio::test]
@@ -22140,7 +22243,7 @@ mod control_act_tests {
             let quote = read_call_quote(&node.state, A).await.unwrap();
             let offer = quote.offer_msat.unwrap() + quote.offer_max_routing_fee_msat;
             assert!(offer <= 10_000);
-            let mut grant = g1_grant(3600, 400_000, 400_000);
+            let mut grant = g1_grant(86_400, 400_000, 400_000);
             grant["per_call_max_msat"] = 10_000.into();
             grant["call_per_payment_max_msat"] = 10_000.into();
             grant["message_per_payment_max_msat"] = grant::MESSAGING_PER_CALL_MAX_MSAT.into();
@@ -26898,10 +27001,123 @@ mod control_act_tests {
         spend_status_now(&node.state).await.unwrap();
         assert_eq!(node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count(), 1);
         assert!(!budget_ask_path(dir.path()).exists(), "sent: the next start asks nothing");
+        // Every startup with that saved link picks the ask up through the
+        // normal connect route (any OS), and a live import keeps it on disk
+        // until it is sent.
+        save_budget_ask(dir.path());
+        let fresh = NodeState::for_identifier("app.bitsov.desktop");
+        let _ = tokio::time::timeout(Duration::from_secs(5), connect_remote_at(&fresh, dir.path(), false)).await;
+        assert!(fresh.budget_after_pairing.load(Ordering::SeqCst), "startup restores the ask");
+        let joined = NodeState::for_identifier("app.bitsov.desktop");
+        let other = tempfile::tempdir().unwrap();
+        pairing_imported_at(&joined, other.path());
+        assert!(budget_ask_path(other.path()).is_file() && joined.budget_after_pairing.load(Ordering::SeqCst));
         // Forget drops a waiting ask with the link.
         save_budget_ask(dir.path());
         remote_access_forget_at(&state, dir.path()).await.unwrap();
         assert!(!budget_ask_path(dir.path()).exists());
+    }
+
+    /// A node-routed call needs a grant that outlasts this node's call limit:
+    /// 240 minutes while the limit is unknown, the limit once seen on a hold
+    /// of this node (another node's limit does not count).
+    #[test]
+    fn the_call_window_uses_the_known_limit_of_this_node_or_the_most_any_node_allows() {
+        let node = fake(AuthMode::Unauthenticated, happy());
+        let own = node.state.node_id.lock().unwrap().clone().unwrap_or_default();
+        let minutes = |m: u64| now_ms() + m * 60_000;
+        assert_eq!(call_window_fits(&node.state, minutes(200)).unwrap_err().code, "call_window_short");
+        assert!(call_window_fits(&node.state, minutes(242)).is_ok());
+        *node.state.call_limit_seen.lock().unwrap() = Some((own.clone(), 60));
+        assert!(call_window_fits(&node.state, minutes(62)).is_ok());
+        assert_eq!(call_window_fits(&node.state, minutes(60)).unwrap_err().code, "call_window_short");
+        *node.state.call_limit_seen.lock().unwrap() = Some(("another-node".into(), 60));
+        assert_eq!(call_window_fits(&node.state, minutes(62)).unwrap_err().code, "call_window_short");
+    }
+
+    /// The node's grant is read again for a paid answer: a grant replaced by a
+    /// short one after the app's last poll refuses the answer, unsent and unpaid.
+    #[tokio::test]
+    async fn a_paid_answer_is_checked_against_the_grant_the_node_holds_now() {
+        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
+        *g1.grant.lock().unwrap() = g1_grant(5 * 60, 2_000_000, 2_000_000);
+        let answer = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","sdp":"v=0"}"#;
+        let error = do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, answer, 15_000, None, None).await.unwrap_err();
+        assert_eq!(error.code, "call_window_short");
+        assert!(!node.posts().iter().any(|(p, _)| p == "/messages/compose"), "nothing sent or paid");
+        // A whole-day grant passes this check (whatever follows it).
+        *g1.grant.lock().unwrap() = g1_grant(86_400, 2_000_000, 2_000_000);
+        let later = do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, answer, 15_000, None, None).await;
+        assert_ne!(later.err().map(|e| e.code), Some("call_window_short"));
+    }
+
+    /// A read that fails while the request is prepared (the budget proposal,
+    /// read after the capability check) keeps the ask: nothing is posted
+    /// without the day's budget, and the next healthy poll sends it once.
+    #[tokio::test]
+    async fn a_failed_budget_read_while_preparing_the_ask_keeps_it() {
+        let spoil: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let hook = spoil.clone();
+        let first: Routes = Arc::new(move |_m, p, _b| {
+            // Between the pause check and the proposal: the book becomes unreadable once.
+            if p == "/status" {
+                if let Some(book) = hook.lock().unwrap().take() {
+                    std::fs::write(book, b"not a budget book").unwrap();
+                }
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(first));
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        with_book(&node.state, true, |b| { b.ceiling_msat = 2_000_000; Ok(()) }).unwrap();
+        let (dir, node_id) = budget_dir(&node.state).unwrap();
+        let book = budget::book_path(&dir, &node_id);
+        let healthy = std::fs::read(&book).unwrap();
+        node.state.approvals_restored.store(true, Ordering::SeqCst);
+        *spoil.lock().unwrap() = Some(book.clone());
+        pairing_imported(&node.state);
+        let _ = spend_status_now(&node.state).await;
+        assert!(spoil.lock().unwrap().is_none(), "the book was spoiled during preparation");
+        assert!(!node.posts().iter().any(|(p, _)| p == "/pair/elevation-request"), "no request without its budget");
+        assert!(node.state.budget_after_pairing.load(Ordering::SeqCst), "the ask is kept");
+        std::fs::write(&book, healthy).unwrap();
+        let _ = spend_status_now(&node.state).await;
+        let asks: Vec<_> = node.posts().into_iter().filter(|(p, _)| p == "/pair/elevation-request").collect();
+        assert_eq!(asks.len(), 1);
+        assert_eq!(asks[0].1["budget"]["ttl_secs"], 86_400);
+    }
+
+    /// The automatic ask and an explicit ask share one request: an explicit
+    /// ask that arrives while the automatic one is being sent follows it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_automatic_and_an_explicit_ask_never_post_twice() {
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let a = arrived.clone();
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let wait = Mutex::new(wait);
+        let first: Routes = Arc::new(move |m, p, _b| {
+            if m == "POST" && p == "/pair/elevation-request" {
+                a.notify_one();
+                let _ = wait.lock().unwrap().recv_timeout(Duration::from_secs(5));
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(first));
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        let state: &'static NodeState = Box::leak(Box::new(node.state));
+        pairing_imported(state);
+        let auto = tokio::spawn(async move { spend_status_now(state).await });
+        arrived.notified().await;
+        let explicit = tokio::spawn(async move { do_spend_request(state, None, None).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        release.send(()).unwrap();
+        auto.await.unwrap().unwrap();
+        let view = explicit.await.unwrap().unwrap();
+        let pending = state.spend.lock().unwrap().pending().map(|p| p.op_id.clone());
+        assert!(pending.is_some());
+        assert_eq!(view.request_id, pending, "the explicit ask follows the one request");
+        assert_eq!(node.seen.lock().unwrap().iter()
+            .filter(|(m, p, _, _)| m == "POST" && p == "/api/v1/pair/elevation-request").count(), 1);
     }
 
     #[tokio::test]

@@ -36,6 +36,8 @@ pub const KIND_FILE_REF: u16 = 200;
 /// 1:1 call signalling (genome kinds 400-403): offer, answer, ICE, hangup.
 /// The offer is the per-call admission, paid at the callee's `call_msat`.
 pub const KIND_CALL_OFFER: u16 = 400;
+/// The callee's answer: one paid signal.
+pub const KIND_CALL_ANSWER: u16 = 401;
 pub const KIND_CALL_HANGUP: u16 = 403;
 /// M6 (genome kind 404 `CALL_BLOCK`): one paid 60-second interval of a
 /// node-routed call, priced by the callee and drawn from the call's
