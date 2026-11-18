@@ -1,0 +1,239 @@
+import { createSignal, type JSX, onCleanup, onMount } from 'solid-js';
+import { t as tr } from '../i18n';
+import { onEscape } from './escapeStack';
+
+/**
+ * The video area of a call: their picture large, yours small. Presentation
+ * only; the media, its quality and its payment are untouched.
+ *
+ * - Full screen: the button, a double-click on the picture, Esc to leave.
+ *   The DOM Fullscreen API on this area (the webview allows element full
+ *   screen); where it is missing or refused, the area fills the window instead.
+ * - The call window can be moved and resized (pointer or arrow keys), within
+ *   the window and to at most 70% of its width, so the chat stays usable beside it.
+ * - Your own picture moves between the four corners (drag, click or arrow keys).
+ */
+export type SelfCorner = 'br' | 'bl' | 'tr' | 'tl';
+const CORNERS: SelfCorner[] = ['br', 'bl', 'tl', 'tr'];
+const MIN_WIDTH = 280;
+const STEP = 24;
+const SIZE_STEP = 40;
+
+type FullscreenDoc = Document & { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => Promise<void> | void };
+type FullscreenEl = HTMLElement & { webkitRequestFullscreen?: () => Promise<void> | void };
+
+const fullscreenElement = () => {
+  const doc = document as FullscreenDoc;
+  return doc.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
+};
+
+/** Largest call window: the chat keeps at least 30% of the window beside it. */
+export const maxPanelWidth = (viewport: number) => Math.max(MIN_WIDTH, Math.min(960, Math.floor(viewport * 0.7)));
+
+export function CallVideoStage(props: {
+  /** The call window this area sits in: moved and resized as a whole. */
+  panel: () => HTMLElement | undefined;
+  remote: JSX.Element;
+  self: JSX.Element;
+  cameraOff: boolean;
+}) {
+  let stage: HTMLDivElement | undefined;
+  const [full, setFull] = createSignal<'native' | 'window' | null>(null);
+  const [corner, setCorner] = createSignal<SelfCorner>('br');
+  const [width, setWidth] = createSignal<number | null>(null);
+  let releaseEscape: (() => void) | null = null;
+
+  const leaveWindowFill = () => {
+    releaseEscape?.();
+    releaseEscape = null;
+    if (full() === 'window') setFull(null);
+  };
+  const fillWindow = () => {
+    setFull('window');
+    releaseEscape?.();
+    releaseEscape = onEscape(leaveWindowFill);
+  };
+  const toggleFullscreen = async () => {
+    if (!stage) return;
+    if (full() === 'window') { leaveWindowFill(); return; }
+    const doc = document as FullscreenDoc;
+    if (fullscreenElement() === stage) {
+      try { await (doc.exitFullscreen ? doc.exitFullscreen() : doc.webkitExitFullscreen?.()); } catch { /* already left */ }
+      setFull(null);
+      return;
+    }
+    const el = stage as FullscreenEl;
+    const request = el.requestFullscreen ? () => el.requestFullscreen() : el.webkitRequestFullscreen ? () => el.webkitRequestFullscreen!() : null;
+    const enabled = doc.fullscreenEnabled !== false || !!el.webkitRequestFullscreen;
+    if (!request || !enabled) { fillWindow(); return; }
+    try {
+      await request();
+      setFull('native');
+    } catch {
+      // Refused (no user gesture, a webview without element full screen): fill the window instead.
+      fillWindow();
+    }
+  };
+  const fullscreenChanged = () => {
+    if (full() === 'native' && fullscreenElement() !== stage) setFull(null);
+  };
+  onMount(() => {
+    document.addEventListener('fullscreenchange', fullscreenChanged);
+    document.addEventListener('webkitfullscreenchange', fullscreenChanged);
+  });
+  onCleanup(() => {
+    document.removeEventListener('fullscreenchange', fullscreenChanged);
+    document.removeEventListener('webkitfullscreenchange', fullscreenChanged);
+    releaseEscape?.();
+    if (stage && fullscreenElement() === stage) {
+      const doc = document as FullscreenDoc;
+      try { void (doc.exitFullscreen ? doc.exitFullscreen() : doc.webkitExitFullscreen?.())?.catch?.(() => {}); } catch { /* gone */ }
+    }
+    // The call window goes back to its own place and size for the next call.
+    const panel = props.panel();
+    if (panel) for (const p of ['right', 'bottom', 'width']) panel.style.removeProperty(p);
+    panel?.removeAttribute('data-call-window-moved');
+  });
+
+  // ---- moving and resizing the call window ----
+  const place = () => {
+    const panel = props.panel();
+    if (!panel) return null;
+    const rect = panel.getBoundingClientRect();
+    return {
+      panel,
+      right: panel.style.right ? parseFloat(panel.style.right) : Math.max(0, window.innerWidth - rect.right),
+      bottom: panel.style.bottom ? parseFloat(panel.style.bottom) : Math.max(0, window.innerHeight - rect.bottom),
+      width: panel.style.width ? parseFloat(panel.style.width) : rect.width || 340,
+      height: rect.height,
+    };
+  };
+  const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+  const moveTo = (right: number, bottom: number, width?: number) => {
+    const p = place();
+    if (!p) return;
+    const w = clamp(width ?? p.width, Math.min(MIN_WIDTH, window.innerWidth), maxPanelWidth(window.innerWidth));
+    p.panel.style.width = `${Math.round(w)}px`;
+    setWidth(Math.round(w));
+    p.panel.style.right = `${Math.round(clamp(right, 0, window.innerWidth - w))}px`;
+    p.panel.style.bottom = `${Math.round(clamp(bottom, 0, window.innerHeight - Math.min(p.height, window.innerHeight)))}px`;
+    p.panel.setAttribute('data-call-window-moved', '');
+  };
+  const moveBy = (dx: number, dy: number) => { const p = place(); if (p) moveTo(p.right - dx, p.bottom - dy); };
+  /** The window keeps its right edge; growing widens it to the left. */
+  const resizeBy = (d: number) => { const p = place(); if (p) moveTo(p.right, p.bottom, p.width + d); };
+
+  const drag = (e: PointerEvent, onMove: (dx: number, dy: number, start: NonNullable<ReturnType<typeof place>>) => void) => {
+    const start = place();
+    if (!start || e.button > 0) return;
+    e.preventDefault();
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    const target = e.currentTarget as HTMLElement;
+    try { target.setPointerCapture?.(e.pointerId); } catch { /* synthetic pointer */ }
+    const move = (m: PointerEvent) => onMove(m.clientX - x0, m.clientY - y0, start);
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  };
+  const arrows = (e: KeyboardEvent, by: (dx: number, dy: number) => void, step: number) => {
+    const d = ({ ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] } as Record<string, number[]>)[e.key];
+    if (!d) return;
+    e.preventDefault();
+    by(d[0], d[1]);
+  };
+
+  // ---- your own picture ----
+  const nextCorner = () => setCorner(CORNERS[(CORNERS.indexOf(corner()) + 1) % CORNERS.length]);
+  const selfKeys = (e: KeyboardEvent) => {
+    const c = corner();
+    const v = c[0] as 'b' | 't';
+    const h = c[1] as 'r' | 'l';
+    const to: Record<string, SelfCorner> = { ArrowLeft: `${v}l`, ArrowRight: `${v}r`, ArrowUp: `t${h}`, ArrowDown: `b${h}` } as Record<string, SelfCorner>;
+    if (to[e.key]) { e.preventDefault(); setCorner(to[e.key]); }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); nextCorner(); }
+  };
+  let selfMoved = false;
+  const selfDrag = (e: PointerEvent) => {
+    if (!stage || e.button > 0) return;
+    e.stopPropagation();
+    selfMoved = false;
+    const box = stage.getBoundingClientRect();
+    const move = (m: PointerEvent) => {
+      if (!box.width || !box.height) return;
+      selfMoved = true;
+      const x = (m.clientX - box.left) / box.width;
+      const y = (m.clientY - box.top) / box.height;
+      setCorner(`${y < 0.5 ? 't' : 'b'}${x < 0.5 ? 'l' : 'r'}` as SelfCorner);
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  };
+
+  return (
+    <div
+      ref={stage}
+      class="call-videos"
+      data-call-stage
+      data-call-fullscreen={full() ?? undefined}
+      role="group"
+      aria-label={tr('caVideoStageLabel')}
+      onDblClick={(e) => {
+        // A double-click on your own picture or a control is not a full-screen request.
+        if ((e.target as HTMLElement).closest('[data-call-self], [data-call-stage-controls]')) return;
+        void toggleFullscreen();
+      }}
+    >
+      {props.remote}
+      {/* Your own picture, named and shown as in a mirror; with the camera off it says so instead of going black. */}
+      <div
+        class="call-self" data-call-self data-camera-off={props.cameraOff ? '' : undefined} data-corner={corner()}
+        role="button" tabindex="0" aria-label={tr('caVideoSelfMove')}
+        onPointerDown={selfDrag}
+        onClick={() => { if (!selfMoved) nextCorner(); selfMoved = false; }}
+        onKeyDown={selfKeys}
+      >
+        {props.self}
+      </div>
+      <div class="call-stage-controls" data-call-stage-controls>
+        <button
+          type="button" class="call-stage-btn" data-call-move aria-label={tr('caVideoMove')} title={tr('caVideoMove')}
+          hidden={full() !== null}
+          onPointerDown={(e) => drag(e, (dx, dy, s) => moveTo(s.right - dx, s.bottom - dy))}
+          onKeyDown={(e) => arrows(e, moveBy, STEP)}
+        ><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1l2.5 2.5h-1.75v3.75h3.75V5.5L15 8l-2.5 2.5V8.75H8.75v3.75h1.75L8 15l-2.5-2.5h1.75V8.75H3.5v1.75L1 8l2.5-2.5v1.75h3.75V3.5H5.5z" fill="currentColor" /></svg></button>
+        {/* Wider to the left (Left/Up), narrower (Right/Down); the window keeps its right edge. */}
+        <div
+          class="call-stage-btn" data-call-resize role="slider" tabindex="0" title={tr('caVideoResize')}
+          aria-label={tr('caVideoResize')} aria-orientation="horizontal"
+          aria-valuemin={MIN_WIDTH} aria-valuemax={maxPanelWidth(window.innerWidth)}
+          aria-valuenow={width() ?? 340}
+          hidden={full() !== null}
+          onPointerDown={(e) => drag(e, (dx, _dy, s) => moveTo(s.right, s.bottom, s.width - dx))}
+          onKeyDown={(e) => {
+            const d = ({ ArrowLeft: SIZE_STEP, ArrowUp: SIZE_STEP, ArrowRight: -SIZE_STEP, ArrowDown: -SIZE_STEP } as Record<string, number>)[e.key];
+            if (d) { e.preventDefault(); resizeBy(d); }
+          }}
+        ><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M2 2l5 5M14 10v4h-4M14 14l-5-5" stroke="currentColor" stroke-width="1.6" fill="none" /></svg></div>
+        <button
+          type="button" class="call-stage-btn" data-call-fullscreen-toggle
+          aria-pressed={full() !== null}
+          aria-label={full() !== null ? tr('caVideoExitFullscreen') : tr('caVideoFullscreen')}
+          title={full() !== null ? tr('caVideoExitFullscreen') : tr('caVideoFullscreen')}
+          onClick={() => void toggleFullscreen()}
+        ><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d={full() !== null ? 'M6 2v4H2M10 2v4h4M6 14v-4H2M10 14v-4h4' : 'M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4'} stroke="currentColor" stroke-width="1.6" fill="none" /></svg></button>
+      </div>
+    </div>
+  );
+}

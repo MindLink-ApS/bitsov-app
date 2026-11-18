@@ -3666,13 +3666,14 @@ describe('calls in the shell', () => {
     expect(host.used('call_signal').map(c => c.args!.kind)).toEqual([401]);
   });
 
-  it.each([['NotAllowedError', /permission.*denied/i], ['NotFoundError', /no.*microphone/i]])('shows a clear %s capture error and enables another call', async (name, message) => {
+  it.each([['NotAllowedError', 'data-call-permission', /Give BitSov access to the microphone.*System Settings → Privacy & Security.*Nothing was sent or paid/], ['NotFoundError', 'data-call-ended', /no.*microphone/i]])('shows a clear %s capture error and enables another call', async (name, where, message) => {
     const host = stubHost();
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => { throw new DOMException('capture failed', name as string); } } });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     ring('audio');
-    await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(message as RegExp));
+    // A refused microphone gets its own screen: what to allow and where; a missing one keeps the plain reason.
+    await vi.waitFor(() => expect(text(`[${where}]`)).toMatch(message as RegExp));
     expect(host.used('call_signal')).toHaveLength(0);
     expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false);
   });

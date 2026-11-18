@@ -38,8 +38,14 @@ const MEDIA_ERROR = () => tr('caCameraMicrophoneNotAvailableCheckSystemSettingsP
 export const NO_MEDIA_DEVICES = 'MediaDevicesUnavailable';
 
 /** Where this platform's owner allows the microphone and camera. */
-const permissionPlace = (platform: AppPlatform) =>
+export const permissionPlace = (platform: AppPlatform = appPlatform()) =>
   platform === 'ios' ? tr('caSettingsBitSov') : platform === 'android' ? tr('caSettingsAppsBitSovPermissions') : tr('caSystemSettingsPrivacySecurity');
+
+/** The owner (or the OS) refused the microphone or camera, as opposed to a missing or busy device. */
+export const mediaDenied = (error: unknown): boolean => {
+  const name = error && typeof error === 'object' && 'name' in error ? error.name : '';
+  return name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError';
+};
 
 export function mediaError(error: unknown, media: CallMedia, platform: AppPlatform = appPlatform()): string {
   const name = error && typeof error === 'object' && 'name' in error ? error.name : '';
@@ -264,6 +270,11 @@ export type CallView = {
    * (`endsAt` set: it ends then unless that clears), or it ended for that.
    */
   stopped: CallStop | null;
+  /**
+   * The owner refused the microphone (or camera) for this call. Asked on the
+   * tap of Call or Accept, before anything is sent or paid, so nothing was.
+   */
+  mediaDenied: boolean;
 };
 
 /** `closed`: the host ended it (or nothing was owed); `unknown`: check pending result; `refused`: still open. */
@@ -319,7 +330,7 @@ export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
   liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, offline: false,
   close: null, stuck: null, dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null, minutes: null,
-  stopped: null,
+  stopped: null, mediaDenied: false,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
@@ -1150,6 +1161,7 @@ export function createCallEngine(deps: CallDeps) {
     } catch (error) {
       if (view.callId !== callId || !active()) return;
       end(null, tr('caNothingWasPaid', mediaError(error, view.media)));
+      set({ mediaDenied: mediaDenied(error) });
       return;
     }
     if (view.callId !== callId || !active()) return;
@@ -1270,16 +1282,19 @@ export function createCallEngine(deps: CallDeps) {
       claim(callId);
       own = [];
       set({ ...IDLE, phase: 'calling', peer, callId, media, outgoing: true, camera: media === 'video' });
-      const session = consent ? startMinutes(peer, callId, consent.block_msat, consent.max_hold_msat, true) : null;
+      // The microphone (and camera) is asked for first: a refusal leaves no minutes session, so nothing is read, held or paid.
+      let session: CallMinutes | null = null;
       let conn: RTCPeerConnection;
       try {
         conn = await open(media);
         if (cancelled === callId || view.callId !== callId || !active()) return;
+        session = consent ? startMinutes(peer, callId, consent.block_msat, consent.max_hold_msat, true) : null;
         await conn.setLocalDescription(await conn.createOffer());
         await gathered(conn, GATHER_MS);
       } catch (error) {
         if (cancelled === callId || view.callId !== callId || !active()) return;
         end(null, tr('caNothingWasPaid', mediaError(error, view.media)));
+        set({ mediaDenied: mediaDenied(error) });
         return;
       }
       // Cancelled before the offer went out: nothing is paid.
