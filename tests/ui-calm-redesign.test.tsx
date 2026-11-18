@@ -35,11 +35,12 @@ describe('denomination formatting', () => {
     expect(btc(100_000_000_000)).toBe('1');
     expect(btc(100_000_000_001)).toBe('1.00000000001');
     setDenom('sats');
-    expect(sats(500)).toBe('0.5');
-    expect(sats(1500)).toBe('1.5');
-    expect(sats(999)).toBe('0.999');
-    expect(sats(12_345)).toBe('12.345');
-    expect(sats(99_999_999_500)).toBe('99\u202f999\u202f999.5');
+    // Sats mode shows whole sats, rounded up and marked; never a sub-sat decimal.
+    expect(sats(500)).toBe('about 1');
+    expect(sats(1500)).toBe('about 2');
+    expect(sats(999)).toBe('about 1');
+    expect(sats(12_345)).toBe('about 13');
+    expect(sats(99_999_999_500)).toBe('about 100\u202f000\u202f000');
   });
 });
 

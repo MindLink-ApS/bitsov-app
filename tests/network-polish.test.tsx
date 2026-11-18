@@ -93,13 +93,14 @@ it('never substitutes an invoice request amount for an unknown settled amount', 
   expect(document.body.textContent).not.toContain('99');
 });
 
-it('keeps zero, fractional sats, and the chosen BTC denomination exact', () => {
+it('keeps zero exact, rounds fractional sats up as "about", and keeps the chosen BTC denomination exact', () => {
   setDenom('sats');
   const [msat, setMsat] = createSignal(0);
   dispose = render(() => <SettledPayment direction="received" msat={msat()} />, document.body);
   expect(document.body.textContent).toContain('0 sats');
   setMsat(1500);
-  expect(document.body.textContent).toContain('1.5 sats');
+  expect(document.body.textContent).toContain('about 2 sats');
+  expect(document.body.textContent).not.toContain('1.5');
   setDenom('btc');
   expect(document.body.textContent).toContain('0.000000015 BTC');
 });

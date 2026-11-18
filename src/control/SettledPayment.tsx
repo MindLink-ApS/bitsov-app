@@ -9,6 +9,6 @@ export function SettledPayment(props: { direction: 'sent' | 'received'; msat: nu
       <circle cx="24" cy="24" r="21" class="settled-ring" />
       <path d="m14 24 7 7 14-15" pathLength="1" class="settled-check" />
     </svg>
-    <span>{props.direction === 'sent' ? tr('extraPaid') : tr('extraReceived')} <strong class="settled-amount"><Show when={known()} fallback={tr('caAmountUnknown')}>{amount(props.msat!)}</Show></strong></span>
+    <span>{props.direction === 'sent' ? tr('extraPaid') : tr('extraReceived')} <strong class="settled-amount" data-settled-msat={known() ? String(props.msat) : undefined}><Show when={known()} fallback={tr('caAmountUnknown')}>{amount(props.msat!)}</Show></strong></span>
   </div>;
 }

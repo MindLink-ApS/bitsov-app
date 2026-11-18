@@ -516,8 +516,9 @@ describe('the Wallet page', () => {
     type('[data-receive-amount]', '2');
     click('[data-receive-create]');
     await vi.waitFor(() => expect($('[data-wallet-settled]')).not.toBeNull());
-    expect(text('[data-wallet-settled]')).toContain(reported === null ? 'Amount unknown' : '1.5 sats');
-    expect(text('[data-wallet-settled]')).not.toContain('2 sats');
+    expect(text('[data-wallet-settled]')).toContain(reported === null ? 'Amount unknown' : 'about 2 sats');
+    // The node's settled amount (1.5 sats, shown rounded), never the 2 sats requested.
+    expect($('[data-wallet-settled] [data-settled-msat]')?.getAttribute('data-settled-msat') ?? null).toBe(reported === null ? null : '1500');
     expect($('[data-receive-invoice] [data-wallet-qr]')).toBeNull();
   });
 
@@ -663,8 +664,9 @@ describe('the Wallet page', () => {
     click('[data-send-review]');
     click('[data-wallet-confirm]');
     await vi.waitFor(() => expect($('[data-wallet-settled]')).not.toBeNull());
-    expect(text('[data-wallet-settled]')).toContain('1.5 sats');
-    expect(text('[data-send-result]')).toContain('0.125 sats');
+    expect(text('[data-wallet-settled]')).toContain('about 2 sats');
+    expect($('[data-wallet-settled] [data-settled-msat]')?.getAttribute('data-settled-msat')).toBe('1500');
+    expect(text('[data-send-result]')).toContain('about 1 sat');
     expect(text('[data-send-result]')).not.toContain('7 sats');
   });
 

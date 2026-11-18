@@ -1,5 +1,5 @@
 import { t, language } from '../i18n';
-// Display helpers. Keep msat precision in the selected denomination.
+// Display helpers. Sats show whole numbers (rounded up); BTC keeps msat precision.
 // Denomination (sats vs BTC) follows the settings toggle — amounts stay msat.
 // Call sites must use amount() (or sats()+satUnit()); never append a unit literal.
 
@@ -19,9 +19,35 @@ const groupAmount = (value: string, nowrap = false) => {
 /** 1 BTC = 1e8 sats = 1e11 msat. */
 const MSAT_PER_BTC = 100_000_000_000;
 
-/** Number only (no unit). BTC mode keeps every msat digit (up to 11 fractional places). */
+/**
+ * Whole sats for display: a fraction is rounded UP, so a cost, a ceiling or a
+ * limit is never shown smaller than what may be paid. Display only: amounts
+ * stay msat everywhere else.
+ */
+export function wholeSats(msat: number): { sats: number; rounded: boolean } {
+  const absolute = Math.abs(msat);
+  const whole = Math.ceil(absolute / 1000);
+  return { sats: msat < 0 ? -whole : whole, rounded: whole * 1000 !== absolute };
+}
+
+/** Number only (no unit). Sats show whole numbers ("about"/"ca." when rounded); BTC mode keeps every msat digit. */
 export function sats(msat: number, nowrap = false): string {
   if (denom() === 'btc') return btc(msat, nowrap);
+  const shown = wholeSats(msat);
+  const number = `${shown.sats < 0 ? '-' : ''}${groupDigits(String(Math.abs(shown.sats)), nowrap)}`;
+  return shown.rounded ? t('amountAbout', number) : number;
+}
+
+/** An estimate's figure: "≈ 10" (the sign already says it is rounded), otherwise sats(). */
+export function estimatedSats(msat: number, estimate: boolean, nowrap = false): string {
+  if (!estimate) return sats(msat, nowrap);
+  if (denom() === 'btc') return `≈ ${btc(msat, nowrap)}`;
+  const shown = wholeSats(msat);
+  return `≈ ${shown.sats < 0 ? '-' : ''}${groupDigits(String(Math.abs(shown.sats)), nowrap)}`;
+}
+
+/** Exact sats with msat decimals, for technical details only. */
+export function exactSats(msat: number, nowrap = false): string {
   if (!Number.isSafeInteger(msat)) return groupAmount((msat / 1000).toFixed(3).replace(/\.?0+$/, ''), nowrap);
   const absolute = Math.abs(msat);
   const whole = Math.floor(absolute / 1000);
@@ -48,11 +74,15 @@ export function btc(msat: number, nowrap = false): string {
 /** `sat` / `sats` / `BTC`, matching the number returned by sats(). */
 export const satUnit = (msat: number) => {
   if (denom() === 'btc') return 'BTC';
-  return msat === 1000 ? 'sat' : 'sats';
+  return Math.abs(wholeSats(msat).sats) === 1 ? 'sat' : 'sats';
 };
 
 /** Number and unit together. Prefer this at every display site. */
 export const amount = (msat: number, nowrap = false) => `${sats(msat, nowrap)} ${satUnit(msat)}`;
+
+/** Number and unit with every msat digit, for a Details disclosure (where parts must add up exactly). */
+export const exactAmount = (msat: number, nowrap = false) =>
+  denom() === 'btc' ? `${btc(msat, nowrap)} BTC` : `${exactSats(msat, nowrap)} ${msat === 1000 ? 'sat' : 'sats'}`;
 
 export const satsWhole = (value: number, nowrap = false) => groupAmount(String(value), nowrap);
 

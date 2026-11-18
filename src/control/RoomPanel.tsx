@@ -10,7 +10,7 @@ import { t as tr } from '../i18n';
 import { createEffect, createMemo, createSignal, For, on, Show, Switch, Match, type JSX } from 'solid-js';
 import { t, type CopyKey } from '../i18n';
 import { createStore, reconcile } from 'solid-js/store';
-import { amount as fmtAmount, clock, day, sats, satUnit } from './format';
+import { amount as fmtAmount, clock, day, estimatedSats, satUnit } from './format';
 import {
   MAX_MEMBERS, newMsgId, planLegs, planTotal, roomChatText, roomRefusalWords, roomThread,
   type LegOutcome, type LegPlan, type LocalRoom, type MemberInfo, type RoomEntry,
@@ -191,7 +191,7 @@ export function RoomThread(props: {
   createEffect(on(() => items().length, () => queueMicrotask(() => stream?.scrollTo?.({ top: stream.scrollHeight }))));
 
   const legLine = (l: LegPlan) =>
-    l.state === 'pay' ? `${l.estimate ? '≈ ' : ''}${fmtAmount(l.msat)}` : l.state === 'skip' ? l.reason : t('roomReadingPrice');
+    l.state === 'pay' ? `${estimatedSats(l.msat, l.estimate)} ${satUnit(l.msat)}` : l.state === 'skip' ? l.reason : t('roomReadingPrice');
 
   return (
     <>
@@ -334,7 +334,7 @@ export function RoomThread(props: {
                 <div class="cost" data-cost>
                   <span class="label">{t('uiCostToSend')}</span>
                   <Show when={total() !== null} fallback={<span class="sats">…</span>}>
-                    <span class="sats" data-cost-msat={total()!}>{estimate() ? '≈ ' : ''}{sats(total()!, true)}<span class="unit">{satUnit(total()!)}</span></span>
+                    <span class="sats" data-cost-msat={total()!}>{estimatedSats(total()!, !!estimate(), true)}<span class="unit">{satUnit(total()!)}</span></span>
                   </Show>
                   <span class="basis">{legs().some((l) => l.state === 'reading')
                     ? t('roomReadingPrices')

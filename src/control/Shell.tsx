@@ -15,6 +15,8 @@ import { hostText } from './hostCopy';
 import { AddDevice } from '../onboarding/AddDevice';
 import { PairWords } from '../onboarding/PairWords';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
+import { createCallQuitGuard } from './quitGuard';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ConnectionCard, nextLastCall, type NodeAnswer, type StunSource, type TrackedCall } from './ConnectionCard';
 import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
 import { ASSISTANTS, type AssistantId } from './assistants';
@@ -43,7 +45,7 @@ import { createStore, produce, reconcile } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
-import { amount as fmtAmount, paidAmount, budgetNote, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
+import { amount as fmtAmount, estimatedSats, exactAmount, paidAmount, budgetNote, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
 import { ambiguousThousands, amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
@@ -2095,6 +2097,15 @@ export function ControlCenter(props: Props) {
     return tr('caStartSomething');
   };
   const nameOf = (id: string) => (id.toLowerCase() === ownId().toLowerCase() ? tr('uiYou') : peerName(peerById().get(id.toLowerCase()), id));
+  // Closing the window during a live call asks first (desktop only; display only).
+  const quitGuard = createCallQuitGuard(
+    () => {
+      const v = callView();
+      return (v.phase === 'live' || v.phase === 'reconnecting') && v.peer ? nameOf(v.peer) : null;
+    },
+    () => (isTauri() && !isMobilePlatform() ? getCurrentWindow() : null),
+  );
+  createEffect(() => { if (quitGuard.asking() !== null) onCleanup(onEscape(() => quitGuard.stay())); });
   /** Resolve only an unambiguous mapping reported by the node. */
   const channelName = (pubkey: string) => {
     const matches = peers().filter((p) => p.ln_pubkey?.toLowerCase() === pubkey.toLowerCase());
@@ -2656,6 +2667,20 @@ export function ControlCenter(props: Props) {
         callAgain={(peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); }}
         confirmMinutes={() => { if (!moneyBlocked()) void calls.confirmMinutes(); }}
       />
+      <Show when={quitGuard.asking()}>
+        {(name) => (
+          <>
+            <div class="settings-scrim open" data-quit-scrim onClick={() => quitGuard.stay()} />
+            <div class="panel quit-confirm" role="alertdialog" aria-modal="true" aria-labelledby="quit-confirm-text" data-quit-confirm>
+              <p id="quit-confirm-text">{tr('quitDuringCall', name())}</p>
+              <div class="row" style={{ 'justify-content': 'flex-end', gap: 'var(--s-2)' }}>
+                <button type="button" class="quiet" data-quit-stay ref={(el) => queueMicrotask(() => el.focus())} onClick={() => quitGuard.stay()}>{tr('quitStayInCall')}</button>
+                <button type="button" class="danger" data-quit-yes onClick={() => quitGuard.quit()}>{tr('quitEndCallAndQuit')}</button>
+              </div>
+            </div>
+          </>
+        )}
+      </Show>
       <Show when={!routedCalls}>
       <MeetingPanel
         view={meetingView()}
@@ -3262,8 +3287,8 @@ function Conversation(props: {
   const sub = () =>
     props.track.kind === 'peer' ? (
       <span class="row" style={{ gap: 'var(--s-2)' }}>
+        {/* The node key lives on the contact sheet under Technical, not next to the name. */}
         <span class={`dot ${props.peer?.connected ? 'ok' : ''}`} />
-        <span class="id" title={(props.track as { id: string }).id}>{shortId((props.track as { id: string }).id)}</span>
       </span>
     ) : (
       <span class="id">
@@ -3524,6 +3549,7 @@ function MessageView(props: {
   const entrance = createMessageEntrance(props.m.id, props.fresh, props.seenEntrances);
   const amount = () => (props.paid ?? props.m.payment_amount_msat ?? 0) + (props.allowance?.readmission_msat ?? 0);
   const paidLabel = () => paidAmount(amount(), props.allowance?.fee_paid_msat);
+  const [costShown, setCostShown] = createSignal(false);
   // Only a received chat message in a peer thread can be a request card.
   const request = createMemo(() =>
     props.out || props.room || !props.onPay || props.m.kind === 200
@@ -3594,13 +3620,29 @@ function MessageView(props: {
       </Show>
       <div class="stamp">
         <Show when={props.paid !== undefined || props.m.payment_amount_msat != null}>
-          <span
-            class="sats-meta"
-            title={props.out ? paidLabel() : tr('extraToYou', fmtAmount(amount()))}
+          {/* A sent message's cost is one tap away, not printed under every bubble. */}
+          <Show
+            when={props.out}
+            fallback={
+              <span class="sats-meta" title={tr('extraToYou', fmtAmount(amount()))}>
+                <Bolt />
+                <span class="sats">{fmtAmount(amount(), true)}</span>
+              </span>
+            }
           >
-            <Bolt />
-            <span class={props.out ? "money-text" : "sats"}>{props.out ? paidLabel() : fmtAmount(amount(), true)}</span>
-          </span>
+            <button
+              type="button"
+              class="sats-meta cost-toggle"
+              data-message-cost={costShown() ? 'shown' : 'hidden'}
+              title={paidLabel()}
+              aria-label={costShown() ? paidLabel() : tr('uiShowMessageCost')}
+              aria-expanded={costShown()}
+              onClick={() => setCostShown(v => !v)}
+            >
+              <Bolt />
+              <Show when={costShown()}><span class="money-text">{paidLabel()}</span></Show>
+            </button>
+          </Show>
           <Show when={props.out && props.allowance?.readmission_msat}>
             <span data-readmission-paid>{tr('extraInclAdmissionAgain')} {sats(props.allowance!.readmission_msat!)} {satUnit(props.allowance!.readmission_msat!)}</span>
           </Show>
@@ -5872,7 +5914,7 @@ function Composer(props: {
   const labelPrice = () => {
     const s = shown();
     if (s.msat === null) return '';
-    const figure = `${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
+    const figure = `${estimatedSats(s.msat, s.estimate)} ${satUnit(s.msat)}`;
     return ` · ${mode() === 'file' ? tr('uiFileUpTo', figure) : figure}`;
   };
 
@@ -6732,7 +6774,7 @@ function Composer(props: {
   };
   const chatPrice = () => {
     const c = messageShown();
-    return c.msat === null ? '' : ` · ${c.estimate ? '≈ ' : ''}${sats(c.msat)} ${satUnit(c.msat)}`;
+    return c.msat === null ? '' : ` · ${estimatedSats(c.msat, c.estimate)} ${satUnit(c.msat)}`;
   };
 
   // A closed spending window or money going offline withdraws the review.
@@ -7137,11 +7179,12 @@ function Composer(props: {
             <>
               <dl class="price-breakdown" data-price-breakdown>
                 <dt>{tr('uiNamedPrice', possessive(props.name))}</dt>
-                <dd>{fmtAmount(b().priceMsat)}</dd>
+                {/* Exact amounts in this breakdown, so the parts visibly add up to the ceiling. */}
+                <dd>{exactAmount(b().priceMsat)}</dd>
                 <dt>{tr('uiRoutingFeeAtMost')}</dt>
-                <dd>{fmtAmount(b().routingMsat)}</dd>
+                <dd>{exactAmount(b().routingMsat)}</dd>
                 <dt class="total">{tr('uiYouPayAtMost')}</dt>
-                <dd class="total">{fmtAmount(b().ceilingMsat)}</dd>
+                <dd class="total">{exactAmount(b().ceilingMsat)}</dd>
               </dl>
               <p class="hint price-note">
                 {tr('uiACeilingNotAChargeTheAmountActually')}
@@ -7156,8 +7199,7 @@ function Composer(props: {
               <span class="label">{tr('uiCostToSend')}</span>
               <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
                 <span class="sats" data-cost-msat={shown().msat!}>
-                  {shown().estimate ? '≈ ' : ''}
-                  {sats(shown().msat!, true)}
+                  {estimatedSats(shown().msat!, !!shown().estimate, true)}
                   <span class="unit">{satUnit(shown().msat!)}</span>
                 </span>
               </Show>
