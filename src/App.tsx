@@ -747,27 +747,52 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
-  const refresh = async () => {
-    if (!props.ready()) return;
+  // On a slow node a read can outlast the 3 s poll. Only the newest read may write,
+  // a poll tick is skipped while one is in flight, and nothing writes once the
+  // panel is gone.
+  let disposed = false;
+  let latest = 0;
+  let inFlight: Promise<void> | null = null;
+  const stale = (id: number) => disposed || id !== latest;
+
+  const read = async () => {
+    const id = ++latest;
     try {
       const state = await props.source.fundState();
+      if (stale(id)) return;
       setFund(state);
       setError(null);
       // The onboarding record carries the address once started; fall back to the
       // payments endpoint if the node did not include one.
       if (state && !state.funding_address && !address() && !props.moneyBlocked?.()) {
         try {
-          setAddress(await props.source.fundingAddress());
+          const fallback = await props.source.fundingAddress();
+          if (stale(id)) return;
+          setAddress(fallback);
           setAddressError(null);
         } catch (e) {
+          if (stale(id)) return;
           // The wallet backend may not expose one (only embedded LDK does); the
           // state address is primary, but say so instead of waiting forever.
           setAddressError(isMoneyNotReady(e) ? null : String(e));
         }
       }
     } catch (e) {
+      if (stale(id)) return;
       setError(String(e));
     }
+  };
+
+  // A poll joins the read in flight; an explicit refresh (after starting a deposit)
+  // always reads afresh, and being newest, its reply wins over the older one.
+  const refresh = (explicit = false): Promise<void> => {
+    if (disposed || !props.ready()) return Promise.resolve();
+    if (inFlight && !explicit) return inFlight;
+    const run: Promise<void> = read().finally(() => {
+      if (inFlight === run) inFlight = null;
+    });
+    inFlight = run;
+    return run;
   };
 
   let timer: number | undefined;
@@ -778,6 +803,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
     }, 3000);
   });
   onCleanup(() => {
+    disposed = true;
     if (timer) window.clearInterval(timer);
   });
 
@@ -793,7 +819,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
     setError(null);
     try {
       setFund(await props.source.fundStart(value));
-      await refresh();
+      await refresh(true);
     } catch (e) {
       setError(isMoneyNotReady(e) ? null : String(e));
     } finally {
