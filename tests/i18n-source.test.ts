@@ -14,16 +14,20 @@ const consentScopes = new Set(['sats', 'span', 'approvalDate', 'termLines', 'app
 // translate at the display boundary. No file-wide or component-wide exemption.
 const protocol: Record<string, Record<string, string[]>> = {
   'control/Shell.tsx': {
-    NOT_A_VOICE_NOTE: ['not a voice note'], FILE_TOO_LARGE: ['file over 1.4 MB'], FILE_NOT_STORED: ['not stored'],
+    NOT_A_VOICE_NOTE: ['not a voice note'], FILE_TOO_LARGE: ['file over 1.4 MB'], FILE_RESPONSE_TOO_LARGE: ['response too large to load safely'], FILE_NOT_STORED: ['not stored'],
   },
   'control/call.ts': { createCallEngine: ['NotFoundError'], RECOVERY_CLOSING: ['Your last call is still closing. End it, then call again.'] },
   // M6 A1: the placeholder session description that carries the node-routed marker (wire bytes, never shown).
   'control/nodeRoutedConnection.ts': { nodeRoutedSdp: ['o=bitsov 0 0 IN IP4 0.0.0.0', 'c=IN IP4 0.0.0.0'] },
+  // M6 P3: the copied call report is a fixed English record set beside the node journal (the button and confirmation are translated).
+  'control/callReport.ts': {
+    callReportLines: ['BitSov call report', 'app record; compare with the node journal', 'clock: this device', 'block_receipts: count and sum only; seq, amount and time of each are in the node journal'],
+  },
   'control/readiness.ts': { readinessSource: ['not_ready'], MONEY_NOT_READY: ['Money is not ready yet. Your node will retry automatically.'] },
   'control/polling.ts': { pollingSource: ['Shell closed', 'Shell stopped'] },
   'control/wallet.ts': { artifactActivity: ['Paid an invoice', 'Paid a node directly', 'Invoice · {0}'], activityLabel: ['Invoice · '] },
   'control/StarterBalance.tsx': { StarterStep: ['storage', 'request', 'read'] },
-  'control/Shell.tsx#errors': { ReceivedFile: ['large', 'gone', 'save'] },
+  'control/Shell.tsx#errors': { ReceivedFile: ['large', 'response', 'gone', 'save'] },
   'control/sample.ts': {
     SAMPLE_PEERS: ['Gamma VM'],
     SAMPLE_READS: ['GET /api/v1/messages?limit=50', 'GET /api/v1/messages?peer=… ({0} contacts)'],

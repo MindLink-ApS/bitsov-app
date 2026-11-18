@@ -197,6 +197,7 @@ export type NodeReadiness = {
 };
 
 export type NodeOverview = {
+  chain_view?: { explorer_default?: boolean; trust_level: string } | null;
   money_ready?: boolean | null;
   readiness?: NodeReadiness | null;
   node_id: string;
@@ -435,6 +436,8 @@ export type ActionError = {
     // G1 node grants: refused before any payment (see src-tauri/src/grant.rs).
     | 'grant_ended' | 'grant_exhausted' | 'grant_per_call' | 'grant_recipient' | 'grant_unpriced' | 'grant_ledger' | 'grant_refused' | 'grant_unknown' | 'grant_first_contact' | 'grant_readmission'
     | 'grant_no_envelope'
+    // A messaging grant (relation or owner-approved) never funds an explicit payment.
+    | 'grant_messaging'
     // Spend breakers (node 409 budget_exceeded reasons; the host maps them):
     // grant_paused needs a reset; failures_pending waits for unresolved payments;
     // rate_limited (minute/hour) and velocity recover with time on their own.
@@ -469,7 +472,7 @@ export type ActionError = {
     | 'approval_rate_limited' | 'approval_invalid' | 'approval_unsaved' | 'approval_changed' | 'approval_self'
     // H2 call admissions: a new offer while an earlier one is still open; ending one the host never recorded;
     // a second hangup; the node refusing a call signal before payment.
-    | 'call_needs_node_upgrade'
+    | 'call_needs_node_upgrade' | 'call_unsupported'
     | 'call_admission_open' | 'call_not_found' | 'hangup_in_flight' | 'call_identity_changed'
     // M6 call minutes: the host or node refused a block or the call's reservation before paying.
     | 'call_block_not_due' | 'call_reservation_closed' | 'call_price_changed'
@@ -479,6 +482,12 @@ export type ActionError = {
     | 'call_hold_changed' | 'call_minutes_unpayable'
     // M6 call minutes: the node refused the offer above the agreed per-minute price or hold (genome N3); nothing sent, held or paid.
     | 'call_offer_price_above_consent' | 'call_offer_hold_above_consent'
+    // A hangup above the grant's message cap: the call could not be ended, so it is not placed.
+    // `call_hangup_unpayable`: a lower signed limit the owner could raise;
+    // `call_hangup_above_message_max`: above the most any message payment may carry.
+    | 'call_hangup_unpayable' | 'call_hangup_above_message_max'
+    // No live price for an answer or hangup; a minute past the agreed hold. Nothing paid.
+    | 'call_price_unknown' | 'call_minutes_above_hold'
     | 'invalid'
     | 'node';
   message: string;

@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Build, sign and verify BitSov.app (optionally also a .dmg) on Apple Silicon.
+# Build, sign and verify a native BitSov.app (optionally also a .dmg) on macOS.
 # Ad-hoc by default; see docs/MAC_PACKAGE.md for Developer ID / notary hooks.
 #
 # No publishing. This script never opens, launches or executes the built app
 # or the bundled node. Notarization is opt-in; nothing here binds a port.
 #
-# Usage: scripts/package-mac.sh [--dmg] [--use-existing-sidecar]
+# Usage: scripts/package-mac.sh [--arch arm64|x86_64] [--dmg] [--beta] [--call-seal] [--use-existing-sidecar]
+#   --arch                  native host architecture; cross builds are refused
+#   --beta                  use the separate signet-only beta profile
 #   --dmg                   create a plain .dmg from the verified app
 #                           (no Finder layout or Applications shortcut)
+#   --call-seal             enable sealed call audio for a test build
 #   --use-existing-sidecar  bundle the sidecar already at
-#                           src-tauri/bin/konsensus-aarch64-apple-darwin instead
+#                           src-tauri/bin/konsensus-<target> instead
 #                           of fetching. Every sidecar is still re-verified
 #                           against the pinned release before packaging.
 #                           Same as BITSOV_USE_EXISTING_SIDECAR=1.
@@ -21,25 +24,72 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 WANT_DMG=0
+CALL_SEAL=0
+BETA=0
+ARCH=""
+TARGETED=0
 USE_EXISTING="${BITSOV_USE_EXISTING_SIDECAR:-0}"
 while [ $# -gt 0 ]; do
   case "$1" in
+    --arch)
+      case "${2:-}" in
+        arm64|x86_64) ;;
+        *) echo "--arch requires arm64 or x86_64" >&2; exit 2 ;;
+      esac
+      ARCH="$2"; TARGETED=1; shift ;;
     --dmg) WANT_DMG=1 ;;
+    --call-seal) CALL_SEAL=1 ;;
+    --beta) BETA=1 ;;
     --use-existing-sidecar) USE_EXISTING=1 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
 done
 
-if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
-  echo "package-mac.sh builds the Apple Silicon package on macOS arm64 only." >&2
+HOST_ARCH="$(uname -m)"
+if [ "$(uname -s)" != Darwin ]; then
+  echo "package-mac.sh requires a native macOS arm64 or x86_64 host." >&2
   exit 2
 fi
-TRIPLE="aarch64-apple-darwin"
+ARCH="${ARCH:-$HOST_ARCH}"
+case "$ARCH" in
+  arm64) TRIPLE="aarch64-apple-darwin"; DMG_ARCH=aarch64 ;;
+  x86_64) TRIPLE="x86_64-apple-darwin"; DMG_ARCH=x86_64; TARGETED=1 ;;
+  *) echo "--arch must be arm64 or x86_64; universal packages are unsupported." >&2; exit 2 ;;
+esac
+if [ "$HOST_ARCH" != "$ARCH" ]; then
+  echo "--arch $ARCH requires a native $ARCH host (found $HOST_ARCH)." >&2
+  exit 2
+fi
+if [ "$ARCH" = x86_64 ]; then
+  if ! TRANSLATED="$(sysctl -in sysctl.proc_translated 2>/dev/null)"; then
+    echo "Cannot determine whether this Intel process is translated." >&2
+    exit 2
+  fi
+  if [ "$TRANSLATED" = 1 ]; then
+    echo "The Intel package requires a native Intel host; Rosetta builds are unsupported." >&2
+    exit 2
+  fi
+fi
+# Preserve the original implicit arm64 command and paths. Explicit native
+# targets use Cargo's target subdirectory and honor the caller's target root.
+TARGET_DIR="src-tauri/target"
+BUNDLE_DIR="$TARGET_DIR/release/bundle"
+if [ "$TARGETED" = 1 ]; then
+  TARGET_DIR="${CARGO_TARGET_DIR:-src-tauri/target}"
+  BUNDLE_DIR="$TARGET_DIR/$TRIPLE/release/bundle"
+fi
+case "$TARGET_DIR" in
+  /*) CARGO_OUTPUT="$TARGET_DIR" ;;
+  *) CARGO_OUTPUT="$ROOT/$TARGET_DIR" ;;
+esac
 SIDECAR="src-tauri/bin/konsensus-$TRIPLE"
-APP="src-tauri/target/release/bundle/macos/BitSov.app"
-DMG_DIR="src-tauri/target/release/bundle/dmg"
+APP="$BUNDLE_DIR/macos/BitSov.app"
+if [ "$BETA" = 1 ]; then
+  APP="$BUNDLE_DIR/macos/BitSov Beta.app"
+fi
+DMG_DIR="$BUNDLE_DIR/dmg"
 
 # The certificate must already be imported/unlocked by the caller. Keep the
 # default independent of Tauri's APPLE_* environment variables.
@@ -84,17 +134,29 @@ echo "== 2. app bundle build =="
 npm ci --ignore-scripts --no-audit --no-fund
 # Never inspect or upload stale artifacts. Build only the app: Tauri's DMG
 # would snapshot it before our final signing and verification.
-rm -rf src-tauri/target/release/bundle
-BUILD_LOG="src-tauri/target/package-mac.log"
-mkdir -p src-tauri/target
+rm -rf "$BUNDLE_DIR"
+BUILD_LOG="$TARGET_DIR/package-mac.log"
+mkdir -p "$TARGET_DIR"
+BUILD_ARGS=(build --bundles app --no-sign --ci)
+if [ "$TARGETED" = 1 ]; then
+  BUILD_ARGS+=(--target "$TRIPLE")
+  BUILD_LOG="$TARGET_DIR/package-mac-$TRIPLE.log"
+fi
+if [ "$BETA" = 1 ]; then
+  BUILD_ARGS+=(--config src-tauri/tauri.beta.conf.json)
+fi
+if [ "$CALL_SEAL" = 1 ]; then
+  BUILD_ARGS+=(--features call-seal)
+  export VITE_CALL_SEAL=sealed
+fi
 # Tauri finishes sidecar placement, resources and Info.plist before returning.
 # Its release environment also excludes assistant.html from dist.
-# Pin the output path even if the caller sets a different Cargo target dir.
-CARGO_TARGET_DIR="$ROOT/src-tauri/target" CI=true TAURI_BUNDLER_DMG_IGNORE_CI=false \
-  npm run tauri -- build --bundles app --no-sign --ci -- --locked 2>&1 | tee "$BUILD_LOG"
+# Use the same output root for Cargo and every packaging/checking step.
+CARGO_TARGET_DIR="$CARGO_OUTPUT" CI=true TAURI_BUNDLER_DMG_IGNORE_CI=false \
+  npm run tauri -- "${BUILD_ARGS[@]}" -- --locked 2>&1 | tee "$BUILD_LOG"
 
 echo "== 3. static checks =="
-bash scripts/check-mac-bundle.sh --app "$APP" --sidecar "$SIDECAR" --dist dist
+bash scripts/check-mac-bundle.sh --arch "$ARCH" --app "$APP" --sidecar "$SIDECAR" --dist dist
 
 # This byte-for-byte comparison must precede signing: codesign changes the
 # bundled sidecar, but must never change the authenticated source in bin/.
@@ -123,10 +185,10 @@ if [ "$SIGNING_IDENTITY" != - ]; then
   # No team identifiers or machine-specific signing settings live in source.
   TEAM_ID="$(codesign -dv --verbose=4 "$APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
   BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw -o - "$APP/Contents/Info.plist")"
-  KEYCHAIN_ENTITLEMENTS="src-tauri/target/mac-keychain-entitlements.plist"
-  PROFILE_PLIST="src-tauri/target/mac-provision-profile.plist"
+  KEYCHAIN_ENTITLEMENTS="$TARGET_DIR/mac-keychain-entitlements.plist"
+  PROFILE_PLIST="$TARGET_DIR/mac-provision-profile.plist"
   security cms -D -i "$PROVISION_PROFILE" -o "$PROFILE_PLIST"
-  CERTIFICATE_PREFIX="src-tauri/target/mac-signing-certificate-"
+  CERTIFICATE_PREFIX="$TARGET_DIR/mac-signing-certificate-"
   rm -f "${CERTIFICATE_PREFIX}0"
   codesign --display --extract-certificates "$CERTIFICATE_PREFIX" "$APP"
   python3 scripts/mac-keychain-entitlements.py \
@@ -147,7 +209,7 @@ verify_app
 # Optional future release path. Submit a zip, then staple the app BEFORE DMG
 # creation, so both app.zip and the image can carry the notarization ticket.
 if [ -n "$NOTARY_PROFILE" ]; then
-  NOTARY_ZIP="src-tauri/target/BitSov-notary.zip"
+  NOTARY_ZIP="$TARGET_DIR/BitSov-notary.zip"
   rm -f "$NOTARY_ZIP"
   ditto -c -k --keepParent "$APP" "$NOTARY_ZIP"
   xcrun notarytool submit "$NOTARY_ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
@@ -174,7 +236,7 @@ du -sh "$APP"
 if [ "$WANT_DMG" = 1 ]; then
   echo "== 7. dmg from verified app =="
   VERSION="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
-  DMG="$DMG_DIR/BitSov_${VERSION}_aarch64.dmg"
+  DMG="$DMG_DIR/BitSov_${VERSION}_${DMG_ARCH}.dmg"
   mkdir -p "$DMG_DIR"
   hdiutil create -srcfolder "$APP" -volname BitSov -format UDZO "$DMG"
   if [ "$SIGNING_IDENTITY" != - ]; then

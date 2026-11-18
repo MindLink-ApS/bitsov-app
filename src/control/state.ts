@@ -1,6 +1,7 @@
+import { hostText } from './hostCopy';
 import { t as tr } from '../i18n';
 import { t, possessive } from '../i18n';
-import { MONEY_NOT_READY, readinessLine } from './readiness';
+import { isChainUnavailable, MONEY_NOT_READY, readinessLine } from './readiness';
 import { feeCeiling } from './format';
 // Control-center state as pure functions over plain data, so the rules are
 // testable without a window: which track a live message belongs to, how history
@@ -196,14 +197,21 @@ export function peerNotReadyMessage(error: unknown, name: string): string | null
 
 /** Any rejection from the host, as an action error. */
 export function asActionError(e: unknown): ActionError {
+  if (e === 'not_ready:chain_unavailable') return { code: 'not_ready', reason: 'chain_unavailable', message: tr('chainUnavailable') };
   if (e === MONEY_NOT_READY) return { code: 'not_ready', message: MONEY_NOT_READY };
   if (e && typeof e === 'object' && 'code' in e && 'message' in e) {
     const { code, message, undelivered, admission, pending_id, reason, remaining_msat, operation_id } = e as ActionError;
-    const out: ActionError = { code, message: code === 'not_ready' ? MONEY_NOT_READY : String(message) };
+    // Host refusals with their own plain words, in the app's language.
+    const out: ActionError = { code, message: isChainUnavailable(e) ? tr('chainUnavailable') : code === 'not_ready' ? MONEY_NOT_READY
+      : code === 'grant_messaging' ? tr('caGrantMessagingPayment')
+      : code === 'call_price_unknown' ? tr('caCallPriceUnreadNothingPaid')
+      : code === 'call_hangup_unpayable' ? tr('caCallHangupUnpayable')
+      : code === 'call_hangup_above_message_max' ? tr('caCallHangupAboveMessageMax')
+      : code === 'call_unsupported' ? tr('caTheirNodeDoesNotTakeCallsYetNothingWas') : hostText(String(message)) };
     if (typeof pending_id === 'string' && pending_id) out.pending_id = pending_id;
     if (typeof operation_id === 'string' && operation_id) out.operation_id = operation_id;
     // Owner approval refusals: only the node's known reasons, and an amount that is one.
-    if (typeof reason === 'string' && APPROVAL_OFF_REASONS.has(reason)) out.reason = reason;
+    if (isChainUnavailable(e) || (typeof reason === 'string' && APPROVAL_OFF_REASONS.has(reason))) out.reason = reason;
     if (msat(remaining_msat)) out.remaining_msat = remaining_msat;
     if (undelivered && msat(undelivered.paid_msat)) out.undelivered = { paid_msat: undelivered.paid_msat, retry: undelivered.retry === true };
     if (admission && msat(admission.admission_msat) && msat(admission.message_msat) && msat(admission.total_msat)
@@ -213,7 +221,7 @@ export function asActionError(e: unknown): ActionError {
     }
     return out;
   }
-  return { code: 'node', message: typeof e === 'string' ? e : String((e as Error)?.message ?? e) };
+  return { code: 'node', message: hostText(typeof e === 'string' ? e : String((e as Error)?.message ?? e)) };
 }
 
 const msat = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 0;
@@ -420,6 +428,60 @@ export function freshness(readAt: number | null, nowMs: number): { label: string
 
 export type Pill = { tone: 'ok' | 'warn' | 'err' | 'idle'; text: string; live: boolean };
 
+/**
+ * Pill hysteresis (display only). One status read that comes back unreachable
+ * or timed out is not an outage: the pill says the node is not answering only
+ * after this many failed reads in a row, spanning at least this long. The
+ * first good read clears it. Polling, node calls and money gates are unchanged.
+ */
+export const NOT_ANSWERING_AFTER_MISSES = 3;
+export const NOT_ANSWERING_AFTER_MS = 5_000;
+
+/**
+ * Safety net while the status poll answers: the 60 s stale-overview rule
+ * flashed "not answering" while the node was still answering; 180 s
+ * keeps a hung box (status answers, its overview read never returns) visible.
+ */
+export const STALE_OVERVIEW_NOT_ANSWERING_MS = 180_000;
+
+/** Host errors that mean "could not reach the node right now", not a verdict from it. */
+const TRANSIENT_NODE_ERROR = /connection[ _](refused|lost|closed)|ECONN|network[ _]error|failed to fetch|timed?[ _]out|unreachable|remote unavailable|remote handshake limit or endpoint unavailable|remote_handshake_unavailable/i;
+
+export function transientNodeError(error: string | null | undefined): boolean {
+  return !!error && TRANSIENT_NODE_ERROR.test(error);
+}
+
+/** Failed status reads in a row, and when the first of them came back. */
+export type StatusChecks = { misses: number; since: number | null };
+export const NO_MISSES: StatusChecks = { misses: 0, since: null };
+
+/** The ready/error pair the pill shows, debounced from the status poll. */
+export type PillStatus = { ready: boolean; error: string | null; quiet: boolean; checks: StatusChecks };
+export const INITIAL_PILL_STATUS: PillStatus = { ready: false, error: null, quiet: false, checks: NO_MISSES };
+
+export function notAnswering(checks: StatusChecks, nowMs: number): boolean {
+  return checks.misses >= NOT_ANSWERING_AFTER_MISSES && checks.since !== null && nowMs - checks.since >= NOT_ANSWERING_AFTER_MS;
+}
+
+/**
+ * Fold one status read into what the pill shows. Only a transient miss is
+ * debounced: a locked node, a host cooldown, a refused pairing or any other
+ * error shows at once, as does every good read. While misses are unconfirmed
+ * the pill keeps what it said before (on first load: still connecting).
+ */
+export function pillStatusAfter(
+  prev: PillStatus,
+  read: { ready: boolean; error: string | null; locked?: boolean; retry_after_secs?: number | null },
+  refused: boolean,
+  nowMs: number,
+): PillStatus {
+  const missed = !refused && !read.locked && !read.retry_after_secs && !read.ready && transientNodeError(read.error);
+  if (!missed) return { ready: read.ready, error: read.error, quiet: false, checks: NO_MISSES };
+  const checks = { misses: prev.checks.misses + 1, since: prev.checks.since ?? nowMs };
+  if (notAnswering(checks, nowMs)) return { ready: read.ready, error: read.error, quiet: true, checks };
+  return { ...prev, checks };
+}
+
 /** The rail's node pill: one glance at whether this seat is connected to its node. */
 export function nodePill(input: {
   remote?: boolean;
@@ -431,15 +493,25 @@ export function nodePill(input: {
   overview: NodeOverview | null;
   link: LinkState | null;
   nowMs: number;
+  /** Status reads have failed long enough to say so (see `pillStatusAfter`). */
+  quiet?: boolean;
+  /**
+   * `ready`/`error` come from the debounced status poll. Its answer then
+   * outranks the overview's age up to STALE_OVERVIEW_NOT_ANSWERING_MS: a late
+   * overview read says the node is not answering only past that safety net.
+   */
+  statusChecked?: boolean;
 }): Pill {
   if (input.phone && !input.remote) return { tone: 'idle', text: t('uiConnectToYourNode'), live: false };
   if (input.retryAfterSecs) return { tone: 'warn', text: t('uiRemoteConnectionWaitingS', input.retryAfterSecs), live: false };
+  if (input.quiet) return { tone: 'warn', text: t('uiNodeNotAnswering'), live: false };
   if (input.remote && input.error) return { tone: 'warn', text: t('uiRemoteConnectionUnavailable'), live: false };
   if (input.remote && !input.ready) return { tone: 'idle', text: t('uiConnectingToRemoteNode'), live: false };
   if (input.error) return { tone: 'err', text: t('uiNodeStopped'), live: false };
   if (!input.ready) return { tone: 'idle', text: t('uiStartingNode'), live: false };
   if (!input.overview) return { tone: 'ok', text: t('uiNodeRunning'), live: false };
-  if (freshness(input.overview.read_at, input.nowMs).stale) {
+  const overviewAge = input.nowMs - input.overview.read_at;
+  if (input.statusChecked ? overviewAge > STALE_OVERVIEW_NOT_ANSWERING_MS : freshness(input.overview.read_at, input.nowMs).stale) {
     return { tone: 'warn', text: t('uiNodeNotAnswering'), live: false };
   }
   if (input.overview.money_ready === false) return { tone: 'warn', text: readinessLine(input.overview, input.nowMs)!, live: input.link === 'open' };

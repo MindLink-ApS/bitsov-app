@@ -104,6 +104,11 @@
   --rail-w: 248px;
   --context-w: 360px;
   --chat-max: 720px;
+
+  /* stacking — a note floating inside the chat: above the message list and the composer (2),
+     below the chat's own popovers (call confirm 4, menus 5, avatar menu 6–7) and below every
+     full-screen layer (Wallet 18, Settings scrim 20 / panel 21, info 40, sheets 60+). */
+  --z-chat-float: 3;
 }
 
 html[data-theme='light'] {
@@ -200,6 +205,8 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .hint { font-size: var(--t-sm); color: var(--muted); line-height: var(--lh-body); max-width: 60ch; }
 .ok-note { font-size: var(--t-sm); color: var(--ok); }
 .err-note { font-size: var(--t-sm); color: var(--err); overflow-wrap: anywhere; }
+/* A refusal sits just above the box, where it can't fall off the bottom of a phone screen. */
+.composer > [data-composer-note] { order: -1; width: min(var(--chat-max), 100%); margin: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
@@ -235,6 +242,9 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .track-link .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-sans); font-size: var(--t-md); }
 .track-link .badge { font-size: var(--t-xs); font-weight: 600; font-variant-numeric: tabular-nums; color: var(--bg); background: var(--ink); border-radius: var(--r-chip); padding: 0 6px; min-width: 18px; text-align: center; }
 .track-link .meta { font-family: var(--font-mono); font-size: var(--t-xs); color: var(--faint); }
+/* In the desktop rail the hint gives way first: the entry's name stays whole. */
+.rail .track-link .name { flex: 1 1 auto; }
+.rail .track-link .meta { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track-empty { font-size: var(--t-sm); color: var(--faint); padding: 2px var(--s-2); }
 .rail-foot { margin-top: auto; display: flex; flex-direction: column; gap: var(--s-2); }
 .new-track { justify-content: center; border: 1px dashed var(--line-strong); }
@@ -318,7 +328,8 @@ label.field input {
 .composer { border-top: 1px solid var(--line); padding: var(--s-3) var(--s-4) var(--s-4); display: flex; flex-direction: column; align-items: center; gap: var(--s-2); background: var(--bg); width: 100%; flex: none; z-index: 2; }
 .composer textarea { resize: none; min-height: 40px; max-height: 160px; border-radius: 18px; overflow-y: auto; }
 .composer-plus-wrap { position: relative; flex: none; display: flex; }
-.composer-menu { position: absolute; right: 0; bottom: calc(100% + 8px); min-width: 150px; display: flex; flex-direction: column; padding: 4px; background: var(--raised); border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,0.3); z-index: 5; }
+/* Fixed, outside the composer's scroll box; Shell places it above + (followAnchor). */
+.composer-menu { position: fixed; max-height: var(--overlay-room, none); overflow-y: auto; min-width: 150px; display: flex; flex-direction: column; padding: 4px; background: var(--raised); border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,0.3); z-index: 5; }
 .composer-menu[hidden] { display: none; }
 .composer-menu-item { border: none; background: transparent; color: var(--ink); text-align: left; padding: 8px 12px; border-radius: var(--r-chip); font-size: var(--t-sm); }
 .composer-menu-item:hover { background: var(--surface); }
@@ -326,6 +337,17 @@ label.field input {
 .composer-panel .panel-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); font-size: var(--t-sm); }
 .composer-panel .panel-head .link { padding: 0 4px; }
 .composer-panel .composer-main { width: 100%; padding: 0; background: transparent; }
+/* One box at a time: the file or voice note takes the message bar's place, and its row reads straight. */
+.composer[data-mode="file"] [data-composer-bar] { display: none; }
+.file-panel .composer-main, .file-panel .composer-main:focus-within { border: none; box-shadow: none; align-items: center; }
+.file-panel .file-chip { min-width: 0; padding: 0; }
+.file-panel .file-chip > .hint:last-child { flex-basis: 100%; margin: 0; }
+.file-panel .file-chip .file-name { min-width: 0; }
+/* The picker opens over the chat, not under the bar, so nothing moves. */
+.composer-emoji-wrap { position: relative; flex: none; display: flex; }
+/* Fixed over the chat, outside the composer's scroll box; Shell places it above the emoji button. */
+.composer-emoji-wrap .emoji-picker { position: fixed; margin: 0; width: 240px; max-width: calc(100vw - 32px); max-height: min(40vh, var(--overlay-room, 40vh)); overflow-y: auto; z-index: 5; box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+.composer-icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; display: block; }
 .passive-status { margin: 0; }
 .passive-status > summary { display: none; }
 .signal-bar { align-items: flex-end; }
@@ -367,6 +389,10 @@ label.field input {
 .attach.soft { width: 34px; height: 34px; border-radius: 50%; border: none; background: var(--raised); color: var(--ink); font-size: var(--t-lg); line-height: 1; flex: none; }
 .attach.soft:hover { background: var(--line-strong); color: var(--ink); }
 .file-chip { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); padding: 6px 8px; }
+.composer-main.file-row { flex-wrap: wrap; }
+.composer-main.file-row .file-chip { flex: 1 1 10rem; min-width: 0; }
+.composer-main.file-row .file-chip .file-name { overflow-wrap: anywhere; }
+.composer .composer-main.file-row .primary { flex: 0 1 auto; max-width: 100%; margin-left: auto; white-space: normal; }
 .composer-bar { display: flex; align-items: center; gap: var(--s-3); width: min(var(--chat-max), 100%); }
 .composer-bar.cost-only { padding: 0 4px; }
 .composer > .approval { width: min(var(--chat-max), 100%); align-self: center; }
@@ -683,6 +709,9 @@ html[data-theme='light'] .target-badge.honest { color: #6b4c00; }
  * Where an answer came from is always printed under it. Orange stays for sats
  * and the one action; a preview of what would leave is plain mono on ink. */
 .ai-providers-bar { width: 100%; display: flex; justify-content: center; padding: var(--s-2) var(--s-4); background: var(--bg); border-bottom: 1px solid var(--line); flex: none; z-index: 2; }
+/* The assistant's role line wraps; its Forget button keeps its width and its word on one line. */
+.ai-providers-bar:has([data-assistant-forget]) { align-items: center; gap: var(--s-3); }
+.ai-providers-bar [data-assistant-forget] { flex: none; white-space: nowrap; }
 .ai-watches { display: block; }
 .ai-watches summary { cursor: pointer; }
 .ai-watch-notices { display: block; max-height: 12rem; overflow-y: auto; }
@@ -930,6 +959,29 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 .refusal-counts thead th { font-weight: 500; }
 
 .money-notice { margin: 0; padding: var(--s-3) var(--s-6); background: var(--surface); border-bottom: 1px solid var(--line); }
+/* Above the app: payments coming and going must not push the whole window down and back. */
+header > .money-notice { position: fixed; top: max(var(--s-2), env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); width: max-content; max-width: min(560px, calc(100vw - 32px)); z-index: 40; border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+/* Desktop: the same card, floating over the top of the message list only. StreamFrame puts the
+   list and a note layer in one grid cell, so the layer is exactly the list's box: the card can
+   never reach the bars above it or the composer below it, whatever their height, and the frame
+   clips anything that still cannot fit. The layer lets the pointer through; only the card takes it.
+   With no message list (start view, welcome, loading) the card stays a plain line in the column:
+   it may move content, but it never covers a control. */
+.track > .money-notice-float { flex: none; }
+/* The frame takes the list's place in the column and keeps its floor: a list never got shorter
+   than its own vertical padding, so neither does the frame (iOS keyboard-open padding below). */
+.stream-frame { flex: 1; min-height: calc(2 * var(--s-6)); display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
+.stream-frame > * { grid-area: 1 / 1; }
+.stream-frame:has(> .stream-note-layer) { overflow: clip; }
+.stream-note-layer { position: relative; z-index: var(--z-chat-float); container: stream-note / size; display: flex; justify-content: center; align-items: flex-start; padding: var(--s-2) 16px; pointer-events: none; }
+.stream-note-layer > .money-notice { pointer-events: auto; width: max-content; max-width: min(560px, 100%); max-height: 100%; overflow-y: auto; border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+/* A short message list (small window, assistant bars open): a compact card, two lines, then one. */
+@container stream-note (max-height: 5rem) {
+  .stream-note-layer > .money-notice { padding: 2px var(--s-3); font-size: var(--t-xs); line-height: 1.35; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+}
+@container stream-note (max-height: 2.4rem) {
+  .stream-note-layer > .money-notice { -webkit-line-clamp: 1; }
+}
 .node-pill[data-pill="warn"] .what { white-space: normal; }
 
 /* Front door / Discover */
@@ -1015,7 +1067,16 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 button.danger { background: var(--err); color: var(--err-ink); border: none; }
 .call-videos { position: relative; border-radius: 10px; overflow: hidden; background: #000; aspect-ratio: 4 / 3; }
 .call-video.remote { width: 100%; height: 100%; object-fit: cover; }
-.call-video.local { position: absolute; right: 8px; bottom: 8px; width: 30%; border-radius: 6px; border: 1px solid var(--line-strong); }
+/* Your own picture: a 3:4 box (30% wide) inside the video area whatever the camera's shape; the stream fills it (cover).
+   Its short "You" label is capped so the tile never grows over their picture; the camera-off words below scale fully. */
+.call-self { position: absolute; right: 8px; bottom: 8px; width: 30%; max-width: calc(100% - 16px); aspect-ratio: 3 / 4; max-height: calc(100% - 16px); box-sizing: border-box; border-radius: 6px; border: 1px solid var(--line-strong); overflow: hidden; background: #222; }
+.call-video.local { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+/* Hidden, not removed: WebKit can pause or drop a display:none player, and the same one is shown again when the camera returns. */
+.call-self[data-camera-off] .call-video.local { visibility: hidden; }
+.call-self-label { position: absolute; left: 4px; bottom: 4px; max-width: calc(100% - 8px); box-sizing: border-box; padding: 1px 6px; border-radius: 4px; background: rgba(0, 0, 0, .65); color: #fff; font-size: min(.8rem, 20px); line-height: 1.4; overflow-wrap: anywhere; }
+/* Camera off: the words are the tile, so it grows with them (large text included) within the video area. */
+.call-self[data-camera-off] { width: max-content; min-width: min(30%, calc(100% - 16px)); aspect-ratio: auto; overflow: auto; }
+.call-self[data-camera-off] .call-self-label { position: static; display: block; max-width: none; font-size: .8rem; padding: var(--s-2); background: none; text-align: center; }
 .meeting-panel .meeting-legs { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s-2); }
 .meeting-panel .meeting-legs label { display: flex; align-items: center; gap: var(--s-2); }
 .meeting-panel .muted { color: var(--muted); }
@@ -1343,6 +1404,9 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .msg.sending .bubble { opacity: 0.72; animation: msg-send var(--d-mid) var(--ease-out); }
 /* Unsent: kept whole on its own track, plainly not delivered. */
 .msg.unsent .bubble { opacity: 0.72; border: 1px dashed var(--unknown-ink); background: transparent; }
+/* The reason can be long: it wraps inside the screen instead of running off the left edge. */
+.msg.unsent { max-width: 100%; min-width: 0; }
+.msg.unsent .stamp [data-unsent-reason] { white-space: normal; overflow-wrap: anywhere; min-width: 0; text-align: right; }
 .msg.unsent .unsent-actions { display: flex; gap: var(--s-3, 12px); justify-content: flex-end; }
 .artifact.failed .failed-text { margin: 4px 0 0; padding-left: 8px; border-left: 2px solid var(--unknown-ink); white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg.sending .stamp :is(.sats, .money-text) { color: var(--muted); }
@@ -1510,6 +1574,7 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
 .call-repairs { flex: 0 0 auto; max-height: 35vh; overflow: auto; padding: var(--s-3) var(--s-4); border-bottom: 1px solid var(--line-strong); background: var(--raised); }
 .call-repairs .call-actions { align-items: center; margin-top: var(--s-2); }
 .in-call-pay { display: grid; gap: var(--s-2); }
+.in-call-pay:empty { display: none; }
 .in-call-pay .pay-flow { min-width: 0; }
 .in-call-pay .amount-input { min-width: 0; width: 100%; }
 
@@ -1633,6 +1698,9 @@ html[data-platform='ios'] .composer {
   max-height: calc(var(--visible-height, 100dvh) - var(--safe-area-top) - 140px);
   overflow-y: auto;
 }
+/* A tall composer shrinks and scrolls inside the screen: flex: none pushed its end, and any limit there, off the bottom. */
+html[data-platform='ios'] .composer, .cc[data-phone-shell='true'] .composer { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+/* The + menu and the emoji picker are fixed overlays, so this box keeps scrolling while they are open. */
 html[data-platform='ios'] .composer-panel { max-height: calc(var(--visible-height, 100dvh) * .45); flex-shrink: 0; }
 .ios-back { display: none; }
 html[data-platform='ios'] .ios-back { display: inline-flex; align-items: center; min-height: 44px; flex-shrink: 0; padding: 0 var(--s-4); }
@@ -1647,6 +1715,7 @@ html[data-platform='ios'] .track > .ios-back { align-self: flex-start; }
   html[data-platform='ios'][data-keyboard-open='true'] .rail { display: none; }
   html[data-platform='ios'][data-keyboard-open='true'] .track-head { padding-block: var(--s-2); }
   html[data-platform='ios'][data-keyboard-open='true'] .stream { padding-block: var(--s-2); }
+  html[data-platform='ios'][data-keyboard-open='true'] .stream-frame { min-height: calc(2 * var(--s-2)); }
   html[data-platform='ios'][data-keyboard-open='true'] .composer { padding-block: var(--s-2); gap: var(--s-1); }
 }
 /* Clip onboarding's scroll region below the status bar, including while its
@@ -1884,3 +1953,9 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
   gap: var(--s-3);
 }
 .waiting-calls .call-panel { position: relative; right: auto; bottom: auto; }
+.call-panel[data-call-approval-open] { z-index: 52; max-height: calc(100dvh - 48px); overflow-y: auto; }
+
+/* The node's approval, step by step. */
+.approval-steps { margin: var(--s-2) 0; padding-left: 1.4em; list-style: decimal; }
+.approval-steps > li + li { margin-top: var(--s-2); }
+.approval-steps code { display: block; margin: var(--s-1) 0; overflow-wrap: anywhere; }

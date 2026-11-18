@@ -220,6 +220,26 @@ func clientAccount(_ path: UnsafePointer<CChar>) throws -> String {
     return String(directory.path.dropFirst(prefix.count))
 }
 
+/// No passcode means no user-presence items and no Face ID / Touch ID. Report
+/// that distinctly so the app can send the owner to Settings. Never prompts.
+let errPasscodeNotSet: OSStatus = -77_001
+
+func passcodeNotSet(_ canEvaluate: (inout NSError?) -> Bool = { error in
+    let context = LAContext()
+    defer { context.invalidate() }
+    return context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error)
+}) -> Bool {
+    var error: NSError?
+    if canEvaluate(&error) { return false }
+    return error?.domain == LAErrorDomain && error?.code == LAError.passcodeNotSet.rawValue
+}
+
+func classifyClientStatus(_ status: OSStatus, passcodeMissing: () -> Bool = { passcodeNotSet() }) -> OSStatus {
+    // Success, a missing item and the owner's own cancel keep their meaning.
+    guard status != errSecSuccess, status != errSecItemNotFound, status != errSecUserCanceled else { return status }
+    return passcodeMissing() ? errPasscodeNotSet : status
+}
+
 @_cdecl("bitsov_client_key_read")
 public func bitsov_client_key_read(_ path: UnsafePointer<CChar>?, _ output: UnsafeMutablePointer<UInt8>?,
     _ handle: UnsafeMutableRawPointer? = nil) -> Int32 {
@@ -228,7 +248,7 @@ public func bitsov_client_key_read(_ path: UnsafePointer<CChar>?, _ output: Unsa
         do {
             let context = handle.map { Unmanaged<LAContext>.fromOpaque($0).takeUnretainedValue() }
             let (status, result) = ClientKeychain().readData(try clientAccount(path), context: context)
-            guard status == errSecSuccess, var data = result else { return status }
+            guard status == errSecSuccess, var data = result else { return classifyClientStatus(status) }
             defer { data.resetBytes(in: 0..<data.count) }
             data.copyBytes(to: output, count: 32)
             return errSecSuccess
@@ -241,7 +261,7 @@ public func bitsov_client_key_read(_ path: UnsafePointer<CChar>?, _ output: Unsa
 public func bitsov_client_key_add(_ path: UnsafePointer<CChar>?, _ seed: UnsafePointer<UInt8>?) -> Int32 {
     guard let path = path, let seed = seed else { return errSecParam }
     return autoreleasepool {
-        do { return ClientKeychain().insert(try clientAccount(path), seed) }
+        do { return classifyClientStatus(ClientKeychain().insert(try clientAccount(path), seed)) }
         catch { return errSecParam }
     }
 }

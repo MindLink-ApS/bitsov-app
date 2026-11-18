@@ -38,6 +38,7 @@ pub struct RemoteRetry {
     failure_revision: std::sync::atomic::AtomicU64,
     last_error: std::sync::Mutex<ConnectionFailure>,
     endpoint: std::sync::Mutex<Option<String>>,
+    refused: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -59,6 +60,22 @@ impl RemoteRetry {
     pub fn reset_for_replacement(&self) {
         *self.state.lock().unwrap() = RemoteRetryState::default();
         self.clear_connection_error();
+    }
+
+    /// The node definitively refused this app's saved pairing. Until the owner
+    /// acts (Try again, a new link, Forget), nothing reconnects on its own and
+    /// the proxy admits no new tunnel: every dial would get the same answer.
+    pub fn refuse(&self) {
+        self.refused.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// An owner action: the next attempt may dial again.
+    pub fn clear_refusal(&self) {
+        self.refused.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_refused(&self) -> bool {
+        self.refused.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn set_endpoint(&self, endpoint: &str) {
@@ -98,6 +115,22 @@ impl RemoteRetry {
 
     pub fn is_retrying(&self) -> bool {
         self.state.lock().unwrap().retrying
+    }
+
+    /// A dial's anti-burst stamp with no dial behind it, as a cancelled dial leaves,
+    /// for as long as a test needs it.
+    #[cfg(test)]
+    pub fn stamp_for_test(&self, lasting: Duration) {
+        self.state.lock().unwrap().next = Some(tokio::time::Instant::now() + lasting);
+    }
+
+    /// A failure set the deadline: the node's rate limit, an unavailable handshake,
+    /// or a re-dial during a failure streak. Every dial also stamps `next` for a
+    /// second against bursts, so `remaining` alone says nothing about the connection:
+    /// a healthy dial in flight, or one its caller cancelled, is not a cooldown.
+    pub fn cooling_down(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.retrying && state.next.is_some_and(|next| next > tokio::time::Instant::now())
     }
 
     pub fn failure_revision(&self) -> u64 {
@@ -150,10 +183,39 @@ impl RemoteRetry {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, crate::remote_access::RemoteError>>,
     {
-        use crate::remote_access::RemoteError;
         // Serialize through the outcome so queued requests see the first
         // failure's deadline before they can send another handshake.
         let _attempt = self.attempt.lock().await;
+        self.run_admitted(operation).await
+    }
+
+    /// For automatic dials of an existing pairing (proxy tunnels, status
+    /// probes). The refusal is checked and recorded while the attempt lock is
+    /// held, so requests queued behind a refused handshake never send another.
+    pub async fn run_unless_refused<T, F, Fut>(&self, operation: F) -> Result<T, crate::remote_access::RemoteError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, crate::remote_access::RemoteError>>,
+    {
+        use crate::remote_access::{RemoteError, REFUSED_PAIRING_MESSAGE};
+        let _attempt = self.attempt.lock().await;
+        if self.is_refused() {
+            return Err(RemoteError::Refused(REFUSED_PAIRING_MESSAGE.into()));
+        }
+        let result = self.run_admitted(operation).await;
+        if result.as_ref().err().is_some_and(RemoteError::is_definitive_refusal) {
+            self.refuse();
+        }
+        result
+    }
+
+    /// The caller holds `attempt`.
+    async fn run_admitted<T, F, Fut>(&self, operation: F) -> Result<T, crate::remote_access::RemoteError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, crate::remote_access::RemoteError>>,
+    {
+        use crate::remote_access::RemoteError;
         if let Some(seconds) = self.remaining() {
             return Err(RemoteError::Waiting(seconds));
         }
@@ -242,6 +304,71 @@ mod tests {
 mod remote_tests {
     use super::*;
     use crate::remote_access::RemoteError;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_is_a_cooldown_until_its_deadline_passes() {
+        for error in [RemoteError::RateLimited(60), RemoteError::HandshakeUnavailable] {
+            let retry = RemoteRetry::default();
+            assert!(!retry.cooling_down());
+            let _: Result<(), _> = retry.run(|| async { Err(error) }).await;
+            let wait = retry.remaining().unwrap();
+            assert!(retry.cooling_down());
+            tokio::time::advance(Duration::from_secs(wait)).await;
+            assert!(retry.remaining().is_none());
+            assert!(!retry.cooling_down(), "an expired deadline is no cooldown");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_redial_during_a_failure_streak_is_a_cooldown_until_it_succeeds() {
+        let retry = std::sync::Arc::new(RemoteRetry::default());
+        let _: Result<(), _> = retry.run(|| async { Err(RemoteError::HandshakeUnavailable) }).await;
+        tokio::time::advance(Duration::from_secs(retry.remaining().unwrap())).await;
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let dial = tokio::spawn({
+            let retry = retry.clone();
+            async move { retry.run(|| async { let _ = finished.await; Ok(()) }).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(retry.remaining().is_some(), "the dial is in flight");
+        assert!(retry.cooling_down(), "still inside the streak");
+        finish.send(()).unwrap();
+        dial.await.unwrap().unwrap();
+        assert!(!retry.cooling_down());
+        assert!(!retry.is_retrying());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_healthy_or_cancelled_dial_is_no_cooldown_and_still_stops_a_burst() {
+        let retry = std::sync::Arc::new(RemoteRetry::default());
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let dial = tokio::spawn({
+            let retry = retry.clone();
+            async move { retry.run(|| async { let _ = finished.await; Ok(()) }).await }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(retry.remaining(), Some(1), "the anti-burst stamp is set");
+        assert!(!retry.is_retrying());
+        assert!(!retry.cooling_down(), "a healthy dial in flight");
+        finish.send(()).unwrap();
+        dial.await.unwrap().unwrap();
+        assert!(!retry.cooling_down());
+
+        // Cancelled by its caller: not a cooldown, and the stamp still stops a burst.
+        let cancelled = tokio::spawn({
+            let retry = retry.clone();
+            async move { retry.run(|| std::future::pending::<Result<(), RemoteError>>()).await }
+        });
+        tokio::task::yield_now().await;
+        cancelled.abort();
+        let _ = cancelled.await;
+        assert_eq!(retry.remaining(), Some(1));
+        assert!(!retry.cooling_down());
+        let dialled = std::cell::Cell::new(false);
+        let next: Result<(), _> = retry.run(|| async { dialled.set(true); Ok(()) }).await;
+        assert!(matches!(next, Err(RemoteError::Waiting(1))));
+        assert!(!dialled.get());
+    }
     use std::cell::Cell;
 
     #[tokio::test(start_paused = true)]

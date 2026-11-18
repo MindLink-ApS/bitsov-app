@@ -5,9 +5,13 @@ wallet activity and node settings into one interface. Messages use the
 recipient node's price and your spending approvals and limits.
 
 **This is a signet-only beta. Use signet test coins, never mainnet funds.**
-This describes the supported beta deployment; it does not mean every development
-profile enforces the network for you. Check your node's configuration before
-connecting.
+Packaged previews use `tech.mindlink.bitsov.beta`; that profile and Remote Test
+require an explicit signet configuration and a signet network report before
+becoming ready. The beta has separate app storage and Keychain service names.
+The current bundled node cannot select a network during initialization, so the
+beta offers remote signet pairing. It cannot create a local node yet. Existing
+node configurations are never converted. Other development profiles retain
+their own behavior; check their configuration before connecting.
 
 ## What works today
 

@@ -13,10 +13,12 @@ import { t as tr } from '../i18n';
  * one offer and one hangup for the caller, one answer for the callee.
  */
 import { appPlatform, type AppPlatform } from '../platform';
+import { MESSAGE_PAYMENT_CAP_MSAT } from './ownerApproval';
 import { provenUnpaid } from './paymentOutcome';
-import { asActionError } from './state';
+import { asActionError, messagePerPaymentMax } from './state';
 import { amount } from './format';
 import { createCallMinutes, type CallMinutes, type MinutesDeps, type MinutesView } from './callMinutes';
+import { SEAL_ENDED, SEAL_NOT_AGREED, SEAL_REFUSED } from './nodeRoutedConnection';
 import type { ActionError, CallQuote, CallReceipt, Message, MinutesConsent, NodeGrantSummary, OpView } from './types';
 
 export const CALL_OFFER = 400;
@@ -42,6 +44,7 @@ const permissionPlace = (platform: AppPlatform) =>
 export function mediaError(error: unknown, media: CallMedia, platform: AppPlatform = appPlatform()): string {
   const name = error && typeof error === 'object' && 'name' in error ? error.name : '';
   const devices = media === 'video' ? tr('caMicrophoneOrCamera') : tr('caMicrophone');
+  if (name === SEAL_REFUSED) return tr('caCallSealRefused');
   if (name === NO_MEDIA_DEVICES) return media === 'video' ? tr('caThisBuildCannotUseTheMicrophoneOrCameraYet') : tr('caThisBuildCannotUseTheMicrophoneYet');
   if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
     return tr('caPermissionToUseTheWasDeniedAllowAccessIn', devices, permissionPlace(platform));
@@ -53,6 +56,19 @@ export function mediaError(error: unknown, media: CallMedia, platform: AppPlatfo
 
 /** How long a dropped connection may take to come back before the call ends. */
 export const DISCONNECT_GRACE_MS = 10_000;
+/**
+ * Phones only: how long a call may stay locked, backgrounded or with a
+ * silenced microphone before it is hung up. The phone OS silences the
+ * microphone of an app it does not show, while the call (and its paid
+ * minutes) would otherwise go on. Coming back within this time continues the
+ * call; after it, the call ends through the normal hangup and no further
+ * minute is paid.
+ */
+export const SILENCED_GRACE_MS = 20_000;
+/** Why a phone call stopped (or is about to): the app went out of view, or the microphone went quiet. */
+export type CallStopCause = 'background' | 'microphone';
+/** `endsAt`: while the grace runs, when the call ends; null once it ended for this cause. */
+export type CallStop = { cause: CallStopCause; endsAt: number | null };
 /** 1:1 recovery includes gathering and paid signalling; meetings keep their own grace. */
 export const RECONNECT_GRACE_MS = 30_000;
 const RESTART_DELAY_MS = 2_000;
@@ -75,6 +91,10 @@ export function stunServer(url: string | null | undefined): RTCIceServer[] {
 }
 
 export const isCallKind = (kind: number) => kind >= CALL_OFFER && kind <= CALL_HANGUP;
+/** M6: the caller pays one minute block per 60 s as its own message (genome N1/N3). */
+export const CALL_BLOCK = 404;
+/** A call's signals and its paid minute blocks: call traffic, never chat bubbles. */
+export const isCallTrafficKind = (kind: number) => isCallKind(kind) || kind === CALL_BLOCK;
 
 export type CallMedia = 'audio' | 'video';
 /** `unpaid` (M6): only received, from the callee's node, when the paid minutes ran out. */
@@ -126,6 +146,19 @@ export function newCallId(random: (a: Uint8Array) => Uint8Array = (a) => crypto.
 export const callCost = (q: CallQuote) => q.call_total_msat;
 /** What one answer/ICE/hangup costs at most, all-in. */
 export const signalCost = (q: CallQuote) => q.signal_msat + q.signal_max_routing_fee_msat;
+/**
+ * The most an answer or hangup can cost under this quote, or null: without their
+ * live answer the signal price is only this node's tariff, and an amount this app
+ * cannot hold exactly is no amount.
+ */
+export const answerCost = (q: CallQuote): number | null =>
+  q.offer_msat === null || !Number.isSafeInteger(signalCost(q)) ? null : signalCost(q);
+/** Why a press pays nothing: the live price is missing or above what the button showed, price or routing ceiling. */
+const answerRefusal = (shown: CallQuote, live: Outcome<CallQuote>): string | null => {
+  if (!live.ok || answerCost(live.value) === null) return tr('caCallPriceUnreadNothingPaid');
+  return live.value.signal_msat > shown.signal_msat || live.value.signal_max_routing_fee_msat > shown.signal_max_routing_fee_msat
+    ? tr('caCallPriceRoseNothingPaid') : null;
+};
 
 /**
  * The grant's limit on each call payment, as the host reports it: the signed
@@ -136,17 +169,33 @@ export const signalCost = (q: CallQuote) => q.signal_msat + q.signal_max_routing
 export const callPerPaymentMax = (grant: NodeGrantSummary): number | null =>
   grant.call_per_payment_max_msat ?? (grant.envelopes ? null : grant.per_call_max_msat);
 /**
- * What an owner-chosen per-payment limit must allow for a call, as the host
- * checks it: the largest single payment among the offer, one hangup and one
- * agreed minute (price plus routing allowance). They are separate payments;
- * their sum is checked against the remaining budget instead.
+ * What the call per-payment limit must allow, as the host checks it: the
+ * larger of the offer (all-in) and one agreed minute at its PRICE. The node
+ * pins no routing fee for a usable direct channel and refuses a minute whose
+ * ceiling does not fit before any hold or payment; the routing allowance
+ * stays in the hold and the budget checks. Answer, ICE and hangup are
+ * bounded like messages instead (`hangupOverMessageCap`).
  */
 export const callPerPaymentNeed = (q: CallQuote, minutes: boolean): number =>
   Math.max(
     (q.offer_msat ?? 0) + q.offer_max_routing_fee_msat,
-    signalCost(q),
-    minutes && q.block_msat != null ? q.block_msat + (q.block_max_routing_fee_msat ?? 0) : 0,
+    minutes && q.block_msat != null ? q.block_msat : 0,
   );
+/** The message cap a hangup exceeds, or null: a call that could not be ended is never placed. */
+export const hangupOverMessageCap = (q: CallQuote, grant: NodeGrantSummary | null | undefined): number | null => {
+  if (!grant) return null;
+  const cap = messagePerPaymentMax(grant);
+  return signalCost(q) > cap ? cap : null;
+};
+/**
+ * Why a hangup does not fit (`hangupOverMessageCap`), in words: a lower signed
+ * limit the owner could raise, or the 6-sat most any message payment may
+ * carry, which no approval raises.
+ */
+export const hangupOverMessageCapCopy = (q: CallQuote, cap: number): string =>
+  signalCost(q) > MESSAGE_PAYMENT_CAP_MSAT
+    ? tr('caHangingUpThisCallCostsMoreThanMessageMax', amount(signalCost(q)), amount(MESSAGE_PAYMENT_CAP_MSAT))
+    : tr('caHangingUpThisCallCostsMoreThanMessageCap', amount(signalCost(q)), amount(cap));
 
 export type CallState = 'idle' | 'ringing' | 'connecting' | 'live' | 'reconnecting' | 'ended';
 /** Detailed card phase; consumers can use CallView.state for the shared lifecycle. */
@@ -210,6 +259,11 @@ export type CallView = {
    * incoming one only watches the node end it). Amounts are the node's own.
    */
   minutes: MinutesView | null;
+  /**
+   * Phones only: the call is out of view or its microphone is silenced
+   * (`endsAt` set: it ends then unless that clears), or it ended for that.
+   */
+  stopped: CallStop | null;
 };
 
 /** `closed`: the host ended it (or nothing was owed); `unknown`: check pending result; `refused`: still open. */
@@ -251,8 +305,12 @@ export function callRefusal(error: ActionError): string {
   // The node checked the offer against the minutes agreed before Ring (genome N3) and refused it.
   if (error.code === 'call_offer_price_above_consent') return tr('caMinutesOfferPriceAboveConsent');
   if (error.code === 'call_offer_hold_above_consent') return tr('caMinutesOfferHoldAboveConsent');
+  // Also what a node says while its Lightning link comes back after a restart: not only a lack of capacity.
+  if (error.code === 'call_liquidity_insufficient') return tr('caMinutesLiquidityRefused');
+  // The box's budget for this contact could not hold the call's reservation: say what to do, plainly.
+  if (error.code === 'grant_recipient') return tr('caCallContactBudgetRefused');
   // The grant refusals name a per-payment limit; for a call it is the reservation that did not fit.
-  return ['grant_per_call', 'grant_exhausted', 'grant_recipient'].includes(error.code)
+  return ['grant_per_call', 'grant_exhausted'].includes(error.code)
     ? tr('caMinutesGrantRefused', error.message) : error.message;
 }
 
@@ -261,13 +319,18 @@ export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
   liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, offline: false,
   close: null, stuck: null, dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null, minutes: null,
+  stopped: null,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
 export type CallDeps = {
+  /** Display a replacement-budget request after a total-budget refusal. */
+  onBudgetNeeded?: (amountMsat: number | null) => void;
   /** M6: media goes through the node link (`nodeRoutedConnection.ts`), not a direct connection. Copy only. */
   routed?: boolean;
+  /** Node-routed video is on (flag `VITE_CALL_VIDEO`): a routed call may carry the camera. */
+  routedVideo?: boolean;
   /**
    * M6 A2: paid minutes. When set, a call is placed only with the callee's
    * per-minute price in its quote and a session whose node keeps a call
@@ -280,12 +343,13 @@ export type CallDeps = {
   /** Report local teardown by exact admission. Host keeps cleanup pending. No send. */
   closeAdmission?: (operationId: string, peer: string, callId: string) => Promise<void>;
   /** Check current spend permission and show the shell’s approval path before capture. */
-  authorize?: () => Promise<boolean>;
+  authorize?: (reservationPeer?: string) => Promise<boolean>;
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
   /** Latest grant read by the shell; the host rechecks it before paying. */
   grant?: () => NodeGrantSummary | null;
   /** `minutes`: only on a node-routed offer, the minutes agreed before Ring (kept by the host). */
-  signal: (peer: string, kind: number, plaintext: string, maxMsat: number, minutes?: MinutesConsent) => Promise<Outcome<CallReceipt>>;
+  /** `maxHangupMsat`, on an offer: the most its hangup was shown to cost. The host saves no higher ceiling for End. */
+  signal: (peer: string, kind: number, plaintext: string, maxMsat: number, minutes?: MinutesConsent, maxHangupMsat?: number) => Promise<Outcome<CallReceipt>>;
   getUserMedia: (c: MediaStreamConstraints) => Promise<MediaStream>;
   peerConnection: (config: RTCConfiguration) => RTCPeerConnection;
   now: () => number;
@@ -294,6 +358,12 @@ export type CallDeps = {
   onMissed?: (call: { callId: string; peer: string; media: CallMedia; at: number }) => void;
   /** iOS only: local session policy, never a signal or payment. */
   audioSession?: (live: boolean) => Promise<void>;
+  /**
+   * Phones (iOS, Android): hang up a call that stays out of view or whose
+   * microphone stays silenced for SILENCED_GRACE_MS (see `setBackgrounded`,
+   * `micSilent`). Desktop builds leave it off.
+   */
+  stopWhenSilenced?: boolean;
   onStreams: (local: MediaStream | null, remote: MediaStream | null) => void;
   newCallId?: () => string;
   /** Read at each call: the owner's STUN setting, `[]` (host only) by default. */
@@ -357,7 +427,9 @@ export function createCallEngine(deps: CallDeps) {
   const waiting = new Map<string, {
     view: () => CallView;
     receive: (m: Message, ownId: string) => Promise<void>;
-    decline: () => Promise<void>;
+    decline: (shown: CallQuote) => Promise<void>;
+    ignore: () => void;
+    note: (message: string) => void;
     dismiss: () => void;
     endLocal: () => void;
     takeIncoming: () => IncomingOffer | null;
@@ -413,6 +485,97 @@ export function createCallEngine(deps: CallDeps) {
   let audioQueue = Promise.resolve();
   let backgrounded = false;
   let videoGeneration = 0;
+
+  // Phones (`stopWhenSilenced`): a call out of view, or with a silenced
+  // microphone, is hung up after SILENCED_GRACE_MS unless that clears first.
+  /** The OS muted our microphone track (the owner's own mute never does). */
+  let micMuted = false;
+  /** The capture path has heard only digital silence for a while (see callAudio `onSilence`). */
+  let micQuiet = false;
+  /** Our microphone track ended: it never comes back in this call. */
+  let micEnded = false;
+  let stopTimer: ReturnType<typeof setTimeout> | undefined;
+  /** While the grace runs: when the call ends. A change of cause never moves it. */
+  let stopEndsAt: number | null = null;
+  let offMic: (() => void) | null = null;
+  let checkingStop = false;
+  /** The engine's own hangup, bound once the engine is built. */
+  let stopHangup: () => void = () => {};
+  // From the answer on: the phases in which the minutes are paid.
+  const stopGuarded = () => view.phase === 'connecting' || view.phase === 'live' || view.phase === 'reconnecting';
+  const stopCause = (): CallStopCause | null =>
+    backgrounded ? 'background' : micEnded || micMuted || (micQuiet && !view.muted) ? 'microphone' : null;
+  const clearStop = () => { clearTimeout(stopTimer); stopTimer = undefined; stopEndsAt = null; };
+  const stopNow = (cause: CallStopCause) => {
+    clearStop();
+    const was = checkingStop;
+    checkingStop = true;
+    try { set({ stopped: { cause, endsAt: null } }); } finally { checkingStop = was; }
+    // The normal hangup: it ends the minutes at once, then ends the call at the host.
+    stopHangup();
+  };
+  const checkStop = () => {
+    if (!deps.stopWhenSilenced || checkingStop) return;
+    checkingStop = true;
+    try {
+      if (!stopGuarded()) {
+        clearStop();
+        // A countdown is never shown for a call that is no longer paid for.
+        if (view.stopped && view.stopped.endsAt !== null) set({ stopped: null });
+        return;
+      }
+      // The deadline passed (a phone may deliver the timer late, after it is
+      // back in view): the call ends now, whatever changed meanwhile.
+      if (stopEndsAt !== null && deps.now() >= stopEndsAt) { stopNow(view.stopped?.cause ?? stopCause() ?? 'background'); return; }
+      const cause = stopCause();
+      if (!cause) {
+        if (stopTimer !== undefined || view.stopped) { clearStop(); set({ stopped: null }); }
+        return;
+      }
+      if (micEnded) { stopNow(cause); return; }
+      if (stopTimer === undefined) {
+        const callId = view.callId;
+        stopEndsAt = deps.now() + SILENCED_GRACE_MS;
+        stopTimer = setTimeout(() => {
+          stopTimer = undefined;
+          stopEndsAt = null;
+          // The deadline is reached: the call ends, never runs on past it.
+          if (view.callId === callId && stopGuarded()) stopNow(stopCause() ?? view.stopped?.cause ?? cause);
+        }, SILENCED_GRACE_MS);
+        set({ stopped: { cause, endsAt: stopEndsAt } });
+      } else if (view.stopped?.cause !== cause || view.stopped?.endsAt !== stopEndsAt) {
+        // Another cause keeps the deadline already running; the countdown shows that one.
+        set({ stopped: { cause, endsAt: stopEndsAt } });
+      }
+    } finally { checkingStop = false; }
+  };
+  /** Follow the OS's mute and end of our microphone track (phones only). */
+  const watchMic = (stream: MediaStream) => {
+    offMic?.();
+    offMic = null;
+    micMuted = false;
+    micQuiet = false;
+    micEnded = false;
+    if (!deps.stopWhenSilenced) return;
+    const tracks = stream.getAudioTracks();
+    // A track the OS already muted fires no 'mute' event.
+    micMuted = tracks.some((t) => t.muted === true && t.readyState !== 'ended');
+    const mute = () => { if (local === stream) { micMuted = true; checkStop(); } };
+    const unmute = () => { if (local === stream) { micMuted = tracks.some((t) => t.muted === true && t.readyState !== 'ended'); checkStop(); } };
+    const ended = () => { if (local === stream) { micEnded = true; checkStop(); } };
+    for (const t of tracks) {
+      t.addEventListener?.('mute', mute);
+      t.addEventListener?.('unmute', unmute);
+      t.addEventListener?.('ended', ended);
+    }
+    offMic = () => {
+      for (const t of tracks) {
+        t.removeEventListener?.('mute', mute);
+        t.removeEventListener?.('unmute', unmute);
+        t.removeEventListener?.('ended', ended);
+      }
+    };
+  };
   const updateAudio = (live: boolean) => {
     if (!deps.audioSession || live === audioLive) return;
     audioLive = live;
@@ -439,6 +602,7 @@ export function createCallEngine(deps: CallDeps) {
     updateAudio(pc !== null && (view.phase === 'live' ||
       (view.phase === 'reconnecting' && view.liveAt !== null)));
     deps.onView(view);
+    checkStop();
   };
   const active = () => view.phase !== 'idle' && view.phase !== 'ended';
 
@@ -467,6 +631,12 @@ export function createCallEngine(deps: CallDeps) {
     ringTimer = undefined;
     clearTimeout(dropTimer);
     dropTimer = undefined;
+    clearStop();
+    offMic?.();
+    offMic = null;
+    micMuted = false;
+    micQuiet = false;
+    micEnded = false;
     videoSender = null;
     const oldPc = pc;
     pc = null;
@@ -556,7 +726,13 @@ export function createCallEngine(deps: CallDeps) {
     minutes = null;
     teardown();
     healedRefusal = null;
-    set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null });
+    // Ending at the host starts now, though it waits for local teardown: a result
+    // that arrives meanwhile is End's to answer, so the card says it is closing.
+    const closingNow = endAtHost && !!deps.endCall && ids.some((id) => !closing.has(id));
+    // A stop that already ended the call stays said; one still in its grace does not.
+    set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null,
+      stopped: view.stopped?.endsAt === null ? view.stopped : null,
+      ...(closingNow ? { close: { status: 'closing' as const, message: null } } : {}) });
     if (session) { if (view.outgoing) session.finish(); else session.dispose(); }
     const recorded = record && peer ? Promise.all(operations.map(([operationId, wireCallId]) => closeAdmission(operationId, peer, wireCallId))) : Promise.resolve();
     if (endAtHost && ids.length) void recorded.then(() => closeAdmissions(ids, callId));
@@ -653,6 +829,7 @@ export function createCallEngine(deps: CallDeps) {
       throw new Error(MEDIA_ERROR());
     }
     local = stream;
+    watchMic(stream);
     const conn = deps.peerConnection({ iceServers: deps.iceServers?.() ?? [] });
     pc = conn;
     stream.getTracks().forEach((t) => {
@@ -678,6 +855,7 @@ export function createCallEngine(deps: CallDeps) {
       } else if (state === 'closed') {
         // M6: the node admits call audio only once the first minute is paid.
         if (deps.routed && (conn as { endDetail?: string | null }).endDetail === NOT_PAID) end('unpaid', tr('caMinutesNotPaidInTime'));
+        else if (deps.routed && (conn as { endDetail?: string | null }).endDetail === SEAL_ENDED) end('failed', tr('caCallSealEnded'));
         else end('failed', deps.routed ? tr('caTheNodeMediaLinkClosed') : tr('caTheDirectConnectionClosed'));
       }
     };
@@ -709,7 +887,7 @@ export function createCallEngine(deps: CallDeps) {
     view = { ...view, pendingCount: view.pendingCount + 1, pendingMsat: view.pendingMsat + maxMsat };
   };
 
-  const pay = async (kind: number, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number, targetId = wireId ?? view.callId, owner = { peer: view.peer, callId: view.callId }, owed = false, minutes?: MinutesConsent) => {
+  const pay = async (kind: number, body: Omit<Signal, 'v' | 'call_id'>, maxMsat: number, targetId = wireId ?? view.callId, owner = { peer: view.peer, callId: view.callId }, owed = false, minutes?: MinutesConsent, maxHangupMsat?: number) => {
     const { peer, callId } = owner;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<Outcome<CallReceipt>>((resolve) => {
@@ -739,7 +917,7 @@ export function createCallEngine(deps: CallDeps) {
     let r: Outcome<CallReceipt>;
     try {
       const signal = Promise.resolve().then(() => deps.signal(peer!, kind,
-        JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat, ...(minutes ? [minutes] : [])))
+        JSON.stringify({ v: 1, call_id: targetId!, ...body }), maxMsat, minutes, maxHangupMsat))
         .catch((error): Outcome<CallReceipt> => ({ ok: false, error: asActionError(error) })).then(result => {
         const operationId = result.ok ? result.value.operation_id
           : result.error.operation_id;
@@ -816,6 +994,11 @@ export function createCallEngine(deps: CallDeps) {
         recoveryRefused(conn, tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(callPerPaymentNeed(q, false)), amount(recoveryLimit)));
         return;
       }
+      const recoveryHangupCap = hangupOverMessageCap(q, grant);
+      if (recoveryHangupCap !== null) {
+        recoveryRefused(conn, hangupOverMessageCapCopy(q, recoveryHangupCap));
+        return;
+      }
       const id = (deps.newCallId ?? newCallId)();
       if (admissions.has(id)) throw new Error(tr('caCouldNotAllocateAFreshCallIdForRecovery'));
       conn.restartIce?.();
@@ -829,7 +1012,7 @@ export function createCallEngine(deps: CallDeps) {
       restartAnswerPending = true;
       own.push(id);
       const sdp = `${conn.localDescription!.sdp.trimEnd()}\r\n${RESTART_ATTRIBUTE}${view.callId}\r\n`;
-      const r = await pay(CALL_OFFER, { media: view.media, sdp }, q.offer_msat + q.offer_max_routing_fee_msat, id);
+      const r = await pay(CALL_OFFER, { media: view.media, sdp }, q.offer_msat + q.offer_max_routing_fee_msat, id, undefined, false, undefined, signalCost(q));
       if (pc !== conn) return;
       if (r.ok) {
         wireId = id;
@@ -880,14 +1063,17 @@ export function createCallEngine(deps: CallDeps) {
   /** M6 A2: one paid-minutes session per call; its view and its stop belong to that call only. */
   const startMinutes = (peer: string, callId: string, agreedBlockMsat: number, reservationMaxMsat: number | null, pays: boolean) => {
     minutes?.dispose();
-    minutes = createCallMinutes({
+    const session: CallMinutes = createCallMinutes({
       peer, callId, agreedBlockMsat, reservationMaxMsat, pays, deps: deps.minutes!, now: deps.now,
       onChange: (m) => { if (view.callId === callId) set({ minutes: m }); },
       // The node ended it, or paying stopped: the call ends now, never left 'connected'.
       onStop: (stop) => { if (view.callId === callId && active()) end(stop.code === 'unpaid' ? 'unpaid' : stop.code === 'node_ended' ? 'hangup' : 'failed', stop.message); },
+      // A call that ended (or was replaced) is never paid for, whatever its session still believes.
+      canPay: () => minutes === session && view.callId === callId && active(),
     });
-    set({ minutes: minutes.view() });
-    return minutes;
+    minutes = session;
+    set({ minutes: session.view() });
+    return session;
   };
 
   /** Media is set up but not flowing yet: give up after a while (nothing paid). */
@@ -912,8 +1098,8 @@ export function createCallEngine(deps: CallDeps) {
     }
   };
 
-  /** Accept the ringing call: one paid answer. */
-  const accept = () => guarded(async () => {
+  /** Accept the ringing call: one paid answer, at most the price `shown` on the button. */
+  const accept = (shown: CallQuote) => guarded(async () => {
     if (view.phase !== 'incoming' || !offerSdp) return;
     const callId = view.callId;
     if (deps.authorize && !await deps.authorize()) return;
@@ -923,7 +1109,8 @@ export function createCallEngine(deps: CallDeps) {
     awaitConnect(callId!);
     const q = await deps.quote(view.peer!);
     if (view.callId !== callId || !active()) return;
-    if (!q.ok) { end(null, q.error.message); return; }
+    const refused = answerRefusal(shown, q);
+    if (refused !== null || !q.ok) { end(null, refused); return; }
     quote = q.value;
     let conn: RTCPeerConnection;
     try {
@@ -950,11 +1137,14 @@ export function createCallEngine(deps: CallDeps) {
     }
   });
 
-  return {
+  const api = {
     view: () => view,
     /** Move an untouched waiting offer to the normal answer path after media is free. */
-    acceptWaiting: async (id: string) => {
-      if (active() || busy || deps.busy?.() || view.pendingCount || view.unknownCount || (view.close && view.close.status !== 'closed')) return;
+    acceptWaiting: async (id: string, shown: CallQuote) => {
+      if (active() || busy || deps.busy?.() || view.pendingCount || view.unknownCount || (view.close && view.close.status !== 'closed')) {
+        waiting.get(id)?.note(tr('incomingWaiting'));
+        return;
+      }
       const offer = waiting.get(id)?.takeIncoming();
       if (!offer) return;
       quote = null;
@@ -962,10 +1152,10 @@ export function createCallEngine(deps: CallDeps) {
       admissions.add(offer.callId);
       offerSdp = offer.sdp;
       incomingAt = offer.at;
-      const media: CallMedia = deps.routed ? 'audio' : offer.media;
+      const media: CallMedia = deps.routed && !deps.routedVideo ? 'audio' : offer.media;
       set({ ...IDLE, phase: 'incoming', peer: offer.peer, callId: offer.callId, media, camera: media === 'video' });
       ringTimer = setTimeout(() => { if (view.callId === offer.callId && view.phase === 'incoming') end('timeout'); }, Math.max(0, RING_MS - (deps.now() - incomingAt)));
-      await accept();
+      await accept(shown);
     },
     /** Transfer without a hangup or missed record; only a pending offer is movable. */
     takeIncoming: (): IncomingOffer | null => {
@@ -975,15 +1165,19 @@ export function createCallEngine(deps: CallDeps) {
       set(IDLE);
       return offer;
     },
-    declineWaiting: (id: string) => waiting.get(id)?.decline(),
+    declineWaiting: (id: string, shown: CallQuote) => waiting.get(id)?.decline(shown),
+    /** Why a press on this waiting card did nothing yet. */
+    note: (message: string) => { if (view.phase === 'incoming') set({ error: message }); },
     dismissWaiting: (id: string) => { waiting.get(id)?.dismiss(); },
+    ignoreWaiting: (id: string) => { waiting.get(id)?.ignore(); },
 
     /** Place a call. The price was shown before this is called. */
     place: (peer: string, requested: CallMedia, q: CallQuote) => guarded(async (claim) => {
       const generation = mediaGeneration;
-      // M6: a node-routed call carries audio only (no camera is captured or offered).
-      const media: CallMedia = deps.routed ? 'audio' : requested;
+      // M6: a node-routed call carries audio only (no camera is captured or offered), unless node-routed video is on.
+      const media: CallMedia = deps.routed && !deps.routedVideo ? 'audio' : requested;
       if (active() || deps.busy?.()) return;
+      deps.onBudgetNeeded?.(null);
       if (q.offer_msat === null || q.call_total_msat === null) {
         set({ ...IDLE, phase: 'ended', peer, error: tr('caTheirNodeDoesNotTakeCallsYetNothingWas') });
         return;
@@ -995,6 +1189,7 @@ export function createCallEngine(deps: CallDeps) {
       if (grant && q.call_total_msat > grant.remaining_msat) {
         set({ ...IDLE, phase: 'ended', peer, error:
           tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat), amount(grant.remaining_msat)) });
+        deps.onBudgetNeeded?.(q.call_total_msat);
         return;
       }
       const perPayment = grant ? callPerPaymentMax(grant) : null;
@@ -1002,6 +1197,11 @@ export function createCallEngine(deps: CallDeps) {
       if (perPayment !== null && need > perPayment) {
         set({ ...IDLE, phase: 'ended', peer, error:
           tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(need), amount(perPayment)) });
+        return;
+      }
+      const hangupCap = hangupOverMessageCap(q, grant);
+      if (hangupCap !== null) {
+        set({ ...IDLE, phase: 'ended', peer, error: hangupOverMessageCapCopy(q, hangupCap) });
         return;
       }
       // M6: no node-routed call without the per-minute price and the most held the owner agreed to.
@@ -1018,7 +1218,7 @@ export function createCallEngine(deps: CallDeps) {
       }
       const consent: MinutesConsent | undefined = deps.minutes && block !== null && most !== null
         ? { block_msat: block, block_max_routing_fee_msat: q.block_max_routing_fee_msat ?? 0, max_hold_msat: most } : undefined;
-      if (deps.authorize && !await deps.authorize()) return;
+      if (deps.authorize && !await deps.authorize(peer)) return;
       if (generation !== mediaGeneration || active() || deps.busy?.()) return;
       quote = q;
       const callId = (deps.newCallId ?? newCallId)();
@@ -1044,7 +1244,7 @@ export function createCallEngine(deps: CallDeps) {
       if (cancelled === callId || view.callId !== callId || !active()) return;
       // From here the host may hold this admission: every end asks it to close it.
       own.push(callId);
-      const r = await pay(CALL_OFFER, { media, sdp: conn.localDescription!.sdp }, q.offer_msat + q.offer_max_routing_fee_msat, undefined, undefined, false, consent);
+      const r = await pay(CALL_OFFER, { media, sdp: conn.localDescription!.sdp }, q.offer_msat + q.offer_max_routing_fee_msat, undefined, undefined, false, consent, signalCost(q));
       // Cancelled while the offer was in flight: the mic is already off; the host ends it if it was paid.
       if (cancelled === callId || view.callId !== callId || !active()) return;
       if (!r.ok && r.error.code === 'call_needs_node_upgrade') {
@@ -1061,6 +1261,7 @@ export function createCallEngine(deps: CallDeps) {
         return;
       }
       if (!r.ok) {
+        if (r.error.code === 'grant_exhausted') deps.onBudgetNeeded?.(q.call_total_msat);
         end(null, session ? callRefusal(r.error) : r.error.message);
         return;
       }
@@ -1089,8 +1290,15 @@ export function createCallEngine(deps: CallDeps) {
     /** M6 A2: the owner confirms the node's hold for this outgoing call (as the card shows it). */
     confirmMinutes: async () => { if (view.outgoing && active()) await minutes?.confirm(); },
 
-    /** Decline a ringing call: one paid hangup, so the caller stops ringing. */
-    decline: () => guarded(async () => {
+    /** Stop ringing on this device: nothing is sent or paid, and their ring times out by itself. */
+    ignore: () => {
+      if (view.phase !== 'incoming' || view.silenced) return;
+      teardown();
+      set(IDLE);
+    },
+
+    /** Decline a ringing call: one paid hangup, at most the price `shown` on the button, so the caller stops ringing. */
+    decline: (shown: CallQuote) => guarded(async () => {
       if (view.phase !== 'incoming') return;
       set({ silenced: true });
       const owner = { peer: view.peer, callId: view.callId };
@@ -1098,15 +1306,15 @@ export function createCallEngine(deps: CallDeps) {
       const generation = mediaGeneration;
       const q = await deps.quote(owner.peer!);
       if (mediaGeneration !== generation || view.callId !== owner.callId || view.phase !== 'incoming') return;
-      if (q.ok) owe(signalCost(q.value));
+      const refused = answerRefusal(shown, q);
+      if (refused !== null || !q.ok) { end('declined', refused); return; }
+      owe(signalCost(q.value));
       end('declined');
-      if (q.ok) {
-        try {
-          const r = await pay(CALL_HANGUP, { reason: 'declined' }, signalCost(q.value), id, owner, true);
-          if (!r.ok && view.callId === owner.callId) set({ error: r.error.message });
-        } catch (error) {
-          if (view.callId === owner.callId) set({ error: asActionError(error).message });
-        }
+      try {
+        const r = await pay(CALL_HANGUP, { reason: 'declined' }, signalCost(q.value), id, owner, true);
+        if (!r.ok && view.callId === owner.callId) set({ error: r.error.message });
+      } catch (error) {
+        if (view.callId === owner.callId) set({ error: asActionError(error).message });
       }
     }),
 
@@ -1181,18 +1389,32 @@ export function createCallEngine(deps: CallDeps) {
       if (view.callId === callId && view.close?.status === 'closed') set({ close: { status: 'closed', message: tr('caTheEarlierCallIsEndedYouCanCallThem') } });
     },
 
-    /** iOS visibility only: stop video capture, retain audio and transport.
-     * Foregrounding never captures again without the owner's camera action. */
+    /** Phone visibility: stop video capture, retain audio and transport.
+     * Foregrounding never captures again without the owner's camera action.
+     * With `stopWhenSilenced`, a call that stays hidden is hung up after
+     * SILENCED_GRACE_MS. */
     setBackgrounded: (hidden: boolean) => {
       if (hidden && !backgrounded) videoGeneration++;
       backgrounded = hidden;
       if (hidden) pauseVideo();
+      checkStop();
+    },
+
+    /** The capture path heard only digital silence for a while (true), or sound again (false). */
+    micSilent: (silent: boolean) => {
+      if (micQuiet === silent) return;
+      micQuiet = silent;
+      checkStop();
     },
 
     toggleMute: () => {
       if (!local) return;
       const muted = !view.muted;
       local.getAudioTracks().forEach((t) => { t.enabled = !muted; });
+      // The owner's own mute is silent on purpose; unmuting needs fresh evidence of a silenced microphone.
+      if (!muted) micQuiet = false;
+      // Node-routed audio: the capture path must know, so unmuting starts a fresh silence observation.
+      (pc as { setMuted?: (muted: boolean) => void } | null)?.setMuted?.(muted);
       set({ muted });
     },
 
@@ -1278,7 +1500,8 @@ export function createCallEngine(deps: CallDeps) {
           {
             // M6: a node-routed call is audio only. A video offer is answered with audio:
             // the camera is never captured or sent, whatever the caller asked for.
-            const media: CallMedia = deps.routed ? 'audio' : s.media!;
+            // Only a build with node-routed video on takes the offer as it came.
+            const media: CallMedia = deps.routed && !deps.routedVideo ? 'audio' : s.media!;
             set({ ...IDLE, phase: 'incoming', peer, callId: s.call_id, media, camera: media === 'video' });
           }
           ringTimer = setTimeout(() => { if (view.callId === s.call_id && view.phase === 'incoming') end('timeout'); }, RING_MS);
@@ -1303,9 +1526,11 @@ export function createCallEngine(deps: CallDeps) {
               answerInFlight = false;
               if (view.phase === 'reconnecting') void restart(conn);
             }
-          } catch {
+          } catch (error) {
             // Not a connectivity failure (no relay would help): no 'failed' reason, only the words.
-            if (pc === conn) end(null, tr('caTheirAnswerCouldNotBeUsed'));
+            // A sealing call whose answer could not be sealed says so, and names no side as the cause.
+            const name = error && typeof error === 'object' && 'name' in error ? error.name : '';
+            if (pc === conn) end(null, name === SEAL_NOT_AGREED || name === SEAL_REFUSED ? tr('caCallSealNotAgreed') : tr('caTheirAnswerCouldNotBeUsed'));
           }
           return;
         }
@@ -1334,4 +1559,6 @@ export function createCallEngine(deps: CallDeps) {
       }
     },
   };
+  stopHangup = () => { void api.hangup(); };
+  return api;
 }

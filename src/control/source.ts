@@ -95,6 +95,8 @@ export interface Source {
   nodeUnlockPassword(password: string): Promise<void>;
   /** Android: save (fingerprint-protected) or discard the password the node just accepted. */
   nodeUnlockRemember(remember: boolean): Promise<void>;
+  /** Fresh Mac only: the owner's explicit choice to create a node (recovery phrase and wallet) here. */
+  nodeSetupLocal(confirmed: boolean): Promise<void>;
   nodeRepairInitialized(confirmed: boolean): Promise<void>;
   nodeRepairPriceFloor(confirmed: boolean): Promise<void>;
   pairingStatus(): Promise<PairingView>;
@@ -163,7 +165,12 @@ export interface Source {
    * `recipient` (owner_device_approval_v1): `id` is the ApprovalView's grant_op and
    * the host reads /pair/first-contact-grant/{grant_op}?recipient=. Absent: today's id.
    */
-  firstContactStatus(id: string, recipient?: string): Promise<OwnerContactApproval>;
+  /**
+   * With `recipient`: the node's first-contact grant for this client's budget operation
+   * (`id`; empty = the current one), approved on another owner device or at the box console.
+   * `maxMsat` binds the exact cap the app asked to have approved.
+   */
+  firstContactStatus(id: string, recipient?: string, maxMsat?: number): Promise<OwnerContactApproval>;
   firstContactCancel(id: string): Promise<void>;
   wallet(): Promise<WalletOverview>;
   starterCurrent(nodeId: string): Promise<StarterStatus>;
@@ -182,7 +189,7 @@ export interface Source {
   // actions: spending ones are refused by the host outside the owner's spend window
   spendStatus(): Promise<SpendView>;
   /** The owner's one tap: open the short spend window, or ask the node for spend. */
-  spendRequest(): Promise<SpendView>;
+  spendRequest(callPeerOrBudget?: string | number): Promise<SpendView>;
   spendLock(): Promise<SpendView>;
   /** Withdraw the pending request at the node, then forget it. */
   spendCancel(): Promise<SpendView>;
@@ -260,7 +267,7 @@ export interface Source {
   /** Validate the admission for local teardown without releasing it. */
   closeCallAdmission(operationId: string, peer: string, callId: string): Promise<void>;
   /** One paid call signal (kinds 400-403) under the message budget rules; a node-routed offer carries the agreed minutes. */
-  callSignal(peer: string, kind: number, plaintext: string, maxMsat: number, minutes?: MinutesConsent): Promise<CallReceipt>;
+  callSignal(peer: string, kind: number, plaintext: string, maxMsat: number, minutes?: MinutesConsent, maxHangupMsat?: number): Promise<CallReceipt>;
   /** M6: one call's paid interval and reservation at the node; null once the node no longer lists it. Read-only. */
   callStatus(peer: string, callId: string): Promise<CallStatus | null>;
   /** M6: pay block `seq` (one minute) of an outgoing call; the host takes the amount from the node's reservation. */
@@ -314,6 +321,7 @@ export const hostSource: Source = {
     }
   },
   remoteAccessReplace: (link) => invoke<RemoteImportView>('remote_access_connect', { link }),
+  nodeSetupLocal: (confirmed) => invoke<void>('node_setup_local', { confirmed }),
   nodeRepairInitialized: (confirmed) => invoke<void>('node_repair_initialized', { confirmed }),
   nodeRepairPriceFloor: (confirmed) => invoke<void>('node_repair_price_floor', { confirmed }),
   identityRestore: (mnemonic) => invoke<RestoreOutcome>('identity_restore', { mnemonic }),
@@ -364,7 +372,7 @@ export const hostSource: Source = {
   sponsorRequest: (text) => invoke<FundingAsk>('sponsor_request', { text }),
   sponsorRequestStatus: (paymentHash) => invoke<FundingStatus>('sponsor_request_status', { payment_hash: paymentHash }),
   firstContactRequest: (recipient, maxMsat, budgetMsat) => invoke<OwnerContactApproval | null>('first_contact_request', { recipient, max_msat: maxMsat, contact_budget_msat: budgetMsat ?? null }),
-  firstContactStatus: (id, recipient) => invoke<OwnerContactApproval>('first_contact_status', { id, recipient: recipient ?? null }),
+  firstContactStatus: (id, recipient, maxMsat) => invoke<OwnerContactApproval>('first_contact_status', { id, recipient: recipient ?? null, max_msat: maxMsat ?? null }),
   firstContactCancel: (id) => invoke<void>('first_contact_cancel', { id }),
   wallet: () => invoke<WalletOverview>('payments_overview'),
   starterCurrent: (nodeId) => invoke<StarterStatus>('starter_current', { node_id: nodeId }),
@@ -375,7 +383,9 @@ export const hostSource: Source = {
   liveLink: () => invoke<LinkState | null>('live_link'),
   // Keep request_id and granted_op exactly as returned by the host.
   spendStatus: () => invoke<SpendView>('spend_status'),
-  spendRequest: () => invoke<SpendView>('spend_request'),
+  spendRequest: (proposal) => proposal === undefined
+    ? invoke<SpendView>('spend_request')
+    : invoke<SpendView>('spend_request', typeof proposal === 'string' ? { call_peer: proposal } : { budget_msat: proposal }),
   spendLock: () => invoke<SpendView>('spend_lock'),
   spendCancel: () => invoke<SpendView>('spend_cancel'),
   addDevice: input => invoke<AddView>('add_device', { input }),
@@ -421,7 +431,7 @@ export const hostSource: Source = {
   fileSave: (messageId) => invoke<FileSaveResult>('file_save', { message_id: messageId }),
   callQuote: (peer) => invoke<CallQuote>('call_quote', { peer }),
   closeCallAdmission: (operationId, peer, callId) => invoke<void>('op_close_call', { operation_id: operationId, peer, call_id: callId }),
-  callSignal: (peer, kind, plaintext, maxMsat, minutes) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat, ...(minutes ? { minutes } : {}) }),
+  callSignal: (peer, kind, plaintext, maxMsat, minutes, maxHangupMsat) => invoke<CallReceipt>('call_signal', { peer, kind, plaintext, max_msat: maxMsat, ...(minutes ? { minutes } : {}), ...(maxHangupMsat !== undefined ? { max_hangup_msat: maxHangupMsat } : {}) }),
   callStatus: (peer, callId) => invoke<CallStatus | null>('call_status', { peer, call_id: callId }),
   callBlock: (peer, callId, seq) => invoke<CallReceipt>('call_block', { peer, call_id: callId, seq }),
   callHold: (peer, callId, confirmReservedMsat) => invoke<CallStatus>('call_hold', { peer, call_id: callId, ...(confirmReservedMsat === null ? {} : { confirm_reserved_msat: confirmReservedMsat }) }),

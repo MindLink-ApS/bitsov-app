@@ -1,5 +1,5 @@
 import { createMemo, createSignal, createUniqueId, For, onCleanup, onMount, Show } from 'solid-js';
-import { isMobilePlatform } from '../platform';
+import { isMacOS, isMobilePlatform } from '../platform';
 import { t } from '../i18n';
 import { clock, day, satsWhole } from './format';
 import { ambiguousThousands, parseAmount } from './amountInput';
@@ -108,6 +108,7 @@ export function FirstSpendSheet(props: {
         }}>
         <div class="first-spend-keyboard-summary money" data-first-spend-keyboard-summary>
           <strong data-first-spend-keyboard-daily>{daily() === null ? t('firstSpendAllowUnavailable') : t('firstSpendAllow', daily()!)}</strong>
+          <span data-first-spend-keyboard-window>{t('firstSpendWindow')}</span>
           <span data-first-spend-keyboard-cost>{props.costLine}</span>
         </div>
         <div class="first-spend-grabber" aria-hidden="true"
@@ -125,7 +126,7 @@ export function FirstSpendSheet(props: {
         }>
           <p class="first-spend-starts-now">{daily() === null ? t('firstSpendStartsNowUnavailable') : t('firstSpendStartsNow', daily()!)}</p>
         </Show>
-        <Show when={props.onSetupApprovals}>
+        <Show when={props.onSetupApprovals && (isMobilePlatform() || isMacOS())}>
           <p class="hint">{t('approvalSetupReason')}</p>
           <button type="button" class="link" data-approval-setup onClick={() => props.onSetupApprovals?.()}>
             {t(isMobilePlatform() ? 'obSetupBiometrics' : 'obSetupTouchId')}

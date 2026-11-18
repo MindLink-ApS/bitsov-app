@@ -47,11 +47,42 @@ const MAX_LOCAL_REQUEST_PREFIX: usize = 64 * 1024;
 const LOCAL_AUTH_TIMEOUT: Duration = Duration::from_secs(2);
 const REMOTE_READER_QUEUE: usize = 2;
 const MAX_LOCAL_CONNECTIONS: usize = 8;
+/// Of those, slots only a call media socket may use, so a full HTTP pool
+/// plus the live WebSocket cannot starve a call's audio.
+const RESERVED_MEDIA_CONNECTIONS: usize = 1;
+/// A proxied request waits at most this long for its remote tunnel (handshake
+/// queue included). Shorter than the slowest local caller's own timeout, so a
+/// request is never forwarded after that caller has given up.
+const REMOTE_CONNECT_DEADLINE: Duration = Duration::from_secs(60);
+/// Request bytes held for a caller while its tunnel is set up. Beyond this the
+/// rest waits in the socket, and the caller's close is seen once it is read.
+const MAX_HELD_LOCAL_BYTES: usize = 1024 * 1024;
 const MAX_PENDING_LOCAL_AUTH: usize = 16;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const HANDSHAKE_UNAVAILABLE: &str = "remote handshake limit or endpoint unavailable";
+/// Response header naming the code of an error the loopback proxy itself
+/// wrote (the same code is in the JSON body). Node responses never pass
+/// through `write_proxy_error`.
+pub const PROXY_ERROR_HEADER: &str = "x-bitsov-proxy-error";
+/// Proxy-originated codes that only mean "no tunnel right now": worth a retry.
+const TRANSIENT_PROXY_ERRORS: [&str; 5] = [
+    "remote_retry_wait", "remote_proxy_busy", "remote_proxy_auth_busy",
+    "remote_handshake_unavailable", "remote_transport_refused",
+];
+
+/// The code of a transient error written by this proxy, read from its header
+/// or else its JSON body. `None` for anything else, including every response
+/// the node itself sent.
+pub fn transient_proxy_error(header: Option<&str>, body: Option<&[u8]>) -> Option<&'static str> {
+    #[derive(Deserialize)]
+    struct Body { code: String }
+    let body_code = || body.filter(|b| b.len() <= 1024)
+        .and_then(|b| serde_json::from_slice::<Body>(b).ok()).map(|b| b.code);
+    let code = header.map(str::to_owned).or_else(body_code)?;
+    TRANSIENT_PROXY_ERRORS.into_iter().find(|known| *known == code)
+}
 
 /// Longest `hosted_by` label shown, in characters (the node's own limit).
 pub const HOSTED_BY_MAX_CHARS: usize = 64;
@@ -298,6 +329,9 @@ pub enum RemoteError {
     Local(String),
     Transport(String),
     Refused(String),
+    /// The node already holds a pairing for this app's client identity and
+    /// refused only the ticket. The existing pairing still reconnects.
+    AlreadyPaired,
     HandshakeUnavailable,
     Unclaimed,
     LocalNetwork,
@@ -306,6 +340,8 @@ pub enum RemoteError {
     Waiting(u64),
     /// Seconds since the pairing ticket expired.
     Expired(u64),
+    /// This device has no passcode, so its protected identity cannot be stored or read.
+    DeviceUnavailable,
 }
 
 fn elapsed_text(seconds: u64) -> String {
@@ -329,10 +365,12 @@ impl fmt::Display for RemoteError {
             Self::Local(message) => f.write_str(message),
             Self::Transport(message) => write!(f, "remote transport failed: {message}"),
             Self::Refused(message) => write!(f, "remote node refused pairing: {message}"),
+            Self::AlreadyPaired => write!(f, "remote node refused pairing: {ALREADY_PAIRED_MESSAGE}"),
             Self::Unclaimed => f.write_str("This node isn't set up yet. Finish setup on a Mac, then add this phone."),
             Self::LocalNetwork => f.write_str("Local network access is denied or unavailable. Check BitSov's Local Network permission in Settings and your network connection."),
             Self::AndroidLocalNetwork => f.write_str("Local network access is unavailable. Allow Nearby devices for BitSov in Android Settings, then return to BitSov or tap Reconnect."),
             Self::HandshakeUnavailable => f.write_str(HANDSHAKE_UNAVAILABLE),
+            Self::DeviceUnavailable => f.write_str(PASSCODE_REQUIRED),
             Self::RateLimited(seconds) => write!(f, "Remote connection limited; waiting {seconds} s"),
             Self::Waiting(seconds) => write!(f, "Remote connection unavailable; waiting {seconds} s"),
         }
@@ -340,6 +378,22 @@ impl fmt::Display for RemoteError {
 }
 
 impl std::error::Error for RemoteError {}
+
+impl RemoteError {
+    /// The node answered and refused this app's saved pairing: an unknown or
+    /// revoked client, a used or expired ticket. Retrying the same link and
+    /// client identity cannot change that answer. Transport errors, timeouts,
+    /// busy replies and `AlreadyPaired` (the pairing itself stands) are never
+    /// definitive.
+    pub fn is_definitive_refusal(&self) -> bool {
+        matches!(self, Self::Refused(_) | Self::Expired(_))
+    }
+}
+
+/// Shown for a pairing the node has already refused while it stays refused.
+pub const REFUSED_PAIRING_MESSAGE: &str = "this app's pairing was refused; pair again from an enrolled device";
+
+const ALREADY_PAIRED_MESSAGE: &str = "This device already has a pairing. Reconnect with its saved pairing; a second-device ticket is for a new device.";
 
 /// Stable renderer contract. Detail is diagnostic copy, never a ticket or key.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -360,10 +414,41 @@ pub enum ConnectionErrorKind {
     Clock,
     Used,
     ClaimMismatch,
+    /// No device passcode (and so no Face ID / Touch ID): protected storage is off.
+    DeviceUnavailable,
     Other,
 }
 
 pub const USED_TICKET_MESSAGE: &str = "This ticket expired, was already used, or its owner was revoked. Ask an enrolled owner device for a new ticket.";
+pub const EXPIRED_TICKET_MESSAGE: &str = "This ticket has expired. Ask an enrolled owner device for a new ticket.";
+
+/// Stable diagnostic codes. The renderer maps `kind` (and these codes) to copy;
+/// detail never carries peer text or prose meant for the user.
+pub const UNREACHABLE_CODE: &str = "remote_unreachable";
+pub const CONNECTION_FAILED_CODE: &str = "remote_connection_failed";
+pub const PASSCODE_REQUIRED_CODE: &str = "device_passcode_required";
+/// The Apple Keychain bridge's fixed text for a device without a passcode
+/// (`bitsov_ffi::keychain_status::PASSCODE_REQUIRED`, which Android does not
+/// link). Kept here so every target compiles the classification; a test binds
+/// the two copies wherever the bridge exists.
+pub const PASSCODE_REQUIRED: &str = "This device has no passcode, so Face ID and protected storage are off. Turn on a passcode in Settings, then try again.";
+
+/// Classify the node's refusal of a pairing code by its reason, for every ticket
+/// kind (first pairing, owner, second device, legacy). Only a fixed local
+/// message crosses; the node's text stays out of the renderer.
+fn ticket_refusal(code: &str, message: &str, ticket: Option<&str>) -> Option<&'static str> {
+    if code != "authentication_failed" { return None; }
+    let reason = message.to_ascii_lowercase();
+    // A used, revoked or mismatched code needs a new ticket, whatever its kind.
+    if reason.contains("already used") || reason.contains("did not match") || reason.contains("does not match")
+        || reason.contains("did not verify") {
+        return Some(USED_TICKET_MESSAGE);
+    }
+    if reason.contains("expired") { return Some(EXPIRED_TICKET_MESSAGE); }
+    // Owner and second-device tickets are single use; any other refusal of one
+    // means it can no longer pair this device.
+    ticket.is_some_and(|c| c.starts_with("owner_") || c.starts_with("second_")).then_some(USED_TICKET_MESSAGE)
+}
 
 impl ConnectionError {
     pub fn main_window_only() -> Self {
@@ -400,7 +485,7 @@ impl From<&RemoteError> for ConnectionError {
             RemoteError::Unclaimed => (Unclaimed, error.to_string()),
             RemoteError::LocalNetwork | RemoteError::AndroidLocalNetwork => (LocalNetwork, error.to_string()),
             RemoteError::HandshakeUnavailable | RemoteError::Waiting(_) | RemoteError::Transport(_) =>
-                (Unreachable, "The remote node could not be reached.".into()),
+                (Unreachable, UNREACHABLE_CODE.into()),
             RemoteError::RateLimited(_) => (Busy, "The remote connection is busy. Try again shortly.".into()),
             // A very old expiry can also mean the device clock is wrong. This
             // is a recovery hint, never proof of clock skew or an expiry bypass.
@@ -408,17 +493,27 @@ impl From<&RemoteError> for ConnectionError {
                 (Clock, "Check this device's date and time, or request a fresh pairing link.".into()),
             RemoteError::Expired(_) => (Expired, error.to_string()),
             RemoteError::Refused(message) if message == USED_TICKET_MESSAGE => (Used, USED_TICKET_MESSAGE.into()),
-            _ => (Other, "The remote connection could not be established.".into()),
+            RemoteError::Refused(message) if message == EXPIRED_TICKET_MESSAGE => (Expired, EXPIRED_TICKET_MESSAGE.into()),
+            RemoteError::DeviceUnavailable => (DeviceUnavailable, PASSCODE_REQUIRED_CODE.into()),
+            RemoteError::Local(message) if message == PASSCODE_REQUIRED =>
+                (DeviceUnavailable, PASSCODE_REQUIRED_CODE.into()),
+            _ => (Other, CONNECTION_FAILED_CODE.into()),
         };
         // Peer text may echo authentication codes. Only fixed local copy crosses.
         Self { kind, detail }
     }
 }
 
-// BSD sockets cannot definitively distinguish an iOS privacy denial from an
-// unavailable route. Preserve these classes without asserting permission was
-// denied; a timeout/refusal alone is not evidence of a privacy restriction.
-fn classify_connect_error(error: std::io::Error, ios: bool, endpoint: &str) -> RemoteError {
+/// Platforms that gate connections to local addresses behind a Local Network
+/// permission: iOS, and macOS 15 and later. On these a denial is reported as
+/// `LocalNetwork`, so the tester is pointed at the setting instead of a
+/// generic "unreachable".
+const LOCAL_NETWORK_PRIVACY: bool = cfg!(any(target_os = "ios", target_os = "macos"));
+
+// BSD sockets cannot definitively distinguish a Local Network privacy denial
+// from an unavailable route. Preserve these classes without asserting permission
+// was denied; a timeout/refusal alone is not evidence of a privacy restriction.
+fn classify_connect_error(error: std::io::Error, local_network_privacy: bool, endpoint: &str) -> RemoteError {
     use std::io::ErrorKind;
     let local = endpoint_parts(endpoint).is_ok_and(|(host, _)| {
         match host.parse::<std::net::IpAddr>() {
@@ -427,12 +522,17 @@ fn classify_connect_error(error: std::io::Error, ios: bool, endpoint: &str) -> R
             Err(_) => host.trim_end_matches('.').to_ascii_lowercase().ends_with(".local"),
         }
     });
-    if ios && local && matches!(error.kind(), ErrorKind::PermissionDenied | ErrorKind::NetworkDown
+    if local_network_privacy && local && matches!(error.kind(), ErrorKind::PermissionDenied | ErrorKind::NetworkDown
         | ErrorKind::NetworkUnreachable | ErrorKind::HostUnreachable) {
         RemoteError::LocalNetwork
     } else {
         RemoteError::HandshakeUnavailable
     }
+}
+
+/// A connect failure on this platform, classified as above.
+fn connect_error(error: std::io::Error, endpoint: &str) -> RemoteError {
+    classify_connect_error(error, LOCAL_NETWORK_PRIVACY, endpoint)
 }
 
 /// Exact UTF-8 string signed by the node for the pairing link.
@@ -1031,7 +1131,7 @@ fn load_with(
     path: &Path,
     sealer: Option<&dyn Sealer>,
 ) -> Result<Option<RemoteDescriptor>, RemoteError> {
-    if !path.exists() {
+    if pairing::key::nothing_at(path) {
         return Ok(None);
     }
     pairing::key::check_owner_only(path, "remote access descriptor")
@@ -1398,11 +1498,11 @@ async fn encrypted_auth<S: AsyncRead + AsyncWrite + Unpin>(
                         "authentication reply has an unsupported version".into(),
                     ));
                 }
-                let reason: String = if code == "already_paired" {
-                    "This device already has a pairing. Reconnect with its saved pairing; a second-device ticket is for a new device.".into()
-                } else if code == "authentication_failed"
-                    && descriptor.code.as_deref().is_some_and(|c| c.starts_with("owner_") || c.starts_with("second_")) {
-                    USED_TICKET_MESSAGE.into()
+                if code == "already_paired" {
+                    return Err(RemoteError::AlreadyPaired);
+                }
+                let reason: String = if let Some(fixed) = ticket_refusal(&code, &message, descriptor.code.as_deref()) {
+                    fixed.into()
                 } else { format!("{code}: {message}").chars().take(160).collect() };
                 Err(RemoteError::Refused(reason))
             }
@@ -1780,17 +1880,19 @@ async fn authenticated_prefix(
 }
 
 fn map_pre_auth_failure(error: RemoteError) -> RemoteError {
+    if is_lost_connection(&error) { RemoteError::HandshakeUnavailable } else { error }
+}
+
+/// The connection timed out or dropped: the box gave no answer to act on.
+fn is_lost_connection(error: &RemoteError) -> bool {
     match error {
-        RemoteError::Transport(message)
-            if message.starts_with("cannot read frame")
-                || message.starts_with("cannot write frame")
-                || message.starts_with("cannot connect to endpoint")
-                || message == "connection timed out"
-                || message == "frame write timed out" =>
-        {
-            RemoteError::HandshakeUnavailable
-        }
-        other => other,
+        RemoteError::HandshakeUnavailable => true,
+        RemoteError::Transport(message) => message.starts_with("cannot read frame")
+            || message.starts_with("cannot write frame")
+            || message.starts_with("cannot connect to endpoint")
+            || message == "connection timed out"
+            || message == "frame write timed out",
+        _ => false,
     }
 }
 
@@ -1806,10 +1908,10 @@ fn is_unauthenticated_local(error: &RemoteError) -> bool {
     )
 }
 
-async fn write_proxy_error(local: &mut TcpStream, status: &str, code: &str, message: &str) {
+pub(crate) async fn write_proxy_error(local: &mut TcpStream, status: &str, code: &str, message: &str) {
     let body = format!(r#"{{"code":"{code}","message":"{message}"}}"#);
     let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{PROXY_ERROR_HEADER}: {code}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = tokio::time::timeout(WRITE_TIMEOUT, async {
@@ -1825,7 +1927,7 @@ async fn write_connection_error(local: &mut TcpStream, error: &RemoteError) {
     }
     let (status, code, message) = match error {
         RemoteError::HandshakeUnavailable => ("503 Service Unavailable", "remote_handshake_unavailable", HANDSHAKE_UNAVAILABLE),
-        RemoteError::Refused(_) => ("403 Forbidden", "remote_pairing_refused", "remote node refused pairing"),
+        RemoteError::Refused(_) | RemoteError::AlreadyPaired => ("403 Forbidden", "remote_pairing_refused", "remote node refused pairing"),
         _ => ("502 Bad Gateway", "remote_transport_refused", "remote transport validation failed"),
     };
     write_proxy_error(local, status, code, message).await;
@@ -1889,6 +1991,42 @@ async fn connect_authenticated(
     Ok((remote, noise, client_id, scopes))
 }
 
+// The endpoint that last completed the handshake and authentication, per box
+// identity. Endpoints are public routing data; this is never persisted.
+static PREFERRED_ENDPOINTS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+const MAX_PREFERRED_ENDPOINTS: usize = 8;
+
+fn endpoint_memory_key(descriptor: &RemoteDescriptor) -> String {
+    format!("{}/{}/{}", descriptor.node_id, descriptor.transport_pubkey, descriptor.box_transport_pubkey)
+}
+
+/// Try the endpoint that worked last time first, then the rest in their
+/// advertised order. An unknown or no longer advertised endpoint changes nothing.
+fn ordered_endpoints<'a>(descriptor: &RemoteDescriptor, mut endpoints: Vec<&'a str>) -> Vec<&'a str> {
+    let key = endpoint_memory_key(descriptor);
+    let preferred = PREFERRED_ENDPOINTS.lock().ok()
+        .and_then(|memory| memory.iter().find(|(k, _)| *k == key).map(|(_, endpoint)| endpoint.clone()));
+    if let Some(index) = preferred.and_then(|p| endpoints.iter().position(|endpoint| *endpoint == p)) {
+        let endpoint = endpoints.remove(index);
+        endpoints.insert(0, endpoint);
+    }
+    endpoints
+}
+
+fn remember_endpoint(descriptor: &RemoteDescriptor, endpoint: &str) {
+    let key = endpoint_memory_key(descriptor);
+    let Ok(mut memory) = PREFERRED_ENDPOINTS.lock() else { return };
+    memory.retain(|(k, _)| *k != key);
+    if memory.len() >= MAX_PREFERRED_ENDPOINTS { memory.remove(0); }
+    memory.push((key, endpoint.to_owned()));
+}
+
+fn forget_endpoint(descriptor: &RemoteDescriptor, endpoint: &str) {
+    let key = endpoint_memory_key(descriptor);
+    let Ok(mut memory) = PREFERRED_ENDPOINTS.lock() else { return };
+    memory.retain(|(k, remembered)| *k != key || remembered != endpoint);
+}
+
 async fn connect_bound(
     descriptor: &RemoteDescriptor, key: &ClientKey, name: &str, recovery_node: Option<&str>,
     before_auth: Option<&(dyn Fn() -> Result<(), RemoteError> + Sync)>,
@@ -1896,6 +2034,8 @@ async fn connect_bound(
     let routes = if descriptor.endpoints.is_empty() { &descriptor.bootstrap_routes } else { &descriptor.endpoints };
     let endpoints = if routes.is_empty() { vec![descriptor.endpoint.as_str()] }
         else { routes.iter().map(String::as_str).collect() };
+    // Each unreachable endpoint costs up to CONNECT_TIMEOUT, on every new tunnel.
+    let endpoints = ordered_endpoints(descriptor, endpoints);
     let mut last = RemoteError::HandshakeUnavailable;
     for endpoint in endpoints {
         let attempt = async {
@@ -1907,14 +2047,27 @@ async fn connect_bound(
             let target = endpoint;
             let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(target))
                 .await.map_err(|_| RemoteError::HandshakeUnavailable)?
-                .map_err(|error| classify_connect_error(error, cfg!(target_os = "ios"), endpoint))?;
+                .map_err(|error| connect_error(error, endpoint))?;
             let (noise, hash) = pinned_handshake_bound(&mut stream, descriptor, key).await?;
             Ok::<_, RemoteError>((stream, noise, hash))
         }.await;
         match attempt {
             Ok((mut remote, mut noise, hash)) => {
-                let (client, scopes, proofs) = encrypted_auth(&mut remote, &mut noise, descriptor, key, name, recovery_node, before_auth).await?;
-                return Ok((remote, noise, hash, client, scopes, proofs));
+                match encrypted_auth(&mut remote, &mut noise, descriptor, key, name, recovery_node, before_auth).await {
+                    Ok((client, scopes, proofs)) => {
+                        remember_endpoint(descriptor, endpoint);
+                        return Ok((remote, noise, hash, client, scopes, proofs));
+                    }
+                    // A one-time code may already be spent on this box, so the
+                    // next endpoint could only refuse it, and an answer from the
+                    // box is final. Leaving here also keeps `before_auth` to one
+                    // run for a code; without a code it has nothing to retire.
+                    Err(error) if descriptor.has_code() || !is_lost_connection(&error) => return Err(error),
+                    Err(error) => {
+                        forget_endpoint(descriptor, endpoint);
+                        last = error;
+                    }
+                }
             }
             Err(error @ RemoteError::RateLimited(_)) => return Err(error),
             // Keep the actionable OS error if a later fallback is unreachable.
@@ -2217,7 +2370,10 @@ pub async fn authenticate_pinned_transport_and_save_record(
     let (_, _, _, client_id, scopes, _) = retry.run(|| async {
         let snapshot = current.lock().unwrap().clone();
         let result = connect_bound(&snapshot, key, client_name, None, Some(&retire)).await;
-        if matches!(&result, Err(RemoteError::Transport(_) | RemoteError::HandshakeUnavailable))
+        // The ticket was retired before its proof was sent. After a lost reply,
+        // or when the node already pairs this client identity, reconnect with
+        // the existing pairing: same keys, no code, never the ticket again.
+        if matches!(&result, Err(RemoteError::Transport(_) | RemoteError::HandshakeUnavailable | RemoteError::AlreadyPaired))
             && one_use(&snapshot) && !current.lock().unwrap().has_code() {
             let consumed = current.lock().unwrap().clone();
             return connect_bound(&consumed, key, client_name, None, None).await;
@@ -2246,6 +2402,34 @@ pub async fn authenticate_pinned_transport_and_save_record(
     descriptor.into_inner().map_err(|_| RemoteError::Local("remote descriptor lock is poisoned".into()))
 }
 
+/// Resolves once the local caller has closed or reset its connection, or sent
+/// something the sanitizer rejects. A close is only visible behind the bytes
+/// before it, so what the caller sends meanwhile (a request body) is read and
+/// held for the tunnel.
+async fn caller_gone(local: &mut TcpStream, http: &mut LocalHttpSanitizer, held: &mut Vec<u8>) -> Result<(), RemoteError> {
+    let mut buffer = vec![0u8; 4096];
+    while held.len() < MAX_HELD_LOCAL_BYTES {
+        match local.read(&mut buffer).await {
+            Ok(count @ 1..) => held.extend(http.push(&buffer[..count])?),
+            _ => return Ok(()),
+        }
+    }
+    std::future::pending().await
+}
+
+/// A call media WebSocket upgrade (`/api/v1/calls/<id>/media`), which may use
+/// the reserved slots.
+fn is_call_media_upgrade(http: &LocalHttpSanitizer, initial: &[u8]) -> bool {
+    let line = initial.split(|byte| *byte == b'\r').next().unwrap_or_default();
+    let Some(target) = std::str::from_utf8(line).ok()
+        .and_then(|line| line.strip_prefix("GET "))
+        .and_then(|line| line.strip_suffix(" HTTP/1.1")) else { return false };
+    let path = target.split('?').next().unwrap_or_default();
+    matches!(http.state, LocalHttpState::Upgraded)
+        && path.strip_prefix("/api/v1/calls/").and_then(|rest| rest.strip_suffix("/media"))
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+}
+
 struct AuthenticatedLocal {
     stream: TcpStream,
     http: LocalHttpSanitizer,
@@ -2263,23 +2447,38 @@ async fn serve_connection(
 ) -> Result<(), RemoteError> {
     let AuthenticatedLocal {
         stream: mut local,
-        http: local_http,
-        initial: initial_local,
+        http: mut local_http,
+        initial: mut initial_local,
     } = local;
     let snapshot = descriptor
         .lock()
         .map_err(|_| RemoteError::Local("remote descriptor lock is poisoned".into()))?
         .clone();
-    let (remote, noise, client_id, scopes) = match retry
-        .run(|| connect_authenticated(&snapshot, &key, &client_name))
-        .await
-    {
+    // The node refused this app's pairing: admit no new tunnel (live feed, API
+    // polling) until the owner acts, and record a refusal seen here first.
+    // Both happen inside the serialized admission, so tunnels queued behind
+    // the refused handshake answer 403 without dialing.
+    // The request is already buffered. If its caller gives up while it waits
+    // or while the tunnel is being set up, drop it instead of forwarding it
+    // late. That cancels the dial and says nothing about the pairing.
+    let connected = tokio::select! {
+        biased;
+        gone = caller_gone(&mut local, &mut local_http, &mut initial_local) => return gone,
+        connected = tokio::time::timeout(
+            REMOTE_CONNECT_DEADLINE,
+            retry.run_unless_refused(|| connect_authenticated(&snapshot, &key, &client_name)),
+        ) => connected.unwrap_or(Err(RemoteError::HandshakeUnavailable)),
+    };
+    let (remote, noise, client_id, scopes) = match connected {
         Ok(connection) => connection,
         Err(error) => {
             write_connection_error(&mut local, &error).await;
             return Err(error);
         }
     };
+    if let Some(gone) = futures_util::FutureExt::now_or_never(caller_gone(&mut local, &mut local_http, &mut initial_local)) {
+        return gone;
+    }
 
     if noise.get_remote_static() != Some(&snapshot.transport_pubkey_bytes[..]) {
         write_proxy_error(&mut local, "503 Service Unavailable", "node_locked", "Node is locked after restart").await;
@@ -2372,12 +2571,13 @@ pub fn loopback_addr(api_base: &str) -> Result<SocketAddr, RemoteError> {
 }
 
 /// Each HTTP connection occupies a Noise tunnel. Retain a bounded warm pool,
-/// leaving the proxy's eighth slot for the live WebSocket. Local connect stays
-/// bounded, while WAN requests have time to complete without losing the tunnel.
+/// leaving one shared slot for the live WebSocket (the reserved media slot is
+/// out of reach for HTTP anyway). Local connect stays bounded, while WAN
+/// requests have time to complete without losing the tunnel.
 pub fn http_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(2))
-        .pool_max_idle_per_host(MAX_LOCAL_CONNECTIONS - 1)
+        .pool_max_idle_per_host(MAX_LOCAL_CONNECTIONS - RESERVED_MEDIA_CONNECTIONS - 1)
         .pool_idle_timeout(Duration::from_secs(55))
         .timeout(Duration::from_secs(15))
         .no_proxy()
@@ -2409,7 +2609,8 @@ pub async fn start_proxy(
     // HTTP keep-alive and WebSocket connections each retain one remote
     // TCP/Noise tunnel. Independent byte streams are never interleaved; this
     // bounded set is the safe reusable pool without adding a mux wire protocol.
-    let tunnel_permits = Arc::new(Semaphore::new(MAX_LOCAL_CONNECTIONS));
+    let tunnel_permits = Arc::new(Semaphore::new(MAX_LOCAL_CONNECTIONS - RESERVED_MEDIA_CONNECTIONS));
+    let media_permits = Arc::new(Semaphore::new(RESERVED_MEDIA_CONNECTIONS));
     let auth_permits = Arc::new(Semaphore::new(MAX_PENDING_LOCAL_AUTH));
     let last_error = Arc::new(Mutex::new(None));
 
@@ -2465,6 +2666,7 @@ pub async fn start_proxy(
                         let local_auth = local_auth.clone();
                         let last_error = last_error.clone();
                         let tunnel_permits = tunnel_permits.clone();
+                        let media_permits = media_permits.clone();
                         let retry = retry.clone();
                         let mut connection_stopped = stopped.clone();
                         connections.spawn(async move {
@@ -2489,7 +2691,10 @@ pub async fn start_proxy(
                                     }
                                 };
                             drop(auth_permit);
-                            let Ok(tunnel_permit) = tunnel_permits.try_acquire_owned() else {
+                            let reserved = if is_call_media_upgrade(&local_http, &initial_local) {
+                                media_permits.try_acquire_owned().ok()
+                            } else { None };
+                            let Some(tunnel_permit) = reserved.or_else(|| tunnel_permits.try_acquire_owned().ok()) else {
                                 write_proxy_error(
                                     &mut stream,
                                     "503 Service Unavailable",
@@ -2995,6 +3200,11 @@ mod tests {
         assert!(!text.contains("\"code\""));
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    mod linux_candidate_tests {
+        include!("remote_access/linux_candidate_tests.rs");
+    }
+
     fn sealed_fixture(seed: u8) -> (tempfile::TempDir, PathBuf, RemoteDescriptor, String) {
         let dir = tempfile::tempdir().unwrap();
         let node = SigningKey::from_bytes(&[seed; 32]);
@@ -3311,6 +3521,57 @@ mod tests {
             r#"{"v":1,"ok":true,"client_id":"abcd","scopes":[]}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn ticket_refusals_become_used_or_expired_for_every_ticket_kind() {
+        // Reasons the node sends with authentication_failed (konsensus-node remote_access).
+        let used = [
+            "first-pairing code is unavailable or already used",
+            "second-device ticket unavailable or already used",
+            "pairing request is unknown, already used, or expired",
+            "pairing code did not match",
+            "remote pairing proof did not verify",
+            "remote pairing key does not match the existing transport binding",
+        ];
+        let expired = ["first-pairing code expired", "second-device ticket invalid or expired", "operation expired"];
+        for ticket in [None, Some("legacy0123"), Some("owner_abc"), Some("second_abc")] {
+            for reason in used {
+                assert_eq!(ticket_refusal("authentication_failed", reason, ticket), Some(USED_TICKET_MESSAGE), "{reason}");
+            }
+            for reason in expired {
+                assert_eq!(ticket_refusal("authentication_failed", reason, ticket), Some(EXPIRED_TICKET_MESSAGE), "{reason}");
+            }
+            assert_eq!(ticket_refusal("box_locked", "first-pairing code expired", ticket), None);
+        }
+        // Any other refusal of a single-use owner or second-device ticket still means used.
+        assert_eq!(ticket_refusal("authentication_failed", "denied", Some("owner_x")), Some(USED_TICKET_MESSAGE));
+        assert_eq!(ticket_refusal("authentication_failed", "denied", Some("legacy")), None);
+        let used = ConnectionError::from(&RemoteError::Refused(USED_TICKET_MESSAGE.into()));
+        assert_eq!((used.kind, used.detail.as_str()), (ConnectionErrorKind::Used, USED_TICKET_MESSAGE));
+        let expired = ConnectionError::from(&RemoteError::Refused(EXPIRED_TICKET_MESSAGE.into()));
+        assert_eq!(expired.kind, ConnectionErrorKind::Expired);
+        // Unknown peer text never reaches the renderer.
+        let other = ConnectionError::from(&RemoteError::Refused("authentication_failed: secret".into()));
+        assert_eq!((other.kind, other.detail.as_str()), (ConnectionErrorKind::Other, CONNECTION_FAILED_CODE));
+    }
+
+    #[test]
+    fn diagnostics_are_codes_and_a_missing_passcode_has_its_own_kind() {
+        for error in [RemoteError::HandshakeUnavailable, RemoteError::Waiting(3), RemoteError::Transport("x".into())] {
+            let mapped = ConnectionError::from(&error);
+            assert_eq!((mapped.kind, mapped.detail.as_str()), (ConnectionErrorKind::Unreachable, UNREACHABLE_CODE));
+        }
+        for error in [RemoteError::DeviceUnavailable,
+                      RemoteError::Local(PASSCODE_REQUIRED.into())] {
+            let mapped = ConnectionError::from(&error);
+            assert_eq!((mapped.kind, mapped.detail.as_str()), (ConnectionErrorKind::DeviceUnavailable, PASSCODE_REQUIRED_CODE));
+        }
+        assert_eq!(serde_json::to_value(ConnectionErrorKind::DeviceUnavailable).unwrap(), "device_unavailable");
+        // The bridge's text and this copy must stay identical (no bridge on Android).
+        #[cfg(not(target_os = "android"))]
+        assert_eq!(bitsov_ffi::keychain_status::PASSCODE_REQUIRED, PASSCODE_REQUIRED);
+        assert_eq!(ConnectionError::from(&RemoteError::Local("other".into())).kind, ConnectionErrorKind::Other);
     }
 
     fn transport_pair() -> (TransportState, TransportState) {
@@ -3960,6 +4221,738 @@ mod tests {
         assert!(server.await.unwrap().is_err());
     }
 
+    // Handshake and authenticate every accepted tunnel, then hand back what
+    // arrives inside it (the forwarded HTTP bytes) until the tunnel closes.
+    async fn authenticating_responder(listener: TcpListener, secret: [u8; 32], forwarded: mpsc::UnboundedSender<Vec<u8>>) {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(authenticate_and_forward(stream, secret, forwarded.clone()));
+        }
+    }
+
+    // Complete the handshake and read the app's authentication request.
+    async fn read_auth_request(stream: &mut TcpStream, secret: [u8; 32]) -> Result<TransportState, RemoteError> {
+        let mut noise = Builder::new(NOISE_PROTOCOL.parse().unwrap())
+            .local_private_key(&secret).build_responder().unwrap();
+        let mut output = vec![0u8; MAX_HANDSHAKE_FRAME];
+        let message = read_frame(stream, MAX_HANDSHAKE_FRAME).await?;
+        noise.read_message(&message, &mut output).unwrap();
+        let length = noise.write_message(&[], &mut output).unwrap();
+        write_frame(stream, &output[..length]).await?;
+        let message = read_frame(stream, MAX_HANDSHAKE_FRAME).await?;
+        noise.read_message(&message, &mut output).unwrap();
+        let mut noise = noise.into_transport_mode().unwrap();
+        let encrypted = read_frame(stream, MAX_TRANSPORT_FRAME).await?;
+        let auth = decode_transport(&mut noise, &encrypted, MAX_AUTH_PLAINTEXT)?;
+        let _: RemoteAuthRequest = serde_json::from_slice(&auth).unwrap();
+        Ok(noise)
+    }
+
+    // The node's answer to a client it does not know: a definitive refusal.
+    async fn refuse_authentication(mut stream: TcpStream, secret: [u8; 32]) -> Result<(), RemoteError> {
+        let mut noise = read_auth_request(&mut stream, secret).await?;
+        let response = serde_json::to_vec(&RemoteAuthResponse::Error {
+            v: 1, code: "authentication_failed".into(), message: "unknown client".into(),
+        }).unwrap();
+        let encrypted = encode_transport(&mut noise, &response)?;
+        write_frame(&mut stream, &encrypted).await
+    }
+
+    async fn authenticate_and_forward(mut stream: TcpStream, secret: [u8; 32], forwarded: mpsc::UnboundedSender<Vec<u8>>) -> Result<(), RemoteError> {
+        let mut noise = read_auth_request(&mut stream, secret).await?;
+        let response = serde_json::to_vec(&RemoteAuthResponse::Ok {
+            v: 1, client_id: "0123456789abcdef0123456789abcdef".into(),
+            scopes: vec!["read".into()],
+            box_transport_pubkey: None, box_transport_signature: None,
+            transport_pubkey: None, transport_signature: None,
+        }).unwrap();
+        let encrypted = encode_transport(&mut noise, &response)?;
+        write_frame(&mut stream, &encrypted).await?;
+        loop {
+            let encrypted = read_frame(&mut stream, MAX_TRANSPORT_FRAME).await?;
+            let _ = forwarded.send(decode_transport(&mut noise, &encrypted, MAX_NOISE_PLAINTEXT)?);
+        }
+    }
+
+    async fn proxy_for(descriptor: RemoteDescriptor, local_auth: &Arc<str>, retry: Arc<RemoteRetry>) -> (RemoteProxy, tempfile::TempDir, tempfile::TempDir) {
+        let app_dir = tempfile::tempdir().unwrap();
+        persist_at(&config_path(app_dir.path()), &descriptor).unwrap();
+        let pairing_store = tempfile::tempdir().unwrap();
+        let key = Arc::new(ClientKey::load_or_create(pairing_store.path()).unwrap());
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = probe.local_addr().unwrap();
+        drop(probe);
+        let proxy = start_proxy(&format!("http://{local_addr}/{}", "api/v1"), app_dir.path(), descriptor, key,
+            "BitSov test", pairing_store.path().to_path_buf(), local_auth.clone(), retry).await.unwrap();
+        (proxy, app_dir, pairing_store)
+    }
+
+    // The caller gives up while the tunnel is still being set up (here: the
+    // box holds the handshake). The buffered request must not be sent later.
+    #[tokio::test]
+    async fn a_request_whose_caller_gave_up_is_never_forwarded() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let secret = [66u8; 32];
+        let node = SigningKey::from_bytes(&[65u8; 32]);
+        let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+        let descriptor = parse_pairing_link(&signed_link(
+            listener.local_addr().unwrap().to_string(), &node, public, &test_code(67),
+        )).unwrap();
+        let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (forwarded, mut forwarded_rx) = mpsc::unbounded_channel();
+        let server = tokio::spawn({
+            let release = release.clone();
+            async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                accepted_tx.send(()).unwrap();
+                release.notified().await;
+                let _ = authenticate_and_forward(stream, secret, forwarded).await;
+            }
+        });
+        let local_auth: Arc<str> = Arc::from("c".repeat(64));
+        let (proxy, _app, _store) = proxy_for(descriptor, &local_auth, Arc::new(RemoteRetry::default())).await;
+
+        let mut caller = TcpStream::connect(proxy.local_addr()).await.unwrap();
+        caller.write_all(format!(
+            "GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\n{LOCAL_AUTH_HEADER}: {local_auth}\r\n\r\n"
+        ).as_bytes()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), accepted_rx.recv()).await.unwrap().unwrap();
+        // The caller's own timeout fires: it closes the connection.
+        drop(caller);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        release.notify_one();
+        let late = tokio::time::timeout(Duration::from_secs(2), forwarded_rx.recv()).await;
+        assert!(!matches!(late, Ok(Some(_))), "a request was forwarded after its caller gave up");
+        drop(proxy);
+        server.abort();
+    }
+
+    // A request queued behind a slow tunnel setup gets a bounded wait. After
+    // the deadline it is answered (503) and never forwarded.
+    #[tokio::test]
+    async fn a_queued_request_has_an_overall_connect_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let secret = [69u8; 32];
+        let node = SigningKey::from_bytes(&[68u8; 32]);
+        let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+        let descriptor = parse_pairing_link(&signed_link(
+            listener.local_addr().unwrap().to_string(), &node, public, &test_code(70),
+        )).unwrap();
+        let (forwarded, mut forwarded_rx) = mpsc::unbounded_channel();
+        let server = tokio::spawn(authenticating_responder(listener, secret, forwarded));
+        let local_auth: Arc<str> = Arc::from("d".repeat(64));
+        let retry = Arc::new(RemoteRetry::default());
+        let (proxy, _app, _store) = proxy_for(descriptor, &local_auth, retry.clone()).await;
+
+        // Another tunnel setup holds the handshake queue.
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        let holder = tokio::spawn({
+            let retry = retry.clone();
+            async move { retry.run(|| async { let _ = held.await; Ok(()) }).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut caller = TcpStream::connect(proxy.local_addr()).await.unwrap();
+        caller.write_all(format!(
+            "GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\n{LOCAL_AUTH_HEADER}: {local_auth}\r\n\r\n"
+        ).as_bytes()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::pause();
+        tokio::time::advance(REMOTE_CONNECT_DEADLINE + Duration::from_secs(1)).await;
+        tokio::time::resume();
+        let mut response = String::new();
+        let read = tokio::time::timeout(Duration::from_secs(2), caller.read_to_string(&mut response)).await;
+        release.send(()).unwrap();
+        holder.await.unwrap().unwrap();
+        let late = tokio::time::timeout(Duration::from_secs(1), forwarded_rx.recv()).await;
+        assert!(!matches!(late, Ok(Some(_))), "a request was forwarded after the connect deadline");
+        assert!(read.is_ok(), "the caller is answered at the deadline");
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"), "{response}");
+        assert!(response.contains("remote_handshake_unavailable"));
+        assert!(response.contains(&format!("{PROXY_ERROR_HEADER}: remote_handshake_unavailable")));
+        assert!(!retry.is_refused(), "a deadline says nothing about the pairing");
+        drop(proxy);
+        server.abort();
+    }
+
+    async fn send_status_request(proxy: &RemoteProxy, local_auth: &str) -> TcpStream {
+        let mut caller = TcpStream::connect(proxy.local_addr()).await.unwrap();
+        caller.write_all(format!(
+            "GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\n{LOCAL_AUTH_HEADER}: {local_auth}\r\n\r\n"
+        ).as_bytes()).await.unwrap();
+        caller
+    }
+
+    // A refusal that arrives inside the connect race is recorded, is answered
+    // with the code the media link treats as final, and stops every later dial.
+    #[tokio::test]
+    async fn a_refusal_met_inside_the_connect_race_is_recorded_and_stops_dialing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let secret = [72u8; 32];
+        let node = SigningKey::from_bytes(&[71u8; 32]);
+        let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+        let descriptor = parse_pairing_link(&signed_link(
+            listener.local_addr().unwrap().to_string(), &node, public, &test_code(73),
+        )).unwrap();
+        let dials = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn({
+            let dials = dials.clone();
+            async move {
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    dials.fetch_add(1, Ordering::SeqCst);
+                    let _ = refuse_authentication(stream, secret).await;
+                }
+            }
+        });
+        let local_auth: Arc<str> = Arc::from("e".repeat(64));
+        let retry = Arc::new(RemoteRetry::default());
+        let (proxy, _app, _store) = proxy_for(descriptor, &local_auth, retry.clone()).await;
+        for _ in 0..3 {
+            let mut caller = send_status_request(&proxy, &local_auth).await;
+            let mut response = String::new();
+            tokio::time::timeout(Duration::from_secs(5), caller.read_to_string(&mut response)).await.unwrap().unwrap();
+            assert!(response.starts_with("HTTP/1.1 403 Forbidden"), "{response}");
+            assert!(response.contains(&format!("{PROXY_ERROR_HEADER}: remote_pairing_refused")), "{response}");
+            assert!(retry.is_refused());
+        }
+        assert_eq!(dials.load(Ordering::SeqCst), 1, "no dial once refused");
+        drop(proxy);
+        server.abort();
+    }
+
+    // The caller closes while the box holds the handshake. The dial is
+    // cancelled and nothing is recorded, even if the box would have refused.
+    #[tokio::test]
+    async fn a_caller_giving_up_mid_dial_is_not_a_refusal() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let secret = [75u8; 32];
+        let node = SigningKey::from_bytes(&[74u8; 32]);
+        let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+        let descriptor = parse_pairing_link(&signed_link(
+            listener.local_addr().unwrap().to_string(), &node, public, &test_code(76),
+        )).unwrap();
+        let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (forwarded, mut forwarded_rx) = mpsc::unbounded_channel();
+        let server = tokio::spawn({
+            let release = release.clone();
+            async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                accepted_tx.send(()).unwrap();
+                release.notified().await;
+                let _ = refuse_authentication(stream, secret).await;
+                authenticating_responder(listener, secret, forwarded).await;
+            }
+        });
+        let local_auth: Arc<str> = Arc::from("f".repeat(64));
+        let retry = Arc::new(RemoteRetry::default());
+        let (proxy, _app, _store) = proxy_for(descriptor, &local_auth, retry.clone()).await;
+
+        let caller = send_status_request(&proxy, &local_auth).await;
+        tokio::time::timeout(Duration::from_secs(2), accepted_rx.recv()).await.unwrap().unwrap();
+        drop(caller);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        release.notify_one();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!retry.is_refused(), "a caller's cancellation set the refused flag");
+        assert!(retry.connection_error().is_none(), "a caller's cancellation was counted as a failure");
+        assert_eq!(retry.failure_revision(), 0);
+
+        // The next caller dials normally once the cancelled attempt's spacing has passed.
+        while retry.remaining().is_some() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let _caller = send_status_request(&proxy, &local_auth).await;
+        let bytes = tokio::time::timeout(Duration::from_secs(5), forwarded_rx.recv()).await.unwrap().unwrap();
+        assert!(bytes.starts_with(b"GET /api/v1/status"));
+        drop(proxy);
+        server.abort();
+    }
+
+    // The caller closes while queued behind another tunnel's handshake, on the
+    // path that checks the refusal. Its turn must never come.
+    #[tokio::test]
+    async fn a_caller_that_gives_up_in_the_admission_queue_never_dials() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let secret = [78u8; 32];
+        let node = SigningKey::from_bytes(&[77u8; 32]);
+        let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+        let descriptor = parse_pairing_link(&signed_link(
+            listener.local_addr().unwrap().to_string(), &node, public, &test_code(79),
+        )).unwrap();
+        let local_auth: Arc<str> = Arc::from("9".repeat(64));
+        let retry = Arc::new(RemoteRetry::default());
+        let (proxy, _app, _store) = proxy_for(descriptor, &local_auth, retry.clone()).await;
+
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        let holder = tokio::spawn({
+            let retry = retry.clone();
+            async move { retry.run_unless_refused(|| async { let _ = held.await; Ok(()) }).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let caller = send_status_request(&proxy, &local_auth).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(caller);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        release.send(()).unwrap();
+        holder.await.unwrap().unwrap();
+        let dialed = tokio::time::timeout(Duration::from_millis(500), listener.accept()).await;
+        assert!(dialed.is_err(), "a caller that gave up still reached the box");
+        assert!(!retry.is_refused());
+        drop(proxy);
+    }
+
+    // A caller gives up only through its client's timeout, and `caller_gone`
+    // sees that only if the client closes the socket. Pin both halves: the
+    // close itself, and the request it stops at the proxy.
+    #[tokio::test]
+    async fn a_client_timeout_closes_the_socket_and_the_request_is_never_forwarded() {
+        // The whole request was read and no answer ever comes.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/{}", listener.local_addr().unwrap(), "api/v1/messages/compose");
+        let client = http_client_builder().timeout(Duration::from_millis(500)).build().unwrap();
+        let request = tokio::spawn(client.post(url).body("{\"kind\":404}").send());
+        let (mut accepted, _) = listener.accept().await.unwrap();
+        let mut seen = Vec::new();
+        let mut buffer = [0u8; 4096];
+        while !seen.ends_with(b"{\"kind\":404}") {
+            let read = accepted.read(&mut buffer).await.unwrap();
+            assert_ne!(read, 0, "the client gave up before it sent the request");
+            seen.extend_from_slice(&buffer[..read]);
+        }
+        assert!(request.await.unwrap().unwrap_err().is_timeout());
+        let closed = tokio::time::timeout(Duration::from_secs(2), accepted.read(&mut buffer)).await
+            .expect("the client closes its socket when the request times out");
+        assert!(matches!(closed, Ok(0) | Err(_)), "{closed:?}");
+
+        // Through the proxy, with the tunnel still queued, for the client-wide
+        // timeout (the 15 s callers) and a per-request one (the money path).
+        for per_request in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let secret = [87u8; 32];
+            let node = SigningKey::from_bytes(&[86u8; 32]);
+            let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+            let descriptor = parse_pairing_link(&signed_link(
+                listener.local_addr().unwrap().to_string(), &node, public, &test_code(88),
+            )).unwrap();
+            let (forwarded, mut forwarded_rx) = mpsc::unbounded_channel();
+            let server = tokio::spawn(authenticating_responder(listener, secret, forwarded));
+            let local_auth: Arc<str> = Arc::from("6".repeat(64));
+            let retry = Arc::new(RemoteRetry::default());
+            let (proxy, _app, _store) = proxy_for(descriptor, &local_auth, retry.clone()).await;
+            let (release, held) = tokio::sync::oneshot::channel::<()>();
+            let holder = tokio::spawn({
+                let retry = retry.clone();
+                async move { retry.run(|| async { let _ = held.await; Ok(()) }).await }
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            let builder = http_client_builder();
+            let client = if per_request { builder } else { builder.timeout(Duration::from_millis(200)) }.build().unwrap();
+            let url = format!("http://{}/{}", proxy.local_addr(), "api/v1/messages/compose");
+            let post = client.post(url).header(LOCAL_AUTH_HEADER, local_auth.as_ref()).body("{\"kind\":404}");
+            let post = if per_request { post.timeout(Duration::from_millis(200)) } else { post };
+            assert!(post.send().await.unwrap_err().is_timeout());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            release.send(()).unwrap();
+            holder.await.unwrap().unwrap();
+            let late = tokio::time::timeout(Duration::from_secs(1), forwarded_rx.recv()).await;
+            assert!(!matches!(late, Ok(Some(_))), "forwarded after the client timed out (per request: {per_request})");
+            drop(proxy);
+            server.abort();
+        }
+    }
+
+    // A body too large for the first read is still in the socket when the
+    // caller closes. The close must be seen behind it.
+    #[tokio::test]
+    async fn a_caller_that_gives_up_after_sending_a_body_is_never_forwarded() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let secret = [81u8; 32];
+        let node = SigningKey::from_bytes(&[80u8; 32]);
+        let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+        let descriptor = parse_pairing_link(&signed_link(
+            listener.local_addr().unwrap().to_string(), &node, public, &test_code(82),
+        )).unwrap();
+        let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (forwarded, mut forwarded_rx) = mpsc::unbounded_channel();
+        let server = tokio::spawn({
+            let release = release.clone();
+            async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                accepted_tx.send(()).unwrap();
+                release.notified().await;
+                let _ = authenticate_and_forward(stream, secret, forwarded).await;
+            }
+        });
+        let local_auth: Arc<str> = Arc::from("8".repeat(64));
+        let (proxy, _app, _store) = proxy_for(descriptor, &local_auth, Arc::new(RemoteRetry::default())).await;
+
+        let mut caller = TcpStream::connect(proxy.local_addr()).await.unwrap();
+        caller.write_all(format!(
+            "POST /api/v1/spend HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10000\r\n{LOCAL_AUTH_HEADER}: {local_auth}\r\n\r\n"
+        ).as_bytes()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), accepted_rx.recv()).await.unwrap().unwrap();
+        caller.write_all(&[b'z'; 10_000]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(caller);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        release.notify_one();
+        let late = tokio::time::timeout(Duration::from_secs(2), forwarded_rx.recv()).await;
+        assert!(!matches!(late, Ok(Some(_))), "a request was forwarded after its caller gave up");
+        drop(proxy);
+        server.abort();
+    }
+
+    // Bytes read while the tunnel was set up arrive once, in order, and a body
+    // over the holding limit keeps flowing through the tunnel afterwards.
+    #[tokio::test]
+    async fn a_body_sent_while_the_tunnel_is_set_up_is_forwarded_intact() {
+        for length in [10_000, MAX_HELD_LOCAL_BYTES + 256 * 1024] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let secret = [84u8; 32];
+            let node = SigningKey::from_bytes(&[83u8; 32]);
+            let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+            let descriptor = parse_pairing_link(&signed_link(
+                listener.local_addr().unwrap().to_string(), &node, public, &test_code(85),
+            )).unwrap();
+            let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
+            let release = Arc::new(tokio::sync::Notify::new());
+            let (forwarded, mut forwarded_rx) = mpsc::unbounded_channel();
+            let server = tokio::spawn({
+                let release = release.clone();
+                async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    accepted_tx.send(()).unwrap();
+                    release.notified().await;
+                    let _ = authenticate_and_forward(stream, secret, forwarded).await;
+                }
+            });
+            let local_auth: Arc<str> = Arc::from("7".repeat(64));
+            let (proxy, _app, _store) = proxy_for(descriptor, &local_auth, Arc::new(RemoteRetry::default())).await;
+
+            let mut caller = TcpStream::connect(proxy.local_addr()).await.unwrap();
+            caller.write_all(format!(
+                "POST /api/v1/files HTTP/1.1\r\nHost: localhost\r\nContent-Length: {length}\r\n{LOCAL_AUTH_HEADER}: {local_auth}\r\n\r\n"
+            ).as_bytes()).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), accepted_rx.recv()).await.unwrap().unwrap();
+            let body: Vec<u8> = (0..length).map(|index| (index % 251) as u8).collect();
+            let expected = body.clone();
+            // Held open: a close would drop the request.
+            let writer = tokio::spawn(async move { caller.write_all(&body).await.unwrap(); caller });
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            release.notify_one();
+            let mut received = Vec::new();
+            let end = loop {
+                let bytes = tokio::time::timeout(Duration::from_secs(10), forwarded_rx.recv()).await.unwrap().unwrap();
+                received.extend(bytes);
+                if let Some(end) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                    if received.len() >= end + 4 + length { break end + 4; }
+                }
+            };
+            assert!(received.starts_with(b"POST /api/v1/files HTTP/1.1\r\n"));
+            assert!(received[end..] == expected[..], "the body changed on its way through ({length} bytes)");
+            let _caller = writer.await.unwrap();
+            drop(proxy);
+            server.abort();
+        }
+    }
+
+    #[test]
+    fn only_the_proxys_own_transient_errors_are_retryable() {
+        for code in TRANSIENT_PROXY_ERRORS {
+            assert_eq!(transient_proxy_error(Some(code), None), Some(code));
+            let body = format!(r#"{{"code":"{code}","message":"x"}}"#);
+            assert_eq!(transient_proxy_error(None, Some(body.as_bytes())), Some(code));
+        }
+        for code in ["remote_pairing_refused", "remote_proxy_unauthorized", "node_locked", "call_not_admitted"] {
+            assert_eq!(transient_proxy_error(Some(code), None), None);
+            let body = format!(r#"{{"code":"{code}","message":"x"}}"#);
+            assert_eq!(transient_proxy_error(None, Some(body.as_bytes())), None);
+        }
+        assert_eq!(transient_proxy_error(None, Some(br#"{"error":"not admitted"}"#)), None);
+        assert_eq!(transient_proxy_error(None, Some(b"Service Unavailable")), None);
+        assert_eq!(transient_proxy_error(None, None), None);
+    }
+
+    // Skip one CONNECT_TIMEOUT on the virtual clock once the dead endpoint
+    // holds an attempt. Real loopback IO runs on the real clock, because a
+    // paused clock auto-advances while the runtime waits for socket events.
+    async fn skip_dead_endpoint(accepts: &std::sync::atomic::AtomicUsize, expected: usize) {
+        while accepts.load(std::sync::atomic::Ordering::SeqCst) < expected {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::pause();
+        tokio::time::advance(CONNECT_TIMEOUT).await;
+        tokio::time::resume();
+    }
+
+    // A box can advertise an address this device cannot reach (for example a
+    // container bridge) before the reachable one. Only the first new tunnel
+    // may pay the connect timeout for it.
+    #[tokio::test]
+    async fn new_tunnels_try_the_endpoint_that_last_worked_first() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_endpoint = dead.local_addr().unwrap().to_string();
+        let dead_accepts = Arc::new(AtomicUsize::new(0));
+        let silent = tokio::spawn({
+            let dead_accepts = dead_accepts.clone();
+            async move {
+                let mut held = Vec::new();
+                loop {
+                    // Accept the TCP connection, never answer the handshake.
+                    held.push(dead.accept().await.unwrap().0);
+                    dead_accepts.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        let live = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_endpoint = live.local_addr().unwrap().to_string();
+        let secret = [62u8; 32];
+        let node = SigningKey::from_bytes(&[61u8; 32]);
+        let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+        let mut descriptor = parse_pairing_link(&signed_link(
+            dead_endpoint.clone(), &node, public, &test_code(63),
+        )).unwrap();
+        descriptor.endpoints = vec![dead_endpoint, live_endpoint];
+        let (forwarded, _forwarded_rx) = mpsc::unbounded_channel();
+        let server = tokio::spawn(authenticating_responder(live, secret, forwarded));
+        let store = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(store.path()).unwrap();
+
+        let start = tokio::time::Instant::now();
+        let (first, ()) = tokio::join!(
+            connect_authenticated(&descriptor, &key, "test phone"),
+            skip_dead_endpoint(&dead_accepts, 1),
+        );
+        assert!(first.is_ok(), "the second endpoint answers");
+        assert!(start.elapsed() >= CONNECT_TIMEOUT, "{:?}", start.elapsed());
+        assert_eq!(dead_accepts.load(Ordering::SeqCst), 1);
+
+        // No clock skip this time: the remembered endpoint answers at once.
+        let second = tokio::time::timeout(Duration::from_secs(2),
+            connect_authenticated(&descriptor, &key, "test phone")).await
+            .expect("the remembered endpoint is tried first, without a connect timeout");
+        assert!(second.is_ok());
+        assert_eq!(dead_accepts.load(Ordering::SeqCst), 1, "the unreachable endpoint is not tried again");
+
+        // A descriptor that no longer lists the remembered endpoint falls back
+        // to its own order.
+        let mut moved = descriptor.clone();
+        moved.endpoints.truncate(1);
+        let (result, ()) = tokio::join!(
+            connect_authenticated(&moved, &key, "test phone"),
+            skip_dead_endpoint(&dead_accepts, 2),
+        );
+        assert!(result.is_err());
+        assert_eq!(dead_accepts.load(Ordering::SeqCst), 2);
+        silent.abort();
+        server.abort();
+    }
+
+    // What a box does once it has the app's authentication request.
+    enum AuthStage { Stall, Drop, Answer(Vec<u8>) }
+
+    // Completes the handshake on every tunnel, then behaves as `stage` says.
+    // Returns how many authentication requests arrived.
+    fn box_failing_auth(listener: TcpListener, secret: [u8; 32], stage: AuthStage) -> (Arc<std::sync::atomic::AtomicUsize>, tokio::task::JoinHandle<()>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = requests.clone();
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let Ok(mut noise) = read_auth_request(&mut stream, secret).await else { continue };
+                counted.fetch_add(1, Ordering::SeqCst);
+                match &stage {
+                    AuthStage::Stall => held.push(stream),
+                    AuthStage::Drop => drop(stream),
+                    AuthStage::Answer(answer) => {
+                        let encrypted = encode_transport(&mut noise, answer).unwrap();
+                        write_frame(&mut stream, &encrypted).await.unwrap();
+                        held.push(stream);
+                    }
+                }
+            }
+        });
+        (requests, server)
+    }
+
+    // Counts connections and answers nothing.
+    fn counting_listener(listener: TcpListener) -> (Arc<std::sync::atomic::AtomicUsize>, tokio::task::JoinHandle<()>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dials = Arc::new(AtomicUsize::new(0));
+        let counted = dials.clone();
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                held.push(listener.accept().await.unwrap().0);
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        (dials, server)
+    }
+
+    // One box at two addresses. `seed` keeps its endpoint memory to this test.
+    fn box_at_two_endpoints(seed: u8, first: &str, second: &str) -> ([u8; 32], RemoteDescriptor) {
+        let secret = [seed; 32];
+        let node = SigningKey::from_bytes(&[seed + 1; 32]);
+        let public = X25519PublicKey::from(&StaticSecret::from(secret)).to_bytes();
+        let mut descriptor = parse_pairing_link(&signed_link(first.to_owned(), &node, public, &test_code(seed + 2))).unwrap();
+        descriptor.endpoints = vec![first.to_owned(), second.to_owned()];
+        (secret, descriptor)
+    }
+
+    async fn loopback_listener() -> (TcpListener, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        (listener, endpoint)
+    }
+
+    // The memory is only replaced by a later success, so an endpoint that
+    // finishes the handshake and then fails must not hold back the others.
+    #[tokio::test]
+    async fn a_remembered_endpoint_that_fails_in_auth_gives_way_to_the_next() {
+        use std::sync::atomic::Ordering;
+        for (seed, stage) in [(120u8, AuthStage::Stall), (130, AuthStage::Drop)] {
+            let stalls = matches!(stage, AuthStage::Stall);
+            let (remembered, remembered_endpoint) = loopback_listener().await;
+            let (real, real_endpoint) = loopback_listener().await;
+            let (secret, mut descriptor) = box_at_two_endpoints(seed, &remembered_endpoint, &real_endpoint);
+            descriptor.code = None;
+            let (requests, failing) = box_failing_auth(remembered, secret, stage);
+            let (forwarded, _forwarded_rx) = mpsc::unbounded_channel();
+            let server = tokio::spawn(authenticating_responder(real, secret, forwarded));
+            let store = tempfile::tempdir().unwrap();
+            let key = ClientKey::load_or_create(store.path()).unwrap();
+            remember_endpoint(&descriptor, &remembered_endpoint);
+
+            let first = if stalls {
+                tokio::join!(
+                    connect_authenticated(&descriptor, &key, "test phone"),
+                    skip_dead_endpoint(&requests, 1),
+                ).0
+            } else {
+                connect_authenticated(&descriptor, &key, "test phone").await
+            };
+            assert!(first.is_ok(), "the other endpoint answers: {:?}", first.err());
+            assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+            // No clock skip: the endpoint that worked is tried first.
+            let second = tokio::time::timeout(Duration::from_secs(2),
+                connect_authenticated(&descriptor, &key, "test phone")).await
+                .expect("the next tunnel starts at the endpoint that worked");
+            assert!(second.is_ok());
+            assert_eq!(requests.load(Ordering::SeqCst), 1, "the failing endpoint is not tried again");
+            failing.abort();
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_in_auth_is_final_and_does_not_try_the_next_endpoint() {
+        use std::sync::atomic::Ordering;
+        let answer = |code: &str| serde_json::to_vec(&RemoteAuthResponse::Error {
+            v: 1, code: code.into(), message: "unknown client".into(),
+        }).unwrap();
+        type Expected = fn(&RemoteError) -> bool;
+        let cases: [(u8, Vec<u8>, Expected); 3] = [
+            (140, answer("authentication_failed"), |error| matches!(error, RemoteError::Refused(_))),
+            (150, answer("already_paired"), |error| matches!(error, RemoteError::AlreadyPaired)),
+            (160, b"not an authentication reply".to_vec(), |error| matches!(error, RemoteError::Transport(m) if m.contains("wrong shape"))),
+        ];
+        for (seed, reply, expected) in cases {
+            let (answering, answering_endpoint) = loopback_listener().await;
+            let (other, other_endpoint) = loopback_listener().await;
+            let (secret, mut descriptor) = box_at_two_endpoints(seed, &answering_endpoint, &other_endpoint);
+            descriptor.code = None;
+            let (requests, answers) = box_failing_auth(answering, secret, AuthStage::Answer(reply));
+            let (dials, silent) = counting_listener(other);
+            let store = tempfile::tempdir().unwrap();
+            let key = ClientKey::load_or_create(store.path()).unwrap();
+            remember_endpoint(&descriptor, &answering_endpoint);
+
+            let error = connect_authenticated(&descriptor, &key, "test phone").await.err().expect("the box refused");
+            assert!(expected(&error), "{error}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(requests.load(Ordering::SeqCst), 1);
+            assert_eq!(dials.load(Ordering::SeqCst), 0, "{error}");
+            assert_eq!(ordered_endpoints(&descriptor, vec![&other_endpoint, &answering_endpoint])[0], answering_endpoint,
+                "an endpoint that answered stays remembered");
+            answers.abort();
+            silent.abort();
+        }
+    }
+
+    // The first box may have consumed the ticket with no reply reaching the app.
+    // Sending it to another endpoint could only turn that into a refusal.
+    #[tokio::test]
+    async fn a_one_time_code_is_not_sent_to_another_endpoint_after_an_auth_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for (seed, stage) in [(170u8, AuthStage::Stall), (180, AuthStage::Drop)] {
+            let stalls = matches!(stage, AuthStage::Stall);
+            let (first, first_endpoint) = loopback_listener().await;
+            let (other, other_endpoint) = loopback_listener().await;
+            let (secret, descriptor) = box_at_two_endpoints(seed, &first_endpoint, &other_endpoint);
+            assert!(descriptor.has_code());
+            let (requests, failing) = box_failing_auth(first, secret, stage);
+            let (dials, silent) = counting_listener(other);
+            let store = tempfile::tempdir().unwrap();
+            let key = ClientKey::load_or_create(store.path()).unwrap();
+            let retired = AtomicUsize::new(0);
+            let retire = || -> Result<(), RemoteError> {
+                retired.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            };
+
+            let connect = connect_bound(&descriptor, &key, "test phone", None, Some(&retire));
+            let result = if stalls {
+                tokio::join!(connect, skip_dead_endpoint(&requests, 1)).0
+            } else {
+                connect.await
+            };
+            let error = result.err().expect("no endpoint may pair");
+            assert!(is_lost_connection(&error), "{error}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(requests.load(Ordering::SeqCst), 1);
+            assert_eq!(dials.load(Ordering::SeqCst), 0, "the ticket stays with the first box");
+            assert_eq!(retired.load(Ordering::SeqCst), 1);
+            failing.abort();
+            silent.abort();
+        }
+    }
+
+    // With every endpoint failing, no success replaces the memory, so the one
+    // that failed in auth has to be forgotten. Another endpoint's memory stays.
+    #[tokio::test]
+    async fn only_the_endpoint_that_failed_in_auth_is_forgotten() {
+        let (failing_listener, failing_endpoint) = loopback_listener().await;
+        let (closed, closed_endpoint) = loopback_listener().await;
+        drop(closed);
+        let (secret, mut descriptor) = box_at_two_endpoints(190, &closed_endpoint, &failing_endpoint);
+        descriptor.code = None;
+        let (_requests, failing) = box_failing_auth(failing_listener, secret, AuthStage::Drop);
+        let store = tempfile::tempdir().unwrap();
+        let key = ClientKey::load_or_create(store.path()).unwrap();
+        let advertised = vec![closed_endpoint.as_str(), failing_endpoint.as_str()];
+
+        remember_endpoint(&descriptor, &closed_endpoint);
+        assert!(connect_authenticated(&descriptor, &key, "test phone").await.is_err());
+        let reversed: Vec<&str> = advertised.iter().rev().copied().collect();
+        assert_eq!(ordered_endpoints(&descriptor, reversed.clone())[0], closed_endpoint, "not the endpoint that failed");
+
+        remember_endpoint(&descriptor, &failing_endpoint);
+        assert!(connect_authenticated(&descriptor, &key, "test phone").await.is_err());
+        assert_eq!(ordered_endpoints(&descriptor, advertised.clone()), advertised, "the memory is gone");
+        failing.abort();
+    }
+
     #[tokio::test]
     async fn proxy_caps_authenticated_local_connections() {
         let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4008,7 +5001,7 @@ mod tests {
             "GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\n{LOCAL_AUTH_HEADER}: {local_auth}\r\n\r\n"
         );
         let mut held_local = Vec::new();
-        for _ in 0..MAX_LOCAL_CONNECTIONS {
+        for _ in 0..MAX_LOCAL_CONNECTIONS - RESERVED_MEDIA_CONNECTIONS {
             let mut stream = TcpStream::connect(proxy.local_addr()).await.unwrap();
             stream.write_all(request.as_bytes()).await.unwrap();
             held_local.push(stream);
@@ -4032,7 +5025,26 @@ mod tests {
         let response = String::from_utf8(response).unwrap();
         assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
         assert!(response.contains("remote_proxy_busy"));
+        assert!(response.contains(&format!("{PROXY_ERROR_HEADER}: remote_proxy_busy\r\n")));
 
+        // A call's media socket still gets the reserved slot (it queues for
+        // the handshake like the others); a second one does not.
+        let media = format!(
+            "GET /api/v1/calls/0123456789abcdef0123456789abcdef/media?peer={} HTTP/1.1\r\nHost: localhost\r\n\
+             Connection: Upgrade\r\nUpgrade: websocket\r\n{LOCAL_AUTH_HEADER}: {local_auth}\r\n\r\n", "ab".repeat(32)
+        );
+        let mut call_media = TcpStream::connect(proxy.local_addr()).await.unwrap();
+        call_media.write_all(media.as_bytes()).await.unwrap();
+        let mut byte = [0u8; 1];
+        assert!(tokio::time::timeout(Duration::from_millis(200), call_media.read(&mut byte)).await.is_err(),
+            "the media socket must not be turned away while HTTP holds every shared slot");
+        let mut second_media = TcpStream::connect(proxy.local_addr()).await.unwrap();
+        second_media.write_all(media.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(1), second_media.read_to_end(&mut response)).await.unwrap();
+        assert!(String::from_utf8(response).unwrap().contains("remote_proxy_busy"));
+
+        drop(call_media);
         drop(held_local);
         drop(proxy);
         remote_server.abort();
@@ -4250,6 +5262,18 @@ mod onboarding_error_tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_macos_local_network_denial_points_at_the_setting() {
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::HostUnreachable] {
+            let error = connect_error(std::io::Error::from(kind), "10.0.0.2:9735");
+            assert!(matches!(error, RemoteError::LocalNetwork), "{kind:?}");
+            assert!(error.to_string().contains("Local Network permission"));
+        }
+        assert!(matches!(connect_error(std::io::Error::from(std::io::ErrorKind::TimedOut), "10.0.0.2:9735"), RemoteError::HandshakeUnavailable));
+        assert!(matches!(connect_error(std::io::Error::from(std::io::ErrorKind::HostUnreachable), "example.com:9735"), RemoteError::HandshakeUnavailable));
+    }
+
     #[test]
     fn ios_local_network_usage_copy_explains_box_connection_and_recovery() {
         let plist = include_str!("../Info.ios.plist");
@@ -4267,3 +5291,24 @@ mod onboarding_error_tests {
 #[cfg(test)]
 #[path = "remote_access/second_tests.rs"]
 pub(crate) mod second_tests;
+
+/// Preparation entry point; production persistence is unchanged.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn persist_linux_candidate(path: &Path, descriptor: &RemoteDescriptor, sealer: Option<&dyn Sealer>) -> Result<(), RemoteError> {
+    let sealer = at_rest::linux::required(sealer).map_err(RemoteError::Local)?;
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => { load_with(path, Some(&sealer))?; }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(RemoteError::Local(format!("cannot inspect remote descriptor: {error}"))),
+    }
+    persist_with(path, descriptor, Some(&sealer))
+}
+
+/// Preparation entry point; production loading is unchanged.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn load_linux_candidate(path: &Path, sealer: Option<&dyn Sealer>) -> Result<Option<RemoteDescriptor>, RemoteError> {
+    let sealer = at_rest::linux::required(sealer).map_err(RemoteError::Local)?;
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    load_with(path, Some(&sealer))
+}

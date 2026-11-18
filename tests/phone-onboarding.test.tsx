@@ -508,3 +508,15 @@ it('leaves a connection that progresses alone', async () => {
   await vi.advanceTimersByTimeAsync(60_000);
   expect(document.querySelector('[data-phone-onboarding]')?.getAttribute('data-phone-onboarding')).toBe('words');
 });
+it.each([
+  ['en', 'Your keys stay in the node. This phone never shows your recovery phrase and keeps no copy of it.'],
+  ['da', 'Dine nøgler bliver i noden. Denne telefon viser aldrig din gendannelsessætning og gemmer ingen kopi af den.'],
+] as const)('PhoneTrust says only what this phone does with the recovery phrase in %s', async (locale, expected) => {
+  dispose = render(() => <PhoneTrust locale={locale} onContinue={async () => {}} />, document.body);
+  await tick();
+  const options = document.querySelector('.phone-options')!;
+  const lines = [...options.querySelectorAll('p')].map(p => p.textContent);
+  expect(lines).toContain(expected);
+  // The old promise covered all of BitSov, but the Mac shows a new phrase once during setup.
+  expect(options.textContent).not.toMatch(/never shows you your recovery phrase|never copies it anywhere|kopierer den aldrig/);
+});

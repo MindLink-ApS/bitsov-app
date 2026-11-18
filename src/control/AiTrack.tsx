@@ -3,6 +3,7 @@ import { WATCHES, type WatchNotice, type WatchRule, type WatchUpdate } from './w
 import { ASSISTANTS, modelProposalText, type ModelProposal, type LocalTurn, type AssistantId, type AssistantThread } from './assistants';
 import { SoftError } from './SoftError';
 import { DelayedSpinner } from './DelayedSpinner';
+import { StreamFrame } from './StreamFrame';
 // "Ask your node": the AI track in the main window.
 //
 // The app is the broker. A question becomes a topic; the host reads it through
@@ -564,6 +565,7 @@ export function AiTrack(props: {
         </div>
       </Show>
 
+      <StreamFrame>
       <div class="stream ai-stream" ref={stream} data-stream data-ai-track>
         <div class="chat-column ai-chat-column">
           <Show when={session.turns.length === 0}>
@@ -614,6 +616,7 @@ export function AiTrack(props: {
           </For>
         </div>
       </div>
+      </StreamFrame>
 
       <form
         class="composer ai-composer"

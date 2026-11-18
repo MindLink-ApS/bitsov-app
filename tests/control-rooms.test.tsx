@@ -9,6 +9,7 @@ import {
   type LegPlan, type MemberInfo, type RoomBinding,
 } from '../src/control/room';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
+import { setLanguagePref } from '../src/i18n';
 
 const OWN = '1'.repeat(64);
 const A = 'a'.repeat(64);
@@ -280,6 +281,7 @@ describe('rooms in the shell', () => {
   let mount: HTMLElement;
   beforeEach(() => {
     resetContactsForTests();
+    setLanguagePref('en');
     resetRooms();
     setPetname(A, 'Maya');
     setPetname(B, 'Jon');
@@ -301,8 +303,8 @@ describe('rooms in the shell', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.hasAttribute('data-trust-continue'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))!.click();
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
   async function openRoom(...picks: string[]) {
@@ -363,6 +365,13 @@ describe('rooms in the shell', () => {
     expect(mount.textContent).not.toMatch(/coming soon|not on the protocol/i);
     expect(mount.textContent?.includes('This node does not support rooms yet.')).toBe(!supported);
     expect($('[data-room-new]') !== null).toBe(supported);
+  });
+
+  it('does not say the node lacks rooms before the node has answered', async () => {
+    stubHost({ node_overview: () => new Promise(() => {}) });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-rooms-coming-soon]')).not.toBeNull());
+    expect(text('[data-rooms-coming-soon]')).toBe('Rooms show here once your box answers.');
   });
 
   it('keeps the coming-soon line (and no New room) while our node does not check room bindings', async () => {
@@ -668,6 +677,33 @@ describe('rooms in the shell', () => {
     expect($('[data-room-send-msat]')!.getAttribute('data-room-send-msat')).toBe('2500');
     expect(text(`[data-room-leg="${A}"]`)).toMatch(/up to 2.5 sats \(2.1 sats to them, plus a network fee\)/);
     expect(text('[data-room-send] .kind')).toMatch(/up to 2.5 sats in all/);
+  });
+
+  it.each([
+    [true, 'Do not send it again. Retry delivery pays nothing new: your node re-sends the proof it already paid for. If anything is still due (this message\'s price, or admission again after a reconnect), it stops before paying and asks you first, with the price.', 'Send den ikke igen. At prøve levering igen koster ikke noget nyt'],
+    [false, 'Do not send it again: that could pay twice. Check the pending result first.', 'Send den ikke igen: det kan betyde, at der betales to gange. Kontrollér det afventende resultat først.'],
+  ])('a paid, undelivered leg reads the host sentence in Danish, warning kept (retry %s)', async (retry, suffix, danish) => {
+    setLanguagePref('da');
+    const host = stubHost({
+      message_send: (args) => {
+        if (args!.recipient === A) throw { code: 'payment_settled_undelivered', message: `Payment settled (2100 msat paid), message not yet delivered. ${suffix}`, undelivered: { paid_msat: 2100, retry } };
+        return receipt(args!.recipient as string, args!.max_msat as number, 2);
+      },
+    });
+    await openShell();
+    rememberRoom(AB);
+    await vi.waitFor(() => expect($(`[data-track="bound:${AB.id}"]`)).not.toBeNull());
+    click(`[data-track="bound:${AB.id}"]`);
+    await vi.waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('6000'));
+    typeDraft('hi');
+    click('[data-send]');
+    await vi.waitFor(() => expect($('[data-room-confirm]')).not.toBeNull());
+    click('[data-room-confirm]');
+    await vi.waitFor(() => expect($('[data-room-send]')).not.toBeNull());
+    const note = text(`[data-room-leg="${A}"] [data-room-leg-note]`);
+    expect(note).toContain('Betalingen er gennemført (2100 msat betalt), beskeden er endnu ikke leveret.');
+    expect(note).toContain(danish);
+    expect(note).not.toMatch(/Payment settled|Do not send/);
   });
 
   it('a room chat with legal leading JSON whitespace goes to its room, never the direct chat, and stays hidden after Leave', async () => {

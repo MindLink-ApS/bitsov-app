@@ -43,6 +43,13 @@ const HELLO_INTERVAL_MS = 1_000;
 export const OPUS_REHELLO_FRAMES = 50;
 /** ...and give up after this many (five seconds): the call ends instead of staying silent. */
 export const OPUS_FALLBACK_FRAMES = 250;
+/**
+ * Captured frames of exact digital zero (ten seconds) before the microphone
+ * counts as silenced. A phone OS that silences a hidden app's microphone
+ * delivers exact zeros; a live microphone always carries some noise, even in
+ * a quiet room or between quiet words.
+ */
+export const SILENT_FRAMES = 500;
 
 export type MediaTransport = { send: (payload: Uint8Array) => void };
 
@@ -60,6 +67,11 @@ export type CallAudioDeps = {
    * it). Called at most once; the caller ends the call.
    */
   onError?: (message: string) => void;
+  /**
+   * The microphone has delivered only digital silence for SILENT_FRAMES
+   * (true), or sound again (false). Reported on change only.
+   */
+  onSilence?: (silent: boolean) => void;
 };
 
 export type CallAudio = {
@@ -67,6 +79,7 @@ export type CallAudio = {
   ready: Promise<void>;
   /** One downlink frame as the host delivered it: seq + payload. */
   feed: (frame: Uint8Array) => void;
+  /** The owner's own mute: sends silence, and is no evidence of a silenced microphone. */
   setMuted: (muted: boolean) => void;
   /** The codec this app sends with right now, and what each side offered. */
   codecs: () => { sending: Codec; localCaps: number; peerCaps: number | null };
@@ -132,9 +145,25 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
     sayHello();
   };
 
+  let zeroFrames = 0;
+  let silent = false;
+  /** Count exact-zero frames from the microphone; our own mute is no evidence either way. */
+  const listen = (pcm: Float32Array) => {
+    if (!deps.onSilence) return;
+    let zero = !muted;
+    for (let i = 0; zero && i < pcm.length; i++) if (pcm[i] !== 0) zero = false;
+    zeroFrames = zero ? zeroFrames + 1 : 0;
+    const now = zeroFrames >= SILENT_FRAMES;
+    if (now !== silent) {
+      silent = now;
+      deps.onSilence(now);
+    }
+  };
+
   /** One captured 20 ms frame at the context rate. */
   const captured = (pcm: Float32Array) => {
     if (closed || !context) return;
+    listen(pcm);
     const frame = muted ? new Float32Array(pcm.length) : pcm;
     sending = encoder ? chooseCodec(localCaps, peerCaps) : 'pcmu';
     if (sending === 'opus' && encoder) {
@@ -328,7 +357,17 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
         else if (undecodable % OPUS_REHELLO_FRAMES === 0) sayHello();
       }
     },
-    setMuted: (next) => { muted = next; },
+    setMuted: (next) => {
+      if (next === muted) return;
+      muted = next;
+      // Muting or unmuting starts a fresh observation: what the microphone
+      // delivered before says nothing about what it delivers now.
+      zeroFrames = 0;
+      if (silent) {
+        silent = false;
+        deps.onSilence?.(false);
+      }
+    },
     codecs: () => ({ sending, localCaps, peerCaps }),
     stats: () => readStats(),
     close: async () => {

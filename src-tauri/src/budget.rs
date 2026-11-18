@@ -11,8 +11,11 @@
 //!   direct-payment hashes and all-in allowances (retained for replay detection). Nothing in
 //!   the file can spend: no token, no scope, no grant, no approval state.
 //! - **Not stored**: the owner's approval. [`Autopay`] lives in host memory for
-//!   at most [`BUDGET_WINDOW_MS`] and ends when the app quits. After a restart
-//!   the tally is still there, and sending automatically needs one new approval.
+//!   at most [`BUDGET_WINDOW_MS`]; the approval itself is the node's grant.
+//!   After a restart the app reads that grant back from the node, never from
+//!   this file, and resumes within its remaining total and its original expiry:
+//!   nothing is renewed, refilled or extended. On a node without spending
+//!   grants, sending automatically after a restart needs one new approval.
 //!
 //! # Limits, narrowest wins
 //!
@@ -545,18 +548,61 @@ pub fn book_path(dir: &Path, node_id: &str) -> PathBuf {
     dir.join(format!("budget-{short}.json"))
 }
 
+/// `app-spend/budget-<first 16 hex>.established`: an empty marker that this
+/// identity's book has been written at least once.
+///
+/// A book is *established* when this marker is present (anything at the path,
+/// a dangling symlink included). It is created right after the first book
+/// rename succeeds, and on the first successful load of a book written by an
+/// older build that had no marker. A marker that could not be written after a
+/// committed save does not fail that save; the next load or save writes it. Once established, a missing book is lost
+/// spending history, not a first run: [`load`] refuses it instead of starting
+/// a fresh, empty book. A brand-new install, or a new identity, has neither
+/// book nor marker and starts empty as before.
+///
+/// Sibling stores cannot stand in for this marker: `call-index-v2` is written
+/// at sign-in before any book exists, and a first send writes
+/// `spend-pending.json` before its first book reservation.
+pub fn established_path(dir: &Path, node_id: &str) -> PathBuf {
+    book_path(dir, node_id).with_extension("established")
+}
+
 pub fn load(dir: &Path, node_id: &str) -> Result<Book, ActionError> {
+    let established = established_path(dir, node_id);
     match std::fs::read(book_path(dir, node_id)) {
         Ok(bytes) => {
             let book: Book = serde_json::from_slice(&bytes).map_err(unreadable)?;
             if book.version != BOOK_VERSION || !book.node_id.eq_ignore_ascii_case(node_id) {
                 return Err(unreadable("it belongs to another version or identity"));
             }
+            if crate::pairing::key::nothing_at(&established) {
+                mark_established(dir, node_id).map_err(unreadable)?;
+            }
             Ok(book)
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Book::new(node_id)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && crate::pairing::key::nothing_at(&book_path(dir, node_id)) => {
+            if !crate::pairing::key::nothing_at(&established) {
+                return Err(unreadable("it is missing, but this app has saved one before"));
+            }
+            Ok(Book::new(node_id))
+        }
         Err(e) => Err(unreadable(e)),
     }
+}
+
+/// Durable before it returns, so a later missing book is never read as new.
+/// Returns the plain I/O error; the caller wraps it with `unreadable`.
+#[cfg(unix)]
+fn mark_established(dir: &Path, node_id: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).custom_flags(libc::O_NOFOLLOW)
+        .open(established_path(dir, node_id)).and_then(|f| f.sync_all())?;
+    std::fs::File::open(dir).and_then(|f| f.sync_all())
+}
+
+#[cfg(not(unix))]
+fn mark_established(_dir: &Path, _node_id: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "private budget storage is not supported on this platform"))
 }
 
 /// Write-then-rename so a crash leaves the old book or the new one, never half.
@@ -575,8 +621,62 @@ pub fn save(dir: &Path, book: &Book) -> Result<(), ActionError> {
     let mut file = options.open(&tmp).map_err(unreadable)?;
     file.write_all(&serde_json::to_vec(book).map_err(unreadable)?).map_err(unreadable)?;
     file.sync_all().map_err(unreadable)?;
+    #[cfg(test)]
+    if faults::hit(dir, faults::Step::Rename) { return Err(unreadable("injected rename failure")); }
     std::fs::rename(&tmp, &path).map_err(unreadable)?;
+    // The book is committed from here on, so nothing below fails the save: a
+    // caller told the write failed would repeat an edit that already landed,
+    // such as a reservation, and count it twice.
+    //
+    // The marker follows the rename on purpose. Written first, a failed rename
+    // or a crash between the two would leave a marker with no book, and every
+    // later load would refuse a store that was never written. Written after,
+    // the only gap is a committed book without its marker. The next save
+    // writes it again, and the next load writes it before it hands the book
+    // out, refusing (before any edit) if it still cannot.
+    if !mark_after_commit(dir, &book.node_id) {
+        // No error detail: it can name the private budget path.
+        eprintln!("budget: book saved; its first-write marker was not, and is written again on the next load or save");
+        let _ = std::fs::File::open(dir).and_then(|f| f.sync_all());
+    }
     Ok(())
+}
+
+/// The marker write that follows a committed book rename. True when written.
+#[cfg(unix)]
+fn mark_after_commit(dir: &Path, node_id: &str) -> bool {
+    #[cfg(test)]
+    if faults::hit(dir, faults::Step::Marker) { return false; }
+    mark_established(dir, node_id).is_ok()
+}
+
+/// Test-only I/O failures for one budget directory, armed until disarmed.
+#[cfg(test)]
+pub(crate) mod faults {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub(crate) enum Step {
+        /// The book rename fails: nothing is committed.
+        Rename,
+        /// The marker write after a committed book rename fails.
+        Marker,
+    }
+
+    static ARMED: Mutex<Vec<(PathBuf, Step)>> = Mutex::new(Vec::new());
+
+    pub(crate) fn arm(dir: &Path, step: Step) {
+        ARMED.lock().unwrap_or_else(|e| e.into_inner()).push((dir.to_path_buf(), step));
+    }
+
+    pub(crate) fn disarm(dir: &Path) {
+        ARMED.lock().unwrap_or_else(|e| e.into_inner()).retain(|(d, _)| d != dir);
+    }
+
+    pub(super) fn hit(dir: &Path, step: Step) -> bool {
+        ARMED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(d, s)| d == dir && *s == step)
+    }
 }
 
 #[cfg(not(unix))]

@@ -3,6 +3,7 @@ import { deviceWord, isMobilePlatform } from '../platform';
 import type { JoinInput, JoinView } from './AddDevice';
 import { BoxIllustration } from './BoxIllustration';
 import { LocalNodeSwitch } from './LocalNodeSwitch';
+import { LocalNodeSetup } from './LocalNodeSetup';
 import { DeviceApprovals } from './DeviceApprovals';
 import { SoftError } from '../control/SoftError';
 import { createEffect, createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
@@ -44,6 +45,8 @@ export function Onboarding(props: {
   pairing: () => PairingView;
   trustAck: () => boolean;
   onRetry: () => void;
+  /** Fresh Mac only: the owner's explicit choice to create a node here. */
+  onSetupLocal?: () => Promise<void>;
   selectedTarget?: NodeTarget;
   onTargetChange?: (target: NodeTarget) => void;
   device?: () => DeviceView | null;
@@ -80,7 +83,8 @@ export function Onboarding(props: {
   const [internalTarget, setInternalTarget] = createSignal<NodeTarget>(
     phone() || props.pairing().remote || props.initialPairingLink !== undefined ? 'network' : 'local',
   );
-  const target = () => props.selectedTarget ?? internalTarget();
+  const localUnavailable = () => props.status().network_refusal === 'local_unavailable';
+  const target = () => localUnavailable() ? 'network' : props.selectedTarget ?? internalTarget();
   const setTarget = (t: NodeTarget) => {
     setInternalTarget(t);
     props.onTargetChange?.(t);
@@ -188,6 +192,14 @@ export function Onboarding(props: {
     } finally { setScanning(false); }
   };
 
+  // After a refusal: scan (or paste) a new link from an owner device. The saved
+  // link stays until the new one is reviewed and saved.
+  const pairAgain = async () => {
+    if (busy()) return;
+    if (props.onScanRemote) return scanRemote();
+    document.getElementById(props.pairingInputId ?? 'remote-pairing-link')?.focus();
+  };
+
   const forgetRemote = async () => {
     if (busy()) return;
     setPreview(null);
@@ -254,7 +266,7 @@ export function Onboarding(props: {
         <h2 class="node-target-title" classList={{ 'sr-only': stage() === 'node' }}>{t('obNodeLocation')}</h2>
         <div class="node-target-grid" role="radiogroup" aria-label={t('obChooseLocation')}>
           {/* Option 1: This computer (local node). A phone has no node of its own to run. */}
-          <Show when={!phone()}>
+          <Show when={!phone() && !localUnavailable()}>
           <button
             type="button"
             class="node-target-card"
@@ -305,7 +317,7 @@ export function Onboarding(props: {
             </div>
             <div class="target-info">
               <div class="target-head">
-                <strong>{phone() ? t('obYourNode') : t('obComputerAtHome')}</strong>
+                <strong>{localUnavailable() ? t('obBetaConnectSignet') : phone() ? t('obYourNode') : t('obComputerAtHome')}</strong>
                 <div class="row" style={{ width: 'auto', gap: 'var(--s-2)' }}>
                   <Show when={hostedBy()} fallback={<span class="target-badge">{t('obPairingLink')}</span>}>
                     {(label) => (
@@ -372,8 +384,12 @@ export function Onboarding(props: {
       </div>
 
       {/* "Use this Mac instead" means nothing on a phone. */}
-      <Show when={!phone() && props.onForgetRemote && (props.pairing().remote || target() !== 'local' || remoteChoiceEdited())}>
+      <Show when={!phone() && !localUnavailable() && props.onForgetRemote && (props.pairing().remote || target() !== 'local' || remoteChoiceEdited())}>
         <LocalNodeSwitch onForget={forgetRemote} disabled={busy()} remoteRevision={remoteRevision()} />
+      </Show>
+
+      <Show when={!phone() && !localUnavailable() && props.onSetupLocal && props.status().local_setup_needed && !props.pairing().remote && target() === 'local'}>
+        <LocalNodeSetup onConfirm={props.onSetupLocal!} />
       </Show>
 
       <Switch>
@@ -489,6 +505,24 @@ export function Onboarding(props: {
                 <p class="hint">{t('obLocalSecurityLimit')}</p>
               </div>
             </details>
+          </div>
+        </Match>
+
+        {/* A definitive refusal: one way forward, and no Try again that cannot help. */}
+        <Match when={props.pairing().state === 'failed' && props.pairing().refused}>
+          <div class="panel pairing error" data-pairing="refused">
+            <h2>{t('obRefusedTitle')}</h2>
+            <p class="err-note" role="alert" data-refused-summary>{t('obRefusedLine')}</p>
+            <p class="hint">{props.onScanRemote ? t('obRefusedHow') : t('obRefusedHowPaste')}</p>
+            <button type="button" class="primary" data-pair-again disabled={busy()} onClick={() => void pairAgain()}>
+              {scanning() ? t('obScanning') : props.onScanRemote ? t('obScanNewQr') : t('obPasteNewLink')}
+            </button>
+            <Show when={props.pairing().reason}>{reason => (
+              <details class="quiet-detail" data-soft-detail>
+                <summary>{t('uiDetails')}</summary>
+                <p class="hint">{onboardingDiagnostic(reason(), t('obPairingLinkHelp'))}</p>
+              </details>
+            )}</Show>
           </div>
         </Match>
 

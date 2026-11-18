@@ -26,9 +26,12 @@ export function normalizePairingLink(input: string): string {
 
 /** Structured host failures; detail belongs in connection diagnostics. */
 export type ConnectionError = {
-  kind: 'unclaimed' | 'local_network' | 'unreachable' | 'busy' | 'expired' | 'clock' | 'used' | 'tailscale' | 'claim_mismatch' | 'other';
+  kind: 'unclaimed' | 'local_network' | 'unreachable' | 'busy' | 'expired' | 'clock' | 'used' | 'tailscale' | 'claim_mismatch' | 'device_unavailable' | 'other';
+  /** Diagnostic text or a stable code (e.g. `remote_unreachable`); never shown as the reason. */
   detail: string;
 };
+
+export type NetworkRefusal = 'none' | 'mainnet' | 'unknown' | 'other' | 'local_unavailable';
 
 export type NodeStatus = {
   /** Host has inspected the saved descriptor; null means startup is unresolved. */
@@ -42,7 +45,10 @@ export type NodeStatus = {
   remember_offer?: boolean;
   local_owner?: boolean;
   owner_warning?: string | null;
+  /** Fresh Mac: nothing was created; the owner chooses where BitSov runs. */
+  local_setup_needed?: boolean;
   initialization_repair?: 'none' | 'required' | 'repairing' | 'price_floor_required' | 'price_floor_repairing';
+  network_refusal?: NetworkRefusal;
   retry_after_secs?: number | null;
   ready: boolean;
   node_id: string | null;
@@ -65,6 +71,11 @@ export type PairingView = {
   hosted_by?: string | null;
   /** Durable acknowledgement from the host, bound to this connection mode. */
   trust_acknowledged_node_id?: string | null;
+  /**
+   * The node refused this app's saved pairing (unknown or revoked app, used
+   * ticket). The host no longer reconnects on its own; only pairing again helps.
+   */
+  refused?: boolean;
 };
 
 export type StepStatus = 'todo' | 'active' | 'done' | 'failed' | 'skipped' | 'blocked';

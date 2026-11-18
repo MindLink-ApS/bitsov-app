@@ -249,3 +249,17 @@ for _ in 0..<20 {
     precondition(status == errSecSuccess && publicKey == publicMetadata)
 }
 print("PASS: repeated metadata lookups request attributes only and forbid authentication UI")
+
+// No passcode: the bridge reports its own status, without prompting, so the app
+// can open Settings. Other statuses, a missing item and a cancel are unchanged.
+precondition(classifyClientStatus(errSecAuthFailed, passcodeMissing: { true }) == errPasscodeNotSet)
+precondition(classifyClientStatus(errSecAuthFailed, passcodeMissing: { false }) == errSecAuthFailed)
+for kept in [errSecSuccess, errSecItemNotFound, errSecUserCanceled] {
+    precondition(classifyClientStatus(kept, passcodeMissing: { preconditionFailure("not consulted") }) == kept)
+}
+precondition(passcodeNotSet { error in
+    error = NSError(domain: LAErrorDomain, code: LAError.passcodeNotSet.rawValue); return false })
+precondition(!passcodeNotSet { error in
+    error = NSError(domain: LAErrorDomain, code: LAError.biometryNotEnrolled.rawValue); return false })
+precondition(!passcodeNotSet { _ in true })
+print("PASS: a missing passcode is reported as its own status, without authentication UI")
