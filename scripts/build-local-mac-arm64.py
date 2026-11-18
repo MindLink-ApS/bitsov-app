@@ -198,10 +198,10 @@ def check_inputs(root):
         raise RuntimeError("External Cargo configuration is unsupported for this local package.")
 
 
-def check_source(root, expected=None):
-    if probe(["git", "status", "--porcelain"], root):
+def check_source(root, expected=None, *, env):
+    if probe(["git", "status", "--porcelain"], root, env):
         raise RuntimeError("Commit source changes before packaging.")
-    commit = probe(["git", "rev-parse", "HEAD"], root)
+    commit = probe(["git", "rev-parse", "HEAD"], root, env)
     if len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
         raise RuntimeError("A full source commit is required.")
     if expected is not None and commit != expected:
@@ -258,8 +258,8 @@ def build(root, target, output):
     if folded_target == folded_output or folded_target in folded_output.parents or folded_output in folded_target.parents:
         raise RuntimeError("Target and artifact directories must be separate.")
     check_inputs(root)
-    commit = check_source(root)
     env = build_environment(target)
+    commit = check_source(root, env=env)
     bundle = target / TARGET / "release/bundle"
     if bundle.exists():
         raise RuntimeError("Remove the previous target bundle before packaging.")
@@ -269,7 +269,7 @@ def build(root, target, output):
          "--", "--locked"], root, env, deadline)
     app = bundle / "macos/BitSov Remote Test.app"
     check_inputs(root)
-    check_source(root, commit)
+    check_source(root, commit, env=env)
     verify_bundle(app)
     metadata = {"commit": commit, "target": TARGET, "profile": "remote-only-signet",
                 "signing": "none", "versions": {
@@ -296,7 +296,7 @@ def build(root, target, output):
                 raise RuntimeError("Artifact checksum verification failed.")
         check_disk()
         check_inputs(root)
-        check_source(root, commit)
+        check_source(root, commit, env=env)
         if time.monotonic() >= deadline:
             raise RuntimeError("The 60-minute build deadline expired.")
         staging.rename(output)

@@ -24,6 +24,7 @@ class LocalArmBuild(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("local_arm_build", SCRIPT)
         self.builder = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.builder)
+        self.source_probe = self.builder.probe
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -296,7 +297,98 @@ class LocalArmBuild(unittest.TestCase):
         for values in ((" M edited",), ("", "b" * 40)):
             with self.subTest(values=values), patch.object(subprocess, "check_output", side_effect=values):
                 with self.assertRaises(RuntimeError):
-                    self.builder.check_source(self.root, "a" * 40)
+                    self.builder.check_source(self.root, "a" * 40,
+                                              env=self.builder.build_environment(self.root / "target"))
+
+    def source_repository(self, name):
+        source = self.root / name
+        source.mkdir(parents=True)
+        (source / "input").write_text("original")
+        (source / "src-tauri").mkdir()
+        (source / "src-tauri/tauri.remote-only.conf.json").write_text("{}")
+        env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+        def git(*args):
+            return subprocess.check_output(["git", "-c", "user.name=Package tests", "-c",
+                                            "user.email=package-tests@example.invalid", *args], cwd=source,
+                                           env=env, text=True, stderr=subprocess.DEVNULL).strip()
+        git("init", "-q")
+        git("add", "input", "src-tauri")
+        git("commit", "-q", "-m", "Fixture input")
+        return source, git
+
+    def package_fixture_command(self, command, root, env, deadline):
+        app = Path(env["CARGO_TARGET_DIR"]) / self.builder.TARGET / "release/bundle/macos/BitSov Remote Test.app"
+        if command[:3] == ["npm", "run", "tauri"]:
+            (app / "Contents/MacOS").mkdir(parents=True)
+            (app / "Contents/MacOS/bitsov-app").write_bytes(b"fixture executable")
+            (app / "Contents/Info.plist").write_bytes(plistlib.dumps({
+                "CFBundleIdentifier": "tech.mindlink.bitsov.remotetest"}))
+        elif command[0] == "ditto":
+            with zipfile.ZipFile(command[-1], "w") as archive:
+                for path in app.rglob("*"):
+                    if path.is_file():
+                        archive.write(path, f"{app.name}/{path.relative_to(app).as_posix()}")
+
+    def package_fixture_probe(self, command, root, env=None):
+        if command[0] == "git":
+            return self.source_probe(command, root, env)
+        return "arm64" if command[0] == "lipo" else "fixture version"
+
+    def test_git_overrides_do_not_hide_dirty_source(self):
+        for mode in ("repository", "worktree", "index"):
+            with self.subTest(mode=mode):
+                source, git = self.source_repository(f"{mode}/source")
+                foreign, _ = self.source_repository(f"{mode}/foreign")
+                (source / "input").write_text("edited")
+                overrides = {"GIT_WORK_TREE": str(foreign)}
+                if mode == "repository":
+                    overrides["GIT_DIR"] = str(foreign / ".git")
+                elif mode == "index":
+                    git("add", "input")
+                    (source / "input").write_text("original")
+                    overrides = {"GIT_INDEX_FILE": str(foreign / ".git/index")}
+                with patch.dict(os.environ, overrides), \
+                     patch.object(self.builder, "run", side_effect=RuntimeError("Fixture build started")) as run:
+                    with self.assertRaisesRegex(RuntimeError, "Commit source changes"):
+                        self.builder.build(source, self.root / "target", self.root / "output")
+                    run.assert_not_called()
+
+    def test_git_overrides_do_not_hide_source_commit_changes(self):
+        for phase in ("compile", "archive"):
+            with self.subTest(phase=phase):
+                source, git = self.source_repository(f"{phase}/source")
+                foreign, foreign_git = self.source_repository(f"{phase}/foreign")
+                foreign_git("commit", "--allow-empty", "-q", "-m", "Foreign fixture update")
+                def external(command, *args):
+                    self.package_fixture_command(command, *args)
+                    if ((phase == "compile" and command[:3] == ["npm", "run", "tauri"])
+                            or (phase == "archive" and command[0] == "ditto")):
+                        git("commit", "--allow-empty", "-q", "-m", "Fixture update")
+                overrides = {"GIT_DIR": str(foreign / ".git"), "GIT_WORK_TREE": str(foreign),
+                             "GIT_INDEX_FILE": str(foreign / ".git/index")}
+                output = self.root / phase / "output"
+                with self.resources(), patch.dict(os.environ, overrides), \
+                     patch.object(self.builder, "run", side_effect=external) as run, \
+                     patch.object(self.builder, "probe", side_effect=self.package_fixture_probe):
+                    with self.assertRaisesRegex(RuntimeError, "The source commit changed"):
+                        self.builder.build(source, self.root / phase / "target", output)
+                if phase == "compile":
+                    self.assertNotIn("ditto", [call.args[0][0] for call in run.call_args_list])
+                self.assertFalse(output.exists())
+
+    def test_git_overrides_do_not_change_recorded_source_commit(self):
+        source, git = self.source_repository("source")
+        foreign, foreign_git = self.source_repository("foreign")
+        foreign_git("commit", "--allow-empty", "-q", "-m", "Foreign fixture update")
+        expected = git("rev-parse", "HEAD")
+        overrides = {"GIT_DIR": str(foreign / ".git"), "GIT_WORK_TREE": str(foreign),
+                     "GIT_INDEX_FILE": str(foreign / ".git/index")}
+        output = self.root / "output"
+        with self.resources(), patch.dict(os.environ, overrides), \
+             patch.object(self.builder, "run", side_effect=self.package_fixture_command), \
+             patch.object(self.builder, "probe", side_effect=self.package_fixture_probe):
+            self.builder.build(source, self.root / "target", output)
+        self.assertEqual(json.loads((output / "build.json").read_text())["commit"], expected)
 
     def start_supervisor(self, seconds=10):
         pidfile, marker, lock = [self.root / name for name in ("child.pid", "survived", "build.lock")]
