@@ -103,3 +103,6 @@ pub(crate) fn required(sealer: Option<&dyn Sealer>) -> Result<RequiredSealer<'_>
 mod secret_service;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod identity_fixture;
