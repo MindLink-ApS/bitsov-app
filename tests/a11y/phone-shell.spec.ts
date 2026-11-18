@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { checkContactPanelModal } from './contact-panel-check';
 const preview = '/docs/ui/u5-phone-shell/harness/preview.html';
 for (const lang of ['en', 'da']) {
   test(`${lang}: phone navigation, reachable entries and safe-area geometry`, async ({ page }) => {
@@ -373,4 +374,29 @@ for (const [scene, lang, denom, width] of ['budget-open', 'spend-open'].flatMap(
         expect(outer.x + outer.width).toBeLessThanOrEqual(width + 0.5);
         expect(await send.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
       });
+}
+
+for (const lang of ['en', 'da']) {
+  test(`${lang}: the contact panel keeps focus and hides the chat and tabs behind it`, async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 740 });
+    await page.goto(`${preview}?scene=chat&lang=${lang}`);
+    await expect(page.locator('[data-composer]')).toBeVisible();
+    await checkContactPanelModal(page, ['[data-send]', '[data-composer-plus]', '[data-call="audio"]', '[data-phone-tab="chats"]', '[data-ios-back="thread"]']);
+  });
+  for (const width of [360, 393]) {
+    test(`${lang} ${width}: the assistant's Forget button keeps its word on one line`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 740 });
+      await page.goto(`${preview}?scene=list&lang=${lang}`);
+      await page.locator('[data-phone-list] [data-track="assistant:node"]').click();
+      const forget = page.locator('[data-assistant-forget]');
+      await expect(forget).toBeVisible();
+      const lines = await forget.evaluate((el) => {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size;
+      });
+      expect(lines).toBe(1);
+      expect(await forget.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+    });
+  }
 }
