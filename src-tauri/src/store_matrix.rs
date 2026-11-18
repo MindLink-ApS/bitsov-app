@@ -28,6 +28,10 @@ pub enum Bad {
     Directory,
     /// A symlink whose target does not exist.
     DanglingSymlink,
+    /// Nothing at the path, in a store `prepare` made established.
+    Missing,
+    /// These exact bytes: a well-formed file whose content is wrong.
+    Raw(&'static str),
 }
 
 /// A store under test. `prepare` creates whatever else a load needs (a key,
@@ -89,7 +93,8 @@ pub fn plant(path: &Path, store: &Store<'_>, bad: &Bad) -> bool {
         Bad::Garbage => b"\x00\xff garbage \x7f not a store".to_vec(),
         Bad::Truncated(cut) => valid[..*cut].to_vec(),
         Bad::Empty => Vec::new(),
-        Bad::WrongShape(shape) => shape.as_bytes().to_vec(),
+        Bad::WrongShape(shape) | Bad::Raw(shape) => shape.as_bytes().to_vec(),
+        Bad::Missing => return true,
         Bad::Directory => {
             std::fs::create_dir_all(path.join("inside")).unwrap();
             std::fs::write(path.join("inside/keep"), b"keep").unwrap();
