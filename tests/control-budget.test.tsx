@@ -176,8 +176,8 @@ describe('invisible payments in the composer and the context panel', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await waitFor(() => expect(mount.querySelector('[data-composer]') || [...mount.querySelectorAll('button')].find((b) => b.textContent?.includes('I understand'))).toBeTruthy());
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))?.click();
+    await waitFor(() => expect(mount.querySelector('[data-composer]') || [...mount.querySelectorAll('button')].find((b) => b.hasAttribute('data-trust-continue'))).toBeTruthy());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))?.click();
     await waitFor(() => expect($(`[data-track="peer:${MAYA}"]`)?.getAttribute('aria-current')).toBe('true'));
     await waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
   }

@@ -14,6 +14,15 @@ for (const lang of ['en', 'da'] as const) {
   });
 }
 
+// Under reduced motion every element gets a near-zero transition. The panel's
+// inherited `visibility` must still switch at once, or Close refuses focus on open.
+test('reduced motion: the contact panel still keeps focus and hides the chat behind it', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/?sample', { waitUntil: 'networkidle' });
+  expect(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches)).toBe(true);
+  await checkContactPanelModal(page, ['[data-send]', '[data-composer-plus]', '[data-call="audio"]', '.rail [data-track^="peer:"]', '[data-profile]']);
+});
+
 // Other code also makes parts of the window inert (Settings, Wallet, the first-spend
 // sheet, phone sheets). The panel must never undo what another owner asked for, and
 // a live region next to the panel may announce but its controls must not be reachable.
