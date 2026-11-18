@@ -163,7 +163,7 @@ class LocalArmBuild(unittest.TestCase):
             if command[0] == "lipo":
                 return "arm64\n"
             return "version fixture\n"
-        with patch.object(subprocess, "check_output", side_effect=probe), \
+        with self.resources(), patch.object(subprocess, "check_output", side_effect=probe), \
              patch.object(self.builder, "run", side_effect=external):
             self.builder.build(source, target, output)
         self.assertEqual(commands[0], ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"])
