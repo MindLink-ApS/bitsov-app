@@ -1244,11 +1244,11 @@ describe('control center shell', () => {
     it('promises no command at the node only when the node says it can (owner_device_approval_v1)', async () => {
       await open(true, none);
       const today = mount.querySelector('[data-touch-id-first]')!.textContent!;
-      expect(today).toContain('Your node does not yet accept Touch ID approvals in place of its command');
-      expect(today).not.toContain('without a command at the node');
+      expect(today).toContain('Your box does not yet accept Touch ID approvals, so for now the person who set it up approves at the box');
+      expect(today).not.toContain('with nothing to do at the box');
       dispose?.(); mount?.remove(); vi.unstubAllGlobals();
       await open(true, none, ['owner_device_approval_v1']);
-      await waitFor(() => expect(mount.querySelector('[data-touch-id-first]')!.textContent).toContain('one Touch ID tap approves a contact here, without a command at the node'));
+      await waitFor(() => expect(mount.querySelector('[data-touch-id-first]')!.textContent).toContain('one Touch ID tap approves a contact here, with nothing to do at the box'));
     });
 
     it('a lapsed setup says "again", not "one time"', async () => {

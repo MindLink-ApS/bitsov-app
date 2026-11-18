@@ -1498,8 +1498,9 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(capture).not.toHaveBeenCalled();
   });
   it('keeps Ask again ordinary after dismissing a refused Ring and starting another call', async () => {
+    // A whole-day approval: a window ending before the call could is refused on its own (below).
     const grant: NodeGrantSummary = { budget_msat: 10_000, remaining_msat: 10_000, per_call_max_msat: 10_000,
-      expires_at_ms: Date.now() + 600_000, envelopes: null };
+      expires_at_ms: Date.now() + 86_400_000, envelopes: null };
     const host = stubHost({
       grant,
       block: () => {
@@ -1523,6 +1524,74 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(host.used('spend_request')[0].args).toEqual({});
     expect(host.used('call_block')).toHaveLength(1);
   });
+  // A box approval that ends mid-call cuts the call off (the callee's media is refused).
+  // So a node-routed call is never placed or answered inside a window that ends first.
+  const SHORT = () => ({ budget_msat: 2_000_000, remaining_msat: 2_000_000, per_call_max_msat: 2_000_000, expires_at_ms: Date.now() + 5 * 60_000 - 1_000, envelopes: null });
+  const visibleText = (el: Element) => {
+    const copy = el.cloneNode(true) as Element;
+    copy.querySelectorAll('details:not([open])').forEach((d) => [...d.childNodes].forEach((n) => { if (!(n instanceof Element && n.tagName === 'SUMMARY')) n.remove(); }));
+    return copy.textContent ?? '';
+  };
+  it.each([
+    ['en', 'Your box’s approval ends in 5 min, before this call could end, and the call would stop there. Nothing was paid. Ask the person who set up your box for a new approval, then call again.'],
+    ['da', 'Godkendelsen fra din boks udløber om 5 min, før opkaldet kan nå at slutte, så opkaldet ville stoppe der. Intet blev betalt. Bed den, der har sat din boks op, om en ny godkendelse, og ring igen.'],
+  ] as const)('refuses to ring when the box approval ends before the call could (%s)', async (lang, said) => {
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    const host = stubHost({ grant: SHORT() });
+    await openShell(); setLanguagePref(lang);
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-ended]')!.textContent).toBe(said);
+    expect(visibleText($('[data-call-panel]')!)).not.toMatch(/konsensus\s|--op\b|Terminal/);
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+    expect(capture).not.toHaveBeenCalled();
+  });
+  it('rings as before inside a whole-day approval', async () => {
+    const host = stubHost({ grant: { ...SHORT(), expires_at_ms: Date.now() + 86_400_000 } });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect(host.used('call_signal').map((c) => (c.args as { kind: number }).kind)).toEqual([400]);
+  });
+  it.each([
+    ['en', 'Your box’s approval ends in 5 min, before this call could end, and the call would stop there. Nothing was paid. Ask the person who set up your box for a new approval. The caller keeps ringing until it times out.'],
+    ['da', 'Godkendelsen fra din boks udløber om 5 min, før opkaldet kan nå at slutte, så opkaldet ville stoppe der. Intet blev betalt. Bed den, der har sat din boks op, om en ny godkendelse. Det ringer hos den anden, til opkaldet udløber.'],
+  ] as const)('refuses to answer when the box approval ends before the call could, and pays nothing (%s)', async (lang, said) => {
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    const host = stubHost({ grant: SHORT() });
+    await openShell(); setLanguagePref(lang);
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'incoming', kind: 400, sender: A, recipient: OWN,
+      timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect($('[data-call-error]')?.textContent).toBe(said));
+    expect($('[data-call-panel="incoming"]')).not.toBeNull();
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(capture).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['en', 'Their box stopped the call. Its approval may have run out. Nothing was paid for that minute.'],
+    ['da', 'Den andens boks stoppede opkaldet. Dens godkendelse kan være udløbet. Der blev ikke betalt for det minut.'],
+  ] as const)('a minute their box refused ends with a plain cause, the raw node text only under Details (%s)', async (lang, said) => {
+    const raw = 'Not sent - nothing was paid. callee refused the call block invoice: deadline margin, call sequence or no E2EE session; nothing was paid';
+    const host = stubHost({ block: () => { throw { code: 'not_dispatched', message: raw, reason: 'call_block_unpayable' }; } });
+    await openShell(); setLanguagePref(lang);
+    await ringAndAnswer(host);
+    // Not dispatched: tried again a few times (2 s apart), then the call ends.
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull(), { timeout: 12_000 });
+    expect($('[data-call-ended]')?.textContent).toBe(said);
+    const panel = $('[data-call-panel]')!;
+    expect(visibleText(panel)).not.toContain('callee refused');
+    expect(visibleText(panel)).not.toContain('E2EE');
+    const details = $<HTMLDetailsElement>('[data-call-end-detail]')!;
+    expect(details.open).toBe(false);
+    expect(details.textContent).toContain('callee refused the call block invoice');
+  }, 20_000);
   it('approves answering without requiring a reservation price from the caller', async () => {
     let quote = QUOTE;
     const host = stubHost({

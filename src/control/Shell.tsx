@@ -48,6 +48,7 @@ import { ambiguousThousands, amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_
 import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
+import { OperatorDetails } from './OperatorDetails';
 import { PorchPanel } from './Porch';
 import { ContactPanel } from './ContactPanel';
 import { onEscape } from './escapeStack';
@@ -1551,6 +1552,7 @@ export function ControlCenter(props: Props) {
       return allowed;
     },
     grant: () => budget()?.node_grant ?? null,
+    callLimitMinutes,
     quote: (peer) => act(() => source.callQuote(peer)),
     signal: async (peer, kind, plaintext, maxMsat, minutes, maxHangupMsat) => {
       const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes, maxHangupMsat));
@@ -3751,7 +3753,11 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
               <MinutesConsent quote={q()} />
               <RingBudgetNote grant={props.actions.callGrant?.() ?? null} peer={props.peer} name={props.name} quote={q()} callLimitMinutes={props.actions.callLimitMinutes?.() ?? null} />
             </>}</Show>
-            <p class="hint" data-call-stun-source>{callStunLabel()}</p>
+            {/* The route finder's address is technical: only under Details. */}
+            <details class="quiet-detail" data-call-stun-detail>
+              <summary>{tr('uiDetails')}</summary>
+              <p class="hint" data-call-stun-source>{callStunLabel()}</p>
+            </details>
             <div class="call-confirm-actions">
               <button type="button" class="soft" data-call-confirm-cancel onClick={() => disarm()}>{tr('uiCancel')}</button>
               <button ref={ringBtn} type="button" class="primary soft money" data-call-confirm={media()} disabled={off() || !priceReady()} onClick={() => { if (off() || !priceReady()) return; const m = media(); setArmed(null); place(m); }}>{tr('uiRing')}</button>
@@ -3952,8 +3958,6 @@ function CallPanel(props: {
   }));
   const v = () => props.view;
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
-  // A ceiling, not what it will cost: the routing fee is usually far less.
-  const price = () => { const q = shown(); const m = q && answerCost(q); return m === null ? '' : ` · ${tr('caUpToAmount', fmtAmount(m))}`; };
   /** The M6 paid-minutes line is on the card (same condition as its render below). */
   const minutesShown = () => !!(props.routed && v().outgoing && v().minutes);
   /**
@@ -3983,9 +3987,17 @@ function CallPanel(props: {
         </header>
         <Show when={props.waiting && props.answerBlocked && v().phase === 'incoming'}><p class="hint">{tr('incomingWaiting')}</p></Show>
         <Show when={noPrice() && v().phase === 'incoming'}><p class="hint" role="status" data-call-answer-price>{tr('caCallAnswerNoPrice')}</p></Show>
-        {/* What answering can cost this owner, in words: the answer, their own hangup, and only a reconnect beyond that (each one signal, all-in). */}
+        {/* What answering can cost this owner, in words: the answer, their own hangup, and only a reconnect beyond that (each one signal, all-in).
+            Kept one tap away under Details: the ringing card itself carries no price. */}
         <Show when={v().phase === 'incoming' && shown() ? answerCost(shown()!) : null}>
-          {(m) => <p class="hint" data-call-answer-cost>{tr('caCallAnswerCostNote', fmtAmount(m()))}</p>}
+          {(m) => <details class="quiet-detail" data-call-answer-detail>
+            <summary>{tr('uiDetails')}</summary>
+            <p class="hint" data-call-answer-cost>{tr('caCallAnswerCostNote', fmtAmount(m()))}</p>
+          </details>}
+        </Show>
+        {/* Decline is the free local ignore: nothing is sent or paid, so their ring runs out by itself. */}
+        <Show when={v().phase === 'incoming' && !v().silenced}>
+          <p class="hint" data-call-decline-note>{tr('caCallDeclineFreeNote')}</p>
         </Show>
         <Show when={v().phase === 'incoming' && props.spendingReady === false}>
           <p class="hint" role="status" data-call-spend-needed>
@@ -4068,6 +4080,12 @@ function CallPanel(props: {
             : v().minutes?.stop?.limit?.code === 'ceiling_exhausted' ? tr('caCallEndedTotalLimit')
             : v().minutes?.stop?.limit?.code === 'grant_exhausted' ? tr('caCallEndedGrantLimit')
             : v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
+          <Show when={!v().stuck ? v().minutes?.stop?.detail : null}>
+            {(detail) => <details class="quiet-detail" data-call-end-detail>
+              <summary>{tr('uiDetails')}</summary>
+              <p class="hint">{detail()}</p>
+            </details>}
+          </Show>
           <Show when={!v().stuck ? v().minutes?.stop?.limit : null}>
             {(limit) => <p class="hint" data-call-budget-limit={limit().code}>
               {hostText(limit().message)}{' '}
@@ -4125,9 +4143,9 @@ function CallPanel(props: {
         <div class="call-actions">
           <Switch>
             <Match when={v().phase === 'incoming'}>
-              <button type="button" class="primary soft money" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.accept(q); }}>{tr('uiAccept')}{price()}</button>
-              <button type="button" class="soft" data-call-decline disabled={props.blocked || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.decline(q); }}>{tr('uiDecline')}{price()}</button>
-              <button type="button" class="soft" data-call-ignore disabled={props.view.silenced} onClick={() => props.ignore()}>{tr('uiIgnore')}</button>
+              {/* No price on either button: Accept stays bounded by the quote read for it (`shown`), and Decline is the free local ignore. */}
+              <button type="button" class="primary soft money" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.accept(q); }}>{tr('uiAccept')}</button>
+              <button type="button" class="soft" data-call-decline data-call-ignore disabled={props.view.silenced} onClick={() => props.ignore()}>{tr('uiDecline')}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
               <Show when={v().stuck}>
@@ -4843,7 +4861,7 @@ function UndeliveredView(props: {
           {tr('uiStopRetrying')}</button>
       </Show>
       <Show when={props.a.ownerApproval}>
-        {(approval) => <div data-retry-owner><p>{tr('caApproveAtYourNodeThenCheck')}</p><code class="address">{approval().owner_command}</code></div>}
+        {(approval) => <div data-retry-owner><p>{tr('caApproveAtYourNodeThenCheck')}</p><OperatorDetails><code class="address">{approval().owner_command}</code></OperatorDetails></div>}
       </Show>
       <Show when={props.a.note}>
         <p class="hint" data-retry-note>{props.a.note}</p>
@@ -7219,8 +7237,10 @@ function Composer(props: {
           <Show when={pending().approval.approval_window_secs !== undefined}>
             <p role="status" data-contact-countdown>{tr('uiWaitingForRemoteApproval')} {Math.floor(ownerCountdown() / 60)}:{String(ownerCountdown() % 60).padStart(2, '0')} {tr('uiRemaining')}</p>
           </Show>
-          <textarea readonly aria-label={tr('uiOwnerApprovalCommand')} data-contact-owner-command data-command={pending().approval.owner_command} value={pending().approval.owner_command} />
-          <button type="button" class="link" onClick={async () => { try { await navigator.clipboard.writeText(pending().approval.owner_command); } catch { setNote(tr('uiSelectAndCopyTheCommandAbove')); } }}>{tr('uiCopyCommand')}</button>
+          <OperatorDetails>
+            <textarea readonly aria-label={tr('uiOwnerApprovalCommand')} data-contact-owner-command data-command={pending().approval.owner_command} value={pending().approval.owner_command} />
+            <button type="button" class="link" onClick={async () => { try { await navigator.clipboard.writeText(pending().approval.owner_command); } catch { setNote(tr('uiSelectAndCopyTheCommandAbove')); } }}>{tr('uiCopyCommand')}</button>
+          </OperatorDetails>
           <button type="button" class="link" data-contact-cancel onClick={() => cancelOwner()}>{tr('uiCancel')}</button>
           <p class="hint">{tr('uiCancelDoesNotRevokeAnApprovalAlreadyIssued')} {pending().approval.approval_window_secs !== undefined ? tr('caFive') : tr('caTwo')} {tr('uiMinutes')}</p>
         </div></TouchIdFirst>}
@@ -7343,23 +7363,30 @@ function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: J
 /** What is true while a spend request waits, for whichever action raised it (the default holds for every consumer). */
 const spendWaitDefault = () => tr('spendWaitDefault');
 
-/** The node's own approval, for someone who has never used a terminal: where, what, and who can do it. */
+/**
+ * The node's own approval, in plain words: the box needs one yes from the
+ * person who set it up. The exact line stays closed under Details, for that
+ * person only; nothing outside it names a command or a terminal.
+ */
 function NodeApprovalSteps(props: { command?: string | null }) {
   return <>
-    <Show when={props.command}>
-      {(command) => <ol class="approval-steps" data-approval-steps>
-        <li>{tr('caApprovalStepOpen')}</li>
-        <li>
-          {tr('caApprovalStepPaste')}
-          <code class="address" data-owner-action>{command()}</code>
-          <CopyButton text={command()} label={tr('caApprovalCopy')} />
-        </li>
-        <li>{tr('caApprovalStepCode')}</li>
-      </ol>}
-    </Show>
     <p class="hint" data-approval-who>{tr('caApprovalWho')}</p>
+    <Show when={props.command}>
+      {(command) => <OperatorDetails>
+        <ol class="approval-steps" data-approval-steps>
+          <li>{tr('caApprovalStepOpen')}</li>
+          <li>
+            {tr('caApprovalStepPaste')}
+            <code class="address" data-owner-action>{command()}</code>
+            <CopyButton text={command()} label={tr('caApprovalCopy')} />
+          </li>
+          <li>{tr('caApprovalStepCode')}</li>
+        </ol>
+      </OperatorDetails>}
+    </Show>
   </>;
 }
+
 
 function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions; hasPending?: boolean; stays?: string; requestBudgetMsat?: number }) {
   const line = () => spendLine(props.spend, props.now);
@@ -7423,9 +7450,12 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
           {(p) => (
             <div class="approval" data-approval="unavailable">
               <p>
-                <strong>{tr(line().open ? 'spendReplacementUnavailable' : 'uiThisNodeCannotGrantSpendingToTheApp')}</strong> {tr('uiReceivingStillWorksYourNodeSays')}
+                <strong>{tr(line().open ? 'spendReplacementUnavailable' : 'uiThisNodeCannotGrantSpendingToTheApp')}</strong>
               </p>
-              <code class="address" data-owner-action>{p().owner_action}</code>
+              <OperatorDetails>
+                <p>{tr('uiReceivingStillWorksYourNodeSays')}</p>
+                <code class="address" data-owner-action>{p().owner_action}</code>
+              </OperatorDetails>
             </div>
           )}
         </Match>
@@ -8440,8 +8470,10 @@ function NewTrack(props: {
                   <p><strong>{tr('caApproveThisGiftAtYourNode')}</strong>{' '}{tr('uiRunThisCommandOnceInTheOwnerS')}</p>
                   <Show when={ownerWait()} fallback={<p>{tr('caReviewTheRequestAndCompareTheCodeToPrepare')}</p>}>
                     {(pending) => <>
-                      <textarea readonly aria-label={tr('uiOwnerApprovalCommand')} data-starter-owner-command value={pending().owner_command} />
-                      <button type="button" class="link" onClick={() => void navigator.clipboard.writeText(pending().owner_command).catch(() => setCandErr(tr('uiSelectAndCopyTheCommandAbove')))}>{tr('uiCopyCommand')}</button>
+                      <OperatorDetails>
+                        <textarea readonly aria-label={tr('uiOwnerApprovalCommand')} data-starter-owner-command value={pending().owner_command} />
+                        <button type="button" class="link" onClick={() => void navigator.clipboard.writeText(pending().owner_command).catch(() => setCandErr(tr('uiSelectAndCopyTheCommandAbove')))}>{tr('uiCopyCommand')}</button>
+                      </OperatorDetails>
                       <p class="hint">{tr('caWaitingForTheNodeToReportThisGiftFunded')}</p>
                     </>}
                   </Show>
