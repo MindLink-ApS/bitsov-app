@@ -17,6 +17,9 @@ loopback interface, see [DEV_EXTERNAL_NODE.md](DEV_EXTERNAL_NODE.md).
 
 ## Build
 
+For a local unsigned release archive on Apple Silicon, see
+[Local Apple Silicon remote test package](LOCAL_MAC_ARM64.md).
+
 On macOS, with the usual npm and Rust/Tauri build prerequisites installed:
 
 ```bash
