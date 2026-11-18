@@ -122,6 +122,85 @@ fn spend_call_index_fails_closed() {
     assert_ne!(assert_refuses(&store, &json_cases(&store)), 0);
 }
 
+/// Recovery (the pending slot repairing its operation's index) must refuse a
+/// damaged or dangling mapping, never write over it.
+#[test]
+fn spend_call_index_recovery_fails_closed() {
+    let pending = serde_json::json!({
+        "id": "slot", "node_id": NODE, "request_hash": "hash", "max_msat": 1_000,
+        "target": null, "over_budget": false, "operation_id": OP_ID,
+    });
+    let index = |dir: &Path| {
+        let key = serde_json::to_vec(&(NODE, "peer", "call")).unwrap();
+        spend_dir(dir).join("call-index").join(format!("{}.json", blake3::hash(&key).to_hex()))
+    };
+    let prepare = |dir: &Path| {
+        let ops = spend_dir(dir).join("ops");
+        std::fs::create_dir_all(&ops).unwrap();
+        write_private(&ops.join(format!("{OP_ID}.json")), &serde_json::to_vec(&call_offer()).unwrap());
+        // An older operation that is not a call admission.
+        let mut other = call_offer();
+        other.op_id = "00000000-0000-4000-8000-000000000002".into();
+        other.kind = "message".into();
+        other.created_ms = 0;
+        write_private(&ops.join(format!("{}.json", other.op_id)), &serde_json::to_vec(&other).unwrap());
+        write_private(&spend_dir(dir).join("spend-pending.json"), &serde_json::to_vec(&pending).unwrap());
+    };
+    let store = Store {
+        name: "call-index/<hash>.json behind spend-pending.json",
+        valid: serde_json::to_vec(&serde_json::json!({"op_id": OP_ID, "created_ms": 1})).unwrap(),
+        version_key: None,
+        prepare: &prepare,
+        file: &index,
+        load: &journal_load,
+        may_create: &[],
+    };
+    let mut cases = json_cases(&store);
+    // An older mapping whose operation record is gone: replacing it would
+    // drop the only trace of that admission.
+    cases.push(Bad::Raw(r#"{"op_id":"00000000-0000-4000-8000-000000000009","created_ms":0}"#));
+    // An older mapping whose record is not a call admission for this slot.
+    cases.push(Bad::Raw(r#"{"op_id":"00000000-0000-4000-8000-000000000002","created_ms":0}"#));
+    assert_eq!(assert_refuses(&store, &cases), cases.len());
+}
+
+/// The one-time history migration keeps a dangling mapping in place and marks
+/// only that call unresolved; it neither replaces it nor stops.
+#[test]
+fn spend_call_index_migration_keeps_a_dangling_mapping() {
+    let index = |dir: &Path| {
+        let key = serde_json::to_vec(&(NODE, "peer", "call")).unwrap();
+        spend_dir(dir).join("call-index").join(format!("{}.json", blake3::hash(&key).to_hex()))
+    };
+    let missing = r#"{"op_id":"00000000-0000-4000-8000-000000000009","created_ms":0}"#;
+    for bad in [Bad::DanglingSymlink, Bad::Raw(missing)] {
+        let dir = tempfile::tempdir().unwrap();
+        let spend = spend_dir(dir.path());
+        std::fs::create_dir_all(spend.join("ops")).unwrap();
+        write_private(&spend.join("ops").join(format!("{OP_ID}.json")), &serde_json::to_vec(&call_offer()).unwrap());
+        let path = index(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        match bad {
+            Bad::DanglingSymlink => std::os::unix::fs::symlink(path.with_file_name("no-such-target"), &path).unwrap(),
+            _ => write_private(&path, missing.as_bytes()),
+        }
+        let before = (std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink(), std::fs::read(&path).ok());
+        spend_journal::initialize_history(&spend).unwrap();
+        let after = (std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink(), std::fs::read(&path).ok());
+        assert_eq!(before, after, "{bad:?}: the mapping must be left as it was");
+        assert!(spend_journal::read_call_admission(&spend, NODE, "peer", "call").is_err(), "{bad:?}");
+        let journal = Journal::open(&spend).unwrap();
+        assert!(journal.call_operations(NODE, Some("peer")).is_err(), "{bad:?}: the call stays fenced");
+    }
+}
+
+/// A book written before (the marker next to it) is established: losing the
+/// book must not hand back fresh, empty spending defaults.
+fn established_budget(dir: &Path) {
+    crate::budget::save(dir, &crate::budget::Book::new(NODE)).unwrap();
+    std::fs::remove_file(crate::budget::book_path(dir, NODE)).unwrap();
+}
+
 #[test]
 fn budget_book_fails_closed() {
     let load = |dir: &Path| crate::budget::load(dir, NODE).map(drop).map_err(|e| e.message);
@@ -129,12 +208,43 @@ fn budget_book_fails_closed() {
         name: "budget-<id>.json",
         valid: serde_json::to_vec(&crate::budget::Book::new(NODE)).unwrap(),
         version_key: Some("version"),
-        prepare: &|_| {},
+        prepare: &established_budget,
         file: &|dir| crate::budget::book_path(dir, NODE),
         load: &load,
         may_create: &[],
     };
-    assert_ne!(assert_refuses(&store, &json_cases(&store)), 0);
+    let mut cases = json_cases(&store);
+    cases.push(Bad::Missing);
+    assert_ne!(assert_refuses(&store, &cases), 0);
+}
+
+#[test]
+fn budget_book_starts_fresh_only_when_never_written() {
+    use crate::budget::{book_path, load, save, Book};
+    // A brand-new install: no store at all.
+    let fresh = tempfile::tempdir().unwrap();
+    let dir = fresh.path().join("app-spend");
+    assert_eq!(load(&dir, NODE).unwrap().ceiling_msat, Book::new(NODE).ceiling_msat);
+    assert!(!dir.exists(), "a read must not create the store");
+    // The first save establishes it.
+    save(&dir, &Book::new(NODE)).unwrap();
+    std::fs::remove_file(book_path(&dir, NODE)).unwrap();
+    assert_eq!(load(&dir, NODE).unwrap_err().code, "budget_unreadable");
+    // Another identity in the same directory has never written a book.
+    assert!(load(&dir, "cd").is_ok());
+
+    // A book from a build without the marker is marked on its first read.
+    let upgraded = tempfile::tempdir().unwrap();
+    write_private(&book_path(upgraded.path(), NODE), &serde_json::to_vec(&Book::new(NODE)).unwrap());
+    load(upgraded.path(), NODE).unwrap();
+    std::fs::remove_file(book_path(upgraded.path(), NODE)).unwrap();
+    assert_eq!(load(upgraded.path(), NODE).unwrap_err().code, "budget_unreadable");
+
+    // A first save that failed wrote no book, so it establishes nothing.
+    let failed = tempfile::tempdir().unwrap();
+    std::fs::create_dir(book_path(failed.path(), NODE).with_extension("json.tmp")).unwrap();
+    assert!(save(failed.path(), &Book::new(NODE)).is_err());
+    assert!(load(failed.path(), NODE).is_ok());
 }
 
 fn client_key(dir: &Path) {
