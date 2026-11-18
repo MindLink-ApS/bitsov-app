@@ -76,6 +76,14 @@ const RESTART_DELAY_MS = 2_000;
 // is required: the node deliberately rejects repeated 400/401 for one call id.
 const RESTART_REQUEST_MID = 'bitsov-restart-v1';
 const RESTART_ATTRIBUTE = 'a=x-bitsov-restart-of:';
+/** Plain end copy the ended card re-words in the current language (a sealed call that could not stay sealed). */
+export type EndKey = 'caCallSealEnded' | 'caCallSealNotAgreed';
+/** The phase the card and pill show: a live call whose node-routed media is interrupted reads as Reconnecting. */
+export const shownPhase = (v: Pick<CallView, 'phase' | 'interruptedUntil'>): Phase =>
+  v.phase === 'live' && v.interruptedUntil != null ? 'reconnecting' : v.phase;
+/** Display only: when a reconnecting card's call ends if nothing comes back. */
+export const shownDropAt = (v: Pick<CallView, 'phase' | 'dropAt' | 'interruptedUntil'>): number | null =>
+  v.phase === 'reconnecting' ? v.dropAt : v.interruptedUntil ?? null;
 export const restartParent = (sdp: string) => sdp.split(/\r?\n/).find(line => line.startsWith(RESTART_ATTRIBUTE))?.slice(RESTART_ATTRIBUTE.length);
 const withoutRestart = (sdp: string) => sdp.split(/\r?\n/).filter(line => !line.startsWith(RESTART_ATTRIBUTE)).join('\r\n');
 /** How long an accepted call may stay 'connecting' before it ends. */
@@ -244,6 +252,13 @@ export type CallView = {
   offline: boolean;
   /** Display only: while reconnecting, when the call ends if the connection has not come back. */
   dropAt: number | null;
+  /**
+   * Display only: node-routed media is frozen or its link is down (the phase stays `live`), and when
+   * the link's own grace ends the call. Never read by the call's logic: it starts no recovery and pays nothing.
+   */
+  interruptedUntil?: number | null;
+  /** Display only: `error` is this plain copy, so the ended card can word it in the current language. */
+  errorKey?: EndKey | null;
   /** Display only: this call has used its one recovery attempt (a restart offer, or a restart request or answer). */
   recoveryUsed: boolean;
   /** Display only: the one recovery was already used when this drop began, so none is tried this time. */
@@ -317,7 +332,7 @@ export function callRefusal(error: ActionError): string {
 export const IDLE: CallView = {
   silenced: false,
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
-  liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, offline: false,
+  liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, interruptedUntil: null, errorKey: null, offline: false,
   close: null, stuck: null, dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null, minutes: null,
   stopped: null,
 };
@@ -736,11 +751,11 @@ export function createCallEngine(deps: CallDeps) {
   /** Local teardown validates identity only; op_end_call performs node-confirmed cleanup. */
   /** `end` is tearing the call down (its own media close reports back meanwhile). */
   let ending = false;
-  const end = (reason: HangupReason | null, error: string | null = null, opts: { record?: boolean; endAtHost?: boolean; confirmed?: string } = {}) => {
+  const end = (reason: HangupReason | null, error: string | null = null, opts: { record?: boolean; endAtHost?: boolean; confirmed?: string; errorKey?: EndKey } = {}) => {
     ending = true;
     try { endNow(reason, error, opts); } finally { ending = false; }
   };
-  const endNow = (reason: HangupReason | null, error: string | null, opts: { record?: boolean; endAtHost?: boolean; confirmed?: string }) => {
+  const endNow = (reason: HangupReason | null, error: string | null, opts: { record?: boolean; endAtHost?: boolean; confirmed?: string; errorKey?: EndKey }) => {
     if (view.phase === 'incoming' && !view.silenced && reason !== 'declined' && view.callId && view.peer) {
       deps.onMissed?.({ callId: view.callId, peer: view.peer, media: view.media, at: incomingAt });
     }
@@ -761,7 +776,7 @@ export function createCallEngine(deps: CallDeps) {
     // that arrives meanwhile is End's to answer, so the card says it is closing.
     const closingNow = endAtHost && !!deps.endCall && ids.some((id) => !closing.has(id));
     // A stop that already ended the call stays said; one still in its grace does not.
-    set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null,
+    set({ phase: 'ended', reason, error, errorKey: opts.errorKey ?? null, interruptedUntil: null, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null,
       stopped: view.stopped?.endsAt === null ? view.stopped : null,
       ...(closingNow ? { close: { status: 'closing' as const, message: null } } : {}) });
     if (session) { if (view.outgoing) session.finish(); else session.dispose(); }
@@ -886,7 +901,7 @@ export function createCallEngine(deps: CallDeps) {
       } else if (state === 'closed') {
         // M6: the node admits call audio only once the first minute is paid.
         if (deps.routed && (conn as { endDetail?: string | null }).endDetail === NOT_PAID) end('unpaid', tr('caMinutesNotPaidInTime'));
-        else if (deps.routed && (conn as { endDetail?: string | null }).endDetail === SEAL_ENDED) end('failed', tr('caCallSealEnded'));
+        else if (deps.routed && (conn as { endDetail?: string | null }).endDetail === SEAL_ENDED) end('failed', tr('caCallSealEnded'), { errorKey: 'caCallSealEnded' });
         else end('failed', deps.routed ? tr('caTheNodeMediaLinkClosed') : tr('caTheDirectConnectionClosed'));
       }
     };
@@ -897,13 +912,12 @@ export function createCallEngine(deps: CallDeps) {
       if (state === 'failed' || state === 'disconnected' || state === 'closed') connectionChanged(state);
       else if ((state === 'connected' || state === 'completed') && conn.connectionState === 'connected') connectionChanged('connected');
     };
-    // Node-routed media: a node link that stays down past a few seconds (frozen or lost media) shows the
-    // Reconnecting phase, until the link is back or its own grace ends the call. Display only: no restart,
-    // no signal and no payment; the adapter's grace timer still owns the end.
+    // Node-routed media: frozen or lost media past a few seconds is said as Reconnecting, until it is back or
+    // the link's own grace ends the call. A display field only: the phase stays as it is, so no recovery path
+    // (restart, signal, payment) can see it; the adapter's grace timer still owns the end.
     (conn as { oninterruption?: ((endsAt: number | null) => void) | null }).oninterruption = (endsAt) => {
       if (pc !== conn || !active() || ending) return;
-      if (endsAt !== null && view.phase === 'live') set({ phase: 'reconnecting', dropAt: endsAt });
-      else if (endsAt === null && view.phase === 'reconnecting' && dropTimer === undefined) set({ phase: 'live', dropAt: null });
+      if ((view.interruptedUntil ?? null) !== endsAt) set({ interruptedUntil: endsAt });
     };
     // Network events are display only: they set view.offline for the call panel's note, and never
     // call reconnect()/restart() or touch anything those or the answer path read.
@@ -1592,7 +1606,8 @@ export function createCallEngine(deps: CallDeps) {
             // Not a connectivity failure (no relay would help): no 'failed' reason, only the words.
             // A sealing call whose answer could not be sealed says so, and names no side as the cause.
             const name = error && typeof error === 'object' && 'name' in error ? error.name : '';
-            if (pc === conn) end(null, name === SEAL_NOT_AGREED || name === SEAL_REFUSED ? tr('caCallSealNotAgreed') : tr('caTheirAnswerCouldNotBeUsed'));
+            const sealNo = name === SEAL_NOT_AGREED || name === SEAL_REFUSED;
+            if (pc === conn) end(null, sealNo ? tr('caCallSealNotAgreed') : tr('caTheirAnswerCouldNotBeUsed'), sealNo ? { errorKey: 'caCallSealNotAgreed' } : {});
           }
           return;
         }

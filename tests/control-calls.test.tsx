@@ -4271,6 +4271,21 @@ describe('calls in the shell', () => {
     expect(details.textContent).toMatch(technical);
   });
 
+  it.each([
+    ['en', 'da', 'Forbindelsen til Maya blev afbrudt.', /The direct connection closed\./],
+    ['da', 'en', 'The connection to Maya was lost.', /Den direkte forbindelse blev lukket\./],
+  ] as const)('changing the language on a lost-connection ended card (%s to %s) re-words the cause; the technical words stay under Details', async (from, to, said, technical) => {
+    stubHost();
+    await liveCall();
+    setLanguagePref(from);
+    FakePc.made[0].state('closed');
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    setLanguagePref(to);
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe(said));
+    expect($<HTMLDetailsElement>('[data-call-end-detail]')!.open).toBe(false);
+    expect($('[data-call-end-detail]')!.textContent).toMatch(technical);
+  });
+
   it.each([['en', 'Reconnecting…', 'Live'], ['da', 'Forbinder igen…', 'I gang']] as const)('frozen media on a live call shows Reconnecting, then Live again (%s)', async (lang, said, live) => {
     stubHost();
     await liveCall();

@@ -56,7 +56,7 @@ import { custodyBadge, CustodyBadgeView } from './custody';
 import { CopyButton, NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
-import { answerCost, callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { answerCost, callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, shownDropAt, shownPhase, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { CallReportCopy } from './CallReportCopy';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { nodeRoutedAudio, nodeRoutedVideo, sealedAudio } from './callFlags';
@@ -3962,6 +3962,8 @@ function CallPanel(props: {
   const v = () => props.view;
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
   const endLine = () => callEndLine(v(), who());
+  /** What the card shows: interrupted node-routed media reads as Reconnecting (display only; the engine stays live). */
+  const cardPhase = () => shownPhase(v());
   /** The M6 paid-minutes line is on the card (same condition as its render below). */
   const minutesShown = () => !!(props.routed && v().outgoing && v().minutes);
   /**
@@ -3981,9 +3983,9 @@ function CallPanel(props: {
   };
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
-      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={v().phase} data-call-approval-open={props.approvalOpen ? '' : undefined} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[v().phase]} ${who()}`}>
+      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={cardPhase()} data-call-approval-open={props.approvalOpen ? '' : undefined} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[cardPhase()]} ${who()}`}>
         <header>
-          <strong data-call-title aria-live="polite">{CALL_TITLE[v().phase]}{v().media === 'video' ? tr('uiVideo') : ''}</strong>
+          <strong data-call-title aria-live="polite">{CALL_TITLE[cardPhase()]}{v().media === 'video' ? tr('uiVideo') : ''}</strong>
           <span class="who">{who()}</span>
           <Show when={(v().phase === 'live' || v().phase === 'reconnecting') && v().liveAt !== null}>
             <span class="duration" data-call-duration>{duration(Math.max(0, tick() - v().liveAt!))}</span>
@@ -4019,10 +4021,10 @@ function CallPanel(props: {
           <CallNetworkNote onOpenSettings={props.openCallSettings} />
         </Show>
         {/* While reconnecting: what is happening, and when the call ends if it does not come back (display only). */}
-        <Show when={v().phase === 'reconnecting'}>
+        <Show when={cardPhase() === 'reconnecting'}>
           <p class="hint" role="status" data-call-reconnecting>
             {tr('uiConnectionLostReconnecting')}
-            <Show when={v().dropAt !== null}>{' '}{tr('uiIfItIsnTBackIn')} <span data-call-drop-in>{Math.max(0, Math.ceil((v().dropAt! - tick()) / 1000))}</span> {tr('uiSTheCallEnds')}</Show>
+            <Show when={shownDropAt(v()) !== null}>{' '}{tr('uiIfItIsnTBackIn')} <span data-call-drop-in>{Math.max(0, Math.ceil((shownDropAt(v())! - tick()) / 1000))}</span> {tr('uiSTheCallEnds')}</Show>
             <Show when={v().recoveryUsedBefore}>{' '}{tr('uiThisCallAlreadyUsedItsOneRecoveryWaiting')}</Show>
           </p>
         </Show>
