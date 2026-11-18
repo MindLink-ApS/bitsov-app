@@ -168,6 +168,10 @@ struct NodeState {
     signet_only: bool,
     network_refusal: Mutex<crate::network_policy::NetworkRefusal>,
     network_auth_epoch: Mutex<u64>,
+    /// The epoch whose credential passed its checks: identity (when the node
+    /// has one), then a signet report. Signet-only builds send ordinary
+    /// requests only under it; a new credential or any epoch change ends it.
+    network_verified: Mutex<Option<u64>>,
     #[cfg(all(test, desktop, not(feature = "mobile")))]
     test_init_network_support: Mutex<Option<bool>>,
     #[cfg(all(desktop, not(feature = "mobile")))]
@@ -595,6 +599,22 @@ impl NodeState {
         *self.network_refusal.lock().unwrap() = crate::network_policy::NetworkRefusal::None;
     }
 
+    /// Whether the current credential may make ordinary requests: always on
+    /// other builds; on a signet-only build once its network check passed.
+    fn network_checked(&self) -> bool {
+        if !self.signet_only { return true; }
+        let epoch = self.network_auth_epoch.lock().unwrap();
+        *self.network_verified.lock().unwrap() == Some(*epoch)
+    }
+
+    /// Until the network check passes, only the checks themselves may run.
+    fn require_network_authority(&self, method: &reqwest::Method, path: &str) -> Result<(), String> {
+        if (*method == reqwest::Method::GET && NETWORK_CHECK_ROUTES.contains(&path)) || self.network_checked() {
+            return Ok(());
+        }
+        Err(NETWORK_UNCHECKED.into())
+    }
+
     fn require_local_peer(&self) -> Result<(), String> {
         if self.signet_only && !self.remote_mode.load(Ordering::SeqCst)
             && self.external_node.lock().unwrap().is_none() && !verified_local_node(self)
@@ -722,6 +742,7 @@ impl NodeState {
             signet_only: false,
             network_refusal: Mutex::new(crate::network_policy::NetworkRefusal::None),
             network_auth_epoch: Mutex::new(0),
+            network_verified: Mutex::new(None),
             #[cfg(all(test, desktop, not(feature = "mobile")))]
             test_init_network_support: Mutex::new(None),
             api_base: api_base.into(),
@@ -1596,6 +1617,7 @@ async fn restart_node(
     *state.all_in_caps_node.lock().unwrap() = None;
     *state.readmission_ask.lock().unwrap() = None;
     *state.token.lock().unwrap() = None;
+    *state.network_verified.lock().unwrap() = None;
 
     if state.stop_for_restart(NODE_SHUTDOWN_BUDGET) {
         for _ in 0..4 {
@@ -2161,6 +2183,11 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
     }
 }
 
+/// The reads that identify a node and report its network. They are the only
+/// requests a signet-only build sends before that report is checked.
+const NETWORK_CHECK_ROUTES: [&str; 3] = ["/identity", "/status", "/bootstrap/state"];
+const NETWORK_UNCHECKED: &str = "The node's network is not checked yet. Nothing was sent.";
+
 async fn require_signet_report(state: &NodeState, bootstrap: bool) -> Result<u64, String> {
     let epoch = *state.network_auth_epoch.lock().unwrap();
     if !state.signet_only { return Ok(epoch); }
@@ -2176,6 +2203,7 @@ async fn require_signet_report(state: &NodeState, bootstrap: bool) -> Result<u64
     let authority = state.network_auth_epoch.lock().unwrap();
     if *authority != epoch { return Err("The connection changed during its network check.".into()); }
     *state.network_refusal.lock().unwrap() = crate::network_policy::NetworkRefusal::None;
+    *state.network_verified.lock().unwrap() = Some(epoch);
     Ok(epoch)
 }
 
@@ -2459,6 +2487,8 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
             }
             let authority = state.network_auth_epoch.lock().unwrap();
             if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
+            // A new credential is checked again before ordinary requests.
+            *state.network_verified.lock().unwrap() = None;
             *state.token.lock().unwrap() = Some(session.token.clone());
             *state.auth.lock().unwrap() = AuthMode::Paired(session);
             *state.pairing_view.lock().unwrap() = view;
@@ -2467,6 +2497,7 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
         Ok(Established::LocalFallback { token }) => {
             let authority = state.network_auth_epoch.lock().unwrap();
             if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
+            *state.network_verified.lock().unwrap() = None;
             *state.token.lock().unwrap() = Some(token);
             *state.auth.lock().unwrap() = AuthMode::Local;
             *state.pairing_view.lock().unwrap() = view;
@@ -2696,9 +2727,11 @@ async fn call_api(
     if path == "/pair/first-contact-grant" {
         return Err("First-contact approval requires independent owner authority at the node. This app cannot issue it with its paired spend grant.".into());
     }
+    state.require_network_authority(&method, path)?;
     ensure_fresh_token(state).await;
     let mut refreshed = false;
     loop {
+        state.require_network_authority(&method, path)?;
         let token = state
             .token
             .lock()
@@ -5596,6 +5629,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     existing_operation = prior.as_ref().and_then(|p| p.operation_id.clone());
     ensure_fresh_token(state).await;
     if cfg!(test) { pause_points::at(&state.api_base, "after_token").await; }
+    if !state.network_checked() { return Err(ActionError::new("app_not_ready", NETWORK_UNCHECKED)); }
     let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
     if body["host_expected_node_id"].as_str().is_some_and(|expected| expected != node_id) {
@@ -6311,6 +6345,9 @@ async fn replay_direct_payment(state: &NodeState, journal: &Journal, pending: &m
     if let Some(refused) = replay_refusal(state, journal, pending) { return Err(refused); }
     ensure_fresh_token(state).await;
     if let Some(refused) = replay_refusal(state, journal, pending) { return Err(refused); }
+    if !state.network_checked() {
+        return Err(spend_journal::unknown("The node's network is not checked yet. Nothing was dispatched again."));
+    }
     let token = state.token.lock().unwrap().clone()
         .ok_or_else(|| spend_journal::unknown("The node is not authenticated yet. Nothing was dispatched again."))?;
     // One attempt, no re-authentication loop: a refused sign-in sends nothing.
@@ -7389,6 +7426,7 @@ async fn resume_admission_send(state: &NodeState, pending_id: &str, peer: &str, 
     refuse_if_connection_busy(state)?;
     refuse_if_paused(state)?;
     ensure_fresh_token(state).await;
+    if !state.network_checked() { return Err(ActionError::new("app_not_ready", NETWORK_UNCHECKED)); }
     let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     check_node_grant(state, "/messages/compose", &body, max_msat).await?;
     // Restore the original reservation in place. The whole-operation answer
@@ -7855,6 +7893,7 @@ async fn read_file_blob(state: &NodeState, id: &str) -> Result<act::FileBlob, St
     ensure_fresh_token(state).await;
     let mut refreshed = false;
     loop {
+        if !state.network_checked() { return Err(NETWORK_UNCHECKED.into()); }
         let token = state
             .token
             .lock()
@@ -8935,6 +8974,7 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     let prior = journal.pending()?;
     existing_operation = prior.as_ref().and_then(|p| p.operation_id.clone());
     ensure_fresh_token(state).await;
+    if !state.network_checked() { return Err(ActionError::new("app_not_ready", NETWORK_UNCHECKED)); }
     let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
     match &prior {
@@ -10547,6 +10587,7 @@ async fn ai_provider_views(app: &AppHandle<impl tauri::Runtime>) -> Vec<ai::Prov
 /// Read one topic through the broker, off the async runtime.
 async fn ai_read_topic(state: &NodeState, topic: ai::Topic, since_ms: Option<u64>) -> Result<ai::TopicRead, String> {
     ensure_fresh_token(state).await;
+    if !state.network_checked() { return Err(NETWORK_UNCHECKED.into()); }
     let auth = node_auth(state);
     let base = state.api_base.clone();
     let proxy_auth = state
@@ -10890,6 +10931,7 @@ async fn live_bridge(app: AppHandle) {
             }
             if !*state.ready.lock().unwrap() { return Ok(None); }
             ensure_fresh_token(&state).await;
+            if !state.network_checked() { return Ok(None); }
             let Some(token) = state.token.lock().unwrap().clone() else { return Ok(None); };
             let url = control::ws_url(&state.api_base, &token)?;
             *session_identity.lock().unwrap() = state.node_id.lock().unwrap().clone();
@@ -11110,7 +11152,7 @@ async fn media_bridge<R: tauri::Runtime>(
     };
     let link = control::media::run_media_link_full(
         || async {
-            if !*state.ready.lock().unwrap() { return Ok(None); }
+            if !*state.ready.lock().unwrap() || !state.network_checked() { return Ok(None); }
             let Some(token) = media_token(&state).await else { return Ok(None); };
             let url = control::media::media_url(&state.api_base, &call_id, &peer)?;
             Ok(Some((url, token, state.remote_proxy_auth.to_string())))
@@ -11755,7 +11797,8 @@ mod phone_signet_gate_tests {
     use crate::profile::AppProfile;
 
     fn phone_state() -> NodeState {
-        let mut state = NodeState::for_profile(AppProfile::for_platform("tech.mindlink.bitsov", true));
+        // The production constructor, built as a phone build would build it.
+        let mut state = crate::profile::as_phone_build(|| NodeState::for_identifier("tech.mindlink.bitsov"));
         // Nothing listens here: any report read fails and must be refused.
         state.api_base = "http://localhost:1/api/v1".into();
         state

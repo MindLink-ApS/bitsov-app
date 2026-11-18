@@ -273,6 +273,7 @@ async fn request(
     body: Option<&str>,
 ) -> Result<Zeroizing<Vec<u8>>, String> {
     guard(state)?;
+    state.require_network_authority(&method, path)?;
     ensure_fresh_token(state).await;
     let token = state
         .token
