@@ -5671,6 +5671,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // came while this minute waited here issues nothing.
     if path == "/messages/compose" && body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK)) {
         if let Some(refused) = block_consent_refusal(state, &node_id, &body) { return Err(refused); }
+        if cfg!(test) { pause_points::at(&state.api_base, "between_block_checks").await; }
         if minute_past_journaled_hold(state, &journal, &node_id, &body, max_msat)? {
             return Err(ActionError::new(MINUTE_PAST_HOLD, MINUTE_PAST_HOLD_WORDS));
         }
@@ -8381,8 +8382,14 @@ const MINUTE_PAST_HOLD_WORDS: &str = "The next minute of this call would go past
 /// yet does. A journal that cannot be read pays nothing.
 fn minute_past_journaled_hold(state: &NodeState, journal: &Journal, node_id: &str, body: &serde_json::Value, cap: u64) -> Result<bool, ActionError> {
     let (peer, call_id) = block_identity(body);
-    let limit = state.call_consents.lock().unwrap().find(node_id, &peer, &call_id)
-        .and_then(|c| Some(c.confirmed_msat?.min(c.consent.max_hold_msat)));
+    // Ended or refused since `block_consent_refusal` (End takes no money lock):
+    // that refusal is the answer, not "past the hold".
+    let limit = {
+        let kept = state.call_consents.lock().unwrap();
+        let Some(c) = kept.find(node_id, &peer, &call_id) else { return Err(ActionError::new("call_no_consent", NO_CONSENT)) };
+        if let Some(error) = consent_closed(&c.phase) { return Err(error); }
+        c.confirmed_msat.map(|m| m.min(c.consent.max_hold_msat))
+    };
     let Some(limit) = limit else { return Ok(true) };
     let records = journal.call_operations_for(node_id, Some(&peer), Some(&call_id))?;
     let journaled = records.iter().filter(|r| r.kind == "call_block" && r.state != spend_journal::OperationState::Unpaid)
@@ -18034,6 +18041,25 @@ mod control_act_tests {
                 assert_eq!(minutes_sent(&node), minutes as usize, "{case}");
             }
         }
+    }
+
+    /// End lands while a minute sits between its two checks under the money
+    /// lock (consent still admitted, then the hold). The minute is refused as
+    /// a call that ended, not as one past its hold, and nothing is sent.
+    #[test]
+    fn a2_end_between_the_minute_checks_reports_the_call_ended() {
+        let rt = race_runtime();
+        let (routes, _) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "between_block_checks");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+        rt.block_on(arrived.notified());
+        end_minutes(&node.state, CALL_ID);
+        release.notify_one();
+        let code = rt.block_on(minute).unwrap().unwrap_err().code;
+        assert_eq!(code, "call_not_live", "End came first: the call ended, not past its hold");
+        assert_eq!(consent_phase(node), ConsentPhase::Ended);
+        assert_eq!(minutes_sent(node), 0);
     }
 
     /// A minute and End or local teardown, racing freely on OS threads (the
