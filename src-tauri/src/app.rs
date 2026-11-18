@@ -5828,6 +5828,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     journal.record_outcome(&pending, OpState::Dispatching, None)?;
     let begun = pending.clone();
     let abandon = |journal: &Journal| -> Result<(), ActionError> {
+        // Tests only: this step can be made to fail (`fault_points`).
+        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_abandon")?;
         if retry.is_some() {
             // This attempt paid nothing new; its original payment still exists.
             journal.record_outcome(&begun, OpState::PaidUndelivered, None)?;
@@ -5871,18 +5873,19 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         }
         journal.save(&pending)?;
     }
-    let release = |state: &NodeState| match &charged {
-        Some(id) => close_charge(state, id, None, None),
-        None => Ok(()),
+    let release = |state: &NodeState| -> Result<(), ActionError> {
+        // Tests only: this step can be made to fail (`fault_points`).
+        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_release")?;
+        match &charged {
+            Some(id) => close_charge(state, id, None, None),
+            None => Ok(()),
+        }
     };
     // Proven unpaid: free the reservation first, then retire the pending
     // record. A failed release returns with that record still saved, so a
     // reservation is never left held with nothing that can reconcile it.
     let unpaid_cleanup = |state: &NodeState, journal: &Journal| -> Result<(), ActionError> {
-        // Tests only: either step can be made to fail (`fault_points`).
-        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_release")?;
         release(state)?;
-        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_abandon")?;
         abandon(journal)
     };
     pending.non_dispatch_proven = false;
@@ -9038,9 +9041,13 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
         Some(p) if p.resumable && p.node_id == node_id => {}
         _ => return Err(spend_journal::unknown("Check the pending result before sending again.")),
     }
-    let abandon = |journal: &Journal| match &prior {
-        Some(p) => journal.save(p),
-        None => journal.clear(),
+    let abandon = |journal: &Journal| -> Result<(), ActionError> {
+        // Tests only: this step can be made to fail (`fault_points`).
+        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_abandon")?;
+        match &prior {
+            Some(p) => journal.save(p),
+            None => journal.clear(),
+        }
     };
     refuse_if_paused(state)?;
     check_auth(state, auth)?;
@@ -9054,12 +9061,14 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     }
     pending.budgeted = true;
     journal.save(&pending)?;
-    let release = |state: &NodeState| close_charge(state, &charge_id, None, None);
+    let release = |state: &NodeState| -> Result<(), ActionError> {
+        // Tests only: this step can be made to fail (`fault_points`).
+        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_release")?;
+        close_charge(state, &charge_id, None, None)
+    };
     // Proven unpaid: release, then clear (see `money_post_with`).
     let unpaid_cleanup = |state: &NodeState, journal: &Journal| -> Result<(), ActionError> {
-        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_release")?;
         release(state)?;
-        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_abandon")?;
         abandon(journal)
     };
     if let Err(e) = refuse_if_connection_waiting(state)
