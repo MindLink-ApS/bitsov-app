@@ -554,7 +554,8 @@ pub fn book_path(dir: &Path, node_id: &str) -> PathBuf {
 /// A book is *established* when this marker is present (anything at the path,
 /// a dangling symlink included). It is created right after the first book
 /// rename succeeds, and on the first successful load of a book written by an
-/// older build that had no marker. Once established, a missing book is lost
+/// older build that had no marker. A marker that could not be written after a
+/// committed save does not fail that save; the next load or save writes it. Once established, a missing book is lost
 /// spending history, not a first run: [`load`] refuses it instead of starting
 /// a fresh, empty book. A brand-new install, or a new identity, has neither
 /// book nor marker and starts empty as before.
@@ -619,10 +620,62 @@ pub fn save(dir: &Path, book: &Book) -> Result<(), ActionError> {
     let mut file = options.open(&tmp).map_err(unreadable)?;
     file.write_all(&serde_json::to_vec(book).map_err(unreadable)?).map_err(unreadable)?;
     file.sync_all().map_err(unreadable)?;
+    #[cfg(test)]
+    if faults::hit(dir, faults::Step::Rename) { return Err(unreadable("injected rename failure")); }
     std::fs::rename(&tmp, &path).map_err(unreadable)?;
-    // After the rename: a failed first save must not leave a marker for a
-    // book that was never written.
-    mark_established(dir, &book.node_id)
+    // The book is committed from here on, so nothing below fails the save: a
+    // caller told the write failed would repeat an edit that already landed,
+    // such as a reservation, and count it twice.
+    //
+    // The marker follows the rename on purpose. Written first, a failed rename
+    // or a crash between the two would leave a marker with no book, and every
+    // later load would refuse a store that was never written. Written after,
+    // the only gap is a committed book without its marker. The next save
+    // writes it again, and the next load writes it before it hands the book
+    // out, refusing (before any edit) if it still cannot.
+    if !mark_after_commit(dir, &book.node_id) {
+        // No error detail: it can name the private budget path.
+        eprintln!("budget: book saved; its first-write marker was not, and is written again on the next load or save");
+        let _ = std::fs::File::open(dir).and_then(|f| f.sync_all());
+    }
+    Ok(())
+}
+
+/// The marker write that follows a committed book rename. True when written.
+#[cfg(unix)]
+fn mark_after_commit(dir: &Path, node_id: &str) -> bool {
+    #[cfg(test)]
+    if faults::hit(dir, faults::Step::Marker) { return false; }
+    mark_established(dir, node_id).is_ok()
+}
+
+/// Test-only I/O failures for one budget directory, armed until disarmed.
+#[cfg(test)]
+pub(crate) mod faults {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub(crate) enum Step {
+        /// The book rename fails: nothing is committed.
+        Rename,
+        /// The marker write after a committed book rename fails.
+        Marker,
+    }
+
+    static ARMED: Mutex<Vec<(PathBuf, Step)>> = Mutex::new(Vec::new());
+
+    pub(crate) fn arm(dir: &Path, step: Step) {
+        ARMED.lock().unwrap_or_else(|e| e.into_inner()).push((dir.to_path_buf(), step));
+    }
+
+    pub(crate) fn disarm(dir: &Path) {
+        ARMED.lock().unwrap_or_else(|e| e.into_inner()).retain(|(d, _)| d != dir);
+    }
+
+    pub(super) fn hit(dir: &Path, step: Step) -> bool {
+        ARMED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(d, s)| d == dir && *s == step)
+    }
 }
 
 #[cfg(not(unix))]

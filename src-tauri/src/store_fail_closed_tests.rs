@@ -247,6 +247,47 @@ fn budget_book_starts_fresh_only_when_never_written() {
     assert!(load(failed.path(), NODE).is_ok());
 }
 
+/// A marker failure after the book rename has committed: the save stands and
+/// is reported as saved, the book holds the reservation once, and the marker
+/// is written again by the next load.
+#[test]
+fn budget_marker_failure_after_commit_keeps_the_save() {
+    use crate::budget::{book_path, established_path, faults, load, save, Book};
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("app-spend");
+    let mut book = Book::new(NODE);
+    book.reserve("r1", "peer", false, 5_000, 1);
+    faults::arm(&dir, faults::Step::Marker);
+    let saved = save(&dir, &book);
+    faults::disarm(&dir);
+    assert!(saved.is_ok(), "a committed book is saved: {:?}", saved.err().map(|e| e.message));
+    assert!(crate::pairing::key::nothing_at(&established_path(&dir, NODE)), "the marker write failed");
+    let loaded = load(&dir, NODE).unwrap();
+    assert_eq!(loaded.ledger.iter().filter(|e| e.id == "r1").count(), 1, "reserved exactly once");
+    assert!(!crate::pairing::key::nothing_at(&established_path(&dir, NODE)), "the next load writes it");
+    std::fs::remove_file(book_path(&dir, NODE)).unwrap();
+    assert_eq!(load(&dir, NODE).unwrap_err().code, "budget_unreadable");
+}
+
+/// A first save whose rename fails commits nothing: no book, no marker, and
+/// the next load starts fresh.
+#[test]
+fn budget_rename_failure_leaves_no_marker() {
+    use crate::budget::{book_path, established_path, faults, load, save, Book};
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("app-spend");
+    faults::arm(&dir, faults::Step::Rename);
+    let saved = save(&dir, &Book::new(NODE));
+    faults::disarm(&dir);
+    assert_eq!(saved.unwrap_err().code, "budget_unreadable");
+    assert!(crate::pairing::key::nothing_at(&book_path(&dir, NODE)));
+    assert!(crate::pairing::key::nothing_at(&established_path(&dir, NODE)));
+    assert!(load(&dir, NODE).unwrap().ledger.is_empty());
+    // Not established by the failed attempt: a later first save still works.
+    save(&dir, &Book::new(NODE)).unwrap();
+    assert!(!crate::pairing::key::nothing_at(&established_path(&dir, NODE)));
+}
+
 fn client_key(dir: &Path) {
     write_private(&dir.join(crate::pairing::key::KEY_FILE), "11".repeat(32).as_bytes());
 }
