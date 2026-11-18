@@ -69,6 +69,8 @@ export function CallVideoStage(props: {
     if (full() === 'window') setFull(null);
   };
   const fillWindow = () => {
+    // A request that settles after the call ended registers nothing.
+    if (disposed) return;
     setFull('window');
     releaseEscape?.();
     releaseEscape = onEscape(leaveWindowFill);
@@ -88,6 +90,11 @@ export function CallVideoStage(props: {
     if (!request || !enabled) { fillWindow(); return; }
     try {
       await request();
+      if (disposed) {
+        // Granted after the call ended: leave full screen again, nothing to show.
+        try { await (doc.exitFullscreen ? doc.exitFullscreen() : doc.webkitExitFullscreen?.()); } catch { /* already left */ }
+        return;
+      }
       setFull('native');
     } catch {
       // Refused (no user gesture, a webview without element full screen): fill the window instead.
