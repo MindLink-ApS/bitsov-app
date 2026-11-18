@@ -424,3 +424,15 @@ it.each(['en', 'da'])('focuses the PhoneTrust heading with its deposit disclosur
   expect(document.getElementById(heading.getAttribute('aria-describedby')!)?.textContent).toBe(locale === 'en' ? 'The host can spend your deposits.' : 'Værten kan bruge dine indskud.');
   expect(heading.closest('[aria-live], [role="alert"], [role="status"]')).toBeNull();
 });
+it.each([
+  ['en', 'Your keys stay in the node. This phone never shows your recovery phrase and keeps no copy of it.'],
+  ['da', 'Dine nøgler bliver i noden. Denne telefon viser aldrig din gendannelsessætning og gemmer ingen kopi af den.'],
+] as const)('PhoneTrust says only what this phone does with the recovery phrase in %s', async (locale, expected) => {
+  dispose = render(() => <PhoneTrust locale={locale} onContinue={async () => {}} />, document.body);
+  await tick();
+  const options = document.querySelector('.phone-options')!;
+  const lines = [...options.querySelectorAll('p')].map(p => p.textContent);
+  expect(lines).toContain(expected);
+  // The old promise covered all of BitSov, but the Mac shows a new phrase once during setup.
+  expect(options.textContent).not.toMatch(/never shows you your recovery phrase|never copies it anywhere|kopierer den aldrig/);
+});
