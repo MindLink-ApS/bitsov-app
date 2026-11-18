@@ -18260,7 +18260,7 @@ mod control_act_tests {
     #[test]
     fn a2_a_refusal_between_the_minute_checks_keeps_its_own_reason() {
         const CODE: &str = "test_refused_between_checks";
-        const WORDS: &str = "Refused between the two checks for this test. Nothing was paid.";
+        const WORDS: &str = "Synthetic refusal text for this test only.";
         let rt = race_runtime();
         let case = "refused between checks";
         let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
