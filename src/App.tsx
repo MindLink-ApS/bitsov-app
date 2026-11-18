@@ -618,6 +618,8 @@ function IdentityGate(props: {
   };
 
   const displayError = () => error() ?? props.restoreError();
+  // A failed restore gets its own plain summary; the raw error stays behind Details.
+  const restoreFailed = () => props.restoreError() !== null && displayError() === props.restoreError();
 
   return (
     <div class="state ready">
@@ -727,7 +729,7 @@ function IdentityGate(props: {
       </Show>
 
       <Show when={displayError()}>
-        <SoftError message={displayError()!} />
+        <SoftError message={displayError()!} summary={restoreFailed() ? t('obRestoreFailed') : undefined} />
       </Show>
     </div>
   );

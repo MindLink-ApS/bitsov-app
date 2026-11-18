@@ -393,3 +393,45 @@ for (const lang of ['en', 'da']) {
     });
   }
 }
+
+// UX-10. A room nobody in it can receive yet: the reason under the cost wraps and stays
+// readable, and the composer stays on screen.
+const noRecipients = { en: 'No members can receive this message right now', da: 'Ingen medlemmer kan modtage denne besked lige nu' };
+for (const lang of ['en', 'da'] as const) {
+  for (const [width, height] of [[360, 740], [393, 852]] as const) {
+    test(`${lang} ${width}: a room's can't-send reason wraps and the composer stays on screen`, async ({ page }) => {
+      await page.setViewportSize({ width, height });
+      await page.goto(`${preview}?scene=list&lang=${lang}`);
+      await page.waitForSelector('[data-phone-list]');
+      // A local room with two sample contacts, as + New room would leave it.
+      const id = await page.evaluate(async () => {
+        const room = await import('/src/control/room.ts');
+        const own = '3f9a' + '1'.repeat(56) + 'c0de';
+        const made = await room.newRoom(own, ['a'.repeat(64), 'b'.repeat(64)]);
+        return room.rememberRoom(made)!.id;
+      });
+      await page.locator(`[data-phone-list] [data-track="bound:${id}"]`).click();
+      const basis = page.locator('[data-room-composer] [data-cost] .basis');
+      await expect(basis).toHaveText(noRecipients[lang]);
+      await page.waitForTimeout(400); // The phone shell's slide has settled.
+      const m = await basis.evaluate((el) => {
+        const s = getComputedStyle(el);
+        const r = el.getBoundingClientRect();
+        const form = el.closest('[data-room-composer]')!.getBoundingClientRect();
+        const send = el.closest('[data-room-composer]')!.querySelector('[data-send]')!.getBoundingClientRect();
+        return { sw: el.scrollWidth, cw: el.clientWidth, sh: el.scrollHeight, ch: el.clientHeight, overflow: s.overflowX, ellipsis: s.textOverflow, left: r.left, right: r.right,
+          top: form.top, bottom: form.bottom, sendRight: send.right, sendBottom: send.bottom, vw: window.innerWidth, vh: window.innerHeight };
+      });
+      expect(m.sw).toBeLessThanOrEqual(m.cw);
+      expect(m.sh).toBeLessThanOrEqual(m.ch);
+      expect(m.overflow).not.toBe('hidden');
+      expect(m.ellipsis).not.toBe('ellipsis');
+      expect(m.left).toBeGreaterThanOrEqual(0);
+      expect(m.right).toBeLessThanOrEqual(m.vw + 0.5);
+      expect(m.top).toBeGreaterThanOrEqual(0);
+      expect(m.bottom).toBeLessThanOrEqual(m.vh + 0.5);
+      expect(m.sendRight).toBeLessThanOrEqual(m.vw + 0.5);
+      expect(m.sendBottom).toBeLessThanOrEqual(m.vh + 0.5);
+    });
+  }
+}
