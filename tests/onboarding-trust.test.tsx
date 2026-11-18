@@ -213,3 +213,76 @@ it.each(['mode', 'node'] as const)('a new trust boundary (%s) drops the earlier 
   }, { timeout: 4000 });
   expect(summaries()).not.toContain(TRUST_RETRY);
 });
+
+it('a failed trust save survives status polls that keep the same mode and node id', async () => {
+  vi.useFakeTimers();
+  const { state, invoke } = host();
+  mount();
+  await vi.advanceTimersByTimeAsync(1);
+  state.fail = true;
+  accept();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(summaries()).toContain(TRUST_RETRY);
+  const polls = () => invoke.mock.calls.filter(([cmd]) => cmd === 'node_status').length;
+  const before = polls();
+  // Every poll hands the gate fresh status and pairing objects with the same values.
+  await vi.advanceTimersByTimeAsync(1500 * 4);
+  expect(polls()).toBeGreaterThanOrEqual(before + 3);
+  expect(summaries()).toContain(TRUST_RETRY);
+  expect(anyGate()).not.toBeNull();
+});
+
+it('a node id that is briefly missing on a poll is not a new trust boundary', async () => {
+  vi.useFakeTimers();
+  const { state } = host();
+  mount();
+  await vi.advanceTimersByTimeAsync(1);
+  state.fail = true;
+  accept();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(summaries()).toContain(TRUST_RETRY);
+  state.node = null as unknown as string;
+  await vi.advanceTimersByTimeAsync(1500);
+  state.node = 'AB'.repeat(32);
+  await vi.advanceTimersByTimeAsync(1500 * 2);
+  expect(anyGate()).not.toBeNull();
+  expect(summaries()).toContain(TRUST_RETRY);
+});
+
+it('a trust save that fails after a restore cleared the gate does not bring its error back', async () => {
+  const { state, invoke } = host();
+  let fail!: (error: Error) => void;
+  const pending = new Promise<boolean>((_, reject) => { fail = reject; });
+  vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string, args?: Record<string, unknown>) =>
+    cmd === 'trust_acknowledge' ? pending : invoke(cmd, args),
+  });
+  mount();
+  await vi.waitFor(() => expect(anyGate()).not.toBeNull());
+  accept();
+  await submitRestore();
+  await vi.waitFor(() => expect(document.querySelector('.ok-note')).not.toBeNull());
+  fail(new Error('Could not save trust acknowledgement.'));
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(summaries()).not.toContain(TRUST_RETRY);
+  expect(document.querySelector('[data-soft-detail]')).toBeNull();
+  expect(anyGate()).not.toBeNull();
+  expect(state.accepted).toBeNull();
+});
+
+it('a trust save that fails after the mode changed does not show on the new gate', async () => {
+  const { state, invoke } = host();
+  let fail!: (error: Error) => void;
+  const pending = new Promise<boolean>((_, reject) => { fail = reject; });
+  vi.stubGlobal('__TAURI_INTERNALS__', { invoke: (cmd: string, args?: Record<string, unknown>) =>
+    cmd === 'trust_acknowledge' ? pending : invoke(cmd, args),
+  });
+  mount();
+  await vi.waitFor(() => expect(gate()).not.toBeNull());
+  accept();
+  state.remote = false;
+  await vi.waitFor(() => expect(document.querySelector('[data-gate="g6-local-trust"]')).not.toBeNull(), { timeout: 4000 });
+  fail(new Error('Could not save trust acknowledgement.'));
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(summaries()).not.toContain(TRUST_RETRY);
+  expect(document.querySelector('[data-gate="g6-local-trust"]')).not.toBeNull();
+});

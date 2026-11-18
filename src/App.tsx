@@ -587,13 +587,25 @@ function IdentityGate(props: {
   const [trustError, setTrustError] = createSignal<string | null>(null);
   const [restored, setRestored] = createSignal<string | null>(null);
   usePairingActivity(() => showRestore() || busy() || savingTrust());
+  // Only the latest Continue may report a failed save. A restore or a new trust
+  // boundary bumps this, so an acknowledgement still in flight cannot write later.
+  let trustAttempt = 0;
+  const dropTrustError = () => { trustAttempt++; setTrustError(null); };
   // A failed save belongs to one trust boundary; a new mode or node id asks afresh.
-  createEffect(on([() => props.remote, props.nodeId], () => setTrustError(null), { defer: true }));
+  // Polls hand over fresh status/pairing objects every tick, so compare the values:
+  // the memo only notifies on a real change. A briefly missing node id keeps the last one.
+  let lastNodeId: string | null = null;
+  const trustBoundary = createMemo(() => {
+    const id = props.nodeId()?.toLowerCase() ?? null;
+    if (id) lastNodeId = id;
+    return `${props.remote ? 'remote' : 'local'}.${lastNodeId ?? ''}`;
+  });
+  createEffect(on(trustBoundary, dropTrustError, { defer: true }));
 
   const submitRestore = async (event: Event) => {
     event.preventDefault();
     // A restore replaces the identity the failed acknowledgement was for.
-    setTrustError(null);
+    dropTrustError();
     // Read once, then clear immediately: the phrase lives in this component for the
     // duration of the call and nowhere else. The host forwards it to the node.
     const value = phrase();
@@ -666,9 +678,10 @@ function IdentityGate(props: {
       <button class="primary" data-trust-continue disabled={busy() || savingTrust()} onClick={async () => {
         setSavingTrust(true);
         setError(null);
-        setTrustError(null);
+        dropTrustError();
+        const attempt = trustAttempt;
         try { await props.onContinue(); }
-        catch (e) { setTrustError(String(e)); }
+        catch (e) { if (attempt === trustAttempt) setTrustError(String(e)); }
         finally { setSavingTrust(false); }
       }}>
         {t('obTrustContinue')}
