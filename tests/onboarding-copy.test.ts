@@ -48,8 +48,6 @@ const literalAllowlist: Record<string, readonly string[]> = {
     "Remote trust",
     "Nøglerne ligger på den anden maskine. Alle, der kan logge ind på den, kan bruge dine indskud. Indsæt kun penge, hvis du stoler på værten.",
     "This node’s keys live on the remote machine. Anyone with access — whoever can log in to that computer — can spend what you deposit. Only fund a node whose host you trust.",
-    "Nøglerne bliver i boksen. BitSov viser aldrig din gendannelsessætning og kopierer den aldrig.",
-    "Your keys stay in the node. BitSov never shows you your recovery phrase and never copies it anywhere.",
   ],
 };
 

@@ -244,8 +244,16 @@ it.each([
   setLanguagePref(lang);
   const raw = 'Error: GET /onboarding/state returned 500: {"error":"internal"}';
   const funded = { current_step: 'funded', tier: 'full', funding_address: 'bcrt1qfunded', funding_amount_sats_required: 50_000, funding_amount_sats_received: 50_000, funding_evidence: null, funded: true };
+  // Only the first read after funding fails; that read belongs to this panel's own
+  // start(). Later reads return funded, so any other mounted deposit panel settles
+  // after one tick and stops reading, and a read by this panel would clear the error.
   let started = false;
-  const fundState = vi.fn(() => (started ? Promise.reject(raw) : Promise.resolve(null)));
+  let failed = false;
+  const fundState = vi.fn(() => {
+    if (!started) return Promise.resolve(null);
+    if (!failed) { failed = true; return Promise.reject(raw); }
+    return Promise.resolve(funded);
+  });
   const fundStart = vi.fn(() => { started = true; return Promise.resolve(funded); });
   const receive = await openReceive({ fund_state: fundState, fund_start: fundStart });
   await vi.waitFor(() => expect(receive()?.querySelector('[data-fund-start]')).toBeTruthy());
@@ -254,8 +262,15 @@ it.each([
   expect(fundStart).toHaveBeenCalledTimes(1);
   await vi.waitFor(() => expect(receive()?.querySelector('[data-soft-summary]')?.textContent).toBe(expected));
   expect(receive()!.querySelector('.funded')).not.toBeNull();
-  // Later ticks do not read again for a funded deposit, so the manual step stays.
+  // One tick lets any other mounted panel take its funded read and stop; this
+  // panel adds no read of its own.
+  const beforeTick = fundState.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(3_000);
+  expect(fundState.mock.calls.length - beforeTick).toBeLessThanOrEqual(1);
+  // From here no panel reads the deposit status again: five more ticks, no new read.
+  const reads = fundState.mock.calls.length;
   await vi.advanceTimersByTimeAsync(15_000);
+  expect(fundState).toHaveBeenCalledTimes(reads);
   const summary = receive()!.querySelector('[data-soft-summary]')!.textContent!;
   expect(summary).toBe(expected);
   expect(summary).not.toMatch(/every few seconds|få sekunders mellemrum/);
