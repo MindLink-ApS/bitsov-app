@@ -17978,67 +17978,98 @@ mod control_act_tests {
         assert_eq!(minutes_sent(&node), 0);
     }
 
-    /// End or local teardown on another OS thread against a minute's last step.
-    /// Either one revokes at once, while the minute still holds the money lock.
-    /// Revoked first: no kind 404 goes out and the minute is charged nothing.
-    /// Decided first: exactly one kind 404 goes out and is accounted, and End's
-    /// hangup is ordered after it.
+    /// End or local teardown on the runtime's worker threads against a minute's
+    /// last step. Either one revokes at once, while the minute still holds the
+    /// money lock. Revoked first: no kind 404 goes out and the minute is charged
+    /// nothing, its reservation released. Decided first: exactly one kind 404
+    /// goes out and is accounted, and End's hangup is ordered after it.
+    /// Teardown never claims the node closed the call. Every wait is bounded.
     #[test]
     fn a2_a_minute_revoked_first_is_never_sent_and_one_decided_first_goes_before_the_hangup() {
         let rt = race_runtime();
         for ender in ["end", "close"] {
             for revoke_first in [true, false] {
                 let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
-                let node = rt.block_on(minute_ready(routes));
+                let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
                 let state = &node.state;
                 let spent = budget_now(state).spent_msat;
-                let op = offer_op(&node);
+                let op = offer_op(node);
                 let point = if revoke_first { "before_decision" } else { "after_decision" };
                 let case = format!("{ender} {point}");
+                let before = minute_snapshot(node, &paid);
+                assert_admitted_and_idle(node, &case);
                 let (arrived, release) = pause_points::arm(&state.api_base, point);
-                std::thread::scope(|s| {
-                    let minute = s.spawn(|| rt.block_on(do_call_block(state, A, CALL_ID, 0)));
-                    rt.block_on(arrived.notified());
-                    let stop = s.spawn(|| rt.block_on(async {
-                        if ender == "end" { do_op_end_call(state, CALL_ID).await.map(|_| ()) }
-                        else { do_op_close_call(state, &op, A, CALL_ID).await }
-                    }));
-                    let deadline = Instant::now() + Duration::from_secs(2);
-                    while consent_phase(&node) != ConsentPhase::Ended && Instant::now() < deadline {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    let phase = consent_phase(&node);
-                    let sent_while_paused = compose_kinds(&node);
-                    // Every assertion below runs after the minute is released, so a
-                    // failure ends the test instead of leaving it paused.
-                    release.notify_one();
-                    assert_eq!(phase, ConsentPhase::Ended, "{case}: revoked at once, without the money lock");
-                    assert_eq!(sent_while_paused, [400], "{case}: nothing goes out while the minute holds the lock");
-                    let minute = minute.join().unwrap();
-                    if revoke_first {
-                        assert_eq!(minute.unwrap_err().code, "call_not_live", "{case}");
-                    } else {
-                        minute.unwrap();
-                    }
-                    stop.join().unwrap().unwrap();
-                });
+                let minute = rt.spawn(do_call_block(state, A, CALL_ID, 0));
+                reach(&rt, &arrived, &release, &case);
+                let stop = {
+                    let op = op.clone();
+                    rt.spawn(async move {
+                        if ender == "end" { do_op_end_call(&node.state, CALL_ID).await.map(|_| ()) }
+                        else { do_op_close_call(&node.state, &op, A, CALL_ID).await }
+                    })
+                };
+                let phase = phase_once_ended(node);
+                let sent_while_paused = compose_kinds(node);
+                let posts_while_paused = node.posts();
+                let stop_waiting = !stop.is_finished();
+                // Every assertion below runs after the minute is released, so a
+                // failure ends the test instead of leaving it paused.
+                release.notify_one();
+                assert_eq!(phase, ConsentPhase::Ended, "{case}: revoked at once, without the money lock");
+                assert_eq!(sent_while_paused, [400], "{case}: nothing goes out while the minute holds the lock");
+                assert_eq!(posts_while_paused, before.posts, "{case}: no POST of any kind while paused");
+                assert!(stop_waiting, "{case}: the ender waits for the minute's money lock");
+                let minute = joined(&rt, minute, &case);
+                if revoke_first {
+                    assert_eq!(minute.unwrap_err().code, "call_not_live", "{case}");
+                } else {
+                    minute.unwrap();
+                }
+                joined(&rt, stop, &case).unwrap();
                 let hangups = u64::from(ender == "end");
                 let minutes = u64::from(!revoke_first);
                 let mut order = vec![400];
                 if !revoke_first { order.push(404); }
                 if ender == "end" { order.push(403); }
-                assert_eq!(compose_kinds(&node), order, "{case}: the minute, if any, then the hangup");
+                assert_eq!(compose_kinds(node), order, "{case}: the minute, if any, then the hangup");
                 assert_eq!(budget_now(state).spent_msat, spent + (minutes + hangups) * PAID_SIGNAL_MSAT, "{case}: charged exactly what was sent");
                 assert_eq!(paid.lock().unwrap().pays as u64, 1 + minutes + hangups, "{case}");
-                let records = minute_records(&node);
+                let records = minute_records(node);
                 assert_eq!(records.len(), 1, "{case}");
                 assert_eq!(records[0].state, if revoke_first { spend_journal::OperationState::Unpaid } else { spend_journal::OperationState::Settled }, "{case}");
                 assert_eq!(records[0].paid_msat.unwrap_or(0), minutes * PAID_SIGNAL_MSAT, "{case}");
-                assert!(pending(&node).is_none(), "{case}");
-                assert_eq!(consent_phase(&node), ConsentPhase::Ended, "{case}");
-                // Revoked: no later minute passes.
+                assert!(pending(node).is_none(), "{case}");
+                assert_eq!(consent_phase(node), ConsentPhase::Ended, "{case}");
+                // Every POST: the earlier ones unchanged, then exactly the expected
+                // signals for this peer and call, and nothing else.
+                let after = minute_snapshot(node, &paid);
+                assert_eq!(after.posts[..before.posts.len()], before.posts[..], "{case}");
+                let added: Vec<_> = after.posts[before.posts.len()..].iter().map(compose_signal).collect();
+                let expected: Vec<_> = order[1..].iter().map(|kind| ("/messages/compose".to_string(), *kind, A.to_string(), CALL_ID.to_string())).collect();
+                assert_eq!(added, expected, "{case}: no other POST");
+                // One reservation per paid signal; a refused minute's is released.
+                assert_eq!(after.book[..before.book.len()], before.book[..], "{case}");
+                assert_eq!(after.book.len(), before.book.len() + (minutes + hangups) as usize, "{case}: no reservation left held");
+                assert!(after.book.iter().all(|(_, _, settled)| *settled), "{case}: no reservation left held");
+                assert_eq!(records[0].peer, A, "{case}");
+                assert_eq!(records[0].call_id.as_deref(), Some(CALL_ID), "{case}");
+                assert_ne!(records[0].op_id, op, "{case}");
+                let hangup_ops = hangup_records(node);
+                assert_eq!(hangup_ops.len() as u64, hangups, "{case}");
+                if let Some(hangup) = hangup_ops.first() {
+                    assert_eq!(hangup.parent_op.as_deref(), Some(op.as_str()), "{case}: the hangup is bound to the offer");
+                    assert_eq!(hangup.state, spend_journal::OperationState::Settled, "{case}");
+                    assert_ne!(hangup.op_id, records[0].op_id, "{case}");
+                } else {
+                    let offer = spend_journal(state).unwrap().operation_record(&op).unwrap().expect("the offer stays recorded");
+                    assert!(!offer.call_closed, "{case}: local teardown is not the node closing the call");
+                    assert!(!call_consent(state, A, CALL_ID).expect("consent kept").node_closed, "{case}");
+                }
+                // Revoked: no later minute passes, and nothing more is sent or paid.
+                let settled = minute_snapshot(node, &paid);
                 assert_eq!(rt.block_on(do_call_block(state, A, CALL_ID, 1)).unwrap_err().code, "call_not_live", "{case}");
-                assert_eq!(minutes_sent(&node), minutes as usize, "{case}");
+                assert_eq!(minutes_sent(node), minutes as usize, "{case}");
+                assert_eq!(minute_snapshot(node, &paid), settled, "{case}");
             }
         }
     }
@@ -18091,7 +18122,11 @@ mod control_act_tests {
     /// Waits, bounded, for a minute to reach its armed pause point. If it never
     /// does, the gate is released so nothing stays paused, and the test fails.
     fn reach(rt: &tokio::runtime::Runtime, arrived: &tokio::sync::Notify, release: &tokio::sync::Notify, case: &str) {
-        if rt.block_on(async { tokio::time::timeout(Duration::from_secs(5), arrived.notified()).await }).is_err() {
+        reach_within(rt, arrived, release, case, Duration::from_secs(5));
+    }
+
+    fn reach_within(rt: &tokio::runtime::Runtime, arrived: &tokio::sync::Notify, release: &tokio::sync::Notify, case: &str, bound: Duration) {
+        if rt.block_on(async { tokio::time::timeout(bound, arrived.notified()).await }).is_err() {
             release.notify_one();
             panic!("{case}: the minute never reached its pause point");
         }
@@ -18100,8 +18135,12 @@ mod control_act_tests {
     /// A spawned task's result, bounded: a task still running after 20 seconds
     /// is aborted and fails the test instead of hanging it.
     fn joined<T>(rt: &tokio::runtime::Runtime, task: tokio::task::JoinHandle<T>, case: &str) -> T {
+        joined_within(rt, task, case, Duration::from_secs(20))
+    }
+
+    fn joined_within<T>(rt: &tokio::runtime::Runtime, task: tokio::task::JoinHandle<T>, case: &str, bound: Duration) -> T {
         let abort = task.abort_handle();
-        match rt.block_on(async { tokio::time::timeout(Duration::from_secs(20), task).await }) {
+        match rt.block_on(async { tokio::time::timeout(bound, task).await }) {
             Ok(done) => done.unwrap(),
             Err(_) => {
                 abort.abort();
@@ -18278,6 +18317,211 @@ mod control_act_tests {
         assert_eq!(minute_snapshot(node, &paid), before, "{case}: no POST, charge, reservation or payment");
         assert!(minute_records(node).is_empty(), "{case}");
         assert!(pending(node).is_none(), "{case}");
+    }
+
+    /// Synthetic: the call's consent disappears while a minute sits between its
+    /// two checks (no product path removes a kept consent). The second check
+    /// finds none and the minute is refused as having no consent: nothing is
+    /// sent, charged, reserved or begun, and nothing is hung up.
+    #[test]
+    fn a2_a_consent_gone_between_the_minute_checks_pays_nothing() {
+        let rt = race_runtime();
+        let case = "consent gone between checks";
+        let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
+        let before = minute_snapshot(node, &paid);
+        assert_admitted_and_idle(node, case);
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "between_block_checks");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+        reach(&rt, &arrived, &release, case);
+        node.state.call_consents.lock().unwrap().entries.retain(|c| !(c.node_id == OWN && c.peer == A && c.call_id == CALL_ID));
+        release.notify_one();
+        let error = joined(&rt, minute, case).unwrap_err();
+        assert_eq!((error.code, error.message.as_str()), ("call_no_consent", NO_CONSENT), "{case}");
+        assert_eq!(minute_snapshot(node, &paid), before, "{case}: no POST, charge, reservation or payment");
+        assert!(minute_records(node).is_empty(), "{case}");
+        assert!(pending(node).is_none(), "{case}");
+    }
+
+    /// Synthetic: a minute of this call already settled in the journal with
+    /// ceiling `cap_msat`, as if paid earlier.
+    fn seed_settled_minute(node: &Fake, seq: u32, cap_msat: u64) {
+        let journal = spend_journal(&node.state).unwrap();
+        let body = act::call_block_body(A, CALL_ID, seq).unwrap();
+        let operation = (spend_journal::new_operation_id().unwrap(), spend_journal::operation(&body));
+        let begun = journal.begin_operation(OWN, "/messages/compose", &body, cap_msat, Some(operation)).unwrap();
+        journal.record_outcome(&begun, spend_journal::OperationState::Settled, None).unwrap();
+        journal.clear().unwrap();
+    }
+
+    /// A minute whose ceiling would pass the hold the owner confirmed, as the
+    /// journal counts it under the money lock: refused as past the hold, the
+    /// call's consent refused for good, and the call hung up. No kind 404 goes
+    /// out and no minute operation is begun; the hangup is the only POST and is
+    /// paid like any hangup. Three ways there: (synthetic) the confirmed hold
+    /// cleared while the minute sits between its checks, the confirmed hold
+    /// used up by minutes already journaled, and a journaled ceiling so large
+    /// the sum overflows.
+    #[test]
+    fn a2_a_minute_past_its_journaled_hold_is_refused_and_the_call_hung_up() {
+        let rt = race_runtime();
+        for variant in ["hold cleared between checks", "hold used up", "sum overflows"] {
+            let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+            let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
+            assert_admitted_and_idle(node, variant);
+            match variant {
+                "hold used up" => seed_settled_minute(node, 59, 600_000),
+                "sum overflows" => seed_settled_minute(node, 59, u64::MAX),
+                _ => {}
+            }
+            let seeded: Vec<_> = minute_records(node).into_iter().map(|r| (r.op_id, r.state, r.cap_msat)).collect();
+            let before = minute_snapshot(node, &paid);
+            let error = if variant == "hold cleared between checks" {
+                let (arrived, release) = pause_points::arm(&node.state.api_base, "between_block_checks");
+                let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+                reach(&rt, &arrived, &release, variant);
+                node.state.call_consents.lock().unwrap().find_mut(OWN, A, CALL_ID).expect("consent kept").confirmed_msat = None;
+                release.notify_one();
+                joined(&rt, minute, variant).unwrap_err()
+            } else {
+                let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+                joined(&rt, minute, variant).unwrap_err()
+            };
+            assert_eq!(error.code, MINUTE_PAST_HOLD, "{variant}: {}", error.message);
+            assert!(error.message.starts_with(MINUTE_PAST_HOLD_WORDS), "{variant}");
+            assert_eq!(consent_phase(node), ConsentPhase::Refused { code: MINUTE_PAST_HOLD, message: MINUTE_PAST_HOLD_WORDS.into() }, "{variant}: refused for good");
+            let after = minute_snapshot(node, &paid);
+            assert_eq!(after.posts[..before.posts.len()], before.posts[..], "{variant}");
+            let added: Vec<_> = after.posts[before.posts.len()..].iter().map(compose_signal).collect();
+            assert_eq!(added, [("/messages/compose".to_string(), 403, A.to_string(), CALL_ID.to_string())], "{variant}: the hangup alone goes out");
+            assert_eq!(after.spent, before.spent + PAID_SIGNAL_MSAT, "{variant}: the hangup alone is charged");
+            assert_eq!(after.pays, before.pays + 1, "{variant}");
+            assert_eq!(after.book[..before.book.len()], before.book[..], "{variant}");
+            assert_eq!(after.book.len(), before.book.len() + 1, "{variant}: one reservation, for the hangup");
+            let minutes: Vec<_> = minute_records(node).into_iter().map(|r| (r.op_id, r.state, r.cap_msat)).collect();
+            assert_eq!(minutes, seeded, "{variant}: no minute operation begun");
+            assert!(pending(node).is_none(), "{variant}");
+            let hangups = hangup_records(node);
+            assert_eq!(hangups.len(), 1, "{variant}");
+            assert_eq!(hangups[0].parent_op.as_deref(), Some(offer_op(node).as_str()), "{variant}: the hangup is bound to the offer");
+        }
+    }
+
+    /// The text of a caught panic.
+    fn panic_text(caught: Box<dyn std::any::Any + Send>) -> String {
+        caught.downcast_ref::<String>().cloned().or_else(|| caught.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()
+    }
+
+    /// The pause helpers these tests use fail, and clean up, within bounds
+    /// when the orchestration goes wrong, instead of hanging: a pause point that
+    /// does not exist or is never reached, an ender that never revokes or fails,
+    /// a task that never finishes, and two nodes paused at the same point.
+    #[test]
+    fn a2_paused_minute_orchestration_fails_within_bounds() {
+        let rt = race_runtime();
+        let short = Duration::from_millis(500);
+        let ready = || -> (&'static Fake, Arc<Mutex<OpsNode>>) {
+            let (routes, paid) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+            (Box::leak(Box::new(rt.block_on(minute_ready(routes)))), paid)
+        };
+
+        // A pause point no step names: the wait for it fails, and the minute,
+        // never paused, goes out.
+        let case = "missing point";
+        let (node, _) = ready();
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "no_such_point");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reach_within(&rt, &arrived, &release, case, short)));
+        assert!(panic_text(failed.expect_err("the wait must fail")).contains("never reached its pause point"), "{case}");
+        joined(&rt, minute, case).expect("not paused: the minute goes out");
+        assert_eq!(minutes_sent(node), 1, "{case}");
+
+        // A minute that fails before its pause point: the wait fails and releases
+        // the gate it left armed, so a later minute is not paused there.
+        let case = "unreached point";
+        let (node, _) = ready();
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "between_block_checks");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 1));
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reach_within(&rt, &arrived, &release, case, short)));
+        assert!(panic_text(failed.expect_err("the wait must fail")).contains("never reached its pause point"), "{case}");
+        assert_eq!(joined(&rt, minute, case).unwrap_err().code, "call_block_not_due", "{case}");
+        let later = rt.block_on(async { tokio::time::timeout(Duration::from_secs(5), do_call_block(&node.state, A, CALL_ID, 0)).await });
+        assert!(later.is_ok(), "{case}: the unreached gate was released; a later minute is not left paused");
+        later.unwrap().expect("the later minute goes out");
+        assert_eq!(minutes_sent(node), 1, "{case}");
+
+        // An ender that never revokes (End for another call): the wait for Ended
+        // gives up within its bound; released, the minute goes out and the ender
+        // reports its own error.
+        let case = "ender never revokes";
+        let (node, _) = ready();
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "between_block_checks");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+        reach(&rt, &arrived, &release, case);
+        let stop = rt.spawn(do_op_end_call(&node.state, "fedcba9876543210fedcba9876543210"));
+        let waited = Instant::now();
+        let phase = phase_once_ended(node);
+        let waited = waited.elapsed();
+        release.notify_one();
+        assert_eq!(phase, ConsentPhase::Admitted, "{case}");
+        assert!(waited < Duration::from_secs(5), "{case}: the wait for Ended is bounded");
+        joined(&rt, minute, case).expect("not revoked: the minute goes out");
+        assert_eq!(joined(&rt, stop, case).unwrap_err().code, "call_not_found", "{case}");
+        assert_eq!(compose_kinds(node), [400, 404], "{case}");
+
+        // An ender that revokes and then fails (teardown naming no recorded
+        // admission): the minute is still refused, and the ender's error is
+        // returned, not lost.
+        let case = "ender error";
+        let (node, paid) = ready();
+        let before = minute_snapshot(node, &paid);
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "between_block_checks");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+        reach(&rt, &arrived, &release, case);
+        let stop = rt.spawn(do_op_close_call(&node.state, "00000000-0000-4000-8000-000000000000", A, CALL_ID));
+        let phase = phase_once_ended(node);
+        release.notify_one();
+        assert_eq!(phase, ConsentPhase::Ended, "{case}");
+        assert_eq!(joined(&rt, minute, case).unwrap_err().code, "call_not_live", "{case}");
+        assert_eq!(joined(&rt, stop, case).unwrap_err().code, "call_not_found", "{case}");
+        assert_eq!(minute_snapshot(node, &paid), before, "{case}");
+
+        // A task that never finishes: the bounded join fails and aborts it.
+        let case = "task never finishes";
+        let alive = Arc::new(());
+        let held = alive.clone();
+        let stuck = rt.spawn(async move {
+            let _held = held;
+            std::future::pending::<()>().await
+        });
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| joined_within(&rt, stuck, case, short)));
+        assert!(panic_text(failed.expect_err("the join must fail")).contains("did not finish in time"), "{case}");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Arc::strong_count(&alive) > 1 && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(2)); }
+        assert_eq!(Arc::strong_count(&alive), 1, "{case}: the stuck task was aborted");
+
+        // Two nodes paused at the same point: each gate is its own node's.
+        // Ending and releasing one leaves the other paused and admitted.
+        let case = "two nodes";
+        let (first, _) = ready();
+        let (second, _) = ready();
+        let (arrived_1, release_1) = pause_points::arm(&first.state.api_base, "between_block_checks");
+        let (arrived_2, release_2) = pause_points::arm(&second.state.api_base, "between_block_checks");
+        let minute_1 = rt.spawn(do_call_block(&first.state, A, CALL_ID, 0));
+        let minute_2 = rt.spawn(do_call_block(&second.state, A, CALL_ID, 0));
+        reach(&rt, &arrived_1, &release_1, case);
+        reach(&rt, &arrived_2, &release_2, case);
+        end_minutes(&first.state, CALL_ID);
+        release_1.notify_one();
+        let first_minute = joined(&rt, minute_1, case);
+        let second_still_paused = !minute_2.is_finished();
+        let second_phase = consent_phase(second);
+        release_2.notify_one();
+        assert_eq!(first_minute.unwrap_err().code, "call_not_live", "{case}");
+        assert!(second_still_paused, "{case}: the other node's minute stays paused");
+        assert_eq!(second_phase, ConsentPhase::Admitted, "{case}: the other node's call is not ended");
+        joined(&rt, minute_2, case).expect("the other node's minute goes out");
+        assert_eq!((minutes_sent(first), minutes_sent(second)), (0, 1), "{case}");
     }
 
     /// A minute and End or local teardown, racing freely on OS threads (the
