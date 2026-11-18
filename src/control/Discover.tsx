@@ -299,11 +299,11 @@ export function FrontDoorCardView(props: { card: FrontDoor; now: number; shareQr
       <dl class="prices">
         <div>
           <dt>{tr('caKnockFromCard')}</dt>
-          <dd data-fd-knock-price>{fmtAmount(c().prices.admission_msat)}</dd>
+          <dd data-fd-knock-price>{fmtAmount(c().prices.admission_msat, 'up')}</dd>
         </div>
         <div>
           <dt>{tr('caMessageFromCard')}</dt>
-          <dd>{fmtAmount(c().prices.message_msat)}</dd>
+          <dd>{fmtAmount(c().prices.message_msat, 'up')}</dd>
         </div>
       </dl>
     </article>

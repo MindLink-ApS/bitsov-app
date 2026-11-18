@@ -675,7 +675,7 @@ describe('rooms in the shell', () => {
     expect(host.used('message_send')).toHaveLength(1);
     expect($(`[data-room-leg="${A}"]`)!.getAttribute('data-leg-state')).toBe('undelivered');
     expect($('[data-room-send-msat]')!.getAttribute('data-room-send-msat')).toBe('2500');
-    expect(text(`[data-room-leg="${A}"]`)).toMatch(/up to about 3 sats \(about 3 sats to them, plus a network fee\)/);
+    expect(text(`[data-room-leg="${A}"]`)).toMatch(/up to about 3 sats \(about 2 sats to them, plus a network fee\)/);
     expect(text('[data-room-send] .kind')).toMatch(/up to about 3 sats in all/);
   });
 

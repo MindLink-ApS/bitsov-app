@@ -769,18 +769,18 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     const who = room ? tr('uiThisRoom') : tr('caThisContact');
     const limit = book.limits.get(key(target, room));
     if (limit !== undefined && spentOn(target, room) + max > limit) {
-      return refuse('budget_exhausted', tr('caYouHaveUsedOfForInTheLast24', fmtAmount(spentOn(target, room)), fmtAmount(limit), who, fmtAmount(max)));
+      return refuse('budget_exhausted', tr('caYouHaveUsedOfForInTheLast24', fmtAmount(spentOn(target, room), 'up'), fmtAmount(limit, 'up'), who, fmtAmount(max, 'up')));
     }
     const ceiling = Math.min(!manual && autopay ? autopay.ceiling : book.ceiling, book.ceiling);
     if (spentAll() + max > ceiling) {
-      return refuse('ceiling_exhausted', tr('caYouHaveUsedOfYourAppAllInPayment', fmtAmount(spentAll()), fmtAmount(ceiling), fmtAmount(max)));
+      return refuse('ceiling_exhausted', tr('caYouHaveUsedOfYourAppAllInPayment', fmtAmount(spentAll(), 'up'), fmtAmount(ceiling, 'up'), fmtAmount(max, 'up')));
     }
     if (autopay && !manual) {
       let confirm: number | null = null;
       if (limit === undefined) {
         if (first === undefined) return refuse('first_contact', tr('caYourFirstPaidMessageToNeedsYourOKOnce', who));
         confirm = Math.min(first, book.ceiling);
-        if (confirm < max) return refuse('invalid', tr('caABudgetOfDoesNotCoverThisMessage', fmtAmount(confirm)));
+        if (confirm < max) return refuse('invalid', tr('caABudgetOfDoesNotCoverThisMessage', fmtAmount(confirm, 'up')));
       }
       return Promise.resolve(confirm);
     }
@@ -1132,7 +1132,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     budgetSet: (target, room, limitMsat) => {
       const k = key(target.toLowerCase(), room);
       if (limitMsat === 0) book.limits.delete(k);
-      else if (limitMsat > book.ceiling) return refuse('invalid', tr('caThatIsAboveYourApprovedDailyTotalOfRaise', fmtAmount(book.ceiling)));
+      else if (limitMsat > book.ceiling) return refuse('invalid', tr('caThatIsAboveYourApprovedDailyTotalOfRaise', fmtAmount(book.ceiling, 'up')));
       else book.limits.set(k, limitMsat);
       return ok(budgetView());
     },
@@ -1180,7 +1180,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
       }
       if (v2 && !isRoom && to === hex('a') && raised[to] === undefined) {
         raised[to] = 3000;
-        return refuse('price_changed', tr('caMayaSPriceRoseTo3SatsAboveYour', fmtAmount(maxMsat)));
+        return refuse('price_changed', tr('caMayaSPriceRoseTo3SatsAboveYour', fmtAmount(maxMsat, 'up')));
       }
       if (amount + fee > maxMsat) return refuse('price_changed', tr('caPriceAboveConfirmedCeilingNothingDispatched'));
       if (confirm !== null) book.limits.set(key(to, isRoom), confirm);

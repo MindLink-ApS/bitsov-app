@@ -194,8 +194,8 @@ export const hangupOverMessageCap = (q: CallQuote, grant: NodeGrantSummary | nul
  */
 export const hangupOverMessageCapCopy = (q: CallQuote, cap: number): string =>
   signalCost(q) > MESSAGE_PAYMENT_CAP_MSAT
-    ? tr('caHangingUpThisCallCostsMoreThanMessageMax', amount(signalCost(q)), amount(MESSAGE_PAYMENT_CAP_MSAT))
-    : tr('caHangingUpThisCallCostsMoreThanMessageCap', amount(signalCost(q)), amount(cap));
+    ? tr('caHangingUpThisCallCostsMoreThanMessageMax', amount(signalCost(q), 'up'), amount(MESSAGE_PAYMENT_CAP_MSAT, 'up'))
+    : tr('caHangingUpThisCallCostsMoreThanMessageCap', amount(signalCost(q), 'up'), amount(cap, 'up'));
 
 export type CallState = 'idle' | 'ringing' | 'connecting' | 'live' | 'reconnecting' | 'ended';
 /** Detailed card phase; consumers can use CallView.state for the shared lifecycle. */
@@ -991,7 +991,7 @@ export function createCallEngine(deps: CallDeps) {
       }
       const recoveryLimit = grant ? callPerPaymentMax(grant) : null;
       if (recoveryLimit !== null && callPerPaymentNeed(q, false) > recoveryLimit) {
-        recoveryRefused(conn, tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(callPerPaymentNeed(q, false)), amount(recoveryLimit)));
+        recoveryRefused(conn, tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(callPerPaymentNeed(q, false), 'up'), amount(recoveryLimit, 'up')));
         return;
       }
       const recoveryHangupCap = hangupOverMessageCap(q, grant);
@@ -1188,7 +1188,7 @@ export function createCallEngine(deps: CallDeps) {
       const grant = deps.grant?.();
       if (grant && q.call_total_msat > grant.remaining_msat) {
         set({ ...IDLE, phase: 'ended', peer, error:
-          tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat), amount(grant.remaining_msat)) });
+          tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat, 'up'), amount(grant.remaining_msat, 'up')) });
         deps.onBudgetNeeded?.(q.call_total_msat);
         return;
       }
@@ -1196,7 +1196,7 @@ export function createCallEngine(deps: CallDeps) {
       const need = callPerPaymentNeed(q, Boolean(deps.minutes));
       if (perPayment !== null && need > perPayment) {
         set({ ...IDLE, phase: 'ended', peer, error:
-          tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(need), amount(perPayment)) });
+          tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(need, 'up'), amount(perPayment, 'up')) });
         return;
       }
       const hangupCap = hangupOverMessageCap(q, grant);

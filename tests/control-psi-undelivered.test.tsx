@@ -242,7 +242,7 @@ describe('paid, not delivered: in the conversation', () => {
     await vi.waitFor(() => expect($('[data-artifact="undelivered"]')).toBeNull());
     expect(host.used('message_retry').map((c) => c.args!.approved_msat)).toEqual([null, 14000]);
     $<HTMLButtonElement>('article.msg.out .sats-meta')!.click();
-    expect(text('article.msg.out')).toContain('paid 4 sats plus any network fee');
+    expect(text('article.msg.out')).toContain('paid 4 sats · network fee amount unknown');
     expect(host.used('message_send')).toHaveLength(1);
     await vi.waitFor(() => expect(mount.textContent).toContain('hello Maya'));
   });

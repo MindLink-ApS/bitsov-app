@@ -54,7 +54,7 @@ export function ringBudgetShort(grant: NodeGrantSummary | null, peer: string, q:
 }
 
 export const ringBudgetText = (name: string, s: RingBudgetShort) =>
-  tr('uiRingContactBudgetShort', fmtAmount(s.leftMsat), name, fmtAmount(s.holdMsat));
+  tr('uiRingContactBudgetShort', fmtAmount(s.leftMsat, 'up'), name, fmtAmount(s.holdMsat, 'up'));
 
 /** The warning line in the call confirm; renders nothing unless a known hold is above the remainder. */
 export function RingBudgetNote(props: { grant: NodeGrantSummary | null; peer: string; name: string; quote: CallQuote | null; callLimitMinutes: number | null; now?: number }) {

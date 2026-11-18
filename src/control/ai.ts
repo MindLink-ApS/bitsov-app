@@ -8,7 +8,7 @@ import { language, copy, type CopyKey } from '../i18n';
 // broker's allowlisted projection, so nothing leaves the machine. A remote
 // model only ever sees a body the owner was shown first (see `Disclosure`).
 
-import { ago, sats, satsWhole, satUnit, shortId, uptime } from './format';
+import { ago, sats, satsWhole, satUnit, shortId, uptime, type Rounding } from './format';
 import { petnameOf } from './petnames';
 import { peerName } from './state';
 import type {
@@ -196,7 +196,7 @@ const REASON: Record<Unavailable['kind'], string> = {
 const missing = (what: string, reason: Unavailable) =>
   tr('caYourNodeDidNotReturnNothingWasGuessed', what, REASON[reason.kind]);
 
-const satsText = (msat: number) => `${sats(msat)} ${satUnit(msat)}`;
+const satsText = (msat: number, round: Rounding) => `${sats(msat, round)} ${satUnit(msat, round)}`;
 
 function ready<T>(output: ToolOutput | undefined, tool: ToolOutput['tool']): Report<T> | null {
   return output && output.tool === tool ? (output.report as Report<T>) : null;
@@ -213,8 +213,8 @@ function balanceAnswer(report: Report<BalanceReport>): Answer {
     node_reported: tr('caThatIsTheFigureYourNodeReportsItDoes'),
   }[b.label];
   const out = value(b.channel_local_balance);
-  const send = out === null ? '' : tr('caYourLocalChannelBalanceIs', satsText(out));
-  return { text: tr('caYourNodeReports', satsText(total), what, send), cards: [{ type: 'balance', balance: b, channels: null }] };
+  const send = out === null ? '' : tr('caYourLocalChannelBalanceIs', satsText(out, 'down'));
+  return { text: tr('caYourNodeReports', satsText(total, 'down'), what, send), cards: [{ type: 'balance', balance: b, channels: null }] };
 }
 
 function channelsAnswer(report: Report<ChannelsReport>): Answer {
@@ -230,7 +230,7 @@ function channelsAnswer(report: Report<ChannelsReport>): Answer {
   return {
     text:
       tr('caActiveExtra768', count, count === 1 ? tr('caChannel') : tr('caChannels'), active) +
-      tr('caOverTheActiveOnesYouCanSendAndReceive', satsText(sum((ch) => ch.local_balance)), satsText(sum((ch) => ch.remote_balance))),
+      tr('caOverTheActiveOnesYouCanSendAndReceive', satsText(sum((ch) => ch.local_balance), 'down'), satsText(sum((ch) => ch.remote_balance), 'down')),
     cards: [{ type: 'balance', balance: null, channels: c }],
   };
 }
@@ -288,7 +288,7 @@ function pricesAnswer(report: Report<LocalPricesReport>): Answer {
   const line = (category: string) => {
     const price = p.prices.find((x) => x.category === category);
     const msat = value(price?.price);
-    return msat === null ? null : tr('caFor', satsText(msat), CATEGORY[category] ?? category);
+    return msat === null ? null : tr('caFor', satsText(msat, 'up'), CATEGORY[category] ?? category);
   };
   const first = line('communication');
   const rest = ['files_media', 'structured_data', 'collaboration'].map(line).filter(Boolean);
@@ -317,12 +317,12 @@ function paymentsAnswer(report: Report<PaymentsReport>, label: string): Answer {
       ? tr('caYourSpendingCouldNotBeAddedUp')
       : spent === 0
         ? tr('caNoSpendingWasFoundInThePaidMessageHistory', label)
-        : tr('caYouSpentOnPaidMessages', lead, satsText(spent));
+        : tr('caYouSpentOnPaidMessages', lead, satsText(spent, 'up'));
   text += earned === null
     ? tr('caYourReceivedTotalCouldNotBeAddedUp')
     : earned === 0
       ? tr('caNoIncomeWasFoundInThePaidMessageHistory', label)
-      : tr('caYouReceivedFromPaidMessages', satsText(earned), label);
+      : tr('caYouReceivedFromPaidMessages', satsText(earned, 'down'), label);
   // Totals cover all inspected entries; the broker caps the listed subset.
   // Counts from that subset cannot establish whether any spending occurred.
   if (r.entries.length) {
@@ -442,7 +442,7 @@ export const PRESETS: { id: Preset; label: string; detail: string }[] = [
 // ---- copy text -----------------------------------------------------------------
 
 export function cardText(card: Card, nameOf: (id: string) => string): string {
-  const fig = (a: Amount | undefined) => (value(a) === null ? tr('caUnavailableExtra63') : satsText(value(a)!));
+  const fig = (a: Amount | undefined, round: Rounding) => (value(a) === null ? tr('caUnavailableExtra63') : satsText(value(a)!, round));
   switch (card.type) {
     case 'node': {
       const h = card.health;
@@ -459,23 +459,23 @@ export function cardText(card: Card, nameOf: (id: string) => string): string {
     case 'balance': {
       const lines: string[] = [];
       if (card.balance) {
-        lines.push(tr('caBalanceExtra827', fig(card.balance.wallet_balance)), tr('caLightningYours997', fig(card.balance.channel_local_balance)), tr('caLightningTheirs998', fig(card.balance.channel_remote_balance)));
+        lines.push(tr('caBalanceExtra827', fig(card.balance.wallet_balance, 'down')), tr('caLightningYours997', fig(card.balance.channel_local_balance, 'down')), tr('caLightningTheirs998', fig(card.balance.channel_remote_balance, 'down')));
       }
       if (card.channels) {
         lines.push(tr('caChannelsActive', value(card.channels.count) ?? '?', value(card.channels.active_count) ?? '?'));
         for (const ch of card.channels.channels) {
-          lines.push(tr('caYoursTheirs', ch.active ? tr('caActive') : tr('caInactive'), fig(ch.local_balance), fig(ch.remote_balance)));
+          lines.push(tr('caYoursTheirs', ch.active ? tr('caActive') : tr('caInactive'), fig(ch.local_balance, 'down'), fig(ch.remote_balance, 'down')));
         }
       }
       return lines.join('\n');
     }
     case 'payments': {
       const r = card.report;
-      const lines = [tr('caPaidMessagesSpentReceived', card.window, fig(r.sent_total), fig(r.received_total))];
+      const lines = [tr('caPaidMessagesSpentReceived', card.window, fig(r.sent_total, 'up'), fig(r.received_total, 'down'))];
       for (const e of r.entries) {
         const who = e.peer.state === 'value' ? nameOf(e.peer.value) : tr('caWithheld');
         const when = new Date(e.at_ms).toISOString().slice(0, 16).replace('T', ' ');
-        lines.push(`${when}  ${e.direction === 'sent' ? tr('caTo') : tr('caFrom')} ${who}  ${fig(e.amount)}`);
+        lines.push(`${when}  ${e.direction === 'sent' ? tr('caTo') : tr('caFrom')} ${who}  ${fig(e.amount, e.direction === 'sent' ? 'up' : 'down')}`);
       }
       return lines.join('\n');
     }

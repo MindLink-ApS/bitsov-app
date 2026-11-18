@@ -620,9 +620,9 @@ describe('acting from the track', () => {
     expect(host.used('message_send')[0].args).toEqual({ recipient: A, is_room: false, plaintext: 'gm Maya', max_msat: 2000, max_recipient_msat: null, first_contact_msat: null });
     // The cost is not printed under the message; one tap shows it.
     expect($('[data-message="sent-1"] .stamp .money-text')).toBeNull();
-    await waitFor(() => expect($('[data-message="sent-1"] .sats-meta')?.getAttribute('title')).toBe('paid 2 sats plus any network fee'));
+    await waitFor(() => expect($('[data-message="sent-1"] .sats-meta')?.getAttribute('title')).toBe('paid 2 sats · network fee amount unknown'));
     $<HTMLButtonElement>('[data-message="sent-1"] .sats-meta')!.click();
-    await waitFor(() => expect(text('[data-message="sent-1"] .stamp .money-text')).toBe('paid 2 sats plus any network fee'));
+    await waitFor(() => expect(text('[data-message="sent-1"] .stamp .money-text')).toBe('paid 2 sats · network fee amount unknown'));
     expect(text('[data-message="sent-1"] .stamp')).not.toContain('ceiling');
     expect(text('[data-message="sent-1"] [data-delivery]').trim()).toBe('Sent');
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('');
@@ -1252,7 +1252,7 @@ describe('acting from the track', () => {
     await waitFor(() => expect(host.used('file_send')[0]?.args).toEqual({ recipient: A, filename: 'hi.txt', mime_type: 'text/plain', data_b64: 'aGk=', max_msat: 8000, first_contact_msat: null }));
     await waitFor(() => expect(text('[data-message="file-1"] .file-name')).toBe('hi.txt'));
     $<HTMLButtonElement>('[data-message="file-1"] .sats-meta')!.click();
-    expect(text('[data-message="file-1"] .sats-meta')).toBe('paid about 5 sats');
+    expect(text('[data-message="file-1"] .sats-meta')).toBe('paid about 5 sats · exactly 4.375 sats');
     expect($('[data-message="file-1"] .bubble')!.classList.contains('file')).toBe(true);
     expect($('[data-message="file-1"] [data-delivery]')?.getAttribute('data-delivery')).toBe('sent');
   });

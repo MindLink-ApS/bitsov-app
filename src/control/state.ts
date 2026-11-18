@@ -232,7 +232,7 @@ const APPROVAL_OFF_REASONS = new Set(['seed_not_encrypted', 'seed_password_not_t
  * sent", never "send again": a second send could pay twice.
  */
 export function undeliveredCopy(u: Undelivered): { title: string; body: string; detail: string } {
-  const paid = `${sats(u.paid_msat)} ${satUnit(u.paid_msat)}`;
+  const paid = `${sats(u.paid_msat, 'up')} ${satUnit(u.paid_msat, 'up')}`;
   return {
     title: t('undeliveredTitle', paid),
     body: t(u.retry ? 'undeliveredRetryBody' : 'undeliveredStopBody'),
@@ -242,7 +242,7 @@ export function undeliveredCopy(u: Undelivered): { title: string; body: string; 
 
 /** The approval a paid, undelivered message needs once Retry delivery paid nothing new. Nothing is paid until the owner approves. */
 export function admissionCopy(a: AdmissionPrice): { body: string; detail: string; action: string } {
-  const s = (m: number) => `${sats(m)} ${satUnit(m)}`;
+  const s = (m: number) => `${sats(m, 'up')} ${satUnit(m, 'up')}`;
   // Details keep exact amounts so the parts visibly add up to the total.
   const x = (m: number) => exactAmount(m);
   return {

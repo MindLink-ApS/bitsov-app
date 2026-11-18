@@ -1,13 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { createRoot, createSignal } from 'solid-js';
+import { createRoot, createSignal, Show } from 'solid-js';
 import { render } from 'solid-js/web';
 import { ControlCenter } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID, SAMPLE_PEERS } from '../src/control/sample';
 import { resetContactsForTests } from '../src/control/petnames';
 import { createCallQuitGuard, type ClosableWindow } from '../src/control/quitGuard';
-import { shortId } from '../src/control/format';
+import { amount, shortId, shownTotal } from '../src/control/format';
+import { SettledPayment } from '../src/control/SettledPayment';
+import { QuitConfirm } from '../src/control/QuitConfirm';
 import { copy, setLanguagePref, t } from '../src/i18n';
 
 let dispose: (() => void) | undefined;
@@ -160,9 +162,82 @@ it('asks "You are in a call with X" before closing during a live call, and only 
 });
 
 it.each([
-  ['en', 'You are in a call with Maya. End it and quit?'],
-  ['da', 'Du er i et opkald med Maya. Vil du afslutte det og lukke?'],
+  ['en', 'You are in a call with Maya. Closing BitSov drops the call. Close anyway?'],
+  ['da', 'Du er i et opkald med Maya. Hvis du lukker BitSov, afbrydes opkaldet. Luk alligevel?'],
 ] as const)('says the %s quit question plainly', (locale, text) => {
   setLanguagePref(locale);
   expect(t('quitDuringCall', 'Maya')).toBe(text);
+});
+
+// Review round 1: rounding direction is chosen per site; parts add up; the quit dialog is a real modal.
+it.each(['en', 'da'] as const)('rounds money in down and costs up, and never hides a small receipt (%s)', (locale) => {
+  setLanguagePref(locale);
+  const about = locale === 'da' ? 'ca.' : 'about';
+  expect(amount(1500, 'down')).toBe(`${about} 1 sat`);
+  expect(amount(1999, 'down')).toBe(`${about} 1 sat`);
+  expect(amount(1500, 'up')).toBe(`${about} 2 sats`);
+  expect(amount(2000, 'down')).toBe('2 sats');
+  expect(amount(500, 'down')).toBe(locale === 'da' ? 'under 1 sat' : 'less than 1 sat');
+  expect(amount(0, 'down')).toBe('0 sats');
+});
+
+it('shows a total that its rounded parts add up to, never below the real total', () => {
+  // 1 sat + up to 1.25 sats: parts 1 + about 2, total about 3.
+  expect(shownTotal(2250, [1000, 1250])).toBe('about 3 sats');
+  // 1.5 + 1.5: each part shows about 2, so the total shows about 4, not 3.
+  expect(shownTotal(3000, [1500, 1500])).toBe('about 4 sats');
+  expect(shownTotal(3000, [1000, 2000])).toBe('3 sats');
+  // Parts that do not add up to the total: the total alone, rounded up.
+  expect(shownTotal(3100, [1000, 2000])).toBe('about 4 sats');
+});
+
+it('shows a received amount rounded down, with the exact amount one tap away', () => {
+  mount = document.createElement('div');
+  document.body.appendChild(mount);
+  dispose = render(() => <SettledPayment direction="received" msat={1500} />, mount);
+  expect($('.settled-amount').textContent).toBe('about 1 sat');
+  expect($('[data-settled-exact] summary').textContent).toBe('Details');
+  expect($('[data-settled-exact]').textContent).toBe('Detailsexactly 1.5 sats');
+});
+
+it.each([
+  ['en', 'Close and drop the call', /Clos(e|ing) BitSov/],
+  ['da', 'Luk og afbryd opkaldet', /lukker BitSov/],
+] as const)('%s quit copy says what the button does: close the app, and the call drops', (locale, button, question) => {
+  setLanguagePref(locale);
+  expect(t('quitCloseAndDrop')).toBe(button);
+  expect(t('quitDuringCall', 'Maya')).toMatch(question);
+  expect(t('quitDuringCall', 'Maya')).not.toMatch(/End it|quit\?/);
+});
+
+it.each(['en', 'da'] as const)('says an unknown fee amount truthfully and calmly in %s', (locale) => {
+  for (const key of ['uiNetworkFeeNotReported', 'uiNetworkFeeNotReported502', 'extraNetworkFeeUnknown'] as const) {
+    expect(copy[locale][key]).toMatch(locale === 'da' ? /beløb ukendt/ : /amount unknown/);
+    expect(copy[locale][key]).not.toMatch(/not reported|not disclosed|ikke oplyst/);
+  }
+});
+
+it('keeps keyboard focus inside the quit dialog and gives it back on Stay', async () => {
+  mount = document.createElement('div');
+  document.body.appendChild(mount);
+  const [open, setOpen] = createSignal(false);
+  const stay = vi.fn(() => setOpen(false));
+  const close = vi.fn();
+  dispose = render(() => <>
+    <div data-behind><button type="button" data-opener>Hang up</button></div>
+    <Show when={open()}><QuitConfirm name="Maya" onStay={stay} onClose={close} /></Show>
+  </>, mount);
+  $<HTMLButtonElement>('[data-opener]').focus();
+  setOpen(true);
+  await Promise.resolve();
+  expect(document.activeElement?.hasAttribute('data-quit-stay')).toBe(true);
+  expect($('[data-behind]').hasAttribute('inert')).toBe(true);
+  expect($('[data-quit-confirm]').closest('[inert]')).toBeNull();
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  expect(stay).toHaveBeenCalledTimes(1);
+  await Promise.resolve();
+  expect($('[data-quit-confirm]')).toBeNull();
+  expect($('[data-behind]').hasAttribute('inert')).toBe(false);
+  expect(document.activeElement?.hasAttribute('data-opener')).toBe(true);
+  expect(close).not.toHaveBeenCalled();
 });

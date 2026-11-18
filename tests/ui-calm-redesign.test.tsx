@@ -10,19 +10,19 @@ describe('denomination formatting', () => {
 
   it('formats sats by default', () => {
     setDenom('sats');
-    expect(sats(1000)).toBe('1');
-    expect(satUnit(1000)).toBe('sat');
-    expect(satUnit(2000)).toBe('sats');
-    expect(amount(2000)).toBe('2 sats');
+    expect(sats(1000, 'up')).toBe('1');
+    expect(satUnit(1000, 'up')).toBe('sat');
+    expect(satUnit(2000, 'up')).toBe('sats');
+    expect(amount(2000, 'up')).toBe('2 sats');
   });
 
   it('formats BTC when toggled', () => {
     setDenom('btc');
     expect(btc(100_000_000_000)).toBe('1'); // 1 BTC in msat
-    expect(sats(100_000_000_000)).toBe('1');
-    expect(satUnit(1000)).toBe('BTC');
-    expect(sats(50_000_000)).toBe('0.0005'); // 50_000 sats
-    expect(amount(50_000_000)).toBe('0.0005 BTC');
+    expect(sats(100_000_000_000, 'up')).toBe('1');
+    expect(satUnit(1000, 'up')).toBe('BTC');
+    expect(sats(50_000_000, 'up')).toBe('0.0005'); // 50_000 sats
+    expect(amount(50_000_000, 'up')).toBe('0.0005 BTC');
   });
 
   it('keeps sub-sat msat exact in BTC mode and carries correctly at 1 BTC', () => {
@@ -36,11 +36,11 @@ describe('denomination formatting', () => {
     expect(btc(100_000_000_001)).toBe('1.00000000001');
     setDenom('sats');
     // Sats mode shows whole sats, rounded up and marked; never a sub-sat decimal.
-    expect(sats(500)).toBe('about 1');
-    expect(sats(1500)).toBe('about 2');
-    expect(sats(999)).toBe('about 1');
-    expect(sats(12_345)).toBe('about 13');
-    expect(sats(99_999_999_500)).toBe('about 100\u202f000\u202f000');
+    expect(sats(500, 'up')).toBe('about 1');
+    expect(sats(1500, 'up')).toBe('about 2');
+    expect(sats(999, 'up')).toBe('about 1');
+    expect(sats(12_345, 'up')).toBe('about 13');
+    expect(sats(99_999_999_500, 'up')).toBe('about 100\u202f000\u202f000');
   });
 });
 
@@ -210,8 +210,8 @@ describe('BTC mode never appends sats to a BTC figure', () => {
     const quote = mount.querySelector('[data-door-quote], [data-readmission-quote], [data-first-contact]');
     if (quote) expect(quote.textContent).not.toMatch(btcThenSats);
 
-    expect(amount(2_000)).toBe('0.00000002 BTC');
-    expect(amount(2_000)).not.toMatch(/\bsats\b/);
+    expect(amount(2_000, 'up')).toBe('0.00000002 BTC');
+    expect(amount(2_000, 'up')).not.toMatch(/\bsats\b/);
     expect(mount.textContent).not.toMatch(btcThenSats);
   });
 });

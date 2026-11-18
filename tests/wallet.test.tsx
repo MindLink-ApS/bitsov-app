@@ -516,9 +516,10 @@ describe('the Wallet page', () => {
     type('[data-receive-amount]', '2');
     click('[data-receive-create]');
     await vi.waitFor(() => expect($('[data-wallet-settled]')).not.toBeNull());
-    expect(text('[data-wallet-settled]')).toContain(reported === null ? 'Amount unknown' : 'about 2 sats');
-    // The node's settled amount (1.5 sats, shown rounded), never the 2 sats requested.
-    expect($('[data-wallet-settled] [data-settled-msat]')?.getAttribute('data-settled-msat') ?? null).toBe(reported === null ? null : '1500');
+    // The node's settled amount (1.5 sats: about 1, exactly 1.5 under Details), never the 2 sats requested.
+    expect(text('[data-wallet-settled]')).toContain(reported === null ? 'Amount unknown' : 'about 1 sat');
+    expect(text('[data-wallet-settled]')).not.toContain('2 sats');
+    expect($('[data-wallet-settled] [data-settled-exact]')?.textContent ?? null).toBe(reported === null ? null : 'Detailsexactly 1.5 sats');
     expect($('[data-receive-invoice] [data-wallet-qr]')).toBeNull();
   });
 
@@ -598,7 +599,7 @@ describe('the Wallet page', () => {
     await vi.waitFor(() => expect($('[data-send-result="ok"]')).not.toBeNull());
     expect(host.used('payment_pay').map((c) => c.args)).toEqual([{ bolt11: INVOICE, amount_msat: 2000, max_msat: 7000 }]);
     expect(text('[data-send-result]')).toMatch(/Paid 2 sats/);
-    expect(text('[data-send-result]')).toContain('Network fee: unknown');
+    expect(text('[data-send-result]')).toContain('Network fee: amount unknown');
     expect(text('[data-wallet-settled]')).toContain('2 sats');
     expect(text('[data-wallet-settled]')).not.toContain('7 sats');
     click('[data-wallet-tab="activity"]');
@@ -665,7 +666,7 @@ describe('the Wallet page', () => {
     click('[data-wallet-confirm]');
     await vi.waitFor(() => expect($('[data-wallet-settled]')).not.toBeNull());
     expect(text('[data-wallet-settled]')).toContain('about 2 sats');
-    expect($('[data-wallet-settled] [data-settled-msat]')?.getAttribute('data-settled-msat')).toBe('1500');
+    expect(text('[data-wallet-settled] [data-settled-exact]')).toBe('Detailsexactly 1.5 sats');
     expect(text('[data-send-result]')).toContain('about 1 sat');
     expect(text('[data-send-result]')).not.toContain('7 sats');
   });

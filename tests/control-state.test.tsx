@@ -30,14 +30,14 @@ const live = (message: Message, room_id: string | null = null): LiveEvent => ({ 
 
 describe('sats display', () => {
   it('shows whole sats, rounding a price up (never down) and saying so', () => {
-    expect(sats(1000)).toBe('1');
-    expect(sats(4242)).toBe('about 5');
-    expect(sats(1500)).toBe('about 2');
-    expect(sats(4001)).toBe('about 5');
-    expect(sats(482_500_000)).toBe('482\u202f500');
-    expect(satUnit(1000)).toBe('sat');
-    expect(satUnit(2000)).toBe('sats');
-    expect(satUnit(1500)).toBe('sats');
+    expect(sats(1000, 'up')).toBe('1');
+    expect(sats(4242, 'up')).toBe('about 5');
+    expect(sats(1500, 'up')).toBe('about 2');
+    expect(sats(4001, 'up')).toBe('about 5');
+    expect(sats(482_500_000, 'up')).toBe('482\u202f500');
+    expect(satUnit(1000, 'up')).toBe('sat');
+    expect(satUnit(2000, 'up')).toBe('sats');
+    expect(satUnit(1500, 'up')).toBe('sats');
   });
 });
 

@@ -1741,8 +1741,8 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     expect(text('[data-tally-total]')).toBe('1 sat / 500 sats');
-    expect(text('[data-fee-unknown]')).toContain('network fee not reported');
-    expect(text(`[data-budget-row="${MAYA}"]`)).toContain('network fee not reported');
+    expect(text('[data-fee-unknown]')).toContain('network fee amount unknown');
+    expect(text(`[data-budget-row="${MAYA}"]`)).toContain('network fee amount unknown');
   });
 
   // ---- "Allow payments" / "Resume payments" as approve & send, bound to armed_by_request ----
