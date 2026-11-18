@@ -168,6 +168,10 @@ struct NodeState {
     signet_only: bool,
     network_refusal: Mutex<crate::network_policy::NetworkRefusal>,
     network_auth_epoch: Mutex<u64>,
+    /// The epoch whose credential passed its checks: identity (when the node
+    /// has one), then a signet report. Signet-only builds send ordinary
+    /// requests only under it; a new credential or any epoch change ends it.
+    network_verified: Mutex<Option<u64>>,
     #[cfg(all(test, desktop, not(feature = "mobile")))]
     test_init_network_support: Mutex<Option<bool>>,
     #[cfg(all(desktop, not(feature = "mobile")))]
@@ -550,8 +554,11 @@ impl Default for NodeState {
 
 impl NodeState {
     fn for_identifier(identifier: &str) -> Self {
+        Self::for_profile(crate::profile::AppProfile::for_identifier(identifier))
+    }
+
+    fn for_profile(profile: crate::profile::AppProfile) -> Self {
         let mut state = Self::default();
-        let profile = crate::profile::AppProfile::for_identifier(identifier);
         state.remote_only = profile.remote_only();
         state.signet_only = profile.signet_only();
         state.remote_mode.store(state.remote_only, Ordering::SeqCst);
@@ -590,6 +597,32 @@ impl NodeState {
         let mut epoch = self.network_auth_epoch.lock().unwrap();
         *epoch = epoch.wrapping_add(1);
         *self.network_refusal.lock().unwrap() = crate::network_policy::NetworkRefusal::None;
+    }
+
+    /// Until the network check passes, only the checks themselves may run.
+    fn require_network_authority(&self, method: &reqwest::Method, path: &str) -> Result<(), String> {
+        self.under_network_check(method, path, || ())
+    }
+
+    /// Reads the credential under the lock that replaces it, so a signet-only
+    /// build sends exactly the credential whose network check passed.
+    fn under_network_check<T>(&self, method: &reqwest::Method, path: &str, read: impl FnOnce() -> T) -> Result<T, String> {
+        if !self.signet_only { return Ok(read()); }
+        let epoch = self.network_auth_epoch.lock().unwrap();
+        let check_route = *method == reqwest::Method::GET && NETWORK_CHECK_ROUTES.contains(&path);
+        if !check_route && *self.network_verified.lock().unwrap() != Some(*epoch) {
+            return Err(NETWORK_UNCHECKED.into());
+        }
+        Ok(read())
+    }
+
+    fn checked_token(&self, method: &reqwest::Method, path: &str) -> Result<Option<String>, String> {
+        self.under_network_check(method, path, || self.token.lock().unwrap().clone())
+    }
+
+    /// The credential for an ordinary request, or a refusal before its check.
+    fn ordinary_token(&self) -> Result<Option<String>, String> {
+        self.checked_token(&reqwest::Method::POST, "")
     }
 
     fn require_local_peer(&self) -> Result<(), String> {
@@ -719,6 +752,7 @@ impl NodeState {
             signet_only: false,
             network_refusal: Mutex::new(crate::network_policy::NetworkRefusal::None),
             network_auth_epoch: Mutex::new(0),
+            network_verified: Mutex::new(None),
             #[cfg(all(test, desktop, not(feature = "mobile")))]
             test_init_network_support: Mutex::new(None),
             api_base: api_base.into(),
@@ -1593,6 +1627,7 @@ async fn restart_node(
     *state.all_in_caps_node.lock().unwrap() = None;
     *state.readmission_ask.lock().unwrap() = None;
     *state.token.lock().unwrap() = None;
+    *state.network_verified.lock().unwrap() = None;
 
     if state.stop_for_restart(NODE_SHUTDOWN_BUDGET) {
         for _ in 0..4 {
@@ -2087,6 +2122,7 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
     if authenticate(state, data_dir).await.is_err() {
         return;
     }
+    let credential_epoch = *state.network_auth_epoch.lock().unwrap();
     // The signed descriptor pins identity; provisional tokens can only enroll.
     // No identity/status probe or normal authority is granted before approval.
     if add_device::is_second_join(state) {
@@ -2125,7 +2161,7 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
                     "remote node identity does not match the signed pairing descriptor",
                 );
             }
-            let network_epoch = match require_signet_report(state, false).await {
+            let network_epoch = match require_signet_report_for(state, false, credential_epoch).await {
                 Ok(epoch) => epoch,
                 Err(_) => return,
             };
@@ -2158,9 +2194,26 @@ async fn finish_auth(state: &NodeState, data_dir: &Path) {
     }
 }
 
+/// The reads that identify a node and report its network. They are the only
+/// requests a signet-only build sends before that report is checked.
+const NETWORK_CHECK_ROUTES: [&str; 3] = ["/identity", "/status", "/bootstrap/state"];
+const NETWORK_UNCHECKED: &str = "The node's network is not checked yet. Nothing was sent.";
+
+/// Called under the network authority as a new credential is published: no
+/// report or identity read taken for an earlier credential can approve it.
+fn new_credential_epoch(state: &NodeState, authority: &mut u64) {
+    if state.signet_only { *authority = authority.wrapping_add(1); }
+}
+
 async fn require_signet_report(state: &NodeState, bootstrap: bool) -> Result<u64, String> {
     let epoch = *state.network_auth_epoch.lock().unwrap();
-    if !state.signet_only { return Ok(epoch); }
+    require_signet_report_for(state, bootstrap, epoch).await
+}
+
+/// The report approves only the credential of `epoch`. A credential published
+/// after it waits for its own identity and network checks.
+async fn require_signet_report_for(state: &NodeState, bootstrap: bool, epoch: u64) -> Result<u64, String> {
+    if !state.signet_only { return Ok(*state.network_auth_epoch.lock().unwrap()); }
     let report = if bootstrap {
         get_json::<serde_json::Value>(state, "/bootstrap/state").await
             .map(|value| value.get("network").and_then(|v| v.as_str()).map(str::to_owned))
@@ -2170,9 +2223,11 @@ async fn require_signet_report(state: &NodeState, bootstrap: bool) -> Result<u64
     let result = report.map_err(|_| crate::network_policy::NetworkRefusal::Unknown)
         .and_then(|network| crate::network_policy::NetworkRefusal::reported(network.as_deref()));
     if let Err(refusal) = result { return Err(state.refuse_network(refusal)); }
+    if cfg!(test) { pause_points::at(&state.api_base, "before_report_accept").await; }
     let authority = state.network_auth_epoch.lock().unwrap();
     if *authority != epoch { return Err("The connection changed during its network check.".into()); }
     *state.network_refusal.lock().unwrap() = crate::network_policy::NetworkRefusal::None;
+    *state.network_verified.lock().unwrap() = Some(epoch);
     Ok(epoch)
 }
 
@@ -2454,16 +2509,21 @@ async fn authenticate(state: &NodeState, data_dir: &Path) -> Result<(), String> 
             if let Some(ctx) = ctx {
                 view.bootstrap = pairing::bootstrap_state(&ctx.client).await.ok().flatten();
             }
-            let authority = state.network_auth_epoch.lock().unwrap();
+            let mut authority = state.network_auth_epoch.lock().unwrap();
             if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
+            // A new credential is checked again before ordinary requests.
+            new_credential_epoch(state, &mut authority);
+            *state.network_verified.lock().unwrap() = None;
             *state.token.lock().unwrap() = Some(session.token.clone());
             *state.auth.lock().unwrap() = AuthMode::Paired(session);
             *state.pairing_view.lock().unwrap() = view;
             Ok(())
         }
         Ok(Established::LocalFallback { token }) => {
-            let authority = state.network_auth_epoch.lock().unwrap();
+            let mut authority = state.network_auth_epoch.lock().unwrap();
             if *authority != network_epoch { return Err("The connection changed during authentication.".into()); }
+            new_credential_epoch(state, &mut authority);
+            *state.network_verified.lock().unwrap() = None;
             *state.token.lock().unwrap() = Some(token);
             *state.auth.lock().unwrap() = AuthMode::Local;
             *state.pairing_view.lock().unwrap() = view;
@@ -2693,15 +2753,14 @@ async fn call_api(
     if path == "/pair/first-contact-grant" {
         return Err("First-contact approval requires independent owner authority at the node. This app cannot issue it with its paired spend grant.".into());
     }
+    state.require_network_authority(&method, path)?;
     ensure_fresh_token(state).await;
     let mut refreshed = false;
     loop {
         let token = state
-            .token
-            .lock()
-            .unwrap()
-            .clone()
+            .checked_token(&method, path)?
             .ok_or_else(|| "the node is not authenticated yet".to_string())?;
+        if cfg!(test) { pause_points::at(&state.api_base, "after_network_check").await; }
         let mut request = state
             .http
             .request(method.clone(), format!("{}{path}", state.api_base))
@@ -5466,6 +5525,13 @@ fn reserve(state: &NodeState, auth: Auth, charge: &Charge, id: &str, max_msat: u
         Auth::Window(_) => None,
     };
     with_book(state, true, |book| {
+        // Reserve each charge once. An unsettled row under this id is this same
+        // charge from an attempt whose reservation landed but was reported
+        // failed: re-plan without it and hold it once. A settled row with this
+        // id is an earlier identical send and stays.
+        if let Some(i) = book.ledger.iter().rposition(|e| e.id == id && !e.settled) {
+            book.ledger.remove(i);
+        }
         let plan = budget::plan(book, budget::Ask {
             target: &charge.target,
             room: charge.room,
@@ -5593,7 +5659,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     existing_operation = prior.as_ref().and_then(|p| p.operation_id.clone());
     ensure_fresh_token(state).await;
     if cfg!(test) { pause_points::at(&state.api_base, "after_token").await; }
-    let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
+    let token = state.ordinary_token().map_err(|e| ActionError::new("app_not_ready", &e))?
+        .ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
     if body["host_expected_node_id"].as_str().is_some_and(|expected| expected != node_id) {
         return act::with_op(Active(body["host_admission_op"].as_str()), Err(ActionError::new(
@@ -5604,6 +5671,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // came while this minute waited here issues nothing.
     if path == "/messages/compose" && body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK)) {
         if let Some(refused) = block_consent_refusal(state, &node_id, &body) { return Err(refused); }
+        if cfg!(test) { pause_points::at(&state.api_base, "between_block_checks").await; }
         if minute_past_journaled_hold(state, &journal, &node_id, &body, max_msat)? {
             return Err(ActionError::new(MINUTE_PAST_HOLD, MINUTE_PAST_HOLD_WORDS));
         }
@@ -6308,7 +6376,8 @@ async fn replay_direct_payment(state: &NodeState, journal: &Journal, pending: &m
     if let Some(refused) = replay_refusal(state, journal, pending) { return Err(refused); }
     ensure_fresh_token(state).await;
     if let Some(refused) = replay_refusal(state, journal, pending) { return Err(refused); }
-    let token = state.token.lock().unwrap().clone()
+    let token = state.ordinary_token()
+        .map_err(|_| spend_journal::unknown("The node's network is not checked yet. Nothing was dispatched again."))?
         .ok_or_else(|| spend_journal::unknown("The node is not authenticated yet. Nothing was dispatched again."))?;
     // One attempt, no re-authentication loop: a refused sign-in sends nothing.
     let response = state.http.post(format!("{}{}", state.api_base, direct.path))
@@ -7386,7 +7455,8 @@ async fn resume_admission_send(state: &NodeState, pending_id: &str, peer: &str, 
     refuse_if_connection_busy(state)?;
     refuse_if_paused(state)?;
     ensure_fresh_token(state).await;
-    let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
+    let token = state.ordinary_token().map_err(|e| ActionError::new("app_not_ready", &e))?
+        .ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     check_node_grant(state, "/messages/compose", &body, max_msat).await?;
     // Restore the original reservation in place. The whole-operation answer
     // settles this same entry, including its already-paid admission.
@@ -7853,10 +7923,7 @@ async fn read_file_blob(state: &NodeState, id: &str) -> Result<act::FileBlob, St
     let mut refreshed = false;
     loop {
         let token = state
-            .token
-            .lock()
-            .unwrap()
-            .clone()
+            .ordinary_token()?
             .ok_or_else(|| "the node is not authenticated yet".to_string())?;
         let mut response = state
             .http
@@ -8315,8 +8382,14 @@ const MINUTE_PAST_HOLD_WORDS: &str = "The next minute of this call would go past
 /// yet does. A journal that cannot be read pays nothing.
 fn minute_past_journaled_hold(state: &NodeState, journal: &Journal, node_id: &str, body: &serde_json::Value, cap: u64) -> Result<bool, ActionError> {
     let (peer, call_id) = block_identity(body);
-    let limit = state.call_consents.lock().unwrap().find(node_id, &peer, &call_id)
-        .and_then(|c| Some(c.confirmed_msat?.min(c.consent.max_hold_msat)));
+    // Ended or refused since `block_consent_refusal` (End takes no money lock):
+    // that refusal is the answer, not "past the hold".
+    let limit = {
+        let kept = state.call_consents.lock().unwrap();
+        let Some(c) = kept.find(node_id, &peer, &call_id) else { return Err(ActionError::new("call_no_consent", NO_CONSENT)) };
+        if let Some(error) = consent_closed(&c.phase) { return Err(error); }
+        c.confirmed_msat.map(|m| m.min(c.consent.max_hold_msat))
+    };
     let Some(limit) = limit else { return Ok(true) };
     let records = journal.call_operations_for(node_id, Some(&peer), Some(&call_id))?;
     let journaled = records.iter().filter(|r| r.kind == "call_block" && r.state != spend_journal::OperationState::Unpaid)
@@ -8932,7 +9005,8 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     let prior = journal.pending()?;
     existing_operation = prior.as_ref().and_then(|p| p.operation_id.clone());
     ensure_fresh_token(state).await;
-    let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
+    let token = state.ordinary_token().map_err(|e| ActionError::new("app_not_ready", &e))?
+        .ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
     match &prior {
         None => {}
@@ -10544,7 +10618,10 @@ async fn ai_provider_views(app: &AppHandle<impl tauri::Runtime>) -> Vec<ai::Prov
 /// Read one topic through the broker, off the async runtime.
 async fn ai_read_topic(state: &NodeState, topic: ai::Topic, since_ms: Option<u64>) -> Result<ai::TopicRead, String> {
     ensure_fresh_token(state).await;
+    let checked = state.ordinary_token()?;
     let auth = node_auth(state);
+    // The session read must still be the credential whose network check passed.
+    if state.signet_only && state.ordinary_token()? != checked { return Err(NETWORK_UNCHECKED.into()); }
     let base = state.api_base.clone();
     let proxy_auth = state
         .remote_mode
@@ -10887,7 +10964,7 @@ async fn live_bridge(app: AppHandle) {
             }
             if !*state.ready.lock().unwrap() { return Ok(None); }
             ensure_fresh_token(&state).await;
-            let Some(token) = state.token.lock().unwrap().clone() else { return Ok(None); };
+            let Ok(Some(token)) = state.ordinary_token() else { return Ok(None); };
             let url = control::ws_url(&state.api_base, &token)?;
             *session_identity.lock().unwrap() = state.node_id.lock().unwrap().clone();
             Ok(Some((url, state.remote_proxy_auth.to_string())))
@@ -11108,7 +11185,12 @@ async fn media_bridge<R: tauri::Runtime>(
     let link = control::media::run_media_link_full(
         || async {
             if !*state.ready.lock().unwrap() { return Ok(None); }
+            let Ok(checked) = state.ordinary_token() else { return Ok(None); };
             let Some(token) = media_token(&state).await else { return Ok(None); };
+            // A credential replaced while this token was fetched ends its check.
+            if state.signet_only && state.ordinary_token().ok().flatten().is_none_or(|now| Some(now) != checked) {
+                return Ok(None);
+            }
             let url = control::media::media_url(&state.api_base, &call_id, &peer)?;
             Ok(Some((url, token, state.remote_proxy_auth.to_string())))
         },
@@ -11744,6 +11826,63 @@ fn assistant_mock_builder() -> tauri::Builder<tauri::Wry> {
 #[cfg(all(test, desktop, not(feature = "mobile"), unix))]
 #[path = "beta_network_tests.rs"]
 mod beta_network_tests;
+
+#[cfg(test)]
+mod phone_signet_gate_tests {
+    use super::*;
+    use crate::network_policy::NetworkRefusal;
+    use crate::profile::AppProfile;
+
+    fn phone_state() -> NodeState {
+        // The production constructor, built as a phone build would build it.
+        let mut state = crate::profile::as_phone_build(|| NodeState::for_identifier("tech.mindlink.bitsov"));
+        // Nothing listens here: any report read fails and must be refused.
+        state.api_base = "http://localhost:1/api/v1".into();
+        state
+    }
+
+    #[test]
+    fn phone_product_build_is_signet_only() {
+        assert!(phone_state().signet_only);
+        assert!(!NodeState::for_profile(AppProfile::for_platform("tech.mindlink.bitsov", false)).signet_only);
+    }
+
+    #[tokio::test]
+    async fn phone_report_gate_refuses_without_a_signet_report() {
+        let state = phone_state();
+        for bootstrap in [false, true] {
+            assert!(require_signet_report(&state, bootstrap).await.is_err(), "{bootstrap}");
+            assert_eq!(*state.network_refusal.lock().unwrap(), NetworkRefusal::Unknown);
+        }
+    }
+
+    #[tokio::test]
+    async fn phone_candidate_gate_refuses_without_a_signet_report() {
+        let state = phone_state();
+        assert_eq!(require_signet_candidate_report(&state, "token").await, Err(NetworkRefusal::Unknown));
+    }
+
+    #[test]
+    fn phone_candidate_acceptance_refuses_non_signet_reports() {
+        for refusal in [NetworkRefusal::Mainnet, NetworkRefusal::Unknown, NetworkRefusal::Other] {
+            let state = phone_state();
+            let mut epoch = *state.network_auth_epoch.lock().unwrap();
+            let before = epoch;
+            assert!(accept_signet_candidate_report(&state, &mut epoch, Err(refusal)).is_err(), "{refusal:?}");
+            assert_ne!(epoch, before);
+            assert_eq!(*state.network_refusal.lock().unwrap(), refusal);
+        }
+    }
+
+    #[test]
+    fn phone_local_peer_gate_refuses_an_unverified_local_node() {
+        let state = phone_state();
+        assert!(!state.remote_mode.load(Ordering::SeqCst));
+        assert!(state.require_local_peer().is_err());
+        state.remote_mode.store(true, Ordering::SeqCst);
+        assert!(state.require_local_peer().is_ok());
+    }
+}
 
 #[cfg(all(test, desktop, not(feature = "mobile")))]
 mod remote_test_profile_tests {
@@ -17904,6 +18043,25 @@ mod control_act_tests {
         }
     }
 
+    /// End lands while a minute sits between its two checks under the money
+    /// lock (consent still admitted, then the hold). The minute is refused as
+    /// a call that ended, not as one past its hold, and nothing is sent.
+    #[test]
+    fn a2_end_between_the_minute_checks_reports_the_call_ended() {
+        let rt = race_runtime();
+        let (routes, _) = minutes_routes("live", hold_json(8_000, 2_000, 60));
+        let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "between_block_checks");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+        rt.block_on(arrived.notified());
+        end_minutes(&node.state, CALL_ID);
+        release.notify_one();
+        let code = rt.block_on(minute).unwrap().unwrap_err().code;
+        assert_eq!(code, "call_not_live", "End came first: the call ended, not past its hold");
+        assert_eq!(consent_phase(node), ConsentPhase::Ended);
+        assert_eq!(minutes_sent(node), 0);
+    }
+
     /// A minute and End or local teardown, racing freely on OS threads (the
     /// ender started at staggered delays). The outcome is one of the two the
     /// guarantee allows: no kind 404 and nothing charged for it, or exactly one,
@@ -22900,6 +23058,49 @@ mod control_act_tests {
         let receipt = do_message_send(&proven, A, false, "hi", 7000, None).await.unwrap();
         assert_eq!(receipt.amount_msat, 2000);
         assert_eq!(budget_now(&proven).spent_msat, 4000);
+    }
+
+    /// The marker write after a committed book rename fails on every save: the
+    /// send still goes once and its reservation is counted once, not reported
+    /// as a failed write that a later send would reserve again.
+    #[tokio::test]
+    async fn a_marker_failure_after_the_book_lands_reserves_once() {
+        let routes: Routes = Arc::new(|m, p, b| {
+            if p == "/messages/compose" { return (200, serde_json::json!({"message_id": "m1",
+                "delivered": true, "amount_msat": 2000, "max_routing_fee_msat": 10000}).to_string()); }
+            happy()(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        let (dir, _) = budget_dir(&node.state).unwrap();
+        budget::faults::arm(&dir, budget::faults::Step::Marker);
+        let first = do_message_send(&node.state, A, false, "hi", 12000, None).await;
+        let second = do_message_send(&node.state, A, false, "hi", 12000, None).await;
+        budget::faults::disarm(&dir);
+        assert!(first.is_ok(), "{:?}", first.err().map(|e| e.code));
+        assert!(second.is_ok(), "{:?}", second.err().map(|e| e.code));
+        let view = budget_now(&node.state);
+        assert_eq!(view.unsettled_msat, 0, "no reservation left behind");
+        assert_eq!(view.accounted_msat, 24000, "two sends, each counted once");
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+    }
+
+    /// Reserving the same charge again (a retry after a reported failure)
+    /// leaves one reservation for it, never two.
+    #[tokio::test]
+    async fn reserving_the_same_charge_twice_holds_it_once() {
+        let node = fake(AuthMode::Local, happy());
+        spend_advance(&node.state, true).await.unwrap();
+        let (auth, plan) = plan_message(&node.state, A, false, 5000, None).unwrap();
+        let charge = Charge { target: A.into(), room: false, confirm: plan.confirm, readmission_possible: false,
+            confirmed: false, operation: false, envelope_ids: None, failure_final_on: None };
+        reserve(&node.state, auth, &charge, "charge-1", 5000).unwrap();
+        reserve(&node.state, auth, &charge, "charge-1", 5000).unwrap();
+        let rows = with_book(&node.state, false, |b| Ok(b.ledger.iter().filter(|e| e.id == "charge-1").count())).unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(budget_now(&node.state).unsettled_msat, 5000);
+        close_charge(&node.state, "charge-1", None, None).unwrap();
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0, "one release clears it");
     }
 
     #[tokio::test]

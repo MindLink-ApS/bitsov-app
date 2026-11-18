@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::act::{ActionError, OperationContext::Active};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Pending {
     /// Durable per-send identity. Separate from the deterministic operation fingerprint.
     #[serde(default)]
@@ -169,6 +170,7 @@ pub fn operation(body: &serde_json::Value) -> String {
 pub enum OperationState { Dispatching, AdmissionResumable, Paid, Unpaid, PaidUndelivered, FailedPaid, Unknown, Settled, Closed }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OperationRecord {
     pub op_id: String,
     pub node_id: String,
@@ -279,7 +281,7 @@ pub fn unknown(detail: impl std::fmt::Display) -> ActionError {
 pub fn read_pending(dir: &Path) -> Result<Option<Pending>, ActionError> {
     match std::fs::read(dir.join("spend-pending.json")) {
         Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(unknown),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && absent(&dir.join("spend-pending.json")) => Ok(None),
         Err(e) => Err(unknown(e)),
     }
 }
@@ -697,9 +699,19 @@ pub struct UnresolvedCall {
     pub hangup_cap_msat: Option<u64>,
 }
 
+/// A dangling symlink reads as `NotFound` but is not an empty slot.
+fn absent(path: &Path) -> bool {
+    crate::pairing::key::nothing_at(path)
+}
+
 fn damaged_record() -> ActionError {
     // Do not log parser errors: they can contain bytes from a damaged record.
     eprintln!("spend ledger: required operation record or call index is missing, unreadable, or invalid");
+    damaged_record_error()
+}
+
+/// The `damaged_record` error without its log line, for a failure already logged.
+fn damaged_record_error() -> ActionError {
     unknown("Required operation record or call index is missing, unreadable, or invalid.")
 }
 
@@ -710,7 +722,7 @@ fn read_operation(path: &Path, expected_id: Option<&str>) -> Result<Option<Opera
             if expected_id.is_some_and(|id| id != record.op_id) { return Err(damaged_record()); }
             Ok(Some(record))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && absent(path) => Ok(None),
         Err(_) => Err(damaged_record()),
     }
 }
@@ -773,9 +785,10 @@ pub fn list_operations(dir: &Path, node_id: &str, peer: Option<&str>, limit: usi
 /// Read an atomic index/record snapshot when a live signal arrives, before
 /// waiting on a dispatch. The snapshot grants no payment authority.
 pub fn read_call_admission(dir: &Path, node_id: &str, peer: &str, call: &str) -> Result<Option<OperationRecord>, ActionError> {
-    let entry: CallIndex = match std::fs::read(call_index_path(dir, node_id, peer, call)) {
+    let path = call_index_path(dir, node_id, peer, call);
+    let entry: CallIndex = match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| damaged_record())?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && absent(&path) => return Ok(None),
         Err(_) => return Err(damaged_record()),
     };
     if entry.op_id.len() != 36 || !entry.op_id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') {
@@ -885,11 +898,50 @@ fn write_call_membership(_dir: &Path, _record: &OperationRecord) -> Result<(), A
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CallIndex { op_id: String, created_ms: u64 }
 
 fn call_index_path(dir: &Path, node_id: &str, peer: &str, call: &str) -> PathBuf {
     let key = serde_json::to_vec(&(node_id, peer, call)).expect("string tuple serializes");
     dir.join("call-index").join(format!("{}.json", blake3::hash(&key).to_hex()))
+}
+
+/// What is at a call's index slot before `record` may be written there.
+enum IndexSlot { Absent, Keep, Replace }
+
+/// A call index slot that cannot be checked. Already logged by
+/// `damaged_record`; the caller turns it into `damaged_record_error`.
+struct SlotDamaged;
+
+fn slot_damaged() -> SlotDamaged {
+    let _ = damaged_record();
+    SlotDamaged
+}
+
+/// A mapping is only replaced when it is readable and names an operation
+/// record that exists and is a call admission for this same slot. A dangling
+/// symlink, an unreadable file or a mapping whose record is missing or
+/// damaged is evidence of an admission that cannot be checked any more:
+/// refuse, and leave it in place for the owner's repair.
+fn index_slot(dir: &Path, path: &Path, record: &OperationRecord) -> Result<IndexSlot, SlotDamaged> {
+    let old: CallIndex = match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| slot_damaged())?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && absent(path) => return Ok(IndexSlot::Absent),
+        Err(_) => return Err(slot_damaged()),
+    };
+    if (old.created_ms, &old.op_id) >= (record.created_ms, &record.op_id) { return Ok(IndexSlot::Keep); }
+    if old.op_id == record.op_id { return Ok(IndexSlot::Replace); }
+    if old.op_id.len() != 36 || !old.op_id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') {
+        return Err(slot_damaged());
+    }
+    // read_operation has already logged its failure through damaged_record.
+    let mapped = read_operation(&dir.join("ops").join(format!("{}.json", old.op_id)), Some(&old.op_id))
+        .map_err(|_| SlotDamaged)?
+        .ok_or_else(slot_damaged)?;
+    let same_slot = matches!(mapped.kind.as_str(), "call_offer" | "call_recovery")
+        && mapped.call_id.as_deref().is_some_and(|call| call_index_path(dir, &mapped.node_id, &mapped.peer, call) == path);
+    if !same_slot { return Err(slot_damaged()); }
+    Ok(IndexSlot::Replace)
 }
 
 #[cfg(unix)]
@@ -911,14 +963,7 @@ fn write_call_index(dir: &Path, record: &OperationRecord) -> Result<(), ActionEr
     if !matches!(record.kind.as_str(), "call_offer" | "call_recovery") { return Ok(()); }
     let Some(call) = record.call_id.as_deref() else { return Ok(()) };
     let path = call_index_path(dir, &record.node_id, &record.peer, call);
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            let old: CallIndex = serde_json::from_slice(&bytes).map_err(|_| damaged_record())?;
-            if (old.created_ms, &old.op_id) >= (record.created_ms, &record.op_id) { return Ok(()); }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(damaged_record()),
-    }
+    if let IndexSlot::Keep = index_slot(dir, &path, record).map_err(|SlotDamaged| damaged_record_error())? { return Ok(()); }
     let parent = path.parent().expect("index directory");
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(parent).map_err(unknown)?;
     let next = path.with_extension("next");
@@ -953,12 +998,10 @@ pub fn initialize_history(dir: &Path) -> Result<(), ActionError> {
         let Some(call) = record.call_id.as_deref() else { continue };
         let lock = history_lock(dir)?;
         lock.lock().map_err(unknown)?;
-        // Preserve a damaged existing mapping as a fail-closed marker for just
-        // this call. It must not stop migration/authentication for other calls.
-        let damaged = match std::fs::read(call_index_path(dir, &record.node_id, &record.peer, call)) {
-            Ok(bytes) => serde_json::from_slice::<CallIndex>(&bytes).is_err(),
-            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
-        };
+        // Preserve a damaged or dangling existing mapping as a fail-closed
+        // marker for just this call (the scan below marks it unresolved). It
+        // must not stop migration/authentication for other calls.
+        let damaged = index_slot(dir, &call_index_path(dir, &record.node_id, &record.peer, call), &record).is_err();
         if damaged {
             let _ = damaged_record();
             let _ = lock.unlock();
