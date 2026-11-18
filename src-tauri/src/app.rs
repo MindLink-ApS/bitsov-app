@@ -5875,6 +5875,16 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         Some(id) => close_charge(state, id, None, None),
         None => Ok(()),
     };
+    // Proven unpaid: free the reservation first, then retire the pending
+    // record. A failed release returns with that record still saved, so a
+    // reservation is never left held with nothing that can reconcile it.
+    let unpaid_cleanup = |state: &NodeState, journal: &Journal| -> Result<(), ActionError> {
+        // Tests only: either step can be made to fail (`fault_points`).
+        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_release")?;
+        release(state)?;
+        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_abandon")?;
+        abandon(journal)
+    };
     pending.non_dispatch_proven = false;
     pending.dispatched_at = Some(spend_journal::timestamp_ms());
     journal.save(&pending)?;
@@ -5884,8 +5894,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     if let Err(e) = refuse_if_connection_waiting(state)
         .and_then(|()| refuse_if_paused(state))
         .and_then(|()| check_auth(state, auth)) {
-        abandon(&journal)?;
-        release(state)?;
+        unpaid_cleanup(state, &journal)?;
         return Err(e);
     }
     if cfg!(test) { pause_points::at(&state.api_base, "before_decision").await; }
@@ -5898,11 +5907,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // or the POST.
     if path == "/messages/compose" && body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK)) {
         if let Some(refused) = block_consent_refusal(state, &node_id, &body) {
-            // Tests only: either cleanup step can be made to fail (`fault_points`).
-            #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "final_refusal_abandon")?;
-            abandon(&journal)?;
-            #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "final_refusal_release")?;
-            release(state)?;
+            unpaid_cleanup(state, &journal)?;
             return Err(refused);
         }
     }
@@ -5913,16 +5918,14 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     let status = response.status();
     // These statuses are rejected by authentication before any handler runs.
     if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
-        abandon(&journal)?;
-        release(state)?;
+        unpaid_cleanup(state, &journal)?;
         state.autopay.lock().unwrap().lock();
         *state.node_grant.lock().unwrap() = None;
         return Err(state.spend.lock().unwrap().refused());
     }
     let text = response.text().await.map_err(|_| spend_journal::unknown("The response was interrupted."))?;
     if act::readiness_refusal(status.as_u16(), &text) {
-        abandon(&journal)?;
-        release(state)?;
+        unpaid_cleanup(state, &journal)?;
         return Err(act::readiness_error(status.as_u16(), &text));
     }
     // A call refusal proves unpaid only for a fresh attempt (new operation id or
@@ -5958,8 +5961,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
             // It also names a state that may hold a payment: this proves nothing.
             Some((_, false)) => {}
             None => {
-                abandon(&journal)?;
-                release(state)?;
+                unpaid_cleanup(state, &journal)?;
                 return Err(act::call_not_dispatched(&text)
                     .unwrap_or_else(|| ActionError::new("not_dispatched", act::not_dispatched_message(&text))));
             }
@@ -5991,8 +5993,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     }
     // G1: the node refused under its grant before reserving or paying anything.
     if let Some(refusal) = grant::refusal(status.as_u16(), &text) {
-        abandon(&journal)?;
-        release(state)?;
+        unpaid_cleanup(state, &journal)?;
         let known = state.node_grant.lock().unwrap().clone();
         if refusal.ends_grant() { drop_grant(state); }
         return Err(refusal.error(known.as_ref()));
@@ -6026,8 +6027,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     if let Some(code) = operation_id.as_ref().and(act::operation_conflict(status.as_u16(), &text)) {
         match code {
             "operation_mismatch" => {
-                abandon(&journal)?;
-                release(state)?;
+                unpaid_cleanup(state, &journal)?;
                 return Err(ActionError::new("operation_mismatch", act::OPERATION_MISMATCH));
             }
             "failed_paid" => {
@@ -6092,8 +6092,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // (a recipient gone offline, no call price): nothing to wait for, no fence.
     if fresh_attempt && !status.is_success()
         && operation_id.as_deref().is_some_and(|id| act::released_without_payment(&text, id)) {
-        abandon(&journal)?;
-        release(state)?;
+        unpaid_cleanup(state, &journal)?;
         return Err(ActionError::new("not_dispatched", act::released_refusal_message(&text)));
     }
     if !status.is_success() {
@@ -9056,11 +9055,17 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     pending.budgeted = true;
     journal.save(&pending)?;
     let release = |state: &NodeState| close_charge(state, &charge_id, None, None);
+    // Proven unpaid: release, then clear (see `money_post_with`).
+    let unpaid_cleanup = |state: &NodeState, journal: &Journal| -> Result<(), ActionError> {
+        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_release")?;
+        release(state)?;
+        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_abandon")?;
+        abandon(journal)
+    };
     if let Err(e) = refuse_if_connection_waiting(state)
         .and_then(|()| refuse_if_paused(state))
         .and_then(|()| check_auth(state, auth)) {
-        abandon(&journal)?;
-        release(state)?;
+        unpaid_cleanup(state, &journal)?;
         return Err(e);
     }
     let response = state.http.post(format!("{}{}", state.api_base, porch::ROUTE))
@@ -9068,8 +9073,7 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
         .map_err(|_| spend_journal::unknown("The node did not return a complete response."))?;
     let status = response.status();
     if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
-        abandon(&journal)?;
-        release(state)?;
+        unpaid_cleanup(state, &journal)?;
         state.autopay.lock().unwrap().lock();
         *state.node_grant.lock().unwrap() = None;
         return Err(state.spend.lock().unwrap().refused());
@@ -9109,8 +9113,7 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
         }
     };
     if let Some(e) = nothing_paid {
-        abandon(&journal)?;
-        release(state)?;
+        unpaid_cleanup(state, &journal)?;
         return Err(e);
     }
     if !status.is_success() {
@@ -18551,91 +18554,207 @@ mod control_act_tests {
     }
 
     /// The call ends while a minute sits just before its last consent check, and
-    /// the cleanup of that refused minute then fails: (i) the journal abandon, or
-    /// (ii) the release of its reservation (`fault_points`). The cleanup error is
-    /// the answer, not the refusal and not a success. No kind 404 goes out and
-    /// nothing more is paid. The fence and reservation stay as the failed step
-    /// left them. Today's recovery then runs:
-    /// - With the abandon failed, the minute stays pending with an unknown
-    ///   outcome. End asks the node by its operation id, has it abandoned,
-    ///   records it unpaid, releases its reservation and pays the hangup.
-    /// - With the release failed, the minute is already recorded unpaid and
-    ///   nothing is pending. End pays the hangup. Nothing releases the leftover
-    ///   reservation yet: it keeps holding budget and never pays.
+    /// the cleanup of that refused minute then fails (`fault_points`). Cleanup
+    /// releases the reservation first, then retires the pending record, so a
+    /// failure at either step leaves the record in place for reconciliation.
+    /// The cleanup error is the answer, not the refusal and not a success. No
+    /// kind 404 goes out and nothing more is paid.
+    /// - Release fails: the reservation is still held, next to its record.
+    /// - Abandon fails: the reservation is already released.
+    ///
+    /// Recovery reconciles the minute by its operation id (the node abandons
+    /// it), records it unpaid and frees what is still held. Nothing is left
+    /// reserved, nothing is released twice and no minute is paid. It runs
+    /// through End (which then pays its hangup once) or through the owner's
+    /// check (which sends nothing).
     #[test]
     fn a2_a_final_refusal_whose_cleanup_fails_reports_it_and_pays_nothing_more() {
         const MINUTE_MSAT: u64 = 8_000 + 2_000;
         let rt = race_runtime();
-        for step in ["abandon", "release"] {
+        for (step, recovery) in [("release", "end"), ("abandon", "end"), ("release", "check")] {
+            let case = format!("{step} fails, recovered by {recovery}");
             let (routes, paid) = minutes_routes_with_abandon();
             let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
             let before = minute_snapshot(node, &paid);
-            assert_admitted_and_idle(node, step);
-            assert_eq!(budget_now(&node.state).unsettled_msat, 0, "{step}");
-            fault_points::arm(&node.state.api_base, if step == "abandon" { "final_refusal_abandon" } else { "final_refusal_release" });
+            assert_admitted_and_idle(node, &case);
+            assert_eq!(budget_now(&node.state).unsettled_msat, 0, "{case}");
+            fault_points::arm(&node.state.api_base, if step == "abandon" { "unpaid_abandon" } else { "unpaid_release" });
             let (arrived, release) = pause_points::arm(&node.state.api_base, "before_decision");
             let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
-            reach(&rt, &arrived, &release, step);
+            reach(&rt, &arrived, &release, &case);
             end_minutes(&node.state, CALL_ID);
             release.notify_one();
-            let error = joined(&rt, minute, step).unwrap_err();
-            assert_eq!(error.code, "spend_unknown", "{step}: the cleanup error is the answer: {}", error.message);
-            assert!(error.message.ends_with("Synthetic fault for this test only."), "{step}: {}", error.message);
+            let error = joined(&rt, minute, &case).unwrap_err();
+            assert_eq!(error.code, "spend_unknown", "{case}: the cleanup error is the answer: {}", error.message);
+            assert!(error.message.ends_with("Synthetic fault for this test only."), "{case}: {}", error.message);
 
-            // Nothing sent or paid; the minute's reservation is still held.
+            // Nothing sent or paid. The record stays, with an unknown outcome.
             let after = minute_snapshot(node, &paid);
-            assert_eq!(after.posts, before.posts, "{step}: no kind 404, no other POST");
-            assert_eq!((after.spent, after.pays), (before.spent, before.pays), "{step}: nothing paid");
-            assert_eq!(after.book[..before.book.len()], before.book[..], "{step}");
-            assert_eq!(after.book.len(), before.book.len() + 1, "{step}");
-            let held = after.book.last().unwrap();
-            assert_eq!((held.1, held.2), (MINUTE_MSAT, false), "{step}: the minute's reservation stays held");
-            assert_eq!(budget_now(&node.state).unsettled_msat, MINUTE_MSAT, "{step}");
+            assert_eq!(after.posts, before.posts, "{case}: no kind 404, no other POST");
+            assert_eq!((after.spent, after.pays), (before.spent, before.pays), "{case}: nothing paid");
             let records = minute_records(node);
-            assert_eq!(records.len(), 1, "{step}");
+            assert_eq!(records.len(), 1, "{case}");
             let id = records[0].op_id.clone();
-            if step == "abandon" {
-                // Never abandoned: the outcome stays unknown and the fence holds.
-                assert_eq!((&records[0].state, records[0].paid_msat), (&spend_journal::OperationState::Unknown, None), "{step}");
-                assert_eq!(pending(node).expect("the fence stays").operation_id.as_deref(), Some(id.as_str()), "{step}");
-                assert_eq!(no_pending_spend(&node.state).unwrap_err().code, "spend_unknown", "{step}");
+            assert_eq!((&records[0].state, records[0].paid_msat), (&spend_journal::OperationState::Unknown, None), "{case}");
+            assert_eq!(pending(node).expect("the record stays").operation_id.as_deref(), Some(id.as_str()), "{case}");
+            assert_eq!(no_pending_spend(&node.state).unwrap_err().code, "spend_unknown", "{case}: the fence holds");
+            assert_eq!(after.book[..before.book.len()], before.book[..], "{case}");
+            if step == "release" {
+                assert_eq!(after.book.len(), before.book.len() + 1, "{case}");
+                let held = after.book.last().unwrap();
+                assert_eq!((held.1, held.2), (MINUTE_MSAT, false), "{case}: the reservation stays held, next to its record");
+                assert_eq!(budget_now(&node.state).unsettled_msat, MINUTE_MSAT, "{case}");
             } else {
-                // Abandoned before the release failed: recorded unpaid, no fence.
-                assert_eq!((&records[0].state, records[0].paid_msat), (&spend_journal::OperationState::Unpaid, Some(0)), "{step}");
-                assert!(pending(node).is_none(), "{step}");
-                assert!(no_pending_spend(&node.state).is_ok(), "{step}");
+                assert_eq!(after.book, before.book, "{case}: released before the abandon failed");
+                assert_eq!(budget_now(&node.state).unsettled_msat, 0, "{case}");
             }
 
             // No second try: the next minute is refused and nothing moves.
-            assert_eq!(rt.block_on(do_call_block(&node.state, A, CALL_ID, 0)).unwrap_err().code, "call_not_live", "{step}");
-            assert_eq!(minute_snapshot(node, &paid), after, "{step}: no automatic second spend");
+            assert_eq!(rt.block_on(do_call_block(&node.state, A, CALL_ID, 0)).unwrap_err().code, "call_not_live", "{case}");
+            assert_eq!(minute_snapshot(node, &paid), after, "{case}: no automatic second spend");
 
-            // Recovery as today: End settles what is left, then pays the hangup once.
+            if recovery == "check" {
+                assert_eq!(rt.block_on(do_spend_reconcile(&node.state)).unwrap(), NOTHING_PAID, "{case}");
+                let checked = minute_snapshot(node, &paid);
+                let asked: Vec<_> = checked.posts[before.posts.len()..].iter().map(|(path, _)| path.clone()).collect();
+                assert_eq!(checked.posts[..before.posts.len()], before.posts[..], "{case}");
+                assert_eq!(asked, [format!("/messages/operations/{id}/abandon")], "{case}: the check sends no message, only the abandon");
+                assert_eq!((checked.spent, checked.pays), (before.spent, before.pays), "{case}: and pays nothing");
+                assert_eq!(checked.book, before.book, "{case}: no reservation left behind");
+                assert_eq!(budget_now(&node.state).unsettled_msat, 0, "{case}");
+                assert!(no_pending_spend(&node.state).is_ok(), "{case}: the fence lifts");
+                assert_eq!(ledger_record(node, &id)["state"], "unpaid", "{case}");
+            }
+            // End reconciles what is left, then pays the hangup once.
             let end = rt.block_on(do_op_end_call(&node.state, CALL_ID)).unwrap();
             assert_eq!((end.kind.as_str(), &end.state, end.paid_msat),
-                ("call_hangup", &spend_journal::OperationState::Settled, Some(PAID_SIGNAL_MSAT)), "{step}: a paid hangup");
-            assert_eq!(compose_kinds(node), [400, 403], "{step}: no minute, one hangup");
-            assert_eq!(budget_now(&node.state).spent_msat, before.spent + PAID_SIGNAL_MSAT, "{step}: only the hangup is charged");
-            assert_eq!(paid.lock().unwrap().pays, before.pays + 1, "{step}");
-            assert!(pending(node).is_none(), "{step}");
-            assert_eq!(ledger_record(node, &id)["state"], "unpaid", "{step}");
+                ("call_hangup", &spend_journal::OperationState::Settled, Some(PAID_SIGNAL_MSAT)), "{case}: a paid hangup");
+            assert_eq!(compose_kinds(node), [400, 403], "{case}: no minute, one hangup");
+            assert_eq!(budget_now(&node.state).spent_msat, before.spent + PAID_SIGNAL_MSAT, "{case}: only the hangup is charged");
+            assert_eq!(paid.lock().unwrap().pays, before.pays + 1, "{case}");
+            assert!(pending(node).is_none(), "{case}");
+            assert_eq!(ledger_record(node, &id)["state"], "unpaid", "{case}");
+            assert_eq!(budget_now(&node.state).unsettled_msat, 0, "{case}: nothing left reserved");
+            let ended = book(node);
+            assert_eq!(ended[..before.book.len()], before.book[..], "{case}");
+            assert_eq!(ended.len(), before.book.len() + 1, "{case}: the hangup's row alone");
+            assert_eq!((ended.last().unwrap().1, ended.last().unwrap().2), (PAID_SIGNAL_MSAT, true), "{case}");
             let targets = node.targets();
-            let lookups: Vec<_> = targets.iter().filter(|t| t.contains("/messages/operations/")).cloned().collect();
-            if step == "abandon" {
-                let at = |what: String| targets.iter().position(|t| *t == what).unwrap_or_else(|| panic!("{what}: {targets:?}"));
-                let last_compose = targets.iter().rposition(|t| t == "POST /messages/compose").unwrap();
-                assert!(at(format!("GET /messages/operations/{id}")) < at(format!("POST /messages/operations/{id}/abandon")), "{step}");
-                assert!(at(format!("POST /messages/operations/{id}/abandon")) < last_compose, "{step}: abandoned before the hangup");
-                assert_eq!(budget_now(&node.state).unsettled_msat, 0, "{step}: the reconciled minute's reservation is released");
-            } else {
-                assert!(lookups.is_empty(), "{step}: nothing pending to reconcile: {lookups:?}");
-                assert_eq!(budget_now(&node.state).unsettled_msat, MINUTE_MSAT, "{step}: the leftover reservation still holds budget");
-                // The owner's check finds nothing pending and sends nothing.
-                rt.block_on(do_spend_reconcile(&node.state)).expect("nothing pending to check");
-                assert_eq!(compose_kinds(node), [400, 403], "{step}");
-                assert_eq!(budget_now(&node.state).unsettled_msat, MINUTE_MSAT, "{step}");
-            }
+            let at = |what: String| targets.iter().position(|t| *t == what).unwrap_or_else(|| panic!("{what}: {targets:?}"));
+            let last_compose = targets.iter().rposition(|t| t == "POST /messages/compose").unwrap();
+            assert!(at(format!("GET /messages/operations/{id}")) < at(format!("POST /messages/operations/{id}/abandon")), "{case}");
+            assert!(at(format!("POST /messages/operations/{id}/abandon")) < last_compose, "{case}: abandoned before the hangup");
         }
+    }
+
+    /// A minute refused at the recheck just before its POST (a connection
+    /// cooldown began meanwhile) whose reservation then fails to release: the
+    /// same as at the final consent check. The record stays with the
+    /// reservation held, and End reconciles both before its hangup.
+    #[test]
+    fn a2_a_minute_refused_at_its_dispatch_recheck_keeps_its_record_when_the_release_fails() {
+        const MINUTE_MSAT: u64 = 8_000 + 2_000;
+        let rt = race_runtime();
+        let case = "dispatch recheck";
+        let (routes, paid) = minutes_routes_with_abandon();
+        let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
+        let before = minute_snapshot(node, &paid);
+        assert_admitted_and_idle(node, case);
+        fault_points::arm(&node.state.api_base, "unpaid_release");
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "before_dispatch");
+        let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+        reach(&rt, &arrived, &release, case);
+        node.state.remote_retry.failed(&remote_access::RemoteError::RateLimited(60));
+        release.notify_one();
+        let error = joined(&rt, minute, case).unwrap_err();
+        assert_eq!(error.code, "spend_unknown", "{case}: {}", error.message);
+        assert!(error.message.ends_with("Synthetic fault for this test only."), "{case}: {}", error.message);
+        let after = minute_snapshot(node, &paid);
+        assert_eq!(after.posts, before.posts, "{case}: no kind 404");
+        assert_eq!((after.spent, after.pays), (before.spent, before.pays), "{case}");
+        assert_eq!(after.book.len(), before.book.len() + 1, "{case}");
+        assert_eq!((after.book.last().unwrap().1, after.book.last().unwrap().2), (MINUTE_MSAT, false), "{case}: still held");
+        let records = minute_records(node);
+        assert_eq!(records.len(), 1, "{case}");
+        let id = records[0].op_id.clone();
+        assert_eq!(pending(node).expect("the record stays").operation_id.as_deref(), Some(id.as_str()), "{case}");
+
+        node.state.remote_retry.reset_for_replacement();
+        end_minutes(&node.state, CALL_ID);
+        let end = rt.block_on(do_op_end_call(&node.state, CALL_ID)).unwrap();
+        assert_eq!(end.kind, "call_hangup", "{case}");
+        assert_eq!(compose_kinds(node), [400, 403], "{case}");
+        assert_eq!(paid.lock().unwrap().pays, before.pays + 1, "{case}: the hangup alone is paid");
+        assert!(pending(node).is_none(), "{case}");
+        assert_eq!(ledger_record(node, &id)["state"], "unpaid", "{case}");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0, "{case}: nothing left reserved");
+    }
+
+    /// A paid read the node refuses before paying, whose reservation then fails to
+    /// release: the read's record stays and its reservation is still held. Nothing
+    /// is paid or fetched again. A read has no operation id, so the owner's check
+    /// cannot settle it by itself and keeps both, as for any read whose outcome
+    /// is not known.
+    #[tokio::test]
+    async fn a_read_refused_before_paying_keeps_its_record_when_the_release_fails() {
+        let body = serde_json::json!({"error": "porch_knock_first: detail", "code": 409, "reason": "porch_knock_first"}).to_string();
+        let (node, peer, _) = porch_node(Arc::new(move |_, _, _| (409, body.clone())));
+        porch_budget(&node, &peer).await;
+        fault_points::arm(&node.state.api_base, "unpaid_release");
+        let error = do_porch_read(&node.state, &peer, "/index.md", 6_000).await.unwrap_err();
+        assert_eq!(error.code, "spend_unknown", "{}", error.message);
+        assert!(error.message.ends_with("Synthetic fault for this test only."), "{}", error.message);
+        assert_eq!(fetches(&node).len(), 1);
+        assert_eq!((budget_now(&node.state).spent_msat, budget_now(&node.state).unsettled_msat), (0, 6_000), "held, never paid");
+        let held = pending(&node).expect("the record stays");
+        assert_eq!(book(&node), [(held.charge_id().to_string(), 6_000, false)]);
+        assert_eq!(no_pending_spend(&node.state).unwrap_err().code, "spend_unknown", "the fence holds");
+        assert_eq!(do_spend_reconcile(&node.state).await.unwrap_err().code, "spend_unknown");
+        assert_eq!(fetches(&node).len(), 1, "nothing fetched or paid again");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 6_000);
+        assert_eq!(pending(&node).unwrap().id, held.id);
+    }
+
+    /// A delivery retry (its message paid, not delivered) refused just before its
+    /// POST, whose retry reservation then fails to release. The retry's record
+    /// stays, in flight, with the retry's reservation held. The owner's check asks
+    /// the node by operation id, settles the retry's reservation at zero and puts
+    /// the paid, undelivered record back. The original paid row is never touched,
+    /// and nothing is sent or paid again.
+    #[test]
+    fn a_delivery_retry_refused_before_its_post_keeps_its_record_when_the_release_fails() {
+        let rt = race_runtime();
+        let (fake_node, ops) = ops_fake(|n| { n.script = vec![("paid", false)]; n.settled_incomplete = true; });
+        let node: &'static Fake = Box::leak(Box::new(fake_node));
+        let record = rt.block_on(psi_first(node));
+        let original = (record.request_hash.clone(), 14_000, true);
+        let retry_row = format!("{}-retry-1", record.request_hash);
+        assert_eq!(book(node), [original.clone()]);
+        let (composes, pays) = (compose_bodies(node).len(), ops.lock().unwrap().pays);
+        fault_points::arm(&node.state.api_base, "unpaid_release");
+        let (arrived, release) = pause_points::arm(&node.state.api_base, "before_dispatch");
+        let retry = rt.spawn(async move { do_message_retry(&node.state, A, "gm", Some(14_000)).await });
+        reach(&rt, &arrived, &release, "retry");
+        node.state.remote_retry.failed(&remote_access::RemoteError::RateLimited(60));
+        release.notify_one();
+        let error = joined(&rt, retry, "retry").unwrap_err();
+        assert_eq!(error.code, "spend_unknown", "{}", error.message);
+        assert!(error.message.ends_with("Synthetic fault for this test only."), "{}", error.message);
+        assert_eq!(compose_bodies(node).len(), composes, "the retry was not sent");
+        assert_eq!(book(node), [original.clone(), (retry_row.clone(), 14_000, false)], "the retry's reservation stays held");
+        let kept = pending(node).expect("the retry's record stays");
+        assert_eq!(kept.charge_id.as_deref(), Some(retry_row.as_str()));
+        assert_eq!(kept.rollback_charge_id.as_deref(), Some(record.request_hash.as_str()));
+        assert_eq!(kept.operation_id, record.operation_id);
+        assert_eq!(kept.undelivered.as_ref().map(|u| (u.in_flight, u.attempts)), Some((true, 1)));
+
+        node.state.remote_retry.reset_for_replacement();
+        assert_eq!(rt.block_on(do_spend_reconcile(&node.state)).unwrap_err().code, "undelivered_pending");
+        assert_eq!(book(node), [original, (retry_row, 0, true)], "the retry's reservation alone, settled at zero");
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0);
+        let back = pending(node).expect("the paid, undelivered record is back");
+        assert_eq!((back.operation_id, back.undelivered.map(|u| u.in_flight)), (record.operation_id, Some(false)));
+        assert_eq!((compose_bodies(node).len(), ops.lock().unwrap().pays), (composes, pays), "nothing sent or paid again");
     }
 
     /// A minute and End or local teardown, racing freely on OS threads (the
