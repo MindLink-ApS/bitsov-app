@@ -5828,6 +5828,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     journal.record_outcome(&pending, OpState::Dispatching, None)?;
     let begun = pending.clone();
     let abandon = |journal: &Journal| -> Result<(), ActionError> {
+        // Tests only: this step can be made to fail (`fault_points`).
+        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_abandon")?;
         if retry.is_some() {
             // This attempt paid nothing new; its original payment still exists.
             journal.record_outcome(&begun, OpState::PaidUndelivered, None)?;
@@ -5871,9 +5873,13 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         }
         journal.save(&pending)?;
     }
-    let release = |state: &NodeState| match &charged {
-        Some(id) => close_charge(state, id, None, None),
-        None => Ok(()),
+    let release = |state: &NodeState| -> Result<(), ActionError> {
+        // Tests only: this step can be made to fail (`fault_points`).
+        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_release")?;
+        match &charged {
+            Some(id) => close_charge(state, id, None, None),
+            None => Ok(()),
+        }
     };
     pending.non_dispatch_proven = false;
     pending.dispatched_at = Some(spend_journal::timestamp_ms());
@@ -8347,6 +8353,29 @@ mod pause_points {
             gate.arrived.notify_one();
             gate.release.notified().await;
         }
+    }
+}
+
+/// Compiled only for the tests that use it: a one-time failure of a named
+/// cleanup step on one node's money path, so a test can show what a failed
+/// cleanup leaves behind. Armed per node and point; consumed when it fires.
+#[cfg(all(test, desktop, not(feature = "mobile")))]
+mod fault_points {
+    use std::sync::Mutex;
+
+    static ARMED: Mutex<Vec<(String, &'static str)>> = Mutex::new(Vec::new());
+
+    /// The next pass through `point` on this node fails, once.
+    pub fn arm(api_base: &str, point: &'static str) {
+        ARMED.lock().unwrap().push((api_base.into(), point));
+    }
+
+    /// Fails, once, if `point` is armed for this node.
+    pub fn check(api_base: &str, point: &'static str) -> Result<(), super::ActionError> {
+        let mut armed = ARMED.lock().unwrap();
+        let Some(i) = armed.iter().position(|(base, p)| base == api_base && *p == point) else { return Ok(()) };
+        armed.remove(i);
+        Err(super::spend_journal::unknown("Synthetic fault for this test only."))
     }
 }
 
@@ -18522,6 +18551,94 @@ mod control_act_tests {
         assert_eq!(second_phase, ConsentPhase::Admitted, "{case}: the other node's call is not ended");
         joined(&rt, minute_2, case).expect("the other node's minute goes out");
         assert_eq!((minutes_sent(first), minutes_sent(second)), (0, 1), "{case}");
+    }
+
+    /// The call ends while a minute sits just before its last consent check, and
+    /// the cleanup of that refused minute then fails: (i) the journal abandon, or
+    /// (ii) the release of its reservation (`fault_points`). The cleanup error is
+    /// the answer, not the refusal and not a success. No kind 404 goes out and
+    /// nothing more is paid. The fence and reservation stay as the failed step
+    /// left them. Today's recovery then runs:
+    /// - With the abandon failed, the minute stays pending with an unknown
+    ///   outcome. End asks the node by its operation id, has it abandoned,
+    ///   records it unpaid, releases its reservation and pays the hangup.
+    /// - With the release failed, the minute is already recorded unpaid and
+    ///   nothing is pending. End pays the hangup. Nothing releases the leftover
+    ///   reservation yet: it keeps holding budget and never pays.
+    #[test]
+    fn a2_a_final_refusal_whose_cleanup_fails_reports_it_and_pays_nothing_more() {
+        const MINUTE_MSAT: u64 = 8_000 + 2_000;
+        let rt = race_runtime();
+        for step in ["abandon", "release"] {
+            let (routes, paid) = minutes_routes_with_abandon();
+            let node: &'static Fake = Box::leak(Box::new(rt.block_on(minute_ready(routes))));
+            let before = minute_snapshot(node, &paid);
+            assert_admitted_and_idle(node, step);
+            assert_eq!(budget_now(&node.state).unsettled_msat, 0, "{step}");
+            fault_points::arm(&node.state.api_base, if step == "abandon" { "unpaid_abandon" } else { "unpaid_release" });
+            let (arrived, release) = pause_points::arm(&node.state.api_base, "before_decision");
+            let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
+            reach(&rt, &arrived, &release, step);
+            end_minutes(&node.state, CALL_ID);
+            release.notify_one();
+            let error = joined(&rt, minute, step).unwrap_err();
+            assert_eq!(error.code, "spend_unknown", "{step}: the cleanup error is the answer: {}", error.message);
+            assert!(error.message.ends_with("Synthetic fault for this test only."), "{step}: {}", error.message);
+
+            // Nothing sent or paid; the minute's reservation is still held.
+            let after = minute_snapshot(node, &paid);
+            assert_eq!(after.posts, before.posts, "{step}: no kind 404, no other POST");
+            assert_eq!((after.spent, after.pays), (before.spent, before.pays), "{step}: nothing paid");
+            assert_eq!(after.book[..before.book.len()], before.book[..], "{step}");
+            assert_eq!(after.book.len(), before.book.len() + 1, "{step}");
+            let held = after.book.last().unwrap();
+            assert_eq!((held.1, held.2), (MINUTE_MSAT, false), "{step}: the minute's reservation stays held");
+            assert_eq!(budget_now(&node.state).unsettled_msat, MINUTE_MSAT, "{step}");
+            let records = minute_records(node);
+            assert_eq!(records.len(), 1, "{step}");
+            let id = records[0].op_id.clone();
+            if step == "abandon" {
+                // Never abandoned: the outcome stays unknown and the fence holds.
+                assert_eq!((&records[0].state, records[0].paid_msat), (&spend_journal::OperationState::Unknown, None), "{step}");
+                assert_eq!(pending(node).expect("the fence stays").operation_id.as_deref(), Some(id.as_str()), "{step}");
+                assert_eq!(no_pending_spend(&node.state).unwrap_err().code, "spend_unknown", "{step}");
+            } else {
+                // Abandoned before the release failed: recorded unpaid, no fence.
+                assert_eq!((&records[0].state, records[0].paid_msat), (&spend_journal::OperationState::Unpaid, Some(0)), "{step}");
+                assert!(pending(node).is_none(), "{step}");
+                assert!(no_pending_spend(&node.state).is_ok(), "{step}");
+            }
+
+            // No second try: the next minute is refused and nothing moves.
+            assert_eq!(rt.block_on(do_call_block(&node.state, A, CALL_ID, 0)).unwrap_err().code, "call_not_live", "{step}");
+            assert_eq!(minute_snapshot(node, &paid), after, "{step}: no automatic second spend");
+
+            // Recovery as today: End settles what is left, then pays the hangup once.
+            let end = rt.block_on(do_op_end_call(&node.state, CALL_ID)).unwrap();
+            assert_eq!((end.kind.as_str(), &end.state, end.paid_msat),
+                ("call_hangup", &spend_journal::OperationState::Settled, Some(PAID_SIGNAL_MSAT)), "{step}: a paid hangup");
+            assert_eq!(compose_kinds(node), [400, 403], "{step}: no minute, one hangup");
+            assert_eq!(budget_now(&node.state).spent_msat, before.spent + PAID_SIGNAL_MSAT, "{step}: only the hangup is charged");
+            assert_eq!(paid.lock().unwrap().pays, before.pays + 1, "{step}");
+            assert!(pending(node).is_none(), "{step}");
+            assert_eq!(ledger_record(node, &id)["state"], "unpaid", "{step}");
+            let targets = node.targets();
+            let lookups: Vec<_> = targets.iter().filter(|t| t.contains("/messages/operations/")).cloned().collect();
+            if step == "abandon" {
+                let at = |what: String| targets.iter().position(|t| *t == what).unwrap_or_else(|| panic!("{what}: {targets:?}"));
+                let last_compose = targets.iter().rposition(|t| t == "POST /messages/compose").unwrap();
+                assert!(at(format!("GET /messages/operations/{id}")) < at(format!("POST /messages/operations/{id}/abandon")), "{step}");
+                assert!(at(format!("POST /messages/operations/{id}/abandon")) < last_compose, "{step}: abandoned before the hangup");
+                assert_eq!(budget_now(&node.state).unsettled_msat, 0, "{step}: the reconciled minute's reservation is released");
+            } else {
+                assert!(lookups.is_empty(), "{step}: nothing pending to reconcile: {lookups:?}");
+                assert_eq!(budget_now(&node.state).unsettled_msat, MINUTE_MSAT, "{step}: the leftover reservation still holds budget");
+                // The owner's check finds nothing pending and sends nothing.
+                rt.block_on(do_spend_reconcile(&node.state)).expect("nothing pending to check");
+                assert_eq!(compose_kinds(node), [400, 403], "{step}");
+                assert_eq!(budget_now(&node.state).unsettled_msat, MINUTE_MSAT, "{step}");
+            }
+        }
     }
 
     /// A minute and End or local teardown, racing freely on OS threads (the
