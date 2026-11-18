@@ -5828,6 +5828,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     journal.record_outcome(&pending, OpState::Dispatching, None)?;
     let begun = pending.clone();
     let abandon = |journal: &Journal| -> Result<(), ActionError> {
+        // Tests only: this step can be made to fail (`fault_points`).
+        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_abandon")?;
         if retry.is_some() {
             // This attempt paid nothing new; its original payment still exists.
             journal.record_outcome(&begun, OpState::PaidUndelivered, None)?;
@@ -5871,9 +5873,13 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         }
         journal.save(&pending)?;
     }
-    let release = |state: &NodeState| match &charged {
-        Some(id) => close_charge(state, id, None, None),
-        None => Ok(()),
+    let release = |state: &NodeState| -> Result<(), ActionError> {
+        // Tests only: this step can be made to fail (`fault_points`).
+        #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_release")?;
+        match &charged {
+            Some(id) => close_charge(state, id, None, None),
+            None => Ok(()),
+        }
     };
     pending.non_dispatch_proven = false;
     pending.dispatched_at = Some(spend_journal::timestamp_ms());
@@ -5898,10 +5904,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     // or the POST.
     if path == "/messages/compose" && body["kind"].as_u64() == Some(u64::from(act::KIND_CALL_BLOCK)) {
         if let Some(refused) = block_consent_refusal(state, &node_id, &body) {
-            // Tests only: either cleanup step can be made to fail (`fault_points`).
-            #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "final_refusal_abandon")?;
             abandon(&journal)?;
-            #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "final_refusal_release")?;
             release(state)?;
             return Err(refused);
         }
@@ -18572,7 +18575,7 @@ mod control_act_tests {
             let before = minute_snapshot(node, &paid);
             assert_admitted_and_idle(node, step);
             assert_eq!(budget_now(&node.state).unsettled_msat, 0, "{step}");
-            fault_points::arm(&node.state.api_base, if step == "abandon" { "final_refusal_abandon" } else { "final_refusal_release" });
+            fault_points::arm(&node.state.api_base, if step == "abandon" { "unpaid_abandon" } else { "unpaid_release" });
             let (arrived, release) = pause_points::arm(&node.state.api_base, "before_decision");
             let minute = rt.spawn(do_call_block(&node.state, A, CALL_ID, 0));
             reach(&rt, &arrived, &release, step);
