@@ -16,7 +16,7 @@ export default defineConfig({
     channel: 'chrome',
     viewport: { width: 1280, height: 820 },
     // Settled colours. A mid-transition opacity makes axe report blended greys.
-    reducedMotion: 'reduce',
+    contextOptions: { reducedMotion: 'reduce' },
   },
   webServer: {
     command: 'npm run dev',
