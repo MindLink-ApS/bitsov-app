@@ -73,8 +73,16 @@ run 3 "not valid JSON" --out "$T/out" --runner xwin --source-sha "$SHA" --check-
 
 # A profile.rs that no longer maps the beta identifier to signet_only stops the build.
 cp "$T/root/src-tauri/src/profile.rs" "$T/profile.rs.bak"
-sed 's/signet_only: matches!(identifier, BETA_IDENTIFIER | REMOTE_TEST_IDENTIFIER)/signet_only: identifier == REMOTE_TEST_IDENTIFIER/' \
-  "$T/profile.rs.bak" > "$T/root/src-tauri/src/profile.rs"
+# Each mutation must really change the file, or the check would pass for nothing.
+mutate() {
+  sed "$1" "$T/profile.rs.bak" > "$T/root/src-tauri/src/profile.rs"
+  if cmp -s "$T/profile.rs.bak" "$T/root/src-tauri/src/profile.rs"; then
+    echo "FAIL: profile.rs mutation did not apply: $1"; FAILS=$((FAILS + 1))
+  fi
+}
+mutate 's/matches!(identifier, BETA_IDENTIFIER | REMOTE_TEST_IDENTIFIER)/identifier == REMOTE_TEST_IDENTIFIER/'
+run 3 "no longer maps the beta identifiers" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+mutate 's/signet_only: signet_only_for(identifier, mobile)/signet_only: false/'
 run 3 "no longer maps the beta identifiers" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 cp "$T/profile.rs.bak" "$T/root/src-tauri/src/profile.rs"
 

@@ -68,7 +68,13 @@ const constant = (name) => {
 };
 const beta = constant("BETA_IDENTIFIER");
 const remote = constant("REMOTE_TEST_IDENTIFIER");
-if (!/signet_only:\s*matches!\(identifier,\s*BETA_IDENTIFIER\s*\|\s*REMOTE_TEST_IDENTIFIER\)/.test(profile)) {
+// Either the inline form, or the shared policy function (desktop builds are not mobile,
+// so `mobile ||` cannot loosen it): both must keep the beta identifiers on signet.
+const ids = String.raw`matches!\(identifier,\s*BETA_IDENTIFIER\s*\|\s*REMOTE_TEST_IDENTIFIER\)`;
+const inline = new RegExp(String.raw`signet_only:\s*` + ids).test(profile);
+const viaFn = /signet_only:\s*signet_only_for\(identifier,/.test(profile)
+  && new RegExp(String.raw`fn signet_only_for\(identifier: &str, mobile: bool\) -> bool \{\s*mobile\s*\|\|\s*` + ids + String.raw`\s*\}`).test(profile);
+if (!inline && !viaFn) {
   fail("profile.rs no longer maps the beta identifiers to signet_only");
 }
 const id = config.identifier;
