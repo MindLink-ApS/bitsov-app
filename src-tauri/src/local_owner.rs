@@ -205,6 +205,7 @@ pub struct OwnerState {
     test_completion_dependencies: AtomicBool,
 }
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Metadata {
     ceremony_id: String,
     node_id: String,
@@ -563,6 +564,16 @@ async fn submit(
     Ok(())
 }
 
+/// The receipt `submit` writes before finalize is sent. Only a missing file
+/// is `None`; a damaged one is refused rather than read as "no setup known".
+fn load_attempt(store: &Path) -> Result<Option<Metadata>, String> {
+    const DAMAGED: &str = "The saved owner setup record is damaged. Check the node before starting again.";
+    device::read_private(&store.join("local-owner-attempt.json"))
+        .map_err(|_| DAMAGED.to_string())?
+        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| DAMAGED.to_string()))
+        .transpose()
+}
+
 pub async fn reconcile(
     app: &AppHandle<impl tauri::Runtime>,
     state: &NodeState,
@@ -573,19 +584,12 @@ pub async fn reconcile(
         return Err("The node has not committed this identity. Cancel this attempt and create a new phrase.".into());
     }
     let store = device_store(state).map_err(|e| e.message)?;
-    let pending = state
-        .owner
-        .pending
-        .lock()
-        .unwrap()
-        .clone()
-        .or_else(|| {
-            device::read_private(&store.join("local-owner-attempt.json"))
-                .ok()
-                .flatten()
-                .and_then(|b| serde_json::from_slice::<Metadata>(&b).ok())
-        })
-        .ok_or("No submitted owner setup is known. Reopen the app to check the node.")?;
+    let cached = state.owner.pending.lock().unwrap().clone();
+    let pending = match cached {
+        Some(pending) => pending,
+        None => load_attempt(&store)?
+            .ok_or("No submitted owner setup is known. Reopen the app to check the node.")?,
+    };
     if !pending.submitted {
         return Err("No backup confirmation was submitted. Cancel this attempt.".into());
     }
@@ -1038,6 +1042,28 @@ mod lifecycle_tests {
                 .submitted
         );
         assert!(dir.path().join("local-owner-attempt.json").exists());
+    }
+    /// After a restart this receipt is the only proof finalize was sent: any
+    /// damaged file is refused, never read as "no setup known".
+    #[cfg(unix)]
+    #[test]
+    fn submitted_attempt_receipt_fails_closed() {
+        use crate::store_matrix::{assert_refuses, json_cases, write_private, Store};
+        let pending = Metadata { ceremony_id: "a".repeat(32), node_id: "b".repeat(64), submitted: true };
+        let valid = serde_json::to_vec(&pending).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        write_private(&dir.path().join("local-owner-attempt.json"), &valid);
+        assert!(load_attempt(dir.path()).unwrap().unwrap().submitted);
+        let store = Store {
+            name: "local-owner-attempt.json",
+            valid,
+            version_key: None,
+            prepare: &|_| {},
+            file: &|dir| dir.join("local-owner-attempt.json"),
+            load: &|dir| load_attempt(dir).map(drop),
+            may_create: &[],
+        };
+        assert_ne!(assert_refuses(&store, &json_cases(&store)), 0);
     }
 }
 
