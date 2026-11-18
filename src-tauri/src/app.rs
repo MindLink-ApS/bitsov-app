@@ -5553,6 +5553,17 @@ fn reserve(state: &NodeState, auth: Auth, charge: &Charge, id: &str, max_msat: u
     })
 }
 
+/// Release an attempt's own reservation, and only that: the last book row with
+/// its charge id, while it is still held (or settled at zero). An earlier
+/// identical send has the same charge id; its settled row is never released.
+/// Nothing to do when the attempt's row is already gone.
+fn release_own_reservation(state: &NodeState, id: &str) -> Result<(), ActionError> {
+    let own = with_book(state, false, |book| Ok(book.ledger.iter().rev()
+        .find(|e| e.id == id).is_some_and(|e| !e.settled || e.msat == 0)))?;
+    if own { close_charge(state, id, None, None)?; }
+    Ok(())
+}
+
 /// Settle or release durably; callers must retain the journal on I/O failure.
 fn close_charge(state: &NodeState, id: &str, paid: Option<u64>, target: Option<&Target>) -> Result<(), ActionError> {
     let (dir, _) = budget_dir(state)?;
@@ -5872,7 +5883,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         journal.save(&pending)?;
     }
     let release = |state: &NodeState| match &charged {
-        Some(id) => close_charge(state, id, None, None),
+        Some(id) => release_own_reservation(state, id),
         None => Ok(()),
     };
     // Proven unpaid: free the reservation first, then retire the pending
@@ -6519,10 +6530,7 @@ const UNPAID_RELEASE_FINISHED: &str = "Previous action accounted for. Nothing wa
 fn finish_unpaid_release(state: &NodeState, journal: &Journal, pending: &spend_journal::Pending) -> Result<bool, ActionError> {
     let Some(decided) = &pending.unpaid_release else { return Ok(false) };
     if state.node_id.lock().unwrap().as_deref() != Some(pending.node_id.as_str()) { return Ok(false); }
-    // Only a reservation still held: a settled row with the same id is an
-    // earlier payment, never this attempt's.
-    let held = with_book(state, false, |book| Ok(book.ledger.iter().rev().find(|e| e.id == pending.charge_id()).is_some_and(|e| !e.settled)))?;
-    if held { close_charge(state, pending.charge_id(), None, None)?; }
+    release_own_reservation(state, pending.charge_id())?;
     journal.record_outcome(pending, decided.outcome.clone(), None)?;
     match &decided.restore {
         Some(prior) => journal.save(prior)?,
@@ -6650,9 +6658,9 @@ async fn reconcile_operation_with_reply(state: &NodeState, journal: &Journal, mu
         (Outcome::NothingPaid, _) => {
             // A crash before the save below repeats this release. An earlier
             // identical send shares the charge id: its row must not go instead.
-            let own_row = !payment_failed || with_book(state, false, |book| Ok(book.ledger.iter().rev()
-                .find(|e| e.id == pending.charge_id()).is_some_and(|e| !e.settled || e.msat == 0)))?;
-            if pending.budgeted && own_row { close_charge(state, pending.charge_id(), None, None)?; }
+            if pending.budgeted { release_own_reservation(state, pending.charge_id())?; }
+            // Tests only: stop between the release and the save below (`fault_points`).
+            #[cfg(all(test, desktop, not(feature = "mobile")))] fault_points::check(&state.api_base, "unpaid_reconcile_released")?;
             pending.resumable = true;
             pending.budgeted = false;
             pending.accounting_msat = None;
@@ -9093,7 +9101,7 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     }
     pending.budgeted = true;
     journal.save(&pending)?;
-    let release = |state: &NodeState| close_charge(state, &charge_id, None, None);
+    let release = |state: &NodeState| release_own_reservation(state, &charge_id);
     // Proven unpaid: save the decision, release, then clear (see `money_post_with`).
     let unpaid_cleanup = |state: &NodeState, journal: &Journal, pending: &spend_journal::Pending| -> Result<(), ActionError> {
         let mut decided = pending.clone();
@@ -15606,6 +15614,39 @@ mod control_act_tests {
             assert!(pending(&node).is_none());
             assert_eq!(ops.lock().unwrap().pays, 1);
         }
+    }
+
+    /// Two identical messages to the same contact share a charge id. The second
+    /// is reconciled as unpaid, and that reconciliation is cut off after it
+    /// released its reservation and before it saved the record. Run again (a
+    /// restart), it releases only that attempt's own reservation, which is
+    /// already gone: the first message's settled row stays with what it paid,
+    /// and the spend is unchanged.
+    #[tokio::test]
+    async fn an_unpaid_attempt_releases_only_its_own_reservation_never_an_identical_earlier_send() {
+        let (node, ops) = ops_fake(|n| n.script = vec![("acked", false), ("prepared", true)]);
+        spend_advance(&node.state, true).await.unwrap();
+        do_message_send(&node.state, A, false, "gm", 14000, None).await.expect("the first message goes");
+        let first = book(&node);
+        assert_eq!(first.len(), 1);
+        assert!(first[0].2 && first[0].1 > 0, "settled with what it paid: {first:?}");
+        let spent = budget_now(&node.state).spent_msat;
+        assert_eq!(do_message_send(&node.state, A, false, "gm", 14000, None).await.unwrap_err().code, "spend_unknown");
+        let second = pending(&node).unwrap();
+        assert_eq!(second.charge_id(), first[0].0, "the same charge id");
+        assert_eq!(book(&node), [first[0].clone(), (first[0].0.clone(), 14000, false)]);
+        dispatch_age(&node, 301_000);
+
+        fault_points::arm(&node.state.api_base, "unpaid_reconcile_released");
+        let cut = do_spend_reconcile(&reopen(&node)).await.unwrap_err();
+        assert!(cut.message.ends_with("Synthetic fault for this test only."), "{}", cut.message);
+        assert_eq!(book(&node), first, "the second attempt's reservation alone is released");
+        assert_eq!(pending(&node).unwrap().id, second.id, "the record was not saved yet");
+
+        assert_eq!(do_spend_reconcile(&reopen(&node)).await.unwrap(), NOTHING_PAID);
+        assert_eq!(book(&node), first, "the first message's settled row stays");
+        assert_eq!(budget_now(&node.state).spent_msat, spent, "the spend is unchanged");
+        assert_eq!(ops.lock().unwrap().pays, 1);
     }
 
     /// Real-UI 10b: the app is killed mid-send, the node restarts and reports
