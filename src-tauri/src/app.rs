@@ -5461,6 +5461,9 @@ struct Charge {
     envelope_ids: Option<bool>,
     /// `final_failure_node` of this send's status; None for a send with no operation.
     failure_final_on: Option<String>,
+    /// A node-routed paid offer or a paid answer: the grant read under the
+    /// money lock must also outlast this node's call limit (`call_window_fits`).
+    call_window: bool,
 }
 
 fn budget_dir(state: &NodeState) -> Result<(PathBuf, String), ActionError> {
@@ -5539,6 +5542,7 @@ fn plan_manual_charge(state: &NodeState, target: &str, max_msat: u64) -> Result<
     Ok(Charge {
         target: target.into(), room: false, confirm: None,
         readmission_possible: false, confirmed: false, operation: false, envelope_ids: None, failure_final_on: None,
+        call_window: false,
     })
 }
 
@@ -5785,6 +5789,12 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         check_node_grant_with_envelope_ids(state, path, &body, max_msat,
             charge.as_ref().and_then(|c| c.envelope_ids), cap).await?
     };
+    // A node-routed paid offer or a paid answer must fit inside the grant read
+    // here, under the money lock, before anything is reserved or sent: a grant
+    // replaced by a short one after the earlier checks still refuses it.
+    if charge.as_ref().is_some_and(|c| c.call_window) {
+        if let Some(g) = &node_grant { call_window_fits(state, g.expires_at_ms())?; }
+    }
     let reserve_msat = match (&charge, &node_grant) {
         // A zero cap: the node pays nothing, re-admission included.
         _ if max_msat == 0 => 0,
@@ -7655,7 +7665,7 @@ async fn do_message_send_inner(
             body["max_routing_fee_msat"] = serde_json::json!(ask.max_routing_fee_msat);
         }
     }
-    let charge = Charge { target: target.clone(), room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room, envelope_ids: Some(caps.envelope_ids), failure_final_on: final_failure_node(&caps.status) };
+    let charge = Charge { target: target.clone(), room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room, envelope_ids: Some(caps.envelope_ids), failure_final_on: final_failure_node(&caps.status), call_window: false };
     let sent = money_post(state, auth, "/messages/compose", body.clone(), max_msat, Some(charge)).await;
     let sent = match sent {
         // After a reconnect or restart the contact asks for admission again,
@@ -7812,7 +7822,7 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
         confirm_first_contact(state, &target, cap, contact_budget, caps.readmission_possible).await?;
     }
     // Nothing can be paid under a zero cap, re-admission included.
-    let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations, envelope_ids: Some(caps.envelope_ids), failure_final_on: None };
+    let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations, envelope_ids: Some(caps.envelope_ids), failure_final_on: None, call_window: false };
     let text = match money_post_with(state, auth, "/messages/compose", body, cap, Some(charge), Some(&undelivered)).await {
         // The node pays re-admission under a cap that fits the contact's signed
         // quote: Retry delivery (zero cap) asks the owner for that price.
@@ -8549,6 +8559,7 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
             operation: caps.operations,
             envelope_ids: Some(caps.envelope_ids),
             failure_final_on: final_failure_node(&caps.status),
+            call_window: false,
         };
         // Refused or ended while this minute was prepared: nothing is sent.
         consent_payable(state, &consent, hold.reserved_msat)?;
@@ -8745,6 +8756,7 @@ async fn do_call_signal_bounded(
         operation: caps.operations,
         envelope_ids: Some(caps.envelope_ids),
         failure_final_on: final_failure_node(&caps.status),
+        call_window: kind == act::KIND_CALL_ANSWER || (kind == act::KIND_CALL_OFFER && minutes.is_some()),
     };
     let text = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await?;
     let reply: act::SendReply = text.decode("/messages/compose")?;
@@ -9035,6 +9047,7 @@ async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64)
         operation: false,
         envelope_ids: None,
         failure_final_on: None,
+        call_window: false,
     };
     let (text, accounted) = porch_post(state, auth, body, max_msat, charge).await?;
     porch::project(&text, &target, &path, accounted, now_unix().max(0) as u64).map_err(|e| {
@@ -9220,6 +9233,7 @@ async fn do_file_send(
         operation: false,
         envelope_ids: Some(caps.envelope_ids),
         failure_final_on: None,
+        call_window: false,
     };
     let text = money_post(
         state,
@@ -10658,15 +10672,9 @@ async fn do_renderer_call_signal(
         // M6 A2: a node-routed offer carries the minutes agreed before Ring.
         Some(consent) if kind == act::KIND_CALL_OFFER => do_call_offer_with_minutes(state, peer, plaintext, max_msat, consent, max_hangup_msat).await,
         Some(_) => Err(ActionError::invalid("only an offer carries agreed minutes")),
-        None => {
-            // An answer on a paired app: checked against the grant as the node has it now.
-            if kind == act::KIND_CALL_ANSWER && matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(_)) {
-                if let Some(grant) = read_grant(state).await? {
-                    call_window_fits(state, grant.expires_at_ms())?;
-                }
-            }
-            do_call_signal_bounded(state, peer, kind, plaintext, max_msat, None, None, max_hangup_msat).await
-        }
+        // A paid answer's call window is checked under the money lock, against
+        // the grant read there (none on an owner session or a pre-G1 node).
+        None => do_call_signal_bounded(state, peer, kind, plaintext, max_msat, None, None, max_hangup_msat).await,
     }
 }
 
@@ -14827,7 +14835,7 @@ mod control_act_tests {
             // A minute reaches the node only under an admitted, confirmed consent.
             if kind == 404 { admit_minutes(&node.state, A, CALL_ID); }
             let charge = Charge { target: A.into(), room, confirm: None, readmission_possible: false,
-                confirmed: false, operation: true, envelope_ids: Some(true), failure_final_on: None };
+                confirmed: false, operation: true, envelope_ids: Some(true), failure_final_on: None, call_window: false };
             let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()), path,
                 serde_json::json!({"recipient": A, "is_room": room, "kind": kind, "plaintext": OFFER}),
                 15000, Some(charge), None).await.unwrap_err();
@@ -14879,7 +14887,7 @@ mod control_act_tests {
             journal.save(&prior).unwrap();
             drop(journal);
             let charge = Charge { target: A.into(), room: false, confirm: None, readmission_possible: false,
-                confirmed: false, operation: has_operation_id, envelope_ids: Some(true), failure_final_on: None };
+                confirmed: false, operation: has_operation_id, envelope_ids: Some(true), failure_final_on: None, call_window: false };
             let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()),
                 "/messages/compose", body, 15000, Some(charge), prior.undelivered.as_ref()).await.unwrap_err();
             if has_operation_id && (kind == 400 || !delivery_retry) {
@@ -15200,7 +15208,7 @@ mod control_act_tests {
         let mut body = act::compose_body(ROOM, true, "hi").unwrap();
         body["max_total_msat"] = serde_json::json!(13000);
         body["max_recipient_msat"] = serde_json::json!({A: 7000, C: 6000});
-        let charge = Charge { target: ROOM.into(), room: true, confirm: plan.confirm, readmission_possible: false, confirmed: false, operation: true, envelope_ids: None, failure_final_on: None };
+        let charge = Charge { target: ROOM.into(), room: true, confirm: plan.confirm, readmission_possible: false, confirmed: false, operation: true, envelope_ids: None, failure_final_on: None, call_window: false };
         money_post(&ops.state, auth, "/messages/compose", body, 13000, Some(charge)).await.unwrap();
         assert_eq!(op_ids(&node), [None]);
         assert_eq!(op_ids(&ops), [None], "genome refuses operation_id for rooms (slice 4)");
@@ -15833,7 +15841,7 @@ mod control_act_tests {
                     else if command == "porch" {
                         porch_post(&node.state, Auth::Window(0), serde_json::json!({}), 6000,
                             Charge { target: A.into(), room: false, confirm: None,
-                                readmission_possible: false, confirmed: false, operation: false, envelope_ids: None, failure_final_on: None }).await.map(|_| ())
+                                readmission_possible: false, confirmed: false, operation: false, envelope_ids: None, failure_final_on: None, call_window: false }).await.map(|_| ())
                     }
                     else { money_post_with(&node.state, Auth::Window(0), "/messages/compose",
                         serde_json::json!({}), 7000, None, None).await.map(|_| ()) }
@@ -22089,7 +22097,7 @@ mod control_act_tests {
             journal.record_outcome(&prior, spend_journal::OperationState::Unpaid, None).unwrap();
         }
         let charge = Charge { target: A.into(), room: false, confirm: None, readmission_possible: false,
-            confirmed: false, operation: true, envelope_ids: Some(true), failure_final_on: None };
+            confirmed: false, operation: true, envelope_ids: Some(true), failure_final_on: None, call_window: false };
         let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()),
             "/messages/compose", body, 15000, Some(charge), None).await.unwrap_err();
         assert_eq!(err.code, "not_dispatched");
@@ -22231,6 +22239,93 @@ mod control_act_tests {
         }
     }
 
+    fn call_window_grant(secs: i64) -> serde_json::Value {
+        let mut grant = g1_grant(secs, 400_000, 400_000);
+        grant["per_call_max_msat"] = 10_000.into();
+        grant["call_per_payment_max_msat"] = 10_000.into();
+        grant["message_per_payment_max_msat"] = grant::MESSAGING_PER_CALL_MAX_MSAT.into();
+        grant
+    }
+
+    /// A paid answer is checked against the grant the node holds when it is
+    /// paid: a short grant refuses it, unsent and unpaid; a whole day sends it.
+    #[tokio::test]
+    async fn a_paid_answer_is_checked_against_the_grant_the_node_holds_now() {
+        for (secs, sent) in [(5 * 60, false), (86_400, true)] {
+            let (node, _dir, g1) = call_grant_node(1_000);
+            g1_approved(&node, 500_000).await;
+            with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+            let quote = read_call_quote(&node.state, A).await.unwrap();
+            let max = quote.signal_msat + quote.signal_max_routing_fee_msat;
+            *g1.grant.lock().unwrap() = call_window_grant(secs);
+            let result = do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, OFFER, max, None, None).await;
+            if sent {
+                assert_eq!(composes(&node), 1, "{secs}: {:?}", result.err());
+            } else {
+                assert_eq!(result.unwrap_err().code, "call_window_short", "{secs}");
+                assert_eq!(composes(&node), 0, "nothing sent or paid");
+            }
+        }
+    }
+
+    /// The grant can change after every earlier check and before the paid
+    /// step: replaced by a short one while the send waits for the money lock,
+    /// a node-routed Ring and a paid Answer are both refused there, before
+    /// anything is reserved or sent.
+    #[test]
+    fn a_grant_shortened_under_the_money_lock_refuses_a_ring_and_an_answer() {
+        for kind in [act::KIND_CALL_OFFER, act::KIND_CALL_ANSWER] {
+            let rt = race_runtime();
+            let (node, _dir, g1) = call_grant_node(1_000);
+            let quote = rt.block_on(async {
+                g1_approved(&node, 500_000).await;
+                with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+                read_call_quote(&node.state, A).await.unwrap()
+            });
+            *g1.grant.lock().unwrap() = call_window_grant(86_400);
+            let minute = control::MinutesConsent { block_msat: 10_000, block_max_routing_fee_msat: 5_000, max_hold_msat: 240 * 15_000 };
+            let state = &node.state;
+            let (arrived, release) = pause_points::arm(&state.api_base, "after_lock");
+            let result = std::thread::scope(|s| {
+                let send = s.spawn(|| rt.block_on(async {
+                    if kind == act::KIND_CALL_OFFER {
+                        let offer = quote.offer_msat.unwrap() + quote.offer_max_routing_fee_msat;
+                        do_call_signal_bounded(state, A, kind, OFFER, offer, None, Some(&minute), None).await
+                    } else {
+                        do_call_signal_bounded(state, A, kind, OFFER, quote.signal_msat + quote.signal_max_routing_fee_msat, None, None, None).await
+                    }
+                }));
+                rt.block_on(arrived.notified());
+                *g1.grant.lock().unwrap() = call_window_grant(5 * 60);
+                release.notify_one();
+                send.join().unwrap()
+            });
+            assert_eq!(result.unwrap_err().code, "call_window_short", "{kind}");
+            assert_eq!(composes(&node), 0, "{kind}: nothing sent or paid");
+            assert_eq!(pending_operation_id(state).unwrap(), None, "{kind}: nothing pending");
+        }
+    }
+
+    /// A node without grants (pre-G1) keeps its answer path: no grant read
+    /// is needed or made for the call window, and nothing new refuses it.
+    #[tokio::test]
+    async fn a_paid_answer_on_a_node_without_grants_keeps_its_old_path() {
+        let routes = call_routes(Some(1_000));
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1", "message_operations_v1"]}).to_string());
+            }
+            if p == "/pair/grant" { return (404, serde_json::json!({"code": "not_found"}).to_string()); }
+            if p.contains("/call") || p == "/payments/price/401" || p == "/messages/compose" { routes(m, p, b) } else { (0, String::new()) }
+        });
+        let (node, _dir, _g1) = g1_node_with(&["read", "receive", "spend"], Some(first));
+        let quote = read_call_quote(&node.state, A).await.unwrap();
+        let result = do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, OFFER,
+            quote.signal_msat + quote.signal_max_routing_fee_msat, None, None).await;
+        let code = result.as_ref().err().map(|e| e.code);
+        assert!(!matches!(code, Some("grant_unknown" | "call_window_short")), "{:?}", result.err());
+    }
+
     /// A minute is compared at its price with the signed per-payment limit:
     /// the node pins no routing fee for a usable direct channel.
     #[tokio::test]
@@ -22300,7 +22395,7 @@ mod control_act_tests {
             let signal = quote.signal_msat + quote.signal_max_routing_fee_msat;
             for (cap, sent) in [(signal - 1, false), (signal, true)] {
                 let before = composes(&node);
-                let mut grant = g1_grant(3600, 400_000, 400_000);
+                let mut grant = g1_grant(86_400, 400_000, 400_000);
                 grant["per_call_max_msat"] = 50_000.into();
                 grant["call_per_payment_max_msat"] = 50_000.into();
                 grant["message_per_payment_max_msat"] = cap.into();
@@ -23793,7 +23888,7 @@ mod control_act_tests {
         spend_advance(&node.state, true).await.unwrap();
         let (auth, plan) = plan_message(&node.state, A, false, 5000, None).unwrap();
         let charge = Charge { target: A.into(), room: false, confirm: plan.confirm, readmission_possible: false,
-            confirmed: false, operation: false, envelope_ids: None, failure_final_on: None };
+            confirmed: false, operation: false, envelope_ids: None, failure_final_on: None, call_window: false };
         reserve(&node.state, auth, &charge, "charge-1", 5000).unwrap();
         reserve(&node.state, auth, &charge, "charge-1", 5000).unwrap();
         let rows = with_book(&node.state, false, |b| Ok(b.ledger.iter().filter(|e| e.id == "charge-1").count())).unwrap();
@@ -27033,22 +27128,6 @@ mod control_act_tests {
         assert_eq!(call_window_fits(&node.state, minutes(60)).unwrap_err().code, "call_window_short");
         *node.state.call_limit_seen.lock().unwrap() = Some(("another-node".into(), 60));
         assert_eq!(call_window_fits(&node.state, minutes(62)).unwrap_err().code, "call_window_short");
-    }
-
-    /// The node's grant is read again for a paid answer: a grant replaced by a
-    /// short one after the app's last poll refuses the answer, unsent and unpaid.
-    #[tokio::test]
-    async fn a_paid_answer_is_checked_against_the_grant_the_node_holds_now() {
-        let (node, _dir, g1) = g1_node(&["read", "receive", "spend"]);
-        *g1.grant.lock().unwrap() = g1_grant(5 * 60, 2_000_000, 2_000_000);
-        let answer = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","sdp":"v=0"}"#;
-        let error = do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, answer, 15_000, None, None).await.unwrap_err();
-        assert_eq!(error.code, "call_window_short");
-        assert!(!node.posts().iter().any(|(p, _)| p == "/messages/compose"), "nothing sent or paid");
-        // A whole-day grant passes this check (whatever follows it).
-        *g1.grant.lock().unwrap() = g1_grant(86_400, 2_000_000, 2_000_000);
-        let later = do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, answer, 15_000, None, None).await;
-        assert_ne!(later.err().map(|e| e.code), Some("call_window_short"));
     }
 
     /// A read that fails while the request is prepared (the budget proposal,
