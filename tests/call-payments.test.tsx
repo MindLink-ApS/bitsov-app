@@ -1896,6 +1896,23 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(capture).not.toHaveBeenCalled();
   });
 
+  it('a host refusal for a too-short approval is proven unpaid: Call again stays, nothing counts as maybe paid', async () => {
+    // The app's own checks pass on its last-read whole-day grant; the host then
+    // finds the node's grant short and refuses before anything is sent.
+    const host = stubHost({
+      grant: { budget_msat: 2_000_000, remaining_msat: 2_000_000, per_call_max_msat: 2_000_000, expires_at_ms: Date.now() + 86_400_000, envelopes: null },
+      offer: () => { throw { code: 'call_window_short', message: 'Your box’s approval ends before this call could end, and the call would stop there. Nothing was sent or paid. Ask the person who set up your box for a new approval.' }; },
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(host.used('call_signal')).toHaveLength(1);
+    expect(host.used('call_block')).toHaveLength(0);
+    await vi.waitFor(() => expect($('[data-call-again]')).not.toBeNull());
+    expect($('[data-call-panel]')!.textContent).not.toMatch(/may have been paid|kan være betalt|unknown|ukendt/i);
+  });
   it.each(['en', 'da'] as const)('an exhausted active grant offers a larger owner request without ringing again (%s)', async lang => {
     const host = stubHost({
       quote: { ...QUOTE, offer_msat: 600_000, offer_max_routing_fee_msat: 0, signal_msat: 1_000, signal_max_routing_fee_msat: 0, call_total_msat: 601_000 },
