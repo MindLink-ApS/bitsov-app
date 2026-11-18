@@ -17,6 +17,7 @@ import {
 } from './room';
 import { createMessageEntrance } from './messageEntrance';
 import { DelayedSpinner } from './DelayedSpinner';
+import { StreamFrame } from './StreamFrame';
 import type { Delivery, Message, PriceQuote } from './types';
 
 export type RoomContact = { id: string; name: string } & MemberInfo;
@@ -209,6 +210,7 @@ export function RoomThread(props: {
           </div>
         </div>
       </Show>
+      <StreamFrame>
       <div class="stream" ref={stream} data-stream data-room-stream>
         <div class="chat-column">
           <p class="day" data-room-honesty>
@@ -302,6 +304,7 @@ export function RoomThread(props: {
           </For>
         </div>
       </div>
+      </StreamFrame>
 
       <form class="composer" data-composer data-room-composer onSubmit={(e) => { e.preventDefault(); openReview(); }}>
         <Show

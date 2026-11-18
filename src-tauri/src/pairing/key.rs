@@ -66,6 +66,17 @@ impl ClientKey {
         }
     }
 
+    /// Preparation entry point; the production loader keeps its existing policy.
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn load_linux_candidate(dir: &Path, sealer: Option<&dyn Sealer>) -> Result<Self, PairError> {
+        let sealer = at_rest::linux::required(sealer).map_err(PairError::Local)?;
+        let key = Self::load_or_create_sealed(dir, &sealer)?;
+        match dir.join(KEY_FILE).symlink_metadata() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(key),
+            _ => Err(PairError::Local("client identity migration is incomplete".into())),
+        }
+    }
+
     fn load_or_create_plain(dir: &Path) -> Result<Self, PairError> {
         if sealed_file_exists(dir)? {
             return Err(PairError::Local(
@@ -118,7 +129,7 @@ impl ClientKey {
         let seed = if sealed_file_exists(dir)? {
             sealed_seed(&sealed, sealer)?
         } else {
-            let seed = if plain.exists() {
+            let seed = if !nothing_at(&plain) {
                 plain_seed(&plain)?
             } else {
                 let mut seed = Zeroizing::new([0u8; 32]);
@@ -320,6 +331,13 @@ pub(crate) fn restrict_dir(dir: &Path) -> Result<(), PairError> {
             .map_err(|e| PairError::Local(format!("cannot restrict {}: {e}", dir.display())))?;
     }
     Ok(())
+}
+
+/// True only when nothing at all is at `path`. A dangling symlink is not an
+/// absent store: reading through it says `NotFound`, but it must not pass for
+/// a fresh start.
+pub(crate) fn nothing_at(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Open a new file at `0600`. Fails with `AlreadyExists` if it is there.
@@ -601,3 +619,6 @@ mod keychain;
 pub use keychain::SmokeOutcome;
 #[cfg(all(not(test), target_os = "macos", not(feature = "mobile")))]
 pub(crate) fn storage_smoke_test() -> Result<SmokeOutcome, String> { keychain::smoke_test() }
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod linux;

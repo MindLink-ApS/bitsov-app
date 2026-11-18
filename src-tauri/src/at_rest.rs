@@ -112,3 +112,6 @@ pub fn install_ios() -> Result<(), String> {
     }
     install(Arc::new(IosSealer))
 }
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) mod linux;

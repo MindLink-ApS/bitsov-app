@@ -104,6 +104,11 @@
   --rail-w: 248px;
   --context-w: 360px;
   --chat-max: 720px;
+
+  /* stacking — a note floating inside the chat: above the message list and the composer (2),
+     below the chat's own popovers (call confirm 4, menus 5, avatar menu 6–7) and below every
+     full-screen layer (Wallet 18, Settings scrim 20 / panel 21, info 40, sheets 60+). */
+  --z-chat-float: 3;
 }
 
 html[data-theme='light'] {
@@ -237,6 +242,9 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .track-link .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-sans); font-size: var(--t-md); }
 .track-link .badge { font-size: var(--t-xs); font-weight: 600; font-variant-numeric: tabular-nums; color: var(--bg); background: var(--ink); border-radius: var(--r-chip); padding: 0 6px; min-width: 18px; text-align: center; }
 .track-link .meta { font-family: var(--font-mono); font-size: var(--t-xs); color: var(--faint); }
+/* In the desktop rail the hint gives way first: the entry's name stays whole. */
+.rail .track-link .name { flex: 1 1 auto; }
+.rail .track-link .meta { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track-empty { font-size: var(--t-sm); color: var(--faint); padding: 2px var(--s-2); }
 .rail-foot { margin-top: auto; display: flex; flex-direction: column; gap: var(--s-2); }
 .new-track { justify-content: center; border: 1px dashed var(--line-strong); }
@@ -320,7 +328,8 @@ label.field input {
 .composer { border-top: 1px solid var(--line); padding: var(--s-3) var(--s-4) var(--s-4); display: flex; flex-direction: column; align-items: center; gap: var(--s-2); background: var(--bg); width: 100%; flex: none; z-index: 2; }
 .composer textarea { resize: none; min-height: 40px; max-height: 160px; border-radius: 18px; overflow-y: auto; }
 .composer-plus-wrap { position: relative; flex: none; display: flex; }
-.composer-menu { position: absolute; right: 0; bottom: calc(100% + 8px); min-width: 150px; display: flex; flex-direction: column; padding: 4px; background: var(--raised); border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,0.3); z-index: 5; }
+/* Fixed, outside the composer's scroll box; Shell places it above + (followAnchor). */
+.composer-menu { position: fixed; max-height: var(--overlay-room, none); overflow-y: auto; min-width: 150px; display: flex; flex-direction: column; padding: 4px; background: var(--raised); border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,0.3); z-index: 5; }
 .composer-menu[hidden] { display: none; }
 .composer-menu-item { border: none; background: transparent; color: var(--ink); text-align: left; padding: 8px 12px; border-radius: var(--r-chip); font-size: var(--t-sm); }
 .composer-menu-item:hover { background: var(--surface); }
@@ -328,6 +337,17 @@ label.field input {
 .composer-panel .panel-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); font-size: var(--t-sm); }
 .composer-panel .panel-head .link { padding: 0 4px; }
 .composer-panel .composer-main { width: 100%; padding: 0; background: transparent; }
+/* One box at a time: the file or voice note takes the message bar's place, and its row reads straight. */
+.composer[data-mode="file"] [data-composer-bar] { display: none; }
+.file-panel .composer-main, .file-panel .composer-main:focus-within { border: none; box-shadow: none; align-items: center; }
+.file-panel .file-chip { min-width: 0; padding: 0; }
+.file-panel .file-chip > .hint:last-child { flex-basis: 100%; margin: 0; }
+.file-panel .file-chip .file-name { min-width: 0; }
+/* The picker opens over the chat, not under the bar, so nothing moves. */
+.composer-emoji-wrap { position: relative; flex: none; display: flex; }
+/* Fixed over the chat, outside the composer's scroll box; Shell places it above the emoji button. */
+.composer-emoji-wrap .emoji-picker { position: fixed; margin: 0; width: 240px; max-width: calc(100vw - 32px); max-height: min(40vh, var(--overlay-room, 40vh)); overflow-y: auto; z-index: 5; box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+.composer-icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; display: block; }
 .passive-status { margin: 0; }
 .passive-status > summary { display: none; }
 .signal-bar { align-items: flex-end; }
@@ -689,6 +709,9 @@ html[data-theme='light'] .target-badge.honest { color: #6b4c00; }
  * Where an answer came from is always printed under it. Orange stays for sats
  * and the one action; a preview of what would leave is plain mono on ink. */
 .ai-providers-bar { width: 100%; display: flex; justify-content: center; padding: var(--s-2) var(--s-4); background: var(--bg); border-bottom: 1px solid var(--line); flex: none; z-index: 2; }
+/* The assistant's role line wraps; its Forget button keeps its width and its word on one line. */
+.ai-providers-bar:has([data-assistant-forget]) { align-items: center; gap: var(--s-3); }
+.ai-providers-bar [data-assistant-forget] { flex: none; white-space: nowrap; }
 .ai-watches { display: block; }
 .ai-watches summary { cursor: pointer; }
 .ai-watch-notices { display: block; max-height: 12rem; overflow-y: auto; }
@@ -936,6 +959,29 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
 .refusal-counts thead th { font-weight: 500; }
 
 .money-notice { margin: 0; padding: var(--s-3) var(--s-6); background: var(--surface); border-bottom: 1px solid var(--line); }
+/* Above the app: payments coming and going must not push the whole window down and back. */
+header > .money-notice { position: fixed; top: max(var(--s-2), env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); width: max-content; max-width: min(560px, calc(100vw - 32px)); z-index: 40; border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+/* Desktop: the same card, floating over the top of the message list only. StreamFrame puts the
+   list and a note layer in one grid cell, so the layer is exactly the list's box: the card can
+   never reach the bars above it or the composer below it, whatever their height, and the frame
+   clips anything that still cannot fit. The layer lets the pointer through; only the card takes it.
+   With no message list (start view, welcome, loading) the card stays a plain line in the column:
+   it may move content, but it never covers a control. */
+.track > .money-notice-float { flex: none; }
+/* The frame takes the list's place in the column and keeps its floor: a list never got shorter
+   than its own vertical padding, so neither does the frame (iOS keyboard-open padding below). */
+.stream-frame { flex: 1; min-height: calc(2 * var(--s-6)); display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
+.stream-frame > * { grid-area: 1 / 1; }
+.stream-frame:has(> .stream-note-layer) { overflow: clip; }
+.stream-note-layer { position: relative; z-index: var(--z-chat-float); container: stream-note / size; display: flex; justify-content: center; align-items: flex-start; padding: var(--s-2) 16px; pointer-events: none; }
+.stream-note-layer > .money-notice { pointer-events: auto; width: max-content; max-width: min(560px, 100%); max-height: 100%; overflow-y: auto; border: 1px solid var(--line-strong); border-radius: var(--r-control); box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+/* A short message list (small window, assistant bars open): a compact card, two lines, then one. */
+@container stream-note (max-height: 5rem) {
+  .stream-note-layer > .money-notice { padding: 2px var(--s-3); font-size: var(--t-xs); line-height: 1.35; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+}
+@container stream-note (max-height: 2.4rem) {
+  .stream-note-layer > .money-notice { -webkit-line-clamp: 1; }
+}
 .node-pill[data-pill="warn"] .what { white-space: normal; }
 
 /* Front door / Discover */
@@ -1654,9 +1700,7 @@ html[data-platform='ios'] .composer {
 }
 /* A tall composer shrinks and scrolls inside the screen: flex: none pushed its end, and any limit there, off the bottom. */
 html[data-platform='ios'] .composer, .cc[data-phone-shell='true'] .composer { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
-/* A scrolling box would clip the + menu, which opens above it, on Android as on iPhone. The emoji
-   picker sits inside the composer, so the composer keeps scrolling while it is open. */
-:is(html[data-platform='ios'], .cc[data-phone-shell='true']) .composer:has(.composer-menu:not([hidden])) { overflow: visible; }
+/* The + menu and the emoji picker are fixed overlays, so this box keeps scrolling while they are open. */
 html[data-platform='ios'] .composer-panel { max-height: calc(var(--visible-height, 100dvh) * .45); flex-shrink: 0; }
 .ios-back { display: none; }
 html[data-platform='ios'] .ios-back { display: inline-flex; align-items: center; min-height: 44px; flex-shrink: 0; padding: 0 var(--s-4); }
@@ -1671,6 +1715,7 @@ html[data-platform='ios'] .track > .ios-back { align-self: flex-start; }
   html[data-platform='ios'][data-keyboard-open='true'] .rail { display: none; }
   html[data-platform='ios'][data-keyboard-open='true'] .track-head { padding-block: var(--s-2); }
   html[data-platform='ios'][data-keyboard-open='true'] .stream { padding-block: var(--s-2); }
+  html[data-platform='ios'][data-keyboard-open='true'] .stream-frame { min-height: calc(2 * var(--s-2)); }
   html[data-platform='ios'][data-keyboard-open='true'] .composer { padding-block: var(--s-2); gap: var(--s-1); }
 }
 /* Clip onboarding's scroll region below the status bar, including while its

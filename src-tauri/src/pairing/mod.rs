@@ -152,6 +152,7 @@ impl std::fmt::Debug for Established {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Record {
     client_id: String,
     client_pubkey: String,
@@ -216,7 +217,7 @@ pub fn short_code(challenge: &[u8]) -> String {
 
 fn load_record(store: &Path, key: &ClientKey) -> Result<Option<Record>, PairError> {
     let path = store.join(RECORD_FILE);
-    if !path.exists() {
+    if key::nothing_at(&path) {
         return Ok(None);
     }
     key::check_owner_only(&path, "pairing record")?;

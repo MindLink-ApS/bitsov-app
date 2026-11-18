@@ -56,6 +56,9 @@ pub const MAX_PAYMENT_MSAT: u64 = 100_000_000_000;
 /// The node accepts 4 MiB per file, but axum's default 2 MB request limit caps
 /// the base64 JSON body first. Stay under it rather than meet a bare 413.
 pub const FILE_MAX_BYTES: usize = 1_400_000;
+/// Most of a stored-file response read into memory: the largest allowed file in
+/// base64, plus room for its JSON fields.
+pub const FILE_BODY_MAX: usize = FILE_MAX_BYTES / 3 * 4 + 4 + 64 * 1024;
 
 /// `compose` refuses plaintext over 1 MiB.
 pub const PLAINTEXT_MAX_BYTES: usize = 1 << 20;
@@ -1547,6 +1550,22 @@ pub fn is_voice_mime(mime: &str) -> bool {
     mime.trim().to_ascii_lowercase().starts_with("audio/")
 }
 
+fn is_webm_container(mime: &str) -> bool {
+    mime.trim().to_ascii_lowercase().starts_with("video/webm")
+}
+
+/// A recorded voice note is WebM, and the stored type can come back as
+/// `video/webm` for the same audio-only file. That one shape still plays as
+/// sound; any other non-audio type, whatever its name, is not a voice note.
+pub fn is_voice_file(name: &str, mime: &str) -> bool {
+    if is_voice_mime(mime) {
+        return true;
+    }
+    let stem = name.strip_prefix("voice-note-").and_then(|n| n.strip_suffix(".webm"));
+    is_webm_container(mime)
+        && stem.is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+}
+
 /// `GET /files` windows, newest first. Genome's list takes only `limit`, so a
 /// lookup widens the window until it finds the message or the list ends.
 pub const FILE_LIST_WINDOWS: [usize; 3] = [50, 200, 1000];
@@ -1557,6 +1576,9 @@ pub const VOICE_NOT_STORED: &str = "voice note not stored on this node";
 pub const FILE_NOT_STORED: &str = "file not stored on this node";
 /// Received file over the app's 1.4 MB send/receive cap.
 pub const FILE_TOO_LARGE: &str = "file over 1.4 MB";
+/// The whole response passed [`FILE_BODY_MAX`], so the file inside was never
+/// parsed: its own size is unknown, and may be within the cap.
+pub const FILE_RESPONSE_TOO_LARGE: &str = "response too large to load safely";
 
 /// What a message's stored file is, by its type (never its name).
 #[derive(Debug, PartialEq, Eq)]
@@ -1585,7 +1607,8 @@ pub fn stored_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> StoredLooku
 /// Voice notes only: same lookup, then require an audio mime.
 pub fn voice_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> VoiceLookup<'a> {
     match stored_file_for(rows, message_id) {
-        StoredLookup::Found(r) if is_voice_mime(&r.mime_type) => VoiceLookup::Voice(r),
+        // The list has no name: `video/webm` goes on to the fetch, where `is_voice_file` reads it.
+        StoredLookup::Found(r) if is_voice_mime(&r.mime_type) || is_webm_container(&r.mime_type) => VoiceLookup::Voice(r),
         StoredLookup::Found(_) => VoiceLookup::NotVoice,
         StoredLookup::Missing => VoiceLookup::Missing,
     }
@@ -2241,6 +2264,10 @@ mod tests {
         assert_eq!(voice_file_for(&rows, "cd"), VoiceLookup::Missing);
         assert!(is_voice_mime(" Audio/MP4"));
         assert!(!is_voice_mime("text/html"));
+        assert!(is_voice_file("voice-note-20261104-155255.webm", "video/webm"));
+        assert!(is_voice_file("anything.ogg", "audio/ogg"));
+        assert!(!is_voice_file("holiday.webm", "video/webm"));
+        assert!(!is_voice_file("voice-note-x.webm", "text/html"));
         assert_eq!(stored_file_for(&rows, "ab"), StoredLookup::Found(&rows[0]));
         assert_eq!(stored_file_for(&rows[1..], "ab"), StoredLookup::Found(&rows[1]));
         assert_eq!(stored_file_for(&rows, "zz"), StoredLookup::Missing);
