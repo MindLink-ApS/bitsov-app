@@ -576,7 +576,7 @@ pub fn load(dir: &Path, node_id: &str) -> Result<Book, ActionError> {
                 return Err(unreadable("it belongs to another version or identity"));
             }
             if crate::pairing::key::nothing_at(&established) {
-                mark_established(dir, node_id)?;
+                mark_established(dir, node_id).map_err(unreadable)?;
             }
             Ok(book)
         }
@@ -591,17 +591,18 @@ pub fn load(dir: &Path, node_id: &str) -> Result<Book, ActionError> {
 }
 
 /// Durable before it returns, so a later missing book is never read as new.
+/// Returns the plain I/O error; the caller wraps it with `unreadable`.
 #[cfg(unix)]
-fn mark_established(dir: &Path, node_id: &str) -> Result<(), ActionError> {
+fn mark_established(dir: &Path, node_id: &str) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).custom_flags(libc::O_NOFOLLOW)
-        .open(established_path(dir, node_id)).and_then(|f| f.sync_all()).map_err(unreadable)?;
-    std::fs::File::open(dir).and_then(|f| f.sync_all()).map_err(unreadable)
+        .open(established_path(dir, node_id)).and_then(|f| f.sync_all())?;
+    std::fs::File::open(dir).and_then(|f| f.sync_all())
 }
 
 #[cfg(not(unix))]
-fn mark_established(_dir: &Path, _node_id: &str) -> Result<(), ActionError> {
-    Err(unreadable("private budget storage is not supported on this platform"))
+fn mark_established(_dir: &Path, _node_id: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "private budget storage is not supported on this platform"))
 }
 
 /// Write-then-rename so a crash leaves the old book or the new one, never half.
