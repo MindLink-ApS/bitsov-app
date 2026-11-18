@@ -599,20 +599,30 @@ impl NodeState {
         *self.network_refusal.lock().unwrap() = crate::network_policy::NetworkRefusal::None;
     }
 
-    /// Whether the current credential may make ordinary requests: always on
-    /// other builds; on a signet-only build once its network check passed.
-    fn network_checked(&self) -> bool {
-        if !self.signet_only { return true; }
-        let epoch = self.network_auth_epoch.lock().unwrap();
-        *self.network_verified.lock().unwrap() == Some(*epoch)
-    }
-
     /// Until the network check passes, only the checks themselves may run.
     fn require_network_authority(&self, method: &reqwest::Method, path: &str) -> Result<(), String> {
-        if (*method == reqwest::Method::GET && NETWORK_CHECK_ROUTES.contains(&path)) || self.network_checked() {
-            return Ok(());
+        self.under_network_check(method, path, || ())
+    }
+
+    /// Reads the credential under the lock that replaces it, so a signet-only
+    /// build sends exactly the credential whose network check passed.
+    fn under_network_check<T>(&self, method: &reqwest::Method, path: &str, read: impl FnOnce() -> T) -> Result<T, String> {
+        if !self.signet_only { return Ok(read()); }
+        let epoch = self.network_auth_epoch.lock().unwrap();
+        let check_route = *method == reqwest::Method::GET && NETWORK_CHECK_ROUTES.contains(&path);
+        if !check_route && *self.network_verified.lock().unwrap() != Some(*epoch) {
+            return Err(NETWORK_UNCHECKED.into());
         }
-        Err(NETWORK_UNCHECKED.into())
+        Ok(read())
+    }
+
+    fn checked_token(&self, method: &reqwest::Method, path: &str) -> Result<Option<String>, String> {
+        self.under_network_check(method, path, || self.token.lock().unwrap().clone())
+    }
+
+    /// The credential for an ordinary request, or a refusal before its check.
+    fn ordinary_token(&self) -> Result<Option<String>, String> {
+        self.checked_token(&reqwest::Method::POST, "")
     }
 
     fn require_local_peer(&self) -> Result<(), String> {
@@ -2731,12 +2741,8 @@ async fn call_api(
     ensure_fresh_token(state).await;
     let mut refreshed = false;
     loop {
-        state.require_network_authority(&method, path)?;
         let token = state
-            .token
-            .lock()
-            .unwrap()
-            .clone()
+            .checked_token(&method, path)?
             .ok_or_else(|| "the node is not authenticated yet".to_string())?;
         let mut request = state
             .http
@@ -5629,8 +5635,8 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     existing_operation = prior.as_ref().and_then(|p| p.operation_id.clone());
     ensure_fresh_token(state).await;
     if cfg!(test) { pause_points::at(&state.api_base, "after_token").await; }
-    if !state.network_checked() { return Err(ActionError::new("app_not_ready", NETWORK_UNCHECKED)); }
-    let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
+    let token = state.ordinary_token().map_err(|e| ActionError::new("app_not_ready", &e))?
+        .ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
     if body["host_expected_node_id"].as_str().is_some_and(|expected| expected != node_id) {
         return act::with_op(Active(body["host_admission_op"].as_str()), Err(ActionError::new(
@@ -6345,10 +6351,8 @@ async fn replay_direct_payment(state: &NodeState, journal: &Journal, pending: &m
     if let Some(refused) = replay_refusal(state, journal, pending) { return Err(refused); }
     ensure_fresh_token(state).await;
     if let Some(refused) = replay_refusal(state, journal, pending) { return Err(refused); }
-    if !state.network_checked() {
-        return Err(spend_journal::unknown("The node's network is not checked yet. Nothing was dispatched again."));
-    }
-    let token = state.token.lock().unwrap().clone()
+    let token = state.ordinary_token()
+        .map_err(|_| spend_journal::unknown("The node's network is not checked yet. Nothing was dispatched again."))?
         .ok_or_else(|| spend_journal::unknown("The node is not authenticated yet. Nothing was dispatched again."))?;
     // One attempt, no re-authentication loop: a refused sign-in sends nothing.
     let response = state.http.post(format!("{}{}", state.api_base, direct.path))
@@ -7426,8 +7430,8 @@ async fn resume_admission_send(state: &NodeState, pending_id: &str, peer: &str, 
     refuse_if_connection_busy(state)?;
     refuse_if_paused(state)?;
     ensure_fresh_token(state).await;
-    if !state.network_checked() { return Err(ActionError::new("app_not_ready", NETWORK_UNCHECKED)); }
-    let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
+    let token = state.ordinary_token().map_err(|e| ActionError::new("app_not_ready", &e))?
+        .ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     check_node_grant(state, "/messages/compose", &body, max_msat).await?;
     // Restore the original reservation in place. The whole-operation answer
     // settles this same entry, including its already-paid admission.
@@ -7893,12 +7897,8 @@ async fn read_file_blob(state: &NodeState, id: &str) -> Result<act::FileBlob, St
     ensure_fresh_token(state).await;
     let mut refreshed = false;
     loop {
-        if !state.network_checked() { return Err(NETWORK_UNCHECKED.into()); }
         let token = state
-            .token
-            .lock()
-            .unwrap()
-            .clone()
+            .ordinary_token()?
             .ok_or_else(|| "the node is not authenticated yet".to_string())?;
         let mut response = state
             .http
@@ -8974,8 +8974,8 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     let prior = journal.pending()?;
     existing_operation = prior.as_ref().and_then(|p| p.operation_id.clone());
     ensure_fresh_token(state).await;
-    if !state.network_checked() { return Err(ActionError::new("app_not_ready", NETWORK_UNCHECKED)); }
-    let token = state.token.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
+    let token = state.ordinary_token().map_err(|e| ActionError::new("app_not_ready", &e))?
+        .ok_or_else(|| ActionError::new("app_not_ready", "Not authenticated."))?;
     let node_id = state.node_id.lock().unwrap().clone().ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
     match &prior {
         None => {}
@@ -10587,8 +10587,10 @@ async fn ai_provider_views(app: &AppHandle<impl tauri::Runtime>) -> Vec<ai::Prov
 /// Read one topic through the broker, off the async runtime.
 async fn ai_read_topic(state: &NodeState, topic: ai::Topic, since_ms: Option<u64>) -> Result<ai::TopicRead, String> {
     ensure_fresh_token(state).await;
-    if !state.network_checked() { return Err(NETWORK_UNCHECKED.into()); }
+    let checked = state.ordinary_token()?;
     let auth = node_auth(state);
+    // The session read must still be the credential whose network check passed.
+    if state.signet_only && state.ordinary_token()? != checked { return Err(NETWORK_UNCHECKED.into()); }
     let base = state.api_base.clone();
     let proxy_auth = state
         .remote_mode
@@ -10931,8 +10933,7 @@ async fn live_bridge(app: AppHandle) {
             }
             if !*state.ready.lock().unwrap() { return Ok(None); }
             ensure_fresh_token(&state).await;
-            if !state.network_checked() { return Ok(None); }
-            let Some(token) = state.token.lock().unwrap().clone() else { return Ok(None); };
+            let Ok(Some(token)) = state.ordinary_token() else { return Ok(None); };
             let url = control::ws_url(&state.api_base, &token)?;
             *session_identity.lock().unwrap() = state.node_id.lock().unwrap().clone();
             Ok(Some((url, state.remote_proxy_auth.to_string())))
@@ -11152,8 +11153,13 @@ async fn media_bridge<R: tauri::Runtime>(
     };
     let link = control::media::run_media_link_full(
         || async {
-            if !*state.ready.lock().unwrap() || !state.network_checked() { return Ok(None); }
+            if !*state.ready.lock().unwrap() { return Ok(None); }
+            let Ok(checked) = state.ordinary_token() else { return Ok(None); };
             let Some(token) = media_token(&state).await else { return Ok(None); };
+            // A credential replaced while this token was fetched ends its check.
+            if state.signet_only && state.ordinary_token().ok().flatten().is_none_or(|now| Some(now) != checked) {
+                return Ok(None);
+            }
             let url = control::media::media_url(&state.api_base, &call_id, &peer)?;
             Ok(Some((url, token, state.remote_proxy_auth.to_string())))
         },

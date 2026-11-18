@@ -276,10 +276,7 @@ async fn request(
     state.require_network_authority(&method, path)?;
     ensure_fresh_token(state).await;
     let token = state
-        .token
-        .lock()
-        .unwrap()
-        .clone()
+        .checked_token(&method, path)?
         .ok_or("Pair this app before owner setup.")?;
     let mut request = state
         .http

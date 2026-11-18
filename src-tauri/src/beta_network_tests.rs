@@ -573,5 +573,90 @@ async fn beta_direct_reads_wait_for_the_network_check_of_a_new_credential() {
     assert_eq!(file_read_after(true).await, 0, "a new credential reads nothing before its network check");
 }
 
+/// Answers every request with 200 and records the credential each one carried.
+fn bearer_recorder() -> (String, Arc<Mutex<Vec<Option<String>>>>) {
+    use std::io::{BufRead, Read, Write};
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let base = format!("http://localhost:{}/api/v1", listener.local_addr().unwrap().port());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    std::thread::spawn(move || for stream in listener.incoming() {
+        let Ok(stream) = stream else { break };
+        let mut reader = std::io::BufReader::new(stream);
+        let (mut line, mut length, mut auth) = (String::new(), 0, None);
+        if reader.read_line(&mut line).is_err() { continue; }
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).is_err() || line == "\r\n" || line.is_empty() { break; }
+            let Some((name, value)) = line.split_once(':') else { continue };
+            if name.eq_ignore_ascii_case("content-length") { length = value.trim().parse().unwrap_or(0); }
+            if name.eq_ignore_ascii_case("authorization") { auth = value.trim().strip_prefix("Bearer ").map(str::to_owned); }
+        }
+        let mut body = vec![0; length];
+        let _ = reader.read_exact(&mut body);
+        record.lock().unwrap().push(auth);
+        let _ = write!(reader.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}");
+    });
+    (base, seen)
+}
+
+/// A credential replaced right after a request passed its network check must
+/// not ride that check: the request carries the checked credential or nothing.
+#[test]
+fn beta_request_never_carries_a_credential_replaced_after_its_network_check() {
+    let (base, seen) = bearer_recorder();
+    let mut state = NodeState::for_identifier(BETA);
+    assert!(state.signet_only);
+    state.api_base = base;
+    *state.token.lock().unwrap() = Some("tok.checked".into());
+    let epoch = *state.network_auth_epoch.lock().unwrap();
+    *state.network_verified.lock().unwrap() = Some(epoch);
+    let state = Arc::new(state);
+    let invoice = |state: Arc<NodeState>| std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+            .block_on(call_api(&state, reqwest::Method::POST, "/payments/invoice", Some(serde_json::json!({}))))
+    });
+
+    // Hold the credential so the request stops after its check, before dispatch.
+    let held = state.token.lock().unwrap();
+    let request = invoice(state.clone());
+    std::thread::sleep(Duration::from_millis(300));
+    // A new sign-in publishes its credential as `authenticate` does: under the
+    // network authority, the old check is cleared and the new credential set.
+    let (cleared, wait_cleared) = std::sync::mpsc::channel();
+    let (installed, wait_installed) = std::sync::mpsc::channel::<()>();
+    let replacement = {
+        let state = state.clone();
+        std::thread::spawn(move || {
+            let _authority = state.network_auth_epoch.lock().unwrap();
+            *state.network_verified.lock().unwrap() = None;
+            cleared.send(()).unwrap();
+            wait_installed.recv().unwrap();
+        })
+    };
+    let mut held = Some(held);
+    if wait_cleared.recv_timeout(Duration::from_millis(500)).is_ok() {
+        **held.as_mut().unwrap() = Some("tok.unchecked".into());
+        drop(held.take());
+    } else {
+        // The request holds the authority through dispatch; replace after it.
+        drop(held.take());
+        wait_cleared.recv().unwrap();
+        *state.token.lock().unwrap() = Some("tok.unchecked".into());
+    }
+    installed.send(()).unwrap();
+    replacement.join().unwrap();
+    let _ = request.join().unwrap();
+    assert!(
+        !seen.lock().unwrap().iter().any(|auth| auth.as_deref() == Some("tok.unchecked")),
+        "a credential that never passed a network check reached the node",
+    );
+
+    // The new credential is refused until its own check passes; nothing is sent.
+    let sent = seen.lock().unwrap().len();
+    assert_eq!(invoice(state.clone()).join().unwrap(), Err(NETWORK_UNCHECKED.into()));
+    assert_eq!(seen.lock().unwrap().len(), sent);
+}
+
 #[path = "beta_network_renewal_tests.rs"]
 pub(super) mod renewal_tests;
