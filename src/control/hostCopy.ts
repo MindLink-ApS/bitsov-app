@@ -12,6 +12,9 @@ import { HOST_COPY_MONEY_DA } from './hostMoneyCopy';
 export const HOST_COPY_DA: readonly (readonly [string, string])[] = [
   ...HOST_COPY_MONEY_DA,
   ['No app storage.', 'Appen har ikke sit lager klar.'],
+  ['Your box’s approval ends before this call could end, and the call would stop there. Nothing was sent or paid. Ask the person who set up your box for a new approval.', 'Godkendelsen fra din boks udløber, før opkaldet kan nå at slutte, så opkaldet ville stoppe der. Intet blev sendt eller betalt. Bed den, der har sat din boks op, om en ny godkendelse.'],
+  ['The day’s budget could not be read yet. Nothing was sent.', 'Dagens budget kunne ikke læses endnu. Intet blev sendt.'],
+  ['The app could not update its own files. Nothing was sent.', 'Appen kunne ikke opdatere sine egne filer. Intet blev sendt.'],
   ['No node identity.', 'Din boks har ingen identitet endnu.'],
   ['Not authenticated.', 'Du er ikke logget ind.'],
   ['The app data directory is not ready.', 'Appens datamappe er ikke klar.'],
