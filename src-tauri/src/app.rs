@@ -5466,6 +5466,13 @@ fn reserve(state: &NodeState, auth: Auth, charge: &Charge, id: &str, max_msat: u
         Auth::Window(_) => None,
     };
     with_book(state, true, |book| {
+        // Reserve each charge once. An unsettled row under this id is this same
+        // charge from an attempt whose reservation landed but was reported
+        // failed: re-plan without it and hold it once. A settled row with this
+        // id is an earlier identical send and stays.
+        if let Some(i) = book.ledger.iter().rposition(|e| e.id == id && !e.settled) {
+            book.ledger.remove(i);
+        }
         let plan = budget::plan(book, budget::Ask {
             target: &charge.target,
             room: charge.room,
@@ -22900,6 +22907,49 @@ mod control_act_tests {
         let receipt = do_message_send(&proven, A, false, "hi", 7000, None).await.unwrap();
         assert_eq!(receipt.amount_msat, 2000);
         assert_eq!(budget_now(&proven).spent_msat, 4000);
+    }
+
+    /// The marker write after a committed book rename fails on every save: the
+    /// send still goes once and its reservation is counted once, not reported
+    /// as a failed write that a later send would reserve again.
+    #[tokio::test]
+    async fn a_marker_failure_after_the_book_lands_reserves_once() {
+        let routes: Routes = Arc::new(|m, p, b| {
+            if p == "/messages/compose" { return (200, serde_json::json!({"message_id": "m1",
+                "delivered": true, "amount_msat": 2000, "max_routing_fee_msat": 10000}).to_string()); }
+            happy()(m, p, b)
+        });
+        let node = fake(AuthMode::Local, routes);
+        spend_advance(&node.state, true).await.unwrap();
+        let (dir, _) = budget_dir(&node.state).unwrap();
+        budget::faults::arm(&dir, budget::faults::Step::Marker);
+        let first = do_message_send(&node.state, A, false, "hi", 12000, None).await;
+        let second = do_message_send(&node.state, A, false, "hi", 12000, None).await;
+        budget::faults::disarm(&dir);
+        assert!(first.is_ok(), "{:?}", first.err().map(|e| e.code));
+        assert!(second.is_ok(), "{:?}", second.err().map(|e| e.code));
+        let view = budget_now(&node.state);
+        assert_eq!(view.unsettled_msat, 0, "no reservation left behind");
+        assert_eq!(view.accounted_msat, 24000, "two sends, each counted once");
+        assert!(spend_journal(&node.state).unwrap().pending().unwrap().is_none());
+    }
+
+    /// Reserving the same charge again (a retry after a reported failure)
+    /// leaves one reservation for it, never two.
+    #[tokio::test]
+    async fn reserving_the_same_charge_twice_holds_it_once() {
+        let node = fake(AuthMode::Local, happy());
+        spend_advance(&node.state, true).await.unwrap();
+        let (auth, plan) = plan_message(&node.state, A, false, 5000, None).unwrap();
+        let charge = Charge { target: A.into(), room: false, confirm: plan.confirm, readmission_possible: false,
+            confirmed: false, operation: false, envelope_ids: None, failure_final_on: None };
+        reserve(&node.state, auth, &charge, "charge-1", 5000).unwrap();
+        reserve(&node.state, auth, &charge, "charge-1", 5000).unwrap();
+        let rows = with_book(&node.state, false, |b| Ok(b.ledger.iter().filter(|e| e.id == "charge-1").count())).unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(budget_now(&node.state).unsettled_msat, 5000);
+        close_charge(&node.state, "charge-1", None, None).unwrap();
+        assert_eq!(budget_now(&node.state).unsettled_msat, 0, "one release clears it");
     }
 
     #[tokio::test]

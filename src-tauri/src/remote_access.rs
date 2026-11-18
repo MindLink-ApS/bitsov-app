@@ -1131,7 +1131,7 @@ fn load_with(
     path: &Path,
     sealer: Option<&dyn Sealer>,
 ) -> Result<Option<RemoteDescriptor>, RemoteError> {
-    if !path.exists() {
+    if pairing::key::nothing_at(path) {
         return Ok(None);
     }
     pairing::key::check_owner_only(path, "remote access descriptor")

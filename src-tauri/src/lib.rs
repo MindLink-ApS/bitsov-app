@@ -24,6 +24,10 @@ pub mod at_rest;
 mod apple_key_material;
 pub mod pairing;
 mod trust;
+#[cfg(all(test, unix))]
+mod store_matrix;
+#[cfg(all(test, unix))]
+mod store_fail_closed_tests;
 mod profile;
 mod network_policy;
 #[cfg(any(target_os = "ios", all(test, unix)))]

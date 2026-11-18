@@ -129,7 +129,7 @@ impl ClientKey {
         let seed = if sealed_file_exists(dir)? {
             sealed_seed(&sealed, sealer)?
         } else {
-            let seed = if plain.exists() {
+            let seed = if !nothing_at(&plain) {
                 plain_seed(&plain)?
             } else {
                 let mut seed = Zeroizing::new([0u8; 32]);
@@ -331,6 +331,13 @@ pub(crate) fn restrict_dir(dir: &Path) -> Result<(), PairError> {
             .map_err(|e| PairError::Local(format!("cannot restrict {}: {e}", dir.display())))?;
     }
     Ok(())
+}
+
+/// True only when nothing at all is at `path`. A dangling symlink is not an
+/// absent store: reading through it says `NotFound`, but it must not pass for
+/// a fresh start.
+pub(crate) fn nothing_at(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Open a new file at `0600`. Fails with `AlreadyExists` if it is there.
