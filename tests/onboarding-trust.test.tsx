@@ -9,21 +9,25 @@ let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.unstubAllGlobals(); vi.useRealTimers(); setLanguagePref('system'); localStorage.clear(); });
 
 function host(accepted: string | null = null, remote = true) {
-  const state = { node, accepted, fail: false };
+  const state = { node, accepted, fail: false, remote, restoreFail: false };
   const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
     if (cmd === 'peers_list') return [{ node_id: 'cd'.repeat(32), addr: null, label: 'Peer', connected: true }];
     if (cmd === 'messages_list') return [];
     if (cmd === 'node_status') return { ready: true, node_id: state.node, error: null };
     if (cmd === 'pairing_status') return {
-      state: 'paired', remote, scopes: ['read'], bootstrap: null,
+      state: 'paired', remote: state.remote, scopes: ['read'], bootstrap: null,
       short_code: null, code_from_node: false, reason: null,
       trust_acknowledged_node_id: state.accepted,
     };
     if (cmd === 'trust_acknowledge') {
       if (state.fail) throw new Error('Could not save trust acknowledgement.');
-      expect(args).toMatchObject({ node_id: state.node, remote });
+      expect(args).toMatchObject({ node_id: state.node, remote: state.remote });
       state.accepted = state.node;
       return true;
+    }
+    if (cmd === 'identity_restore') {
+      if (state.restoreFail) throw new Error('Restore refused by node.');
+      return { node_id: state.node };
     }
     throw new Error('unavailable');
   });
@@ -32,6 +36,23 @@ function host(accepted: string | null = null, remote = true) {
 }
 const mount = () => { dispose = render(() => <App />, document.body); };
 const gate = () => document.querySelector('[data-gate="g6-remote-trust"]');
+const anyGate = () => document.querySelector('[data-gate^="g6-"]');
+const summaries = () => [...document.querySelectorAll('[data-soft-summary]')].map(e => e.textContent);
+const TRUST_RETRY = 'Could not save your answer. Check that your node is running, then press the button again.';
+async function failTrustSave(state: { fail: boolean }) {
+  state.fail = true;
+  await vi.waitFor(() => expect(anyGate()).not.toBeNull());
+  accept();
+  await vi.waitFor(() => expect(summaries()).toContain(TRUST_RETRY));
+}
+async function submitRestore() {
+  document.querySelector<HTMLButtonElement>('[data-restore-open]')!.click();
+  await vi.waitFor(() => expect(document.querySelector('#restore-phrase')).not.toBeNull());
+  const field = document.querySelector<HTMLInputElement>('#restore-phrase')!;
+  field.value = 'abandon '.repeat(23) + 'art';
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+  document.querySelector<HTMLFormElement>('form.restore')!.requestSubmit();
+}
 const accept = () => [...document.querySelectorAll('button')].find(b => b.textContent?.includes('I understand'))!.click();
 
 it('reinstall with existing pairing and durable acknowledgement skips trust with empty webview storage', async () => {
@@ -128,6 +149,8 @@ it('a Danish trust save failure shows the Danish message, not the raw error', as
   [...document.querySelectorAll('button')].find(b => b.textContent?.includes('Jeg forstår'))!.click();
   await vi.waitFor(() => expect(document.querySelector('[data-soft-summary]')?.textContent)
     .toBe('Dit svar kunne ikke gemmes. Tjek at din node kører, og tryk så på knappen igen.'));
+  expect(document.querySelector('[data-soft-detail]')?.textContent).toContain('Could not save trust acknowledgement.');
+  expect(document.querySelector<HTMLDetailsElement>('[data-soft-detail]')!.open).toBe(false);
   expect(gate()).not.toBeNull();
 });
 
@@ -153,4 +176,40 @@ it.each([true, false])('renders the G6 disclosure and its button in Danish (remo
   const buttons = [...document.querySelectorAll('button')].map(b => b.textContent?.trim());
   expect(buttons).toContain('Jeg forstår — fortsæt til indbetaling');
   expect(buttons).not.toContain('I understand — continue to funding');
+});
+
+it('a successful restore clears an earlier failed trust save', async () => {
+  const { state } = host();
+  mount();
+  await failTrustSave(state);
+  await submitRestore();
+  await vi.waitFor(() => expect(document.querySelector('.ok-note')).not.toBeNull());
+  expect(summaries()).not.toContain(TRUST_RETRY);
+  expect(document.querySelector('[data-soft-detail]')).toBeNull();
+  expect(anyGate()).not.toBeNull();
+});
+
+it('a failed restore after a failed trust save shows only the restore error', async () => {
+  const { state } = host();
+  mount();
+  await failTrustSave(state);
+  state.restoreFail = true;
+  await submitRestore();
+  await vi.waitFor(() => expect(summaries().some(s => s !== TRUST_RETRY)).toBe(true));
+  expect(summaries()).toHaveLength(1);
+  expect(summaries()).not.toContain(TRUST_RETRY);
+});
+
+it.each(['mode', 'node'] as const)('a new trust boundary (%s) drops the earlier failed trust save', async change => {
+  const { state } = host();
+  mount();
+  await failTrustSave(state);
+  if (change === 'mode') state.remote = false;
+  else state.node = 'cd'.repeat(32);
+  const next = change === 'mode' ? '[data-gate="g6-local-trust"]' : '[data-gate="g6-remote-trust"]';
+  await vi.waitFor(() => {
+    expect(document.querySelector(next)).not.toBeNull();
+    if (change === 'node') expect(document.querySelector('.node-id')!.getAttribute('title')).toBe(state.node);
+  }, { timeout: 4000 });
+  expect(summaries()).not.toContain(TRUST_RETRY);
 });

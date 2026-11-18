@@ -14,7 +14,7 @@ import { softenError } from './control/userFacing';
 import { SoftError } from './control/SoftError';
 import { DelayedSpinner } from './control/DelayedSpinner';
 import { isMoneyNotReady } from './control/readiness';
-import { createEffect, createMemo, createSignal, onCleanup, onMount, Show, type ParentProps } from 'solid-js';
+import { createEffect, createMemo, createSignal, on, onCleanup, onMount, Show, type ParentProps } from 'solid-js';
 import { qrSvg } from './qr';
 import { Onboarding, type NodeTarget } from './onboarding/Onboarding';
 import { FIRST_RUN_PHONE_MESSAGE, INITIAL_PAIRING, type NodeStatus, type PairingView } from './onboarding/pairing';
@@ -587,9 +587,13 @@ function IdentityGate(props: {
   const [trustError, setTrustError] = createSignal<string | null>(null);
   const [restored, setRestored] = createSignal<string | null>(null);
   usePairingActivity(() => showRestore() || busy() || savingTrust());
+  // A failed save belongs to one trust boundary; a new mode or node id asks afresh.
+  createEffect(on([() => props.remote, props.nodeId], () => setTrustError(null), { defer: true }));
 
   const submitRestore = async (event: Event) => {
     event.preventDefault();
+    // A restore replaces the identity the failed acknowledgement was for.
+    setTrustError(null);
     // Read once, then clear immediately: the phrase lives in this component for the
     // duration of the call and nowhere else. The host forwards it to the node.
     const value = phrase();
