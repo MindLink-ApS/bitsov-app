@@ -194,8 +194,8 @@ export const hangupOverMessageCap = (q: CallQuote, grant: NodeGrantSummary | nul
  */
 export const hangupOverMessageCapCopy = (q: CallQuote, cap: number): string =>
   signalCost(q) > MESSAGE_PAYMENT_CAP_MSAT
-    ? tr('caHangingUpThisCallCostsMoreThanMessageMax', amount(signalCost(q), 'up'), amount(MESSAGE_PAYMENT_CAP_MSAT, 'up'))
-    : tr('caHangingUpThisCallCostsMoreThanMessageCap', amount(signalCost(q), 'up'), amount(cap, 'up'));
+    ? tr('caHangingUpThisCallCostsMoreThanMessageMax', amount(signalCost(q), 'up'), amount(MESSAGE_PAYMENT_CAP_MSAT, 'down'))
+    : tr('caHangingUpThisCallCostsMoreThanMessageCap', amount(signalCost(q), 'up'), amount(cap, 'down'));
 
 export type CallState = 'idle' | 'ringing' | 'connecting' | 'live' | 'reconnecting' | 'ended';
 /** Detailed card phase; consumers can use CallView.state for the shared lifecycle. */
@@ -991,7 +991,7 @@ export function createCallEngine(deps: CallDeps) {
       }
       const recoveryLimit = grant ? callPerPaymentMax(grant) : null;
       if (recoveryLimit !== null && callPerPaymentNeed(q, false) > recoveryLimit) {
-        recoveryRefused(conn, tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(callPerPaymentNeed(q, false), 'up'), amount(recoveryLimit, 'up')));
+        recoveryRefused(conn, tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(callPerPaymentNeed(q, false), 'up'), amount(recoveryLimit, 'down')));
         return;
       }
       const recoveryHangupCap = hangupOverMessageCap(q, grant);
@@ -1196,7 +1196,7 @@ export function createCallEngine(deps: CallDeps) {
       const need = callPerPaymentNeed(q, Boolean(deps.minutes));
       if (perPayment !== null && need > perPayment) {
         set({ ...IDLE, phase: 'ended', peer, error:
-          tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(need, 'up'), amount(perPayment, 'up')) });
+          tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(need, 'up'), amount(perPayment, 'down')) });
         return;
       }
       const hangupCap = hangupOverMessageCap(q, grant);

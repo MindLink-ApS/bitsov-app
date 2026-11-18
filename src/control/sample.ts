@@ -769,11 +769,11 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     const who = room ? tr('uiThisRoom') : tr('caThisContact');
     const limit = book.limits.get(key(target, room));
     if (limit !== undefined && spentOn(target, room) + max > limit) {
-      return refuse('budget_exhausted', tr('caYouHaveUsedOfForInTheLast24', fmtAmount(spentOn(target, room), 'up'), fmtAmount(limit, 'up'), who, fmtAmount(max, 'up')));
+      return refuse('budget_exhausted', tr('caYouHaveUsedOfForInTheLast24', fmtAmount(spentOn(target, room), 'up'), fmtAmount(limit, 'down'), who, fmtAmount(max, 'up')));
     }
     const ceiling = Math.min(!manual && autopay ? autopay.ceiling : book.ceiling, book.ceiling);
     if (spentAll() + max > ceiling) {
-      return refuse('ceiling_exhausted', tr('caYouHaveUsedOfYourAppAllInPayment', fmtAmount(spentAll(), 'up'), fmtAmount(ceiling, 'up'), fmtAmount(max, 'up')));
+      return refuse('ceiling_exhausted', tr('caYouHaveUsedOfYourAppAllInPayment', fmtAmount(spentAll(), 'up'), fmtAmount(ceiling, 'down'), fmtAmount(max, 'up')));
     }
     if (autopay && !manual) {
       let confirm: number | null = null;
@@ -1132,7 +1132,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     budgetSet: (target, room, limitMsat) => {
       const k = key(target.toLowerCase(), room);
       if (limitMsat === 0) book.limits.delete(k);
-      else if (limitMsat > book.ceiling) return refuse('invalid', tr('caThatIsAboveYourApprovedDailyTotalOfRaise', fmtAmount(book.ceiling, 'up')));
+      else if (limitMsat > book.ceiling) return refuse('invalid', tr('caThatIsAboveYourApprovedDailyTotalOfRaise', fmtAmount(book.ceiling, 'down')));
       else book.limits.set(k, limitMsat);
       return ok(budgetView());
     },

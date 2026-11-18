@@ -10,7 +10,7 @@ import { t as tr } from '../i18n';
 import { createEffect, createMemo, createSignal, For, on, Show, Switch, Match, type JSX } from 'solid-js';
 import { t, type CopyKey } from '../i18n';
 import { createStore, reconcile } from 'solid-js/store';
-import { amount as fmtAmount, shownTotal, clock, day, estimatedSats, satUnit } from './format';
+import { amount as fmtAmount, shownTotal, shownTotalFigure, clock, day, estimatedSats, satUnit } from './format';
 import {
   MAX_MEMBERS, newMsgId, planLegs, planTotal, roomChatText, roomRefusalWords, roomThread,
   type LegOutcome, type LegPlan, type LocalRoom, type MemberInfo, type RoomEntry,
@@ -150,6 +150,8 @@ export function RoomThread(props: {
   }));
   const total = () => planTotal(legs());
   const estimate = () => legs().some((l) => l.state === 'pay' && l.estimate);
+  // The headline is the sum of the legs as shown below it, so the figures add up.
+  const headline = () => shownTotalFigure(total()!, legs().flatMap((l) => (l.state === 'pay' ? [l.msat] : [])), estimate(), true);
 
   const [draft, setDraft] = createSignal('');
   const [busy, setBusy] = createSignal(false);
@@ -282,7 +284,7 @@ export function RoomThread(props: {
                           <span class="kind" data-room-send-msat={s().outcomes.reduce((t, o) => t + o.paidMsat, 0)}>
                             {s().outcomes.every((o) => o.state === 'sent')
                               ? roomCostCopy(s().outcomes.map((o) => o.paidMsat), 'paid')
-                              : t('roomMessageTotal', fmtAmount(s().outcomes.reduce((t, o) => t + o.paidMsat, 0), 'up'))}
+                              : t('roomMessageTotal', shownTotal(s().outcomes.reduce((t, o) => t + o.paidMsat, 0), s().outcomes.map((o) => o.paidMsat)))}
                           </span>
                           <ul class="room-legs">
                             <For each={s().outcomes}>
@@ -334,7 +336,7 @@ export function RoomThread(props: {
                 <div class="cost" data-cost>
                   <span class="label">{t('uiCostToSend')}</span>
                   <Show when={total() !== null} fallback={<span class="sats">…</span>}>
-                    <span class="sats" data-cost-msat={total()!}>{estimatedSats(total()!, !!estimate(), 'up', true)}<span class="unit">{satUnit(total()!, 'up')}</span></span>
+                    <span class="sats" data-cost-msat={total()!}>{headline().figure}<span class="unit">{headline().unit}</span></span>
                   </Show>
                   <span class="basis">{legs().some((l) => l.state === 'reading')
                     ? t('roomReadingPrices')

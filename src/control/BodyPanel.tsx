@@ -508,7 +508,7 @@ function SetpointsOrgan(props: OrganismProps) {
   const hot = usePulse(() => spent());
   const summary = () => {
     const x = h();
-    if (x.state === 'holding') return tr('caHExtra94', amount(x.spent_msat, 'up'), amount(x.ceiling_msat, 'up'), hoursLeft(x.until_ms, props.now));
+    if (x.state === 'holding') return tr('caHExtra94', amount(x.spent_msat, 'up'), amount(x.ceiling_msat, 'down'), hoursLeft(x.until_ms, props.now));
     if (x.state === 'paused') return tr('caPaused');
     if (x.state === 'waiting') return tr('caWaitingForYou');
     if (x.state === 'none') return tr('caNone');
@@ -555,7 +555,7 @@ function SetpointsOrgan(props: OrganismProps) {
               <Show when={x().grant}>
                 {(g) => (
                   <p class="organ-line" data-setpoint-grant>
-                    {tr('caFiniteNodeGrant')}{' '}<span class="sats">{amount(g().remaining_msat, 'down', true)}</span>{' '}{tr('uiOf')}{' '}{amount(g().budget_msat, 'up')}{' '}{tr('caLeft')}{' '}{hoursLeft(g().expires_at_ms, props.now)}{' '}{tr('caH')}</p>
+                    {tr('caFiniteNodeGrant')}{' '}<span class="sats">{amount(g().remaining_msat, 'down', true)}</span>{' '}{tr('uiOf')}{' '}{amount(g().budget_msat, 'down')}{' '}{tr('caLeft')}{' '}{hoursLeft(g().expires_at_ms, props.now)}{' '}{tr('caH')}</p>
                 )}
               </Show>
               <For each={x().rows.slice(0, 3)}>
@@ -564,7 +564,7 @@ function SetpointsOrgan(props: OrganismProps) {
               <For each={x().reached.slice(0, 2)}>
                 {(r: Setpoint) => (
                   <p class="organ-line" data-setpoint-reached={r.target}>
-                    {tr('caResting')}{' '}{props.nameOfTrack(`${r.room ? 'room' : 'peer'}:${r.target}`)}{' '}{tr('caSetpointReached')}{amount(r.spent_msat, 'up')}/{amount(r.limit_msat, 'up')}{' '}{tr('caTodayFreesAsOlderPaymentsPass24H')}</p>
+                    {tr('caResting')}{' '}{props.nameOfTrack(`${r.room ? 'room' : 'peer'}:${r.target}`)}{' '}{tr('caSetpointReached')}{amount(r.spent_msat, 'up')}/{amount(r.limit_msat, 'down')}{' '}{tr('caTodayFreesAsOlderPaymentsPass24H')}</p>
                 )}
               </For>
               <Show when={x().unsettled_msat > 0}>
@@ -592,7 +592,7 @@ function SetpointBar(props: { label: string; spent: number; limit: number; note:
     <div class="organ-row setpoint" classList={{ hot: hot(), reached: props.spent >= props.limit }} data-setpoint={props.data}>
       <span class="who">{props.label}</span>
       <span class="meter" aria-hidden="true"><span style={{ width: pct(props.spent, props.limit) }} /></span>
-      <span class="sats">{amount(props.spent, 'up', true)}/{amount(props.limit, 'up', true)}</span>
+      <span class="sats">{amount(props.spent, 'up', true)}/{amount(props.limit, 'down', true)}</span>
       <span class="organ-note">{props.note}</span>
     </div>
   );

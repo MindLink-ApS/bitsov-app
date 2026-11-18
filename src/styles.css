@@ -321,6 +321,10 @@ label.field input {
 @keyframes arrive { from { opacity: 0; transform: translateY(6px); } }
 .stamp { display: flex; align-items: center; gap: var(--s-2); font-size: var(--t-xs); color: var(--faint); margin-top: 2px; font-variant-numeric: tabular-nums; }
 .stamp :is(.sats, .money-text) { color: var(--accent); }
+.exact-amount { display: inline; }
+.exact-amount > summary { display: inline; cursor: pointer; list-style: none; }
+.exact-amount > summary::-webkit-details-marker { display: none; }
+.exact-amount[open] > summary::after { content: " · "; }
 .stamp .cost-toggle { background: none; border: 0; padding: 0 2px; margin: 0; min-height: 0; color: inherit; font: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }
 .stamp .bolt { width: 9px; height: 12px; fill: var(--accent); }
 .artifact { border: 1px solid var(--ember-line); background: var(--ember); border-radius: var(--r-panel); padding: var(--s-3) var(--s-4); display: flex; flex-direction: column; gap: var(--s-1); }

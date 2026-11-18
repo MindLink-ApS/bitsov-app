@@ -17,6 +17,7 @@ import { PairWords } from '../onboarding/PairWords';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
 import { createCallQuitGuard } from './quitGuard';
 import { QuitConfirm } from './QuitConfirm';
+import { AmountWithExact } from './ExactAmount';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ConnectionCard, nextLastCall, type NodeAnswer, type StunSource, type TrackedCall } from './ConnectionCard';
 import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
@@ -3622,7 +3623,7 @@ function MessageView(props: {
             fallback={
               <span class="sats-meta" title={tr('extraToYou', fmtAmount(amount(), 'down'))}>
                 <Bolt />
-                <span class="sats">{fmtAmount(amount(), 'down', true)}</span>
+                <span class="sats"><AmountWithExact msat={amount()} round="down" nowrap /></span>
               </span>
             }
           >
@@ -3868,7 +3869,7 @@ function CallMinutesLine(props: { minutes: MinutesView; ended: boolean; confirm?
       <Match when={props.ended && hold()}>
         {(h) => (
           <Show when={h().closed} fallback={<p class="hint" data-call-minutes="held">{tr('uiMinutesSummaryHeld', fmtAmount(h().spent_msat, 'up'), fmtAmount(h().remaining_msat, 'up'))}</p>}>
-            <p class="hint" data-call-minutes="released">{tr('uiMinutesSummaryReleased', fmtAmount(h().spent_msat, 'up'), fmtAmount(h().released_msat, 'up'))}</p>
+            <p class="hint" data-call-minutes="released">{tr('uiMinutesSummaryReleased', fmtAmount(h().spent_msat, 'up'), fmtAmount(h().released_msat, 'down'))}</p>
           </Show>
         )}
       </Match>
@@ -7765,13 +7766,13 @@ function BudgetBar(props: {
           )}
         </Match>
         <Match when={props.stand.kind === 'grant_limited'}>
-          <p class="spend-line" data-node-grant-limit>{tr('uiYourNodeSSpendGrantCannotCoverThis')} {fmtAmount(props.budget.node_grant?.remaining_msat ?? 0, 'down')} {tr('uiLeftAndAllowsAtMost')} {fmtAmount(props.budget.node_grant ? messagePerPaymentMax(props.budget.node_grant) : 0, 'up')} {tr('uiPerPaymentAskYourNodeSOwnerFor')}</p>
+          <p class="spend-line" data-node-grant-limit>{tr('uiYourNodeSSpendGrantCannotCoverThis')} {fmtAmount(props.budget.node_grant?.remaining_msat ?? 0, 'down')} {tr('uiLeftAndAllowsAtMost')} {fmtAmount(props.budget.node_grant ? messagePerPaymentMax(props.budget.node_grant) : 0, 'down')} {tr('uiPerPaymentAskYourNodeSOwnerFor')}</p>
         </Match>
         <Match when={props.stand.kind === 'contact_used' && (props.stand as Extract<BudgetStandT, { kind: 'contact_used' }>)}>
           {(st) => (
             <div class="approval budget-used" data-budget-used="contact">
               <p>
-                <strong>{tr('uiBudgetFor')} {who()} {tr('uiUsedUp')}</strong> {fmtAmount(st().spent, 'up')} {tr('uiOf')} {fmtAmount(st().limit, 'up')} {tr('uiInTheLast24HoursAndThisMessage')} {props.priceMsat === null ? '…' : fmtAmount(props.priceMsat, 'up')}.
+                <strong>{tr('uiBudgetFor')} {who()} {tr('uiUsedUp')}</strong> {fmtAmount(st().spent, 'up')} {tr('uiOf')} {fmtAmount(st().limit, 'down')} {tr('uiInTheLast24HoursAndThisMessage')} {props.priceMsat === null ? '…' : fmtAmount(props.priceMsat, 'up')}.
                 <Show when={budgetNote(props.budget.rows.find(r => r.target === props.target && r.room === props.room))}>{note => <> {note()}.</>}</Show>
                 {' '}{tr('uiItFreesUpAsOlderPaymentsPass24')}
               </p>
@@ -7799,7 +7800,7 @@ function BudgetBar(props: {
           {(st) => (
             <div class="approval budget-used" data-budget-used="total">
               <p>
-                <strong>{tr('uiYourAppAllInLimitIsUsedUp')}</strong> {fmtAmount(st().spent, 'up')} {tr('uiOf')} {fmtAmount(st().ceiling, 'up')} {tr('uiInTheLast24HoursRaisingItIs')} {budgetNote(props.budget)}
+                <strong>{tr('uiYourAppAllInLimitIsUsedUp')}</strong> {fmtAmount(st().spent, 'up')} {tr('uiOf')} {fmtAmount(st().ceiling, 'down')} {tr('uiInTheLast24HoursRaisingItIs')} {budgetNote(props.budget)}
               </p>
               <Show when={st().raiseTo}>
                 {(to) => (
@@ -7817,7 +7818,7 @@ function BudgetBar(props: {
               <p class="spend-line" data-budget-line>
                 <span class="dot ok" />
                 <span class="line-text">
-                  {tr('uiPaysAutomatically')} {fmtAmount(st().spent, 'up')} {tr('uiOf')} {fmtAmount(st().limit, 'up')} {tr('uiTo')} {who()} {tr('uiIn24H')}
+                  {tr('uiPaysAutomatically')} {fmtAmount(st().spent, 'up')} {tr('uiOf')} {fmtAmount(st().limit, 'down')} {tr('uiTo')} {who()} {tr('uiIn24H')}
                   <Show when={budgetNote(props.budget.rows.find(r => r.target === props.target && r.room === props.room))}>{note => <> · {note()}</>}</Show>
                   {' '}{tr('uiApprovalEndsIn')}{' '}
                   {hoursLeft(props.budget.autopay.open_until_ms, props.now, props.budget.window_ms)} {tr('uiH')}{' '}
@@ -7903,7 +7904,7 @@ function BudgetPanel(props: {
             <div class="tally" data-tally>
               <span class="label">{tr('caKnownPaidInTheLast24Hours')}</span>
               <span class="sats big" data-tally-total>
-                {fmtAmount(b().spent_msat, 'up', true)} <span class="unit">/ {fmtAmount(b().ceiling_msat, 'up', true)}</span>
+                {fmtAmount(b().spent_msat, 'up', true)} <span class="unit">/ {fmtAmount(b().ceiling_msat, 'down', true)}</span>
               </span>
               <span class="meter" aria-hidden="true"><span style={{ width: pct(b().spent_msat, b().ceiling_msat) }} /></span>
               <Show when={b().unsettled_msat > 0}>
@@ -7915,12 +7916,12 @@ function BudgetPanel(props: {
               <Show when={b().node_grant}>
                 {(g) => (
                   <span class="hint" data-node-grant>
-                    {tr('caYourFiniteNodeGrantAllows')}{' '}{fmtAmount(g().remaining_msat, 'down')}{' '}{tr('uiOf')}{' '}{fmtAmount(g().budget_msat, 'up')}{' '}{tr('caMoreAtMost')}{' '}
+                    {tr('caYourFiniteNodeGrantAllows')}{' '}{fmtAmount(g().remaining_msat, 'down')}{' '}{tr('uiOf')}{' '}{fmtAmount(g().budget_msat, 'down')}{' '}{tr('caMoreAtMost')}{' '}
                     <Show
                       when={grantSplitCaps(g())}
-                      fallback={<>{fmtAmount(g().per_call_max_msat, 'up')}{' '}{tr('caPerPaymentFor')}</>}
+                      fallback={<>{fmtAmount(g().per_call_max_msat, 'down')}{' '}{tr('caPerPaymentFor')}</>}
                     >
-                      {(caps) => <>{fmtAmount(caps().message, 'up')}{' '}{tr('caPerMessagePayment')}{' '}{fmtAmount(caps().call, 'up')}{' '}{tr('caPerCallPaymentFor')}</>}
+                      {(caps) => <>{fmtAmount(caps().message, 'down')}{' '}{tr('caPerMessagePayment')}{' '}{fmtAmount(caps().call, 'down')}{' '}{tr('caPerCallPaymentFor')}</>}
                     </Show>
                     {' '}{timeLeft(g().expires_at_ms, props.now)}.
                   </span>
@@ -7954,7 +7955,7 @@ function BudgetPanel(props: {
                       <span class="who">{directPaymentName(row.target) ?? props.nameOf(row.target, row.room)}</span>
                       <span class="sats" data-row-tally>
                         {fmtAmount(row.spent_msat, 'up', true)}
-                        <span class="unit">{row.limit_msat === null ? tr('caApprovedByHand') : `/ ${fmtAmount(row.limit_msat, 'up', true)}`}</span>
+                        <span class="unit">{row.limit_msat === null ? tr('caApprovedByHand') : `/ ${fmtAmount(row.limit_msat, 'down', true)}`}</span>
                       </span>
                     </div>
                     <Show when={budgetNote(row)}>{note => <span class="hint">{note()}</span>}</Show>
@@ -8364,7 +8365,7 @@ function NewTrack(props: {
                       </button>
                       <p class="hint" data-starter-purse>
                         {tr('caYouFundItFromYourOwnNodeOnlyAfter')}{' '}{fmtAmount(sponsor()!.purse_used_msat, 'up')}{' '}{tr('uiOf')}{' '}
-                        {fmtAmount(sponsor()!.purse_msat, 'up')}{' '}{tr('caUsedInTheLast24Hours')}</p>
+                        {fmtAmount(sponsor()!.purse_msat, 'down')}{' '}{tr('caUsedInTheLast24Hours')}</p>
                     </>
                   }
                 >
@@ -8416,7 +8417,7 @@ function NewTrack(props: {
                     </button>
                     <p class="hint" data-starter-purse>
                       {tr('caYouFundItFromYourOwnNodeOnlyAfter')}{' '}{fmtAmount(sponsor()!.purse_used_msat, 'up')}{' '}{tr('uiOf')}{' '}
-                      {fmtAmount(sponsor()!.purse_msat, 'up')}{' '}{tr('caUsedInTheLast24Hours')}</p>
+                      {fmtAmount(sponsor()!.purse_msat, 'down')}{' '}{tr('caUsedInTheLast24Hours')}</p>
                   </Show>
                 }
               >

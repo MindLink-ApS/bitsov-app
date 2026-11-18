@@ -22,8 +22,9 @@ const MSAT_PER_BTC = 100_000_000_000;
 /**
  * Which way a whole-sat display rounds. Every display site picks one:
  * - 'up' for a cost, a price, a ceiling or a limit: never shown smaller than what may be paid;
- * - 'down' for money received, a balance, or what is left to spend (a remaining budget or grant):
- *   never shown larger than what is there, so a payment never looks possible when it is not.
+ * - 'down' for money received or returned, a balance, what is left to spend, and an existing
+ *   limit, budget or grant cap: never shown larger than what is there or allowed, so a payment
+ *   never looks possible when it is not. (An amount being approved now is a cost: 'up'.)
  */
 export type Rounding = 'up' | 'down';
 
@@ -98,11 +99,20 @@ export const amount = (msat: number, round: Rounding, nowrap = false) => `${sats
  * total exactly, the total is shown on its own (rounded up).
  */
 export function shownTotal(total: number, parts: number[]): string {
-  if (denom() === 'btc' || parts.reduce((a, b) => a + b, 0) !== total) return amount(total, 'up');
+  const { figure, unit } = shownTotalFigure(total, parts, false);
+  return `${figure} ${unit}`;
+}
+
+/** shownTotal() as a figure and its unit, for a headline that styles the unit apart; an estimate shows "≈". */
+export function shownTotalFigure(total: number, parts: number[], estimate: boolean, nowrap = false): { figure: string; unit: string } {
+  if (denom() === 'btc' || parts.reduce((a, b) => a + b, 0) !== total) {
+    return { figure: estimatedSats(total, estimate, 'up', nowrap), unit: satUnit(total, 'up') };
+  }
   const shown = parts.map((m) => wholeSats(m, 'up'));
   const sum = shown.reduce((a, b) => a + b.sats, 0);
-  const text = `${groupDigits(String(sum))} ${sum === 1 ? 'sat' : 'sats'}`;
-  return shown.some((p) => p.rounded) ? t('amountAbout', text) : text;
+  const number = groupDigits(String(sum), nowrap);
+  const figure = estimate ? `≈ ${number}` : shown.some((p) => p.rounded) ? t('amountAbout', number) : number;
+  return { figure, unit: sum === 1 ? 'sat' : 'sats' };
 }
 
 /** Number and unit with every msat digit, for a Details disclosure (where parts must add up exactly). */

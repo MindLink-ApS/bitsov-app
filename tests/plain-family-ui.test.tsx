@@ -7,7 +7,10 @@ import { ControlCenter } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID, SAMPLE_PEERS } from '../src/control/sample';
 import { resetContactsForTests } from '../src/control/petnames';
 import { createCallQuitGuard, type ClosableWindow } from '../src/control/quitGuard';
-import { amount, shortId, shownTotal } from '../src/control/format';
+import { amount, shortId, shownTotal, shownTotalFigure } from '../src/control/format';
+import { AmountWithExact } from '../src/control/ExactAmount';
+import { hangupOverMessageCapCopy } from '../src/control/call';
+import type { CallQuote } from '../src/control/types';
 import { SettledPayment } from '../src/control/SettledPayment';
 import { QuitConfirm } from '../src/control/QuitConfirm';
 import { ringBudgetText } from '../src/control/ringBudget';
@@ -260,4 +263,51 @@ it('rounds every remaining/left budget figure down at its display site', () => {
   const up = sources.match(/(?<!h\(\)\.)(remaining_msat|leftMsat|left\(\)\.(total|contact!?)|liveGrantRemaining\(\)!?)( \?\? 0)?, 'up'/g) ?? [];
   expect(up).toEqual([]);
   expect(sources.match(/(remaining_msat|leftMsat|left\(\)\.(total|contact!?)|liveGrantRemaining\(\)!?)( \?\? 0)?, 'down'/g)?.length ?? 0).toBeGreaterThanOrEqual(8);
+});
+
+// Review round 2: what is allowed or returned rounds down; room headlines add up; receipts keep exact amounts.
+it('says a grant allows about 1 sat per payment (1.5 sats), never about 2, while the cost still rounds up', () => {
+  setLanguagePref('en');
+  const text = hangupOverMessageCapCopy({ signal_msat: 1000, signal_max_routing_fee_msat: 1000 } as CallQuote, 1500);
+  expect(text).toContain('can cost up to 2 sats, more than the about 1 sat per message payment');
+  expect(text).not.toContain('about 2 sats per message');
+});
+
+it('rounds returned money and existing limits, budgets and grant caps down at their display sites', () => {
+  const read = (f: string) => readFileSync(join(__dirname, '../src/control', f), 'utf8');
+  const sources = ['Shell.tsx', 'BodyPanel.tsx', 'call.ts', 'sample.ts'].map(read).join('\n');
+  const allowed = /(released_msat|per_call_max_msat|caps\(\)\.(message|call)|perPayment|recoveryLimit|MESSAGE_PAYMENT_CAP_MSAT|messagePerPaymentMax\([^)]*\) : 0|st\(\)\.(limit|ceiling)|ceiling_msat|g\(\)\.budget_msat|limit_msat|props\.limit|purse_msat|amount\(cap|book\.ceiling|fmtAmount\((limit|ceiling))/;
+  const sites = sources.split('\n').flatMap((line) => line.match(/(fmtAmount|amount)\((?:[^()]|\([^()]*\))*?, '(up|down)'/g) ?? []);
+  // A new limit being approved ("raise it to …") is a cost the owner signs, so it rounds up.
+  const approving = (call: string) => call.includes('Math.min(props.budget.ceiling_msat * 2');
+  const wrong = sites.filter((call) => allowed.test(call) && !approving(call) && call.endsWith("'up'"));
+  expect(wrong).toEqual([]);
+  expect(sites.filter((call) => allowed.test(call)).length).toBeGreaterThanOrEqual(20);
+});
+
+it('sums a room headline from the legs as shown: two 2.5-sat legs cost about 6, not 5', () => {
+  setLanguagePref('en');
+  expect(shownTotalFigure(5000, [2500, 2500], false)).toEqual({ figure: 'about 6', unit: 'sats' });
+  expect(shownTotalFigure(5000, [2500, 2500], true)).toEqual({ figure: '≈ 6', unit: 'sats' });
+  expect(shownTotalFigure(4000, [2000, 2000], false)).toEqual({ figure: '4', unit: 'sats' });
+  const room = readFileSync(join(__dirname, '../src/control/RoomPanel.tsx'), 'utf8');
+  expect(room).toContain('shownTotalFigure(total()!');
+  expect(room).not.toMatch(/fmtAmount\(s\(\)\.outcomes\.reduce/);
+});
+
+it('keeps the exact amount one tap away for a rounded incoming amount or history row', () => {
+  setLanguagePref('en');
+  mount = document.createElement('div');
+  document.body.appendChild(mount);
+  dispose = render(() => <>
+    <span data-a><AmountWithExact msat={1500} round="down" prefix="+" /></span>
+    <span data-b><AmountWithExact msat={2000} round="down" /></span>
+  </>, mount);
+  expect($('[data-a] summary').textContent).toBe('+about 1 sat');
+  expect($('[data-a] [data-exact-amount-value]').textContent).toBe('exactly 1.5 sats');
+  expect($('[data-b]').textContent).toBe('2 sats');
+  expect($('[data-b] details')).toBeNull();
+  const read = (f: string) => readFileSync(join(__dirname, '../src/control', f), 'utf8');
+  expect(read('WalletPage.tsx').match(/<AmountWithExact /g)?.length).toBe(3);
+  expect(read('Shell.tsx')).toContain('<AmountWithExact msat={amount()} round="down" nowrap />');
 });

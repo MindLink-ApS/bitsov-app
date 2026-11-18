@@ -20,6 +20,7 @@ import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show
 import { qrSvg } from '../qr';
 import { copyPlainText } from '../assistant/copy';
 import { deviceWord } from '../platform';
+import { AmountWithExact } from './ExactAmount';
 import { amount as fmtAmount, shownTotal, allIn, clock, day, routingFee, sats, satUnit, shortId } from './format';
 import { ambiguousThousands, amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { denom } from './prefs';
@@ -403,8 +404,8 @@ function ActivityView(props: {
       </div>
       <Show when={!loading() && incomplete()}><p class="err-note" role="status" data-activity-incomplete>{t('caActivityNotComplete')}</p></Show>
       <p class="wallet-totals" data-activity-totals>
-        <span>{t('extraReceived')} <strong data-activity-in={totals().in}>{fmtAmount(totals().in, 'down')}</strong></span>
-        <span>{t('extraSent')} <strong data-activity-out={totals().out}>{fmtAmount(totals().out, 'up')}</strong></span>
+        <span>{t('extraReceived')} <strong data-activity-in={totals().in}><AmountWithExact msat={totals().in} round="down" /></strong></span>
+        <span>{t('extraSent')} <strong data-activity-out={totals().out}><AmountWithExact msat={totals().out} round="up" /></strong></span>
       </p>
       <Show when={!loading() || shown().length > 0} fallback={<DelayedSpinner />}>
         <ul class="wallet-list" data-activity-list>
@@ -435,7 +436,7 @@ function ActivityView(props: {
                       </span>
                     </span>
                     <span class="wallet-row-amount" classList={{ in: a.direction === 'in', pending: a.kind === 'invoice' && a.status !== 'paid' }}>
-                      {a.msat === null ? '' : `${a.direction === 'in' ? '+' : '−'}${fmtAmount(a.msat, a.direction === 'in' ? 'down' : 'up')}`}
+                      {a.msat === null ? '' : <AmountWithExact msat={a.msat} round={a.direction === 'in' ? 'down' : 'up'} prefix={a.direction === 'in' ? '+' : '−'} />}
                     </span>
                   </li>
                 </>
