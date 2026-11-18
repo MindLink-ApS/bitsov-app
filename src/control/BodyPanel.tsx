@@ -555,7 +555,7 @@ function SetpointsOrgan(props: OrganismProps) {
               <Show when={x().grant}>
                 {(g) => (
                   <p class="organ-line" data-setpoint-grant>
-                    {tr('caFiniteNodeGrant')}{' '}<span class="sats">{amount(g().remaining_msat, 'up', true)}</span>{' '}{tr('uiOf')}{' '}{amount(g().budget_msat, 'up')}{' '}{tr('caLeft')}{' '}{hoursLeft(g().expires_at_ms, props.now)}{' '}{tr('caH')}</p>
+                    {tr('caFiniteNodeGrant')}{' '}<span class="sats">{amount(g().remaining_msat, 'down', true)}</span>{' '}{tr('uiOf')}{' '}{amount(g().budget_msat, 'up')}{' '}{tr('caLeft')}{' '}{hoursLeft(g().expires_at_ms, props.now)}{' '}{tr('caH')}</p>
                 )}
               </Show>
               <For each={x().rows.slice(0, 3)}>

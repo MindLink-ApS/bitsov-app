@@ -1188,7 +1188,7 @@ export function createCallEngine(deps: CallDeps) {
       const grant = deps.grant?.();
       if (grant && q.call_total_msat > grant.remaining_msat) {
         set({ ...IDLE, phase: 'ended', peer, error:
-          tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat, 'up'), amount(grant.remaining_msat, 'up')) });
+          tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat, 'up'), amount(grant.remaining_msat, 'down')) });
         deps.onBudgetNeeded?.(q.call_total_msat);
         return;
       }

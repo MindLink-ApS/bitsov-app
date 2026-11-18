@@ -7151,11 +7151,11 @@ function Composer(props: {
         <p id={sendReasonId} class="hint" classList={{ 'sr-only': mode() === 'message' && !draft().trim() }} data-send-disabled-reason>{disabledReason()}</p>
       </Show>
       <Show when={mode() === 'message' && liveGrantRemaining() !== null}>
-        <p class="hint" data-send-budget>{tr(budget()?.autopay.state === 'open' ? 'sendBudgetRemaining' : 'caNodeGrantSeparateLimits', fmtAmount(liveGrantRemaining()!, 'up'))}</p>
+        <p class="hint" data-send-budget>{tr(budget()?.autopay.state === 'open' ? 'sendBudgetRemaining' : 'caNodeGrantSeparateLimits', fmtAmount(liveGrantRemaining()!, 'down'))}</p>
         <Show when={budget()?.autopay.state !== 'open' ? appBudgetRemaining() : null}>
           {(left) => <p class="hint" data-send-app-budget>{left().contact === null
-            ? tr('caAppTotalRemaining', fmtAmount(left().total, 'up'))
-            : tr('caAppContactRemaining', fmtAmount(left().contact!, 'up'), fmtAmount(left().total, 'up'), tr(room() ? 'uiThisRoom' : 'caThisContact'))}</p>}
+            ? tr('caAppTotalRemaining', fmtAmount(left().total, 'down'))
+            : tr('caAppContactRemaining', fmtAmount(left().contact!, 'down'), fmtAmount(left().total, 'down'), tr(room() ? 'uiThisRoom' : 'caThisContact'))}</p>}
         </Show>
       </Show>
       <div class="composer-meta">
@@ -7765,7 +7765,7 @@ function BudgetBar(props: {
           )}
         </Match>
         <Match when={props.stand.kind === 'grant_limited'}>
-          <p class="spend-line" data-node-grant-limit>{tr('uiYourNodeSSpendGrantCannotCoverThis')} {fmtAmount(props.budget.node_grant?.remaining_msat ?? 0, 'up')} {tr('uiLeftAndAllowsAtMost')} {fmtAmount(props.budget.node_grant ? messagePerPaymentMax(props.budget.node_grant) : 0, 'up')} {tr('uiPerPaymentAskYourNodeSOwnerFor')}</p>
+          <p class="spend-line" data-node-grant-limit>{tr('uiYourNodeSSpendGrantCannotCoverThis')} {fmtAmount(props.budget.node_grant?.remaining_msat ?? 0, 'down')} {tr('uiLeftAndAllowsAtMost')} {fmtAmount(props.budget.node_grant ? messagePerPaymentMax(props.budget.node_grant) : 0, 'up')} {tr('uiPerPaymentAskYourNodeSOwnerFor')}</p>
         </Match>
         <Match when={props.stand.kind === 'contact_used' && (props.stand as Extract<BudgetStandT, { kind: 'contact_used' }>)}>
           {(st) => (
@@ -7915,7 +7915,7 @@ function BudgetPanel(props: {
               <Show when={b().node_grant}>
                 {(g) => (
                   <span class="hint" data-node-grant>
-                    {tr('caYourFiniteNodeGrantAllows')}{' '}{fmtAmount(g().remaining_msat, 'up')}{' '}{tr('uiOf')}{' '}{fmtAmount(g().budget_msat, 'up')}{' '}{tr('caMoreAtMost')}{' '}
+                    {tr('caYourFiniteNodeGrantAllows')}{' '}{fmtAmount(g().remaining_msat, 'down')}{' '}{tr('uiOf')}{' '}{fmtAmount(g().budget_msat, 'up')}{' '}{tr('caMoreAtMost')}{' '}
                     <Show
                       when={grantSplitCaps(g())}
                       fallback={<>{fmtAmount(g().per_call_max_msat, 'up')}{' '}{tr('caPerPaymentFor')}</>}

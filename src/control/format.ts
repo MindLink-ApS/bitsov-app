@@ -22,7 +22,8 @@ const MSAT_PER_BTC = 100_000_000_000;
 /**
  * Which way a whole-sat display rounds. Every display site picks one:
  * - 'up' for a cost, a price, a ceiling or a limit: never shown smaller than what may be paid;
- * - 'down' for money received, a balance or what can still be spent: never shown larger than what is there.
+ * - 'down' for money received, a balance, or what is left to spend (a remaining budget or grant):
+ *   never shown larger than what is there, so a payment never looks possible when it is not.
  */
 export type Rounding = 'up' | 'down';
 

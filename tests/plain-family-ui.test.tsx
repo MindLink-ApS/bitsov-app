@@ -10,6 +10,7 @@ import { createCallQuitGuard, type ClosableWindow } from '../src/control/quitGua
 import { amount, shortId, shownTotal } from '../src/control/format';
 import { SettledPayment } from '../src/control/SettledPayment';
 import { QuitConfirm } from '../src/control/QuitConfirm';
+import { ringBudgetText } from '../src/control/ringBudget';
 import { copy, setLanguagePref, t } from '../src/i18n';
 
 let dispose: (() => void) | undefined;
@@ -240,4 +241,23 @@ it('keeps keyboard focus inside the quit dialog and gives it back on Stay', asyn
   expect($('[data-behind]').hasAttribute('inert')).toBe(false);
   expect(document.activeElement?.hasAttribute('data-opener')).toBe(true);
   expect(close).not.toHaveBeenCalled();
+});
+
+// What is left to spend rounds down: never show more remaining than exists.
+it('shows a remaining budget rounded down: 1.5 sats left is about 1, never about 2', () => {
+  setLanguagePref('en');
+  const text = ringBudgetText('Maya', { leftMsat: 1500, holdMsat: 3500 });
+  expect(text).toContain('only about 1 sat left');
+  // The hold is the most the call may cost: it still rounds up.
+  expect(text).toContain('holds up to about 4 sats');
+  expect(text).not.toContain('about 2');
+});
+
+it('rounds every remaining/left budget figure down at its display site', () => {
+  const sources = ['Shell.tsx', 'BodyPanel.tsx', 'call.ts', 'ringBudget.tsx']
+    .map((f) => readFileSync(join(__dirname, '../src/control', f), 'utf8')).join('\n');
+  // A call's minutes hold (h().remaining_msat) is still held against this call: a cost ceiling, so it rounds up.
+  const up = sources.match(/(?<!h\(\)\.)(remaining_msat|leftMsat|left\(\)\.(total|contact!?)|liveGrantRemaining\(\)!?)( \?\? 0)?, 'up'/g) ?? [];
+  expect(up).toEqual([]);
+  expect(sources.match(/(remaining_msat|leftMsat|left\(\)\.(total|contact!?)|liveGrantRemaining\(\)!?)( \?\? 0)?, 'down'/g)?.length ?? 0).toBeGreaterThanOrEqual(8);
 });
