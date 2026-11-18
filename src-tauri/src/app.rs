@@ -326,6 +326,11 @@ struct NodeState {
     /// A pairing link was just imported: ask the node once for the day's
     /// budget as soon as this pairing is signed in (see `ask_budget_after_pairing`).
     budget_after_pairing: AtomicBool,
+    /// One budget ask at a time: a concurrent poll leaves it to the running one.
+    budget_ask_busy: AtomicBool,
+    /// Desktop: the file that carries the budget ask across the restart that
+    /// follows an imported link, removed once the ask is sent or not needed.
+    budget_ask_marker: Mutex<Option<PathBuf>>,
     /// M6 A1: the open node-routed media session, if a call has one. The host
     /// owns its socket; the renderer only pushes payloads and reads frames.
     media: Mutex<Option<MediaSession>>,
@@ -808,6 +813,8 @@ impl NodeState {
             trust_write: Mutex::new(()),
             approvals_restored: AtomicBool::new(false),
             budget_after_pairing: AtomicBool::new(false),
+            budget_ask_busy: AtomicBool::new(false),
+            budget_ask_marker: Mutex::new(None),
             media: Mutex::new(None),
             #[cfg(feature = "call-seal")]
             call_seal: Mutex::new(None),
@@ -1962,6 +1969,7 @@ async fn bootstrap_node_at(app: &AppHandle<impl tauri::Runtime>, app_data_dir: P
     let _startup = StartupFinished(&state.local_startup);
     match remote_access::load_persisted(&app_data_dir) {
         Ok(Some(_)) => {
+            restore_budget_ask(&state, &app_data_dir);
             if let Err(error) = connect_remote_at(&state, &app_data_dir, true).await {
                 set_error(&state, error);
             }
@@ -3655,6 +3663,9 @@ async fn remote_access_import_at<R: tauri::Runtime>(
     // The owner chose a node at home: stop offering to create one here.
     #[cfg(all(desktop, not(feature = "mobile")))]
     state.local_setup_needed.store(false, Ordering::SeqCst);
+    // The saved link is used on the next start: carry the budget ask there.
+    #[cfg(not(any(mobile, feature = "mobile")))]
+    save_budget_ask(app_data_dir);
     #[cfg(not(any(mobile, feature = "mobile")))]
     Ok(result)
 }
@@ -3697,6 +3708,8 @@ async fn remote_access_forget_at(state: &NodeState, app_data_dir: &Path) -> Resu
     let _recovery = state.remote_recovery.lock().await;
     remote_access::forget_persisted(app_data_dir).map_err(|error| error.to_string())?;
     state.budget_after_pairing.store(false, Ordering::SeqCst);
+    *state.budget_ask_marker.lock().unwrap() = None;
+    remove_budget_ask(&budget_ask_path(app_data_dir));
     state.remote_retry.clear_refusal();
     // Preserve established connections (Forget still selects the next startup).
     // An unfinished attach, however, must leave no stale remote onboarding state.
@@ -9217,12 +9230,55 @@ fn pairing_imported(state: &NodeState) {
     state.budget_after_pairing.store(true, Ordering::SeqCst);
 }
 
+const BUDGET_ASK_FILE: &str = "budget-ask-after-pairing";
+
+fn budget_ask_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(BUDGET_ASK_FILE)
+}
+
+/// Desktop import: the link is used on the next start, so the one budget ask
+/// waits in a file until then. It holds no secret, only that the ask is due.
+#[cfg_attr(any(mobile, feature = "mobile"), allow(dead_code))]
+fn save_budget_ask(app_data_dir: &Path) {
+    if let Err(error) = std::fs::write(budget_ask_path(app_data_dir), b"1\n") {
+        eprintln!("[spend] could not keep the budget ask for the next start: {error}");
+    }
+}
+
+/// Startup with a saved link: an ask the import left for this start is due.
+#[cfg_attr(not(all(desktop, not(feature = "mobile"), unix)), allow(dead_code))]
+fn restore_budget_ask(state: &NodeState, app_data_dir: &Path) {
+    let path = budget_ask_path(app_data_dir);
+    if path.is_file() {
+        *state.budget_ask_marker.lock().unwrap() = Some(path);
+        pairing_imported(state);
+    }
+}
+
+fn remove_budget_ask(path: &Path) {
+    if let Err(error) = std::fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("[spend] could not clear the budget ask: {error}");
+        }
+    }
+}
+
+/// The ask was sent, or is not needed: never again for this link.
+fn budget_ask_done(state: &NodeState) {
+    state.budget_after_pairing.store(false, Ordering::SeqCst);
+    if let Some(path) = state.budget_ask_marker.lock().unwrap().take() {
+        remove_budget_ask(&path);
+    }
+}
+
 /// One owner step up front: right after pairing, ask the node for the day's
 /// budget so its owner can say yes before the first call, not at Accept or
 /// Ring. Only asks (never obtains), only once per imported link, and only for
 /// a signed-in pairing without spending and without a request already waiting.
 /// It records no wants: a yes at the box opens nothing in the app until the
-/// owner taps here. Waits, without losing the ask, while not signed in yet.
+/// owner taps here. Waits, without losing the ask, while not signed in yet and
+/// after any read that fails before the request: the next poll tries again.
+/// The ask is spent just before its POST, so an unclear POST is never repeated.
 async fn ask_budget_after_pairing(state: &NodeState) -> Result<(), ActionError> {
     if !state.budget_after_pairing.load(Ordering::SeqCst) {
         return Ok(());
@@ -9231,7 +9287,20 @@ async fn ask_budget_after_pairing(state: &NodeState) -> Result<(), ActionError> 
         AuthMode::Paired(session) => session.scopes.iter().any(|s| s == "spend"),
         _ => return Ok(()),
     };
-    if !state.budget_after_pairing.swap(false, Ordering::SeqCst) || has_spend || budget_paused(state)? {
+    if state.budget_ask_busy.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    struct Busy<'a>(&'a AtomicBool);
+    impl Drop for Busy<'_> {
+        fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
+    }
+    let _busy = Busy(&state.budget_ask_busy);
+    // Another poll may have finished the ask while this one waited.
+    if !state.budget_after_pairing.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    if has_spend || budget_paused(state)? {
+        budget_ask_done(state);
         return Ok(());
     }
     // A saved request from an earlier run is followed, not repeated.
@@ -9242,14 +9311,18 @@ async fn ask_budget_after_pairing(state: &NodeState) -> Result<(), ActionError> 
     let generation = {
         let gate = state.spend.lock().unwrap();
         if gate.pending().is_some_and(|p| p.expires_at_ms > now_ms()) {
+            drop(gate);
+            budget_ask_done(state);
             return Ok(());
         }
         gate.generation()
     };
     // Pre-G1 nodes keep their old ask-at-use path.
     if !node_has_g1(state).await? {
+        budget_ask_done(state);
         return Ok(());
     }
+    budget_ask_done(state);
     post_elevation_request(state, Want::Window, None, None, generation).await?;
     save_spend_pending(state);
     Ok(())
@@ -26768,6 +26841,67 @@ mod control_act_tests {
         pairing_imported(&node.state);
         let _ = spend_status_now(&node.state).await;
         assert!(node.state.budget_after_pairing.load(Ordering::SeqCst));
+    }
+
+    /// A read that fails before the request (here `/status`) keeps the one
+    /// pairing ask: the next healthy poll sends it, exactly once.
+    #[tokio::test]
+    async fn a_failed_read_before_the_budget_ask_keeps_it_for_the_next_poll() {
+        let down = Arc::new(AtomicBool::new(true));
+        let flag = down.clone();
+        let first: Routes = Arc::new(move |_m, p, _b| {
+            if p == "/status" && flag.load(Ordering::SeqCst) {
+                return (503, serde_json::json!({"code": "unavailable"}).to_string());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(first));
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        let asks = |node: &Fake| node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count();
+        pairing_imported(&node.state);
+        let _ = spend_status_now(&node.state).await;
+        assert_eq!(asks(&node), 0);
+        assert!(node.state.budget_after_pairing.load(Ordering::SeqCst), "a failed read must not use up the ask");
+        down.store(false, Ordering::SeqCst);
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(asks(&node), 1);
+        // The box said yes; later polls only follow the request.
+        *g1.grant.lock().unwrap() = g1_grant(86_400, 2_000_000, 2_000_000);
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(asks(&node), 1);
+        assert!(!node.state.budget_after_pairing.load(Ordering::SeqCst));
+        // Nothing opens in the app by itself.
+        assert_ne!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Open);
+    }
+
+    /// Desktop Import saves the link for the next start: the ask goes with it
+    /// in a file, is picked up at that start, and is removed once sent.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    #[tokio::test]
+    async fn a_desktop_import_keeps_the_budget_ask_for_the_next_start() {
+        use base64::Engine;
+        let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let state = NodeState::for_identifier("app.bitsov.desktop");
+        let dir = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({"v": 2, "endpoint": "127.0.0.1:9", "endpoints": ["127.0.0.1:9"],
+            "box_transport_pubkey": "22".repeat(32),
+            "code": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([44; 32])});
+        let link = format!("bitsov://pair/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).unwrap()));
+        remote_access_import_at(app.handle(), &state, dir.path(), &link).await.unwrap();
+        assert!(budget_ask_path(dir.path()).is_file(), "the ask must outlive this process");
+        // The next start: a fresh process picks the ask up.
+        let (node, _node_dir, g1) = g1_node(&["read", "receive"]);
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        assert!(!node.state.budget_after_pairing.load(Ordering::SeqCst));
+        restore_budget_ask(&node.state, dir.path());
+        assert!(node.state.budget_after_pairing.load(Ordering::SeqCst));
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count(), 1);
+        assert!(!budget_ask_path(dir.path()).exists(), "sent: the next start asks nothing");
+        // Forget drops a waiting ask with the link.
+        save_budget_ask(dir.path());
+        remote_access_forget_at(&state, dir.path()).await.unwrap();
+        assert!(!budget_ask_path(dir.path()).exists());
     }
 
     #[tokio::test]

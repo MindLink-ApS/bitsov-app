@@ -8467,7 +8467,7 @@ function NewTrack(props: {
               </Show>
               <Show when={ownerRequired()}>
                 <div class="approval" data-starter-owner-approval="pending">
-                  <p><strong>{tr('caApproveThisGiftAtYourNode')}</strong>{' '}{tr('uiRunThisCommandOnceInTheOwnerS')}</p>
+                  <p><strong>{tr('caApproveThisGiftAtYourNode')}</strong>{' '}{tr('caTheBoxOwnerApprovesThisGiftOnce')}</p>
                   <Show when={ownerWait()} fallback={<p>{tr('caReviewTheRequestAndCompareTheCodeToPrepare')}</p>}>
                     {(pending) => <>
                       <OperatorDetails>

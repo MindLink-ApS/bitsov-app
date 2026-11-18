@@ -421,8 +421,12 @@ type IncomingOffer = { callId: string; peer: string; media: CallMedia; at: numbe
 
 export type CallEngine = ReturnType<typeof createCallEngine>;
 
-/** The call limit assumed while this box's own (`[calls] max_call_minutes`) is not known yet, in minutes. */
-export const ASSUMED_CALL_LIMIT_MINUTES = 15;
+/**
+ * The call limit assumed while this box's own (`[calls] max_call_minutes`) is
+ * not known yet, in minutes: the most any node allows (docs/CALLS.md), so an
+ * unknown limit never lets a call start that its approval could not cover.
+ */
+export const ASSUMED_CALL_LIMIT_MINUTES = 240;
 /** Room beyond the call limit, so a box approval never ends during the call's last minute. */
 export const CALL_WINDOW_MARGIN_MS = 60_000;
 
@@ -1149,6 +1153,11 @@ export function createCallEngine(deps: CallDeps) {
       return;
     }
     if (view.callId !== callId || !active()) return;
+    // Checked again at the paid step: preparing media takes time, and the approval may have changed meanwhile.
+    if (deps.minutes) {
+      const late = windowEndsBeforeCall(deps.grant?.(), deps.now(), deps.callLimitMinutes?.());
+      if (late !== null) { end(null, tr('caCallWindowShortAnswer', late)); return; }
+    }
     negotiated = true; // The peer may see the answer before our host receipt.
     const r = await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(quote));
     if (view.callId !== callId || !active()) return;
@@ -1275,6 +1284,11 @@ export function createCallEngine(deps: CallDeps) {
       }
       // Cancelled before the offer went out: nothing is paid.
       if (cancelled === callId || view.callId !== callId || !active()) return;
+      // Checked again at the paid step: preparing media takes time, and the approval may have changed meanwhile.
+      if (deps.minutes) {
+        const late = windowEndsBeforeCall(deps.grant?.(), deps.now(), deps.callLimitMinutes?.());
+        if (late !== null) { end(null, tr('caCallWindowShortRing', late)); return; }
+      }
       // From here the host may hold this admission: every end asks it to close it.
       own.push(callId);
       const r = await pay(CALL_OFFER, { media, sdp: conn.localDescription!.sdp }, q.offer_msat + q.offer_max_routing_fee_msat, undefined, undefined, false, consent, signalCost(q));
