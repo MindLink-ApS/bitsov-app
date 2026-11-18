@@ -436,3 +436,45 @@ it.each([
   // The old promise covered all of BitSov, but the Mac shows a new phrase once during setup.
   expect(options.textContent).not.toMatch(/never shows you your recovery phrase|never copies it anywhere|kopierer den aldrig/);
 });
+it.each([
+  ['en', 'Please wait…', 'Could not save. Try again.'],
+  ['da', 'Vent et øjeblik…', 'Kunne ikke gemme. Prøv igen.'],
+] as const)('PhoneTrust saves once while pending, says a failed save plainly, and retries with a new save in %s', async (locale, waiting, failure) => {
+  const saves: { resolve: () => void; reject: (e: unknown) => void }[] = [];
+  const onContinue = vi.fn(() => new Promise<void>((resolve, reject) => { saves.push({ resolve, reject }); }));
+  dispose = render(() => <PhoneTrust locale={locale} onContinue={onContinue} />, document.body);
+  await tick();
+  const action = () => document.querySelector<HTMLButtonElement>('button.primary')!;
+  const reason = () => {
+    const id = action().getAttribute('aria-describedby');
+    return id ? document.getElementById(id)?.textContent : undefined;
+  };
+  expect(action().disabled).toBe(false);
+  expect(reason()).toBeUndefined();
+  action().click(); await tick();
+  expect(onContinue).toHaveBeenCalledTimes(1);
+  expect(action().disabled).toBe(true);
+  expect(reason()).toBe(waiting);
+  // Repeated activation while the save is pending, including an event that
+  // reaches the handler despite the disabled attribute, starts no second save.
+  action().click();
+  action().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  await tick();
+  expect(onContinue).toHaveBeenCalledTimes(1);
+  expect(document.querySelector('[role="alert"]')).toBeNull();
+  saves[0].reject(new Error('synthetic host refusal'));
+  await tick();
+  expect(document.querySelector('[role="alert"]')?.textContent).toBe(failure);
+  expect(document.body.textContent).not.toContain('synthetic host refusal');
+  expect(action().disabled).toBe(false);
+  expect(reason()).toBeUndefined();
+  action().click(); await tick();
+  expect(onContinue).toHaveBeenCalledTimes(2);
+  expect(document.querySelector('[role="alert"]')).toBeNull();
+  expect(action().disabled).toBe(true);
+  expect(reason()).toBe(waiting);
+  saves[1].resolve(); await tick();
+  expect(onContinue).toHaveBeenCalledTimes(2);
+  expect(document.querySelector('[role="alert"]')).toBeNull();
+  expect(action().disabled).toBe(false);
+});
