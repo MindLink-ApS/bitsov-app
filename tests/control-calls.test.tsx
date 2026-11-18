@@ -4217,6 +4217,116 @@ describe('calls in the shell', () => {
     expect($('[data-stun-own]')).toBeNull();
     expect($('[data-stun-own-hint]')).toBeNull();
   });
+
+  // Call end states: one plain cause per end, no protocol text in the chat, never a card gone without its end.
+  const boundHost = (over: Record<string, Reply> = {}) => stubHost({
+    call_signal: (args) => ({ operation_id: args!.kind === 400 ? 'op-400' : null, message_id: 'sig', kind: args!.kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() }),
+    ...over,
+  });
+
+  it.each([
+    ['en', 'hangup', 'No answer'], ['da', 'hangup', 'Intet svar'],
+    ['en', 'timeout', 'No answer'], ['en', 'declined', 'Declined'], ['da', 'declined', 'Afvist'], ['en', 'busy', 'Busy'],
+  ] as const)('their side ending our ringing call (%s, %s) says "%s"; only an explicit decline says declined', async (lang, reason, said) => {
+    const host = boundHost();
+    await openShell();
+    setLanguagePref(lang);
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    const callId = JSON.parse(host.used('call_signal')[0].args!.plaintext as string).call_id as string;
+    host.emitLive({ type: 'message', room_id: null, message: { ...msg(403, { call_id: callId, reason }), admission_operation_id: 'op-400' } });
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(text('[data-call-ended]')).toBe(said);
+  });
+
+  it.each(['en', 'da'] as const)('our own ring running out says No answer, never Hung up (%s)', async (lang) => {
+    boundHost();
+    await openShell();
+    setLanguagePref(lang);
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    await vi.advanceTimersByTimeAsync(RING_MS + 1);
+    vi.useRealTimers();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(text('[data-call-ended]')).toBe(lang === 'en' ? 'No answer' : 'Intet svar');
+    expect(text('[data-call-panel]')).not.toMatch(/Hung up|Lagt på/);
+  });
+
+  it.each([
+    ['en', 'The connection to Maya was lost.', /The direct connection closed\./],
+    ['da', 'Forbindelsen til Maya blev afbrudt.', /Den direkte forbindelse blev lukket\./],
+  ] as const)('a lost connection ends with one plain cause that never blames money; the technical words only under a closed Details (%s)', async (lang, said, technical) => {
+    stubHost();
+    await liveCall();
+    setLanguagePref(lang);
+    FakePc.made[0].state('closed');
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(text('[data-call-ended]')).toBe(said);
+    expect(text('[data-call-ended]')).not.toMatch(/sats|paid|budget|betal|brugt/i);
+    const details = $<HTMLDetailsElement>('[data-call-end-detail]')!;
+    expect(details.open).toBe(false);
+    expect(details.textContent).toMatch(technical);
+  });
+
+  it.each([['en', 'Reconnecting…', 'Live'], ['da', 'Forbinder igen…', 'I gang']] as const)('frozen media on a live call shows Reconnecting, then Live again (%s)', async (lang, said, live) => {
+    stubHost();
+    await liveCall();
+    setLanguagePref(lang);
+    const pc = FakePc.made[0] as unknown as { oninterruption?: (endsAt: number | null) => void };
+    pc.oninterruption!(Date.now() + 27_000);
+    await vi.waitFor(() => expect($('[data-call-panel="reconnecting"]')).not.toBeNull());
+    expect(text('[data-call-title]')).toBe(said);
+    expect($('[data-call-reconnecting]')).not.toBeNull();
+    expect($('[data-call-hangup]')).not.toBeNull();
+    pc.oninterruption!(null);
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    expect(text('[data-call-title]')).toBe(live);
+  });
+
+  it('an answered incoming call that ended keeps its card, with the reason and Call again', async () => {
+    const host = stubHost({ messages_list: () => [] });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { media: 'audio', sdp: 'offer' }) });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(FakePc.made).toHaveLength(1));
+    FakePc.made[0].connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    FakePc.made[0].state('closed');
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(text('[data-call-ended]')).toBe('The connection to Maya was lost.');
+    expect($('[data-call-again]')).not.toBeNull();
+  });
+
+  it('call-control payloads never render in the chat, old history included; each call is one system line', async () => {
+    const t0 = Date.now() - 60 * 60_000;
+    const call = (id: string, kind: number, at: number, body: Record<string, unknown>, sender = A) =>
+      ({ id, kind, sender, recipient: sender === A ? OWN : A, timestamp: t0 + at, plaintext: JSON.stringify(body), payment_amount_msat: 1000 });
+    stubHost({ messages_list: (args) => (args!.peer === A ? [
+      { id: 'chat-1', kind: 0, sender: A, recipient: OWN, timestamp: t0 - 1000, plaintext: 'hello', payment_amount_msat: 2000 },
+      call('offer', 400, 0, { v: 1, call_id: ID, media: 'video', sdp: 'v=0' }, OWN),
+      call('answer', 401, 5_000, { v: 1, call_id: ID, sdp: 'v=0' }),
+      // An older app stored its minute receipts as ordinary messages.
+      call('old-receipt-0', 0, 6_000, { call_id: ID, seq: 0 }, OWN),
+      call('old-receipt-1', 0, 66_000, { call_id: ID, seq: 1 }, OWN),
+      call('block-2', 404, 126_000, { call_id: ID, seq: 2 }, OWN),
+      call('bye', 403, 5_000 + 8 * 60_000, { v: 1, call_id: ID, reason: 'hangup' }),
+      { id: 'chat-2', kind: 0, sender: OWN, recipient: A, timestamp: t0 + 9 * 60_000, plaintext: 'talk soon', payment_amount_msat: 2000 },
+    ] : []) });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-message="chat-2"]')).not.toBeNull());
+    const chat = $('[data-message="chat-1"]')!.closest('.stream, [data-stream], main') ?? mount;
+    expect(chat.textContent).not.toContain('{"call_id"');
+    expect(chat.textContent).not.toContain('"seq"');
+    for (const id of ['offer', 'answer', 'old-receipt-0', 'old-receipt-1', 'block-2', 'bye']) expect($(`[data-message="${id}"]`)).toBeNull();
+    const lines = mount.querySelectorAll('[data-call-line]');
+    expect(lines).toHaveLength(1);
+    expect(lines[0].textContent).toMatch(/^Video call · 8 min · /);
+    expect(lines[0].textContent).not.toMatch(/sats/);
+  });
 });
 
 describe('iOS Live call audio and background video', () => {

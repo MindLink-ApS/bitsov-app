@@ -76,7 +76,7 @@ const RESTART_DELAY_MS = 2_000;
 // is required: the node deliberately rejects repeated 400/401 for one call id.
 const RESTART_REQUEST_MID = 'bitsov-restart-v1';
 const RESTART_ATTRIBUTE = 'a=x-bitsov-restart-of:';
-const restartParent = (sdp: string) => sdp.split(/\r?\n/).find(line => line.startsWith(RESTART_ATTRIBUTE))?.slice(RESTART_ATTRIBUTE.length);
+export const restartParent = (sdp: string) => sdp.split(/\r?\n/).find(line => line.startsWith(RESTART_ATTRIBUTE))?.slice(RESTART_ATTRIBUTE.length);
 const withoutRestart = (sdp: string) => sdp.split(/\r?\n/).filter(line => !line.startsWith(RESTART_ATTRIBUTE)).join('\r\n');
 /** How long an accepted call may stay 'connecting' before it ends. */
 export const CONNECT_TIMEOUT_MS = 30_000;
@@ -724,6 +724,13 @@ export function createCallEngine(deps: CallDeps) {
   const admissionOps = new Map<string, Map<string, string>>();
   /** Their hangup for one of our offers, waiting for that offer's receipt to bring the host-bound op id. */
   const pendingPeerEnds = new Map<string, { callId: string; reason: HangupReason }>();
+  /**
+   * Their side ended our call while it still rang: nobody answered. A ringing
+   * callee has no hang-up button (Decline sends nothing), so only an explicit
+   * `declined` (or `busy`) is said as such; anything else is "No answer".
+   */
+  const peerEndReason = (reason: HangupReason): HangupReason =>
+    view.outgoing && view.phase === 'ringing' && reason === 'hangup' ? 'timeout' : reason;
   const closeAdmission = (operationId: string, peer: string, callId: string): Promise<void> =>
     deps.closeAdmission?.(operationId, peer, callId).catch(() => { /* Host preserves the fence on storage failure. */ }) ?? Promise.resolve();
   /** Local teardown validates identity only; op_end_call performs node-confirmed cleanup. */
@@ -890,6 +897,14 @@ export function createCallEngine(deps: CallDeps) {
       if (state === 'failed' || state === 'disconnected' || state === 'closed') connectionChanged(state);
       else if ((state === 'connected' || state === 'completed') && conn.connectionState === 'connected') connectionChanged('connected');
     };
+    // Node-routed media: a node link that stays down past a few seconds (frozen or lost media) shows the
+    // Reconnecting phase, until the link is back or its own grace ends the call. Display only: no restart,
+    // no signal and no payment; the adapter's grace timer still owns the end.
+    (conn as { oninterruption?: ((endsAt: number | null) => void) | null }).oninterruption = (endsAt) => {
+      if (pc !== conn || !active() || ending) return;
+      if (endsAt !== null && view.phase === 'live') set({ phase: 'reconnecting', dropAt: endsAt });
+      else if (endsAt === null && view.phase === 'reconnecting' && dropTimer === undefined) set({ phase: 'live', dropAt: null });
+    };
     // Network events are display only: they set view.offline for the call panel's note, and never
     // call reconnect()/restart() or touch anything those or the answer path read.
     offNetwork?.();
@@ -952,7 +967,7 @@ export function createCallEngine(deps: CallDeps) {
             operations.set(operationId, targetId!);
             admissionOps.set(callId!, operations);
             const pendingEnd = pendingPeerEnds.get(operationId);
-            if (pendingEnd?.callId === targetId) end(pendingEnd.reason, null, peerEnd(targetId!));
+            if (pendingEnd?.callId === targetId) end(peerEndReason(pendingEnd.reason), null, peerEnd(targetId!));
           }
         }
         return result;
@@ -1601,7 +1616,7 @@ export function createCallEngine(deps: CallDeps) {
                 return;
               }
             }
-            end(s.reason ?? 'hangup', null, peerEnd(s.call_id));
+            end(peerEndReason(s.reason ?? 'hangup'), null, peerEnd(s.call_id));
           }
       }
     },

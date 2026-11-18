@@ -30,6 +30,8 @@ const CALL_ATTRIBUTE = 'a=x-bitsov-call:';
 const SEAL_ATTRIBUTE = 'a=x-bitsov-e2e:';
 /** A closed node link may come back (the host reconnects); after this long the call ends. */
 export const LINK_GRACE_MS = 30_000;
+/** A node link down this long (frozen or lost media) is said as Reconnecting on the card. Display only. */
+export const MEDIA_FROZEN_MS = 3_000;
 
 /** The placeholder description that tells an M6 app "meet me at the node". */
 export function nodeRoutedSdp(type: 'offer' | 'answer', callId: string | null, sealAttribute?: string | null): string {
@@ -154,6 +156,11 @@ export class NodeRoutedConnection {
   onicecandidate: Handler = null;
   /** Why the node link ended for good, when the engine needs to say so (`not_paid`). */
   endDetail: string | null = null;
+  /**
+   * Display only: the open link has been down for `MEDIA_FROZEN_MS` (`endsAt`: when its grace ends the call),
+   * or it came back (`null`). Nothing here restarts, signals or pays.
+   */
+  oninterruption: ((endsAt: number | null) => void) | null = null;
 
   private stream: MediaStream | null = null;
   private audio: CallAudio | null = null;
@@ -170,6 +177,8 @@ export class NodeRoutedConnection {
   /** The owner's own mute, kept for an audio engine built later. */
   private muted = false;
   private graceTimer: ReturnType<typeof setTimeout> | undefined;
+  private frozenTimer: ReturnType<typeof setTimeout> | undefined;
+  private interrupted = false;
   private readonly now: () => number;
   /** This connection made its offer or answer. Never a second: a seal does not restart. */
   private sealOffered = false;
@@ -304,6 +313,8 @@ export class NodeRoutedConnection {
     this.closed = true;
     clearTimeout(this.graceTimer);
     this.graceTimer = undefined;
+    clearTimeout(this.frozenTimer);
+    this.frozenTimer = undefined;
     const audio = this.audio;
     this.audio = null;
     void audio?.close();
@@ -427,6 +438,9 @@ export class NodeRoutedConnection {
       case 'open': {
         clearTimeout(this.graceTimer);
         this.graceTimer = undefined;
+        clearTimeout(this.frozenTimer);
+        this.frozenTimer = undefined;
+        if (this.interrupted) { this.interrupted = false; this.oninterruption?.(null); }
         this.linkOpen = true;
         if (link.limits) this.video?.setNodeLimits(link.limits);
         this.maybeConnected();
@@ -437,7 +451,16 @@ export class NodeRoutedConnection {
         this.video?.linkReset();
         // The host reconnects on its own; the call stays live meanwhile.
         if (this.wasOpen && this.graceTimer === undefined) {
-          this.graceTimer = setTimeout(() => { this.graceTimer = undefined; this.setState('closed'); this.endSession(); }, this.deps.linkGraceMs ?? LINK_GRACE_MS);
+          const grace = this.deps.linkGraceMs ?? LINK_GRACE_MS;
+          const endsAt = this.now() + grace;
+          this.graceTimer = setTimeout(() => { this.graceTimer = undefined; clearTimeout(this.frozenTimer); this.frozenTimer = undefined; this.setState('closed'); this.endSession(); }, grace);
+          // Frozen past a few seconds: the card says Reconnecting (with when the call ends), never a still "Live".
+          this.frozenTimer = setTimeout(() => {
+            this.frozenTimer = undefined;
+            if (this.closed || this.linkOpen || this.connectionState === 'closed') return;
+            this.interrupted = true;
+            this.oninterruption?.(endsAt);
+          }, Math.min(MEDIA_FROZEN_MS, grace));
         }
         break;
       case 'sealed':

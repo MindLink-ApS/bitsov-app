@@ -21,7 +21,7 @@ import {
   BLOCK_GRACE_MS, ENDED_CONFIRM_MS, MAX_ATTEMPTS, PASSING_MAX_ATTEMPTS, RETRY_MS, STATUS_POLL_MS,
   createCallMinutes, waitUntilPaid, type MinutesDeps, type MinutesStop, type MinutesView,
 } from '../src/control/callMinutes';
-import { createNodeRoutedConnection, nodeRoutedSdp, type MediaSessionEvent } from '../src/control/nodeRoutedConnection';
+import { createNodeRoutedConnection, LINK_GRACE_MS, nodeRoutedSdp, type MediaSessionEvent } from '../src/control/nodeRoutedConnection';
 import type { CallAudio } from '../src/control/callAudio';
 import type { MediaBridge, MediaLink } from '../src/control/mediaBridge';
 import { amount } from '../src/control/format';
@@ -1025,6 +1025,38 @@ describe('node-routed calls carry audio only, and a dead media session stops the
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(pay).toHaveBeenCalledTimes(1);
     expect(e.sessions.map((x) => x.state)).toEqual(['open', 'closed']);
+  });
+
+  it('frozen media: a node link down for 3 s shows Reconnecting, back to Live when it returns, and ends after its grace; nothing extra is sent', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const pay = vi.fn(async (_p: string, _c: string, seq: number) => { node.settle(seq); return ok(receipt(seq)); });
+    const e = routedEngine(minutesOf(node, pay));
+    await e.engine.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(e.last().minutes?.reservation).not.toBeNull());
+    await e.engine.confirmMinutes();
+    await e.engine.receive(answerMessage, OWN);
+    await vi.waitFor(() => expect(pay).toHaveBeenCalledWith(A, ID, 0));
+    await vi.advanceTimersByTimeAsync(0);
+    e.link({ link: 'open', detail: null });
+    await vi.waitFor(() => expect(e.last().phase).toBe('live'));
+    const sent = e.signals.length;
+    // A short blip stays Live.
+    e.link({ link: 'closed', detail: null });
+    await vi.advanceTimersByTimeAsync(2_900);
+    expect(e.last().phase).toBe('live');
+    // Frozen past about 3 s: Reconnecting, with when the link's own grace (30 s) ends the call.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(e.last()).toMatchObject({ phase: 'reconnecting', dropAt: Date.now() - 3_000 + LINK_GRACE_MS });
+    e.link({ link: 'open', detail: null });
+    expect(e.last()).toMatchObject({ phase: 'live', dropAt: null });
+    // Lost for good: Reconnecting, then the card ends (never just gone), at the existing 30 s deadline.
+    e.link({ link: 'closed', detail: null });
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(e.last().phase).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(LINK_GRACE_MS - 3_000);
+    expect(e.last()).toMatchObject({ phase: 'ended', reason: 'failed' });
+    // Display only: no restart offer or other signal was sent for any of it.
+    expect(e.signals.slice(sent).map((x) => x.kind)).toEqual([]);
   });
 
   it('a phone locked mid-call: minutes are paid during the grace, then the call is hung up and no further minute is paid', async () => {
@@ -2116,7 +2148,10 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect($('[data-call-ended]')?.textContent).toBe(`Your node’s hold for this call does not match what you agreed to, so the call ended. ${ABOVE}`);
+    // One plain line; the node's own words wait under a closed Details.
+    expect($('[data-call-ended]')?.textContent).toBe('Your node’s hold for this call does not match what you agreed to, so the call ended.');
+    expect($<HTMLDetailsElement>('[data-call-end-detail]')!.open).toBe(false);
+    expect($('[data-call-end-detail]')!.textContent).toContain(ABOVE);
     expect(host.used('call_block')).toHaveLength(0);
     expect(host.used('call_media_open')).toHaveLength(0);
   });
@@ -2486,7 +2521,8 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await openShell();
     await ringAndAnswer(host);
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect($('[data-call-ended]')?.textContent).toBe('A minute of the call could not be paid, so the call ended. Nothing was paid for that minute. Your node paused spending after failed payments. Nothing was sent.');
+    expect($('[data-call-ended]')?.textContent).toBe('A minute of the call could not be paid, so the call ended. Nothing was paid for that minute.');
+    expect($('[data-call-end-detail]')!.textContent).toContain('Your node paused spending after failed payments. Nothing was sent.');
     expect(host.used('call_media_open')).toHaveLength(0);
   });
 
