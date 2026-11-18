@@ -29,11 +29,11 @@ afterEach(() => {
 });
 
 describe('petnames', () => {
-  it('stores a local petname that wins over peer.label, and never shows the id as a name', () => {
+  it('stores a local petname and never uses peer.label as the display name', () => {
     const peerWithoutLabel: Peer = { node_id: A, addr: null, label: null, connected: true, fingerprint: 'aaaaaaaa' };
     expect(peerName(peerWithoutLabel, A)).toBe('New contact');
     const peer: Peer = { node_id: A, addr: null, label: 'RemoteClaim', connected: true, fingerprint: 'aaaaaaaa' };
-    expect(peerName(peer, A)).toBe('RemoteClaim');
+    expect(peerName(peer, A)).toBe('New contact');
     expect(claimedName(peer)).toBe('RemoteClaim');
     setPetname(A, '  Maya  ');
     expect(petnameOf(A)).toBe('Maya');

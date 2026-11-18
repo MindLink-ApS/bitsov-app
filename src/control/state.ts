@@ -9,7 +9,7 @@ import { feeCeiling } from './format';
 // fresh the node's figures are.
 
 import { ago, sats, satUnit } from './format';
-import { contactRevision, petnameOf, petnameTakenByOther } from './petnames';
+import { contactRevision, petnameOf } from './petnames';
 import type {
   ActionError,
   AdmissionPrice,
@@ -38,19 +38,13 @@ export const trackKey = (t: TrackRef): string =>
   t.kind === 'peer' || t.kind === 'room' || t.kind === 'bound' || t.kind === 'assistant' ? `${t.kind}:${t.id.toLowerCase()}` : t.kind;
 
 /**
- * Display name for a contact: the owner's local petname, else the name the
- * contact already carries (its label or card) unless that copies a name you gave
- * someone else, else a plain "New contact".
- * Never the node id: that stays under the contact's Technical details.
+ * Display name for a contact: the owner's local petname, else a plain "New contact".
+ * Never the node id (that stays under the contact's Technical details), and never
+ * a name the contact claims: that is shown apart, marked, in {@link claimedName}.
  */
-export const peerName = (peer: Peer | undefined, id: string): string => {
+export const peerName = (_peer: Peer | undefined, id: string): string => {
   contactRevision();
-  const pet = petnameOf(id);
-  if (pet) return pet;
-  // A name someone else's node claims is used only while it does not copy a
-  // name you gave another person: a second "Maya" is a new contact until you say so.
-  const claim = claimedName(peer);
-  return claim && !petnameTakenByOther(id, claim) ? claim : t('contactNew');
+  return petnameOf(id) ?? t('contactNew');
 };
 
 /** Remote-supplied name (peer label / profile card). Suggestion only — never truth. */

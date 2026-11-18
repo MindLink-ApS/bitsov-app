@@ -103,7 +103,7 @@ import {
   type Denom,
   type ThemePref,
 } from './prefs';
-import { petnameOf, petnameTakenByOther, reconcileKeyChange, verifyState } from './petnames';
+import { petnameOf, petnameTakenByOther, reconcileKeyChange, setPetname, verifyState } from './petnames';
 import {
   ADMISSION_MAX_MSAT,
   applyDelivery,
@@ -2930,7 +2930,7 @@ function Rail(props: {
     const key = props.openKey ?? '';
     if (advanced && (key === 'ai' || key === 'discover' || key === 'porch' || key.startsWith('assistant:'))) advanced.open = true;
   });
-  const item = (t: TrackRef, name: string | (() => string), meta?: JSX.Element) => {
+  const item = (t: TrackRef, name: string | (() => string), meta?: JSX.Element, sub?: () => string | null) => {
     const key = trackKey(t);
     return (
       <button
@@ -2940,7 +2940,7 @@ function Rail(props: {
         disabled={!props.active}
         onClick={() => props.onOpen(t)}
       >
-        <span class="name">{typeof name === 'function' ? name() : name}</span>
+        <span class="name">{typeof name === 'function' ? name() : name}<Show when={sub?.()}>{(s) => <span class="track-claimed" data-track-claimed>{s()}</span>}</Show></span>
         <Show when={(props.unread[key] ?? 0) > 0} fallback={meta}>
           <span class="badge" aria-label={tr('uiNew', props.unread[key])}>{props.unread[key]}</span>
         </Show>
@@ -2979,7 +2979,8 @@ function Rail(props: {
             }><p class="track-empty">{tr('uiNoContactsYet')}</p></Show>
           }>
             {(p) =>
-              item({ kind: 'peer', id: p.node_id.toLowerCase() }, () => peerName(p, p.node_id), <span class={`dot ${p.connected ? 'ok' : ''}`} title={p.connected ? tr('uiConnected') : tr('uiOffline')} />)
+              item({ kind: 'peer', id: p.node_id.toLowerCase() }, () => peerName(p, p.node_id), <span class={`dot ${p.connected ? 'ok' : ''}`} title={p.connected ? tr('uiConnected') : tr('uiOffline')} />,
+                () => !petnameOf(p.node_id) && claimedName(p) ? tr('contactCallsThemselves', claimedName(p)!) : null)
             }
           </For>
         </Show>
@@ -3336,11 +3337,23 @@ function Conversation(props: {
       <StreamFrame>
       <div class="stream" ref={stream} data-stream>
         <div class="chat-column">
-        <Show when={props.track.kind === 'peer' && props.peer && !petnameOf(props.track.id) && (!claimedName(props.peer) || petnameTakenByOther(props.track.id, claimedName(props.peer)!))}>
-          <p class="day" data-add-name>
-            {tr('contactNoName')}{' '}
-            <button type="button" class="link" onClick={() => setContactOpen(true)}>{tr('contactAddName')}</button>
-          </p>
+        <Show when={props.track.kind === 'peer' && props.peer && !petnameOf(props.track.id) ? props.peer : null}>
+          {(p) => (
+            <div class="day" data-add-name>
+              {/* A name they claim is shown apart and marked; it becomes their name only on your tap. */}
+              <Show when={claimedName(p())} fallback={<p>{tr('contactNoName')}</p>}>
+                {(c) => (
+                  <p data-claimed-name>
+                    {tr('contactCallsThemselves', c())}{' '}
+                    <Show when={!petnameTakenByOther(p().node_id, c())} fallback={<span class="hint" style={{ color: "var(--warn)" }} data-claimed-clash role="note">{tr('contactNameClash')}</span>}>
+                      <button type="button" class="link" data-use-claimed onClick={() => setPetname(p().node_id, c())}>{tr('contactUseThisName')}</button>
+                    </Show>
+                  </p>
+                )}
+              </Show>
+              <button type="button" class="link" data-add-name-open onClick={() => setContactOpen(true)}>{tr('contactAddName')}</button>
+            </div>
+          )}
         </Show>
         <Show when={props.introduced}>
           {(c) => (

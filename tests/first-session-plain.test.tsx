@@ -17,6 +17,8 @@ import type { Source } from '../src/control/source';
 const A = 'a'.repeat(64);
 const B = 'b'.repeat(64);
 const C = 'c'.repeat(64);
+const E = 'e'.repeat(64);
+const F = 'f'.repeat(64);
 
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
@@ -46,12 +48,53 @@ describe('P1-3: a person, never "Unnamed contact (c1926…)"', () => {
     expect(name).not.toMatch(/[0-9a-f]{4}/);
   });
 
-  it('uses the name the contact already has, and the owner name wins', () => {
-    expect(peerName(peer(A, ' Kim '), A)).toBe('Kim');
+  it('never uses a name the contact claims; only your own name for them', () => {
+    expect(peerName(peer(A, 'Far'), A)).toBe('New contact');
+    expect(peerName(peer(A, 'Danske Bank'), A)).toBe('New contact');
     setPetname(A, 'Mor');
     expect(peerName(peer(A, 'Kim'), A)).toBe('Mor');
-     // Someone else claiming a name you already gave another person is a new contact.
-    expect(peerName(peer(B, 'mor'), B)).toBe('New contact');
+  });
+
+  const withClaims = (claims: Record<string, string>) => {
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    const base = source.peers.bind(source);
+    source.peers = async () => [...await base(), ...Object.entries(claims).map(([id, label]) => peer(id, label))];
+    return source;
+  };
+
+  it.each([
+    ['en', 'Calls themselves "Far"', 'Use this name'],
+    ['da', 'Kalder sig "Far"', 'Brug dette navn'],
+  ] as const)('shows a claimed name only as a marked second line until you tap Use this name (%s)', async (lang, calls, use) => {
+    setLanguagePref(lang);
+    const fresh = lang === 'en' ? 'New contact' : 'Ny kontakt';
+    await open(withClaims({ [E]: 'Far' }));
+    await vi.waitFor(() => expect($(`[data-track="peer:${E}"]`)).not.toBeNull());
+    const row = $(`[data-track="peer:${E}"]`)!;
+    expect(row.querySelector('.name')!.firstChild!.textContent).toBe(fresh);
+    expect(row.querySelector('[data-track-claimed]')!.textContent).toBe(calls);
+    row.click();
+    await vi.waitFor(() => expect($('[data-claimed-name]')).not.toBeNull());
+    expect($('.track-head h1')!.textContent).toBe(fresh);
+    expect($('[data-claimed-name]')!.textContent).toContain(calls);
+    expect($('[data-claimed-clash]')).toBeNull();
+    const button = $<HTMLButtonElement>('[data-use-claimed]')!;
+    expect(button.textContent).toBe(use);
+    button.click();
+    await vi.waitFor(() => expect($('.track-head h1')!.textContent).toBe('Far'));
+    expect($(`[data-track="peer:${E}"] .name`)!.textContent).toBe('Far');
+    expect($(`[data-track="peer:${E}"] [data-track-claimed]`)).toBeNull();
+    expect($('[data-add-name]')).toBeNull();
+  });
+
+  it('warns instead of offering the name when it copies a name you gave someone else', async () => {
+    await open(withClaims({ [F]: 'maya' }));
+    await vi.waitFor(() => expect($(`[data-track="peer:${F}"]`)).not.toBeNull());
+    $<HTMLButtonElement>(`[data-track="peer:${F}"]`)!.click();
+    await vi.waitFor(() => expect($('[data-claimed-name]')).not.toBeNull());
+    expect($('.track-head h1')!.textContent).toBe('New contact');
+    expect($('[data-use-claimed]')).toBeNull();
+    expect($('[data-claimed-clash]')!.textContent).toBe('You already gave this name to someone else. Check who this is before you name them.');
   });
 
   it('offers Add name and keeps the full id under Technical', async () => {
@@ -61,7 +104,7 @@ describe('P1-3: a person, never "Unnamed contact (c1926…)"', () => {
     row.closest('button')!.click();
     await vi.waitFor(() => expect($('[data-add-name]')).not.toBeNull());
     expect($('.track-head h1')!.textContent).toBe('New contact');
-    $<HTMLButtonElement>('[data-add-name] button')!.click();
+    $<HTMLButtonElement>('[data-add-name-open]')!.click();
     await vi.waitFor(() => expect($('[data-contact-panel]')?.getAttribute('data-contact-panel')).toBe('open'));
     const technical = $<HTMLDetailsElement>('[data-contact-technical]')!;
     expect(technical.open).toBe(false);

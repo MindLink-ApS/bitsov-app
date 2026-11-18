@@ -250,6 +250,9 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 
 .track-link .meta { font-family: var(--font-mono); font-size: var(--t-xs); color: var(--faint); }
 /* In the desktop rail the hint gives way first: the entry's name stays whole. */
 .rail .track-link .name { flex: 1 1 auto; }
+/* A name the contact claims: a marked second line, never the name itself. */
+.track-claimed { display: block; overflow: hidden; text-overflow: ellipsis; font-size: var(--t-xs); color: var(--muted); }
+[data-add-name] p { margin: 0; }
 .rail .track-link .meta { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track-empty { font-size: var(--t-sm); color: var(--faint); padding: 2px var(--s-2); }
 .rail-foot { margin-top: auto; display: flex; flex-direction: column; gap: var(--s-2); }
