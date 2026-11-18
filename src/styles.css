@@ -1102,7 +1102,7 @@ button.danger { background: var(--err); color: var(--err-ink); border: none; }
 .call-videos:is(:fullscreen, [data-call-fullscreen]) .call-video.remote { object-fit: contain; }
 .call-videos:is(:fullscreen, [data-call-fullscreen]) .call-self { width: min(22%, 280px); }
 /* A moved or resized call window: its place and width are inline, kept within the window by the app. */
-.call-panel[data-call-window-moved] { max-width: calc(100vw - 16px); }
+.call-panel[data-call-window-moved] { max-width: min(960px, 70vw); }
 /* The microphone or camera was refused: what to do, plainly. */
 .call-permission { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-3); border-radius: var(--r-control, 8px); background: var(--surface); border-left: 3px solid var(--warn, var(--accent)); }
 .call-permission strong { font-size: 1.05rem; }

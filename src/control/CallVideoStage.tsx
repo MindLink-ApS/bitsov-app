@@ -28,7 +28,9 @@ const fullscreenElement = () => {
 };
 
 /** Largest call window: the chat keeps at least 30% of the window beside it. */
-export const maxPanelWidth = (viewport: number) => Math.max(MIN_WIDTH, Math.min(960, Math.floor(viewport * 0.7)));
+export const maxPanelWidth = (viewport: number) => Math.min(960, Math.floor(viewport * 0.7));
+/** Smallest call window: 280 px, or less where 70% of the window is less. */
+export const minPanelWidth = (viewport: number) => Math.min(MIN_WIDTH, maxPanelWidth(viewport));
 
 export function CallVideoStage(props: {
   /** The call window this area sits in: moved and resized as a whole. */
@@ -41,6 +43,7 @@ export function CallVideoStage(props: {
   const [full, setFull] = createSignal<'native' | 'window' | null>(null);
   const [corner, setCorner] = createSignal<SelfCorner>('br');
   const [width, setWidth] = createSignal<number | null>(null);
+  const [maxWidth, setMaxWidth] = createSignal(maxPanelWidth(window.innerWidth));
   let releaseEscape: (() => void) | null = null;
 
   const leaveWindowFill = () => {
@@ -112,13 +115,26 @@ export function CallVideoStage(props: {
   const moveTo = (right: number, bottom: number, width?: number) => {
     const p = place();
     if (!p) return;
-    const w = clamp(width ?? p.width, Math.min(MIN_WIDTH, window.innerWidth), maxPanelWidth(window.innerWidth));
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const w = clamp(width ?? p.width, minPanelWidth(vw), maxPanelWidth(vw));
     p.panel.style.width = `${Math.round(w)}px`;
     setWidth(Math.round(w));
-    p.panel.style.right = `${Math.round(clamp(right, 0, window.innerWidth - w))}px`;
-    p.panel.style.bottom = `${Math.round(clamp(bottom, 0, window.innerHeight - Math.min(p.height, window.innerHeight)))}px`;
+    setMaxWidth(maxPanelWidth(vw));
+    p.panel.style.right = `${Math.round(clamp(right, 0, vw - w))}px`;
+    // The card is taller once wider (its video is 4:3): measure it at the new width before placing it.
+    const height = p.panel.getBoundingClientRect().height || p.height;
+    p.panel.style.bottom = `${Math.round(clamp(bottom, 0, vh - Math.min(height, vh)))}px`;
     p.panel.setAttribute('data-call-window-moved', '');
   };
+  /** The app window changed size: a moved or resized call window keeps the 70% cap and stays inside. */
+  const viewportChanged = () => {
+    const p = place();
+    if (p?.panel.hasAttribute('data-call-window-moved')) moveTo(p.right, p.bottom, p.width);
+    else setMaxWidth(maxPanelWidth(window.innerWidth));
+  };
+  onMount(() => window.addEventListener('resize', viewportChanged));
+  onCleanup(() => window.removeEventListener('resize', viewportChanged));
   const moveBy = (dx: number, dy: number) => { const p = place(); if (p) moveTo(p.right - dx, p.bottom - dy); };
   /** The window keeps its right edge; growing widens it to the left. */
   const resizeBy = (d: number) => { const p = place(); if (p) moveTo(p.right, p.bottom, p.width + d); };
@@ -217,7 +233,7 @@ export function CallVideoStage(props: {
         <div
           class="call-stage-btn" data-call-resize role="slider" tabindex="0" title={tr('caVideoResize')}
           aria-label={tr('caVideoResize')} aria-orientation="horizontal"
-          aria-valuemin={MIN_WIDTH} aria-valuemax={maxPanelWidth(window.innerWidth)}
+          aria-valuemin={Math.min(MIN_WIDTH, maxWidth())} aria-valuemax={maxWidth()}
           aria-valuenow={width() ?? 340}
           hidden={full() !== null}
           onPointerDown={(e) => drag(e, (dx, _dy, s) => moveTo(s.right, s.bottom, s.width - dx))}

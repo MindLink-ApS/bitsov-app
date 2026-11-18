@@ -35,7 +35,14 @@ function stage() {
   const panel = document.createElement('aside');
   panel.className = 'call-panel';
   // Where the stylesheet puts it: bottom right, 340 wide.
-  panel.getBoundingClientRect = () => ({ left: window.innerWidth - 340, top: window.innerHeight - 400, right: window.innerWidth, bottom: window.innerHeight, width: 340, height: 400, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+  // Its height follows its width, as the 4:3 video does: 145 px of card around the picture.
+  panel.getBoundingClientRect = () => {
+    const width = panel.style.width ? parseFloat(panel.style.width) : 340;
+    const height = Math.round(width * 0.75) + 145;
+    const right = window.innerWidth - (panel.style.right ? parseFloat(panel.style.right) : 0);
+    const bottom = window.innerHeight - (panel.style.bottom ? parseFloat(panel.style.bottom) : 0);
+    return { left: right - width, top: bottom - height, right, bottom, width, height, x: right - width, y: bottom - height, toJSON: () => ({}) } as DOMRect;
+  };
   root.appendChild(panel);
   dispose = render(() => <CallVideoStage panel={() => panel} cameraOff={false}
     remote={<video data-call-media="remote" class="call-video remote" />}
@@ -116,12 +123,67 @@ describe('the call video window', () => {
     // Never wider than 70% of the window: the chat stays usable beside it.
     for (let i = 0; i < 100; i++) key(size, 'ArrowLeft');
     expect(parseFloat(panel.style.width)).toBe(maxPanelWidth(window.innerWidth));
-    expect(parseFloat(panel.style.width)).toBeLessThanOrEqual(Math.max(280, window.innerWidth * 0.7));
+    expect(parseFloat(panel.style.width)).toBeLessThanOrEqual(window.innerWidth * 0.7);
     dispose!();
     dispose = null;
     expect(panel.style.width).toBe('');
     expect(panel.style.right).toBe('');
     expect(panel.hasAttribute('data-call-window-moved')).toBe(false);
+  });
+
+  describe('within a window of another size', () => {
+    const size0 = { w: window.innerWidth, h: window.innerHeight };
+    const viewport = (w: number, h: number) => {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: w });
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: h });
+    };
+    afterEach(() => viewport(size0.w, size0.h));
+    const top = (panel: HTMLElement) => panel.getBoundingClientRect().top;
+
+    it('keeps the 70% cap and its place when the window gets narrower', () => {
+      viewport(1200, 900);
+      const panel = stage();
+      const size = $('[data-call-resize]')!;
+      for (let i = 0; i < 20; i++) key(size, 'ArrowLeft');
+      expect(parseFloat(panel.style.width)).toBe(840);
+      const move = $('[data-call-move]')!;
+      for (let i = 0; i < 10; i++) key(move, 'ArrowLeft');
+      viewport(800, 900);
+      window.dispatchEvent(new Event('resize'));
+      expect(parseFloat(panel.style.width)).toBe(560);
+      const r = panel.getBoundingClientRect();
+      expect(r.left).toBeGreaterThanOrEqual(0);
+      expect(r.right).toBeLessThanOrEqual(800);
+      expect(size.getAttribute('aria-valuenow')).toBe('560');
+      expect(size.getAttribute('aria-valuemax')).toBe('560');
+    });
+
+    it('never exceeds 70% of a phone-wide window, even below the usual minimum', () => {
+      viewport(375, 812);
+      const panel = stage();
+      const size = $('[data-call-resize]')!;
+      for (let i = 0; i < 20; i++) key(size, 'ArrowLeft');
+      expect(parseFloat(panel.style.width)).toBeLessThanOrEqual(375 * 0.7);
+      for (let i = 0; i < 20; i++) key(size, 'ArrowRight');
+      expect(parseFloat(panel.style.width)).toBeLessThanOrEqual(375 * 0.7);
+      expect(Number(size.getAttribute('aria-valuemin'))).toBeLessThanOrEqual(Number(size.getAttribute('aria-valuemax')));
+    });
+
+    it('a window moved up and then made wider (and taller) stays fully on screen', () => {
+      viewport(1600, 900);
+      const panel = stage();
+      const move = $('[data-call-move]')!;
+      for (let i = 0; i < 17; i++) key(move, 'ArrowUp');
+      expect(top(panel)).toBeGreaterThanOrEqual(0);
+      // One drag of the size handle: the card grows by far more than the room left above it.
+      const size = $('[data-call-resize]')!;
+      size.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 1000, clientY: 500, button: 0 }));
+      window.dispatchEvent(new MouseEvent('pointermove', { clientX: 300, clientY: 500 }));
+      window.dispatchEvent(new MouseEvent('pointerup', {}));
+      expect(parseFloat(panel.style.width)).toBe(960);
+      expect(top(panel)).toBeGreaterThanOrEqual(0);
+      expect(panel.getBoundingClientRect().bottom).toBeLessThanOrEqual(900);
+    });
   });
 
   it('moves the call window by dragging its handle', () => {
