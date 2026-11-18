@@ -18905,6 +18905,127 @@ mod control_act_tests {
         }
     }
 
+    /// `ops_node` on a node that also confirms an operation's abandon.
+    fn ops_fake_with_abandon() -> (Fake, Arc<Mutex<OpsNode>>) {
+        let (inner, ops) = ops_node();
+        let routes: Routes = Arc::new(move |m, p, b| {
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1",
+                    "message_operations_v1", "message_operation_abandon_v1"]}).to_string());
+            }
+            if let Some(id) = p.strip_prefix("/messages/operations/").and_then(|id| id.strip_suffix("/abandon")) {
+                return (200, op_reply(id, "abandoned"));
+            }
+            inner(m, p, b)
+        });
+        (fake(AuthMode::Local, routes), ops)
+    }
+
+    /// A message is paid; an identical one (same charge id) is refused just
+    /// before its POST, its reservation is released, and retiring its record
+    /// then fails. The owner's check, in this process or after a restart,
+    /// finishes it: the earlier payment's settled row, the spend and the
+    /// contact's usage stay exactly as they were, and nothing is sent or paid
+    /// again.
+    #[test]
+    fn an_identical_send_whose_clear_fails_after_its_release_keeps_the_earlier_payment() {
+        let rt = race_runtime();
+        for restarted in [false, true] {
+            let case = if restarted { "after a restart" } else { "in this process" };
+            let (fake_node, ops) = ops_fake_with_abandon();
+            let node: &'static Fake = Box::leak(Box::new(fake_node));
+            rt.block_on(spend_advance(&node.state, true)).unwrap();
+            rt.block_on(do_message_send(&node.state, A, false, "gm", 14000, None)).expect("the first message goes");
+            let paid = book(node);
+            assert!(paid.len() == 1 && paid[0].2 && paid[0].1 > 0, "{case}: {paid:?}");
+            let usage = |node: &Fake| budget_now(&node.state).rows.into_iter().find(|r| r.target == A).map(|r| (r.spent_msat, r.accounted_msat, r.unsettled_msat));
+            let (spent, contact) = (budget_now(&node.state).spent_msat, usage(node));
+
+            fault_points::arm(&node.state.api_base, "unpaid_abandon");
+            let (arrived, release) = pause_points::arm(&node.state.api_base, "before_dispatch");
+            let second = rt.spawn(async move { do_message_send(&node.state, A, false, "gm", 14000, None).await });
+            reach(&rt, &arrived, &release, case);
+            node.state.remote_retry.failed(&remote_access::RemoteError::RateLimited(60));
+            release.notify_one();
+            let error = joined(&rt, second, case).unwrap_err();
+            assert_eq!(error.code, "spend_unknown", "{case}: {}", error.message);
+            assert!(error.message.ends_with("Synthetic fault for this test only."), "{case}: {}", error.message);
+            node.state.remote_retry.reset_for_replacement();
+            let kept = pending(node).expect("the second send's record stays");
+            assert_eq!(kept.charge_id(), paid[0].0, "{case}: the same charge id");
+            assert_eq!(book(node), paid, "{case}: the second send's reservation alone is released");
+
+            let check = |node: &'static Fake| if restarted { rt.block_on(do_spend_reconcile(&reopen(node))) } else { rt.block_on(do_spend_reconcile(&node.state)) };
+            check(node).expect("the owner's check finishes the cleanup");
+            for round in ["checked", "checked again"] {
+                assert_eq!(book(node), paid, "{case}, {round}: the earlier payment's row stays, settled");
+                assert_eq!(budget_now(&node.state).spent_msat, spent, "{case}, {round}: the spend is unchanged");
+                assert_eq!(usage(node), contact, "{case}, {round}: the contact's usage is unchanged");
+                if round == "checked" { check(node).expect("a second check changes nothing"); }
+            }
+            assert!(no_pending_spend(&node.state).is_ok(), "{case}");
+            assert_eq!(compose_bodies(node).len(), 1, "{case}: the second message was never sent");
+            assert_eq!(ops.lock().unwrap().pays, 1, "{case}: paid once");
+        }
+    }
+
+    /// A paid, undelivered message's delivery retry is refused just before its
+    /// POST; the retry's reservation is released and retiring its record then
+    /// fails. The owner's check, in this process or after a restart, puts the
+    /// paid, undelivered record back: the next check reports it as known and
+    /// undelivered, and the original payment's accounting is intact. From
+    /// there, stopping the retries works, and so does a later retry.
+    #[test]
+    fn a_delivery_retry_whose_clear_fails_after_its_release_recovers_to_the_undelivered_record() {
+        let rt = race_runtime();
+        for restarted in [false, true] {
+            for then in ["dismiss", "retry"] {
+                let case = format!("{} then {then}", if restarted { "after a restart" } else { "in this process" });
+                let (fake_node, ops) = ops_fake(|n| { n.script = vec![("paid", false)]; n.settled_incomplete = true; });
+                let node: &'static Fake = Box::leak(Box::new(fake_node));
+                let record = rt.block_on(psi_first(node));
+                let original = book(node);
+                assert_eq!(original, [(record.request_hash.clone(), 14_000, true)], "{case}");
+                let (composes, pays) = (compose_bodies(node).len(), ops.lock().unwrap().pays);
+
+                fault_points::arm(&node.state.api_base, "unpaid_abandon");
+                let (arrived, release) = pause_points::arm(&node.state.api_base, "before_dispatch");
+                let retry = rt.spawn(async move { do_message_retry(&node.state, A, "gm", Some(14_000)).await });
+                reach(&rt, &arrived, &release, &case);
+                node.state.remote_retry.failed(&remote_access::RemoteError::RateLimited(60));
+                release.notify_one();
+                let error = joined(&rt, retry, &case).unwrap_err();
+                assert_eq!(error.code, "spend_unknown", "{case}: {}", error.message);
+                assert!(error.message.ends_with("Synthetic fault for this test only."), "{case}: {}", error.message);
+                node.state.remote_retry.reset_for_replacement();
+                assert_eq!(book(node), original, "{case}: the retry's reservation is released");
+                assert_eq!(pending(node).expect("the retry's record stays").undelivered.map(|u| u.in_flight), Some(true), "{case}");
+
+                let check = |node: &'static Fake| if restarted { rt.block_on(do_spend_reconcile(&reopen(node))) } else { rt.block_on(do_spend_reconcile(&node.state)) };
+                check(node).expect("the owner's check finishes the cleanup");
+                assert_eq!(serde_json::to_value(pending(node).expect("the paid, undelivered record is back")).unwrap(),
+                    serde_json::to_value(&record).unwrap(), "{case}");
+                assert_eq!(check(node).unwrap_err().code, "undelivered_pending", "{case}: known, paid, undelivered");
+                assert_eq!(book(node), original, "{case}: the original payment's accounting is intact");
+                assert_eq!((compose_bodies(node).len(), ops.lock().unwrap().pays), (composes, pays), "{case}: nothing sent or paid");
+
+                if then == "dismiss" {
+                    do_spend_dismiss_undelivered(&node.state, &record.id).expect("stopping the retries works");
+                    assert!(pending(node).is_none(), "{case}");
+                    assert!(no_pending_spend(&node.state).is_ok(), "{case}");
+                } else {
+                    ops.lock().unwrap().settled_incomplete = false;
+                    rt.block_on(do_message_retry(&node.state, A, "gm", Some(14_000))).expect("a later retry works");
+                    assert!(pending(node).is_none(), "{case}: delivered");
+                    assert_eq!(ops.lock().unwrap().pays, pays, "{case}: the retry pays nothing new");
+                }
+                let books = book(node);
+                assert_eq!(books[0], original[0], "{case}: the original paid row is untouched");
+                assert_eq!(budget_now(&node.state).unsettled_msat, 0, "{case}");
+            }
+        }
+    }
+
     /// Records saved before the cleanup decision existed (no such field) still
     /// load, with no decision; a record without a decision never writes one.
     #[tokio::test]
