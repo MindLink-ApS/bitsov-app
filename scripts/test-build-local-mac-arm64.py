@@ -6,11 +6,13 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import zipfile
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("build-local-mac-arm64.py")
@@ -25,13 +27,25 @@ class LocalArmBuild(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        env_patch = patch.dict(os.environ, {"CARGO_HOME": str(self.root / "cargo-cache")})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
 
     def resources(self, load=0, free=120 * 1024**3):
         stack = __import__("contextlib").ExitStack()
         stack.enter_context(patch.object(os, "getloadavg", return_value=(load, 0, 0)))
         stack.enter_context(patch.object(self.builder.shutil, "disk_usage",
                                         return_value=(200 * 1024**3, 0, free)))
+        stack.enter_context(patch.object(self.builder, "check_no_other_builds"))
         return stack
+
+    def test_existing_compilation_refuses_before_start(self):
+        for process in ("R /usr/bin/rustc\n", "S /usr/bin/cargo\n", "R /usr/bin/clippy-driver\n"):
+            with self.subTest(process=process), patch.object(subprocess, "check_output", return_value=process):
+                with self.assertRaises(RuntimeError):
+                    self.builder.check_no_other_builds()
+        with patch.object(subprocess, "check_output", return_value="Z /usr/bin/cargo\nS /usr/bin/other\n"):
+            self.builder.check_no_other_builds()
 
     def test_load_boundary_refuses_before_any_command(self):
         for load in (20, 21, float("nan")):
@@ -76,25 +90,29 @@ class LocalArmBuild(unittest.TestCase):
         self.assertGreaterEqual(int(output.read_text()), 10)
 
     def test_timeout_stops_the_entire_process_group(self):
-        marker = self.root / "survived"
-        child = "import pathlib,sys,time; time.sleep(1); pathlib.Path(sys.argv[1]).touch()"
-        parent = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]]); time.sleep(10)"
+        command, pidfile, marker = self.group_command(False)
         with self.resources():
-            with self.assertRaises(RuntimeError):
-                self.builder.run([sys.executable, "-c", parent, child, str(marker)],
-                                 self.root, os.environ.copy(), time.monotonic() + 0.2)
-        time.sleep(1.1)
+            with self.assertRaisesRegex(RuntimeError, "deadline"):
+                self.builder.run(command, self.root, os.environ.copy(), time.monotonic() + 3)
+        self.assertTrue(pidfile.exists(), "descendant must be ready before timeout")
+        self.assert_process_stopped(int(pidfile.read_text()))
         self.assertFalse(marker.exists())
 
     def test_timeout_kills_a_descendant_that_ignores_termination(self):
-        marker = self.root / "survived"
-        child = "import pathlib,signal,sys,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(1.5); pathlib.Path(sys.argv[1]).touch()"
-        parent = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]]); time.sleep(10)"
-        with self.resources(), self.assertRaises(RuntimeError):
-            self.builder.run([sys.executable, "-c", parent, child, str(marker)],
-                             self.root, os.environ.copy(), time.monotonic() + 0.4)
-        time.sleep(1.6)
+        command, pidfile, marker = self.group_command(True)
+        with self.resources(), self.assertRaisesRegex(RuntimeError, "deadline"):
+            self.builder.run(command, self.root, os.environ.copy(), time.monotonic() + 3)
+        self.assertTrue(pidfile.exists(), "descendant must install its handler before timeout")
+        self.assert_process_stopped(int(pidfile.read_text()))
         self.assertFalse(marker.exists())
+
+    def group_command(self, ignore_term):
+        pidfile, marker = self.root / "descendant.pid", self.root / "survived"
+        child = ("import os,pathlib,signal,sys,time; "
+                 + ("signal.signal(signal.SIGTERM,signal.SIG_IGN); " if ignore_term else "")
+                 + "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(20); pathlib.Path(sys.argv[2]).touch()")
+        parent = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',*sys.argv[1:]]); time.sleep(30)"
+        return [sys.executable, "-c", parent, child, str(pidfile), str(marker)], pidfile, marker
 
     def test_expired_deadline_never_starts_a_command(self):
         marker = self.root / "started"
@@ -109,9 +127,15 @@ class LocalArmBuild(unittest.TestCase):
         self.assertFalse(marker.exists())
 
     def test_low_disk_during_command_stops_children(self):
-        with self.resources(free=109 * 1024**3), self.assertRaises(RuntimeError):
-            self.builder.run([sys.executable, "-c", "import time; time.sleep(10)"],
-                             self.root, os.environ.copy(), time.monotonic() + 5)
+        command, pidfile, marker = self.group_command(True)
+        def disk(_):
+            return (200 * 1024**3, 0, (109 if pidfile.exists() else 120) * 1024**3)
+        with self.resources(), patch.object(self.builder.shutil, "disk_usage", side_effect=disk), \
+             self.assertRaisesRegex(RuntimeError, "free disk"):
+            self.builder.run(command, self.root, os.environ.copy(), time.monotonic() + 5)
+        self.assertTrue(pidfile.exists(), "disk must drop after the descendant starts")
+        self.assert_process_stopped(int(pidfile.read_text()))
+        self.assertFalse(marker.exists())
 
     def test_bundle_identity_native_binary_and_sidecar_absence(self):
         app = self.root / "BitSov Remote Test.app"
@@ -141,6 +165,8 @@ class LocalArmBuild(unittest.TestCase):
         target, output = self.root / "target", self.root / "artifacts"
         source = self.root / "source"
         source.mkdir()
+        (source / "src-tauri").mkdir()
+        (source / "src-tauri/tauri.remote-only.conf.json").write_text("{}")
         commands = []
         def external(command, root, env, deadline):
             commands.append(command)
@@ -154,7 +180,11 @@ class LocalArmBuild(unittest.TestCase):
                 (app / "Contents/Info.plist").write_bytes(plistlib.dumps({
                     "CFBundleIdentifier": "tech.mindlink.bitsov.remotetest"}))
             elif command[0] == "ditto":
-                Path(command[-1]).write_bytes(b"local archive")
+                app = Path(command[-2])
+                with zipfile.ZipFile(command[-1], "w") as archive:
+                    for path in app.rglob("*"):
+                        if path.is_file():
+                            archive.write(path, f"{app.name}/{path.relative_to(app).as_posix()}")
         def probe(command, **kwargs):
             if command[:3] == ["git", "rev-parse", "HEAD"]:
                 return "a" * 40 + "\n"
@@ -199,6 +229,92 @@ class LocalArmBuild(unittest.TestCase):
                 self.builder.build(source, target, output)
         self.assertFalse(output.exists())
 
+    def test_build_environment_excludes_overrides(self):
+        with patch.dict(os.environ, {"RUSTFLAGS": "override", "RUSTC_WRAPPER": "override",
+                                    "CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS": "true",
+                                    "TAURI_CONFIG": "override", "VITE_CALL_SEAL": "override",
+                                    "BITSOV_TEST": "override"}):
+            env = self.builder.build_environment(self.root / "target")
+        for name in ("RUSTFLAGS", "RUSTC_WRAPPER", "CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS",
+                     "TAURI_CONFIG", "VITE_CALL_SEAL", "BITSOV_TEST"):
+            self.assertNotIn(name, env)
+        self.assertEqual(env["CARGO_BUILD_JOBS"], "2")
+
+    def test_environment_files_and_external_cargo_config_are_refused_without_reading(self):
+        source = self.root / "source"
+        source.mkdir()
+        config = self.root / ".cargo/config.toml"
+        config.parent.mkdir()
+        config.touch()
+        with self.assertRaises(RuntimeError):
+            self.builder.check_inputs(source)
+        config.unlink()
+        (source / ".env.production.local").touch()
+        with self.assertRaises(RuntimeError):
+            self.builder.check_inputs(source)
+
+    def test_changed_source_head_or_worktree_prevents_finalization(self):
+        for values in ((" M edited",), ("", "b" * 40)):
+            with self.subTest(values=values), patch.object(subprocess, "check_output", side_effect=values):
+                with self.assertRaises(RuntimeError):
+                    self.builder.check_source(self.root, "a" * 40)
+
+    def start_supervisor(self, seconds=10):
+        pidfile, marker, lock = [self.root / name for name in ("child.pid", "survived", "build.lock")]
+        pidfile.unlink(missing_ok=True)
+        program = '''
+import importlib.util,os,pathlib,sys,time
+spec=importlib.util.spec_from_file_location("builder",sys.argv[1])
+b=importlib.util.module_from_spec(spec); spec.loader.exec_module(b)
+b.os.getloadavg=lambda:(0,0,0)
+b.shutil.disk_usage=lambda _: (200*1024**3,0,120*1024**3)
+b.check_no_other_builds=lambda:None
+b.check_no_other_builds=lambda:None
+b.install_handlers()
+child="import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(__import__('os').getpid())); time.sleep(20); pathlib.Path(sys.argv[2]).touch()"
+with b.build_lock(pathlib.Path(sys.argv[4])):
+    b.supervise(lambda: b.run([sys.executable,"-c",child,sys.argv[2],sys.argv[3]],pathlib.Path.cwd(),os.environ.copy(),time.monotonic()+30),int(sys.argv[5]))
+'''
+        process = subprocess.Popen([sys.executable, "-c", program, str(SCRIPT), str(pidfile),
+                                    str(marker), str(lock), str(seconds)], stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: process.poll() is None and process.kill())
+        deadline = time.monotonic() + 4
+        while not pidfile.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(pidfile.exists(), "build child must be running before interruption")
+        return process, int(pidfile.read_text()), marker, lock
+
+    def assert_process_stopped(self, pid):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.02)
+        self.fail("build child survived interruption")
+
+    def test_terminal_and_termination_signals_stop_the_build(self):
+        for sig in (signal.SIGHUP, signal.SIGQUIT, signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=sig):
+                process, child, marker, _ = self.start_supervisor()
+                process.send_signal(sig)
+                self.assertNotEqual(process.wait(timeout=5), 0)
+                self.assert_process_stopped(child)
+                self.assertFalse(marker.exists())
+
+    def test_parent_death_keeps_lock_until_worker_deadline_stops_build(self):
+        process, child, marker, lock = self.start_supervisor(seconds=2)
+        process.kill()
+        process.wait(timeout=5)
+        with self.assertRaises(RuntimeError):
+            with self.builder.build_lock(lock):
+                self.fail("orphaned worker lost the build lock")
+        self.assert_process_stopped(child)
+        with self.builder.build_lock(lock):
+            pass
+        self.assertFalse(marker.exists())
+
     def test_source_ancestors_and_overlapping_output_directories_are_refused(self):
         source = self.root / "source"
         source.mkdir()
@@ -210,6 +326,42 @@ class LocalArmBuild(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     self.builder.build(source, target, output)
                 run.assert_not_called()
+
+    def test_archive_must_contain_the_checked_app_bytes(self):
+        app = self.root / "App.app"
+        app.mkdir()
+        (app / "file").write_bytes(b"checked")
+        archive = self.root / "app.zip"
+        with zipfile.ZipFile(archive, "w") as zipped:
+            zipped.writestr("App.app/file", b"different")
+        with self.assertRaises(RuntimeError):
+            self.builder.verify_archive(archive, app)
+
+    def test_edit_or_checkout_during_compilation_prevents_artifact_finalization(self):
+        for mode in ("edit", "commit"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(dir=self.root) as temp:
+                base = Path(temp)
+                source, target, output = [base / name for name in ("source", "target", "output")]
+                source.mkdir()
+                tracked = source / "input"
+                tracked.write_text("original")
+                def git(*args):
+                    subprocess.run(["git", "-c", "user.name=Package tests", "-c",
+                                    "user.email=package-tests@example.invalid", *args], cwd=source,
+                                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                git("init", "-q")
+                git("add", "input")
+                git("commit", "-q", "-m", "Fixture input")
+                def external(command, *_):
+                    if command[:3] == ["npm", "run", "tauri"]:
+                        if mode == "edit":
+                            tracked.write_text("edited")
+                        else:
+                            git("commit", "--allow-empty", "-q", "-m", "Fixture update")
+                with patch.object(self.builder, "run", side_effect=external):
+                    with self.assertRaises(RuntimeError):
+                        self.builder.build(source, target, output)
+                self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":

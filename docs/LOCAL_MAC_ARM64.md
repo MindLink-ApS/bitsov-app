@@ -9,9 +9,8 @@ Commit the source changes first. Choose separate target and artifact directories
 outside the checkout, and an artifact directory that does not already exist:
 
 ```bash
-export CARGO_TARGET_DIR="../arm64-target"
-export CARGO_BUILD_JOBS=2
-python3 scripts/build-local-mac-arm64.py --output-dir ../arm64-artifacts
+CARGO_TARGET_DIR="$PWD/../arm64-target" CARGO_BUILD_JOBS=2 \
+  python3 scripts/build-local-mac-arm64.py --output-dir ../arm64-artifacts
 ```
 
 The script installs the locked npm dependencies without lifecycle scripts,
@@ -23,19 +22,26 @@ The existing profile keeps its separate data directory and requires a signet
 network report before becoming ready. Its existing storage requirements apply.
 
 Each invocation takes a per-user lock shared across source checkouts. A second
-invocation refuses immediately. Build commands run at reduced priority. The
-script refuses a one-minute load average of 20 or higher, an unreadable load
+invocation refuses immediately, as does an active Cargo or Rust compilation.
+Build commands run at reduced priority. A separate worker retains the lock and
+deadline if the launcher exits. The script refuses a one-minute load average
+of 20 or higher, an unreadable load
 average, or less than 110 GiB of free space on the root volume. It checks disk
 space throughout each command and stops its process group on failure, timeout,
 interruption or termination. Dependency installation, compilation and archiving
 share one 60-minute budget. Run other local build tools separately.
+
+Source state is checked before and after compilation and before finalization.
+The wrapper uses a limited build environment and refuses local frontend
+environment files or external Cargo configuration without reading their contents.
+Use a fresh target bundle directory for retries after an incomplete package.
 
 The output directory contains:
 
 - `BitSov-Remote-Test-arm64.app.zip`, containing `BitSov Remote Test.app`.
 - `build.json`, with the full source commit, target, profile and tool versions.
 - `SHA256SUMS`, covering the ZIP and metadata, reread and verified before the
-  output directory is finalized.
+  output directory is finalized. The ZIP contents are checked against the app.
 
 Verify the artifacts locally with `shasum -a 256 -c SHA256SUMS` from the output
 directory. Incomplete builds do not finalize an artifact directory. The target
