@@ -8,8 +8,8 @@ import { feeCeiling } from './format';
 // and live traffic merge, what a send would cost and on what basis, and how
 // fresh the node's figures are.
 
-import { ago, sats, satUnit, shortId } from './format';
-import { contactRevision, petnameOf } from './petnames';
+import { ago, sats, satUnit } from './format';
+import { contactRevision, petnameOf, petnameTakenByOther } from './petnames';
 import type {
   ActionError,
   AdmissionPrice,
@@ -38,14 +38,19 @@ export const trackKey = (t: TrackRef): string =>
   t.kind === 'peer' || t.kind === 'room' || t.kind === 'bound' || t.kind === 'assistant' ? `${t.kind}:${t.id.toLowerCase()}` : t.kind;
 
 /**
- * Display name for a contact: the owner's local petname, else Unnamed contact plus a short id.
- * Remote profile names live in {@link claimedName} only — never as the rail title.
+ * Display name for a contact: the owner's local petname, else the name the
+ * contact already carries (its label or card) unless that copies a name you gave
+ * someone else, else a plain "New contact".
+ * Never the node id: that stays under the contact's Technical details.
  */
 export const peerName = (peer: Peer | undefined, id: string): string => {
   contactRevision();
   const pet = petnameOf(id);
   if (pet) return pet;
-  return t('extraUnnamedContact', shortId(id));
+  // A name someone else's node claims is used only while it does not copy a
+  // name you gave another person: a second "Maya" is a new contact until you say so.
+  const claim = claimedName(peer);
+  return claim && !petnameTakenByOther(id, claim) ? claim : t('contactNew');
 };
 
 /** Remote-supplied name (peer label / profile card). Suggestion only — never truth. */

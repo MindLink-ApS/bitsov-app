@@ -67,7 +67,7 @@ import { hostCallSeal, hostMediaBridge, unavailableMediaBridge } from './mediaBr
 import { createCallAudio } from './callAudio';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
 import { NewRoomPanel, RoomThread, type RoomSend, type ThreadRead } from './RoomPanel';
-import { blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
+import { attachmentOf, type Attachment, blobUrl, duration, FILE_MAX_BYTES, fileNameOf, isVoiceNote, type Recording, startRecording, VOICE_MAX_MS } from './voice';
 import { EMOJIS, insertEmoji } from './emoji';
 import { cleanPurpose, hostReadProblem, invoicePaymentHash, NOT_PAYABLE_NOTE, type NotPayable, payeeView, readChatInvoice } from './bolt11';
 import { safeImageMime, looksLikeSafeImageName, dataImageUrl } from './frontDoorMedia';
@@ -103,7 +103,7 @@ import {
   type Denom,
   type ThemePref,
 } from './prefs';
-import { reconcileKeyChange, verifyState } from './petnames';
+import { petnameOf, petnameTakenByOther, reconcileKeyChange, verifyState } from './petnames';
 import {
   ADMISSION_MAX_MSAT,
   applyDelivery,
@@ -126,6 +126,7 @@ import {
   nodePill,
   type PillStatus,
   peerName,
+  claimedName,
   sentMessage,
   spendLine,
   streamItems,
@@ -517,6 +518,11 @@ export function ControlCenter(props: Props) {
   });
   onCleanup(() => props.onWatchSamples?.(null));
   const [track, setTrack] = createSignal<TrackRef | null>(null);
+  // The app opens where it was left: the last person or room, not an empty chat.
+  createEffect(() => {
+    const t = track();
+    if (t?.kind === 'peer' || t?.kind === 'bound') writeLastTrack(t);
+  });
   const [quote, setQuote] = createSignal<PriceQuote | null>(null);
   const [quoteError, setQuoteError] = createSignal<string | undefined>();
   let quoteRead = 0;
@@ -778,8 +784,13 @@ export function ControlCenter(props: Props) {
     setPeers(value);
     setPeersLoaded(true);
     if (!track() && !phoneLayout()) {
-      const first = value.find((p) => p.connected) ?? value[0];
-      if (first) setTrack({ kind: 'peer', id: first.node_id.toLowerCase() });
+      const last = readLastTrack();
+      if (last?.kind === 'peer' && value.some((p) => p.node_id.toLowerCase() === last.id)) setTrack(last);
+      else if (last?.kind === 'bound' && localRooms().some((r) => r.id === last.id)) setTrack(last);
+      else {
+        const first = value.find((p) => p.connected) ?? value[0];
+        if (first) setTrack({ kind: 'peer', id: first.node_id.toLowerCase() });
+      }
     }
   });
   const loadRooms = () => attempt('rooms', () => source.rooms(), setRooms);
@@ -2184,7 +2195,6 @@ export function ControlCenter(props: Props) {
             queueMicrotask(() => callPanel?.focus());
           }} />
           {props.offline}
-          <ChainNotice overview={overview()} />
           <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
             onEnded={() => { void loadBudget(); void loadWallet(); }} />
           <Show when={moneyBlocked()}><p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p></Show>
@@ -2243,7 +2253,7 @@ export function ControlCenter(props: Props) {
           <Show when={track()}><button type="button" class="link ios-back" data-ios-back="thread" onClick={phoneBack}><Show when={phoneShell()}><span aria-hidden="true">‹ </span></Show>{tr('uiBack')}</button></Show>
           <Show when={!phoneShell()}>
             {props.offline}
-            <ChainNotice overview={overview()} />
+            {/* The chain source is a Settings → Node fact, never a banner over the chat or a call. */}
             <CallRepairs source={source} refreshKey={callView().error} blocked={moneyBlocked()}
               onEnded={() => { void loadBudget(); void loadWallet(); }} />
           </Show>
@@ -2914,6 +2924,12 @@ function Rail(props: {
     queueMicrotask(() => document.querySelector<HTMLElement>('[data-avatar-menu] [role="menuitem"]')?.focus());
     onCleanup(onEscape(() => { setMenuOpen(false); avatar?.focus(); }));
   });
+  // Advanced starts folded; it unfolds (and stays as the owner leaves it) when what is open lives there.
+  let advanced: HTMLDetailsElement | undefined;
+  createEffect(() => {
+    const key = props.openKey ?? '';
+    if (advanced && (key === 'ai' || key === 'discover' || key === 'porch' || key.startsWith('assistant:'))) advanced.open = true;
+  });
   const item = (t: TrackRef, name: string | (() => string), meta?: JSX.Element) => {
     const key = trackKey(t);
     return (
@@ -3015,39 +3031,43 @@ function Rail(props: {
         </div>
       </Show>
 
-      <div class="track-group" data-assistants>
-        <h2>{tr('uiAssistants')}</h2>
-        <Show when={props.active}>
-          <For each={Object.entries(ASSISTANTS) as [AssistantId, typeof ASSISTANTS[AssistantId]][]}>
-            {([id, assistant]) => item({ kind: 'assistant', id }, assistant.name, <span class="meta">{tr('uiReadOnly')}</span>)}
-          </For>
-        </Show>
-        <Show when={props.active}>{item({ kind: 'ai' }, () => tr('uiAskYourNode'), <span class="meta">{tr('uiLocal')}</span>)}</Show>
-      </div>
+      {/* Helpers and public pages are for later: folded away so the first view is people and rooms. */}
+      <details class="track-group rail-advanced" data-rail-advanced ref={advanced}>
+        <summary>{tr('railAdvanced')}</summary>
+        <div class="track-group" data-assistants>
+          <h2>{tr('railHelpers')}</h2>
+          <Show when={props.active}>
+            <For each={Object.entries(ASSISTANTS) as [AssistantId, typeof ASSISTANTS[AssistantId]][]}>
+              {([id, assistant]) => item({ kind: 'assistant', id }, assistant.name, <span class="meta">{tr('railViewOnly')}</span>)}
+            </For>
+          </Show>
+          <Show when={props.active}>{item({ kind: 'ai' }, () => tr('railAskYourBox'), <span class="meta">{tr('railOnYourBox')}</span>)}</Show>
+        </div>
 
-      <div class="track-group">
-        <h2>{tr('uiBrowse')}</h2>
-        <Show when={props.active}>
-          <button
-            class="track-link"
-            data-track="discover"
-            aria-current={props.openKey === 'discover'}
-            onClick={() => props.onOpen({ kind: 'discover' })}
-          >
-            <span class="name">{tr('uiProfiles')}</span>
-            <span class="meta">{tr('uiPasteACard')}</span>
-          </button>
-          <button
-            class="track-link"
-            data-track="porch"
-            aria-current={props.openKey === 'porch'}
-            onClick={() => props.onOpen({ kind: 'porch' })}
-          >
-            <span class="name">{tr('uiPorch')}</span>
-            <span class="meta">{tr('uiCardsPagesPaid')}</span>
-          </button>
-        </Show>
-      </div>
+        <div class="track-group">
+          <h2>{tr('railExplore')}</h2>
+          <Show when={props.active}>
+            <button
+              class="track-link"
+              data-track="discover"
+              aria-current={props.openKey === 'discover'}
+              onClick={() => props.onOpen({ kind: 'discover' })}
+            >
+              <span class="name">{tr('railAddFromCard')}</span>
+              <span class="meta">{tr('railFromTheirCard')}</span>
+            </button>
+            <button
+              class="track-link"
+              data-track="porch"
+              aria-current={props.openKey === 'porch'}
+              onClick={() => props.onOpen({ kind: 'porch' })}
+            >
+              <span class="name">{tr('railPublicPages')}</span>
+              <span class="meta">{tr('railMayCost')}</span>
+            </button>
+          </Show>
+        </div>
+      </details>
 
       <div class="rail-foot">
         <Show when={props.active}>
@@ -3104,6 +3124,23 @@ function Rail(props: {
 }
 
 // ---- tracks ---------------------------------------------------------------
+
+const LAST_TRACK_KEY = 'bitsov.lastTrack';
+
+/** The last opened person or room, on this device only. */
+function readLastTrack(): TrackRef | null {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem(LAST_TRACK_KEY) ?? 'null');
+    if (!v || typeof v !== 'object') return null;
+    const { kind, id } = v as { kind?: unknown; id?: unknown };
+    if ((kind === 'peer' || kind === 'bound') && typeof id === 'string' && id) return { kind, id: kind === 'peer' ? id.toLowerCase() : id };
+  } catch { /* private mode or a damaged value */ }
+  return null;
+}
+
+function writeLastTrack(t: TrackRef & { id: string }) {
+  try { localStorage.setItem(LAST_TRACK_KEY, JSON.stringify({ kind: t.kind, id: t.id })); } catch { /* private mode */ }
+}
 
 function TrackHead(props: {
   title: string;
@@ -3299,6 +3336,12 @@ function Conversation(props: {
       <StreamFrame>
       <div class="stream" ref={stream} data-stream>
         <div class="chat-column">
+        <Show when={props.track.kind === 'peer' && props.peer && !petnameOf(props.track.id) && (!claimedName(props.peer) || petnameTakenByOther(props.track.id, claimedName(props.peer)!))}>
+          <p class="day" data-add-name>
+            {tr('contactNoName')}{' '}
+            <button type="button" class="link" onClick={() => setContactOpen(true)}>{tr('contactAddName')}</button>
+          </p>
+        </Show>
         <Show when={props.introduced}>
           {(c) => (
             <p class="day" data-introduced={c().node_id}>
@@ -3566,7 +3609,11 @@ function MessageView(props: {
         when={payable()}
         fallback={
           <div class="bubble" classList={{ file: props.m.kind === 200 }} data-kind={props.m.kind}>
-            <Show when={props.m.kind === 200} fallback={props.m.plaintext ?? tr('extraEncryptedContentNotAvailableOnThisDevice')}>
+            <Show when={props.m.kind === 200} fallback={
+              <Show when={attachmentOf(props.m.plaintext)} fallback={props.m.plaintext ?? tr('extraEncryptedContentNotAvailableOnThisDevice')}>
+                {(a) => <AttachmentCard attachment={a()} />}
+              </Show>
+            }>
               <Show
                 when={!props.out && props.fileFetch && props.fileSave}
                 fallback={
@@ -3577,7 +3624,8 @@ function MessageView(props: {
               >
                 <ReceivedFile
                   id={props.m.id}
-                  name={fileNameOf(props.m.plaintext) ?? tr('fileNoun')}
+                  name={fileNameOf(props.m.plaintext) ?? tr('extraFile')}
+                  sizeHint={attachmentOf(props.m.plaintext)?.size}
                   voice={isVoiceNote(props.m.kind, props.m.plaintext) ? props.voiceUrl : undefined}
                   loadFile={props.fileFetch!}
                   save={props.fileSave!}
@@ -3668,6 +3716,11 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
       ? tr('uiUpToToRingTheirCallPricePlus', fmtAmount(cost()!), fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat), feeCeiling(quote()!.offer_max_routing_fee_msat), fmtAmount(signalCost(quote()!)), fmtAmount(callCost(quote()!)!), callStunLabel())
       : tr('uiReadingTheirCallPrice'));
   const priceReady = () => !refreshing() && why() === null;
+  // A price read is under way: the confirm opens (or stays open) and says so; Ring waits.
+  const fetching = () => refreshing() || (quote() === null && why() === null);
+  // The header buttons only ask, so they open the confirm while the price is still on its way.
+  // An offline contact cannot be rung whatever the price, so that stays shut.
+  const buttonOff = () => props.blocked || props.actions.callActive() || (fetching() ? props.offline === true : off());
   const place = (media: CallMedia) => { const q = quote(); if (q && !off() && priceReady()) props.actions.placeCall(props.peer, media, q); };
   // A call pays and rings someone, so one tap only asks: the call/video button
   // opens a small confirm with the price, and Ring places it. A mis-tap on the
@@ -3676,9 +3729,10 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   let ringBtn: HTMLButtonElement | undefined;
   let wrap: HTMLDivElement | undefined;
   createEffect(on(() => props.peer, () => setArmed(null), { defer: true }));
-  createEffect(() => { if (off()) setArmed(null); });
+  // Never closes by itself while the price is fetched: only Cancel, outside, Escape, or a read that rules the call out.
+  createEffect(() => { if (buttonOff()) setArmed(null); });
   const arm = (media: CallMedia) => {
-    if (off()) return;
+    if (buttonOff()) return;
     if (armed() === media) { disarm(false); return; }
     setArmed(media);
     if (nodeRoutedAudio()) {
@@ -3721,19 +3775,19 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   const callWord = (media: CallMedia) => (media === 'video' ? tr('uiVideoCall') : tr('uiCall'));
   return (
     <div class="call-buttons" data-call-buttons ref={wrap}>
-      <button type="button" class={props.callbackMedia ? "soft call-button" : "soft call-button icon-btn"} data-call={props.callbackMedia ?? 'audio'} data-call-back={props.callbackMedia ? '' : undefined} disabled={off()} title={title()} aria-label={props.callbackMedia ? tr('incomingCallBack') : tr('uiCall95', props.name, cost() !== null ? tr('uiUpTo', fmtAmount(cost()!)) : '')} aria-haspopup="dialog" aria-expanded={armed() === (props.callbackMedia ?? 'audio')} onClick={() => arm(props.callbackMedia ?? 'audio')}>
+      <button type="button" class={props.callbackMedia ? "soft call-button" : "soft call-button icon-btn"} data-call={props.callbackMedia ?? 'audio'} data-call-back={props.callbackMedia ? '' : undefined} disabled={buttonOff()} title={title()} aria-label={props.callbackMedia ? tr('incomingCallBack') : tr('uiCall95', props.name, cost() !== null ? tr('uiUpTo', fmtAmount(cost()!)) : '')} aria-haspopup="dialog" aria-expanded={armed() === (props.callbackMedia ?? 'audio')} onClick={() => arm(props.callbackMedia ?? 'audio')}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z" /></svg>
         <Show when={props.callbackMedia}>{tr('incomingCallBack')}</Show>
       </button>
       {/* Node-routed video, when this build has it: the same price and the same path as the audio. */}
       <Show when={!props.callbackMedia && nodeRoutedVideo()}>
-      <button type="button" class="soft call-button icon-btn" data-call="video" disabled={off()} title={title()} aria-haspopup="dialog" aria-expanded={armed() === 'video'} onClick={() => arm('video')} aria-label={tr('uiVideoCall')}>
+      <button type="button" class="soft call-button icon-btn" data-call="video" disabled={buttonOff()} title={title()} aria-haspopup="dialog" aria-expanded={armed() === 'video'} onClick={() => arm('video')} aria-label={tr('uiVideoCall')}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="12" height="12" rx="2" /><path d="m15 10 6-3v10l-6-3z" /></svg>
       </button>
       </Show>
       {/* Video and meetings are app-to-app media: hidden while calls are node-routed (M6). */}
       <Show when={!props.callbackMedia && !nodeRoutedAudio()}>
-      <button type="button" class="soft call-button icon-btn" data-call="video" disabled={off()} title={title()} aria-haspopup="dialog" aria-expanded={armed() === 'video'} onClick={() => arm('video')} aria-label={tr('uiVideoCall98', props.name, cost() !== null ? tr('uiUpTo', fmtAmount(cost()!)) : '')}>
+      <button type="button" class="soft call-button icon-btn" data-call="video" disabled={buttonOff()} title={title()} aria-haspopup="dialog" aria-expanded={armed() === 'video'} onClick={() => arm('video')} aria-label={tr('uiVideoCall98', props.name, cost() !== null ? tr('uiUpTo', fmtAmount(cost()!)) : '')}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="12" height="12" rx="2" /><path d="m15 10 6-3v10l-6-3z" /></svg>
       </button>
       <button type="button" class="soft call-button icon-btn quiet" data-call="meeting" disabled={off()} title={tr('uiStartAMeetingWithAndUpToMore', props.name, MAX_PARTICIPANTS - 2)} aria-label={tr('uiStartAMeetingWith', props.name)} onClick={() => props.actions.planMeeting(props.peer)}>
@@ -3747,7 +3801,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
               <strong>{callWord(media())} {props.name}?</strong>
               <Show when={priceReady() && cost() !== null}>{' '}<span class="hint">{tr('uiUpTo105')} {fmtAmount(cost()!)}{tr('uiNothingIsPaidUntilYouPressRing')}</span></Show>
             </p>
-            <Show when={!priceReady()}><p class="hint" role="status">{why() ?? tr('uiReadingTheirCallPrice')}</p></Show>
+            <Show when={!priceReady() || fetching()}><p class="hint" role="status" data-call-fetching={fetching() ? '' : undefined}>{why() ?? tr('callFetchingPrice')}</p></Show>
             <Show when={priceReady() && nodeRoutedAudio() && quote()?.block_msat != null ? quote() : null}>{(q) => <>
               <MinutesConsent quote={q()} />
               <RingBudgetNote grant={props.actions.callGrant?.() ?? null} peer={props.peer} name={props.name} quote={q()} callLimitMinutes={props.actions.callLimitMinutes?.() ?? null} />
@@ -4403,6 +4457,8 @@ function ReceivedFile(props: {
   voice?: (messageId: string) => Promise<string>;
   loadFile: (messageId: string) => Promise<VoiceBlob>;
   save: (messageId: string) => Promise<FileSaveResult>;
+  /** Size read from the message's own payload, shown until the host says more. */
+  sizeHint?: number;
 }) {
   const [meta, setMeta] = createSignal<FileMeta | null>(null);
   const [err, setErr] = createSignal<'gone' | 'large' | 'response' | 'save' | null>(null);
@@ -4469,7 +4525,7 @@ function ReceivedFile(props: {
       </Show>
       <p class="file-meta" data-file-meta>
         <Show when={err() === 'large' || err() === 'response'} fallback={
-          <Show when={meta()} fallback={busy() ? '…' : ''}>
+          <Show when={meta()} fallback={busy() ? '…' : props.sizeHint !== undefined ? kb(props.sizeHint) : ''}>
             {(b) => <>{kb(b().size_bytes)} · {shortMime(b().mime_type)}</>}
           </Show>
         }>
@@ -4482,6 +4538,37 @@ function ReceivedFile(props: {
           {saved() ? tr('caSaved641') : busy() ? '…' : tr('extraSave')}
         </button>
       </Show>
+    </div>
+  );
+}
+
+/**
+ * A file that came as text (base64, a data: URI or a file record): a card with
+ * its name and size and Save, never the payload itself. Save stays on this device.
+ */
+function AttachmentCard(props: { attachment: Attachment }) {
+  const isImage = () => safeImageMime(props.attachment.mime ?? '') !== null;
+  const name = () => props.attachment.name ?? (isImage() ? tr('fileImage') : tr('extraFile'));
+  const [url, setUrl] = createSignal<string | null>(null);
+  onCleanup(() => { const u = url(); if (u) URL.revokeObjectURL(u); });
+  const onSave = (e: MouseEvent) => {
+    if (url()) return;
+    try {
+      const bin = atob(props.attachment.b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const u = URL.createObjectURL(new Blob([bytes], { type: props.attachment.mime ?? 'application/octet-stream' }));
+      setUrl(u);
+      (e.currentTarget as HTMLAnchorElement).href = u;
+    } catch {
+      e.preventDefault();
+    }
+  };
+  return (
+    <div class="received-file" data-attachment-card>
+      <span class="file-name" data-attachment-name>{name()}</span>
+      <p class="file-meta"><span data-attachment-size>{kb(props.attachment.size)}</span></p>
+      <a class="link" data-attachment-save href={url() ?? '#'} download={name()} onClick={onSave}>{tr('extraSave')}</a>
     </div>
   );
 }

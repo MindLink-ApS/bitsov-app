@@ -70,8 +70,61 @@ export function fileNameOf(plaintext: string | null): string | null {
       return null;
     }
   }
+  // A bare payload (base64 or a data: URI) is never a name.
+  if (bareB64(text) !== null || DATA_URI.test(text)) return null;
   const m = /^\[file: (.+)\]$/.exec(text);
   return baseName(m ? m[1] : text);
+}
+
+const DATA_URI = /^data:([\w.+-]+\/[\w.+-]+)?(?:;[\w=.+-]+)*;base64,([A-Za-z0-9+/\s]+={0,2})$/;
+
+/** The base64 alphabet only, long enough to be a payload, and not a node id, an invoice or a word. */
+function bareB64(text: string): string | null {
+  const b = text.replace(/\s+/g, '');
+  if (b.length < 80 || b.length % 4 !== 0) return null;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b)) return null;
+  // Bytes as base64 mix upper and lower case; a node id, an invoice or a long word does not.
+  if (!/[A-Z]/.test(b) || !/[a-z]/.test(b)) return null;
+  return b;
+}
+
+function decodedSize(b64: string): number {
+  const pad = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
+  return Math.floor((b64.length * 3) / 4) - pad;
+}
+
+export type Attachment = { name: string | null; mime: string | null; size: number; b64: string };
+
+/**
+ * A message whose text is a file's bytes (a bare base64 blob, a data: URI, or a
+ * file record with `data_b64`): shown as a file card, never as text.
+ */
+export function attachmentOf(plaintext: string | null): Attachment | null {
+  if (plaintext === null) return null;
+  const text = plaintext.trim();
+  if (text.startsWith('{')) {
+    try {
+      const v: unknown = JSON.parse(text);
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+      const o = v as Record<string, unknown>;
+      const data = [o.data_b64, o.data, o.content_b64].find((x): x is string => typeof x === 'string');
+      const b = data?.replace(/\s+/g, '') ?? '';
+      // A file record's payload may be short; it is still bytes, not a message.
+      if (!b || b.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b)) return null;
+      const n = [o.filename, o.name, o.file_name].find((x): x is string => typeof x === 'string' && x.trim() !== '');
+      const mime = [o.mime_type, o.mime, o.type].find((x): x is string => typeof x === 'string' && x.trim() !== '');
+      return { name: n ? baseName(n) : null, mime: mime ?? null, size: decodedSize(b), b64: b };
+    } catch {
+      return null;
+    }
+  }
+  const uri = DATA_URI.exec(text);
+  if (uri) {
+    const b = uri[2].replace(/\s+/g, '');
+    return { name: null, mime: uri[1] ?? null, size: decodedSize(b), b64: b };
+  }
+  const b = bareB64(text);
+  return b === null ? null : { name: null, mime: null, size: decodedSize(b), b64: b };
 }
 
 /** A name without any directory part, or null when the last component is empty. */

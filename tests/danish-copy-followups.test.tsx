@@ -22,7 +22,7 @@ it('retains the payment, on-chain and fee meanings in Danish copy', () => {
   expect(t('uiTheseCategoriesOverlapAndDoNotAddUp')).toContain('i totalen på kæden');
   expect(t('uiTheseCategoriesOverlapAndDoNotAddUp')).toContain('fra det disponible beløb på kæden');
   expect(t('uiOnChainFundsHeldForAnchorChannelClosing')).toContain('tilbageholdt til gebyrer ved lukning');
-  expect(t('uiLocalOKMoneyReady')).toBe('Lokalt OK · Betalinger klar');
+  expect(t('uiLocalOKMoneyReady')).toBe('Forbundet · Klar til at betale');
   expect(t('extraLocalOKMoneyReady', 'x')).toBe('Lokalt OK · Betalinger klar · x');
   expect(t('moneyNotReady')).toBe('Betalinger er ikke klar endnu. Din node prøver automatisk igen.');
 });

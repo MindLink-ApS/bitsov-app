@@ -324,7 +324,7 @@ describe('the Wallet page', () => {
     await openWallet();
     $<HTMLButtonElement>('[data-wallet-tab="channels"]')!.click();
     await vi.waitFor(() => expect(text('[data-channel="c1"] .channel-peer')).toBe('Maya'));
-    expect(text('[data-channel="c2"] .channel-peer')).toContain('Unnamed contact');
+    expect(text('[data-channel="c2"] .channel-peer')).toContain('New contact');
   });
 
   it('keeps the honest channel fallback when two contacts claim the same LN key', async () => {
@@ -332,7 +332,7 @@ describe('the Wallet page', () => {
     setPetname(A, 'Maya'); setPetname(B, 'Josh');
     await openWallet();
     $<HTMLButtonElement>('[data-wallet-tab="channels"]')!.click();
-    expect(text('[data-channel="c1"] .channel-peer')).toContain('Unnamed contact');
+    expect(text('[data-channel="c1"] .channel-peer')).toContain('New contact');
   });
 
   it('shows independent node categories with overlap and routing limits, without a derived total', async () => {
