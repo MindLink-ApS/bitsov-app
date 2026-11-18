@@ -2778,7 +2778,9 @@ describe('calls in the shell', () => {
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     ring('audio');
-    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('token lacks required scope: spend'));
+    // One plain line; the host's own words wait under Details.
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe('The call could not be placed.'));
+    expect(text('[data-call-end-detail]')).toContain('token lacks required scope: spend');
     expect($('[data-call-panel="calling"]')).toBeNull();
     expect(FakePc.made[0].closed).toBe(true);
     // A refused offer paid nothing, and the ended panel says so.
@@ -3232,7 +3234,9 @@ describe('calls in the shell', () => {
     expect($('[data-call-spend-needed]')).toBeNull();
     $<HTMLButtonElement>('[data-call-accept]')!.click();
     await vi.waitFor(() => expect($('[data-call-approval] [data-call-approve]')).not.toBeNull());
-    expect(text('[data-call-ended]')).toContain('The node grant cannot cover this answer. Nothing was paid.');
+    // One plain line; the host's own words wait under Details.
+    expect(text('[data-call-ended]')).toBe('The call could not be answered.');
+    expect(text('[data-call-end-detail]')).toContain('The node grant cannot cover this answer. Nothing was paid.');
     expect(text('[data-call-approval]')).toMatch(/call has ended.*approve spending.*call again/i);
     expect(text('[data-call-approval]')).not.toContain('press Call or Accept again');
     setLanguagePref('da');
@@ -3253,7 +3257,8 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-accept]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect(text('[data-call-ended]')).toContain('The node grant cannot cover this answer. Nothing was paid.');
+    expect(text('[data-call-ended]')).toBe('The call could not be answered.');
+    expect(text('[data-call-end-detail]')).toContain('The node grant cannot cover this answer. Nothing was paid.');
     expect($('[data-call-approval]')).toBeNull();
     expect(host.used('call_signal')).toHaveLength(1);
     expect(host.used('spend_request')).toHaveLength(0);
@@ -4284,6 +4289,36 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect(text('[data-call-ended]')).toBe(said));
     expect($<HTMLDetailsElement>('[data-call-end-detail]')!.open).toBe(false);
     expect($('[data-call-end-detail]')!.textContent).toMatch(technical);
+  });
+
+  it.each([['en', 'da', 'Opkaldet kunne ikke besvares.'], ['da', 'en', 'The call could not be answered.']] as const)('changing the language after a refused answer (%s to %s) re-words the line; the host text stays only under Details', async (from, to, said) => {
+    const RAW = 'host: answer_dispatch_refused (op 7)';
+    const host = stubHost({ messages_list: () => [], call_signal: () => { throw { code: 'node', message: RAW }; } });
+    await openShell();
+    setLanguagePref(from);
+    host.emitLive({ type: 'message', room_id: null, message: msg(400, { media: 'audio', sdp: 'offer' }) });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(text('[data-call-ended]')).not.toContain(RAW);
+    setLanguagePref(to);
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe(said));
+    expect($<HTMLDetailsElement>('[data-call-end-detail]')!.open).toBe(false);
+    expect(text('[data-call-end-detail]')).toContain(RAW);
+  });
+
+  it.each([['en', 'da', /Intet blev betalt\.$/, /Nothing was paid/], ['da', 'en', /Nothing was paid\.$/, /Intet blev betalt/]] as const)('changing the language after a refused microphone (%s to %s) re-words the line', async (from, to, now, before) => {
+    stubHost();
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => { throw Object.assign(new Error('denied'), { name: 'NotAllowedError' }); } } });
+    await openShell();
+    setLanguagePref(from);
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    ring('audio');
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(text('[data-call-ended]')).toMatch(before);
+    setLanguagePref(to);
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(now));
+    expect(text('[data-call-ended]')).not.toMatch(before);
   });
 
   it.each([['en', 'Reconnecting…', 'Live'], ['da', 'Forbinder igen…', 'I gang']] as const)('frozen media on a live call shows Reconnecting, then Live again (%s)', async (lang, said, live) => {

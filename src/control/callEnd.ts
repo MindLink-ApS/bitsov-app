@@ -29,6 +29,8 @@ export function callEndLine(v: CallView, name: string): CallEndLine {
   if (stop) return extra(stop.theirBox ? tr('caMinutesTheirBoxStopped') : STOP_MESSAGE[stop.code](), stop.raw);
   // A sealed call that could not stay (or become) sealed: its own plain words, never "connection lost".
   if (v.errorKey) return extra(tr(v.errorKey));
+  // An end without a reason that the engine worded: worded again now, with the host's own words under Details.
+  if (v.endWords) return extra(v.endWords(), v.endRaw);
   switch (v.reason) {
     case 'declined': return extra(tr('callDeclined'), v.error);
     case 'busy': return extra(tr('callBusy'), v.error);
@@ -38,6 +40,7 @@ export function callEndLine(v: CallView, name: string): CallEndLine {
     case 'unpaid': return extra(v.liveAt === null ? tr('caMinutesNotPaidInTime') : tr('caCallEndedUnpaid'));
     // A connectivity end: the connection was lost, or never made. The engine's own words go under Details.
     case 'failed': return extra(v.liveAt === null ? tr('caCallEndCouldNotConnect', name) : tr('caCallEndConnectionLost', name), v.error);
-    default: return extra(v.error ?? tr('callEnded'));
+    // An end nobody worded: a plain generic line; whatever was said goes under Details.
+    default: return v.error === null ? extra(tr('callEnded')) : extra(tr('caCallEndStopped'), v.error);
   }
 }

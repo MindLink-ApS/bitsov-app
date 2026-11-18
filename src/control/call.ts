@@ -1,4 +1,4 @@
-import { t as tr } from '../i18n';
+import { t as tr, type CopyKey } from '../i18n';
 /**
  * 1:1 calls (regtest prototype). Media runs peer to peer over WebRTC in this
  * webview and never touches the node. By default no ICE server is contacted:
@@ -259,6 +259,12 @@ export type CallView = {
   interruptedUntil?: number | null;
   /** Display only: `error` is this plain copy, so the ended card can word it in the current language. */
   errorKey?: EndKey | null;
+  /**
+   * Display only: the ended card's line, worded when it is shown (so in the current language), for an end
+   * without a reason. `endRaw`: the host's or node's own words for it, shown only under Details.
+   */
+  endWords?: (() => string) | null;
+  endRaw?: string | null;
   /** Display only: this call has used its one recovery attempt (a restart offer, or a restart request or answer). */
   recoveryUsed: boolean;
   /** Display only: the one recovery was already used when this drop began, so none is tried this time. */
@@ -329,10 +335,20 @@ export function callRefusal(error: ActionError): string {
     ? tr('caMinutesGrantRefused', error.message) : error.message;
 }
 
+/** `callRefusal`'s plain line, worded on each read, when the app has its own words for the refusal; else null. */
+export function refusalWords(error: ActionError): (() => string) | null {
+  if (error.code === 'call_offer_price_above_consent') return () => tr('caMinutesOfferPriceAboveConsent');
+  if (error.code === 'call_offer_hold_above_consent') return () => tr('caMinutesOfferHoldAboveConsent');
+  if (error.code === 'call_liquidity_insufficient') return () => tr('caMinutesLiquidityRefused');
+  if (error.code === 'grant_recipient') return () => tr('caCallContactBudgetRefused');
+  if (['grant_per_call', 'grant_exhausted'].includes(error.code)) return () => tr('caMinutesGrantRefused', '').trim();
+  return null;
+}
+
 export const IDLE: CallView = {
   silenced: false,
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
-  liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, interruptedUntil: null, errorKey: null, offline: false,
+  liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, interruptedUntil: null, errorKey: null, endWords: null, endRaw: null, offline: false,
   close: null, stuck: null, dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null, minutes: null,
   stopped: null,
 };
@@ -748,14 +764,26 @@ export function createCallEngine(deps: CallDeps) {
     view.outgoing && view.phase === 'ringing' && reason === 'hangup' ? 'timeout' : reason;
   const closeAdmission = (operationId: string, peer: string, callId: string): Promise<void> =>
     deps.closeAdmission?.(operationId, peer, callId).catch(() => { /* Host preserves the fence on storage failure. */ }) ?? Promise.resolve();
+  /**
+   * An end without a reason, its card line worded on each read (the language may change while the card is up).
+   * `error` keeps what it always said, for everything else that reads it.
+   */
+  const endSaying = (words: () => string, raw?: string, error: string = words()) => end(null, error, raw === undefined ? { words } : { words, raw });
+  /**
+   * The host's or node's own words: a plain generic line on the card, and the words themselves only under Details.
+   * The app's own wait running out (an unknown outcome) is worded by the app, so it stays the line.
+   */
+  const endRawly = (generic: CopyKey, raw: string) => raw === tr('caTheNodeDidNotAnswerInTimeThePayment')
+    ? endSaying(() => tr('caTheNodeDidNotAnswerInTimeThePayment'))
+    : endSaying(() => tr(generic), raw, raw);
   /** Local teardown validates identity only; op_end_call performs node-confirmed cleanup. */
   /** `end` is tearing the call down (its own media close reports back meanwhile). */
   let ending = false;
-  const end = (reason: HangupReason | null, error: string | null = null, opts: { record?: boolean; endAtHost?: boolean; confirmed?: string; errorKey?: EndKey } = {}) => {
+  const end = (reason: HangupReason | null, error: string | null = null, opts: { record?: boolean; endAtHost?: boolean; confirmed?: string; errorKey?: EndKey; words?: () => string; raw?: string } = {}) => {
     ending = true;
     try { endNow(reason, error, opts); } finally { ending = false; }
   };
-  const endNow = (reason: HangupReason | null, error: string | null, opts: { record?: boolean; endAtHost?: boolean; confirmed?: string; errorKey?: EndKey }) => {
+  const endNow = (reason: HangupReason | null, error: string | null, opts: { record?: boolean; endAtHost?: boolean; confirmed?: string; errorKey?: EndKey; words?: () => string; raw?: string }) => {
     if (view.phase === 'incoming' && !view.silenced && reason !== 'declined' && view.callId && view.peer) {
       deps.onMissed?.({ callId: view.callId, peer: view.peer, media: view.media, at: incomingAt });
     }
@@ -776,7 +804,7 @@ export function createCallEngine(deps: CallDeps) {
     // that arrives meanwhile is End's to answer, so the card says it is closing.
     const closingNow = endAtHost && !!deps.endCall && ids.some((id) => !closing.has(id));
     // A stop that already ended the call stays said; one still in its grace does not.
-    set({ phase: 'ended', reason, error, errorKey: opts.errorKey ?? null, interruptedUntil: null, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null,
+    set({ phase: 'ended', reason, error, errorKey: opts.errorKey ?? null, endWords: opts.words ?? null, endRaw: opts.raw ?? null, interruptedUntil: null, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null,
       stopped: view.stopped?.endsAt === null ? view.stopped : null,
       ...(closingNow ? { close: { status: 'closing' as const, message: null } } : {}) });
     if (session) { if (view.outgoing) session.finish(); else session.dispose(); }
@@ -1145,7 +1173,7 @@ export function createCallEngine(deps: CallDeps) {
     try {
       await run((id) => { callId = id; });
     } catch (error) {
-      if (view.callId === callId && active()) end(null, asActionError(error).message);
+      if (view.callId === callId && active()) endRawly('caCallEndStopped', asActionError(error).message);
     } finally {
       if (action === actionGeneration) busy = false;
     }
@@ -1168,7 +1196,7 @@ export function createCallEngine(deps: CallDeps) {
     const q = await deps.quote(view.peer!);
     if (view.callId !== callId || !active()) return;
     const refused = answerRefusal(shown, q);
-    if (refused !== null || !q.ok) { end(null, refused); return; }
+    if (refused !== null || !q.ok) { endSaying(() => answerRefusal(shown, q) ?? tr('caCallEndAnswerFailed')); return; }
     quote = q.value;
     let conn: RTCPeerConnection;
     try {
@@ -1178,19 +1206,20 @@ export function createCallEngine(deps: CallDeps) {
       await gathered(conn, GATHER_MS);
     } catch (error) {
       if (view.callId !== callId || !active()) return;
-      end(null, tr('caNothingWasPaid', mediaError(error, view.media)));
+      const media = view.media;
+      endSaying(() => tr('caNothingWasPaid', mediaError(error, media)));
       return;
     }
     if (view.callId !== callId || !active()) return;
     // Checked again at the paid step: preparing media takes time, and the approval may have changed meanwhile.
     if (deps.minutes) {
       const late = windowEndsBeforeCall(deps.grant?.(), deps.now(), deps.callLimitMinutes?.());
-      if (late !== null) { end(null, tr('caCallWindowShortAnswer', late)); return; }
+      if (late !== null) { endSaying(() => tr('caCallWindowShortAnswer', late)); return; }
     }
     negotiated = true; // The peer may see the answer before our host receipt.
     const r = await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(quote));
     if (view.callId !== callId || !active()) return;
-    if (!r.ok) end(null, r.error.message);
+    if (!r.ok) endRawly('caCallEndAnswerFailed', r.error.message);
     else {
       // M6: the caller pays the minutes; this side only watches its node end the call.
       if (deps.minutes) startMinutes(view.peer!, wireId ?? callId!, 0, null, false).start();
@@ -1242,7 +1271,7 @@ export function createCallEngine(deps: CallDeps) {
       if (active() || deps.busy?.()) return;
       deps.onBudgetNeeded?.(null);
       if (q.offer_msat === null || q.call_total_msat === null) {
-        set({ ...IDLE, phase: 'ended', peer, error: tr('caTheirNodeDoesNotTakeCallsYetNothingWas') });
+        set({ ...IDLE, phase: 'ended', peer, error: tr('caTheirNodeDoesNotTakeCallsYetNothingWas'), endWords: () => tr('caTheirNodeDoesNotTakeCallsYetNothingWas') });
         return;
       }
       // Bounded by the grant's remaining budget; the node enforces the call's
@@ -1250,40 +1279,38 @@ export function createCallEngine(deps: CallDeps) {
       // owner chose it (never the node's messaging clamp).
       const grant = deps.grant?.();
       if (grant && q.call_total_msat > grant.remaining_msat) {
-        set({ ...IDLE, phase: 'ended', peer, error:
-          tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat), amount(grant.remaining_msat)) });
+        set({ ...IDLE, phase: 'ended', peer, error: tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat), amount(grant.remaining_msat)), endWords: ((total, left) => () => tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(total), amount(left)))(q.call_total_msat, grant.remaining_msat) });
         deps.onBudgetNeeded?.(q.call_total_msat);
         return;
       }
       const perPayment = grant ? callPerPaymentMax(grant) : null;
       const need = callPerPaymentNeed(q, Boolean(deps.minutes));
       if (perPayment !== null && need > perPayment) {
-        set({ ...IDLE, phase: 'ended', peer, error:
-          tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(need), amount(perPayment)) });
+        set({ ...IDLE, phase: 'ended', peer, error: tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(need), amount(perPayment)), endWords: () => tr('caThisCallNeedsUpToPerPaymentYourNodeGrantAllows', amount(need), amount(perPayment)) });
         return;
       }
       const hangupCap = hangupOverMessageCap(q, grant);
       if (hangupCap !== null) {
-        set({ ...IDLE, phase: 'ended', peer, error: hangupOverMessageCapCopy(q, hangupCap) });
+        set({ ...IDLE, phase: 'ended', peer, error: hangupOverMessageCapCopy(q, hangupCap), endWords: () => hangupOverMessageCapCopy(q, hangupCap) });
         return;
       }
       // M6: no node-routed call without the per-minute price and the most held the owner agreed to.
       const block = q.block_msat ?? null;
       const most = q.reservation_max_msat ?? null;
       if (deps.minutes && (block === null || most === null)) {
-        set({ ...IDLE, phase: 'ended', peer, error: tr('caMinutesNoPrice') });
+        set({ ...IDLE, phase: 'ended', peer, error: tr('caMinutesNoPrice'), endWords: () => tr('caMinutesNoPrice') });
         return;
       }
       // Nor from a session whose node keeps no reservation: its minutes would never be paid.
       if (deps.minutes && q.minutes_payable !== true) {
-        set({ ...IDLE, phase: 'ended', peer, error: tr('caMinutesOwnerSession') });
+        set({ ...IDLE, phase: 'ended', peer, error: tr('caMinutesOwnerSession'), endWords: () => tr('caMinutesOwnerSession') });
         return;
       }
       // Nor inside a box approval that would end before the call could: the call would die there.
       if (deps.minutes) {
         const left = windowEndsBeforeCall(grant, deps.now(), deps.callLimitMinutes?.());
         if (left !== null) {
-          set({ ...IDLE, phase: 'ended', peer, error: tr('caCallWindowShortRing', left) });
+          set({ ...IDLE, phase: 'ended', peer, error: tr('caCallWindowShortRing', left), endWords: () => tr('caCallWindowShortRing', left) });
           return;
         }
       }
@@ -1308,7 +1335,7 @@ export function createCallEngine(deps: CallDeps) {
         await gathered(conn, GATHER_MS);
       } catch (error) {
         if (cancelled === callId || view.callId !== callId || !active()) return;
-        end(null, tr('caNothingWasPaid', mediaError(error, view.media)));
+        endSaying(() => tr('caNothingWasPaid', mediaError(error, media)));
         return;
       }
       // Cancelled before the offer went out: nothing is paid.
@@ -1316,7 +1343,7 @@ export function createCallEngine(deps: CallDeps) {
       // Checked again at the paid step: preparing media takes time, and the approval may have changed meanwhile.
       if (deps.minutes) {
         const late = windowEndsBeforeCall(deps.grant?.(), deps.now(), deps.callLimitMinutes?.());
-        if (late !== null) { end(null, tr('caCallWindowShortRing', late)); return; }
+        if (late !== null) { endSaying(() => tr('caCallWindowShortRing', late)); return; }
       }
       // From here the host may hold this admission: every end asks it to close it.
       own.push(callId);
@@ -1326,19 +1353,22 @@ export function createCallEngine(deps: CallDeps) {
       if (!r.ok && r.error.code === 'call_needs_node_upgrade') {
         // Refused before dispatch (proven unpaid): no admission exists, nothing to end at the host.
         own = own.filter((id) => id !== callId);
-        end(null, tr('caYourNodeNeedsAnUpdateBeforePaidCallsWork'));
+        endSaying(() => tr('caYourNodeNeedsAnUpdateBeforePaidCallsWork'));
         return;
       }
       if (!r.ok && r.error.code === 'call_admission_open') {
         // Refused before paying: an earlier call to them is still open at the host. Say so; never a silent block.
         own = own.filter((id) => id !== callId);
-        end(null, tr('caAnEarlierCallToThemIsStillBeingEnded'));
+        endSaying(() => tr('caAnEarlierCallToThemIsStillBeingEnded'));
         set({ stuck: { opId: r.error.operation_id ?? null } });
         return;
       }
       if (!r.ok) {
         if (r.error.code === 'grant_exhausted') deps.onBudgetNeeded?.(q.call_total_msat);
-        end(null, session ? callRefusal(r.error) : r.error.message);
+        // A refusal the app words itself stays the line; the node's own text goes under Details.
+        const plain = session ? refusalWords(r.error) : null;
+        if (plain) endSaying(plain, r.error.message, callRefusal(r.error));
+        else endRawly('caCallEndPlaceFailed', r.error.message);
         return;
       }
       // The node reserved this call's minutes when the offer went out: the host checks that hold
@@ -1607,7 +1637,10 @@ export function createCallEngine(deps: CallDeps) {
             // A sealing call whose answer could not be sealed says so, and names no side as the cause.
             const name = error && typeof error === 'object' && 'name' in error ? error.name : '';
             const sealNo = name === SEAL_NOT_AGREED || name === SEAL_REFUSED;
-            if (pc === conn) end(null, sealNo ? tr('caCallSealNotAgreed') : tr('caTheirAnswerCouldNotBeUsed'), sealNo ? { errorKey: 'caCallSealNotAgreed' } : {});
+            if (pc === conn) {
+              if (sealNo) end(null, tr('caCallSealNotAgreed'), { errorKey: 'caCallSealNotAgreed' });
+              else endSaying(() => tr('caTheirAnswerCouldNotBeUsed'));
+            }
           }
           return;
         }

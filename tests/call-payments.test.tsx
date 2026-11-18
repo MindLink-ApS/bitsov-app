@@ -1099,6 +1099,59 @@ describe('node-routed calls carry audio only, and a dead media session stops the
     expect(e.signals.slice(sent).map((x) => x.kind)).toEqual([]);
   });
 
+  /** A live routed call whose frames flowed at the returned time and then stopped; Reconnecting shows after 3 s. */
+  async function frozenAfterFrames(pay: MinutesDeps['pay'], node: ReturnType<typeof fakeNode>) {
+    const e = routedEngine(minutesOf(node, pay));
+    await e.engine.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(e.last().minutes?.reservation).not.toBeNull());
+    await e.engine.confirmMinutes();
+    await e.engine.receive(answerMessage, OWN);
+    await vi.waitFor(() => expect(pay).toHaveBeenCalledWith(A, ID, 0));
+    await vi.advanceTimersByTimeAsync(0);
+    e.link({ link: 'open', detail: null });
+    await vi.waitFor(() => expect(e.last().phase).toBe('live'));
+    e.frame();
+    const lastFrame = Date.now();
+    await vi.advanceTimersByTimeAsync(3_500);
+    expect(shownPhase(e.last())).toBe('reconnecting');
+    return { e, lastFrame };
+  }
+
+  it('a socket that reopens without frames is not recovery: still Reconnecting, and the call ends at last frame + 30 s', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const pay = vi.fn(async (_p: string, _c: string, seq: number) => { node.settle(seq); return ok(receipt(seq)); });
+    const { e, lastFrame } = await frozenAfterFrames(pay, node);
+    const sent = e.signals.length;
+    await vi.advanceTimersByTimeAsync(20_000 - 3_500);
+    e.link({ link: 'closed', detail: null });
+    await vi.advanceTimersByTimeAsync(1_000);
+    e.link({ link: 'open', detail: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(e.last()).toMatchObject({ phase: 'live', interruptedUntil: lastFrame + LINK_GRACE_MS });
+    expect(shownPhase(e.last())).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(lastFrame + LINK_GRACE_MS - 1 - Date.now());
+    expect(e.last().phase).toBe('live');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(e.last()).toMatchObject({ phase: 'ended', reason: 'failed' });
+    expect(e.signals.slice(sent).map((x) => x.kind)).toEqual([]);
+  });
+
+  it('after a socket reopen, a frame arriving again is what clears Reconnecting and its deadline', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const pay = vi.fn(async (_p: string, _c: string, seq: number) => { node.settle(seq); return ok(receipt(seq)); });
+    const { e } = await frozenAfterFrames(pay, node);
+    e.link({ link: 'closed', detail: null });
+    await vi.advanceTimersByTimeAsync(1_000);
+    e.link({ link: 'open', detail: null });
+    expect(shownPhase(e.last())).toBe('reconnecting');
+    e.frame();
+    expect(e.last().interruptedUntil).toBeNull();
+    expect(shownPhase(e.last())).toBe('live');
+    // Frames keep coming: no deadline is left to end the call.
+    for (let i = 0; i < 40; i++) { await vi.advanceTimersByTimeAsync(1_000); e.frame(); }
+    expect(e.last().phase).toBe('live');
+  });
+
   it('an interruption while an answer receipt is still on its way never starts a paid recovery', async () => {
     const node = fakeNode({ now: () => Date.now() });
     let land: (r: Outcome<CallReceipt>) => void = () => {};

@@ -503,9 +503,10 @@ export class NodeRoutedConnection {
     if (this.closed) return;
     switch (link.link) {
       case 'open': {
-        this.clearStall(true);
-        // Frames get a fresh few seconds to resume on the reopened link.
-        if (this.lastFrameAt !== null) this.lastFrameAt = this.now();
+        // A reopened socket is not media: once frames have flowed, only a frame arriving again clears the stall,
+        // and its deadline (counted from the last frame) stands meanwhile. Before any frame, the link is all there is.
+        if (this.lastFrameAt === null) this.clearStall(true);
+        else if (this.graceTimer !== undefined) this.frameStall = true;
         this.linkOpen = true;
         if (link.limits) this.video?.setNodeLimits(link.limits);
         this.maybeConnected();
@@ -516,9 +517,9 @@ export class NodeRoutedConnection {
         this.video?.linkReset();
         // The host reconnects on its own; the call stays live meanwhile.
         if (this.wasOpen) {
-          // A frame stall already running keeps its deadline; it is now the link's.
+          // A stall already running keeps its deadline; otherwise media stopped at the last frame (or now, if none came).
           this.frameStall = false;
-          this.startStall(this.now());
+          this.startStall(this.lastFrameAt ?? this.now());
         }
         break;
       case 'sealed':

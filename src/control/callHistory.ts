@@ -4,7 +4,7 @@ import type { Message } from './types';
 /**
  * Call control is never chat: the signals and paid minutes (kinds 400–404),
  * and any payload that names a call (`{"call_id":…}`, such as a minute
- * receipt an older app stored as an ordinary message).
+ * receipt that an older app version saved as an ordinary message).
  */
 export function isCallControlMessage(m: Pick<Message, 'kind' | 'plaintext'>): boolean {
   if (isCallTrafficKind(m.kind)) return true;
