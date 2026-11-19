@@ -323,6 +323,19 @@ struct NodeState {
     trust_write: Mutex<()>,
     /// A pending console approval saved by an earlier run was loaded once.
     approvals_restored: AtomicBool,
+    /// A pairing link was just imported: ask the node once for the day's
+    /// budget as soon as this pairing is signed in (see `ask_budget_after_pairing`).
+    budget_after_pairing: AtomicBool,
+    /// Serializes creating an elevation request, for the automatic pairing ask
+    /// and every explicit ask alike: one POST at a time, each after a fresh
+    /// look at the pending request. Never held while waiting for `money`.
+    elevation_create: tokio::sync::Mutex<()>,
+    /// This node's call limit (`max_call_minutes`) as last seen on one of its
+    /// holds, for the call-window check before a paid offer or answer.
+    call_limit_seen: Mutex<Option<(String, u16)>>,
+    /// Desktop: the file that carries the budget ask across the restart that
+    /// follows an imported link, removed once the ask is sent or not needed.
+    budget_ask_marker: Mutex<Option<PathBuf>>,
     /// M6 A1: the open node-routed media session, if a call has one. The host
     /// owns its socket; the renderer only pushes payloads and reads frames.
     media: Mutex<Option<MediaSession>>,
@@ -804,6 +817,10 @@ impl NodeState {
             device_lifecycle: Mutex::new(()),
             trust_write: Mutex::new(()),
             approvals_restored: AtomicBool::new(false),
+            budget_after_pairing: AtomicBool::new(false),
+            elevation_create: tokio::sync::Mutex::new(()),
+            call_limit_seen: Mutex::new(None),
+            budget_ask_marker: Mutex::new(None),
             media: Mutex::new(None),
             #[cfg(feature = "call-seal")]
             call_seal: Mutex::new(None),
@@ -2356,7 +2373,11 @@ async fn connect_remote_with(state: &NodeState, app_data_dir: &Path, wait: bool,
                 state.phone_setup.lock().unwrap().get_or_insert_with(|| saved.as_ref().is_none_or(|d|
                     d.pending_phone_enrollment()));
                 match saved {
-                    Some(descriptor) => attach_remote_with(state, app_data_dir, descriptor, interaction).await,
+                    Some(descriptor) => {
+                        // Every startup with a saved link (desktop, phone, any OS) picks up an ask left due.
+                        restore_budget_ask(state, app_data_dir);
+                        attach_remote_with(state, app_data_dir, descriptor, interaction).await
+                    }
                     None => {
                         #[cfg(any(mobile, feature = "mobile"))]
                         {
@@ -3574,6 +3595,8 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
     state.local_setup_needed.store(false, Ordering::SeqCst);
     *state.error.lock().unwrap() = None;
     state.remote_retry.clear_connection_error();
+    // The owner's one budget step comes right after this link, not at a call.
+    pairing_imported_at(state, dir);
     // Subscribe while holding remote_change: Forget must invalidate even a
     // spawned task that has not been polled yet.
     spawn_remote_connect(app, dir, true);
@@ -3642,12 +3665,16 @@ async fn remote_access_import_at<R: tauri::Runtime>(
     #[cfg(any(mobile, feature = "mobile"))]
     {
         *state.error.lock().unwrap() = None;
+        pairing_imported_at(state, app_data_dir);
         spawn_remote_connect(_app, app_data_dir, true);
         return Ok(RemoteImportView { restart_required: false, ..result });
     }
     // The owner chose a node at home: stop offering to create one here.
     #[cfg(all(desktop, not(feature = "mobile")))]
     state.local_setup_needed.store(false, Ordering::SeqCst);
+    // The saved link is used on the next start: carry the budget ask there.
+    #[cfg(not(any(mobile, feature = "mobile")))]
+    save_budget_ask(app_data_dir);
     #[cfg(not(any(mobile, feature = "mobile")))]
     Ok(result)
 }
@@ -3689,6 +3716,11 @@ async fn remote_access_forget_at(state: &NodeState, app_data_dir: &Path) -> Resu
     state.remote_connect_generation.send_modify(|generation| *generation = generation.wrapping_add(1));
     let _recovery = state.remote_recovery.lock().await;
     remote_access::forget_persisted(app_data_dir).map_err(|error| error.to_string())?;
+    state.budget_after_pairing.store(false, Ordering::SeqCst);
+    *state.budget_ask_marker.lock().unwrap() = None;
+    if let Err(error) = remove_budget_ask(&budget_ask_path(app_data_dir)) {
+        eprintln!("[spend] could not clear the budget ask: {error}");
+    }
     state.remote_retry.clear_refusal();
     // Preserve established connections (Forget still selects the next startup).
     // An unfinished attach, however, must leave no stale remote onboarding state.
@@ -4623,13 +4655,6 @@ async fn put_front_door(state: &NodeState, body: serde_json::Value) -> Result<St
     Ok(text)
 }
 
-/// The node's `konsensus.toml` when this app knows it: an attached external
-/// node's, else the one it started. Only ever shown in an owner command.
-fn owner_config(state: &NodeState) -> Option<PathBuf> {
-    let external = state.external_node.lock().unwrap().as_ref().map(|dir| dir.join("konsensus.toml"));
-    external.or_else(|| state.config.lock().unwrap().clone())
-}
-
 /// Whether the node still waits on this request. A request the node reports
 /// over (expired, or lost to a restart) is not reused; an unreadable status
 /// keeps the request, since the owner may be approving it right now.
@@ -4657,7 +4682,7 @@ async fn ask_front_door_owner(state: &NodeState) -> String {
             let ask = serde_json::json!({ "scopes": ["front_door"] });
             match call_api(state, reqwest::Method::POST, "/pair/elevation-request", Some(ask)).await {
                 Ok((code, body)) if code.is_success() => decode_act::<act::ElevationReply>("/pair/elevation-request", &body)
-                    .and_then(|r| r.into_elevation(owner_config(state).as_deref()))
+                    .and_then(|r| r.into_elevation())
                     .map_err(|e| e.message),
                 Ok((code, body)) => Err(api_error("/pair/elevation-request", code, &body)),
                 Err(e) => Err(e),
@@ -5285,7 +5310,7 @@ async fn gated_post_auth(
     if act::is_scope_refusal(status.as_u16()) {
         return Err(ActionError::new(
                 "owner_only",
-                "Your node allows this only from the owner's own terminal, not from a paired app.",
+                "Your box allows this only from its owner, not from a paired app. Ask the person who set it up.",
             ));
     }
     if !status.is_success() {
@@ -5436,6 +5461,9 @@ struct Charge {
     envelope_ids: Option<bool>,
     /// `final_failure_node` of this send's status; None for a send with no operation.
     failure_final_on: Option<String>,
+    /// A node-routed paid offer or a paid answer: the grant read under the
+    /// money lock must also outlast this node's call limit (`call_window_fits`).
+    call_window: bool,
 }
 
 fn budget_dir(state: &NodeState) -> Result<(PathBuf, String), ActionError> {
@@ -5514,6 +5542,7 @@ fn plan_manual_charge(state: &NodeState, target: &str, max_msat: u64) -> Result<
     Ok(Charge {
         target: target.into(), room: false, confirm: None,
         readmission_possible: false, confirmed: false, operation: false, envelope_ids: None, failure_final_on: None,
+        call_window: false,
     })
 }
 
@@ -5760,6 +5789,12 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
         check_node_grant_with_envelope_ids(state, path, &body, max_msat,
             charge.as_ref().and_then(|c| c.envelope_ids), cap).await?
     };
+    // A node-routed paid offer or a paid answer must fit inside the grant read
+    // here, under the money lock, before anything is reserved or sent: a grant
+    // replaced by a short one after the earlier checks still refuses it.
+    if charge.as_ref().is_some_and(|c| c.call_window) {
+        if let Some(g) = &node_grant { call_window_fits(state, g.expires_at_ms())?; }
+    }
     let reserve_msat = match (&charge, &node_grant) {
         // A zero cap: the node pays nothing, re-admission included.
         _ if max_msat == 0 => 0,
@@ -6913,7 +6948,9 @@ fn budget_proposal(state: &NodeState, want: Want, minimum: Option<u64>) -> Optio
     let book = with_book(state, false, |b| Ok(b.clone())).ok()?;
     Some(match want {
         Want::Budget(ceiling) => grant::proposal(ceiling, grant::MAX_TTL_SECS, &book.contacts),
-        Want::Window => grant::proposal(book.ceiling_msat.max(minimum.unwrap_or(0)), act::SPEND_WINDOW_MS / 1000, &Default::default()),
+        // A whole day, as the node allows: the app's own ten-minute lock
+        // (`act::SPEND_WINDOW_MS`) still closes payments here by itself.
+        Want::Window => grant::proposal(book.ceiling_msat.max(minimum.unwrap_or(0)), grant::MAX_TTL_SECS, &Default::default()),
     })
 }
 
@@ -7180,31 +7217,7 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>, budget_m
                     },
                 }
             } else if let Some(want) = want {
-                let mut ask = serde_json::json!({ "scopes": ["spend"] });
-                // A G1 node shows the owner a budget to approve; the owner's
-                // flags override it. Older nodes get the pre-G1 body.
-                if let Some(amount) = budget_msat {
-                    ask["budget"] = grant::proposal(amount, act::SPEND_WINDOW_MS / 1000, &Default::default());
-                } else if node_has_g1(state).await.unwrap_or(false) {
-                    if let Some(budget) = budget_proposal(state, want, minimum) {
-                        ask["budget"] = budget;
-                    }
-                }
-                let (status, body) = call_api(state, reqwest::Method::POST, "/pair/elevation-request", Some(ask)).await?;
-                if !status.is_success() {
-                    return Err(ActionError::node(api_error("/pair/elevation-request", status, &body)));
-                }
-                let reply: act::ElevationReply = decode_act("/pair/elevation-request", &body)?;
-                let pending = reply.into_elevation(owner_config(state).as_deref())?;
-                request_id = Some(pending.op_id.clone());
-                let mut gate = state.spend.lock().unwrap();
-                if gate.generation() == generation && pending.expires_at_ms > now_ms() {
-                    if budget_msat.is_some() {
-                        gate.set_replacement_pending(pending, now_ms());
-                    } else {
-                        gate.set_pending(pending);
-                    }
-                }
+                request_id = post_elevation_request(state, want, budget_msat, minimum, generation).await?;
             }
         }
     }
@@ -7212,6 +7225,54 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>, budget_m
         view: act::SpendView { request_id, ..state.spend.lock().unwrap().view(now_ms()) },
         armed_granted_op,
     })
+}
+
+/// Ask the node for spend (`POST /pair/elevation-request`) and remember the
+/// pending request when the window's generation is still `generation`.
+/// Returns the node's request id. Never obtains anything by itself.
+async fn post_elevation_request(state: &NodeState, want: Want, budget_msat: Option<u64>, minimum: Option<u64>, generation: u64) -> Result<Option<String>, ActionError> {
+    // One request at a time, shared with the automatic pairing ask; a request
+    // that appeared meanwhile is followed, not repeated (a replacement still asks).
+    let _create = state.elevation_create.lock().await;
+    if budget_msat.is_none() {
+        let live = state.spend.lock().unwrap().pending()
+            .filter(|p| p.expires_at_ms > now_ms()).map(|p| p.op_id.clone());
+        if let Some(op_id) = live {
+            return Ok(Some(op_id));
+        }
+    }
+    let mut ask = serde_json::json!({ "scopes": ["spend"] });
+    // A G1 node shows the owner a budget to approve; the owner's
+    // flags override it. Older nodes get the pre-G1 body.
+    if let Some(amount) = budget_msat {
+        ask["budget"] = grant::proposal(amount, grant::MAX_TTL_SECS, &Default::default());
+    } else if node_has_g1(state).await.unwrap_or(false) {
+        if let Some(budget) = budget_proposal(state, want, minimum) {
+            ask["budget"] = budget;
+        }
+    }
+    dispatch_elevation_request(state, ask, budget_msat, generation).await
+}
+
+/// POST one prepared elevation request and track it when the window's
+/// generation is still `generation`. Callers hold `elevation_create`.
+async fn dispatch_elevation_request(state: &NodeState, ask: serde_json::Value, budget_msat: Option<u64>, generation: u64) -> Result<Option<String>, ActionError> {
+    let (status, body) = call_api(state, reqwest::Method::POST, "/pair/elevation-request", Some(ask)).await?;
+    if !status.is_success() {
+        return Err(ActionError::node(api_error("/pair/elevation-request", status, &body)));
+    }
+    let reply: act::ElevationReply = decode_act("/pair/elevation-request", &body)?;
+    let pending = reply.into_elevation()?;
+    let request_id = Some(pending.op_id.clone());
+    let mut gate = state.spend.lock().unwrap();
+    if gate.generation() == generation && pending.expires_at_ms > now_ms() {
+        if budget_msat.is_some() {
+            gate.set_replacement_pending(pending, now_ms());
+        } else {
+            gate.set_pending(pending);
+        }
+    }
+    Ok(request_id)
 }
 
 /// Read only the policy and backend from the SAME config passed to node start.
@@ -7604,7 +7665,7 @@ async fn do_message_send_inner(
             body["max_routing_fee_msat"] = serde_json::json!(ask.max_routing_fee_msat);
         }
     }
-    let charge = Charge { target: target.clone(), room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room, envelope_ids: Some(caps.envelope_ids), failure_final_on: final_failure_node(&caps.status) };
+    let charge = Charge { target: target.clone(), room: is_room, confirm: plan.confirm, readmission_possible, confirmed: node_ok.is_some(), operation: caps.operations && !is_room, envelope_ids: Some(caps.envelope_ids), failure_final_on: final_failure_node(&caps.status), call_window: false };
     let sent = money_post(state, auth, "/messages/compose", body.clone(), max_msat, Some(charge)).await;
     let sent = match sent {
         // After a reconnect or restart the contact asks for admission again,
@@ -7761,7 +7822,7 @@ async fn do_message_retry(state: &NodeState, recipient: &str, plaintext: &str, a
         confirm_first_contact(state, &target, cap, contact_budget, caps.readmission_possible).await?;
     }
     // Nothing can be paid under a zero cap, re-admission included.
-    let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations, envelope_ids: Some(caps.envelope_ids), failure_final_on: None };
+    let charge = Charge { target: target.clone(), room: false, confirm: None, readmission_possible: readmission_possible && approved_msat.is_some(), confirmed: approved_msat.is_some(), operation: caps.operations, envelope_ids: Some(caps.envelope_ids), failure_final_on: None, call_window: false };
     let text = match money_post_with(state, auth, "/messages/compose", body, cap, Some(charge), Some(&undelivered)).await {
         // The node pays re-admission under a cap that fits the contact's signed
         // quote: Retry delivery (zero cap) asks the owner for that price.
@@ -8412,6 +8473,7 @@ async fn end_call_past_hold(state: &NodeState, consent: &CallConsent) -> ActionE
 /// paid. Pays nothing itself (a refused hold is hung up).
 async fn do_call_hold(state: &NodeState, peer: &str, call_id: &str, confirm_reserved_msat: Option<u64>) -> Result<control::CallStatus, ActionError> {
     let (status, hold, consent) = checked_call_hold(state, peer, call_id).await?;
+    *state.call_limit_seen.lock().unwrap() = Some((consent.node_id.clone(), hold.max_call_minutes));
     if let Some(shown) = confirm_reserved_msat {
         if shown != hold.reserved_msat {
             return Err(ActionError::new("call_hold_changed",
@@ -8497,6 +8559,7 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
             operation: caps.operations,
             envelope_ids: Some(caps.envelope_ids),
             failure_final_on: final_failure_node(&caps.status),
+            call_window: false,
         };
         // Refused or ended while this minute was prepared: nothing is sent.
         consent_payable(state, &consent, hold.reserved_msat)?;
@@ -8650,6 +8713,10 @@ async fn do_call_signal_bounded(
                 }
                 error
             })?;
+        // A node-routed call must fit inside the grant the node holds now.
+        if minutes.is_some() {
+            if let Some(g) = &checked { call_window_fits(state, g.expires_at_ms())?; }
+        }
         // A hangup is bounded like a message (the 6-sat cap). A call that
         // could not be ended is never started.
         if let Some(g) = checked {
@@ -8689,6 +8756,7 @@ async fn do_call_signal_bounded(
         operation: caps.operations,
         envelope_ids: Some(caps.envelope_ids),
         failure_final_on: final_failure_node(&caps.status),
+        call_window: kind == act::KIND_CALL_ANSWER || (kind == act::KIND_CALL_OFFER && minutes.is_some()),
     };
     let text = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await?;
     let reply: act::SendReply = text.decode("/messages/compose")?;
@@ -8979,6 +9047,7 @@ async fn do_porch_read(state: &NodeState, peer: &str, path: &str, max_msat: u64)
         operation: false,
         envelope_ids: None,
         failure_final_on: None,
+        call_window: false,
     };
     let (text, accounted) = porch_post(state, auth, body, max_msat, charge).await?;
     porch::project(&text, &target, &path, accounted, now_unix().max(0) as u64).map_err(|e| {
@@ -9164,6 +9233,7 @@ async fn do_file_send(
         operation: false,
         envelope_ids: Some(caps.envelope_ids),
         failure_final_on: None,
+        call_window: false,
     };
     let text = money_post(
         state,
@@ -9200,6 +9270,133 @@ async fn do_file_send(
     act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
+/// A pairing link was just imported: the next signed-in spend poll asks the
+/// node once for the day's budget (`ask_budget_after_pairing`).
+fn pairing_imported(state: &NodeState) {
+    state.budget_after_pairing.store(true, Ordering::SeqCst);
+}
+
+const BUDGET_ASK_FILE: &str = "budget-ask-after-pairing";
+
+fn budget_ask_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(BUDGET_ASK_FILE)
+}
+
+/// A link was imported and is used now: the ask is due in this run and, until
+/// it is sent, in every later start too (the app may quit first).
+fn pairing_imported_at(state: &NodeState, app_data_dir: &Path) {
+    save_budget_ask(app_data_dir);
+    *state.budget_ask_marker.lock().unwrap() = Some(budget_ask_path(app_data_dir));
+    pairing_imported(state);
+}
+
+/// The ask waits in a file until it is sent. It holds no secret, only that
+/// the ask is due. Desktop Import writes it for the next start.
+fn save_budget_ask(app_data_dir: &Path) {
+    if let Err(error) = std::fs::write(budget_ask_path(app_data_dir), b"1\n") {
+        eprintln!("[spend] could not keep the budget ask for the next start: {error}");
+    }
+}
+
+/// Startup with a saved link: an ask the import left for this start is due.
+fn restore_budget_ask(state: &NodeState, app_data_dir: &Path) {
+    let path = budget_ask_path(app_data_dir);
+    if path.is_file() {
+        *state.budget_ask_marker.lock().unwrap() = Some(path);
+        pairing_imported(state);
+    }
+}
+
+fn remove_budget_ask(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// The ask is sent now, or not needed: never again for this link. Its file
+/// goes first: if it cannot be removed, nothing is sent and the ask stays, so
+/// a later start can never repeat a request whose result was unclear.
+fn budget_ask_done(state: &NodeState) -> Result<(), ActionError> {
+    let path = state.budget_ask_marker.lock().unwrap().clone();
+    if let Some(path) = path {
+        remove_budget_ask(&path).map_err(|error| {
+            eprintln!("[spend] could not clear the budget ask: {error}");
+            ActionError::new("app_not_ready", "The app could not update its own files. Nothing was sent.")
+        })?;
+        *state.budget_ask_marker.lock().unwrap() = None;
+    }
+    state.budget_after_pairing.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+/// One owner step up front: right after pairing, ask the node for the day's
+/// budget so its owner can say yes before the first call, not at Accept or
+/// Ring. Only asks (never obtains), only once per imported link, and only for
+/// a signed-in pairing without spending and without a request already waiting.
+/// It records no wants: a yes at the box opens nothing in the app until the
+/// owner taps here. Waits, without losing the ask, while not signed in yet and
+/// after any read that fails before the request: the next poll tries again.
+/// The ask is spent just before its POST, so an unclear POST is never repeated.
+async fn ask_budget_after_pairing(state: &NodeState) -> Result<(), ActionError> {
+    if !state.budget_after_pairing.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    if !matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(_)) {
+        return Ok(());
+    }
+    if budget_paused(state)? {
+        return budget_ask_done(state);
+    }
+    // A saved request from an earlier run is followed, not repeated. This read
+    // may also refresh the session, so its scopes are read only after it.
+    if !state.approvals_restored.load(Ordering::SeqCst) {
+        do_budget_status(state).await?;
+    }
+    let has_spend = match &*state.auth.lock().unwrap() {
+        AuthMode::Paired(session) => session.scopes.iter().any(|s| s == "spend"),
+        _ => return Ok(()),
+    };
+    if has_spend {
+        return budget_ask_done(state);
+    }
+    restore_spend_pending(state);
+    // One request at a time, shared with every explicit ask. Busy: the next poll tries again.
+    let Ok(_create) = state.elevation_create.try_lock() else { return Ok(()) };
+    if !state.budget_after_pairing.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let generation = {
+        let gate = state.spend.lock().unwrap();
+        if gate.pending().is_some_and(|p| p.expires_at_ms > now_ms()) {
+            drop(gate);
+            return budget_ask_done(state);
+        }
+        gate.generation()
+    };
+    // Pre-G1 nodes keep their old ask-at-use path.
+    if !node_has_g1(state).await? {
+        return budget_ask_done(state);
+    }
+    // The whole request is ready before the ask is spent: a failed read keeps it.
+    let budget = budget_proposal(state, Want::Window, None)
+        .ok_or_else(|| ActionError::new("app_not_ready", "The day’s budget could not be read yet. Nothing was sent."))?;
+    let ask = serde_json::json!({ "scopes": ["spend"], "budget": budget });
+    // Spent just before the POST: an unclear POST is never repeated.
+    budget_ask_done(state)?;
+    dispatch_elevation_request(state, ask, None, generation).await?;
+    save_spend_pending(state);
+    Ok(())
+}
+
+/// `spend_status`: the pairing's first budget ask, then the usual poll.
+async fn spend_status_now(state: &NodeState) -> Result<act::SpendView, ActionError> {
+    if let Err(error) = ask_budget_after_pairing(state).await {
+        eprintln!("[spend] could not ask for the budget after pairing: {}", error.message);
+    }
+    spend_advance(state, false).await
+}
+
 /// The owner's spend window as it stands; polls a pending elevation request.
 #[tauri::command(rename_all = "snake_case")]
 async fn spend_status(
@@ -9208,7 +9405,7 @@ async fn spend_status(
 ) -> Result<act::SpendView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
-    spend_advance(state.inner(), false).await
+    spend_status_now(state.inner()).await
 }
 
 /// The owner's one tap: open a short spend window, or ask the node for spend.
@@ -9319,7 +9516,7 @@ fn device_error(e: device_key::DeviceKeyError) -> ActionError {
     match e {
         device_key::DeviceKeyError::Cancelled => ActionError::new("device_cancelled", "Biometric approval was cancelled. Nothing was approved."),
         device_key::DeviceKeyError::Unavailable => ActionError::new("device_unavailable", "This phone has no hardware-backed Android Keystore key the app can use. Approve at the node instead."),
-        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Strong biometric approval is not available on this phone right now (none enrolled, unavailable, or locked out). Nothing was approved. Approve at the node instead, with the konsensus grant command."),
+        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Strong biometric approval is not available on this phone right now (none enrolled, unavailable, or locked out). Nothing was approved. Ask the person who set up your box to approve it there instead."),
         device_key::DeviceKeyError::Invalid => ActionError::new("device_invalid", "This phone's approval key no longer works (for example, biometric enrollment changed). Set up biometric approvals again."),
         device_key::DeviceKeyError::Other(code) => ActionError::new("device_key", format!("Android Keystore refused ({code}). Nothing was approved.")),
     }
@@ -9330,7 +9527,7 @@ fn device_error(e: device_key::DeviceKeyError) -> ActionError {
     match e {
         device_key::DeviceKeyError::Cancelled => ActionError::new("device_cancelled", "Biometric approval (Touch ID or Face ID) was cancelled. Nothing was approved."),
         device_key::DeviceKeyError::Unavailable => ActionError::new("device_unavailable", "This device has no Secure Enclave the app can use. Approve at the node instead."),
-        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Touch ID or Face ID is not available on this device right now (not enrolled, or locked out after failed tries). Nothing was approved. Approve at the node instead, with the konsensus grant command."),
+        device_key::DeviceKeyError::BiometryUnavailable => ActionError::new("device_biometry", "Touch ID or Face ID is not available on this device right now (not enrolled, or locked out after failed tries). Nothing was approved. Ask the person who set up your box to approve it there instead."),
         device_key::DeviceKeyError::Invalid => ActionError::new("device_invalid", "This device's approval key no longer works (for example, the enrolled fingerprints or face changed). Set up biometric approvals again."),
         device_key::DeviceKeyError::Other(code) => ActionError::new("device_key", format!("The Secure Enclave refused ({code}). Nothing was approved.")),
     }
@@ -10440,6 +10637,28 @@ async fn call_signal(
     do_renderer_call_signal(state.inner(), &peer, kind, &plaintext, max_msat, minutes, max_hangup_msat).await
 }
 
+/// The most minutes any node lets one call last (`[calls] max_call_minutes`).
+const CALL_LIMIT_MAX_MINUTES: u64 = 240;
+/// Room beyond the call limit, so an approval never ends in a call's last minute.
+const CALL_WINDOW_MARGIN_MS: u64 = 60_000;
+const CALL_WINDOW_SHORT: &str = "Your box’s approval ends before this call could end, and the call would stop there. Nothing was sent or paid. Ask the person who set up your box for a new approval.";
+
+/// A node-routed call lives only as long as the box approval. Refuse, before
+/// anything is sent or paid, a paid offer or answer whose freshly read grant
+/// ends before this node's call limit could (the most any node allows while
+/// that limit is not known yet).
+fn call_window_fits(state: &NodeState, grant_expires_at_ms: u64) -> Result<(), ActionError> {
+    let node = state.node_id.lock().unwrap().clone();
+    let limit = state.call_limit_seen.lock().unwrap().as_ref()
+        .filter(|(seen, _)| node.as_deref() == Some(seen.as_str()))
+        .map_or(CALL_LIMIT_MAX_MINUTES, |(_, minutes)| u64::from(*minutes).max(1));
+    let needed = now_ms().saturating_add(limit * 60_000 + CALL_WINDOW_MARGIN_MS);
+    if grant_expires_at_ms < needed {
+        return Err(ActionError::new("call_window_short", CALL_WINDOW_SHORT));
+    }
+    Ok(())
+}
+
 /// One call signal as the renderer asks for it. Every offer names the hangup
 /// ceiling it was shown with: without one it is refused, and nothing is sent.
 async fn do_renderer_call_signal(
@@ -10453,6 +10672,8 @@ async fn do_renderer_call_signal(
         // M6 A2: a node-routed offer carries the minutes agreed before Ring.
         Some(consent) if kind == act::KIND_CALL_OFFER => do_call_offer_with_minutes(state, peer, plaintext, max_msat, consent, max_hangup_msat).await,
         Some(_) => Err(ActionError::invalid("only an offer carries agreed minutes")),
+        // A paid answer's call window is checked under the money lock, against
+        // the grant read there (none on an owner session or a pre-G1 node).
         None => do_call_signal_bounded(state, peer, kind, plaintext, max_msat, None, None, max_hangup_msat).await,
     }
 }
@@ -11067,7 +11288,7 @@ fn stop_supervised_node(child: &SharedChild, budget: Duration) -> StopOutcome {
     StopOutcome::Killed
 }
 
-/// Registration of the supervised node, coordinated with quit (Codex R2G on 3ff4e60e).
+/// Registration of the supervised node, coordinated with quit.
 ///
 /// The hazard: the host process ends as soon as the exit handler returns, taking every
 /// other thread with it. So whatever the exit handler cannot see — a node deregistered
@@ -12260,7 +12481,7 @@ mod api_base_tests {
 }
 
 /// Custody provenance must bind the IPv4 endpoint the app dials, not any
-/// listener that shares its port (Codex app95 delta1).
+/// listener that shares its port.
 #[cfg(all(test, desktop, not(feature = "mobile"), unix))]
 mod verified_local_socket_tests {
     use super::{
@@ -12667,7 +12888,7 @@ mod remote_onboarding_tests {
             transport_signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(signature.to_bytes()),
             code: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([44; 32]),
-            hosted_by: Some("Rasmus's Pi".into()),
+            hosted_by: Some("Alex's Pi".into()),
             ..Default::default()
         };
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -12675,7 +12896,7 @@ mod remote_onboarding_tests {
         *state.remote_descriptor.lock().unwrap() =
             Some(remote_access::parse_pairing_link(&format!("bitsov://pair/{encoded}")).unwrap());
         state.remote_mode.store(true, Ordering::SeqCst);
-        assert_eq!(serde_json::to_value(state.pairing_snapshot()).unwrap()["hosted_by"], "Rasmus's Pi");
+        assert_eq!(serde_json::to_value(state.pairing_snapshot()).unwrap()["hosted_by"], "Alex's Pi");
         state.remote_mode.store(false, Ordering::SeqCst);
         assert!(serde_json::to_value(state.pairing_snapshot()).unwrap()["hosted_by"].is_null());
     }
@@ -14614,7 +14835,7 @@ mod control_act_tests {
             // A minute reaches the node only under an admitted, confirmed consent.
             if kind == 404 { admit_minutes(&node.state, A, CALL_ID); }
             let charge = Charge { target: A.into(), room, confirm: None, readmission_possible: false,
-                confirmed: false, operation: true, envelope_ids: Some(true), failure_final_on: None };
+                confirmed: false, operation: true, envelope_ids: Some(true), failure_final_on: None, call_window: false };
             let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()), path,
                 serde_json::json!({"recipient": A, "is_room": room, "kind": kind, "plaintext": OFFER}),
                 15000, Some(charge), None).await.unwrap_err();
@@ -14666,7 +14887,7 @@ mod control_act_tests {
             journal.save(&prior).unwrap();
             drop(journal);
             let charge = Charge { target: A.into(), room: false, confirm: None, readmission_possible: false,
-                confirmed: false, operation: has_operation_id, envelope_ids: Some(true), failure_final_on: None };
+                confirmed: false, operation: has_operation_id, envelope_ids: Some(true), failure_final_on: None, call_window: false };
             let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()),
                 "/messages/compose", body, 15000, Some(charge), prior.undelivered.as_ref()).await.unwrap_err();
             if has_operation_id && (kind == 400 || !delivery_retry) {
@@ -14987,7 +15208,7 @@ mod control_act_tests {
         let mut body = act::compose_body(ROOM, true, "hi").unwrap();
         body["max_total_msat"] = serde_json::json!(13000);
         body["max_recipient_msat"] = serde_json::json!({A: 7000, C: 6000});
-        let charge = Charge { target: ROOM.into(), room: true, confirm: plan.confirm, readmission_possible: false, confirmed: false, operation: true, envelope_ids: None, failure_final_on: None };
+        let charge = Charge { target: ROOM.into(), room: true, confirm: plan.confirm, readmission_possible: false, confirmed: false, operation: true, envelope_ids: None, failure_final_on: None, call_window: false };
         money_post(&ops.state, auth, "/messages/compose", body, 13000, Some(charge)).await.unwrap();
         assert_eq!(op_ids(&node), [None]);
         assert_eq!(op_ids(&ops), [None], "genome refuses operation_id for rooms (slice 4)");
@@ -15620,7 +15841,7 @@ mod control_act_tests {
                     else if command == "porch" {
                         porch_post(&node.state, Auth::Window(0), serde_json::json!({}), 6000,
                             Charge { target: A.into(), room: false, confirm: None,
-                                readmission_possible: false, confirmed: false, operation: false, envelope_ids: None, failure_final_on: None }).await.map(|_| ())
+                                readmission_possible: false, confirmed: false, operation: false, envelope_ids: None, failure_final_on: None, call_window: false }).await.map(|_| ())
                     }
                     else { money_post_with(&node.state, Auth::Window(0), "/messages/compose",
                         serde_json::json!({}), 7000, None, None).await.map(|_| ()) }
@@ -16444,7 +16665,7 @@ mod control_act_tests {
         assert_eq!(compose_bodies(&node).len(), 1);
     }
 
-    /// Codex review of 2d683b5 (P1): accounting must not erase the undelivered
+    /// Accounting must not erase the undelivered
     /// record. Reconciliation settles the book and keeps the record, the retry
     /// and the fence; only the owner stopping retries releases it.
     #[tokio::test]
@@ -16506,7 +16727,7 @@ mod control_act_tests {
         })
     }
 
-    /// Codex review of 0308673 (P1), the reviewer's scenario: a cached message
+    /// A cached message
     /// price of 50,000 msat, the paid proof consumed on an earlier connection,
     /// and a much lower fresh quote (1,000 admission + 1,000 message + two
     /// 5,000 fee ceilings = 12,000). A message-price cap would let the node buy
@@ -16580,7 +16801,7 @@ mod control_act_tests {
         assert_eq!(bodies.len(), 3);
         assert_eq!(bodies[2], serde_json::json!({"recipient": A, "is_room": false, "kind": 0, "plaintext": "gm", "max_total_msat": 14000}), "capped at exactly what the owner approved");
         // While each retry was on the wire the SAME record was there, in flight:
-        // never removed and re-created (Codex review of 2d683b5, P2).
+        // never removed and re-created.
         let seen = at_compose.lock().unwrap().clone();
         assert_eq!(seen.len(), 2);
         for (during, n) in seen.iter().zip([1, 1]) {
@@ -16654,7 +16875,7 @@ mod control_act_tests {
         ], "one admission allowance and one message in the book");
     }
 
-    /// Codex review of 0308673 (P2): a retry's own book entry survives expiry
+    /// A retry's own book entry survives expiry
     /// and pruning while its record still needs it, so reconciliation and Stop
     /// retrying keep working a day later.
     #[tokio::test]
@@ -16675,7 +16896,7 @@ mod control_act_tests {
         assert!(pending(&node).is_none());
     }
 
-    /// Codex review of 0308673 (P2): a delivered retry saves its accounting as
+    /// A delivered retry saves its accounting as
     /// a resolved delivery. A crash before the record is cleared leaves known
     /// money that reconciliation settles, never an unknown in-flight retry.
     #[tokio::test]
@@ -21876,7 +22097,7 @@ mod control_act_tests {
             journal.record_outcome(&prior, spend_journal::OperationState::Unpaid, None).unwrap();
         }
         let charge = Charge { target: A.into(), room: false, confirm: None, readmission_possible: false,
-            confirmed: false, operation: true, envelope_ids: Some(true), failure_final_on: None };
+            confirmed: false, operation: true, envelope_ids: Some(true), failure_final_on: None, call_window: false };
         let err = money_post_with(&node.state, Auth::Window(approval_generation(&node.state).unwrap()),
             "/messages/compose", body, 15000, Some(charge), None).await.unwrap_err();
         assert_eq!(err.code, "not_dispatched");
@@ -21992,6 +22213,119 @@ mod control_act_tests {
         g1_node_with(&["read", "receive"], Some(first))
     }
 
+    /// A node-routed Ring is checked against the grant the node holds now: a
+    /// grant that ends before the call could is refused, unsent and unpaid.
+    #[tokio::test]
+    async fn a_paid_ring_is_checked_against_the_grant_the_node_holds_now() {
+        for (secs, sent) in [(3_600, false), (86_400, true)] {
+            let (node, _dir, g1) = call_grant_node(1_000);
+            g1_approved(&node, 500_000).await;
+            with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+            let quote = read_call_quote(&node.state, A).await.unwrap();
+            let offer = quote.offer_msat.unwrap() + quote.offer_max_routing_fee_msat;
+            let mut grant = g1_grant(secs, 400_000, 400_000);
+            grant["per_call_max_msat"] = 10_000.into();
+            grant["call_per_payment_max_msat"] = 10_000.into();
+            grant["message_per_payment_max_msat"] = grant::MESSAGING_PER_CALL_MAX_MSAT.into();
+            *g1.grant.lock().unwrap() = grant;
+            let minute = control::MinutesConsent { block_msat: 10_000, block_max_routing_fee_msat: 5_000, max_hold_msat: 240 * 15_000 };
+            let result = do_call_signal_bounded(&node.state, A, 400, OFFER, offer, None, Some(&minute), None).await;
+            if sent {
+                assert_eq!(composes(&node), 1, "{secs}: {:?}", result.err());
+            } else {
+                assert_eq!(result.unwrap_err().code, "call_window_short", "{secs}");
+                assert_eq!(composes(&node), 0, "nothing sent or paid");
+            }
+        }
+    }
+
+    fn call_window_grant(secs: i64) -> serde_json::Value {
+        let mut grant = g1_grant(secs, 400_000, 400_000);
+        grant["per_call_max_msat"] = 10_000.into();
+        grant["call_per_payment_max_msat"] = 10_000.into();
+        grant["message_per_payment_max_msat"] = grant::MESSAGING_PER_CALL_MAX_MSAT.into();
+        grant
+    }
+
+    /// A paid answer is checked against the grant the node holds when it is
+    /// paid: a short grant refuses it, unsent and unpaid; a whole day sends it.
+    #[tokio::test]
+    async fn a_paid_answer_is_checked_against_the_grant_the_node_holds_now() {
+        for (secs, sent) in [(5 * 60, false), (86_400, true)] {
+            let (node, _dir, g1) = call_grant_node(1_000);
+            g1_approved(&node, 500_000).await;
+            with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+            let quote = read_call_quote(&node.state, A).await.unwrap();
+            let max = quote.signal_msat + quote.signal_max_routing_fee_msat;
+            *g1.grant.lock().unwrap() = call_window_grant(secs);
+            let result = do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, OFFER, max, None, None).await;
+            if sent {
+                assert_eq!(composes(&node), 1, "{secs}: {:?}", result.err());
+            } else {
+                assert_eq!(result.unwrap_err().code, "call_window_short", "{secs}");
+                assert_eq!(composes(&node), 0, "nothing sent or paid");
+            }
+        }
+    }
+
+    /// The grant can change after every earlier check and before the paid
+    /// step: replaced by a short one while the send waits for the money lock,
+    /// a node-routed Ring and a paid Answer are both refused there, before
+    /// anything is reserved or sent.
+    #[test]
+    fn a_grant_shortened_under_the_money_lock_refuses_a_ring_and_an_answer() {
+        for kind in [act::KIND_CALL_OFFER, act::KIND_CALL_ANSWER] {
+            let rt = race_runtime();
+            let (node, _dir, g1) = call_grant_node(1_000);
+            let quote = rt.block_on(async {
+                g1_approved(&node, 500_000).await;
+                with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+                read_call_quote(&node.state, A).await.unwrap()
+            });
+            *g1.grant.lock().unwrap() = call_window_grant(86_400);
+            let minute = control::MinutesConsent { block_msat: 10_000, block_max_routing_fee_msat: 5_000, max_hold_msat: 240 * 15_000 };
+            let state = &node.state;
+            let (arrived, release) = pause_points::arm(&state.api_base, "after_lock");
+            let result = std::thread::scope(|s| {
+                let send = s.spawn(|| rt.block_on(async {
+                    if kind == act::KIND_CALL_OFFER {
+                        let offer = quote.offer_msat.unwrap() + quote.offer_max_routing_fee_msat;
+                        do_call_signal_bounded(state, A, kind, OFFER, offer, None, Some(&minute), None).await
+                    } else {
+                        do_call_signal_bounded(state, A, kind, OFFER, quote.signal_msat + quote.signal_max_routing_fee_msat, None, None, None).await
+                    }
+                }));
+                rt.block_on(arrived.notified());
+                *g1.grant.lock().unwrap() = call_window_grant(5 * 60);
+                release.notify_one();
+                send.join().unwrap()
+            });
+            assert_eq!(result.unwrap_err().code, "call_window_short", "{kind}");
+            assert_eq!(composes(&node), 0, "{kind}: nothing sent or paid");
+            assert_eq!(pending_operation_id(state).unwrap(), None, "{kind}: nothing pending");
+        }
+    }
+
+    /// A node without grants (pre-G1) keeps its answer path: no grant read
+    /// is needed or made for the call window, and nothing new refuses it.
+    #[tokio::test]
+    async fn a_paid_answer_on_a_node_without_grants_keeps_its_old_path() {
+        let routes = call_routes(Some(1_000));
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p == "/status" {
+                return (200, serde_json::json!({"api_capabilities": ["paid_send_caps_v1", "room_terminal_outcomes_v1", "message_operations_v1"]}).to_string());
+            }
+            if p == "/pair/grant" { return (404, serde_json::json!({"code": "not_found"}).to_string()); }
+            if p.contains("/call") || p == "/payments/price/401" || p == "/messages/compose" { routes(m, p, b) } else { (0, String::new()) }
+        });
+        let (node, _dir, _g1) = g1_node_with(&["read", "receive", "spend"], Some(first));
+        let quote = read_call_quote(&node.state, A).await.unwrap();
+        let result = do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, OFFER,
+            quote.signal_msat + quote.signal_max_routing_fee_msat, None, None).await;
+        let code = result.as_ref().err().map(|e| e.code);
+        assert!(!matches!(code, Some("grant_unknown" | "call_window_short")), "{:?}", result.err());
+    }
+
     /// A minute is compared at its price with the signed per-payment limit:
     /// the node pins no routing fee for a usable direct channel.
     #[tokio::test]
@@ -22004,7 +22338,7 @@ mod control_act_tests {
             let quote = read_call_quote(&node.state, A).await.unwrap();
             let offer = quote.offer_msat.unwrap() + quote.offer_max_routing_fee_msat;
             assert!(offer <= 10_000);
-            let mut grant = g1_grant(3600, 400_000, 400_000);
+            let mut grant = g1_grant(86_400, 400_000, 400_000);
             grant["per_call_max_msat"] = 10_000.into();
             grant["call_per_payment_max_msat"] = 10_000.into();
             grant["message_per_payment_max_msat"] = grant::MESSAGING_PER_CALL_MAX_MSAT.into();
@@ -22061,7 +22395,7 @@ mod control_act_tests {
             let signal = quote.signal_msat + quote.signal_max_routing_fee_msat;
             for (cap, sent) in [(signal - 1, false), (signal, true)] {
                 let before = composes(&node);
-                let mut grant = g1_grant(3600, 400_000, 400_000);
+                let mut grant = g1_grant(86_400, 400_000, 400_000);
                 grant["per_call_max_msat"] = 50_000.into();
                 grant["call_per_payment_max_msat"] = 50_000.into();
                 grant["message_per_payment_max_msat"] = cap.into();
@@ -23083,25 +23417,24 @@ mod control_act_tests {
     }
 
     #[tokio::test]
-    async fn the_owner_command_names_the_nodes_config_when_the_node_does_not() {
+    async fn the_owner_command_never_names_the_boxs_config() {
+        // Whether the app knows the config, an attached node's config, or the node
+        // names its own: the view carries the bare command, never a file path.
         let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op}"));
         *node.state.config.lock().unwrap() = Some(PathBuf::from("/Users/owner/Bitsov Node/konsensus.toml"));
         let view = spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(
-            view.pending.unwrap().owner_action,
-            "konsensus grant --op ab01 --config '/Users/owner/Bitsov Node/konsensus.toml'"
-        );
-        // An attached external node's config wins over the one the app started.
+        assert_eq!(view.pending.unwrap().owner_action, "konsensus grant --op ab01");
         let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op}"));
         *node.state.config.lock().unwrap() = Some(PathBuf::from("/own/konsensus.toml"));
         *node.state.external_node.lock().unwrap() = Some(PathBuf::from("/ext"));
         let view = spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(view.pending.unwrap().owner_action, "konsensus grant --op ab01 --config '/ext/konsensus.toml'");
-        // A node that already names its config is shown verbatim.
-        let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op} --config /srv/n/konsensus.toml"));
+        assert_eq!(view.pending.unwrap().owner_action, "konsensus grant --op ab01");
+        let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op} --config /data/umbrel/app-data/konsensus.toml"));
         *node.state.config.lock().unwrap() = Some(PathBuf::from("/elsewhere/konsensus.toml"));
         let view = spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(view.pending.unwrap().owner_action, "konsensus grant --op ab01 --config /srv/n/konsensus.toml");
+        let json = serde_json::to_string(&view).unwrap();
+        assert_eq!(view.pending.unwrap().owner_action, "konsensus grant --op ab01");
+        assert!(!json.contains("konsensus.toml") && !json.contains("--config"), "{json}");
     }
 
     #[tokio::test]
@@ -23127,9 +23460,9 @@ mod control_act_tests {
         let view = spend_advance(&node.state, true).await.unwrap();
         assert_eq!(view.state, act::SpendState::Pending);
         let pending = view.pending.unwrap();
-        // The node named no config; the app adds the one it started the node with.
-        let config = node.state.config.lock().unwrap().clone().unwrap();
-        assert_eq!(pending.owner_action, format!("konsensus grant --op ab12 --config '{}'", config.display()));
+        // The node named no config, and the app adds none: no file path reaches the view.
+        assert!(node.state.config.lock().unwrap().is_some());
+        assert_eq!(pending.owner_action, "konsensus grant --op ab12");
         assert_eq!(node.posts()[0], ("/pair/elevation-request".to_string(), serde_json::json!({"scopes": ["spend"]})));
         assert_eq!(do_message_send(&node.state, A, false, "gm", 7000, None).await.unwrap_err().code, "spend_locked");
 
@@ -23555,7 +23888,7 @@ mod control_act_tests {
         spend_advance(&node.state, true).await.unwrap();
         let (auth, plan) = plan_message(&node.state, A, false, 5000, None).unwrap();
         let charge = Charge { target: A.into(), room: false, confirm: plan.confirm, readmission_possible: false,
-            confirmed: false, operation: false, envelope_ids: None, failure_final_on: None };
+            confirmed: false, operation: false, envelope_ids: None, failure_final_on: None, call_window: false };
         reserve(&node.state, auth, &charge, "charge-1", 5000).unwrap();
         reserve(&node.state, auth, &charge, "charge-1", 5000).unwrap();
         let rows = with_book(&node.state, false, |b| Ok(b.ledger.iter().filter(|e| e.id == "charge-1").count())).unwrap();
@@ -24910,7 +25243,7 @@ mod control_act_tests {
         }
     }
 
-    /// Codex app#90: a status poll of request aa01 is still waiting on the node
+    /// A status poll of request aa01 is still waiting on the node
     /// when the owner cancels and sets up again (aa02). The delayed reply must
     /// not write aa01 back, nor clear aa02, in either direction.
     #[test]
@@ -26118,7 +26451,7 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn a_room_leg_never_pays_above_its_confirmed_cap_even_when_the_budget_would_readmit() {
-        // Codex #101 P1: the same budgeted reconnect that the 1:1 path pays under
+        // The same budgeted reconnect that the 1:1 path pays under
         // the contact's fresh quote. A room leg keeps its confirmed 7,000 msat.
         let readmit = Arc::new(Mutex::new(ReadmitNode::default()));
         let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(readmit_routes(readmit.clone())));
@@ -26646,12 +26979,232 @@ mod control_act_tests {
         assert!(read_first_contact_quote(&node.state, "not-a-node").await.is_err());
     }
 
+    /// The owner's one approval at the box covers a whole day, not ten minutes:
+    /// a call that starts late in a short window would die mid-way.
+    #[tokio::test]
+    async fn a_window_ask_and_a_replacement_propose_a_whole_day() {
+        let (node, _dir, _g1) = g1_node(&["read", "receive"]);
+        with_book(&node.state, true, |b| { b.ceiling_msat = 2_000_000; Ok(()) }).unwrap();
+        assert_eq!(spend_advance(&node.state, true).await.unwrap().state, act::SpendState::Pending);
+        assert_eq!(node.posts(), vec![("/pair/elevation-request".into(), serde_json::json!({
+            "scopes": ["spend"], "budget": {"budget_msat": 2_000_000, "ttl_secs": 86_400},
+        }))]);
+        let budget = budget_proposal(&node.state, Want::Window, None).unwrap();
+        assert_eq!(budget["ttl_secs"], grant::MAX_TTL_SECS);
+        // Never more than the owner's own daily ceiling unless a call needs it.
+        assert_eq!(budget["budget_msat"], 2_000_000);
+        assert_eq!(budget_proposal(&node.state, Want::Window, Some(700_000)).unwrap()["budget_msat"], 2_000_000);
+    }
+
+    /// Right after a pairing link is imported the app asks once for the day's
+    /// budget, so the owner's one step comes up front instead of at the first
+    /// Accept or Ring. The ask opens nothing in the app by itself.
+    #[tokio::test]
+    async fn a_new_pairing_asks_once_for_the_days_budget() {
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        // A fresh pairing: the node holds no grant for it yet.
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        let asks = |node: &Fake| node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count();
+        // An ordinary status poll asks nothing.
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(asks(&node), 0);
+        pairing_imported(&node.state);
+        let view = spend_status_now(&node.state).await.unwrap();
+        assert_eq!(view.state, act::SpendState::Pending);
+        assert_eq!(asks(&node), 1);
+        assert_eq!(node.posts()[0].1["budget"]["ttl_secs"], 86_400);
+        // Once: later polls only follow it, also after the box said yes.
+        *g1.grant.lock().unwrap() = g1_grant(86_400, 2_000_000, 2_000_000);
+        spend_status_now(&node.state).await.unwrap();
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(asks(&node), 1);
+        // The box said yes: the app keeps its own lock closed until the owner taps.
+        assert!(node.state.wants.lock().unwrap().window == false && node.state.wants.lock().unwrap().budget.is_none());
+        assert_ne!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Open);
+        assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
+
+        // A pairing that already has spending, or paused payments, asks nothing.
+        let (node, _dir, _g1) = g1_node(&["read", "receive", "spend"]);
+        pairing_imported(&node.state);
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(asks(&node), 0);
+        let (node, _dir, g1) = g1_node(&["read", "receive"]);
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        with_book(&node.state, true, |b| { b.paused = true; Ok(()) }).unwrap();
+        pairing_imported(&node.state);
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(asks(&node), 0);
+        // Not signed in yet: the ask waits for the session instead of being lost.
+        let node = fake(AuthMode::Unauthenticated, happy());
+        pairing_imported(&node.state);
+        let _ = spend_status_now(&node.state).await;
+        assert!(node.state.budget_after_pairing.load(Ordering::SeqCst));
+    }
+
+    /// A read that fails before the request (here `/status`) keeps the one
+    /// pairing ask: the next healthy poll sends it, exactly once.
+    #[tokio::test]
+    async fn a_failed_read_before_the_budget_ask_keeps_it_for_the_next_poll() {
+        let down = Arc::new(AtomicBool::new(true));
+        let flag = down.clone();
+        let first: Routes = Arc::new(move |_m, p, _b| {
+            if p == "/status" && flag.load(Ordering::SeqCst) {
+                return (503, serde_json::json!({"code": "unavailable"}).to_string());
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(first));
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        let asks = |node: &Fake| node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count();
+        pairing_imported(&node.state);
+        let _ = spend_status_now(&node.state).await;
+        assert_eq!(asks(&node), 0);
+        assert!(node.state.budget_after_pairing.load(Ordering::SeqCst), "a failed read must not use up the ask");
+        down.store(false, Ordering::SeqCst);
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(asks(&node), 1);
+        // The box said yes; later polls only follow the request.
+        *g1.grant.lock().unwrap() = g1_grant(86_400, 2_000_000, 2_000_000);
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(asks(&node), 1);
+        assert!(!node.state.budget_after_pairing.load(Ordering::SeqCst));
+        // Nothing opens in the app by itself.
+        assert_ne!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Open);
+    }
+
+    /// Desktop Import saves the link for the next start: the ask goes with it
+    /// in a file, is picked up at that start, and is removed once sent.
+    #[cfg(all(desktop, not(feature = "mobile")))]
+    #[tokio::test]
+    async fn a_desktop_import_keeps_the_budget_ask_for_the_next_start() {
+        use base64::Engine;
+        let app = tauri::test::mock_builder().build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let state = NodeState::for_identifier("app.bitsov.desktop");
+        let dir = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({"v": 2, "endpoint": "127.0.0.1:9", "endpoints": ["127.0.0.1:9"],
+            "box_transport_pubkey": "22".repeat(32),
+            "code": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([44; 32])});
+        let link = format!("bitsov://pair/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).unwrap()));
+        remote_access_import_at(app.handle(), &state, dir.path(), &link).await.unwrap();
+        assert!(budget_ask_path(dir.path()).is_file(), "the ask must outlive this process");
+        // The next start: a fresh process picks the ask up.
+        let (node, _node_dir, g1) = g1_node(&["read", "receive"]);
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        assert!(!node.state.budget_after_pairing.load(Ordering::SeqCst));
+        restore_budget_ask(&node.state, dir.path());
+        assert!(node.state.budget_after_pairing.load(Ordering::SeqCst));
+        spend_status_now(&node.state).await.unwrap();
+        assert_eq!(node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count(), 1);
+        assert!(!budget_ask_path(dir.path()).exists(), "sent: the next start asks nothing");
+        // Every startup with that saved link picks the ask up through the
+        // normal connect route (any OS), and a live import keeps it on disk
+        // until it is sent.
+        save_budget_ask(dir.path());
+        let fresh = NodeState::for_identifier("app.bitsov.desktop");
+        let _ = tokio::time::timeout(Duration::from_secs(5), connect_remote_at(&fresh, dir.path(), false)).await;
+        assert!(fresh.budget_after_pairing.load(Ordering::SeqCst), "startup restores the ask");
+        let joined = NodeState::for_identifier("app.bitsov.desktop");
+        let other = tempfile::tempdir().unwrap();
+        pairing_imported_at(&joined, other.path());
+        assert!(budget_ask_path(other.path()).is_file() && joined.budget_after_pairing.load(Ordering::SeqCst));
+        // Forget drops a waiting ask with the link.
+        save_budget_ask(dir.path());
+        remote_access_forget_at(&state, dir.path()).await.unwrap();
+        assert!(!budget_ask_path(dir.path()).exists());
+    }
+
+    /// A node-routed call needs a grant that outlasts this node's call limit:
+    /// 240 minutes while the limit is unknown, the limit once seen on a hold
+    /// of this node (another node's limit does not count).
+    #[test]
+    fn the_call_window_uses_the_known_limit_of_this_node_or_the_most_any_node_allows() {
+        let node = fake(AuthMode::Unauthenticated, happy());
+        let own = node.state.node_id.lock().unwrap().clone().unwrap_or_default();
+        let minutes = |m: u64| now_ms() + m * 60_000;
+        assert_eq!(call_window_fits(&node.state, minutes(200)).unwrap_err().code, "call_window_short");
+        assert!(call_window_fits(&node.state, minutes(242)).is_ok());
+        *node.state.call_limit_seen.lock().unwrap() = Some((own.clone(), 60));
+        assert!(call_window_fits(&node.state, minutes(62)).is_ok());
+        assert_eq!(call_window_fits(&node.state, minutes(60)).unwrap_err().code, "call_window_short");
+        *node.state.call_limit_seen.lock().unwrap() = Some(("another-node".into(), 60));
+        assert_eq!(call_window_fits(&node.state, minutes(62)).unwrap_err().code, "call_window_short");
+    }
+
+    /// A read that fails while the request is prepared (the budget proposal,
+    /// read after the capability check) keeps the ask: nothing is posted
+    /// without the day's budget, and the next healthy poll sends it once.
+    #[tokio::test]
+    async fn a_failed_budget_read_while_preparing_the_ask_keeps_it() {
+        let spoil: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let hook = spoil.clone();
+        let first: Routes = Arc::new(move |_m, p, _b| {
+            // Between the pause check and the proposal: the book becomes unreadable once.
+            if p == "/status" {
+                if let Some(book) = hook.lock().unwrap().take() {
+                    std::fs::write(book, b"not a budget book").unwrap();
+                }
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(first));
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        with_book(&node.state, true, |b| { b.ceiling_msat = 2_000_000; Ok(()) }).unwrap();
+        let (dir, node_id) = budget_dir(&node.state).unwrap();
+        let book = budget::book_path(&dir, &node_id);
+        let healthy = std::fs::read(&book).unwrap();
+        node.state.approvals_restored.store(true, Ordering::SeqCst);
+        *spoil.lock().unwrap() = Some(book.clone());
+        pairing_imported(&node.state);
+        let _ = spend_status_now(&node.state).await;
+        assert!(spoil.lock().unwrap().is_none(), "the book was spoiled during preparation");
+        assert!(!node.posts().iter().any(|(p, _)| p == "/pair/elevation-request"), "no request without its budget");
+        assert!(node.state.budget_after_pairing.load(Ordering::SeqCst), "the ask is kept");
+        std::fs::write(&book, healthy).unwrap();
+        let _ = spend_status_now(&node.state).await;
+        let asks: Vec<_> = node.posts().into_iter().filter(|(p, _)| p == "/pair/elevation-request").collect();
+        assert_eq!(asks.len(), 1);
+        assert_eq!(asks[0].1["budget"]["ttl_secs"], 86_400);
+    }
+
+    /// The automatic ask and an explicit ask share one request: an explicit
+    /// ask that arrives while the automatic one is being sent follows it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_automatic_and_an_explicit_ask_never_post_twice() {
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let a = arrived.clone();
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let wait = Mutex::new(wait);
+        let first: Routes = Arc::new(move |m, p, _b| {
+            if m == "POST" && p == "/pair/elevation-request" {
+                a.notify_one();
+                let _ = wait.lock().unwrap().recv_timeout(Duration::from_secs(5));
+            }
+            (0, String::new())
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(first));
+        *g1.grant.lock().unwrap() = serde_json::Value::Null;
+        let state: &'static NodeState = Box::leak(Box::new(node.state));
+        pairing_imported(state);
+        let auto = tokio::spawn(async move { spend_status_now(state).await });
+        arrived.notified().await;
+        let explicit = tokio::spawn(async move { do_spend_request(state, None, None).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        release.send(()).unwrap();
+        auto.await.unwrap().unwrap();
+        let view = explicit.await.unwrap().unwrap();
+        let pending = state.spend.lock().unwrap().pending().map(|p| p.op_id.clone());
+        assert!(pending.is_some());
+        assert_eq!(view.request_id, pending, "the explicit ask follows the one request");
+        assert_eq!(node.seen.lock().unwrap().iter()
+            .filter(|(m, p, _, _)| m == "POST" && p == "/api/v1/pair/elevation-request").count(), 1);
+    }
+
     #[tokio::test]
     async fn g1_a_window_never_outlives_the_node_grant() {
         let (node, _dir, g1) = g1_node(&["read", "receive"]);
         *g1.grant.lock().unwrap() = g1_grant(120, 400_000, 400_000);
         spend_advance(&node.state, true).await.unwrap();
-        assert_eq!(node.posts()[0].1["budget"], serde_json::json!({"budget_msat": 500_000, "ttl_secs": 600}));
+        assert_eq!(node.posts()[0].1["budget"], serde_json::json!({"budget_msat": 500_000, "ttl_secs": 86_400}));
         spend_advance(&node.state, false).await.unwrap();
         let view = spend_advance(&node.state, false).await.unwrap();
         let expires = g1.grant.lock().unwrap()["expires_at"].as_u64().unwrap() * 1000;
@@ -26697,7 +27250,7 @@ mod control_act_tests {
         let (_, _, _, body) = seen.iter().find(|(method, path, _, _)|
             method == "POST" && path == "/api/v1/pair/elevation-request").unwrap();
         let asked: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert_eq!(asked["budget"], serde_json::json!({"budget_msat": 3_621_000, "ttl_secs": 600}));
+        assert_eq!(asked["budget"], serde_json::json!({"budget_msat": 3_621_000, "ttl_secs": 86_400}));
         assert!(!seen.iter().any(|(method, path, _, _)| method == "POST" && path.contains("/messages/")));
     }
 
@@ -26715,7 +27268,7 @@ mod control_act_tests {
             let view = do_spend_request(&node.state, None, Some(A)).await.unwrap();
             assert_eq!(view.state, act::SpendState::Pending);
             assert_eq!(node.posts(), vec![("/pair/elevation-request".into(), serde_json::json!({
-                "scopes": ["spend"], "budget": {"budget_msat": expected, "ttl_secs": 600},
+                "scopes": ["spend"], "budget": {"budget_msat": expected, "ttl_secs": 86_400},
             }))]);
             assert!(expected >= quote.reservation_max_msat.unwrap() + quote.call_total_msat.unwrap());
             assert_eq!(with_book(&node.state, false, |b| Ok(b.ceiling_msat)).unwrap(), ceiling);
@@ -26746,7 +27299,7 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn call_budget_proposal_requires_a_safe_current_minute_price() {
-        for block in [None, Some(0), Some(u64::MAX), Some(control::MAX_SAFE_MSAT / 240 - 5_000)] {
+        for block in [None, Some(0), Some(u64::MAX), Some(control::MAX_SAFE_MSAT / control::CALL_MAX_BLOCKS - 5_000)] {
             let (node, _dir, _g1) = call_budget_node(block);
             assert_eq!(do_spend_request(&node.state, None, Some(A)).await.unwrap_err().code, "call_price_unknown");
             assert!(node.posts().is_empty());
@@ -26798,7 +27351,7 @@ mod control_act_tests {
         assert_eq!(requested.state, act::SpendState::Open);
         assert_eq!(node.posts().iter().filter(|(p, _)| p == "/pair/elevation-request").count(), 1);
         assert_eq!(node.posts().last().unwrap().1, serde_json::json!({
-            "scopes": ["spend"], "budget": {"budget_msat": 601_000, "ttl_secs": 600}
+            "scopes": ["spend"], "budget": {"budget_msat": 601_000, "ttl_secs": 86_400}
         }));
         assert_eq!(*g1.grant.lock().unwrap(), original);
         assert_eq!(check_node_grant_with_envelope_ids(&node.state, "/messages/compose", &serde_json::json!({"recipient": A}), 601_000, None, grant::PaymentCap::CallTotal).await.unwrap_err().code, "grant_exhausted");
@@ -27832,7 +28385,7 @@ mod stop_adapter_tests {
 
     #[test]
     fn quit_during_a_restart_stop_still_stops_the_node() {
-        // Codex R2G on 3ff4e60e: the restore deregistered the old node before its
+        // The restore deregistered the old node before its
         // stop, so a quit meanwhile found nothing, the host exited and took the restore
         // worker — and its SIGKILL fallback — with it, leaving the node running.
         let state = NodeState::default();

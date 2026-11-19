@@ -2949,7 +2949,7 @@ mod tests {
                 "box_transport_pubkey": box_key,
                 "box_transport_signature": box_signature,
                 "expires_at": NOW + 86_400,
-                "hosted_by": "Rasmus's Pi",
+                "hosted_by": "Alex's Pi",
             });
             for (key, value) in extra.as_object().unwrap() {
                 fields[key] = value.clone();
@@ -2958,7 +2958,7 @@ mod tests {
         };
 
         let descriptor = parse_pairing_link_at(&ticket(serde_json::json!({})), NOW).unwrap();
-        assert_eq!(descriptor.hosted_by(), Some("Rasmus's Pi"));
+        assert_eq!(descriptor.hosted_by(), Some("Alex's Pi"));
         assert!(descriptor.has_code());
         // The node writes `null` when `[node].hosted_by` is unset.
         let unlabeled = parse_pairing_link_at(&ticket(serde_json::json!({ "hosted_by": null })), NOW).unwrap();
@@ -2980,9 +2980,9 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let live = ticket(serde_json::json!({ "expires_at": unix_now() + 86_400 }));
         let view = import_pairing_link(data.path(), &live).unwrap();
-        assert_eq!(view.hosted_by.as_deref(), Some("Rasmus's Pi"));
+        assert_eq!(view.hosted_by.as_deref(), Some("Alex's Pi"));
         let reloaded = load_persisted(data.path()).unwrap().unwrap();
-        assert_eq!(reloaded.hosted_by(), Some("Rasmus's Pi"));
+        assert_eq!(reloaded.hosted_by(), Some("Alex's Pi"));
         assert!(reloaded.has_code());
     }
 
@@ -3081,7 +3081,7 @@ mod tests {
         assert_eq!(label("  My Pi  ").as_deref(), Some("My Pi"));
         // Markup stays literal; the renderer shows it as text.
         assert_eq!(label("<img src=x onerror=alert(1)>").as_deref(), Some("<img src=x onerror=alert(1)>"));
-        for odd in ["Pi\u{202E}kcab", "Rasmus\u{7}Pi", "line\nbreak", "zero\u{200B}width", "\u{2066}Pi", "   ", ""] {
+        for odd in ["Pi\u{202E}kcab", "Alex\u{7}Pi", "line\nbreak", "zero\u{200B}width", "\u{2066}Pi", "   ", ""] {
             assert_eq!(label(odd), None, "{odd:?}");
         }
 

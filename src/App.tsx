@@ -1,4 +1,5 @@
 import { t } from './i18n';
+import { hostText } from './control/hostCopy';
 import { invoke } from '@tauri-apps/api/core';
 import { PhoneTrust } from './onboarding/PhoneTrust';
 import { PhoneOnboarding } from './onboarding/PhoneOnboarding';
@@ -459,7 +460,7 @@ function AppScreen() {
     </div>
     <div data-app-screen inert={pairingRequest() !== null} style={{ display: 'contents' }}>
     <Show when={status().local_owner && status().owner_warning}>
-      <aside role="alert" class="panel" data-owner-warning>{status().owner_warning}</aside>
+      <aside role="alert" class="panel" data-owner-warning>{hostText(status().owner_warning!)}</aside>
     </Show>
     <Show when={showRemember()}>
       <RememberUnlock mobile={onPhone} platform={platform} onChoose={async (remember) => {

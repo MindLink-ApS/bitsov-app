@@ -134,7 +134,7 @@ signal hook is compiled only for tests; no production behavior, sleeps, or
 thread-count settings changed. The sibling price-floor test uses the same
 handshake because it had the same polling deadline and documented failure.
 
-Atlas P3: the sheet now shows one short requester fingerprint line immediately
+The sheet now shows one short requester fingerprint line immediately
 under the title, using English/Danish copy. The signed terms remain verbatim
 and appear once. A regression test in both languages failed before the fix
 and now checks the line, its position, and nonduplicated budget terms.

@@ -137,7 +137,7 @@ function hostDecode(text: string): InvoiceAmount {
 }
 
 /**
- * Codex #85 delta 2: a regtest invoice signed by CANONICAL_PAYEE, and three
+ * A regtest invoice signed by CANONICAL_PAYEE, and three
  * re-encodings (a set padding bit in p, a leading zero word in c and in the
  * features) that the node's parser reads as that same invoice while their raw
  * words recover other keys. The real host refuses all three (act.rs tests).
@@ -170,7 +170,7 @@ describe('reading a chat invoice', () => {
     expect(readChatInvoice(donation, 1496314658_000, 'mainnet')).toEqual({ ok: false, reason: 'no_amount' });
   });
 
-  // Codex #85 delta 2: the node hashes its canonical re-serialization, so a
+  // The node hashes its canonical re-serialization, so a
   // payee recovered from raw words can differ from the one it pays. The shape
   // filter therefore names no payee at all; only the host's decode does.
   it('never names a payee: not for canonical, non-canonical or n-carrying invoices', () => {
@@ -183,7 +183,7 @@ describe('reading a chat invoice', () => {
       expect(inv).not.toHaveProperty('payee');
       expect(JSON.stringify(inv)).not.toContain(maya.slice(2, 20));
     }
-    // Codex's contract: anything displayed for these is null or the node's payee.
+    // The display contract: anything displayed for these is null or the node's payee.
     for (const body of NONCANONICAL) {
       const r = readChatInvoice(body, FIXTURE_NOW, 'regtest');
       expect(r).toMatchObject({ ok: true, invoice: { msat: 21_000 } });
@@ -463,7 +463,7 @@ describe('a request in chat', () => {
     expect(host.used('payment_pay')[0].args).toEqual({ bolt11, amount_msat: 21_000, max_msat: 26_000 });
   });
 
-  // Codex #85 P1a: a contact can forward someone else's invoice. Neither the
+  // A contact can forward someone else's invoice. Neither the
   // card nor the confirm may say it pays them.
   it('a forwarded third-party invoice shows its own payee, not verified as the contact, on card and confirm', async () => {
     const stranger = pubOf(STRANGER_KEY);
@@ -513,7 +513,7 @@ describe('a request in chat', () => {
     expect(host.used('payment_pay')).toHaveLength(0);
   });
 
-  // Codex #85 P1: the card must not name a second n while the node pays the first.
+  // The card must not name a second n while the node pays the first.
   it('an invoice with two n fields, or an n the host refuses, is plain text with a note: no card, no Pay, no payee', async () => {
     const bolt11 = invoice({ payeeTags: [pubOf(MAYA_KEY), pubOf(STRANGER_KEY)] });
     const host = stubHost({ messages_list: () => [msg('two-n', bolt11), msg('bad-n', invoice({ payeeTags: [pubOf(STRANGER_KEY)] }))] });
@@ -537,7 +537,7 @@ describe('a request in chat', () => {
     expect(host.used('payment_pay')).toHaveLength(0);
   });
 
-  // Codex #85 P2: a typed pubkey in Maya's thread is not Maya's node either.
+  // A typed pubkey in Maya's thread is not Maya's node either.
   it('the Direct review names the typed node, not verified as the contact, not "Pay Maya"', async () => {
     const stranger = pubOf(STRANGER_KEY);
     const host = stubHost();
@@ -558,7 +558,7 @@ describe('a request in chat', () => {
     expect(host.used('payment_keysend')).toHaveLength(0);
   });
 
-  // Fable #85 F2: after paying, the card says so and offers no second Pay.
+  // After paying, the card says so and offers no second Pay.
   it('marks a paid card by payment hash, including a re-cased copy, and keeps other cards payable', async () => {
     const bolt11 = invoice();
     const other = invoice({ purpose: 'second round', hashByte: 8 });
@@ -600,7 +600,7 @@ describe('a request in chat', () => {
     expect($('[data-request-pay]') === null).toBe(shown !== 'open');
   });
 
-  // Codex #85 P1b: a retained readmission quote raises the message price.
+  // A retained readmission quote raises the message price.
   // Send in chat must show that price from Request mode, send at most it,
   // and a new quote must wait for another explicit Send.
   it('Send in chat shows the readmission total it sends, and a changed quote needs another Send', async () => {
@@ -696,7 +696,7 @@ describe('a request in chat', () => {
     expect($('[data-message="in-1"] [data-request-card]')).toBeNull();
     expect(host.used('payment_pay')).toHaveLength(0);
   });
-  // Codex #85 delta 2: card and confirm show only the host's decode.
+  // Card and confirm show only the host's decode.
   it('card and confirm show the host’s payee and amount, and pay its canonical invoice', async () => {
     const hostPayee = pubOf(STRANGER_KEY);
     const signedByMaya = invoice({ purpose: 'dinner' });
@@ -738,7 +738,7 @@ describe('a request in chat', () => {
     await vi.waitFor(() => expect($('[data-request-card] [data-payee]')).not.toBeNull());
   });
 
-  it('Codex non-canonical encodings: no card, no payee, no review, nothing paid', async () => {
+  it('non-canonical encodings: no card, no payee, no review, nothing paid', async () => {
     vi.useFakeTimers({ toFake: ['Date'], now: FIXTURE_NOW });
     try {
       const refusal = { code: 'invalid', message: 'This invoice is not in its standard encoding, so the app cannot be sure who it pays. Ask for a fresh invoice.' };

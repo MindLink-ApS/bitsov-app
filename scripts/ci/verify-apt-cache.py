@@ -24,6 +24,16 @@ def identity(archive):
     return package, version, arch
 
 
+def same_architecture(file_arch, index_arch):
+    """Apt names debs from an ISA-variant index (e.g. amd64v3) after the
+    variant, while the index stanza keeps the base Architecture (amd64)."""
+    if index_arch is None:
+        return False
+    variant = file_arch[len(index_arch):]
+    return file_arch == index_arch or (
+        file_arch.startswith(index_arch) and re.fullmatch(r"v[0-9]+", variant) is not None)
+
+
 def matches(archive, metadata):
     wanted = identity(archive)
     if wanted is None or archive.is_symlink() or not archive.is_file():
@@ -32,14 +42,16 @@ def matches(archive, metadata):
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     for stanza in metadata.strip().split("\n\n"):
         fields = dict(line.split(": ", 1) for line in stanza.splitlines() if ": " in line and not line.startswith(" "))
-        actual = tuple(fields.get(key) for key in ("Package", "Version", "Architecture"))
-        if (actual == wanted and fields.get("SHA256") == digest
+        actual = tuple(fields.get(key) for key in ("Package", "Version"))
+        if (actual == wanted[:2] and same_architecture(wanted[2], fields.get("Architecture"))
+                and fields.get("SHA256") == digest
                 and fields.get("Size") == str(archive.stat().st_size)):
             return True
     return False
 
 
 def main(directory):
+    kept = discarded = 0
     for archive in Path(directory).glob("*.deb"):
         wanted = identity(archive)
         metadata = ""
@@ -55,6 +67,10 @@ def main(directory):
             # A stale/corrupt cache is a miss, never permission to install it.
             print(f"Discarding unverified cached archive: {archive.name}")
             archive.unlink()
+            discarded += 1
+        else:
+            kept += 1
+    print(f"Cached archives: {kept} verified, {discarded} discarded")
 
 
 if __name__ == "__main__":
