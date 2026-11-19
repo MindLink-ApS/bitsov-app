@@ -3286,6 +3286,11 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(false));
     expect(text('[data-call-accept]')).toBe(accept);
     expect(text('[data-call-decline]')).toBe(decline);
+    // Answer is the one big green button, and it comes first.
+    const answer = $<HTMLButtonElement>('[data-call-accept]')!;
+    expect(answer.classList.contains('call-answer')).toBe(true);
+    expect(mount.querySelector('[data-call-panel="incoming"] .call-actions button')).toBe(answer);
+    expect($('[data-call-decline]')!.classList.contains('call-answer')).toBe(false);
     expect(visible('[data-call-panel="incoming"]')).not.toMatch(/\bsats?\b/);
     expect(text('[data-call-decline-note]')).toBe(note);
     // One way to say no: no second, differently priced button.
