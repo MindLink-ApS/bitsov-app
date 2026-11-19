@@ -246,6 +246,35 @@ it('keeps keyboard focus inside the quit dialog and gives it back on Stay', asyn
   expect(close).not.toHaveBeenCalled();
 });
 
+it('opens the quit question as a native modal, above a spending sheet that is already open', async () => {
+  mount = document.createElement('div');
+  document.body.appendChild(mount);
+  const [open, setOpen] = createSignal(false);
+  const stay = vi.fn(() => setOpen(false));
+  dispose = render(() => <>
+    <dialog data-sheet><button type="button">Allow</button></dialog>
+    <Show when={open()}><QuitConfirm name="Maya" onStay={stay} onClose={vi.fn()} /></Show>
+  </>, mount);
+  const sheet = $<HTMLDialogElement>('[data-sheet]');
+  sheet.showModal();
+  setOpen(true);
+  await Promise.resolve();
+  const layer = $<HTMLElement>('[data-quit-layer]');
+  // Only a native modal opened later than the sheet sits above it; an ordinary element stays underneath.
+  expect(layer.tagName).toBe('DIALOG');
+  expect((layer as HTMLDialogElement).open).toBe(true);
+  expect(layer.getAttribute('role')).toBe('alertdialog');
+  expect(document.activeElement?.hasAttribute('data-quit-stay')).toBe(true);
+  expect(sheet.open, 'the sheet behind is left as it was').toBe(true);
+  // The dialog's own cancel (Escape at the platform level) means Stay.
+  layer.dispatchEvent(new Event('cancel', { cancelable: true }));
+  expect(stay).toHaveBeenCalledTimes(1);
+  await Promise.resolve();
+  expect($('[data-quit-layer]')).toBeNull();
+  expect(sheet.open).toBe(true);
+  sheet.close();
+});
+
 // What is left to spend rounds down: never show more remaining than exists.
 it('shows a remaining budget rounded down: 1.5 sats left is about 1, never about 2', () => {
   setLanguagePref('en');

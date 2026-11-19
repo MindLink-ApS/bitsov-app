@@ -3650,7 +3650,8 @@ function MessageView(props: {
               <Show when={costShown()}><span class="money-text">{paidLabel()}{paidExact() ? ` · ${paidExact()}` : ''}</span></Show>
             </button>
           </Show>
-          <Show when={props.out && props.allowance?.readmission_msat}>
+          {/* Like the paid line, the admission-again part shows only when the sender opens the cost. */}
+          <Show when={props.out && costShown() && props.allowance?.readmission_msat}>
             <span data-readmission-paid>{tr('extraInclAdmissionAgain')} {sats(props.allowance!.readmission_msat!, 'up')} {satUnit(props.allowance!.readmission_msat!, 'up')}</span>
           </Show>
         </Show>

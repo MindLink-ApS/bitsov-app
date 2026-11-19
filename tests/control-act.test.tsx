@@ -900,8 +900,14 @@ describe('acting from the track', () => {
     submit();
     await waitFor(() => expect(host.used('message_send')).toHaveLength(2));
     expect(host.used('message_send')[1].args!.max_msat, 'the quoted all-in total').toBe(13_000);
+    // Quiet chat: no amount under the sent bubble until the sender opens its cost.
+    await waitFor(() => expect($('[data-message-cost]')).not.toBeNull());
+    expect($('[data-readmission-paid]'), 'no admission amount printed under a sent bubble').toBeNull();
+    $<HTMLButtonElement>('[data-message-cost]')!.click();
     await waitFor(() => expect($('[data-readmission-paid]')).not.toBeNull());
     expect(text('[data-readmission-paid]')).toContain('incl. admission again 1 sat');
+    $<HTMLButtonElement>('[data-message-cost]')!.click();
+    await waitFor(() => expect($('[data-readmission-paid]')).toBeNull());
     expect($('[data-readmission-quote]')).toBeNull();
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value, 'draft clears only after the paid send').toBe('');
   });
