@@ -11288,7 +11288,7 @@ fn stop_supervised_node(child: &SharedChild, budget: Duration) -> StopOutcome {
     StopOutcome::Killed
 }
 
-/// Registration of the supervised node, coordinated with quit (Codex R2G on 3ff4e60e).
+/// Registration of the supervised node, coordinated with quit.
 ///
 /// The hazard: the host process ends as soon as the exit handler returns, taking every
 /// other thread with it. So whatever the exit handler cannot see — a node deregistered
@@ -12481,7 +12481,7 @@ mod api_base_tests {
 }
 
 /// Custody provenance must bind the IPv4 endpoint the app dials, not any
-/// listener that shares its port (Codex app95 delta1).
+/// listener that shares its port.
 #[cfg(all(test, desktop, not(feature = "mobile"), unix))]
 mod verified_local_socket_tests {
     use super::{
@@ -16665,7 +16665,7 @@ mod control_act_tests {
         assert_eq!(compose_bodies(&node).len(), 1);
     }
 
-    /// Codex review of 2d683b5 (P1): accounting must not erase the undelivered
+    /// Accounting must not erase the undelivered
     /// record. Reconciliation settles the book and keeps the record, the retry
     /// and the fence; only the owner stopping retries releases it.
     #[tokio::test]
@@ -16727,7 +16727,7 @@ mod control_act_tests {
         })
     }
 
-    /// Codex review of 0308673 (P1), the reviewer's scenario: a cached message
+    /// A cached message
     /// price of 50,000 msat, the paid proof consumed on an earlier connection,
     /// and a much lower fresh quote (1,000 admission + 1,000 message + two
     /// 5,000 fee ceilings = 12,000). A message-price cap would let the node buy
@@ -16801,7 +16801,7 @@ mod control_act_tests {
         assert_eq!(bodies.len(), 3);
         assert_eq!(bodies[2], serde_json::json!({"recipient": A, "is_room": false, "kind": 0, "plaintext": "gm", "max_total_msat": 14000}), "capped at exactly what the owner approved");
         // While each retry was on the wire the SAME record was there, in flight:
-        // never removed and re-created (Codex review of 2d683b5, P2).
+        // never removed and re-created.
         let seen = at_compose.lock().unwrap().clone();
         assert_eq!(seen.len(), 2);
         for (during, n) in seen.iter().zip([1, 1]) {
@@ -16875,7 +16875,7 @@ mod control_act_tests {
         ], "one admission allowance and one message in the book");
     }
 
-    /// Codex review of 0308673 (P2): a retry's own book entry survives expiry
+    /// A retry's own book entry survives expiry
     /// and pruning while its record still needs it, so reconciliation and Stop
     /// retrying keep working a day later.
     #[tokio::test]
@@ -16896,7 +16896,7 @@ mod control_act_tests {
         assert!(pending(&node).is_none());
     }
 
-    /// Codex review of 0308673 (P2): a delivered retry saves its accounting as
+    /// A delivered retry saves its accounting as
     /// a resolved delivery. A crash before the record is cleared leaves known
     /// money that reconciliation settles, never an unknown in-flight retry.
     #[tokio::test]
@@ -25243,7 +25243,7 @@ mod control_act_tests {
         }
     }
 
-    /// Codex app#90: a status poll of request aa01 is still waiting on the node
+    /// A status poll of request aa01 is still waiting on the node
     /// when the owner cancels and sets up again (aa02). The delayed reply must
     /// not write aa01 back, nor clear aa02, in either direction.
     #[test]
@@ -26451,7 +26451,7 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn a_room_leg_never_pays_above_its_confirmed_cap_even_when_the_budget_would_readmit() {
-        // Codex #101 P1: the same budgeted reconnect that the 1:1 path pays under
+        // The same budgeted reconnect that the 1:1 path pays under
         // the contact's fresh quote. A room leg keeps its confirmed 7,000 msat.
         let readmit = Arc::new(Mutex::new(ReadmitNode::default()));
         let (node, _dir, g1) = g1_node_with(&["read", "receive"], Some(readmit_routes(readmit.clone())));
@@ -28385,7 +28385,7 @@ mod stop_adapter_tests {
 
     #[test]
     fn quit_during_a_restart_stop_still_stops_the_node() {
-        // Codex R2G on 3ff4e60e: the restore deregistered the old node before its
+        // The restore deregistered the old node before its
         // stop, so a quit meanwhile found nothing, the host exited and took the restore
         // worker — and its SIGKILL fallback — with it, leaving the node running.
         let state = NodeState::default();

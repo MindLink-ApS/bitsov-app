@@ -1033,7 +1033,7 @@ describe('a network change during a call (display only)', () => {
     expect(last()).toMatchObject({ phase: 'live', offline: false });
   });
 
-  it('Codex #238 (1): offline/online while their answer is still being applied: one 400, as on main', async () => {
+  it('offline/online while their answer is still being applied: one 400, as on main', async () => {
     const { e, sent } = engine({ newCallId: freshIds() });
     await e.place(A, 'audio', QUOTE);
     let apply!: () => void;
@@ -1047,7 +1047,7 @@ describe('a network change during a call (display only)', () => {
     expect(offers(sent)).toBe(1);
   });
 
-  it('Codex #238 (2): live → ICE disconnected → offline → online → ICE back in 100 ms: one 400, as on main', async () => {
+  it('live → ICE disconnected → offline → online → ICE back in 100 ms: one 400, as on main', async () => {
     const { e, sent } = engine({ newCallId: freshIds() });
     await e.place(A, 'audio', QUOTE);
     await answer(e);
@@ -3613,7 +3613,7 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($('[data-call-camera-off]')).toBeNull());
   });
 
-  it('Codex: a camera error, then a drop: the camera error is shown as it is, never as a recovery that could not start', async () => {
+  it('a camera error, then a drop: the camera error is shown as it is, never as a recovery that could not start', async () => {
     vi.spyOn(HTMLMediaElement.prototype, 'srcObject', 'set').mockImplementation(() => {});
     const host = stubHost({ messages_list: () => [] });
     await openShell();
