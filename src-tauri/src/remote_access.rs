@@ -504,10 +504,16 @@ impl From<&RemoteError> for ConnectionError {
     }
 }
 
-// BSD sockets cannot definitively distinguish an iOS privacy denial from an
-// unavailable route. Preserve these classes without asserting permission was
-// denied; a timeout/refusal alone is not evidence of a privacy restriction.
-fn classify_connect_error(error: std::io::Error, ios: bool, endpoint: &str) -> RemoteError {
+/// Platforms that gate connections to local addresses behind a Local Network
+/// permission: iOS, and macOS 15 and later. On these a denial is reported as
+/// `LocalNetwork`, so the tester is pointed at the setting instead of a
+/// generic "unreachable".
+const LOCAL_NETWORK_PRIVACY: bool = cfg!(any(target_os = "ios", target_os = "macos"));
+
+// BSD sockets cannot definitively distinguish a Local Network privacy denial
+// from an unavailable route. Preserve these classes without asserting permission
+// was denied; a timeout/refusal alone is not evidence of a privacy restriction.
+fn classify_connect_error(error: std::io::Error, local_network_privacy: bool, endpoint: &str) -> RemoteError {
     use std::io::ErrorKind;
     let local = endpoint_parts(endpoint).is_ok_and(|(host, _)| {
         match host.parse::<std::net::IpAddr>() {
@@ -516,12 +522,17 @@ fn classify_connect_error(error: std::io::Error, ios: bool, endpoint: &str) -> R
             Err(_) => host.trim_end_matches('.').to_ascii_lowercase().ends_with(".local"),
         }
     });
-    if ios && local && matches!(error.kind(), ErrorKind::PermissionDenied | ErrorKind::NetworkDown
+    if local_network_privacy && local && matches!(error.kind(), ErrorKind::PermissionDenied | ErrorKind::NetworkDown
         | ErrorKind::NetworkUnreachable | ErrorKind::HostUnreachable) {
         RemoteError::LocalNetwork
     } else {
         RemoteError::HandshakeUnavailable
     }
+}
+
+/// A connect failure on this platform, classified as above.
+fn connect_error(error: std::io::Error, endpoint: &str) -> RemoteError {
+    classify_connect_error(error, LOCAL_NETWORK_PRIVACY, endpoint)
 }
 
 /// Exact UTF-8 string signed by the node for the pairing link.
@@ -1120,7 +1131,7 @@ fn load_with(
     path: &Path,
     sealer: Option<&dyn Sealer>,
 ) -> Result<Option<RemoteDescriptor>, RemoteError> {
-    if !path.exists() {
+    if pairing::key::nothing_at(path) {
         return Ok(None);
     }
     pairing::key::check_owner_only(path, "remote access descriptor")
@@ -2036,7 +2047,7 @@ async fn connect_bound(
             let target = endpoint;
             let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(target))
                 .await.map_err(|_| RemoteError::HandshakeUnavailable)?
-                .map_err(|error| classify_connect_error(error, cfg!(target_os = "ios"), endpoint))?;
+                .map_err(|error| connect_error(error, endpoint))?;
             let (noise, hash) = pinned_handshake_bound(&mut stream, descriptor, key).await?;
             Ok::<_, RemoteError>((stream, noise, hash))
         }.await;
@@ -2938,7 +2949,7 @@ mod tests {
                 "box_transport_pubkey": box_key,
                 "box_transport_signature": box_signature,
                 "expires_at": NOW + 86_400,
-                "hosted_by": "Rasmus's Pi",
+                "hosted_by": "Alex's Pi",
             });
             for (key, value) in extra.as_object().unwrap() {
                 fields[key] = value.clone();
@@ -2947,7 +2958,7 @@ mod tests {
         };
 
         let descriptor = parse_pairing_link_at(&ticket(serde_json::json!({})), NOW).unwrap();
-        assert_eq!(descriptor.hosted_by(), Some("Rasmus's Pi"));
+        assert_eq!(descriptor.hosted_by(), Some("Alex's Pi"));
         assert!(descriptor.has_code());
         // The node writes `null` when `[node].hosted_by` is unset.
         let unlabeled = parse_pairing_link_at(&ticket(serde_json::json!({ "hosted_by": null })), NOW).unwrap();
@@ -2969,9 +2980,9 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let live = ticket(serde_json::json!({ "expires_at": unix_now() + 86_400 }));
         let view = import_pairing_link(data.path(), &live).unwrap();
-        assert_eq!(view.hosted_by.as_deref(), Some("Rasmus's Pi"));
+        assert_eq!(view.hosted_by.as_deref(), Some("Alex's Pi"));
         let reloaded = load_persisted(data.path()).unwrap().unwrap();
-        assert_eq!(reloaded.hosted_by(), Some("Rasmus's Pi"));
+        assert_eq!(reloaded.hosted_by(), Some("Alex's Pi"));
         assert!(reloaded.has_code());
     }
 
@@ -3070,7 +3081,7 @@ mod tests {
         assert_eq!(label("  My Pi  ").as_deref(), Some("My Pi"));
         // Markup stays literal; the renderer shows it as text.
         assert_eq!(label("<img src=x onerror=alert(1)>").as_deref(), Some("<img src=x onerror=alert(1)>"));
-        for odd in ["Pi\u{202E}kcab", "Rasmus\u{7}Pi", "line\nbreak", "zero\u{200B}width", "\u{2066}Pi", "   ", ""] {
+        for odd in ["Pi\u{202E}kcab", "Alex\u{7}Pi", "line\nbreak", "zero\u{200B}width", "\u{2066}Pi", "   ", ""] {
             assert_eq!(label(odd), None, "{odd:?}");
         }
 
@@ -3187,6 +3198,11 @@ mod tests {
         let text = std::fs::read_to_string(path).unwrap();
         assert!(!text.contains(&code));
         assert!(!text.contains("\"code\""));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    mod linux_candidate_tests {
+        include!("remote_access/linux_candidate_tests.rs");
     }
 
     fn sealed_fixture(seed: u8) -> (tempfile::TempDir, PathBuf, RemoteDescriptor, String) {
@@ -5246,6 +5262,18 @@ mod onboarding_error_tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_macos_local_network_denial_points_at_the_setting() {
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::HostUnreachable] {
+            let error = connect_error(std::io::Error::from(kind), "10.0.0.2:9735");
+            assert!(matches!(error, RemoteError::LocalNetwork), "{kind:?}");
+            assert!(error.to_string().contains("Local Network permission"));
+        }
+        assert!(matches!(connect_error(std::io::Error::from(std::io::ErrorKind::TimedOut), "10.0.0.2:9735"), RemoteError::HandshakeUnavailable));
+        assert!(matches!(connect_error(std::io::Error::from(std::io::ErrorKind::HostUnreachable), "example.com:9735"), RemoteError::HandshakeUnavailable));
+    }
+
     #[test]
     fn ios_local_network_usage_copy_explains_box_connection_and_recovery() {
         let plist = include_str!("../Info.ios.plist");
@@ -5263,3 +5291,24 @@ mod onboarding_error_tests {
 #[cfg(test)]
 #[path = "remote_access/second_tests.rs"]
 pub(crate) mod second_tests;
+
+/// Preparation entry point; production persistence is unchanged.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn persist_linux_candidate(path: &Path, descriptor: &RemoteDescriptor, sealer: Option<&dyn Sealer>) -> Result<(), RemoteError> {
+    let sealer = at_rest::linux::required(sealer).map_err(RemoteError::Local)?;
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => { load_with(path, Some(&sealer))?; }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(RemoteError::Local(format!("cannot inspect remote descriptor: {error}"))),
+    }
+    persist_with(path, descriptor, Some(&sealer))
+}
+
+/// Preparation entry point; production loading is unchanged.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn load_linux_candidate(path: &Path, sealer: Option<&dyn Sealer>) -> Result<Option<RemoteDescriptor>, RemoteError> {
+    let sealer = at_rest::linux::required(sealer).map_err(RemoteError::Local)?;
+    let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
+    load_with(path, Some(&sealer))
+}
