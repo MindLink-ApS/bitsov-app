@@ -191,7 +191,10 @@ sha1_of() {
 # This build requests x86_64 only (XWIN_ARCH is set below), so the marker must list x86_64.
 XWIN_ARCH_PINNED=x86_64
 xwin_cache_complete() {
+  # cargo-xwin reads the whole marker as UTF-8 first; any invalid byte (on any line) leaves its
+  # architecture list empty and sends it to the network, so the marker must decode in full.
   [ -r "$1/xwin/DONE" ] &&
+    node -e 'try { new (require("util").TextDecoder)("utf-8", { fatal: true }).decode(require("fs").readFileSync(process.argv[1])); } catch { process.exit(1); }' "$1/xwin/DONE" &&
     awk -v want="$XWIN_ARCH_PINNED" 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == want) ok = 1 } END { exit !ok }' "$1/xwin/DONE"
 }
 # Tauri 2.12.0 (the CLI pinned in package-lock.json) reuses <cache>/tauri/NSIS only when its required

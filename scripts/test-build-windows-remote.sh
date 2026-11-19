@@ -305,6 +305,12 @@ for marker in 'done' aarch64 'aarch64 arm' 'x86 64' 'sdk/include'; do
 done
 CASE="xwin DONE lists x86_64 on line 2 only"; printf 'aarch64\nx86_64\n' > "$XWIN/xwin/DONE"
 run 5 "xwin/DONE does not list it" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+CASE="xwin DONE with invalid UTF-8 on a later line"; printf 'x86_64\nsdk/\377\n' > "$XWIN/xwin/DONE"
+run 5 "xwin/DONE does not list it" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+CASE="xwin DONE with invalid UTF-8 on the first line"; printf 'x86_64 \377\n' > "$XWIN/xwin/DONE"
+run 5 "xwin/DONE does not list it" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+CASE="xwin DONE with valid non-ASCII UTF-8 on a later line"; printf 'x86_64\nsdk/\303\251\n' > "$XWIN/xwin/DONE"
+run 0 "check only: nothing built" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 CASE="xwin DONE with both arches"; printf 'aarch64 x86_64\n' > "$XWIN/xwin/DONE"
 run 0 "check only: nothing built" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 CASE=""; XWIN="$T/cache/xwin"
