@@ -176,8 +176,8 @@ describe('invisible payments in the composer and the context panel', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await waitFor(() => expect(mount.querySelector('[data-composer]') || [...mount.querySelectorAll('button')].find((b) => b.textContent?.includes('I understand'))).toBeTruthy());
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))?.click();
+    await waitFor(() => expect(mount.querySelector('[data-composer]') || [...mount.querySelectorAll('button')].find((b) => b.hasAttribute('data-trust-continue'))).toBeTruthy());
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))?.click();
     await waitFor(() => expect($(`[data-track="peer:${MAYA}"]`)?.getAttribute('aria-current')).toBe('true'));
     await waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
   }
@@ -1875,7 +1875,7 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(backInBox() || keptUnsent()).toBe(true);
   }, 25_000);
 
-  it('Codex r2 #2: a budget edit response showing it armed is not a fresh read: it waits for a real read, then sends once', async () => {
+  it('a budget edit response showing it armed is not a fresh read: it waits for a real read, then sends once', async () => {
     // Real reads keep showing op-R waiting for the owner; only the edit's own response shows it armed.
     const host = allowHost('preset', { budget_set: () => armedBy('op-R') });
     await openShell();
@@ -1992,7 +1992,7 @@ describe('invisible payments in the composer and the context panel', () => {
   it.each([
     ['the contact budget is used up, then recovers', (h: ReturnType<typeof stubHost>) => armedBy('op-R', { rows: [{ target: MAYA, room: false, limit_msat: 50_000, spent_msat: 50_000 }] }), true],
     ['the owner has another budget request out', (h: ReturnType<typeof stubHost>) => armedBy('op-R', { waiting_for_owner: true }), false],
-  ])('Codex r1 #1: queued, %s → never sent, even if the budget recovers', async (_name, limited, recovers) => {
+  ])('queued, %s → never sent, even if the budget recovers', async (_name, limited, recovers) => {
     const { host, release } = await budgetTwoBehindOne();
     host.state.budget = limited(host);
     await nextRead(host);
@@ -2006,7 +2006,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await waitFor(() => expect(unsentReason()).toContain('Allowed, but your budget does not cover this message. Nothing was sent.'));
   }, 30_000);
 
-  it('Codex r1 #3: a fresh read after the press shows its request neither waiting nor live → lapsed, and a later arm by it never sends', async () => {
+  it('a fresh read after the press shows its request neither waiting nor live → lapsed, and a later arm by it never sends', async () => {
     let hostRef!: ReturnType<typeof stubHost>;
     // The press is taken (op-R, waiting), but the node drops it before any read sees it pending.
     const host = allowHost('preset', { budget_approve: () => ({ ...hostRef.state.budget, waiting_for_owner: true, request_id: 'op-R', granted_op: null }) });
@@ -2022,7 +2022,7 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(host.used('message_send')).toHaveLength(0);
   }, 25_000);
 
-  it('Codex r2 #1 (Fable B1): in a room, queued and nothing revoked → it goes once after the send ahead', async () => {
+  it('in a room, queued and nothing revoked → it goes once after the send ahead', async () => {
     const { host, release } = await budgetTwoBehindOne(undefined, undefined, true);
     release();
     await waitFor(() => expect(sentTexts(host)).toEqual(['one', 'two']));
@@ -2031,7 +2031,7 @@ describe('invisible payments in the composer and the context panel', () => {
     expect(sentTexts(host)).toEqual(['one', 'two']);
   }, 30_000);
 
-  it('Codex r2 #1: in a room, queued while the room budget is used up → never sent', async () => {
+  it('in a room, queued while the room budget is used up → never sent', async () => {
     const { host, release } = await budgetTwoBehindOne(undefined, undefined, true);
     host.state.budget = armedBy('op-R', { rows: [{ target: ROOM, room: true, limit_msat: 50_000, spent_msat: 50_000 }] });
     await nextRead(host);
@@ -2055,7 +2055,7 @@ describe('invisible payments in the composer and the context panel', () => {
   }
   const cancelOk = { spend_cancel: () => locked };
 
-  it('Codex r3: the owner cancels its request while it waits; a read that later shows it armed never sends it', async () => {
+  it('the owner cancels its request while it waits; a read that later shows it armed never sends it', async () => {
     const host = allowHost('preset', cancelOk);
     await openShell();
     await pressAllow('preset');
@@ -2069,7 +2069,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await waitFor(() => expect(unsentReason()).toContain('You cancelled the request. Nothing was sent.'));
   }, 30_000);
 
-  it('Codex r3: the owner cancels its request while it is queued behind a send: never sent', async () => {
+  it('the owner cancels its request while it is queued behind a send: never sent', async () => {
     const { host, release } = await budgetTwoBehindOne(undefined, undefined, false, cancelOk);
     await cancelRequest(host);
     release();
@@ -2078,7 +2078,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await waitFor(() => expect(unsentReason()).toContain('You cancelled the request. Nothing was sent.'));
   }, 30_000);
 
-  it('Fable UX: its turn comes right after a budget edit response, while that edit\'s own read is out: it waits for the read, then goes once', async () => {
+  it('its turn comes right after a budget edit response, while that edit\'s own read is out: it waits for the read, then goes once', async () => {
     const held: HeldRead = { next: false, land: null };
     // A row edit: its own response replaces the budget, and the read it starts right after is held.
     const { host, release } = await budgetTwoBehindOne(undefined, undefined, false, { budget_set: () => { held.next = true; return armedBy('op-R'); } }, held);

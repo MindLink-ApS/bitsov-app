@@ -36,6 +36,7 @@ import { readSpendPreset, saveSpendPreset } from './prefs';
 import { WelcomeHome } from './WelcomeHome';
 import { ChainNotice } from './ChainNotice';
 import { DelayedSpinner } from './DelayedSpinner';
+import { StreamFrame, StreamNoteContext } from './StreamFrame';
 import { isChainUnavailable, MONEY_NOT_READY, readinessLine, readinessSource } from './readiness';
 import { batch, createEffect, createMemo, createResource, createSignal, createUniqueId, For, type JSX, Match, on, onCleanup, onMount, Show, Switch, untrack } from 'solid-js';
 import { createStore, produce, reconcile } from 'solid-js/store';
@@ -46,7 +47,9 @@ import { amount as fmtAmount, paidAmount, budgetNote, allIn, clock, day, feeCeil
 import { ambiguousThousands, amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
+import { softenError } from './userFacing';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
+import { OperatorDetails } from './OperatorDetails';
 import { PorchPanel } from './Porch';
 import { ContactPanel } from './ContactPanel';
 import { onEscape } from './escapeStack';
@@ -54,13 +57,15 @@ import { custodyBadge, CustodyBadgeView } from './custody';
 import { CopyButton, NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
-import { answerCost, callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, isCallTrafficKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { answerCost, callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, shownDropAt, shownPhase, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { CallReportCopy } from './CallReportCopy';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { nodeRoutedAudio, nodeRoutedVideo, sealedAudio } from './callFlags';
 import { AUDIO_PLAYOUT_DELAY_MS, createCallVideo, trackVideoSource, type VideoStatus } from './callVideo';
 import { createNodeRoutedConnection, sealLabelScope, type SealState } from './nodeRoutedConnection';
 import { waitUntilPaid, type MinutesDeps, type MinutesView } from './callMinutes';
+import { callEndLine } from './callEnd';
+import { callLines, isCallControlMessage } from './callHistory';
 import { hostCallSeal, hostMediaBridge, unavailableMediaBridge } from './mediaBridge';
 import { createCallAudio } from './callAudio';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
@@ -1550,6 +1555,7 @@ export function ControlCenter(props: Props) {
       return allowed;
     },
     grant: () => budget()?.node_grant ?? null,
+    callLimitMinutes,
     quote: (peer) => act(() => source.callQuote(peer)),
     signal: async (peer, kind, plaintext, maxMsat, minutes, maxHangupMsat) => {
       const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes, maxHangupMsat));
@@ -2149,6 +2155,12 @@ export function ControlCenter(props: Props) {
       onAddContact={() => setTrack({ kind: 'discover' })}
       onAddSats={() => openWallet('receive')} />;
 
+  // Desktop: the money notice floats over the message list (StreamFrame) when there is one, and
+  // sits in the column otherwise (start view, welcome, loading).
+  const moneyNotice = () => <p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p>;
+  const [streamFrames, setStreamFrames] = createSignal(0);
+  const streamNote = { show: () => moneyBlocked() && !phoneShell(), note: moneyNotice, frame: (d: 1 | -1) => setStreamFrames((n) => n + d) };
+
   return (
     <div class="cc" data-phone-shell={phoneShell() ? "true" : undefined} classList={{ 'no-context': !props.active }} data-mode={source.mode}
       data-swipe-call={!['idle', 'ended'].includes(callView().phase) || !['idle', 'ended'].includes(meetingView().phase)}>
@@ -2230,6 +2242,7 @@ export function ControlCenter(props: Props) {
       />
 
       <Show when={props.active} fallback={<section class="track">{props.firstRun}</section>}>
+        <StreamNoteContext.Provider value={streamNote}>
         <section class="track" aria-label={tr('caTrack')} hidden={phoneShell() && (phoneTab() !== 'chats' || track() === null)} inert={walletTab() !== null || contextOpen()}>
           <Show when={track()}><button type="button" class="link ios-back" data-ios-back="thread" onClick={phoneBack}><Show when={phoneShell()}><span aria-hidden="true">‹ </span></Show>{tr('uiBack')}</button></Show>
           <Show when={!phoneShell()}>
@@ -2241,8 +2254,8 @@ export function ControlCenter(props: Props) {
           <Show when={notifications && props.active && !contextOpen() && walletTab() === null}>
             <Show when={callView().phase !== 'idle' || waitingCalls().length > 0}><NotificationSettings notifications={notifications!} offer /></Show>
           </Show>
-          <Show when={moneyBlocked() && !phoneShell()}>
-            <p class="hint money-notice" data-money-notice role="status">{!live() ? tr('waitingConnection') : tr('moneyNotReady')} {tr('moneyReadinessScope')}</p>
+          <Show when={moneyBlocked() && !phoneShell() && streamFrames() === 0}>
+            <div class="money-notice-float">{moneyNotice()}</div>
           </Show>
           <Show when={introNotice()}>
             {(n) => (
@@ -2425,6 +2438,7 @@ export function ControlCenter(props: Props) {
             )}
           </Show>
         </section>
+        </StreamNoteContext.Provider>
       </Show>
 
       <Show when={phoneShell()}>
@@ -3235,8 +3249,14 @@ function Conversation(props: {
       room: props.roomQuote,
       nowMs: props.now,
     });
-  // Protocol payloads belong to their own views, not the chat stream (a call's minute blocks included).
-  const items = createMemo(() => streamItems(props.messages.filter((m) => !isCallTrafficKind(m.kind) && !isPorchKind(m.kind) && !(props.track.kind === 'peer' && roomOf(m, props.ownId))), props.artifacts));
+  // Protocol payloads belong to their own views, not the chat stream (a call's minute blocks included,
+  // and any older app's `{"call_id":…}` receipt): each call is one system line instead.
+  const items = createMemo(() => {
+    const own = props.messages.filter((m) => !isPorchKind(m.kind) && !(props.track.kind === 'peer' && roomOf(m, props.ownId)));
+    const missed = new Set(props.artifacts.flatMap((a) => a.type === 'missed-call' ? [a.id.slice(a.id.lastIndexOf(':') + 1)] : []));
+    const lines = props.track.kind === 'peer' ? callLines(own, (callId) => missed.has(callId)) : [];
+    return streamItems(own.filter((m) => !isCallControlMessage(m)), [...props.artifacts, ...lines]);
+  });
   // Solid's For keys by identity. Primitive ids keep rows mounted when reads replace objects.
   const keyedItems = createMemo(() => new Map(items().map((item) => [
     item.type === 'message' ? `message:${item.message.id}` : `artifact:${item.artifact.id}`, item,
@@ -3286,6 +3306,7 @@ function Conversation(props: {
           />
         )}
       </Show>
+      <StreamFrame>
       <div class="stream" ref={stream} data-stream>
         <div class="chat-column">
         <Show when={props.introduced}>
@@ -3382,6 +3403,7 @@ function Conversation(props: {
         </Show>
         </div>
       </div>
+      </StreamFrame>
 
       <Composer
         admissionResume={props.artifacts.flatMap((a) => a.type === 'restored' ? [a.op] : a.type === 'failed' && !a.confirmedBy && a.op ? [a.op] : [])
@@ -3740,7 +3762,11 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
               <MinutesConsent quote={q()} />
               <RingBudgetNote grant={props.actions.callGrant?.() ?? null} peer={props.peer} name={props.name} quote={q()} callLimitMinutes={props.actions.callLimitMinutes?.() ?? null} />
             </>}</Show>
-            <p class="hint" data-call-stun-source>{callStunLabel()}</p>
+            {/* The route finder's address is technical: only under Details. */}
+            <details class="quiet-detail" data-call-stun-detail>
+              <summary>{tr('uiDetails')}</summary>
+              <p class="hint" data-call-stun-source>{callStunLabel()}</p>
+            </details>
             <div class="call-confirm-actions">
               <button type="button" class="soft" data-call-confirm-cancel onClick={() => disarm()}>{tr('uiCancel')}</button>
               <button ref={ringBtn} type="button" class="primary soft money" data-call-confirm={media()} disabled={off() || !priceReady()} onClick={() => { if (off() || !priceReady()) return; const m = media(); setArmed(null); place(m); }}>{tr('uiRing')}</button>
@@ -3764,11 +3790,6 @@ function videoStatusLine(status: VideoStatus | null | undefined): string | null 
 }
 
 const CALL_TITLE = CALL_STATE_WORD;
-const END_REASON: Record<string, string> = {
-  get hangup() { return tr('callHungUp'); }, get declined() { return tr('callDeclined'); },
-  get busy() { return tr('callBusy'); }, get timeout() { return tr('callNoAnswer'); }, get failed() { return tr('callFailed'); },
-  get unpaid() { return tr('caCallEndedUnpaid'); },
-};
 
 /**
  * M6 consent before Ring: the callee's per-minute price and the most any node
@@ -3941,8 +3962,9 @@ function CallPanel(props: {
   }));
   const v = () => props.view;
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
-  // A ceiling, not what it will cost: the routing fee is usually far less.
-  const price = () => { const q = shown(); const m = q && answerCost(q); return m === null ? '' : ` · ${tr('caUpToAmount', fmtAmount(m))}`; };
+  const endLine = () => callEndLine(v(), who());
+  /** What the card shows: interrupted node-routed media reads as Reconnecting (display only; the engine stays live). */
+  const cardPhase = () => shownPhase(v());
   /** The M6 paid-minutes line is on the card (same condition as its render below). */
   const minutesShown = () => !!(props.routed && v().outgoing && v().minutes);
   /**
@@ -3962,9 +3984,9 @@ function CallPanel(props: {
   };
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
-      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={v().phase} data-call-approval-open={props.approvalOpen ? '' : undefined} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[v().phase]} ${who()}`}>
+      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={cardPhase()} data-call-approval-open={props.approvalOpen ? '' : undefined} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[cardPhase()]} ${who()}`}>
         <header>
-          <strong data-call-title aria-live="polite">{CALL_TITLE[v().phase]}{v().media === 'video' ? tr('uiVideo') : ''}</strong>
+          <strong data-call-title aria-live="polite">{CALL_TITLE[cardPhase()]}{v().media === 'video' ? tr('uiVideo') : ''}</strong>
           <span class="who">{who()}</span>
           <Show when={(v().phase === 'live' || v().phase === 'reconnecting') && v().liveAt !== null}>
             <span class="duration" data-call-duration>{duration(Math.max(0, tick() - v().liveAt!))}</span>
@@ -3972,9 +3994,17 @@ function CallPanel(props: {
         </header>
         <Show when={props.waiting && props.answerBlocked && v().phase === 'incoming'}><p class="hint">{tr('incomingWaiting')}</p></Show>
         <Show when={noPrice() && v().phase === 'incoming'}><p class="hint" role="status" data-call-answer-price>{tr('caCallAnswerNoPrice')}</p></Show>
-        {/* What answering can cost this owner, in words: the answer, their own hangup, and only a reconnect beyond that (each one signal, all-in). */}
+        {/* What answering can cost this owner, in words: the answer, their own hangup, and only a reconnect beyond that (each one signal, all-in).
+            Kept one tap away under Details: the ringing card itself carries no price. */}
         <Show when={v().phase === 'incoming' && shown() ? answerCost(shown()!) : null}>
-          {(m) => <p class="hint" data-call-answer-cost>{tr('caCallAnswerCostNote', fmtAmount(m()))}</p>}
+          {(m) => <details class="quiet-detail" data-call-answer-detail>
+            <summary>{tr('uiDetails')}</summary>
+            <p class="hint" data-call-answer-cost>{tr('caCallAnswerCostNote', fmtAmount(m()))}</p>
+          </details>}
+        </Show>
+        {/* Decline is the free local ignore: nothing is sent or paid, so their ring runs out by itself. */}
+        <Show when={v().phase === 'incoming' && !v().silenced}>
+          <p class="hint" data-call-decline-note>{tr('caCallDeclineFreeNote')}</p>
         </Show>
         <Show when={v().phase === 'incoming' && props.spendingReady === false}>
           <p class="hint" role="status" data-call-spend-needed>
@@ -3992,10 +4022,10 @@ function CallPanel(props: {
           <CallNetworkNote onOpenSettings={props.openCallSettings} />
         </Show>
         {/* While reconnecting: what is happening, and when the call ends if it does not come back (display only). */}
-        <Show when={v().phase === 'reconnecting'}>
+        <Show when={cardPhase() === 'reconnecting'}>
           <p class="hint" role="status" data-call-reconnecting>
             {tr('uiConnectionLostReconnecting')}
-            <Show when={v().dropAt !== null}>{' '}{tr('uiIfItIsnTBackIn')} <span data-call-drop-in>{Math.max(0, Math.ceil((v().dropAt! - tick()) / 1000))}</span> {tr('uiSTheCallEnds')}</Show>
+            <Show when={shownDropAt(v()) !== null}>{' '}{tr('uiIfItIsnTBackIn')} <span data-call-drop-in>{Math.max(0, Math.ceil((shownDropAt(v())! - tick()) / 1000))}</span> {tr('uiSTheCallEnds')}</Show>
             <Show when={v().recoveryUsedBefore}>{' '}{tr('uiThisCallAlreadyUsedItsOneRecoveryWaiting')}</Show>
           </p>
         </Show>
@@ -4051,12 +4081,14 @@ function CallPanel(props: {
           {(connection) => <p class="hint" data-call-connection>{tr('uiConnection')} {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} {tr('uiLocal140')} {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} {tr('uiRemote')}</p>}
         </Show>
         <Show when={v().phase === 'ended'}>
-          <p class="hint" data-call-ended>{v().stuck
-            ? tr('uiACallToIsStillClosingAtYour', who())
-            : v().minutes?.stop?.limit?.code === 'budget_exhausted' ? tr('caCallEndedContactLimit')
-            : v().minutes?.stop?.limit?.code === 'ceiling_exhausted' ? tr('caCallEndedTotalLimit')
-            : v().minutes?.stop?.limit?.code === 'grant_exhausted' ? tr('caCallEndedGrantLimit')
-            : v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
+          {/* One plain, cause-specific line; the host's or node's own words only under Details. */}
+          <p class="hint" data-call-ended>{endLine().text}</p>
+          <Show when={endLine().detail}>
+            {(detail) => <details class="quiet-detail" data-call-end-detail>
+              <summary>{tr('uiDetails')}</summary>
+              <p class="hint">{detail()}</p>
+            </details>}
+          </Show>
           <Show when={!v().stuck ? v().minutes?.stop?.limit : null}>
             {(limit) => <p class="hint" data-call-budget-limit={limit().code}>
               {hostText(limit().message)}{' '}
@@ -4114,9 +4146,9 @@ function CallPanel(props: {
         <div class="call-actions">
           <Switch>
             <Match when={v().phase === 'incoming'}>
-              <button type="button" class="primary soft money" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.accept(q); }}>{tr('uiAccept')}{price()}</button>
-              <button type="button" class="soft" data-call-decline disabled={props.blocked || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.decline(q); }}>{tr('uiDecline')}{price()}</button>
-              <button type="button" class="soft" data-call-ignore disabled={props.view.silenced} onClick={() => props.ignore()}>{tr('uiIgnore')}</button>
+              {/* No price on either button: Accept stays bounded by the quote read for it (`shown`), and Decline is the free local ignore. */}
+              <button type="button" class="primary soft money" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.accept(q); }}>{tr('uiAccept')}</button>
+              <button type="button" class="soft" data-call-decline data-call-ignore disabled={props.view.silenced} onClick={() => props.ignore()}>{tr('uiDecline')}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
               <Show when={v().stuck}>
@@ -4125,7 +4157,8 @@ function CallPanel(props: {
               <Show when={v().close?.status === 'refused' && !v().stuck}>
                 <button type="button" class="soft money" data-call-close-retry onClick={() => props.closeAgain()}>{tr('uiTryEndingItAgain')}</button>
               </Show>
-              <Show when={v().outgoing && v().close?.status === 'closed' && !v().stuck && v().pendingCount === 0 && v().unknownCount === 0}>
+              {/* Every ended call can be called again (same priced confirm), once nothing of it is still open or settling. */}
+              <Show when={v().callId !== null && v().peer !== null && (v().outgoing ? v().close?.status === 'closed' : (v().close === null || v().close!.status === 'closed')) && !v().stuck && v().pendingCount === 0 && v().unknownCount === 0}>
                 <Show when={again()} fallback={<button type="button" class="soft" data-call-again disabled={props.blocked} onClick={() => void offerAgain()}>{tr('uiCallAgain')}</button>}>
                   {(q) => <>
                     <Show when={props.routed && q().block_msat != null}><MinutesConsent quote={q()} /></Show>
@@ -4622,6 +4655,16 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
 function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; /** The same offline signal the header call buttons get, so Call back re-reads the price when they are back. */ offlineOf?: (id: string) => boolean; onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>; onStop?: (pendingId: string | null) => Promise<unknown>; onRestore?: (id: string) => void; onDiscard?: (id: string) => void }) {
   return (
     <Switch>
+      <Match when={props.a.type === 'call-line' && props.a}>
+        {(a) => {
+          const line = () => a() as Extract<Artifact, { type: 'call-line' }>;
+          return <p class="hint call-line" data-call-line={line().callId}>
+            {tr(line().media === 'video' ? 'caCallLineVideo' : 'caCallLineAudio')}
+            <Show when={line().minutes !== null}>{' · '}{tr('caCallLineMinutes', line().minutes!)}</Show>
+            {' · '}<time datetime={new Date(line().at).toISOString()}>{clock(line().at)}</time>
+          </p>;
+        }}
+      </Match>
       <Match when={props.a.type === 'missed-call' && props.a}>
         {a => {
           const call = () => a() as Extract<Artifact, { type: 'missed-call' }>;
@@ -4739,7 +4782,7 @@ function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: 
           return (
             <div class="artifact out failed" data-artifact="failed" data-code={f().error.code}>
               <span class="kind">{f().action}</span>
-              <span>{f().error.message}</span>
+              <FailedReason message={f().error.message} />
               <Show when={f().text !== undefined}>
                 {/* The whole message stays readable here; no resend while the payment result is open. */}
                 <blockquote class="failed-text" data-failed-text>{f().text}</blockquote>
@@ -4773,6 +4816,31 @@ function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: 
         {(a) => <UndeliveredView moneyBlocked={props.moneyBlocked} a={a() as Extract<Artifact, { type: 'undelivered' }>} onRetry={props.onRetry} onStop={props.onStop} />}
       </Match>
     </Switch>
+  );
+}
+
+/**
+ * Why an action failed, in plain words. Raw host text sits behind Details;
+ * money text (paid, refused, an amount in sats) always shows whole.
+ */
+function FailedReason(props: { message: string }) {
+  const soft = () => {
+    const m = props.message;
+    if (/\d\s*m?sats?\b/i.test(m)) return { summary: m, detail: null };
+    return softenError(m, tr('caFailedReasonCheckNode'));
+  };
+  return (
+    <div class="failed-reason" data-failed-reason>
+      <span data-soft-summary>{soft().summary}</span>
+      <Show when={soft().detail}>
+        {(d) => (
+          <details class="quiet-detail" data-soft-detail>
+            <summary>{tr('uiDetails')}</summary>
+            <p class="hint">{d()}</p>
+          </details>
+        )}
+      </Show>
+    </div>
   );
 }
 
@@ -4832,7 +4900,7 @@ function UndeliveredView(props: {
           {tr('uiStopRetrying')}</button>
       </Show>
       <Show when={props.a.ownerApproval}>
-        {(approval) => <div data-retry-owner><p>{tr('caApproveAtYourNodeThenCheck')}</p><code class="address">{approval().owner_command}</code></div>}
+        {(approval) => <div data-retry-owner><p>{tr('caApproveAtYourNodeThenCheck')}</p><OperatorDetails><code class="address">{approval().owner_command}</code></OperatorDetails></div>}
       </Show>
       <Show when={props.a.note}>
         <p class="hint" data-retry-note>{props.a.note}</p>
@@ -7208,8 +7276,10 @@ function Composer(props: {
           <Show when={pending().approval.approval_window_secs !== undefined}>
             <p role="status" data-contact-countdown>{tr('uiWaitingForRemoteApproval')} {Math.floor(ownerCountdown() / 60)}:{String(ownerCountdown() % 60).padStart(2, '0')} {tr('uiRemaining')}</p>
           </Show>
-          <textarea readonly aria-label={tr('uiOwnerApprovalCommand')} data-contact-owner-command data-command={pending().approval.owner_command} value={pending().approval.owner_command} />
-          <button type="button" class="link" onClick={async () => { try { await navigator.clipboard.writeText(pending().approval.owner_command); } catch { setNote(tr('uiSelectAndCopyTheCommandAbove')); } }}>{tr('uiCopyCommand')}</button>
+          <OperatorDetails>
+            <textarea readonly aria-label={tr('uiOwnerApprovalCommand')} data-contact-owner-command data-command={pending().approval.owner_command} value={pending().approval.owner_command} />
+            <button type="button" class="link" onClick={async () => { try { await navigator.clipboard.writeText(pending().approval.owner_command); } catch { setNote(tr('uiSelectAndCopyTheCommandAbove')); } }}>{tr('uiCopyCommand')}</button>
+          </OperatorDetails>
           <button type="button" class="link" data-contact-cancel onClick={() => cancelOwner()}>{tr('uiCancel')}</button>
           <p class="hint">{tr('uiCancelDoesNotRevokeAnApprovalAlreadyIssued')} {pending().approval.approval_window_secs !== undefined ? tr('caFive') : tr('caTwo')} {tr('uiMinutes')}</p>
         </div></TouchIdFirst>}
@@ -7332,23 +7402,30 @@ function TouchIdFirst(props: { actions: Actions; stays: JSX.Element; children: J
 /** What is true while a spend request waits, for whichever action raised it (the default holds for every consumer). */
 const spendWaitDefault = () => tr('spendWaitDefault');
 
-/** The node's own approval, for someone who has never used a terminal: where, what, and who can do it. */
+/**
+ * The node's own approval, in plain words: the box needs one yes from the
+ * person who set it up. The exact line stays closed under Details, for that
+ * person only; nothing outside it names a command or a terminal.
+ */
 function NodeApprovalSteps(props: { command?: string | null }) {
   return <>
-    <Show when={props.command}>
-      {(command) => <ol class="approval-steps" data-approval-steps>
-        <li>{tr('caApprovalStepOpen')}</li>
-        <li>
-          {tr('caApprovalStepPaste')}
-          <code class="address" data-owner-action>{command()}</code>
-          <CopyButton text={command()} label={tr('caApprovalCopy')} />
-        </li>
-        <li>{tr('caApprovalStepCode')}</li>
-      </ol>}
-    </Show>
     <p class="hint" data-approval-who>{tr('caApprovalWho')}</p>
+    <Show when={props.command}>
+      {(command) => <OperatorDetails>
+        <ol class="approval-steps" data-approval-steps>
+          <li>{tr('caApprovalStepOpen')}</li>
+          <li>
+            {tr('caApprovalStepPaste')}
+            <code class="address" data-owner-action>{command()}</code>
+            <CopyButton text={command()} label={tr('caApprovalCopy')} />
+          </li>
+          <li>{tr('caApprovalStepCode')}</li>
+        </ol>
+      </OperatorDetails>}
+    </Show>
   </>;
 }
+
 
 function SpendBar(props: { spend: SpendView | null; error: string | undefined; now: number; actions: Actions; hasPending?: boolean; stays?: string; requestBudgetMsat?: number }) {
   const line = () => spendLine(props.spend, props.now);
@@ -7412,9 +7489,12 @@ function SpendBar(props: { spend: SpendView | null; error: string | undefined; n
           {(p) => (
             <div class="approval" data-approval="unavailable">
               <p>
-                <strong>{tr(line().open ? 'spendReplacementUnavailable' : 'uiThisNodeCannotGrantSpendingToTheApp')}</strong> {tr('uiReceivingStillWorksYourNodeSays')}
+                <strong>{tr(line().open ? 'spendReplacementUnavailable' : 'uiThisNodeCannotGrantSpendingToTheApp')}</strong>
               </p>
-              <code class="address" data-owner-action>{p().owner_action}</code>
+              <OperatorDetails>
+                <p>{tr('uiReceivingStillWorksYourNodeSays')}</p>
+                <code class="address" data-owner-action>{p().owner_action}</code>
+              </OperatorDetails>
             </div>
           )}
         </Match>
@@ -8426,11 +8506,13 @@ function NewTrack(props: {
               </Show>
               <Show when={ownerRequired()}>
                 <div class="approval" data-starter-owner-approval="pending">
-                  <p><strong>{tr('caApproveThisGiftAtYourNode')}</strong>{' '}{tr('uiRunThisCommandOnceInTheOwnerS')}</p>
+                  <p><strong>{tr('caApproveThisGiftAtYourNode')}</strong>{' '}{tr('caTheBoxOwnerApprovesThisGiftOnce')}</p>
                   <Show when={ownerWait()} fallback={<p>{tr('caReviewTheRequestAndCompareTheCodeToPrepare')}</p>}>
                     {(pending) => <>
-                      <textarea readonly aria-label={tr('uiOwnerApprovalCommand')} data-starter-owner-command value={pending().owner_command} />
-                      <button type="button" class="link" onClick={() => void navigator.clipboard.writeText(pending().owner_command).catch(() => setCandErr(tr('uiSelectAndCopyTheCommandAbove')))}>{tr('uiCopyCommand')}</button>
+                      <OperatorDetails>
+                        <textarea readonly aria-label={tr('uiOwnerApprovalCommand')} data-starter-owner-command value={pending().owner_command} />
+                        <button type="button" class="link" onClick={() => void navigator.clipboard.writeText(pending().owner_command).catch(() => setCandErr(tr('uiSelectAndCopyTheCommandAbove')))}>{tr('uiCopyCommand')}</button>
+                      </OperatorDetails>
                       <p class="hint">{tr('caWaitingForTheNodeToReportThisGiftFunded')}</p>
                     </>}
                   </Show>

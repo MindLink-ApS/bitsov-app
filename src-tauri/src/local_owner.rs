@@ -273,12 +273,10 @@ async fn request(
     body: Option<&str>,
 ) -> Result<Zeroizing<Vec<u8>>, String> {
     guard(state)?;
+    state.require_network_authority(&method, path)?;
     ensure_fresh_token(state).await;
     let token = state
-        .token
-        .lock()
-        .unwrap()
-        .clone()
+        .checked_token(&method, path)?
         .ok_or("Pair this app before owner setup.")?;
     let mut request = state
         .http
@@ -666,13 +664,13 @@ async fn mark_live(state: &NodeState, expected: &str) -> Result<(), String> {
 }
 pub async fn verify_device(state: &NodeState) -> Result<(), String> {
     let store = device_store(state).map_err(|e| e.message)?;
-    let (_, mut record) = local_key(state, &store).map_err(|e| e.message)?.ok_or("Owner device not enrolled on this Mac. Enroll through the owner console; setup cannot reopen on an initialized node.")?;
+    let (_, mut record) = local_key(state, &store).map_err(|e| e.message)?.ok_or("This Mac is not added as an owner device yet. Ask the person who set up your box to add it; setup cannot reopen on a box that is already set up.")?;
     let binding = device_binding(state).await.map_err(|e| e.message)?;
     let id = key_id(&record.public_key)?;
     if binding.device_approvals.as_deref() != Some("enabled")
         || !binding.device_keys.iter().any(|k| k.key_id == id)
     {
-        return Err("Owner device not enrolled or approvals disabled. This Mac has only the authority reported by the node. Enroll through the owner console; the recovery phrase cannot be shown again.".into());
+        return Err("This Mac needs approval before it can approve payments. It has only what your box allows it. Ask the person who set up your box to add it; the recovery phrase cannot be shown again.".into());
     }
     let _guard = state.device_lifecycle.lock().unwrap();
     if device::load_record(&store).as_ref() != Some(&record) {

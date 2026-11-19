@@ -56,9 +56,17 @@ test('emoji picker and the body energy table are valid aria', async ({ page }) =
   // The table cells reset `font`; the figures keep their body size and tabular numerals.
   const fig = await page.locator('.settings-modal.open .energy .energy-fig').first().evaluate((el) => {
     const cs = getComputedStyle(el);
-    const md = getComputedStyle(document.documentElement).getPropertyValue('--t-md').trim();
-    return { size: cs.fontSize, md, numeric: cs.fontVariantNumeric };
+    const token = getComputedStyle(document.documentElement).getPropertyValue('--t-md').trim();
+    // The token is in rem and computed sizes are in px: resolve it on a probe beside the figure.
+    const probe = document.createElement('span');
+    probe.style.fontSize = 'var(--t-md)';
+    el.parentElement!.appendChild(probe);
+    const md = getComputedStyle(probe).fontSize;
+    probe.remove();
+    return { size: cs.fontSize, token, md, numeric: cs.fontVariantNumeric };
   });
+  expect(fig.token).not.toBe('');
+  expect(fig.md).toMatch(/px$/);
   expect(fig.size).toBe(fig.md);
   expect(fig.numeric).toContain('tabular-nums');
   expect(energyViolations.map((v) => v.nodes.map((n) => n.failureSummary).join('\n'))).toEqual([]);
