@@ -28,14 +28,6 @@ const literalAllowlist: Record<string, readonly string[]> = {
     "Cancel",
   ],
   'src/App.tsx': [
-    "Local trust — read this before you deposit",
-    "Your node is only reachable while this Mac is awake and BitSov is open.",
-    "This node trusts every program on this computer. Anything running under your user account can ask it for full access over",
-    "— enough to spend what you deposit and read your history. Only fund a node on a machine you control.",
-    "Your keys stay in the node. BitSov never shows you your recovery phrase and never copies it anywhere.",
-    "Remote trust — read this before you deposit",
-    "This node’s keys live on the remote machine. Anyone with access — whoever can log in to that computer — can spend what you deposit. Only fund a node whose host you trust.",
-    "I understand — continue to funding",
     "sats",
   ],
   // This existing bilingual G6 consent screen is also deliberately preserved.
@@ -56,8 +48,6 @@ const literalAllowlist: Record<string, readonly string[]> = {
     "Remote trust",
     "Nøglerne ligger på den anden maskine. Alle, der kan logge ind på den, kan bruge dine indskud. Indsæt kun penge, hvis du stoler på værten.",
     "This node’s keys live on the remote machine. Anyone with access — whoever can log in to that computer — can spend what you deposit. Only fund a node whose host you trust.",
-    "Nøglerne bliver i boksen. BitSov viser aldrig din gendannelsessætning og kopierer den aldrig.",
-    "Your keys stay in the node. BitSov never shows you your recovery phrase and never copies it anywhere.",
   ],
 };
 

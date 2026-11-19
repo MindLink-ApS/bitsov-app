@@ -303,8 +303,8 @@ describe('rooms in the shell', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.hasAttribute('data-trust-continue'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))!.click();
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
   async function openRoom(...picks: string[]) {
@@ -365,6 +365,13 @@ describe('rooms in the shell', () => {
     expect(mount.textContent).not.toMatch(/coming soon|not on the protocol/i);
     expect(mount.textContent?.includes('This node does not support rooms yet.')).toBe(!supported);
     expect($('[data-room-new]') !== null).toBe(supported);
+  });
+
+  it('does not say the node lacks rooms before the node has answered', async () => {
+    stubHost({ node_overview: () => new Promise(() => {}) });
+    await openShell();
+    await vi.waitFor(() => expect($('[data-rooms-coming-soon]')).not.toBeNull());
+    expect(text('[data-rooms-coming-soon]')).toBe('Rooms show here once your box answers.');
   });
 
   it('keeps the coming-soon line (and no New room) while our node does not check room bindings', async () => {

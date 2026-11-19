@@ -206,8 +206,8 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.hasAttribute('data-trust-continue'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))!.click();
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
 
@@ -218,6 +218,28 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     expect($('[data-call="video"]')).toBeNull();
     expect($('[data-call="meeting"]')).toBeNull();
     expect($('[data-meeting-panel]')).toBeNull();
+  });
+
+  it('before Ring, the minutes hold is one short plain promise; the full rules wait behind Details, in English and Danish', async () => {
+    const host = stubHost();
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-reservation-max]')).not.toBeNull());
+    const hold = $('[data-call-reservation-max]')!.textContent!;
+    expect(hold).toMatch(/^Your node sets aside at most .+? for the minutes and gives back what is not used\. If it would need more, it does not ring and nothing is paid\. You confirm before the first minute is paid\.$/);
+    const amount = hold.match(/at most (.+?) for the minutes/)![1];
+    const detail = $<HTMLDetailsElement>('[data-call-reservation-detail]')!;
+    expect(detail.open).toBe(false);
+    // Nothing of the old paragraph is lost: it is behind Details, with the same amount.
+    expect(detail.querySelector('p')!.textContent).toContain(`a hold of at most ${amount} (4 hours, the most a node allows)`);
+    expect(detail.querySelector('p')!.textContent).toContain('nothing is paid');
+    try {
+      setLanguagePref('da');
+      expect($('[data-call-reservation-max]')!.textContent).toBe(`Din node reserverer højst ${amount} til minutterne og giver det ubrugte tilbage. Skulle den bruge mere, ringer den ikke op, og der betales intet. Du bekræfter, før det første minut betales.`);
+      expect(detail.querySelector('summary')!.textContent).toBe('Detaljer');
+    } finally { setLanguagePref('en'); }
+    expect(host.used('call_signal')).toHaveLength(0);
   });
 
   it('places a call through the host media socket: no RTCPeerConnection, the node label, live on the host’s open', async () => {
@@ -439,7 +461,9 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
     host.media({ link: 'ended', detail: 'the node refused the media socket (403)' });
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect($('[data-call-ended]')?.textContent).toBe('The call audio link through your node closed.');
+    // Never connected: said as such, with the technical words under Details.
+    expect($('[data-call-ended]')?.textContent).toBe('The call to Maya could not connect.');
+    expect($('[data-call-end-detail]')!.textContent).toContain('The call audio link through your node closed.');
   });
 
   /** Rings Maya and brings the call live through the host media socket. */

@@ -63,8 +63,8 @@ export function OwnerApprovals(props: OwnerApprovalsProps) {
   const memory = props.memory ?? approvalMemory();
   const { hidden, setHidden, kept, setKept, said, busy } = memory;
   const mobile = () => props.mobile ?? isMobilePlatform();
-  const device = () => mobile() ? (deviceWord() === 'iPad' ? 'iPad' : tr('phone')) : 'Mac';
-  const tap = () => (mobile() ? tr('biometrics') : 'Touch ID');
+  const device = () => mobile() ? (deviceWord() === 'iPad' ? 'iPad' : tr('phone')) : tr('uiMac');
+  const tap = () => (mobile() ? tr('biometrics') : tr('uiTouchID'));
   const live = (v: ApprovalView) => v.status === 'pending' && secondsLeft(v, props.now) > 0;
   /** Approve is offered only while the node still lists it as waiting. */
   const waiting = (opId: string) => props.approvals.some((v) => v.op_id === opId && live(v));
@@ -244,8 +244,9 @@ export function OwnerApprovalWait(props: {
         </div>
       </Show>
       <Show when={props.fallback}>
-        <details class="other-ways" data-other-ways>
-          <summary>{tr('uiOtherWays')}</summary>
+        {/* For whoever set up the box only: the node's exact line, closed by default. */}
+        <details class="other-ways" data-other-ways data-approval-operator>
+          <summary>{tr('uiDetails')}</summary>
           <code class="address" data-owner-action>{props.fallback}</code>
         </details>
       </Show>

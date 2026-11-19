@@ -5,7 +5,7 @@ name: Build
 # Tauri crate. Make it a REQUIRED status on main so review happens on a compiled SHA, not
 # on greps.
 #
-# CI cost (private repo, minutes are billed):
+# CI resource use:
 # - A newer push to the same PR cancels the older run. Pushes, tags, and merge-queue
 #   runs are not cancelled.
 # - Docs-only and `pm/` pulls skip the heavy jobs. `Authority Check` has no `if` and
@@ -209,6 +209,7 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
+          npx vitest run
 
       # Tauri v2 Linux prerequisites. `cargo check` still runs the gtk/webkit -sys build
       # scripts, which resolve these via pkg-config.
