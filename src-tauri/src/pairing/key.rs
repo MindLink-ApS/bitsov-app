@@ -25,6 +25,9 @@ pub const KEY_FILE: &str = "client-ed25519.key";
 /// The seed sealed by the installed [`at_rest::Sealer`]. Never plaintext.
 pub const SEALED_KEY_FILE: &str = "client-ed25519.sealed";
 const MAX_SEALED_KEY_BYTES: u64 = 16384;
+/// Where plaintext storage is never allowed and no sealer is installed.
+pub(crate) const NO_PROTECTED_STORAGE: &str =
+    "protected storage is unavailable on this device; nothing was saved";
 static SEALED_KEY_LOCK: Mutex<()> = Mutex::new(());
 
 /// The client signing key. `Debug` never prints key material.
@@ -62,6 +65,8 @@ impl ClientKey {
         #[cfg(not(all(not(test), any(target_os = "ios", target_os = "macos"))))]
         match at_rest::installed() {
             Some(sealer) => Self::load_or_create_sealed(dir, sealer),
+            // Windows never stores a plaintext identity: no sealer is an error.
+            None if cfg!(windows) => Err(PairError::Local(NO_PROTECTED_STORAGE.into())),
             None => Self::load_or_create_plain(dir),
         }
     }
@@ -608,6 +613,21 @@ mod tests {
         let retry = ClientKey::load_or_create_sealed(dir.path(), &MemorySealer).unwrap();
         assert_eq!(retry.public_hex(), original.public_hex());
         assert!(!dir.path().join(KEY_FILE).exists());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn no_sealer_is_an_error_and_writes_nothing() {
+        assert!(at_rest::installed().is_none(), "tests never install a global sealer");
+        let dir = std::env::temp_dir().join(format!("bitsov-no-sealer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let error = ClientKey::load_or_create(&dir).unwrap_err();
+        assert!(error.to_string().contains(NO_PROTECTED_STORAGE), "{error}");
+        assert!(nothing_at(&dir), "no folder or file is created");
     }
 }
 
