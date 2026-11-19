@@ -12888,7 +12888,7 @@ mod remote_onboarding_tests {
             transport_signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(signature.to_bytes()),
             code: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([44; 32]),
-            hosted_by: Some("Rasmus's Pi".into()),
+            hosted_by: Some("Alex's Pi".into()),
             ..Default::default()
         };
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -12896,7 +12896,7 @@ mod remote_onboarding_tests {
         *state.remote_descriptor.lock().unwrap() =
             Some(remote_access::parse_pairing_link(&format!("bitsov://pair/{encoded}")).unwrap());
         state.remote_mode.store(true, Ordering::SeqCst);
-        assert_eq!(serde_json::to_value(state.pairing_snapshot()).unwrap()["hosted_by"], "Rasmus's Pi");
+        assert_eq!(serde_json::to_value(state.pairing_snapshot()).unwrap()["hosted_by"], "Alex's Pi");
         state.remote_mode.store(false, Ordering::SeqCst);
         assert!(serde_json::to_value(state.pairing_snapshot()).unwrap()["hosted_by"].is_null());
     }

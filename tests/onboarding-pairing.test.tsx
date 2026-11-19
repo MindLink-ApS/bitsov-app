@@ -852,13 +852,13 @@ describe('pairing panel', () => {
   });
 
   it('new ticket: shows "hosted by" in the confirmation and the home-node badge, then forget clears it', async () => {
-    const el = await importWith(async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', hosted_by: "Rasmus's Pi", restart_required: true }));
+    const el = await importWith(async () => ({ endpoint: 'home:4242', node_id_fingerprint: 'ab…cd', hosted_by: "Alex's Pi", restart_required: true }));
     await vi.waitFor(() => expect(el.querySelector('[data-import-result]')).not.toBeNull());
     expect(el.querySelector('[data-import-result]')!.textContent).toBe(
-      "Remote node home:4242 (hosted by Rasmus's Pi) saved. Node ID fingerprint: ab…cd. Restart BitSov to connect.",
+      "Remote node home:4242 (hosted by Alex's Pi) saved. Node ID fingerprint: ab…cd. Restart BitSov to connect.",
     );
-    expect(badge().textContent).toBe("Hosted by Rasmus's Pi");
-    expect(badge().getAttribute('title')).toBe("Hosted by Rasmus's Pi");
+    expect(badge().textContent).toBe("Hosted by Alex's Pi");
+    expect(badge().getAttribute('title')).toBe("Hosted by Alex's Pi");
     el.querySelector<HTMLButtonElement>('[data-use-local]')!.click();
     await vi.waitFor(() => expect(badge().textContent).toBe('Pairing link'));
   });
