@@ -15,13 +15,13 @@ import { render } from 'solid-js/web';
 import App from '../src/App';
 import { setLanguagePref } from '../src/i18n';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
-import { createCallEngine, parseSignal, SILENCED_GRACE_MS, type CallDeps, type CallView } from '../src/control/call';
+import { createCallEngine, parseSignal, shownPhase, SILENCED_GRACE_MS, type CallDeps, type CallView } from '../src/control/call';
 import * as callEngine from '../src/control/call';
 import {
   BLOCK_GRACE_MS, ENDED_CONFIRM_MS, MAX_ATTEMPTS, PASSING_MAX_ATTEMPTS, RETRY_MS, STATUS_POLL_MS,
   createCallMinutes, waitUntilPaid, type MinutesDeps, type MinutesStop, type MinutesView,
 } from '../src/control/callMinutes';
-import { createNodeRoutedConnection, nodeRoutedSdp, type MediaSessionEvent } from '../src/control/nodeRoutedConnection';
+import { createNodeRoutedConnection, LINK_GRACE_MS, nodeRoutedSdp, type MediaSessionEvent } from '../src/control/nodeRoutedConnection';
 import type { CallAudio } from '../src/control/callAudio';
 import type { MediaBridge, MediaLink } from '../src/control/mediaBridge';
 import { amount } from '../src/control/format';
@@ -180,7 +180,7 @@ describe('paying the minutes of one outgoing call', () => {
     const node = fakeNode({ now: () => Date.now(), reservation: false });
     const s = session(node, undefined, true, async () => fail('call_no_reservation', 'Your node keeps no reservation for this call’s minutes, so the app pays none of them. No minute was paid. The app hung up the call; your node releases what it held.'));
     await s.minutes.refresh();
-    expect(s.stops).toEqual([{ code: 'hold_refused', message: expect.stringContaining('keeps no reservation') }]);
+    expect(s.stops).toEqual([{ code: 'hold_refused', message: expect.stringContaining('keeps no reservation'), raw: expect.stringContaining('keeps no reservation') }]);
     expect(s.stops[0].message).toContain('does not match what you agreed to');
     s.minutes.start();
     await s.minutes.confirm();
@@ -693,6 +693,22 @@ describe('the call engine with paid minutes', () => {
     ({ status: vi.fn(async () => ok(node.status())), hold: vi.fn(hold ?? (async () => ok(node.status()))), pay });
   const answer = (e: ReturnType<typeof engine>) => e.engine.receive({ id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: 0, plaintext: JSON.stringify({ v: 1, call_id: ID, sdp: nodeRoutedSdp('answer', ID) }), payment_amount_msat: 1 }, OWN);
 
+  it('a refused Accept clears its short-approval line once a later Accept goes through', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const grant: NodeGrantSummary = { budget_msat: 2_000_000, remaining_msat: 2_000_000, per_call_max_msat: 2_000_000, expires_at_ms: Date.now() + 5 * 60_000, envelopes: null } as NodeGrantSummary;
+    const e = engine(minutesOf(node, vi.fn()), undefined, grant);
+    await e.engine.receive({ id: 'off', kind: 400, sender: A, recipient: OWN, timestamp: 0,
+      plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 1 }, OWN);
+    await e.engine.accept(QUOTE);
+    expect(e.last()).toMatchObject({ phase: 'incoming' });
+    expect(e.last().error).toMatch(/ends in/);
+    grant.expires_at_ms = Date.now() + 86_400_000;   // the box owner approves a whole day
+    await e.engine.accept(QUOTE);
+    expect(e.signals.map((x) => x.kind)).toEqual([401]);
+    expect(e.last().phase).not.toBe('incoming');
+    expect(e.last().error ?? '').not.toMatch(/ends in/);
+  });
+
   it('the offer carries the minutes agreed before Ring, for the host to keep; never from an owner session', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const e = engine(minutesOf(node, vi.fn()));
@@ -721,7 +737,7 @@ describe('the call engine with paid minutes', () => {
 
   it('the signed per-payment limit binds one agreed minute; the 6-sat message cap does not', async () => {
     const node = fakeNode({ now: () => Date.now() });
-    const grant = (per: number): NodeGrantSummary => ({ expires_at_ms: Date.now() + 3_600_000, budget_msat: 500_000, remaining_msat: 500_000, per_call_max_msat: per, message_per_payment_max_msat: Math.min(per, 6_000), call_per_payment_max_msat: per });
+    const grant = (per: number): NodeGrantSummary => ({ expires_at_ms: Date.now() + 86_400_000, budget_msat: 500_000, remaining_msat: 500_000, per_call_max_msat: per, message_per_payment_max_msat: Math.min(per, 6_000), call_per_payment_max_msat: per });
     // A 25-sat minute (its price; the 5-sat allowance stays in the hold): above the owner's 21-sat limit.
     const dear = { ...QUOTE, block_msat: 25_000, reservation_max_msat: 240 * 30_000 };
     const owner = engine(minutesOf(node, vi.fn()), undefined, grant(21_000));
@@ -738,7 +754,7 @@ describe('the call engine with paid minutes', () => {
   it.each([[10_000, true], [10_001, false]] as const)('compares a minute at its price with the signed limit: block %i', async (block, dials) => {
     // The node pins no routing fee for a usable direct channel; the 5-sat allowance stays in the hold.
     const node = fakeNode({ now: () => Date.now() });
-    const grant: NodeGrantSummary = { expires_at_ms: Date.now() + 3_600_000, budget_msat: 500_000, remaining_msat: 500_000,
+    const grant: NodeGrantSummary = { expires_at_ms: Date.now() + 86_400_000, budget_msat: 500_000, remaining_msat: 500_000,
       per_call_max_msat: 10_000, message_per_payment_max_msat: 6_000, call_per_payment_max_msat: 10_000 };
     const q = { ...QUOTE, offer_msat: 1_000, call_total_msat: 12_000, block_msat: block, reservation_max_msat: 240 * (block + FEE) };
     const e = engine(minutesOf(node, vi.fn()), undefined, grant);
@@ -754,7 +770,7 @@ describe('the call engine with paid minutes', () => {
 
   it('places no call whose hangup the message cap could not pay', async () => {
     const node = fakeNode({ now: () => Date.now() });
-    const grant = (message: number): NodeGrantSummary => ({ expires_at_ms: Date.now() + 3_600_000, budget_msat: 500_000, remaining_msat: 500_000,
+    const grant = (message: number): NodeGrantSummary => ({ expires_at_ms: Date.now() + 86_400_000, budget_msat: 500_000, remaining_msat: 500_000,
       per_call_max_msat: 50_000, message_per_payment_max_msat: message, call_per_payment_max_msat: 50_000 });
     // QUOTE's hangup: 1 sat plus a 5-sat routing allowance.
     const tight = engine(minutesOf(node, vi.fn()), undefined, grant(5_999));
@@ -956,8 +972,9 @@ describe('node-routed calls carry audio only, and a dead media session stops the
     const sessions: MediaSessionEvent[] = [];
     const media: MediaStreamConstraints[] = [];
     let link: ((l: MediaLink) => void) | null = null;
+    let frame: ((f: Uint8Array) => void) | null = null;
     let fatal: (() => void) | null = null;
-    const bridge: MediaBridge = { open: async (_c, _p, _f, l) => { link = l; }, send: () => {}, close: async () => {} };
+    const bridge: MediaBridge = { open: async (_c, _p, f, l) => { link = l; frame = f; }, send: () => {}, close: async () => {} };
     const audio = (_s: MediaStream, _t: unknown, onFatal: () => void): CallAudio => {
       fatal = onFatal;
       return { ready: Promise.resolve(), feed: () => {}, setMuted: () => {}, codecs: () => ({ sending: 'pcmu', localCaps: 1, peerCaps: null }), stats: async () => null, close: async () => {} } as CallAudio;
@@ -981,7 +998,7 @@ describe('node-routed calls carry audio only, and a dead media session stops the
       ...over,
     };
     calls = createCallEngine(deps);
-    return { engine: calls, views, signals, sessions, media, last: () => views[views.length - 1], link: (l: MediaLink) => link?.(l), fatal: () => fatal?.() };
+    return { engine: calls, views, signals, sessions, media, last: () => views[views.length - 1], link: (l: MediaLink) => link?.(l), frame: () => frame?.(new Uint8Array([0, 0, 0, 1, 1, 2, 3])), fatal: () => fatal?.() };
   }
 
   it('a video offer to a node-routed app rings as audio and is answered without the camera', async () => {
@@ -1025,6 +1042,159 @@ describe('node-routed calls carry audio only, and a dead media session stops the
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(pay).toHaveBeenCalledTimes(1);
     expect(e.sessions.map((x) => x.state)).toEqual(['open', 'closed']);
+  });
+
+  it('frozen media: a node link down for 3 s shows Reconnecting, back to Live when it returns, and ends after its grace; nothing extra is sent', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const pay = vi.fn(async (_p: string, _c: string, seq: number) => { node.settle(seq); return ok(receipt(seq)); });
+    const e = routedEngine(minutesOf(node, pay));
+    await e.engine.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(e.last().minutes?.reservation).not.toBeNull());
+    await e.engine.confirmMinutes();
+    await e.engine.receive(answerMessage, OWN);
+    await vi.waitFor(() => expect(pay).toHaveBeenCalledWith(A, ID, 0));
+    await vi.advanceTimersByTimeAsync(0);
+    e.link({ link: 'open', detail: null });
+    await vi.waitFor(() => expect(e.last().phase).toBe('live'));
+    const sent = e.signals.length;
+    // A short blip stays Live.
+    e.link({ link: 'closed', detail: null });
+    await vi.advanceTimersByTimeAsync(2_900);
+    expect(e.last().phase).toBe('live');
+    // Frozen past about 3 s: shown as Reconnecting, with when the link's own grace (30 s) ends the call.
+    // Display only: the engine's phase stays live, so no recovery path can see it.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(e.last()).toMatchObject({ phase: 'live', interruptedUntil: Date.now() - 3_000 + LINK_GRACE_MS });
+    expect(shownPhase(e.last())).toBe('reconnecting');
+    e.link({ link: 'open', detail: null });
+    expect(e.last()).toMatchObject({ phase: 'live', interruptedUntil: null });
+    expect(shownPhase(e.last())).toBe('live');
+    // Lost for good: Reconnecting, then the card ends (never just gone), at the existing 30 s deadline.
+    e.link({ link: 'closed', detail: null });
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(shownPhase(e.last())).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(LINK_GRACE_MS - 3_000);
+    expect(e.last()).toMatchObject({ phase: 'ended', reason: 'failed' });
+    // Display only: no restart offer or other signal was sent for any of it.
+    expect(e.signals.slice(sent).map((x) => x.kind)).toEqual([]);
+  });
+
+  it('frames stalling on an open link: a short stall stays Live, past 3 s it shows Reconnecting, frames back clear it, and a stall past the grace ends the call; nothing extra is sent', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const pay = vi.fn(async (_p: string, _c: string, seq: number) => { node.settle(seq); return ok(receipt(seq)); });
+    const e = routedEngine(minutesOf(node, pay));
+    await e.engine.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(e.last().minutes?.reservation).not.toBeNull());
+    await e.engine.confirmMinutes();
+    await e.engine.receive(answerMessage, OWN);
+    await vi.waitFor(() => expect(pay).toHaveBeenCalledWith(A, ID, 0));
+    await vi.advanceTimersByTimeAsync(0);
+    e.link({ link: 'open', detail: null });
+    await vi.waitFor(() => expect(e.last().phase).toBe('live'));
+    const sent = e.signals.length;
+    e.frame();
+    // A short stall (2 s) with the link open: still Live.
+    await vi.advanceTimersByTimeAsync(2_000);
+    e.frame();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(shownPhase(e.last())).toBe('live');
+    // Frames stop while the link stays open (its heartbeat still answers): Reconnecting within about 3 s.
+    const lastFrame = Date.now() - 2_000;
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(e.last()).toMatchObject({ phase: 'live', interruptedUntil: lastFrame + LINK_GRACE_MS });
+    expect(shownPhase(e.last())).toBe('reconnecting');
+    // Frames resume: Live again, no deadline.
+    e.frame();
+    expect(e.last().interruptedUntil).toBeNull();
+    expect(shownPhase(e.last())).toBe('live');
+    // Frames stop for good: Reconnecting, then the call ends at the existing 30 s grace, counted from the last frame.
+    await vi.advanceTimersByTimeAsync(LINK_GRACE_MS - 1_000);
+    expect(shownPhase(e.last())).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(e.last()).toMatchObject({ phase: 'ended', reason: 'failed' });
+    expect(e.signals.slice(sent).map((x) => x.kind)).toEqual([]);
+  });
+
+  /** A live routed call whose frames flowed at the returned time and then stopped; Reconnecting shows after 3 s. */
+  async function frozenAfterFrames(pay: MinutesDeps['pay'], node: ReturnType<typeof fakeNode>) {
+    const e = routedEngine(minutesOf(node, pay));
+    await e.engine.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(e.last().minutes?.reservation).not.toBeNull());
+    await e.engine.confirmMinutes();
+    await e.engine.receive(answerMessage, OWN);
+    await vi.waitFor(() => expect(pay).toHaveBeenCalledWith(A, ID, 0));
+    await vi.advanceTimersByTimeAsync(0);
+    e.link({ link: 'open', detail: null });
+    await vi.waitFor(() => expect(e.last().phase).toBe('live'));
+    e.frame();
+    const lastFrame = Date.now();
+    await vi.advanceTimersByTimeAsync(3_500);
+    expect(shownPhase(e.last())).toBe('reconnecting');
+    return { e, lastFrame };
+  }
+
+  it('a socket that reopens without frames is not recovery: still Reconnecting, and the call ends at last frame + 30 s', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const pay = vi.fn(async (_p: string, _c: string, seq: number) => { node.settle(seq); return ok(receipt(seq)); });
+    const { e, lastFrame } = await frozenAfterFrames(pay, node);
+    const sent = e.signals.length;
+    await vi.advanceTimersByTimeAsync(20_000 - 3_500);
+    e.link({ link: 'closed', detail: null });
+    await vi.advanceTimersByTimeAsync(1_000);
+    e.link({ link: 'open', detail: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(e.last()).toMatchObject({ phase: 'live', interruptedUntil: lastFrame + LINK_GRACE_MS });
+    expect(shownPhase(e.last())).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(lastFrame + LINK_GRACE_MS - 1 - Date.now());
+    expect(e.last().phase).toBe('live');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(e.last()).toMatchObject({ phase: 'ended', reason: 'failed' });
+    expect(e.signals.slice(sent).map((x) => x.kind)).toEqual([]);
+  });
+
+  it('after a socket reopen, a frame arriving again is what clears Reconnecting and its deadline', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const pay = vi.fn(async (_p: string, _c: string, seq: number) => { node.settle(seq); return ok(receipt(seq)); });
+    const { e } = await frozenAfterFrames(pay, node);
+    e.link({ link: 'closed', detail: null });
+    await vi.advanceTimersByTimeAsync(1_000);
+    e.link({ link: 'open', detail: null });
+    expect(shownPhase(e.last())).toBe('reconnecting');
+    e.frame();
+    expect(e.last().interruptedUntil).toBeNull();
+    expect(shownPhase(e.last())).toBe('live');
+    // Frames keep coming: no deadline is left to end the call.
+    for (let i = 0; i < 40; i++) { await vi.advanceTimersByTimeAsync(1_000); e.frame(); }
+    expect(e.last().phase).toBe('live');
+  });
+
+  it('an interruption while an answer receipt is still on its way never starts a paid recovery', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    let land: (r: Outcome<CallReceipt>) => void = () => {};
+    const signals: number[] = [];
+    const authorize = vi.fn(async () => true);
+    const e = routedEngine(minutesOf(node, vi.fn()), {
+      authorize,
+      signal: (_peer, kind) => { signals.push(kind); return kind === 401 ? new Promise((r) => { land = r; }) : Promise.resolve(okReceipt(kind)); },
+    });
+    await e.engine.receive({ id: 'off', kind: 400, sender: A, recipient: OWN, timestamp: 0,
+      plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 1 }, OWN);
+    const accepting = e.engine.accept(QUOTE);
+    await vi.waitFor(() => expect(signals).toEqual([401]));
+    const asked = authorize.mock.calls.length;
+    // The caller got the answer first: the link opens and the call is live before our receipt lands.
+    e.link({ link: 'open', detail: null });
+    await vi.waitFor(() => expect(e.last().phase).toBe('live'));
+    e.link({ link: 'closed', detail: null });
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(shownPhase(e.last())).toBe('reconnecting');
+    land(okReceipt(401));
+    await accepting;
+    await vi.advanceTimersByTimeAsync(5_000);
+    // No recovery request, offer or approval for one: only the answer was ever sent.
+    expect(signals).toEqual([401]);
+    expect(authorize).toHaveBeenCalledTimes(asked);
+    expect(e.last().recoveryUsed).toBe(false);
   });
 
   it('a phone locked mid-call: minutes are paid during the grace, then the call is hung up and no further minute is paid', async () => {
@@ -1258,8 +1428,8 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.hasAttribute('data-trust-continue'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))!.click();
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
   }
@@ -1498,8 +1668,9 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(capture).not.toHaveBeenCalled();
   });
   it('keeps Ask again ordinary after dismissing a refused Ring and starting another call', async () => {
+    // A whole-day approval: a window ending before the call could is refused on its own (below).
     const grant: NodeGrantSummary = { budget_msat: 10_000, remaining_msat: 10_000, per_call_max_msat: 10_000,
-      expires_at_ms: Date.now() + 600_000, envelopes: null };
+      expires_at_ms: Date.now() + 86_400_000, envelopes: null };
     const host = stubHost({
       grant,
       block: () => {
@@ -1523,6 +1694,135 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(host.used('spend_request')[0].args).toEqual({});
     expect(host.used('call_block')).toHaveLength(1);
   });
+  // A box approval that ends mid-call cuts the call off (the callee's media is refused).
+  // So a node-routed call is never placed or answered inside a window that ends first.
+  const SHORT = () => ({ budget_msat: 2_000_000, remaining_msat: 2_000_000, per_call_max_msat: 2_000_000, expires_at_ms: Date.now() + 5 * 60_000 - 1_000, envelopes: null });
+  const visibleText = (el: Element) => {
+    const copy = el.cloneNode(true) as Element;
+    copy.querySelectorAll('details:not([open])').forEach((d) => [...d.childNodes].forEach((n) => { if (!(n instanceof Element && n.tagName === 'SUMMARY')) n.remove(); }));
+    return copy.textContent ?? '';
+  };
+  it.each([
+    ['en', 'Your box’s approval ends in 5 min, before this call could end, and the call would stop there. Nothing was paid. Ask the person who set up your box for a new approval, then call again.'],
+    ['da', 'Godkendelsen fra din boks udløber om 5 min, før opkaldet kan nå at slutte, så opkaldet ville stoppe der. Intet blev betalt. Bed den, der har sat din boks op, om en ny godkendelse, og ring igen.'],
+  ] as const)('refuses to ring when the box approval ends before the call could (%s)', async (lang, said) => {
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    const host = stubHost({ grant: SHORT() });
+    await openShell(); setLanguagePref(lang);
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-ended]')!.textContent).toBe(said);
+    expect(visibleText($('[data-call-panel]')!)).not.toMatch(/konsensus\s|--op\b|Terminal/);
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+    expect(capture).not.toHaveBeenCalled();
+  });
+  it('rings as before inside a whole-day approval', async () => {
+    const host = stubHost({ grant: { ...SHORT(), expires_at_ms: Date.now() + 86_400_000 } });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect(host.used('call_signal').map((c) => (c.args as { kind: number }).kind)).toEqual([400]);
+  });
+  it.each([
+    ['en', 'Your box’s approval ends in 5 min, before this call could end, and the call would stop there. Nothing was paid. Ask the person who set up your box for a new approval. The caller keeps ringing until it times out.'],
+    ['da', 'Godkendelsen fra din boks udløber om 5 min, før opkaldet kan nå at slutte, så opkaldet ville stoppe der. Intet blev betalt. Bed den, der har sat din boks op, om en ny godkendelse. Det ringer hos den anden, til opkaldet udløber.'],
+  ] as const)('refuses to answer when the box approval ends before the call could, and pays nothing (%s)', async (lang, said) => {
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    const host = stubHost({ grant: SHORT() });
+    await openShell(); setLanguagePref(lang);
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'incoming', kind: 400, sender: A, recipient: OWN,
+      timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect($('[data-call-error]')?.textContent).toBe(said));
+    expect($('[data-call-panel="incoming"]')).not.toBeNull();
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(capture).not.toHaveBeenCalled();
+  });
+  // The box's call limit is unknown until its first hold: assume the most any node allows (240 min).
+  const HOUR = () => ({ ...SHORT(), expires_at_ms: Date.now() + 60 * 60_000 });
+  it('an unknown call limit counts as the longest any box allows: a one-hour approval rings nothing and pays nothing', async () => {
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    const host = stubHost({ grant: HOUR() });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-ended]')!.textContent).toMatch(/ends in 60 min/);
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+    expect(capture).not.toHaveBeenCalled();
+  });
+  it('an unknown call limit counts as the longest any box allows: a one-hour approval answers nothing and pays nothing', async () => {
+    const capture = vi.spyOn(navigator.mediaDevices, 'getUserMedia');
+    const host = stubHost({ grant: HOUR() });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'incoming', kind: 400, sender: A, recipient: OWN,
+      timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect($('[data-call-error]')?.textContent).toMatch(/ends in 60 min/));
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(capture).not.toHaveBeenCalled();
+  });
+  // Time passes while the microphone is prepared: the approval is checked again right before the paid step.
+  const LONG_ENOUGH = () => ({ ...SHORT(), expires_at_ms: Date.now() + 250 * 60_000 });
+  const slowMicrophone = () => {
+    const real = Date.now.bind(Date);
+    const media = navigator.mediaDevices;
+    const prepare = media.getUserMedia.bind(media);
+    let shift = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => real() + shift);
+    vi.spyOn(media, 'getUserMedia').mockImplementation(async (c) => { shift = 15 * 60_000; return prepare(c); });
+  };
+  it('re-checks the approval at the paid step: a ring whose approval ran short during setup sends and pays nothing', async () => {
+    const host = stubHost({ grant: LONG_ENOUGH() });
+    await openShell();
+    slowMicrophone();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-ended]')!.textContent).toMatch(/ends in 235 min/);
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_block')).toHaveLength(0);
+  });
+  it('re-checks the approval at the paid step: an answer whose approval ran short during setup sends and pays nothing', async () => {
+    const host = stubHost({ grant: LONG_ENOUGH() });
+    await openShell();
+    slowMicrophone();
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'incoming', kind: 400, sender: A, recipient: OWN,
+      timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect($('[data-call-ended]')!.textContent).toMatch(/ends in 235 min/);
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+  it.each([
+    ['en', 'Their box stopped the call. Its approval may have run out. Nothing was paid for that minute.'],
+    ['da', 'Den andens boks stoppede opkaldet. Dens godkendelse kan være udløbet. Der blev ikke betalt for det minut.'],
+  ] as const)('a minute their box refused ends with a plain cause, the raw node text only under Details (%s)', async (lang, said) => {
+    const raw = 'Not sent - nothing was paid. callee refused the call block invoice: deadline margin, call sequence or no E2EE session; nothing was paid';
+    const host = stubHost({ block: () => { throw { code: 'not_dispatched', message: raw, reason: 'call_block_unpayable' }; } });
+    await openShell(); setLanguagePref(lang);
+    await ringAndAnswer(host);
+    // Not dispatched: tried again a few times (2 s apart), then the call ends.
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull(), { timeout: 12_000 });
+    expect($('[data-call-ended]')?.textContent).toBe(said);
+    const panel = $('[data-call-panel]')!;
+    expect(visibleText(panel)).not.toContain('callee refused');
+    expect(visibleText(panel)).not.toContain('E2EE');
+    const details = $<HTMLDetailsElement>('[data-call-end-detail]')!;
+    expect(details.open).toBe(false);
+    expect(details.textContent).toContain('callee refused the call block invoice');
+  }, 20_000);
   it('approves answering without requiring a reservation price from the caller', async () => {
     let quote = QUOTE;
     const host = stubHost({
@@ -1665,6 +1965,23 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(capture).not.toHaveBeenCalled();
   });
 
+  it('a host refusal for a too-short approval is proven unpaid: Call again stays, nothing counts as maybe paid', async () => {
+    // The app's own checks pass on its last-read whole-day grant; the host then
+    // finds the node's grant short and refuses before anything is sent.
+    const host = stubHost({
+      grant: { budget_msat: 2_000_000, remaining_msat: 2_000_000, per_call_max_msat: 2_000_000, expires_at_ms: Date.now() + 86_400_000, envelopes: null },
+      offer: () => { throw { code: 'call_window_short', message: 'Your box’s approval ends before this call could end, and the call would stop there. Nothing was sent or paid. Ask the person who set up your box for a new approval.' }; },
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(host.used('call_signal')).toHaveLength(1);
+    expect(host.used('call_block')).toHaveLength(0);
+    await vi.waitFor(() => expect($('[data-call-again]')).not.toBeNull());
+    expect($('[data-call-panel]')!.textContent).not.toMatch(/may have been paid|kan være betalt|unknown|ukendt/i);
+  });
   it.each(['en', 'da'] as const)('an exhausted active grant offers a larger owner request without ringing again (%s)', async lang => {
     const host = stubHost({
       quote: { ...QUOTE, offer_msat: 600_000, offer_max_routing_fee_msat: 0, signal_msat: 1_000, signal_max_routing_fee_msat: 0, call_total_msat: 601_000 },
@@ -1854,8 +2171,8 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.hasAttribute('data-trust-continue'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))!.click();
     await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
     $<HTMLButtonElement>(`[data-track="peer:${other}"]`)!.click();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')?.disabled).toBe(false));
@@ -1986,7 +2303,10 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect($('[data-call-ended]')?.textContent).toBe(`Your node’s hold for this call does not match what you agreed to, so the call ended. ${ABOVE}`);
+    // One plain line; the node's own words wait under a closed Details.
+    expect($('[data-call-ended]')?.textContent).toBe('Your node’s hold for this call does not match what you agreed to, so the call ended.');
+    expect($<HTMLDetailsElement>('[data-call-end-detail]')!.open).toBe(false);
+    expect($('[data-call-end-detail]')!.textContent).toContain(ABOVE);
     expect(host.used('call_block')).toHaveLength(0);
     expect(host.used('call_media_open')).toHaveLength(0);
   });
@@ -1996,8 +2316,8 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.hasAttribute('data-trust-continue'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))!.click();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')?.title).toContain('keeps no reservation for a call’s minutes'));
     expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(true);
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
@@ -2009,8 +2329,8 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.hasAttribute('data-trust-continue'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))!.click();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')?.title).toContain('does not advertise a per-minute call price'));
     expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(true);
     $<HTMLButtonElement>('[data-call="audio"]')!.click();
@@ -2356,8 +2676,28 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await openShell();
     await ringAndAnswer(host);
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect($('[data-call-ended]')?.textContent).toBe('A minute of the call could not be paid, so the call ended. Nothing was paid for that minute. Your node paused spending after failed payments. Nothing was sent.');
+    expect($('[data-call-ended]')?.textContent).toBe('A minute of the call could not be paid, so the call ended. Nothing was paid for that minute.');
+    expect($('[data-call-end-detail]')!.textContent).toContain('Your node paused spending after failed payments. Nothing was sent.');
     expect(host.used('call_media_open')).toHaveLength(0);
+  });
+
+  it.each([
+    ['en', 'da', 'Et minut af opkaldet kunne ikke betales, så opkaldet sluttede. Der blev ikke betalt for det minut.'],
+    ['da', 'en', 'A minute of the call could not be paid, so the call ended. Nothing was paid for that minute.'],
+  ] as const)('changing the language on an ended card (%s to %s) re-words the cause and keeps the node text under Details', async (from, to, said) => {
+    const RAW = 'node says: callee_block_refused (seq 0)';
+    const host = stubHost({ block: () => { throw { code: 'grant_paused', message: RAW }; } });
+    setLanguagePref(from);
+    try {
+      await openShell();
+      await ringAndAnswer(host);
+      await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+      expect($('[data-call-ended]')!.textContent).not.toContain(RAW);
+      setLanguagePref(to);
+      await vi.waitFor(() => expect($('[data-call-ended]')!.textContent).toBe(said));
+      expect($<HTMLDetailsElement>('[data-call-end-detail]')!.open).toBe(false);
+      expect($('[data-call-end-detail]')!.textContent).toContain(RAW);
+    } finally { setLanguagePref('en'); }
   });
 
   it('a budget with no room ends the call with its own plain reason, not as a failed payment', async () => {

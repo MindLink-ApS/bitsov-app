@@ -147,6 +147,10 @@ html[data-theme='light'] {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    /* Jump to the end value at the start. Without this, every element runs the
+       inherited `visibility` change too, and starts hidden: a just-opened
+       panel's controls would refuse focus for that first instant. */
+    transition-timing-function: step-start !important;
     scroll-behavior: auto !important;
   }
   .msg.fresh .bubble,
@@ -324,7 +328,7 @@ label.field input {
 .empty-track { animation: arrive var(--d-mid) var(--ease-out); margin: auto; max-width: 420px; text-align: center; display: flex; flex-direction: column; gap: var(--s-3); align-items: center; }
 .empty-track h2 { font-family: var(--font-display); font-weight: 400; font-size: var(--t-3xl); }
 
-/* composer: Claude-like single bar */
+/* composer: single bar */
 .composer { border-top: 1px solid var(--line); padding: var(--s-3) var(--s-4) var(--s-4); display: flex; flex-direction: column; align-items: center; gap: var(--s-2); background: var(--bg); width: 100%; flex: none; z-index: 2; }
 .composer textarea { resize: none; min-height: 40px; max-height: 160px; border-radius: 18px; overflow-y: auto; }
 .composer-plus-wrap { position: relative; flex: none; display: flex; }

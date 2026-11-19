@@ -1,4 +1,5 @@
 import { t } from './i18n';
+import { hostText } from './control/hostCopy';
 import { invoke } from '@tauri-apps/api/core';
 import { PhoneTrust } from './onboarding/PhoneTrust';
 import { PhoneOnboarding } from './onboarding/PhoneOnboarding';
@@ -14,7 +15,7 @@ import { softenError } from './control/userFacing';
 import { SoftError } from './control/SoftError';
 import { DelayedSpinner } from './control/DelayedSpinner';
 import { isMoneyNotReady } from './control/readiness';
-import { createEffect, createMemo, createSignal, onCleanup, onMount, Show, type ParentProps } from 'solid-js';
+import { createEffect, createMemo, createSignal, on, onCleanup, onMount, Show, type ParentProps } from 'solid-js';
 import { qrSvg } from './qr';
 import { Onboarding, type NodeTarget } from './onboarding/Onboarding';
 import { FIRST_RUN_PHONE_MESSAGE, INITIAL_PAIRING, type NodeStatus, type PairingView } from './onboarding/pairing';
@@ -459,7 +460,7 @@ function AppScreen() {
     </div>
     <div data-app-screen inert={pairingRequest() !== null} style={{ display: 'contents' }}>
     <Show when={status().local_owner && status().owner_warning}>
-      <aside role="alert" class="panel" data-owner-warning>{status().owner_warning}</aside>
+      <aside role="alert" class="panel" data-owner-warning>{hostText(status().owner_warning!)}</aside>
     </Show>
     <Show when={showRemember()}>
       <RememberUnlock mobile={onPhone} platform={platform} onChoose={async (remember) => {
@@ -583,11 +584,29 @@ function IdentityGate(props: {
   const [busy, setBusy] = createSignal(false);
   const [savingTrust, setSavingTrust] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  // A failed save of the G6 acknowledgement: plain summary, raw text only in Details.
+  const [trustError, setTrustError] = createSignal<string | null>(null);
   const [restored, setRestored] = createSignal<string | null>(null);
   usePairingActivity(() => showRestore() || busy() || savingTrust());
+  // Only the latest Continue may report a failed save. A restore or a new trust
+  // boundary bumps this, so an acknowledgement still in flight cannot write later.
+  let trustAttempt = 0;
+  const dropTrustError = () => { trustAttempt++; setTrustError(null); };
+  // A failed save belongs to one trust boundary; a new mode or node id asks afresh.
+  // Polls hand over fresh status/pairing objects every tick, so compare the values:
+  // the memo only notifies on a real change. A briefly missing node id keeps the last one.
+  let lastNodeId: string | null = null;
+  const trustBoundary = createMemo(() => {
+    const id = props.nodeId()?.toLowerCase() ?? null;
+    if (id) lastNodeId = id;
+    return `${props.remote ? 'remote' : 'local'}.${lastNodeId ?? ''}`;
+  });
+  createEffect(on(trustBoundary, dropTrustError, { defer: true }));
 
   const submitRestore = async (event: Event) => {
     event.preventDefault();
+    // A restore replaces the identity the failed acknowledgement was for.
+    dropTrustError();
     // Read once, then clear immediately: the phrase lives in this component for the
     // duration of the call and nowhere else. The host forwards it to the node.
     const value = phrase();
@@ -640,42 +659,33 @@ function IdentityGate(props: {
         when={props.remote}
         fallback={
           <section class="panel disclosure" data-gate="g6-local-trust">
-            <h2>Local trust — read this before you deposit</h2>
-            <p>Your node is only reachable while this Mac is awake and BitSov is open.</p>
+            <h2>{t('obLocalTrustTitle')}</h2>
+            <p>{t('obLocalTrustAwake')}</p>
             <p>
-              This node trusts every program on this computer. Anything running under your user
-              account can ask it for full access over <code>127.0.0.1</code> — enough to spend what
-              you deposit and read your history. Only fund a node on a machine you control.
+              {t('obLocalTrustProgramsBefore')} <code>127.0.0.1</code> {t('obLocalTrustProgramsAfter')}
             </p>
-            <p>
-              Your keys stay in the node. BitSov never shows you your recovery phrase and never
-              copies it anywhere.
-            </p>
+            <p>{t('obTrustKeysStay')}</p>
           </section>
         }
       >
         <section class="panel disclosure" data-gate="g6-remote-trust">
-          <h2>Remote trust — read this before you deposit</h2>
-          <p>
-            This node’s keys live on the remote machine. Anyone with access —
-            whoever can log in to that computer — can spend what you deposit. Only fund a node whose host you trust.
-          </p>
-          <p>
-            Your keys stay in the node. BitSov never shows you your recovery phrase and never
-            copies it anywhere.
-          </p>
+          <h2>{t('obRemoteTrustTitle')}</h2>
+          <p>{t('obRemoteTrustBody')}</p>
+          <p>{t('obTrustKeysStay')}</p>
         </section>
       </Show>
 
       <Show when={!props.bootstrap}>
-      <button class="primary" disabled={busy() || savingTrust()} onClick={async () => {
+      <button class="primary" data-trust-continue disabled={busy() || savingTrust()} onClick={async () => {
         setSavingTrust(true);
         setError(null);
+        dropTrustError();
+        const attempt = trustAttempt;
         try { await props.onContinue(); }
-        catch (e) { setError(String(e)); }
+        catch (e) { if (attempt === trustAttempt) setTrustError(String(e)); }
         finally { setSavingTrust(false); }
       }}>
-        I understand — continue to funding
+        {t('obTrustContinue')}
       </button>
       </Show>
 
@@ -726,6 +736,9 @@ function IdentityGate(props: {
       </Show>
       </Show>
 
+      <Show when={trustError()}>
+        <SoftError message={trustError()!} summary={t('obTrustSaveRetry')} />
+      </Show>
       <Show when={displayError()}>
         <SoftError message={displayError()!} />
       </Show>
@@ -745,7 +758,8 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
   const [addressError, setAddressError] = createSignal<string | null>(null);
   const [amount, setAmount] = createSignal(String(DEFAULT_FUNDING_SATS));
   const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
+  // `summary` is the plain sentence for a host failure; the raw text stays behind Details.
+  const [error, setError] = createSignal<{ message: string; summary?: 'obFundStateFailed' | 'obFundStartFailed' } | null>(null);
 
   const refresh = async () => {
     if (!props.ready()) return;
@@ -766,7 +780,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
         }
       }
     } catch (e) {
-      setError(String(e));
+      setError({ message: String(e), summary: 'obFundStateFailed' });
     }
   };
 
@@ -786,7 +800,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
     if (props.moneyBlocked?.()) return;
     const value = Number(amount());
     if (!Number.isInteger(value) || value < 1 || value > 4_294_967_295) {
-      setError(t('obWholeSats'));
+      setError({ message: t('obWholeSats') });
       return;
     }
     setBusy(true);
@@ -795,10 +809,18 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
       setFund(await props.source.fundStart(value));
       await refresh();
     } catch (e) {
-      setError(isMoneyNotReady(e) ? null : String(e));
+      setError(isMoneyNotReady(e) ? null : { message: String(e), summary: 'obFundStartFailed' });
     } finally {
       setBusy(false);
     }
+  };
+
+  // The interval above stops reading once the node reports funded, so a status
+  // failure in that state must not promise an automatic retry.
+  const errorSummary = () => {
+    const summary = error()?.summary;
+    if (!summary) return undefined;
+    return t(summary === 'obFundStateFailed' && fund()?.funded ? 'obFundStateStopped' : summary);
   };
 
   const depositAddress = () => fund()?.funding_address ?? address()?.address ?? null;
@@ -905,7 +927,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
 
 
       <Show when={error()}>
-        <SoftError message={error()!} />
+        <SoftError message={error()!.message} summary={errorSummary()} />
       </Show>
     </div>
   );
