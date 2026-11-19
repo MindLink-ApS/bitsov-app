@@ -4587,7 +4587,9 @@ function AttachmentCard(props: { attachment: Attachment }) {
       const bin = atob(props.attachment.b64);
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      const u = URL.createObjectURL(new Blob([bytes], { type: props.attachment.mime ?? 'application/octet-stream' }));
+      // Always plain bytes: a sender-chosen type (text/html, image/svg+xml) would let the
+      // webview render the file with this app's origin instead of saving it.
+      const u = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
       setUrl(u);
       (e.currentTarget as HTMLAnchorElement).href = u;
     } catch {

@@ -399,4 +399,26 @@ describe('P1-17: a file, never a base64 blob', () => {
     expect(card.querySelector('[data-attachment-save]')!.textContent).toBe(save);
     expect($('[data-message="m3"] [data-attachment-name]')!.textContent).toBe('photo.png');
   });
+
+  it('Save never hands the webview a sender-chosen type: an HTML or SVG attachment is saved as plain bytes', async () => {
+    const html = btoa('<html><script>alert(1)</script></html>');
+    const svg = btoa('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    const msg = (id: string, plaintext: string): Message => ({ id, kind: 1, sender: A, recipient: SAMPLE_OWN_ID, timestamp: 1, plaintext, payment_amount_msat: null });
+    source.messages = async (p: string) => (p.toLowerCase() === A ? [
+      msg('h', JSON.stringify({ filename: 'page.html', mime_type: 'text/html', data_b64: html })),
+      msg('s', JSON.stringify({ filename: 'pic.svg', mime_type: 'image/svg+xml', data_b64: svg })),
+    ] : []);
+    const made: Blob[] = [];
+    const create = vi.spyOn(URL, 'createObjectURL').mockImplementation((b) => { made.push(b as Blob); return `blob:test/${made.length}`; });
+    try {
+      await open(source);
+      await vi.waitFor(() => expect($('[data-message="s"] [data-attachment-save]')).not.toBeNull());
+      for (const id of ['h', 's']) $<HTMLAnchorElement>(`[data-message="${id}"] [data-attachment-save]`)!.click();
+      expect(made).toHaveLength(2);
+      for (const b of made) expect(b.type).toBe('application/octet-stream');
+    } finally {
+      create.mockRestore();
+    }
+  });
 });
