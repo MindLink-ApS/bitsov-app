@@ -27299,7 +27299,7 @@ mod control_act_tests {
 
     #[tokio::test]
     async fn call_budget_proposal_requires_a_safe_current_minute_price() {
-        for block in [None, Some(0), Some(u64::MAX), Some(control::MAX_SAFE_MSAT / 240 - 5_000)] {
+        for block in [None, Some(0), Some(u64::MAX), Some(control::MAX_SAFE_MSAT / control::CALL_MAX_BLOCKS - 5_000)] {
             let (node, _dir, _g1) = call_budget_node(block);
             assert_eq!(do_spend_request(&node.state, None, Some(A)).await.unwrap_err().code, "call_price_unknown");
             assert!(node.posts().is_empty());
