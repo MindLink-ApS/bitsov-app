@@ -4,7 +4,7 @@
 # throwaway GNUPGHOME under /tmp (short path — gpg-agent socket paths are length-limited).
 #
 # Covers the accept case and every refusal class GnuPG can report while STILL emitting
-# VALIDSIG (Codex P1 on PR #10): a different key, a revoked signing key (REVKEYSIG), an
+# VALIDSIG: a different key, a revoked signing key (REVKEYSIG), an
 # expired signing key (EXPKEYSIG), an expired signature (EXPSIG), a tampered file (BADSIG)
 # and a missing public key (NO_PUBKEY). Each case asserts the function's exit code AND the
 # printed reason. bash 3.2 compatible (macOS /bin/bash). Exit 1 on any failure.

@@ -2038,7 +2038,7 @@ mod tests {
         assert_eq!(room_sendable(&alone).unwrap_err().code, "room_unreachable");
     }
 
-    /// Codex's review fixture: a 21,000-msat regtest invoice signed by
+    /// A 21,000-msat regtest invoice signed by
     /// `CANONICAL_PAYEE`, and three re-encodings the node's parser accepts as
     /// that same invoice (a set padding bit in `p`, a leading zero word in `c`,
     /// a leading zero word in the features). Read from their raw words, each
