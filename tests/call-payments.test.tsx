@@ -693,6 +693,22 @@ describe('the call engine with paid minutes', () => {
     ({ status: vi.fn(async () => ok(node.status())), hold: vi.fn(hold ?? (async () => ok(node.status()))), pay });
   const answer = (e: ReturnType<typeof engine>) => e.engine.receive({ id: 'ans', kind: 401, sender: A, recipient: OWN, timestamp: 0, plaintext: JSON.stringify({ v: 1, call_id: ID, sdp: nodeRoutedSdp('answer', ID) }), payment_amount_msat: 1 }, OWN);
 
+  it('a refused Accept clears its short-approval line once a later Accept goes through', async () => {
+    const node = fakeNode({ now: () => Date.now() });
+    const grant: NodeGrantSummary = { budget_msat: 2_000_000, remaining_msat: 2_000_000, per_call_max_msat: 2_000_000, expires_at_ms: Date.now() + 5 * 60_000, envelopes: null } as NodeGrantSummary;
+    const e = engine(minutesOf(node, vi.fn()), undefined, grant);
+    await e.engine.receive({ id: 'off', kind: 400, sender: A, recipient: OWN, timestamp: 0,
+      plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 1 }, OWN);
+    await e.engine.accept(QUOTE);
+    expect(e.last()).toMatchObject({ phase: 'incoming' });
+    expect(e.last().error).toMatch(/ends in/);
+    grant.expires_at_ms = Date.now() + 86_400_000;   // the box owner approves a whole day
+    await e.engine.accept(QUOTE);
+    expect(e.signals.map((x) => x.kind)).toEqual([401]);
+    expect(e.last().phase).not.toBe('incoming');
+    expect(e.last().error ?? '').not.toMatch(/ends in/);
+  });
+
   it('the offer carries the minutes agreed before Ring, for the host to keep; never from an owner session', async () => {
     const node = fakeNode({ now: () => Date.now() });
     const e = engine(minutesOf(node, vi.fn()));
