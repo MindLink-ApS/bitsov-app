@@ -1134,7 +1134,8 @@ export function createCallEngine(deps: CallDeps) {
     if (deps.authorize && !await deps.authorize()) return;
     if (view.callId !== callId || view.phase !== 'incoming') return;
     clearTimeout(ringTimer);
-    set({ phase: 'connecting' });
+    // An earlier refused Accept may have left its reason on the card: this one goes ahead.
+    set({ phase: 'connecting', error: null });
     awaitConnect(callId!);
     const q = await deps.quote(view.peer!);
     if (view.callId !== callId || !active()) return;
