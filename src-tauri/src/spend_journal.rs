@@ -999,11 +999,14 @@ fn write_call_index(_dir: &Path, _record: &OperationRecord) -> Result<(), Action
 pub fn initialize_history(dir: &Path) -> Result<(), ActionError> {
     crate::private_fs::ensure_dir(dir).map_err(unknown)?;
     let marker = dir.join("call-index-v2");
+    // Checked on every start, with or without a marker.
+    for entry in std::fs::read_dir(dir).map_err(unknown)? {
+        if entry.map_err(unknown)?.file_name() != "call-index-v2" {
+            return Err(damaged_record());
+        }
+    }
     if !absent(&marker) {
         return crate::private_fs::verify_file(&marker).map_err(unknown);
-    }
-    if std::fs::read_dir(dir).map_err(unknown)?.next().is_some() {
-        return Err(damaged_record());
     }
     crate::private_fs::ensure_marker(&marker).map_err(unknown)
 }
@@ -1117,6 +1120,18 @@ mod windows_history_tests {
         initialize_history(&dir).unwrap();
         grant_everyone_read(&dir.join("call-index-v2"));
         assert!(initialize_history(&dir).is_err());
+        // A valid marker plus any other entry: refused, nothing written.
+        let marked = root.join("app-spend-marked");
+        initialize_history(&marked).unwrap();
+        let marker_bytes = std::fs::read(marked.join("call-index-v2")).unwrap();
+        std::fs::create_dir(marked.join("ops")).unwrap();
+        assert!(initialize_history(&marked).is_err());
+        std::fs::remove_dir(marked.join("ops")).unwrap();
+        std::fs::write(marked.join("spend-pending.json"), b"{}").unwrap();
+        assert!(initialize_history(&marked).is_err());
+        assert_eq!(std::fs::read(marked.join("call-index-v2")).unwrap(), marker_bytes);
+        assert_eq!(std::fs::read(marked.join("spend-pending.json")).unwrap(), b"{}");
+        assert_eq!(std::fs::read_dir(&marked).unwrap().count(), 2);
         // Any history object without the marker: refused, no marker written.
         let other = root.join("app-spend-2");
         crate::private_fs::ensure_dir(&other).unwrap();

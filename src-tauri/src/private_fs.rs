@@ -36,21 +36,10 @@ pub(crate) fn verify_file(path: &Path) -> io::Result<()> {
     win_private::open_verified(path, ObjectKind::File, Access::Read).map(drop)
 }
 
-/// Write `bytes` to a new scratch file `scratch`, read it back, and publish it
-/// as `dest` by handle, then flush the folder. A leftover `scratch` is refused
-/// (`AlreadyExists`), never reused or deleted.
-pub(crate) fn write_new(
-    scratch: &Path,
-    dest: &Path,
-    bytes: &[u8],
-    replace: bool,
-) -> io::Result<()> {
-    write_checked(scratch, dest, bytes, replace, |error| error, |_| Ok(()))
-}
-
-/// [`write_new`], with `check` run on the bytes read back through the scratch
-/// handle before anything is published. A failed check deletes only the
-/// scratch object this call created.
+/// Write `bytes` to a new scratch file `scratch`, run `check` on the bytes read
+/// back through the same handle, then publish it as `dest` by handle and flush
+/// the folder. A leftover `scratch` is refused (`AlreadyExists`), never reused
+/// or deleted; a failed check deletes only the scratch object this call made.
 pub(crate) fn write_checked<E>(
     scratch: &Path,
     dest: &Path,
@@ -76,6 +65,22 @@ pub(crate) fn write_checked<E>(
         return Err(error);
     }
     win_private::publish(file, dest, bytes, replace).map_err(io_error)
+}
+
+/// Replace `dest`: an existing object there must first verify (kind, reparse
+/// flag, link count, owner, access list) and is otherwise refused and left
+/// unchanged; then [`write_checked`] with replacement.
+pub(crate) fn write_replacing_verified<E>(
+    scratch: &Path,
+    dest: &Path,
+    bytes: &[u8],
+    io_error: impl Fn(io::Error) -> E,
+    check: impl FnOnce(&[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    if !crate::pairing::key::nothing_at(dest) {
+        verify_file(dest).map_err(&io_error)?;
+    }
+    write_checked(scratch, dest, bytes, true, io_error, check)
 }
 
 fn written(file: &mut VerifiedFile, bytes: &[u8]) -> io::Result<()> {

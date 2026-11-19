@@ -61,11 +61,12 @@ pub fn acknowledge(
     #[cfg(windows)]
     let save = || -> Result<(), Box<dyn std::error::Error>> {
         crate::pairing::key::restrict_dir(store)?;
-        crate::private_fs::write_new(
+        crate::private_fs::write_replacing_verified(
             &store.join(format!("{FILE}.tmp")),
             &store.join(FILE),
             &serde_json::to_vec(&ack)?,
-            true,
+            |error| error,
+            |_| Ok(()),
         )?;
         Ok(())
     };
@@ -113,6 +114,43 @@ mod windows_store_tests {
         junction(&link, &store);
         assert!(acknowledge(&link, "abcd", true, false).is_err());
         assert!(acknowledge(&foreign_owned_dir(), "abcd", true, false).is_err());
+    }
+
+    #[test]
+    fn a_tampered_acknowledgement_is_never_overwritten() {
+        if elevated() {
+            return;
+        }
+        // Extra access entry on the existing acknowledgement.
+        let store = temp_root("trust-overwrite-acl").join("app-client");
+        acknowledge(&store, "aaaa", true, false).unwrap();
+        let path = store.join(FILE);
+        let bytes = std::fs::read(&path).unwrap();
+        grant_everyone_read(&path);
+        assert!(acknowledge(&store, "bbbb", true, false).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(crate::pairing::key::nothing_at(&store.join(format!("{FILE}.tmp"))));
+
+        // An ordinary file that inherits its access list.
+        let store = temp_root("trust-overwrite-plain").join("app-client");
+        acknowledge(&store, "aaaa", true, false).unwrap();
+        let path = store.join(FILE);
+        let planted = store.join("planted");
+        std::fs::write(&planted, b"planted").unwrap();
+        std::fs::rename(&planted, &path).unwrap();
+        assert!(acknowledge(&store, "bbbb", true, false).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"planted");
+
+        // A second name for another file (hard link).
+        let store = temp_root("trust-overwrite-link").join("app-client");
+        acknowledge(&store, "aaaa", true, false).unwrap();
+        let path = store.join(FILE);
+        let bytes = std::fs::read(&path).unwrap();
+        let alias = store.join("alias");
+        std::fs::hard_link(&path, &alias).unwrap();
+        assert!(acknowledge(&store, "bbbb", true, false).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::read(&alias).unwrap(), bytes);
     }
 }
 

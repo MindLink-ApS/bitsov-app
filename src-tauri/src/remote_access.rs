@@ -919,10 +919,6 @@ fn stored_bytes(
     sealer: Option<&dyn Sealer>,
 ) -> Result<Vec<u8>, RemoteError> {
     let Some(sealer) = sealer else {
-        // Windows never stores a plaintext pairing code.
-        if cfg!(windows) {
-            return Err(RemoteError::Local(pairing::key::NO_PROTECTED_STORAGE.into()));
-        }
         return serde_json::to_vec(descriptor)
             .map_err(|_| RemoteError::Local("cannot serialize remote descriptor".into()));
     };
@@ -953,26 +949,6 @@ fn stored_bytes(
         hosted_by: descriptor.hosted_by.clone(),
     })
     .map_err(|_| RemoteError::Local("cannot serialize remote descriptor".into()))
-}
-
-#[cfg(all(test, windows))]
-mod windows_tests {
-    use super::*;
-
-    #[test]
-    fn no_sealer_never_serializes_the_code() {
-        let descriptor: RemoteDescriptor = serde_json::from_value(serde_json::json!({
-            "v": 1, "endpoint": "https://node.example:8443", "node_id": "node",
-            "transport_pubkey": "00", "transport_signature": "00", "code": "one-time",
-        }))
-        .unwrap();
-        let error = stored_bytes(&descriptor, None).unwrap_err();
-        assert!(error.to_string().contains(pairing::key::NO_PROTECTED_STORAGE), "{error}");
-        let dir = std::env::temp_dir().join(format!("bitsov-no-sealer-ra-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(persist_with(&dir.join("descriptor.json"), &descriptor, None).is_err());
-        assert!(pairing::key::nothing_at(&dir));
-    }
 }
 
 /// Restore the plaintext code from `sealed_code`. Returns whether the file
@@ -1007,65 +983,6 @@ fn open_sealed_code(
         .map_err(|_| RemoteError::Local("the remote access descriptor is corrupt".into()))?;
     stored.code = Some(code.to_owned());
     Ok((stored, false))
-}
-
-/// The descriptor file's bytes. Unix keeps the plain path read; Windows reads
-/// through one verified handle, bounded by the link limit.
-#[cfg(not(windows))]
-fn read_descriptor_file(path: &Path) -> std::io::Result<Vec<u8>> {
-    std::fs::read(path)
-}
-
-#[cfg(windows)]
-fn read_descriptor_file(path: &Path) -> std::io::Result<Vec<u8>> {
-    crate::private_fs::read(path, MAX_LINK_BYTES as u64).map(|bytes| bytes.to_vec())
-}
-
-/// Windows: an existing descriptor must verify before it is replaced; the new
-/// one is written to a new private scratch file, read back through the same
-/// handle (including the sealed code), and published by handle.
-#[cfg(windows)]
-fn persist_with(
-    path: &Path,
-    descriptor: &RemoteDescriptor,
-    sealer: Option<&dyn Sealer>,
-) -> Result<(), RemoteError> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| RemoteError::Local("remote config has no parent directory".into()))?;
-    pairing::key::restrict_dir(dir).map_err(|e| RemoteError::Local(e.to_string()))?;
-    if !pairing::key::nothing_at(path) {
-        crate::private_fs::verify_file(path).map_err(|e| {
-            RemoteError::Local(format!("cannot use the saved remote access descriptor: {e}"))
-        })?;
-    }
-    let bytes = stored_bytes(descriptor, sealer)?;
-    if bytes.len() > MAX_LINK_BYTES {
-        return Err(RemoteError::Local(
-            "the remote access descriptor is oversized".into(),
-        ));
-    }
-    crate::private_fs::write_checked(
-        &dir.join(format!("{REMOTE_CONFIG_FILE}.tmp")),
-        path,
-        &bytes,
-        true,
-        |error| RemoteError::Local(format!("cannot persist remote descriptor: {error}")),
-        |readback| {
-            if sealer.is_some() && descriptor.code.is_some() {
-                let stored = serde_json::from_slice(readback).map_err(|_| {
-                    RemoteError::Local("cannot verify protected pairing code".into())
-                })?;
-                let (opened, _) = open_sealed_code(stored, sealer)?;
-                if opened.code != descriptor.code {
-                    return Err(RemoteError::Local(
-                        "protected pairing code does not reopen to the same code".into(),
-                    ));
-                }
-            }
-            Ok(())
-        },
-    )
 }
 
 #[cfg(not(windows))]
@@ -1121,6 +1038,19 @@ fn persist_with(
     }
     Ok(())
 }
+
+/// The descriptor file's bytes; unchanged path read outside Windows.
+#[cfg(not(windows))]
+fn read_descriptor_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path)
+}
+
+/// Windows: the descriptor on the private-file layer.
+#[cfg(windows)]
+#[path = "remote_access/windows_store.rs"]
+mod windows_store;
+#[cfg(windows)]
+use windows_store::{persist_with, read_descriptor_file};
 
 /// Validate with the same parser as import, without storage or network access.
 pub fn preview_pairing_link(link: &str) -> Result<RemotePreviewView, RemoteError> {

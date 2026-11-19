@@ -243,13 +243,13 @@ const MAX_RECORD_BYTES: u64 = 64 * 1024;
 #[cfg(windows)]
 fn save_record(store: &Path, record: &Record) -> Result<(), PairError> {
     let text = serde_json::to_vec(record).expect("record serializes");
-    crate::private_fs::write_new(
+    crate::private_fs::write_replacing_verified(
         &store.join(format!("{RECORD_FILE}.tmp")),
         &store.join(RECORD_FILE),
         &text,
-        true,
+        |e| PairError::Local(format!("cannot write the pairing record: {e}")),
+        |_| Ok(()),
     )
-    .map_err(|e| PairError::Local(format!("cannot write the pairing record: {e}")))
 }
 
 #[cfg(not(windows))]
@@ -557,6 +557,9 @@ mod windows_store_tests {
         let bytes = std::fs::read(&path).unwrap();
         grant_everyone_read(&path);
         assert!(load_record(&store, &key).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // ...and the tampered record is not overwritten either.
+        assert!(save_remote_record(&store, &key, "client-4".into(), vec![]).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         // Reparse point at the record name.
         let other = root.join("other");

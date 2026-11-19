@@ -96,6 +96,10 @@ mod local_owner;
 mod owner_password;
 #[path = "home_keychain.rs"]
 mod home_keychain;
+/// Windows: public home-node records on the private-file layer.
+#[cfg(windows)]
+#[path = "home_keychain_windows.rs"]
+mod home_keychain_windows;
 #[cfg(all(desktop, not(feature = "mobile")))]
 #[path = "remote_owner.rs"]
 mod remote_owner;
@@ -12007,7 +12011,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
                 bitsov_ffi::win_private::elevation_gate().map_err(|error| error.to_string())?;
                 bitsov_app::at_rest::install_windows(&app.config().identifier)?;
                 let data_dir = app.path().app_data_dir()?;
-                home_keychain::set_windows_pairing_store(&data_dir.join(PAIRING_STORE_DIR))?;
+                home_keychain_windows::set_pairing_store(&data_dir.join(PAIRING_STORE_DIR))?;
             }
             // Install the immutable profile policy before any commands or tasks run.
             crate::profile::install(&app.config().identifier)?;

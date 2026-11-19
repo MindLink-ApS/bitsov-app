@@ -44,7 +44,7 @@ fn store(
     #[cfg(windows)]
     {
         let _ = name;
-        windows_store(windows_root()?, node, suffix, bytes, secret, device_blob)
+        super::home_keychain_windows::store(node, suffix, bytes, secret, device_blob)
     }
     #[cfg(not(any(
         windows,
@@ -105,7 +105,7 @@ fn read(
     #[cfg(windows)]
     {
         let _ = name;
-        windows_read(windows_root()?, node, suffix, secret, device_blob)
+        super::home_keychain_windows::read(node, suffix, secret, device_blob)
     }
     #[cfg(not(any(
         windows,
@@ -116,156 +116,6 @@ fn read(
     {
         let _ = (name, secret, device_blob);
         Err("Home-node unlock requires protected device storage.".into())
-    }
-}
-
-/// Windows keeps only the two public home-node records, as owner-only files
-/// under `app-client/home-node-store-v1/<blake3(node)>/`. Secrets, device
-/// blobs and every other item still require protected device storage.
-#[cfg(windows)]
-static WINDOWS_PAIRING_STORE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-
-/// Set once at startup to the private pairing folder (`app-client`).
-#[cfg(windows)]
-pub fn set_windows_pairing_store(store: &std::path::Path) -> Result<(), String> {
-    WINDOWS_PAIRING_STORE
-        .set(store.to_path_buf())
-        .map_err(|_| "Home-node storage was set up twice.".into())
-}
-
-#[cfg(windows)]
-fn windows_root() -> Result<&'static std::path::Path, String> {
-    WINDOWS_PAIRING_STORE
-        .get()
-        .map(|path| path.as_path())
-        .ok_or_else(|| "Home-node unlock requires protected device storage.".into())
-}
-
-#[cfg(windows)]
-const WINDOWS_RECORD_BYTES: u64 = 16384;
-
-/// The record's folder and file, or the usual refusal for anything that is
-/// not one of the two public records.
-#[cfg(windows)]
-fn windows_record(
-    store: &std::path::Path,
-    node: &str,
-    suffix: &str,
-    secret: bool,
-    device_blob: Option<&[u8]>,
-) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
-    service(node, suffix)?;
-    if secret || device_blob.is_some() || !matches!(suffix, "box-transport" | "unlock-binding") {
-        return Err("Home-node unlock requires protected device storage.".into());
-    }
-    let dir = store
-        .join("home-node-store-v1")
-        .join(blake3::hash(node.as_bytes()).to_hex().as_str());
-    let file = dir.join(format!("{suffix}.json"));
-    Ok((dir, file))
-}
-
-#[cfg(windows)]
-fn windows_store(
-    store: &std::path::Path,
-    node: &str,
-    suffix: &str,
-    bytes: &[u8],
-    secret: bool,
-    device_blob: Option<&[u8]>,
-) -> Result<(), String> {
-    let (dir, file) = windows_record(store, node, suffix, secret, device_blob)?;
-    if bytes.is_empty() || bytes.len() as u64 > WINDOWS_RECORD_BYTES {
-        return Err("Invalid home-node item.".into());
-    }
-    let refused = |_| "Could not save the home-node item in private storage.".to_string();
-    // Each level gets its own protected descriptor; none is inherited.
-    for level in [store.to_path_buf(), store.join("home-node-store-v1"), dir.clone()] {
-        crate::private_fs::ensure_dir(&level).map_err(refused)?;
-    }
-    crate::private_fs::write_new(&dir.join(format!("{suffix}.json.tmp")), &file, bytes, true).map_err(refused)
-}
-
-#[cfg(windows)]
-fn windows_read(
-    store: &std::path::Path,
-    node: &str,
-    suffix: &str,
-    secret: bool,
-    device_blob: Option<&[u8]>,
-) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-    let (_, file) = windows_record(store, node, suffix, secret, device_blob)?;
-    crate::private_fs::read_optional(&file, WINDOWS_RECORD_BYTES)
-        .map_err(|_| "Could not read the home-node item from private storage.".into())
-}
-
-#[cfg(all(test, windows))]
-mod windows_tests {
-    use super::*;
-
-    const NODE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
-    fn elevated() -> bool {
-        bitsov_ffi::win_private::elevation_gate().is_err()
-    }
-
-    fn store_dir(name: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("bitsov-home-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        root.join("app-client")
-    }
-
-    #[test]
-    fn public_records_round_trip_and_secrets_stay_refused() {
-        if elevated() {
-            return;
-        }
-        let store = store_dir("round-trip");
-        for suffix in ["box-transport", "unlock-binding"] {
-            assert!(windows_read(&store, NODE, suffix, false, None).unwrap().is_none());
-            windows_store(&store, NODE, suffix, b"{\"v\":1}", false, None).unwrap();
-            windows_store(&store, NODE, suffix, b"{\"v\":2}", false, None).unwrap();
-            assert_eq!(windows_read(&store, NODE, suffix, false, None).unwrap().unwrap().as_slice(), b"{\"v\":2}");
-        }
-        for (suffix, secret, blob) in [
-            ("seed-password", true, None),
-            ("box-transport", true, None),
-            ("unlock-binding", false, Some(&b"blob"[..])),
-            ("other", false, None),
-        ] {
-            assert!(windows_store(&store, NODE, suffix, b"x", secret, blob).is_err());
-            assert!(windows_read(&store, NODE, suffix, secret, blob).is_err());
-        }
-        assert!(windows_store(&store, "not-a-node", "box-transport", b"x", false, None).is_err());
-    }
-
-    #[test]
-    fn a_tampered_record_is_refused_and_left_unchanged() {
-        if elevated() {
-            return;
-        }
-        let store = store_dir("tampered");
-        windows_store(&store, NODE, "box-transport", b"{}", false, None).unwrap();
-        let (dir, file) = windows_record(&store, NODE, "box-transport", false, None).unwrap();
-        // Replace the record with an ordinary file, which inherits its access list.
-        std::fs::remove_file(&file).unwrap();
-        std::fs::write(&file, b"planted").unwrap();
-        assert!(windows_read(&store, NODE, "box-transport", false, None).is_err());
-        assert_eq!(std::fs::read(&file).unwrap(), b"planted");
-        // Extra access entry on a record this layer wrote.
-        windows_store(&store, NODE, "unlock-binding", b"{}", false, None).unwrap();
-        let (_, binding) = windows_record(&store, NODE, "unlock-binding", false, None).unwrap();
-        crate::private_fs::fixtures::grant_everyone_read(&binding);
-        assert!(windows_read(&store, NODE, "unlock-binding", false, None).is_err());
-        assert_eq!(std::fs::read(&binding).unwrap(), b"{}");
-        // Wrong owner: a system folder is never accepted as the store.
-        let foreign = crate::private_fs::fixtures::foreign_owned_dir();
-        assert!(windows_store(&foreign, NODE, "box-transport", b"{}", false, None).is_err());
-        // A leftover scratch file blocks a save instead of being reused.
-        std::fs::write(dir.join("unlock-binding.json.tmp"), b"leftover").unwrap();
-        assert!(windows_store(&store, NODE, "unlock-binding", b"{}", false, None).is_err());
-        assert_eq!(std::fs::read(dir.join("unlock-binding.json.tmp")).unwrap(), b"leftover");
     }
 }
 
