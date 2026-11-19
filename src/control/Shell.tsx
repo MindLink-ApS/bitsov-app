@@ -521,7 +521,8 @@ export function ControlCenter(props: Props) {
   // The app opens where it was left: the last person or room, not an empty chat.
   createEffect(() => {
     const t = track();
-    if (t?.kind === 'peer' || t?.kind === 'bound') writeLastTrack(t);
+    const node = ownId();
+    if ((t?.kind === 'peer' || t?.kind === 'bound') && node) writeLastTrack(node, t);
   });
   const [quote, setQuote] = createSignal<PriceQuote | null>(null);
   const [quoteError, setQuoteError] = createSignal<string | undefined>();
@@ -783,16 +784,28 @@ export function ControlCenter(props: Props) {
   const loadPeers = () => attempt('peers', () => source.peers(), (value) => {
     setPeers(value);
     setPeersLoaded(true);
-    if (!track() && !phoneLayout()) {
-      const last = readLastTrack();
-      if (last?.kind === 'peer' && value.some((p) => p.node_id.toLowerCase() === last.id)) setTrack(last);
-      else if (last?.kind === 'bound' && localRooms().some((r) => r.id === last.id)) setTrack(last);
-      else {
-        const first = value.find((p) => p.connected) ?? value[0];
-        if (first) setTrack({ kind: 'peer', id: first.node_id.toLowerCase() });
-      }
-    }
+    if (!track() && !phoneLayout()) openAtStart(value);
   });
+  /**
+   * Opens where the owner left off on this node: the saved person while they are
+   * still a contact, or the saved room only once this node is known to take rooms.
+   * Otherwise the first connected contact, as before.
+   */
+  const openAtStart = (list: Peer[]) => {
+    const last = readLastTrack(ownId());
+    // A saved room waits for the node's capabilities; a failed read counts as no rooms.
+    if (last?.kind === 'bound' && overview() === null && !errors.overview) return;
+    if (last?.kind === 'peer' && list.some((p) => p.node_id.toLowerCase() === last.id)) setTrack(last);
+    else if (last?.kind === 'bound' && nodeRooms() && localRooms().some((r) => r.id === last.id)) setTrack(last);
+    else {
+      const first = list.find((p) => p.connected) ?? list[0];
+      if (first) setTrack({ kind: 'peer', id: first.node_id.toLowerCase() });
+    }
+  };
+  // A start that waited on the node's capabilities resolves once they arrive.
+  createEffect(on([overview, () => errors.overview], ([o, failed]) => {
+    if ((o || failed) && !track() && !phoneLayout() && peersLoaded()) untrack(() => openAtStart(peers()));
+  }, { defer: true }));
   const loadRooms = () => attempt('rooms', () => source.rooms(), setRooms);
   const loadWallet = () => attempt('wallet', () => source.wallet(), value => { watchWalletAt = Date.now(); setWallet(value); });
   const loadSpend = () => attempt('spendPoll', () => source.spendStatus(), (value) => {
@@ -3128,19 +3141,21 @@ function Rail(props: {
 
 const LAST_TRACK_KEY = 'bitsov.lastTrack';
 
-/** The last opened person or room, on this device only. */
-function readLastTrack(): TrackRef | null {
+/** The last opened person or room on this node, kept on this device only. */
+function readLastTrack(node: string): TrackRef | null {
+  if (!node) return null;
   try {
     const v: unknown = JSON.parse(localStorage.getItem(LAST_TRACK_KEY) ?? 'null');
     if (!v || typeof v !== 'object') return null;
-    const { kind, id } = v as { kind?: unknown; id?: unknown };
+    const { node: savedFor, kind, id } = v as { node?: unknown; kind?: unknown; id?: unknown };
+    if (typeof savedFor !== 'string' || savedFor.toLowerCase() !== node.toLowerCase()) return null;
     if ((kind === 'peer' || kind === 'bound') && typeof id === 'string' && id) return { kind, id: kind === 'peer' ? id.toLowerCase() : id };
   } catch { /* private mode or a damaged value */ }
   return null;
 }
 
-function writeLastTrack(t: TrackRef & { id: string }) {
-  try { localStorage.setItem(LAST_TRACK_KEY, JSON.stringify({ kind: t.kind, id: t.id })); } catch { /* private mode */ }
+function writeLastTrack(node: string, t: TrackRef & { id: string }) {
+  try { localStorage.setItem(LAST_TRACK_KEY, JSON.stringify({ node, kind: t.kind, id: t.id })); } catch { /* private mode */ }
 }
 
 function TrackHead(props: {
@@ -3764,7 +3779,9 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   };
   const disarm = (refocus = true) => {
     const media = armed();
-    dialogRead++;
+    // Cancel drops only this opening's own re-read. The first price read is not
+    // the dialog's: it keeps going, so a reopened confirm gets its price.
+    if (refreshing()) dialogRead++;
     setRefreshing(false);
     setArmed(null);
     if (refocus && media) wrap?.querySelector<HTMLButtonElement>(`[data-call="${media}"]`)?.focus();

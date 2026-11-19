@@ -5,6 +5,7 @@ import { sampleSource, SAMPLE_OWN_ID } from '../src/control/sample';
 import { nodePill, peerName } from '../src/control/state';
 import { attachmentOf, fileNameOf } from '../src/control/voice';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
+import { newRoom, rememberRoom, resetRooms } from '../src/control/room';
 import { setLanguagePref } from '../src/i18n';
 import type { Message, NodeOverview, Peer } from '../src/control/types';
 import type { Source } from '../src/control/source';
@@ -164,9 +165,30 @@ describe('P1-12: the call confirm stays open while it fetches the price', () => 
   });
 });
 
+describe('P1-12: a confirm closed during the first price read', () => {
+  it('still gets that price when reopened (app-to-app calls)', async () => {
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    const real = source.callQuote.bind(source);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    source.callQuote = async (p: string) => { await gate; return real(p); };
+    await open(source);
+    await vi.waitFor(() => expect($('[data-call="audio"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    expect($('[data-call-confirm-box="audio"]')).not.toBeNull();
+    $<HTMLButtonElement>('[data-call-confirm-cancel]')!.click();
+    expect($('[data-call-confirm-box]')).toBeNull();
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    expect($('[data-call-fetching]')).toBeNull();
+  });
+});
+
 describe('P1-15: opens the last conversation', () => {
   it('reopens the conversation that was open last time', async () => {
-    localStorage.setItem('bitsov.lastTrack', JSON.stringify({ kind: 'peer', id: B }));
+    localStorage.setItem('bitsov.lastTrack', JSON.stringify({ node: SAMPLE_OWN_ID, kind: 'peer', id: B }));
     await open();
     await vi.waitFor(() => expect($(`[data-track="peer:${B}"]`)?.getAttribute('aria-current')).toBe('true'));
     expect($(`[data-track="peer:${A}"]`)!.getAttribute('aria-current')).toBe('false');
@@ -175,7 +197,37 @@ describe('P1-15: opens the last conversation', () => {
   it('remembers the conversation you open', async () => {
     await open();
     $<HTMLButtonElement>(`[data-track="peer:${B}"]`)!.click();
-    await vi.waitFor(() => expect(JSON.parse(localStorage.getItem('bitsov.lastTrack') ?? 'null')).toEqual({ kind: 'peer', id: B }));
+    await vi.waitFor(() => expect(JSON.parse(localStorage.getItem('bitsov.lastTrack') ?? 'null')).toEqual({ node: SAMPLE_OWN_ID, kind: 'peer', id: B }));
+  });
+
+  it('does not reopen a conversation saved under another node', async () => {
+    localStorage.setItem('bitsov.lastTrack', JSON.stringify({ node: 'f'.repeat(64), kind: 'peer', id: B }));
+    await open();
+    await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
+    expect($(`[data-track="peer:${B}"]`)!.getAttribute('aria-current')).toBe('false');
+  });
+
+  it.each([
+    ['without', false],
+    ['with', true],
+  ] as const)('a saved room on a node %s rooms: reopened only when this node supports rooms', async (_label, rooms) => {
+    resetRooms();
+    const room = rememberRoom(await newRoom(SAMPLE_OWN_ID, [A]))!;
+    localStorage.setItem('bitsov.lastTrack', JSON.stringify({ node: SAMPLE_OWN_ID, kind: 'bound', id: room.id }));
+    const source = sampleSource({ firstLiveMs: 1e9, rooms });
+    const thread = vi.spyOn(source, 'roomThread');
+    try {
+      await open(source);
+      if (rooms) {
+        await vi.waitFor(() => expect($(`[data-track="bound:${room.id.toLowerCase()}"]`)?.getAttribute('aria-current')).toBe('true'));
+      } else {
+        await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
+        await new Promise((r) => setTimeout(r, 30));
+        expect(thread).not.toHaveBeenCalled();
+      }
+    } finally {
+      resetRooms();
+    }
   });
 });
 
@@ -213,6 +265,44 @@ describe('P1-17: a file, never a base64 blob', () => {
   // 200 bytes: the size a card shows is the decoded size, not the text length.
   const blob = btoa(String.fromCharCode(...Array.from({ length: 200 }, (_, i) => (i * 37) % 256)));
   const record = JSON.stringify({ filename: 'photo.png', mime_type: 'image/png', data_b64: blob });
+
+  // Ordinary text must never become a file: when in doubt, it stays text.
+  const ordinary = [
+    'Hello please call me when you get home I have some news about the plans for our lovely weekend away',
+    'HellopleasecallmewhenyougethomeIhavesomenewsabouttheplansforourlovelyweekendawayandthenwecantalk',
+    'Hej mor jeg ringer i morgen tidlig og så kan vi snakke om weekenden og hvad vi skal spise til middag',
+    'HejMorJegRingerIMorgenTidligOgSaaKanViSnakkeOmWeekendenOgHvadViSkalSpiseTilMiddagPaaLoerdagAften',
+    'https://example.com/a/very/long/path/with/Many/Segments/AndQuery?x=1&y=2&z=3&w=4&v=5&u=6&t=7&s=8',
+    'Pneumonoultramicroscopicsilicovolcanoconiosis'.repeat(3),
+    'HahaHaha'.repeat(20),
+    'abc123ABC'.repeat(20),
+    'Room42Kitchen7Garden3Window9Door1Chair5Table8Lamp2Sofa6Rug4Shelf0Plant'.repeat(2),
+    'ab'.repeat(64),
+    'AB'.repeat(64),
+    'a'.repeat(64) + 'b'.repeat(64),
+    'lnbc2500u1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpuaztrnwngzn3kdzw5hydlzf03qdgm2hdq27cqv3agm2awhz5se903vruatfhq77w3ls4evs3ch9zw97j25emudupq63nyw24cg27h2rspfj9srp',
+    'Tak for i går! Det var dejligt at se jer alle sammen. Kys og kram fra os begge to, vi ses snart igen.',
+    'OK',
+  ];
+
+  it.each(ordinary.map((t, i) => [i, t] as const))('ordinary text %i stays text', (_i, text) => {
+    expect(attachmentOf(text)).toBeNull();
+  });
+
+  it('shows an ordinary long sentence as text, not a File card', async () => {
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    const words = ordinary[0];
+    source.messages = async (p: string) => (p.toLowerCase() === A ? [{ id: 'w1', kind: 1, sender: A, recipient: SAMPLE_OWN_ID, timestamp: 1, plaintext: words, payment_amount_msat: null }] : []);
+    await open(source);
+    await vi.waitFor(() => expect($('[data-message="w1"]')).not.toBeNull());
+    expect($('[data-message="w1"] [data-attachment-card]')).toBeNull();
+    expect($('[data-message="w1"]')!.textContent).toContain(words);
+  });
+
+  it('still finds real base64 bytes, including line-wrapped', () => {
+    const wrapped = blob.match(/.{1,76}/g)!.join('\n');
+    expect(attachmentOf(wrapped)).toMatchObject({ size: 200 });
+  });
 
   it('never names a file after its payload', () => {
     expect(fileNameOf(blob)).toBeNull();

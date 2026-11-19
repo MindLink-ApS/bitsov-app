@@ -78,13 +78,21 @@ export function fileNameOf(plaintext: string | null): string | null {
 
 const DATA_URI = /^data:([\w.+-]+\/[\w.+-]+)?(?:;[\w=.+-]+)*;base64,([A-Za-z0-9+/\s]+={0,2})$/;
 
-/** The base64 alphabet only, long enough to be a payload, and not a node id, an invoice or a word. */
+/**
+ * Bare text read as file bytes only when nothing else fits: one unbroken run of
+ * the base64 alphabet (line wraps allowed, never a space), long, with the mix
+ * random bytes give (upper, lower, digits) and a `+`, `/` or padding. Anything
+ * in doubt stays text: a missed file reads as text, a sentence must never vanish.
+ */
 function bareB64(text: string): string | null {
-  const b = text.replace(/\s+/g, '');
-  if (b.length < 80 || b.length % 4 !== 0) return null;
+  if (/[ \t]/.test(text)) return null;
+  const b = text.replace(/\r?\n/g, '');
+  if (b.length < 120 || b.length % 4 !== 0) return null;
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b)) return null;
-  // Bytes as base64 mix upper and lower case; a node id, an invoice or a long word does not.
-  if (!/[A-Z]/.test(b) || !/[a-z]/.test(b)) return null;
+  if (!/[+/]/.test(b) && !b.endsWith('=')) return null;
+  const share = (re: RegExp) => (b.match(re)?.length ?? 0) / b.length;
+  if (share(/[A-Z]/g) < 0.15 || share(/[a-z]/g) < 0.15 || share(/[0-9]/g) < 0.03) return null;
+  if (new Set(b).size < 24) return null;
   return b;
 }
 
