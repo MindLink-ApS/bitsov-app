@@ -461,7 +461,9 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
     host.media({ link: 'ended', detail: 'the node refused the media socket (403)' });
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect($('[data-call-ended]')?.textContent).toBe('The call audio link through your node closed.');
+    // Never connected: said as such, with the technical words under Details.
+    expect($('[data-call-ended]')?.textContent).toBe('The call to Maya could not connect.');
+    expect($('[data-call-end-detail]')!.textContent).toContain('The call audio link through your node closed.');
   });
 
   /** Rings Maya and brings the call live through the host media socket. */

@@ -109,7 +109,7 @@ describe('the receipt decides which echo is whose (message_id, never text)', () 
   });
 });
 
-describe('an error names an operation; it never identifies the card (Codex #221 r1 #2)', () => {
+describe('an error names an operation; it never identifies the card', () => {
   it('a later receipt for the operation an unknown card names leaves that card and its words alone', async () => {
     const { source, pending } = deferredSource();
     await open(source);
@@ -148,7 +148,7 @@ describe('an error names an operation; it never identifies the card (Codex #221 
   });
 });
 
-describe('Codex #221 r1: stale snapshots, honest states, nothing vanishes', () => {
+describe('stale snapshots, honest states, nothing vanishes', () => {
   it('#3 a snapshot from before the receipt (dispatching, no message_id) never restores a receipted op', async () => {
     const { source, pending } = deferredSource();
     let finishRead!: (l: OpList) => void;
@@ -200,7 +200,7 @@ describe('Codex #221 r1: stale snapshots, honest states, nothing vanishes', () =
     expect(texts).toContain('This app’s record: paid about 3 sats, not delivered. Check pending result to retry delivery or stop retrying.');
   });
 
-  it('Fable: a message held behind a paid-not-delivered one says so (not "result not known")', async () => {
+  it('a message held behind a paid-not-delivered one says so (not "result not known")', async () => {
     const { source, pending } = deferredSource();
     await open(source);
     await press('paid one');
@@ -214,7 +214,7 @@ describe('Codex #221 r1: stale snapshots, honest states, nothing vanishes', () =
   });
 });
 
-describe('Codex #221 r2 #2: every receipt path confirms its operation', () => {
+describe('every receipt path confirms its operation', () => {
   it('a delivered retry is confirmed: a later paid_undelivered snapshot of it never comes back beside the message', async () => {
     const { source, pending } = deferredSource();
     let list = ops([]);
@@ -238,7 +238,7 @@ describe('Codex #221 r2 #2: every receipt path confirms its operation', () => {
   });
 });
 
-describe('Codex #221 r3 (exception round)', () => {
+describe('pending results after send exceptions', () => {
   it.each([
     ['budget_unreadable', 'Your budget file could not be read.'],
     ['app_not_ready', 'No app storage.'],
@@ -352,7 +352,7 @@ describe('Codex #221 r3 (exception round)', () => {
   });
 });
 
-describe('Codex #221 r1 #1: leaving while the first approval request is still being made keeps the words', () => {
+describe('leaving while the first approval request is still being made keeps the words', () => {
   const budget: BudgetView = {
     paused: false, waiting_for_owner: false, preset: 'careful',
     autopay: { state: 'open', open_until_ms: Date.now() + 861400000, ceiling_msat: 500000, basis: 'node_grant' },

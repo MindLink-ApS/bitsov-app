@@ -139,8 +139,10 @@ describe('acting from the track', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    // The hub confirm reads "I understand — …" in English and "Jeg forstår — …" in Danish.
+    const confirm = (b: Element) => /I understand|Jeg forstår/.test(b.textContent ?? '');
+    await waitFor(() => expect([...mount.querySelectorAll('button')].some(confirm)).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find(confirm)!.click();
     await waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
     if (opts.waitCost !== false) {
       await waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
@@ -440,7 +442,7 @@ describe('acting from the track', () => {
     return { host, sent, release };
   }
 
-  it('Codex cxr-touch-1 r3 #1: a queued Approve & send never goes while the budget read is known stale (grant_unknown)', async () => {
+  it('a queued Approve & send never goes while the budget read is known stale (grant_unknown)', async () => {
     let unknown = false;
     const { host, sent, release } = await grantTwoBehindOne({
       budget_status: () => { if (unknown) throw { code: 'grant_unknown', message: 'The node grant could not be read.' }; throw new Error('no budget here'); },
@@ -455,7 +457,7 @@ describe('acting from the track', () => {
     await waitFor(() => expect(unsentReason()).toContain('Spending needs approving again. Press Send to ask.'));
   }, 30_000);
 
-  it('Codex cxr-touch-1 r3 #2: its spending window running out while queued: never sent, even though the view still says open', async () => {
+  it('its spending window running out while queued: never sent, even though the view still says open', async () => {
     const { sent, release } = await grantTwoBehindOne({}, () => view('open', { basis: 'node_grant', open_until_ms: Date.now() + 1500, granted_op: 'cd35', armed_by_request: null }));
     await vi.advanceTimersByTimeAsync(2500);
     release();
@@ -464,7 +466,7 @@ describe('acting from the track', () => {
     await waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'));
   }, 30_000);
 
-  it('Codex budget r1 #2 (every kind): the price moving while it is queued cancels it for good, even if it moves back', async () => {
+  it('every kind: the price moving while it is queued cancels it for good, even if it moves back', async () => {
     const gates: (() => void)[] = [];
     const gate = (i: number) => new Promise<void>((r) => { gates[i] = r; });
     const waits = [gate(0), gate(1), gate(2)];
@@ -578,6 +580,57 @@ describe('acting from the track', () => {
     await pressWaiting(host);
     await waitFor(() => expect(text('[data-touch-id-stays-text="spend"]')).toContain('Your message waits in its bubble and sends once this approval goes through.'));
     expect(text('[data-touch-id-stays-text="spend"]')).not.toContain('until you press Send');
+  });
+
+  /** What shows without opening anything: closed Details keep only their summary. */
+  const visible = (sel: string) => {
+    const el = $(sel);
+    if (!el) return '';
+    const copy = el.cloneNode(true) as Element;
+    copy.querySelectorAll('details:not([open])').forEach((d) => [...d.childNodes].forEach((n) => { if (!(n instanceof Element && n.tagName === 'SUMMARY')) n.remove(); }));
+    return copy.textContent ?? '';
+  };
+  const CLI = /konsensus\s|--op\b|--config\b|Terminal|terminal|command|kommando/;
+
+  it.each([
+    ['en', 'Details', 'Your box needs one yes from the person who set it up.'],
+    ['da', 'Detaljer', 'Din boks skal have ét ja fra den, der har sat den op.'],
+  ] as const)('a spend request waits in plain words; the exact line is only under %s, for whoever set up the box', async (lang, details, plain) => {
+    const host = stubHost({
+      spend_request: () => {
+        host.spend.v = view('pending', { pending: { op_id: 'ab12', expires_at_ms: Date.now() + 900_000, owner_action: 'konsensus grant --op ab12', owner_can_grant: true } });
+        return { ...host.spend.v, request_id: 'ab12' };
+      },
+    });
+    await openShell();
+    setLanguagePref(lang);
+    type('[data-composer] textarea', 'gm Maya');
+    submit();
+    await waitFor(() => expect($('[data-approval="pending"]')).not.toBeNull());
+    const shown = visible('[data-approval="pending"]');
+    expect(shown).toContain(plain);
+    expect(shown).not.toMatch(CLI);
+    expect(shown).not.toContain('ab12');
+    const operator = $<HTMLDetailsElement>('[data-approval-operator]')!;
+    expect(operator.open).toBe(false);
+    expect(operator.querySelector('summary')!.textContent).toBe(details);
+    expect(operator.querySelector('[data-owner-action]')!.textContent).toBe('konsensus grant --op ab12');
+    // No copy button, tooltip or label carries the line outside it.
+    const outside = [...mount.querySelectorAll('[data-approval="pending"] *')].filter((el) => !operator.contains(el));
+    for (const el of outside) {
+      for (const attr of ['title', 'aria-label', 'data-copy']) expect(el.getAttribute(attr) ?? '', attr).not.toMatch(CLI);
+    }
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
+  it('a node that cannot grant says so plainly; its own words stay under Details', async () => {
+    stubHost({
+      spend_status: () => view('unavailable', { pending: { op_id: 'ab12', expires_at_ms: Date.now() + 900_000, owner_action: 'konsensus grant --op ab12 is unavailable in this deployment', owner_can_grant: false } }),
+    });
+    await openShell();
+    await waitFor(() => expect($('[data-approval="unavailable"]')).not.toBeNull());
+    expect(visible('[data-approval="unavailable"]')).not.toMatch(CLI);
+    expect($('[data-approval="unavailable"] [data-owner-action]')!.closest('details')?.open).toBe(false);
   });
 
   it('asks the owner once (Approve & send), then sends that message once the grant lands, and shows the receipt and delivery', async () => {
@@ -1047,7 +1100,7 @@ describe('acting from the track', () => {
       expect(host.used('payment_pay')).toHaveLength(0);
     });
 
-    // Codex #83 P1: reselecting the active mode or tab while a payment is in
+    // Reselecting the active mode or tab while a payment is in
     // flight must not leave a reusable review (or draft) that pays again.
     const deferred = () => {
       let resolve!: (v: unknown) => void;

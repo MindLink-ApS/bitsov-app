@@ -275,7 +275,7 @@ describe('paid, not delivered: in the conversation', () => {
     expect(host.used('message_retry')).toHaveLength(1);
   });
 
-  // Codex review of 0308673 (P2): a stale card names its own record, so the
+  // A stale card names its own record, so the
   // host refuses it instead of releasing a different unresolved message.
   it('a stale card never stops retrying a different message', async () => {
     let current: string | null = null;
