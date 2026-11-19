@@ -13,6 +13,10 @@ import { STOP_MESSAGE } from './callMinutes';
  */
 export type CallEndLine = { text: string; detail: string | null };
 
+const FREE_DECLINE = {
+  sending: 'caDeclineFreeSending', delivered: 'caDeclineFreeDelivered', not_sent: 'caDeclineFreeNotSent', unknown: 'caDeclineFreeUnknown',
+} as const;
+
 export function callEndLine(v: CallView, name: string): CallEndLine {
   const extra = (text: string, ...more: (string | null | undefined)[]): CallEndLine => {
     const detail = more.filter((m): m is string => !!m && m !== text).join(' ');
@@ -20,6 +24,10 @@ export function callEndLine(v: CallView, name: string): CallEndLine {
   };
   if (v.stuck) return { text: tr('uiACallToIsStillClosingAtYour', name), detail: null };
   const stop = v.minutes?.stop;
+  // Cut after the box approval ran out, on a node that does not keep the call: said as that, not as a minute or a link.
+  if (v.budgetEnded) return extra(tr('caCallEndedBudgetRanOut'), stop?.raw);
+  // A free Decline: only what is known of its delivery. It was never paid.
+  if (v.reason === 'declined' && v.freeDecline) return extra(tr(FREE_DECLINE[v.freeDecline]), v.error);
   // A limit the owner set: the evidence is the node's own limit code.
   const limit = stop?.limit?.code;
   if (limit === 'budget_exhausted') return extra(tr('caCallEndedContactLimit'), stop?.raw);

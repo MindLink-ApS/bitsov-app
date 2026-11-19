@@ -1746,6 +1746,58 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(host.used('call_signal')).toHaveLength(0);
     expect(capture).not.toHaveBeenCalled();
   });
+  // A node that keeps an admitted call through its approval's end (`call_continuity_v1`):
+  // the same short approval no longer refuses the call. The legacy refusals above stay.
+  const OVERVIEW = (capabilities: string[]) => () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
+    lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities });
+  it('a continuity node rings with one minute left on the box approval', async () => {
+    const host = stubHost({ grant: { ...SHORT(), expires_at_ms: Date.now() + 60_000 }, replies: { node_overview: OVERVIEW(['call_continuity_v1']) } });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect(host.used('call_signal').map((c) => (c.args as { kind: number }).kind)).toEqual([400]);
+  });
+  it('a continuity node answers with five minutes left on the box approval', async () => {
+    const host = stubHost({ grant: SHORT(), replies: { node_overview: OVERVIEW(['call_continuity_v1']) } });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'incoming', kind: 400, sender: A, recipient: OWN,
+      timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal').map((c) => (c.args as { kind: number }).kind)).toEqual([401]));
+    expect($('[data-call-error]')).toBeNull();
+  });
+  it.each([
+    ['allowance or free replies alone', ['standing_allowance_v1', 'call_reply_free_v1']],
+    ['a near name', ['call_continuity_v2']],
+  ] as const)('%s does not lift the guard: a short approval still rings nothing', async (_name, capabilities) => {
+    const host = stubHost({ grant: SHORT(), replies: { node_overview: OVERVIEW([...capabilities]) } });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+  it.each([
+    ['en', 'a whole day', 86_400_000, [], 'Ready for calls'],
+    ['da', 'a whole day', 86_400_000, [], 'Klar til opkald'],
+    ['en', 'five minutes on a continuity node', 5 * 60_000 - 1_000, ['call_continuity_v1'], 'Ready for calls'],
+    ['en', 'five minutes', 5 * 60_000 - 1_000, [], 'Not ready for calls: your box’s approval ends in 5 min, before a call could end.'],
+    ['da', 'five minutes', 5 * 60_000 - 1_000, [], 'Ikke klar til opkald: godkendelsen fra din boks udløber om 5 min, før et opkald kan nå at slutte.'],
+    ['en', 'an expired grant', -1_000, ['call_continuity_v1', 'standing_allowance_v1'], 'Not ready for calls yet: your box has not approved spending for this app.'],
+    ['da', 'an expired grant', -1_000, ['standing_allowance_v1'], 'Ikke klar til opkald endnu: din boks har ikke godkendt betalinger for denne app.'],
+  ] as const)('the ring confirm says whether calls are ready (%s, %s)', async (lang, _name, left, capabilities, said) => {
+    stubHost({ grant: { ...SHORT(), expires_at_ms: Date.now() + left }, replies: { node_overview: OVERVIEW([...capabilities]) } });
+    await openShell(); setLanguagePref(lang);
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-ready]')?.textContent).toBe(said));
+    expect($('[data-call-ready]')!.getAttribute('data-call-ready')).toBe(said.startsWith('Ready') || said.startsWith('Klar') ? 'ready' : 'not-ready');
+    expect(visibleText($('[data-call-confirm-box]')!)).not.toMatch(/konsensus\s|--op\b|--config\b|Terminal/);
+  });
+
   // The box's call limit is unknown until its first hold: assume the most any node allows (240 min).
   const HOUR = () => ({ ...SHORT(), expires_at_ms: Date.now() + 60 * 60_000 });
   it('an unknown call limit counts as the longest any box allows: a one-hour approval rings nothing and pays nothing', async () => {

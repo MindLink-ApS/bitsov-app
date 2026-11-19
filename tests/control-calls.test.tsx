@@ -3303,7 +3303,57 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect(pause.mock.contexts).toContain(audio));
     expect($('[data-call-panel="incoming"]')).toBeNull();
     expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('call_free_reply')).toHaveLength(0);
     expect(host.used('op_end_call')).toHaveLength(0);
+    expect(host.used('spend_request')).toHaveLength(0);
+  });
+
+  const FREE_NODE = () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
+    lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(),
+    capabilities: ['call_reply_free_v1'] });
+  const freeReceipt = (args?: Record<string, unknown>) => ({ message_id: 'r1', kind: args!.kind, amount_msat: 0, total_msat: 0, max_routing_fee_msat: 0, delivered: true, accepted: true, sent_at_ms: Date.now() });
+
+  it.each([
+    ['en', 'Declining is free. They are told you declined.', 'Declined. They were told, and it cost nothing.'],
+    ['da', 'Det er gratis at afvise. Den anden får besked om, at du afviste.', 'Afvist. Den anden fik besked, og det kostede intet.'],
+  ] as const)('with free replies on both nodes, Decline posts the free declined hangup: zero cap, no grant, no spend request (%s)', async (lang, note, ended) => {
+    const host = stubHost({
+      messages_list: () => [], call_quote: () => QUOTE, node_overview: FREE_NODE,
+      peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, free_replies: true }],
+      call_free_reply: freeReceipt,
+    });
+    await openShell();
+    setLanguagePref(lang);
+    incoming(host);
+    await vi.waitFor(() => expect(text('[data-call-decline-note]')).toBe(note));
+    expect(visible('[data-call-panel="incoming"]')).not.toMatch(/konsensus\s|--op\b|Terminal/);
+    $<HTMLButtonElement>('[data-call-decline]')!.click();
+    await vi.waitFor(() => expect(host.used('call_free_reply')).toHaveLength(1));
+    expect(host.used('call_free_reply')[0].args).toEqual({ peer: A, kind: 403, plaintext: JSON.stringify({ v: 1, call_id: ID, reason: 'declined' }) });
+    await vi.waitFor(() => expect(text('[data-call-ended]')).toBe(ended));
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('spend_request')).toHaveLength(0);
+    expect(host.used('op_end_call')).toHaveLength(0);
+  });
+
+  it.each([
+    ['our node only', true, false],
+    ['their node only', false, true],
+    ['their node, but not connected', true, 'offline'],
+  ] as const)('with free replies on %s, Decline stays the local Ignore and posts nothing', async (_name, own, theirs) => {
+    const host = stubHost({
+      messages_list: () => [], call_quote: () => QUOTE,
+      ...(own ? { node_overview: FREE_NODE } : {}),
+      peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: theirs !== 'offline', fingerprint: null, free_replies: theirs !== false }],
+      call_free_reply: freeReceipt,
+    });
+    await openShell();
+    incoming(host);
+    await vi.waitFor(() => expect(text('[data-call-decline-note]')).toBe('Declining is free and sends nothing. Their phone keeps ringing until the call times out.'));
+    $<HTMLButtonElement>('[data-call-decline]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).toBeNull());
+    expect(host.used('call_free_reply')).toHaveLength(0);
+    expect(host.used('call_signal')).toHaveLength(0);
     expect(host.used('spend_request')).toHaveLength(0);
   });
 

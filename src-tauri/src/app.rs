@@ -5415,6 +5415,11 @@ fn no_pending_spend(state: &NodeState) -> Result<(), ActionError> {
 enum Auth {
     Window(u64),
     Budget(u64),
+    /// A live call's next minute after the owner's approval ran out by time,
+    /// on a node that draws it on the hold pinned at admission
+    /// (`call_continuity_v1`). Only [`do_call_block`] makes it; an explicit
+    /// lock, or a token the node refused, ends it.
+    CallHold,
 }
 
 /// A cooldown is a proven pre-dispatch refusal, before journal or reservation I/O.
@@ -5441,7 +5446,19 @@ fn check_auth(state: &NodeState, auth: Auth) -> Result<(), ActionError> {
     match auth {
         Auth::Window(g) => state.spend.lock().unwrap().check_generation(g, now_ms()),
         Auth::Budget(g) => state.autopay.lock().unwrap().check_generation(g, now_ms()),
+        Auth::CallHold if approval_lapsed_or_open(state) => Ok(()),
+        Auth::CallHold => Err(ActionError::new("budget_needed", "Your budget approval changed while sending. Nothing was sent; approve it again.")),
     }
+}
+
+/// The owner's approval is open, or ran out by time. Not after a lock: every
+/// lock (the owner's, or a token the node refused) closes both gates.
+fn approval_lapsed_or_open(state: &NodeState) -> bool {
+    let now = now_ms();
+    let window = state.spend.lock().unwrap().view(now).state;
+    let budget = state.autopay.lock().unwrap().view(now).state;
+    matches!(window, act::SpendState::Open | act::SpendState::Expired)
+        || matches!(budget, budget::AutopayState::Open | budget::AutopayState::Expired)
 }
 
 /// A message send's line in the budget ledger.
@@ -5551,7 +5568,7 @@ fn reserve(state: &NodeState, auth: Auth, charge: &Charge, id: &str, max_msat: u
     let now = now_ms();
     let ceiling = match auth {
         Auth::Budget(_) => state.autopay.lock().unwrap().ceiling(now),
-        Auth::Window(_) => None,
+        Auth::Window(_) | Auth::CallHold => None,
     };
     with_book(state, true, |book| {
         // Reserve each charge once. An unsettled row under this id is this same
@@ -8538,12 +8555,24 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
         }
         let mut body = act::call_block_body(&target, call_id, seq)?;
         let needs_contact = || ActionError::new("call_needs_contact", "Calls go to contacts you have already paid. Send them a message first. Nothing was paid.");
-        let (auth, plan) = plan_message(state, &target, false, cap, None)
-            .map_err(|e| if e.code == "first_contact" { needs_contact() } else { e })?;
+        let caps = require_price_caps(state, false).await?;
+        let (auth, plan) = match plan_message(state, &target, false, cap, None) {
+            // The approval ran out by time during this admitted call: a node
+            // that keeps the call draws this minute on its pinned hold, as the
+            // owner confirmed it. The book's limits still apply.
+            Err(e) if matches!(e.code, "spend_expired" | "spend_locked")
+                && status_lists(&caps.status, CALL_CONTINUITY_CAPABILITY) && approval_lapsed_or_open(state) => {
+                let plan = with_book(state, false, |book| budget::plan(book, budget::Ask {
+                    target: &target, room: false, max_msat: cap, first_contact_msat: None,
+                    autopay: None, window: Ok(()), now_ms: now_ms(),
+                }))?;
+                (Auth::CallHold, plan)
+            }
+            planned => planned.map_err(|e| if e.code == "first_contact" { needs_contact() } else { e })?,
+        };
         if plan.confirm.is_some() {
             return Err(needs_contact());
         }
-        let caps = require_price_caps(state, false).await?;
         if !caps.operations {
             return Err(ActionError::new("call_needs_node_upgrade",
                 "Upgrade your node before making calls: it cannot track call payments and admission safely. Nothing was paid."));
@@ -8663,6 +8692,9 @@ async fn do_call_signal_bounded(
         return Err(ActionError::new("call_needs_node_upgrade",
             "Upgrade your node before making calls: it cannot track call payments and admission safely. Nothing was paid."));
     }
+    // `call_continuity_v1`: this node keeps an admitted call through its
+    // grant's expiry or renewal, so the grant need not outlast the call.
+    let continuity = status_lists(&caps.status, CALL_CONTINUITY_CAPABILITY);
     let quote = read_call_quote(state, &target).await.map_err(ActionError::node)?;
     let unsupported = || ActionError::new(
         "call_unsupported", "Their node does not take calls yet (no call price advertised). Nothing was paid.");
@@ -8713,8 +8745,9 @@ async fn do_call_signal_bounded(
                 }
                 error
             })?;
-        // A node-routed call must fit inside the grant the node holds now.
-        if minutes.is_some() {
+        // A node-routed call must fit inside the grant the node holds now,
+        // unless the node keeps an admitted call past that grant's end.
+        if minutes.is_some() && !continuity {
             if let Some(g) = &checked { call_window_fits(state, g.expires_at_ms())?; }
         }
         // A hangup is bounded like a message (the 6-sat cap). A call that
@@ -8756,7 +8789,7 @@ async fn do_call_signal_bounded(
         operation: caps.operations,
         envelope_ids: Some(caps.envelope_ids),
         failure_final_on: final_failure_node(&caps.status),
-        call_window: kind == act::KIND_CALL_ANSWER || (kind == act::KIND_CALL_OFFER && minutes.is_some()),
+        call_window: !continuity && (kind == act::KIND_CALL_ANSWER || (kind == act::KIND_CALL_OFFER && minutes.is_some())),
     };
     let text = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await?;
     let reply: act::SendReply = text.decode("/messages/compose")?;
@@ -10637,6 +10670,95 @@ async fn call_signal(
     do_renderer_call_signal(state.inner(), &peer, kind, &plaintext, max_msat, minutes, max_hangup_msat).await
 }
 
+/// A free reply to a ringing incoming call: its answer, or its declined
+/// hangup. See [`do_call_free_reply`].
+#[tauri::command(rename_all = "snake_case")]
+async fn call_free_reply(
+    window: WebviewWindow<impl tauri::Runtime>,
+    state: State<'_, NodeState>,
+    peer: String,
+    kind: u16,
+    plaintext: String,
+) -> Result<act::CallReceipt, ActionError> {
+    reject_sealed_window(&window)?;
+    drop(window);
+    do_call_free_reply(state.inner(), &peer, kind, &plaintext).await
+}
+
+/// `/status` capability: this node sends a callee's answer, or its declined
+/// hangup, to a ringing call free, to a caller that advertises it too.
+const FREE_REPLY_CAPABILITY: &str = "call_reply_free_v1";
+/// `/status` capability: an admitted call keeps its media and its minutes,
+/// drawn on the hold pinned at admission, after its grant expires or is
+/// renewed. A revoke still ends it.
+const CALL_CONTINUITY_CAPABILITY: &str = "call_continuity_v1";
+
+fn status_lists(status: &serde_json::Value, capability: &str) -> bool {
+    status["api_capabilities"].as_array().is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some(capability)))
+}
+
+const FREE_REPLY_UNAVAILABLE: &str = "This reply cannot go out for free: your node or theirs does not take free call replies. Nothing was sent or paid.";
+const FREE_REPLY_NOT_SENT: &str = "Your node did not send this reply for free, so it was not sent. Nothing was paid.";
+const FREE_REPLY_UNKNOWN: &str = "It is not known yet whether your node sent this reply. Nothing can be paid for it.";
+
+/// A callee's answer, or its declined hangup, to a call ringing here, sent
+/// free. Only when this node and the caller's node both advertise
+/// `call_reply_free_v1` and the caller is connected, all read fresh here; the
+/// node checks the same again and binds the reply to the ringing call.
+///
+/// The compose carries a zero cap (`max_total_msat` and
+/// `max_routing_fee_msat` both 0), so whatever the node decides it can pay
+/// nothing for it. It needs no grant, opens no spend window, reserves nothing
+/// in the budget book and journals no payment. A refusal is final: the
+/// renderer never retries it as a paid signal.
+async fn do_call_free_reply(state: &NodeState, peer: &str, kind: u16, plaintext: &str) -> Result<act::CallReceipt, ActionError> {
+    let target = control::node_id(peer).map_err(ActionError::invalid)?;
+    let signal: serde_json::Value = serde_json::from_str(plaintext).map_err(|_| ActionError::invalid("invalid call signal"))?;
+    let bound = signal["call_id"].as_str().is_some_and(act::is_call_id);
+    let reply = match kind {
+        act::KIND_CALL_ANSWER => signal["sdp"].is_string(),
+        act::KIND_CALL_HANGUP => signal["reason"].as_str() == Some("declined"),
+        _ => false,
+    };
+    if !bound || !reply {
+        return Err(ActionError::invalid("only an answer or a declined hangup to a ringing call is a free reply"));
+    }
+    let mut body = act::call_body(&target, kind, plaintext)?;
+    let unavailable = || ActionError::new("call_reply_not_free", FREE_REPLY_UNAVAILABLE);
+    let status: serde_json::Value = get_json(state, "/status").await.map_err(|_| unavailable())?;
+    if !status_lists(&status, FREE_REPLY_CAPABILITY) {
+        return Err(unavailable());
+    }
+    let peers: Vec<control::Peer> = get_json(state, "/peers").await.map_err(|_| unavailable())?;
+    let caller = control::with_meeting_support(peers).into_iter().find(|p| p.node_id.eq_ignore_ascii_case(&target));
+    if !caller.is_some_and(|p| p.free_replies) {
+        return Err(unavailable());
+    }
+    body["max_total_msat"] = serde_json::json!(0);
+    body["max_routing_fee_msat"] = serde_json::json!(0);
+    let unknown = || ActionError::new("call_reply_unknown", FREE_REPLY_UNKNOWN);
+    let (status, text) = call_api(state, reqwest::Method::POST, "/messages/compose", Some(body)).await.map_err(|_| unknown())?;
+    // A refusal the node answered before sending; a server failure may have come after.
+    if status.is_client_error() {
+        return Err(ActionError::new("call_reply_not_sent", FREE_REPLY_NOT_SENT));
+    }
+    if !status.is_success() {
+        return Err(unknown());
+    }
+    let reply: act::SendReply = serde_json::from_str(&text).map_err(|_| unknown())?;
+    Ok(act::CallReceipt {
+        operation_id: reply.operation_id.clone(),
+        total_msat: reply.total_msat()?,
+        message_id: reply.message_id,
+        kind,
+        amount_msat: reply.amount_msat,
+        max_routing_fee_msat: reply.max_routing_fee_msat,
+        delivered: reply.delivered,
+        accepted: reply.accepted,
+        sent_at_ms: now_ms(),
+    })
+}
+
 /// The most minutes any node lets one call last (`[calls] max_call_minutes`).
 const CALL_LIMIT_MAX_MINUTES: u64 = 240;
 /// Room beyond the call limit, so an approval never ends in a call's last minute.
@@ -11952,6 +12074,7 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             call_audio_session,
             call_quote,
             call_signal,
+            call_free_reply,
             call_status,
             call_block,
             call_hold,
@@ -22306,6 +22429,219 @@ mod control_act_tests {
         }
     }
 
+    /// [`call_grant_node`] on a node that also advertises `extra`.
+    fn call_grant_node_with(offer_msat: u64, extra: &'static [&'static str]) -> (Fake, tempfile::TempDir, G1) {
+        let routes = call_routes(Some(offer_msat));
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p == "/status" {
+                let mut caps = vec!["paid_send_caps_v1", "room_terminal_outcomes_v1", "spend_budget_grant_v1", "message_operations_v1"];
+                caps.extend_from_slice(extra);
+                return (200, serde_json::json!({"api_capabilities": caps}).to_string());
+            }
+            if p.contains("/call") || p == "/payments/price/401" || p == "/messages/compose" {
+                routes(m, p, b)
+            } else { (0, String::new()) }
+        });
+        g1_node_with(&["read", "receive"], Some(first))
+    }
+
+    /// With `call_continuity_v1` the node keeps an admitted call through its
+    /// grant's expiry, so a Ring or an Answer near the window's end is sent;
+    /// the same grant on a node without it is refused (tests above).
+    #[tokio::test]
+    async fn capable_call_near_window_end_is_admitted_with_pinned_coverage() {
+        for (extra, sent) in [(&["call_continuity_v1"][..], true), (&[][..], false), (&["call_continuity_v2"][..], false), (&["standing_allowance_v1", "call_reply_free_v1"][..], false)] {
+            for kind in [act::KIND_CALL_OFFER, act::KIND_CALL_ANSWER] {
+                let (node, _dir, g1) = call_grant_node_with(1_000, extra);
+                g1_approved(&node, 500_000).await;
+                with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+                let quote = read_call_quote(&node.state, A).await.unwrap();
+                // One minute left on the box approval.
+                *g1.grant.lock().unwrap() = call_window_grant(60);
+                let minute = control::MinutesConsent { block_msat: 10_000, block_max_routing_fee_msat: 5_000, max_hold_msat: 240 * 15_000 };
+                let result = if kind == act::KIND_CALL_OFFER {
+                    let offer = quote.offer_msat.unwrap() + quote.offer_max_routing_fee_msat;
+                    do_call_signal_bounded(&node.state, A, kind, OFFER, offer, None, Some(&minute), None).await
+                } else {
+                    do_renderer_call_signal(&node.state, A, kind, OFFER, quote.signal_msat + quote.signal_max_routing_fee_msat, None, None).await
+                };
+                if sent {
+                    assert_eq!(composes(&node), 1, "{extra:?} {kind}: {:?}", result.err());
+                    // Still within the minutes the owner agreed to: the hold's ceilings go with the offer.
+                    if kind == act::KIND_CALL_OFFER {
+                        assert_eq!(compose_bodies(&node)[0]["max_hold_msat"], 240 * 15_000);
+                    }
+                } else {
+                    assert_eq!(result.unwrap_err().code, "call_window_short", "{extra:?} {kind}");
+                    assert_eq!(composes(&node), 0, "{extra:?} {kind}: nothing sent or paid");
+                }
+            }
+        }
+    }
+
+    /// The legacy guard is kept exactly: without `call_continuity_v1`, an
+    /// unknown call limit still needs 241 minutes of approval.
+    #[tokio::test]
+    async fn legacy_node_retains_241_minute_unknown_limit_guard() {
+        for (secs, sent) in [(240 * 60, false), (241 * 60 + 30, true)] {
+            let (node, _dir, g1) = call_grant_node_with(1_000, &[]);
+            g1_approved(&node, 500_000).await;
+            with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+            let quote = read_call_quote(&node.state, A).await.unwrap();
+            *g1.grant.lock().unwrap() = call_window_grant(secs);
+            let result = do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, OFFER, quote.signal_msat + quote.signal_max_routing_fee_msat, None, None).await;
+            if !sent { assert_eq!(result.unwrap_err().code, "call_window_short", "{secs}"); }
+            assert_eq!(composes(&node), usize::from(sent), "{secs}");
+        }
+    }
+
+    const DECLINE: &str = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","reason":"declined"}"#;
+
+    /// A fake node for free replies: `own` lists its capabilities, `peer` is
+    /// the caller as `GET /peers` reports it, and compose answers `compose`.
+    fn free_reply_node(own: &'static [&'static str], peer: serde_json::Value, compose: (u16, serde_json::Value)) -> Fake {
+        let inner = happy();
+        fake(AuthMode::Local, Arc::new(move |m, p, b| match p {
+            "/status" => {
+                let mut caps = vec!["paid_send_caps_v1", "room_terminal_outcomes_v1", "message_operations_v1"];
+                caps.extend_from_slice(own);
+                (200, serde_json::json!({"api_capabilities": caps}).to_string())
+            }
+            "/peers" => (200, serde_json::json!([peer.clone()]).to_string()),
+            "/messages/compose" => (compose.0, compose.1.to_string()),
+            _ => inner(m, p, b),
+        }))
+    }
+
+    fn free_peer() -> serde_json::Value {
+        serde_json::json!({"node_id": A, "connected": true, "capabilities": ["X3dh", "Custom(\"call_reply_free_v1\")"]})
+    }
+
+    fn free_receipt() -> (u16, serde_json::Value) {
+        (200, serde_json::json!({"message_id": "r1", "delivered": true, "accepted": true, "amount_msat": 0, "max_routing_fee_msat": 0}))
+    }
+
+    /// On a capable node, to a caller whose node advertises free replies, a
+    /// Decline is one compose of the declined hangup with a zero cap: no
+    /// grant, no spend window, no spend request, nothing held in the journal
+    /// or the budget book. An Answer goes the same way.
+    #[tokio::test]
+    async fn a_free_reply_posts_the_declined_hangup_or_answer_with_a_zero_cap_and_no_grant() {
+        for (kind, plaintext) in [(act::KIND_CALL_HANGUP, DECLINE), (act::KIND_CALL_ANSWER, OFFER)] {
+            let node = free_reply_node(&["call_reply_free_v1"], free_peer(), free_receipt());
+            assert_eq!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Locked, "no window open");
+            let receipt = do_call_free_reply(&node.state, A, kind, plaintext).await.unwrap();
+            assert_eq!((receipt.kind, receipt.amount_msat, receipt.total_msat, receipt.delivered), (kind, 0, 0, true));
+            assert_eq!(node.posts(), [("/messages/compose".to_string(), serde_json::json!({
+                "recipient": A, "is_room": false, "kind": kind, "plaintext": plaintext,
+                "max_total_msat": 0, "max_routing_fee_msat": 0}))]);
+            assert!(!node.targets().iter().any(|t| t.contains("/pair/")), "{:?}", node.targets());
+            assert!(pending(&node).is_none());
+            assert!(book(&node).is_empty(), "nothing reserved in the budget book");
+        }
+    }
+
+    /// Never free on a guess: our node and the caller's node must both
+    /// advertise it, the caller must be connected, and the names must match
+    /// exactly. Otherwise nothing is sent, and nothing is paid instead.
+    #[tokio::test]
+    async fn mixed_peer_capability_never_implies_free_or_continuous_call() {
+        let cases: [(&'static [&'static str], serde_json::Value); 7] = [
+            (&[], free_peer()),
+            (&["call_continuity_v1", "standing_allowance_v1"], free_peer()),
+            (&["call_reply_free_v2"], free_peer()),
+            (&["call_reply_free_v1"], serde_json::json!({"node_id": A, "connected": false, "capabilities": ["Custom(\"call_reply_free_v1\")"]})),
+            (&["call_reply_free_v1"], serde_json::json!({"node_id": A, "connected": true, "capabilities": ["call_reply_free_v1"]})),
+            (&["call_reply_free_v1"], serde_json::json!({"node_id": A, "connected": true})),
+            (&["call_reply_free_v1"], serde_json::json!({"node_id": C, "connected": true, "capabilities": ["Custom(\"call_reply_free_v1\")"]})),
+        ];
+        for (own, peer) in cases {
+            let node = free_reply_node(own, peer.clone(), free_receipt());
+            for (kind, plaintext) in [(act::KIND_CALL_HANGUP, DECLINE), (act::KIND_CALL_ANSWER, OFFER)] {
+                let error = do_call_free_reply(&node.state, A, kind, plaintext).await.unwrap_err();
+                assert_eq!(error.code, "call_reply_not_free", "{own:?} {peer}");
+            }
+            assert!(node.posts().is_empty(), "{own:?} {peer}: {:?}", node.posts());
+        }
+    }
+
+    /// Only the exact answer or declined hangup goes out free; anything else
+    /// is refused before any request, and a refusal by the node is final:
+    /// one compose, never a paid retry.
+    #[tokio::test]
+    async fn only_an_answer_or_a_declined_hangup_is_a_free_reply_and_it_is_never_retried_paid() {
+        let node = free_reply_node(&["call_reply_free_v1"], free_peer(), free_receipt());
+        for (kind, plaintext) in [
+            (act::KIND_CALL_HANGUP, r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","reason":"hangup"}"#),
+            (act::KIND_CALL_HANGUP, r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef"}"#),
+            (act::KIND_CALL_HANGUP, r#"{"v":1,"call_id":"not-a-call","reason":"declined"}"#),
+            (act::KIND_CALL_OFFER, OFFER),
+            (402, r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","candidate":""}"#),
+            (act::KIND_CALL_BLOCK, r#"{"call_id":"0123456789abcdef0123456789abcdef","seq":0}"#),
+            (act::KIND_CALL_ANSWER, r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef"}"#),
+        ] {
+            assert_eq!(do_call_free_reply(&node.state, A, kind, plaintext).await.unwrap_err().code, "invalid", "{kind} {plaintext}");
+        }
+        assert!(node.posts().is_empty());
+        let refused = free_reply_node(&["call_reply_free_v1"], free_peer(),
+            (409, serde_json::json!({"error": "price above max_total_msat", "code": "price_cap_exceeded"})));
+        let error = do_call_free_reply(&refused.state, A, act::KIND_CALL_HANGUP, DECLINE).await.unwrap_err();
+        assert_eq!(error.code, "call_reply_not_sent");
+        assert_eq!(compose_bodies(&refused).iter().map(|b| b["max_total_msat"].clone()).collect::<Vec<_>>(), [serde_json::json!(0)]);
+        assert!(pending(&refused).is_none());
+    }
+
+    fn with_status_caps(routes: Routes, extra: &'static [&'static str]) -> Routes {
+        Arc::new(move |m, p, b| {
+            let (status, body) = routes(m, p, b);
+            if p == "/status" && status == 200 {
+                let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+                if let Some(caps) = value["api_capabilities"].as_array_mut() {
+                    caps.extend(extra.iter().map(|c| serde_json::json!(c)));
+                }
+                return (status, value.to_string());
+            }
+            (status, body)
+        })
+    }
+
+    /// A live call's next minute after the owner's approval ran out by time:
+    /// a continuity node draws it on the hold pinned at admission, so the app
+    /// pays it; a legacy node would refuse it, so the app does not try. A
+    /// spending lock (or a refused token) still stops it on both.
+    #[tokio::test]
+    async fn a_minute_after_the_approval_lapsed_is_paid_only_on_a_continuity_node() {
+        for (continuity, lapse) in [(true, "time"), (false, "time"), (true, "lock")] {
+            let (routes, _next, reserved) = PacedHold { per_block: 10_000, fee: 5_000, minutes: 40,
+                closing: 0, direct: false, spent: SPENT_AT_CEILING }.routes();
+            let routes = with_status_caps(routes, if continuity { &["call_continuity_v1"] } else { &[] });
+            let node = paced_call(routes, reserved).await;
+            do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+            {
+                let now = now_ms();
+                let mut autopay = node.state.autopay.lock().unwrap();
+                let mut spend = node.state.spend.lock().unwrap();
+                if lapse == "time" {
+                    autopay.arm_until(now, now, 500_000, act::SpendBasis::AppLock);
+                    spend.arm_until(now, now, act::SpendBasis::AppLock);
+                } else {
+                    autopay.lock();
+                    spend.lock();
+                }
+            }
+            let result = do_call_block(&node.state, A, CALL_ID, 1).await;
+            if continuity && lapse == "time" {
+                assert_eq!(result.map(|r| r.kind).unwrap(), act::KIND_CALL_BLOCK);
+                assert_eq!(compose_kinds(&node), [400, 404, 404]);
+                assert!(pending(&node).is_none());
+            } else {
+                let code = result.unwrap_err().code;
+                assert!(matches!(code, "spend_expired" | "spend_locked" | "budget_needed"), "{continuity} {lapse}: {code}");
+                assert_eq!(compose_kinds(&node), [400, 404], "{continuity} {lapse}: nothing more sent");
+            }
+        }
+    }
+
     /// A node without grants (pre-G1) keeps its answer path: no grant read
     /// is needed or made for the call window, and nothing new refuses it.
     #[tokio::test]
@@ -28812,6 +29148,7 @@ mod assistant_acl_tests {
                 "call_audio_session",
                 "call_quote",
                 "call_signal",
+                "call_free_reply",
                 // M6 A2: a call's paid minutes (status read, one block payment).
                 "call_status",
                 "call_block",

@@ -5,6 +5,7 @@ import { MediaView } from './CallMedia';
 import { CallVideoStage } from './CallVideoStage';
 import { MicAccessNote } from './MicAccessNote';
 import { knownCallLimit, RingBudgetNote } from './ringBudget';
+import { callContinuity, callReadiness, freeReplies } from './callCapabilities';
 import { createMessageNotifications, NotificationSettings } from './messageNotifications';
 import { isTauri, invoke } from '@tauri-apps/api/core';
 import { OwnerApprovalSheets } from './OwnerApprovalSheet';
@@ -360,6 +361,8 @@ export type Actions = {
   callGrant?: () => NodeGrantSummary | null;
   /** Display only: the call limit (minutes) this box pinned on a reservation earlier this session; null when not seen. */
   callLimitMinutes?: () => number | null;
+  /** Our node keeps an admitted call after its grant ends (`call_continuity_v1`). */
+  callContinuity?: () => boolean;
   callView?: () => CallView;
   /** Open the meeting planner with this contact picked. Pays nothing. */
   planMeeting: (peer: string) => void;
@@ -1563,6 +1566,10 @@ export function ControlCenter(props: Props) {
     },
     grant: () => budget()?.node_grant ?? null,
     callLimitMinutes,
+    // Only by the exact names our node and the caller's node advertise; an older node lists neither.
+    callContinuity: () => callContinuity(overview()?.capabilities),
+    freeReply: (peer) => freeReplies(overview()?.capabilities, peerById().get(peer.toLowerCase())),
+    sendFree: (peer, kind, plaintext) => act(() => source.callFreeReply(peer, kind, plaintext)),
     quote: (peer) => act(() => source.callQuote(peer)),
     signal: async (peer, kind, plaintext, maxMsat, minutes, maxHangupMsat) => {
       const r = await act(() => source.callSignal(peer, kind, plaintext, maxMsat, minutes, maxHangupMsat));
@@ -1599,7 +1606,7 @@ export function ControlCenter(props: Props) {
           } : undefined,
           admitted: callMinutes ? (callId, peer, closed) => waitUntilPaid(callMinutes.status, peer, callId, () => Date.now(), closed) : undefined,
           // A media session that closed for good ends its call, so no further minute is paid.
-          onSession: (event) => { if (event.state === 'closed') calls.mediaClosed(event.callId); },
+          onSession: (event) => { if (event.state === 'closed') calls.mediaClosed(event.callId, { refused: event.refused === true }); },
           // The literal flag lets a build without it drop the seal code entirely.
           ...(import.meta.env.VITE_CALL_SEAL === 'sealed' && sealedAudio() && isTauri() ? { seal: hostCallSeal(), onSeal: nextSealLabel() } : {}),
         })
@@ -1715,6 +1722,7 @@ export function ControlCenter(props: Props) {
     callView,
     callActive: () => !['idle', 'ended'].includes(callView().phase) || meetingOn(),
     callLimitMinutes,
+    callContinuity: () => callContinuity(overview()?.capabilities),
     callGrant: () => grantUnknown() || (budget() !== null && (!budgetConfirmed() || !!errors.budgetPoll)) ? null : budget()?.node_grant ?? null,
     // Opens the planner; the contact is pre-picked only if their node takes meetings.
     planMeeting: (peer) => {
@@ -2691,6 +2699,8 @@ export function ControlCenter(props: Props) {
         accept={(shown) => { if (!moneyBlocked()) void calls.accept(shown); }}
         decline={(shown) => void calls.decline(shown)}
         ignore={() => calls.ignore()}
+        refuse={() => void calls.refuse()}
+        freeReply={callView().phase === 'incoming' && !!callView().peer && freeReplies(overview()?.capabilities, peerById().get(callView().peer!.toLowerCase()))}
         hangup={() => void calls.hangup()}
         mute={() => calls.toggleMute()}
         camera={() => void calls.toggleCamera()}
@@ -3800,6 +3810,9 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
               <Show when={priceReady() && cost() !== null}>{' '}<span class="hint">{tr('uiUpTo105')} {fmtAmount(cost()!)}{tr('uiNothingIsPaidUntilYouPressRing')}</span></Show>
             </p>
             <Show when={!priceReady()}><p class="hint" role="status">{why() ?? tr('uiReadingTheirCallPrice')}</p></Show>
+            <Show when={nodeRoutedAudio()}>
+              <CallReadyLine grant={props.actions.callGrant?.() ?? null} continuity={props.actions.callContinuity?.() === true} limitMinutes={props.actions.callLimitMinutes?.() ?? null} />
+            </Show>
             <Show when={priceReady() && nodeRoutedAudio() && quote()?.block_msat != null ? quote() : null}>{(q) => <>
               <MinutesConsent quote={q()} />
               <RingBudgetNote grant={props.actions.callGrant?.() ?? null} peer={props.peer} name={props.name} quote={q()} callLimitMinutes={props.actions.callLimitMinutes?.() ?? null} />
@@ -3818,6 +3831,17 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
       </Show>
     </div>
   );
+}
+
+/** Ready for calls only with a live grant that can carry one (`callReadiness`); never from a capability alone. */
+function CallReadyLine(props: { grant: NodeGrantSummary | null; continuity: boolean; limitMinutes: number | null }) {
+  const readiness = () => callReadiness({ grant: props.grant, now: Date.now(), continuity: props.continuity, limitMinutes: props.limitMinutes });
+  const text = () => {
+    const r = readiness();
+    if (r.ready) return tr('caCallReady');
+    return r.reason === 'window_short' ? tr('caCallNotReadyWindowShort', r.minutesLeft) : tr('caCallNotReadyNoGrant');
+  };
+  return <p class="hint" role="status" data-call-ready={readiness().ready ? 'ready' : 'not-ready'}>{text()}</p>;
 }
 
 /** The call panel's title: the same word as the pill. */
@@ -3945,6 +3969,10 @@ function CallPanel(props: {
   decline: (shown: CallQuote) => void;
   /** Stop ringing here: nothing sent or paid. */
   ignore: () => void;
+  /** Decline: the free declined hangup when both nodes take free replies, else the local Ignore. */
+  refuse?: () => void;
+  /** Our node and this caller's node both take free replies: Decline tells them, at no cost. */
+  freeReply?: boolean;
   hangup: () => void;
   mute: () => void;
   camera: () => void;
@@ -4044,9 +4072,9 @@ function CallPanel(props: {
             <p class="hint" data-call-answer-cost>{tr('caCallAnswerCostNote', fmtAmount(m()))}</p>
           </details>}
         </Show>
-        {/* Decline is the free local ignore: nothing is sent or paid, so their ring runs out by itself. */}
+        {/* Decline is free: a free reply that tells them when both nodes take one, else the local ignore whose ring runs out by itself. */}
         <Show when={v().phase === 'incoming' && !v().silenced}>
-          <p class="hint" data-call-decline-note>{tr('caCallDeclineFreeNote')}</p>
+          <p class="hint" data-call-decline-note>{tr(props.freeReply ? 'caCallDeclineToldNote' : 'caCallDeclineFreeNote')}</p>
         </Show>
         <Show when={v().phase === 'incoming' && props.spendingReady === false}>
           <p class="hint" role="status" data-call-spend-needed>
@@ -4194,7 +4222,7 @@ function CallPanel(props: {
             <Match when={v().phase === 'incoming'}>
               {/* No price on either button: Accept stays bounded by the quote read for it (`shown`), and Decline is the free local ignore. */}
               <button type="button" class="primary soft money call-answer" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.accept(q); }}>{tr('uiAccept')}</button>
-              <button type="button" class="soft" data-call-decline data-call-ignore disabled={props.view.silenced} onClick={() => props.ignore()}>{tr('uiDecline')}</button>
+              <button type="button" class="soft" data-call-decline data-call-ignore disabled={props.view.silenced} onClick={() => (props.refuse ?? props.ignore)()}>{tr('uiDecline')}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
               <Show when={v().stuck}>

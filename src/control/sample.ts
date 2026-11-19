@@ -1270,6 +1270,7 @@ export function sampleSource(opts: { liveEveryMs?: number; firstLiveMs?: number;
     callQuote: () => ok({ offer_msat: 10_000, offer_max_routing_fee_msat: 5000, signal_msat: 1000, signal_max_routing_fee_msat: 5000, call_total_msat: 21_000 }),
     closeCallAdmission: async () => {},
     callSignal: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
+    callFreeReply: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
     callStatus: async () => null,
     callBlock: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
     callHold: () => refuse('invalid', tr('caCallsNeedARealNodeSampleDataCannotRing')),
