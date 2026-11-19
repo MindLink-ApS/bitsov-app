@@ -235,6 +235,19 @@ describe('Body panel and stream on an N1/N2 node', () => {
     expect(stream.textContent!.indexOf('to reach you')).toBeLessThan(stream.textContent!.indexOf('saw your talk'));
   });
 
+  it('a payment received at the door never shows more than arrived: 1.5 sats reads about 1, never about 2', async () => {
+    const { emit } = start();
+    const stranger = '9'.repeat(64);
+    await vi.waitFor(() => expect($('[data-membrane-refused-by]')).not.toBeNull());
+    emit({ type: 'membrane', event: ev({ seq: 950, at: Date.now(), verdict: 'admitted', code: 'settled', counterparty: stranger, first_contact: true, paid_msat: 1500 }) });
+    await vi.waitFor(() => expect($(`[data-door-track="peer:${stranger}"]`)).not.toBeNull());
+    $<HTMLButtonElement>(`[data-door-track="peer:${stranger}"]`)!.click();
+    await vi.waitFor(() => expect($('[data-door="in-admitted"]')).not.toBeNull());
+    const card = $('[data-door="in-admitted"]')!.textContent!;
+    expect(card).toMatch(/paid about 1 sat to reach you/);
+    expect(card).not.toMatch(/about 2/);
+  });
+
   it('shows a paid re-admission and an admission-required refusal in plain words', async () => {
     const { emit } = start();
     await vi.waitFor(() => expect($('[data-membrane-refused-by]')).not.toBeNull());

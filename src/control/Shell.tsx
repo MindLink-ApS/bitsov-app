@@ -47,7 +47,7 @@ import { createStore, produce, reconcile } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
-import { amount as fmtAmount, shownTotal, estimatedSats, exactAmount, wholeSats, paidAmount, budgetNote, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
+import { amount as fmtAmount, shownTotal, estimatedSats, exactAmount, wholeSats, paidAmount, budgetNote, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime, type Rounding } from './format';
 import { ambiguousThousands, amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
@@ -4610,9 +4610,10 @@ function DeliveryMark(props: { d: Delivery }) {
  */
 function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => string }) {
   const c = props.card;
-  const amt = (msat: number) => (
+  // A price someone must pay rounds up; money that reached you rounds down.
+  const amt = (msat: number, round: Rounding) => (
     <>
-      <span class="sats">{sats(msat, 'up', true)}</span> {satUnit(msat, 'up')}
+      <span class="sats">{sats(msat, round, true)}</span> {satUnit(msat, round)}
     </>
   );
   return (
@@ -4625,7 +4626,7 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
           {(x) => (
             <>
               <p class="door-head">
-                <span class="id" title={x().sender}>{shortId(x().sender)}</span>{' '}{tr('uiPaid')}{' '}<Show when={x().paid_msat !== null} fallback={tr('caYourPriceLower')}>{amt(x().paid_msat!)}</Show>{' '}{tr('caToReachYou')}</p>
+                <span class="id" title={x().sender}>{shortId(x().sender)}</span>{' '}{tr('uiPaid')}{' '}<Show when={x().paid_msat !== null} fallback={tr('caYourPriceLower')}>{amt(x().paid_msat!, 'down')}</Show>{' '}{tr('caToReachYou')}</p>
               <p class="door-proof">{tr('caSettledRecipientBoundSingleUse')}</p>
               <p class="door-note">{tr('caNotAContactAndNotAddedNothingIsKept')}</p>
             </>
@@ -4638,9 +4639,9 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
                 {tr('caRefusedAtYourDoor')}{' '}{gateWords(x().code)}
               </p>
               <p class="door-proof">
-                <Show when={x().required_msat !== null}>{tr('caNeeded656')}{' '}{amt(x().required_msat!)}</Show>
+                <Show when={x().required_msat !== null}>{tr('caNeeded656')}{' '}{amt(x().required_msat!, 'up')}</Show>
                 <Show when={x().required_msat !== null && x().paid_msat !== null}> · </Show>
-                <Show when={x().paid_msat !== null}>{tr('uiPaid')}{' '}{amt(x().paid_msat!)}</Show>
+                <Show when={x().paid_msat !== null}>{tr('uiPaid')}{' '}{amt(x().paid_msat!, 'down')}</Show>
               </p>
               <p class="door-note">{tr('caSignedBy')}{' '}{props.nameOf(x().sender)}{tr('caNothingWasStoredOrDelivered')}</p>
             </>
