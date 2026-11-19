@@ -47,6 +47,24 @@ class CacheVerificationTests(unittest.TestCase):
         self.archive.rename(renamed)
         self.assertTrue(verifier.matches(renamed, self.metadata.replace("Version: 1.0", "Version: 1:1.0")))
 
+    def test_isa_variant_filename_matches_base_architecture(self):
+        renamed = self.archive.with_name("libexample_1.0_amd64v3.deb")
+        self.archive.rename(renamed)
+        self.assertTrue(verifier.matches(renamed, self.metadata))
+
+    def test_isa_variant_still_requires_hash(self):
+        renamed = self.archive.with_name("libexample_1.0_amd64v3.deb")
+        self.archive.rename(renamed)
+        renamed.write_bytes(b"tampered")
+        self.assertFalse(verifier.matches(renamed, self.metadata))
+
+    def test_other_architecture_is_rejected(self):
+        for name in ("libexample_1.0_arm64.deb", "libexample_1.0_amd64x.deb", "libexample_1.0_amd64v.deb"):
+            renamed = self.archive.with_name(name)
+            self.archive.rename(renamed)
+            self.assertFalse(verifier.matches(renamed, self.metadata), name)
+            self.archive = renamed
+
     def test_tampered_file_is_removed_before_apt_can_reuse_it(self):
         self.archive.write_bytes(b"tampered")
         with patch.object(verifier.subprocess, "run", return_value=CompletedProcess([], 0, self.metadata)):
