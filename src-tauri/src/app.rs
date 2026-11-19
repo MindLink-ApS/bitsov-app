@@ -238,11 +238,12 @@ impl NodeBound {
         (id.as_deref() == Some(node_id)).then(|| Self { node_id: node_id.into(), changes: id.changes(), remote, network, until })
     }
 
-    /// Still this node over this connection, and still in time.
+    /// Still this node over this connection, and still in time. Taking the
+    /// snapshot can block, so the time is read after it, not before.
     fn holds(&self, state: &NodeState) -> bool {
-        if self.until.is_some_and(|until| tokio::time::Instant::now() >= until) { return false; }
-        NodeBound::now(state, &self.node_id, None)
-            .is_some_and(|now| (now.changes, now.remote, now.network) == (self.changes, self.remote, self.network))
+        let same = NodeBound::now(state, &self.node_id, None)
+            .is_some_and(|now| (now.changes, now.remote, now.network) == (self.changes, self.remote, self.network));
+        same && self.until.is_none_or(|until| tokio::time::Instant::now() < until)
     }
 
     fn refusal(&self, route: &str) -> String {
@@ -21036,6 +21037,40 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_token_acquisition()
     });
     assert!(result.is_err(), "a passed deadline preserves refusal");
     assert_eq!(read_count.load(Ordering::SeqCst), 0, "a status read was dispatched after its deadline");
+}
+
+#[test]
+fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() {
+    let rt = race_runtime();
+    let read_count = Arc::new(AtomicUsize::new(0));
+    let seen = read_count.clone();
+    let mut node = fake(AuthMode::Local, Arc::new(move |_m, p, _b| {
+        if p.starts_with("/calls?") {
+            seen.fetch_add(1, Ordering::SeqCst);
+            (200, "[]".into())
+        } else { (404, "{}".into()) }
+    }));
+    node.state.signet_only = true;
+    *node.state.network_verified.lock().unwrap() = Some(*node.state.network_auth_epoch.lock().unwrap());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let bound = NodeBound::now(&node.state, OWN, Some(deadline)).unwrap();
+    let (arrived, resume) = pause_points::arm(&node.state.api_base, "after_network_check");
+    let result = std::thread::scope(|s| {
+        let read = s.spawn(|| rt.block_on(read_call_status_from(&node.state, Some(&bound), A, CALL_ID)));
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), arrived.notified()).await.expect("credential acquired");
+        });
+        // The final check waits on the network epoch, held here past the deadline.
+        let epoch = node.state.network_auth_epoch.lock().unwrap();
+        assert!(tokio::time::Instant::now() < deadline, "resume before the deadline");
+        resume.notify_one();
+        std::thread::sleep(deadline.saturating_duration_since(tokio::time::Instant::now()) + Duration::from_millis(100));
+        assert!(!read.is_finished(), "read still waiting for validation");
+        drop(epoch);
+        read.join().unwrap()
+    });
+    assert!(result.is_err(), "a passed deadline preserves refusal");
+    assert_eq!(read_count.load(Ordering::SeqCst), 0, "a status read was dispatched after final validation blocked across its deadline");
 }
 
 
