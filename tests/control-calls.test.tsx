@@ -2086,8 +2086,8 @@ describe('calls in the shell', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.hasAttribute('data-trust-continue'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))!.click();
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
 
@@ -3439,13 +3439,20 @@ describe('calls in the shell', () => {
     const pc = FakePc.made[0]; pc.connect();
     await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
     expect($('[data-call-reconnecting]')).toBeNull();
+    // The seconds left are read from Date.now() on a 1 s display interval. Fake the clock
+    // before the drop so the countdown moves by the time we advance, not by how fast the
+    // runner happens to deliver that interval within a real wait.
+    vi.useFakeTimers();
     pc.state('disconnected');
     await vi.waitFor(() => expect($('[data-call-reconnecting]')).not.toBeNull());
     expect(text('[data-call-reconnecting]')).toMatch(/^Connection lost\. Reconnecting… If it isn’t back in (29|30) s, the call ends\.$/);
     expect(text('[data-on-call]')).toMatch(/^Reconnecting… · (29|30) s$/);
+    const pillSeconds = () => Number(/· (\d+) s$/.exec(text('[data-on-call]'))?.[1]);
     const before = Number(text('[data-call-drop-in]'));
-    await new Promise((r) => setTimeout(r, 1200));
+    const pillBefore = pillSeconds();
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(Number(text('[data-call-drop-in]'))).toBeLessThan(before);
+    expect(pillSeconds()).toBeLessThan(pillBefore);
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     expect($('[data-call-recovery-note]')).toBeNull();
