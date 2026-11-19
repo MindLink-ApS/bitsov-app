@@ -1073,6 +1073,15 @@ header > .money-notice { position: fixed; top: max(var(--s-2), env(safe-area-ins
 .call-actions .call-answer { background: var(--ok); border-color: var(--ok); color: var(--bg); font-size: var(--t-lg, 1.125rem); font-weight: 650; min-height: 48px; }
 .call-actions .call-answer:hover:not(:disabled) { background: color-mix(in srgb, var(--ok) 88%, var(--bg)); }
 .call-actions .call-answer:disabled { opacity: 0.55; }
+/* Decline and hang up are the red ones, as big as Answer; colour is never the only cue (each says what it does). */
+.call-actions :is(.call-decline, [data-call-hangup]) { font-size: var(--t-lg, 1.125rem); font-weight: 650; min-height: 48px; }
+/* A call reads like a phone call: who it is, what is happening, then the choices. */
+.call-panel .call-head { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 2px; padding-top: var(--s-1, 4px); }
+.call-panel .call-head .call-avatar { width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; flex: none; margin-bottom: var(--s-2); background: var(--raised); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line-strong); font-size: 1.375rem; font-weight: 650; }
+.call-panel .call-head .call-name { margin: 0; flex: none; max-width: 100%; color: var(--ink); font-size: var(--t-xl); font-weight: 650; line-height: 1.3; white-space: normal; overflow-wrap: anywhere; }
+.call-panel .call-head .call-status { margin: 0; color: var(--muted); font-size: var(--t-sm); line-height: 1.4; overflow-wrap: anywhere; }
+/* While the call is under way the head steps back for the call itself. */
+.call-panel:is([data-call-panel="live"], [data-call-panel="reconnecting"], [data-call-panel="ended"]) .call-head .call-avatar { width: 40px; height: 40px; font-size: var(--t-lg); margin-bottom: var(--s-1, 4px); }
 button.danger { background: var(--err); color: var(--err-ink); border: none; }
 .call-videos { position: relative; border-radius: 10px; overflow: hidden; background: #000; aspect-ratio: 4 / 3; }
 .call-video.remote { width: 100%; height: 100%; object-fit: cover; }
@@ -1279,7 +1288,7 @@ button.danger.soft { border-radius: var(--r-chip); padding: 7px 14px; font-weigh
 .call-panel header strong { font-weight: 600; }
 .call-panel [data-call-paid] { color: var(--muted); }
 /* An ended call that never started (e.g. above the grant ceiling): read it, nothing moved. */
-.call-panel [data-call-ended] { color: var(--ink); background: var(--raised); border-left: 3px solid var(--money); border-radius: var(--r-control); padding: var(--s-2) var(--s-3); max-width: none; line-height: 1.5; }
+.call-panel p.hint[data-call-ended] { color: var(--ink); background: var(--raised); border-left: 3px solid var(--money); border-radius: var(--r-control); padding: var(--s-2) var(--s-3); max-width: none; line-height: 1.5; }
 .call-panel .duration { color: var(--muted); }
 .meeting-panel .meeting-legs label { font-size: var(--t-sm); }
 
@@ -1518,6 +1527,15 @@ input[type='checkbox'], input[type='radio'] { width: auto; flex: none; padding: 
   .call-repairs .call-actions { flex-direction: column; align-items: stretch; }
   .call-panel .call-actions button,
   .call-repairs .call-actions button { flex: none; width: 100%; white-space: normal; text-align: center; }
+  /* On a phone-sized window a ringing or calling card fills the screen, like a phone call: the person at the top, the choices at the bottom. */
+  .call-panel[data-call-main]:is([data-call-panel="incoming"], [data-call-panel="calling"], [data-call-panel="ringing"]) {
+    top: max(var(--s-4), env(safe-area-inset-top, 0px)); bottom: max(var(--s-4), env(safe-area-inset-bottom, 0px));
+    left: max(var(--s-4), env(safe-area-inset-left, 0px)); right: max(var(--s-4), env(safe-area-inset-right, 0px));
+    width: auto; max-height: none; padding: var(--s-6) var(--s-4) var(--s-4);
+  }
+  .call-panel[data-call-main]:is([data-call-panel="incoming"], [data-call-panel="calling"], [data-call-panel="ringing"]) .call-head { padding-top: 8dvh; padding-bottom: var(--s-4); }
+  .call-panel[data-call-main]:is([data-call-panel="incoming"], [data-call-panel="calling"], [data-call-panel="ringing"]) .call-head .call-avatar { width: 96px; height: 96px; font-size: 2rem; }
+  .call-panel[data-call-main]:is([data-call-panel="incoming"], [data-call-panel="calling"], [data-call-panel="ringing"]) .call-actions { margin-top: auto; }
   /* Message bar: the text gets its own full row; emoji, voice, + and Send sit under it. */
   .signal-bar { flex-wrap: wrap; row-gap: var(--s-2); }
   .signal-bar > textarea { order: -1; flex: 1 1 100%; }

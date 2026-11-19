@@ -2500,7 +2500,7 @@ describe('calls in the shell', () => {
     ring('audio');
     await vi.waitFor(() => expect($('[data-call-approval] [data-touch-id-first]')).not.toBeNull());
     const stays = $('[data-call-approval] [data-touch-id-stays-text="spend"]')!;
-    expect(stays.textContent).toContain('Nothing is paid until you press Call or Accept again after approval.');
+    expect(stays.textContent).toContain('Nothing is paid until you press Call or Answer again after approval.');
     expect($('[data-call-approval]')!.textContent).not.toMatch(/press Send/);
     expect(host.used('call_signal')).toHaveLength(0);
   });
@@ -2950,7 +2950,7 @@ describe('calls in the shell', () => {
     const accept = $<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!;
     expect(accept.disabled).toBe(true);
     await vi.waitFor(() => expect(text('[data-waiting-calls] [data-call-answer-cost]')).toContain('6 sats'));
-    expect(accept.textContent).toBe('Accept');
+    expect(accept.textContent).toBe('Answer');
     const audio = play.mock.contexts.find(a => a instanceof HTMLAudioElement && a.src.includes('incoming-ring')) as HTMLAudioElement;
     expect(audio.loop).toBe(false); expect(audio.volume).toBeLessThan(0.5);
     const before = host.used('call_signal').length;
@@ -3077,17 +3077,19 @@ describe('calls in the shell', () => {
     await openShell();
     incoming(host);
     await vi.waitFor(() => expect($('[data-call-spend-needed]')).not.toBeNull());
-    expect(text('[data-call-spend-needed]')).toMatch(/answer.*paid signal.*approval/i);
-    expect(text('[data-call-spend-approve]')).toBe('Approve spending');
+    // No spending form or price on the ringing card: a plain line, and the way to set calls up one tap away under Details.
+    expect(text('[data-call-spend-needed]')).toBe('Calls are not set up on this device yet, so this call can’t be answered here. Declining still works.');
+    expect($('[data-call-spend-approve]')!.closest('details')?.open).toBe(false);
+    expect(text('[data-call-spend-approve]')).toBe('Set up calls');
     expect(host.used('spend_request')).toHaveLength(0);
     expect(host.used('call_signal')).toHaveLength(0);
     expect(capture).not.toHaveBeenCalled();
     setLanguagePref('da');
-    expect(text('[data-call-spend-needed]')).toMatch(/svar.*betalt signal.*godkend/i);
-    expect(text('[data-call-spend-approve]')).toBe('Godkend betalinger');
+    expect(text('[data-call-spend-needed]')).toBe('Opkald er ikke gjort klar på denne enhed endnu, så du kan ikke svare her. Du kan stadig afvise.');
+    expect(text('[data-call-spend-approve]')).toBe('Gør klar til opkald');
     $<HTMLButtonElement>('[data-call-spend-approve]')!.click();
     await vi.waitFor(() => expect($('[data-call-approval] [data-call-approve]')).not.toBeNull());
-    expect(text('[data-call-approval]')).toContain('Acceptér');
+    expect(text('[data-call-approval]')).toContain('Besvar');
     $<HTMLButtonElement>('[data-call-approve]')!.click();
     await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
     await vi.waitFor(() => expect($('[data-call-spend-needed]')).toBeNull());
@@ -3131,7 +3133,7 @@ describe('calls in the shell', () => {
     $<HTMLButtonElement>('[data-waiting-calls] [data-call-spend-approve]')!.click();
     if (timing === 'after') endPrimary();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect(text('[data-call-approval]')).toContain('press Call or Accept again');
+    expect(text('[data-call-approval]')).toContain('press Call or Answer again');
     expect(text('[data-call-approval]')).not.toContain('ask them to call again');
     $<HTMLButtonElement>('[data-call-approve]')!.click();
     await vi.waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
@@ -3274,8 +3276,8 @@ describe('calls in the shell', () => {
   };
 
   it.each([
-    ['en', 'Accept', 'Decline', 'Declining is free and sends nothing. Their phone keeps ringing until the call times out.'],
-    ['da', 'Acceptér', 'Afvis', 'Det er gratis at afvise, og intet bliver sendt. Det ringer hos den anden, til opkaldet udløber.'],
+    ['en', 'Answer', 'Decline', 'Declining is free and sends nothing. Their phone keeps ringing until the call times out.'],
+    ['da', 'Besvar', 'Afvis', 'Det er gratis at afvise, og intet bliver sendt. Det ringer hos den anden, til opkaldet udløber.'],
   ] as const)('Decline is the free local Ignore, said honestly, and no button carries a price (%s)', async (lang, accept, decline, note) => {
     const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
     const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
@@ -3349,7 +3351,7 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(false));
     expect($<HTMLButtonElement>('[data-call-decline]')!.disabled).toBe(false);
     expect(text('[data-call-answer-cost]')).toContain('at most 6 sats');
-    expect(text('[data-call-accept]')).toBe('Accept');
+    expect(text('[data-call-accept]')).toBe('Answer');
     expect(text('[data-call-decline]')).toBe('Decline');
   });
 
@@ -3380,7 +3382,7 @@ describe('calls in the shell', () => {
     expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(true);
     // Declining is the free local ignore: it needs no price.
     expect($<HTMLButtonElement>('[data-call-decline]')!.disabled).toBe(false);
-    expect(text('[data-call-accept]')).toBe('Accept');
+    expect(text('[data-call-accept]')).toBe('Answer');
     expect(text('[data-call-answer-price]')).toMatch(/nothing can be paid/i);
     expect($('[data-call-answer-cost]')).toBeNull();
     expect(host.used('call_signal')).toHaveLength(0);
@@ -3471,7 +3473,7 @@ describe('calls in the shell', () => {
     await openShell();
     host.emitLive({ type: 'message', room_id: null, message: { id: 'live-offer', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: 'v=0 offer' }), payment_amount_msat: 10_000 } });
     await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
-    expect(text('[data-call-title]')).toBe('Incoming call');
+    expect(text('[data-call-title]')).toBe('Incoming audio call');
     await vi.waitFor(() => expect(text('[data-call-answer-cost]')).toContain('at most 6 sats'));
     expect($('[data-message="live-offer"]')).toBeNull();
     $<HTMLButtonElement>('[data-call-accept]')!.click();
@@ -3482,7 +3484,7 @@ describe('calls in the shell', () => {
     expect(text('[data-call-duration]')).toMatch(/^0:0\d$/);
     const pill = $<HTMLButtonElement>('[data-on-call]')!;
     expect(pill?.textContent).toMatch(/Live · 00:0\d/);
-    expect(text('[data-call-title]')).toBe('Live');
+    expect(text('[data-call-title]')).toBe('In call');
     $<HTMLButtonElement>('[data-track="discover"]')!.click();
     pill.click();
     await vi.waitFor(() => expect(document.activeElement).toBe($('[data-call-panel="live"]')));
@@ -3538,14 +3540,14 @@ describe('calls in the shell', () => {
     await openShell();
     host.emitLive({ type: 'message', room_id: null, message: { ...msg(400, { media: 'video', sdp: 'offer' }), timestamp: Date.now() } });
     await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
-    expect(text('[data-call-camera-notice]')).toBe('This is a video call: your camera turns on when you press Accept. You can turn it off with Camera.');
+    expect(text('[data-call-camera-notice]')).toBe('This is a video call: your camera turns on when you press Answer. You can turn it off with Camera.');
     try {
       setLanguagePref('da');
-      expect(text('[data-call-camera-notice]')).toBe('Dette er et videoopkald: dit kamera tændes, når du trykker Acceptér. Du kan slukke det med Kamera.');
-      expect(text('[data-call-accept]')).toMatch(/^Acceptér/);
+      expect(text('[data-call-camera-notice]')).toBe('Dette er et videoopkald: dit kamera tændes, når du trykker Besvar. Du kan slukke det med Kamera.');
+      expect(text('[data-call-accept]')).toMatch(/^Besvar/);
     } finally { setLanguagePref('en'); }
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
-    expect(text('[data-call-accept]')).toMatch(/^Accept/);
+    expect(text('[data-call-accept]')).toMatch(/^Answer/);
     $<HTMLButtonElement>('[data-call-accept]')!.click();
     await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));
     FakePc.made[0].connect();
@@ -4335,7 +4337,7 @@ describe('calls in the shell', () => {
     expect(text('[data-call-permission]')).not.toMatch(before);
   });
 
-  it.each([['en', 'Reconnecting…', 'Live'], ['da', 'Forbinder igen…', 'I gang']] as const)('frozen media on a live call shows Reconnecting, then Live again (%s)', async (lang, said, live) => {
+  it.each([['en', 'Reconnecting…', 'In call'], ['da', 'Genopretter forbindelsen…', 'I samtale']] as const)('frozen media on a live call shows Reconnecting, then Live again (%s)', async (lang, said, live) => {
     stubHost();
     await liveCall();
     setLanguagePref(lang);
