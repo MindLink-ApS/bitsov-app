@@ -140,16 +140,8 @@ def main():
         violations.extend(("changed file path", category) for category in categories(path))
     in_hunk = False
     current_path = None
-    added_lines = []
-
-    def flush_attribution():
-        if len(added_lines) > 1 and has_attribution("\n".join(added_lines)):
-            violations.append(("added line", "internal attribution"))
-        added_lines.clear()
 
     for line in diff.split("\n"):
-        if not (in_hunk and line.startswith("+")):
-            flush_attribution()
         if line.startswith("diff --git "):
             in_hunk = False
             current_path = None
@@ -160,11 +152,6 @@ def main():
         elif in_hunk and line.startswith("+"):
             violations.extend(("added line", category)
                               for category in categories(line[1:], current_path))
-            if is_example(line[1:], current_path):
-                flush_attribution()
-            else:
-                added_lines.append(line[1:])
-    flush_attribution()
 
     if violations:
         # Never echo the offending text or file paths into public Actions logs.

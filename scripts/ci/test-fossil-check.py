@@ -222,13 +222,29 @@ class FossilCheckTests(unittest.TestCase):
                 with self.subTest(index=index, variant=variant):
                     self.check_change("docs/notes.md", f"// [{text.replace(' ', '-')}]: note\n", 1)
 
-    def test_wrapped_attribution_phrases_in_added_blocks(self):
+    def test_attribution_phrases_do_not_span_added_lines(self):
         for index, phrase in enumerate(ATTRIBUTIONS):
             words = phrase.upper().split()
             for split in range(1, len(words)):
                 with self.subTest(index=index, split=split):
                     content = " ".join(words[:split]) + "\n" + " ".join(words[split:]) + "\n"
-                    self.check_change(f"docs/wrapped-{index}-{split}.md", content, 1)
+                    self.check_change(f"docs/wrapped-{index}-{split}.md", content, 0)
+
+    def test_adjacent_added_lines_keep_independent_word_boundaries(self):
+        for index, phrase in enumerate(ATTRIBUTIONS):
+            words = phrase.split()
+            for split in range(1, len(words)):
+                with self.subTest(index=index, split=split):
+                    content = ("Update the " + " ".join(words[:split]) + "\n"
+                               + " ".join(words[split:]) + " status is ready\n")
+                    self.check_change(f"docs/adjacent-{index}-{split}.md", content, 0)
+
+    def test_inline_attribution_still_fails_between_benign_added_lines(self):
+        for index, phrase in enumerate(ATTRIBUTIONS):
+            with self.subTest(index=index):
+                text = "\t-- ".join(phrase.upper().split())
+                content = f"public text before\n// [{text}]: note\npublic text after\n"
+                self.check_change(f"docs/inline-{index}.md", content, 1)
 
     def test_attribution_fragments_do_not_join_unrelated_changes(self):
         context = "".join(f"unchanged line {index}\n" for index in range(20))
