@@ -12,6 +12,7 @@ mkdir -p "$T/root/scripts" "$T/root/src-tauri/src" "$T/root/packaging/windows" "
 cp scripts/build-windows-remote.sh "$T/root/scripts/"
 cp src-tauri/src/profile.rs "$T/root/src-tauri/src/"
 cp packaging/windows/tauri.windows-beta.conf.json "$T/root/packaging/windows/"
+cp package-lock.json "$T/root/"
 SCRIPT="$T/root/scripts/build-windows-remote.sh"
 GOOD="$T/root/packaging/windows/tauri.windows-beta.conf.json"
 SHA=0123456789abcdef0123456789abcdef01234567
@@ -23,13 +24,26 @@ chmod +x "$T/bin/"*
 NODE_DIR="$(dirname "$(command -v node)")"
 SAFE_PATH="$T/bin:$NODE_DIR:/usr/bin:/bin"
 
+# The NSIS plugin fixture is not Tauri's real DLL, so the throwaway copy of the script expects the
+# fixture's SHA-1 instead; the shipped script keeps Tauri's pinned value (checked here first).
+grep -qx 'NSIS_TAURI_UTILS_SHA1=75197fee3c6a814fe035788d1c34ead39349b860' "$SCRIPT" || { echo "FAIL: the shipped NSIS plugin SHA-1 changed"; exit 1; }
+printf 'nsis tauri utils fixture\n' > "$T/fixture.dll"
+FIXTURE_SHA1="$( (command -v sha1sum >/dev/null 2>&1 && sha1sum "$T/fixture.dll") || shasum -a 1 "$T/fixture.dll")"
+FIXTURE_SHA1="${FIXTURE_SHA1%% *}"
+sed -i.bak "s/^NSIS_TAURI_UTILS_SHA1=.*/NSIS_TAURI_UTILS_SHA1=$FIXTURE_SHA1/" "$SCRIPT" && rm -f "$SCRIPT.bak"
+
+# Where the Tauri bundler keeps its NSIS cache for a given home (dirs::cache_dir()).
+nsis_dir() { case "$(uname -s)" in Darwin) echo "$1/Library/Caches/tauri/NSIS" ;; *) echo "$1/.cache/tauri/NSIS" ;; esac; }
+fill_nsis() { mkdir -p "$(nsis_dir "$1")/Plugins/x86-unicode/additional"; cp "$T/fixture.dll" "$(nsis_dir "$1")/Plugins/x86-unicode/additional/nsis_tauri_utils.dll"; }
+SDKV=10.0.22621; CRTV=14.40
+
 FAILS=0
 CASE=""
 run() { # <expected-exit> <expected-text> <args...>
   local want="$1" text="$2" got=0 out
   shift 2
-  out="$(env PATH="$SAFE_PATH" XWIN_CACHE_DIR="$XWIN" BITSOV_TAURI_NSIS_CACHE="$NSIS" \
-    bash "$SCRIPT" "$@" 2>&1)" || got=$?
+  out="$(env -u XWIN_SDK_VERSION -u XWIN_CRT_VERSION PATH="$SAFE_PATH" HOME="$HOMEDIR" XDG_CACHE_HOME="$HOMEDIR/.cache" XWIN_CACHE_DIR="$XWIN" \
+    ${SDKV:+XWIN_SDK_VERSION="$SDKV"} ${CRTV:+XWIN_CRT_VERSION="$CRTV"} bash "$SCRIPT" "$@" 2>&1)" || got=$?
   if [ "$got" != "$want" ] || ! printf '%s' "$out" | grep -qF -- "$text"; then
     echo "FAIL: ${CASE:+$CASE: }$* -> exit $got (want $want), output:"; echo "$out"; FAILS=$((FAILS + 1))
   else
@@ -43,8 +57,8 @@ overlay() { # <name> <node expression applied to config c>
 }
 
 # Filled caches and node_modules: preflight passes without downloads.
-XWIN="$T/cache/xwin"; NSIS="$T/cache/nsis"
-mkdir -p "$XWIN/crt" "$NSIS/Plugins" "$T/root/node_modules/.bin"
+XWIN="$T/cache/xwin"; HOMEDIR="$T/home-full"
+mkdir -p "$XWIN/xwin" "$T/root/node_modules/.bin"; echo done > "$XWIN/xwin/DONE"; fill_nsis "$HOMEDIR"
 printf '#!/bin/sh\n' > "$T/root/node_modules/.bin/tauri"; chmod +x "$T/root/node_modules/.bin/tauri"
 
 run 0 "check only: nothing built" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
@@ -71,6 +85,13 @@ run 3 "must replace the sidecar fetch" --out "$T/out" --runner xwin --source-sha
   --overlay "$(overlay nobefore 'delete c.build')"
 printf '{ not json' > "$T/broken.json"
 run 3 "not valid JSON" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only --overlay "$T/broken.json"
+# The installer never downloads WebView2.
+run 3 "webviewInstallMode must be" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only \
+  --overlay "$(overlay nowebview 'delete c.bundle.windows.webviewInstallMode')"
+run 3 "webviewInstallMode must be" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only \
+  --overlay "$(overlay bootstrapper 'c.bundle.windows.webviewInstallMode={type:"downloadBootstrapper"}')"
+run 3 "webviewInstallMode must be" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only \
+  --overlay "$(overlay embedded 'c.bundle.windows.webviewInstallMode={type:"embedBootstrapper"}')"
 
 # ---- profile.rs policy -------------------------------------------------------
 # The guard accepts only the exact signet policy of AppProfile::for_platform: the
@@ -264,9 +285,36 @@ EMPTY="$T/cache/empty"; mkdir -p "$EMPTY"
 XWIN="$EMPTY"
 run 5 "MSVC CRT and Windows SDK" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 run 0 "allowed download: cargo-xwin would download" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only --allow-downloads
-XWIN="$T/cache/xwin"; NSIS="$EMPTY"
+# A cache folder with content but no completion marker is not a cache cargo-xwin reuses.
+CASE="xwin cache without DONE"; XWIN="$T/cache/xwin-partial"; mkdir -p "$XWIN/crt" "$XWIN/xwin/sdk"
+run 5 "xwin/DONE missing" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+CASE="empty xwin DONE"; : > "$XWIN/xwin/DONE"
+run 5 "xwin/DONE missing" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+CASE=""; XWIN="$T/cache/xwin"
+HOMEDIR="$T/home-empty"; mkdir -p "$HOMEDIR"
 run 5 "NSIS tools" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
-NSIS="$T/cache/nsis"
+# Empty Plugins/crt folders (or any other partial cache) do not pass.
+CASE="NSIS Plugins folder only"; HOMEDIR="$T/home-plugins"; mkdir -p "$(nsis_dir "$HOMEDIR")/Plugins/x86-unicode/additional"
+run 5 "missing or mismatched files" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+CASE="NSIS plugin with other bytes"; printf 'altered\n' > "$(nsis_dir "$HOMEDIR")/Plugins/x86-unicode/additional/nsis_tauri_utils.dll"
+run 5 "missing or mismatched files" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+run 0 "allowed download: the Tauri bundler" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only --allow-downloads
+CASE="old BITSOV_TAURI_NSIS_CACHE is ignored"
+out="$(env PATH="$SAFE_PATH" HOME="$HOMEDIR" XDG_CACHE_HOME="$HOMEDIR/.cache" XWIN_CACHE_DIR="$XWIN" XWIN_SDK_VERSION="$SDKV" XWIN_CRT_VERSION="$CRTV" \
+  BITSOV_TAURI_NSIS_CACHE="$(nsis_dir "$T/home-full")" bash "$SCRIPT" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only 2>&1)" && got=0 || got=$?
+if [ "$got" = 5 ]; then echo "ok: $CASE: exit 5"; else echo "FAIL: $CASE: exit $got (want 5)"; echo "$out"; FAILS=$((FAILS + 1)); fi
+CASE=""; HOMEDIR="$T/home-full"
+# SDK and CRT versions are explicit, never cargo-xwin's latest.
+CASE="no SDK version"; SDKV=""
+run 4 "XWIN_SDK_VERSION" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only --allow-downloads
+CASE="no CRT version"; SDKV=10.0.22621; CRTV=""
+run 4 "XWIN_CRT_VERSION" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only --allow-downloads
+CASE=""; CRTV=14.40
+# The NSIS check is written for one Tauri CLI version.
+CASE="other Tauri CLI in the lockfile"; cp "$T/root/package-lock.json" "$T/lock.keep"
+node -e 'const fs=require("fs");const l=JSON.parse(fs.readFileSync(process.argv[1]));l.packages["node_modules/@tauri-apps/cli"].version="2.13.0";fs.writeFileSync(process.argv[1],JSON.stringify(l));' "$T/root/package-lock.json"
+run 2 "NSIS cache check is written for 2.12.0" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+mv "$T/lock.keep" "$T/root/package-lock.json"; CASE=""
 rm "$T/root/node_modules/.bin/tauri"
 run 5 "npm ci would download" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 run 0 "allowed download: npm ci" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only --allow-downloads

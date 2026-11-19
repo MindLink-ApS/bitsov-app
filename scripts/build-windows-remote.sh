@@ -137,6 +137,9 @@ const bundle = config.bundle;
 if (!bundle || typeof bundle !== "object") fail("no bundle section");
 if (!Array.isArray(bundle.externalBin) || bundle.externalBin.length !== 0) fail("bundle.externalBin must be [] (no node in the installer)");
 if (!Array.isArray(bundle.targets) || bundle.targets.length !== 1 || bundle.targets[0] !== "nsis") fail('bundle.targets must be exactly ["nsis"]');
+// The installer never downloads anything: WebView2 must already be on the machine (Windows 11 has it).
+const webview = bundle.windows && bundle.windows.webviewInstallMode;
+if (!webview || webview.type !== "skip") fail('bundle.windows.webviewInstallMode must be {"type":"skip"} (no download at install time)');
 const before = (config.build && config.build.beforeBundleCommand) || "";
 if (typeof before !== "string" || before === "" || /fetch-node-sidecar/.test(before)) {
   fail("build.beforeBundleCommand must replace the sidecar fetch/verify step");
@@ -148,7 +151,7 @@ NODE
 PROFILE_LINE="$(validate_overlay)" || exit 3
 BUNDLE_ID="${PROFILE_LINE%%$'\t'*}"
 PRODUCT="${PROFILE_LINE#*$'\t'}"
-echo "overlay ok: $BUNDLE_ID ($PRODUCT), signet-only, no bundled node, nsis"
+echo "overlay ok: $BUNDLE_ID ($PRODUCT), signet-only, no bundled node, nsis, no WebView2 download"
 
 # ---- 2. Host preflight: refuse every step that would download ----------------
 if [ "$RUNNER" = auto ]; then
@@ -179,12 +182,37 @@ host_cache() { # dirs::cache_dir() as cargo-xwin and the Tauri bundler use it
     *) echo "${XDG_CACHE_HOME:-$HOME/.cache}" ;;
   esac
 }
-nonempty_dir() { [ -d "$1" ] && [ -n "$(ls -A "$1" 2>/dev/null)" ]; }
+sha1_of() {
+  if command -v sha1sum >/dev/null 2>&1; then sha1sum "$1"; else shasum -a 1 "$1"; fi | cut -d' ' -f1 | tr 'A-F' 'a-f'
+}
+# A cache only counts when the tool itself would reuse it without going online.
+# cargo-xwin fetches its manifest unless <cache>/xwin/DONE exists.
+xwin_cache_complete() { [ -s "$1/xwin/DONE" ]; }
+# Tauri 2.12.0 (the CLI pinned in package-lock.json) reuses <cache>/tauri/NSIS only when its required
+# files exist and the plugin matches this SHA-1 (tauri-bundler, bundle/windows/nsis/mod.rs); otherwise it downloads.
+TAURI_CLI_VERSION=2.12.0
+NSIS_TAURI_UTILS_SHA1=75197fee3c6a814fe035788d1c34ead39349b860
+nsis_cache_complete() {
+  local dir="$1" file
+  local required=(Plugins/x86-unicode/additional/nsis_tauri_utils.dll)
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) required+=(makensis.exe Bin/makensis.exe Stubs/lzma-x86-unicode Stubs/lzma_solid-x86-unicode
+      Include/MUI2.nsh Include/FileFunc.nsh Include/x64.nsh Include/nsDialogs.nsh Include/WinMessages.nsh
+      Include/Win/COM.nsh Include/Win/Propkey.nsh Include/Win/RestartManager.nsh) ;;
+  esac
+  for file in "${required[@]}"; do [ -f "$dir/$file" ] || return 1; done
+  [ "$(sha1_of "$dir/Plugins/x86-unicode/additional/nsis_tauri_utils.dll")" = "$NSIS_TAURI_UTILS_SHA1" ]
+}
+
+LOCKED_TAURI_CLI="$(node -e 'const l=require(process.argv[1]);const p=l.packages&&l.packages["node_modules/@tauri-apps/cli"];process.stdout.write(p?p.version:"")' "$ROOT/package-lock.json" 2>/dev/null || true)"
+[ "$LOCKED_TAURI_CLI" = "$TAURI_CLI_VERSION" ] || die "package-lock.json pins Tauri CLI ${LOCKED_TAURI_CLI:-?}; the NSIS cache check is written for $TAURI_CLI_VERSION, update it first"
 
 DOWNLOADS=()
 MISSING=()
+# Both caches are where the tools themselves look: XWIN_CACHE_DIR is exported to cargo-xwin below,
+# and the Tauri bundler always uses the OS cache folder (it has no cache setting of its own).
 XWIN_CACHE="${XWIN_CACHE_DIR:-$(host_cache)/cargo-xwin}"
-TAURI_NSIS_CACHE="${BITSOV_TAURI_NSIS_CACHE:-$(host_cache)/tauri/NSIS}"
+TAURI_NSIS_CACHE="$(host_cache)/tauri/NSIS"
 
 if [ "$RUNNER" = xwin ]; then
   command -v cargo-xwin >/dev/null 2>&1 || MISSING+=("cargo-xwin (cargo install --locked cargo-xwin, or the messense/cargo-xwin image)")
@@ -194,11 +222,14 @@ if [ "$RUNNER" = xwin ]; then
   else
     MISSING+=("rustup")
   fi
-  nonempty_dir "$XWIN_CACHE" || DOWNLOADS+=("cargo-xwin would download the MSVC CRT and Windows SDK into $XWIN_CACHE")
+  # The SDK and CRT versions are chosen explicitly, never cargo-xwin's latest-available default.
+  [ -n "${XWIN_SDK_VERSION:-}" ] || MISSING+=("XWIN_SDK_VERSION (the Windows SDK version to build against)")
+  [ -n "${XWIN_CRT_VERSION:-}" ] || MISSING+=("XWIN_CRT_VERSION (the MSVC CRT version to build against)")
+  xwin_cache_complete "$XWIN_CACHE" || DOWNLOADS+=("cargo-xwin would download the MSVC CRT and Windows SDK into $XWIN_CACHE (no complete cache: xwin/DONE missing)")
 else
   command -v cargo >/dev/null 2>&1 || MISSING+=("cargo with the MSVC toolchain")
 fi
-nonempty_dir "$TAURI_NSIS_CACHE" || DOWNLOADS+=("the Tauri bundler would download its NSIS tools into $TAURI_NSIS_CACHE")
+nsis_cache_complete "$TAURI_NSIS_CACHE" || DOWNLOADS+=("the Tauri bundler would download its NSIS tools into $TAURI_NSIS_CACHE (missing or mismatched files)")
 [ -x "$ROOT/node_modules/.bin/tauri" ] || DOWNLOADS+=("npm ci would download node_modules")
 
 if [ "${#MISSING[@]}" -gt 0 ]; then
@@ -224,6 +255,9 @@ fi
 if [ "$ALLOW_DOWNLOADS" != 1 ]; then
   export CARGO_NET_OFFLINE=true
   export npm_config_offline=true
+fi
+if [ "$RUNNER" = xwin ]; then
+  export XWIN_CACHE_DIR="$XWIN_CACHE" XWIN_SDK_VERSION XWIN_CRT_VERSION
 fi
 if [ ! -x "$ROOT/node_modules/.bin/tauri" ]; then
   npm ci --no-audit --no-fund
@@ -268,6 +302,8 @@ cp "${installers[0]}" "$OUT/$NAME"
   echo "product.name=$PRODUCT"
   echo "target=$TARGET"
   echo "bundle=nsis"
+  echo "webview.install=skip (the installer never downloads WebView2)"
+  [ "$RUNNER" != xwin ] || echo "xwin.sdk=$XWIN_SDK_VERSION xwin.crt=$XWIN_CRT_VERSION"
   echo "runner=$RUNNER"
   echo "profile=signet-only (selected by bundle identifier); remote node only on Windows"
   echo "bundled.node=absent"
