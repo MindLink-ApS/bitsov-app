@@ -307,7 +307,11 @@ describe('P1-17: a file, never a base64 blob', () => {
     JSON.stringify({ data_b64: blob }),
     JSON.stringify({ data: blob, note: 'hi' }),
     JSON.stringify({ filename: 'notes.txt', data: 'Meet me at noon' }),
-    JSON.stringify({ mime_type: 'text/plain', data_b64: 'SGVsbG8=' }),
+    JSON.stringify({ mime_type: 'text/plain', data_b64: 'Meet me at noon' }),
+    JSON.stringify({ filename: 'a.txt', mime_type: 'text/plain', data_b64: 'SGVsbG8' }),
+    JSON.stringify({ filename: 'a.txt', data_b64: 'SGVs=bG8' }),
+    JSON.stringify({ filename: 'a.txt', data_b64: 'SGV+bG-_' }),
+    JSON.stringify({ filename: 'a.txt', data_b64: 'SGVsbG8=!!!!' }),
     JSON.stringify({ type: 'greeting', data: blob }),
   ];
 
@@ -322,6 +326,30 @@ describe('P1-17: a file, never a base64 blob', () => {
     ['file kind', { type: 'file', data_b64: blob }, null],
   ] as const)('JSON that names an attachment is a file (%s)', (_l, record, name) => {
     expect(attachmentOf(JSON.stringify(record))).toMatchObject({ name, size: 200 });
+  });
+
+  // A record that names a file keeps its card at any size: only well-formed base64 is required.
+  it.each([
+    ['hello.txt', { type: 'file', filename: 'hello.txt', mime_type: 'text/plain', data_b64: btoa('hello') }, 'hello.txt', 5],
+    ['a short MIME-typed payload', { mime_type: 'text/plain', data_b64: 'SGVsbG8=' }, null, 5],
+    ['1 byte', { filename: 'one.bin', data_b64: 'QQ==' }, 'one.bin', 1],
+    ['empty', { filename: 'empty.txt', data_b64: '' }, 'empty.txt', 0],
+    ['URL-safe', { filename: 'u.bin', data_b64: '-_-_' }, 'u.bin', 3],
+    ['line-wrapped text file', { filename: 'notes.txt', mime_type: 'text/plain', data_b64: btoa('Hello world\n'.repeat(100)).match(/.{1,76}/g)!.join('\n') }, 'notes.txt', 1200],
+  ] as const)('an explicitly named small or text file keeps its card (%s)', (_l, record, name, size) => {
+    expect(attachmentOf(JSON.stringify(record))).toMatchObject({ name, size });
+  });
+
+  it('shows a small named file as a card with its name and Save', async () => {
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    const text = JSON.stringify({ type: 'file', filename: 'hello.txt', mime_type: 'text/plain', data_b64: 'aGVsbG8=' });
+    source.messages = async (p: string) => (p.toLowerCase() === A ? [{ id: 'h1', kind: 1, sender: A, recipient: SAMPLE_OWN_ID, timestamp: 1, plaintext: text, payment_amount_msat: null }] : []);
+    await open(source);
+    await vi.waitFor(() => expect($('[data-message="h1"]')).not.toBeNull());
+    expect($('[data-message="h1"] [data-attachment-name]')?.textContent).toBe('hello.txt');
+    expect($('[data-message="h1"] [data-attachment-size]')?.textContent).toBe('5 B');
+    expect($('[data-message="h1"] [data-attachment-save]')?.textContent).toBe('Save');
+    expect($('[data-message="h1"]')!.textContent).not.toContain('aGVsbG8=');
   });
 
   it.each(['Meet me at noon', 'Your parcel has arrived'])('a JSON chat message %s stays readable in the chat', async (words) => {

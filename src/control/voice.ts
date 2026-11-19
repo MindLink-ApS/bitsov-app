@@ -96,6 +96,28 @@ function bareB64(text: string): string | null {
   return b;
 }
 
+/**
+ * Well-formed base64 of any length, returned in the standard alphabet: standard
+ * or URL-safe (never mixed), padding only at the end, length a multiple of 4,
+ * line wraps allowed but no spaces inside, and it must decode.
+ */
+function wellFormedB64(text: string): string | null {
+  const t = text.trim();
+  if (/[ \t]/.test(t)) return null;
+  const b = t.replace(/\r?\n/g, '');
+  if (b.length % 4 !== 0) return null;
+  const std = /^[A-Za-z0-9+/]*={0,2}$/.test(b);
+  const url = /^[A-Za-z0-9_-]*={0,2}$/.test(b);
+  if (!std && !url) return null;
+  const norm = std ? b : b.replace(/-/g, '+').replace(/_/g, '/');
+  try {
+    atob(norm);
+  } catch {
+    return null;
+  }
+  return norm;
+}
+
 function decodedSize(b64: string): number {
   const pad = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
   return Math.floor((b64.length * 3) / 4) - pad;
@@ -120,9 +142,9 @@ export function attachmentOf(plaintext: string | null): Attachment | null {
       const mime = [o.mime_type, o.mime].find((x): x is string => typeof x === 'string' && /^[\w.+-]+\/[\w.+-]+$/.test(x.trim()));
       const fileKind = [o.type, o.kind].some((x) => x === 'file' || x === 'attachment');
       if (!n && !mime && !fileKind) return null;
-      // And its payload must pass the same strict bytes check as bare text.
+      // A named file needs only well-formed base64 (any size); the bare-text heuristic is not for it.
       const data = [o.data_b64, o.data, o.content_b64].find((x): x is string => typeof x === 'string');
-      const b = data === undefined ? null : bareB64(data);
+      const b = data === undefined ? null : wellFormedB64(data);
       if (b === null) return null;
       return { name: n ? baseName(n) : null, mime: mime ?? null, size: decodedSize(b), b64: b };
     } catch {
