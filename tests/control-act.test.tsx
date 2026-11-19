@@ -582,6 +582,57 @@ describe('acting from the track', () => {
     expect(text('[data-touch-id-stays-text="spend"]')).not.toContain('until you press Send');
   });
 
+  /** What shows without opening anything: closed Details keep only their summary. */
+  const visible = (sel: string) => {
+    const el = $(sel);
+    if (!el) return '';
+    const copy = el.cloneNode(true) as Element;
+    copy.querySelectorAll('details:not([open])').forEach((d) => [...d.childNodes].forEach((n) => { if (!(n instanceof Element && n.tagName === 'SUMMARY')) n.remove(); }));
+    return copy.textContent ?? '';
+  };
+  const CLI = /konsensus\s|--op\b|--config\b|Terminal|terminal|command|kommando/;
+
+  it.each([
+    ['en', 'Details', 'Your box needs one yes from the person who set it up.'],
+    ['da', 'Detaljer', 'Din boks skal have ét ja fra den, der har sat den op.'],
+  ] as const)('a spend request waits in plain words; the exact line is only under %s, for whoever set up the box', async (lang, details, plain) => {
+    const host = stubHost({
+      spend_request: () => {
+        host.spend.v = view('pending', { pending: { op_id: 'ab12', expires_at_ms: Date.now() + 900_000, owner_action: 'konsensus grant --op ab12', owner_can_grant: true } });
+        return { ...host.spend.v, request_id: 'ab12' };
+      },
+    });
+    await openShell();
+    setLanguagePref(lang);
+    type('[data-composer] textarea', 'gm Maya');
+    submit();
+    await waitFor(() => expect($('[data-approval="pending"]')).not.toBeNull());
+    const shown = visible('[data-approval="pending"]');
+    expect(shown).toContain(plain);
+    expect(shown).not.toMatch(CLI);
+    expect(shown).not.toContain('ab12');
+    const operator = $<HTMLDetailsElement>('[data-approval-operator]')!;
+    expect(operator.open).toBe(false);
+    expect(operator.querySelector('summary')!.textContent).toBe(details);
+    expect(operator.querySelector('[data-owner-action]')!.textContent).toBe('konsensus grant --op ab12');
+    // No copy button, tooltip or label carries the line outside it.
+    const outside = [...mount.querySelectorAll('[data-approval="pending"] *')].filter((el) => !operator.contains(el));
+    for (const el of outside) {
+      for (const attr of ['title', 'aria-label', 'data-copy']) expect(el.getAttribute(attr) ?? '', attr).not.toMatch(CLI);
+    }
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
+  it('a node that cannot grant says so plainly; its own words stay under Details', async () => {
+    stubHost({
+      spend_status: () => view('unavailable', { pending: { op_id: 'ab12', expires_at_ms: Date.now() + 900_000, owner_action: 'konsensus grant --op ab12 is unavailable in this deployment', owner_can_grant: false } }),
+    });
+    await openShell();
+    await waitFor(() => expect($('[data-approval="unavailable"]')).not.toBeNull());
+    expect(visible('[data-approval="unavailable"]')).not.toMatch(CLI);
+    expect($('[data-approval="unavailable"] [data-owner-action]')!.closest('details')?.open).toBe(false);
+  });
+
   it('asks the owner once (Approve & send), then sends that message once the grant lands, and shows the receipt and delivery', async () => {
     const host = stubHost();
     await openShell();

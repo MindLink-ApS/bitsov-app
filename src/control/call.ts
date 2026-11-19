@@ -347,6 +347,8 @@ export type CallDeps = {
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
   /** Latest grant read by the shell; the host rechecks it before paying. */
   grant?: () => NodeGrantSummary | null;
+  /** This box's call limit in minutes, once seen on one of its holds; null while unknown. */
+  callLimitMinutes?: () => number | null;
   /** `minutes`: only on a node-routed offer, the minutes agreed before Ring (kept by the host). */
   /** `maxHangupMsat`, on an offer: the most its hangup was shown to cost. The host saves no higher ceiling for End. */
   signal: (peer: string, kind: number, plaintext: string, maxMsat: number, minutes?: MinutesConsent, maxHangupMsat?: number) => Promise<Outcome<CallReceipt>>;
@@ -418,6 +420,28 @@ export function gathered(pc: RTCPeerConnection, ms: number): Promise<void> {
 type IncomingOffer = { callId: string; peer: string; media: CallMedia; at: number; sdp: string };
 
 export type CallEngine = ReturnType<typeof createCallEngine>;
+
+/**
+ * The call limit assumed while this box's own (`[calls] max_call_minutes`) is
+ * not known yet, in minutes: the most any node allows (docs/CALLS.md), so an
+ * unknown limit never lets a call start that its approval could not cover.
+ */
+export const ASSUMED_CALL_LIMIT_MINUTES = 240;
+/** Room beyond the call limit, so a box approval never ends during the call's last minute. */
+export const CALL_WINDOW_MARGIN_MS = 60_000;
+
+/**
+ * A node-routed call lives only as long as the box approval: when it ends, the
+ * box refuses the call's media and the call dies mid-way. The minutes left on
+ * that approval when it would end before a call of `limitMinutes` could, or
+ * null when it covers the call (or no approval is known).
+ */
+export function windowEndsBeforeCall(grant: NodeGrantSummary | null | undefined, now: number, limitMinutes?: number | null): number | null {
+  if (!grant || !Number.isFinite(grant.expires_at_ms)) return null;
+  const limit = limitMinutes && limitMinutes > 0 ? limitMinutes : ASSUMED_CALL_LIMIT_MINUTES;
+  const left = grant.expires_at_ms - now;
+  return left < limit * 60_000 + CALL_WINDOW_MARGIN_MS ? Math.max(0, Math.ceil(left / 60_000)) : null;
+}
 
 export function createCallEngine(deps: CallDeps) {
   let view: CallView = IDLE;
@@ -1102,6 +1126,11 @@ export function createCallEngine(deps: CallDeps) {
   const accept = (shown: CallQuote) => guarded(async () => {
     if (view.phase !== 'incoming' || !offerSdp) return;
     const callId = view.callId;
+    // Never answer a node-routed call the box approval would cut off: nothing is sent or paid, and it keeps ringing.
+    if (deps.minutes) {
+      const left = windowEndsBeforeCall(deps.grant?.(), deps.now(), deps.callLimitMinutes?.());
+      if (left !== null) { set({ error: tr('caCallWindowShortAnswer', left) }); return; }
+    }
     if (deps.authorize && !await deps.authorize()) return;
     if (view.callId !== callId || view.phase !== 'incoming') return;
     clearTimeout(ringTimer);
@@ -1124,6 +1153,11 @@ export function createCallEngine(deps: CallDeps) {
       return;
     }
     if (view.callId !== callId || !active()) return;
+    // Checked again at the paid step: preparing media takes time, and the approval may have changed meanwhile.
+    if (deps.minutes) {
+      const late = windowEndsBeforeCall(deps.grant?.(), deps.now(), deps.callLimitMinutes?.());
+      if (late !== null) { end(null, tr('caCallWindowShortAnswer', late)); return; }
+    }
     negotiated = true; // The peer may see the answer before our host receipt.
     const r = await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(quote));
     if (view.callId !== callId || !active()) return;
@@ -1216,6 +1250,14 @@ export function createCallEngine(deps: CallDeps) {
         set({ ...IDLE, phase: 'ended', peer, error: tr('caMinutesOwnerSession') });
         return;
       }
+      // Nor inside a box approval that would end before the call could: the call would die there.
+      if (deps.minutes) {
+        const left = windowEndsBeforeCall(grant, deps.now(), deps.callLimitMinutes?.());
+        if (left !== null) {
+          set({ ...IDLE, phase: 'ended', peer, error: tr('caCallWindowShortRing', left) });
+          return;
+        }
+      }
       const consent: MinutesConsent | undefined = deps.minutes && block !== null && most !== null
         ? { block_msat: block, block_max_routing_fee_msat: q.block_max_routing_fee_msat ?? 0, max_hold_msat: most } : undefined;
       if (deps.authorize && !await deps.authorize(peer)) return;
@@ -1242,6 +1284,11 @@ export function createCallEngine(deps: CallDeps) {
       }
       // Cancelled before the offer went out: nothing is paid.
       if (cancelled === callId || view.callId !== callId || !active()) return;
+      // Checked again at the paid step: preparing media takes time, and the approval may have changed meanwhile.
+      if (deps.minutes) {
+        const late = windowEndsBeforeCall(deps.grant?.(), deps.now(), deps.callLimitMinutes?.());
+        if (late !== null) { end(null, tr('caCallWindowShortRing', late)); return; }
+      }
       // From here the host may hold this admission: every end asks it to close it.
       own.push(callId);
       const r = await pay(CALL_OFFER, { media, sdp: conn.localDescription!.sdp }, q.offer_msat + q.offer_max_routing_fee_msat, undefined, undefined, false, consent, signalCost(q));

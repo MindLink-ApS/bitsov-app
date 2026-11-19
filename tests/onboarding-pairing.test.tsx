@@ -356,7 +356,8 @@ describe('pairing panel', () => {
     expect(panel.textContent).not.toMatch(/secur(e|es) (your|the) pairing|prevents/i);
     expect(panel.textContent).toContain('cannot spend');
     expect(panel.textContent).toContain('cannot replace a live identity');
-    expect(panel.textContent).toContain('owner CLI');
+    expect(panel.textContent).toContain('the person who set up your box approves this app there');
+    expect(panel.textContent).not.toMatch(/\bCLI\b|terminal|command/i);
     expect(panel.textContent).toContain('Less exposure, not solved local security');
   });
 

@@ -99,6 +99,8 @@ export type MinutesStopCode = 'unpaid' | 'node_ended' | 'payment_failed' | 'budg
 export type MinutesStop = {
   code: MinutesStopCode;
   message: string;
+  /** The node's own words when they are not plain: shown only under Details. */
+  detail?: string;
   /** The node grant or separate app limit that refused the minute, including its accounted amount. */
   limit?: Pick<ActionError, 'code' | 'message'>;
 };
@@ -165,6 +167,14 @@ export const STOP_MESSAGE: Record<MinutesStopCode, () => string> = {
   hold_refused: () => tr('caMinutesHoldRefused'),
 };
 
+/**
+ * The callee's box refused the minute (for example its approval ran out, so it
+ * no longer takes this call's media). The node says so in protocol words.
+ */
+export function theirBoxRefused(error: Pick<ActionError, 'message'> & { reason?: string | null }): boolean {
+  return error.reason === 'call_block_unpayable' || /callee refused the call block invoice/i.test(error.message);
+}
+
 export function createCallMinutes(opts: {
   peer: string;
   callId: string;
@@ -228,13 +238,16 @@ export function createCallMinutes(opts: {
   };
 
   /** Stops while ringing (the hold was refused) or while paying; never after the call ended. */
-  const stopWith = (code: MinutesStopCode, detail: string | null = null, limit?: Pick<ActionError, 'code' | 'message'>) => {
+  const stopWith = (code: MinutesStopCode, detail: string | null = null, limit?: Pick<ActionError, 'code' | 'message'>, refusal?: ActionError) => {
     if (stopped || disposed || settling) return;
     stopped = true;
     running = false;
     clearTimeout(timer);
     timer = undefined;
-    const stop: MinutesStop = { code, message: detail ? `${STOP_MESSAGE[code]()} ${detail}` : STOP_MESSAGE[code]() };
+    // Their box stopping the call is said in plain words; its protocol text stays under Details.
+    const stop: MinutesStop = code === 'payment_failed' && detail && refusal && theirBoxRefused(refusal)
+      ? { code, message: tr('caMinutesTheirBoxStopped'), detail }
+      : { code, message: detail ? `${STOP_MESSAGE[code]()} ${detail}` : STOP_MESSAGE[code]() };
     if (limit) stop.limit = { code: limit.code, message: limit.message };
     emit({ stop });
     opts.onStop(stop);
@@ -320,7 +333,7 @@ export function createCallMinutes(opts: {
       const retryable = code === 'not_dispatched' || code === 'call_block_not_due';
       attempts++;
       if (retryable && attempts < MAX_ATTEMPTS && !lapsed()) { schedule(RETRY_MS, () => void tick()); return; }
-      stopWith('payment_failed', r.error.message, code === 'grant_exhausted' ? r.error : undefined);
+      stopWith('payment_failed', r.error.message, code === 'grant_exhausted' ? r.error : undefined, r.error);
       return;
     }
     // Paid or not is unknown: never pay again on top of it.

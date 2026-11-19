@@ -2803,12 +2803,10 @@ describe('calls in the shell', () => {
     expect(text('[data-call-paid]')).toMatch(/^This call paid up to 21 sats:/);
   });
 
-  it('declining never shows "paid nothing", even for a moment, while its hangup is owed; Close waits for it', async () => {
-    let land!: (r: unknown) => void;
-    const host = stubHost({ messages_list: () => [], call_signal: () => new Promise((resolve) => { land = resolve; }) });
+  it('declining sends and owes nothing: no hangup is paid, no "paid" line ever shows, and the card goes away', async () => {
+    const host = stubHost({ messages_list: () => [] });
     await openShell();
     const seen: string[] = [];
-    // Every paid line ever inserted, even one replaced in the same tick.
     const watch = new MutationObserver((records) => records.forEach((r) => r.addedNodes.forEach((n) => {
       if (!(n instanceof Element)) return;
       [n, ...n.querySelectorAll('[data-call-paid]')].forEach((el) => { if (el.hasAttribute('data-call-paid')) seen.push(el.getAttribute('data-call-paid')!); });
@@ -2817,16 +2815,11 @@ describe('calls in the shell', () => {
     host.emitLive({ type: 'message', room_id: null, message: { id: 'live-offer', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: 'v=0 offer' }), payment_amount_msat: 10_000 } });
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-decline]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-decline]')!.click();
-    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    await vi.waitFor(() => expect(land).toBeDefined());
-    expect(text('[data-call-paid]')).toBe('A payment for this call is still settling: up to 6 sats. The total updates when it finishes. Media was not billed.');
-    expect($<HTMLButtonElement>('[data-call-dismiss]')!.disabled).toBe(true);
-    land({ message_id: 'sig', kind: 403, amount_msat: 1_000, total_msat: 6_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() });
-    await vi.waitFor(() => expect($('[data-call-paid]')?.getAttribute('data-call-paid')).toBe('settled'));
-    expect($<HTMLButtonElement>('[data-call-dismiss]')!.disabled).toBe(false);
+    await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).toBeNull());
     watch.disconnect();
-    expect(seen).toContain('pending');
-    expect(seen).not.toContain('nothing');
+    expect(seen).toEqual([]);
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('op_end_call')).toHaveLength(0);
   });
 
   it.each(['call_id_used', 'call_busy', 'call_signal_in_flight', 'call_signal_invalid', 'call_not_live'])(
@@ -2946,7 +2939,7 @@ describe('calls in the shell', () => {
     else expect($('[data-missed-call]')).toBeNull();
   });
 
-  it('keeps a second priced card visible with a soft tone and working decline while the first call stays live', async () => {
+  it('keeps a second card visible with a soft tone and a working free decline while the first call stays live', async () => {
     const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
     const host = payHost(); await liveCall();
     const pc = FakePc.made[0];
@@ -2954,11 +2947,15 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-panel="incoming"]')).not.toBeNull());
     const accept = $<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!;
     expect(accept.disabled).toBe(true);
-    await vi.waitFor(() => expect(accept.textContent).toContain('6 sats'));
+    await vi.waitFor(() => expect(text('[data-waiting-calls] [data-call-answer-cost]')).toContain('6 sats'));
+    expect(accept.textContent).toBe('Accept');
     const audio = play.mock.contexts.find(a => a instanceof HTMLAudioElement && a.src.includes('incoming-ring')) as HTMLAudioElement;
     expect(audio.loop).toBe(false); expect(audio.volume).toBeLessThan(0.5);
+    const before = host.used('call_signal').length;
     $<HTMLButtonElement>('[data-waiting-calls] [data-call-decline]')!.click();
-    await vi.waitFor(() => expect(host.used('call_signal').some(c => c.args?.kind === 403 && String(c.args.plaintext).includes('f'.repeat(32)))).toBe(true));
+    // The free Decline: the waiting card goes, nothing is sent for it, and the live call goes on.
+    await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-panel="incoming"]')).toBeNull());
+    expect(host.used('call_signal')).toHaveLength(before);
     expect($('[data-call-panel="live"]')).not.toBeNull(); expect(pc.closed).toBe(false);
     expect($('[data-missed-call]')).toBeNull();
   });
@@ -2969,7 +2966,7 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-accept]')).not.toBeNull());
     $<HTMLButtonElement>('[data-call-panel="live"] [data-call-hangup]')!.click();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!.disabled).toBe(false));
-    await vi.waitFor(() => expect(text('[data-waiting-calls] [data-call-accept]')).toContain('6 sats'));
+    await vi.waitFor(() => expect(text('[data-waiting-calls] [data-call-answer-cost]')).toContain('6 sats'));
     $<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!.click();
     await vi.waitFor(() => expect(host.used('call_signal').some(c => c.args?.kind === 401 && String(c.args.plaintext).includes('f'.repeat(32)))).toBe(true));
     expect($('[data-waiting-calls] [data-call-panel]')).toBeNull();
@@ -3262,7 +3259,73 @@ describe('calls in the shell', () => {
     expect(host.used('spend_request')).toHaveLength(0);
   });
 
-  it('Accept and Decline wait for the price, then show it as a ceiling', async () => {
+  /** What the card shows without opening anything: closed Details keep only their summary. */
+  const visible = (sel: string) => {
+    const el = $(sel);
+    if (!el) return '';
+    const copy = el.cloneNode(true) as Element;
+    copy.querySelectorAll('details:not([open])').forEach((d) => [...d.childNodes].forEach((n) => { if (!(n instanceof Element && n.tagName === 'SUMMARY')) n.remove(); }));
+    return copy.textContent ?? '';
+  };
+
+  it.each([
+    ['en', 'Accept', 'Decline', 'Declining is free and sends nothing. Their phone keeps ringing until the call times out.'],
+    ['da', 'Acceptér', 'Afvis', 'Det er gratis at afvise, og intet bliver sendt. Det ringer hos den anden, til opkaldet udløber.'],
+  ] as const)('Decline is the free local Ignore, said honestly, and no button carries a price (%s)', async (lang, accept, decline, note) => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
+    const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    const host = stubHost({ messages_list: () => [], call_quote: () => QUOTE });
+    await openShell();
+    setLanguagePref(lang);
+    incoming(host);
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(false));
+    expect(text('[data-call-accept]')).toBe(accept);
+    expect(text('[data-call-decline]')).toBe(decline);
+    expect(visible('[data-call-panel="incoming"]')).not.toMatch(/\bsats?\b/);
+    expect(text('[data-call-decline-note]')).toBe(note);
+    // One way to say no: no second, differently priced button.
+    expect(mount.querySelectorAll('[data-call-panel="incoming"] .call-actions button')).toHaveLength(2);
+    // What answering costs is still there, one tap away under Details.
+    const cost = $('[data-call-answer-cost]')!;
+    expect(cost.closest('details')?.open).toBe(false);
+    const audio = play.mock.contexts.find(a => a instanceof HTMLAudioElement && a.loop) as HTMLAudioElement;
+    $<HTMLButtonElement>('[data-call-decline]')!.click();
+    await vi.waitFor(() => expect(pause.mock.contexts).toContain(audio));
+    expect($('[data-call-panel="incoming"]')).toBeNull();
+    expect(host.used('call_signal')).toHaveLength(0);
+    expect(host.used('op_end_call')).toHaveLength(0);
+    expect(host.used('spend_request')).toHaveLength(0);
+  });
+
+  it('Decline works with no readable price: it pays nothing either way', async () => {
+    let answer: Reply = () => QUOTE;
+    const host = stubHost({ messages_list: () => [], call_quote: (args) => answer(args) });
+    await openShell();
+    answer = () => { throw { code: 'node', message: 'Could not read it' }; };
+    incoming(host);
+    await vi.waitFor(() => expect($('[data-call-answer-price]')).not.toBeNull());
+    expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(true);
+    expect($<HTMLButtonElement>('[data-call-decline]')!.disabled).toBe(false);
+    $<HTMLButtonElement>('[data-call-decline]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).toBeNull());
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it('the ring confirm keeps the STUN address out of sight, under Details', async () => {
+    const own = 'stun:192.0.2.10:3478';
+    stubHost({ node_overview: overviewWith({ stun_source: 'own', stun_port: 3478, stun_url: own }) });
+    await openShell();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-confirm-box]')).not.toBeNull());
+    expect(visible('[data-call-confirm-box]')).not.toContain('stun:');
+    expect(visible('[data-call-confirm-box]')).not.toContain('192.0.2.10');
+    const source = $('[data-call-stun-source]')!;
+    expect(source.closest('details')?.open).toBe(false);
+    expect(source.textContent).toContain(own);
+  });
+
+  it('Accept waits for the price, which shows as a ceiling under Details; Decline is free at once', async () => {
     let read = (_q: CallQuote) => {};
     let answer: Reply = () => QUOTE;
     const host = stubHost({ messages_list: () => [], call_quote: (args) => answer(args) });
@@ -3271,12 +3334,13 @@ describe('calls in the shell', () => {
     incoming(host);
     await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
     expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(true);
-    expect($<HTMLButtonElement>('[data-call-decline]')!.disabled).toBe(true);
+    expect($<HTMLButtonElement>('[data-call-decline]')!.disabled).toBe(false);
     read(QUOTE);
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(false));
     expect($<HTMLButtonElement>('[data-call-decline]')!.disabled).toBe(false);
-    expect(text('[data-call-accept]')).toBe('Accept · up to 6 sats');
-    expect(text('[data-call-decline]')).toBe('Decline · up to 6 sats');
+    expect(text('[data-call-answer-cost]')).toContain('at most 6 sats');
+    expect(text('[data-call-accept]')).toBe('Accept');
+    expect(text('[data-call-decline]')).toBe('Decline');
   });
 
   it('the incoming card says in words what answering can cost: the answer, your own hangup, and nothing more but a reconnect', async () => {
@@ -3284,11 +3348,11 @@ describe('calls in the shell', () => {
     await openShell();
     incoming(host);
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(false));
-    expect(text('[data-call-accept]')).toBe('Accept · up to 6 sats');
-    expect(text('[data-call-answer-cost]')).toBe('Answering costs you at most 6 sats. Hanging up costs at most 6 sats more. The caller pays for the call itself. Ignore costs nothing. If the connection drops, trying to reconnect can add payments of at most 6 sats each, even if it fails.');
+    expect(text('[data-call-answer-cost]')).toContain('at most 6 sats');
+    expect(text('[data-call-answer-cost]')).toBe('Answering costs you at most 6 sats. Hanging up costs at most 6 sats more. The caller pays for the call itself. Declining costs nothing. If the connection drops, trying to reconnect can add payments of at most 6 sats each, even if it fails.');
     try {
       setLanguagePref('da');
-      expect(text('[data-call-answer-cost]')).toBe('At svare koster dig højst 6 sats. At lægge på koster højst 6 sats mere. Den, der ringer, betaler selve opkaldet. Ignorér koster intet. Hvis forbindelsen falder ud, kan forsøg på at forbinde igen medføre flere betalinger på højst 6 sats hver, også hvis det ikke lykkes.');
+      expect(text('[data-call-answer-cost]')).toBe('At svare koster dig højst 6 sats. At lægge på koster højst 6 sats mere. Den, der ringer, betaler selve opkaldet. Det er gratis at afvise. Hvis forbindelsen falder ud, kan forsøg på at forbinde igen medføre flere betalinger på højst 6 sats hver, også hvis det ikke lykkes.');
     } finally { setLanguagePref('en'); }
     expect(host.used('call_signal')).toHaveLength(0);
   });
@@ -3296,7 +3360,7 @@ describe('calls in the shell', () => {
   it.each([
     ['the read fails', () => { throw { code: 'node', message: 'Could not read it' }; }],
     ['their node gives no live price', () => ({ ...QUOTE, offer_msat: null, offer_max_routing_fee_msat: 0, call_total_msat: null })],
-  ] as [string, Reply][])('when %s the buttons stay off and the card says why', async (_case, reply) => {
+  ] as [string, Reply][])('when %s Accept stays off and the card says why', async (_case, reply) => {
     let answer: Reply = () => QUOTE;
     const host = stubHost({ messages_list: () => [], call_quote: (args) => answer(args) });
     await openShell();
@@ -3304,7 +3368,8 @@ describe('calls in the shell', () => {
     incoming(host);
     await vi.waitFor(() => expect($('[data-call-answer-price]')).not.toBeNull());
     expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(true);
-    expect($<HTMLButtonElement>('[data-call-decline]')!.disabled).toBe(true);
+    // Declining is the free local ignore: it needs no price.
+    expect($<HTMLButtonElement>('[data-call-decline]')!.disabled).toBe(false);
     expect(text('[data-call-accept]')).toBe('Accept');
     expect(text('[data-call-answer-price]')).toMatch(/nothing can be paid/i);
     expect($('[data-call-answer-cost]')).toBeNull();
@@ -3321,7 +3386,7 @@ describe('calls in the shell', () => {
     incoming(host);
     await vi.waitFor(() => expect($('[data-call-answer-price]')).not.toBeNull());
     const audio = play.mock.contexts.find(a => a instanceof HTMLAudioElement && a.loop) as HTMLAudioElement;
-    expect(text('[data-call-ignore]')).toBe('Ignore');
+    expect(text('[data-call-ignore]')).toBe('Decline');
     $<HTMLButtonElement>('[data-call-ignore]')!.click();
     await vi.waitFor(() => expect(pause.mock.contexts).toContain(audio));
     expect($('[data-call-panel="incoming"]')).toBeNull();
@@ -3363,15 +3428,13 @@ describe('calls in the shell', () => {
 
   it.each([
     ['Accept', '[data-call-accept]', 'a dearer price', () => ({ ...QUOTE, signal_msat: 2_000 })],
-    ['Decline', '[data-call-decline]', 'a dearer price', () => ({ ...QUOTE, signal_msat: 2_000 })],
     ['Accept', '[data-call-accept]', 'a failed read', () => { throw { code: 'node', message: 'Could not read it' }; }],
-    ['Decline', '[data-call-decline]', 'a failed read', () => { throw { code: 'node', message: 'Could not read it' }; }],
   ] as [string, string, string, Reply][])('%s showing 6 sats: on %s no call_signal goes out and the card says nothing was paid', async (_button, selector, _case, second) => {
     let answer: Reply = () => QUOTE;
     const host = stubHost({ messages_list: () => [], call_quote: (args) => answer(args) });
     await openShell();
     incoming(host);
-    await vi.waitFor(() => expect(text('[data-call-accept]')).toBe('Accept · up to 6 sats'));
+    await vi.waitFor(() => expect(text('[data-call-answer-cost]')).toContain('at most 6 sats'));
     answer = second;
     $<HTMLButtonElement>(selector)!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
@@ -3383,7 +3446,7 @@ describe('calls in the shell', () => {
     let answer: Reply = () => QUOTE;
     const host = payHost({ call_quote: (args) => answer(args) }); await liveCall();
     host.emitLive({ type: 'message', room_id: null, message: msg(400, { call_id: 'f'.repeat(32), media: 'audio', sdp: 'second-offer' }) });
-    await vi.waitFor(() => expect(text('[data-waiting-calls] [data-call-accept]')).toBe('Accept · up to 6 sats'));
+    await vi.waitFor(() => expect(text('[data-waiting-calls] [data-call-answer-cost]')).toContain('at most 6 sats'));
     $<HTMLButtonElement>('[data-call-panel="live"] [data-call-hangup]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!.disabled).toBe(false));
@@ -3399,7 +3462,7 @@ describe('calls in the shell', () => {
     host.emitLive({ type: 'message', room_id: null, message: { id: 'live-offer', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: 'v=0 offer' }), payment_amount_msat: 10_000 } });
     await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
     expect(text('[data-call-title]')).toBe('Incoming call');
-    await vi.waitFor(() => expect(text('[data-call-accept]')).toBe('Accept · up to 6 sats'));
+    await vi.waitFor(() => expect(text('[data-call-answer-cost]')).toContain('at most 6 sats'));
     expect($('[data-message="live-offer"]')).toBeNull();
     $<HTMLButtonElement>('[data-call-accept]')!.click();
     await vi.waitFor(() => expect(host.used('call_signal')).toHaveLength(1));

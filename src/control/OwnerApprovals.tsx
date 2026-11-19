@@ -244,8 +244,9 @@ export function OwnerApprovalWait(props: {
         </div>
       </Show>
       <Show when={props.fallback}>
-        <details class="other-ways" data-other-ways>
-          <summary>{tr('uiOtherWays')}</summary>
+        {/* For whoever set up the box only: the node's exact line, closed by default. */}
+        <details class="other-ways" data-other-ways data-approval-operator>
+          <summary>{tr('uiDetails')}</summary>
           <code class="address" data-owner-action>{props.fallback}</code>
         </details>
       </Show>
