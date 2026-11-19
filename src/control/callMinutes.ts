@@ -101,6 +101,13 @@ export type MinutesStop = {
   message: string;
   /** The node's own words when they are not plain: shown only under Details. */
   detail?: string;
+  /**
+   * Display only, kept apart from `message` (which is worded in the language of the moment it stopped):
+   * the node's own text for this stop, and whether their box refused the minute. The ended card words the
+   * cause from `code` in the current language and shows `raw` only under Details.
+   */
+  raw?: string;
+  theirBox?: boolean;
   /** The node grant or separate app limit that refused the minute, including its accounted amount. */
   limit?: Pick<ActionError, 'code' | 'message'>;
 };
@@ -246,8 +253,8 @@ export function createCallMinutes(opts: {
     timer = undefined;
     // Their box stopping the call is said in plain words; its protocol text stays under Details.
     const stop: MinutesStop = code === 'payment_failed' && detail && refusal && theirBoxRefused(refusal)
-      ? { code, message: tr('caMinutesTheirBoxStopped'), detail }
-      : { code, message: detail ? `${STOP_MESSAGE[code]()} ${detail}` : STOP_MESSAGE[code]() };
+      ? { code, message: tr('caMinutesTheirBoxStopped'), detail, raw: detail, theirBox: true }
+      : { code, message: detail ? `${STOP_MESSAGE[code]()} ${detail}` : STOP_MESSAGE[code](), ...(detail ? { raw: detail } : {}) };
     if (limit) stop.limit = { code: limit.code, message: limit.message };
     emit({ stop });
     opts.onStop(stop);

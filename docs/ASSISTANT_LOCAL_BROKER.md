@@ -40,6 +40,19 @@ fault rows (q33–q50) ask the same keys as earlier rows, so a healthy node
 answers them. q20, q24, q25, q27 and q32 stay `Unavailable`: the broker has
 no allowlisted route that answers them. That is unchanged from the mock.
 
+The node overview and assistant node cards label the session count as
+**Encrypted node-to-node sessions** (English) or **Krypterede sessioner mellem
+noder** (Danish), including in copied reports. This is the count reported by
+the node's health response. It does not establish encryption between user
+apps or whether the hosting nodes can read message content. The same count
+does not establish the protection of a particular call; read the call card's
+disclosure for that call.
+
+På dansk: Antallet gælder krypterede sessioner mellem noder. Det dokumenterer
+ikke kryptering mellem brugernes apps eller, om de noder, der driver tjenesten,
+kan læse beskedindhold. Antallet dokumenterer heller ikke beskyttelsen af et
+bestemt opkald; læs oplysningerne på kortet for det opkald.
+
 Running it (not run in this change; no `tauri dev` here):
 
 ```bash
