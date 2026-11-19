@@ -305,8 +305,12 @@ export function callRefusal(error: ActionError): string {
   // The node checked the offer against the minutes agreed before Ring (genome N3) and refused it.
   if (error.code === 'call_offer_price_above_consent') return tr('caMinutesOfferPriceAboveConsent');
   if (error.code === 'call_offer_hold_above_consent') return tr('caMinutesOfferHoldAboveConsent');
+  // Also what a node says while its Lightning link comes back after a restart: not only a lack of capacity.
+  if (error.code === 'call_liquidity_insufficient') return tr('caMinutesLiquidityRefused');
+  // The box's budget for this contact could not hold the call's reservation: say what to do, plainly.
+  if (error.code === 'grant_recipient') return tr('caCallContactBudgetRefused');
   // The grant refusals name a per-payment limit; for a call it is the reservation that did not fit.
-  return ['grant_per_call', 'grant_exhausted', 'grant_recipient'].includes(error.code)
+  return ['grant_per_call', 'grant_exhausted'].includes(error.code)
     ? tr('caMinutesGrantRefused', error.message) : error.message;
 }
 
@@ -321,6 +325,8 @@ export const IDLE: CallView = {
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
 
 export type CallDeps = {
+  /** Display a replacement-budget request after a total-budget refusal. */
+  onBudgetNeeded?: (amountMsat: number | null) => void;
   /** M6: media goes through the node link (`nodeRoutedConnection.ts`), not a direct connection. Copy only. */
   routed?: boolean;
   /** Node-routed video is on (flag `VITE_CALL_VIDEO`): a routed call may carry the camera. */
@@ -337,7 +343,7 @@ export type CallDeps = {
   /** Report local teardown by exact admission. Host keeps cleanup pending. No send. */
   closeAdmission?: (operationId: string, peer: string, callId: string) => Promise<void>;
   /** Check current spend permission and show the shell’s approval path before capture. */
-  authorize?: () => Promise<boolean>;
+  authorize?: (reservationPeer?: string) => Promise<boolean>;
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
   /** Latest grant read by the shell; the host rechecks it before paying. */
   grant?: () => NodeGrantSummary | null;
@@ -720,9 +726,13 @@ export function createCallEngine(deps: CallDeps) {
     minutes = null;
     teardown();
     healedRefusal = null;
+    // Ending at the host starts now, though it waits for local teardown: a result
+    // that arrives meanwhile is End's to answer, so the card says it is closing.
+    const closingNow = endAtHost && !!deps.endCall && ids.some((id) => !closing.has(id));
     // A stop that already ended the call stays said; one still in its grace does not.
     set({ phase: 'ended', reason, error, camera: false, muted: false, offline: false, dropAt: null, recoveryError: null,
-      stopped: view.stopped?.endsAt === null ? view.stopped : null });
+      stopped: view.stopped?.endsAt === null ? view.stopped : null,
+      ...(closingNow ? { close: { status: 'closing' as const, message: null } } : {}) });
     if (session) { if (view.outgoing) session.finish(); else session.dispose(); }
     const recorded = record && peer ? Promise.all(operations.map(([operationId, wireCallId]) => closeAdmission(operationId, peer, wireCallId))) : Promise.resolve();
     if (endAtHost && ids.length) void recorded.then(() => closeAdmissions(ids, callId));
@@ -1167,6 +1177,7 @@ export function createCallEngine(deps: CallDeps) {
       // M6: a node-routed call carries audio only (no camera is captured or offered), unless node-routed video is on.
       const media: CallMedia = deps.routed && !deps.routedVideo ? 'audio' : requested;
       if (active() || deps.busy?.()) return;
+      deps.onBudgetNeeded?.(null);
       if (q.offer_msat === null || q.call_total_msat === null) {
         set({ ...IDLE, phase: 'ended', peer, error: tr('caTheirNodeDoesNotTakeCallsYetNothingWas') });
         return;
@@ -1178,6 +1189,7 @@ export function createCallEngine(deps: CallDeps) {
       if (grant && q.call_total_msat > grant.remaining_msat) {
         set({ ...IDLE, phase: 'ended', peer, error:
           tr('caThisCallNeedsUpToYourNodeGrantAllows', amount(q.call_total_msat), amount(grant.remaining_msat)) });
+        deps.onBudgetNeeded?.(q.call_total_msat);
         return;
       }
       const perPayment = grant ? callPerPaymentMax(grant) : null;
@@ -1206,7 +1218,7 @@ export function createCallEngine(deps: CallDeps) {
       }
       const consent: MinutesConsent | undefined = deps.minutes && block !== null && most !== null
         ? { block_msat: block, block_max_routing_fee_msat: q.block_max_routing_fee_msat ?? 0, max_hold_msat: most } : undefined;
-      if (deps.authorize && !await deps.authorize()) return;
+      if (deps.authorize && !await deps.authorize(peer)) return;
       if (generation !== mediaGeneration || active() || deps.busy?.()) return;
       quote = q;
       const callId = (deps.newCallId ?? newCallId)();
@@ -1249,6 +1261,7 @@ export function createCallEngine(deps: CallDeps) {
         return;
       }
       if (!r.ok) {
+        if (r.error.code === 'grant_exhausted') deps.onBudgetNeeded?.(q.call_total_msat);
         end(null, session ? callRefusal(r.error) : r.error.message);
         return;
       }

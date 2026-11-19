@@ -161,6 +161,70 @@ describe('acting from the track', () => {
     await waitFor(() => expect(host.used('spend_request')).toHaveLength(1));
   };
 
+  it.each([
+    ['en', true, false], ['da', true, false],
+    ['en', true, true], ['da', true, true],
+    ['en', false, false], ['da', false, false],
+  ] as const)('keeps the open window and lock action visible with a replacement request (%s, grantable: %s, Touch ID offer: %s)', async (language, ownerCanGrant, touchId) => {
+    const host = stubHost({
+      pairing_status: () => ({ ...paired, remote: touchId }),
+      device_key_status: () => ({ available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }),
+    });
+    host.spend.v = {
+      ...openView(),
+      pending: { op_id: 'ef56', expires_at_ms: Date.now() + 900_000, owner_action: 'approve replacement', owner_can_grant: ownerCanGrant },
+    };
+    await openShell();
+    setLanguagePref(language);
+    const status = $<HTMLDetailsElement>('[data-spend="open"] [data-spend-status]');
+    expect(status).not.toBeNull();
+    expect(status!.open).toBe(true);
+    expect(status!.textContent).toContain(language === 'en' ? 'Spending approved,' : 'Betalinger godkendt,');
+    const lock = status!.querySelector<HTMLButtonElement>('[data-spend-lock]')!;
+    expect(lock.textContent).toBe(language === 'en' ? 'Lock now' : 'Lås nu');
+    expect(lock.disabled).toBe(false);
+    expect($(`[data-spend="open"] [data-approval="${ownerCanGrant ? 'pending' : 'unavailable'}"]`)).not.toBeNull();
+    if (ownerCanGrant) {
+      const hint = text(touchId ? '[data-touch-id-stays-text="spend"]' : '[data-approval="pending"]');
+      expect(hint).toContain(language === 'en' ? 'Cancelling this request does not close it.' : 'Annullering af denne anmodning lukker det ikke.');
+      expect(hint).not.toMatch(/Nothing is paid|Intet betales|Nothing is sent|Intet sendes/);
+      const cancel = $(touchId ? '[data-spend-cancel-visible]' : '[data-spend-cancel]')!;
+      expect(cancel.textContent).toContain(language === 'en' ? 'Cancel request' : 'Annuller anmodning');
+    } else {
+      expect(text('[data-approval="unavailable"]')).toContain(language === 'en'
+        ? 'This node cannot approve the replacement request.'
+        : 'Denne node kan ikke godkende erstatningsanmodningen.');
+    }
+    lock.click();
+    await waitFor(() => expect(host.used('spend_lock')).toHaveLength(1));
+    await waitFor(() => expect($('[data-spend="locked"]')).not.toBeNull());
+    expect(host.used('spend_cancel')).toHaveLength(0);
+    expect(host.used('spend_request')).toHaveLength(0);
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
+  it.each([false, true])('cancelling a replacement leaves the current window open (Touch ID offer: %s)', async touchId => {
+    const host = stubHost({
+      pairing_status: () => ({ ...paired, remote: touchId }),
+      device_key_status: () => ({ available: true, state: 'none', fingerprint: null, owner_action: null, expires_at_ms: null }),
+      spend_cancel: () => (host.spend.v = { ...host.spend.v, pending: null }),
+    });
+    host.spend.v = {
+      ...openView(),
+      pending: { op_id: 'ef56', expires_at_ms: Date.now() + 900_000, owner_action: 'approve replacement', owner_can_grant: true },
+    };
+    const openUntil = host.spend.v.open_until_ms;
+    await openShell();
+    expect(text(touchId ? '[data-touch-id-stays-text="spend"]' : '[data-approval="pending"]')).toContain('Cancelling this request does not close it.');
+    $<HTMLButtonElement>(touchId ? '[data-spend-cancel-visible]' : '[data-spend-cancel]')!.click();
+    await waitFor(() => expect(host.used('spend_cancel')).toHaveLength(1));
+    await waitFor(() => expect($('[data-approval="pending"]')).toBeNull());
+    expect($('[data-spend="open"] [data-spend-lock]')).not.toBeNull();
+    expect(host.spend.v.open_until_ms).toBe(openUntil);
+    expect(host.used('spend_lock')).toHaveLength(0);
+    expect(host.used('message_send')).toHaveLength(0);
+  });
+
   it('Approve & send: exactly one send, however many status reads follow the grant', async () => {
     const host = stubHost();
     await openShell();
@@ -609,6 +673,37 @@ describe('acting from the track', () => {
     submit();
     await waitFor(() => expect(text('[data-artifact="failed"]')).toContain('no route'));
     expect(text('[data-artifact="failed"]')).toContain('Message not sent');
+  });
+
+  it.each([
+    ['en', 'Your node could not finish this. Check that your node is running, then look at the result before you try again.'],
+    ['da', 'Din node kunne ikke gøre det færdigt. Tjek at din node kører, og se resultatet, før du prøver igen.'],
+  ] as const)('a failed send shows plain %s copy, with the raw host text only under Details', async (locale, summary) => {
+    stubHost({ message_send: () => { throw new Error('unexpected message_send'); } }).spend.v = openView();
+    setLanguagePref(locale);
+    await openShell();
+    type('[data-composer] textarea', 'hi');
+    submit();
+    await waitFor(() => expect($('[data-artifact="failed"] [data-failed-reason]')).not.toBeNull());
+    const reason = $('[data-artifact="failed"] [data-failed-reason]')!;
+    expect(reason.querySelector('[data-soft-summary]')!.textContent).toBe(summary);
+    // Nothing outside the closed Details names the raw host text.
+    const details = reason.querySelector<HTMLDetailsElement>('details[data-soft-detail]')!;
+    expect(details.open).toBe(false);
+    expect(details.textContent).toContain('unexpected message_send');
+    const visible = $('[data-artifact="failed"]')!.cloneNode(true) as HTMLElement;
+    visible.querySelector('details')!.remove();
+    expect(visible.textContent).not.toContain('message_send');
+  });
+
+  it('a failed send whose reason names money keeps the whole reason visible', async () => {
+    stubHost({ message_send: () => { throw { code: 'failed_paid', message: 'Paid 2 sats; their node refused it.' }; } }).spend.v = openView();
+    await openShell();
+    type('[data-composer] textarea', 'hi');
+    submit();
+    await waitFor(() => expect($('[data-artifact="failed"] [data-failed-reason]')).not.toBeNull());
+    expect(text('[data-artifact="failed"] [data-failed-reason] [data-soft-summary]')).toBe('Paid 2 sats; their node refused it.');
+    expect($('[data-artifact="failed"] [data-soft-detail]')).toBeNull();
   });
 
   it('keeps first-contact admission inside the displayed ceiling', async () => {

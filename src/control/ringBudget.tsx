@@ -1,0 +1,67 @@
+/**
+ * Display only: before Ring, say plainly when the box's budget for this
+ * contact cannot hold the call.
+ *
+ * The node grant's per-contact remainder comes from the host's grant summary
+ * (`recipient_left_msat_by_recipient`, lower-case keys; a contact without its
+ * own budget is absent). The hold is the node's own call limit
+ * (`max_call_minutes`) × the shown per-minute price and routing allowance,
+ * plus the offer and the closing hangup, each with its routing cap. The node
+ * reserves that closing allowance inside the hold, so it counts here too. The
+ * host does not report that limit
+ * before Ring, so the only known value is the one the box pinned on an
+ * earlier call's reservation this session (kept in memory, never stored).
+ *
+ * Nothing here is sent anywhere or gates anything: Ring stays enabled and the
+ * node remains the authority. An unknown limit, an unknown remainder, an
+ * expired grant or a quote without a per-minute price shows nothing.
+ */
+import { Show } from 'solid-js';
+import { t as tr } from '../i18n';
+import { amount as fmtAmount } from './format';
+import type { CallQuote, NodeGrantSummary } from './types';
+
+/** The node's minimum closing reserve: a hold always funds at least this for its hangup. */
+const MIN_CLOSING_MSAT = 1_000;
+
+export type RingBudgetShort = { leftMsat: number; holdMsat: number };
+
+/** A node call limit the node could pin (1-240 whole minutes); anything else is unknown. */
+export const knownCallLimit = (minutes: number | null | undefined): number | null =>
+  typeof minutes === 'number' && Number.isInteger(minutes) && minutes >= 1 && minutes <= 240 ? minutes : null;
+
+/**
+ * What this call would hold with the node's call limit known (display only):
+ * minutes × (per-minute price + per-minute routing allowance) + offer + offer
+ * routing cap + closing allowance (hangup + its routing cap, at least the
+ * node's minimum). Null when the limit or the per-minute price is unknown.
+ */
+export function callHoldMsat(q: CallQuote | null, callLimitMinutes: number | null): number | null {
+  const minutes = knownCallLimit(callLimitMinutes);
+  if (!q || minutes === null || q.block_msat == null || q.offer_msat == null) return null;
+  const closing = Math.max(q.signal_msat + q.signal_max_routing_fee_msat, MIN_CLOSING_MSAT);
+  return minutes * (q.block_msat + (q.block_max_routing_fee_msat ?? 0)) + q.offer_msat + q.offer_max_routing_fee_msat + closing;
+}
+
+/** The contact's remainder and the call's hold when the hold is higher; otherwise null. */
+export function ringBudgetShort(grant: NodeGrantSummary | null, peer: string, q: CallQuote | null, callLimitMinutes: number | null, now: number): RingBudgetShort | null {
+  if (!grant || grant.expires_at_ms <= now) return null;
+  const left = grant.recipient_left_msat_by_recipient?.[peer.toLowerCase()];
+  if (typeof left !== 'number' || !Number.isFinite(left) || left < 0) return null;
+  const hold = callHoldMsat(q, callLimitMinutes);
+  if (hold === null || hold <= left) return null;
+  return { leftMsat: left, holdMsat: hold };
+}
+
+export const ringBudgetText = (name: string, s: RingBudgetShort) =>
+  tr('uiRingContactBudgetShort', fmtAmount(s.leftMsat), name, fmtAmount(s.holdMsat));
+
+/** The warning line in the call confirm; renders nothing unless a known hold is above the remainder. */
+export function RingBudgetNote(props: { grant: NodeGrantSummary | null; peer: string; name: string; quote: CallQuote | null; callLimitMinutes: number | null; now?: number }) {
+  const short = () => ringBudgetShort(props.grant, props.peer, props.quote, props.callLimitMinutes, props.now ?? Date.now());
+  return (
+    <Show when={short()}>
+      {(s) => <p class="hint" role="note" data-call-contact-budget-short>{ringBudgetText(props.name, s())}</p>}
+    </Show>
+  );
+}

@@ -69,7 +69,7 @@ afterEach(() => {
   root?.remove();
 });
 
-function mount(s: Stub, opts: { nodeReads?: boolean; peers?: Peer[] } = {}) {
+function mount(s: Stub, opts: { known?: boolean; nodeReads?: boolean; peers?: Peer[] } = {}) {
   root = document.createElement('div');
   document.body.appendChild(root);
   dispose = render(
@@ -79,6 +79,7 @@ function mount(s: Stub, opts: { nodeReads?: boolean; peers?: Peer[] } = {}) {
         now={Date.now()}
         peers={opts.peers ?? PEERS}
         nodeReads={opts.nodeReads ?? true}
+        known={opts.known}
         moneyBlocked={false}
         spend={OPEN}
         spendGate={<span data-spend-gate />}
@@ -160,6 +161,15 @@ describe('PorchPanel', () => {
     await tick();
     expect($(`[data-porch-peer="${MAYA}"]`)).not.toBeNull();
     expect($(`[data-porch-peer="${BEN}"]`)).toBeNull();
+    dispose?.();
+    root.remove();
+
+    // Not known yet: it never claims the node lacks this or that no contact offers it.
+    mount(stub(() => page('/index.md', 'markdown', '')), { nodeReads: false, known: false });
+    await tick();
+    expect($('[data-porch-waiting]')).not.toBeNull();
+    expect($('[data-porch-node-off]')).toBeNull();
+    expect($('[data-porch-none]')).toBeNull();
     dispose?.();
     root.remove();
 
