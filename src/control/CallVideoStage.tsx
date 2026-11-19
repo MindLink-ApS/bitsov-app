@@ -32,6 +32,9 @@ export const maxPanelWidth = (viewport: number) => Math.min(960, Math.floor(view
 /** Smallest call window: 280 px, or less where 70% of the window is less. */
 export const minPanelWidth = (viewport: number) => Math.min(MIN_WIDTH, maxPanelWidth(viewport));
 
+/** How far a press may wander and still count as a tap on your own picture (pointer jitter, a touch). */
+export const TAP_SLOP_PX = 8;
+
 export function CallVideoStage(props: {
   /** The call window this area sits in: moved and resized as a whole. */
   panel: () => HTMLElement | undefined;
@@ -200,8 +203,12 @@ export function CallVideoStage(props: {
     e.stopPropagation();
     selfMoved = false;
     const box = stage.getBoundingClientRect();
+    const startX = e.clientX;
+    const startY = e.clientY;
     const move = (m: PointerEvent) => {
       if (!box.width || !box.height) return;
+      // A tap's small wobble is still a tap: only a real move is a drag, and only a drag moves the picture.
+      if (!selfMoved && Math.hypot(m.clientX - startX, m.clientY - startY) < TAP_SLOP_PX) return;
       selfMoved = true;
       const x = (m.clientX - box.left) / box.width;
       const y = (m.clientY - box.top) / box.height;

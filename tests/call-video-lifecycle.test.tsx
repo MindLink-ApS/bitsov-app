@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Show, createSignal } from 'solid-js';
 import { render } from 'solid-js/web';
-import { CallVideoStage } from '../src/control/CallVideoStage';
+import { CallVideoStage, TAP_SLOP_PX } from '../src/control/CallVideoStage';
 import { escapeDepth } from '../src/control/escapeStack';
 
 let release: (() => void) | undefined;
@@ -102,5 +102,46 @@ describe('the video stage after the call ends', () => {
       if (descriptor) Object.defineProperty(HTMLElement.prototype, 'requestFullscreen', descriptor);
       else delete (HTMLElement.prototype as { requestFullscreen?: unknown }).requestFullscreen;
     }
+  });
+});
+
+describe('tapping your own picture', () => {
+  const tap = (self: HTMLElement, wobble: number) => {
+    pointer(self, 'pointerdown', 300, 230);
+    pointer(window, 'pointermove', 300 + wobble, 230 - wobble);
+    pointer(window, 'pointerup', 300 + wobble, 230 - wobble);
+    self.click();
+  };
+
+  it('a tap with the usual small wobble still moves it to the next corner', () => {
+    const { panel } = mountStage();
+    const self = panel.querySelector<HTMLElement>('[data-call-self]')!;
+    const before = self.dataset.corner;
+    tap(self, 2);
+    expect(self.dataset.corner).not.toBe(before);
+    const second = self.dataset.corner;
+    tap(self, Math.floor((TAP_SLOP_PX - 1) / Math.SQRT2));
+    expect(self.dataset.corner).not.toBe(second);
+  });
+
+  it('a real drag places it where it was dropped, and the click after it does not cycle again', () => {
+    const { panel } = mountStage();
+    const self = panel.querySelector<HTMLElement>('[data-call-self]')!;
+    pointer(self, 'pointerdown', 300, 230);
+    pointer(window, 'pointermove', 40, 30);
+    pointer(window, 'pointerup', 40, 30);
+    self.click();
+    expect(self.dataset.corner).toBe('tl');
+  });
+
+  it('a wobble alone never drags it to the corner under the finger', () => {
+    const { panel } = mountStage();
+    const self = panel.querySelector<HTMLElement>('[data-call-self]')!;
+    // Pressed right at the middle: a small wobble across the centre lines must not jump corners mid-press.
+    pointer(self, 'pointerdown', 170, 128);
+    const at = self.dataset.corner;
+    pointer(window, 'pointermove', 168, 126);
+    expect(self.dataset.corner).toBe(at);
+    pointer(window, 'pointerup', 168, 126);
   });
 });
