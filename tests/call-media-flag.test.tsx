@@ -284,12 +284,14 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
     expect($('[data-call-route="node"]')).not.toBeNull();
     expect(FakePc.made).toBe(0);
-    expect(FakeAudioContext.made).toHaveLength(1);
+    // The local ringback had its own context while ringing; it closed on the answer. One call audio graph is left.
+    await vi.waitFor(() => expect(FakeAudioContext.made.filter((c) => !c.closed)).toHaveLength(1));
+    const callAudio = FakeAudioContext.made.find((c) => !c.closed)!;
     // Hang up: the host ends the admission and the media socket closes with the call.
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect(host.used('call_media_close').length).toBeGreaterThan(0));
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    await vi.waitFor(() => expect(FakeAudioContext.made[0].closed).toBe(true));
+    await vi.waitFor(() => expect(callAudio.closed).toBe(true));
   });
 
   it('with sealing off, no seal command runs and the label and the offer are as they were', async () => {

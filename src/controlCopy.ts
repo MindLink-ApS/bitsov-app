@@ -1229,7 +1229,20 @@ export const controlEn = {
   "caNodeApi": "Node API",
   "caNodeCapabilities": "Node capabilities",
   "caNetwork": "Network",
-  "caCopyVersions": "Copy versions"
+  "caCopyVersions": "Copy versions",
+  "caMicAccessTitle": "Give BitSov access to the microphone",
+  "caMicCameraAccessTitle": "Give BitSov access to the microphone and camera",
+  "caMicPane": "Microphone",
+  "caMicCameraPane": "Microphone and Camera",
+  "caMicAccessSteps": "Open {1} and turn on {0} for BitSov. Then try again.",
+  "caNothingSentOrPaid": "Nothing was sent or paid.",
+  "caOpenSettings": "Open Settings",
+  "caVideoFullscreen": "Full screen",
+  "caVideoExitFullscreen": "Exit full screen",
+  "caVideoStageLabel": "Call video. Double-click for full screen; Esc leaves it.",
+  "caVideoMove": "Move the call window (arrow keys)",
+  "caVideoResize": "Call window size (arrow keys)",
+  "caVideoSelfMove": "Your picture: press to move it to another corner"
 };
 
 export const controlDa: Record<keyof typeof controlEn, string> = {
@@ -2460,5 +2473,18 @@ export const controlDa: Record<keyof typeof controlEn, string> = {
   "caNodeApi": "Node-API",
   "caNodeCapabilities": "Node-funktioner",
   "caNetwork": "Netværk",
-  "caCopyVersions": "Kopiér versioner"
+  "caCopyVersions": "Kopiér versioner",
+  "caMicAccessTitle": "Giv BitSov adgang til mikrofonen",
+  "caMicCameraAccessTitle": "Giv BitSov adgang til mikrofonen og kameraet",
+  "caMicPane": "Mikrofon",
+  "caMicCameraPane": "Mikrofon og Kamera",
+  "caMicAccessSteps": "Åbn {1}, og slå {0} til for BitSov. Prøv så igen.",
+  "caNothingSentOrPaid": "Intet blev sendt eller betalt.",
+  "caOpenSettings": "Åbn Indstillinger",
+  "caVideoFullscreen": "Fuld skærm",
+  "caVideoExitFullscreen": "Afslut fuld skærm",
+  "caVideoStageLabel": "Opkaldsvideo. Dobbeltklik for fuld skærm; Esc afslutter.",
+  "caVideoMove": "Flyt opkaldsvinduet (piletaster)",
+  "caVideoResize": "Opkaldsvinduets størrelse (piletaster)",
+  "caVideoSelfMove": "Dit billede: tryk for at flytte det til et andet hjørne"
 };

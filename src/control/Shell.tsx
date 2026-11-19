@@ -1,7 +1,9 @@
-import { IncomingCallAlerts } from './IncomingCallAlerts';
+import { IncomingCallAlerts, OutgoingRingback } from './IncomingCallAlerts';
 import { createMissedCalls } from './missedCalls';
 import { createPhoneLayout, createPhoneNavigationGuard, PhoneTabs, type PhoneTab } from './PhoneShell';
 import { MediaView } from './CallMedia';
+import { CallVideoStage } from './CallVideoStage';
+import { MicAccessNote } from './MicAccessNote';
 import { knownCallLimit, RingBudgetNote } from './ringBudget';
 import { createMessageNotifications, NotificationSettings } from './messageNotifications';
 import { isTauri, invoke } from '@tauri-apps/api/core';
@@ -2594,6 +2596,7 @@ export function ControlCenter(props: Props) {
       </PairingActivityProvider>
       <span class="sr-only" role="status" aria-live="polite" data-send-live data-send-live-seq={sendLive().seq}>{sendLive().text}</span>
       <IncomingCallAlerts view={callView()} waiting={waitingCalls()} nameOf={nameOf} />
+      <OutgoingRingback view={callView()} />
       <div class="waiting-calls" data-waiting-calls>
         <For each={waitingCalls().map(v => `${v.peer}:${v.callId}`)}>{key => {
           onCleanup(() => waitingPanels.delete(key));
@@ -4032,16 +4035,17 @@ function CallPanel(props: {
           </p>
         </Show>
         <Show when={v().media === 'video' && (v().phase === 'live' || v().phase === 'connecting' || v().phase === 'reconnecting')}>
-          <div class="call-videos">
-            <Show when={props.videoCanvas} fallback={<MediaView stream={props.streams.remote} video muted={false} kind="remote" />}>
+          <CallVideoStage
+            panel={() => panel}
+            cameraOff={!v().camera}
+            remote={<Show when={props.videoCanvas} fallback={<MediaView stream={props.streams.remote} video muted={false} kind="remote" />}>
               {(canvas) => { canvas().classList.add('call-video', 'remote'); canvas().dataset.callMedia = 'remote'; return <>{canvas()}</>; }}
-            </Show>
-            {/* Your own picture, named and shown as in a mirror; with the camera off it says so instead of going black. */}
-            <div class="call-self" data-call-self data-camera-off={v().camera ? undefined : ''}>
+            </Show>}
+            self={<>
               <MediaView stream={props.streams.local} video muted kind="local" />
               <span class="call-self-label" data-call-self-label>{v().camera ? tr('uiYou') : `${tr('uiYou')} · ${tr('uiCallSelfCameraOff')}`}</span>
-            </div>
-          </div>
+            </>}
+          />
         </Show>
         <Show when={props.routed && v().media === 'video' && videoStatusLine(props.videoStatus)}>
           {(line) => <p class="hint" role="status" data-call-video-status>{line()}</p>}
@@ -4082,7 +4086,10 @@ function CallPanel(props: {
         <Show when={v().phase === 'ended' ? v().connection : null}>
           {(connection) => <p class="hint" data-call-connection>{tr('uiConnection')} {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} {tr('uiLocal140')} {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} {tr('uiRemote')}</p>}
         </Show>
-        <Show when={v().phase === 'ended'}>
+        <Show when={v().phase === 'ended' && v().mediaDenied}>
+          <MicAccessNote media={v().media} />
+        </Show>
+        <Show when={v().phase === 'ended' && !v().mediaDenied}>
           {/* One plain, cause-specific line; the host's or node's own words only under Details. */}
           <p class="hint" data-call-ended>{endLine().text}</p>
           <Show when={endLine().detail}>
