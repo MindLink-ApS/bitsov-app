@@ -96,6 +96,10 @@ mod local_owner;
 mod owner_password;
 #[path = "home_keychain.rs"]
 mod home_keychain;
+/// Windows: public home-node records on the private-file layer.
+#[cfg(windows)]
+#[path = "home_keychain_windows.rs"]
+mod home_keychain_windows;
 #[cfg(all(desktop, not(feature = "mobile")))]
 #[path = "remote_owner.rs"]
 mod remote_owner;
@@ -10891,8 +10895,11 @@ async fn ai_read(
             }
             &ai::threads::MacSealer
         };
-        #[cfg(not(all(target_os = "macos", not(feature = "mobile"))))]
+        #[cfg(not(any(windows, all(target_os = "macos", not(feature = "mobile")))))]
         let sealer = bitsov_app::at_rest::installed().ok_or("Sealed thread storage is unavailable on this platform.")?;
+        // The Windows sealer protects pairing only; AI threads have no private folder there.
+        #[cfg(windows)]
+        let sealer = windows_ai_storage_refused()?;
         let update = ai::threads::poll_watches(&dir, assistant, poll.revision.as_deref(), &poll.sample,
             &mut settings, &mut engine, true, now_ms(), sealer)?;
         return serde_json::to_value(update).map_err(|_| "Could not encode watch notices.".into());
@@ -10930,8 +10937,11 @@ async fn ai_read(
             }
             &ai::threads::MacSealer
         };
-        #[cfg(not(all(target_os = "macos", not(feature = "mobile"))))]
+        #[cfg(not(any(windows, all(target_os = "macos", not(feature = "mobile")))))]
         let sealer = bitsov_app::at_rest::installed().ok_or("Sealed thread storage is unavailable on this platform.")?;
+        // The Windows sealer protects pairing only; AI threads have no private folder there.
+        #[cfg(windows)]
+        let sealer = windows_ai_storage_refused()?;
         let changed_rule = match &request { ai::threads::Request::SetWatch { rule, .. } => Some(*rule), _ => None };
         let saved = ai::threads::apply(&dir, assistant, request, sealer)?;
         settings.insert(assistant.id(), saved.clone());
@@ -11792,6 +11802,21 @@ fn guard_ios_startup<R: tauri::Runtime>(
     }
 }
 
+/// AI threads and watches stay refused on Windows even with the pairing
+/// sealer installed: their folder is not on the private-file layer.
+#[cfg(windows)]
+fn windows_ai_storage_refused() -> Result<&'static dyn bitsov_app::at_rest::Sealer, String> {
+    Err("Sealed thread storage is unavailable on this platform.".into())
+}
+
+#[cfg(all(test, windows))]
+mod windows_ai_storage_tests {
+    #[test]
+    fn ai_threads_and_watches_stay_refused() {
+        assert!(super::windows_ai_storage_refused().is_err());
+    }
+}
+
 /// Runs synchronously on the event-loop thread, before admitting commands or
 /// starting any tasks. Returning false also prevents a duplicate resume task
 /// when this foreground event has just started the deferred bootstrap.
@@ -11978,6 +12003,16 @@ fn app_builder() -> tauri::Builder<tauri::Wry> {
             handler
         })
         .setup(|app| {
+            // Windows: refuse an elevated process, then install current-user
+            // DPAPI, before any storage, identity or bootstrap work. Either
+            // failure is fatal.
+            #[cfg(windows)]
+            {
+                bitsov_ffi::win_private::elevation_gate().map_err(|error| error.to_string())?;
+                bitsov_app::at_rest::install_windows(&app.config().identifier)?;
+                let data_dir = app.path().app_data_dir()?;
+                home_keychain_windows::set_pairing_store(&data_dir.join(PAIRING_STORE_DIR))?;
+            }
             // Install the immutable profile policy before any commands or tasks run.
             crate::profile::install(&app.config().identifier)?;
             app.manage(NodeState::for_identifier(&app.config().identifier));
