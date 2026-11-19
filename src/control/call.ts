@@ -298,7 +298,7 @@ export type CallView = {
   mediaDenied: boolean;
   /**
    * A Decline sent as a free reply (both nodes take them): `sending`, then
-   * `delivered` (their node took it), `not_sent` (our node refused it before
+   * `delivered` (their node accepted it), `not_sent` (our node refused it before
    * sending) or `unknown`. Null for the local Ignore. Never paid either way.
    */
   freeDecline: 'sending' | 'delivered' | 'not_sent' | 'unknown' | null;
@@ -1486,7 +1486,8 @@ export function createCallEngine(deps: CallDeps) {
       end('declined');
       const r = await sendFree(peer, CALL_HANGUP, { reason: 'declined' }, id);
       if (view.callId !== callId) return;
-      const outcome = r.ok ? (r.value.delivered ? 'delivered' : 'unknown')
+      // Told only on their node's acceptance (it stored the reply), not on a transport write alone.
+      const outcome = r.ok ? (r.value.delivered && r.value.accepted ? 'delivered' : 'unknown')
         : r.error.code === 'call_reply_not_free' || r.error.code === 'call_reply_not_sent' || r.error.code === 'invalid' ? 'not_sent' : 'unknown';
       set({ freeDecline: outcome });
     }),

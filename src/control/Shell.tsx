@@ -3839,7 +3839,8 @@ function CallReadyLine(props: { grant: NodeGrantSummary | null; continuity: bool
   const text = () => {
     const r = readiness();
     if (r.ready) return tr('caCallReady');
-    return r.reason === 'window_short' ? tr('caCallNotReadyWindowShort', r.minutesLeft) : tr('caCallNotReadyNoGrant');
+    return r.reason === 'window_short' ? tr('caCallNotReadyWindowShort', r.minutesLeft)
+      : r.reason === 'call_limit' ? tr('caCallNotReadyCallLimit') : tr('caCallNotReadyNoGrant');
   };
   return <p class="hint" role="status" data-call-ready={readiness().ready ? 'ready' : 'not-ready'}>{text()}</p>;
 }

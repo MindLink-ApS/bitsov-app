@@ -538,8 +538,10 @@ export class NodeRoutedConnection {
         // The call could not stay sealed: say so. It does not go on in the clear.
         if (link.detail && SEAL_DETAIL.test(link.detail)) this.endDetail = SEAL_ENDED;
         if (link.detail && AUTH_REFUSED.test(link.detail)) this.refused = true;
-        // The node refused or dropped the media session for good.
+        // The node refused or dropped the media session for good. A refusal
+        // reaches the shell first, with its reason, before the generic close.
         this.stopWatching();
+        if (this.refused) this.endSession();
         this.setState('closed');
         this.endSession();
         break;

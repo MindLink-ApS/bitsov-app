@@ -121,6 +121,9 @@ describe('ready for calls only with a live grant (A6)', () => {
     ['5 minutes left, legacy node', grant(5), false, { ready: false, reason: 'window_short', minutesLeft: 5 }],
     ['5 minutes left, continuity node', grant(5), true, { ready: true }],
     ['240 minutes left with an unknown limit, legacy node', grant(240), false, { ready: false, reason: 'window_short', minutesLeft: 240 }],
+    ['a grant that allows no call payment', { ...grant(1_440), call_per_payment_max_msat: 0 }, true, { ready: false, reason: 'call_limit' }],
+    ['a grant whose only per-call limit is zero', { ...grant(1_440), per_call_max_msat: 0 }, true, { ready: false, reason: 'call_limit' }],
+    ['a relation grant (each contact’s envelope binds)', { ...grant(1_440), per_call_max_msat: 0, call_per_payment_max_msat: null, envelopes: { [A]: NOW + 86_400_000 } }, true, { ready: true }],
   ] as const)('%s', (_name, g, continuity, expected) => {
     expect(callReadiness({ grant: g, now: NOW, continuity })).toEqual(expected);
   });
@@ -161,6 +164,9 @@ describe('Decline and Accept with free replies (A4)', () => {
       'Declined here, but they were not told, so their phone keeps ringing until the call times out. Nothing was paid.',
       'Afvist her, men den anden fik ikke besked, så det ringer hos dem, til opkaldet udløber. Intet blev betalt.'],
     ['an unknown delivery', { ok: false, error: { code: 'call_reply_unknown', message: 'unknown' } as ActionError }, 'unknown',
+      'Declined here. It is not known yet whether they were told. Nothing was paid.',
+      'Afvist her. Det vides endnu ikke, om den anden fik besked. Intet blev betalt.'],
+    ['written to their node but not accepted', { ok: true, value: { ...FREE, delivered: true, accepted: false } }, 'unknown',
       'Declined here. It is not known yet whether they were told. Nothing was paid.',
       'Afvist her. Det vides endnu ikke, om den anden fik besked. Intet blev betalt.'],
     ['sent but not yet delivered', { ok: true, value: { ...FREE, delivered: false, accepted: false } }, 'unknown',

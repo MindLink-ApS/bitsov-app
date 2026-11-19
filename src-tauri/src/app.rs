@@ -354,6 +354,11 @@ struct NodeState {
     /// (whose guard lives through the whole body), and nothing else is locked,
     /// awaited or written while either is held.
     call_consents: Mutex<CallConsents>,
+    /// Bumped by every explicit stop of spending: the owner's lock or pause,
+    /// a token the node refused, a new connection or identity. Never by an
+    /// approval or grant simply running out. A call's minutes may outlive
+    /// its approval only while this is what it was when the call was offered.
+    spend_stops: std::sync::atomic::AtomicU64,
 }
 
 /// M6 A2: one outgoing call's agreed minutes, bound to the node identity,
@@ -382,6 +387,8 @@ struct CallConsent {
     /// closed (or it held none and the call ended). Never set on the app's
     /// own say-so (a refusal, a hangup that failed or was not seen through).
     node_closed: bool,
+    /// `NodeState::spend_stops` when this call was offered.
+    stops: u64,
 }
 
 impl CallConsent {
@@ -444,7 +451,7 @@ impl CallConsents {
     /// Take the consent for a call id once. The same terms for a call that is
     /// still open are a no-op (the same offer again); different terms, or any
     /// terms for a call that was refused or ended, are refused.
-    fn register(&mut self, node_id: String, peer: &str, call_id: &str, consent: control::MinutesConsent) -> Result<(), ActionError> {
+    fn register(&mut self, node_id: String, peer: &str, call_id: &str, consent: control::MinutesConsent, stops: u64) -> Result<(), ActionError> {
         if let Some(existing) = self.find(&node_id, peer, call_id) {
             return match &existing.phase {
                 phase if phase.open() && existing.consent == consent => Ok(()),
@@ -464,7 +471,7 @@ impl CallConsents {
         }
         self.entries.push(CallConsent {
             node_id, peer: peer.into(), call_id: call_id.into(), consent,
-            confirmed_msat: None, phase: ConsentPhase::Offering, offering: false, dispatched: false, node_closed: false,
+            confirmed_msat: None, phase: ConsentPhase::Offering, offering: false, dispatched: false, node_closed: false, stops,
         });
         Ok(())
     }
@@ -825,6 +832,7 @@ impl NodeState {
             #[cfg(feature = "call-seal")]
             call_seal: Mutex::new(None),
             call_consents: Mutex::new(CallConsents::default()),
+            spend_stops: std::sync::atomic::AtomicU64::new(0),
             node_grant: Mutex::new(None),
             all_in_caps_node: Mutex::new(None),
             readmission_ask: Mutex::new(None),
@@ -3556,6 +3564,7 @@ async fn remote_access_connect_at<R: tauri::Runtime>(
         *state.token.lock().unwrap() = None;
         *state.node_id.lock().unwrap() = None;
     });
+    stop_spending(state);
     state.spend.lock().unwrap().lock();
     state.autopay.lock().unwrap().lock();
     *state.wants.lock().unwrap() = Wants::default();
@@ -5415,11 +5424,11 @@ fn no_pending_spend(state: &NodeState) -> Result<(), ActionError> {
 enum Auth {
     Window(u64),
     Budget(u64),
-    /// A live call's next minute after the owner's approval ran out by time,
-    /// on a node that draws it on the hold pinned at admission
-    /// (`call_continuity_v1`). Only [`do_call_block`] makes it; an explicit
-    /// lock, or a token the node refused, ends it.
-    CallHold,
+    /// A live call's next minute after the owner's approval ran out, on a
+    /// node that draws it on the hold pinned at admission
+    /// (`call_continuity_v1`). Only [`do_call_block`] makes it, with the
+    /// call's `spend_stops` at its offer; any explicit stop since ends it.
+    CallHold(u64),
 }
 
 /// A cooldown is a proven pre-dispatch refusal, before journal or reservation I/O.
@@ -5446,19 +5455,26 @@ fn check_auth(state: &NodeState, auth: Auth) -> Result<(), ActionError> {
     match auth {
         Auth::Window(g) => state.spend.lock().unwrap().check_generation(g, now_ms()),
         Auth::Budget(g) => state.autopay.lock().unwrap().check_generation(g, now_ms()),
-        Auth::CallHold if approval_lapsed_or_open(state) => Ok(()),
-        Auth::CallHold => Err(ActionError::new("budget_needed", "Your budget approval changed while sending. Nothing was sent; approve it again.")),
+        Auth::CallHold(stops) if spend_stops(state) == stops => Ok(()),
+        Auth::CallHold(_) => Err(ActionError::new("spend_locked", "Sending spends from your node. Approve spending first.")),
     }
 }
 
-/// The owner's approval is open, or ran out by time. Not after a lock: every
-/// lock (the owner's, or a token the node refused) closes both gates.
-fn approval_lapsed_or_open(state: &NodeState) -> bool {
-    let now = now_ms();
-    let window = state.spend.lock().unwrap().view(now).state;
-    let budget = state.autopay.lock().unwrap().view(now).state;
-    matches!(window, act::SpendState::Open | act::SpendState::Expired)
-        || matches!(budget, budget::AutopayState::Open | budget::AutopayState::Expired)
+fn spend_stops(state: &NodeState) -> u64 {
+    state.spend_stops.load(Ordering::SeqCst)
+}
+
+/// An explicit stop of spending (see `NodeState::spend_stops`).
+fn stop_spending(state: &NodeState) {
+    state.spend_stops.fetch_add(1, Ordering::SeqCst);
+}
+
+/// The node refused this app's token: nothing may spend, held call minutes included.
+fn refuse_spend(state: &NodeState) -> ActionError {
+    stop_spending(state);
+    state.autopay.lock().unwrap().lock();
+    *state.node_grant.lock().unwrap() = None;
+    state.spend.lock().unwrap().refused()
 }
 
 /// A message send's line in the budget ledger.
@@ -5568,7 +5584,7 @@ fn reserve(state: &NodeState, auth: Auth, charge: &Charge, id: &str, max_msat: u
     let now = now_ms();
     let ceiling = match auth {
         Auth::Budget(_) => state.autopay.lock().unwrap().ceiling(now),
-        Auth::Window(_) | Auth::CallHold => None,
+        Auth::Window(_) | Auth::CallHold(_) => None,
     };
     with_book(state, true, |book| {
         // Reserve each charge once. An unsettled row under this id is this same
@@ -5964,9 +5980,7 @@ async fn money_post_with(state: &NodeState, auth: Auth, path: &str, mut body: se
     if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
         abandon(&journal)?;
         release(state)?;
-        state.autopay.lock().unwrap().lock();
-        *state.node_grant.lock().unwrap() = None;
-        return Err(state.spend.lock().unwrap().refused());
+        return Err(refuse_spend(state));
     }
     let text = response.text().await.map_err(|_| spend_journal::unknown("The response was interrupted."))?;
     if act::readiness_refusal(status.as_u16(), &text) {
@@ -7184,6 +7198,7 @@ async fn spend_advance_for_inner(state: &NodeState, want: Option<Want>, budget_m
                         let wants = std::mem::take(&mut *state.wants.lock().unwrap());
                         let node = match node {
                             None => {
+                                stop_spending(state);
                                 state.autopay.lock().unwrap().lock();
                                 return Err(gate.refused());
                             }
@@ -8239,7 +8254,7 @@ async fn offer_within_consent(
     }
     {
         let mut kept = state.call_consents.lock().unwrap();
-        kept.register(node_id.clone(), &target, &call_id, consent)?;
+        kept.register(node_id.clone(), &target, &call_id, consent, spend_stops(state))?;
         let entry = kept.find_mut(&node_id, &target, &call_id)
             .ok_or_else(|| ActionError::new("call_no_consent", "Nothing was paid."))?;
         if entry.phase != ConsentPhase::Offering || entry.offering || entry.dispatched {
@@ -8557,16 +8572,18 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
         let needs_contact = || ActionError::new("call_needs_contact", "Calls go to contacts you have already paid. Send them a message first. Nothing was paid.");
         let caps = require_price_caps(state, false).await?;
         let (auth, plan) = match plan_message(state, &target, false, cap, None) {
-            // The approval ran out by time during this admitted call: a node
-            // that keeps the call draws this minute on its pinned hold, as the
-            // owner confirmed it. The book's limits still apply.
+            // The approval ran out during this admitted call (by time, or the
+            // grant left the node's list): a node that keeps the call draws
+            // this minute on its pinned hold, as the owner confirmed it, unless
+            // spending was explicitly stopped since the call was offered. The
+            // book's limits still apply.
             Err(e) if matches!(e.code, "spend_expired" | "spend_locked")
-                && status_lists(&caps.status, CALL_CONTINUITY_CAPABILITY) && approval_lapsed_or_open(state) => {
+                && status_lists(&caps.status, CALL_CONTINUITY_CAPABILITY) && spend_stops(state) == consent.stops => {
                 let plan = with_book(state, false, |book| budget::plan(book, budget::Ask {
                     target: &target, room: false, max_msat: cap, first_contact_msat: None,
                     autopay: None, window: Ok(()), now_ms: now_ms(),
                 }))?;
-                (Auth::CallHold, plan)
+                (Auth::CallHold(consent.stops), plan)
             }
             planned => planned.map_err(|e| if e.code == "first_contact" { needs_contact() } else { e })?,
         };
@@ -9146,9 +9163,7 @@ async fn porch_post(state: &NodeState, auth: Auth, body: serde_json::Value, max_
     if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
         abandon(&journal)?;
         release(state)?;
-        state.autopay.lock().unwrap().lock();
-        *state.node_grant.lock().unwrap() = None;
-        return Err(state.spend.lock().unwrap().refused());
+        return Err(refuse_spend(state));
     }
     let text = response.text().await.map_err(|_| spend_journal::unknown("The response was interrupted."))?;
     let code = status.as_u16();
@@ -9462,6 +9477,12 @@ async fn spend_lock(
 ) -> Result<act::SpendView, ActionError> {
     reject_sealed_window(&window)?;
     drop(window);
+    Ok(do_spend_lock(state.inner()))
+}
+
+fn do_spend_lock(state: &NodeState) -> act::SpendView {
+    // The owner's lock also stops a live call's held minutes.
+    stop_spending(state);
     let view = {
         let mut gate = state.spend.lock().unwrap();
         gate.lock();
@@ -9469,8 +9490,8 @@ async fn spend_lock(
         *state.wants.lock().unwrap() = Wants::default();
         gate.view(now_ms())
     };
-    save_spend_pending(state.inner());
-    Ok(view)
+    save_spend_pending(state);
+    view
 }
 
 /// Withdraw the pending request at the node, then forget it here.
@@ -9499,6 +9520,7 @@ async fn do_spend_cancel(state: &NodeState) -> Result<act::SpendView, ActionErro
         if pending.is_some() && gate.generation() == generation && gate.pending() == pending.as_ref() {
             gate.clear_pending();
         } else {
+            stop_spending(state);
             gate.lock();
         }
         *state.wants.lock().unwrap() = Wants::default();
@@ -10331,6 +10353,7 @@ async fn do_budget_approve(state: &NodeState, ceiling_msat: u64, preset: budget:
 
 /// Pause-all: every payment stops now, and stays stopped across restarts.
 fn do_budget_pause(state: &NodeState) -> Result<budget::BudgetView, ActionError> {
+    stop_spending(state);
     state.autopay.lock().unwrap().lock();
     state.spend.lock().unwrap().lock();
     *state.wants.lock().unwrap() = Wants::default();
@@ -10746,9 +10769,15 @@ async fn do_call_free_reply(state: &NodeState, peer: &str, kind: u16, plaintext:
         return Err(unknown());
     }
     let reply: act::SendReply = serde_json::from_str(&text).map_err(|_| unknown())?;
+    // Free only on a receipt that shows nothing paid: any amount, routing
+    // ceiling, re-admission or fee is not a free reply, so it is unknown.
+    let total = reply.total_msat().map_err(|_| unknown())?;
+    if reply.amount_msat != 0 || total != 0 || reply.fee_paid_msat.unwrap_or(0) != 0 {
+        return Err(unknown());
+    }
     Ok(act::CallReceipt {
         operation_id: reply.operation_id.clone(),
-        total_msat: reply.total_msat()?,
+        total_msat: total,
         message_id: reply.message_id,
         kind,
         amount_msat: reply.amount_msat,
@@ -17571,7 +17600,7 @@ mod control_act_tests {
         let node_id = state.node_id.lock().unwrap().clone()
             .ok_or_else(|| ActionError::new("app_not_ready", "No node identity."))?;
         let mut kept = state.call_consents.lock().unwrap();
-        kept.register(node_id.clone(), peer, call_id, consent)?;
+        kept.register(node_id.clone(), peer, call_id, consent, spend_stops(state))?;
         kept.find_mut(&node_id, peer, call_id).expect("just registered").dispatched = true;
         Ok(())
     }
@@ -20359,7 +20388,7 @@ mod control_act_tests {
             {
                 let mut kept = node.state.call_consents.lock().unwrap();
                 for n in 0..3 * CALL_CONSENTS_KEPT {
-                    kept.register(node_id.clone(), A, &id(n), MINUTES).unwrap();
+                    kept.register(node_id.clone(), A, &id(n), MINUTES, 0).unwrap();
                     assert!(kept.node_reported(&node_id, A, &id(n), None, true), "a short call its node closed");
                 }
                 assert!(kept.entries.len() <= CALL_CONSENTS_KEPT);
@@ -20367,8 +20396,8 @@ mod control_act_tests {
                 assert!(refused.pinned() && matches!(refused.phase, ConsentPhase::Refused { .. }));
                 assert_eq!(kept.pinned_count(&node_id), 1, "it counts against the open-call limit");
                 // With it pinned, only 15 more calls fit at once.
-                for n in 5000..5000 + CALL_CONSENTS_OPEN - 1 { kept.register(node_id.clone(), A, &id(n), MINUTES).unwrap(); }
-                assert_eq!(kept.register(node_id.clone(), A, &id(6000), MINUTES).unwrap_err().code, "call_consents_full");
+                for n in 5000..5000 + CALL_CONSENTS_OPEN - 1 { kept.register(node_id.clone(), A, &id(n), MINUTES, 0).unwrap(); }
+                assert_eq!(kept.register(node_id.clone(), A, &id(6000), MINUTES, 0).unwrap_err().code, "call_consents_full");
                 for n in 5000..5000 + CALL_CONSENTS_OPEN - 1 { kept.node_reported(&node_id, A, &id(n), None, true); }
             }
             // Wider rebinding, confirming the hold and paying a minute all stay refused.
@@ -20400,29 +20429,29 @@ mod control_act_tests {
         let mut kept = CallConsents::default();
         // A full table of open calls (offering or admitted): a new call is refused, none is evicted.
         for n in 0..CALL_CONSENTS_OPEN {
-            kept.register("node".into(), A, &id(n), MINUTES).unwrap();
+            kept.register("node".into(), A, &id(n), MINUTES, 0).unwrap();
             if n % 2 == 0 { kept.admit("node", A, &id(n)); }
         }
-        assert_eq!(kept.register("node".into(), A, &id(1000), MINUTES).unwrap_err().code, "call_consents_full");
+        assert_eq!(kept.register("node".into(), A, &id(1000), MINUTES, 0).unwrap_err().code, "call_consents_full");
         assert_eq!(kept.pinned_count("node"), CALL_CONSENTS_OPEN);
         // Another node identity's calls neither count here nor are evicted for it.
-        kept.register("other".into(), A, &id(1000), MINUTES).unwrap();
+        kept.register("other".into(), A, &id(1000), MINUTES, 0).unwrap();
         assert_eq!(kept.pinned_count("other"), 1);
         // Ending one at the app frees nothing: only its node showing it closed does.
         kept.end("node", Some(A), &id(CALL_CONSENTS_OPEN - 1));
-        assert_eq!(kept.register("node".into(), A, &id(1000), MINUTES).unwrap_err().code, "call_consents_full");
+        assert_eq!(kept.register("node".into(), A, &id(1000), MINUTES, 0).unwrap_err().code, "call_consents_full");
         gone(&mut kept, &id(CALL_CONSENTS_OPEN - 1));
         // A refused call whose hold is not closed takes that slot and stays pinned.
         let refused = id(1500);
-        kept.register("node".into(), A, &refused, MINUTES).unwrap();
+        kept.register("node".into(), A, &refused, MINUTES, 0).unwrap();
         kept.refuse("node", A, &refused, "call_hold_above_consent", "refused");
-        assert_eq!(kept.register("node".into(), A, &id(1000), MINUTES).unwrap_err().code, "call_consents_full",
+        assert_eq!(kept.register("node".into(), A, &id(1000), MINUTES, 0).unwrap_err().code, "call_consents_full",
             "a refused call with an open hold counts against the limit");
         kept.end("node", Some(A), &id(CALL_CONSENTS_OPEN - 2));
         gone(&mut kept, &id(CALL_CONSENTS_OPEN - 2));
         // Then many short calls, refused or ended and closed at their node, press the table far past its size.
         for n in 2000..2000 + 3 * CALL_CONSENTS_KEPT {
-            kept.register("node".into(), A, &id(n), MINUTES).unwrap();
+            kept.register("node".into(), A, &id(n), MINUTES, 0).unwrap();
             if n % 3 == 0 { kept.refuse("node", A, &id(n), "call_hold_above_consent", "refused"); } else { kept.end("node", Some(A), &id(n)); }
             gone(&mut kept, &id(n));
         }
@@ -20431,14 +20460,14 @@ mod control_act_tests {
         for n in 0..CALL_CONSENTS_OPEN - 2 {
             let c = kept.find("node", A, &id(n)).expect("an open call is never evicted");
             assert_eq!((c.consent, c.phase.open()), (MINUTES, true));
-            assert_eq!(kept.register("node".into(), A, &id(n), wider).unwrap_err().code, "invalid");
-            assert!(kept.register("node".into(), A, &id(n), MINUTES).is_ok(), "the same offer again is a no-op");
+            assert_eq!(kept.register("node".into(), A, &id(n), wider, 0).unwrap_err().code, "invalid");
+            assert!(kept.register("node".into(), A, &id(n), MINUTES, 0).is_ok(), "the same offer again is a no-op");
         }
         // The refused call is still kept: it refuses any terms, and never becomes ended or admitted again.
         let c = kept.find("node", A, &refused).expect("a refused call is never evicted before its node closes it");
         assert!(c.pinned() && matches!(c.phase, ConsentPhase::Refused { .. }));
         for terms in [MINUTES, wider] {
-            assert_eq!(kept.register("node".into(), A, &refused, terms).unwrap_err().code, "invalid");
+            assert_eq!(kept.register("node".into(), A, &refused, terms, 0).unwrap_err().code, "invalid");
         }
         kept.end("node", Some(A), &refused);
         kept.admit("node", A, &refused);
@@ -20464,10 +20493,10 @@ mod control_act_tests {
         assert!(kept.node_reported("node", A, &refused, Some(&status("ended", "outgoing", Some(true))), false));
         let c = kept.find("node", A, &refused).unwrap();
         assert!(!c.pinned() && matches!(c.phase, ConsentPhase::Refused { .. }));
-        assert_eq!(kept.register("node".into(), A, &refused, wider).unwrap_err().code, "invalid");
+        assert_eq!(kept.register("node".into(), A, &refused, wider, 0).unwrap_err().code, "invalid");
         // An accepted offer the node no longer lists is over, whatever is pending elsewhere.
         let accepted = id(1000);
-        kept.register("node".into(), A, &accepted, MINUTES).unwrap();
+        kept.register("node".into(), A, &accepted, MINUTES, 0).unwrap();
         kept.find_mut("node", A, &accepted).unwrap().dispatched = true;
         assert!(kept.node_reported("node", A, &accepted, None, false));
         assert_eq!(kept.find("node", A, &accepted).unwrap().phase, ConsentPhase::Ended);
@@ -22591,6 +22620,31 @@ mod control_act_tests {
         assert!(pending(&refused).is_none());
     }
 
+    /// A free reply is reported free only on a success whose receipt shows
+    /// nothing paid. A server failure, an unreadable success, or one that
+    /// names any amount, fee or re-admission is unknown: never free, never
+    /// retried, and still one compose.
+    #[tokio::test]
+    async fn a_free_reply_is_free_only_on_a_zero_receipt_and_otherwise_unknown() {
+        let cases = [
+            (500, serde_json::json!({"error": "internal"})),
+            (503, serde_json::json!({})),
+            (200, serde_json::json!("not a receipt")),
+            (200, serde_json::json!({"message_id": "r1", "delivered": true})),
+            (200, serde_json::json!({"message_id": "r1", "delivered": true, "accepted": true, "amount_msat": 1_000, "max_routing_fee_msat": 0})),
+            (200, serde_json::json!({"message_id": "r1", "delivered": true, "accepted": true, "amount_msat": 0, "max_routing_fee_msat": 5_000})),
+            (200, serde_json::json!({"message_id": "r1", "delivered": true, "accepted": true, "amount_msat": 0, "max_routing_fee_msat": 0, "readmission_msat": 1_500})),
+            (200, serde_json::json!({"message_id": "r1", "delivered": true, "accepted": true, "amount_msat": 0, "max_routing_fee_msat": 0, "fee_paid_msat": 1})),
+        ];
+        for (status, body) in cases {
+            let node = free_reply_node(&["call_reply_free_v1"], free_peer(), (status, body.clone()));
+            let error = do_call_free_reply(&node.state, A, act::KIND_CALL_HANGUP, DECLINE).await.unwrap_err();
+            assert_eq!(error.code, "call_reply_unknown", "{status} {body}");
+            assert_eq!(composes(&node), 1, "{status} {body}: one compose, no retry");
+            assert!(pending(&node).is_none());
+        }
+    }
+
     fn with_status_caps(routes: Routes, extra: &'static [&'static str]) -> Routes {
         Arc::new(move |m, p, b| {
             let (status, body) = routes(m, p, b);
@@ -22611,33 +22665,113 @@ mod control_act_tests {
     /// spending lock (or a refused token) still stops it on both.
     #[tokio::test]
     async fn a_minute_after_the_approval_lapsed_is_paid_only_on_a_continuity_node() {
-        for (continuity, lapse) in [(true, "time"), (false, "time"), (true, "lock")] {
+        for (continuity, stop) in [(true, "none"), (false, "none"), (true, "window_lock"), (true, "pause"), (true, "token_refused"), (true, "both_gates_by_hand")] {
             let (routes, _next, reserved) = PacedHold { per_block: 10_000, fee: 5_000, minutes: 40,
                 closing: 0, direct: false, spent: SPENT_AT_CEILING }.routes();
             let routes = with_status_caps(routes, if continuity { &["call_continuity_v1"] } else { &[] });
             let node = paced_call(routes, reserved).await;
             do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
             {
+                // The owner's approval runs out by time during the call.
                 let now = now_ms();
-                let mut autopay = node.state.autopay.lock().unwrap();
-                let mut spend = node.state.spend.lock().unwrap();
-                if lapse == "time" {
-                    autopay.arm_until(now, now, 500_000, act::SpendBasis::AppLock);
-                    spend.arm_until(now, now, act::SpendBasis::AppLock);
-                } else {
-                    autopay.lock();
-                    spend.lock();
-                }
+                node.state.autopay.lock().unwrap().arm_until(now, now, 500_000, act::SpendBasis::AppLock);
+                node.state.spend.lock().unwrap().arm_until(now, now, act::SpendBasis::AppLock);
+            }
+            // Then, perhaps, spending is stopped on purpose. The lock command
+            // closes only the spend window; the expired budget stays expired.
+            match stop {
+                "window_lock" => { do_spend_lock(&node.state); }
+                "pause" => { do_budget_pause(&node.state).unwrap(); }
+                "token_refused" => { refuse_spend(&node.state); }
+                // A reconciliation closing both gates is not an explicit stop.
+                "both_gates_by_hand" => { node.state.autopay.lock().unwrap().lock(); node.state.spend.lock().unwrap().lock(); }
+                _ => {}
             }
             let result = do_call_block(&node.state, A, CALL_ID, 1).await;
-            if continuity && lapse == "time" {
-                assert_eq!(result.map(|r| r.kind).unwrap(), act::KIND_CALL_BLOCK);
+            if continuity && matches!(stop, "none" | "both_gates_by_hand") {
+                assert_eq!(result.map(|r| r.kind).unwrap(), act::KIND_CALL_BLOCK, "{stop}");
                 assert_eq!(compose_kinds(&node), [400, 404, 404]);
                 assert!(pending(&node).is_none());
             } else {
                 let code = result.unwrap_err().code;
-                assert!(matches!(code, "spend_expired" | "spend_locked" | "budget_needed"), "{continuity} {lapse}: {code}");
-                assert_eq!(compose_kinds(&node), [400, 404], "{continuity} {lapse}: nothing more sent");
+                assert!(matches!(code, "spend_expired" | "spend_locked" | "budget_needed" | "budget_paused"), "{continuity} {stop}: {code}");
+                assert_eq!(compose_kinds(&node), [400, 404], "{continuity} {stop}: nothing more sent");
+            }
+        }
+    }
+
+    /// The owner locks spending while a held minute waits for the money lock:
+    /// the lock is checked again at dispatch, and that minute is not sent.
+    #[test]
+    fn a_lock_while_a_held_minute_waits_stops_it_at_dispatch() {
+        let rt = race_runtime();
+        let (routes, _next, reserved) = PacedHold { per_block: 10_000, fee: 5_000, minutes: 40,
+            closing: 0, direct: false, spent: SPENT_AT_CEILING }.routes();
+        let node = rt.block_on(async {
+            let node = paced_call(with_status_caps(routes, &["call_continuity_v1"]), reserved).await;
+            do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+            let now = now_ms();
+            node.state.autopay.lock().unwrap().arm_until(now, now, 500_000, act::SpendBasis::AppLock);
+            node.state.spend.lock().unwrap().arm_until(now, now, act::SpendBasis::AppLock);
+            node
+        });
+        let state = &node.state;
+        let (arrived, release) = pause_points::arm(&state.api_base, "after_lock");
+        let result = std::thread::scope(|s| {
+            let send = s.spawn(|| rt.block_on(do_call_block(state, A, CALL_ID, 1)));
+            rt.block_on(arrived.notified());
+            do_spend_lock(state);
+            release.notify_one();
+            send.join().unwrap()
+        });
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(compose_kinds(&node), [400, 404]);
+    }
+
+    /// The node grant really expires during the call and the budget poll
+    /// reconciles it (both local gates close, the grant is forgotten): on a
+    /// continuity node the call's next held minute is still paid; on a
+    /// legacy node it is not.
+    #[tokio::test]
+    async fn a_held_minute_survives_reconciliation_after_the_grant_expired_on_a_continuity_node() {
+        for continuity in [true, false] {
+            let (routes, _, reserved) = PacedHold { per_block: 10_000, fee: 5_000, minutes: 40,
+                closing: 0, direct: false, spent: SPENT_AT_CEILING }.routes();
+            let first: Routes = Arc::new(move |m, p, b| {
+                if p == "/pair/elevation/ab12" {
+                    return (200, serde_json::json!({"op_id": "ab12", "status": "pending"}).to_string());
+                }
+                if p.starts_with("/pair/") { return (0, String::new()); }
+                let (status, body) = routes(m, p, b);
+                if p == "/status" {
+                    let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    let caps = value["api_capabilities"].as_array_mut().unwrap();
+                    caps.push(grant::CAPABILITY.into());
+                    if continuity { caps.push("call_continuity_v1".into()); }
+                    return (status, value.to_string());
+                }
+                (status, body)
+            });
+            let (node, _dir, g1) = g1_node_with(&["read", "receive", "spend"], Some(first));
+            *g1.grant.lock().unwrap() = g1_grant(3600, 5_000_000, 5_000_000);
+            approve_calls(&node).await;
+            node.state.autopay.lock().unwrap().lock();
+            spend_advance(&node.state, true).await.unwrap();
+            do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap();
+            remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
+            do_call_hold(&node.state, A, CALL_ID, Some(reserved)).await.unwrap();
+            do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+            // The grant ends at the node; the poll reconciles it.
+            *g1.grant.lock().unwrap() = g1_grant(-5, 5_000_000, 4_000_000);
+            do_budget_status(&node.state).await.unwrap();
+            assert!(node.state.node_grant.lock().unwrap().is_none(), "reconciled");
+            let result = do_call_block(&node.state, A, CALL_ID, 1).await;
+            if continuity {
+                assert_eq!(result.map(|r| r.kind).unwrap(), act::KIND_CALL_BLOCK);
+                assert_eq!(compose_kinds(&node), [400, 404, 404]);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(compose_kinds(&node), [400, 404]);
             }
         }
     }

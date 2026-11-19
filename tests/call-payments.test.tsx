@@ -25,6 +25,7 @@ import { createNodeRoutedConnection, LINK_GRACE_MS, nodeRoutedSdp, type MediaSes
 import type { CallAudio } from '../src/control/callAudio';
 import type { MediaBridge, MediaLink } from '../src/control/mediaBridge';
 import { amount } from '../src/control/format';
+import { callEndLine } from '../src/control/callEnd';
 import { provenUnpaid } from '../src/control/paymentOutcome';
 import type { ActionError, CallQuote, CallReceipt, CallReservation, CallStatus, NodeGrantSummary, SpendView } from '../src/control/types';
 import type { PairingView as OnboardingPairingView } from '../src/onboarding/pairing';
@@ -988,7 +989,7 @@ describe('node-routed calls carry audio only, and a dead media session stops the
       getUserMedia: async (c) => { media.push(c); return audioStream(); },
       peerConnection: () => createNodeRoutedConnection({
         callId: () => calls?.view().callId ?? null, peer: () => calls?.view().peer ?? null, bridge, audio,
-        onSession: (event) => { sessions.push(event); if (event.state === 'closed') calls?.mediaClosed(event.callId); },
+        onSession: (event) => { sessions.push(event); if (event.state === 'closed') calls?.mediaClosed(event.callId, { refused: event.refused === true }); },
       }),
       now: () => Date.now(),
       onView: (v) => views.push(v),
@@ -1042,6 +1043,32 @@ describe('node-routed calls carry audio only, and a dead media session stops the
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(pay).toHaveBeenCalledTimes(1);
     expect(e.sessions.map((x) => x.state)).toEqual(['open', 'closed']);
+  });
+
+  // The real adapter and engine: the node refuses the media socket after the box approval ended.
+  it.each([
+    [false, 401, true], [false, 403, true], [true, 403, false], [false, 503, false],
+  ] as const)('continuity %s, the node refusing media with %s after the approval ended: budget ran out = %s', async (continuity, code, budget) => {
+    const node = fakeNode({ now: () => Date.now(), minutes: 10 });
+    const pay = vi.fn(async (_p: string, _c: string, seq: number) => { node.settle(seq); return ok(receipt(seq)); });
+    const grantEnds = Date.now() + 4 * 60_000;
+    const e = routedEngine(minutesOf(node, pay), {
+      callLimitMinutes: () => 2, callContinuity: () => continuity,
+      grant: () => ({ budget_msat: 5_000_000, remaining_msat: 5_000_000, per_call_max_msat: 5_000_000, expires_at_ms: grantEnds, envelopes: null }),
+    });
+    await e.engine.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(e.last().minutes?.reservation).not.toBeNull());
+    await e.engine.confirmMinutes();
+    await e.engine.receive(answerMessage, OWN);
+    await vi.waitFor(() => expect(pay).toHaveBeenCalledWith(A, ID, 0));
+    await vi.advanceTimersByTimeAsync(0);
+    e.link({ link: 'open', detail: null });
+    await vi.waitFor(() => expect(e.last().phase).toBe('live'));
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(e.last().phase).toBe('live');
+    e.link({ link: 'ended', detail: `the node refused the media socket (${code})` });
+    expect(e.last()).toMatchObject({ phase: 'ended', budgetEnded: budget });
+    expect(callEndLine(e.last(), 'Maya').text === 'The budget ran out during the call, so it ended.').toBe(budget);
   });
 
   it('frozen media: a node link down for 3 s shows Reconnecting, back to Live when it returns, and ends after its grace; nothing extra is sent', async () => {
