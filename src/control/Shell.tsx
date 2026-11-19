@@ -49,6 +49,7 @@ import { amount as fmtAmount, paidAmount, budgetNote, allIn, clock, day, feeCeil
 import { ambiguousThousands, amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
+import { softenError } from './userFacing';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { OperatorDetails } from './OperatorDetails';
 import { PorchPanel } from './Porch';
@@ -58,13 +59,15 @@ import { custodyBadge, CustodyBadgeView } from './custody';
 import { CopyButton, NO_CHANNELS, WalletPage, type WalletActions, type WalletTab } from './WalletPage';
 import { artifactActivity, logActivity, type LoggedActivity } from './wallet';
 import { mobileQrScannerAvailable, scanPairingLink } from '../pairingScanner';
-import { answerCost, callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, isCallKind, isCallTrafficKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
+import { answerCost, callCost, callPerPaymentMax, createCallEngine, NO_MEDIA_DEVICES, RECOVERY_CLOSING, IDLE as CALL_IDLE, shownDropAt, shownPhase, isCallKind, signalCost, stunServer, type CallMedia, type CallView } from './call';
 import { CallReportCopy } from './CallReportCopy';
 import { createMeetingEngine, declineCost, inviteCost, joinCost, MAX_PARTICIPANTS, MEETING_IDLE, type LegState, type MeetingView, type ShownQuotes } from './meeting';
 import { nodeRoutedAudio, nodeRoutedVideo, sealedAudio } from './callFlags';
 import { AUDIO_PLAYOUT_DELAY_MS, createCallVideo, trackVideoSource, type VideoStatus } from './callVideo';
 import { createNodeRoutedConnection, sealLabelScope, type SealState } from './nodeRoutedConnection';
 import { waitUntilPaid, type MinutesDeps, type MinutesView } from './callMinutes';
+import { callEndLine } from './callEnd';
+import { callLines, isCallControlMessage } from './callHistory';
 import { hostCallSeal, hostMediaBridge, unavailableMediaBridge } from './mediaBridge';
 import { createCallAudio } from './callAudio';
 import { admitRoom, leaveRoom, localRoom, localRooms, newRoom, rememberRoom, ROOM_CAPABILITY, ROOM_PAGE, roomOf, sameRoom, sendRoom, type LegPlan, type LocalRoom } from './room';
@@ -3249,8 +3252,14 @@ function Conversation(props: {
       room: props.roomQuote,
       nowMs: props.now,
     });
-  // Protocol payloads belong to their own views, not the chat stream (a call's minute blocks included).
-  const items = createMemo(() => streamItems(props.messages.filter((m) => !isCallTrafficKind(m.kind) && !isPorchKind(m.kind) && !(props.track.kind === 'peer' && roomOf(m, props.ownId))), props.artifacts));
+  // Protocol payloads belong to their own views, not the chat stream (a call's minute blocks included,
+  // and any older app's `{"call_id":…}` receipt): each call is one system line instead.
+  const items = createMemo(() => {
+    const own = props.messages.filter((m) => !isPorchKind(m.kind) && !(props.track.kind === 'peer' && roomOf(m, props.ownId)));
+    const missed = new Set(props.artifacts.flatMap((a) => a.type === 'missed-call' ? [a.id.slice(a.id.lastIndexOf(':') + 1)] : []));
+    const lines = props.track.kind === 'peer' ? callLines(own, (callId) => missed.has(callId)) : [];
+    return streamItems(own.filter((m) => !isCallControlMessage(m)), [...props.artifacts, ...lines]);
+  });
   // Solid's For keys by identity. Primitive ids keep rows mounted when reads replace objects.
   const keyedItems = createMemo(() => new Map(items().map((item) => [
     item.type === 'message' ? `message:${item.message.id}` : `artifact:${item.artifact.id}`, item,
@@ -3784,11 +3793,6 @@ function videoStatusLine(status: VideoStatus | null | undefined): string | null 
 }
 
 const CALL_TITLE = CALL_STATE_WORD;
-const END_REASON: Record<string, string> = {
-  get hangup() { return tr('callHungUp'); }, get declined() { return tr('callDeclined'); },
-  get busy() { return tr('callBusy'); }, get timeout() { return tr('callNoAnswer'); }, get failed() { return tr('callFailed'); },
-  get unpaid() { return tr('caCallEndedUnpaid'); },
-};
 
 /**
  * M6 consent before Ring: the callee's per-minute price and the most any node
@@ -3961,6 +3965,9 @@ function CallPanel(props: {
   }));
   const v = () => props.view;
   const who = () => (v().peer ? props.nameOf(v().peer!) : '');
+  const endLine = () => callEndLine(v(), who());
+  /** What the card shows: interrupted node-routed media reads as Reconnecting (display only; the engine stays live). */
+  const cardPhase = () => shownPhase(v());
   /** The M6 paid-minutes line is on the card (same condition as its render below). */
   const minutesShown = () => !!(props.routed && v().outgoing && v().minutes);
   /**
@@ -3980,9 +3987,9 @@ function CallPanel(props: {
   };
   return (
     <Show when={v().phase !== 'idle' || props.approvalOpen}>
-      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={v().phase} data-call-approval-open={props.approvalOpen ? '' : undefined} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[v().phase]} ${who()}`}>
+      <aside ref={el => { panel = el; props.panelRef(el); }} tabindex="-1" class="call-panel" data-call-panel={cardPhase()} data-call-approval-open={props.approvalOpen ? '' : undefined} role="dialog" aria-label={props.approvalOpen ? tr('uiCallSpendingApproval') : `${CALL_TITLE[cardPhase()]} ${who()}`}>
         <header>
-          <strong data-call-title aria-live="polite">{CALL_TITLE[v().phase]}{v().media === 'video' ? tr('uiVideo') : ''}</strong>
+          <strong data-call-title aria-live="polite">{CALL_TITLE[cardPhase()]}{v().media === 'video' ? tr('uiVideo') : ''}</strong>
           <span class="who">{who()}</span>
           <Show when={(v().phase === 'live' || v().phase === 'reconnecting') && v().liveAt !== null}>
             <span class="duration" data-call-duration>{duration(Math.max(0, tick() - v().liveAt!))}</span>
@@ -4018,10 +4025,10 @@ function CallPanel(props: {
           <CallNetworkNote onOpenSettings={props.openCallSettings} />
         </Show>
         {/* While reconnecting: what is happening, and when the call ends if it does not come back (display only). */}
-        <Show when={v().phase === 'reconnecting'}>
+        <Show when={cardPhase() === 'reconnecting'}>
           <p class="hint" role="status" data-call-reconnecting>
             {tr('uiConnectionLostReconnecting')}
-            <Show when={v().dropAt !== null}>{' '}{tr('uiIfItIsnTBackIn')} <span data-call-drop-in>{Math.max(0, Math.ceil((v().dropAt! - tick()) / 1000))}</span> {tr('uiSTheCallEnds')}</Show>
+            <Show when={shownDropAt(v()) !== null}>{' '}{tr('uiIfItIsnTBackIn')} <span data-call-drop-in>{Math.max(0, Math.ceil((shownDropAt(v())! - tick()) / 1000))}</span> {tr('uiSTheCallEnds')}</Show>
             <Show when={v().recoveryUsedBefore}>{' '}{tr('uiThisCallAlreadyUsedItsOneRecoveryWaiting')}</Show>
           </p>
         </Show>
@@ -4081,13 +4088,9 @@ function CallPanel(props: {
           <MicAccessNote media={v().media} />
         </Show>
         <Show when={v().phase === 'ended' && !v().mediaDenied}>
-          <p class="hint" data-call-ended>{v().stuck
-            ? tr('uiACallToIsStillClosingAtYour', who())
-            : v().minutes?.stop?.limit?.code === 'budget_exhausted' ? tr('caCallEndedContactLimit')
-            : v().minutes?.stop?.limit?.code === 'ceiling_exhausted' ? tr('caCallEndedTotalLimit')
-            : v().minutes?.stop?.limit?.code === 'grant_exhausted' ? tr('caCallEndedGrantLimit')
-            : v().error ?? END_REASON[v().reason ?? 'hangup']}</p>
-          <Show when={!v().stuck ? v().minutes?.stop?.detail : null}>
+          {/* One plain, cause-specific line; the host's or node's own words only under Details. */}
+          <p class="hint" data-call-ended>{endLine().text}</p>
+          <Show when={endLine().detail}>
             {(detail) => <details class="quiet-detail" data-call-end-detail>
               <summary>{tr('uiDetails')}</summary>
               <p class="hint">{detail()}</p>
@@ -4161,7 +4164,8 @@ function CallPanel(props: {
               <Show when={v().close?.status === 'refused' && !v().stuck}>
                 <button type="button" class="soft money" data-call-close-retry onClick={() => props.closeAgain()}>{tr('uiTryEndingItAgain')}</button>
               </Show>
-              <Show when={v().outgoing && v().close?.status === 'closed' && !v().stuck && v().pendingCount === 0 && v().unknownCount === 0}>
+              {/* Every ended call can be called again (same priced confirm), once nothing of it is still open or settling. */}
+              <Show when={v().callId !== null && v().peer !== null && (v().outgoing ? v().close?.status === 'closed' : (v().close === null || v().close!.status === 'closed')) && !v().stuck && v().pendingCount === 0 && v().unknownCount === 0}>
                 <Show when={again()} fallback={<button type="button" class="soft" data-call-again disabled={props.blocked} onClick={() => void offerAgain()}>{tr('uiCallAgain')}</button>}>
                   {(q) => <>
                     <Show when={props.routed && q().block_msat != null}><MinutesConsent quote={q()} /></Show>
@@ -4658,6 +4662,16 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
 function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: Artifact; delivery?: Delivery; nameOf: (id: string) => string; /** The same offline signal the header call buttons get, so Call back re-reads the price when they are back. */ offlineOf?: (id: string) => boolean; onRetry?: (id: string, approvedMsat?: number) => Promise<unknown>; onStop?: (pendingId: string | null) => Promise<unknown>; onRestore?: (id: string) => void; onDiscard?: (id: string) => void }) {
   return (
     <Switch>
+      <Match when={props.a.type === 'call-line' && props.a}>
+        {(a) => {
+          const line = () => a() as Extract<Artifact, { type: 'call-line' }>;
+          return <p class="hint call-line" data-call-line={line().callId}>
+            {tr(line().media === 'video' ? 'caCallLineVideo' : 'caCallLineAudio')}
+            <Show when={line().minutes !== null}>{' · '}{tr('caCallLineMinutes', line().minutes!)}</Show>
+            {' · '}<time datetime={new Date(line().at).toISOString()}>{clock(line().at)}</time>
+          </p>;
+        }}
+      </Match>
       <Match when={props.a.type === 'missed-call' && props.a}>
         {a => {
           const call = () => a() as Extract<Artifact, { type: 'missed-call' }>;
@@ -4775,7 +4789,7 @@ function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: 
           return (
             <div class="artifact out failed" data-artifact="failed" data-code={f().error.code}>
               <span class="kind">{f().action}</span>
-              <span>{f().error.message}</span>
+              <FailedReason message={f().error.message} />
               <Show when={f().text !== undefined}>
                 {/* The whole message stays readable here; no resend while the payment result is open. */}
                 <blockquote class="failed-text" data-failed-text>{f().text}</blockquote>
@@ -4809,6 +4823,31 @@ function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: 
         {(a) => <UndeliveredView moneyBlocked={props.moneyBlocked} a={a() as Extract<Artifact, { type: 'undelivered' }>} onRetry={props.onRetry} onStop={props.onStop} />}
       </Match>
     </Switch>
+  );
+}
+
+/**
+ * Why an action failed, in plain words. Raw host text sits behind Details;
+ * money text (paid, refused, an amount in sats) always shows whole.
+ */
+function FailedReason(props: { message: string }) {
+  const soft = () => {
+    const m = props.message;
+    if (/\d\s*m?sats?\b/i.test(m)) return { summary: m, detail: null };
+    return softenError(m, tr('caFailedReasonCheckNode'));
+  };
+  return (
+    <div class="failed-reason" data-failed-reason>
+      <span data-soft-summary>{soft().summary}</span>
+      <Show when={soft().detail}>
+        {(d) => (
+          <details class="quiet-detail" data-soft-detail>
+            <summary>{tr('uiDetails')}</summary>
+            <p class="hint">{d()}</p>
+          </details>
+        )}
+      </Show>
+    </div>
   );
 }
 

@@ -23429,7 +23429,7 @@ mod control_act_tests {
         *node.state.external_node.lock().unwrap() = Some(PathBuf::from("/ext"));
         let view = spend_advance(&node.state, true).await.unwrap();
         assert_eq!(view.pending.unwrap().owner_action, "konsensus grant --op ab01");
-        let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op} --config /home/umbrel/app-data/konsensus.toml"));
+        let (node, _dir) = paired_fake(asking_node("pending", "konsensus grant --op {op} --config /data/umbrel/app-data/konsensus.toml"));
         *node.state.config.lock().unwrap() = Some(PathBuf::from("/elsewhere/konsensus.toml"));
         let view = spend_advance(&node.state, true).await.unwrap();
         let json = serde_json::to_string(&view).unwrap();

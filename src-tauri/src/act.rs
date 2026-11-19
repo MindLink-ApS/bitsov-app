@@ -1955,9 +1955,9 @@ mod tests {
         assert_eq!(shown("konsensus grant --op ab12").owner_action, "konsensus grant --op ab12");
         // The node names its own config: the path never reaches the app's view.
         for action in [
-            "konsensus grant --op ab12 --config '/home/umbrel/umbrel/app-data/bitsov/konsensus.toml'",
+            "konsensus grant --op ab12 --config '/data/umbrel/app-data/bitsov/konsensus.toml'",
             "konsensus grant --op ab12 --config /srv/n/konsensus.toml",
-            "konsensus grant --op ab12  --config '/Users/o wner/My Node/konsensus.toml'  ",
+            "konsensus grant --op ab12  --config '/Volumes/My Node/konsensus.toml'  ",
         ] {
             let pending = shown(action);
             assert_eq!(pending.owner_action, "konsensus grant --op ab12");
