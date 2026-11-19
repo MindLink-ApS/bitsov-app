@@ -4728,7 +4728,7 @@ function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: 
           return (
             <div class="artifact out" data-artifact="invoice">
               <span class="kind">{tr('chatInvoiceYouReceive')}</span>
-              <span class="sats big">{sats(inv().amount_msat, 'up', true)} <span class="unit">{satUnit(inv().amount_msat, 'up')}</span></span>
+              <span class="sats big"><AmountWithExact msat={inv().amount_msat} round="down" nowrap /></span>
               <Show when={inv().note}>
                 <span class="hint">{inv().note}</span>
               </Show>
@@ -6997,7 +6997,7 @@ function Composer(props: {
               {(inv) => (
                 <div class="composer-bar" data-request-created>
                   <span class="basis">
-                    {tr('uiInvoiceFor')} {fmtAmount(inv().amount_msat, 'up')} {tr('uiIsReadySendItTo')} {props.name} {tr('uiAsAChatMessageItPaysLikeAny')}
+                    {tr('uiInvoiceFor')} <AmountWithExact msat={inv().amount_msat} round="down" /> {tr('uiIsReadySendItTo')} {props.name} {tr('uiAsAChatMessageItPaysLikeAny')}
                   </span>
                   <button type="button" class="primary soft money" data-send-in-chat disabled={props.moneyBlocked || busy() || contactWaiting()} onClick={() => void sendInChat()}>
                     {tr('uiSendInChat')}{chatPrice()}

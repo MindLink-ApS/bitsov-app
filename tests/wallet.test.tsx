@@ -473,6 +473,22 @@ describe('the Wallet page', () => {
     expect(text('[data-channel="c2"] [data-channel-words]')).toMatch(/stays yours/);
   });
 
+  it('a receive invoice never shows more than it asks for: 1.5 sats reads about 1, with the exact amount one tap away', async () => {
+    setLanguagePref('en');
+    const host = stubHost();
+    await openWallet('receive');
+    await vi.waitFor(() => expect($('[data-receive-create]')).not.toBeNull());
+    type('[data-receive-amount]', '1.5');
+    click('[data-receive-create]');
+    await vi.waitFor(() => expect($('[data-receive-invoice]')).not.toBeNull());
+    const asked = (host.used('invoice_create')[0].args as { amount_msat: number }).amount_msat;
+    expect(asked).toBe(1500);
+    const shown = text('[data-receive-invoice] .wallet-request-amount');
+    expect(shown).not.toMatch(/about 2/);
+    expect(shown).toMatch(/about 1 sat/);
+    expect($('[data-receive-invoice] [data-exact-amount-value]')?.textContent).toMatch(/1\.5/);
+  });
+
   it.each(['en', 'da'] as const)('Receive over Lightning (%s): an amount makes an invoice with a QR; it reads as received once the node says paid; nothing is paid', async locale => {
     setLanguagePref(locale);
     let paid = false;

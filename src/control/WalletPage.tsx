@@ -605,7 +605,7 @@ function ReceiveView(props: { moneyBlocked: boolean; actions: WalletActions; rea
             <div class="wallet-request" data-receive-invoice data-receive-status={status() ?? ''}>
               <Show when={received()?.status === 'paid'} fallback={<>
                 <QR value={inv().bolt11.toUpperCase()} label={t('receiveInvoiceQR')} />
-                <span class="wallet-request-amount">{fmtAmount(inv().amount_msat, 'up')}</span>
+                <span class="wallet-request-amount"><AmountWithExact msat={inv().amount_msat} round="down" /></span>
               </>}>
                 <SettledPayment direction="received" msat={received()?.msat ?? null} />
               </Show>

@@ -308,6 +308,6 @@ it('keeps the exact amount one tap away for a rounded incoming amount or history
   expect($('[data-b]').textContent).toBe('2 sats');
   expect($('[data-b] details')).toBeNull();
   const read = (f: string) => readFileSync(join(__dirname, '../src/control', f), 'utf8');
-  expect(read('WalletPage.tsx').match(/<AmountWithExact /g)?.length).toBe(3);
+  expect(read('WalletPage.tsx').match(/<AmountWithExact /g)?.length).toBe(4);
   expect(read('Shell.tsx')).toContain('<AmountWithExact msat={amount()} round="down" nowrap />');
 });
