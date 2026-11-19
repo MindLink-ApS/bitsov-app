@@ -115,12 +115,15 @@ export function attachmentOf(plaintext: string | null): Attachment | null {
       const v: unknown = JSON.parse(text);
       if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
       const o = v as Record<string, unknown>;
-      const data = [o.data_b64, o.data, o.content_b64].find((x): x is string => typeof x === 'string');
-      const b = data?.replace(/\s+/g, '') ?? '';
-      // A file record's payload may be short; it is still bytes, not a message.
-      if (!b || b.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b)) return null;
+      // A file only when the record says so: a file name, a MIME type or a file kind.
       const n = [o.filename, o.name, o.file_name].find((x): x is string => typeof x === 'string' && x.trim() !== '');
-      const mime = [o.mime_type, o.mime, o.type].find((x): x is string => typeof x === 'string' && x.trim() !== '');
+      const mime = [o.mime_type, o.mime].find((x): x is string => typeof x === 'string' && /^[\w.+-]+\/[\w.+-]+$/.test(x.trim()));
+      const fileKind = [o.type, o.kind].some((x) => x === 'file' || x === 'attachment');
+      if (!n && !mime && !fileKind) return null;
+      // And its payload must pass the same strict bytes check as bare text.
+      const data = [o.data_b64, o.data, o.content_b64].find((x): x is string => typeof x === 'string');
+      const b = data === undefined ? null : bareB64(data);
+      if (b === null) return null;
       return { name: n ? baseName(n) : null, mime: mime ?? null, size: decodedSize(b), b64: b };
     } catch {
       return null;

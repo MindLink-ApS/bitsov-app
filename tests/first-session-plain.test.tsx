@@ -299,6 +299,41 @@ describe('P1-17: a file, never a base64 blob', () => {
     expect($('[data-message="w1"]')!.textContent).toContain(words);
   });
 
+  // JSON is a file only when it says so (a file name, a MIME type or a file kind) and its payload is real bytes.
+  const plainJson = [
+    JSON.stringify({ data: 'Meet me at noon' }),
+    JSON.stringify({ data: 'Your parcel has arrived' }),
+    JSON.stringify({ content_b64: blob }),
+    JSON.stringify({ data_b64: blob }),
+    JSON.stringify({ data: blob, note: 'hi' }),
+    JSON.stringify({ filename: 'notes.txt', data: 'Meet me at noon' }),
+    JSON.stringify({ mime_type: 'text/plain', data_b64: 'SGVsbG8=' }),
+    JSON.stringify({ type: 'greeting', data: blob }),
+  ];
+
+  it.each(plainJson.map((t, i) => [i, t] as const))('JSON without a clear file marker stays text %i', (_i, text) => {
+    expect(attachmentOf(text)).toBeNull();
+  });
+
+  it.each([
+    ['filename + mime', { filename: 'photo.png', mime_type: 'image/png', data_b64: blob }, 'photo.png'],
+    ['filename only', { name: 'scan.pdf', content_b64: blob }, 'scan.pdf'],
+    ['mime only', { mime: 'image/jpeg', data: blob }, null],
+    ['file kind', { type: 'file', data_b64: blob }, null],
+  ] as const)('JSON that names an attachment is a file (%s)', (_l, record, name) => {
+    expect(attachmentOf(JSON.stringify(record))).toMatchObject({ name, size: 200 });
+  });
+
+  it.each(['Meet me at noon', 'Your parcel has arrived'])('a JSON chat message %s stays readable in the chat', async (words) => {
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    const text = JSON.stringify({ data: words });
+    source.messages = async (p: string) => (p.toLowerCase() === A ? [{ id: 'j1', kind: 1, sender: A, recipient: SAMPLE_OWN_ID, timestamp: 1, plaintext: text, payment_amount_msat: null }] : []);
+    await open(source);
+    await vi.waitFor(() => expect($('[data-message="j1"]')).not.toBeNull());
+    expect($('[data-message="j1"] [data-attachment-card]')).toBeNull();
+    expect($('[data-message="j1"]')!.textContent).toContain(words);
+  });
+
   it('still finds real base64 bytes, including line-wrapped', () => {
     const wrapped = blob.match(/.{1,76}/g)!.join('\n');
     expect(attachmentOf(wrapped)).toMatchObject({ size: 200 });
