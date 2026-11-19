@@ -12,6 +12,9 @@ export const FIRST_RUN_PHONE_MESSAGE = firstRunGuidance('phone');
 // Pure functions over what the host reports (`node_status`, `pairing_status`), so the
 // step logic is testable without a window. The host never sends a token or key here.
 
+/** The app's own format check refused the text: its message is for the owner as written. */
+export class PairingLinkFormatError extends Error {}
+
 /** Envelope only. The existing Rust parser remains authoritative for the ticket,
  * signed keys, expiry and endpoint, and runs before anything is persisted. */
 export function normalizePairingLink(input: string): string {
@@ -19,7 +22,7 @@ export function normalizePairingLink(input: string): string {
   const prefix = 'bitsov://pair/';
   if (!link.startsWith(prefix) || link.length > prefix.length + 16384 ||
       !/^[A-Za-z0-9_-]+$/.test(link.slice(prefix.length))) {
-    throw new Error(t('obUsePairingTicket'));
+    throw new PairingLinkFormatError(t('obUsePairingTicket'));
   }
   return link;
 }
@@ -149,6 +152,18 @@ export function secureStorageRefusal(error: unknown): string | null {
   const kept = 'detail' in error && error.detail === SECURE_STORAGE_KEPT;
   return kept ? `${t('pairing.secureStorageUnavailable')} ${t('pairing.secureStorageKept')}` : t('pairing.secureStorageUnavailable');
 }
+
+/** A pairing problem to show: `known` is the app's own owner-facing message, shown as the summary. */
+export type PairingProblem = { text: string; known: boolean };
+
+export function pairingProblem(error: unknown): PairingProblem {
+  if (error instanceof PairingLinkFormatError) return { text: error.message, known: true };
+  const refusal = secureStorageRefusal(error);
+  return refusal ? { text: refusal, known: true } : { text: connectionErrorDetail(error), known: false };
+}
+
+/** Details show the reason itself, without a leading "Error:" (or "TypeError:") from String(error). */
+export const withoutErrorPrefix = (text: string) => text.replace(/^[A-Za-z]*Error:\s*/, '');
 
 /** Host connection errors carry sanitized diagnostic copy. */
 export function connectionErrorDetail(error: unknown): string {

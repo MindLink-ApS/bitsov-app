@@ -6,8 +6,9 @@ import { LocalNodeSwitch } from './LocalNodeSwitch';
 import { LocalNodeSetup } from './LocalNodeSetup';
 import { DeviceApprovals } from './DeviceApprovals';
 import { SoftError } from '../control/SoftError';
+import { softenError } from '../control/userFacing';
 import { createEffect, createSignal, For, Match, onMount, Show, Switch } from 'solid-js';
-import { connectionErrorDetail, normalizePairingLink, onboardingDiagnostic, onboardingSteps, scopeList, SECURE_STORAGE_KEPT, type NodeStatus, type PairingView } from './pairing';
+import { normalizePairingLink, onboardingDiagnostic, pairingProblem, withoutErrorPrefix, type PairingProblem, onboardingSteps, scopeList, SECURE_STORAGE_KEPT, type NodeStatus, type PairingView } from './pairing';
 import type { DeviceView } from '../control/types';
 import type { RemoteImportView, RemotePreviewView } from '../control/source';
 import { usePairingActivity } from '../pairingActivity';
@@ -101,7 +102,7 @@ export function Onboarding(props: {
   const [remoteRevision, setRemoteRevision] = createSignal(0);
   const [remoteChoiceEdited, setRemoteChoiceEdited] = createSignal(false);
   const [importResult, setImportResult] = createSignal<RemoteImportView | null>(null);
-  const [importError, setImportError] = createSignal<string | null>(null);
+  const [importError, setImportError] = createSignal<PairingProblem | null>(null);
   const busy = () => importing() || previewing() || scanning() || forgetting() || confirming();
   usePairingActivity(() => busy() || remoteLink().length > 0 || preview() !== null || importResult() !== null);
   createEffect(() => props.onBusyChange?.(busy()));
@@ -117,7 +118,7 @@ export function Onboarding(props: {
     setRemoteLink('');
     setImportError(null);
     try { setRemoteLink(normalizePairingLink(link)); }
-    catch (error) { setImportError(connectionErrorDetail(error)); }
+    catch (error) { setImportError(pairingProblem(error)); }
   };
   onMount(() => {
     if (props.initialPairingLink !== undefined) prefill(props.initialPairingLink);
@@ -147,7 +148,7 @@ export function Onboarding(props: {
         setPreview({ link, view });
       } catch (error) {
         setRemoteLink('');
-        setImportError(connectionErrorDetail(error));
+        setImportError(pairingProblem(error));
       } finally { setPreviewing(false); }
       return;
     }
@@ -174,7 +175,7 @@ export function Onboarding(props: {
       setSavedHostedBy(result.hosted_by ?? null);
       setImportResult(result);
     } catch (error) {
-      setImportError(connectionErrorDetail(error));
+      setImportError(pairingProblem(error));
     } finally { setImporting(false); }
   };
 
@@ -188,7 +189,7 @@ export function Onboarding(props: {
     try { prefill(await props.onScanRemote()); }
     catch {
       // Native errors may contain scanner input. Never display or log them.
-      setImportError(t('obScanFailed'));
+      setImportError({ text: t('obScanFailed'), known: true });
     } finally { setScanning(false); }
   };
 
@@ -640,10 +641,28 @@ export function Onboarding(props: {
           )}
         </Show>
         <Show when={importError()}>
-          <SoftError message={onboardingDiagnostic(importError()!, t('obPairingLinkHelp'))} />
+          {(problem) => (
+            <Show when={!problem().known} fallback={
+              // The app's own format check: its message is the next step, shown as written.
+              <div class="soft-error" data-soft-error="pairing-format">
+                <p class="err-note" role="alert" data-soft-summary>{problem().text}</p>
+              </div>
+            }>
+              <PairingSoftError message={onboardingDiagnostic(problem().text, t('obPairingLinkHelp'))} />
+            </Show>
+          )}
         </Show>
       </form>
       </Show>
     </section>
   );
+}
+
+/**
+ * An unexpected pairing failure: the summary is chosen from the full text, as
+ * before, and Details shows the reason without a leading "Error:".
+ */
+function PairingSoftError(props: { message: string }) {
+  const soft = () => softenError(props.message);
+  return <SoftError message={withoutErrorPrefix(props.message)} summary={soft().detail !== null ? soft().summary : undefined} />;
 }

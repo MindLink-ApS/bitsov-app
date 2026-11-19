@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import App from '../src/App';
+import { setLanguagePref } from '../src/i18n';
 import { ControlCenter } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID } from '../src/control/sample';
 import { MONEY_NOT_READY } from '../src/control/readiness';
@@ -8,7 +9,7 @@ import type { PaymentReceipt } from '../src/control/types';
 
 let dispose: (() => void) | undefined;
 let mount: HTMLElement;
-afterEach(() => { dispose?.(); mount?.remove(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+afterEach(() => { dispose?.(); mount?.remove(); vi.unstubAllGlobals(); vi.useRealTimers(); setLanguagePref('system'); });
 const input = (selector: string, value: string) => {
   const field = mount.querySelector<HTMLInputElement>(selector)!;
   field.value = value;
@@ -184,4 +185,114 @@ it.each(['message', 'pay', 'request', 'file'] as const)('cleans up successful %s
     dispose(); dispose = undefined; mount.remove();
     vi.useRealTimers();
   }
+});
+
+async function openReceive(fundHandlers: Record<string, () => Promise<unknown>>) {
+  vi.useFakeTimers();
+  const own = '1'.repeat(64);
+  const replies: Record<string, () => unknown> = {
+    node_status: () => ({ ready: true, node_id: own, error: null }),
+    trust_acknowledge: () => true,
+    pairing_status: () => ({ state: 'paired', scopes: ['read', 'receive'], short_code: null, code_from_node: true, reason: null, remote: false, bootstrap: null }),
+    node_overview: () => ({ money_ready: true, node_id: own, status: 'ok', version: 'api v2', connected_peers: 0, e2ee_sessions: 0, pending_deliveries: 0, lightning_available: true, block_height: null, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now() }),
+    peers_list: () => [], rooms_list: () => [],
+    payments_overview: () => ({ balance_msat: 0, lightning_outbound_msat: 0, channels: [] }),
+    spend_status: () => ({ state: 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 }),
+    'plugin:event|listen': () => 1,
+    'plugin:event|unlisten': () => null,
+  };
+  vi.stubGlobal('__TAURI_INTERNALS__', {
+    transformCallback: () => 1,
+    invoke: (cmd: string) => {
+      if (fundHandlers[cmd]) return fundHandlers[cmd]();
+      const reply = replies[cmd];
+      return reply ? Promise.resolve(reply()) : Promise.reject(new Error(`unexpected ${cmd}`));
+    },
+  });
+  vi.stubGlobal('__TAURI_EVENT_PLUGIN_INTERNALS__', { unregisterListener: () => {} });
+  mount = document.createElement('div'); document.body.appendChild(mount);
+  dispose = render(() => <App />, mount);
+  const continueButton = () => mount.querySelector<HTMLButtonElement>('[data-trust-continue]');
+  await vi.waitFor(() => expect(continueButton()).not.toBeNull());
+  continueButton()!.click();
+  await vi.waitFor(() => expect(mount.querySelector('[data-first-run]')).toBeNull());
+  await vi.waitFor(() => expect(mount.querySelector('[data-tab="wallet"]')).not.toBeNull());
+  mount.querySelector<HTMLButtonElement>('[data-tab="wallet"]')!.click();
+  await vi.advanceTimersByTimeAsync(0);
+  return () => mount.querySelector('[data-panel="receive"]');
+}
+
+it.each([
+  ['en', 'Could not read the deposit status from your node. BitSov tries again by itself every few seconds.'],
+  ['da', 'Kunne ikke hente status for indbetalingen fra din node. BitSov prøver igen af sig selv med få sekunders mellemrum.'],
+] as const)('a deposit-status read failure shows a plain message, with the raw error only behind Details (%s)', async (lang, expected) => {
+  setLanguagePref(lang);
+  const raw = 'Error: GET /onboarding/state returned 500: {"error":"internal"}';
+  const receive = await openReceive({ fund_state: () => Promise.reject(raw) });
+  await vi.waitFor(() => expect(receive()?.querySelector('[data-soft-summary]')).toBeTruthy());
+  const summary = receive()!.querySelector('[data-soft-summary]')!.textContent!;
+  expect(summary).toBe(expected);
+  expect(summary).not.toContain('500');
+  expect(receive()!.querySelector('[data-soft-detail]')?.textContent).toContain(raw);
+  expect(receive()!.querySelector<HTMLDetailsElement>('[data-soft-detail]')!.open).toBe(false);
+});
+
+it.each([
+  ['en', 'Could not read the deposit status from your node. BitSov will not check again by itself. Check that your node is running, then close and reopen BitSov.'],
+  ['da', 'Kunne ikke hente status for indbetalingen fra din node. BitSov tjekker ikke igen af sig selv. Tjek at din node kører, og luk og åbn så BitSov igen.'],
+] as const)('once the deposit is funded the poll stops, so a status-read failure gives a manual step, not a retry promise (%s)', async (lang, expected) => {
+  setLanguagePref(lang);
+  const raw = 'Error: GET /onboarding/state returned 500: {"error":"internal"}';
+  const funded = { current_step: 'funded', tier: 'full', funding_address: 'bcrt1qfunded', funding_amount_sats_required: 50_000, funding_amount_sats_received: 50_000, funding_evidence: null, funded: true };
+  // Only the first read after funding fails; that read belongs to this panel's own
+  // start(). Later reads return funded, so any other mounted deposit panel settles
+  // after one tick and stops reading, and a read by this panel would clear the error.
+  let started = false;
+  let failed = false;
+  const fundState = vi.fn(() => {
+    if (!started) return Promise.resolve(null);
+    if (!failed) { failed = true; return Promise.reject(raw); }
+    return Promise.resolve(funded);
+  });
+  const fundStart = vi.fn(() => { started = true; return Promise.resolve(funded); });
+  const receive = await openReceive({ fund_state: fundState, fund_start: fundStart });
+  await vi.waitFor(() => expect(receive()?.querySelector('[data-fund-start]')).toBeTruthy());
+  receive()!.querySelector<HTMLButtonElement>('[data-fund-start]')!.click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fundStart).toHaveBeenCalledTimes(1);
+  await vi.waitFor(() => expect(receive()?.querySelector('[data-soft-summary]')?.textContent).toBe(expected));
+  expect(receive()!.querySelector('.funded')).not.toBeNull();
+  // One tick lets any other mounted panel take its funded read and stop; this
+  // panel adds no read of its own.
+  const beforeTick = fundState.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(3_000);
+  expect(fundState.mock.calls.length - beforeTick).toBeLessThanOrEqual(1);
+  // From here no panel reads the deposit status again: five more ticks, no new read.
+  const reads = fundState.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect(fundState).toHaveBeenCalledTimes(reads);
+  const summary = receive()!.querySelector('[data-soft-summary]')!.textContent!;
+  expect(summary).toBe(expected);
+  expect(summary).not.toMatch(/every few seconds|få sekunders mellemrum/);
+  expect(receive()!.querySelector('[data-soft-detail]')?.textContent).toContain(raw);
+});
+
+it.each([
+  ['en', 'Could not get a deposit address. Check that your node is running, then try again.'],
+  ['da', 'Kunne ikke hente en indbetalingsadresse. Tjek at din node kører, og prøv så igen.'],
+] as const)('a failed deposit start shows a plain message, never a deposit address (%s)', async (lang, expected) => {
+  setLanguagePref(lang);
+  const raw = 'Error: POST /onboarding/start returned 502: {"error":"wallet"}';
+  const fundStart = vi.fn(() => Promise.reject(raw));
+  const receive = await openReceive({ fund_state: () => Promise.resolve(null), fund_start: fundStart });
+  await vi.waitFor(() => expect(receive()?.querySelector('[data-fund-start]')).toBeTruthy());
+  receive()!.querySelector<HTMLButtonElement>('[data-fund-start]')!.click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fundStart).toHaveBeenCalledTimes(1);
+  await vi.waitFor(() => expect(receive()?.querySelector('[data-soft-summary]')?.textContent).toBe(expected));
+  expect(receive()!.querySelector('[data-soft-summary]')!.textContent).not.toContain('502');
+  expect(receive()!.querySelector('[data-soft-detail]')?.textContent).toContain(raw);
+  expect(receive()!.querySelector<HTMLDetailsElement>('[data-soft-detail]')!.open).toBe(false);
+  expect(receive()!.querySelector('code.address')).toBeNull();
+  expect(receive()!.querySelector('[data-fund-start]')).not.toBeNull();
 });
