@@ -1,6 +1,40 @@
 use super::*;
 use std::sync::{Arc, Mutex};
 
+#[test]
+fn wrapping_cipher_has_drop_cleanup() {
+    fn requires_cleanup<T: zeroize::ZeroizeOnDrop>() {}
+    requires_cleanup::<WrappingCipher>();
+    assert!(std::mem::needs_drop::<WrappingCipher>());
+}
+
+#[test]
+fn wrapping_authenticator_has_drop_cleanup() {
+    assert!(std::mem::needs_drop::<poly1305::Poly1305>());
+}
+
+#[test]
+fn wrapping_hash_input_has_drop_cleanup() {
+    fn needs_drop<T: zeroize::ZeroizeOnDrop>(_: &T) -> bool { std::mem::needs_drop::<T>() }
+    assert!(needs_drop(&key_hasher()));
+}
+
+#[test]
+fn a_missing_item_preserves_the_sealed_value_and_refuses_new_values() {
+    let (sealer, backend) = fixture();
+    let sealed = sealer.seal("identity", &[23; 32]).unwrap();
+    let original = backend.key.lock().unwrap().clone();
+    *backend.failure.lock().unwrap() = Some(ProviderError::Missing);
+    for error in [sealer.open("identity", &sealed).unwrap_err(), sealer.seal("code", b"next").unwrap_err()] {
+        assert!(error.contains("missing"));
+        assert!(error.contains("restore the original item"));
+        assert!(!error.contains("unavailable"));
+    }
+    assert_eq!(*backend.key.lock().unwrap(), original);
+    *backend.failure.lock().unwrap() = None;
+    assert_eq!(sealer.open("identity", &sealed).unwrap().as_slice(), &[23; 32]);
+}
+
 #[derive(Default)]
 struct MemoryKeyring {
     key: Mutex<Option<Zeroizing<Vec<u8>>>>,
@@ -231,4 +265,36 @@ fn native_provider_construction_does_not_allow_plaintext_fallback() {
     assert!(!sealer.allows_plaintext_fallback());
     assert!(LinuxSealer::new("", [7; 32]).is_err());
     assert!(LinuxSealer::new("invalid\0profile", [7; 32]).is_err());
+}
+
+#[test]
+fn envelopes_remain_compatible_with_the_previous_cipher() {
+    use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
+    let (sealer, _) = fixture();
+    let key = LessSafeKey::new(UnboundKey::new(&CHACHA20_POLY1305, &[29; 32]).unwrap());
+    let nonce = [41; 12];
+    let mut legacy = b"BSLSS002".to_vec();
+    legacy.extend_from_slice(&sealer.key_id);
+    legacy.extend_from_slice(&nonce);
+    let mut aad = b"bitsov-linux-sealed-v2\0".to_vec();
+    aad.extend_from_slice(&12u32.to_be_bytes());
+    aad.extend_from_slice(b"test.profile");
+    aad.extend_from_slice(&8u32.to_be_bytes());
+    aad.extend_from_slice(b"identity");
+    aad.extend_from_slice(&legacy);
+    let mut body = vec![23; 32];
+    key.seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::from(aad), &mut body).unwrap();
+    legacy.extend_from_slice(&body);
+    assert_eq!(sealer.open("identity", &legacy).unwrap().as_slice(), &[23; 32]);
+
+    let current = sealer.seal("identity", &[24; 32]).unwrap();
+    let nonce = current[40..52].try_into().unwrap();
+    let mut aad = b"bitsov-linux-sealed-v2\0".to_vec();
+    aad.extend_from_slice(&12u32.to_be_bytes());
+    aad.extend_from_slice(b"test.profile");
+    aad.extend_from_slice(&8u32.to_be_bytes());
+    aad.extend_from_slice(b"identity");
+    aad.extend_from_slice(&current[..52]);
+    let mut body = current[52..].to_vec();
+    assert_eq!(key.open_in_place(Nonce::assume_unique_for_key(nonce), Aad::from(aad), &mut body).unwrap(), &[24; 32]);
 }
