@@ -139,8 +139,10 @@ describe('acting from the track', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    // The hub confirm reads "I understand — …" in English and "Jeg forstår — …" in Danish.
+    const confirm = (b: Element) => /I understand|Jeg forstår/.test(b.textContent ?? '');
+    await waitFor(() => expect([...mount.querySelectorAll('button')].some(confirm)).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find(confirm)!.click();
     await waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
     if (opts.waitCost !== false) {
       await waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
