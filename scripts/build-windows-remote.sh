@@ -186,8 +186,14 @@ sha1_of() {
   if command -v sha1sum >/dev/null 2>&1; then sha1sum "$1"; else shasum -a 1 "$1"; fi | cut -d' ' -f1 | tr 'A-F' 'a-f'
 }
 # A cache only counts when the tool itself would reuse it without going online.
-# cargo-xwin fetches its manifest unless <cache>/xwin/DONE exists.
-xwin_cache_complete() { [ -s "$1/xwin/DONE" ]; }
+# cargo-xwin 0.23 reuses <cache>/xwin only when the first line of its DONE marker lists every
+# requested architecture (whitespace-separated); otherwise it loads the manifest over the network.
+# This build requests x86_64 only (XWIN_ARCH is set below), so the marker must list x86_64.
+XWIN_ARCH_PINNED=x86_64
+xwin_cache_complete() {
+  [ -r "$1/xwin/DONE" ] &&
+    awk -v want="$XWIN_ARCH_PINNED" 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == want) ok = 1 } END { exit !ok }' "$1/xwin/DONE"
+}
 # Tauri 2.12.0 (the CLI pinned in package-lock.json) reuses <cache>/tauri/NSIS only when its required
 # files exist and the plugin matches this SHA-1 (tauri-bundler, bundle/windows/nsis/mod.rs); otherwise it downloads.
 TAURI_CLI_VERSION=2.12.0
@@ -206,6 +212,14 @@ nsis_cache_complete() {
 
 LOCKED_TAURI_CLI="$(node -e 'const l=require(process.argv[1]);const p=l.packages&&l.packages["node_modules/@tauri-apps/cli"];process.stdout.write(p?p.version:"")' "$ROOT/package-lock.json" 2>/dev/null || true)"
 [ "$LOCKED_TAURI_CLI" = "$TAURI_CLI_VERSION" ] || die "package-lock.json pins Tauri CLI ${LOCKED_TAURI_CLI:-?}; the NSIS cache check is written for $TAURI_CLI_VERSION, update it first"
+# The executable that will run must be that version too (a stale node_modules can hold another one).
+installed_tauri_ok() {
+  [ -x "$ROOT/node_modules/.bin/tauri" ] &&
+    [ "$("$ROOT/node_modules/.bin/tauri" --version 2>/dev/null | head -n 1)" = "tauri-cli $TAURI_CLI_VERSION" ]
+}
+if [ -x "$ROOT/node_modules/.bin/tauri" ] && ! installed_tauri_ok; then
+  die "node_modules has a Tauri CLI other than $TAURI_CLI_VERSION; reinstall from package-lock.json (npm ci) first"
+fi
 
 DOWNLOADS=()
 MISSING=()
@@ -225,7 +239,7 @@ if [ "$RUNNER" = xwin ]; then
   # The SDK and CRT versions are chosen explicitly, never cargo-xwin's latest-available default.
   [ -n "${XWIN_SDK_VERSION:-}" ] || MISSING+=("XWIN_SDK_VERSION (the Windows SDK version to build against)")
   [ -n "${XWIN_CRT_VERSION:-}" ] || MISSING+=("XWIN_CRT_VERSION (the MSVC CRT version to build against)")
-  xwin_cache_complete "$XWIN_CACHE" || DOWNLOADS+=("cargo-xwin would download the MSVC CRT and Windows SDK into $XWIN_CACHE (no complete cache: xwin/DONE missing)")
+  xwin_cache_complete "$XWIN_CACHE" || DOWNLOADS+=("cargo-xwin would download the MSVC CRT and Windows SDK into $XWIN_CACHE (no complete $XWIN_ARCH_PINNED cache: xwin/DONE does not list it)")
 else
   command -v cargo >/dev/null 2>&1 || MISSING+=("cargo with the MSVC toolchain")
 fi
@@ -257,11 +271,12 @@ if [ "$ALLOW_DOWNLOADS" != 1 ]; then
   export npm_config_offline=true
 fi
 if [ "$RUNNER" = xwin ]; then
-  export XWIN_CACHE_DIR="$XWIN_CACHE" XWIN_SDK_VERSION XWIN_CRT_VERSION
+  export XWIN_CACHE_DIR="$XWIN_CACHE" XWIN_SDK_VERSION XWIN_CRT_VERSION XWIN_ARCH="$XWIN_ARCH_PINNED"
 fi
 if [ ! -x "$ROOT/node_modules/.bin/tauri" ]; then
   npm ci --no-audit --no-fund
 fi
+installed_tauri_ok || die "the installed Tauri CLI is not $TAURI_CLI_VERSION; refusing to build"
 
 # Tauri embeds a Windows .ico; the repo keeps only PNG/ICNS (src-tauri/icons/README.md).
 if [ ! -f src-tauri/icons/icon.ico ]; then
@@ -303,7 +318,7 @@ cp "${installers[0]}" "$OUT/$NAME"
   echo "target=$TARGET"
   echo "bundle=nsis"
   echo "webview.install=skip (the installer never downloads WebView2)"
-  [ "$RUNNER" != xwin ] || echo "xwin.sdk=$XWIN_SDK_VERSION xwin.crt=$XWIN_CRT_VERSION"
+  [ "$RUNNER" != xwin ] || echo "xwin.sdk=$XWIN_SDK_VERSION xwin.crt=$XWIN_CRT_VERSION xwin.arch=$XWIN_ARCH_PINNED"
   echo "runner=$RUNNER"
   echo "profile=signet-only (selected by bundle identifier); remote node only on Windows"
   echo "bundled.node=absent"

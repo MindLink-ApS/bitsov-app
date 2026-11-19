@@ -58,8 +58,16 @@ overlay() { # <name> <node expression applied to config c>
 
 # Filled caches and node_modules: preflight passes without downloads.
 XWIN="$T/cache/xwin"; HOMEDIR="$T/home-full"
-mkdir -p "$XWIN/xwin" "$T/root/node_modules/.bin"; echo done > "$XWIN/xwin/DONE"; fill_nsis "$HOMEDIR"
-printf '#!/bin/sh\n' > "$T/root/node_modules/.bin/tauri"; chmod +x "$T/root/node_modules/.bin/tauri"
+mkdir -p "$XWIN/xwin" "$T/root/node_modules/.bin"; printf 'x86_64\nsdk/include\n' > "$XWIN/xwin/DONE"; fill_nsis "$HOMEDIR"
+tauri_stub() { # <version>: a stand-in Tauri CLI that only answers --version
+  cat > "$T/root/node_modules/.bin/tauri" <<STUB
+#!/bin/sh
+[ "\$1" = --version ] && echo "tauri-cli $1"
+exit 0
+STUB
+  chmod +x "$T/root/node_modules/.bin/tauri"
+}
+tauri_stub 2.12.0
 
 run 0 "check only: nothing built" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 run 0 "overlay ok: tech.mindlink.bitsov.beta" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
@@ -287,9 +295,18 @@ run 5 "MSVC CRT and Windows SDK" --out "$T/out" --runner xwin --source-sha "$SHA
 run 0 "allowed download: cargo-xwin would download" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only --allow-downloads
 # A cache folder with content but no completion marker is not a cache cargo-xwin reuses.
 CASE="xwin cache without DONE"; XWIN="$T/cache/xwin-partial"; mkdir -p "$XWIN/crt" "$XWIN/xwin/sdk"
-run 5 "xwin/DONE missing" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+run 5 "xwin/DONE does not list it" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 CASE="empty xwin DONE"; : > "$XWIN/xwin/DONE"
-run 5 "xwin/DONE missing" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+run 5 "xwin/DONE does not list it" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+# cargo-xwin reads the requested architectures from the marker's first line: anything without x86_64 is refetched.
+for marker in 'done' aarch64 'aarch64 arm' 'x86 64' 'sdk/include'; do
+  CASE="xwin DONE first line: $marker"; printf '%s\nsdk/include\n' "$marker" > "$XWIN/xwin/DONE"
+  run 5 "xwin/DONE does not list it" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+done
+CASE="xwin DONE lists x86_64 on line 2 only"; printf 'aarch64\nx86_64\n' > "$XWIN/xwin/DONE"
+run 5 "xwin/DONE does not list it" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+CASE="xwin DONE with both arches"; printf 'aarch64 x86_64\n' > "$XWIN/xwin/DONE"
+run 0 "check only: nothing built" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 CASE=""; XWIN="$T/cache/xwin"
 HOMEDIR="$T/home-empty"; mkdir -p "$HOMEDIR"
 run 5 "NSIS tools" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
@@ -315,6 +332,13 @@ CASE="other Tauri CLI in the lockfile"; cp "$T/root/package-lock.json" "$T/lock.
 node -e 'const fs=require("fs");const l=JSON.parse(fs.readFileSync(process.argv[1]));l.packages["node_modules/@tauri-apps/cli"].version="2.13.0";fs.writeFileSync(process.argv[1],JSON.stringify(l));' "$T/root/package-lock.json"
 run 2 "NSIS cache check is written for 2.12.0" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 mv "$T/lock.keep" "$T/root/package-lock.json"; CASE=""
+# The lockfile is right but node_modules holds another Tauri CLI: refused before any build.
+CASE="installed Tauri CLI 2.9.0"; tauri_stub 2.9.0
+run 2 "a Tauri CLI other than 2.12.0" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+run 2 "a Tauri CLI other than 2.12.0" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only --allow-downloads
+CASE="installed Tauri CLI with no version"; printf '#!/bin/sh\nexit 0\n' > "$T/root/node_modules/.bin/tauri"; chmod +x "$T/root/node_modules/.bin/tauri"
+run 2 "a Tauri CLI other than 2.12.0" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+CASE=""; tauri_stub 2.12.0
 rm "$T/root/node_modules/.bin/tauri"
 run 5 "npm ci would download" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 run 0 "allowed download: npm ci" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only --allow-downloads
