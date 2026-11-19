@@ -13,6 +13,7 @@ cp scripts/build-windows-remote.sh "$T/root/scripts/"
 cp src-tauri/src/profile.rs "$T/root/src-tauri/src/"
 cp packaging/windows/tauri.windows-beta.conf.json "$T/root/packaging/windows/"
 cp package-lock.json "$T/root/"
+cp scripts/xwin-marker-lists.mjs "$T/root/scripts/"
 SCRIPT="$T/root/scripts/build-windows-remote.sh"
 GOOD="$T/root/packaging/windows/tauri.windows-beta.conf.json"
 SHA=0123456789abcdef0123456789abcdef01234567
@@ -309,6 +310,15 @@ CASE="xwin DONE with invalid UTF-8 on a later line"; printf 'x86_64\nsdk/\377\n'
 run 5 "xwin/DONE does not list it" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 CASE="xwin DONE with invalid UTF-8 on the first line"; printf 'x86_64 \377\n' > "$XWIN/xwin/DONE"
 run 5 "xwin/DONE does not list it" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+# A NUL (valid UTF-8) stays inside a token for cargo-xwin; it must not make "x86_64" match.
+for marker in 'x86_64\000junk' 'x86_64\000aarch64' 'x86_64\000' 'aarch64\000x86_64x'; do
+  CASE="xwin DONE first line with NUL: $marker"; printf "$marker\\n" > "$XWIN/xwin/DONE"
+  run 5 "xwin/DONE does not list it" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+done
+CASE="xwin DONE with a CRLF first line"; printf 'x86_64\r\nsdk/include\n' > "$XWIN/xwin/DONE"
+run 0 "check only: nothing built" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
+CASE="xwin DONE with tabs and a no-break space"; printf 'aarch64\t\302\240x86_64\n' > "$XWIN/xwin/DONE"
+run 0 "check only: nothing built" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 CASE="xwin DONE with valid non-ASCII UTF-8 on a later line"; printf 'x86_64\nsdk/\303\251\n' > "$XWIN/xwin/DONE"
 run 0 "check only: nothing built" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 CASE="xwin DONE with both arches"; printf 'aarch64 x86_64\n' > "$XWIN/xwin/DONE"

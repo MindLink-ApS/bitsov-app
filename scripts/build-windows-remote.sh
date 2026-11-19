@@ -191,11 +191,11 @@ sha1_of() {
 # This build requests x86_64 only (XWIN_ARCH is set below), so the marker must list x86_64.
 XWIN_ARCH_PINNED=x86_64
 xwin_cache_complete() {
-  # cargo-xwin reads the whole marker as UTF-8 first; any invalid byte (on any line) leaves its
-  # architecture list empty and sends it to the network, so the marker must decode in full.
-  [ -r "$1/xwin/DONE" ] &&
-    node -e 'try { new (require("util").TextDecoder)("utf-8", { fatal: true }).decode(require("fs").readFileSync(process.argv[1])); } catch { process.exit(1); }' "$1/xwin/DONE" &&
-    awk -v want="$XWIN_ARCH_PINNED" 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == want) ok = 1 } END { exit !ok }' "$1/xwin/DONE"
+  # Read the marker exactly as cargo-xwin 0.23 does (fs::read_to_string, lines().next(),
+  # split_whitespace()): strict UTF-8 for the whole file, the first line without a trailing CR,
+  # tokens split on Unicode whitespace. Only an exact x86_64 token means it reuses the cache.
+  # (A line-based tool would mis-read NUL or other bytes that Rust keeps inside a token.)
+  [ -r "$1/xwin/DONE" ] && node "$ROOT/scripts/xwin-marker-lists.mjs" "$1/xwin/DONE" "$XWIN_ARCH_PINNED"
 }
 # Tauri 2.12.0 (the CLI pinned in package-lock.json) reuses <cache>/tauri/NSIS only when its required
 # files exist and the plugin matches this SHA-1 (tauri-bundler, bundle/windows/nsis/mod.rs); otherwise it downloads.
