@@ -5195,9 +5195,10 @@ function followAnchor(pop: HTMLElement, anchor: HTMLElement, align: 'start' | 'e
 /**
  * While the call card shows: how far up from the bottom of the window the open chat's composer
  * starts, as `--call-composer-clear` on the page (0 with no composer), so the card's CSS can sit
- * above it. Read again when the window, the composer or the open chat changes.
+ * above it. Read again when the window or its visible part (resize, keyboard pan), the composer
+ * or the open chat changes.
  */
-function keepCallCardOverComposer(): () => void {
+export function keepCallCardOverComposer(): () => void {
   const root = document.documentElement;
   let frame = 0;
   let watched: Element | null = null;
@@ -5222,12 +5223,15 @@ function keepCallCardOverComposer(): () => void {
   const vv = window.visualViewport;
   window.addEventListener('resize', schedule);
   vv?.addEventListener('resize', schedule);
+  // A keyboard focus pan moves the composer without resizing anything: read again on viewport scroll too.
+  vv?.addEventListener('scroll', schedule);
   return () => {
     if (frame) cancelAnimationFrame(frame);
     mo.disconnect();
     ro?.disconnect();
     window.removeEventListener('resize', schedule);
     vv?.removeEventListener('resize', schedule);
+    vv?.removeEventListener('scroll', schedule);
     root.style.removeProperty('--call-composer-clear');
   };
 }
