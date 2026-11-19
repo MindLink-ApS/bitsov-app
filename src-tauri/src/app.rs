@@ -2876,6 +2876,10 @@ async fn call_api_on(
         if let Some(ref json) = body {
             request = request.json(json);
         }
+        // Taking the credential can block. Check the binding and its deadline again
+        // after that, with nothing awaited between this check and the send, so a read
+        // that waited never reaches a node it no longer belongs to, or arrives late.
+        if !still() { return Err(changed()); }
         let response = request
             .send()
             .await
@@ -20920,6 +20924,120 @@ mod control_act_tests {
         assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
         assert_eq!(hangups(&node), 1);
     }
+
+// A read can block while it takes the app's credential. The binding (and its
+// deadline) are checked again after that, right before the request leaves, so a
+// read that waited never reaches a node it no longer belongs to, or arrives late.
+// Contention on the network epoch while the credential is held is the signal
+// that the read is blocked there.
+fn wait_for_token_contention(state: &NodeState) {
+    let limit = Instant::now() + Duration::from_secs(2);
+    let mut busy_since = None;
+    loop {
+        match state.network_auth_epoch.try_lock() {
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let since = busy_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= Duration::from_millis(25) { return; }
+            }
+            Ok(epoch) => {
+                drop(epoch);
+                busy_since = None;
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("epoch poisoned"),
+        }
+        assert!(Instant::now() < limit, "read never blocked acquiring its credential");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn bound_status_read_does_not_dispatch_after_switch_during_token_acquisition() {
+    let rt = race_runtime();
+    let read_count = Arc::new(AtomicUsize::new(0));
+    let seen = read_count.clone();
+    let mut node = fake(AuthMode::Local, Arc::new(move |_m, p, _b| {
+        if p.starts_with("/calls?") {
+            seen.fetch_add(1, Ordering::SeqCst);
+            (200, "[]".into())
+        } else { (404, "{}".into()) }
+    }));
+    node.state.signet_only = true;
+    *node.state.network_verified.lock().unwrap() = Some(*node.state.network_auth_epoch.lock().unwrap());
+    let bound = NodeBound::now(&node.state, OWN, None).unwrap();
+    let result = std::thread::scope(|s| {
+        let credential = node.state.token.lock().unwrap();
+        let read = s.spawn(|| rt.block_on(read_call_status_from(&node.state, Some(&bound), A, CALL_ID)));
+        wait_for_token_contention(&node.state);
+        *node.state.node_id.lock().unwrap() = Some(C.into());
+        drop(credential);
+        read.join().unwrap()
+    });
+    assert!(result.is_err(), "a changed binding preserves refusal");
+    assert_eq!(read_count.load(Ordering::SeqCst), 0, "a status read was dispatched after the binding changed");
+}
+
+#[test]
+fn end_does_not_dispatch_after_switch_during_token_acquisition() {
+    let rt = race_runtime();
+    let (routes, _) = node_with_callee_offline(usize::MAX);
+    let switched = Arc::new(AtomicBool::new(false));
+    let wrong_reads = Arc::new(AtomicUsize::new(0));
+    let (on, wrong) = (switched.clone(), wrong_reads.clone());
+    let mut node = rt.block_on(minute_ready(Arc::new(move |m, p, b| {
+        if p.starts_with("/calls?") && on.load(Ordering::SeqCst) {
+            wrong.fetch_add(1, Ordering::SeqCst);
+            return (200, "[]".into());
+        }
+        routes(m, p, b)
+    })));
+    node.state.signet_only = true;
+    *node.state.network_verified.lock().unwrap() = Some(*node.state.network_auth_epoch.lock().unwrap());
+    let offer = offer_op(&node);
+    let (read, go_on) = pause_points::arm(&node.state.api_base, "end_wait_read");
+    let end = std::thread::scope(|s| {
+        let end = s.spawn(|| rt.block_on(do_op_end_call_when_node_ends(&node.state, CALL_ID, None)));
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), read.notified()).await.expect("End's first read completed");
+        });
+        let credential = node.state.token.lock().unwrap();
+        go_on.notify_one();
+        wait_for_token_contention(&node.state);
+        *node.state.node_id.lock().unwrap() = Some(C.into());
+        switched.store(true, Ordering::SeqCst);
+        drop(credential);
+        end.join().unwrap()
+    });
+    assert_eq!(end.unwrap_err().code, "not_dispatched");
+    assert!(admission_is_open(&node, &offer));
+    assert_eq!(wrong_reads.load(Ordering::SeqCst), 0, "End read after the binding changed while waiting for a credential");
+}
+
+#[test]
+fn bound_status_read_does_not_dispatch_after_deadline_during_token_acquisition() {
+    let rt = race_runtime();
+    let read_count = Arc::new(AtomicUsize::new(0));
+    let seen = read_count.clone();
+    let mut node = fake(AuthMode::Local, Arc::new(move |_m, p, _b| {
+        if p.starts_with("/calls?") {
+            seen.fetch_add(1, Ordering::SeqCst);
+            (200, "[]".into())
+        } else { (404, "{}".into()) }
+    }));
+    node.state.signet_only = true;
+    *node.state.network_verified.lock().unwrap() = Some(*node.state.network_auth_epoch.lock().unwrap());
+    let bound = NodeBound::now(&node.state, OWN, Some(tokio::time::Instant::now() + Duration::from_millis(300))).unwrap();
+    let result = std::thread::scope(|s| {
+        let credential = node.state.token.lock().unwrap();
+        let read = s.spawn(|| rt.block_on(read_call_status_from(&node.state, Some(&bound), A, CALL_ID)));
+        wait_for_token_contention(&node.state);
+        std::thread::sleep(Duration::from_millis(350));
+        drop(credential);
+        read.join().unwrap()
+    });
+    assert!(result.is_err(), "a passed deadline preserves refusal");
+    assert_eq!(read_count.load(Ordering::SeqCst), 0, "a status read was dispatched after its deadline");
+}
+
 
     /// No status read starts at or after the wait's deadline: one begun there could
     /// only time out. End's first read is answered "still live" and has completed:
