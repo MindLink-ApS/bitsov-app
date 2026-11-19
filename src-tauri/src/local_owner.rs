@@ -1053,6 +1053,7 @@ pub fn allow_legacy_device_change(state: &NodeState) -> Result<(), ActionError> 
     Ok(())
 }
 
-#[cfg(test)]
+// Uses the Unix-only beta network fixtures.
+#[cfg(all(test, unix))]
 #[path = "local_owner/network_tests.rs"]
 mod network_tests;

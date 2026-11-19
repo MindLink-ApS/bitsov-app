@@ -907,12 +907,16 @@ fn call_index_path(dir: &Path, node_id: &str, peer: &str, call: &str) -> PathBuf
 }
 
 /// What is at a call's index slot before `record` may be written there.
+// Windows initializes history without the index graph (see initialize_history).
+#[cfg_attr(windows, allow(dead_code))]
 enum IndexSlot { Absent, Keep, Replace }
 
 /// A call index slot that cannot be checked. Already logged by
 /// `damaged_record`; the caller turns it into `damaged_record_error`.
+#[cfg_attr(windows, allow(dead_code))]
 struct SlotDamaged;
 
+#[cfg_attr(windows, allow(dead_code))]
 fn slot_damaged() -> SlotDamaged {
     let _ = damaged_record();
     SlotDamaged
@@ -923,6 +927,7 @@ fn slot_damaged() -> SlotDamaged {
 /// symlink, an unreadable file or a mapping whose record is missing or
 /// damaged is evidence of an admission that cannot be checked any more:
 /// refuse, and leave it in place for the owner's repair.
+#[cfg_attr(windows, allow(dead_code))]
 fn index_slot(dir: &Path, path: &Path, record: &OperationRecord) -> Result<IndexSlot, SlotDamaged> {
     let old: CallIndex = match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| slot_damaged())?,
@@ -953,6 +958,7 @@ fn history_lock(dir: &Path) -> Result<File, ActionError> {
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(windows, allow(dead_code))]
 fn history_lock(_dir: &Path) -> Result<File, ActionError> {
     Err(unknown("private spend journal storage is not supported on this platform"))
 }
@@ -985,6 +991,24 @@ fn write_call_index(_dir: &Path, _record: &OperationRecord) -> Result<(), Action
 /// One-time upgrade of pre-index H1 history, before authenticating/enabling money
 /// actions. Never invoked with NodeState::money or spend.lock held. Writers and
 /// migration serialize only a single index update at a time.
+/// Windows: operation records and indexes cannot be written there yet, so a
+/// valid history folder holds at most the migration marker. Anything else is
+/// unexpected and refused as is (no reset, no write). The folder and marker
+/// are private objects, and the marker is made durable with a real flush.
+#[cfg(windows)]
+pub fn initialize_history(dir: &Path) -> Result<(), ActionError> {
+    crate::private_fs::ensure_dir(dir).map_err(unknown)?;
+    let marker = dir.join("call-index-v2");
+    if !absent(&marker) {
+        return crate::private_fs::verify_file(&marker).map_err(unknown);
+    }
+    if std::fs::read_dir(dir).map_err(unknown)?.next().is_some() {
+        return Err(damaged_record());
+    }
+    crate::private_fs::ensure_marker(&marker).map_err(unknown)
+}
+
+#[cfg(not(windows))]
 pub fn initialize_history(dir: &Path) -> Result<(), ActionError> {
     let marker = dir.join("call-index-v2");
     if marker.exists() { return Ok(()); }
@@ -1063,6 +1087,54 @@ pub fn terminal(pending: &Pending, rows: &[serde_json::Value]) -> Option<&'stati
             _ => None,
         }
     })
+}
+
+#[cfg(all(test, windows))]
+mod windows_history_tests {
+    use super::*;
+    use crate::private_fs::fixtures::*;
+
+    #[test]
+    fn a_fresh_history_gets_a_private_marker_and_restarts_cleanly() {
+        if elevated() {
+            return;
+        }
+        let dir = temp_root("history").join("app-spend");
+        initialize_history(&dir).unwrap();
+        crate::private_fs::verify_file(&dir.join("call-index-v2")).unwrap();
+        initialize_history(&dir).unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn unexpected_or_tampered_history_is_refused_without_writes() {
+        if elevated() {
+            return;
+        }
+        let root = temp_root("history-tampered");
+        // An existing marker with a widened access list.
+        let dir = root.join("app-spend");
+        initialize_history(&dir).unwrap();
+        grant_everyone_read(&dir.join("call-index-v2"));
+        assert!(initialize_history(&dir).is_err());
+        // Any history object without the marker: refused, no marker written.
+        let other = root.join("app-spend-2");
+        crate::private_fs::ensure_dir(&other).unwrap();
+        std::fs::create_dir(other.join("ops")).unwrap();
+        assert!(initialize_history(&other).is_err());
+        assert!(absent(&other.join("call-index-v2")));
+        // A plainly created marker inherits its access list: refused.
+        let plain = root.join("app-spend-3");
+        crate::private_fs::ensure_dir(&plain).unwrap();
+        std::fs::write(plain.join("call-index-v2"), b"").unwrap();
+        assert!(initialize_history(&plain).is_err());
+        // Reparse point as the history folder.
+        let link = root.join("link");
+        junction(&link, &dir);
+        assert!(initialize_history(&link).is_err());
+        // Wrong owner.
+        assert!(initialize_history(&foreign_owned_dir()).is_err());
+    }
 }
 
 #[cfg(test)]

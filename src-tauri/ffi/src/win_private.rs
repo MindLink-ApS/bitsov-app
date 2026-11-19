@@ -39,11 +39,12 @@ use windows_sys::Win32::Security::{
     SE_DACL_PROTECTED, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, CreateFileW, FileRenameInfoEx, FlushFileBuffers, GetFileInformationByHandle,
-    SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, DELETE,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_RENAME_INFO, FILE_SHARE_DELETE,
-    FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS, OPEN_EXISTING,
+    CreateDirectoryW, CreateFileW, FileDispositionInfo, FileRenameInfoEx, FlushFileBuffers,
+    GetFileInformationByHandle, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, CREATE_NEW,
+    DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    OPEN_ALWAYS, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use zeroize::Zeroizing;
@@ -482,6 +483,26 @@ impl VerifiedFile {
         &self.file
     }
 
+    /// Delete this object by handle (for scratch files this layer created).
+    /// Only the verified object is removed, whatever its name points to now.
+    pub fn discard(self) -> io::Result<()> {
+        self.require_writable()?;
+        let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+        // SAFETY: valid handle opened with DELETE access; correctly sized struct.
+        let ok = unsafe {
+            SetFileInformationByHandle(
+                self.file.as_raw_handle(),
+                FileDispositionInfo,
+                (&info as *const FILE_DISPOSITION_INFO).cast(),
+                std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(last_error());
+        }
+        Ok(())
+    }
+
     fn require_file(&self) -> io::Result<()> {
         if self.kind == ObjectKind::File {
             Ok(())
@@ -608,12 +629,39 @@ pub fn open_lock(path: &Path) -> io::Result<VerifiedFile> {
 }
 
 /// Read `file` back through its own handle and compare it with `expected`,
-/// flush it, rename it over `dest` by handle, then flush `dest`'s folder.
+/// flush it, rename it to `dest` by handle, then flush `dest`'s folder.
 /// The renamed object is exactly the one that was written and checked.
-pub fn publish(mut file: VerifiedFile, dest: &Path, expected: &[u8]) -> io::Result<()> {
+/// With `replace == false` an existing `dest` fails with `AlreadyExists`.
+/// A failure before the rename deletes the scratch object by handle; after
+/// the rename the object is never deleted.
+pub fn publish(file: VerifiedFile, dest: &Path, expected: &[u8], replace: bool) -> io::Result<()> {
+    let parent = match prepare_publish(&file, dest, expected, replace) {
+        Ok(parent) => parent,
+        Err(error) => {
+            if file.access == Access::ReadWrite && file.kind == ObjectKind::File {
+                let _ = file.discard();
+            }
+            return Err(error);
+        }
+    };
+    drop(file);
+    sync_dir(parent)
+}
+
+fn prepare_publish<'a>(
+    file: &VerifiedFile,
+    dest: &'a Path,
+    expected: &[u8],
+    replace: bool,
+) -> io::Result<&'a Path> {
     current_user()?;
     file.require_writable()?;
-    let readback = file.read_bounded(expected.len() as u64)?;
+    let mut reader = &file.file;
+    reader.seek(SeekFrom::Start(0))?;
+    let mut readback = Zeroizing::new(Vec::new());
+    (&mut reader)
+        .take(expected.len() as u64 + 1)
+        .read_to_end(&mut readback)?;
     if readback.as_slice() != expected {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -632,12 +680,11 @@ pub fn publish(mut file: VerifiedFile, dest: &Path, expected: &[u8]) -> io::Resu
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "publish target has no name"))?;
     // A full, verbatim path, as the rename-by-handle call requires.
     let target = std::fs::canonicalize(parent)?.join(name);
-    rename_by_handle(&file.file, &target)?;
-    drop(file);
-    sync_dir(parent)
+    rename_by_handle(&file.file, &target, replace)?;
+    Ok(parent)
 }
 
-fn rename_by_handle(file: &File, target: &Path) -> io::Result<()> {
+fn rename_by_handle(file: &File, target: &Path, replace: bool) -> io::Result<()> {
     let name: Vec<u16> = target.as_os_str().encode_wide().collect();
     if name.contains(&0) || name.len() > 32_000 {
         return Err(io::Error::new(
@@ -653,8 +700,12 @@ fn rename_by_handle(file: &File, target: &Path) -> io::Result<()> {
     // SAFETY: `buffer` is zeroed, 8-byte aligned and large enough for the
     // header plus the name and its terminating NUL.
     unsafe {
-        (*info).Anonymous.Flags =
-            FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+        (*info).Anonymous.Flags = FILE_RENAME_FLAG_POSIX_SEMANTICS
+            | if replace {
+                FILE_RENAME_FLAG_REPLACE_IF_EXISTS
+            } else {
+                0
+            };
         (*info).RootDirectory = std::ptr::null_mut();
         (*info).FileNameLength = (name.len() * std::mem::size_of::<u16>()) as u32;
         let dest = std::ptr::addr_of_mut!((*info).FileName).cast::<u16>();

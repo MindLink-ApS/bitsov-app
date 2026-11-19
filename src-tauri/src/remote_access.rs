@@ -1009,6 +1009,66 @@ fn open_sealed_code(
     Ok((stored, false))
 }
 
+/// The descriptor file's bytes. Unix keeps the plain path read; Windows reads
+/// through one verified handle, bounded by the link limit.
+#[cfg(not(windows))]
+fn read_descriptor_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path)
+}
+
+#[cfg(windows)]
+fn read_descriptor_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    crate::private_fs::read(path, MAX_LINK_BYTES as u64).map(|bytes| bytes.to_vec())
+}
+
+/// Windows: an existing descriptor must verify before it is replaced; the new
+/// one is written to a new private scratch file, read back through the same
+/// handle (including the sealed code), and published by handle.
+#[cfg(windows)]
+fn persist_with(
+    path: &Path,
+    descriptor: &RemoteDescriptor,
+    sealer: Option<&dyn Sealer>,
+) -> Result<(), RemoteError> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| RemoteError::Local("remote config has no parent directory".into()))?;
+    pairing::key::restrict_dir(dir).map_err(|e| RemoteError::Local(e.to_string()))?;
+    if !pairing::key::nothing_at(path) {
+        crate::private_fs::verify_file(path).map_err(|e| {
+            RemoteError::Local(format!("cannot use the saved remote access descriptor: {e}"))
+        })?;
+    }
+    let bytes = stored_bytes(descriptor, sealer)?;
+    if bytes.len() > MAX_LINK_BYTES {
+        return Err(RemoteError::Local(
+            "the remote access descriptor is oversized".into(),
+        ));
+    }
+    crate::private_fs::write_checked(
+        &dir.join(format!("{REMOTE_CONFIG_FILE}.tmp")),
+        path,
+        &bytes,
+        true,
+        |error| RemoteError::Local(format!("cannot persist remote descriptor: {error}")),
+        |readback| {
+            if sealer.is_some() && descriptor.code.is_some() {
+                let stored = serde_json::from_slice(readback).map_err(|_| {
+                    RemoteError::Local("cannot verify protected pairing code".into())
+                })?;
+                let (opened, _) = open_sealed_code(stored, sealer)?;
+                if opened.code != descriptor.code {
+                    return Err(RemoteError::Local(
+                        "protected pairing code does not reopen to the same code".into(),
+                    ));
+                }
+            }
+            Ok(())
+        },
+    )
+}
+
+#[cfg(not(windows))]
 fn persist_with(
     path: &Path,
     descriptor: &RemoteDescriptor,
@@ -1108,6 +1168,10 @@ pub fn forget_persisted(app_data_dir: &Path) -> Result<(), RemoteError> {
         let dir = app_data_dir.join(REMOTE_CONFIG_DIR);
         pairing::key::restrict_dir(&dir).map_err(|e| RemoteError::Local(e.to_string()))?;
         let reset = dir.join(LOCAL_PAIRING_RESET);
+        #[cfg(windows)]
+        crate::private_fs::ensure_marker(&reset)
+            .map_err(|e| RemoteError::Local(format!("cannot schedule local pairing reset: {e}")))?;
+        #[cfg(not(windows))]
         if reset.exists() {
             pairing::key::check_owner_only(&reset, "local pairing reset")
                 .map_err(|e| RemoteError::Local(e.to_string()))?;
@@ -1158,9 +1222,10 @@ fn load_with(
     if pairing::key::nothing_at(path) {
         return Ok(None);
     }
+    #[cfg(not(windows))]
     pairing::key::check_owner_only(path, "remote access descriptor")
         .map_err(|e| RemoteError::Local(e.to_string()))?;
-    let bytes = std::fs::read(path)
+    let bytes = read_descriptor_file(path)
         .map_err(|e| RemoteError::Local(format!("cannot read remote descriptor: {e}")))?;
     if bytes.len() > MAX_LINK_BYTES {
         return Err(RemoteError::Local(
@@ -1972,7 +2037,7 @@ fn finalize_authenticated_pairing(
         let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
         // Only update the descriptor this handshake started with. Import or
         // forget may have changed the next startup while the network awaited.
-        let stored = std::fs::read(config_path)
+        let stored = read_descriptor_file(config_path)
             .ok()
             .and_then(|bytes| saved_descriptor(&bytes));
         if !stored.is_some_and(|saved| saved.node_id == current.node_id
@@ -2113,7 +2178,7 @@ pub fn commit_bootstrap(app_dir: &Path, previous: &RemoteDescriptor,
 ) -> Result<RemoteDescriptor, RemoteError> {
     verify_transport_proof(node, live_key, live_signature)?;
     let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
-    let stored = std::fs::read(config_path(app_dir)).ok().and_then(|bytes| saved_descriptor(&bytes));
+    let stored = read_descriptor_file(&config_path(app_dir)).ok().and_then(|bytes| saved_descriptor(&bytes));
     if !stored.is_some_and(|saved| saved.node_id == previous.node_id
         && saved.box_transport_pubkey == previous.box_transport_pubkey
         && saved.endpoint == previous.endpoint && saved.endpoints == previous.endpoints
@@ -2140,7 +2205,7 @@ pub fn commit_bootstrap(app_dir: &Path, previous: &RemoteDescriptor,
 pub fn clear_enrollment_commitment(app_dir: &Path, descriptor: &mut RemoteDescriptor) -> Result<(), RemoteError> {
     let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
     let path = config_path(app_dir);
-    let mut saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes))
+    let mut saved = read_descriptor_file(&path).ok().and_then(|bytes| saved_descriptor(&bytes))
         .ok_or_else(|| RemoteError::Local("pairing ticket was forgotten or replaced".into()))?;
     if saved.node_id != descriptor.node_id || saved.endpoint != descriptor.endpoint
         || saved.transport_pubkey != descriptor.transport_pubkey || saved.code.is_some()
@@ -2362,7 +2427,7 @@ pub async fn authenticate_pinned_transport_and_save_record(
     let one_use = |d: &RemoteDescriptor| d.code.as_deref().is_some_and(|c| c.starts_with("second_") || c.starts_with("owner_"));
     // A previous interrupted send may already have retired the ticket on disk.
     let descriptor = if one_use(&descriptor) {
-        let saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
+        let saved = read_descriptor_file(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
         match saved {
             Some(mut saved) if saved.code.is_none() && saved.node_id == descriptor.node_id
                 && saved.endpoint == descriptor.endpoint && saved.transport_pubkey == descriptor.transport_pubkey
@@ -2377,7 +2442,7 @@ pub async fn authenticate_pinned_transport_and_save_record(
         let mut current = current.lock().unwrap();
         if !one_use(&current) { return Ok(()); }
         let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
-        let saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
+        let saved = read_descriptor_file(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
         if !saved.is_some_and(|d| d.node_id == current.node_id && d.endpoint == current.endpoint
             && d.transport_pubkey == current.transport_pubkey && d.code == current.code) {
             return Err(RemoteError::Local("pairing ticket was forgotten or replaced".into()));
@@ -2410,7 +2475,7 @@ pub async fn authenticate_pinned_transport_and_save_record(
             return Err(RemoteError::Invalid("unexpected provisional pairing".into()));
         }
         let _config = REMOTE_CONFIG_LOCK.lock().unwrap();
-        let saved = std::fs::read(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
+        let saved = read_descriptor_file(&path).ok().and_then(|bytes| saved_descriptor(&bytes));
         if !saved.is_some_and(|d| d.node_id == descriptor.node_id && d.endpoint == descriptor.endpoint
             && d.code.is_none() && d.enrollment_commitment == descriptor.enrollment_commitment) {
             return Err(RemoteError::Local("pairing ticket was forgotten or replaced".into()));
@@ -2780,6 +2845,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use std::net::IpAddr;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -3203,6 +3269,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn persistence_is_owner_only_and_code_is_stripped() {
         let dir = tempfile::tempdir().unwrap();
         let node = SigningKey::from_bytes(&[11u8; 32]);
@@ -3237,6 +3304,51 @@ mod tests {
         let link = signed_link("127.0.0.1:4242".into(), &node, transport, &code);
         let path = config_path(dir.path());
         (dir, path, parse_pairing_link(&link).unwrap(), code)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_descriptor_round_trips_and_tampering_is_refused() {
+        use crate::at_rest::test_sealer::MemorySealer;
+        use crate::private_fs::fixtures::*;
+        if elevated() {
+            return;
+        }
+        let (dir, path, descriptor, code) = sealed_fixture(41);
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        let loaded = load_with(&path, Some(&MemorySealer)).unwrap().unwrap();
+        assert_eq!(loaded.code.as_deref(), Some(code.as_str()));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(&code) && text.contains("sealed_code"), "{text}");
+        // The reset marker is a private object too.
+        forget_persisted(dir.path()).unwrap();
+        let reset = path.parent().unwrap().join(LOCAL_PAIRING_RESET);
+        crate::private_fs::verify_file(&reset).unwrap();
+        persist_with(&path, &descriptor, Some(&MemorySealer)).unwrap();
+        // Extra access entry: refused for reading and replacing, bytes kept.
+        let bytes = std::fs::read(&path).unwrap();
+        grant_everyone_read(&path);
+        assert!(load_with(&path, Some(&MemorySealer)).is_err());
+        assert!(persist_with(&path, &descriptor, Some(&MemorySealer)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // A leftover scratch file is refused, not reused or deleted.
+        let (_dir2, path2, descriptor2, _) = sealed_fixture(43);
+        persist_with(&path2, &descriptor2, Some(&MemorySealer)).unwrap();
+        let scratch = path2.with_file_name(format!("{REMOTE_CONFIG_FILE}.tmp"));
+        std::fs::write(&scratch, b"leftover").unwrap();
+        assert!(persist_with(&path2, &descriptor2, Some(&MemorySealer)).is_err());
+        assert_eq!(std::fs::read(&scratch).unwrap(), b"leftover");
+        // Reparse point at the descriptor folder.
+        let (dir3, path3, descriptor3, _) = sealed_fixture(45);
+        let target = dir3.path().join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        junction(path3.parent().unwrap(), &target);
+        assert!(persist_with(&path3, &descriptor3, Some(&MemorySealer)).is_err());
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+        // Wrong owner.
+        let foreign = foreign_owned_dir().join(REMOTE_CONFIG_FILE);
+        assert!(persist_with(&foreign, &descriptor3, Some(&MemorySealer)).is_err());
     }
 
     #[test]
@@ -3292,6 +3404,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_plaintext_pending_code_is_sealed_once_on_load() {
         use crate::at_rest::test_sealer::MemorySealer;
         let (_dir, path, descriptor, code) = sealed_fixture(41);
@@ -3400,6 +3513,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn returning_auth_validates_existing_record_without_rewriting_it() {
         let app_dir = tempfile::tempdir().unwrap();
         let pairing_store = tempfile::tempdir().unwrap();
@@ -3438,6 +3552,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn derived_key_is_stable_and_not_the_ed25519_seed() {
         let a_dir = tempfile::tempdir().unwrap();
         let b_dir = tempfile::tempdir().unwrap();

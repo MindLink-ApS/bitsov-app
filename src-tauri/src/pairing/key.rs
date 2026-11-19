@@ -131,6 +131,13 @@ impl ClientKey {
         restrict_dir(dir)?;
         let sealed = dir.join(SEALED_KEY_FILE);
         let plain = dir.join(KEY_FILE);
+        // Windows never wrote a plaintext identity, so one here was planted.
+        #[cfg(windows)]
+        if !nothing_at(&plain) {
+            return Err(PairError::Local(
+                "an unexpected client key file is present; nothing was changed".into(),
+            ));
+        }
         let seed = if sealed_file_exists(dir)? {
             sealed_seed(&sealed, sealer)?
         } else {
@@ -232,6 +239,7 @@ fn sealed_file_exists(dir: &Path) -> Result<bool, PairError> {
     }
 }
 
+#[cfg(not(windows))]
 fn write_verified_seed(path: &Path, seed: &[u8; 32], sealer: &dyn Sealer) -> Result<(), PairError> {
     let ciphertext = sealer
         .seal(at_rest::CLIENT_SEED_PURPOSE, seed)
@@ -257,6 +265,31 @@ fn write_verified_seed(path: &Path, seed: &[u8; 32], sealer: &dyn Sealer) -> Res
         .map_err(io_error)
 }
 
+/// Seal, write a new scratch file, reopen it through the same handle, and
+/// publish it by handle without replacing an existing sealed key.
+#[cfg(windows)]
+fn write_verified_seed(path: &Path, seed: &[u8; 32], sealer: &dyn Sealer) -> Result<(), PairError> {
+    let ciphertext = sealer
+        .seal(at_rest::CLIENT_SEED_PURPOSE, seed)
+        .map_err(|e| PairError::Local(format!("cannot protect the client key: {e}")))?;
+    let scratch = path.with_extension("sealed.tmp");
+    crate::private_fs::write_checked(
+        &scratch,
+        path,
+        &ciphertext,
+        false,
+        |e| PairError::Local(format!("cannot write the protected client key: {e}")),
+        |readback| {
+            if *open_seed(readback, sealer)? != *seed {
+                return Err(PairError::Local(
+                    "the protected client key does not reopen to the same key".into(),
+                ));
+            }
+            Ok(())
+        },
+    )
+}
+
 fn plain_seed(path: &Path) -> Result<Zeroizing<[u8; 32]>, PairError> {
     check_owner_only(path, "client key file")?;
     let text = Zeroizing::new(
@@ -270,6 +303,18 @@ fn plain_seed(path: &Path) -> Result<Zeroizing<[u8; 32]>, PairError> {
 }
 
 fn sealed_seed(path: &Path, sealer: &dyn Sealer) -> Result<Zeroizing<[u8; 32]>, PairError> {
+    open_seed(&read_sealed(path)?, sealer)
+}
+
+/// The sealed key file, read through a verified handle on Windows.
+#[cfg(windows)]
+fn read_sealed(path: &Path) -> Result<Zeroizing<Vec<u8>>, PairError> {
+    crate::private_fs::read(path, MAX_SEALED_KEY_BYTES)
+        .map_err(|e| PairError::Local(format!("cannot read the protected client key: {e}")))
+}
+
+#[cfg(not(windows))]
+fn read_sealed(path: &Path) -> Result<Vec<u8>, PairError> {
     check_owner_only(path, "protected client key file")?;
     let length = std::fs::metadata(path)
         .map_err(|e| PairError::Local(format!("cannot read the protected client key: {e}")))?
@@ -279,10 +324,13 @@ fn sealed_seed(path: &Path, sealer: &dyn Sealer) -> Result<Zeroizing<[u8; 32]>, 
             "the protected client key is oversized".into(),
         ));
     }
-    let ciphertext = std::fs::read(path)
-        .map_err(|e| PairError::Local(format!("cannot read the protected client key: {e}")))?;
+    std::fs::read(path)
+        .map_err(|e| PairError::Local(format!("cannot read the protected client key: {e}")))
+}
+
+fn open_seed(ciphertext: &[u8], sealer: &dyn Sealer) -> Result<Zeroizing<[u8; 32]>, PairError> {
     let seed = sealer
-        .open(at_rest::CLIENT_SEED_PURPOSE, &ciphertext)
+        .open(at_rest::CLIENT_SEED_PURPOSE, ciphertext)
         .map_err(|e| {
             PairError::Local(format!(
                 "this device cannot open its protected client key: {e}"
@@ -296,7 +344,7 @@ fn sealed_seed(path: &Path, sealer: &dyn Sealer) -> Result<Zeroizing<[u8; 32]>, 
 }
 
 /// Atomically replace `path` with an owner-only file holding `bytes`.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("sealed.tmp");
     let _ = std::fs::remove_file(&tmp);
@@ -378,14 +426,23 @@ pub(crate) fn check_owner_only(path: &Path, what: &str) -> Result<(), PairError>
     Ok(())
 }
 
+/// Create `dir` as a private folder (protected descriptor, current user only),
+/// or verify an existing one. A folder in any other state is refused as is.
+#[cfg(windows)]
+pub(crate) fn restrict_dir(dir: &Path) -> Result<(), PairError> {
+    crate::private_fs::ensure_dir(dir)
+        .map_err(|e| PairError::Local(format!("cannot create {}: {e}", dir.display())))
+}
+
 // Refuse before creating directories or files: skipping Unix modes would expose keys.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn restrict_dir(_dir: &Path) -> Result<(), PairError> {
     Err(PairError::Local(
         "private pairing storage is not supported on this platform".into(),
     ))
 }
 
+// Windows stores never take a path-only file; they use `crate::private_fs`.
 #[cfg(not(unix))]
 pub(crate) fn create_new_protected(_path: &Path) -> std::io::Result<std::fs::File> {
     Err(std::io::Error::new(
@@ -628,6 +685,68 @@ mod windows_tests {
         let error = ClientKey::load_or_create(&dir).unwrap_err();
         assert!(error.to_string().contains(NO_PROTECTED_STORAGE), "{error}");
         assert!(nothing_at(&dir), "no folder or file is created");
+    }
+
+    use crate::at_rest::test_sealer::MemorySealer;
+    use crate::private_fs::fixtures::*;
+
+    fn names(dir: &Path) -> Vec<std::ffi::OsString> {
+        std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name()).collect()
+    }
+
+    #[test]
+    fn the_sealed_identity_round_trips_on_private_storage() {
+        if elevated() {
+            return;
+        }
+        let store = temp_root("client-key").join("app-client");
+        let key = ClientKey::load_or_create_sealed(&store, &MemorySealer).unwrap();
+        let again = ClientKey::load_or_create_sealed(&store, &MemorySealer).unwrap();
+        assert_eq!(again.public_hex(), key.public_hex());
+        assert_eq!(names(&store), [SEALED_KEY_FILE]);
+    }
+
+    #[test]
+    fn a_tampered_sealed_identity_is_refused_and_left_unchanged() {
+        if elevated() {
+            return;
+        }
+        let root = temp_root("client-key-tampered");
+        let store = root.join("app-client");
+        ClientKey::load_or_create_sealed(&store, &MemorySealer).unwrap();
+        let sealed = store.join(SEALED_KEY_FILE);
+        let bytes = std::fs::read(&sealed).unwrap();
+        // Extra access entry.
+        grant_everyone_read(&sealed);
+        assert!(ClientKey::load_or_create_sealed(&store, &MemorySealer).is_err());
+        assert_eq!(std::fs::read(&sealed).unwrap(), bytes);
+        // Reparse point: the store folder is a junction to a real store.
+        let link = root.join("link");
+        junction(&link, &store);
+        assert!(ClientKey::load_or_create_sealed(&link, &MemorySealer).is_err());
+        assert_eq!(std::fs::read(&sealed).unwrap(), bytes);
+        // Wrong owner: a system folder is never accepted as the store.
+        let foreign = foreign_owned_dir();
+        assert!(ClientKey::load_or_create_sealed(&foreign, &MemorySealer).is_err());
+        assert!(nothing_at(&foreign.join(SEALED_KEY_FILE)));
+    }
+
+    #[test]
+    fn a_planted_plaintext_key_or_leftover_scratch_is_refused() {
+        if elevated() {
+            return;
+        }
+        let store = temp_root("client-key-planted").join("app-client");
+        restrict_dir(&store).unwrap();
+        std::fs::write(store.join(KEY_FILE), "11".repeat(32)).unwrap();
+        assert!(ClientKey::load_or_create_sealed(&store, &MemorySealer).is_err());
+        assert!(nothing_at(&store.join(SEALED_KEY_FILE)));
+        std::fs::remove_file(store.join(KEY_FILE)).unwrap();
+        let scratch = store.join(SEALED_KEY_FILE).with_extension("sealed.tmp");
+        std::fs::write(&scratch, b"leftover").unwrap();
+        assert!(ClientKey::load_or_create_sealed(&store, &MemorySealer).is_err());
+        assert_eq!(std::fs::read(&scratch).unwrap(), b"leftover");
+        assert!(nothing_at(&store.join(SEALED_KEY_FILE)));
     }
 }
 

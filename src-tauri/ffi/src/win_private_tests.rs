@@ -112,7 +112,7 @@ fn private_objects_round_trip_through_one_handle() {
     for body in [&b"first"[..], b"second, longer body"] {
         let mut file = create_new_private(&dir.join("record.json.tmp")).unwrap();
         file.replace_contents(body).unwrap();
-        publish(file, &dest, body).unwrap();
+        publish(file, &dest, body, true).unwrap();
         let mut read = open_verified(&dest, ObjectKind::File, Access::Read).unwrap();
         assert_eq!(read.read_bounded(64).unwrap().as_slice(), body);
         assert!(!dir.join("record.json.tmp").exists());
@@ -143,9 +143,10 @@ fn a_readback_mismatch_does_not_publish() {
     let dir = scratch.private();
     let mut file = create_new_private(&dir.join("x.tmp")).unwrap();
     file.replace_contents(b"written").unwrap();
-    assert!(publish(file, &dir.join("x"), b"expected").is_err());
+    assert!(publish(file, &dir.join("x"), b"expected", true).is_err());
     assert!(!dir.join("x").exists());
-    assert_eq!(std::fs::read(dir.join("x.tmp")).unwrap(), b"written");
+    // The scratch object this layer created is deleted by handle.
+    assert!(!dir.join("x.tmp").exists());
 }
 
 #[test]
@@ -392,4 +393,40 @@ fn sync_dir_refuses_files_and_reports_errors() {
     drop(file);
     assert!(sync_dir(&dir.join("f")).is_err());
     assert!(sync_dir(&dir.join("missing")).is_err());
+}
+
+#[test]
+fn publish_without_replace_keeps_an_existing_target() {
+    unelevated!();
+    let scratch = Scratch::new("noclobber");
+    let dir = scratch.private();
+    let dest = dir.join("sealed");
+    let mut first = create_new_private(&dir.join("a.tmp")).unwrap();
+    first.replace_contents(b"first").unwrap();
+    publish(first, &dest, b"first", false).unwrap();
+    let mut second = create_new_private(&dir.join("b.tmp")).unwrap();
+    second.replace_contents(b"second").unwrap();
+    let error = publish(second, &dest, b"second", false).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error}");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"first");
+    assert!(!dir.join("b.tmp").exists());
+}
+
+#[test]
+fn discard_deletes_only_the_verified_object() {
+    unelevated!();
+    let scratch = Scratch::new("discard");
+    let dir = scratch.private();
+    let mut file = create_new_private(&dir.join("scratch.tmp")).unwrap();
+    file.replace_contents(b"x").unwrap();
+    file.discard().unwrap();
+    assert!(!dir.join("scratch.tmp").exists());
+    let read_only = {
+        let mut f = create_new_private(&dir.join("keep")).unwrap();
+        f.replace_contents(b"keep").unwrap();
+        drop(f);
+        open_verified(&dir.join("keep"), ObjectKind::File, Access::Read).unwrap()
+    };
+    assert!(read_only.discard().is_err());
+    assert_eq!(std::fs::read(dir.join("keep")).unwrap(), b"keep");
 }

@@ -1,5 +1,6 @@
 //! App-owned disclosure acknowledgement, kept beside the pairing record.
 use serde::{Deserialize, Serialize};
+#[cfg(not(windows))]
 use std::io::{ErrorKind, Write};
 use std::path::Path;
 
@@ -12,6 +13,19 @@ struct Acknowledgement {
     remote: bool,
 }
 
+/// Windows: read through one verified handle; any other state is refused.
+#[cfg(windows)]
+fn load(store: &Path) -> Result<Option<Acknowledgement>, String> {
+    match crate::private_fs::read_optional(&store.join(FILE), 4096) {
+        Ok(Some(bytes)) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| "Could not read trust acknowledgement.".into()),
+        Ok(None) => Ok(None),
+        Err(_) => Err("Could not read trust acknowledgement.".into()),
+    }
+}
+
+#[cfg(not(windows))]
 fn load(store: &Path) -> Result<Option<Acknowledgement>, String> {
     match std::fs::read(store.join(FILE)) {
         Ok(bytes) => serde_json::from_slice(&bytes)
@@ -44,6 +58,18 @@ pub fn acknowledge(
         node_id: node_id.to_ascii_lowercase(),
         remote,
     };
+    #[cfg(windows)]
+    let save = || -> Result<(), Box<dyn std::error::Error>> {
+        crate::pairing::key::restrict_dir(store)?;
+        crate::private_fs::write_new(
+            &store.join(format!("{FILE}.tmp")),
+            &store.join(FILE),
+            &serde_json::to_vec(&ack)?,
+            true,
+        )?;
+        Ok(())
+    };
+    #[cfg(not(windows))]
     let save = || -> Result<(), Box<dyn std::error::Error>> {
         crate::pairing::key::restrict_dir(store)?;
         let mut tmp = tempfile::NamedTempFile::new_in(store)?;
@@ -54,6 +80,40 @@ pub fn acknowledge(
     };
     save().map_err(|_| "Could not save trust acknowledgement.".to_string())?;
     Ok(true)
+}
+
+#[cfg(all(test, windows))]
+mod windows_store_tests {
+    use super::*;
+    use crate::private_fs::fixtures::*;
+
+    #[test]
+    fn the_acknowledgement_round_trips_and_tampering_is_refused() {
+        if elevated() {
+            return;
+        }
+        let root = temp_root("trust");
+        let store = root.join("app-client");
+        assert!(!acknowledged(&store, "abcd", true).unwrap());
+        acknowledge(&store, "ABCD", true, false).unwrap();
+        acknowledge(&store, "ABCD", true, false).unwrap();
+        assert!(acknowledged(&store, "abcd", true).unwrap());
+        let path = store.join(FILE);
+        let bytes = std::fs::read(&path).unwrap();
+        grant_everyone_read(&path);
+        assert!(acknowledged(&store, "abcd", true).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // A plainly created file inherits its access list: refused.
+        let plain = root.join("plain");
+        crate::pairing::key::restrict_dir(&plain).unwrap();
+        std::fs::write(plain.join(FILE), b"{\"node_id\":\"abcd\",\"remote\":true}").unwrap();
+        assert!(acknowledged(&plain, "abcd", true).is_err());
+        // Reparse point as the store folder.
+        let link = root.join("link");
+        junction(&link, &store);
+        assert!(acknowledge(&link, "abcd", true, false).is_err());
+        assert!(acknowledge(&foreign_owned_dir(), "abcd", true, false).is_err());
+    }
 }
 
 #[cfg(test)]
