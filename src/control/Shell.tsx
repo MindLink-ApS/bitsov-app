@@ -3306,6 +3306,10 @@ function Conversation(props: {
           />
         )}
       </Show>
+      {/* A node still getting ready can refuse a history read without error text, even with cached messages. */}
+      <Show when={props.read === 'failed' && !props.error}>
+        <p class="hint thread-read-status" role="status" data-thread-not-read>{tr('caChatNotReadYet')}</p>
+      </Show>
       <StreamFrame>
       <div class="stream" ref={stream} data-stream>
         <div class="chat-column">
@@ -3332,11 +3336,9 @@ function Conversation(props: {
           each={[...keyedItems().keys()]}
           fallback={
             // Unknown stays unknown: while the history is being read nothing is said, and a failed
-            // read shows only its error (below). Only a read that came back empty says "no messages".
+            // read shows a separate notice. Only a read that came back empty says "no messages".
             <Show when={props.read === 'ok'} fallback={<Switch>
               <Match when={props.read === 'pending'}><div class="empty-track" data-thread-loading><DelayedSpinner /></div></Match>
-              {/* Refused while the node is getting ready: no error text comes with it, and a blank chat says nothing. */}
-              <Match when={props.read === 'failed' && !props.error}><p class="hint" role="status" data-thread-not-read>{tr('caChatNotReadYet')}</p></Match>
             </Switch>}>
               <div class="empty-track" data-thread-empty={props.track.kind === 'room' ? 'room' : knownContact() ? 'known' : 'unknown'}>
                 <h2>{tr('chatEmpty')}</h2>
