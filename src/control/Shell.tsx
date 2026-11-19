@@ -4610,12 +4610,11 @@ function DeliveryMark(props: { d: Delivery }) {
  */
 function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => string }) {
   const c = props.card;
-  // A price someone must pay rounds up; money that reached you rounds down.
-  const amt = (msat: number, round: Rounding) => (
-    <>
-      <span class="sats">{sats(msat, round, true)}</span> {satUnit(msat, round)}
-    </>
-  );
+  // A price someone must pay rounds up; money that reached you rounds down,
+  // with its exact amount one tap away.
+  const amt = (msat: number, round: Rounding) => round === 'down'
+    ? <span class="sats"><AmountWithExact msat={msat} round="down" nowrap /></span>
+    : <><span class="sats">{sats(msat, round, true)}</span> {satUnit(msat, round)}</>;
   return (
     <div class="door-card" data-door={`${c.side}-${c.verdict}`} data-code={c.side === 'out' ? c.code : undefined} classList={{ refused: c.verdict === 'refused' }} role="note">
       <p class="door-rule">

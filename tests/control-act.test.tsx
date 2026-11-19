@@ -948,6 +948,24 @@ describe('acting from the track', () => {
     expect($('[data-artifact="invoice"] svg.qr')).not.toBeNull();
   });
 
+  it('a chat invoice for 1.5 sats reads about 1 sat received, exact one tap away, never about 2', async () => {
+    const host = stubHost();
+    await openShell();
+    $<HTMLButtonElement>('[data-composer-mode="request"]')!.click();
+    type('[data-request-amount]', '1.5');
+    await waitFor(() => expect(text('[data-send]')).toBe('Create invoice'));
+    submit();
+    await waitFor(() => expect($('[data-artifact="invoice"]')).not.toBeNull());
+    expect((host.used('invoice_create')[0].args as { amount_msat: number }).amount_msat).toBe(1500);
+    const card = $('[data-artifact="invoice"]')!;
+    expect(card.querySelector('.sats.big summary')?.textContent).toMatch(/about 1 sat/);
+    expect(card.querySelector('[data-exact-amount-value]')?.textContent).toMatch(/1\.5/);
+    const ready = $('[data-request-created]')!;
+    expect(ready).not.toBeNull();
+    expect(ready.querySelector('.basis summary')?.textContent).toMatch(/about 1 sat/);
+    expect(ready.textContent).not.toMatch(/about 2/);
+  });
+
   it.each(['invoice', 'keysend'])('explains a refused app %s and keeps its draft', async (method) => {
     const refuse = () => Promise.reject({ code: 'ceiling_exhausted', message: 'Your app principal limit is used up.' });
     const host = stubHost({ payment_pay: refuse, payment_keysend: refuse });
