@@ -2298,7 +2298,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(ring.disabled).toBe(true);
     expect($('[data-call-minute-price]')).toBeNull();
     expect($('[data-call-reservation-max]')).toBeNull();
-    expect($('[data-call-confirm-box]')?.textContent).toContain('Reading their call price');
+    expect($('[data-call-confirm-box]')?.textContent).toContain('Fetching price…');
     ring.click();
     expect(host.used('call_signal')).toHaveLength(0);
     await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
