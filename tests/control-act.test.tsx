@@ -139,8 +139,10 @@ describe('acting from the track', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    // The hub confirm reads "I understand — …" in English and "Jeg forstår — …" in Danish.
+    const confirm = (b: Element) => /I understand|Jeg forstår/.test(b.textContent ?? '');
+    await waitFor(() => expect([...mount.querySelectorAll('button')].some(confirm)).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find(confirm)!.click();
     await waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
     if (opts.waitCost !== false) {
       await waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('2000'));
@@ -724,6 +726,37 @@ describe('acting from the track', () => {
     submit();
     await waitFor(() => expect(text('[data-artifact="failed"]')).toContain('no route'));
     expect(text('[data-artifact="failed"]')).toContain('Message not sent');
+  });
+
+  it.each([
+    ['en', 'Your node could not finish this. Check that your node is running, then look at the result before you try again.'],
+    ['da', 'Din node kunne ikke gøre det færdigt. Tjek at din node kører, og se resultatet, før du prøver igen.'],
+  ] as const)('a failed send shows plain %s copy, with the raw host text only under Details', async (locale, summary) => {
+    stubHost({ message_send: () => { throw new Error('unexpected message_send'); } }).spend.v = openView();
+    setLanguagePref(locale);
+    await openShell();
+    type('[data-composer] textarea', 'hi');
+    submit();
+    await waitFor(() => expect($('[data-artifact="failed"] [data-failed-reason]')).not.toBeNull());
+    const reason = $('[data-artifact="failed"] [data-failed-reason]')!;
+    expect(reason.querySelector('[data-soft-summary]')!.textContent).toBe(summary);
+    // Nothing outside the closed Details names the raw host text.
+    const details = reason.querySelector<HTMLDetailsElement>('details[data-soft-detail]')!;
+    expect(details.open).toBe(false);
+    expect(details.textContent).toContain('unexpected message_send');
+    const visible = $('[data-artifact="failed"]')!.cloneNode(true) as HTMLElement;
+    visible.querySelector('details')!.remove();
+    expect(visible.textContent).not.toContain('message_send');
+  });
+
+  it('a failed send whose reason names money keeps the whole reason visible', async () => {
+    stubHost({ message_send: () => { throw { code: 'failed_paid', message: 'Paid 2 sats; their node refused it.' }; } }).spend.v = openView();
+    await openShell();
+    type('[data-composer] textarea', 'hi');
+    submit();
+    await waitFor(() => expect($('[data-artifact="failed"] [data-failed-reason]')).not.toBeNull());
+    expect(text('[data-artifact="failed"] [data-failed-reason] [data-soft-summary]')).toBe('Paid 2 sats; their node refused it.');
+    expect($('[data-artifact="failed"] [data-soft-detail]')).toBeNull();
   });
 
   it('keeps first-contact admission inside the displayed ceiling', async () => {

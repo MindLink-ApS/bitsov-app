@@ -47,6 +47,7 @@ import { amount as fmtAmount, paidAmount, budgetNote, allIn, clock, day, feeCeil
 import { ambiguousThousands, amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
+import { softenError } from './userFacing';
 import { DiscoverPanel, FrontDoorEditor } from './Discover';
 import { OperatorDetails } from './OperatorDetails';
 import { PorchPanel } from './Porch';
@@ -4781,7 +4782,7 @@ function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: 
           return (
             <div class="artifact out failed" data-artifact="failed" data-code={f().error.code}>
               <span class="kind">{f().action}</span>
-              <span>{f().error.message}</span>
+              <FailedReason message={f().error.message} />
               <Show when={f().text !== undefined}>
                 {/* The whole message stays readable here; no resend while the payment result is open. */}
                 <blockquote class="failed-text" data-failed-text>{f().text}</blockquote>
@@ -4815,6 +4816,31 @@ function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: 
         {(a) => <UndeliveredView moneyBlocked={props.moneyBlocked} a={a() as Extract<Artifact, { type: 'undelivered' }>} onRetry={props.onRetry} onStop={props.onStop} />}
       </Match>
     </Switch>
+  );
+}
+
+/**
+ * Why an action failed, in plain words. Raw host text sits behind Details;
+ * money text (paid, refused, an amount in sats) always shows whole.
+ */
+function FailedReason(props: { message: string }) {
+  const soft = () => {
+    const m = props.message;
+    if (/\d\s*m?sats?\b/i.test(m)) return { summary: m, detail: null };
+    return softenError(m, tr('caFailedReasonCheckNode'));
+  };
+  return (
+    <div class="failed-reason" data-failed-reason>
+      <span data-soft-summary>{soft().summary}</span>
+      <Show when={soft().detail}>
+        {(d) => (
+          <details class="quiet-detail" data-soft-detail>
+            <summary>{tr('uiDetails')}</summary>
+            <p class="hint">{d()}</p>
+          </details>
+        )}
+      </Show>
+    </div>
   );
 }
 
