@@ -104,16 +104,21 @@ test.describe('desktop', () => {
     const box = page.locator('[data-call-confirm-box]');
     const ring = page.locator('[data-call-confirm=audio]');
     const cancel = page.locator('[data-call-confirm-cancel]');
+    // The cost line sits under a Details summary inside the confirm: Tab cycles Ring, Details, Cancel.
+    const details = box.locator('summary');
     await expect(box).toBeVisible();
+    await expect(details).toHaveCount(1);
     await expect(ring).toBeFocused();
-    await page.keyboard.press('Tab');
-    await expect(box).toBeVisible();
-    await expect(cancel).toBeFocused();
-    await page.keyboard.press('Shift+Tab');
-    await expect(box).toBeVisible();
-    await expect(ring).toBeFocused();
-    await page.keyboard.press('Shift+Tab');
-    await expect(cancel).toBeFocused();
+    for (const next of [details, cancel, ring]) {
+      await page.keyboard.press('Tab');
+      await expect(box).toBeVisible();
+      await expect(next).toBeFocused();
+    }
+    for (const previous of [cancel, details, ring, cancel]) {
+      await page.keyboard.press('Shift+Tab');
+      await expect(box).toBeVisible();
+      await expect(previous).toBeFocused();
+    }
     await page.keyboard.press('Escape');
     await expect(box).toHaveCount(0);
     await expect(page.locator('[data-call=audio]').first()).toBeFocused();
