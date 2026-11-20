@@ -127,6 +127,10 @@ describe('call audio: Opus failing mid-call', () => {
     speak();
     expect(sent[sent.length - 1][0]).toBe(PAYLOAD_PCMU);
     expect(errors).toEqual([]);
+    // The call report names both codecs each way, in the order used, and the context rate.
+    expect(audio.diagnostics?.()).toEqual({ sent: ['opus', 'mulaw'], received: ['opus', 'mulaw'], contextRate: 48_000 });
+    await audio.close();
+    expect(audio.diagnostics?.()).toEqual({ sent: ['opus', 'mulaw'], received: ['opus', 'mulaw'], contextRate: 48_000 });
   });
 
   it('a decoder that throws on decode falls back the same way', async () => {
