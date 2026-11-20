@@ -8823,6 +8823,15 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
     act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
+/// Spending is open right now: the owner's window, or a budget approval, and
+/// payments are not paused. Fails closed on a book that cannot be read.
+fn spending_open(state: &NodeState) -> bool {
+    let now = now_ms();
+    let window = state.spend.lock().unwrap().check(now).is_ok();
+    let budget = state.autopay.lock().unwrap().ceiling(now).is_some();
+    (window || budget) && budget_paused(state).is_ok_and(|paused| !paused)
+}
+
 /// An incoming call whose answer went out: kept for `held_call_plan`.
 fn keep_answered_call(state: &NodeState, node_id: &str, peer: &str, plaintext: &str, stops: u64) {
     let call_id = serde_json::from_str::<serde_json::Value>(plaintext).ok()
@@ -11015,7 +11024,11 @@ const FREE_REPLY_UNKNOWN: &str = "It is not known yet whether your node sent thi
 /// in the budget book and journals no payment. A refusal is final: the
 /// renderer never retries it as a paid signal.
 async fn do_call_free_reply(state: &NodeState, peer: &str, kind: u16, plaintext: &str) -> Result<act::CallReceipt, ActionError> {
+    // An answer keeps its call (`held_call_plan`) only if spending is open as it
+    // goes out and no stop comes before it is through: the reply itself is free,
+    // so it is no evidence the owner let this app spend.
     let stops = spend_stops(state);
+    let could_spend = kind == act::KIND_CALL_ANSWER && spending_open(state);
     let target = control::node_id(peer).map_err(ActionError::invalid)?;
     let signal: serde_json::Value = serde_json::from_str(plaintext).map_err(|_| ActionError::invalid("invalid call signal"))?;
     let bound = signal["call_id"].as_str().is_some_and(act::is_call_id);
@@ -11030,6 +11043,7 @@ async fn do_call_free_reply(state: &NodeState, peer: &str, kind: u16, plaintext:
     let mut body = act::call_body(&target, kind, plaintext)?;
     let unavailable = || ActionError::new("call_reply_not_free", FREE_REPLY_UNAVAILABLE);
     let status: serde_json::Value = get_json(state, "/status").await.map_err(|_| unavailable())?;
+    let status_node_id = status["node_id"].as_str().map(str::to_string);
     if !status_lists(&status, FREE_REPLY_CAPABILITY) {
         return Err(unavailable());
     }
@@ -11056,8 +11070,10 @@ async fn do_call_free_reply(state: &NodeState, peer: &str, kind: u16, plaintext:
     if reply.amount_msat != 0 || total != 0 || reply.fee_paid_msat.unwrap_or(0) != 0 {
         return Err(unknown());
     }
-    if kind == act::KIND_CALL_ANSWER {
-        let node_id = state.node_id.lock().unwrap().clone().unwrap_or_default();
+    if could_spend && spending_open(state) && spend_stops(state) == stops {
+        // The node's own identity, from the status this reply was checked against when none is cached yet.
+        let cached = state.node_id.lock().unwrap().clone();
+        let node_id = cached.or(status_node_id).unwrap_or_default();
         keep_answered_call(state, &node_id, &target, plaintext, stops);
     }
     Ok(act::CallReceipt {
@@ -23632,6 +23648,102 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         assert_eq!(node.state.held_calls.lock().unwrap().entries[0].signals, 0, "nothing counted");
         assert!(held_call_plan(&node.state, A, act::KIND_CALL_HANGUP, HELD_HANGUP, 6_000).await.unwrap().is_some());
         assert_eq!(compose_kinds(&node), [401]);
+    }
+
+    /// A node with free replies and continuity, whose caller takes free
+    /// replies: a zero-cap compose is a free reply, any other a paid signal.
+    /// `compose_wait`: how long a free reply takes at the node.
+    fn free_answer_node(compose_wait: Duration) -> Fake {
+        let (routes, _) = ledger_call_routes();
+        let routes = with_status_caps(routes, &["call_continuity_v1", "call_reply_free_v1"]);
+        fake(AuthMode::Local, Arc::new(move |m, p, b| {
+            if p == "/peers" { return (200, serde_json::json!([free_peer()]).to_string()); }
+            if p == "/messages/compose" && serde_json::from_str::<serde_json::Value>(b).unwrap()["max_total_msat"] == 0 {
+                std::thread::sleep(compose_wait);
+                return (200, free_receipt().1.to_string());
+            }
+            let (status, body) = routes(m, p, b);
+            if p == "/status" && status == 200 {
+                let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+                value["node_id"] = OWN.into();
+                return (status, value.to_string());
+            }
+            (status, body)
+        }))
+    }
+
+    /// Only the owner's ten-minute window is open: no budget approval.
+    fn open_window_only(state: &NodeState) {
+        let now = now_ms();
+        state.spend.lock().unwrap().arm_until(now, now + 600_000, act::SpendBasis::AppLock);
+        with_book(state, true, |b| b.set_limit(A, false, 50_000)).unwrap();
+    }
+
+    /// After the free answer, the approval lapses by time; then a hangup.
+    async fn hangup_after_lapse(node: &Fake) -> Result<act::CallReceipt, ActionError> {
+        lapse_approvals(&node.state);
+        do_renderer_call_signal(&node.state, A, act::KIND_CALL_HANGUP, HELD_HANGUP, 6_000, None, None).await
+    }
+
+    /// A free answer is no proof that this app could spend: sent while spending
+    /// is locked (never opened, or locked by the owner before it), it goes out
+    /// free but keeps no call, so no later hangup or reconnect is paid on its
+    /// authority. With spending open, the same answer keeps the call.
+    #[tokio::test]
+    async fn a_free_answer_while_spending_is_locked_keeps_no_call() {
+        for case in ["never_opened", "locked_before", "open"] {
+            let node = free_answer_node(Duration::ZERO);
+            match case {
+                "never_opened" => { with_book(&node.state, true, |b| b.set_limit(A, false, 50_000)).unwrap(); }
+                "locked_before" => { open_window_only(&node.state); do_spend_lock(&node.state); }
+                _ => open_window_only(&node.state),
+            }
+            let answer = do_call_free_reply(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER).await.unwrap();
+            assert_eq!((answer.kind, answer.total_msat), (act::KIND_CALL_ANSWER, 0), "{case}: the answer still goes, free");
+            let kept = node.state.held_calls.lock().unwrap().entries.len();
+            let hangup = hangup_after_lapse(&node).await;
+            if case == "open" {
+                assert_eq!(kept, 1);
+                assert_eq!(hangup.unwrap().kind, act::KIND_CALL_HANGUP);
+                assert_eq!(compose_kinds(&node), [401, 403]);
+            } else {
+                assert_eq!(kept, 0, "{case}");
+                assert!(matches!(hangup.unwrap_err().code, "spend_locked" | "spend_expired"), "{case}");
+                assert_eq!(compose_kinds(&node), [401], "{case}: no paid hangup");
+            }
+        }
+    }
+
+    /// The owner locks spending while the free answer is at the node (after
+    /// the app checked spending, before the reply is through): the call is not
+    /// kept, and nothing later is paid on its authority.
+    #[tokio::test]
+    async fn a_lock_while_a_free_answer_is_sent_keeps_no_call() {
+        let node = free_answer_node(Duration::from_millis(300));
+        open_window_only(&node.state);
+        let state = &node.state;
+        let (answer, ()) = tokio::join!(do_call_free_reply(state, A, act::KIND_CALL_ANSWER, HELD_ANSWER), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            do_spend_lock(state);
+        });
+        assert_eq!(answer.unwrap().total_msat, 0);
+        assert!(state.held_calls.lock().unwrap().entries.is_empty());
+        assert!(hangup_after_lapse(&node).await.is_err());
+        assert_eq!(compose_kinds(&node), [401]);
+    }
+
+    /// Before the app has cached its node's identity, a free answer keeps the
+    /// call under the identity its node's status gives, not under none.
+    #[tokio::test]
+    async fn a_free_answer_before_the_node_identity_is_cached_keeps_the_call_under_the_status_identity() {
+        let node = free_answer_node(Duration::ZERO);
+        open_window_only(&node.state);
+        *node.state.node_id.lock().unwrap() = None;
+        do_call_free_reply(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER).await.unwrap();
+        assert_eq!(node.state.held_calls.lock().unwrap().entries.iter().map(|c| c.node_id.clone()).collect::<Vec<_>>(), [OWN.to_string()]);
+        *node.state.node_id.lock().unwrap() = Some(OWN.into());
+        assert_eq!(hangup_after_lapse(&node).await.unwrap().kind, act::KIND_CALL_HANGUP);
+        assert_eq!(compose_kinds(&node), [401, 403]);
     }
 
     /// On a paired node the kept call's signal goes only while the node still
