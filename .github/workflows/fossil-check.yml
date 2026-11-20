@@ -22,10 +22,15 @@ jobs:
           persist-credentials: false
       - name: Test the diff scanner
         run: python3 scripts/ci/test-fossil-check.py
-      - name: Check added lines and changed paths
+      - name: Check added lines, changed paths and commit metadata
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          # Only fingerprints enter step environments, which Actions logs.
-          FOSSIL_PRIVATE_NAME_HASHES: ${{ vars.FOSSIL_PRIVATE_NAME_HASHES }}
+          # A secret, so Actions masks it in the log. Only this step receives it,
+          # and the script never prints the names or any digest of them.
+          FOSSIL_PRIVATE_NAMES: ${{ secrets.FOSSIL_PRIVATE_NAMES }}
+          # Pull requests from forks and from Dependabot receive no repository
+          # secrets. They run the public checks only and print a notice; every
+          # other event fails if the secret is missing.
+          FOSSIL_REQUIRE_PRIVATE_NAMES: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') }}
         run: python3 scripts/ci/fossil-check.py --base "$BASE_SHA" --head "$HEAD_SHA"

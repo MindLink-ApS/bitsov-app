@@ -1,0 +1,40 @@
+# Weekly dependency updates. Minor and patch versions arrive as one grouped
+# pull request per ecosystem; major versions stay separate so each can be
+# reviewed on its own. Security updates are not grouped.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+
+  # One Cargo workspace: the app crate, crates/mock-node and ffi share
+  # src-tauri/Cargo.lock.
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+
+  # Workflows and the composite action. Actions are pinned to full commit
+  # SHAs; Dependabot updates the SHA and the version comment together.
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/*
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-and-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
