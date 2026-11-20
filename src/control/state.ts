@@ -8,7 +8,7 @@ import { feeCeiling } from './format';
 // and live traffic merge, what a send would cost and on what basis, and how
 // fresh the node's figures are.
 
-import { ago, sats, satUnit } from './format';
+import { ago, exactAmount, sats, satUnit, shortId } from './format';
 import { contactRevision, petnameOf } from './petnames';
 import type {
   ActionError,
@@ -231,7 +231,7 @@ const APPROVAL_OFF_REASONS = new Set(['seed_not_encrypted', 'seed_password_not_t
  * sent", never "send again": a second send could pay twice.
  */
 export function undeliveredCopy(u: Undelivered): { title: string; body: string; detail: string } {
-  const paid = `${sats(u.paid_msat)} ${satUnit(u.paid_msat)}`;
+  const paid = `${sats(u.paid_msat, 'up')} ${satUnit(u.paid_msat, 'up')}`;
   return {
     title: t('undeliveredTitle', paid),
     body: t(u.retry ? 'undeliveredRetryBody' : 'undeliveredStopBody'),
@@ -241,12 +241,14 @@ export function undeliveredCopy(u: Undelivered): { title: string; body: string; 
 
 /** The approval a paid, undelivered message needs once Retry delivery paid nothing new. Nothing is paid until the owner approves. */
 export function admissionCopy(a: AdmissionPrice): { body: string; detail: string; action: string } {
-  const s = (m: number) => `${sats(m)} ${satUnit(m)}`;
+  const s = (m: number) => `${sats(m, 'up')} ${satUnit(m, 'up')}`;
+  // Details keep exact amounts so the parts visibly add up to the total.
+  const x = (m: number) => exactAmount(m);
   return {
     body: t(a.quoted ? 'admissionQuotedBody' : 'admissionEstimatedBody', s(a.total_msat)),
     detail: a.quoted
-      ? t('admissionQuotedDetail', s(a.admission_msat), s(a.message_msat), s(a.max_routing_fee_msat ?? 0), s(a.total_msat))
-      : t('admissionEstimatedDetail', s(a.message_msat), s(a.admission_msat), s(a.max_routing_fee_msat ?? 0), s(a.total_msat)),
+      ? t('admissionQuotedDetail', x(a.admission_msat), x(a.message_msat), x(a.max_routing_fee_msat ?? 0), x(a.total_msat))
+      : t('admissionEstimatedDetail', x(a.message_msat), x(a.admission_msat), x(a.max_routing_fee_msat ?? 0), x(a.total_msat)),
     action: t('admissionAction', s(a.total_msat)),
   };
 }

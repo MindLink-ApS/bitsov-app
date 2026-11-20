@@ -17,6 +17,10 @@ import { hostText } from './hostCopy';
 import { AddDevice } from '../onboarding/AddDevice';
 import { PairWords } from '../onboarding/PairWords';
 import { CALL_STATE_WORD, OnCallPill } from './OnCallPill';
+import { createCallQuitGuard } from './quitGuard';
+import { QuitConfirm } from './QuitConfirm';
+import { AmountWithExact } from './ExactAmount';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ConnectionCard, nextLastCall, type NodeAnswer, type StunSource, type TrackedCall } from './ConnectionCard';
 import { watchSamples, type WatchSamples, type WatchUpdates } from './watches';
 import { ASSISTANTS, type AssistantId } from './assistants';
@@ -45,7 +49,7 @@ import { createStore, produce, reconcile } from 'solid-js/store';
 import { qrSvg } from '../qr';
 import type { Proposal } from './ai';
 import { AiTrack, createAiSession } from './AiTrack';
-import { amount as fmtAmount, paidAmount, budgetNote, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime } from './format';
+import { amount as fmtAmount, shownTotal, estimatedSats, exactAmount, wholeSats, paidAmount, budgetNote, allIn, clock, day, feeCeiling, routingFee, sats, satsWhole, satUnit, shortId, uptime, type Rounding } from './format';
 import { ambiguousThousands, amountText, inPaymentBounds, MAX_PAYMENT_MSAT, MIN_PAYMENT_MSAT, parseAmount } from './amountInput';
 import { Organism } from './BodyPanel';
 import { SoftError } from './SoftError';
@@ -2048,7 +2052,7 @@ export function ControlCenter(props: Props) {
         sentOne(t, r.value, text);
       } else if (r.error.code === 'payment_settled_undelivered' && r.error.undelivered) {
         const paid = r.error.undelivered;
-        update({ paid, admission: null, pendingId: r.error.pending_id ?? a.pendingId, note: tr('caStillNotDeliveredPaidForThisMessageSoFar', sats(paid.paid_msat), satUnit(paid.paid_msat)) });
+        update({ paid, admission: null, pendingId: r.error.pending_id ?? a.pendingId, note: tr('caStillNotDeliveredPaidForThisMessageSoFar', sats(paid.paid_msat, 'up'), satUnit(paid.paid_msat, 'up')) });
       } else if (r.error.code === 'not_ready') {
         // The paid card stays retryable; a chain refusal names only this attempt.
         update({ ownerApproval: null, note: isChainUnavailable(r.error) ? tr('chainUnavailableRetry') : null });
@@ -2159,6 +2163,15 @@ export function ControlCenter(props: Props) {
     return tr('caStartSomething');
   };
   const nameOf = (id: string) => (id.toLowerCase() === ownId().toLowerCase() ? tr('uiYou') : peerName(peerById().get(id.toLowerCase()), id));
+  // Closing the window during a live call asks first (desktop only). Confirming closes
+  // exactly as an unguarded close does: the call drops here, nothing is paid to end it.
+  const quitGuard = createCallQuitGuard(
+    () => {
+      const v = callView();
+      return (v.phase === 'live' || v.phase === 'reconnecting') && v.peer ? nameOf(v.peer) : null;
+    },
+    () => (isTauri() && !isMobilePlatform() ? getCurrentWindow() : null),
+  );
   /** Resolve only an unambiguous mapping reported by the node. */
   const channelName = (pubkey: string) => {
     const matches = peers().filter((p) => p.ln_pubkey?.toLowerCase() === pubkey.toLowerCase());
@@ -2723,6 +2736,9 @@ export function ControlCenter(props: Props) {
         callAgain={(peer, media, quote) => { if (!moneyBlocked()) void calls.place(peer, media, quote); }}
         confirmMinutes={() => { if (!moneyBlocked()) void calls.confirmMinutes(); }}
       />
+      <Show when={quitGuard.asking()}>
+        {(name) => <QuitConfirm name={name()} onStay={() => quitGuard.stay()} onClose={() => quitGuard.quit()} />}
+      </Show>
       <Show when={!routedCalls}>
       <MeetingPanel
         view={meetingView()}
@@ -3143,7 +3159,7 @@ function Rail(props: {
               <button type="button" role="menuitem" class="avatar-menu-item wallet" data-open-wallet onClick={() => choose(props.onWallet)}>
                 <span class="name">{tr('uiWallet')}</span>
                 <Show when={props.balanceMsat !== null}>
-                  <span class="meta sats" data-avatar-balance>{fmtAmount(props.balanceMsat!, true)}</span>
+                  <span class="meta sats" data-avatar-balance>{fmtAmount(props.balanceMsat!, 'down', true)}</span>
                 </Show>
               </button>
               <Show when={(props.approvalsWaiting ?? 0) > 0 && props.onApprovals}>
@@ -3365,8 +3381,8 @@ function Conversation(props: {
   const sub = () =>
     props.track.kind === 'peer' ? (
       <span class="row" style={{ gap: 'var(--s-2)' }}>
+        {/* The node key lives on the contact sheet under Technical, not next to the name. */}
         <span class={`dot ${props.peer?.connected ? 'ok' : ''}`} />
-        <span class="id" title={(props.track as { id: string }).id}>{shortId((props.track as { id: string }).id)}</span>
       </span>
     ) : (
       <span class="id">
@@ -3427,14 +3443,14 @@ function Conversation(props: {
         <Show when={props.introduced}>
           {(c) => (
             <p class="day" data-introduced={c().node_id}>
-              {tr('chatIntroduction', props.name, fmtAmount(allIn(c().admission_msat)), feeCeiling(routingFee(c().admission_msat)), fmtAmount(allIn(c().message_msat)), feeCeiling(routingFee(c().message_msat)))}
+              {tr('chatIntroduction', props.name, fmtAmount(allIn(c().admission_msat), 'up'), feeCeiling(routingFee(c().admission_msat)), fmtAmount(allIn(c().message_msat), 'up'), feeCeiling(routingFee(c().message_msat)))}
             </p>
           )}
         </Show>
         <Show when={props.doorstep}>
           {(c) => (
             <p class="day" data-doorstep={c().node_id}>
-              {tr('chatDoorstep', props.name, fmtAmount(allIn(c().admission_msat)), fmtAmount(allIn(c().message_msat)))}
+              {tr('chatDoorstep', props.name, fmtAmount(allIn(c().admission_msat), 'up'), fmtAmount(allIn(c().message_msat), 'up'))}
             </p>
           )}
         </Show>
@@ -3595,7 +3611,7 @@ function RequestCard(props: { inv: InvoiceAmount; peer: string; name: string; bl
   return (
     <div class="request-card" data-request-card data-request-msat={props.inv.amount_msat} data-request-status={done() ?? 'open'}>
       <span class="kind">{tr('chatPaymentRequestFrom')} {props.name}</span>
-      <span class="sats big">{sats(props.inv.amount_msat, true)} <span class="unit">{satUnit(props.inv.amount_msat)}</span></span>
+      <span class="sats big">{sats(props.inv.amount_msat, 'up', true)} <span class="unit">{satUnit(props.inv.amount_msat, 'up')}</span></span>
       <Show when={purpose()} fallback={<span class="hint">{tr('chatNoPurposeGiven')}</span>}>
         <span class="purpose" data-request-purpose>{tr('chatFor')} {purpose()}</span>
       </Show>
@@ -3647,6 +3663,13 @@ function MessageView(props: {
   const entrance = createMessageEntrance(props.m.id, props.fresh, props.seenEntrances);
   const amount = () => (props.paid ?? props.m.payment_amount_msat ?? 0) + (props.allowance?.readmission_msat ?? 0);
   const paidLabel = () => paidAmount(amount(), props.allowance?.fee_paid_msat);
+  const [costShown, setCostShown] = createSignal(false);
+  // The exact amount beside a rounded one, once the owner asked to see the cost.
+  const paidExact = () => {
+    const fee = props.allowance?.fee_paid_msat;
+    const total = amount() + (fee !== undefined && Number.isSafeInteger(fee) && fee >= 0 ? fee : 0);
+    return denom() === 'sats' && Number.isSafeInteger(total) && wholeSats(total, 'up').rounded ? tr('amountExactly', exactAmount(total)) : null;
+  };
   // Only a received chat message in a peer thread can be a request card.
   const request = createMemo(() =>
     props.out || props.room || !props.onPay || props.m.kind === 200
@@ -3722,15 +3745,32 @@ function MessageView(props: {
       </Show>
       <div class="stamp">
         <Show when={props.paid !== undefined || props.m.payment_amount_msat != null}>
-          <span
-            class="sats-meta"
-            title={props.out ? paidLabel() : tr('extraToYou', fmtAmount(amount()))}
+          {/* A sent message's cost is one tap away, not printed under every bubble. */}
+          <Show
+            when={props.out}
+            fallback={
+              <span class="sats-meta" title={tr('extraToYou', fmtAmount(amount(), 'down'))}>
+                <Bolt />
+                <span class="sats"><AmountWithExact msat={amount()} round="down" nowrap /></span>
+              </span>
+            }
           >
-            <Bolt />
-            <span class={props.out ? "money-text" : "sats"}>{props.out ? paidLabel() : fmtAmount(amount(), true)}</span>
-          </span>
-          <Show when={props.out && props.allowance?.readmission_msat}>
-            <span data-readmission-paid>{tr('extraInclAdmissionAgain')} {sats(props.allowance!.readmission_msat!)} {satUnit(props.allowance!.readmission_msat!)}</span>
+            <button
+              type="button"
+              class="sats-meta cost-toggle"
+              data-message-cost={costShown() ? 'shown' : 'hidden'}
+              title={paidLabel()}
+              aria-label={costShown() ? paidLabel() : tr('uiShowMessageCost')}
+              aria-expanded={costShown()}
+              onClick={() => setCostShown(v => !v)}
+            >
+              <Bolt />
+              <Show when={costShown()}><span class="money-text">{paidLabel()}{paidExact() ? ` · ${paidExact()}` : ''}</span></Show>
+            </button>
+          </Show>
+          {/* Like the paid line, the admission-again part shows only when the sender opens the cost. */}
+          <Show when={props.out && costShown() && props.allowance?.readmission_msat}>
+            <span data-readmission-paid>{tr('extraInclAdmissionAgain')} {sats(props.allowance!.readmission_msat!, 'up')} {satUnit(props.allowance!.readmission_msat!, 'up')}</span>
           </Show>
         </Show>
         <span>{clock(props.m.timestamp)}</span>
@@ -3793,7 +3833,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   const off = () => props.blocked || cost() === null || props.actions.callActive() || noMinutePrice() || noMinutesPaid();
   const title = () =>
     why() ?? (noMinutePrice() ? tr('caMinutesNoPrice') : noMinutesPaid() ? tr('caMinutesOwnerSession') : quote() && cost() === null ? (props.offline ? tr('caContactOfflineCannotRing', props.name) : tr('uiSNodeDoesNotTakeCallsYet', possessive(props.name))) : cost() !== null
-      ? tr('uiUpToToRingTheirCallPricePlus', fmtAmount(cost()!), fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat), feeCeiling(quote()!.offer_max_routing_fee_msat), fmtAmount(signalCost(quote()!)), fmtAmount(callCost(quote()!)!), callStunLabel())
+      ? tr('uiUpToToRingTheirCallPricePlus', fmtAmount(cost()!, 'up'), fmtAmount(quote()!.offer_msat! + quote()!.offer_max_routing_fee_msat, 'up'), feeCeiling(quote()!.offer_max_routing_fee_msat), fmtAmount(signalCost(quote()!), 'up'), fmtAmount(callCost(quote()!)!, 'up'), callStunLabel())
       : tr('uiReadingTheirCallPrice'));
   const priceReady = () => !refreshing() && why() === null;
   // A price read is under way: the confirm opens (or stays open) and says so; Ring waits.
@@ -3857,7 +3897,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
   const callWord = (media: CallMedia) => (media === 'video' ? tr('uiVideoCall') : tr('uiCall'));
   return (
     <div class="call-buttons" data-call-buttons ref={wrap}>
-      <button type="button" class={props.callbackMedia ? "soft call-button" : "soft call-button icon-btn"} data-call={props.callbackMedia ?? 'audio'} data-call-back={props.callbackMedia ? '' : undefined} disabled={buttonOff()} title={title()} aria-label={props.callbackMedia ? tr('incomingCallBack') : tr('uiCall95', props.name, cost() !== null ? tr('uiUpTo', fmtAmount(cost()!)) : '')} aria-haspopup="dialog" aria-expanded={armed() === (props.callbackMedia ?? 'audio')} onClick={() => arm(props.callbackMedia ?? 'audio')}>
+      <button type="button" class={props.callbackMedia ? "soft call-button" : "soft call-button icon-btn"} data-call={props.callbackMedia ?? 'audio'} data-call-back={props.callbackMedia ? '' : undefined} disabled={buttonOff()} title={title()} aria-label={props.callbackMedia ? tr('incomingCallBack') : tr('uiCall95', props.name, cost() !== null ? tr('uiUpTo', fmtAmount(cost()!, 'up')) : '')} aria-haspopup="dialog" aria-expanded={armed() === (props.callbackMedia ?? 'audio')} onClick={() => arm(props.callbackMedia ?? 'audio')}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z" /></svg>
         <Show when={props.callbackMedia}>{tr('incomingCallBack')}</Show>
       </button>
@@ -3869,7 +3909,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
       </Show>
       {/* Video and meetings are app-to-app media: hidden while calls are node-routed (M6). */}
       <Show when={!props.callbackMedia && !nodeRoutedAudio()}>
-      <button type="button" class="soft call-button icon-btn" data-call="video" disabled={buttonOff()} title={title()} aria-haspopup="dialog" aria-expanded={armed() === 'video'} onClick={() => arm('video')} aria-label={tr('uiVideoCall98', props.name, cost() !== null ? tr('uiUpTo', fmtAmount(cost()!)) : '')}>
+      <button type="button" class="soft call-button icon-btn" data-call="video" disabled={buttonOff()} title={title()} aria-haspopup="dialog" aria-expanded={armed() === 'video'} onClick={() => arm('video')} aria-label={tr('uiVideoCall98', props.name, cost() !== null ? tr('uiUpTo', fmtAmount(cost()!, 'up')) : '')}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="12" height="12" rx="2" /><path d="m15 10 6-3v10l-6-3z" /></svg>
       </button>
       <button type="button" class="soft call-button icon-btn quiet" data-call="meeting" disabled={off()} title={tr('uiStartAMeetingWithAndUpToMore', props.name, MAX_PARTICIPANTS - 2)} aria-label={tr('uiStartAMeetingWith', props.name)} onClick={() => props.actions.planMeeting(props.peer)}>
@@ -3881,7 +3921,7 @@ function CallButtons(props: { peer: string; name: string; blocked: boolean; acti
           <div class="call-confirm" role="dialog" aria-label={`${callWord(media())} ${props.name}?`} data-call-confirm-box={media()}>
             <p class="call-confirm-text">
               <strong>{callWord(media())} {props.name}?</strong>
-              <Show when={priceReady() && cost() !== null}>{' '}<span class="hint">{tr('uiUpTo105')} {fmtAmount(cost()!)}{tr('uiNothingIsPaidUntilYouPressRing')}</span></Show>
+              <Show when={priceReady() && cost() !== null}>{' '}<span class="hint">{tr('uiUpTo105')} {fmtAmount(cost()!, 'up')}{tr('uiNothingIsPaidUntilYouPressRing')}</span></Show>
             </p>
             <Show when={!priceReady() || fetching()}><p class="hint" role="status" data-call-fetching={fetching() ? '' : undefined}>{why() ?? tr('callFetchingPrice')}</p></Show>
             <Show when={priceReady() && nodeRoutedAudio() && quote()?.block_msat != null ? quote() : null}>{(q) => <>
@@ -3925,13 +3965,13 @@ const CALL_TITLE = CALL_STATE_WORD;
 function MinutesConsent(props: { quote: CallQuote }) {
   return (
     <>
-      <p class="hint" data-call-minute-price>{tr('uiCallMinutePrice', fmtAmount(props.quote.block_msat!), fmtAmount(props.quote.block_max_routing_fee_msat ?? 0))}</p>
+      <p class="hint" data-call-minute-price>{tr('uiCallMinutePrice', fmtAmount(props.quote.block_msat!, 'up'), fmtAmount(props.quote.block_max_routing_fee_msat ?? 0, 'up'))}</p>
       <Show when={props.quote.reservation_max_msat != null}>
         {/* The short promise up front; the full rules (limits, 4 hours) stay one tap away, word for word. */}
-        <p class="hint" data-call-reservation-max>{tr('uiCallReservationShort', fmtAmount(props.quote.reservation_max_msat!))}</p>
+        <p class="hint" data-call-reservation-max>{tr('uiCallReservationShort', fmtAmount(props.quote.reservation_max_msat!, 'up'))}</p>
         <details class="quiet-detail" data-call-reservation-detail>
           <summary>{tr('uiDetails')}</summary>
-          <p class="hint">{tr('uiCallReservationMax', fmtAmount(props.quote.reservation_max_msat!))}</p>
+          <p class="hint">{tr('uiCallReservationMax', fmtAmount(props.quote.reservation_max_msat!, 'up'))}</p>
         </details>
       </Show>
     </>
@@ -3952,7 +3992,7 @@ function CallMinutesLine(props: { minutes: MinutesView; ended: boolean; confirm?
       <Match when={!props.ended && !m().confirmed && !m().stop && hold() && !hold()!.closed ? hold() : null}>
         {(h) => (
           <div data-call-minutes="confirm">
-            <p class="hint" data-call-hold>{tr('uiMinutesHold', fmtAmount(h().reserved_msat), String(h().max_call_minutes), fmtAmount(h().per_block_msat), fmtAmount(h().per_block_fee_msat))}</p>
+            <p class="hint" data-call-hold>{tr('uiMinutesHold', fmtAmount(h().reserved_msat, 'up'), String(h().max_call_minutes), fmtAmount(h().per_block_msat, 'up'), fmtAmount(h().per_block_fee_msat, 'up'))}</p>
             <Show when={props.confirm}>
               {/* The call only connects once the hold is confirmed: say so next to the button, in plain words. */}
               <p class="hint" aria-live="polite" data-call-hold-needed>{tr('uiMinutesConfirmNeeded')}</p>
@@ -3964,30 +4004,30 @@ function CallMinutesLine(props: { minutes: MinutesView; ended: boolean; confirm?
       </Match>
       <Match when={props.ended && hold()}>
         {(h) => (
-          <Show when={h().closed} fallback={<p class="hint" data-call-minutes="held">{tr('uiMinutesSummaryHeld', fmtAmount(h().spent_msat), fmtAmount(h().remaining_msat))}</p>}>
-            <p class="hint" data-call-minutes="released">{tr('uiMinutesSummaryReleased', fmtAmount(h().spent_msat), fmtAmount(h().released_msat))}</p>
+          <Show when={h().closed} fallback={<p class="hint" data-call-minutes="held">{tr('uiMinutesSummaryHeld', fmtAmount(h().spent_msat, 'up'), fmtAmount(h().remaining_msat, 'up'))}</p>}>
+            <p class="hint" data-call-minutes="released">{tr('uiMinutesSummaryReleased', fmtAmount(h().spent_msat, 'up'), fmtAmount(h().released_msat, 'down'))}</p>
           </Show>
         )}
       </Match>
       <Match when={props.ended && m().receiptsMsat > 0}>
-        <p class="hint" data-call-minutes="receipts">{tr('uiMinutesSummaryNoReservation', fmtAmount(m().receiptsMsat))}</p>
+        <p class="hint" data-call-minutes="receipts">{tr('uiMinutesSummaryNoReservation', fmtAmount(m().receiptsMsat, 'up'))}</p>
       </Match>
       <Match when={props.ended}>{null}</Match>
       <Match when={hold()}>
         {(h) => (
           <p class="hint" data-call-minutes="running">
             {m().blocks > 0 || h().spent_msat > 0
-              ? tr('uiMinutesRunning', fmtAmount(h().per_block_msat), fmtAmount(h().per_block_fee_msat), fmtAmount(h().spent_msat), fmtAmount(h().remaining_msat))
-              : tr('uiMinutesReserved', fmtAmount(h().reserved_msat))}
+              ? tr('uiMinutesRunning', fmtAmount(h().per_block_msat, 'up'), fmtAmount(h().per_block_fee_msat, 'up'), fmtAmount(h().spent_msat, 'up'), fmtAmount(h().remaining_msat, 'up'))
+              : tr('uiMinutesReserved', fmtAmount(h().reserved_msat, 'up'))}
             <Show when={m().paying}>{' '}{tr('uiMinutesPaying')}</Show>
           </p>
         )}
       </Match>
       <Match when={m().receiptsMsat > 0}>
-        <p class="hint" data-call-minutes="running">{tr('uiMinutesNoReservation', fmtAmount(m().agreedBlockMsat), fmtAmount(m().receiptsMsat))}</p>
+        <p class="hint" data-call-minutes="running">{tr('uiMinutesNoReservation', fmtAmount(m().agreedBlockMsat, 'up'), fmtAmount(m().receiptsMsat, 'up'))}</p>
       </Match>
       <Match when={m().reservationMaxMsat !== null}>
-        <p class="hint" data-call-minutes="reserving">{tr('uiMinutesReserving', fmtAmount(m().reservationMaxMsat!))}</p>
+        <p class="hint" data-call-minutes="reserving">{tr('uiMinutesReserving', fmtAmount(m().reservationMaxMsat!, 'up'))}</p>
       </Match>
     </Switch>
   );
@@ -4125,7 +4165,7 @@ function CallPanel(props: {
         <Show when={v().phase === 'incoming' && shown() ? answerCost(shown()!) : null}>
           {(m) => <details class="quiet-detail" data-call-answer-detail>
             <summary>{tr('uiDetails')}</summary>
-            <p class="hint" data-call-answer-cost>{tr('caCallAnswerCostNote', fmtAmount(m()))}</p>
+            <p class="hint" data-call-answer-cost>{tr('caCallAnswerCostNote', fmtAmount(m(), 'up'))}</p>
           </details>}
         </Show>
         {/* Decline is the free local ignore: nothing is sent or paid, so their ring runs out by itself. */}
@@ -4177,26 +4217,26 @@ function CallPanel(props: {
         {/* The host reports each signal's ceiling, not settled fees: after the call, "up to" is the honest total. */}
         <Show when={v().phase === 'ended'} fallback={
           <Show when={v().paidMsat > 0 && !minutesShown()}>
-            <p class="hint" data-call-paid>{tr('uiSignalCostCap')} {fmtAmount(v().paidMsat)} {tr('uiIncludesMaximumRoutingFeesSettledAmountMayBe')}</p>
+            <p class="hint" data-call-paid>{tr('uiSignalCostCap')} {fmtAmount(v().paidMsat, 'up')} {tr('uiIncludesMaximumRoutingFeesSettledAmountMayBe')}</p>
           </Show>
         }>
           <Switch>
             {/* Something is still in flight: never "paid nothing" (or a final total) until it settles. */}
             <Match when={v().pendingCount > 0}>
               <p class="hint" data-call-paid="pending">
-                {v().paidMsat > 0 ? tr('uiThisCallPaidUpToSoFar', fmtAmount(v().paidMsat)) : ''}
+                {v().paidMsat > 0 ? tr('uiThisCallPaidUpToSoFar', fmtAmount(v().paidMsat, 'up')) : ''}
                 {v().unknownCount > 0 ? tr('uiCheckPendingResult', v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)) : ''}
-                {v().pendingCount === 1 ? tr('uiAPaymentForThisCallIsStillSettling') : tr('uiPaymentsForThisCallAreStillSettling', v().pendingCount)}{tr('uiUpTo126')} {fmtAmount(v().pendingMsat)}{tr('uiTheTotalUpdatesWhen')} {v().pendingCount === 1 ? tr('uiItFinishes') : tr('uiTheyFinish')}{tr('uiMediaWasNotBilled')}
+                {v().pendingCount === 1 ? tr('uiAPaymentForThisCallIsStillSettling') : tr('uiPaymentsForThisCallAreStillSettling', v().pendingCount)}{tr('uiUpTo126')} {fmtAmount(v().pendingMsat, 'up')}{tr('uiTheTotalUpdatesWhen')} {v().pendingCount === 1 ? tr('uiItFinishes') : tr('uiTheyFinish')}{tr('uiMediaWasNotBilled')}
               </p>
             </Match>
             <Match when={v().unknownCount > 0}>
               <p class="hint" data-call-paid="unknown">
-                {v().paidMsat > 0 ? tr('uiThisCallPaidUpTo', fmtAmount(v().paidMsat)) : tr('uiNoPaymentFromThisCallIsConfirmed')}{' '}
-                {v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)} {tr('uiUpTo133')} {fmtAmount(v().paidMsat + v().unknownMsat)} {tr('uiInAllIf')} {v().unknownCount === 1 ? tr('itPronoun') : tr('theyPronoun')} {tr('uiWentThroughCheckPendingResultMediaWasNot')}
+                {v().paidMsat > 0 ? tr('uiThisCallPaidUpTo', fmtAmount(v().paidMsat, 'up')) : tr('uiNoPaymentFromThisCallIsConfirmed')}{' '}
+                {v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)} {tr('uiUpTo133')} {fmtAmount(v().paidMsat + v().unknownMsat, 'up')} {tr('uiInAllIf')} {v().unknownCount === 1 ? tr('itPronoun') : tr('theyPronoun')} {tr('uiWentThroughCheckPendingResultMediaWasNot')}
               </p>
             </Match>
             <Match when={v().paidMsat > 0}>
-              <p class="hint" data-call-paid="settled">{tr('uiThisCallPaidUpTo136')} {fmtAmount(v().paidMsat)}{tr('uiEachSignalSPricePlusItsRoutingFee')}</p>
+              <p class="hint" data-call-paid="settled">{tr('uiThisCallPaidUpTo136')} {fmtAmount(v().paidMsat, 'up')}{tr('uiEachSignalSPricePlusItsRoutingFee')}</p>
             </Match>
             {/* A call that started (it has an id) and paid nothing; pre-flight refusals already say "Nothing was paid". */}
             <Match when={v().callId !== null}>
@@ -4292,7 +4332,7 @@ function CallPanel(props: {
                 <Show when={again()} fallback={<button type="button" class="soft" data-call-again disabled={props.blocked} onClick={() => void offerAgain()}>{tr('uiCallAgain')}</button>}>
                   {(q) => <>
                     <Show when={props.routed && q().block_msat != null}><MinutesConsent quote={q()} /></Show>
-                    <button type="button" class="primary money" data-call-again-confirm disabled={props.blocked} onClick={() => props.callAgain(v().peer!, v().media, q())}>{tr('uiRingUpTo')} {fmtAmount(2 * callCost(q())!)}</button>
+                    <button type="button" class="primary money" data-call-again-confirm disabled={props.blocked} onClick={() => props.callAgain(v().peer!, v().media, q())}>{tr('uiRingUpTo')} {fmtAmount(2 * callCost(q())!, 'up')}</button>
                   </>}
                 </Show>
                 <Show when={againError()}><p class="hint" role="status">{againError()}</p></Show>
@@ -4333,7 +4373,7 @@ function CallPanel(props: {
             </Show>
             {/* With the paid minutes as the cost line, the signal cap is the detail. */}
             <Show when={v().paidMsat > 0 && minutesShown()}>
-              <p class="hint" data-call-paid>{tr('uiSignalCostCap')} {fmtAmount(v().paidMsat)} {tr('uiIncludesMaximumRoutingFeesSettledAmountMayBe')}</p>
+              <p class="hint" data-call-paid>{tr('uiSignalCostCap')} {fmtAmount(v().paidMsat, 'up')} {tr('uiIncludesMaximumRoutingFeesSettledAmountMayBe')}</p>
             </Show>
             <Show when={v().connection}>
               {(connection) => <p class="hint" data-call-connection>{tr('uiConnection')} {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} {tr('uiLocal140')} {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} {tr('uiRemote')}</p>}
@@ -4414,7 +4454,7 @@ function MeetingPanel(props: {
   const planCost = () => (props.plan?.length && !props.blocked && props.plan.every(meets) ? inviteCost(props.plan.map((id) => quotes[id] ?? null)) : null);
   const joinPrice = () => joinCost(props.view.roster, props.ownId.toLowerCase(), shown(props.view.roster));
   const declinePrice = () => declineCost(props.view, shown(props.view.legs.map((l) => l.peer)));
-  const price = (m: number | null) => (m === null ? '' : ` · ${sats(m)} ${satUnit(m)}`);
+  const price = (m: number | null) => (m === null ? '' : ` · ${sats(m, 'up')} ${satUnit(m, 'up')}`);
   const v = () => props.view;
   const host = () => (v().roster[0] ? props.nameOf(v().roster[0]) : '');
   const others = () => v().roster.slice(1).filter((id) => id !== props.ownId.toLowerCase()).map(props.nameOf).join(', ');
@@ -4448,11 +4488,11 @@ function MeetingPanel(props: {
           <p class="hint" data-meeting-note>{tr('caYouRingEachPersonYouPickTheirCallPrice')}</p>
           <div class="call-actions">
             <button type="button" class="primary soft money" data-meeting-invite disabled={planCost() === null} onClick={() => props.invite(props.plan!, 'audio', shown(props.plan!))}
-              aria-label={tr('caInviteExtra500', planCost() !== null ? tr('uiUpTo', fmtAmount(planCost()!)) : '')}>
+              aria-label={tr('caInviteExtra500', planCost() !== null ? tr('uiUpTo', fmtAmount(planCost()!, 'up')) : '')}>
               {tr('caInvite')}{price(planCost())}
             </button>
             <button type="button" class="soft" data-meeting-invite-video disabled={planCost() === null} onClick={() => props.invite(props.plan!, 'video', shown(props.plan!))}
-              aria-label={tr('caVideoInvite', planCost() !== null ? tr('uiUpTo', fmtAmount(planCost()!)) : '')}>
+              aria-label={tr('caVideoInvite', planCost() !== null ? tr('uiUpTo', fmtAmount(planCost()!, 'up')) : '')}>
               {tr('caVideoInvite597')}{price(planCost())}
             </button>
             <button type="button" class="soft" data-meeting-cancel onClick={() => props.setPlan(null)}>{tr('cancel')}</button>
@@ -4485,17 +4525,17 @@ function MeetingPanel(props: {
             {/* Something is still in flight: never "paid nothing" (or a final total) until it settles. */}
             <Match when={v().pendingCount > 0}>
               <p class="hint" data-meeting-paid="pending">
-                {v().paidMsat > 0 ? tr('caPaidUpToSoFarForThisMeetingS', fmtAmount(v().paidMsat)) : ''}
+                {v().paidMsat > 0 ? tr('caPaidUpToSoFarForThisMeetingS', fmtAmount(v().paidMsat, 'up')) : ''}
                 {v().unknownCount > 0 ? tr('uiCheckPendingResult', v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)) : ''}
-                {v().pendingCount === 1 ? tr('caAPaymentForThisMeetingIsStillSettling') : tr('caPaymentsForThisMeetingAreStillSettling', v().pendingCount)}{tr('uiUpTo126')}{' '}{fmtAmount(v().pendingMsat)}{tr('uiTheTotalUpdatesWhen')}{' '}{v().pendingCount === 1 ? tr('uiItFinishes') : tr('uiTheyFinish')}{tr('caMediaIsNotBilled')}</p>
+                {v().pendingCount === 1 ? tr('caAPaymentForThisMeetingIsStillSettling') : tr('caPaymentsForThisMeetingAreStillSettling', v().pendingCount)}{tr('uiUpTo126')}{' '}{fmtAmount(v().pendingMsat, 'up')}{tr('uiTheTotalUpdatesWhen')}{' '}{v().pendingCount === 1 ? tr('uiItFinishes') : tr('uiTheyFinish')}{tr('caMediaIsNotBilled')}</p>
             </Match>
             <Match when={v().unknownCount > 0}>
               <p class="hint" data-meeting-paid="unknown">
-                {v().paidMsat > 0 ? tr('caPaidUpToForThisMeetingSSignals', fmtAmount(v().paidMsat)) : tr('caNoPaymentForThisMeetingIsConfirmed')}{' '}
-                {v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)}{' '}{tr('uiUpTo133')}{' '}{fmtAmount(v().paidMsat + v().unknownMsat)}{' '}{tr('uiInAllIf')}{' '}{v().unknownCount === 1 ? tr('itPronoun') : tr('theyPronoun')}{' '}{tr('caWentThroughCheckPendingResultMediaIsNotBilled')}</p>
+                {v().paidMsat > 0 ? tr('caPaidUpToForThisMeetingSSignals', fmtAmount(v().paidMsat, 'up')) : tr('caNoPaymentForThisMeetingIsConfirmed')}{' '}
+                {v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)}{' '}{tr('uiUpTo133')}{' '}{fmtAmount(v().paidMsat + v().unknownMsat, 'up')}{' '}{tr('uiInAllIf')}{' '}{v().unknownCount === 1 ? tr('itPronoun') : tr('theyPronoun')}{' '}{tr('caWentThroughCheckPendingResultMediaIsNotBilled')}</p>
             </Match>
             <Match when={v().paidMsat > 0}>
-              <p class="hint" data-meeting-paid="settled">{tr('caPaidUpTo')}{' '}{fmtAmount(v().paidMsat)}{' '}{tr('caForThisMeetingSSignalsEachSignalSPrice')}</p>
+              <p class="hint" data-meeting-paid="settled">{tr('caPaidUpTo')}{' '}{fmtAmount(v().paidMsat, 'up')}{' '}{tr('caForThisMeetingSSignalsEachSignalSPrice')}</p>
             </Match>
             <Match when={v().phase === 'ended'}>
               <p class="hint" data-meeting-paid="nothing">{tr('caThisMeetingPaidNothing')}</p>
@@ -4508,12 +4548,12 @@ function MeetingPanel(props: {
             <Switch>
               <Match when={v().phase === 'invited'}>
                 <button type="button" class="primary soft money" data-meeting-join disabled={props.blocked || joinPrice() === null} onClick={() => props.join(shown(v().roster))}
-                  aria-label={tr('caJoinExtra506', joinPrice() !== null ? tr('uiUpTo', fmtAmount(joinPrice()!)) : '')}>
+                  aria-label={tr('caJoinExtra506', joinPrice() !== null ? tr('uiUpTo', fmtAmount(joinPrice()!, 'up')) : '')}>
                   {tr('caJoin')}{price(joinPrice())}
                 </button>
                 <button type="button" class="soft" data-meeting-decline disabled={props.blocked || declinePrice() === null} onClick={() => props.decline(shown(v().roster))}
-                  aria-label={tr('caDecline', declinePrice() !== null ? tr('uiUpTo', fmtAmount(declinePrice()!)) : '')}>
-                  {tr('uiDecline')}{declinePrice() !== null ? tr('caUpTo', sats(declinePrice()!), satUnit(declinePrice()!)) : ''}
+                  aria-label={tr('caDecline', declinePrice() !== null ? tr('uiUpTo', fmtAmount(declinePrice()!, 'up')) : '')}>
+                  {tr('uiDecline')}{declinePrice() !== null ? tr('caUpTo', sats(declinePrice()!, 'up'), satUnit(declinePrice()!, 'up')) : ''}
                 </button>
               </Match>
               <Match when={v().phase === 'active'}>
@@ -4757,11 +4797,11 @@ function DeliveryMark(props: { d: Delivery }) {
  */
 function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => string }) {
   const c = props.card;
-  const amt = (msat: number) => (
-    <>
-      <span class="sats">{sats(msat, true)}</span> {satUnit(msat)}
-    </>
-  );
+  // A price someone must pay rounds up; money that reached you rounds down,
+  // with its exact amount one tap away.
+  const amt = (msat: number, round: Rounding) => round === 'down'
+    ? <span class="sats"><AmountWithExact msat={msat} round="down" nowrap /></span>
+    : <><span class="sats">{sats(msat, round, true)}</span> {satUnit(msat, round)}</>;
   return (
     <div class="door-card" data-door={`${c.side}-${c.verdict}`} data-code={c.side === 'out' ? c.code : undefined} classList={{ refused: c.verdict === 'refused' }} role="note">
       <p class="door-rule">
@@ -4772,7 +4812,7 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
           {(x) => (
             <>
               <p class="door-head">
-                <span class="id" title={x().sender}>{shortId(x().sender)}</span>{' '}{tr('uiPaid')}{' '}<Show when={x().paid_msat !== null} fallback={tr('caYourPriceLower')}>{amt(x().paid_msat!)}</Show>{' '}{tr('caToReachYou')}</p>
+                <span class="id" title={x().sender}>{shortId(x().sender)}</span>{' '}{tr('uiPaid')}{' '}<Show when={x().paid_msat !== null} fallback={tr('caYourPriceLower')}>{amt(x().paid_msat!, 'down')}</Show>{' '}{tr('caToReachYou')}</p>
               <p class="door-proof">{tr('caSettledRecipientBoundSingleUse')}</p>
               <p class="door-note">{tr('caNotAContactAndNotAddedNothingIsKept')}</p>
             </>
@@ -4785,9 +4825,9 @@ function DoorView(props: { card: DoorCard; at: number; nameOf: (id: string) => s
                 {tr('caRefusedAtYourDoor')}{' '}{gateWords(x().code)}
               </p>
               <p class="door-proof">
-                <Show when={x().required_msat !== null}>{tr('caNeeded656')}{' '}{amt(x().required_msat!)}</Show>
+                <Show when={x().required_msat !== null}>{tr('caNeeded656')}{' '}{amt(x().required_msat!, 'up')}</Show>
                 <Show when={x().required_msat !== null && x().paid_msat !== null}> · </Show>
-                <Show when={x().paid_msat !== null}>{tr('uiPaid')}{' '}{amt(x().paid_msat!)}</Show>
+                <Show when={x().paid_msat !== null}>{tr('uiPaid')}{' '}{amt(x().paid_msat!, 'down')}</Show>
               </p>
               <p class="door-note">{tr('caSignedBy')}{' '}{props.nameOf(x().sender)}{tr('caNothingWasStoredOrDelivered')}</p>
             </>
@@ -4865,7 +4905,7 @@ function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: 
             <article class="msg out sending" data-sending={m().waiting ? 'waiting' : ''} aria-busy="true">
               <div class="bubble">{m().text}</div>
               <div class="stamp">
-                <span class="sats" data-sending-cap={m().capMsat}>{m().waiting ? (m().waitWord === 'allowed' ? tr('chatSendsWhenAllowed') : tr('chatSendsWhenApproved')) : tr('chatSending')} {tr('chatUpTo')} {fmtAmount(m().capMsat, true)}</span>
+                <span class="sats" data-sending-cap={m().capMsat}>{m().waiting ? (m().waitWord === 'allowed' ? tr('chatSendsWhenAllowed') : tr('chatSendsWhenApproved')) : tr('chatSending')} {tr('chatUpTo')} {fmtAmount(m().capMsat, 'up', true)}</span>
               </div>
             </article>
           );
@@ -4884,7 +4924,7 @@ function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: 
           return (
             <div class="artifact out" data-artifact="invoice">
               <span class="kind">{tr('chatInvoiceYouReceive')}</span>
-              <span class="sats big">{sats(inv().amount_msat, true)} <span class="unit">{satUnit(inv().amount_msat)}</span></span>
+              <span class="sats big"><AmountWithExact msat={inv().amount_msat} round="down" nowrap /></span>
               <Show when={inv().note}>
                 <span class="hint">{inv().note}</span>
               </Show>
@@ -4909,9 +4949,9 @@ function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: 
                 <Bolt />
                 <Show
                   when={r().status !== 'failed'}
-                  fallback={<span class="err-note">{tr('chatPaymentOf')} <span class="sats">{sats(r().amount_msat, true)}</span> {satUnit(r().amount_msat)} {tr('chatFailed')}</span>}
+                  fallback={<span class="err-note">{tr('chatPaymentOf')} <span class="sats">{sats(r().amount_msat, 'up', true)}</span> {satUnit(r().amount_msat, 'up')} {tr('chatFailed')}</span>}
                 >
-                  <span>{tr('chatYouSent')} <span class="sats">{sats(r().amount_msat, true)}</span> {satUnit(r().amount_msat)}{r().method === 'keysend' ? tr('chatDirectKeysend') : ''}</span>
+                  <span>{tr('chatYouSent')} <span class="sats">{sats(r().amount_msat, 'up', true)}</span> {satUnit(r().amount_msat, 'up')}{r().method === 'keysend' ? tr('chatDirectKeysend') : ''}</span>
                 </Show>
                 <span class="hint">{clock(r().paid_at_ms)}</span>
               </span>
@@ -4928,8 +4968,8 @@ function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: 
               <span class="file-name">{r().filename} <span class="hint">{kb(r().size_bytes)}</span></span>
               <span class="stamp">
                 <Bolt />
-                <span class="sats">{sats((r().total_msat ?? r().amount_msat + (r().max_routing_fee_msat ?? 0)), true)}</span>
-                <span>{satUnit((r().total_msat ?? r().amount_msat + (r().max_routing_fee_msat ?? 0)))} {tr('chatAllInCeiling')}{feeCeiling(r().max_routing_fee_msat ?? 0)}) · {clock(r().sent_at_ms)}</span>
+                <span class="sats">{sats((r().total_msat ?? r().amount_msat + (r().max_routing_fee_msat ?? 0)), 'up', true)}</span>
+                <span>{satUnit((r().total_msat ?? r().amount_msat + (r().max_routing_fee_msat ?? 0)), 'up')} {tr('chatAllInCeiling')}{feeCeiling(r().max_routing_fee_msat ?? 0)}) · {clock(r().sent_at_ms)}</span>
                 <Show when={props.delivery}>
                   <DeliveryMark d={props.delivery!} />
                 </Show>
@@ -4971,7 +5011,7 @@ function ArtifactView(props: { callActions?: Actions; moneyBlocked: boolean; a: 
           return (
             <div class="artifact out failed" data-artifact="restored" data-op-state={op().state}>
               <span class="kind">{tr('chatMessageSentBeforeThisAppRestarted')}</span>
-              <span>{tr('uiUpTo105')} {sats(op().cap_msat)} {satUnit(op().cap_msat)}{tr('chatThisAppKeepsNoCopyOfTheWords')}</span>
+              <span>{tr('uiUpTo105')} {sats(op().cap_msat, 'up')} {satUnit(op().cap_msat, 'up')}{tr('chatThisAppKeepsNoCopyOfTheWords')}</span>
               <span class="hint" data-restored-state>{opStateText(op())}</span>
             </div>
           );
@@ -5115,7 +5155,7 @@ const RESTORE_OP = new Set<OperationState>(['dispatching', 'unknown', 'paid', 'p
  * retries were stopped, so it never says "sent" or "delivered".
  */
 export function opStateText(op: OpView, subject = tr('caThisAppSRecord')): string {
-  const paid = op.paid_msat === null ? tr('caAnUnknownAmount') : `${sats(op.paid_msat)} ${satUnit(op.paid_msat)}`;
+  const paid = op.paid_msat === null ? tr('caAnUnknownAmount') : `${sats(op.paid_msat, 'up')} ${satUnit(op.paid_msat, 'up')}`;
   switch (op.state) {
     case 'dispatching': case 'unknown': return tr('caTheResultIsNotKnownYetCheckPendingResult', subject);
     case 'admission_resumable': return tr('caAdmissionPaidMessageNotSentSendTheSameMessage', subject, paid);
@@ -5142,7 +5182,7 @@ function AmountField(props: { data: 'pay' | 'request'; label: string; value: str
     if (ambiguousThousands(props.value, denom())) return tr('amountUseSpaces');
     const msat = parseAmount(props.value, denom());
     if (msat === null) return tr('uiUseDigitsAndOneDotAtMostDecimals', denom() === 'btc' ? 11 : 3);
-    return inPaymentBounds(msat) ? null : tr('uiBetweenAnd', fmtAmount(MIN_PAYMENT_MSAT), fmtAmount(MAX_PAYMENT_MSAT));
+    return inPaymentBounds(msat) ? null : tr('uiBetweenAnd', fmtAmount(MIN_PAYMENT_MSAT, 'up'), fmtAmount(MAX_PAYMENT_MSAT, 'up'));
   };
   const invalid = () => problem() !== null;
   return (
@@ -5265,9 +5305,9 @@ function InCallPay(props: {
       const r = await props.actions.keysend({ kind: 'peer', id: peer }, dest, value, '');
       if (r.ok) {
         setResult(r.value.status === 'settled'
-          ? { state: 'sent', text: tr('uiSentTo', fmtAmount(r.value.amount_msat), props.nameOf(peer)) }
+          ? { state: 'sent', text: tr('uiSentTo', fmtAmount(r.value.amount_msat, 'up'), props.nameOf(peer)) }
           : r.value.status === 'failed'
-            ? { state: 'failed', text: tr('uiPaymentOfFailedNoAmountOrRoutingFee', fmtAmount(r.value.amount_msat)) }
+            ? { state: 'failed', text: tr('uiPaymentOfFailedNoAmountOrRoutingFee', fmtAmount(r.value.amount_msat, 'up')) }
             : { state: 'unknown', text: tr('uiPaymentInProgressSettlementIsNotConfirmedCheck') });
       } else {
         setResult(provenUnpaid(r.error.code)
@@ -5290,9 +5330,9 @@ function InCallPay(props: {
           <AmountField data="pay" label={tr('uiAmountToPay', props.nameOf(peer))} value={amount()} onInput={setAmount} cleared={amountCleared()} />
           <Show when={msat() !== null}>
             <dl class="pay-review">
-              <dt>{tr('uiAmount')}</dt><dd>{fmtAmount(msat()!)}</dd>
-              <dt>{tr('uiNetworkFee')}</dt><dd data-call-pay-fee>{tr('uiUpTo178')} {fmtAmount(routingFee(msat()!))}</dd>
-              <dt>{tr('uiTotalAtMost')}</dt><dd data-call-pay-total>{fmtAmount(allIn(msat()!))}</dd>
+              <dt>{tr('uiAmount')}</dt><dd>{fmtAmount(msat()!, 'up')}</dd>
+              <dt>{tr('uiNetworkFee')}</dt><dd data-call-pay-fee>{tr('uiUpTo178')} {fmtAmount(routingFee(msat()!), 'up')}</dd>
+              <dt>{tr('uiTotalAtMost')}</dt><dd data-call-pay-total>{shownTotal(allIn(msat()!), [msat()!, routingFee(msat()!)])}</dd>
             </dl>
           </Show>
           <SpendBar spend={props.spend} error={props.spendError} now={props.now} actions={props.actions} hasPending={props.pending} stays={tr('uiYourAmountStaysHereAfterApprovalPressConfirm')} />
@@ -5978,8 +6018,8 @@ function Composer(props: {
     if (priceProblem()) return priceProblem();
     const cap = messageShown().msat;
     if (cap === null) return tr('uiPriceLoading');
-    if (readmitPrice() || (raisedFrom() !== null && cap > raisedFrom()!)) return tr('uiPriceWentUpToSend', fmtAmount(cap));
-    return tr('uiUpToIncludesMaxRoutingFee', fmtAmount(cap));
+    if (readmitPrice() || (raisedFrom() !== null && cap > raisedFrom()!)) return tr('uiPriceWentUpToSend', fmtAmount(cap, 'up'));
+    return tr('uiUpToIncludesMaxRoutingFee', fmtAmount(cap, 'up'));
   };
 
   const firstContactCostLine = (): string | null => {
@@ -5987,8 +6027,8 @@ function Composer(props: {
     const q = readmitPrice() ?? doorQuote();
     if (priceProblem()) return priceProblem();
     if (!q) return tr('firstSpendCostLoading');
-    return tr('firstSpendCost', fmtAmount(q.admission_msat), fmtAmount(q.message_msat),
-      fmtAmount(q.max_routing_fee_msat ?? 0), fmtAmount(q.total_msat));
+    return tr('firstSpendCost', fmtAmount(q.admission_msat, 'up'), fmtAmount(q.message_msat, 'up'),
+      fmtAmount(q.max_routing_fee_msat ?? 0, 'up'), shownTotal(q.total_msat, [q.admission_msat, q.message_msat, q.max_routing_fee_msat ?? 0]));
   };
 
   const retryPrice = () => {
@@ -6008,7 +6048,7 @@ function Composer(props: {
       return {
         msat: again.total_msat,
         estimate: false,
-        basis: tr('uiAsksForAdmissionAgainThenForThisMessage', props.name, sats(again.admission_msat), satUnit(again.admission_msat), fmtAmount(again.message_msat), feeCeiling(again.max_routing_fee_msat ?? 0)),
+        basis: tr('uiAsksForAdmissionAgainThenForThisMessage', props.name, sats(again.admission_msat, 'up'), satUnit(again.admission_msat, 'up'), fmtAmount(again.message_msat, 'up'), feeCeiling(again.max_routing_fee_msat ?? 0)),
       };
     }
     const q = doorWanted() ? doorQuote() : null;
@@ -6016,7 +6056,7 @@ function Composer(props: {
       return {
         msat: q.total_msat,
         estimate: false,
-        basis: tr('uiSOwnQuoteToOpenTheirDoorThen', props.name, fmtAmount(q.admission_msat), fmtAmount(q.message_msat), feeCeiling(q.max_routing_fee_msat ?? 0)),
+        basis: tr('uiSOwnQuoteToOpenTheirDoorThen', props.name, fmtAmount(q.admission_msat, 'up'), fmtAmount(q.message_msat, 'up'), feeCeiling(q.max_routing_fee_msat ?? 0)),
       };
     }
     const c = props.cost;
@@ -6068,7 +6108,7 @@ function Composer(props: {
   const labelPrice = () => {
     const s = shown();
     if (s.msat === null) return '';
-    const figure = `${s.estimate ? '≈ ' : ''}${sats(s.msat)} ${satUnit(s.msat)}`;
+    const figure = `${estimatedSats(s.msat, s.estimate, 'up')} ${satUnit(s.msat, 'up')}`;
     return ` · ${mode() === 'file' ? tr('uiFileUpTo', figure) : figure}`;
   };
 
@@ -6928,7 +6968,7 @@ function Composer(props: {
   };
   const chatPrice = () => {
     const c = messageShown();
-    return c.msat === null ? '' : ` · ${c.estimate ? '≈ ' : ''}${sats(c.msat)} ${satUnit(c.msat)}`;
+    return c.msat === null ? '' : ` · ${estimatedSats(c.msat, c.estimate, 'up')} ${satUnit(c.msat, 'up')}`;
   };
 
   // A closed spending window or money going offline withdraws the review.
@@ -7038,7 +7078,7 @@ function Composer(props: {
                 </button>
                 {/* The price shows here in every state, approval pending or not, as it does under the message bar. */}
                 <span class="hint" data-file-price={mode() === 'file' && shown().msat !== null ? shown().msat! : undefined}>
-                  {shown().msat !== null ? tr('uiUpToIncludesMaxRoutingFee', fmtAmount(shown().msat!)) : shown().basis} {tr('uiFilesUpTo14MB')}
+                  {shown().msat !== null ? tr('uiUpToIncludesMaxRoutingFee', fmtAmount(shown().msat!, 'up')) : shown().basis} {tr('uiFilesUpTo14MB')}
                 </span>
               </div>
               <button type="submit" class="primary soft money" disabled={disabled()} data-send title={label()} aria-label={label()}>
@@ -7068,8 +7108,8 @@ function Composer(props: {
               }
             >
               <div class="amount-field shown" data-pay-invoice-amount={invoiceMsat() ?? ''}>
-                <span class="amount-value">{invoiceMsat() === null ? '0' : sats(invoiceMsat()!)}</span>
-                <span class="amount-unit">{invoiceMsat() === null ? unitName() : satUnit(invoiceMsat()!)}</span>
+                <span class="amount-value">{invoiceMsat() === null ? '0' : sats(invoiceMsat()!, 'up')}</span>
+                <span class="amount-unit">{invoiceMsat() === null ? unitName() : satUnit(invoiceMsat()!, 'up')}</span>
               </div>
               <textarea data-pay-invoice rows={2} placeholder={tr('uiPasteAnInvoiceFrom', props.name)} value={bolt11()} onInput={(e) => setBolt11(e.currentTarget.value)} aria-label={tr('uiLightningInvoice')} />
             </Show>
@@ -7081,8 +7121,8 @@ function Composer(props: {
                     <span class="label">{tr('uiCostToSend')}</span>
                     <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
                       <span class="sats" data-cost-msat={shown().msat!}>
-                        {sats(shown().msat!, true)}
-                        <span class="unit">{satUnit(shown().msat!)}</span>
+                        {sats(shown().msat!, 'up', true)}
+                        <span class="unit">{satUnit(shown().msat!, 'up')}</span>
                       </span>
                     </Show>
                     <span class="basis" title={shown().basis}>{shown().basis}</span>
@@ -7111,11 +7151,11 @@ function Composer(props: {
                   </Show>
                   <dl>
                     <dt>{tr('uiAmount')}</dt>
-                    <dd data-review-amount>{fmtAmount(rv().msat)}</dd>
+                    <dd data-review-amount>{fmtAmount(rv().msat, 'up')}</dd>
                     <dt>{tr('uiNetworkFee')}</dt>
-                    <dd data-review-fee>{tr('uiUpTo178')} {fmtAmount(routingFee(rv().msat))}</dd>
+                    <dd data-review-fee>{tr('uiUpTo178')} {fmtAmount(routingFee(rv().msat), 'up')}</dd>
                     <dt>{tr('uiTotalAtMost')}</dt>
-                    <dd data-review-total>{fmtAmount(allIn(rv().msat))}</dd>
+                    <dd data-review-total>{shownTotal(allIn(rv().msat), [rv().msat, routingFee(rv().msat)])}</dd>
                     <Show when={rv().kind === 'keysend' && (rv() as { memo: string }).memo.trim()}>
                       <dt>{tr('uiNote')}</dt>
                       <dd>{(rv() as { memo: string }).memo.trim()}</dd>
@@ -7153,7 +7193,7 @@ function Composer(props: {
               {(inv) => (
                 <div class="composer-bar" data-request-created>
                   <span class="basis">
-                    {tr('uiInvoiceFor')} {fmtAmount(inv().amount_msat)} {tr('uiIsReadySendItTo')} {props.name} {tr('uiAsAChatMessageItPaysLikeAny')}
+                    {tr('uiInvoiceFor')} <AmountWithExact msat={inv().amount_msat} round="down" /> {tr('uiIsReadySendItTo')} {props.name} {tr('uiAsAChatMessageItPaysLikeAny')}
                   </span>
                   <button type="button" class="primary soft money" data-send-in-chat disabled={props.moneyBlocked || busy() || contactWaiting()} onClick={() => void sendInChat()}>
                     {tr('uiSendInChat')}{chatPrice()}
@@ -7309,11 +7349,11 @@ function Composer(props: {
         <p id={sendReasonId} class="hint" classList={{ 'sr-only': mode() === 'message' && !draft().trim() }} data-send-disabled-reason>{disabledReason()}</p>
       </Show>
       <Show when={mode() === 'message' && liveGrantRemaining() !== null}>
-        <p class="hint" data-send-budget>{tr(budget()?.autopay.state === 'open' ? 'sendBudgetRemaining' : 'caNodeGrantSeparateLimits', fmtAmount(liveGrantRemaining()!))}</p>
+        <p class="hint" data-send-budget>{tr(budget()?.autopay.state === 'open' ? 'sendBudgetRemaining' : 'caNodeGrantSeparateLimits', fmtAmount(liveGrantRemaining()!, 'down'))}</p>
         <Show when={budget()?.autopay.state !== 'open' ? appBudgetRemaining() : null}>
           {(left) => <p class="hint" data-send-app-budget>{left().contact === null
-            ? tr('caAppTotalRemaining', fmtAmount(left().total))
-            : tr('caAppContactRemaining', fmtAmount(left().contact!), fmtAmount(left().total), tr(room() ? 'uiThisRoom' : 'caThisContact'))}</p>}
+            ? tr('caAppTotalRemaining', fmtAmount(left().total, 'down'))
+            : tr('caAppContactRemaining', fmtAmount(left().contact!, 'down'), fmtAmount(left().total, 'down'), tr(room() ? 'uiThisRoom' : 'caThisContact'))}</p>}
         </Show>
       </Show>
       <div class="composer-meta">
@@ -7333,11 +7373,12 @@ function Composer(props: {
             <>
               <dl class="price-breakdown" data-price-breakdown>
                 <dt>{tr('uiNamedPrice', possessive(props.name))}</dt>
-                <dd>{fmtAmount(b().priceMsat)}</dd>
+                {/* Exact amounts in this breakdown, so the parts visibly add up to the ceiling. */}
+                <dd>{exactAmount(b().priceMsat)}</dd>
                 <dt>{tr('uiRoutingFeeAtMost')}</dt>
-                <dd>{fmtAmount(b().routingMsat)}</dd>
+                <dd>{exactAmount(b().routingMsat)}</dd>
                 <dt class="total">{tr('uiYouPayAtMost')}</dt>
-                <dd class="total">{fmtAmount(b().ceilingMsat)}</dd>
+                <dd class="total">{exactAmount(b().ceilingMsat)}</dd>
               </dl>
               <p class="hint price-note">
                 {tr('uiACeilingNotAChargeTheAmountActually')}
@@ -7352,9 +7393,8 @@ function Composer(props: {
               <span class="label">{tr('uiCostToSend')}</span>
               <Show when={shown().msat !== null} fallback={<span class="sats">…</span>}>
                 <span class="sats" data-cost-msat={shown().msat!}>
-                  {shown().estimate ? '≈ ' : ''}
-                  {sats(shown().msat!, true)}
-                  <span class="unit">{satUnit(shown().msat!)}</span>
+                  {estimatedSats(shown().msat!, !!shown().estimate, 'up', true)}
+                  <span class="unit">{satUnit(shown().msat!, 'up')}</span>
                 </span>
               </Show>
               <span class="basis" title={shown().basis}>{shown().basis}</span>
@@ -7374,7 +7414,7 @@ function Composer(props: {
         {(p) => (
           <>
             <p class="hint" data-readmission-quote>
-              {props.name} {tr('uiAsksForAdmissionAgain')} {sats(p().admission_msat)} {satUnit(p().admission_msat)}{tr('uiNothingWasPaidSendAgain')} {sats(p().total_msat)} {satUnit(p().total_msat)} {tr('uiInAll')}
+              {props.name} {tr('uiAsksForAdmissionAgain')} {sats(p().admission_msat, 'up')} {satUnit(p().admission_msat, 'up')}{tr('uiNothingWasPaidSendAgain')} {sats(p().total_msat, 'up')} {satUnit(p().total_msat, 'up')} {tr('uiInAll')}
             </p>
             <details class="quiet-detail" data-readmission-detail>
               <summary>{tr('uiDetails')}</summary>
@@ -7488,7 +7528,7 @@ function Composer(props: {
           dailyExpired={budget()?.autopay.state === 'expired'}
           onRetry={priceProblem() && priceProblem() !== tr('uiPriceLoading') && !busy() ? retryPrice : undefined}
           costLine={mode() === 'file' && props.filePrice
-            ? tr('firstSpendFileCost', fmtAmount(props.filePrice.principal_msat), fmtAmount(props.filePrice.max_routing_fee_msat), fmtAmount(props.filePrice.total_msat))
+            ? tr('firstSpendFileCost', fmtAmount(props.filePrice.principal_msat, 'up'), fmtAmount(props.filePrice.max_routing_fee_msat, 'up'), shownTotal(props.filePrice.total_msat, [props.filePrice.principal_msat, props.filePrice.max_routing_fee_msat]))
             : firstContactCostLine() ?? priceLine() ?? tr('uiPriceLoading')}
           blockedReason={disabledReason()}
           onPreset={id => { setPresetPick(id); saveSpendPreset(props.ownId, id); }}
@@ -7749,8 +7789,8 @@ export function TouchApproval(props: { peer: string; name: string; priceMsat: nu
           {/* The petname is local; Touch ID names the same key, never a name. */}
           <strong>
             {tr('uiApprove')} {props.name} {tr('extraNode')} <code data-touch-peer>{shortId(props.peer)}</code>{tr('extraWith')} {mobile ? tr('biometrics') : tr('uiTouchID')}.
-          </strong> {tr('uiUpTo105')} <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT)}</span> {tr('extraInTotalFor24HoursAtMost')}{' '}
-          <span data-touch-per-act>{fmtAmount(perAct())}</span> {tr('extraPerMessage')}
+          </strong> {tr('uiUpTo105')} <span data-touch-budget>{fmtAmount(ENVELOPE_BUDGET_MSAT, 'up')}</span> {tr('extraInTotalFor24HoursAtMost')}{' '}
+          <span data-touch-per-act>{fmtAmount(perAct(), 'up')}</span> {tr('extraPerMessage')}
         </span>
       </p>
       <div class="quiet-detail" data-touch-detail>
@@ -7889,17 +7929,17 @@ function BudgetBar(props: {
               <Show when={st().again ? props.door : null}>
                 {(q) => (
                   <p class="door-quote" data-door-quote={q().total_msat} data-readmit>
-                    {who()} {tr('uiReconnectedAndAsksToBeAdmittedAgain')} <strong>{fmtAmount(q().admission_msat)}</strong>{tr('uiThen')}{' '}
-                    <strong>{fmtAmount(q().message_msat)}</strong> {tr('uiForThisMessage')} <strong>{fmtAmount(q().total_msat)}</strong> {tr('uiInAllIncluding')} {feeCeiling(q().max_routing_fee_msat ?? 0)}{tr('uiNothingIsPaidUntilYouSend')}
+                    {who()} {tr('uiReconnectedAndAsksToBeAdmittedAgain')} <strong>{fmtAmount(q().admission_msat, 'up')}</strong>{tr('uiThen')}{' '}
+                    <strong>{fmtAmount(q().message_msat, 'up')}</strong> {tr('uiForThisMessage')} <strong>{shownTotal(q().total_msat, [q().admission_msat, q().message_msat, q().max_routing_fee_msat ?? 0])}</strong> {tr('uiInAllIncluding')} {feeCeiling(q().max_routing_fee_msat ?? 0)}{tr('uiNothingIsPaidUntilYouSend')}
                   </p>
                 )}
               </Show>
               <Show when={st().again ? null : props.door}>
                 {(q) => (
                   <p class="door-quote" data-door-quote={q().total_msat}>
-                    {who()}{tr('uiSDoor')} <strong>{fmtAmount(q().admission_msat)}</strong> {tr('uiOnceToReachThemThen')}{' '}
-                    <strong>{fmtAmount(q().message_msat)}</strong> {tr('uiAMessageThisFirstMessageCosts')}{' '}
-                    <strong>{fmtAmount(q().total_msat)}</strong> {tr('uiInAllIncluding')} {feeCeiling(q().max_routing_fee_msat ?? 0)}{tr('uiNothingIsPaidUntilYouSend')}
+                    {who()}{tr('uiSDoor')} <strong>{fmtAmount(q().admission_msat, 'up')}</strong> {tr('uiOnceToReachThemThen')}{' '}
+                    <strong>{fmtAmount(q().message_msat, 'up')}</strong> {tr('uiAMessageThisFirstMessageCosts')}{' '}
+                    <strong>{shownTotal(q().total_msat, [q().admission_msat, q().message_msat, q().max_routing_fee_msat ?? 0])}</strong> {tr('uiInAllIncluding')} {feeCeiling(q().max_routing_fee_msat ?? 0)}{tr('uiNothingIsPaidUntilYouSend')}
                   </p>
                 )}
               </Show>
@@ -7926,7 +7966,7 @@ function BudgetBar(props: {
                       data-first-budget={msat}
                       onClick={() => props.onFirstPick(msat)}
                     >
-                      {fmtAmount(msat)} {tr('uiADay')}<Show when={worth(msat)}> · {worth(msat)}</Show>
+                      {fmtAmount(msat, 'up')} {tr('uiADay')}<Show when={worth(msat)}> · {worth(msat)}</Show>
                     </button>
                   )}
                 </For>
@@ -7935,13 +7975,13 @@ function BudgetBar(props: {
           )}
         </Match>
         <Match when={props.stand.kind === 'grant_limited'}>
-          <p class="spend-line" data-node-grant-limit>{tr('uiYourNodeSSpendGrantCannotCoverThis')} {fmtAmount(props.budget.node_grant?.remaining_msat ?? 0)} {tr('uiLeftAndAllowsAtMost')} {fmtAmount(props.budget.node_grant ? messagePerPaymentMax(props.budget.node_grant) : 0)} {tr('uiPerPaymentAskYourNodeSOwnerFor')}</p>
+          <p class="spend-line" data-node-grant-limit>{tr('uiYourNodeSSpendGrantCannotCoverThis')} {fmtAmount(props.budget.node_grant?.remaining_msat ?? 0, 'down')} {tr('uiLeftAndAllowsAtMost')} {fmtAmount(props.budget.node_grant ? messagePerPaymentMax(props.budget.node_grant) : 0, 'down')} {tr('uiPerPaymentAskYourNodeSOwnerFor')}</p>
         </Match>
         <Match when={props.stand.kind === 'contact_used' && (props.stand as Extract<BudgetStandT, { kind: 'contact_used' }>)}>
           {(st) => (
             <div class="approval budget-used" data-budget-used="contact">
               <p>
-                <strong>{tr('uiBudgetFor')} {who()} {tr('uiUsedUp')}</strong> {fmtAmount(st().spent)} {tr('uiOf')} {fmtAmount(st().limit)} {tr('uiInTheLast24HoursAndThisMessage')} {props.priceMsat === null ? '…' : fmtAmount(props.priceMsat)}.
+                <strong>{tr('uiBudgetFor')} {who()} {tr('uiUsedUp')}</strong> {fmtAmount(st().spent, 'up')} {tr('uiOf')} {fmtAmount(st().limit, 'down')} {tr('uiInTheLast24HoursAndThisMessage')} {props.priceMsat === null ? '…' : fmtAmount(props.priceMsat, 'up')}.
                 <Show when={budgetNote(props.budget.rows.find(r => r.target === props.target && r.room === props.room))}>{note => <> {note()}.</>}</Show>
                 {' '}{tr('uiItFreesUpAsOlderPaymentsPass24')}
               </p>
@@ -7951,14 +7991,14 @@ function BudgetBar(props: {
                   <p class="hint">
                     {tr('uiThisBudgetAlreadyEqualsYourAppAllIn')}{' '}
                     <button type="button" class="link" data-budget-raise-total disabled={props.actions.moneyBlocked()} onClick={() => void props.actions.approveBudget(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat), props.budget.preset)}>
-                      {tr('uiRaiseTheAppAllInLimitTo')} {fmtAmount(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat))}
+                      {tr('uiRaiseTheAppAllInLimitTo')} {fmtAmount(Math.min(props.budget.ceiling_msat * 2, props.budget.max_daily_msat), 'up')}
                     </button>
                   </p>
                 }
               >
                 {(to) => (
                   <button type="button" class="primary small money" data-budget-raise disabled={props.actions.moneyBlocked()} onClick={() => void props.actions.setBudget(props.target, props.room, to())}>
-                    {tr('uiRaiseTo')} {fmtAmount(to())} {tr('uiADay')}
+                    {tr('uiRaiseTo')} {fmtAmount(to(), 'up')} {tr('uiADay')}
                   </button>
                 )}
               </Show>
@@ -7969,12 +8009,12 @@ function BudgetBar(props: {
           {(st) => (
             <div class="approval budget-used" data-budget-used="total">
               <p>
-                <strong>{tr('uiYourAppAllInLimitIsUsedUp')}</strong> {fmtAmount(st().spent)} {tr('uiOf')} {fmtAmount(st().ceiling)} {tr('uiInTheLast24HoursRaisingItIs')} {budgetNote(props.budget)}
+                <strong>{tr('uiYourAppAllInLimitIsUsedUp')}</strong> {fmtAmount(st().spent, 'up')} {tr('uiOf')} {fmtAmount(st().ceiling, 'down')} {tr('uiInTheLast24HoursRaisingItIs')} {budgetNote(props.budget)}
               </p>
               <Show when={st().raiseTo}>
                 {(to) => (
                   <button type="button" class="primary small money" data-budget-raise-total disabled={props.actions.moneyBlocked()} onClick={() => void props.actions.approveBudget(to(), props.budget.preset)}>
-                    {tr('uiApprove')} {fmtAmount(to())} {tr('uiInTotalForUpTo24Hours')}
+                    {tr('uiApprove')} {fmtAmount(to(), 'up')} {tr('uiInTotalForUpTo24Hours')}
                   </button>
                 )}
               </Show>
@@ -7987,7 +8027,7 @@ function BudgetBar(props: {
               <p class="spend-line" data-budget-line>
                 <span class="dot ok" />
                 <span class="line-text">
-                  {tr('uiPaysAutomatically')} {fmtAmount(st().spent)} {tr('uiOf')} {fmtAmount(st().limit)} {tr('uiTo')} {who()} {tr('uiIn24H')}
+                  {tr('uiPaysAutomatically')} {fmtAmount(st().spent, 'up')} {tr('uiOf')} {fmtAmount(st().limit, 'down')} {tr('uiTo')} {who()} {tr('uiIn24H')}
                   <Show when={budgetNote(props.budget.rows.find(r => r.target === props.target && r.room === props.room))}>{note => <> · {note()}</>}</Show>
                   {' '}{tr('uiApprovalEndsIn')}{' '}
                   {hoursLeft(props.budget.autopay.open_until_ms, props.now, props.budget.window_ms)} {tr('uiH')}{' '}
@@ -8073,11 +8113,11 @@ function BudgetPanel(props: {
             <div class="tally" data-tally>
               <span class="label">{tr('caKnownPaidInTheLast24Hours')}</span>
               <span class="sats big" data-tally-total>
-                {fmtAmount(b().spent_msat, true)} <span class="unit">/ {fmtAmount(b().ceiling_msat, true)}</span>
+                {fmtAmount(b().spent_msat, 'up', true)} <span class="unit">/ {fmtAmount(b().ceiling_msat, 'down', true)}</span>
               </span>
               <span class="meter" aria-hidden="true"><span style={{ width: pct(b().spent_msat, b().ceiling_msat) }} /></span>
               <Show when={b().unsettled_msat > 0}>
-                <span class="hint" data-unsettled>{fmtAmount(b().unsettled_msat)}{' '}{tr('caReservedAtSendCeilingsOutcomeNotKnownYet')}</span>
+                <span class="hint" data-unsettled>{fmtAmount(b().unsettled_msat, 'up')}{' '}{tr('caReservedAtSendCeilingsOutcomeNotKnownYet')}</span>
               </Show>
               <Show when={b().fee_unknown}>
                 <span class="hint" data-fee-unknown>{budgetNote({ ...b(), unsettled_msat: 0, accounted_msat: (b().accounted_msat ?? b().spent_msat) - b().unsettled_msat })}</span>
@@ -8085,12 +8125,12 @@ function BudgetPanel(props: {
               <Show when={b().node_grant}>
                 {(g) => (
                   <span class="hint" data-node-grant>
-                    {tr('caYourFiniteNodeGrantAllows')}{' '}{fmtAmount(g().remaining_msat)}{' '}{tr('uiOf')}{' '}{fmtAmount(g().budget_msat)}{' '}{tr('caMoreAtMost')}{' '}
+                    {tr('caYourFiniteNodeGrantAllows')}{' '}{fmtAmount(g().remaining_msat, 'down')}{' '}{tr('uiOf')}{' '}{fmtAmount(g().budget_msat, 'down')}{' '}{tr('caMoreAtMost')}{' '}
                     <Show
                       when={grantSplitCaps(g())}
-                      fallback={<>{fmtAmount(g().per_call_max_msat)}{' '}{tr('caPerPaymentFor')}</>}
+                      fallback={<>{fmtAmount(g().per_call_max_msat, 'down')}{' '}{tr('caPerPaymentFor')}</>}
                     >
-                      {(caps) => <>{fmtAmount(caps().message)}{' '}{tr('caPerMessagePayment')}{' '}{fmtAmount(caps().call)}{' '}{tr('caPerCallPaymentFor')}</>}
+                      {(caps) => <>{fmtAmount(caps().message, 'down')}{' '}{tr('caPerMessagePayment')}{' '}{fmtAmount(caps().call, 'down')}{' '}{tr('caPerCallPaymentFor')}</>}
                     </Show>
                     {' '}{timeLeft(g().expires_at_ms, props.now)}.
                   </span>
@@ -8123,8 +8163,8 @@ function BudgetPanel(props: {
                     <div class="row" style={{ 'justify-content': 'space-between', gap: 'var(--s-2)' }}>
                       <span class="who">{directPaymentName(row.target) ?? props.nameOf(row.target, row.room)}</span>
                       <span class="sats" data-row-tally>
-                        {fmtAmount(row.spent_msat, true)}
-                        <span class="unit">{row.limit_msat === null ? tr('caApprovedByHand') : `/ ${fmtAmount(row.limit_msat, true)}`}</span>
+                        {fmtAmount(row.spent_msat, 'up', true)}
+                        <span class="unit">{row.limit_msat === null ? tr('caApprovedByHand') : `/ ${fmtAmount(row.limit_msat, 'down', true)}`}</span>
                       </span>
                     </div>
                     <Show when={budgetNote(row)}>{note => <span class="hint">{note()}</span>}</Show>
@@ -8530,18 +8570,18 @@ function NewTrack(props: {
                   fallback={
                     <>
                       <button type="button" class="quiet" data-starter-include disabled={props.moneyBlocked} onClick={() => void includeStarter()}>
-                        {open() ? tr('caIncludeStarterBitcoin', fmtAmount(sponsor()!.gift_msat)) : tr('caIncludeStarterBitcoinApproveFirst')}
+                        {open() ? tr('caIncludeStarterBitcoin', fmtAmount(sponsor()!.gift_msat, 'up')) : tr('caIncludeStarterBitcoinApproveFirst')}
                       </button>
                       <p class="hint" data-starter-purse>
-                        {tr('caYouFundItFromYourOwnNodeOnlyAfter')}{' '}{fmtAmount(sponsor()!.purse_used_msat)}{' '}{tr('uiOf')}{' '}
-                        {fmtAmount(sponsor()!.purse_msat)}{' '}{tr('caUsedInTheLast24Hours')}</p>
+                        {tr('caYouFundItFromYourOwnNodeOnlyAfter')}{' '}{fmtAmount(sponsor()!.purse_used_msat, 'up')}{' '}{tr('uiOf')}{' '}
+                        {fmtAmount(sponsor()!.purse_msat, 'down')}{' '}{tr('caUsedInTheLast24Hours')}</p>
                     </>
                   }
                 >
                   {(st) => (
                     <>
                       <p data-starter-offered>
-                        {tr('caStarterBitcoinUpTo')}{' '}<strong>{fmtAmount(st().gift_msat)}</strong>{tr('caAfterYouApproveTheirRequestItIsTheirsOnce')}</p>
+                        {tr('caStarterBitcoinUpTo')}{' '}<strong>{fmtAmount(st().gift_msat, 'up')}</strong>{tr('caAfterYouApproveTheirRequestItIsTheirsOnce')}</p>
                       <code class="address" data-intro-link>{mine()!.offer_link ?? mine()!.link}</code>
                     </>
                   )}
@@ -8573,7 +8613,7 @@ function NewTrack(props: {
                 </svg>
               </Show>
               <p data-intro-prices>
-                {tr('caAdmission')}{' '}<strong>{fmtAmount(allIn(m().admission_msat))}</strong>{' '}{tr('caIncluding')}{' '}{feeCeiling(routingFee(m().admission_msat))}{tr('caEachMessage')}{' '}<strong>{fmtAmount(allIn(m().message_msat))}</strong>{' '}{tr('caIncluding')}{' '}{feeCeiling(routingFee(m().message_msat))}{' '}{tr('caEstimatedCeilings')}</p>
+                {tr('caAdmission')}{' '}<strong>{fmtAmount(allIn(m().admission_msat), 'up')}</strong>{' '}{tr('caIncluding')}{' '}{feeCeiling(routingFee(m().admission_msat))}{tr('caEachMessage')}{' '}<strong>{fmtAmount(allIn(m().message_msat), 'up')}</strong>{' '}{tr('caIncluding')}{' '}{feeCeiling(routingFee(m().message_msat))}{' '}{tr('caEstimatedCeilings')}</p>
               <p class="hint">
                 {tr('caValidForAbout')}{' '}{minutesLeft(m().expires_at)}{' '}{tr('caMin')}{' '}<button type="button" class="link" onClick={loadMine}>{tr('caNewCard')}</button>
               </p>
@@ -8582,17 +8622,17 @@ function NewTrack(props: {
                 fallback={
                   <Show when={sponsor()?.enabled}>
                     <button type="button" class="quiet" data-starter-include disabled={props.moneyBlocked} onClick={() => void includeStarter()}>
-                      {open() ? tr('caIncludeStarterBitcoin', fmtAmount(sponsor()!.gift_msat)) : tr('caIncludeStarterBitcoinApproveFirst')}
+                      {open() ? tr('caIncludeStarterBitcoin', fmtAmount(sponsor()!.gift_msat, 'up')) : tr('caIncludeStarterBitcoinApproveFirst')}
                     </button>
                     <p class="hint" data-starter-purse>
-                      {tr('caYouFundItFromYourOwnNodeOnlyAfter')}{' '}{fmtAmount(sponsor()!.purse_used_msat)}{' '}{tr('uiOf')}{' '}
-                      {fmtAmount(sponsor()!.purse_msat)}{' '}{tr('caUsedInTheLast24Hours')}</p>
+                      {tr('caYouFundItFromYourOwnNodeOnlyAfter')}{' '}{fmtAmount(sponsor()!.purse_used_msat, 'up')}{' '}{tr('uiOf')}{' '}
+                      {fmtAmount(sponsor()!.purse_msat, 'down')}{' '}{tr('caUsedInTheLast24Hours')}</p>
                   </Show>
                 }
               >
                 {(st) => (
                   <p data-starter-offered>
-                    {tr('caStarterBitcoinUpTo')}{' '}<strong>{fmtAmount(st().gift_msat)}</strong>{tr('caAfterYouApproveTheirRequestItIsTheirsOnce')}</p>
+                    {tr('caStarterBitcoinUpTo')}{' '}<strong>{fmtAmount(st().gift_msat, 'up')}</strong>{tr('caAfterYouApproveTheirRequestItIsTheirsOnce')}</p>
                 )}
               </Show>
               <Show when={kitErr() && kitErr() !== MONEY_NOT_READY}>
@@ -8637,7 +8677,7 @@ function NewTrack(props: {
                   <div class="artifact" data-starter-candidate={c().newcomer}>
                     <span class="kind">{tr('caStarterBitcoin')}{' '}{shortId(c().newcomer)}</span>
                     <p>
-                      {tr('caLightningGift')}{' '}<strong>{fmtAmount(c().gift_msat)}</strong>{tr('caNetworkFeeAtMost')}{' '}{fmtAmount(c().fee_max_msat)}.
+                      {tr('caLightningGift')}{' '}<strong>{fmtAmount(c().gift_msat, 'up')}</strong>{tr('caNetworkFeeAtMost')}{' '}{fmtAmount(c().fee_max_msat, 'up')}.
                     </p>
                     <span class="hint">
                       {tr('caTheyOwnItOnceItArrivesAndCanKeep')}</span>
@@ -8661,7 +8701,7 @@ function NewTrack(props: {
                         disabled={requestLocked() || theirCode().length !== 6}
                         onClick={() => void prepareGift()}
                       >
-                        {giving() ? tr('caPreparing') : tr('caSponsorUpTo', fmtAmount(c().gift_msat + c().fee_max_msat))}
+                        {giving() ? tr('caPreparing') : tr('caSponsorUpTo', fmtAmount(c().gift_msat + c().fee_max_msat, 'up'))}
                       </button>
                       <button type="button" class="quiet" data-starter-cancel disabled={giving() || cancelling() || giftPending()} onClick={() => void cancelKit()}>
                         {tr('cancel')}</button>
@@ -8687,7 +8727,7 @@ function NewTrack(props: {
                 {(g) => (
                   <p class={g().state === 'funded' ? 'ok-note' : 'err-note'} data-starter-gift={g().state}>
                     {g().state === 'funded'
-                      ? tr('caSentItIsTheirsNow', fmtAmount(g().paid_msat))
+                      ? tr('caSentItIsTheirsNow', fmtAmount(g().paid_msat, 'up'))
                       : g().state === 'paying' || g().state === 'unknown'
                         ? tr('caPaymentPendingDoNotSendAgainYourNodeKeeps')
                         : tr('caGiftThisKitIsClosed', g().state)}
@@ -8732,12 +8772,12 @@ function NewTrack(props: {
                   <span class="kind">{tr('caDoorCard')}{' '}{shortId(c().node_id)}</span>
                   <span>{tr('caSignedByTheKeyItNames')}</span>
                   <p data-door-prices>
-                    {tr('caAdmission')}{' '}<strong>{fmtAmount(allIn(c().admission_msat))}</strong>{' '}{tr('caIncluding')}{' '}{feeCeiling(routingFee(c().admission_msat))}{tr('caEachMessage')}{' '}<strong>{fmtAmount(allIn(c().message_msat))}</strong>{' '}{tr('caIncluding')}{' '}{feeCeiling(routingFee(c().message_msat))}{' '}{tr('caEstimatedCeilings')}</p>
+                    {tr('caAdmission')}{' '}<strong>{fmtAmount(allIn(c().admission_msat), 'up')}</strong>{' '}{tr('caIncluding')}{' '}{feeCeiling(routingFee(c().admission_msat))}{tr('caEachMessage')}{' '}<strong>{fmtAmount(allIn(c().message_msat), 'up')}</strong>{' '}{tr('caIncluding')}{' '}{feeCeiling(routingFee(c().message_msat))}{' '}{tr('caEstimatedCeilings')}</p>
                   <Show when={c().starter}>
                     {(st) => (
                       <div class="door-starter" data-door-starter>
                         <p>
-                          {tr('caStarterBitcoinAvailableAfterTheyApprove')}{' '}<strong>{fmtAmount(st().gift_msat)}</strong>.
+                          {tr('caStarterBitcoinAvailableAfterTheyApprove')}{' '}<strong>{fmtAmount(st().gift_msat, 'down')}</strong>.
                         </p>
                         <Show
                           when={ask()}
@@ -8762,7 +8802,7 @@ function NewTrack(props: {
                                 {tr('caShowThisToThemCode')}{' '}<strong>{a().code.slice(0, 3)} {a().code.slice(3)}</strong>{tr('caTheyTypeItBeforeApproving')}</p>
                               <p class="hint" data-starter-status={arrived() ? 'received' : 'waiting'}>
                                 {arrived()
-                                  ? tr('caReceivedInYourOwnNode', fmtAmount(arrived()!.amount_msat))
+                                  ? tr('caReceivedInYourOwnNode', fmtAmount(arrived()!.amount_msat, 'down'))
                                   : tr('caWaitingForStarterBitcoin')}
                               </p>
                               <code class="address" data-starter-request>{a().request}</code>
@@ -8993,14 +9033,14 @@ function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | nu
             <>
               <div class="big-balance">
                 <span class="sats" data-balance>
-                  {sats(w().balance_msat, true)}
-                  <span class="unit">{satUnit(w().balance_msat)}</span>
+                  {sats(w().balance_msat, 'down', true)}
+                  <span class="unit">{satUnit(w().balance_msat, 'down')}</span>
                 </span>
                 <p class="hint">{tr('caNodeReportedTotalOneFigureNotASpendableBalance')}</p>
               </div>
               <dl class="facts">
                 <dt>{props.moneyBlocked ? tr('caLightningOutboundCapacityMoneyNotReady') : tr('caLightningOutboundCapacity')}</dt>
-                <dd class="sats">{fmtAmount(w().lightning_spendable_sats == null ? w().lightning_outbound_msat : w().lightning_spendable_sats! * 1000, true)}</dd>
+                <dd class="sats">{fmtAmount(w().lightning_spendable_sats == null ? w().lightning_outbound_msat : w().lightning_spendable_sats! * 1000, 'down', true)}</dd>
                 <dt>{tr('caOpenChannels')}</dt>
                 <dd class="sats">
                   {active()}{' '}{tr('uiOf')}{' '}{w().channels.length}{' '}{tr('caActive')}</dd>
@@ -9019,8 +9059,8 @@ function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | nu
                         <div style={{ width: `${share()}%`, opacity: c.active ? 1 : 0.4 }} />
                       </div>
                       <div class="row">
-                        <span class="sats">{fmtAmount(c.local_balance_msat, true)}{' '}{tr('caYours')}</span>
-                        <span class="sats">{fmtAmount(c.remote_balance_msat, true)}{' '}{tr('caTheirs')}</span>
+                        <span class="sats">{fmtAmount(c.local_balance_msat, 'down', true)}{' '}{tr('caYours')}</span>
+                        <span class="sats">{fmtAmount(c.remote_balance_msat, 'down', true)}{' '}{tr('caTheirs')}</span>
                       </div>
                     </div>
                   );
