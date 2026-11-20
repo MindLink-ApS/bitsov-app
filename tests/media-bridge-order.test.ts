@@ -13,7 +13,10 @@ function stubHost() {
       return Promise.resolve(null);
     },
   });
-  return { sends: () => sent.filter((s) => s.cmd === 'call_media_send') };
+  return {
+    sends: () => sent.filter((s) => s.cmd === 'call_media_send'),
+    opens: () => sent.filter((s) => s.cmd === 'call_media_open').map((s) => s.args as Record<string, unknown>),
+  };
 }
 
 afterEach(() => vi.unstubAllGlobals());
@@ -40,5 +43,21 @@ describe('host media bridge uplink order', () => {
     await bridge.open('call-1', 'a'.repeat(64), () => {}, () => {});
     bridge.send(new Uint8Array([2]));
     expect(host.sends().map((s) => s.options?.headers?.[MEDIA_ORDER_HEADER])).toEqual(['0', '1']);
+  });
+
+  it('passes its current count to each open, and the count never resets', async () => {
+    const host = stubHost();
+    const bridge = hostMediaBridge();
+    await bridge.open('call-1', 'a'.repeat(64), () => {}, () => {});
+    bridge.send(new Uint8Array([1]));
+    bridge.send(new Uint8Array([2]));
+    await bridge.close();
+    await bridge.open('call-2', 'b'.repeat(64), () => {}, () => {});
+    bridge.send(new Uint8Array([3]));
+    await bridge.close();
+    await bridge.open('call-2', 'b'.repeat(64), () => {}, () => {});
+    bridge.send(new Uint8Array([4]));
+    expect(host.opens().map((args) => args.send_base)).toEqual([0, 2, 3]);
+    expect(host.sends().map((s) => s.options?.headers?.[MEDIA_ORDER_HEADER])).toEqual(['0', '1', '2', '3']);
   });
 });

@@ -314,9 +314,15 @@ pub fn send_order(value: Option<&str>) -> Option<u64> {
 
 /// Puts uplink frames back in the order the renderer sent them before they
 /// enter the uplink queue. Each send runs as its own task off the main thread,
-/// and two of them can reach this point in either order. Nothing here drops a
-/// frame, assigns `seq` or waits: `seq` is still assigned when a frame is
-/// written to the socket, and the queue keeps its own drop-oldest rule.
+/// and two of them can reach this point in either order. Nothing here assigns
+/// `seq` or waits: `seq` is still assigned when a frame is written to the
+/// socket, and the queue keeps its own drop-oldest rule.
+///
+/// A frame counted below the next expected one is dropped, never queued: one
+/// that turns up after its gap was skipped, or one from an earlier session
+/// (the renderer's count never resets, and the session starts at the count it
+/// had at open). The receiver conceals a missing frame as one lost on the way;
+/// a frame sent out of place would be heard.
 #[derive(Default)]
 pub struct SendOrder {
     state: Mutex<SendOrderState>,
@@ -324,7 +330,8 @@ pub struct SendOrder {
 
 #[derive(Default)]
 struct SendOrderState {
-    /// The count expected next; set by the first frame that arrives.
+    /// The count expected next: the session's base, or else the first frame
+    /// that arrives.
     next: Option<u64>,
     /// Frames that came early. `None`: a send that failed its checks, which
     /// only frees its place.
@@ -332,6 +339,12 @@ struct SendOrderState {
 }
 
 impl SendOrder {
+    /// A send order whose first expected count is `base`, the renderer's count
+    /// when it opened this session; none keeps the first frame that arrives.
+    pub fn starting_at(base: Option<u64>) -> Self {
+        Self { state: Mutex::new(SendOrderState { next: base, ..SendOrderState::default() }) }
+    }
+
     /// Take one send: `order` is its count (none from a renderer that does not
     /// send one, which goes straight on), `payload` the frame, or none when the
     /// send failed its checks. Every frame now in order goes onto `queue`.
@@ -346,10 +359,8 @@ impl SendOrder {
         };
         let next = *state.next.get_or_insert(order);
         if order < next {
-            // Its place was already given up: late, but never lost here.
-            if let Some(payload) = payload {
-                queue.push(payload);
-            }
+            // Its place was given up, or it belongs to an earlier session:
+            // dropped, so nothing leaves out of capture order.
             return;
         }
         state.held.insert(order, payload);
@@ -1217,10 +1228,70 @@ mod tests {
         assert_eq!(drain(&queue), [0], "the hold waits for 1");
         order.admit(Some(6), Some(vec![6]), &queue);
         assert_eq!(drain(&queue), [2, 3, 4, 5, 6]);
-        // The missing one turns up after all: late, still sent, never dropped here.
+        // The missing one turns up after all: too late, dropped rather than
+        // sent after 2..6, where it would be heard out of place.
         order.admit(Some(1), Some(vec![1]), &queue);
         order.admit(Some(7), Some(vec![7]), &queue);
-        assert_eq!(drain(&queue), [1, 7]);
+        assert_eq!(drain(&queue), [7]);
+    }
+
+    /// No frame ever leaves after one counted higher.
+    fn assert_capture_order(sent: &[u8]) {
+        assert!(sent.windows(2).all(|pair| pair[0] < pair[1]), "out of capture order: {sent:?}");
+    }
+
+    #[test]
+    fn with_a_base_a_first_frame_that_arrives_late_still_leaves_first() {
+        let order = SendOrder::starting_at(Some(0));
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        for count in [1u64, 0, 2] {
+            order.admit(Some(count), Some(vec![count as u8]), &queue);
+        }
+        let sent = drain(&queue);
+        assert_eq!(sent, [0, 1, 2]);
+        assert_capture_order(&sent);
+    }
+
+    #[test]
+    fn without_a_base_a_frame_below_the_first_arrival_is_dropped_not_reordered() {
+        let order = SendOrder::starting_at(None);
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        for count in [1u64, 0, 2] {
+            order.admit(Some(count), Some(vec![count as u8]), &queue);
+        }
+        let sent = drain(&queue);
+        assert_eq!(sent, [1, 2]);
+        assert_capture_order(&sent);
+    }
+
+    #[test]
+    fn a_late_frame_after_a_skip_is_dropped_not_appended() {
+        let order = SendOrder::starting_at(Some(0));
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(Some(0), Some(vec![0]), &queue);
+        for count in 2..3 + SEND_ORDER_HOLD as u64 {
+            order.admit(Some(count), Some(vec![count as u8]), &queue);
+        }
+        order.admit(Some(1), Some(vec![1]), &queue);
+        order.admit(Some(7), Some(vec![7]), &queue);
+        let sent = drain(&queue);
+        assert_eq!(sent, [0, 2, 3, 4, 5, 6, 7]);
+        assert_capture_order(&sent);
+        assert_eq!(order.held(), 0);
+    }
+
+    #[test]
+    fn with_a_base_a_stale_frame_counted_lower_is_dropped() {
+        let order = SendOrder::starting_at(Some(40));
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(Some(39), Some(vec![39]), &queue);
+        order.admit(Some(12), Some(vec![12]), &queue);
+        assert!(drain(&queue).is_empty());
+        assert_eq!(order.held(), 0);
+        order.admit(Some(41), Some(vec![41]), &queue);
+        assert_eq!(drain(&queue), Vec::<u8>::new(), "41 waits for 40");
+        order.admit(Some(40), Some(vec![40]), &queue);
+        assert_eq!(drain(&queue), [40, 41]);
     }
 
     #[test]
