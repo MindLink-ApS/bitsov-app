@@ -873,7 +873,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
               <div class="panel funded">
                 <h2>{t('obFundingSeen')}</h2>
                 <p class="hint">
-                  {t('obObservedAmount', fmtAmount(received() * 1000))}{t('obFundingNext')}</p>
+                  {t('obObservedAmount', fmtAmount(received() * 1000, 'down'))}{t('obFundingNext')}</p>
                 <Show when={fund()!.funding_evidence}>
                   <p class="evidence">{t('obEvidence')}{' '}{fund()!.funding_evidence}</p>
                 </Show>
@@ -915,7 +915,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
                   <div class="fill" style={{ width: `${progress()}%` }} />
                 </div>
                 <div class="numbers">
-                  <strong>{fmtAmount(received() * 1000)}</strong>{t('obOfAmountSeen', fmtAmount(required() * 1000))}
+                  <strong>{fmtAmount(received() * 1000, 'down')}</strong>{t('obOfAmountSeen', fmtAmount(required() * 1000, 'up'))}
                 </div>
               </div>
               <p class="hint">

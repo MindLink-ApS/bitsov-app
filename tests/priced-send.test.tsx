@@ -10,7 +10,13 @@ let mount: HTMLElement;
 afterEach(() => { dispose?.(); mount?.remove(); vi.restoreAllMocks(); });
 const $ = <T extends HTMLElement = HTMLElement>(s: string) => mount.querySelector<T>(s)!;
 const line = () => $('[data-send-price]')?.textContent;
-const paidBubble = () => $('[data-message="paid"] .sats-meta')?.textContent;
+// A sent message's cost is behind one tap: reveal it, then read what the owner sees.
+const revealCost = (message: string) => {
+  const cost = mount.querySelector<HTMLElement>(`[data-message="${message}"] .sats-meta`);
+  if (cost?.getAttribute('data-message-cost') === 'hidden') cost.click();
+  return cost?.textContent;
+};
+const paidBubble = () => revealCost('paid');
 const type = (text: string) => {
   const area = $<HTMLTextAreaElement>('[data-composer] textarea');
   area.value = text;
@@ -33,25 +39,25 @@ async function open(source: Source) {
 }
 it('shows the exact host-sourced cap separately from plain Send and reports actual paid', async () => {
   const source = sourceForSend(); await open(source);
-  await vi.waitFor(() => expect(line()).toBe('up to 9.75 sats · includes max routing fee'));
+  await vi.waitFor(() => expect(line()).toBe('up to about 10 sats · includes max routing fee'));
   expect($('[data-send]').textContent).toBe('Send');
   $<HTMLButtonElement>('[data-send]').click();
-  await vi.waitFor(() => expect(paidBubble()).toBe('paid 2.25 sats'));
+  await vi.waitFor(() => expect(paidBubble()).toBe('paid about 3 sats · exactly 2.25 sats'));
   expect(vi.mocked(source.send).mock.calls[0].slice(0, 4)).toEqual([A, false, 'gm', 9750]);
-  type('next'); expect(line()).toBe('up to 9.75 sats · includes max routing fee');
+  type('next'); expect(line()).toBe('up to about 10 sats · includes max routing fee');
 });
 it('never relabels a retained fee allowance as actual paid', async () => {
   const source = sourceForSend();
   source.send = vi.fn(async (recipient, isRoom) => ({ message_id: 'paid', recipient, is_room: isRoom, delivered: true, amount_msat: 2250, total_msat: 9750, max_routing_fee_msat: 7500, sent_at_ms: Date.now() }));
   await open(source); $<HTMLButtonElement>('[data-send]').click();
-  await vi.waitFor(() => expect(paidBubble()).toBe('paid 2.25 sats · network fee not reported'));
+  await vi.waitFor(() => expect(paidBubble()).toBe('paid about 3 sats · network fee amount unknown · exactly 2.25 sats'));
 });
 it.each([
-  { fee: 375, readmission: undefined, ceiling: 7500, paid: '2.625' },
-  { fee: 0, readmission: undefined, ceiling: 7500, paid: '2.25' },
-  { fee: 375, readmission: 1000, ceiling: 7500, paid: '3.625' },
-  { fee: 0, readmission: 1000, ceiling: 7500, paid: '3.25' },
-  { fee: 375, readmission: undefined, ceiling: undefined, paid: '2.625' },
+  { fee: 375, readmission: undefined, ceiling: 7500, paid: 'about 3 sats · exactly 2.625' },
+  { fee: 0, readmission: undefined, ceiling: 7500, paid: 'about 3 sats · exactly 2.25' },
+  { fee: 375, readmission: 1000, ceiling: 7500, paid: 'about 4 sats · exactly 3.625' },
+  { fee: 0, readmission: 1000, ceiling: 7500, paid: 'about 4 sats · exactly 3.25' },
+  { fee: 375, readmission: undefined, ceiling: undefined, paid: 'about 3 sats · exactly 2.625' },
 ])('shows the proven fee $fee with readmission $readmission and ceiling $ceiling', async ({ fee, readmission, ceiling, paid }) => {
   const source = sourceForSend();
   source.send = vi.fn(async (recipient, isRoom) => ({ message_id: 'paid', recipient, is_room: isRoom,
@@ -65,7 +71,7 @@ it('keeps the paid amount unknown for an older node omitting both fee fields', a
   source.send = vi.fn(async (recipient, isRoom) => ({ message_id: 'paid', recipient, is_room: isRoom,
     delivered: true, amount_msat: 2250, sent_at_ms: Date.now() }));
   await open(source); $<HTMLButtonElement>('[data-send]').click();
-  await vi.waitFor(() => expect(paidBubble()).toBe('paid 2.25 sats · network fee not reported'));
+  await vi.waitFor(() => expect(paidBubble()).toBe('paid about 3 sats · network fee amount unknown · exactly 2.25 sats'));
 });
 it.each(['loading', 'failed', 'missing', 'stale', 'fee'] as const)('disables send with an honest reason when price is %s', async (state) => {
   const source = sourceForSend();
@@ -96,10 +102,10 @@ it('ignores double-click and held Enter, including after a raised-price refusal'
 });
 it('restores the ceiling for an emoji-only new draft', async () => {
   const source = sourceForSend(); await open(source); $<HTMLButtonElement>('[data-send]').click();
-  await vi.waitFor(() => expect(paidBubble()).toBe('paid 2.25 sats'));
+  await vi.waitFor(() => expect(paidBubble()).toBe('paid about 3 sats · exactly 2.25 sats'));
   $<HTMLButtonElement>('[data-emoji]').click();
   $<HTMLButtonElement>('[data-emoji-pick]').click();
-  expect(line()).toBe('up to 9.75 sats · includes max routing fee');
+  expect(line()).toBe('up to about 10 sats · includes max routing fee');
 });
 it('a late price refusal from A does not erase B’s price', async () => {
   const source = sourceForSend(); let finish!: () => void;
@@ -107,9 +113,9 @@ it('a late price refusal from A does not erase B’s price', async () => {
   await open(source); $<HTMLButtonElement>('[data-send]').click();
   await vi.waitFor(() => expect(source.send).toHaveBeenCalledTimes(1));
   $<HTMLButtonElement>(`[data-track="peer:${'b'.repeat(64)}"]`).click(); type('B draft');
-  await vi.waitFor(() => expect(line()).toBe('up to 9.75 sats · includes max routing fee'));
+  await vi.waitFor(() => expect(line()).toBe('up to about 10 sats · includes max routing fee'));
   finish(); await vi.waitFor(() => expect($<HTMLButtonElement>('[data-send]').disabled).toBe(false));
-  expect(line()).toBe('up to 9.75 sats · includes max routing fee');
+  expect(line()).toBe('up to about 10 sats · includes max routing fee');
 });
 it('ignores the second click of a double-click after a fast price-rise refusal', async () => {
   const source = sourceForSend();
@@ -163,12 +169,12 @@ it.each(['No route or channel to this peer yet.', 'Peer offline.', 'Quote unavai
   expect($<HTMLButtonElement>('[data-send]').disabled).toBe(true);
 });
 
-it.each([['da-DK', '9,75 sats'], ['en-US', '9.75 sats']])('uses exact locale-safe units under Send in %s', async (locale, price) => {
+it.each([['da-DK', 'ca. 10 sats'], ['en-US', 'about 10 sats']])('shows the ceiling as whole sats, rounded up, under Send in %s', async (locale, price) => {
   vi.spyOn(navigator, 'language', 'get').mockReturnValue(locale);
   await open(sourceForSend());
   await vi.waitFor(() => expect(line()).toBe(locale.startsWith('da') ? `højst ${price} · inklusive maksimalt routinggebyr` : `up to ${price} · includes max routing fee`));
   expect($('[data-cost-msat]').getAttribute('data-cost-msat')).toBe('9750');
-  expect($('[data-cost-msat]').textContent).toBe(price.replace(' ', ''));
+  expect($('[data-cost-msat]').textContent).toBe(price.replace(/ sats$/, 'sats'));
 });
 
 it.each(['chain_unavailable', 'not_synced'])('keeps Send disabled with the peer readiness reason: %s', async (reason) => {
@@ -201,23 +207,23 @@ it('preserves a first-contact readiness refusal under Send and recovers on retry
 
 // #125: receipt ceilings must never become the amount displayed in the bubble.
 it.each([
-  { principal: 0, fee: 375, ceiling: 5000, expected: 'paid 0.375 sats' },
+  { principal: 0, fee: 375, ceiling: 5000, expected: 'paid about 1 sat · exactly 0.375 sats' },
   { fee: 0, ceiling: 5000, expected: 'paid 1 sat' },
-  { fee: 375, ceiling: 5000, expected: 'paid 1.375 sats' },
-  { fee: undefined, ceiling: 5000, expected: 'paid 1 sat · network fee not reported' },
-  { fee: undefined, ceiling: 0, expected: 'paid 1 sat · network fee not reported' },
+  { fee: 375, ceiling: 5000, expected: 'paid about 2 sats · exactly 1.375 sats' },
+  { fee: undefined, ceiling: 5000, expected: 'paid 1 sat · network fee amount unknown' },
+  { fee: undefined, ceiling: 0, expected: 'paid 1 sat · network fee amount unknown' },
 ])('bubble uses settlement evidence: $expected (ceiling $ceiling)', async ({ principal = 1000, fee, ceiling, expected }) => {
   const source = sourceForSend();
   source.send = async (recipient, isRoom) => ({ message_id: 'paid', recipient, is_room: isRoom,
     delivered: true, amount_msat: principal, fee_paid_msat: fee, max_routing_fee_msat: ceiling,
     total_msat: 6000, sent_at_ms: Date.now() });
   await open(source); $<HTMLButtonElement>('[data-send]').click();
-  await vi.waitFor(() => expect($('[data-message="paid"] .sats-meta')?.textContent).toBe(expected));
+  await vi.waitFor(() => expect(revealCost('paid')).toBe(expected));
   expect(line()).toBe('');
 });
 it('breaks the ceiling into peer price and routing allowance, and only when they add up', async () => {
   const source = sourceForSend(); await open(source);
-  await vi.waitFor(() => expect(line()).toBe('up to 9.75 sats · includes max routing fee'));
+  await vi.waitFor(() => expect(line()).toBe('up to about 10 sats · includes max routing fee'));
   const rows = [...mount.querySelectorAll('[data-price-breakdown] dd')].map((d) => d.textContent);
   expect(rows).toEqual(['2.25 sats', '7.5 sats', '9.75 sats']);
   expect($('[data-composer-info]').textContent).toContain('A ceiling, not a charge');
@@ -227,7 +233,7 @@ it('breaks the ceiling into peer price and routing allowance, and only when they
   expect($('.send-price').classList.contains('priced')).toBe(true);
   // After a send the bubble reports what was paid; the empty composer stays quiet.
   $<HTMLButtonElement>('[data-send]').click();
-  await vi.waitFor(() => expect(paidBubble()).toBe('paid 2.25 sats'));
+  await vi.waitFor(() => expect(paidBubble()).toBe('paid about 3 sats · exactly 2.25 sats'));
   expect(mount.querySelector('[data-price-breakdown]')).toBeNull();
 });
 it('shows no breakdown when the peer price is unknown or stale', async () => {
