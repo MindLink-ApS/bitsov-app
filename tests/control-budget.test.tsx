@@ -723,7 +723,7 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>(`[data-track="peer:${NEW}"]`)!.click();
     await waitFor(() => expect($('[data-door-quote]')?.getAttribute('data-door-quote')).toBe('17500'));
-    expect(text('[data-door-quote]')).toContain('up to 13.5 sats network fee');
+    expect(text('[data-door-quote]')).toContain('up to about 14 sats network fee');
     expect(text('[data-first-budget="50000"]')).toBe('50 sats a day · 2 messages');
     type('[data-composer] textarea', 'hello including fees');
     await submit();
@@ -1558,11 +1558,11 @@ describe('invisible payments in the composer and the context panel', () => {
     type('[data-composer] textarea', 'room draft');
     await submit();
     await waitFor(() => expect($('[data-cost-msat]')?.getAttribute('data-cost-msat')).toBe('9500'));
-    expect(text('[data-cost]')).toContain('7.5 sats');
+    expect(text('[data-cost]')).toContain('about 8 sats');
     expect(host.used('message_send')).toHaveLength(1);
     expect(host.used('message_send')[0].args).toMatchObject({ max_msat: 7000, max_recipient_msat: { [MAYA]: 7000 } });
     expect($<HTMLTextAreaElement>('[data-composer] textarea')!.value).toBe('room draft');
-    expect(text('[data-send-price]')).toContain('9.5 sats');
+    expect(text('[data-send-price]')).toContain('about 10 sats');
     await submit();
     await waitFor(() => expect(host.used('message_send')).toHaveLength(2));
     expect(host.used('message_send')[1].args).toMatchObject({ max_msat: 9500, max_recipient_msat: { [MAYA]: 9500 } });
@@ -1741,8 +1741,8 @@ describe('invisible payments in the composer and the context panel', () => {
     await openShell();
     $<HTMLButtonElement>('[data-tab="budget"]')!.click();
     expect(text('[data-tally-total]')).toBe('1 sat / 500 sats');
-    expect(text('[data-fee-unknown]')).toContain('network fee not reported');
-    expect(text(`[data-budget-row="${MAYA}"]`)).toContain('network fee not reported');
+    expect(text('[data-fee-unknown]')).toContain('network fee amount unknown');
+    expect(text(`[data-budget-row="${MAYA}"]`)).toContain('network fee amount unknown');
   });
 
   // ---- "Allow payments" / "Resume payments" as approve & send, bound to armed_by_request ----

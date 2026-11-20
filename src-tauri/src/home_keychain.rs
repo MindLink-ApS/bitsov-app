@@ -41,7 +41,13 @@ fn store(
         let _ = name;
         android_store(device_blob, node, suffix, bytes, secret, false)
     }
+    #[cfg(windows)]
+    {
+        let _ = name;
+        super::home_keychain_windows::store(node, suffix, bytes, secret, device_blob)
+    }
     #[cfg(not(any(
+        windows,
         target_os = "android",
         target_os = "ios",
         all(target_os = "macos", desktop, not(feature = "mobile"))
@@ -96,7 +102,13 @@ fn read(
                 format!("Android encrypted storage refused the home-node item: {error}")
             })
     }
+    #[cfg(windows)]
+    {
+        let _ = name;
+        super::home_keychain_windows::read(node, suffix, secret, device_blob)
+    }
     #[cfg(not(any(
+        windows,
         target_os = "android",
         target_os = "ios",
         all(target_os = "macos", desktop, not(feature = "mobile"))

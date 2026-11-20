@@ -50,7 +50,7 @@ export function CallRepairs(props: { source: Source; refreshKey: string | null; 
         <For each={rows()}>{row => <div class="call-actions">
           <span class="hint">{tr('caRecord')}{' '}{row.index_id.slice(0, 12)}{row.acknowledged ? tr('caAcknowledged') : ''}</span>
           <button type="button" class="soft money" data-call-repair disabled={props.blocked || busy() !== null} onClick={() => void repair(row)}>
-            {busy() === row.index_id ? tr('caChecking') : row.hangup_cap_msat != null ? tr('caRepairAndEndUpTo', fmtAmount(row.hangup_cap_msat)) : row.acknowledged ? tr('caCheckRepairAgain') : tr('caCheckRepairAcknowledge')}
+            {busy() === row.index_id ? tr('caChecking') : row.hangup_cap_msat != null ? tr('caRepairAndEndUpTo', fmtAmount(row.hangup_cap_msat, 'up')) : row.acknowledged ? tr('caCheckRepairAgain') : tr('caCheckRepairAcknowledge')}
           </button>
         </div>}</For>
       </Show>

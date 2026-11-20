@@ -77,7 +77,11 @@ export function FirstSpendSheet(props: {
     const opener = document.activeElement as HTMLElement | null;
     scrim.showModal();
     dialog.focus();
-    const keepFocus = (event: FocusEvent) => { if (!dialog.contains(event.target as Node)) dialog.focus(); };
+    // Another modal opened above this sheet (for example the quit-during-a-call question) owns the keyboard:
+    // the sheet stops pulling focus back while it is open, like the owner-approval sheet does.
+    const otherModalOpen = () => [...document.querySelectorAll('dialog[open], [aria-modal="true"]')]
+      .some(el => el !== scrim && !scrim.contains(el));
+    const keepFocus = (event: FocusEvent) => { if (!otherModalOpen() && !dialog.contains(event.target as Node)) dialog.focus(); };
     document.addEventListener('focusin', keepFocus);
     onCleanup(onEscape(props.onCancel));
     onCleanup(() => {
