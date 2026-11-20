@@ -312,7 +312,7 @@ CASE="xwin DONE with invalid UTF-8 on the first line"; printf 'x86_64 \377\n' > 
 run 5 "xwin/DONE does not list it" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 # A NUL (valid UTF-8) stays inside a token for cargo-xwin; it must not make "x86_64" match.
 for marker in 'x86_64\000junk' 'x86_64\000aarch64' 'x86_64\000' 'aarch64\000x86_64x'; do
-  CASE="xwin DONE first line with NUL: $marker"; printf "$marker\\n" > "$XWIN/xwin/DONE"
+  CASE="xwin DONE first line with NUL: $marker"; printf '%b\n' "$marker" > "$XWIN/xwin/DONE"
   run 5 "xwin/DONE does not list it" --out "$T/out" --runner xwin --source-sha "$SHA" --check-only
 done
 CASE="xwin DONE with a CRLF first line"; printf 'x86_64\r\nsdk/include\n' > "$XWIN/xwin/DONE"
