@@ -166,6 +166,95 @@ struct PairingCtx {
     data_dir: PathBuf,
 }
 
+/// The active node's identity. Every change of it, back to a node active before
+/// included, counts once, so a read asked of one node can tell whether that node
+/// stayed the active one throughout: the value alone cannot.
+struct NodeIdCell {
+    id: Mutex<Option<String>>,
+    changes: std::sync::atomic::AtomicU64,
+}
+
+/// Read and written as the `Mutex` it wraps. A write that leaves a different
+/// value is counted when the guard is dropped, still under the lock.
+struct NodeIdGuard<'a> {
+    id: std::sync::MutexGuard<'a, Option<String>>,
+    changes: &'a std::sync::atomic::AtomicU64,
+    before: Option<Option<String>>,
+}
+
+impl NodeIdCell {
+    fn new() -> Self {
+        Self { id: Mutex::new(None), changes: std::sync::atomic::AtomicU64::new(0) }
+    }
+
+    fn lock(&self) -> std::sync::LockResult<NodeIdGuard<'_>> {
+        let guard = |id| NodeIdGuard { id, changes: &self.changes, before: None };
+        self.id.lock().map(guard).map_err(|poisoned| std::sync::PoisonError::new(guard(poisoned.into_inner())))
+    }
+}
+
+impl NodeIdGuard<'_> {
+    /// How many times the identity has changed, as of this guard.
+    fn changes(&self) -> u64 { self.changes.load(Ordering::SeqCst) }
+}
+
+impl std::ops::Deref for NodeIdGuard<'_> {
+    type Target = Option<String>;
+    fn deref(&self) -> &Option<String> { &self.id }
+}
+
+impl std::ops::DerefMut for NodeIdGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Option<String> {
+        if self.before.is_none() { self.before = Some(self.id.clone()); }
+        &mut self.id
+    }
+}
+
+impl Drop for NodeIdGuard<'_> {
+    fn drop(&mut self) {
+        if self.before.as_ref().is_some_and(|before| *before != *self.id) {
+            self.changes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// The node a read is asked of, and the connection it goes over: the node's
+/// identity and how often it has changed, the remote connection and the network
+/// authority. A read bound to it is refused as soon as any of them moves on,
+/// before each request goes out (a retry after a new token included), when its
+/// answer arrives and when that answer is read. `until`: the answer is of no use
+/// from then on, and no request goes out at or after it.
+struct NodeBound {
+    node_id: String,
+    changes: u64,
+    remote: u64,
+    network: u64,
+    until: Option<tokio::time::Instant>,
+}
+
+impl NodeBound {
+    /// Bound to `node_id` as it is now. None when it is not the active node.
+    fn now(state: &NodeState, node_id: &str, until: Option<tokio::time::Instant>) -> Option<Self> {
+        // One lock at a time: other paths take these in either order.
+        let network = *state.network_auth_epoch.lock().unwrap();
+        let remote = *state.remote_connect_generation.borrow();
+        let id = state.node_id.lock().unwrap();
+        (id.as_deref() == Some(node_id)).then(|| Self { node_id: node_id.into(), changes: id.changes(), remote, network, until })
+    }
+
+    /// Still this node over this connection, and still in time. Taking the
+    /// snapshot can block, so the time is read after it, not before.
+    fn holds(&self, state: &NodeState) -> bool {
+        let same = NodeBound::now(state, &self.node_id, None)
+            .is_some_and(|now| (now.changes, now.remote, now.network) == (self.changes, self.remote, self.network));
+        same && self.until.is_none_or(|until| tokio::time::Instant::now() < until)
+    }
+
+    fn refusal(&self, route: &str) -> String {
+        format!("{route}: the active node or its connection changed, or the time for this read ran out")
+    }
+}
+
 struct NodeState {
     /// Fixed by the bundled identifier, never by an environment variable or pairing state.
     remote_only: bool,
@@ -181,7 +270,7 @@ struct NodeState {
     #[cfg(all(desktop, not(feature = "mobile")))]
     owner: local_owner::OwnerState,
     ready: Mutex<bool>,
-    node_id: Mutex<Option<String>>,
+    node_id: NodeIdCell,
     error: Mutex<Option<String>>,
     /// Supervised node process; killed on app exit so no orphan node is left running.
     /// The supervised node, owned through `SharedChild` so signalling stays
@@ -835,7 +924,7 @@ impl NodeState {
             budget_io: Mutex::new(()),
             money: tokio::sync::Mutex::new(()),
             ready: Mutex::new(false),
-            node_id: Mutex::new(None),
+            node_id: NodeIdCell::new(),
             error: Mutex::new(None),
             #[cfg(all(desktop, not(feature = "mobile")))]
             child: Mutex::new(None),
@@ -2772,6 +2861,21 @@ async fn call_api(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<(reqwest::StatusCode, String), String> {
+    call_api_on(state, None, method, path, body).await
+}
+
+/// `call_api`, for a read that only `bound`'s node may answer. Each step that
+/// could cross to another node is checked: before the token is refreshed, before
+/// each request goes out, when the answer arrives (a refusal of the token
+/// included, so no new token is asked for and nothing is retried on another
+/// node) and once the answer is read.
+async fn call_api_on(
+    state: &NodeState,
+    bound: Option<&NodeBound>,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<(reqwest::StatusCode, String), String> {
     // This channel holds the app's delegated (or legacy loopback) credential,
     // never independent owner authority. Do not send it to an owner-only route,
     // including after a refresh or an elevation to budget-scoped spend.
@@ -2779,9 +2883,14 @@ async fn call_api(
         return Err("First-contact approval requires independent owner authority at the node. This app cannot issue it with its paired spend grant.".into());
     }
     state.require_network_authority(&method, path)?;
+    let route = path.split('?').next().unwrap_or(path);
+    let still = || bound.is_none_or(|bound| bound.holds(state));
+    let changed = || bound.map(|bound| bound.refusal(route)).unwrap_or_default();
+    if !still() { return Err(changed()); }
     ensure_fresh_token(state).await;
     let mut refreshed = false;
     loop {
+        if !still() { return Err(changed()); }
         let token = state
             .checked_token(&method, path)?
             .ok_or_else(|| "the node is not authenticated yet".to_string())?;
@@ -2793,10 +2902,15 @@ async fn call_api(
         if let Some(ref json) = body {
             request = request.json(json);
         }
+        // Taking the credential can block. Check the binding and its deadline again
+        // after that, with nothing awaited between this check and the send, so a read
+        // that waited never reaches a node it no longer belongs to, or arrives late.
+        if !still() { return Err(changed()); }
         let response = request
             .send()
             .await
             .map_err(|e| format!("{path} request failed: {e}"))?;
+        if !still() { return Err(changed()); }
         let status = response.status();
 
         // A token is good for 24h and the app may outlive it; refresh once.
@@ -2810,6 +2924,7 @@ async fn call_api(
             .text()
             .await
             .map_err(|e| format!("{path} response read failed: {e}"))?;
+        if !still() { return Err(changed()); }
         return Ok((status, text));
     }
 }
@@ -4040,7 +4155,11 @@ fn now_ms() -> u64 {
 }
 
 async fn get_json<T: serde::de::DeserializeOwned>(state: &NodeState, path: &str) -> Result<T, String> {
-    let (status, body) = call_api(state, reqwest::Method::GET, path, None).await?;
+    get_json_on(state, None, path).await
+}
+
+async fn get_json_on<T: serde::de::DeserializeOwned>(state: &NodeState, bound: Option<&NodeBound>, path: &str) -> Result<T, String> {
+    let (status, body) = call_api_on(state, bound, reqwest::Method::GET, path, None).await?;
     // Error text names the route, never the query (which may carry a peer id).
     let route = path.split('?').next().unwrap_or(path);
     decode(route, status, &body)
@@ -8159,7 +8278,7 @@ fn spend_settled(state: &NodeState) -> bool {
 /// (`CallConsents::node_reported`). A failed read proves nothing: the call
 /// stays pinned. Returns whether the node shows it closed.
 async fn verify_call_closed(state: &NodeState, node_id: &str, peer: &str, call_id: &str) -> bool {
-    let Ok(status) = read_call_status(state, peer, call_id).await else { return false };
+    let Ok(status) = read_call_status_on(state, node_id, peer, call_id).await else { return false };
     let settled = spend_settled(state);
     state.call_consents.lock().unwrap().node_reported(node_id, peer, call_id, status.as_ref(), settled)
 }
@@ -8326,7 +8445,7 @@ async fn checked_call_hold(state: &NodeState, peer: &str, call_id: &str)
             kept.end(&node_id, Some(&target), call_id);
         }
     };
-    let Some(status) = read_call_status(state, &target, call_id).await? else {
+    let Some(status) = read_call_status_on(state, &node_id, &target, call_id).await? else {
         // The node accepted the offer and lists the call no more: it is over.
         reported(state, None);
         return Err(ActionError::new("call_not_live", "Your node no longer lists this call. Nothing more was paid."));
@@ -8496,11 +8615,22 @@ async fn do_call_hold(state: &NodeState, peer: &str, call_id: &str, confirm_rese
 /// them (`GET /calls?peer=`). Read-only: never pays, releases or settles.
 /// `None`: the node no longer lists the call (ended with nothing pending).
 async fn read_call_status(state: &NodeState, peer: &str, call_id: &str) -> Result<Option<control::CallStatus>, ActionError> {
+    read_call_status_from(state, None, peer, call_id).await
+}
+
+/// `read_call_status`, asked of `node_id` only: a failed read if another node
+/// is active, or becomes active at any point of it, even for a moment.
+async fn read_call_status_on(state: &NodeState, node_id: &str, peer: &str, call_id: &str) -> Result<Option<control::CallStatus>, ActionError> {
+    let bound = NodeBound::now(state, node_id, None).ok_or_else(|| ActionError::node("/calls: another node is active"))?;
+    read_call_status_from(state, Some(&bound), peer, call_id).await
+}
+
+async fn read_call_status_from(state: &NodeState, bound: Option<&NodeBound>, peer: &str, call_id: &str) -> Result<Option<control::CallStatus>, ActionError> {
     let peer = control::node_id(peer).map_err(ActionError::invalid)?;
     if !act::is_call_id(call_id) {
         return Err(ActionError::invalid("invalid call id"));
     }
-    let calls: Vec<control::CallStatus> = get_json(state, &format!("/calls?peer={peer}")).await.map_err(ActionError::node)?;
+    let calls: Vec<control::CallStatus> = get_json_on(state, bound, &format!("/calls?peer={peer}")).await.map_err(ActionError::node)?;
     Ok(calls.into_iter().find(|c| c.id == call_id))
 }
 
@@ -8830,27 +8960,35 @@ const END_WAIT_MAX: Duration = if cfg!(test) { Duration::from_secs(5) } else { D
 /// A further request could only be refused, by the node or by anything that
 /// changed meanwhile (a pause, an approval or budget gone), and none of those is a
 /// reason to keep a call open that is over. Nothing is sent or paid, and no other
-/// pending result is touched. A read that fails, or a call still open when the wait
-/// runs out (a read in progress included), leaves the refusal as the answer, and
-/// "Try ending it again" stays on the card.
+/// pending result is touched. A read that fails, a call still open when the wait
+/// runs out (a read in progress included), or another node made active meanwhile
+/// (even for a moment) or its connection replaced, leaves the refusal as the
+/// answer, and "Try ending it again" stays on the card.
 async fn do_op_end_call_when_node_ends(state: &NodeState, call_id: &str, max_msat: Option<u64>) -> Result<spend_journal::OpView, ActionError> {
     let refused = do_op_end_call_with_limit(state, call_id, max_msat).await;
     let Err(error) = &refused else { return refused };
     if error.code != "not_dispatched" { return refused; }
     let Some(offer) = refused_hangup_admission(state, error.operation_id.as_deref()).await else { return refused };
     let deadline = tokio::time::Instant::now() + END_WAIT_MAX;
+    // Only the call's own node can show it ended, and only over the connection
+    // the wait began on. Every read is bound to both and to the deadline: none
+    // goes out, is retried or is believed once another node was made active
+    // (even if the call's own is active again) or the deadline has come, and the
+    // wait ends with the refusal.
+    let Some(bound) = NodeBound::now(state, &offer.node_id, Some(deadline)) else { return refused };
     loop {
-        match tokio::time::timeout_at(deadline, read_call_status(state, &offer.peer, call_id)).await {
+        match tokio::time::timeout_at(deadline, read_call_status_from(state, Some(&bound), &offer.peer, call_id)).await {
             Ok(Ok(Some(status))) if status.state != "ended" => {}
             Ok(Ok(_)) => break,
             Ok(Err(_)) | Err(_) => return refused,
         }
+        if cfg!(test) { pause_points::at(&state.api_base, "end_wait_read").await; }
         tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + END_WAIT_POLL)).await;
     }
-    // Under the same identity that read the call: another node's word closes nothing.
-    if state.node_id.lock().unwrap().as_deref() != Some(offer.node_id.as_str()) { return refused; }
     {
         let _money = state.money.lock().await;
+        // Still the node and connection that read the call: another node's word closes nothing.
+        if !(NodeBound { until: None, ..bound }).holds(state) { return refused; }
         locked_spend_journal(state)?.observe_call(&offer, true)?;
     }
     do_op_end_call_with_limit(state, call_id, max_msat).await
@@ -8959,9 +9097,11 @@ async fn end_call_admission(state: &NodeState, call_id: &str, max_msat: Option<u
             // No hangup can be priced, so this never reached the node, which is how
             // End learns a call is over. Ask it: a call it has ended needs no hangup.
             Err(error) if error.code == "call_price_unknown" => {
-                let over = read_call_status(state, &offer.peer, call_id).await.is_ok_and(|status| status.is_none_or(|s| s.state == "ended"));
+                let Some(bound) = NodeBound::now(state, &offer.node_id, None) else { return Err(error) };
+                let over = read_call_status_from(state, Some(&bound), &offer.peer, call_id).await.is_ok_and(|status| status.is_none_or(|s| s.state == "ended"));
                 let _money = state.money.lock().await;
-                if !over || state.node_id.lock().unwrap().as_deref() != Some(offer.node_id.as_str()) { return Err(error); }
+                // The call's own node, and the same one throughout since the read.
+                if !over || !bound.holds(state) { return Err(error); }
                 let journal = locked_spend_journal(state)?;
                 journal.observe_call(&offer, true)?;
                 return journal.operation_record(&offer.op_id)?.map(Into::into)
@@ -21502,6 +21642,421 @@ mod control_act_tests {
         assert_eq!(error.code, "not_dispatched");
         assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
         assert_eq!(hangups(&node), 1);
+    }
+
+// A read can block while it takes the app's credential. The binding (and its
+// deadline) are checked again after that, right before the request leaves, so a
+// read that waited never reaches a node it no longer belongs to, or arrives late.
+// Contention on the network epoch while the credential is held is the signal
+// that the read is blocked there.
+fn wait_for_token_contention(state: &NodeState) {
+    let limit = Instant::now() + Duration::from_secs(2);
+    let mut busy_since = None;
+    loop {
+        match state.network_auth_epoch.try_lock() {
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let since = busy_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= Duration::from_millis(25) { return; }
+            }
+            Ok(epoch) => {
+                drop(epoch);
+                busy_since = None;
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("epoch poisoned"),
+        }
+        assert!(Instant::now() < limit, "read never blocked acquiring its credential");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn bound_status_read_does_not_dispatch_after_switch_during_token_acquisition() {
+    let rt = race_runtime();
+    let read_count = Arc::new(AtomicUsize::new(0));
+    let seen = read_count.clone();
+    let mut node = fake(AuthMode::Local, Arc::new(move |_m, p, _b| {
+        if p.starts_with("/calls?") {
+            seen.fetch_add(1, Ordering::SeqCst);
+            (200, "[]".into())
+        } else { (404, "{}".into()) }
+    }));
+    node.state.signet_only = true;
+    *node.state.network_verified.lock().unwrap() = Some(*node.state.network_auth_epoch.lock().unwrap());
+    let bound = NodeBound::now(&node.state, OWN, None).unwrap();
+    let result = std::thread::scope(|s| {
+        let credential = node.state.token.lock().unwrap();
+        let read = s.spawn(|| rt.block_on(read_call_status_from(&node.state, Some(&bound), A, CALL_ID)));
+        wait_for_token_contention(&node.state);
+        *node.state.node_id.lock().unwrap() = Some(C.into());
+        drop(credential);
+        read.join().unwrap()
+    });
+    assert!(result.is_err(), "a changed binding preserves refusal");
+    assert_eq!(read_count.load(Ordering::SeqCst), 0, "a status read was dispatched after the binding changed");
+}
+
+#[test]
+fn end_does_not_dispatch_after_switch_during_token_acquisition() {
+    let rt = race_runtime();
+    let (routes, _) = node_with_callee_offline(usize::MAX);
+    let switched = Arc::new(AtomicBool::new(false));
+    let wrong_reads = Arc::new(AtomicUsize::new(0));
+    let (on, wrong) = (switched.clone(), wrong_reads.clone());
+    let mut node = rt.block_on(minute_ready(Arc::new(move |m, p, b| {
+        if p.starts_with("/calls?") && on.load(Ordering::SeqCst) {
+            wrong.fetch_add(1, Ordering::SeqCst);
+            return (200, "[]".into());
+        }
+        routes(m, p, b)
+    })));
+    node.state.signet_only = true;
+    *node.state.network_verified.lock().unwrap() = Some(*node.state.network_auth_epoch.lock().unwrap());
+    let offer = offer_op(&node);
+    let (read, go_on) = pause_points::arm(&node.state.api_base, "end_wait_read");
+    let end = std::thread::scope(|s| {
+        let end = s.spawn(|| rt.block_on(do_op_end_call_when_node_ends(&node.state, CALL_ID, None)));
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), read.notified()).await.expect("End's first read completed");
+        });
+        let credential = node.state.token.lock().unwrap();
+        go_on.notify_one();
+        wait_for_token_contention(&node.state);
+        *node.state.node_id.lock().unwrap() = Some(C.into());
+        switched.store(true, Ordering::SeqCst);
+        drop(credential);
+        end.join().unwrap()
+    });
+    assert_eq!(end.unwrap_err().code, "not_dispatched");
+    assert!(admission_is_open(&node, &offer));
+    assert_eq!(wrong_reads.load(Ordering::SeqCst), 0, "End read after the binding changed while waiting for a credential");
+}
+
+#[test]
+fn bound_status_read_does_not_dispatch_after_deadline_during_token_acquisition() {
+    let rt = race_runtime();
+    let read_count = Arc::new(AtomicUsize::new(0));
+    let seen = read_count.clone();
+    let mut node = fake(AuthMode::Local, Arc::new(move |_m, p, _b| {
+        if p.starts_with("/calls?") {
+            seen.fetch_add(1, Ordering::SeqCst);
+            (200, "[]".into())
+        } else { (404, "{}".into()) }
+    }));
+    node.state.signet_only = true;
+    *node.state.network_verified.lock().unwrap() = Some(*node.state.network_auth_epoch.lock().unwrap());
+    let bound = NodeBound::now(&node.state, OWN, Some(tokio::time::Instant::now() + Duration::from_millis(300))).unwrap();
+    let result = std::thread::scope(|s| {
+        let credential = node.state.token.lock().unwrap();
+        let read = s.spawn(|| rt.block_on(read_call_status_from(&node.state, Some(&bound), A, CALL_ID)));
+        wait_for_token_contention(&node.state);
+        std::thread::sleep(Duration::from_millis(350));
+        drop(credential);
+        read.join().unwrap()
+    });
+    assert!(result.is_err(), "a passed deadline preserves refusal");
+    assert_eq!(read_count.load(Ordering::SeqCst), 0, "a status read was dispatched after its deadline");
+}
+
+#[test]
+fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() {
+    let rt = race_runtime();
+    let read_count = Arc::new(AtomicUsize::new(0));
+    let seen = read_count.clone();
+    let mut node = fake(AuthMode::Local, Arc::new(move |_m, p, _b| {
+        if p.starts_with("/calls?") {
+            seen.fetch_add(1, Ordering::SeqCst);
+            (200, "[]".into())
+        } else { (404, "{}".into()) }
+    }));
+    node.state.signet_only = true;
+    *node.state.network_verified.lock().unwrap() = Some(*node.state.network_auth_epoch.lock().unwrap());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let bound = NodeBound::now(&node.state, OWN, Some(deadline)).unwrap();
+    let (arrived, resume) = pause_points::arm(&node.state.api_base, "after_network_check");
+    let result = std::thread::scope(|s| {
+        let read = s.spawn(|| rt.block_on(read_call_status_from(&node.state, Some(&bound), A, CALL_ID)));
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), arrived.notified()).await.expect("credential acquired");
+        });
+        // The final check waits on the network epoch, held here past the deadline.
+        let epoch = node.state.network_auth_epoch.lock().unwrap();
+        assert!(tokio::time::Instant::now() < deadline, "resume before the deadline");
+        resume.notify_one();
+        std::thread::sleep(deadline.saturating_duration_since(tokio::time::Instant::now()) + Duration::from_millis(100));
+        assert!(!read.is_finished(), "read still waiting for validation");
+        drop(epoch);
+        read.join().unwrap()
+    });
+    assert!(result.is_err(), "a passed deadline preserves refusal");
+    assert_eq!(read_count.load(Ordering::SeqCst), 0, "a status read was dispatched after final validation blocked across its deadline");
+}
+
+
+    /// No status read starts at or after the wait's deadline: one begun there could
+    /// only time out. End's first read is answered "still live" and has completed:
+    /// End stops right after it. The deadline, set before that read, then passes,
+    /// and the node's credential is held elsewhere before End goes on. A read begun
+    /// now would wait for the credential. End returns the refusal at once instead,
+    /// and nothing more reaches the node.
+    #[test]
+    fn end_starts_no_status_read_at_its_deadline() {
+        let rt = race_runtime();
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let node = rt.block_on(minute_ready(routes));
+        let (read, go_on) = pause_points::arm(&node.state.api_base, "end_wait_read");
+        let reads = |node: &Fake| node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let (holding, released) = (AtomicBool::new(false), AtomicBool::new(false));
+        std::thread::scope(|s| {
+            let end = s.spawn(|| rt.block_on(do_op_end_call_when_node_ends(&node.state, CALL_ID, None)));
+            rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(2), read.notified()).await.expect("End's first read completed");
+            });
+            let before = reads(&node);
+            std::thread::sleep(END_WAIT_MAX);
+            s.spawn(|| {
+                let _token = node.state.token.lock().unwrap();
+                holding.store(true, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(500));
+                released.store(true, Ordering::SeqCst);
+            });
+            while !holding.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+            go_on.notify_one();
+            let error = end.join().unwrap().unwrap_err();
+            assert_eq!(error.code, "not_dispatched");
+            assert!(!released.load(Ordering::SeqCst), "a read began at the deadline and waited for the credential");
+            assert_eq!(reads(&node), before, "a read reached the node at the deadline");
+        });
+    }
+
+    /// Another node made active while End waits is never asked about this call.
+    #[tokio::test]
+    async fn end_asks_only_the_calls_own_node_while_it_waits() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let switched = Arc::new(AtomicBool::new(false));
+        let elsewhere = Arc::new(AtomicUsize::new(0));
+        let (on, asked) = (switched.clone(), elsewhere.clone());
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            if p.starts_with("/calls?") && on.load(Ordering::SeqCst) { asked.fetch_add(1, Ordering::SeqCst); }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let before = node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let (end, ()) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+            until_end_is_waiting(&node, before).await;
+            *node.state.node_id.lock().unwrap() = Some(C.into());
+            switched.store(true, Ordering::SeqCst);
+        });
+        assert_eq!(end.unwrap_err().code, "not_dispatched");
+        assert_eq!(elsewhere.load(Ordering::SeqCst), 0, "a status read went to the other node");
+        assert!(admission_is_open(&node, &offer));
+        assert_eq!(hangups(&node), 1);
+    }
+
+    /// A switch of the active node ends the wait with the refusal, at once. The
+    /// call is never shown closed: not even when the call's own node is active
+    /// again by the time the other node's "no such call" comes back.
+    #[tokio::test]
+    async fn a_node_switch_during_ends_wait_leaves_the_refusal() {
+        let (routes, paid) = node_with_callee_offline(usize::MAX);
+        let switched = Arc::new(AtomicBool::new(false));
+        let asked = Arc::new(AtomicBool::new(false));
+        let back = Arc::new(AtomicBool::new(false));
+        let (on, seen, again) = (switched.clone(), asked.clone(), back.clone());
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            if p.starts_with("/calls?") && on.load(Ordering::SeqCst) {
+                // The other node has no such call. Its answer arrives once the
+                // call's own node is active again.
+                seen.store(true, Ordering::SeqCst);
+                while !again.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+                return (200, "[]".into());
+            }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let pays = paid.lock().unwrap().pays;
+        let before = node.targets().iter().filter(|t| t.contains("/calls?")).count();
+        let started = Instant::now();
+        let (end, ()) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+            until_end_is_waiting(&node, before).await;
+            *node.state.node_id.lock().unwrap() = Some(C.into());
+            switched.store(true, Ordering::SeqCst);
+            for _ in 0..500 {
+                if asked.load(Ordering::SeqCst) { break; }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            switched.store(false, Ordering::SeqCst);
+            *node.state.node_id.lock().unwrap() = Some(OWN.into());
+            back.store(true, Ordering::SeqCst);
+        });
+        let error = end.expect_err("a switch never shows the call closed");
+        assert_eq!(error.code, "not_dispatched");
+        assert!(started.elapsed() < END_WAIT_MAX / 2, "the switch ended the wait: {:?}", started.elapsed());
+        assert!(admission_is_open(&node, &offer));
+        assert!(pending(&node).is_none());
+        assert_eq!(hangups(&node), 1);
+        assert_eq!(paid.lock().unwrap().pays, pays, "nothing was paid");
+    }
+
+    /// The node's first status read once `armed` is set is held until the test
+    /// has made another node active and the call's own node active again. Its
+    /// answer then is that the call is not listed.
+    fn read_held_across_a_switch(routes: Routes) -> (Routes, Arc<AtomicBool>, Arc<AtomicBool>, Arc<AtomicBool>) {
+        let (armed, asked, back) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let (on, seen, again) = (armed.clone(), asked.clone(), back.clone());
+        (Arc::new(move |m, p, b| {
+            if p.starts_with("/calls?") && on.load(Ordering::SeqCst) && !seen.swap(true, Ordering::SeqCst) {
+                while !again.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+                return (200, "[]".into());
+            }
+            routes(m, p, b)
+        }), armed, asked, back)
+    }
+
+    /// Once the held read reached the node: another node is made active, then the
+    /// call's own again, and only then does the held read answer.
+    async fn switch_away_and_back(node: &Fake, asked: &AtomicBool, back: &AtomicBool) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !asked.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(1)).await; }
+        }).await.expect("the status read reached the node");
+        *node.state.node_id.lock().unwrap() = Some(C.into());
+        *node.state.node_id.lock().unwrap() = Some(OWN.into());
+        back.store(true, Ordering::SeqCst);
+    }
+
+    /// While End's read is with the node, another node is made active and then
+    /// the call's own again. The answer closes nothing: it is not known to be
+    /// the call's own node's.
+    #[tokio::test]
+    async fn ends_read_across_a_switch_and_back_closes_nothing() {
+        let (routes, paid) = node_with_callee_offline(usize::MAX);
+        let (routes, armed, asked, back) = read_held_across_a_switch(routes);
+        let node = minute_ready(routes).await;
+        let offer = offer_op(&node);
+        let pays = paid.lock().unwrap().pays;
+        armed.store(true, Ordering::SeqCst);
+        let (end, ()) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None),
+            switch_away_and_back(&node, &asked, &back));
+        assert_eq!(end.expect_err("a read across a switch never shows the call closed").code, "not_dispatched");
+        assert!(admission_is_open(&node, &offer));
+        assert_eq!(hangups(&node), 1);
+        assert_eq!(paid.lock().unwrap().pays, pays, "nothing was paid");
+    }
+
+    /// End's read is refused for its token, and the node is switched before the
+    /// refusal comes back. No new token is asked for and the read is not tried
+    /// again on the other node: the refusal stays the answer.
+    #[tokio::test]
+    async fn ends_read_is_not_retried_after_a_node_switch() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let hanging_up = Arc::new(AtomicBool::new(false));
+        let (attempts, minted) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (switched, restored) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let (armed, seen, mint, on, again) = (hanging_up.clone(), attempts.clone(), minted.clone(), switched.clone(), restored.clone());
+        let node = minute_ready(Arc::new(move |m, p, b| {
+            if p == "/messages/compose"
+                && serde_json::from_str::<serde_json::Value>(b).unwrap_or_default()["kind"] == 403
+            {
+                armed.store(true, Ordering::SeqCst);
+            }
+            if !armed.load(Ordering::SeqCst) { return routes(m, p, b); }
+            if p == "/auth/local" {
+                mint.fetch_add(1, Ordering::SeqCst);
+                return (200, r#"{"token":"tok.2"}"#.into());
+            }
+            if p.starts_with("/calls?") {
+                if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // Refused only once another node is active.
+                    while !on.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+                    return (401, "{}".into());
+                }
+                // A retry: answered once the call's own node is active again.
+                while !again.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(1)); }
+                return (200, "[]".into());
+            }
+            routes(m, p, b)
+        })).await;
+        let offer = offer_op(&node);
+        let done = AtomicBool::new(false);
+        let (end, ()) = tokio::join!(
+            async {
+                let end = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await;
+                done.store(true, Ordering::SeqCst);
+                end
+            },
+            async {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while attempts.load(Ordering::SeqCst) < 1 { tokio::time::sleep(Duration::from_millis(1)).await; }
+                }).await.expect("End's first read reached the node");
+                *node.state.node_id.lock().unwrap() = Some(C.into());
+                switched.store(true, Ordering::SeqCst);
+                // Until End is done, or a retry reached the node.
+                for _ in 0..2000 {
+                    if done.load(Ordering::SeqCst) || attempts.load(Ordering::SeqCst) > 1 { break; }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                *node.state.node_id.lock().unwrap() = Some(OWN.into());
+                restored.store(true, Ordering::SeqCst);
+            }
+        );
+        assert_eq!(end.expect_err("a read across a switch never shows the call closed").code, "not_dispatched");
+        assert!(admission_is_open(&node, &offer));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "the read was tried again");
+        assert_eq!(minted.load(Ordering::SeqCst), 0, "a token was asked for after the switch");
+    }
+
+    /// End with the price unavailable asks the node whether the call is over.
+    /// Another node made active, and the call's own again, while that read is
+    /// with the node: the answer closes nothing.
+    #[tokio::test]
+    async fn end_without_a_price_closes_nothing_on_a_read_across_a_switch() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (inner, _) = minutes_routes("live", serde_json::Value::Null);
+        let unreadable = Arc::new(AtomicBool::new(false));
+        let u = unreadable.clone();
+        let (routes, armed, asked, back) = read_held_across_a_switch(Arc::new(move |m, p, b| {
+            if p == format!("/pricing/peers/{A}/call") && u.load(SeqCst) {
+                return (400, r#"{"error":"their node did not answer with a call price; nothing was paid","code":400,"reason":"call_price_unknown"}"#.into());
+            }
+            inner(m, p, b)
+        }));
+        let node = fake(AuthMode::Local, routes);
+        approve_calls(&node).await;
+        let offer = do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap().operation_id.unwrap();
+        unreadable.store(true, SeqCst);
+        armed.store(true, SeqCst);
+        let (end, ()) = tokio::join!(do_op_end_call(&node.state, CALL_ID), switch_away_and_back(&node, &asked, &back));
+        assert_eq!(end.expect_err("a read across a switch never shows the call over").code, "call_price_unknown");
+        assert_eq!(compose_kinds(&node), [400], "nothing was sent");
+        let records = spend_journal(&node.state).unwrap().call_operations(OWN, Some(A)).unwrap();
+        assert!(spend_journal::admission_open(records.iter().find(|r| r.op_id == offer).unwrap(), &records));
+    }
+
+    /// The check after a hangup: a read across a switch and back shows nothing
+    /// closed, and the call's consent stays as it was.
+    #[tokio::test]
+    async fn a_closed_check_across_a_switch_shows_nothing_closed() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let (routes, armed, asked, back) = read_held_across_a_switch(routes);
+        let node = minute_ready(routes).await;
+        armed.store(true, Ordering::SeqCst);
+        let (closed, ()) = tokio::join!(verify_call_closed(&node.state, OWN, A, CALL_ID), switch_away_and_back(&node, &asked, &back));
+        assert!(!closed, "another node's answer closed the call");
+        let consent = call_consent(&node.state, A, CALL_ID).unwrap();
+        assert!(!consent.node_closed && consent_closed(&consent.phase).is_none());
+    }
+
+    /// The hold check before a minute: a read across a switch and back is a failed
+    /// read. The call is not ended by it, and its next minute is not refused for it.
+    #[tokio::test]
+    async fn a_hold_check_across_a_switch_ends_nothing() {
+        let (routes, _) = node_with_callee_offline(usize::MAX);
+        let (routes, armed, asked, back) = read_held_across_a_switch(routes);
+        let node = minute_ready(routes).await;
+        armed.store(true, Ordering::SeqCst);
+        let (hold, ()) = tokio::join!(do_call_hold(&node.state, A, CALL_ID, Some(600_000)), switch_away_and_back(&node, &asked, &back));
+        assert_ne!(hold.expect_err("a read across a switch checks nothing").code, "call_not_live");
+        let consent = call_consent(&node.state, A, CALL_ID).unwrap();
+        assert!(!consent.node_closed && consent_closed(&consent.phase).is_none(), "the call was ended on another node's word");
     }
 
     /// The approval runs out while End waits. The node's own "ended" is enough to
