@@ -108,6 +108,34 @@ describe('stream resampler', () => {
   });
 });
 
+describe('stream resampler edges', () => {
+  it('passes audio through unchanged when both rates match, with no delay', () => {
+    const resampler = new StreamResampler(48_000, 48_000);
+    const frame = tone(437.3, 48_000, 0, 960);
+    expect(resampler.delay).toBe(0);
+    expect(Array.from(resampler.push(frame))).toEqual(Array.from(frame));
+  });
+
+  it.each([
+    [0, 48_000],
+    [8_000, -1],
+    [8_000.5, 48_000],
+    [8_000, Number.NaN],
+  ])('refuses a rate it cannot use: %s Hz -> %s Hz', (from, to) => {
+    expect(() => new StreamResampler(from, to)).toThrow(RangeError);
+  });
+
+  it('ignores an empty first frame, so the stream still starts from its first real sample', () => {
+    const plain = new StreamResampler(8_000, 48_000);
+    const late = new StreamResampler(8_000, 48_000);
+    expect(late.push(new Float32Array(0)).length).toBe(0);
+    for (let k = 0; k < 5; k++) {
+      const frame = tone(437.3, 8_000, k * 160, 160);
+      expect(Array.from(late.push(frame))).toEqual(Array.from(plain.push(frame)));
+    }
+  });
+});
+
 describe('sequenced resampler', () => {
   it('continues on seq + 1 and restarts on a gap, a reorder or a rate change', () => {
     const frames = Array.from({ length: 4 }, (_, k) => tone(437.3, 8_000, k * 160, 160));

@@ -95,12 +95,15 @@ export class StreamResampler {
   /** Convert the next frame of the stream; returns this frame's share of the output. */
   push(input: Float32Array): Float32Array {
     if (this.from === this.to) return input;
+    // An empty frame before any audio must not start the stream: the lead-in
+    // would mirror silence instead of the first real samples.
+    if (!this.started && input.length === 0) return new Float32Array(0);
     const K = this.taps;
     if (!this.started) {
       // Before the stream's first sample: its own start, mirrored.
       const lead = 2 * K;
       const primed = new Float32Array(lead + input.length);
-      for (let j = 1; j <= lead; j++) primed[lead - j] = input.length ? input[Math.min(j, input.length - 1)] : 0;
+      for (let j = 1; j <= lead; j++) primed[lead - j] = input[Math.min(j, input.length - 1)];
       primed.set(input, lead);
       this.history = primed;
       this.base = -lead;
