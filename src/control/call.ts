@@ -926,8 +926,13 @@ export function createCallEngine(deps: CallDeps) {
     dropTimer = undefined;
     clearTimeout(restartTimer);
     restartTimer = undefined;
-    clearTimeout(priceRetryTimer);
-    priceRetries = 0;
+    // A real heal (the media back after a drop) gives the next drop its own price
+    // reads. A reconcile of a connection that never dropped, as after a refused
+    // reconnect, is no heal: its bound and its pending retry stay.
+    if (view.phase === 'reconnecting') {
+      clearTimeout(priceRetryTimer);
+      priceRetries = 0;
+    }
     // Healed: the refusal stays said while live; it is remembered so the next drop starts without it.
     if (view.recoveryError !== null) { healedRefusal = view.recoveryError; set({ recoveryError: null }); }
     if (view.phase !== 'live') {

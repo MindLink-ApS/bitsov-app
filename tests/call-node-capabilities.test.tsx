@@ -423,6 +423,37 @@ describe('Decline and Accept with free replies (A4)', () => {
     t.e.endLocal();
   });
 
+  it('a restart offer on a connection that is still up, whose price never reads, is read four times and then no more', async () => {
+    vi.useFakeTimers();
+    const price = pricedInTurn(...Array<'fail'>(20).fill('fail'));
+    const t = await freeCall(price.quote);
+    t.pcs[0].connectionState = 'connected'; t.pcs[0].onconnectionstatechange?.();
+    await t.e.receive({ id: 'in-400-r', kind: 400, sender: A, recipient: OWN, timestamp: 0,
+      plaintext: JSON.stringify({ v: 1, call_id: 'e'.repeat(32), media: 'audio', sdp: `v=0 offer\r\na=x-bitsov-restart-of:${ID}\r\n` }), payment_amount_msat: 1_000 }, OWN);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(price.reads() - 1).toBe(4);
+    expect(t.sent).toEqual([]);
+    expect(t.last().recoveryUsed).toBe(false);
+    t.e.endLocal();
+  });
+
+  it('a real heal gives the next drop its own bounded price reads', async () => {
+    vi.useFakeTimers();
+    const price = pricedInTurn(...Array<'fail'>(20).fill('fail'));
+    const t = await freeCall(price.quote);
+    // Within the 30 s the drop is given: the read, and three retries 2, 5 and 10 s apart.
+    drop(t.pcs[0]);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(price.reads() - 1).toBe(4);
+    expect(t.last().phase).toBe('reconnecting');
+    // The media comes back, then drops again.
+    drop(t.pcs[0]);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(price.reads() - 1).toBe(8);
+    expect(t.sent).toEqual([]);
+    t.e.endLocal();
+  });
+
   it('a restart offer from the caller whose price cannot be read leaves the recovery unused; the retry answers it once', async () => {
     vi.useFakeTimers();
     const price = pricedInTurn('fail');
