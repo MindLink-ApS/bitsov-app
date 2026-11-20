@@ -19,6 +19,7 @@ import { asActionError, messagePerPaymentMax } from './state';
 import { amount } from './format';
 import { createCallMinutes, type CallMinutes, type MinutesDeps, type MinutesView } from './callMinutes';
 import { SEAL_ENDED, SEAL_NOT_AGREED, SEAL_REFUSED } from './nodeRoutedConnection';
+import type { AudioCodecName, CallAudioDiagnostics } from './callAudio';
 import type { ActionError, CallQuote, CallReceipt, Message, MinutesConsent, NodeGrantSummary, OpView } from './types';
 
 export const CALL_OFFER = 400;
@@ -247,6 +248,12 @@ export type CallView = {
   pendingMsat: number;
   /** Candidate types only: never expose addresses from the stats report. */
   connection: { local: string; remote: string } | null;
+  /**
+   * Node-routed audio, for the call report: the codecs each way over the
+   * whole call (in the order first used) and the audio context's rate.
+   * Codec names and a number only. Null where the engine reports none.
+   */
+  audio?: { sent: AudioCodecName[]; received: AudioCodecName[]; contextRate: number | null } | null;
   reason: HangupReason | null;
   /** A refusal to show (nothing was paid for the refused step). */
   error: string | null;
@@ -359,7 +366,7 @@ export function refusalWords(error: ActionError): (() => string) | null {
 export const IDLE: CallView = {
   silenced: false,
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
-  liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, interruptedUntil: null, errorKey: null, endWords: null, endRaw: null, offline: false,
+  liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, audio: null, reason: null, error: null, interruptedUntil: null, errorKey: null, endWords: null, endRaw: null, offline: false,
   close: null, stuck: null, dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null, minutes: null,
   stopped: null, mediaDenied: false,
 };
@@ -691,6 +698,9 @@ export function createCallEngine(deps: CallDeps) {
     clearTimeout(restartTimer);
     restartTimer = undefined;
     captures.forEach((cancel) => cancel());
+    // A last look at the audio engine before it closes; the ended view that follows carries it.
+    const lastAudio = pc ? audioSeen(pc) : null;
+    if (lastAudio) view = { ...view, audio: lastAudio };
     clearInterval(diagnosticTimer);
     diagnosticTimer = undefined;
     clearTimeout(ringTimer);
@@ -842,7 +852,29 @@ export function createCallEngine(deps: CallDeps) {
     }, (error) => { if (!settled) { finish(); reject(error); } });
   });
 
+  /**
+   * The node-routed engine's codecs so far, added to what this call already
+   * used (a reconnect builds a fresh engine). Null when nothing changed.
+   */
+  const audioSeen = (conn: RTCPeerConnection): CallView['audio'] => {
+    try {
+      const read = (conn as RTCPeerConnection & { audioDiagnostics?: () => CallAudioDiagnostics | null }).audioDiagnostics;
+      const now = typeof read === 'function' ? read.call(conn) : null;
+      if (!now) return null;
+      const before = view.audio ?? { sent: [], received: [], contextRate: null };
+      const merged = {
+        sent: [...new Set([...before.sent, ...now.sent])],
+        received: [...new Set([...before.received, ...now.received])],
+        contextRate: now.contextRate ?? before.contextRate,
+      };
+      const same = merged.sent.join() === before.sent.join() && merged.received.join() === before.received.join() && merged.contextRate === before.contextRate;
+      return same && view.audio ? null : merged;
+    } catch { return null; }
+  };
+
   const readConnection = async (conn: RTCPeerConnection) => {
+    const audio = pc === conn ? audioSeen(conn) : null;
+    if (audio) set({ audio });
     try {
       const stats = await conn.getStats();
       if (pc !== conn) return;
