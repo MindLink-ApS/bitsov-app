@@ -2869,7 +2869,7 @@ describe('calls in the shell', () => {
     expect(text('[data-call-paid]')).not.toMatch(/direct/);
   });
 
-  it.each([['sats', '42.762 sats'], ['btc', '0.00000042762 BTC']] as const)('uses the %s denomination for a fractional call quote', async (denomination, shown) => {
+  it.each([['sats', 'about 43 sats'], ['btc', '0.00000042762 BTC']] as const)('uses the %s denomination for a fractional call quote, rounding a sats ceiling up', async (denomination, shown) => {
     setDenom(denomination);
     stubHost({ call_quote: () => ({ ...QUOTE, call_total_msat: 21_381 }) });
     await openShell();
