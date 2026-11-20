@@ -308,6 +308,12 @@ export type CallView = {
    * refused). The ended card says the budget ran out.
    */
   budgetEnded: boolean;
+  /**
+   * A call answered free was hung up here, but no hangup could be sent: no
+   * live price for it could be read. Their side may still be on the line until
+   * the call ends by itself. Nothing was paid for it.
+   */
+  hangupUnsent: boolean;
 };
 
 /** `closed`: the host ended it (or nothing was owed); `unknown`: check pending result; `refused`: still open. */
@@ -373,7 +379,7 @@ export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
   liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, reason: null, error: null, interruptedUntil: null, errorKey: null, endWords: null, endRaw: null, offline: false,
   close: null, stuck: null, dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null, minutes: null,
-  stopped: null, mediaDenied: false, freeDecline: null, budgetEnded: false,
+  stopped: null, mediaDenied: false, freeDecline: null, budgetEnded: false, hangupUnsent: false,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
@@ -561,6 +567,8 @@ export function createCallEngine(deps: CallDeps) {
   let negotiated = false;
   let answerInFlight = false;
   let restartAttempted = false;
+  /** The call (public id) this device answered free: it read no price first, so its later signals read one when needed. */
+  let freeAnswered: string | null = null;
   let restartRequested = false;
   let restartAnswerPending = false;
   let restartTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1081,6 +1089,23 @@ export function createCallEngine(deps: CallDeps) {
     return r;
   };
 
+  /**
+   * This call's live signal price: the one read for it, or, on a call answered
+   * free (which read none before answering), one read now, bounded in time.
+   * Null when none can be read: then nothing is sent, and the caller says so.
+   */
+  const livePrice = async (callId: string | null, peer: string | null): Promise<CallQuote | null> => {
+    if (quote) return quote;
+    if (callId === null || peer === null || freeAnswered !== callId) return null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), SIGNAL_TIMEOUT_MS); });
+    const read = Promise.resolve().then(() => deps.quote(peer)).catch(() => null);
+    const q = await Promise.race([read, late]).finally(() => clearTimeout(timer));
+    if (view.callId !== callId) return null;
+    if (q?.ok && answerCost(q.value) !== null) quote ??= q.value;
+    return quote;
+  };
+
   const reconnect = (conn: RTCPeerConnection) => {
     if (pc !== conn || !active()) return;
     clearTimeout(ringTimer);
@@ -1097,14 +1122,19 @@ export function createCallEngine(deps: CallDeps) {
   };
 
   const restart = async (conn: RTCPeerConnection) => {
-    if (pc !== conn || !negotiated || !quote || restartAttempted || restartRequested) return;
-    const q = quote;
+    if (pc !== conn || !negotiated || restartAttempted || restartRequested) return;
+    if (!quote && freeAnswered !== view.callId) return;
     // Only the original caller creates offers, so simultaneous failure cannot
     // produce glare or two fresh admission charges. The callee can request it.
     if (!view.outgoing) restartRequested = true;
     else restartAttempted = true;
     set({ recoveryUsed: true });
+    const callId = view.callId;
     try {
+      // A call answered free reads its price now; without one nothing is sent, and the card says so.
+      const q = quote ?? await livePrice(callId, view.peer);
+      if (pc !== conn) return;
+      if (!q) { recoveryRefused(conn, tr('caCallPriceUnreadNothingPaid')); return; }
       // On a node that keeps the call, the callee's reconnect request goes on the
       // call's own authority after the approval ran out (the host decides). A
       // recovery offer is a new admission and still asks.
@@ -1170,7 +1200,7 @@ export function createCallEngine(deps: CallDeps) {
 
   const answerRestart = async (signal: Signal) => {
     const conn = pc;
-    if (!conn || !quote || !negotiated || view.outgoing || restartAttempted || !active() ||
+    if (!conn || (!quote && freeAnswered !== view.callId) || !negotiated || view.outgoing || restartAttempted || !active() ||
         restartParent(signal.sdp!) !== view.callId || admissions.has(signal.call_id) || signal.media !== view.media) return;
     restartAttempted = true;
     reconnect(conn);
@@ -1191,7 +1221,10 @@ export function createCallEngine(deps: CallDeps) {
       if (pc !== conn) return;
       await gathered(conn, GATHER_MS);
       if (pc !== conn) return;
-      const r = await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(quote));
+      const q = quote ?? await livePrice(view.callId, view.peer);
+      if (pc !== conn) return;
+      if (!q) { recoveryRefused(conn, tr('caCallPriceUnreadNothingPaid')); return; }
+      const r = await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(q));
       if (!r.ok) recoveryRefused(conn, r.error.message);
     } catch (error) {
       recoveryRefused(conn, tr('caCallRecoveryFailed', asActionError(error).message));
@@ -1298,6 +1331,7 @@ export function createCallEngine(deps: CallDeps) {
     }
     noteGrantEnd(callId);
     negotiated = true; // The peer may see the answer before our host receipt.
+    if (free) freeAnswered = callId;
     // Both nodes take free replies: the answer goes out free, and a refusal is never retried paid.
     const r = free
       ? await sendFree(view.peer!, CALL_ANSWER, { sdp: conn.localDescription!.sdp }, wireId ?? callId!)
@@ -1548,6 +1582,8 @@ export function createCallEngine(deps: CallDeps) {
       if (!active()) return;
       const callId = view.callId;
       const notify = view.phase !== 'calling' && view.phase !== 'incoming' && quote;
+      // A call answered free read no price first: its hangup is still owed, priced now.
+      const unpriced = !notify && view.phase !== 'calling' && view.phase !== 'incoming' && freeAnswered !== null && freeAnswered === callId;
       const ids = [...admissions].reverse();
       const mine = new Set(deps.endCall ? own : []);
       const owner = { peer: view.peer, callId }; // Keep late cleanup bound to this peer.
@@ -1555,7 +1591,22 @@ export function createCallEngine(deps: CallDeps) {
       // Every hangup owed is pending before the call ends, not one by one as each is sent.
       if (notify) ids.filter(id => !mine.has(id)).forEach(() => owe(signalCost(notify)));
       const operationIds = [...(admissionOps.get(callId!) ?? [])];
-      end('hangup', null, { record: !notify });
+      end('hangup', null, { record: !notify && !unpriced });
+      if (unpriced) {
+        const q = await livePrice(callId, owner.peer);
+        if (view.callId !== callId) return;
+        // No live price, so the host could send no hangup either: said, never left silent.
+        if (!q) { set({ hangupUnsent: true }); return; }
+        for (const id of ids) {
+          if (mine.has(id)) continue;
+          try {
+            const r = await pay(CALL_HANGUP, { reason: 'hangup' }, signalCost(q), id, owner);
+            if (!r.ok && view.callId === callId) set({ error: r.error.message });
+          } catch (error) {
+            if (view.callId === callId) set({ error: asActionError(error).message });
+          }
+        }
+      }
       if (notify) {
         for (const id of ids) {
           if (mine.has(id)) continue;

@@ -23615,6 +23615,25 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         assert_eq!(compose_kinds(&node), [401]);
     }
 
+    /// The kept call's own authority covers its hangup and reconnect request
+    /// only: never a minute (kind 404, which only `do_call_block` pays on the
+    /// pinned hold), an offer or an answer. Nothing is taken from its count.
+    #[tokio::test]
+    async fn held_call_plan_never_covers_a_minute_an_offer_or_an_answer() {
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, with_status_caps(routes, &["call_continuity_v1"]));
+        approve_calls(&node).await;
+        do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER, 6_000, None, None).await.unwrap();
+        lapse_approvals(&node.state);
+        let block = r#"{"call_id":"0123456789abcdef0123456789abcdef","seq":0}"#;
+        for (kind, plaintext) in [(act::KIND_CALL_BLOCK, block), (act::KIND_CALL_OFFER, OFFER), (act::KIND_CALL_ANSWER, HELD_ANSWER), (405, HELD_HANGUP)] {
+            assert!(held_call_plan(&node.state, A, kind, plaintext, 15_000).await.unwrap().is_none(), "{kind}");
+        }
+        assert_eq!(node.state.held_calls.lock().unwrap().entries[0].signals, 0, "nothing counted");
+        assert!(held_call_plan(&node.state, A, act::KIND_CALL_HANGUP, HELD_HANGUP, 6_000).await.unwrap().is_some());
+        assert_eq!(compose_kinds(&node), [401]);
+    }
+
     /// On a paired node the kept call's signal goes only while the node still
     /// holds a live grant. Once the grant itself has ended, the token cannot
     /// spend: nothing is sent, so no refusal by the node can stop anything,

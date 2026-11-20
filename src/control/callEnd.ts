@@ -28,6 +28,8 @@ export function callEndLine(v: CallView, name: string): CallEndLine {
   if (v.budgetEnded) return extra(tr('caCallEndedBudgetRanOut'), stop?.raw);
   // A free Decline: only what is known of its delivery. It was never paid.
   if (v.reason === 'declined' && v.freeDecline) return extra(tr(FREE_DECLINE[v.freeDecline]), v.error);
+  // Hung up here, but no hangup could reach them: they may still be on the line.
+  if (v.hangupUnsent) return extra(tr('caHangupNotSent'), v.error);
   // A limit the owner set: the evidence is the node's own limit code.
   const limit = stop?.limit?.code;
   if (limit === 'budget_exhausted') return extra(tr('caCallEndedContactLimit'), stop?.raw);

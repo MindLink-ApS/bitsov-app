@@ -219,6 +219,69 @@ describe('Decline and Accept with free replies (A4)', () => {
     expect(t.last()).toMatchObject({ phase: 'connecting', error: null, paidMsat: 0 });
   });
 
+  /** The callee's media: connected, then failed, as when the network drops. */
+  const drop = (pc: FakePc) => {
+    pc.connectionState = 'connected'; pc.onconnectionstatechange?.();
+    pc.connectionState = 'failed'; pc.onconnectionstatechange?.();
+  };
+  /** A price that never answers for the free Accept, then `later` for every read after it. */
+  const pricedLater = (later: () => Promise<Outcome<CallQuote>>) => {
+    let reads = 0;
+    return () => reads++ === 0 ? new Promise<Outcome<CallQuote>>(() => {}) : later();
+  };
+
+  it('End of a call answered free, whose price never came, reads it then and sends the hangup: the caller ends too', async () => {
+    vi.useFakeTimers();
+    const t = engine({ free: true, quote: pricedLater(async () => ({ ok: true, value: QUOTE })) });
+    await t.e.receive(offer(), OWN);
+    await t.e.accept(QUOTE);
+    await t.e.hangup();
+    expect(t.sent.map((s) => [s.kind, s.body.call_id, s.body.reason, s.max])).toEqual([[403, ID, 'hangup', 6_000]]);
+    expect(t.last()).toMatchObject({ phase: 'ended', reason: 'hangup', hangupUnsent: false });
+    // The caller's side of the same call ends on that hangup.
+    const caller = engine({ free: false, newCallId: () => ID,
+      signal: async (_peer, kind) => ({ ok: true, value: { operation_id: 'offer-op', message_id: 'm', kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5_000, delivered: true, accepted: true, sent_at_ms: 0 } }) });
+    await caller.e.place(A, 'audio', QUOTE);
+    await caller.e.receive({ id: 'in-401', kind: 401, sender: A, recipient: OWN, timestamp: 0, plaintext: JSON.stringify({ v: 1, call_id: ID, sdp: 'answer' }), payment_amount_msat: 0 }, OWN);
+    // Their node binds the hangup it received to this call's admission.
+    await caller.e.receive({ id: 'in-403', kind: 403, sender: A, recipient: OWN, timestamp: 0, plaintext: JSON.stringify(t.sent[0].body), payment_amount_msat: 1_000, admission_operation_id: 'offer-op' }, OWN);
+    expect(caller.last().phase).toBe('ended');
+  });
+
+  it.each([
+    ['refused', async () => ({ ok: false, error: { code: 'call_price_unknown', message: 'no price' } as ActionError })],
+    ['never answers', () => new Promise<Outcome<CallQuote>>(() => {})],
+  ] as const)('End of a call answered free when its price is %s says they may still be on the line; nothing is paid', async (_name, later) => {
+    vi.useFakeTimers();
+    const t = engine({ free: true, quote: pricedLater(later as () => Promise<Outcome<CallQuote>>) });
+    await t.e.receive(offer(), OWN);
+    await t.e.accept(QUOTE);
+    const ending = t.e.hangup();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await ending;
+    expect(t.sent).toEqual([]);
+    expect(t.last()).toMatchObject({ phase: 'ended', reason: 'hangup', hangupUnsent: true, paidMsat: 0 });
+    expect(callEndLine(t.last(), 'Maya').text).toBe('Hung up here, but they could not be told: their call price could not be read. They may still be on the line until the call ends by itself. Nothing was paid for it.');
+    setLanguagePref('da');
+    expect(callEndLine(t.last(), 'Maya').text).toMatch(/^Lagt på her/);
+  });
+
+  it.each([
+    ['read then', async () => ({ ok: true, value: QUOTE }) as Outcome<CallQuote>, true],
+    ['unreadable', async () => ({ ok: false, error: { code: 'call_price_unknown', message: 'no price' } as ActionError }) as Outcome<CallQuote>, false],
+  ] as const)('a dropped call answered free asks the caller to reconnect when its price is %s', async (_name, later, sends) => {
+    vi.useFakeTimers();
+    const pcs: FakePc[] = [];
+    const t = engine({ free: true, quote: pricedLater(later), peerConnection: () => { const pc = new FakePc(); pcs.push(pc); return pc as unknown as RTCPeerConnection; } });
+    await t.e.receive(offer(), OWN);
+    await t.e.accept(QUOTE);
+    drop(pcs[0]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.sent.map((s) => [s.kind, s.body.sdp_mid])).toEqual(sends ? [[402, 'bitsov-restart-v1']] : []);
+    if (!sends) expect(t.last().recoveryError).toBe('Their call price could not be read, so this was not sent. Nothing was paid.');
+    t.e.endLocal();
+  });
+
   it('the paid Accept keeps its checks: a risen price, or none shown, answers nothing', async () => {
     const risen = engine({ free: false, quote: async () => ({ ok: true, value: { ...QUOTE, signal_msat: QUOTE.signal_msat + 1 } }) });
     await risen.e.receive(offer(), OWN);
