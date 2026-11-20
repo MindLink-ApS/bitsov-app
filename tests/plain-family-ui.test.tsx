@@ -72,10 +72,10 @@ it('keeps the node key out of the chat header and shows it under Technical on th
   expect(head).not.toMatch(/[0-9a-f]{8}…[0-9a-f]{8}/);
   $<HTMLButtonElement>('[data-contact-open]').click();
   await vi.waitFor(() => expect($('[data-contact-panel="open"]')).not.toBeNull());
-  expect($('[data-contact-technical] h3').textContent).toBe('Technical');
+  expect($('[data-contact-technical] summary').textContent).toBe('Technical');
   expect($('[data-contact-node-key]').textContent).toBe(maya);
   setLanguagePref('da');
-  expect($('[data-contact-technical] h3').textContent).toBe('Teknisk');
+  expect($('[data-contact-technical] summary').textContent).toBe('Teknisk');
 });
 
 // P1-6: no cost line under a sent message; one tap shows it.

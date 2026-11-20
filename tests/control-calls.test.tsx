@@ -3286,6 +3286,11 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')!.disabled).toBe(false));
     expect(text('[data-call-accept]')).toBe(accept);
     expect(text('[data-call-decline]')).toBe(decline);
+    // Answer is the one big green button, and it comes first.
+    const answer = $<HTMLButtonElement>('[data-call-accept]')!;
+    expect(answer.classList.contains('call-answer')).toBe(true);
+    expect(mount.querySelector('[data-call-panel="incoming"] .call-actions button')).toBe(answer);
+    expect($('[data-call-decline]')!.classList.contains('call-answer')).toBe(false);
     expect(visible('[data-call-panel="incoming"]')).not.toMatch(/\bsats?\b/);
     expect(text('[data-call-decline-note]')).toBe(note);
     // One way to say no: no second, differently priced button.
@@ -3678,13 +3683,14 @@ describe('calls in the shell', () => {
     expect(host.used('call_signal').map(c => c.args!.kind)).toEqual([401]);
   });
 
-  it.each([['NotAllowedError', /permission.*denied/i], ['NotFoundError', /no.*microphone/i]])('shows a clear %s capture error and enables another call', async (name, message) => {
+  it.each([['NotAllowedError', 'data-call-permission', /Give BitSov access to the microphone.*System Settings → Privacy & Security.*Nothing was sent or paid/], ['NotFoundError', 'data-call-ended', /no.*microphone/i]])('shows a clear %s capture error and enables another call', async (name, where, message) => {
     const host = stubHost();
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => { throw new DOMException('capture failed', name as string); } } });
     await openShell();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     ring('audio');
-    await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(message as RegExp));
+    // A refused microphone gets its own screen: what to allow and where; a missing one keeps the plain reason.
+    await vi.waitFor(() => expect(text(`[${where}]`)).toMatch(message as RegExp));
     expect(host.used('call_signal')).toHaveLength(0);
     expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false);
   });
@@ -4314,7 +4320,8 @@ describe('calls in the shell', () => {
     expect(text('[data-call-end-detail]')).toContain(RAW);
   });
 
-  it.each([['en', 'da', /Intet blev betalt\.$/, /Nothing was paid/], ['da', 'en', /Nothing was paid\.$/, /Intet blev betalt/]] as const)('changing the language after a refused microphone (%s to %s) re-words the line', async (from, to, now, before) => {
+  // A refused microphone shows the permission screen (not the plain end line); it follows the language too.
+  it.each([['en', 'da', /Intet blev sendt eller betalt\.$/, /Nothing was sent or paid/], ['da', 'en', /Nothing was sent or paid\.$/, /Intet blev sendt eller betalt/]] as const)('changing the language after a refused microphone (%s to %s) re-words the line', async (from, to, now, before) => {
     stubHost();
     Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => { throw Object.assign(new Error('denied'), { name: 'NotAllowedError' }); } } });
     await openShell();
@@ -4322,10 +4329,10 @@ describe('calls in the shell', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call="audio"]')!.disabled).toBe(false));
     ring('audio');
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect(text('[data-call-ended]')).toMatch(before);
+    expect(text('[data-call-permission]')).toMatch(before);
     setLanguagePref(to);
-    await vi.waitFor(() => expect(text('[data-call-ended]')).toMatch(now));
-    expect(text('[data-call-ended]')).not.toMatch(before);
+    await vi.waitFor(() => expect(text('[data-call-permission]')).toMatch(now));
+    expect(text('[data-call-permission]')).not.toMatch(before);
   });
 
   it.each([['en', 'Reconnecting…', 'Live'], ['da', 'Forbinder igen…', 'I gang']] as const)('frozen media on a live call shows Reconnecting, then Live again (%s)', async (lang, said, live) => {

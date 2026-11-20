@@ -28,7 +28,7 @@ it('changes mounted settings, composer and wallet labels without a reload', asyn
   await open();
   expect(find('textarea').getAttribute('aria-label')).toBe('Besked til Maya');
   const unnamed = `[data-track="peer:${'c'.repeat(64)}"] .name`;
-  expect(find(unnamed).textContent).toContain('Kontakt uden navn');
+  expect(find(unnamed).textContent).toContain('Ny kontakt');
   find('[data-profile]').click(); find('[data-open-settings]').click();
   expect(find('[data-tab="general"]').textContent).toBe('Generelt');
   find('[data-tab="general"]').click();
@@ -37,8 +37,8 @@ it('changes mounted settings, composer and wallet labels without a reload', asyn
   expect(document.documentElement.lang).toBe('en');
   expect(find('[data-tab="general"]').textContent).toBe('General');
   expect(find('[data-theme-option="light"]').textContent).toBe('Light');
-  expect(find(unnamed).textContent).toContain('Unnamed contact');
-  expect(find('[data-track="ai"] .name').textContent).toBe('Ask your node');
+  expect(find(unnamed).textContent).toContain('New contact');
+  expect(find('[data-track="ai"] .name').textContent).toBe('Ask your box');
   expect(find('textarea').getAttribute('aria-label')).toBe('Message Maya');
   find('[data-settings-close]').click();
   find('[data-profile]').click(); find('[data-open-wallet]').click();

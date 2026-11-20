@@ -275,11 +275,13 @@ export function ContactPanel(props: {
           </div>
         </div>
 
-        <div class="panel" data-contact-technical>
-          <h3>{tr('caTechnical')}</h3>
-          <p class="hint">{tr('caTheirNodeKey')}</p>
-          <p class="contact-fp mono" data-contact-node-key>{contactKey()}</p>
-        </div>
+        <details class="panel" data-contact-technical>
+          <summary>{tr('contactTechnical')}</summary>
+          <dl class="facts">
+            <dt>{tr('contactNodeId')}</dt>
+            <dd class="mono" style={{ 'overflow-wrap': 'anywhere' }} data-contact-node-id data-contact-node-key>{contactKey()}</dd>
+          </dl>
+        </details>
       </aside>
     </>
   );
