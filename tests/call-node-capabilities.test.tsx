@@ -282,6 +282,77 @@ describe('Decline and Accept with free replies (A4)', () => {
     t.e.endLocal();
   });
 
+  /** A price for the free Accept that never answers, then one the test answers by hand. */
+  const pricedByHand = () => {
+    let reads = 0;
+    let answer!: (q: Outcome<CallQuote>) => void;
+    const quote = () => reads++ === 0 ? new Promise<Outcome<CallQuote>>(() => {}) : new Promise<Outcome<CallQuote>>((r) => { answer = r; });
+    return { quote, answer: (q: Outcome<CallQuote>) => answer(q) };
+  };
+  const otherOffer = (): Message => ({ id: 'in-400-b', kind: 400, sender: A, recipient: OWN, timestamp: 0,
+    plaintext: JSON.stringify({ v: 1, call_id: 'b'.repeat(32), media: 'audio', sdp: 'offer' }), payment_amount_msat: 1_000 });
+
+  it.each([
+    ['Close is pressed', async (t: ReturnType<typeof engine>) => { t.e.dismiss(); }],
+    ['a new call rings', async (t: ReturnType<typeof engine>) => { await t.e.receive(otherOffer(), OWN); }],
+    ['a waiting call is accepted', async (t: ReturnType<typeof engine>) => { await t.e.receive(otherOffer(), OWN); await t.e.acceptWaiting(`${A}:${'b'.repeat(32)}`, QUOTE); }],
+  ] as const)('the hangup of a call answered free is owed while its price is read: when %s, the card stays and the hangup still goes', async (_name, meanwhile) => {
+    const price = pricedByHand();
+    const t = engine({ free: true, quote: price.quote });
+    await t.e.receive(offer(), OWN);
+    await t.e.accept(QUOTE);
+    const ending = t.e.hangup();
+    await Promise.resolve();
+    expect(t.last()).toMatchObject({ phase: 'ended', callId: ID, pendingCount: 1 });
+    await meanwhile(t);
+    expect(t.e.view()).toMatchObject({ phase: 'ended', callId: ID });
+    price.answer({ ok: true, value: QUOTE });
+    await ending;
+    expect(t.sent.map((s) => [s.kind, s.body.call_id])).toEqual([[403, ID]]);
+    expect(t.e.view()).toMatchObject({ callId: ID, pendingCount: 0, pendingMsat: 0, hangupUnsent: false });
+  });
+
+  it('when the price of that owed hangup cannot be read, the card says so and only then can be closed', async () => {
+    const price = pricedByHand();
+    const t = engine({ free: true, quote: price.quote });
+    await t.e.receive(offer(), OWN);
+    await t.e.accept(QUOTE);
+    const ending = t.e.hangup();
+    await Promise.resolve();
+    t.e.dismiss();
+    price.answer({ ok: false, error: { code: 'call_price_unknown', message: 'no price' } as ActionError });
+    await ending;
+    expect(t.sent).toEqual([]);
+    expect(t.e.view()).toMatchObject({ phase: 'ended', callId: ID, pendingCount: 0, hangupUnsent: true });
+    t.e.dismiss();
+    expect(t.e.view().phase).toBe('idle');
+  });
+
+  it('a reconnect whose price cannot be read spends nothing: the next drop, priced, asks exactly once', async () => {
+    vi.useFakeTimers();
+    let reads = 0;
+    const quote = () => {
+      reads++;
+      if (reads === 1) return new Promise<Outcome<CallQuote>>(() => {});
+      if (reads === 2) return Promise.resolve({ ok: false, error: { code: 'call_price_unknown', message: 'no price' } as ActionError } as Outcome<CallQuote>);
+      return Promise.resolve({ ok: true, value: QUOTE } as Outcome<CallQuote>);
+    };
+    const pcs: FakePc[] = [];
+    const t = engine({ free: true, quote, peerConnection: () => { const pc = new FakePc(); pcs.push(pc); return pc as unknown as RTCPeerConnection; } });
+    await t.e.receive(offer(), OWN);
+    await t.e.accept(QUOTE);
+    drop(pcs[0]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.sent).toEqual([]);
+    expect(t.last().recoveryUsed).toBe(false);
+    drop(pcs[0]);
+    drop(pcs[0]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.sent.map((s) => s.kind)).toEqual([402]);
+    expect(t.last().recoveryUsed).toBe(true);
+    t.e.endLocal();
+  });
+
   it('the paid Accept keeps its checks: a risen price, or none shown, answers nothing', async () => {
     const risen = engine({ free: false, quote: async () => ({ ok: true, value: { ...QUOTE, signal_msat: QUOTE.signal_msat + 1 } }) });
     await risen.e.receive(offer(), OWN);
