@@ -4090,13 +4090,14 @@ function CallPanel(props: {
   videoStatus?: VideoStatus | null;
   nameOf: (id: string) => string;
   quote: (peer: string) => Promise<Outcome<CallQuote>>;
-  accept: (shown: CallQuote) => void;
+  /** `shown` is null only for a free answer (`freeReply`), which no price bounds. */
+  accept: (shown: CallQuote | null) => void;
   decline: (shown: CallQuote) => void;
   /** Stop ringing here: nothing sent or paid. */
   ignore: () => void;
   /** Decline: the free declined hangup when both nodes take free replies, else the local Ignore. */
   refuse?: () => void;
-  /** Our node and this caller's node both take free replies: Decline tells them, at no cost. */
+  /** Our node and this caller's node both take free replies: Decline tells them, and Accept answers, at no cost. */
   freeReply?: boolean;
   hangup: () => void;
   mute: () => void;
@@ -4188,10 +4189,10 @@ function CallPanel(props: {
           </Show>
         </header>
         <Show when={props.waiting && props.answerBlocked && v().phase === 'incoming'}><p class="hint">{tr('incomingWaiting')}</p></Show>
-        <Show when={noPrice() && v().phase === 'incoming'}><p class="hint" role="status" data-call-answer-price>{tr('caCallAnswerNoPrice')}</p></Show>
+        <Show when={noPrice() && !props.freeReply && v().phase === 'incoming'}><p class="hint" role="status" data-call-answer-price>{tr('caCallAnswerNoPrice')}</p></Show>
         {/* What answering can cost this owner, in words: the answer, their own hangup, and only a reconnect beyond that (each one signal, all-in).
-            Kept one tap away under Details: the ringing card itself carries no price. */}
-        <Show when={v().phase === 'incoming' && shown() ? answerCost(shown()!) : null}>
+            Kept one tap away under Details: the ringing card itself carries no price. A free answer has no such cost to show. */}
+        <Show when={v().phase === 'incoming' && !props.freeReply && shown() ? answerCost(shown()!) : null}>
           {(m) => <details class="quiet-detail" data-call-answer-detail>
             <summary>{tr('uiDetails')}</summary>
             <p class="hint" data-call-answer-cost>{tr('caCallAnswerCostNote', fmtAmount(m(), 'up'))}</p>
@@ -4345,8 +4346,8 @@ function CallPanel(props: {
         <div class="call-actions">
           <Switch>
             <Match when={v().phase === 'incoming'}>
-              {/* No price on either button: Accept stays bounded by the quote read for it (`shown`), and Decline is the free local ignore. */}
-              <button type="button" class="primary soft money call-answer" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.accept(q); }}>{tr('uiAccept')}</button>
+              {/* No price on either button: a paid Accept stays bounded by the quote read for it (`shown`); a free one needs none. Decline is free. */}
+              <button type="button" class="primary soft money call-answer" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced || (!props.freeReply && !shown())} onClick={() => { const q = shown(); if (q || props.freeReply) props.accept(q); }}>{tr('uiAccept')}</button>
               <button type="button" class="soft" data-call-decline data-call-ignore disabled={props.view.silenced} onClick={() => (props.refuse ?? props.ignore)()}>{tr('uiDecline')}</button>
             </Match>
             <Match when={v().phase === 'ended'}>

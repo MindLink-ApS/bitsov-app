@@ -1105,7 +1105,11 @@ export function createCallEngine(deps: CallDeps) {
     else restartAttempted = true;
     set({ recoveryUsed: true });
     try {
-      if (deps.authorize && !await deps.authorize()) {
+      // On a node that keeps the call, the callee's reconnect request goes on the
+      // call's own authority after the approval ran out (the host decides). A
+      // recovery offer is a new admission and still asks.
+      const held = !view.outgoing && deps.callContinuity?.() === true;
+      if (!held && deps.authorize && !await deps.authorize()) {
         recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
         return;
       }
@@ -1237,10 +1241,17 @@ export function createCallEngine(deps: CallDeps) {
     }
   };
 
-  /** Accept the ringing call: one paid answer, at most the price `shown` on the button. */
-  const accept = (shown: CallQuote) => guarded(async () => {
+  /**
+   * Accept the ringing call: one paid answer, at most the price `shown` on the
+   * button. When our node and theirs both take free replies, the answer goes
+   * out free (zero cap, never retried paid), so no price is read or needed.
+   */
+  const accept = (shown: CallQuote | null) => guarded(async () => {
     if (view.phase !== 'incoming' || !offerSdp) return;
     const callId = view.callId;
+    // Decided once, before anything is read: a free answer never becomes a paid one.
+    const free = !!deps.sendFree && deps.freeReply?.(view.peer!) === true;
+    if (!free && !shown) return;
     // Never answer a node-routed call the box approval would cut off: nothing is sent or paid, and it keeps ringing.
     // A node that keeps an admitted call past its approval's end has no such window.
     if (deps.minutes) {
@@ -1253,11 +1264,19 @@ export function createCallEngine(deps: CallDeps) {
     // An earlier refused Accept may have left its reason on the card: this one goes ahead.
     set({ phase: 'connecting', error: null });
     awaitConnect(callId!);
-    const q = await deps.quote(view.peer!);
-    if (view.callId !== callId || !active()) return;
-    const refused = answerRefusal(shown, q);
-    if (refused !== null || !q.ok) { endSaying(() => answerRefusal(shown, q) ?? tr('caCallEndAnswerFailed')); return; }
-    quote = q.value;
+    if (free) {
+      // Read only for this call's later signals (its hangup, a reconnect); the free answer does not wait for it.
+      const peer = view.peer!;
+      void Promise.resolve().then(() => deps.quote(peer)).then((q) => {
+        if (view.callId === callId && active() && quote === null && q.ok && answerCost(q.value) !== null) quote = q.value;
+      }, () => {});
+    } else {
+      const q = await deps.quote(view.peer!);
+      if (view.callId !== callId || !active()) return;
+      const refused = answerRefusal(shown!, q);
+      if (refused !== null || !q.ok) { endSaying(() => answerRefusal(shown!, q) ?? tr('caCallEndAnswerFailed')); return; }
+      quote = q.value;
+    }
     let conn: RTCPeerConnection;
     try {
       conn = await open(view.media);
@@ -1280,10 +1299,9 @@ export function createCallEngine(deps: CallDeps) {
     noteGrantEnd(callId);
     negotiated = true; // The peer may see the answer before our host receipt.
     // Both nodes take free replies: the answer goes out free, and a refusal is never retried paid.
-    const free = !!deps.sendFree && deps.freeReply?.(view.peer!) === true;
     const r = free
       ? await sendFree(view.peer!, CALL_ANSWER, { sdp: conn.localDescription!.sdp }, wireId ?? callId!)
-      : await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(quote));
+      : await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(quote!));
     if (view.callId !== callId || !active()) return;
     if (!r.ok) endRawly('caCallEndAnswerFailed', r.error.message);
     else {
@@ -1298,7 +1316,7 @@ export function createCallEngine(deps: CallDeps) {
   const api = {
     view: () => view,
     /** Move an untouched waiting offer to the normal answer path after media is free. */
-    acceptWaiting: async (id: string, shown: CallQuote) => {
+    acceptWaiting: async (id: string, shown: CallQuote | null) => {
       if (active() || busy || deps.busy?.() || view.pendingCount || view.unknownCount || (view.close && view.close.status !== 'closed')) {
         waiting.get(id)?.note(tr('incomingWaiting'));
         return;

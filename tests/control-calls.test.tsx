@@ -573,6 +573,24 @@ describe('call restart negotiation', () => {
     caller.e.endLocal();
   });
 
+  it.each([
+    ['a node that keeps the call sends the callee’s reconnect request without asking again', true],
+    ['a node that does not keeps asking for an approval first', false],
+  ] as const)('after the approval ran out, %s', async (_name, continuity) => {
+    let approved = true;
+    const authorize = vi.fn(async () => approved);
+    const incoming = engine({ authorize, callContinuity: () => continuity });
+    await incoming.e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);
+    await incoming.e.accept(QUOTE);
+    approved = false;
+    authorize.mockClear();
+    const pc = FakePc.made[0]; pc.connect(); pc.state('failed');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(incoming.sent.filter(s => s.kind === 402)).toHaveLength(continuity ? 1 : 0);
+    expect(authorize).toHaveBeenCalledTimes(continuity ? 0 : 1);
+    incoming.e.endLocal();
+  });
+
   it('a callee-only failure requests one restart and caller ignores duplicate requests', async () => {
     const incoming = engine();
     await incoming.e.receive(msg(400, { media: 'audio', sdp: 'offer' }), OWN);

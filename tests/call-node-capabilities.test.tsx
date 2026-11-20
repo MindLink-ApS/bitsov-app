@@ -205,6 +205,33 @@ describe('Decline and Accept with free replies (A4)', () => {
     expect(t.last()).toMatchObject({ paidMsat: 0, pendingCount: 0, unknownCount: 0 });
   });
 
+  it.each([
+    ['no price could be read', async () => ({ ok: false, error: { code: 'call_price_unknown', message: 'no price' } as ActionError }), QUOTE],
+    ['the live price rose', async () => ({ ok: true, value: { ...QUOTE, signal_msat: QUOTE.signal_msat + 1 } }), QUOTE],
+    ['the price never answers', () => new Promise<Outcome<CallQuote>>(() => {}), QUOTE],
+    ['no price was shown', async () => ({ ok: true, value: QUOTE }), null],
+  ] as const)('a free Accept does not depend on the price: %s, and it still answers free', async (_name, quote, shown) => {
+    const t = engine({ free: true, quote: quote as CallDeps['quote'] });
+    await t.e.receive(offer(), OWN);
+    await t.e.accept(shown);
+    expect(t.freeSent.map((s) => [s.kind, s.body.call_id])).toEqual([[401, ID]]);
+    expect(t.sent).toEqual([]);
+    expect(t.last()).toMatchObject({ phase: 'connecting', error: null, paidMsat: 0 });
+  });
+
+  it('the paid Accept keeps its checks: a risen price, or none shown, answers nothing', async () => {
+    const risen = engine({ free: false, quote: async () => ({ ok: true, value: { ...QUOTE, signal_msat: QUOTE.signal_msat + 1 } }) });
+    await risen.e.receive(offer(), OWN);
+    await risen.e.accept(QUOTE);
+    expect(risen.sent).toEqual([]);
+    expect(risen.last().phase).toBe('ended');
+    const unshown = engine({ free: false });
+    await unshown.e.receive(offer(), OWN);
+    await unshown.e.accept(null);
+    expect(unshown.sent).toEqual([]);
+    expect(unshown.last().phase).toBe('incoming');
+  });
+
   it('a refused free Accept ends the answer and is not retried paid', async () => {
     const t = engine({ free: true, reply: async () => ({ ok: false, error: { code: 'call_reply_not_free', message: 'This reply cannot go out for free: your node or theirs does not take free call replies. Nothing was sent or paid.' } as ActionError }) });
     await t.e.receive(offer(), OWN);

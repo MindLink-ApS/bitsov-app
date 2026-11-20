@@ -452,6 +452,10 @@ struct NodeState {
     /// approval or grant simply running out. A call's minutes may outlive
     /// its approval only while this is what it was when the call was offered.
     spend_stops: std::sync::atomic::AtomicU64,
+    /// Calls that may still send their own hangup and reconnect request after
+    /// the owner's approval ran out (`held_call_plan`). A leaf lock, like
+    /// `call_consents`.
+    held_calls: Mutex<HeldCalls>,
 }
 
 /// M6 A2: one outgoing call's agreed minutes, bound to the node identity,
@@ -622,6 +626,57 @@ impl CallConsents {
             c.confirmed_msat = None;
         }
         closed
+    }
+}
+
+/// `call_continuity_v1`: one call this app took part in while it could
+/// spend. An outgoing call is kept once the owner confirmed its hold, an
+/// incoming one once its answer went out, each with `NodeState::spend_stops`
+/// as it was then. After the owner's approval runs out, such a call may still
+/// send its own hangup and reconnect request (`held_call_plan`), at most
+/// `HELD_CALL_SIGNALS` of them. Memory only: after a restart nothing is kept.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HeldCall {
+    node_id: String,
+    peer: String,
+    call_id: String,
+    stops: u64,
+    signals: u8,
+}
+
+#[derive(Debug, Default)]
+struct HeldCalls {
+    entries: Vec<HeldCall>,
+}
+
+/// Calls kept at once; the oldest goes first.
+const HELD_CALLS_KEPT: usize = 16;
+/// Signals one call may send on its own authority after the approval ran
+/// out: its reconnect request and its hangup, each once more should the first
+/// be refused before payment.
+const HELD_CALL_SIGNALS: u8 = 4;
+
+impl HeldCalls {
+    /// Keep a call. A call already kept stays as it was.
+    fn keep(&mut self, node_id: &str, peer: &str, call_id: &str, stops: u64) {
+        if self.entries.iter().any(|c| c.node_id == node_id && c.peer == peer && c.call_id == call_id) { return; }
+        if self.entries.len() >= HELD_CALLS_KEPT { self.entries.remove(0); }
+        self.entries.push(HeldCall { node_id: node_id.into(), peer: peer.into(), call_id: call_id.into(), stops, signals: 0 });
+    }
+
+    /// The kept call may send one more signal: it began under `stops`, which
+    /// is still current, and has signals left.
+    fn can_send(&self, node_id: &str, peer: &str, call_id: &str, stops: u64) -> bool {
+        self.entries.iter().any(|c| c.node_id == node_id && c.peer == peer && c.call_id == call_id
+            && c.stops == stops && c.signals < HELD_CALL_SIGNALS)
+    }
+
+    /// `can_send`, and count the signal.
+    fn take(&mut self, node_id: &str, peer: &str, call_id: &str, stops: u64) -> bool {
+        let Some(c) = self.entries.iter_mut().find(|c| c.node_id == node_id && c.peer == peer && c.call_id == call_id
+            && c.stops == stops && c.signals < HELD_CALL_SIGNALS) else { return false };
+        c.signals += 1;
+        true
     }
 }
 
@@ -926,6 +981,7 @@ impl NodeState {
             call_seal: Mutex::new(None),
             call_consents: Mutex::new(CallConsents::default()),
             spend_stops: std::sync::atomic::AtomicU64::new(0),
+            held_calls: Mutex::new(HeldCalls::default()),
             node_grant: Mutex::new(None),
             all_in_caps_node: Mutex::new(None),
             readmission_ask: Mutex::new(None),
@@ -5547,10 +5603,11 @@ fn no_pending_spend(state: &NodeState) -> Result<(), ActionError> {
 enum Auth {
     Window(u64),
     Budget(u64),
-    /// A live call's next minute after the owner's approval ran out, on a
-    /// node that draws it on the hold pinned at admission
-    /// (`call_continuity_v1`). Only [`do_call_block`] makes it, with the
-    /// call's `spend_stops` at its offer; any explicit stop since ends it.
+    /// A live call's own payment after the owner's approval ran out, on a
+    /// node that keeps the call (`call_continuity_v1`): its next minute,
+    /// drawn on the hold pinned at admission ([`do_call_block`]), or its
+    /// hangup or reconnect request ([`held_call_plan`]). Carries the call's
+    /// `spend_stops` from when it began; any explicit stop since ends it.
     CallHold(u64),
 }
 
@@ -8639,6 +8696,9 @@ async fn do_call_hold(state: &NodeState, peer: &str, call_id: &str, confirm_rese
             .ok_or_else(|| ActionError::new("call_no_consent", NO_CONSENT))?;
         if let Some(error) = consent_closed(&entry.phase) { return Err(error); }
         entry.confirmed_msat = Some(hold.reserved_msat);
+        let stops = entry.stops;
+        drop(kept);
+        state.held_calls.lock().unwrap().keep(&consent.node_id, &consent.peer, &consent.call_id, stops);
     }
     Ok(status)
 }
@@ -8763,6 +8823,56 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
     act::with_op(Fallback(existing_operation.as_deref()), result)
 }
 
+/// An incoming call whose answer went out: kept for `held_call_plan`.
+fn keep_answered_call(state: &NodeState, node_id: &str, peer: &str, plaintext: &str, stops: u64) {
+    let call_id = serde_json::from_str::<serde_json::Value>(plaintext).ok()
+        .and_then(|v| v["call_id"].as_str().filter(|id| act::is_call_id(id)).map(str::to_string));
+    if let (Some(call_id), false) = (call_id, node_id.is_empty()) {
+        state.held_calls.lock().unwrap().keep(node_id, peer, &call_id, stops);
+    }
+}
+
+const HELD_GRANT_ENDED: &str = "call_grant_ended";
+const HELD_GRANT_ENDED_WORDS: &str = "Your node's spend budget has ended, so this call signal could not be sent. Your node ends the call when its paid time runs out. Nothing was sent or paid.";
+
+/// `call_continuity_v1`: the owner's approval ran out (by time, or the grant
+/// left the node's list) during a call this node keeps. That call may still
+/// send its own hangup, so End can always reach the other side, and the
+/// reconnect request it needs: kinds 402 and 403 only. An offer or an answer
+/// starts or takes a call and still needs an approval. Only for a call kept
+/// in `NodeState::held_calls` whose `spend_stops` is still current (no lock,
+/// pause, refused token or new connection since it began), at most
+/// `HELD_CALL_SIGNALS` per call, each within the book's limits. On a node
+/// with grants, only while the node still holds a live grant: a token
+/// without `spend` is never asked to send, so a refusal cannot stop the
+/// call's minutes. The caller then checks the live price and the message
+/// cap as for any signal. `None`: not such a call; the lapse is the answer.
+async fn held_call_plan(state: &NodeState, target: &str, kind: u16, plaintext: &str, max_msat: u64) -> Result<Option<(Auth, budget::Plan)>, ActionError> {
+    if !matches!(kind, act::KIND_CALL_ICE | act::KIND_CALL_HANGUP) { return Ok(None); }
+    let Some(call_id) = serde_json::from_str::<serde_json::Value>(plaintext).ok()
+        .and_then(|v| v["call_id"].as_str().filter(|id| act::is_call_id(id)).map(str::to_string)) else { return Ok(None) };
+    let node_id = state.node_id.lock().unwrap().clone();
+    let Some(node_id) = node_id else { return Ok(None) };
+    let stops = spend_stops(state);
+    let kept = state.held_calls.lock().unwrap().can_send(&node_id, target, &call_id, stops);
+    if !kept { return Ok(None); }
+    let caps = require_price_caps(state, false).await?;
+    if !status_lists(&caps.status, CALL_CONTINUITY_CAPABILITY) { return Ok(None); }
+    let paired = matches!(&*state.auth.lock().unwrap(), AuthMode::Paired(_));
+    if paired && status_lists(&caps.status, grant::CAPABILITY) {
+        match read_grant(state).await? {
+            Some(g) if g.live(now_ms()) => { *state.node_grant.lock().unwrap() = Some(g); }
+            _ => return Err(ActionError::new(HELD_GRANT_ENDED, HELD_GRANT_ENDED_WORDS)),
+        }
+    }
+    let plan = with_book(state, false, |book| budget::plan(book, budget::Ask {
+        target, room: false, max_msat, first_contact_msat: None,
+        autopay: None, window: Ok(()), now_ms: now_ms(),
+    }))?;
+    let taken = state.held_calls.lock().unwrap().take(&node_id, target, &call_id, stops);
+    Ok(taken.then_some((Auth::CallHold(stops), plan)))
+}
+
 /// One paid call signal (offer, answer, ICE or hangup) to one contact.
 /// Same authority as a 1:1 message: the owner's budget or the ten-minute
 /// window, one journaled spend at a time, a durable operation id when the
@@ -8802,6 +8912,8 @@ async fn do_call_signal_bounded(
     if (minutes.is_some() || shown_hangup.is_some()) && kind != act::KIND_CALL_OFFER {
         return Err(ActionError::invalid("agreed minutes and a shown hangup ceiling go with an offer only"));
     }
+    // An answer keeps its call for `held_call_plan` under the stops it began with.
+    let stops = spend_stops(state);
     // A hangup ends the call's minutes as it begins, whatever its outcome.
     if kind == act::KIND_CALL_HANGUP {
         if let Some(call_id) = serde_json::from_str::<serde_json::Value>(plaintext).ok()
@@ -8832,8 +8944,15 @@ async fn do_call_signal_bounded(
         body["host_admission_op"] = serde_json::json!(admission.op_id);
     }
     let needs_contact = || ActionError::new("call_needs_contact", "Calls go to contacts you have already paid. Send them a message first. Nothing was paid.");
-    let (auth, plan) = plan_message(state, &target, false, max_msat, None)
-        .map_err(|e| if e.code == "first_contact" { needs_contact() } else { e })?;
+    let (auth, plan) = match plan_message(state, &target, false, max_msat, None) {
+        // The approval ran out during a call this node keeps: that call's own
+        // hangup or reconnect request still goes, on the call's authority.
+        Err(e) if matches!(e.code, "spend_expired" | "spend_locked") => match held_call_plan(state, &target, kind, plaintext, max_msat).await? {
+            Some(held) => held,
+            None => return Err(e),
+        },
+        planned => planned.map_err(|e| if e.code == "first_contact" { needs_contact() } else { e })?,
+    };
     if plan.confirm.is_some() {
         return Err(needs_contact());
     }
@@ -8944,6 +9063,7 @@ async fn do_call_signal_bounded(
     };
     let text = money_post(state, auth, "/messages/compose", body, max_msat, Some(charge)).await?;
     let reply: act::SendReply = text.decode("/messages/compose")?;
+    if kind == act::KIND_CALL_ANSWER { keep_answered_call(state, &signal_node_id, &target, plaintext, stops); }
     Ok(act::CallReceipt {
         operation_id: reply.operation_id.clone(),
         total_msat: act::with_op(Active(text.operation_id.as_deref()), reply.total_msat())?,
@@ -9003,8 +9123,10 @@ const END_WAIT_POLL: Duration = if cfg!(test) { Duration::from_millis(10) } else
 const END_WAIT_MAX: Duration = if cfg!(test) { Duration::from_secs(5) } else { Duration::from_secs(100) };
 
 /// The owner's End. A hangup refused before any payment (the callee is offline,
-/// say) cannot reach anyone yet, and no spend is pending for it. The node ends
-/// the call by itself when its paid time runs out, so End waits for that, asking
+/// say), or one that cannot be sent because a kept call's grant has ended
+/// (`HELD_GRANT_ENDED`), cannot reach anyone yet, and no spend is pending for
+/// it. The node ends the call by itself when its paid time runs out, so End
+/// waits for that, asking
 /// the node and holding no lock. The node showing the call ended is the evidence
 /// that closes the admission, so End writes that down and asks for nothing more.
 /// A further request could only be refused, by the node or by anything that
@@ -9017,8 +9139,14 @@ const END_WAIT_MAX: Duration = if cfg!(test) { Duration::from_secs(5) } else { D
 async fn do_op_end_call_when_node_ends(state: &NodeState, call_id: &str, max_msat: Option<u64>) -> Result<spend_journal::OpView, ActionError> {
     let refused = do_op_end_call_with_limit(state, call_id, max_msat).await;
     let Err(error) = &refused else { return refused };
-    if error.code != "not_dispatched" { return refused; }
-    let Some(offer) = refused_hangup_admission(state, error.operation_id.as_deref()).await else { return refused };
+    let offer = match error.code {
+        "not_dispatched" => refused_hangup_admission(state, error.operation_id.as_deref()).await,
+        // A kept call after its grant ended: its minutes stopped as End began,
+        // and the node ends it when its paid time runs out.
+        HELD_GRANT_ENDED => refused_end_admission(state, error.operation_id.as_deref()).await,
+        _ => None,
+    };
+    let Some(offer) = offer else { return refused };
     let deadline = tokio::time::Instant::now() + END_WAIT_MAX;
     // Only the call's own node can show it ended, and only over the connection
     // the wait began on. Every read is bound to both and to the deadline: none
@@ -9042,6 +9170,14 @@ async fn do_op_end_call_when_node_ends(state: &NodeState, call_id: &str, max_msa
         locked_spend_journal(state)?.observe_call(&offer, true)?;
     }
     do_op_end_call_with_limit(state, call_id, max_msat).await
+}
+
+/// The admission End named in its refusal, when no hangup could be sent for it.
+async fn refused_end_admission(state: &NodeState, operation_id: Option<&str>) -> Option<spend_journal::OperationRecord> {
+    let _money = state.money.lock().await;
+    let journal = locked_spend_journal(state).ok()?;
+    let offer = journal.operation_record(operation_id?).ok()??;
+    matches!(offer.kind.as_str(), "call_offer" | "call_recovery").then_some(offer)
 }
 
 /// The admission End's refused hangup belonged to, from the host's own record.
@@ -10879,6 +11015,7 @@ const FREE_REPLY_UNKNOWN: &str = "It is not known yet whether your node sent thi
 /// in the budget book and journals no payment. A refusal is final: the
 /// renderer never retries it as a paid signal.
 async fn do_call_free_reply(state: &NodeState, peer: &str, kind: u16, plaintext: &str) -> Result<act::CallReceipt, ActionError> {
+    let stops = spend_stops(state);
     let target = control::node_id(peer).map_err(ActionError::invalid)?;
     let signal: serde_json::Value = serde_json::from_str(plaintext).map_err(|_| ActionError::invalid("invalid call signal"))?;
     let bound = signal["call_id"].as_str().is_some_and(act::is_call_id);
@@ -10918,6 +11055,10 @@ async fn do_call_free_reply(state: &NodeState, peer: &str, kind: u16, plaintext:
     let total = reply.total_msat().map_err(|_| unknown())?;
     if reply.amount_msat != 0 || total != 0 || reply.fee_paid_msat.unwrap_or(0) != 0 {
         return Err(unknown());
+    }
+    if kind == act::KIND_CALL_ANSWER {
+        let node_id = state.node_id.lock().unwrap().clone().unwrap_or_default();
+        keep_answered_call(state, &node_id, &target, plaintext, stops);
     }
     Ok(act::CallReceipt {
         operation_id: reply.operation_id.clone(),
@@ -23364,6 +23505,210 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
                 assert_eq!(compose_kinds(&node), [400, 404]);
             }
         }
+    }
+
+    const HELD_ANSWER: &str = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","sdp":"v=0"}"#;
+    const HELD_RESTART: &str = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","candidate":"","sdp_mid":"bitsov-restart-v1"}"#;
+    const HELD_HANGUP: &str = r#"{"v":1,"call_id":"0123456789abcdef0123456789abcdef","reason":"hangup"}"#;
+
+    /// Both of the owner's approvals run out by time, as during a long call.
+    fn lapse_approvals(state: &NodeState) {
+        let now = now_ms();
+        state.autopay.lock().unwrap().arm_until(now, now, 500_000, act::SpendBasis::AppLock);
+        state.spend.lock().unwrap().arm_until(now, now, act::SpendBasis::AppLock);
+    }
+
+    /// End of an outgoing call after the owner's approval ran out. On a node
+    /// that keeps the call, the hangup goes on the call's own authority and
+    /// the minutes stop; without it, the lapse is the answer as before. An
+    /// explicit stop (a lock, a pause) is still the answer. Minutes stop in
+    /// every case.
+    #[tokio::test]
+    async fn end_after_the_approval_lapsed_sends_the_hangup_of_a_kept_call() {
+        for (continuity, stop) in [(true, "none"), (false, "none"), (true, "window_lock"), (true, "pause")] {
+            let (routes, _next, reserved) = PacedHold { per_block: 10_000, fee: 5_000, minutes: 40,
+                closing: 0, direct: false, spent: SPENT_AT_CEILING }.routes();
+            let routes = with_status_caps(routes, if continuity { &["call_continuity_v1"] } else { &[] });
+            let node = paced_call(routes, reserved).await;
+            do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+            lapse_approvals(&node.state);
+            match stop {
+                "window_lock" => { do_spend_lock(&node.state); }
+                "pause" => { do_budget_pause(&node.state).unwrap(); }
+                _ => {}
+            }
+            let ended = do_op_end_call(&node.state, CALL_ID).await;
+            if continuity && stop == "none" {
+                let view = ended.unwrap();
+                assert_eq!(compose_kinds(&node), [400, 404, 403], "{view:?}");
+                assert!(pending(&node).is_none());
+            } else {
+                let code = ended.unwrap_err().code;
+                assert!(matches!(code, "spend_expired" | "spend_locked" | "budget_paused"), "{continuity} {stop}: {code}");
+                assert_eq!(compose_kinds(&node), [400, 404], "{continuity} {stop}: no hangup sent");
+            }
+            // Whatever became of the hangup, End stopped the minutes.
+            assert!(do_call_block(&node.state, A, CALL_ID, 1).await.is_err(), "{continuity} {stop}");
+            assert_eq!(compose_kinds(&node).iter().filter(|k| **k == 404).count(), 1, "{continuity} {stop}: no minute after End");
+        }
+    }
+
+    /// An answered incoming call after the owner's approval ran out: on a node
+    /// that keeps the call, its reconnect request and its hangup still go; an
+    /// offer or answer does not. Without the node's support both are refused
+    /// as before.
+    #[tokio::test]
+    async fn a_kept_incoming_call_sends_its_reconnect_request_and_hangup_after_the_lapse() {
+        for continuity in [true, false] {
+            let (routes, _) = ledger_call_routes();
+            let node = fake(AuthMode::Local, with_status_caps(routes, if continuity { &["call_continuity_v1"] } else { &[] }));
+            approve_calls(&node).await;
+            let quote = read_call_quote(&node.state, A).await.unwrap();
+            let signal = quote.signal_msat + quote.signal_max_routing_fee_msat;
+            do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER, signal, None, None).await.unwrap();
+            lapse_approvals(&node.state);
+            // Taking or starting a call still needs an approval.
+            let again = do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER, signal, None, None).await;
+            assert!(matches!(again.unwrap_err().code, "spend_expired" | "spend_locked"), "{continuity}");
+            let restart = do_renderer_call_signal(&node.state, A, 402, HELD_RESTART, signal, None, None).await;
+            let hangup = do_renderer_call_signal(&node.state, A, act::KIND_CALL_HANGUP, HELD_HANGUP, signal, None, None).await;
+            if continuity {
+                assert_eq!(restart.unwrap().kind, 402);
+                assert_eq!(hangup.unwrap().kind, act::KIND_CALL_HANGUP);
+                assert_eq!(compose_kinds(&node), [401, 402, 403]);
+            } else {
+                assert!(matches!(restart.unwrap_err().code, "spend_expired" | "spend_locked"));
+                assert!(matches!(hangup.unwrap_err().code, "spend_expired" | "spend_locked"));
+                assert_eq!(compose_kinds(&node), [401]);
+            }
+        }
+    }
+
+    /// A call never kept here (another call id, or one answered after a lock)
+    /// has no authority of its own; a kept call has a few signals, not a
+    /// channel: past `HELD_CALL_SIGNALS` the lapse is the answer.
+    #[tokio::test]
+    async fn only_a_kept_call_signals_after_the_lapse_and_only_a_few_times() {
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, with_status_caps(routes, &["call_continuity_v1"]));
+        approve_calls(&node).await;
+        let quote = read_call_quote(&node.state, A).await.unwrap();
+        let signal = quote.signal_msat + quote.signal_max_routing_fee_msat;
+        let other = r#"{"v":1,"call_id":"fedcba9876543210fedcba9876543210","reason":"hangup"}"#;
+        do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER, signal, None, None).await.unwrap();
+        lapse_approvals(&node.state);
+        assert!(do_renderer_call_signal(&node.state, A, act::KIND_CALL_HANGUP, other, signal, None, None).await.is_err());
+        for _ in 0..HELD_CALL_SIGNALS {
+            do_renderer_call_signal(&node.state, A, 402, HELD_RESTART, signal, None, None).await.unwrap();
+        }
+        let past = do_renderer_call_signal(&node.state, A, act::KIND_CALL_HANGUP, HELD_HANGUP, signal, None, None).await;
+        assert!(matches!(past.unwrap_err().code, "spend_expired" | "spend_locked"));
+        assert_eq!(compose_kinds(&node).len(), 1 + usize::from(HELD_CALL_SIGNALS));
+        // An explicit stop since the answer: nothing of that call goes any more.
+        let (routes, _) = ledger_call_routes();
+        let node = fake(AuthMode::Local, with_status_caps(routes, &["call_continuity_v1"]));
+        approve_calls(&node).await;
+        do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER, signal, None, None).await.unwrap();
+        stop_spending(&node.state);
+        lapse_approvals(&node.state);
+        assert!(do_renderer_call_signal(&node.state, A, act::KIND_CALL_HANGUP, HELD_HANGUP, signal, None, None).await.is_err());
+        assert_eq!(compose_kinds(&node), [401]);
+    }
+
+    /// On a paired node the kept call's signal goes only while the node still
+    /// holds a live grant. Once the grant itself has ended, the token cannot
+    /// spend: nothing is sent, so no refusal by the node can stop anything,
+    /// and the answer says the node ends the call by itself.
+    #[tokio::test]
+    async fn a_kept_call_signals_only_under_a_live_grant_on_a_paired_node() {
+        for grant_live in [true, false] {
+            let (routes, _) = ledger_call_routes();
+            let first: Routes = Arc::new(move |m, p, b| {
+                if p.starts_with("/pair/") { return (0, String::new()); }
+                let (status, body) = routes(m, p, b);
+                if p == "/status" {
+                    let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    let caps = value["api_capabilities"].as_array_mut().unwrap();
+                    caps.push(grant::CAPABILITY.into());
+                    caps.push("call_continuity_v1".into());
+                    return (status, value.to_string());
+                }
+                (status, body)
+            });
+            let (node, _dir, g1) = g1_node_with(&["read", "receive", "spend"], Some(first));
+            *g1.grant.lock().unwrap() = g1_grant(3600, 5_000_000, 5_000_000);
+            approve_calls(&node).await;
+            node.state.autopay.lock().unwrap().lock();
+            spend_advance(&node.state, true).await.unwrap();
+            let quote = read_call_quote(&node.state, A).await.unwrap();
+            let signal = quote.signal_msat + quote.signal_max_routing_fee_msat;
+            do_renderer_call_signal(&node.state, A, act::KIND_CALL_ANSWER, HELD_ANSWER, signal, None, None).await.unwrap();
+            lapse_approvals(&node.state);
+            if !grant_live { *g1.grant.lock().unwrap() = g1_grant(-5, 5_000_000, 4_000_000); }
+            let stops = spend_stops(&node.state);
+            let hangup = do_renderer_call_signal(&node.state, A, act::KIND_CALL_HANGUP, HELD_HANGUP, signal, None, None).await;
+            if grant_live {
+                assert_eq!(hangup.unwrap().kind, act::KIND_CALL_HANGUP);
+                assert_eq!(compose_kinds(&node), [401, 403]);
+            } else {
+                assert_eq!(hangup.unwrap_err().code, "call_grant_ended");
+                assert_eq!(compose_kinds(&node), [401], "nothing sent on an ended grant");
+                assert_eq!(spend_stops(&node.state), stops, "no refusal stopped anything");
+            }
+        }
+    }
+
+    /// End of a kept outgoing call after its grant itself ended: no hangup
+    /// can be sent, the minutes stop at once, and End waits for the node to
+    /// end the call at its paid time, then closes the admission. Nothing is
+    /// sent, and no refusal stops anything else.
+    #[tokio::test]
+    async fn end_of_a_kept_call_after_its_grant_ended_waits_for_the_node_to_end_it() {
+        let (routes, _, reserved) = PacedHold { per_block: 10_000, fee: 5_000, minutes: 40,
+            closing: 0, direct: false, spent: SPENT_AT_CEILING }.routes();
+        let over = Arc::new(AtomicBool::new(false));
+        let seen = over.clone();
+        let first: Routes = Arc::new(move |m, p, b| {
+            if p.starts_with("/pair/") { return (0, String::new()); }
+            if p.starts_with("/calls?") && seen.load(std::sync::atomic::Ordering::SeqCst) { return (200, "[]".into()); }
+            let (status, body) = routes(m, p, b);
+            if p == "/status" {
+                let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let caps = value["api_capabilities"].as_array_mut().unwrap();
+                caps.push(grant::CAPABILITY.into());
+                caps.push("call_continuity_v1".into());
+                return (status, value.to_string());
+            }
+            (status, body)
+        });
+        let (node, _dir, g1) = g1_node_with(&["read", "receive", "spend"], Some(first));
+        *g1.grant.lock().unwrap() = g1_grant(3600, 5_000_000, 5_000_000);
+        approve_calls(&node).await;
+        node.state.autopay.lock().unwrap().lock();
+        spend_advance(&node.state, true).await.unwrap();
+        do_call_signal(&node.state, A, 400, OFFER, 15_000).await.unwrap();
+        remember_call_consent(&node.state, A, CALL_ID, MINUTES).unwrap();
+        do_call_hold(&node.state, A, CALL_ID, Some(reserved)).await.unwrap();
+        do_call_block(&node.state, A, CALL_ID, 0).await.unwrap();
+        lapse_approvals(&node.state);
+        *g1.grant.lock().unwrap() = g1_grant(-5, 5_000_000, 4_000_000);
+        let stops = spend_stops(&node.state);
+        let state = &node.state;
+        let (arrived, release) = pause_points::arm(&state.api_base, "end_wait_read");
+        let (ended, ()) = tokio::join!(do_op_end_call_when_node_ends(state, CALL_ID, None), async {
+            arrived.notified().await;
+            // While End waits, no minute goes; then the node ends the call at its paid time.
+            assert!(do_call_block(state, A, CALL_ID, 1).await.is_err());
+            over.store(true, std::sync::atomic::Ordering::SeqCst);
+            release.notify_one();
+        });
+        let view = ended.unwrap();
+        assert_eq!((view.kind.as_str(), view.call_id.as_deref()), ("call_offer", Some(CALL_ID)));
+        assert_eq!(compose_kinds(&node), [400, 404], "no hangup on an ended grant, no minute after End");
+        assert_eq!(spend_stops(state), stops);
+        let journal = spend_journal(state).unwrap();
+        let offer = journal.operation_record(&view.op_id).unwrap().unwrap();
+        assert!(!spend_journal::admission_open(&offer, &journal.call_operations_for(OWN, None, Some(CALL_ID)).unwrap()), "the admission is closed");
     }
 
     /// A node without grants (pre-G1) keeps its answer path: no grant read

@@ -1796,6 +1796,27 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await vi.waitFor(() => expect(host.used('call_signal').map((c) => (c.args as { kind: number }).kind)).toEqual([401]));
     expect($('[data-call-error]')).toBeNull();
   });
+  it('with free replies on both nodes, Accept needs no price and shows no paid Details', async () => {
+    let priced = true;
+    const host = stubHost({ grant: { ...SHORT(), expires_at_ms: Date.now() + 86_400_000 },
+      quote: () => { if (priced) return QUOTE; throw { code: 'call_price_unknown', message: 'Their node gave no live call price.' }; },
+      replies: {
+        node_overview: OVERVIEW(['call_reply_free_v1']),
+        peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, meetings: true, free_replies: true }],
+        call_free_reply: (args) => ({ message_id: 'r1', kind: (args as { kind: number }).kind, amount_msat: 0, total_msat: 0, max_routing_fee_msat: 0, delivered: true, accepted: true, sent_at_ms: Date.now() }),
+      } });
+    await openShell();
+    // Their node gives no price for this call.
+    priced = false;
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'incoming', kind: 400, sender: A, recipient: OWN,
+      timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    expect($('[data-call-answer-detail]')).toBeNull();
+    expect($('[data-call-answer-price]')).toBeNull();
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_free_reply').map((c) => (c.args as { kind: number }).kind)).toEqual([401]));
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
   it.each([
     ['allowance or free replies alone', ['standing_allowance_v1', 'call_reply_free_v1']],
     ['a near name', ['call_continuity_v2']],
