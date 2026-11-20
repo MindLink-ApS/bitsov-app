@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { keepCallCardOverComposer } from '../src/control/Shell';
 
@@ -53,5 +55,15 @@ describe('the call card clearance above the open chat composer', () => {
     viewport.dispatchEvent(new Event('resize'));
     vi.advanceTimersByTime(50);
     expect(clear()).toBe('');
+  });
+});
+
+// jsdom does not apply the stylesheet, so read the rule: only the floating card pins its actions
+// to its foot. A waiting-call card in the stack is short and keeps them in place.
+describe('the call card actions pinned to its foot', () => {
+  it('apply to the floating card only, not to waiting-call cards', () => {
+    const css = readFileSync(join(__dirname, '..', 'src', 'styles.css'), 'utf8');
+    const sticky = [...css.matchAll(/([^{}]*\.call-actions)\s*\{[^}]*position:\s*sticky/g)].map((m) => m[1].trim().split('\n').pop()!.trim());
+    expect(sticky).toEqual(['.call-panel[data-call-panel]:not(.waiting-calls .call-panel) > .call-actions']);
   });
 });

@@ -1,10 +1,32 @@
+import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
 
-// The call card and the message composer, in the real app with sample data. Sample data cannot
-// connect a call, so the card stays at "Calling…". The live card is that same card given what a
-// live video call adds (the picture, Mute and Camera before Hang up): its height is what matters.
-// With the card showing, Send, + and the microphone are each on top at their centre, Hang up is on
-// top and in view, and the card never overlaps the composer.
+// The call card and the message composer, in the real app with sample data. The card is held at
+// "Calling…" (below). The live card is that same card given what a live video call adds (the
+// picture, Mute and Camera before Hang up): its height is what matters. With the card showing,
+// Send, + and the microphone are each on top at their centre, Hang up is on top and in view, and
+// the card never overlaps the composer.
+
+// Placing a call asks for the microphone first. Headless browsers have none (Linux WebKit refuses
+// at once) and the call would end before its card shows, so every run, Chrome and WebKit, gets the
+// same fake one. With a microphone the call goes on to its offer, which sample data refuses: the
+// call ends at once in WebKit, after the network wait in Chrome. So the offer is kept in the
+// making, and the card stays at "Calling…" for as long as it is measured, with no timer racing it.
+const FAKE_MEDIA = fileURLToPath(new URL('../fixtures/fake-media-init.js', import.meta.url));
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript({ path: FAKE_MEDIA });
+  await page.addInitScript(() => {
+    const never = () => new Promise<never>(() => {});
+    if (window.RTCPeerConnection) { RTCPeerConnection.prototype.createOffer = never; return; }
+    // A browser build without WebRTC: just enough of a connection to reach the offer.
+    (window as { RTCPeerConnection?: unknown }).RTCPeerConnection = class extends EventTarget {
+      connectionState = 'new'; iceConnectionState = 'new'; iceGatheringState = 'new';
+      addTrack() { return { replaceTrack: async () => {} }; }
+      createOffer = never;
+      close() {}
+    };
+  });
+});
 
 type Box = { left: number; top: number; right: number; bottom: number };
 const SEND = '[data-composer-bar] .send-btn';

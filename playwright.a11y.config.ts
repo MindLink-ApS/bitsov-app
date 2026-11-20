@@ -14,8 +14,9 @@ import { defineConfig } from '@playwright/test';
 // - call-media-webrtc: whole specs that drive the pre-M6 call UI in the real app
 //   (the call button needs the WebRTC build). Listed once in `webrtcCallSpecs`,
 //   kept out of desktop, and run on the legacy-media server with a handset
-//   profile and a fake microphone, as in playwright.webkit.config.ts. Specs
-//   override per describe.
+//   profile. Specs override per describe. The fake microphone comes from the
+//   spec itself (tests/fixtures/fake-media-init.js), so this run and
+//   playwright.webkit.config.ts place calls the same way.
 const desktopPort = 1421;
 const phonePort = 1446;
 const legacyMediaPort = 1447;
@@ -83,10 +84,6 @@ export default defineConfig({
         viewport: { width: 393, height: 852 },
         isMobile: true,
         hasTouch: true,
-        // Placing a call asks for the microphone. Headless Chrome refuses it,
-        // which ends the call before the card can be measured; give it a fake one.
-        permissions: ['microphone', 'camera'],
-        launchOptions: { args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] },
       },
     },
   ],

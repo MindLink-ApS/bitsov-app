@@ -2019,7 +2019,8 @@ html[data-platform='ios'] .call-panel[data-call-panel]:not(.waiting-calls .call-
   --call-bottom: max(calc(var(--keyboard-inset) + max(var(--s-6), var(--safe-area-bottom))), calc(var(--call-composer-clear, 0px) + var(--s-3)));
   max-height: calc(var(--visible-height, 100dvh) + var(--keyboard-inset) - max(var(--s-4), var(--safe-area-top)) - var(--call-bottom));
 }
-.call-panel[data-call-panel] > .call-actions { position: sticky; bottom: 0; z-index: 1; margin-block: calc(-1 * var(--s-2)); padding-block: var(--s-2); background: inherit; }
+/* Only the floating card: a waiting-call card in the stack keeps its actions in place. */
+.call-panel[data-call-panel]:not(.waiting-calls .call-panel) > .call-actions { position: sticky; bottom: 0; z-index: 1; margin-block: calc(-1 * var(--s-2)); padding-block: var(--s-2); background: inherit; }
 
 /* The node's approval, step by step. */
 .approval-steps { margin: var(--s-2) 0; padding-left: 1.4em; list-style: decimal; }
