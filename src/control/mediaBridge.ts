@@ -9,7 +9,9 @@
  * Downlink: the channel carries raw frames (seq + payload) as binary and
  * link transitions as JSON objects (`{ link, detail }`; Tauri hands a JSON
  * channel payload to the page already parsed). Uplink: one `call_media_send`
- * per payload, raw bytes, no JSON.
+ * per payload, raw bytes, no JSON, with a running count in a header. The host
+ * runs each send off its main thread, so sends can reach it out of order; the
+ * count lets it put them back in the order they were sent.
  */
 import { Channel, invoke } from '@tauri-apps/api/core';
 
@@ -63,9 +65,14 @@ export function frameBytes(message: ArrayBuffer | Uint8Array | number[]): Uint8A
   return Uint8Array.from(message);
 }
 
+/** The header that carries the uplink send count (the host's `SEND_ORDER_HEADER`). */
+export const MEDIA_ORDER_HEADER = 'x-bitsov-media-order';
+
 /** The host-owned socket, through Tauri commands. */
 export function hostMediaBridge(): MediaBridge {
   let current: Channel<ChannelMessage> | null = null;
+  // Never reset: a send still in flight from an earlier socket counts lower than every new one.
+  let sent = 0;
   return {
     open: async (callId, peer, onFrame, onLink, sealed, video) => {
       const channel = new Channel<ChannelMessage>();
@@ -84,7 +91,8 @@ export function hostMediaBridge(): MediaBridge {
     },
     send: (payload) => {
       if (!current) return;
-      void invoke<void>('call_media_send', payload).catch(() => undefined);
+      const headers = { [MEDIA_ORDER_HEADER]: String(sent++) };
+      void invoke<void>('call_media_send', payload, { headers }).catch(() => undefined);
     },
     sendVideo: (payload) => (current ? invoke<number>('call_media_video_send', payload).catch(() => 0) : Promise.resolve(0)),
     close: async () => {
