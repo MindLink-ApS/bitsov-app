@@ -29,6 +29,8 @@ export const CALL_HANGUP = 403;
 export const RING_MS = 60_000;
 /** Bound the renderer wait; the host journal still owns any unresolved payment. */
 export const SIGNAL_TIMEOUT_MS = 30_000;
+/** Backoff before a reconnect's price is read again after a failed read; then no more for that drop. */
+const PRICE_RETRY_MS = [2_000, 5_000, 10_000];
 /** How long to wait for ICE gathering before sending what we have. */
 export const GATHER_MS = 3_000;
 /** A permission prompt may never settle; release the call after this wait. */
@@ -731,6 +733,9 @@ export function createCallEngine(deps: CallDeps) {
     cameraBusy = false;
     wireId = null;
     pendingRestartId = null;
+    clearTimeout(priceRetryTimer);
+    priceRetries = 0;
+    restartQueued = [];
     admissions.clear();
     pendingPeerEnds.clear();
     negotiated = false;
@@ -921,6 +926,8 @@ export function createCallEngine(deps: CallDeps) {
     dropTimer = undefined;
     clearTimeout(restartTimer);
     restartTimer = undefined;
+    clearTimeout(priceRetryTimer);
+    priceRetries = 0;
     // Healed: the refusal stays said while live; it is remembered so the next drop starts without it.
     if (view.recoveryError !== null) { healedRefusal = view.recoveryError; set({ recoveryError: null }); }
     if (view.phase !== 'live') {
@@ -1114,6 +1121,40 @@ export function createCallEngine(deps: CallDeps) {
   let hangupPricing: string | null = null;
   /** A reconnect waiting for its price: nothing of the recovery is spent until there is one. */
   let restartPricing = false;
+  /** Reconnects asked for while a price was being read: run once it is read, or retried with it. */
+  let restartQueued: (() => void)[] = [];
+  /** How many times this drop's reconnect price was read again after a failed read. Reset when the call heals. */
+  let priceRetries = 0;
+  let priceRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * The price a reconnect of a call answered free needs. True: there is one, go
+   * ahead. False: not now. A reconnect asked for meanwhile is kept and runs
+   * after this read; a failed read is said, and retried (`again` and the kept
+   * ones) after a bounded backoff while the call is live and still on this
+   * connection. Nothing of the recovery is spent before a price exists.
+   */
+  const restartPrice = async (conn: RTCPeerConnection, again: () => void): Promise<boolean> => {
+    if (quote) return true;
+    if (restartPricing) { restartQueued.push(again); return false; }
+    restartPricing = true;
+    const priced = await livePrice(view.callId, view.peer).finally(() => { restartPricing = false; });
+    const queued = restartQueued;
+    restartQueued = [];
+    if (pc !== conn || !active()) return false;
+    if (priced) { queued.forEach((run) => run()); return true; }
+    recoveryRefused(conn, tr('caCallPriceUnreadNothingPaid'));
+    if (priceRetries < PRICE_RETRY_MS.length) {
+      const delay = PRICE_RETRY_MS[priceRetries++];
+      clearTimeout(priceRetryTimer);
+      priceRetryTimer = setTimeout(() => { if (pc === conn && active()) [again, ...queued].forEach((run) => run()); }, delay);
+    }
+    return false;
+  };
+  /** A recovery step went out: a refusal said earlier for this drop is no longer true. */
+  const recoveryWent = () => {
+    if (view.recoveryError === null) return;
+    set({ recoveryError: null, ...(view.error === view.recoveryError ? { error: null } : {}) });
+  };
 
   const reconnect = (conn: RTCPeerConnection) => {
     if (pc !== conn || !active()) return;
@@ -1131,15 +1172,14 @@ export function createCallEngine(deps: CallDeps) {
   };
 
   const restart = async (conn: RTCPeerConnection) => {
-    if (pc !== conn || !negotiated || restartAttempted || restartRequested || restartPricing) return;
+    if (pc !== conn || !negotiated || restartAttempted || restartRequested) return;
     if (!quote && freeAnswered !== view.callId) return;
     // A call answered free reads its price first. Without one nothing is sent and
-    // nothing of the recovery is spent: a later drop may try again.
+    // nothing of the recovery is spent; it is tried again while the drop lasts.
     if (!quote) {
-      restartPricing = true;
-      const priced = await livePrice(view.callId, view.peer).finally(() => { restartPricing = false; });
+      const again = () => { if (pc === conn && view.phase === 'reconnecting') void restart(conn); };
+      if (!await restartPrice(conn, again)) return;
       if (pc !== conn || restartAttempted || restartRequested) return;
-      if (!priced) { recoveryRefused(conn, tr('caCallPriceUnreadNothingPaid')); return; }
     }
     const q = quote!;
     // Only the original caller creates offers, so simultaneous failure cannot
@@ -1160,6 +1200,7 @@ export function createCallEngine(deps: CallDeps) {
       if (!view.outgoing) {
         const r = await pay(CALL_ICE, { candidate: '', sdp_mid: RESTART_REQUEST_MID }, signalCost(q));
         if (!r.ok) recoveryRefused(conn, r.error.message);
+        else if (pc === conn) recoveryWent();
         return;
       }
       if (q.offer_msat === null) { reconcileConnection(conn); return; }
@@ -1198,6 +1239,7 @@ export function createCallEngine(deps: CallDeps) {
       if (r.ok) {
         wireId = id;
         admissions.add(id);
+        recoveryWent();
       } else {
         restartAnswerPending = false;
         if (provenUnpaid(r.error.code)) own = own.filter((call) => call !== id);
@@ -1215,14 +1257,12 @@ export function createCallEngine(deps: CallDeps) {
     const conn = pc;
     const eligible = () => !!conn && pc === conn && negotiated && !view.outgoing && !restartAttempted && active() &&
         restartParent(signal.sdp!) === view.callId && !admissions.has(signal.call_id) && signal.media === view.media;
-    if (!eligible() || (!quote && freeAnswered !== view.callId) || restartPricing) return;
+    if (!eligible() || (!quote && freeAnswered !== view.callId)) return;
     // A call answered free reads its price before it takes the restart: without
     // one the restart is not applied and the recovery is not spent.
     if (!quote) {
-      restartPricing = true;
-      const priced = await livePrice(view.callId, view.peer).finally(() => { restartPricing = false; });
+      if (!await restartPrice(conn!, () => void answerRestart(signal))) return;
       if (!eligible()) return;
-      if (!priced) { recoveryRefused(conn!, tr('caCallPriceUnreadNothingPaid')); return; }
     }
     const q = quote!;
     if (!conn) return;
@@ -1247,6 +1287,7 @@ export function createCallEngine(deps: CallDeps) {
       if (pc !== conn) return;
       const r = await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(q));
       if (!r.ok) recoveryRefused(conn, r.error.message);
+      else if (pc === conn) recoveryWent();
     } catch (error) {
       recoveryRefused(conn, tr('caCallRecoveryFailed', asActionError(error).message));
     }
@@ -1408,6 +1449,8 @@ export function createCallEngine(deps: CallDeps) {
       // M6: a node-routed call carries audio only (no camera is captured or offered), unless node-routed video is on.
       const media: CallMedia = deps.routed && !deps.routedVideo ? 'audio' : requested;
       if (active() || deps.busy?.()) return;
+      // The last call's hangup is still being priced: its card stays until that hangup is sent or said unsent.
+      if (hangupPricing !== null) { if (view.callId === hangupPricing) set({ error: tr('caLastCallStillEnding') }); return; }
       deps.onBudgetNeeded?.(null);
       if (q.offer_msat === null || q.call_total_msat === null) {
         set({ ...IDLE, phase: 'ended', peer, error: tr('caTheirNodeDoesNotTakeCallsYetNothingWas'), endWords: () => tr('caTheirNodeDoesNotTakeCallsYetNothingWas') });

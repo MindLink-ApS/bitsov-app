@@ -353,6 +353,97 @@ describe('Decline and Accept with free replies (A4)', () => {
     t.e.endLocal();
   });
 
+  it('Ring to someone else while the hangup of a call answered free is priced leaves that card, says so, and rings nobody', async () => {
+    const price = pricedByHand();
+    const t = engine({ free: true, quote: price.quote });
+    await t.e.receive(offer(), OWN);
+    await t.e.accept(QUOTE);
+    const ending = t.e.hangup();
+    await Promise.resolve();
+    await t.e.place('c'.repeat(64), 'audio', QUOTE);
+    expect(t.e.view()).toMatchObject({ phase: 'ended', callId: ID, error: 'Your last call is still being ended. Call again in a moment. Nothing was sent or paid.' });
+    price.answer({ ok: false, error: { code: 'call_price_unknown', message: 'no price' } as ActionError });
+    await ending;
+    expect(t.sent).toEqual([]);
+    expect(t.e.view()).toMatchObject({ callId: ID, hangupUnsent: true, pendingCount: 0 });
+  });
+
+  /** Reads answered in turn: the first (the free Accept's) never, then each of `outcomes`, then a price. */
+  const pricedInTurn = (...outcomes: ('fail' | 'hand')[]) => {
+    let reads = 0;
+    const hands: ((q: Outcome<CallQuote>) => void)[] = [];
+    const quote = () => {
+      const n = reads++;
+      if (n === 0) return new Promise<Outcome<CallQuote>>(() => {});
+      const o = outcomes[n - 1];
+      if (o === 'fail') return Promise.resolve({ ok: false, error: { code: 'call_price_unknown', message: 'no price' } as ActionError } as Outcome<CallQuote>);
+      if (o === 'hand') return new Promise<Outcome<CallQuote>>((r) => { hands.push(r); });
+      return Promise.resolve({ ok: true, value: QUOTE } as Outcome<CallQuote>);
+    };
+    return { quote, hands, reads: () => reads };
+  };
+  const freeCall = async (quote: CallDeps['quote']) => {
+    const pcs: FakePc[] = [];
+    const t = engine({ free: true, quote, peerConnection: () => { const pc = new FakePc(); pcs.push(pc); return pc as unknown as RTCPeerConnection; } });
+    await t.e.receive(offer(), OWN);
+    await t.e.accept(QUOTE);
+    return { ...t, pcs };
+  };
+
+  it('a reconnect asked for while its price is read is kept, and a failed read is retried while the drop lasts: one request, and the refusal is cleared', async () => {
+    vi.useFakeTimers();
+    const price = pricedInTurn('hand');
+    const t = await freeCall(price.quote);
+    drop(t.pcs[0]);
+    await vi.advanceTimersByTimeAsync(0);
+    // A second failure while the first read is still out: kept, not dropped.
+    t.pcs[0].connectionState = 'failed'; t.pcs[0].onconnectionstatechange?.();
+    price.hands[0]({ ok: false, error: { code: 'call_price_unknown', message: 'no price' } as ActionError });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.sent).toEqual([]);
+    expect(t.last()).toMatchObject({ recoveryUsed: false, recoveryError: 'Their call price could not be read, so this was not sent. Nothing was paid.' });
+    // No new connection event comes: the backoff reads again by itself.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(t.sent.map((s) => s.kind)).toEqual([402]);
+    expect(t.last()).toMatchObject({ recoveryUsed: true, recoveryError: null, error: null });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(t.sent.map((s) => s.kind)).toEqual([402]);
+    t.e.endLocal();
+  });
+
+  it('price reads for one drop are bounded: after the backoff runs out nothing more is read or sent', async () => {
+    vi.useFakeTimers();
+    const price = pricedInTurn('fail', 'fail', 'fail', 'fail', 'fail', 'fail');
+    const t = await freeCall(price.quote);
+    drop(t.pcs[0]);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(price.reads()).toBe(1 + 4);
+    expect(t.sent).toEqual([]);
+    expect(t.last().recoveryUsed).toBe(false);
+    t.e.endLocal();
+  });
+
+  it('a restart offer from the caller whose price cannot be read leaves the recovery unused; the retry answers it once', async () => {
+    vi.useFakeTimers();
+    const price = pricedInTurn('fail');
+    const t = await freeCall(price.quote);
+    t.pcs[0].connectionState = 'connected'; t.pcs[0].onconnectionstatechange?.();
+    const restartId = 'e'.repeat(32);
+    const restartOffer = (): Message => ({ id: `in-400-r-${Math.random()}`, kind: 400, sender: A, recipient: OWN, timestamp: 0,
+      plaintext: JSON.stringify({ v: 1, call_id: restartId, media: 'audio', sdp: `v=0 offer\r\na=x-bitsov-restart-of:${ID}\r\n` }), payment_amount_msat: 1_000 });
+    await t.e.receive(restartOffer(), OWN);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.sent).toEqual([]);
+    expect(t.last().recoveryUsed).toBe(false);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(t.sent.map((s) => [s.kind, s.body.call_id])).toEqual([[401, restartId]]);
+    expect(t.last().recoveryUsed).toBe(true);
+    await t.e.receive(restartOffer(), OWN);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.sent).toHaveLength(1);
+    t.e.endLocal();
+  });
+
   it('the paid Accept keeps its checks: a risen price, or none shown, answers nothing', async () => {
     const risen = engine({ free: false, quote: async () => ({ ok: true, value: { ...QUOTE, signal_msat: QUOTE.signal_msat + 1 } }) });
     await risen.e.receive(offer(), OWN);
