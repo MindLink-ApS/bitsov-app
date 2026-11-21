@@ -48,6 +48,9 @@ impl CallActivity {
     }
 
     /// Hold the activity for `call_id` until the returned hold is released.
+    ///
+    /// After `shutdown`, this returns a no-op hold: nothing begins, and
+    /// releasing or dropping it does nothing.
     pub fn hold(self: &Arc<Self>, call_id: &str) -> CallHold {
         let mut state = self.state.lock().unwrap();
         if state.closed {

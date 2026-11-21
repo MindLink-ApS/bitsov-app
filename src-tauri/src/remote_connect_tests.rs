@@ -214,7 +214,8 @@ async fn old_refresh_cannot_publish_after_connection_generation_changes() {
         for index in 0..2 {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut bytes = [0; 4096];
-            let _ = stream.read(&mut bytes).await.unwrap();
+            let read = stream.read(&mut bytes).await.unwrap();
+            assert_ne!(read, 0, "the client sent a request");
             let body = if index == 0 { serde_json::json!({"challenge":"bitsov-pair-token-v1:test"}) }
                 else { serde_json::json!({"token":"late-old-token", "scopes":["read"], "expires_at":now_unix()+600}) }.to_string();
             if index == 1 {
