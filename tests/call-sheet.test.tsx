@@ -30,15 +30,24 @@ const QUOTE: CallQuote = { offer_msat: 10_000, offer_max_routing_fee_msat: 5_000
 /**
  * An ended card's minutes, as the sheet reads them. The node may already have marked the hold
  * closed while money is still in it (`remaining_msat`) or a minute is still being paid.
+ * `clearHold`: settle retired the reservation once the node dropped the call. A minute paid
+ * as the call ended can still be unknown (`lostMinute`) or paid and not delivered (`undeliveredMinute`).
  */
-const endedMinutes = (over: { paying: boolean; remaining_msat: number }): MinutesView => {
-  const reservation: CallReservation = {
+const endedMinutes = (over: {
+  paying: boolean;
+  remaining_msat: number;
+  lostMinute?: boolean;
+  undeliveredMinute?: boolean;
+  clearHold?: boolean;
+}): MinutesView => {
+  const reservation: CallReservation | null = over.clearHold ? null : {
     reserved_msat: 15_000, spent_msat: 0, remaining_msat: over.remaining_msat,
     per_block_msat: 10_000, per_block_fee_msat: 5_000, max_call_minutes: 1, released_msat: 0, closed: true,
   };
   return {
     agreedBlockMsat: 10_000, reservationMaxMsat: 15_000, reservation, confirmed: true, confirming: false, holdError: null,
-    paidUntilMs: null, blocks: 0, receiptsMsat: 0, paying: over.paying, lostMinute: false, undeliveredMinute: false,
+    paidUntilMs: null, blocks: 0, receiptsMsat: 0, paying: over.paying,
+    lostMinute: over.lostMinute === true, undeliveredMinute: over.undeliveredMinute === true,
     undeliveredPendingId: null, stop: null, settled: false, final: false,
   };
 };
@@ -626,6 +635,41 @@ describe('the call sheet in the app', () => {
     // The hold is marked closed, so only paying / remaining_msat can keep Escape from dismissing it.
     expect($('[data-call-nothing-more]')).toBeNull();
     await escapeKeepsCard(host);
+  });
+
+  /** Hang up, with the ended card's minutes replaced by `endedMinutes` (the engine's own settle is not what the sheet reads). */
+  const hangupWithMinutes = async (minutes: Parameters<typeof endedMinutes>[0]) => {
+    const original = callEngine.createCallEngine;
+    vi.spyOn(callEngine, 'createCallEngine').mockImplementation((deps) => original({
+      ...deps,
+      onView: (next) => deps.onView(next.phase === 'ended' ? { ...next, minutes: endedMinutes(minutes) } : next),
+    }));
+    const host = stubHost();
+    await openShell();
+    await ring();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-dismiss]')?.disabled).toBe(false));
+    await vi.waitFor(() => expect($('[data-call-close]')).toBeNull());
+    return host;
+  };
+
+  it.each([
+    ['lost', { paying: false, remaining_msat: 0, lostMinute: true, clearHold: true }],
+    ['undelivered', { paying: false, remaining_msat: 0, undeliveredMinute: true, clearHold: true }],
+  ] as const)('Escape does not close an ended card after the hold is gone while the minute is %s', async (_label, minutes) => {
+    const host = await hangupWithMinutes(minutes);
+    // The node no longer lists the call, so nothing about the hold can keep the card. Only the unknown minute can.
+    expect($('[data-call-nothing-more]')).toBeNull();
+    await escapeKeepsCard(host);
+  });
+
+  it('Escape closes an ended card once the hold is gone and no minute payment is unknown', async () => {
+    await hangupWithMinutes({ paying: false, remaining_msat: 0, clearHold: true });
+    await vi.waitFor(() => expect(escapeDepth()).toBe(1));
+    key('Escape');
+    await vi.waitFor(() => expect($('[data-call-panel]')).toBeNull());
   });
 
   it('Escape does not close an ended card while a signal result is still unknown', async () => {

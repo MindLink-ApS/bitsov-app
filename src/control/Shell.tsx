@@ -4155,8 +4155,9 @@ function CallPanel(props: {
   const endLine = () => callEndLine(v(), who());
   /**
    * An ended card Escape may close: nothing settling or of unknown result, no call still open at the node,
-   * the node's end confirmed (or never needed), no minute still being paid (`minutes.paying`), and no hold
-   * with money left in it (`remaining_msat`, including once the node has marked the hold closed).
+   * the node's end confirmed (or never needed), no minute still being paid (`minutes.paying`), no minute
+   * payment still unknown (`lostMinute` or `undeliveredMinute`, including after settle has cleared the hold),
+   * and no hold with money left in it (`remaining_msat`, including once the node has marked the hold closed).
    * Otherwise only Close or End that call.
    */
   const escapeMayClose = () => {
@@ -4164,7 +4165,7 @@ function CallPanel(props: {
     if (c.pendingCount > 0 || c.unknownCount > 0 || c.stuck) return false;
     if (c.close && c.close.status !== 'closed') return false;
     const minutes = c.minutes;
-    if (minutes?.paying) return false;
+    if (minutes?.paying || minutes?.lostMinute || minutes?.undeliveredMinute) return false;
     const hold = minutes?.reservation;
     if (hold && (!hold.closed || hold.remaining_msat > 0)) return false;
     return true;
