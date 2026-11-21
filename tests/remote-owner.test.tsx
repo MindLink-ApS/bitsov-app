@@ -1,6 +1,7 @@
 import { render } from 'solid-js/web';
 import { afterEach, expect, it, vi } from 'vitest';
 import { RemoteOwnerCeremony, type SetupInput, type SetupView } from '../src/onboarding/RemoteOwnerCeremony';
+import { setLanguagePref } from '../src/i18n';
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.useRealTimers(); });
 const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
@@ -70,6 +71,21 @@ it('shows closed/restarted errors without starting a fresh ceremony automaticall
   const api = vi.fn(async () => {throw new Error('Setup closed after three failed attempts. Restart the box.');});
   const root = mount(api); await start(root);
   expect(root.textContent).toContain('Setup closed'); expect(api).toHaveBeenCalledTimes(1);
+});
+it.each([
+  ['The setup connection was lost. Cancel the pending setup before trying again.', 'Forbindelsen til opsætningen blev afbrudt.'],
+  ['Setup may have completed, but its receipt was invalid. Check the box before retrying.', 'Opsætningen kan være gennemført, men dens kvittering var ugyldig.'],
+  ['Setup closed after three failed attempts or its time limit. Restart the box to begin again.', 'Opsætningen lukkede efter tre mislykkede forsøg'],
+  ['Setup receipt did not match this box and device. Nothing was re-pinned.', 'Boksens gemte nøgle blev ikke ændret.'],
+])('shows the host\'s setup error in Danish: %s', async (english, danish) => {
+  // The host's text arrives as a plain string. The language changes just before it, so the steps above stay findable.
+  let first = true;
+  const api = vi.fn(async () => { if (first) { first = false; setLanguagePref('da'); } throw english; });
+  try {
+    const root = mount(api); await start(root);
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain(danish);
+    expect(root.textContent).not.toContain(english);
+  } finally { setLanguagePref('en'); }
 });
 it('asks for corrected backup words instead of polling the same failed check', async () => {
   vi.useFakeTimers(); const calls: string[]=[];
