@@ -2036,3 +2036,8 @@ html:is([data-platform='ios'], [data-platform='android']) .call-confirm {
 html:is([data-platform='ios'], [data-platform='android']) .call-confirm > * { min-width: 0; max-width: 100%; }
 html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions { position: sticky; bottom: -12px; margin: 0 -12px -12px; padding: 8px 12px 12px; background: var(--surface); flex-wrap: wrap; }
 html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions button { flex: 1 1 auto; min-height: 44px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+/* iOS keeps the full layout height under the keyboard: sit on the keyboard and fit the visible area, like .call-panel and .toast. */
+html[data-platform='ios'] .call-confirm {
+  bottom: calc(var(--keyboard-inset) + max(12px, var(--safe-area-bottom)));
+  max-height: calc(var(--visible-height, 100dvh) - max(12px, var(--safe-area-top)) - max(12px, var(--safe-area-bottom)));
+}

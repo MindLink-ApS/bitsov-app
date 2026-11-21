@@ -155,3 +155,32 @@ for (const platform of ['ios', 'android'] as const) for (const phone of PHONES) 
     await checkSheet(page, phone);
   });
 }
+
+// iOS with the keyboard up: the layout viewport keeps its full height and the keyboard covers its foot, so the
+// sheet follows the visible area the app measures (--keyboard-inset, --visible-height on the root, as set by
+// src/ios/keyboard.ts) and Cancel and Ring stay above the keyboard.
+const KEYBOARDS = [
+  { ...PHONES[0], keyboard: 253 },
+  { ...PHONES[1], keyboard: 336 },
+];
+for (const phone of KEYBOARDS) for (const root of [16, 32]) {
+  test(`Ring confirmation stays above the iOS keyboard: ${phone.width}x${phone.height}, ${root}px text`, async ({ page }) => {
+    const visible = phone.height - phone.keyboard;
+    // The keyboard is the bottom edge now; the home-indicator inset is dropped while it is open.
+    const area = { ...phone, bottom: phone.keyboard };
+    await page.setViewportSize({ width: phone.width, height: phone.height });
+    await page.route('http://sheet.test/**', async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.startsWith('/src/assets/')) return route.fulfill({ path: join(process.cwd(), path) });
+      return route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<!doctype html><html lang="en" data-platform="ios" data-keyboard-open="true"
+        style="--visible-height: ${visible}px; --visible-top: 0px; --keyboard-inset: ${phone.keyboard}px"><head>
+        <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+        <style>${withInsets(phone)}</style><style>html[data-platform="ios"] { font-size: ${root}px; } *, *::before, *::after { animation: none !important; transition: none !important; }</style></head>
+        <body><div class="track-head"><strong>Maya</strong><div class="call-buttons"><button type="button" class="soft call-button icon-btn" aria-label="Call">c</button>
+        ${confirmation('en')}</div></div></body></html>` });
+    });
+    await page.goto('http://sheet.test/');
+    await page.evaluate(async () => { await Promise.all([...document.fonts].map((f) => f.load().catch(() => null))); await document.fonts.ready; });
+    await checkSheet(page, area);
+  });
+}
