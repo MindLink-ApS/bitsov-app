@@ -13,18 +13,35 @@ import { render } from 'solid-js/web';
 import App from '../src/App';
 import { setLanguagePref, type Language } from '../src/i18n';
 import { IDLE, type CallView } from '../src/control/call';
+import * as callEngine from '../src/control/call';
+import type { MinutesView } from '../src/control/callMinutes';
 import { CallSheetHead, callInitials, callStatusLine } from '../src/control/CallSheetHead';
 import { CallCues, CUE_BUSY, CUE_CONNECTED, CUE_ENDED, CUE_INTERRUPTED, cueFor } from '../src/control/IncomingCallAlerts';
 import { escapeDepth } from '../src/control/escapeStack';
 import { resetContactsForTests, setPetname } from '../src/control/petnames';
 import { setDenom, setStunPref } from '../src/control/prefs';
-import type { CallQuote, LiveEvent, SpendView } from '../src/control/types';
+import type { CallQuote, CallReservation, LiveEvent, SpendView } from '../src/control/types';
 import type { PairingView } from '../src/onboarding/pairing';
 
 const OWN = '1'.repeat(64);
 const A = 'a'.repeat(64);
 const ID = '0123456789abcdef0123456789abcdef';
 const QUOTE: CallQuote = { offer_msat: 10_000, offer_max_routing_fee_msat: 5_000, signal_msat: 1_000, signal_max_routing_fee_msat: 5_000, call_total_msat: 21_000 };
+/**
+ * An ended card's minutes, as the sheet reads them. The node may already have marked the hold
+ * closed while money is still in it (`remaining_msat`) or a minute is still being paid.
+ */
+const endedMinutes = (over: { paying: boolean; remaining_msat: number }): MinutesView => {
+  const reservation: CallReservation = {
+    reserved_msat: 15_000, spent_msat: 0, remaining_msat: over.remaining_msat,
+    per_block_msat: 10_000, per_block_fee_msat: 5_000, max_call_minutes: 1, released_msat: 0, closed: true,
+  };
+  return {
+    agreedBlockMsat: 10_000, reservationMaxMsat: 15_000, reservation, confirmed: true, confirming: false, holdError: null,
+    paidUntilMs: null, blocks: 0, receiptsMsat: 0, paying: over.paying, lostMinute: false, undeliveredMinute: false,
+    undeliveredPendingId: null, stop: null, settled: false, final: false,
+  };
+};
 const view = (over: Partial<CallView>): CallView => ({ ...IDLE, peer: A, callId: ID, ...over });
 
 // ---- the head of the sheet: name, avatar and status, in English and Danish ----
@@ -461,6 +478,35 @@ describe('the call sheet in the app', () => {
     expect(host.used('call_signal')).toHaveLength(0);
   });
 
+  it('payments paused: Answer refuses even when its callback is invoked directly', async () => {
+    const host = stubHost({
+      spend_status: () => ({ state: 'expired', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 }),
+      budget_status: () => ({
+        paused: true, waiting_for_owner: false, ceiling_msat: 500_000, max_daily_msat: 100_000_000, spent_msat: 0, unsettled_msat: 0,
+        preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }],
+        rows: [{ target: A, room: false, limit_msat: 50_000, spent_msat: 0 }],
+        autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null },
+        window_ms: 600_000, node_grant: null,
+      }),
+    });
+    await openShell();
+    incoming(host);
+    await vi.waitFor(() => expect($('[data-call-answer-cost]')).not.toBeNull());
+    const accept = $<HTMLButtonElement>('[data-call-accept]')!;
+    expect(accept.disabled).toBe(true);
+    const signals = host.used('call_signal').length;
+    // Disabled is not the only guard: invoke the accept callback itself.
+    accept.disabled = false;
+    accept.click();
+    await new Promise((r) => setTimeout(r, 100));
+    expect($('[data-call-panel="incoming"]')).not.toBeNull();
+    expect($('[data-call-panel="connecting"]')).toBeNull();
+    expect($('[data-call-approval]')).toBeNull();
+    expect(host.used('call_signal')).toHaveLength(signals);
+    expect(host.used('spend_request')).toHaveLength(0);
+    expect(host.used('op_end_call')).toHaveLength(0);
+  });
+
   it.each([
     ['en', 'Calling…', 'Cancel', 'Ringing…', 'Hang up', 'In call'],
     ['da', 'Ringer op…', 'Annuller', 'Ringer…', 'Læg på', 'I samtale'],
@@ -557,6 +603,51 @@ describe('the call sheet in the app', () => {
     await vi.waitFor(() => expect($('[data-call-close="refused"]')).not.toBeNull());
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-dismiss]')?.disabled).toBe(false));
     expect($('[data-call-close-retry]')).not.toBeNull();
+    await escapeKeepsCard(host);
+  });
+
+  it.each([
+    ['a minute is still being paid', { paying: true, remaining_msat: 0 }],
+    ['a minutes hold still has money in it', { paying: false, remaining_msat: 15_000 }],
+  ] as const)('Escape does not close an ended card while %s', async (_label, minutes) => {
+    const original = callEngine.createCallEngine;
+    vi.spyOn(callEngine, 'createCallEngine').mockImplementation((deps) => original({
+      ...deps,
+      onView: (next) => deps.onView(next.phase === 'ended' ? { ...next, minutes: endedMinutes(minutes) } : next),
+    }));
+    const host = stubHost();
+    await openShell();
+    await ring();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-dismiss]')?.disabled).toBe(false));
+    await vi.waitFor(() => expect($('[data-call-close]')).toBeNull());
+    // The hold is marked closed, so only paying / remaining_msat can keep Escape from dismissing it.
+    expect($('[data-call-nothing-more]')).toBeNull();
+    await escapeKeepsCard(host);
+  });
+
+  it('Escape does not close an ended card while a signal result is still unknown', async () => {
+    const host = stubHost({
+      call_signal: (args) => {
+        if (args!.kind === 403) throw { code: 'payment_unknown', message: 'Outcome unknown.' };
+        return { message_id: 'sig', kind: args!.kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
+      },
+    });
+    await openShell();
+    incoming(host);
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="connecting"]')).not.toBeNull());
+    FakePc.made[0].connect();
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-paid="unknown"]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-dismiss]')?.disabled).toBe(false));
+    // The node's end is not the open question: only the unknown signal tally keeps the card.
+    expect($('[data-call-close]')).toBeNull();
+    expect(host.used('op_end_call')).toHaveLength(0);
     await escapeKeepsCard(host);
   });
 });

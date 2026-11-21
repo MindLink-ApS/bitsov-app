@@ -2690,7 +2690,7 @@ export function ControlCenter(props: Props) {
             spendingReady={roomCanSpend()} spendBlock={roomSpendBlock()} approveSpending={() => openCallApproval(key)}
             panelRef={el => { waitingPanels.set(key, el); }}
             blocked={moneyBlocked()} streams={{ local: null, remote: null }} nameOf={nameOf} quote={actions.callQuote}
-            accept={(shown) => { if (!moneyBlocked()) void calls.acceptWaiting(key, shown); }} decline={(shown) => void calls.declineWaiting(key, shown)} ignore={() => calls.ignoreWaiting(key)} dismiss={() => calls.dismissWaiting(key)}
+            accept={(shown) => { if (moneyBlocked() || roomSpendBlock() === 'paused') return; void calls.acceptWaiting(key, shown); }} decline={(shown) => void calls.declineWaiting(key, shown)} ignore={() => calls.ignoreWaiting(key)} dismiss={() => calls.dismissWaiting(key)}
             hangup={() => {}} mute={() => {}} camera={() => {}} closeAgain={() => {}} endStuck={() => {}} callAgain={() => {}} />;
         }}</For>
       </div>
@@ -2741,7 +2741,7 @@ export function ControlCenter(props: Props) {
         videoStatus={routedVideo ? callVideoStatus() : null}
         nameOf={nameOf}
         quote={actions.callQuote}
-        accept={(shown) => { if (!moneyBlocked()) void calls.accept(shown); }}
+        accept={(shown) => { if (moneyBlocked() || roomSpendBlock() === 'paused') return; void calls.accept(shown); }}
         decline={(shown) => void calls.decline(shown)}
         ignore={() => calls.ignore()}
         hangup={() => void calls.hangup()}
@@ -4155,14 +4155,19 @@ function CallPanel(props: {
   const endLine = () => callEndLine(v(), who());
   /**
    * An ended card Escape may close: nothing settling or of unknown result, no call still open at the node,
-   * the node's end confirmed (or never needed), and no minutes hold left open. Otherwise only Close or End that call.
+   * the node's end confirmed (or never needed), no minute still being paid (`minutes.paying`), and no hold
+   * with money left in it (`remaining_msat`, including once the node has marked the hold closed).
+   * Otherwise only Close or End that call.
    */
   const escapeMayClose = () => {
     const c = v();
     if (c.pendingCount > 0 || c.unknownCount > 0 || c.stuck) return false;
     if (c.close && c.close.status !== 'closed') return false;
-    const hold = c.minutes?.reservation;
-    return !hold || hold.closed;
+    const minutes = c.minutes;
+    if (minutes?.paying) return false;
+    const hold = minutes?.reservation;
+    if (hold && (!hold.closed || hold.remaining_msat > 0)) return false;
+    return true;
   };
   // Escape on the main card: a ringing call goes quiet (the card stays, both buttons still work);
   // an ended card closes once it is fully settled. Calling, connecting and live calls ignore it.
