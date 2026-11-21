@@ -117,7 +117,10 @@ for (const lang of ['en', 'da'] as const) for (const [form, width, height] of SI
     await expect(page.locator('[data-call-panel="incoming"]')).toHaveCount(0);
   });
 
-  test(`outgoing sheet, ${form} ${width}×${height}, ${lang}`, async ({ page }) => {
+  test(`outgoing sheet, ${form} ${width}×${height}, ${lang}`, async ({ page, browserName }) => {
+    // Placing a call needs real call media, which only the WebKit run serves (VITE_CALL_MEDIA=webrtc).
+    // Elsewhere the Call button is not offered, so the case is reported as skipped, not dropped.
+    test.skip(browserName !== 'webkit', 'needs the WebKit run, where VITE_CALL_MEDIA=webrtc');
     const c = COPY[lang];
     await open(page, lang, width, height);
     await page.locator('[data-call="audio"]').first().click();

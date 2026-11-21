@@ -128,7 +128,23 @@ describe('call state cues', () => {
     setV(view({ phase: 'ended', reason: 'hangup' }));
     expect(started).toEqual([...CUE_CONNECTED.hz, ...CUE_ENDED.hz]);
     dispose();
-    expect(() => render(() => <CallCues view={view({ phase: 'ended' })} audioContext={() => { throw new Error('no audio'); }} />, root)()).not.toThrow();
+    // A webview that refuses audio stays silent. The change must really ask for a context, so mount before live.
+    let asked = 0;
+    const [w, setW] = createSignal<CallView>(view({ phase: 'connecting' }));
+    const refused = render(() => <CallCues view={w()} audioContext={() => { asked++; throw new Error('no audio'); }} />, root);
+    expect(() => setW(view({ phase: 'live', liveAt: 1 }))).not.toThrow();
+    expect(asked).toBe(1);
+    expect(() => refused()).not.toThrow();
+    // A context that opens but refuses to resume or to make tones stays silent too, and is still closed.
+    let closed = 0;
+    const broken = { currentTime: 0, destination: {}, resume: () => Promise.reject(new Error('blocked')),
+      close: () => { closed++; return Promise.resolve(); },
+      createOscillator: () => { throw new Error('no tones'); }, createGain: () => { throw new Error('no tones'); } };
+    const [x, setX] = createSignal<CallView>(view({ phase: 'connecting' }));
+    const silent = render(() => <CallCues view={x()} audioContext={() => broken as never} />, root);
+    expect(() => setX(view({ phase: 'live', liveAt: 1 }))).not.toThrow();
+    expect(() => silent()).not.toThrow();
+    await vi.waitFor(() => expect(closed).toBeGreaterThan(0));
   });
 });
 
@@ -375,6 +391,33 @@ describe('the call sheet in the app', () => {
     expect(button.closest('details')!.open).toBe(false);
     expect(host.used('spend_request')).toHaveLength(0);
     // Decline still works at once, and costs nothing.
+    $<HTMLButtonElement>('[data-call-decline]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).toBeNull());
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+
+  it.each([
+    ['en', 'Payments are paused, so this call can’t be answered here. Declining still works.'],
+    ['da', 'Betalinger er sat på pause, så du kan ikke svare her. Du kan stadig afvise.'],
+  ] as const)('payments paused (%s): the sheet says paused, not "not set up", and offers no approval it could not honour', async (lang, line) => {
+    const host = stubHost({
+      spend_status: () => ({ state: 'expired', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 }),
+      budget_status: () => ({
+        paused: true, waiting_for_owner: false, ceiling_msat: 500_000, max_daily_msat: 100_000_000, spent_msat: 0, unsettled_msat: 0,
+        preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }],
+        rows: [{ target: A, room: false, limit_msat: 50_000, spent_msat: 0 }],
+        autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null },
+        window_ms: 600_000, node_grant: null,
+      }),
+    });
+    await openShell();
+    setLanguagePref(lang);
+    incoming(host);
+    await vi.waitFor(() => expect($('[data-call-spend-needed]')).not.toBeNull());
+    expect($('[data-call-spend-needed]')!.textContent).toBe(line);
+    expect($('[data-call-spend-approve]')).toBeNull();
+    expect($<HTMLButtonElement>('[data-call-accept]')?.disabled ?? true).toBe(true);
+    expect(host.used('spend_request')).toHaveLength(0);
     $<HTMLButtonElement>('[data-call-decline]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).toBeNull());
     expect(host.used('call_signal')).toHaveLength(0);

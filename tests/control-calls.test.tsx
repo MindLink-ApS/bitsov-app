@@ -3092,16 +3092,16 @@ describe('calls in the shell', () => {
     await openShell();
     incoming(host);
     await vi.waitFor(() => expect($('[data-call-spend-needed]')).not.toBeNull());
-    // No spending form or price on the ringing card: a plain line, and the way to set calls up one tap away under Details.
-    expect(text('[data-call-spend-needed]')).toBe('Calls are not set up on this device yet, so this call can’t be answered here. Declining still works.');
+    // Set up but not approved now: main's plain reason, and the approval one tap away under Details, no spending form.
+    expect(text('[data-call-spend-needed]')).toMatch(/answer.*paid signal.*approval/i);
     expect($('[data-call-spend-approve]')!.closest('details')?.open).toBe(false);
-    expect(text('[data-call-spend-approve]')).toBe('Set up calls');
+    expect(text('[data-call-spend-approve]')).toBe('Approve spending');
     expect(host.used('spend_request')).toHaveLength(0);
     expect(host.used('call_signal')).toHaveLength(0);
     expect(capture).not.toHaveBeenCalled();
     setLanguagePref('da');
-    expect(text('[data-call-spend-needed]')).toBe('Opkald er ikke gjort klar på denne enhed endnu, så du kan ikke svare her. Du kan stadig afvise.');
-    expect(text('[data-call-spend-approve]')).toBe('Gør klar til opkald');
+    expect(text('[data-call-spend-needed]')).toMatch(/svar.*betalt signal.*godkend/i);
+    expect(text('[data-call-spend-approve]')).toBe('Godkend betalinger');
     $<HTMLButtonElement>('[data-call-spend-approve]')!.click();
     await vi.waitFor(() => expect($('[data-call-approval] [data-call-approve]')).not.toBeNull());
     expect(text('[data-call-approval]')).toContain('Besvar');

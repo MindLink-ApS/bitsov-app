@@ -1410,6 +1410,13 @@ export function ControlCenter(props: Props) {
     if (b?.paused) return false;
     return (!!b && !b.waiting_for_owner && b.autopay.state === 'open') || spendLine(spend(), now()).open;
   };
+  /** Why the app may not pay now: never set up, paused, or set up but its approval is not open. */
+  const roomSpendBlock = (): 'unset' | 'paused' | 'closed' | null => {
+    if (roomCanSpend()) return null;
+    const b = budget();
+    if (b?.paused) return 'paused';
+    return b || spend()?.state === 'expired' ? 'closed' : 'unset';
+  };
   /** Through the budget alone, a member it would refuse before paying is skipped here. */
   const roomBudgetSkip = (peer: string, msat: number): string | null => {
     const b = budget();
@@ -2680,7 +2687,7 @@ export function ControlCenter(props: Props) {
           onCleanup(() => waitingPanels.delete(key));
           const view = () => waitingCalls().find(v => `${v.peer}:${v.callId}` === key)!;
           return <CallPanel waiting answerBlocked={!['idle', 'ended'].includes(callView().phase) || meetingOn() || callView().pendingCount > 0 || callView().unknownCount > 0 || (!!callView().close && callView().close!.status !== 'closed')} view={view()} payment={null} approval={null} approvalOpen={false}
-            spendingReady={roomCanSpend()} approveSpending={() => openCallApproval(key)}
+            spendingReady={roomCanSpend()} spendBlock={roomSpendBlock()} approveSpending={() => openCallApproval(key)}
             panelRef={el => { waitingPanels.set(key, el); }}
             blocked={moneyBlocked()} streams={{ local: null, remote: null }} nameOf={nameOf} quote={actions.callQuote}
             accept={(shown) => { if (!moneyBlocked()) void calls.acceptWaiting(key, shown); }} decline={(shown) => void calls.declineWaiting(key, shown)} ignore={() => calls.ignoreWaiting(key)} dismiss={() => calls.dismissWaiting(key)}
@@ -2691,7 +2698,7 @@ export function ControlCenter(props: Props) {
         panelRef={el => { callPanel = el; }}
         quietRing={() => { const v = callView(); if (v.phase === 'incoming' && v.callId && v.peer) setQuietRing(`${v.peer}:${v.callId}`); }}
         ringQuiet={(() => { const v = callView(); return !!v.callId && !!v.peer && ringQuiet(`${v.peer}:${v.callId}`); })()}
-        spendingReady={roomCanSpend()} approveSpending={openCallApproval}
+        spendingReady={roomCanSpend()} spendBlock={roomSpendBlock()} approveSpending={openCallApproval}
         openCallSettings={() => { setTab('general'); setContextOpen(true); }}
         approvalOpen={callApproval()}
         approval={<Show when={callApproval()}>
@@ -4059,6 +4066,8 @@ function CallPanel(props: {
   approvalOpen: boolean;
   approval: JSX.Element;
   spendingReady?: boolean;
+  /** Why spending is not open, so the ringing card says the true reason. */
+  spendBlock?: 'unset' | 'paused' | 'closed' | null;
   approveSpending?: () => void;
   blocked: boolean;
   /** M6: audio goes through both nodes; no direct connection, STUN or recovery notes. */
@@ -4195,15 +4204,20 @@ function CallPanel(props: {
         <Show when={v().phase === 'incoming' && !v().silenced}>
           <p class="hint" data-call-decline-note>{tr('caCallDeclineFreeNote')}</p>
         </Show>
-        {/* Spending is agreed when the device is paired. If it is not open now, the ringing card says so in plain words;
-            the way to set it up stays one tap away under Details, never a spending form over the ringing card. */}
+        {/* Spending is agreed when the device is paired. If it is not open now, the ringing card says why in plain words:
+            never set up, paused, or set up but not approved right now. The way to approve stays one tap away under
+            Details, never a spending form over the ringing card. Approving cannot lift a pause, so a paused card offers none. */}
         <Show when={v().phase === 'incoming' && props.spendingReady === false}>
-          <p class="hint" role="status" data-call-spend-needed>{tr('callNotSetUp')}</p>
-          <details class="quiet-detail" data-call-setup-detail>
-            <summary>{tr('uiDetails')}</summary>
-            <p class="hint">{tr('caAnswerNeedsSpendingApproval')}</p>
-            <button type="button" class="link" data-call-spend-approve disabled={props.blocked || v().silenced} onClick={() => props.approveSpending?.()}>{tr('callSetUp')}</button>
-          </details>
+          <p class="hint" role="status" data-call-spend-needed>
+            {tr(props.spendBlock === 'paused' ? 'callSpendingPaused' : props.spendBlock === 'closed' ? 'caAnswerNeedsSpendingApproval' : 'callNotSetUp')}
+          </p>
+          <Show when={props.spendBlock !== 'paused'}>
+            <details class="quiet-detail" data-call-setup-detail>
+              <summary>{tr('uiDetails')}</summary>
+              <Show when={props.spendBlock !== 'closed'}><p class="hint">{tr('caAnswerNeedsSpendingApproval')}</p></Show>
+              <button type="button" class="link" data-call-spend-approve disabled={props.blocked || v().silenced} onClick={() => props.approveSpending?.()}>{tr(props.spendBlock === 'closed' ? 'uiApproveSpending' : 'callSetUp')}</button>
+            </details>
+          </Show>
         </Show>
         {props.approval}
         {/* No surprise camera: before Accept, a video call says the camera comes on, and how to turn it off. */}
