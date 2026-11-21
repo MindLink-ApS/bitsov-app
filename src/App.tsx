@@ -1,4 +1,5 @@
 import { t } from './i18n';
+import { hostText } from './control/hostCopy';
 import { invoke } from '@tauri-apps/api/core';
 import { PhoneTrust } from './onboarding/PhoneTrust';
 import { PhoneOnboarding } from './onboarding/PhoneOnboarding';
@@ -459,7 +460,7 @@ function AppScreen() {
     </div>
     <div data-app-screen inert={pairingRequest() !== null} style={{ display: 'contents' }}>
     <Show when={status().local_owner && status().owner_warning}>
-      <aside role="alert" class="panel" data-owner-warning>{status().owner_warning}</aside>
+      <aside role="alert" class="panel" data-owner-warning>{hostText(status().owner_warning!)}</aside>
     </Show>
     <Show when={showRemember()}>
       <RememberUnlock mobile={onPhone} platform={platform} onChoose={async (remember) => {
@@ -898,7 +899,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
               <div class="panel funded">
                 <h2>{t('obFundingSeen')}</h2>
                 <p class="hint">
-                  {t('obObservedAmount', fmtAmount(received() * 1000))}{t('obFundingNext')}</p>
+                  {t('obObservedAmount', fmtAmount(received() * 1000, 'down'))}{t('obFundingNext')}</p>
                 <Show when={fund()!.funding_evidence}>
                   <p class="evidence">{t('obEvidence')}{' '}{fund()!.funding_evidence}</p>
                 </Show>
@@ -940,7 +941,7 @@ function Fund(props: { source: Source; ready: () => boolean; moneyBlocked?: () =
                   <div class="fill" style={{ width: `${progress()}%` }} />
                 </div>
                 <div class="numbers">
-                  <strong>{fmtAmount(received() * 1000)}</strong>{t('obOfAmountSeen', fmtAmount(required() * 1000))}
+                  <strong>{fmtAmount(received() * 1000, 'down')}</strong>{t('obOfAmountSeen', fmtAmount(required() * 1000, 'up'))}
                 </div>
               </div>
               <p class="hint">

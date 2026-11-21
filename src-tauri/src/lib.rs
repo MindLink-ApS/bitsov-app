@@ -20,6 +20,8 @@ pub mod spend_journal;
 pub mod control;
 pub mod jarvis;
 pub mod at_rest;
+#[cfg(windows)]
+mod private_fs;
 #[cfg(any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")), all(test, unix)))]
 mod apple_key_material;
 pub mod pairing;

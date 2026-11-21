@@ -198,10 +198,10 @@ describe('call video flag', () => {
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     answer(host);
     await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
-    expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer']);
+    expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer', 'send_base']);
     expect(constraintsSeen.every((c) => !c.video)).toBe(true);
     expect(host.used('call_media_video_send')).toHaveLength(0);
-    expect($('[data-call-route="node"]')?.textContent).toBe('The call goes through your box and theirs. Both boxes can hear it.');
+    expect($('[data-call-route="node"]')?.textContent).toBe('The call travels through your own box and theirs. Those two boxes carry the sound, so they could hear it.');
   });
 
   it('off: an incoming video offer rings and is answered as audio, camera untouched', async () => {
@@ -222,7 +222,7 @@ describe('call video flag', () => {
       const host = stubHost();
       await placeVideo(host);
       expect(constraintsSeen.some((c) => c.video === true)).toBe(true);
-      expect($('[data-call-route="node"]')?.textContent).toBe('The call and its video go through your box and theirs. Both boxes can see and hear it.');
+      expect($('[data-call-route="node"]')?.textContent).toBe('The call and video travel through your own box and theirs. Those two boxes carry the picture and sound, so they could see and hear it.');
       await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
       expect((host.used('call_media_open')[0].args as { video: unknown }).video).toBe(true);
       host.media({ link: 'open', detail: null });
@@ -241,7 +241,7 @@ describe('call video flag', () => {
       const host = stubHost();
       setLanguagePref('da');
       await placeVideo(host);
-      expect($('[data-call-route="node"]')?.textContent).toBe('Opkaldet og videoen går gennem din boks og deres. Begge bokse kan se og høre det.');
+      expect($('[data-call-route="node"]')?.textContent).toBe('Opkaldet og videoen går gennem din egen boks og deres. De to bokse bærer billede og lyd, så de kunne se og høre det.');
       await vi.waitFor(() => expect($('[data-call-video-status]')?.textContent).toBe('Video virker ikke på denne enhed. Lyden fortsætter.'));
     });
 
@@ -267,10 +267,10 @@ describe('call video flag', () => {
       await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
       answer(host);
       await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
-      expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer']);
+      expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer', 'send_base']);
       expect(constraintsSeen.every((c) => !c.video)).toBe(true);
       expect(host.used('call_media_video_send')).toHaveLength(0);
-      expect($('[data-call-route="node"]')?.textContent).toBe('The call goes through your box and theirs. Both boxes can hear it.');
+      expect($('[data-call-route="node"]')?.textContent).toBe('The call travels through your own box and theirs. Those two boxes carry the sound, so they could hear it.');
     });
 
 

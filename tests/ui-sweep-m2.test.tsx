@@ -65,10 +65,10 @@ describe('M2 UI sweep', () => {
     await start();
     expect($('[data-tab="frontdoor"]')!.textContent).toBe('Profile');
     const heads = [...mount.querySelectorAll('.track-group h2')].map((h) => h.textContent);
-    expect(heads).toContain('Browse');
+    expect(heads).toContain('Find people');
     expect(heads).not.toContain('Discover');
     expect($('[data-rooms-coming-soon]')!.textContent).toMatch(/This node does not support rooms yet/);
-    expect($('[data-track="porch"]')!.textContent).toContain('Porch');
+    expect($('[data-track="porch"]')!.textContent).toContain('Public pages');
     const roomBtn = mount.querySelector<HTMLButtonElement>('[data-track^="room:"]');
     if (roomBtn) {
       roomBtn.click();

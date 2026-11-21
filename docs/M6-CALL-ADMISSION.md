@@ -34,8 +34,8 @@ record-only; the next call exposes the host's existing-admission cleanup.
 | #220: 404/prepared can race the original POST | `a2_late_offer_cannot_be_released_by_empty_lookup_or_elapsed_grace` holds the POST before payment across timeout and an aged lookup, checks the admission/slot fence, then lets that original POST pay and cleans it once. Includes released snapshots, metadata-less legacy journals, and already-persisted grace releases with restored late-payment accounting. |
 | #228 abandonment | `a2_only_confirmed_node_abandon_releases_a_call_offer` checks confirmed tombstones, conflicts reporting paying/prepared, and unsupported abandonment. Confirmed abandonment forces a fresh operation ID. |
 | #278 fresh-operation guard | Existing refusal tests retain the HTTP/kind/room/retry constraints. Existing offer retries are stopped by I1; answer retries exercise the unchanged refusal guard and retain their earlier payment. |
-| #222 Codex: reversed not-found/receipt replies | Renderer cleanup captures the actual offer promise before awaiting the host. Both reply orders are tested for cancel and timeout. |
-| #222 Fable: paid errors treated as unpaid | The same matrix includes undelivered_pending, failed_paid, budget_unreadable, node errors, and rejected promises. Only proven non-dispatch skips a deferred host check. |
+| #222: reversed not-found/receipt replies | Renderer cleanup captures the actual offer promise before awaiting the host. Both reply orders are tested for cancel and timeout. |
+| #222: paid errors treated as unpaid | The same matrix includes undelivered_pending, failed_paid, budget_unreadable, node errors, and rejected promises. Only proven non-dispatch skips a deferred host check. |
 | Cleanup after paid errors | `a2_end_call_cleans_paid_errors_without_reclassifying_them_unpaid` checks exactly one hangup and retained paid history. |
 | Capability downgrade during cleanup | `a2_cleanup_requires_operation_support_after_capability_downgrade` proves no unjournaled hangup is sent. |
 
@@ -76,7 +76,7 @@ from outside the node's source. There is no way out of that fence in the app.
 
 ## Recovery and owner repair follow-up
 
-Atlas confirmed that caller-side paid recovery stays refused while the original
+Caller-side paid recovery stays refused while the original
 admission is open. The recovery card says “Your last call is still closing. End
 it, then call again.” End call uses `op_end_call` for the original admission;
 only confirmed closure offers Call again, with a fresh quote and explicit Ring.
@@ -139,7 +139,7 @@ their existing renderer engine; shared host call guards still apply.
   the actual POST, holds its response, and advances Tokio time to verify the
   configured spend timeout. The adjacent explicit-refusal test also stops
   timing preflight; it still asserts the refusal releases the reservation,
-  disables automatic spending, and retains the saved preset. The original Grok report did not name its two tests,
+  disables automatic spending, and retains the saved preset. The original report did not name its two tests,
   so attribution to that earlier run remains unconfirmed.
 
 ## Validation
