@@ -204,3 +204,52 @@ it.each(['en', 'da'] as const)('keeps a visible setup action in the %s approval 
   expect(setupApprovals).toHaveBeenCalledOnce();
   expect(allow).not.toHaveBeenCalled();
 });
+
+describe('the sheet under a newer modal', () => {
+  it('lets the quit question keep the keyboard while it is open, and takes focus back after', async () => {
+    const { QuitConfirm } = await import('../src/control/QuitConfirm');
+    const { createSignal: signal, Show: ShowIf } = await import('solid-js');
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const [quit, setQuit] = signal(false);
+    const allow = vi.fn();
+    const stop = render(() => <>
+      <FirstSpendSheet
+        presets={[{ id: 'careful', ceiling_msat: 500_000, contact_msat: 50_000, room_msat: 100_000 }]}
+        initialPreset="careful" maxDailyMsat={1_000_000} costLine="8 sats" blockedReason={null}
+        onPreset={() => {}} onAllow={allow} onCancel={() => {}} />
+      <ShowIf when={quit()}><QuitConfirm name="Maya" onStay={() => setQuit(false)} onClose={() => {}} /></ShowIf>
+    </>, host);
+    try {
+      setQuit(true);
+      await Promise.resolve();
+      const stay = host.querySelector<HTMLButtonElement>('[data-quit-stay]')!;
+      expect(document.activeElement).toBe(stay);
+      // The sheet's own panel must not be asked to take focus back while the quit question is open
+      // (in WebKit that call succeeds even though the sheet is under a newer modal).
+      const panel = host.querySelector<HTMLElement>('[data-first-spend-scrim] [tabindex="-1"]')!;
+      const pulled = vi.spyOn(panel, 'focus');
+      // A focus move inside the quit question must not be pulled back into the sheet underneath.
+      const yes = host.querySelector<HTMLButtonElement>('[data-quit-yes]')!;
+      const moveTo = (el: HTMLElement) => { el.focus(); el.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); };
+      moveTo(yes);
+      expect(document.activeElement).toBe(yes);
+      moveTo(stay);
+      expect(document.activeElement).toBe(stay);
+      expect(pulled, 'the sheet did not pull focus while the quit question was open').not.toHaveBeenCalled();
+      expect(allow).not.toHaveBeenCalled();
+      setQuit(false);
+      await Promise.resolve();
+      // With the question gone, the sheet keeps its own focus trap again.
+      const outside = document.createElement('button');
+      document.body.appendChild(outside);
+      outside.focus();
+      outside.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      expect(host.querySelector('[data-first-spend-scrim]')!.contains(document.activeElement)).toBe(true);
+      outside.remove();
+    } finally {
+      stop();
+      host.remove();
+    }
+  });
+});

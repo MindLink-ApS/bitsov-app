@@ -5,7 +5,7 @@ import { t as tr } from '../i18n';
 import { createEffect, createSignal, For, Match, on, onMount, Show, Switch, type JSX } from 'solid-js';
 import type { PaymentQuote, Peer, PorchCard, PorchRead, SpendView } from './types';
 import type { Source } from './source';
-import { amount as fmtAmount, shortId } from './format';
+import { amount as fmtAmount, shownTotal, shortId } from './format';
 import { asActionError, spendLine } from './state';
 import { FrontDoorCardView } from './Discover';
 import { SoftError } from './SoftError';
@@ -17,6 +17,10 @@ type Props = {
   peers: Peer[];
   /** This node answers and makes porch reads (`porch_quote_v1`, or legacy `porch_read_v1`). */
   nodeReads: boolean;
+  /** The node and contacts have answered, so what is missing is known. */
+  known?: boolean;
+  /** The last contacts read failed, so the list may be missing contacts. */
+  peersFailed?: boolean;
   moneyBlocked: boolean;
   spend: SpendView | null;
   spendGate: JSX.Element;
@@ -69,7 +73,7 @@ export function PorchPanel(props: Props) {
 
   const cost = (peer: string, path = PORCH_CARD_PATH) => {
     const q = quotes()[quoteKey(peer, path)];
-    return q ? fmtAmount(q.principal_msat) : '…';
+    return q ? fmtAmount(q.principal_msat, 'up') : '…';
   };
   const heldFor = (peer: string) => held().find((c) => c.node_id.toLowerCase() === peer.toLowerCase()) ?? null;
 
@@ -123,6 +127,7 @@ export function PorchPanel(props: Props) {
       <h2>{tr('uiPorch')}</h2>
       <p class="hint">
         {tr('caReadAContactSProfileCardOrPagesStraight')}</p>
+      <Show when={props.known !== false} fallback={<p class="hint" role="status" data-porch-waiting>{tr('caPorchAfterBoxAnswers')}</p>}>
       <Show
         when={props.nodeReads}
         fallback={
@@ -130,11 +135,16 @@ export function PorchPanel(props: Props) {
             {tr('caYourNodeDoesNotMakePorchReadsYetUpdate')}</p>
         }
       >
+        <Show when={props.peersFailed}>
+          <p class="err-note" role="status" data-porch-peers-failed>{tr('caCouldNotLoadContacts')}</p>
+        </Show>
         <Show
           when={readable().length > 0}
           fallback={
-            <p class="hint" data-porch-none>
-              {tr('caNoConnectedContactOffersPorchReadsRightNowContacts')}</p>
+            <Show when={!props.peersFailed}>
+              <p class="hint" data-porch-none>
+                {tr('caNoConnectedContactOffersPorchReadsRightNowContacts')}</p>
+            </Show>
           }
         >
           <ul class="porch-peers" data-porch-peers>
@@ -158,6 +168,7 @@ export function PorchPanel(props: Props) {
           </ul>
         </Show>
       </Show>
+      </Show>
       <Show when={props.moneyBlocked}>
         <p class="hint" data-porch-blocked>{tr('extraPaymentsAreNotReadyYet')}</p>
       </Show>
@@ -176,11 +187,11 @@ export function PorchPanel(props: Props) {
             <p class="hint">{tr('caPaidToTheirNodeOnceNothingIsRetriedReading')}</p>
             <dl>
               <dt>{tr('caRead')}</dt>
-              <dd data-review-amount>{fmtAmount(rv().quote.principal_msat)}</dd>
+              <dd data-review-amount>{fmtAmount(rv().quote.principal_msat, 'up')}</dd>
               <dt>{tr('uiNetworkFee')}</dt>
-              <dd data-review-fee>{tr('uiUpTo178')}{' '}{fmtAmount(rv().quote.max_routing_fee_msat)}</dd>
+              <dd data-review-fee>{tr('uiUpTo178')}{' '}{fmtAmount(rv().quote.max_routing_fee_msat, 'up')}</dd>
               <dt>{tr('uiTotalAtMost')}</dt>
-              <dd data-review-total>{fmtAmount(rv().quote.total_msat)}</dd>
+              <dd data-review-total>{shownTotal(rv().quote.total_msat, [rv().quote.principal_msat, rv().quote.max_routing_fee_msat])}</dd>
             </dl>
             <div class="composer-bar">
               <button type="button" class="link" data-porch-back disabled={busy()} onClick={() => setReview(null)}>{tr('uiBack')}</button>
@@ -282,7 +293,7 @@ function PorchPageView(props: { page: PorchRead }) {
   return (
     <article class="porch-page" data-porch-page={p().path} data-porch-kind={p().kind}>
       <p class="meta">
-        {p().path}{' '}{tr('caPaid')}{' '}{fmtAmount(p().amount_msat)}
+        {p().path}{' '}{tr('caPaid')}{' '}{fmtAmount(p().amount_msat, 'up')}
       </p>
       <Switch>
         <Match when={p().status === 'not_found'}>

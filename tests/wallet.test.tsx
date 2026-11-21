@@ -225,8 +225,8 @@ describe('the Wallet page', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.hasAttribute('data-trust-continue'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))!.click();
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-profile]')?.disabled).toBe(false));
     click('[data-profile]');
     await vi.waitFor(() => expect($('[data-avatar-menu]')).not.toBeNull());
@@ -324,7 +324,7 @@ describe('the Wallet page', () => {
     await openWallet();
     $<HTMLButtonElement>('[data-wallet-tab="channels"]')!.click();
     await vi.waitFor(() => expect(text('[data-channel="c1"] .channel-peer')).toBe('Maya'));
-    expect(text('[data-channel="c2"] .channel-peer')).toContain('Unnamed contact');
+    expect(text('[data-channel="c2"] .channel-peer')).toContain('New contact');
   });
 
   it('keeps the honest channel fallback when two contacts claim the same LN key', async () => {
@@ -332,7 +332,7 @@ describe('the Wallet page', () => {
     setPetname(A, 'Maya'); setPetname(B, 'Josh');
     await openWallet();
     $<HTMLButtonElement>('[data-wallet-tab="channels"]')!.click();
-    expect(text('[data-channel="c1"] .channel-peer')).toContain('Unnamed contact');
+    expect(text('[data-channel="c1"] .channel-peer')).toContain('New contact');
   });
 
   it('shows independent node categories with overlap and routing limits, without a derived total', async () => {
@@ -473,6 +473,22 @@ describe('the Wallet page', () => {
     expect(text('[data-channel="c2"] [data-channel-words]')).toMatch(/stays yours/);
   });
 
+  it('a receive invoice never shows more than it asks for: 1.5 sats reads about 1, with the exact amount one tap away', async () => {
+    setLanguagePref('en');
+    const host = stubHost();
+    await openWallet('receive');
+    await vi.waitFor(() => expect($('[data-receive-create]')).not.toBeNull());
+    type('[data-receive-amount]', '1.5');
+    click('[data-receive-create]');
+    await vi.waitFor(() => expect($('[data-receive-invoice]')).not.toBeNull());
+    const asked = (host.used('invoice_create')[0].args as { amount_msat: number }).amount_msat;
+    expect(asked).toBe(1500);
+    const shown = text('[data-receive-invoice] .wallet-request-amount');
+    expect(shown).not.toMatch(/about 2/);
+    expect(shown).toMatch(/about 1 sat/);
+    expect($('[data-receive-invoice] [data-exact-amount-value]')?.textContent).toMatch(/1\.5/);
+  });
+
   it.each(['en', 'da'] as const)('Receive over Lightning (%s): an amount makes an invoice with a QR; it reads as received once the node says paid; nothing is paid', async locale => {
     setLanguagePref(locale);
     let paid = false;
@@ -516,8 +532,10 @@ describe('the Wallet page', () => {
     type('[data-receive-amount]', '2');
     click('[data-receive-create]');
     await vi.waitFor(() => expect($('[data-wallet-settled]')).not.toBeNull());
-    expect(text('[data-wallet-settled]')).toContain(reported === null ? 'Amount unknown' : '1.5 sats');
+    // The node's settled amount (1.5 sats: about 1, exactly 1.5 under Details), never the 2 sats requested.
+    expect(text('[data-wallet-settled]')).toContain(reported === null ? 'Amount unknown' : 'about 1 sat');
     expect(text('[data-wallet-settled]')).not.toContain('2 sats');
+    expect($('[data-wallet-settled] [data-settled-exact]')?.textContent ?? null).toBe(reported === null ? null : 'Detailsexactly 1.5 sats');
     expect($('[data-receive-invoice] [data-wallet-qr]')).toBeNull();
   });
 
@@ -597,7 +615,7 @@ describe('the Wallet page', () => {
     await vi.waitFor(() => expect($('[data-send-result="ok"]')).not.toBeNull());
     expect(host.used('payment_pay').map((c) => c.args)).toEqual([{ bolt11: INVOICE, amount_msat: 2000, max_msat: 7000 }]);
     expect(text('[data-send-result]')).toMatch(/Paid 2 sats/);
-    expect(text('[data-send-result]')).toContain('Network fee: unknown');
+    expect(text('[data-send-result]')).toContain('Network fee: amount unknown');
     expect(text('[data-wallet-settled]')).toContain('2 sats');
     expect(text('[data-wallet-settled]')).not.toContain('7 sats');
     click('[data-wallet-tab="activity"]');
@@ -663,9 +681,39 @@ describe('the Wallet page', () => {
     click('[data-send-review]');
     click('[data-wallet-confirm]');
     await vi.waitFor(() => expect($('[data-wallet-settled]')).not.toBeNull());
-    expect(text('[data-wallet-settled]')).toContain('1.5 sats');
-    expect(text('[data-send-result]')).toContain('0.125 sats');
+    expect(text('[data-wallet-settled]')).toContain('about 2 sats');
+    expect(text('[data-wallet-settled] [data-settled-exact]')).toBe('Detailsexactly 1.5 sats');
+    expect(text('[data-send-result]')).toContain('about 1 sat');
     expect(text('[data-send-result]')).not.toContain('7 sats');
+  });
+
+  it('says the contacts could not be read once, in the main pane, when no chat is open', async () => {
+    stubHost({ peers_list: () => { throw 'read failed'; } });
+    mount = document.createElement('div');
+    document.body.appendChild(mount);
+    dispose = render(() => <App />, mount);
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.hasAttribute('data-trust-continue'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))!.click();
+    await vi.waitFor(() => expect(mount.textContent).toContain('We could not load your contacts.'));
+    expect(mount.textContent!.split('We could not load your contacts.')).toHaveLength(2);
+    expect(mount.querySelector('.rail')?.textContent).not.toContain('No contacts yet');
+  });
+
+  it('does not say there are no contacts or payments when contacts could not be read', async () => {
+    stubHost({ peers_list: () => { throw 'read failed'; } });
+    await openWallet();
+    await vi.waitFor(() => expect(mount.querySelector('.rail')?.textContent).toContain('We could not load your contacts.'));
+    expect(mount.querySelector('.rail')?.textContent).not.toContain('No contacts yet');
+    await vi.waitFor(() => expect($('[data-activity-incomplete]')).not.toBeNull());
+    expect($('[data-activity-empty="none"]')).toBeNull();
+  });
+
+  it('Activity never says no payments when history could not be read', async () => {
+    stubHost({ messages_list: () => { throw 'read failed'; } });
+    await openWallet();
+    await vi.waitFor(() => expect($('[data-activity-incomplete]')).not.toBeNull());
+    expect(text('[data-activity-incomplete]')).toContain('may be incomplete');
+    expect($('[data-activity-empty="none"]')).toBeNull();
   });
 
   it('Activity with nothing yet says what shows there and offers Receive; a filter that matches nothing says so', async () => {

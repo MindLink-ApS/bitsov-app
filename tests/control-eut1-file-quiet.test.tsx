@@ -107,8 +107,8 @@ describe('EUT-1: file send, quiet copy, delivery tick', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.hasAttribute('data-trust-continue'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))!.click();
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
 
@@ -149,6 +149,27 @@ describe('EUT-1: file send, quiet copy, delivery tick', () => {
       await vi.waitFor(() => expect(text('[data-send]')).toBe(label));
       expect($('[data-send]')!.getAttribute('aria-label')).toBe(label);
     } finally { setLanguagePref('en'); }
+  });
+
+  it('says what is next after an approval with a file chosen, then sends on the next press', async () => {
+    let paused = true;
+    const host = stubHost({
+      budget_status: () => ({ ...openBudget(), paused }),
+      budget_resume: () => { paused = false; return openBudget(); },
+    });
+    await openShell();
+    $<HTMLButtonElement>('[data-composer-mode="file"]')!.click();
+    const input = $<HTMLInputElement>('[data-file-input]')!;
+    Object.defineProperty(input, 'files', { value: [new File(['hi'], 'brief.txt', { type: 'text/plain' })] });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-send]')!.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-send]')!.click();
+    await vi.waitFor(() => expect(host.used('budget_resume')).toHaveLength(1));
+    await vi.waitFor(() => expect(mount.textContent).toMatch(/Approved\. Press Send to send it\./));
+    expect(host.used('file_send')).toHaveLength(0);
+    await vi.waitFor(() => expect(text('[data-send]')).toMatch(/^Send · up to 8 sats$/));
+    $<HTMLButtonElement>('[data-send]')!.click();
+    await vi.waitFor(() => expect(host.used('file_send')).toHaveLength(1));
   });
 
   it('shows a single tick on an acked message bubble', async () => {

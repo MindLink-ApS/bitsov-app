@@ -7,7 +7,7 @@ import { render } from 'solid-js/web';
 import { ControlCenter } from '../src/control/Shell';
 import { sampleSource, SAMPLE_OWN_ID, SAMPLE_PRESETS } from '../src/control/sample';
 import { setLanguagePref } from '../src/i18n';
-import type { BudgetView } from '../src/control/types';
+import type { BudgetView, Message } from '../src/control/types';
 
 const A = 'a'.repeat(64);
 const B = 'b'.repeat(64);
@@ -45,6 +45,58 @@ describe('an empty chat says only what is known', () => {
     expect($('[data-thread-empty]')).toBeNull();
     expect($('[data-thread-loading]')).toBeNull();
     expect(mount.textContent).not.toMatch(/No messages here yet|Nothing here yet/);
+  });
+
+  it.each([
+    ['en', false, 'These messages could not be read yet. They show once your box is ready.'],
+    ['da', false, 'Beskederne kunne ikke hentes endnu. De vises, når din boks er klar.'],
+    ['en', true, 'These messages could not be read yet. They show once your box is ready.'],
+    ['da', true, 'Beskederne kunne ikke hentes endnu. De vises, når din boks er klar.'],
+  ] as const)('a not_ready reread stays visible until retry and recovery (%s, cached: %s)', async (language, cached, warning) => {
+    setLanguagePref(language);
+    const source = sampleSource({ firstLiveMs: 1e9 });
+    const message: Message = { id: 'cached-chat', kind: 0, sender: A, recipient: SAMPLE_OWN_ID,
+      timestamp: 1_725_000_000_000, plaintext: 'Earlier message', payment_amount_msat: null };
+    let reread = false;
+    let pending: { resolve: (messages: Message[]) => void; reject: (error: unknown) => void } | undefined;
+    source.messages = (peer) => {
+      if (peer.toLowerCase() !== A) return Promise.resolve([]);
+      if (!reread) return Promise.resolve(cached ? [message] : []);
+      return new Promise<Message[]>((resolve, reject) => { pending = { resolve, reject }; });
+    };
+    await open(source);
+    await vi.waitFor(() => expect($(cached ? '[data-message="cached-chat"]' : '[data-thread-empty]')).not.toBeNull());
+    expect($('[data-thread-not-read]')).toBeNull();
+
+    const reopen = async () => {
+      $(`[data-track="peer:${B}"]`)!.click();
+      await vi.waitFor(() => expect($(`[data-track="peer:${B}"]`)?.getAttribute('aria-current')).toBe('true'));
+      expect($('[data-thread-not-read]')).toBeNull();
+      pending = undefined;
+      $(`[data-track="peer:${A}"]`)!.click();
+      await vi.waitFor(() => expect(pending).toBeDefined());
+    };
+    reread = true;
+    await reopen();
+    expect($('[data-thread-not-read]')).toBeNull();
+    expect($('[data-thread-empty]')).toBeNull();
+    pending!.reject({ code: 'not_ready', message: '' });
+    await vi.waitFor(() => expect($('[data-thread-not-read]')?.textContent).toBe(warning));
+    expect($('[data-thread-not-read]')?.getAttribute('role')).toBe('status');
+    expect(mount.querySelectorAll('[data-thread-not-read]')).toHaveLength(1);
+    expect($('[data-thread-empty]')).toBeNull();
+    expect($('[data-thread-loading]')).toBeNull();
+    if (cached) expect($('[data-message="cached-chat"]')?.textContent).toContain('Earlier message');
+
+    await reopen();
+    expect($('[data-thread-not-read]')).toBeNull();
+    expect($('[data-thread-empty]')).toBeNull();
+    if (cached) expect($('[data-message="cached-chat"]')?.textContent).toContain('Earlier message');
+    pending!.resolve(cached ? [message, { ...message, id: 'recovered-chat', plaintext: 'Newer message' }] : []);
+    await vi.waitFor(() => expect($(cached ? '[data-message="recovered-chat"]' : '[data-thread-empty]')).not.toBeNull());
+    expect($('[data-thread-not-read]')).toBeNull();
+    expect($('[data-thread-loading]')).toBeNull();
+    if (cached) expect($('[data-message="cached-chat"]')?.textContent).toContain('Earlier message');
   });
 
   it('read and empty, no budget line (status not known here): neutral, no first-contact claim', async () => {

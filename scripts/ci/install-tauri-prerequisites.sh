@@ -19,7 +19,15 @@ for attempt in 1 2; do
     shift 2
     apt-get "${@:1:option_count}" update --error-on=any
     python3 scripts/ci/verify-apt-cache.py "$archives"
+    count() { find "$archives" -maxdepth 1 -name "*.deb" -type f | wc -l; }
+    before=$(count)
     apt-get "${@:1:option_count}" install -y --download-only "${@:option_count+1}"
+    after=$(count)
+    if (( before > 0 && after == before )); then
+      echo "Tauri prerequisites: installed from cache without download ($before verified archives)"
+    else
+      echo "Tauri prerequisites: downloaded $((after - before)) archives, reused $before verified cached archives"
+    fi
   ' _ "$archives" "${#options[@]}" "${options[@]}" "${packages[@]}"; then
     # Restored debs were explicitly rehashed; newly downloaded debs are verified
     # by apt. Never unpack a cache directly into the filesystem.

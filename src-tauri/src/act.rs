@@ -36,6 +36,8 @@ pub const KIND_FILE_REF: u16 = 200;
 /// 1:1 call signalling (genome kinds 400-403): offer, answer, ICE, hangup.
 /// The offer is the per-call admission, paid at the callee's `call_msat`.
 pub const KIND_CALL_OFFER: u16 = 400;
+/// The callee's answer: one paid signal.
+pub const KIND_CALL_ANSWER: u16 = 401;
 pub const KIND_CALL_HANGUP: u16 = 403;
 /// M6 (genome kind 404 `CALL_BLOCK`): one paid 60-second interval of a
 /// node-routed call, priced by the callee and drawn from the call's
@@ -56,6 +58,9 @@ pub const MAX_PAYMENT_MSAT: u64 = 100_000_000_000;
 /// The node accepts 4 MiB per file, but axum's default 2 MB request limit caps
 /// the base64 JSON body first. Stay under it rather than meet a bare 413.
 pub const FILE_MAX_BYTES: usize = 1_400_000;
+/// Most of a stored-file response read into memory: the largest allowed file in
+/// base64, plus room for its JSON fields.
+pub const FILE_BODY_MAX: usize = FILE_MAX_BYTES / 3 * 4 + 4 + 64 * 1024;
 
 /// `compose` refuses plaintext over 1 MiB.
 pub const PLAINTEXT_MAX_BYTES: usize = 1 << 20;
@@ -307,6 +312,54 @@ pub fn call_gone_reason(reply: &serde_json::Value) -> Option<&'static str> {
 /// null one included, is not proof of unpaid.
 pub fn reports_no_payment(reply: &serde_json::Value) -> bool {
     matches!(reply.get("state").map(serde_json::Value::as_str), None | Some(Some("prepared" | "released")))
+}
+
+/// The callee's node refused the minute's invoice because it is catching up, and
+/// the caller's node records this attempt as holding no payment: `released`, no
+/// hash, nothing settled, retry allowed, for this operation. Node compose writes
+/// `released` with no hash only after `proven_unpaid`. Any other state keeps its
+/// doubt: `prepared` can hold a paid admission and the reply would not show it.
+pub fn peer_not_ready_unpaid(status: u16, body: &str, operation_id: &str) -> bool {
+    if status != 503 { return false; }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return false };
+    let zero_or_absent = |field: &str| v.get(field).is_none_or(|value| value.is_null() || value == 0);
+    v["code"] == "peer_not_ready" && v["operation_id"] == operation_id && v["state"] == "released"
+        && v.get("payment_hash").is_some_and(serde_json::Value::is_null)
+        && v["retry_allowed"] == true && v["accepted"] == false
+        && zero_or_absent("amount_msat") && zero_or_absent("readmission_msat") && zero_or_absent("fee_paid_msat")
+}
+
+/// The node's own record that this attempt paid nothing: its reply to the POST
+/// names this operation as `released` with no payment hash and nothing settled.
+/// Node compose writes that only when the attempt failed and `proven_unpaid`
+/// holds: no wallet dispatch began (`dispatched` is set before the first wallet
+/// poll and cleared only for a proven non-dispatch), no admission is pending or
+/// recorded, the wallet knows none of its admission hashes. Its other writer, a
+/// payment the wallet failed for good, always keeps the hash. A released row is
+/// never paid on its own: recovery selects only paying, payment_unknown, paid,
+/// sent and rejected_retryable. Only a POST of the same id could pay it, and the
+/// app mints a new id for every later attempt.
+pub fn released_without_payment(body: &str, operation_id: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return false };
+    let zero_or_absent = |field: &str| v.get(field).is_none_or(|value| value.is_null() || value == 0);
+    v["operation_id"] == operation_id && v["state"] == "released"
+        && v.get("payment_hash").is_some_and(serde_json::Value::is_null)
+        && v["retry_allowed"] == true && v["accepted"] == false
+        && zero_or_absent("amount_msat") && zero_or_absent("readmission_msat") && zero_or_absent("fee_paid_msat")
+}
+
+/// The same refusal in plain words. It passes by itself, and the scheduler retries it.
+pub const PEER_NOT_READY_MINUTE: &str = "Their node is catching up and could not take this minute yet. Nothing was paid for it.";
+
+/// The owner's words for a recipient the node could not reach. The node's own
+/// wording promises a queue, but a released operation is not sent later.
+pub const RECIPIENT_OFFLINE: &str = "They’re offline. Nothing was sent or paid.";
+
+/// The owner's words for that refusal. Only the wording reads the node's text.
+pub fn released_refusal_message(body: &str) -> String {
+    let offline = serde_json::from_str::<serde_json::Value>(body).ok()
+        .is_some_and(|v| v["error"].as_str().is_some_and(|e| e.starts_with("Recipient is offline")));
+    if offline { RECIPIENT_OFFLINE.to_string() } else { not_dispatched_message(body) }
 }
 
 /// Genome `room_binding_v1` compose refusals (`reason` on a `not_dispatched`),
@@ -578,6 +631,17 @@ impl SpendGate {
         self.pending = Some(elevation);
     }
 
+    /// A replacement proposal does not change an existing window's authority
+    /// or invalidate actions already preparing under its generation.
+    pub fn set_replacement_pending(&mut self, elevation: Elevation, now_ms: u64) {
+        self.settle(now_ms);
+        if self.open.is_some() {
+            self.pending = Some(elevation);
+        } else {
+            self.set_pending(elevation);
+        }
+    }
+
     pub fn pending(&self) -> Option<&Elevation> {
         self.pending.as_ref()
     }
@@ -602,11 +666,12 @@ impl SpendGate {
         Ok(())
     }
 
-    /// The owner's grant arrived for something other than this window (a budget
-    /// approval): the request is answered, and the window stays closed.
+    /// Forget an answered or withdrawn request without changing an existing
+    /// window. A request on its own grants no window authority.
     pub fn clear_pending(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
         self.pending = None;
+        if self.open.is_some() { return; }
+        self.generation = self.generation.wrapping_add(1);
         self.armed_by_request = None;
         self.expired = false;
         self.lapse = None;
@@ -614,8 +679,9 @@ impl SpendGate {
 
     /// The owner's request lapsed on the node; the owner may ask again.
     pub fn pending_expired(&mut self, lapse: Lapse) {
-        self.generation = self.generation.wrapping_add(1);
         self.pending = None;
+        if self.open.is_some() { return; }
+        self.generation = self.generation.wrapping_add(1);
         self.armed_by_request = None;
         self.expired = true;
         self.lapse = Some(lapse);
@@ -636,10 +702,12 @@ impl SpendGate {
             if p.expires_at_ms <= now_ms {
                 // A request this node could never grant (a sidecar) offers no Ask again.
                 let lapse = p.owner_can_grant.then_some(Lapse::Expired);
-                self.generation = self.generation.wrapping_add(1);
                 self.pending = None;
-                self.expired = true;
-                self.lapse = lapse;
+                if self.open.is_none() {
+                    self.generation = self.generation.wrapping_add(1);
+                    self.expired = true;
+                    self.lapse = lapse;
+                }
             }
         }
     }
@@ -704,21 +772,15 @@ pub struct ElevationReply {
 }
 
 impl ElevationReply {
-    /// `owner_config` is the node's `konsensus.toml` when this app knows it
-    /// (the node it launched, or an attached external node). A node that names
-    /// no config in its command gets it appended, so the owner can run the
-    /// command from any directory.
-    pub fn into_elevation(self, owner_config: Option<&std::path::Path>) -> Result<Elevation, ActionError> {
+    /// The node's own command is kept only for the box's operator, shown
+    /// behind Details. A `--config <path>` names a file on the box; it is cut
+    /// here, so no screen, tooltip or clipboard carries the box's config path.
+    pub fn into_elevation(self) -> Result<Elevation, ActionError> {
         if self.op_id.is_empty() || self.op_id.len() > 64 || !self.op_id.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(ActionError::node("the node returned an unexpected operation id"));
         }
         let owner_can_grant = self.owner_action.trim_start().starts_with("konsensus grant");
-        let mut owner_action = self.owner_action;
-        if owner_action.trim() == format!("konsensus grant --op {}", self.op_id) {
-            if let Some(path) = owner_config.and_then(config_arg) {
-                owner_action = format!("{} --config {path}", owner_action.trim());
-            }
-        }
+        let owner_action = without_config_path(&self.owner_action);
         Ok(Elevation {
             op_id: self.op_id,
             expires_at_ms: (self.expires_at.max(0) as u64).saturating_mul(1000),
@@ -728,23 +790,16 @@ impl ElevationReply {
     }
 }
 
-/// An absolute config path, single-quoted for a shell. None for a relative or
-/// overlong path, or one with characters no owner should be asked to paste. A
-/// quote or backslash is refused rather than escaped: no escape is safe in
-/// every shell (fish reads `\'` inside single quotes).
-fn config_arg(path: &std::path::Path) -> Option<String> {
-    let text = path.to_str()?;
-    if !path.is_absolute()
-        || text.len() > 400
-        || text.chars().any(|c| {
-            c.is_control()
-                || c == '\'' || c == '\\'
-                || matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
-        })
-    {
-        return None;
+/// A node command without its `--config` argument and anything after it (the
+/// node prints the path last). Text that is not a command is left as it is.
+pub fn without_config_path(action: &str) -> String {
+    if !action.trim_start().starts_with("konsensus ") {
+        return action.to_owned();
     }
-    Some(format!("'{text}'"))
+    match action.find(" --config") {
+        Some(at) => action[..at].trim_end().to_owned(),
+        None => action.trim_end().to_owned(),
+    }
 }
 
 /// `GET /pair/elevation/:op_id` → `status`.
@@ -1484,6 +1539,22 @@ pub fn is_voice_mime(mime: &str) -> bool {
     mime.trim().to_ascii_lowercase().starts_with("audio/")
 }
 
+fn is_webm_container(mime: &str) -> bool {
+    mime.trim().to_ascii_lowercase().starts_with("video/webm")
+}
+
+/// A recorded voice note is WebM, and the stored type can come back as
+/// `video/webm` for the same audio-only file. That one shape still plays as
+/// sound; any other non-audio type, whatever its name, is not a voice note.
+pub fn is_voice_file(name: &str, mime: &str) -> bool {
+    if is_voice_mime(mime) {
+        return true;
+    }
+    let stem = name.strip_prefix("voice-note-").and_then(|n| n.strip_suffix(".webm"));
+    is_webm_container(mime)
+        && stem.is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+}
+
 /// `GET /files` windows, newest first. Genome's list takes only `limit`, so a
 /// lookup widens the window until it finds the message or the list ends.
 pub const FILE_LIST_WINDOWS: [usize; 3] = [50, 200, 1000];
@@ -1494,6 +1565,9 @@ pub const VOICE_NOT_STORED: &str = "voice note not stored on this node";
 pub const FILE_NOT_STORED: &str = "file not stored on this node";
 /// Received file over the app's 1.4 MB send/receive cap.
 pub const FILE_TOO_LARGE: &str = "file over 1.4 MB";
+/// The whole response passed [`FILE_BODY_MAX`], so the file inside was never
+/// parsed: its own size is unknown, and may be within the cap.
+pub const FILE_RESPONSE_TOO_LARGE: &str = "response too large to load safely";
 
 /// What a message's stored file is, by its type (never its name).
 #[derive(Debug, PartialEq, Eq)]
@@ -1522,7 +1596,8 @@ pub fn stored_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> StoredLooku
 /// Voice notes only: same lookup, then require an audio mime.
 pub fn voice_file_for<'a>(rows: &'a [FileRow], message_id: &str) -> VoiceLookup<'a> {
     match stored_file_for(rows, message_id) {
-        StoredLookup::Found(r) if is_voice_mime(&r.mime_type) => VoiceLookup::Voice(r),
+        // The list has no name: `video/webm` goes on to the fetch, where `is_voice_file` reads it.
+        StoredLookup::Found(r) if is_voice_mime(&r.mime_type) || is_webm_container(&r.mime_type) => VoiceLookup::Voice(r),
         StoredLookup::Found(_) => VoiceLookup::NotVoice,
         StoredLookup::Missing => VoiceLookup::Missing,
     }
@@ -1735,6 +1810,31 @@ mod tests {
     }
 
     #[test]
+    fn replacement_request_lapse_keeps_the_original_window_and_fence() {
+        for ending in ["clear", "expired", "lost", "deadline"] {
+            let mut gate = SpendGate::default();
+            gate.set_pending(Elevation { op_id: "ab12".into(), expires_at_ms: 1_900,
+                owner_action: "konsensus grant".into(), owner_can_grant: true });
+            gate.arm_pending_granted_until(1_000, 2_000, SpendBasis::NodeGrant, Some("cd34"));
+            let before = serde_json::to_value(gate.view(1_100)).unwrap();
+            let generation = gate.generation();
+            let pending = Elevation { op_id: "ef56".into(), expires_at_ms: 1_500,
+                owner_action: "konsensus grant".into(), owner_can_grant: true };
+            gate.set_replacement_pending(pending.clone(), 1_100);
+            match ending {
+                "clear" => gate.clear_pending(),
+                "expired" => gate.pending_expired(Lapse::Expired),
+                "lost" => gate.pending_expired(Lapse::Lost),
+                _ => { gate.view(1_500); }
+            }
+            assert_eq!(serde_json::to_value(gate.view(1_500)).unwrap(), before, "{ending}");
+            gate.check_generation(generation, 1_500).unwrap();
+            assert!(!gate.matches_poll(generation, &pending, 1_500));
+            assert_eq!(gate.check(2_000).unwrap_err().code, "spend_expired");
+        }
+    }
+
+    #[test]
     fn the_window_opens_on_approval_and_closes_after_ten_minutes() {
         let mut gate = SpendGate::default();
         assert_eq!(gate.check(0).unwrap_err().code, "spend_locked");
@@ -1765,7 +1865,7 @@ mod tests {
             owner_action: "konsensus grant --op ab12".into(),
         };
         let mut gate = SpendGate::default();
-        gate.set_pending(reply.into_elevation(None).unwrap());
+        gate.set_pending(reply.into_elevation().unwrap());
         assert_eq!(gate.view(99_999).state, SpendState::Pending);
         assert_eq!(gate.check(99_999).unwrap_err().code, "spend_locked");
         assert_eq!(gate.view(100_000).state, SpendState::Expired);
@@ -1775,13 +1875,13 @@ mod tests {
             expires_at: 100,
             owner_action: "unavailable in this deployment: …".into(),
         };
-        gate.set_pending(sidecar.into_elevation(None).unwrap());
+        gate.set_pending(sidecar.into_elevation().unwrap());
         let view = gate.view(0);
         assert_eq!(view.state, SpendState::Unavailable);
         assert!(!view.pending.unwrap().owner_can_grant);
 
         let hostile = ElevationReply { op_id: "../x".into(), expires_at: 1, owner_action: String::new() };
-        assert!(hostile.into_elevation(None).is_err());
+        assert!(hostile.into_elevation().is_err());
         assert!(elevation_status_path("../../payments").is_err());
     }
 
@@ -1819,7 +1919,7 @@ mod tests {
     #[test]
     fn a_lapsed_request_says_why_until_the_next_ask() {
         let pending = |op: &str| ElevationReply { op_id: op.into(), expires_at: 100, owner_action: format!("konsensus grant --op {op}") }
-            .into_elevation(None)
+            .into_elevation()
             .unwrap();
         let mut gate = SpendGate::default();
         gate.set_pending(pending("ab12"));
@@ -1835,7 +1935,7 @@ mod tests {
 
         // A sidecar request running out offers no Ask again: it can never be granted.
         let sidecar = ElevationReply { op_id: "cd34".into(), expires_at: 100, owner_action: "unavailable in this deployment".into() }
-            .into_elevation(None)
+            .into_elevation()
             .unwrap();
         gate.set_pending(sidecar);
         let view = gate.view(100_000);
@@ -1849,20 +1949,25 @@ mod tests {
     }
 
     #[test]
-    fn only_a_safe_absolute_config_is_added_to_the_owner_command() {
+    fn the_owner_command_never_carries_the_boxs_config_path() {
         let reply = |action: &str| ElevationReply { op_id: "ab12".into(), expires_at: 1, owner_action: action.into() };
-        let with = |action: &str, config: &str| reply(action).into_elevation(Some(std::path::Path::new(config))).unwrap().owner_action;
-        assert_eq!(with("konsensus grant --op ab12", "/n/konsensus.toml"), "konsensus grant --op ab12 --config '/n/konsensus.toml'");
-        // Relative, or with characters that could rewrite what the owner sees: left out.
-        assert_eq!(with("konsensus grant --op ab12", "n/konsensus.toml"), "konsensus grant --op ab12");
-        assert_eq!(with("konsensus grant --op ab12", "/n/\u{202E}lmot.toml"), "konsensus grant --op ab12");
-        assert_eq!(with("konsensus grant --op ab12", "/n/\nx.toml"), "konsensus grant --op ab12");
-        assert_eq!(with("konsensus grant --op ab12", "/Users/o'neil/konsensus.toml"), "konsensus grant --op ab12");
-        assert_eq!(with("konsensus grant --op ab12", r"/a\' ; touch /tmp/p ; \'/k.toml"), "konsensus grant --op ab12");
-        assert_eq!(with("konsensus grant --op ab12", &format!("/{}", "n".repeat(500))), "konsensus grant --op ab12");
-        // Only the bare command of THIS request is extended.
-        assert_eq!(with("konsensus grant --op cd34", "/n/konsensus.toml"), "konsensus grant --op cd34");
-        assert_eq!(with("unavailable in this deployment", "/n/konsensus.toml"), "unavailable in this deployment");
+        let shown = |action: &str| reply(action).into_elevation().unwrap();
+        assert_eq!(shown("konsensus grant --op ab12").owner_action, "konsensus grant --op ab12");
+        // The node names its own config: the path never reaches the app's view.
+        for action in [
+            "konsensus grant --op ab12 --config '/data/umbrel/app-data/bitsov/konsensus.toml'",
+            "konsensus grant --op ab12 --config /srv/n/konsensus.toml",
+            "konsensus grant --op ab12  --config '/Volumes/My Node/konsensus.toml'  ",
+        ] {
+            let pending = shown(action);
+            assert_eq!(pending.owner_action, "konsensus grant --op ab12");
+            assert!(pending.owner_can_grant);
+            let json = serde_json::to_string(&pending).unwrap();
+            assert!(!json.contains("--config") && !json.contains("konsensus.toml"), "{json}");
+        }
+        // Not a command: kept as the node said it (the sidecar's refusal).
+        assert_eq!(shown("unavailable in this deployment").owner_action, "unavailable in this deployment");
+        assert!(!shown("unavailable in this deployment").owner_can_grant);
     }
 
     #[test]
@@ -1933,7 +2038,7 @@ mod tests {
         assert_eq!(room_sendable(&alone).unwrap_err().code, "room_unreachable");
     }
 
-    /// Codex's review fixture: a 21,000-msat regtest invoice signed by
+    /// A 21,000-msat regtest invoice signed by
     /// `CANONICAL_PAYEE`, and three re-encodings the node's parser accepts as
     /// that same invoice (a set padding bit in `p`, a leading zero word in `c`,
     /// a leading zero word in the features). Read from their raw words, each
@@ -2153,6 +2258,10 @@ mod tests {
         assert_eq!(voice_file_for(&rows, "cd"), VoiceLookup::Missing);
         assert!(is_voice_mime(" Audio/MP4"));
         assert!(!is_voice_mime("text/html"));
+        assert!(is_voice_file("voice-note-20261104-155255.webm", "video/webm"));
+        assert!(is_voice_file("anything.ogg", "audio/ogg"));
+        assert!(!is_voice_file("holiday.webm", "video/webm"));
+        assert!(!is_voice_file("voice-note-x.webm", "text/html"));
         assert_eq!(stored_file_for(&rows, "ab"), StoredLookup::Found(&rows[0]));
         assert_eq!(stored_file_for(&rows[1..], "ab"), StoredLookup::Found(&rows[1]));
         assert_eq!(stored_file_for(&rows, "zz"), StoredLookup::Missing);
@@ -2222,6 +2331,19 @@ mod tests {
         assert!(settled_incomplete(502, r#"{"error":"no route","code":502}"#).is_none());
         assert!(settled_incomplete(502, r#"{"code":"payment_settled_send_incomplete"}"#).is_none(), "no amount, no mapping");
         assert!(settled_incomplete(502, "bad gateway").is_none());
+    }
+
+    #[test]
+    fn a_recipient_offline_refusal_promises_no_queue() {
+        let reply = serde_json::json!({"accepted": false, "code": 400, "error": "Recipient is offline. Message will be queued and sent when they reconnect.",
+            "max_routing_fee_msat": 5000, "operation_id": "x", "payment_hash": null, "retry_allowed": true, "state": "released"}).to_string();
+        let words = released_refusal_message(&reply);
+        assert_eq!(words, "They\u{2019}re offline. Nothing was sent or paid.");
+        assert!(!words.contains("queue"), "{words}");
+        // Any other refusal keeps the node's own reason.
+        let other = serde_json::json!({"accepted": false, "code": 400, "error": "their node did not answer with a call price (not connected, or this connection is not admitted yet: send them a message first); nothing was paid",
+            "operation_id": "x", "payment_hash": null, "reason": "call_price_unknown", "retry_allowed": true, "state": "released"}).to_string();
+        assert!(released_refusal_message(&other).contains("did not answer with a call price"));
     }
 
     #[test]

@@ -69,7 +69,7 @@ afterEach(() => {
   root?.remove();
 });
 
-function mount(s: Stub, opts: { nodeReads?: boolean; peers?: Peer[] } = {}) {
+function mount(s: Stub, opts: { known?: boolean; nodeReads?: boolean; peers?: Peer[] } = {}) {
   root = document.createElement('div');
   document.body.appendChild(root);
   dispose = render(
@@ -79,6 +79,7 @@ function mount(s: Stub, opts: { nodeReads?: boolean; peers?: Peer[] } = {}) {
         now={Date.now()}
         peers={opts.peers ?? PEERS}
         nodeReads={opts.nodeReads ?? true}
+        known={opts.known}
         moneyBlocked={false}
         spend={OPEN}
         spendGate={<span data-spend-gate />}
@@ -163,6 +164,15 @@ describe('PorchPanel', () => {
     dispose?.();
     root.remove();
 
+    // Not known yet: it never claims the node lacks this or that no contact offers it.
+    mount(stub(() => page('/index.md', 'markdown', '')), { nodeReads: false, known: false });
+    await tick();
+    expect($('[data-porch-waiting]')).not.toBeNull();
+    expect($('[data-porch-node-off]')).toBeNull();
+    expect($('[data-porch-none]')).toBeNull();
+    dispose?.();
+    root.remove();
+
     mount(stub(() => page('/index.md', 'markdown', '')), { nodeReads: false });
     await tick();
     expect($('[data-porch-node-off]')).not.toBeNull();
@@ -194,8 +204,8 @@ describe('PorchPanel', () => {
     expect(s.quotes[s.quotes.length - 1]).toEqual([MAYA, '/notes.txt']);
     expect(s.reads).toEqual([]);
     expect($('[data-review-amount]')?.textContent).toBe('1 sat');
-    expect($('[data-review-fee]')?.textContent).toBe('up to 1.25 sats');
-    expect($('[data-review-total]')?.textContent).toBe('2.25 sats');
+    expect($('[data-review-fee]')?.textContent).toBe('up to about 2 sats');
+    expect($('[data-review-total]')?.textContent).toBe('about 3 sats');
     click('[data-porch-confirm]');
     await tick();
     expect(s.reads).toEqual([[MAYA, '/notes.txt', 2250]]);

@@ -6,6 +6,12 @@ budget approval, capped first contact to a stranger, message delivery and wallet
 pay / request / file / room, spending lock, price refusals and
 "Ask your node". It needs no wallet, seed, mainnet node or funds.
 
+Set `NODE_REPO` to the path to your local `BitSov-bitsov` checkout:
+
+```bash
+NODE_REPO=/path/to/BitSov-bitsov
+```
+
 ## What it runs
 
 | Piece | What |
@@ -82,7 +88,7 @@ Each is labelled where it happens.
 
 ```bash
 # genome under test, e.g. main + open PRs merged in a throwaway worktree
-cd ~/Desktop/BitSov-bitsov && git fetch origin
+cd "$NODE_REPO" && git fetch origin
 git worktree add --detach /tmp/uie2e-genome origin/main
 # (merge the PRs you want into /tmp/uie2e-genome)
 

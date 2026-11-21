@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'solid-js/web';
 import { ControlCenter } from '../src/control/Shell';
+import { setLanguagePref } from '../src/i18n';
 import { sampleSource, SAMPLE_OWN_ID, SAMPLE_PEERS, SAMPLE_STRANGER } from '../src/control/sample';
 import { hostSource } from '../src/control/source';
 import { doorCard, gateWords, membraneLive, membraneNode, membraneRefused, membraneSeed, membraneSummary, nodeMetabolism, organismCaps, type MembraneEntry } from '../src/control/body';
@@ -182,6 +183,7 @@ describe('Body panel and stream on an N1/N2 node', () => {
   afterEach(() => {
     dispose?.();
     mount?.remove();
+    setLanguagePref('en');
   });
   const $ = <T extends HTMLElement = HTMLElement>(sel: string) => mount.querySelector<T>(sel);
 
@@ -233,6 +235,26 @@ describe('Body panel and stream on an N1/N2 node', () => {
     // The card stands before the message it admitted.
     const stream = $('[data-stream]')!;
     expect(stream.textContent!.indexOf('to reach you')).toBeLessThan(stream.textContent!.indexOf('saw your talk'));
+  });
+
+  it.each([
+    ['en', /paid about 1 sat to reach you/, /exactly 1\.5 sats/],
+    ['da', /betalt ca\. 1 sat for at nå dig/i, /præcis 1,5 sat/i],
+  ] as const)('a payment received at the door never shows more than arrived, exact one tap away (%s)', async (lang, said, exact) => {
+    setLanguagePref(lang);
+    const { emit } = start();
+    await vi.waitFor(() => expect($(`[data-door-track="peer:${SAMPLE_STRANGER}"]`)).not.toBeNull());
+    emit({ type: 'membrane', event: ev({ seq: 950, at: Date.now(), verdict: 'admitted', code: 'settled', counterparty: SAMPLE_STRANGER, first_contact: true, paid_msat: 1500 }) });
+    $<HTMLButtonElement>(`[data-door-track="peer:${SAMPLE_STRANGER}"]`)!.click();
+    await vi.waitFor(() => expect(mount.querySelectorAll('[data-door="in-admitted"]').length).toBeGreaterThan(1));
+    const cards = mount.querySelectorAll<HTMLElement>('[data-door="in-admitted"]');
+    const card = [...cards].find((c) => c.querySelector('[data-exact-amount-value]'))!;
+    expect(card).toBeTruthy();
+    const head = card.querySelector('.door-head')!;
+    const shown = [...head.childNodes].map((n) => n instanceof HTMLElement && n.querySelector('details') ? n.querySelector('summary')!.textContent : n.textContent).join('');
+    expect(shown).toMatch(said);
+    expect(shown).not.toMatch(/about 2|ca\. 2/);
+    expect(card.querySelector('[data-exact-amount-value]')?.textContent).toMatch(exact);
   });
 
   it('shows a paid re-admission and an admission-required refusal in plain words', async () => {

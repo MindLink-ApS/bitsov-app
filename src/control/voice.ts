@@ -49,11 +49,120 @@ export function voiceFileName(atMs: number, type: string): string {
   return `voice-note-${stamp}.${type === 'audio/mp4' ? 'm4a' : 'webm'}`;
 }
 
-/** The file name a kind-200 message names: the plaintext itself, or the node's `[file: name]`. */
+/**
+ * The file name a kind-200 message names: the plaintext itself, the node's
+ * `[file: name]`, or the file record some messages carry as JSON
+ * (`{"filename": ..., "data_b64": ...}`). The payload itself is never a name.
+ */
 export function fileNameOf(plaintext: string | null): string | null {
   if (plaintext === null) return null;
-  const m = /^\[file: (.+)\]$/.exec(plaintext.trim());
-  return m ? m[1] : plaintext.trim() || null;
+  const text = plaintext.trim();
+  if (text.startsWith('{')) {
+    try {
+      const v: unknown = JSON.parse(text);
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        const o = v as Record<string, unknown>;
+        const n = [o.filename, o.name, o.file_name].find((x): x is string => typeof x === 'string' && x.trim() !== '');
+        return n ? baseName(n) : null;
+      }
+    } catch {
+      // A truncated or malformed file record: its text is payload, never a name.
+      return null;
+    }
+  }
+  // A bare payload (base64 or a data: URI) is never a name.
+  if (bareB64(text) !== null || DATA_URI.test(text)) return null;
+  const m = /^\[file: (.+)\]$/.exec(text);
+  return baseName(m ? m[1] : text);
+}
+
+const DATA_URI = /^data:([\w.+-]+\/[\w.+-]+)?(?:;[\w=.+-]+)*;base64,([A-Za-z0-9+/\s]+={0,2})$/;
+
+/**
+ * Bare text read as file bytes only when nothing else fits: one unbroken run of
+ * the base64 alphabet (line wraps allowed, never a space), long, with the mix
+ * random bytes give (upper, lower, digits) and a `+`, `/` or padding. Anything
+ * in doubt stays text: a missed file reads as text, a sentence must never vanish.
+ */
+function bareB64(text: string): string | null {
+  if (/[ \t]/.test(text)) return null;
+  const b = text.replace(/\r?\n/g, '');
+  if (b.length < 120 || b.length % 4 !== 0) return null;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b)) return null;
+  if (!/[+/]/.test(b) && !b.endsWith('=')) return null;
+  const share = (re: RegExp) => (b.match(re)?.length ?? 0) / b.length;
+  if (share(/[A-Z]/g) < 0.15 || share(/[a-z]/g) < 0.15 || share(/[0-9]/g) < 0.03) return null;
+  if (new Set(b).size < 24) return null;
+  return b;
+}
+
+/**
+ * Well-formed base64 of any length, returned in the standard alphabet: standard
+ * or URL-safe (never mixed), padding only at the end, length a multiple of 4,
+ * line wraps allowed but no spaces inside, and it must decode.
+ */
+function wellFormedB64(text: string): string | null {
+  const t = text.trim();
+  if (/[ \t]/.test(t)) return null;
+  const b = t.replace(/\r?\n/g, '');
+  if (b.length % 4 !== 0) return null;
+  const std = /^[A-Za-z0-9+/]*={0,2}$/.test(b);
+  const url = /^[A-Za-z0-9_-]*={0,2}$/.test(b);
+  if (!std && !url) return null;
+  const norm = std ? b : b.replace(/-/g, '+').replace(/_/g, '/');
+  try {
+    atob(norm);
+  } catch {
+    return null;
+  }
+  return norm;
+}
+
+function decodedSize(b64: string): number {
+  const pad = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
+  return Math.floor((b64.length * 3) / 4) - pad;
+}
+
+export type Attachment = { name: string | null; mime: string | null; size: number; b64: string };
+
+/**
+ * A message whose text is a file's bytes (a bare base64 blob, a data: URI, or a
+ * file record with `data_b64`): shown as a file card, never as text.
+ */
+export function attachmentOf(plaintext: string | null): Attachment | null {
+  if (plaintext === null) return null;
+  const text = plaintext.trim();
+  if (text.startsWith('{')) {
+    try {
+      const v: unknown = JSON.parse(text);
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+      const o = v as Record<string, unknown>;
+      // A file only when the record says so: a file name, a MIME type or a file kind.
+      const n = [o.filename, o.name, o.file_name].find((x): x is string => typeof x === 'string' && x.trim() !== '');
+      const mime = [o.mime_type, o.mime].find((x): x is string => typeof x === 'string' && /^[\w.+-]+\/[\w.+-]+$/.test(x.trim()));
+      const fileKind = [o.type, o.kind].some((x) => x === 'file' || x === 'attachment');
+      if (!n && !mime && !fileKind) return null;
+      // A named file needs only well-formed base64 (any size); the bare-text heuristic is not for it.
+      const data = [o.data_b64, o.data, o.content_b64].find((x): x is string => typeof x === 'string');
+      const b = data === undefined ? null : wellFormedB64(data);
+      if (b === null) return null;
+      return { name: n ? baseName(n) : null, mime: mime ?? null, size: decodedSize(b), b64: b };
+    } catch {
+      return null;
+    }
+  }
+  const uri = DATA_URI.exec(text);
+  if (uri) {
+    const b = uri[2].replace(/\s+/g, '');
+    return { name: null, mime: uri[1] ?? null, size: decodedSize(b), b64: b };
+  }
+  const b = bareB64(text);
+  return b === null ? null : { name: null, mime: null, size: decodedSize(b), b64: b };
+}
+
+/** A name without any directory part, or null when the last component is empty. */
+function baseName(n: string): string | null {
+  return n.trim().split(/[\\/]/).pop()?.trim() || null;
 }
 
 /** A kind-200 message whose file this app recorded as a voice note. */
@@ -164,5 +273,7 @@ export function blobUrl(dataB64: string, mime: string): string {
   const bin = atob(dataB64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return URL.createObjectURL(new Blob([bytes], { type: mime }));
+  // A voice note's WebM can be stored as video/webm; it is sound and plays as sound.
+  const type = mime.trim().toLowerCase().startsWith('video/webm') ? 'audio/webm' : mime;
+  return URL.createObjectURL(new Blob([bytes], { type }));
 }

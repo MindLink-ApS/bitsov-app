@@ -55,7 +55,7 @@ if grep_in '/fn stop_supervised_node/,/^}/' -qE '"kill"|kill -TERM'; then
 else
   ok "no raw kill(1) on a pid in the teardown path"
 fi
-# Quit during a restore (Codex R2G on 3ff4e60e). stop_adapter_tests prove the NodeState
+# Quit during a restore. stop_adapter_tests prove the NodeState
 # methods; these guards prove the real call sites still go through them. A restore
 # that takes the child out of the slot itself hides it from quit; a spawn that bypasses
 # spawn_child can start a node after quit has looked.

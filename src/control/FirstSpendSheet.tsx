@@ -1,5 +1,5 @@
 import { createMemo, createSignal, createUniqueId, For, onCleanup, onMount, Show } from 'solid-js';
-import { isMobilePlatform } from '../platform';
+import { isMacOS, isMobilePlatform } from '../platform';
 import { t } from '../i18n';
 import { clock, day, satsWhole } from './format';
 import { ambiguousThousands, parseAmount } from './amountInput';
@@ -77,7 +77,11 @@ export function FirstSpendSheet(props: {
     const opener = document.activeElement as HTMLElement | null;
     scrim.showModal();
     dialog.focus();
-    const keepFocus = (event: FocusEvent) => { if (!dialog.contains(event.target as Node)) dialog.focus(); };
+    // Another modal opened above this sheet (for example the quit-during-a-call question) owns the keyboard:
+    // the sheet stops pulling focus back while it is open, like the owner-approval sheet does.
+    const otherModalOpen = () => [...document.querySelectorAll('dialog[open], [aria-modal="true"]')]
+      .some(el => el !== scrim && !scrim.contains(el));
+    const keepFocus = (event: FocusEvent) => { if (!otherModalOpen() && !dialog.contains(event.target as Node)) dialog.focus(); };
     document.addEventListener('focusin', keepFocus);
     onCleanup(onEscape(props.onCancel));
     onCleanup(() => {
@@ -126,7 +130,7 @@ export function FirstSpendSheet(props: {
         }>
           <p class="first-spend-starts-now">{daily() === null ? t('firstSpendStartsNowUnavailable') : t('firstSpendStartsNow', daily()!)}</p>
         </Show>
-        <Show when={props.onSetupApprovals}>
+        <Show when={props.onSetupApprovals && (isMobilePlatform() || isMacOS())}>
           <p class="hint">{t('approvalSetupReason')}</p>
           <button type="button" class="link" data-approval-setup onClick={() => props.onSetupApprovals?.()}>
             {t(isMobilePlatform() ? 'obSetupBiometrics' : 'obSetupTouchId')}

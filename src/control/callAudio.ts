@@ -13,7 +13,9 @@
  *
  * Codec: Opus through WebCodecs where the webview has it (and the peer said
  * it decodes Opus), otherwise G.711 mu-law in pure TypeScript. Both apps
- * learn each other's codecs from in-band HELLO frames.
+ * learn each other's codecs from in-band HELLO frames. Mu-law runs at 8 kHz:
+ * each direction converts to and from the context rate as one continuous
+ * stream (`StreamResampler`), so frame edges carry no step.
  *
  * Opus failing mid-call is not fatal: a failed encoder sends mu-law from the
  * next frame; a failed decoder withdraws Opus with a fresh HELLO, which the
@@ -29,7 +31,7 @@
 import workletUrl from './callAudioWorklet.ts?worker&url';
 import { CAP_OPUS, CAP_PCMU, audioPayload, chooseCodec, decodeFrame, helloPayload, parsePayload, type Codec } from './mediaFrame';
 import { decodeMuLaw, encodeMuLaw, PCMU_RATE } from './g711';
-import { Framer, frameSamples, resample } from './pcm';
+import { Framer, SequencedResampler, StreamResampler, frameSamples } from './pcm';
 import { JitterBuffer, type JitterStats } from './jitterBuffer';
 import { CAPTURE_PROCESSOR, PLAYOUT_PROCESSOR, type CaptureMessage, type PlayoutMessage, type PlayoutReport } from './callAudioShared';
 
@@ -74,6 +76,21 @@ export type CallAudioDeps = {
   onSilence?: (silent: boolean) => void;
 };
 
+/** A codec as the call report names it. */
+export type AudioCodecName = 'opus' | 'mulaw';
+
+/** What carried this call's audio, for the call report. Codec names and a rate only. */
+export type CallAudioDiagnostics = {
+  /** Codecs this app sent audio with, in the order first used (empty: none sent yet). */
+  sent: AudioCodecName[];
+  /** Codecs the peer's audio arrived in, in the order first seen. */
+  received: AudioCodecName[];
+  /** The audio context's real sample rate (Opus needs 48 kHz). */
+  contextRate: number | null;
+};
+
+const codecName = (codec: Codec): AudioCodecName => (codec === 'opus' ? 'opus' : 'mulaw');
+
 export type CallAudio = {
   /** Resolves once capture and playout are wired; rejects when no audio graph could be built. */
   ready: Promise<void>;
@@ -83,6 +100,8 @@ export type CallAudio = {
   setMuted: (muted: boolean) => void;
   /** The codec this app sends with right now, and what each side offered. */
   codecs: () => { sending: Codec; localCaps: number; peerCaps: number | null };
+  /** Which codecs carried audio each way, and the context rate. */
+  diagnostics?: () => CallAudioDiagnostics;
   stats: () => Promise<JitterStats | null>;
   close: () => Promise<void>;
 };
@@ -122,6 +141,16 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
   let playFrame: (seq: number, pcm: Float32Array) => void = () => {};
   let playMarker: (seq: number) => void = () => {};
   let readStats: () => Promise<JitterStats | null> = async () => null;
+  /** Kept after close, so the call report can still name it. */
+  let contextRate: number | null = null;
+  const sentCodecs = new Set<AudioCodecName>();
+  const receivedCodecs = new Set<AudioCodecName>();
+  /** Mu-law uplink: context rate down to 8 kHz, one stream while we keep sending mu-law. */
+  let uplink: StreamResampler | null = null;
+  let lastSent: Codec | null = null;
+  /** Mu-law downlink, and Opus decoded at another rate: one stream per run of consecutive seqs. */
+  const pcmuDownlink = new SequencedResampler();
+  const opusDownlink = new SequencedResampler();
 
   const fail = (message: string) => {
     if (closed || failed) return;
@@ -169,13 +198,20 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
     if (sending === 'opus' && encoder) {
       try {
         encoder.encode(frame);
+        sentCodecs.add('opus');
+        lastSent = 'opus';
         return;
       } catch {
         encoderFailed();
         sending = 'pcmu';
       }
     }
-    send(audioPayload('pcmu', encodeMuLaw(resample(frame, context.sampleRate, PCMU_RATE))));
+    if (!uplink || uplink.from !== context.sampleRate) uplink = new StreamResampler(context.sampleRate, PCMU_RATE);
+    // Mu-law (re)starts after Opus frames: what the filter holds is no longer this stream.
+    else if (lastSent !== 'pcmu') uplink.reset();
+    lastSent = 'pcmu';
+    sentCodecs.add('mulaw');
+    send(audioPayload('pcmu', encodeMuLaw(uplink.push(frame))));
   };
 
   const makeOpus = (rate: number): { encoder: Encoder; decoder: Decoder } => {
@@ -195,7 +231,7 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
           const pcm = new Float32Array(audio.numberOfFrames);
           audio.copyTo(pcm, { planeIndex: 0, format: 'f32-planar' });
           const seq = Math.round(audio.timestamp / FRAME_US) >>> 0;
-          playFrame(seq, audio.sampleRate === rate ? pcm : resample(pcm, audio.sampleRate, rate));
+          playFrame(seq, opusDownlink.push(seq, pcm, audio.sampleRate, rate));
         } finally {
           audio.close();
         }
@@ -299,6 +335,7 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
   const ready = (async () => {
     const ctx = makeContext({ sampleRate: OPUS_RATE, latencyHint: 'interactive' });
     context = ctx;
+    contextRate = ctx.sampleRate;
     await ctx.resume().catch(() => undefined);
     const source = ctx.createMediaStreamSource(deps.stream);
     if (ctx.audioWorklet && typeof AudioWorkletNode !== 'undefined') await buildWorklet(ctx, source);
@@ -336,9 +373,10 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
         if (first) sayHello();
         return;
       }
+      receivedCodecs.add(codecName(payload.codec));
       if (payload.codec === 'pcmu') {
         if (!context) return;
-        playFrame(frame.seq, resample(decodeMuLaw(payload.data), PCMU_RATE, context.sampleRate));
+        playFrame(frame.seq, pcmuDownlink.push(frame.seq, decodeMuLaw(payload.data), PCMU_RATE, context.sampleRate));
       } else {
         if (decoder) {
           try {
@@ -369,6 +407,7 @@ export function createCallAudio(deps: CallAudioDeps): CallAudio {
       }
     },
     codecs: () => ({ sending, localCaps, peerCaps }),
+    diagnostics: () => ({ sent: [...sentCodecs], received: [...receivedCodecs], contextRate }),
     stats: () => readStats(),
     close: async () => {
       if (closed) return;
