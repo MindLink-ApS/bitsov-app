@@ -90,6 +90,16 @@ async function checkSheetOnce(page: Page, phone: Phone) {
   expect(g.sideways).toBe(false);
   expect(g.outside).toEqual([]);
   if (g.scrolls) expect(g.overflowY).toBe('auto');
+  // A sticky Cancel/Ring bar spans the sheet edge to edge (inside its border), so text never shows beside it.
+  const bar = await sheet.evaluate((el) => {
+    const a = el.querySelector<HTMLElement>('.call-confirm-actions')!;
+    const b = el.getBoundingClientRect(), r = a.getBoundingClientRect();
+    return { sticky: getComputedStyle(a).position === 'sticky', left: r.left - (b.left + el.clientLeft), right: (b.left + el.clientLeft + el.clientWidth) - r.right };
+  });
+  if (bar.sticky) {
+    expect(Math.abs(bar.left)).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(bar.right)).toBeLessThanOrEqual(0.5);
+  }
   for (const end of ['top', 'bottom'] as const) {
     await sheet.evaluate((el, at) => { el.scrollTop = at === 'top' ? 0 : el.scrollHeight; el.scrollLeft = el.scrollWidth; }, end);
     expect(await sheet.evaluate((el) => el.scrollLeft)).toBe(0);

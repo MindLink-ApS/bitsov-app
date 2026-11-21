@@ -2024,7 +2024,7 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
     overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; overflow-wrap: anywhere;
   }
   .call-confirm > * { min-width: 0; max-width: 100%; }
-  .call-confirm-actions { position: sticky; bottom: -12px; margin: 0 -12px -12px; padding: 8px 12px 12px; background: var(--surface); flex-wrap: wrap; }
+  .call-confirm-actions { position: sticky; bottom: -12px; margin: 0 -12px -12px; padding: 8px 12px 12px; background: var(--surface); flex-wrap: wrap; max-width: none; }
   .call-confirm-actions button { flex: 1 1 auto; min-height: 44px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 }
 html:is([data-platform='ios'], [data-platform='android']) .call-confirm {
@@ -2034,7 +2034,7 @@ html:is([data-platform='ios'], [data-platform='android']) .call-confirm {
   overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; overflow-wrap: anywhere;
 }
 html:is([data-platform='ios'], [data-platform='android']) .call-confirm > * { min-width: 0; max-width: 100%; }
-html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions { position: sticky; bottom: -12px; margin: 0 -12px -12px; padding: 8px 12px 12px; background: var(--surface); flex-wrap: wrap; }
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions { position: sticky; bottom: -12px; margin: 0 -12px -12px; padding: 8px 12px 12px; background: var(--surface); flex-wrap: wrap; max-width: none; }
 html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions button { flex: 1 1 auto; min-height: 44px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 /* iOS keeps the full layout height under the keyboard: sit on the keyboard and fit the visible area, like .call-panel and .toast. */
 html[data-platform='ios'] .call-confirm {
