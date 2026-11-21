@@ -221,8 +221,8 @@ function Organ(props: {
 
 // ---- metabolism ---------------------------------------------------------------
 
-const plus = (msat: number) => (msat > 0 ? `+${amount(msat)}` : amount(0));
-const minus = (msat: number) => (msat > 0 ? `−${amount(msat)}` : amount(0));
+const plus = (msat: number) => (msat > 0 ? `+${amount(msat, 'down')}` : amount(0, 'down'));
+const minus = (msat: number) => (msat > 0 ? `−${amount(msat, 'up')}` : amount(0, 'up'));
 const acts = (n: number, dir: string) => `${n} ${dir}`;
 
 function MetabolismOrgan(props: OrganismProps & { fresh: { label: string; stale: boolean } }) {
@@ -302,7 +302,7 @@ function Bars(props: { bars: NonNullable<Metabolism['bars']>; now: number }) {
       <For each={slots()}>
         {(b) =>
           b ? (
-            <span class="hour-bar" title={`+${amount(b.in_msat)} / −${amount(b.out_msat)}`} data-bar>
+            <span class="hour-bar" title={`+${amount(b.in_msat, 'down')} / −${amount(b.out_msat, 'up')}`} data-bar>
               <span class="bar-in" style={{ height: h(b.in_msat) }} classList={{ none: b.in_msat === 0 }} />
               <span class="bar-out" style={{ height: h(b.out_msat) }} classList={{ none: b.out_msat === 0 }} />
             </span>
@@ -388,7 +388,7 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
         <Show when={props.door} fallback={props.doorError ? <span data-door-fresh="stale">{tr('caDoorPriceCouldNotBeRead')}</span> : tr('caDoorPriceNotReadYet')}>
           {(d) => (
             <>
-              {tr('caDoorOpenAt')}{' '}<span class="sats">{sats(d().msat, true)}</span> {satUnit(d().msat)}{' '}{tr('caAMessage')}<span class="organ-note">{' '}{tr('caYourPrice')}</span>
+              {tr('caDoorOpenAt')}{' '}<span class="sats">{sats(d().msat, 'up', true)}</span> {satUnit(d().msat, 'up')}{' '}{tr('caAMessage')}<span class="organ-note">{' '}{tr('caYourPrice')}</span>
               <span class="organ-note" classList={{ stale: doorFresh()!.stale }} data-door-fresh={doorFresh()!.stale ? 'stale' : 'fresh'}>
                 {' '}· {doorFresh()!.label}
               </span>
@@ -401,7 +401,7 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
         <span class="sats">{ringRead() ? s().admitted : '—'}</span>
         <span class="organ-note">
           <Show when={ringRead()} fallback={tr('caNotReadYet')}>
-            {amount(s().admitted_msat)}{' '}{tr('caSettled')}<Show when={s().first_contacts > 0}> · {s().first_contacts}{' '}{tr('caFirstContact')}</Show>
+            {amount(s().admitted_msat, 'down')}{' '}{tr('caSettled')}<Show when={s().first_contacts > 0}> · {s().first_contacts}{' '}{tr('caFirstContact')}</Show>
           </Show>
         </span>
       </div>
@@ -410,7 +410,7 @@ function MembraneOrgan(props: OrganismProps & { fresh: { label: string; stale: b
           <span class="who"><span class="dot ok" />{' '}{tr('caAdmittedAgain')}</span>
           <span class="sats">{s().readmitted}</span>
           <span class="organ-note">
-            {amount(s().readmitted_msat)}{' '}{tr('caPaidAfterAReconnectFromTheirOwnQuote')}</span>
+            {amount(s().readmitted_msat, 'down')}{' '}{tr('caPaidAfterAReconnectFromTheirOwnQuote')}</span>
         </div>
       </Show>
       <div class="organ-row" data-membrane-refused>
@@ -446,7 +446,7 @@ function MembraneLine(props: { e: MembraneEntry; hot: boolean; nameOf: (id: stri
             return (
               <span>
                 <span class="ok-word">{tr('caAdmitted')}</span> {a().first_contact ? shortId(a().sender) : props.nameOf(a().sender)}
-                <Show when={a().paid_msat}>{' '}{tr('caPaid')}{' '}<span class="sats">{sats(a().paid_msat!, true)}</span> {satUnit(a().paid_msat!)}</Show>
+                <Show when={a().paid_msat}>{' '}{tr('caPaid')}{' '}<span class="sats">{sats(a().paid_msat!, 'down', true)}</span> {satUnit(a().paid_msat!, 'down')}</Show>
                 <Show when={a().first_contact}>{' '}{tr('caFirstContactNotAdded')}</Show>
               </span>
             );
@@ -458,8 +458,8 @@ function MembraneLine(props: { e: MembraneEntry; hot: boolean; nameOf: (id: stri
             return (
               <span data-membrane-readmission>
                 <span class="ok-word">{tr('caPaidAgain')}</span> {props.nameOf(a().counterparty)} · {gateWords('readmission')}
-                <Show when={a().paid_msat}> · <span class="sats">{sats(a().paid_msat!, true)}</span> {satUnit(a().paid_msat!)}</Show>
-                <Show when={a().cap_msat}>{' '}{tr('caWithinTheirBudgetOf')}{' '}<span class="sats">{sats(a().cap_msat!, true)}</span> {satUnit(a().cap_msat!)}</Show>
+                <Show when={a().paid_msat}> · <span class="sats">{sats(a().paid_msat!, 'down', true)}</span> {satUnit(a().paid_msat!, 'down')}</Show>
+                <Show when={a().cap_msat}>{' '}{tr('caWithinTheirBudgetOf')}{' '}<span class="sats">{sats(a().cap_msat!, 'up', true)}</span> {satUnit(a().cap_msat!, 'up')}</Show>
               </span>
             );
           }}
@@ -479,7 +479,7 @@ function MembraneLine(props: { e: MembraneEntry; hot: boolean; nameOf: (id: stri
               >
                 <span title={r().detail} data-membrane-inbound={r().code}>
                   <span class="err-word">{tr('caRefused')}</span> {r().sender ? props.nameOf(r().sender!) : tr('caUnsigned')} · {gateWords(r().code)}
-                  <Show when={r().required_msat}>{' '}{tr('caNeeded')}{' '}<span class="sats">{sats(r().required_msat!, true)}</span> {satUnit(r().required_msat!)}</Show>
+                  <Show when={r().required_msat}>{' '}{tr('caNeeded')}{' '}<span class="sats">{sats(r().required_msat!, 'up', true)}</span> {satUnit(r().required_msat!, 'up')}</Show>
                 </span>
               </Show>
             );
@@ -508,7 +508,7 @@ function SetpointsOrgan(props: OrganismProps) {
   const hot = usePulse(() => spent());
   const summary = () => {
     const x = h();
-    if (x.state === 'holding') return tr('caHExtra94', amount(x.spent_msat), amount(x.ceiling_msat), hoursLeft(x.until_ms, props.now));
+    if (x.state === 'holding') return tr('caHExtra94', amount(x.spent_msat, 'up'), amount(x.ceiling_msat, 'down'), hoursLeft(x.until_ms, props.now));
     if (x.state === 'paused') return tr('caPaused');
     if (x.state === 'waiting') return tr('caWaitingForYou');
     if (x.state === 'none') return tr('caNone');
@@ -555,7 +555,7 @@ function SetpointsOrgan(props: OrganismProps) {
               <Show when={x().grant}>
                 {(g) => (
                   <p class="organ-line" data-setpoint-grant>
-                    {tr('caFiniteNodeGrant')}{' '}<span class="sats">{amount(g().remaining_msat, true)}</span>{' '}{tr('uiOf')}{' '}{amount(g().budget_msat)}{' '}{tr('caLeft')}{' '}{hoursLeft(g().expires_at_ms, props.now)}{' '}{tr('caH')}</p>
+                    {tr('caFiniteNodeGrant')}{' '}<span class="sats">{amount(g().remaining_msat, 'down', true)}</span>{' '}{tr('uiOf')}{' '}{amount(g().budget_msat, 'down')}{' '}{tr('caLeft')}{' '}{hoursLeft(g().expires_at_ms, props.now)}{' '}{tr('caH')}</p>
                 )}
               </Show>
               <For each={x().rows.slice(0, 3)}>
@@ -564,11 +564,11 @@ function SetpointsOrgan(props: OrganismProps) {
               <For each={x().reached.slice(0, 2)}>
                 {(r: Setpoint) => (
                   <p class="organ-line" data-setpoint-reached={r.target}>
-                    {tr('caResting')}{' '}{props.nameOfTrack(`${r.room ? 'room' : 'peer'}:${r.target}`)}{' '}{tr('caSetpointReached')}{amount(r.spent_msat)}/{amount(r.limit_msat)}{' '}{tr('caTodayFreesAsOlderPaymentsPass24H')}</p>
+                    {tr('caResting')}{' '}{props.nameOfTrack(`${r.room ? 'room' : 'peer'}:${r.target}`)}{' '}{tr('caSetpointReached')}{amount(r.spent_msat, 'up')}/{amount(r.limit_msat, 'down')}{' '}{tr('caTodayFreesAsOlderPaymentsPass24H')}</p>
                 )}
               </For>
               <Show when={x().unsettled_msat > 0}>
-                <p class="organ-note">{tr('caIncludes')}{' '}{amount(x().unsettled_msat)}{' '}{tr('caWhoseOutcomeIsNotKnownYet')}</p>
+                <p class="organ-note">{tr('caIncludes')}{' '}{amount(x().unsettled_msat, 'up')}{' '}{tr('caWhoseOutcomeIsNotKnownYet')}</p>
               </Show>
             </>
           )}
@@ -592,7 +592,7 @@ function SetpointBar(props: { label: string; spent: number; limit: number; note:
     <div class="organ-row setpoint" classList={{ hot: hot(), reached: props.spent >= props.limit }} data-setpoint={props.data}>
       <span class="who">{props.label}</span>
       <span class="meter" aria-hidden="true"><span style={{ width: pct(props.spent, props.limit) }} /></span>
-      <span class="sats">{amount(props.spent, true)}/{amount(props.limit, true)}</span>
+      <span class="sats">{amount(props.spent, 'up', true)}/{amount(props.limit, 'down', true)}</span>
       <span class="organ-note">{props.note}</span>
     </div>
   );

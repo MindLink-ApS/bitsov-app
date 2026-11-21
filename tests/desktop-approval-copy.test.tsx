@@ -48,8 +48,9 @@ describe.each([
     expect(offer.querySelector('[data-touch-id-setup]')?.textContent).toBe(lang === 'en'
       ? 'Set up biometric approvals' : 'Opsæt biometriske godkendelser');
     expect(offer.querySelector('p')?.textContent).toContain(lang === 'en'
-      ? 'Your node does not yet accept biometric approvals in place of its command'
-      : 'Din node accepterer endnu ikke biometriske godkendelser i stedet for sin kommando');
+      ? 'Your box does not yet accept biometric approvals, so for now the person who set it up approves at the box'
+      : 'Din boks accepterer endnu ikke biometriske godkendelser, så indtil videre godkender den, der har sat den op, ved boksen');
+    expect(offer.querySelector('p')?.textContent).not.toMatch(/command|kommando/i);
     expect(offer.textContent).not.toMatch(/Touch ID|\bMac\b|device approvals|enhedsgodkendelser/);
   });
 });
@@ -93,12 +94,12 @@ describe.each(hosts)('%s composed approval copy', (_host, userAgent, macOS) => {
       const text = offer.querySelector('p')!.textContent!;
       if (supported) {
         expect(text).toContain(macOS
-          ? lang === 'en' ? 'After that, one Touch ID tap approves a contact here, without a command at the node.' : 'Derefter godkender ét Touch ID-tryk en kontakt her uden en kommando ved noden.'
-          : lang === 'en' ? 'After that, one device confirmation tap approves a contact here, without a command at the node.' : 'Derefter godkender ét enhedsbekræftelse-tryk en kontakt her uden en kommando ved noden.');
+          ? lang === 'en' ? 'After that, one Touch ID tap approves a contact here, with nothing to do at the box.' : 'Derefter godkender ét Touch ID-tryk en kontakt her, uden noget at gøre ved boksen.'
+          : lang === 'en' ? 'After that, one device confirmation tap approves a contact here, with nothing to do at the box.' : 'Derefter godkender ét enhedsbekræftelse-tryk en kontakt her, uden noget at gøre ved boksen.');
       } else {
         expect(text).toContain(macOS
-          ? lang === 'en' ? 'Your node does not yet accept Touch ID approvals in place of its command, so for now approve as shown under Other ways; once it does, one Touch ID tap will approve a contact here.' : 'Din node accepterer endnu ikke Touch ID-godkendelser i stedet for sin kommando. Godkend indtil videre som vist under Andre måder; derefter vil ét Touch ID-tryk godkende en kontakt her.'
-          : lang === 'en' ? 'Your node does not yet accept device approvals in place of its command, so for now approve as shown under Other ways; once it does, one device confirmation tap will approve a contact here.' : 'Din node accepterer endnu ikke enhedsgodkendelser i stedet for sin kommando. Godkend indtil videre som vist under Andre måder; derefter vil ét enhedsbekræftelse-tryk godkende en kontakt her.');
+          ? lang === 'en' ? 'Your box does not yet accept Touch ID approvals, so for now the person who set it up approves at the box; once it does, one Touch ID tap will approve a contact here.' : 'Din boks accepterer endnu ikke Touch ID-godkendelser, så indtil videre godkender den, der har sat den op, ved boksen; derefter vil ét Touch ID-tryk godkende en kontakt her.'
+          : lang === 'en' ? 'Your box does not yet accept device approvals, so for now the person who set it up approves at the box; once it does, one device confirmation tap will approve a contact here.' : 'Din boks accepterer endnu ikke enhedsgodkendelser, så indtil videre godkender den, der har sat den op, ved boksen; derefter vil ét enhedsbekræftelse-tryk godkende en kontakt her.');
       }
       expect(offer.textContent).not.toMatch(/approvals approvals|enhedsgodkendelser[- ]godkendelser|device approvals tap|enhedsgodkendelser-tryk/);
     });

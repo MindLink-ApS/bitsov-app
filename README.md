@@ -46,9 +46,8 @@ npm test
 npm run build
 ```
 
-The frontend output is in `dist/`. These commands need no node checkout,
-sidecar binary or GitHub CLI login. While this repository is private, cloning
-it still requires repository access; after publication the same URL is public.
+The frontend output is in `dist/`. These commands need no node checkout or
+sidecar binary.
 
 For a browser preview:
 

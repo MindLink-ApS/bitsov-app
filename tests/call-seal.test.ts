@@ -145,7 +145,7 @@ describe('with the flag off, the renderer sends what it sent before sealing exis
     expect(b.opened[0].sealed).toBeUndefined();
   });
 
-  it('the same host call: `call_media_open` carries the same three arguments', async () => {
+  it('the same host call: `call_media_open` carries the same arguments in either build', async () => {
     const calls: { cmd: string; args: Record<string, unknown> }[] = [];
     vi.stubGlobal('__TAURI_INTERNALS__', {
       transformCallback: () => 1,
@@ -154,7 +154,7 @@ describe('with the flag off, the renderer sends what it sent before sealing exis
     await hostMediaBridge().open(ID, PEER, () => {}, () => {});
     expect(calls).toHaveLength(1);
     expect(calls[0].cmd).toBe('call_media_open');
-    expect(Object.keys(calls[0].args).sort()).toEqual(['call_id', 'on_frame', 'peer']);
+    expect(Object.keys(calls[0].args).sort()).toEqual(['call_id', 'on_frame', 'peer', 'send_base']);
     calls.length = 0;
     await hostMediaBridge().open(ID, PEER, () => {}, () => {}, true);
     expect(calls[0].args).toMatchObject({ call_id: ID, peer: PEER, sealed: true });
