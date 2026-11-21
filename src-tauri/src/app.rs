@@ -3781,7 +3781,7 @@ async fn remote_access_import_at<R: tauri::Runtime>(
         *state.error.lock().unwrap() = None;
         pairing_imported_at(state, app_data_dir);
         spawn_remote_connect(_app, app_data_dir, true);
-        return Ok(RemoteImportView { restart_required: false, ..result });
+        Ok(RemoteImportView { restart_required: false, ..result })
     }
     // The owner chose a node at home: stop offering to create one here.
     #[cfg(all(desktop, not(feature = "mobile")))]
@@ -8512,7 +8512,7 @@ mod pause_points {
     static GATES: Mutex<Vec<Gate>> = Mutex::new(Vec::new());
 
     /// One pause at `point` for this node: (arrived, release). Tests only.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(any(not(test), feature = "mobile"), allow(dead_code))]
     pub fn arm(api_base: &str, point: &'static str) -> (Arc<Notify>, Arc<Notify>) {
         let (arrived, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
         GATES.lock().unwrap().push(Gate { api_base: api_base.into(), point, arrived: arrived.clone(), release: release.clone() });
@@ -12272,6 +12272,7 @@ mod beta_network_tests;
 /// node keeps them. Calls go to contacts already in the book: a first
 /// contact is a message, never a ring.
 #[cfg(test)]
+#[cfg_attr(feature = "mobile", allow(dead_code))]
 async fn do_call_signal(
     state: &NodeState,
     peer: &str,

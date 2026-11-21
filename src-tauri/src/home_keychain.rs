@@ -163,6 +163,7 @@ pub fn binding(node: &str) -> Result<UnlockBinding, String> {
 }
 
 /// Called by the owner ceremony or Remember after a node-accepted typed unlock.
+#[cfg_attr(feature = "mobile", allow(dead_code))]
 #[cfg(not(target_os = "android"))]
 pub fn save_password(node: &str, password: &[u8]) -> Result<(), String> {
     if password.is_empty() || password.len() > 4096 {
