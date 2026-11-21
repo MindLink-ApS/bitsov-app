@@ -212,6 +212,9 @@ describe('call video flag', () => {
     host.emitLive({ type: 'message', room_id: null, message: { id: 'off', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: callId, media: 'video', sdp: nodeRoutedSdp('offer', callId) }), attachment: null, status: 'delivered' } });
     await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).not.toBeNull());
     expect($('[data-call-title]')?.textContent).not.toMatch(/video/i);
+    // The card says what will happen: an audio call, with no camera notice.
+    expect($('[data-call-title]')?.textContent).toBe('Incoming audio call');
+    expect($('[data-call-camera-notice]')).toBeNull();
     expect(constraintsSeen.every((c) => !c.video)).toBe(true);
   });
 
