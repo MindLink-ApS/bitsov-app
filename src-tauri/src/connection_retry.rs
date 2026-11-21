@@ -357,7 +357,7 @@ mod remote_tests {
         // Cancelled by its caller: not a cooldown, and the stamp still stops a burst.
         let cancelled = tokio::spawn({
             let retry = retry.clone();
-            async move { retry.run(|| std::future::pending::<Result<(), RemoteError>>()).await }
+            async move { retry.run(std::future::pending::<Result<(), RemoteError>>).await }
         });
         tokio::task::yield_now().await;
         cancelled.abort();

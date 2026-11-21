@@ -1300,7 +1300,8 @@ const paired = { state: 'paired', scopes: ['read', 'receive', 'spend'], node_id:
 
 type Reply = (args?: Record<string, unknown>) => unknown;
 
-function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; grant?: NodeGrantSummary; offer?: Reply; block?: Reply; hold?: Reply; spendRequest?: Reply; ownerCanGrant?: boolean; minutes?: number; endKeepsHold?: boolean; endLeavesUnresolved?: boolean; pairing?: Reply; spend?: SpendView; request?: Reply; reconcile?: Reply; dismiss?: Reply; budget?: Reply; cancel?: Reply; replies?: Record<string, Reply> } = {}) {
+function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; grant?: NodeGrantSummary; offer?: Reply; block?: Reply; hold?: Reply; spendRequest?: Reply; ownerCanGrant?: boolean; minutes?: number; retireOnEnd?: boolean; endKeepsHold?: boolean; endLeavesUnresolved?: boolean; pairing?: Reply; spend?: SpendView; request?: Reply; reconcile?: Reply; dismiss?: Reply; budget?: Reply; cancel?: Reply; replies?: Record<string, Reply> } = {}) {
+  let retired = false;
   resetContactsForTests();
   setPetname(A, 'Maya');
   const calls: { cmd: string; args?: unknown }[] = [];
@@ -1344,7 +1345,8 @@ function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; grant?: N
       }
       return { operation_id: `op-${kind}`, message_id: 'sig', kind, amount_msat: 10_000, total_msat: 15_000, max_routing_fee_msat: 5000, delivered: true, accepted: true, sent_at_ms: Date.now() };
     },
-    call_status: (args) => (callId && (args as { call_id: string }).call_id === callId ? { ...node.status(), id: callId } : null),
+    // retireOnEnd: once ended, the node no longer lists the call.
+    call_status: (args) => (!retired && callId && (args as { call_id: string }).call_id === callId ? { ...node.status(), id: callId } : null),
     // The host's check of the node's hold (and the owner's confirmation of its exact total).
     call_hold: (args) => {
       if (opts.hold) return opts.hold(args);
@@ -1364,6 +1366,7 @@ function stubHost(opts: { quote?: CallQuote | Reply; peers?: string[]; grant?: N
       if (!opts.endKeepsHold) node.close();
       // A minute whose payment is still unresolved stays in the closed hold.
       if (opts.endLeavesUnresolved && node.reservation) { node.reservation.remaining_msat = BLOCK + FEE; node.reservation.released_msat -= BLOCK + FEE; }
+      if (opts.retireOnEnd) retired = true;
       return { op_id: 'end', kind: 'call_hangup', peer: A, call_id: (args as { call_id: string }).call_id, state: 'settled', cap_msat: 6_000, paid_msat: 6_000, message_id: 'hangup' };
     },
     ...(opts.reconcile ? { spend_reconcile: opts.reconcile } : {}),
@@ -3085,6 +3088,52 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     await vi.waitFor(() => expect($('[data-call-minutes="released"]')?.textContent).toBe(
       `Minutes: paid ${amount(BLOCK + FEE, 'up')}. Released back to your budget: ${amount(239 * (BLOCK + FEE), 'up')}.`), { timeout: 4_000 });
     expect(host.used('call_block')).toHaveLength(1);
+  }, 15_000);
+
+  it('a call cancelled before an answer pays no minutes and shows no minutes line, so it keeps "media was not billed" (EN and DA)', async () => {
+    const host = stubHost({ retireOnEnd: true });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    // Ring waits for the fresh quote.
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    await vi.waitFor(() => expect($('[data-call-paid="settled"]')).not.toBeNull(), { timeout: 4_000 });
+    // Let the node's last read land: it no longer lists the call.
+    await new Promise((r) => setTimeout(r, 1_500));
+    expect(host.used('call_block')).toHaveLength(0);
+    expect($('[data-call-minutes]')).toBeNull();
+    expect($('[data-call-paid="settled"]')!.textContent).toMatch(/the exact fees are not reported\. Media was not billed\.$/);
+    try {
+      setLanguagePref('da');
+      expect($('[data-call-paid="settled"]')!.textContent).toMatch(/de præcise gebyrer oplyses ikke\. Medier blev ikke faktureret\.$/);
+    } finally { setLanguagePref('en'); }
+  }, 15_000);
+
+  it('a caller whose minutes were paid is never told media was not billed, live or after; the minutes are counted separately (EN and DA)', async () => {
+    const host = stubHost();
+    await openShell();
+    await ringAndAnswer(host);
+    await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1), { timeout: 3_000 });
+    host.media({ link: 'open', detail: null });
+    await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
+    await vi.waitFor(() => expect(host.used('call_block')).toHaveLength(1), { timeout: 4_000 });
+    // Live: the signal cap waits behind Details, and says the minutes are apart.
+    await vi.waitFor(() => expect($('[data-call-details] [data-call-paid]')).not.toBeNull());
+    expect($('[data-call-details] [data-call-paid]')!.textContent).toMatch(/\(includes maximum routing fees; settled amount may be lower\)\. The minutes are counted separately\.$/);
+    expect($('[data-call-panel]')!.textContent).not.toMatch(/not billed/i);
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-minutes="released"]')).not.toBeNull(), { timeout: 4_000 });
+    await vi.waitFor(() => expect($('[data-call-paid="settled"]')).not.toBeNull(), { timeout: 4_000 });
+    expect($('[data-call-paid="settled"]')!.textContent).toMatch(/^This call paid up to .+: each signal’s price plus its routing-fee cap; the exact fees are not reported\. The minutes are counted separately\.$/);
+    expect($('[data-call-panel]')!.textContent).not.toMatch(/not billed/i);
+    try {
+      setLanguagePref('da');
+      expect($('[data-call-paid="settled"]')!.textContent).toMatch(/de præcise gebyrer oplyses ikke\. Minutterne opgøres for sig\.$/);
+      expect($('[data-call-panel]')!.textContent).not.toMatch(/ikke faktureret/i);
+    } finally { setLanguagePref('en'); }
   }, 15_000);
 
   it('a closed hold that still holds an unresolved minute never says "nothing more is paid"', async () => {
