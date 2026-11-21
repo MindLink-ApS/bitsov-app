@@ -2007,6 +2007,20 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
 }
 .waiting-calls .call-panel { position: relative; right: auto; bottom: auto; }
 .call-panel[data-call-approval-open] { z-index: 52; max-height: calc(100dvh - 48px); overflow-y: auto; }
+/* The call card sits above the open chat's composer (--call-composer-clear, measured while the
+   card shows), never over Send, + or the microphone, and shrinks to the room left above it. Hang-up
+   (Accept, Approve) stays in view at the card's foot while the rest of a tall card scrolls. */
+.call-panel[data-call-panel]:not(.waiting-calls .call-panel) {
+  --call-bottom: max(var(--s-6), env(safe-area-inset-bottom, 0px), calc(var(--call-composer-clear, 0px) + var(--s-3)));
+  bottom: var(--call-bottom);
+  max-height: calc(100dvh - max(var(--s-6), env(safe-area-inset-top, 0px)) - var(--call-bottom));
+}
+html[data-platform='ios'] .call-panel[data-call-panel]:not(.waiting-calls .call-panel) {
+  --call-bottom: max(calc(var(--keyboard-inset) + max(var(--s-6), var(--safe-area-bottom))), calc(var(--call-composer-clear, 0px) + var(--s-3)));
+  max-height: calc(var(--visible-height, 100dvh) + var(--keyboard-inset) - max(var(--s-4), var(--safe-area-top)) - var(--call-bottom));
+}
+/* Only the floating card: a waiting-call card in the stack keeps its actions in place. */
+.call-panel[data-call-panel]:not(.waiting-calls .call-panel) > .call-actions { position: sticky; bottom: 0; z-index: 1; margin-block: calc(-1 * var(--s-2)); padding-block: var(--s-2); background: inherit; }
 
 /* The node's approval, step by step. */
 .approval-steps { margin: var(--s-2) 0; padding-left: 1.4em; list-style: decimal; }

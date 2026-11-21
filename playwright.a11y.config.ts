@@ -11,11 +11,19 @@ import { defineConfig } from '@playwright/test';
 //   Same fixture contract as playwright.phone-shell.config.ts, starter flag included.
 // - legacy-media: the meeting planner checks, which need the pre-M6 call UI
 //   (as in playwright.safe-areas.config.ts). The product default stays node media.
+// - call-media-webrtc: whole specs that drive the pre-M6 call UI in the real app
+//   (the call button needs the WebRTC build). Listed once in `webrtcCallSpecs`,
+//   kept out of desktop, and run on the legacy-media server with a handset
+//   profile. Specs override per describe. The fake microphone comes from the
+//   spec itself (tests/fixtures/fake-media-init.js), so this run and
+//   playwright.webkit.config.ts place calls the same way.
 const desktopPort = 1421;
 const phonePort = 1446;
 const legacyMediaPort = 1447;
 
 const planner = /12-contact planner and primary actions remain reachable/;
+// Specs that need VITE_CALL_MEDIA=webrtc for every case.
+const webrtcCallSpecs = ['call-panel-composer.spec.ts'];
 
 const server = (port: number, env: Record<string, string> = {}) => ({
   command: 'npm run dev',
@@ -40,7 +48,7 @@ export default defineConfig({
     {
       name: 'desktop',
       // inputs.spec.ts has a dedicated WebKit run: playwright.inputs.config.ts.
-      testIgnore: ['inputs.spec.ts', 'phone-shell.spec.ts'],
+      testIgnore: ['inputs.spec.ts', 'phone-shell.spec.ts', ...webrtcCallSpecs],
       grepInvert: planner,
       use: {
         baseURL: `http://localhost:${desktopPort}`,
@@ -66,6 +74,16 @@ export default defineConfig({
       use: {
         baseURL: `http://localhost:${legacyMediaPort}`,
         viewport: { width: 1280, height: 820 },
+      },
+    },
+    {
+      name: 'call-media-webrtc',
+      testMatch: webrtcCallSpecs,
+      use: {
+        baseURL: `http://localhost:${legacyMediaPort}`,
+        viewport: { width: 393, height: 852 },
+        isMobile: true,
+        hasTouch: true,
       },
     },
   ],
