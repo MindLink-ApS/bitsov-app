@@ -583,6 +583,10 @@ export function createCallEngine(deps: CallDeps) {
    *  Tied to that connection, so an ask left open when a call ends neither blocks
    *  the next call nor clears its ask when it finally answers. */
   let restartAsking: RTCPeerConnection | null = null;
+  /** Whether that ask is our own reconnect request (not an answer to the caller's restart). */
+  let restartAskIsRequest = false;
+  /** The caller's restart that landed while our own reconnect request was asking: that one approval answers it. */
+  let restartOfferWaiting: Signal | null = null;
   let restartAnswerPending = false;
   let restartTimer: ReturnType<typeof setTimeout> | undefined;
   let ringTimer: ReturnType<typeof setTimeout> | undefined;
@@ -755,6 +759,8 @@ export function createCallEngine(deps: CallDeps) {
     restartRequested = false;
     restartAnswerPending = false;
     restartAsking = null;
+    restartAskIsRequest = false;
+    restartOfferWaiting = null;
     clearTimeout(restartTimer);
     restartTimer = undefined;
     captures.forEach((cancel) => cancel());
@@ -1234,18 +1240,38 @@ export function createCallEngine(deps: CallDeps) {
     if (askedFirst) {
       if (restartAsking === conn) return;
       restartAsking = conn;
-      const approved = await deps.authorize!().finally(() => { if (restartAsking === conn) restartAsking = null; });
-      if (pc !== conn || restartAttempted || restartRequested) return;
-      if (!approved) {
-        recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
+      restartAskIsRequest = true;
+      // A drop that heals while the ask is open spends nothing on its approval.
+      const dropped = view.phase === 'reconnecting';
+      let approved = false;
+      let failure: string | null = null;
+      try {
+        approved = await deps.authorize!();
+      } catch (error) {
+        failure = tr('caCallRecoveryFailed', asActionError(error).message);
+      } finally {
+        if (restartAsking === conn) { restartAsking = null; restartAskIsRequest = false; }
+      }
+      if (pc !== conn) return;
+      const waiting = restartOfferWaiting;
+      restartOfferWaiting = null;
+      if (restartAttempted || restartRequested) return;
+      if (failure !== null || !approved) {
+        recoveryRefused(conn, failure ?? tr('caCallRecoveryNeedsSpendingApproval'));
         return;
       }
+      // The caller's restart landed while we asked: this approval answers it,
+      // and no paid reconnect request is sent.
+      if (waiting && !view.outgoing) { await answerRestart(waiting, true); return; }
+      if (dropped && view.phase !== 'reconnecting') return;
     }
     // Only the original caller creates offers, so simultaneous failure cannot
     // produce glare or two fresh admission charges. The callee can request it.
-    if (!view.outgoing) restartRequested = true;
-    else restartAttempted = true;
-    set({ recoveryUsed: true });
+    // The caller's recovery counts as used only once its own checks pass.
+    if (!view.outgoing) {
+      restartRequested = true;
+      set({ recoveryUsed: true });
+    }
     try {
       if (pc !== conn) return;
       if (!view.outgoing) {
@@ -1272,6 +1298,8 @@ export function createCallEngine(deps: CallDeps) {
         recoveryRefused(conn, hangupOverMessageCapCopy(q, recoveryHangupCap));
         return;
       }
+      restartAttempted = true;
+      set({ recoveryUsed: true });
       const id = (deps.newCallId ?? newCallId)();
       if (admissions.has(id)) throw new Error(tr('caCouldNotAllocateAFreshCallIdForRecovery'));
       conn.restartIce?.();
@@ -1304,7 +1332,8 @@ export function createCallEngine(deps: CallDeps) {
     }
   };
 
-  const answerRestart = async (signal: Signal) => {
+  /** `approvedAlready`: our own reconnect request's approval, given while this restart waited, answers it. */
+  const answerRestart = async (signal: Signal, approvedAlready = false) => {
     const conn = pc;
     const eligible = () => !!conn && pc === conn && negotiated && !view.outgoing && !restartAttempted && active() &&
         restartParent(signal.sdp!) === view.callId && !admissions.has(signal.call_id) && signal.media === view.media;
@@ -1321,10 +1350,15 @@ export function createCallEngine(deps: CallDeps) {
     // the outbound reconnect request does: a refused or lapsed approval keeps
     // the one recovery for the next try. One ask at a time; the call is checked
     // again once the answer is in.
-    const askedFirst = !!deps.authorize;
+    const askedFirst = !!deps.authorize && !approvedAlready;
     if (askedFirst) {
-      if (restartAsking === conn) return;
+      if (restartAsking === conn) {
+        // Our own reconnect request is asking: its one approval answers this restart.
+        if (restartAskIsRequest) restartOfferWaiting = signal;
+        return;
+      }
       restartAsking = conn;
+      restartAskIsRequest = false;
       let approved = false;
       try {
         approved = await deps.authorize!();

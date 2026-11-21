@@ -513,6 +513,93 @@ describe('call restart negotiation', () => {
     caller.e.endLocal(); callee.e.endLocal();
   });
 
+  describe('a reconnect that has to ask first', () => {
+    const restartId = 'e'.repeat(32);
+    const deliver = async (target: ReturnType<typeof engine>, signal: Sent, sender: string, own: string) =>
+      target.e.receive(msg(signal.kind, signal.body, sender), own);
+    /** A live paid call whose callee asks before any reconnect; its asks are held until answered. */
+    const live = async (calleeAsk: () => Promise<boolean>, callerOver: Partial<CallDeps> = {}) => {
+      let n = 0;
+      let held = false;
+      const asks: ((ok: boolean) => void)[] = [];
+      const authorize = vi.fn(() => held ? new Promise<boolean>((r) => { asks.push(r); }) : calleeAsk());
+      const caller = engine({ newCallId: () => n++ === 0 ? ID : restartId, ...callerOver });
+      const callee = engine({ authorize });
+      await caller.e.place(A, 'audio', QUOTE);
+      await deliver(callee, caller.sent[0], OWN, A);
+      await callee.e.accept(QUOTE);
+      await deliver(caller, callee.sent[0], A, OWN);
+      const [a, b] = FakePc.made;
+      a.connect(); b.connect();
+      return { caller, callee, a, b, asks, authorize, hold: () => { held = true; } };
+    };
+
+    it.each([[true, 1], [false, 0]] as const)('a caller\'s restart that lands while the callee is asking is answered on that one answer (approved %s): never a paid request', async (approved, answers) => {
+      const t = await live(async () => true);
+      t.hold();
+      const asked = t.authorize.mock.calls.length;
+      // Both sides drop: the callee asks before its reconnect request, the caller sends its restart.
+      t.a.state('failed'); t.b.state('failed');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.asks).toHaveLength(1);
+      const restart = t.caller.sent.find((s) => s.kind === 400 && s.body.call_id === restartId)!;
+      expect(restart).toBeDefined();
+      await deliver(t.callee, restart, OWN, A);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.callee.sent.filter((s) => s.kind === 401 && s.body.call_id === restartId)).toHaveLength(0);
+      t.asks[0](approved);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.callee.sent.filter((s) => s.kind === 402)).toHaveLength(0);
+      expect(t.callee.sent.filter((s) => s.kind === 401 && s.body.call_id === restartId)).toHaveLength(answers);
+      expect(t.callee.e.view().recoveryUsed).toBe(approved);
+      expect(t.authorize).toHaveBeenCalledTimes(asked + 1);
+      t.caller.e.endLocal(); t.callee.e.endLocal();
+    });
+
+    it('a drop that heals while the reconnect ask is open spends nothing when it is approved', async () => {
+      const t = await live(async () => true);
+      t.hold();
+      t.b.state('disconnected');
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(t.asks).toHaveLength(1);
+      t.b.connect();
+      expect(t.callee.e.view().phase).toBe('live');
+      t.asks[0](true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.callee.sent.filter((s) => s.kind === 402)).toHaveLength(0);
+      expect(t.callee.e.view().recoveryUsed).toBe(false);
+      t.caller.e.endLocal(); t.callee.e.endLocal();
+    });
+
+    it('an approval that fails to open says so, spends nothing and keeps the recovery', async () => {
+      const t = await live(async () => true);
+      t.authorize.mockImplementation(async () => { throw new Error('approval sheet gone'); });
+      t.b.state('failed');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.callee.sent.filter((s) => s.kind === 402)).toHaveLength(0);
+      expect(t.callee.e.view().recoveryUsed).toBe(false);
+      expect(t.callee.e.view().recoveryError).toContain('approval sheet gone');
+      t.caller.e.endLocal(); t.callee.e.endLocal();
+    });
+
+    it('a caller\'s recovery refused by the grant\'s remaining budget keeps the recovery for after a top-up', async () => {
+      let remaining = 1_000_000;
+      const grant = () => ({ budget_msat: 2_000_000, remaining_msat: remaining, per_call_max_msat: 700_000, expires_at_ms: 10 ** 13, envelopes: null });
+      const t = await live(async () => true, { authorize: async () => true, grant });
+      remaining = 1;
+      t.a.state('failed');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.caller.sent.filter((s) => s.kind === 400 && s.body.call_id === restartId)).toHaveLength(0);
+      expect(t.caller.e.view().recoveryUsed).toBe(false);
+      remaining = 1_000_000;
+      t.a.state('failed');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.caller.sent.filter((s) => s.kind === 400 && s.body.call_id === restartId)).toHaveLength(1);
+      expect(t.caller.e.view().recoveryUsed).toBe(true);
+      t.caller.e.endLocal(); t.callee.e.endLocal();
+    });
+  });
+
   it('a camera error before a drop is not a recovery error: recoveryError stays empty', async () => {
     const local = stream(true);
     const fresh = stream(true, false);
