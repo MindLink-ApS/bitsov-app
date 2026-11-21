@@ -769,6 +769,52 @@ fn absent(path: &Path) -> bool {
     crate::pairing::key::nothing_at(path)
 }
 
+/// Files that sit directly in the journal folder.
+#[cfg(any(windows, test))]
+const JOURNAL_FILES: [&str; 5] = ["spend-pending.json", "spend-pending.next", "spend.lock", "history.lock", "call-index-v2"];
+/// Folders directly in the journal folder; everything else lives below one of them.
+#[cfg(any(windows, test))]
+const JOURNAL_DIRS: [&str; 5] = ["ops", "call-index", "call-index-unresolved", "call-index-acknowledged", "call-ops"];
+
+/// The folders from the journal folder down to `path`'s own folder, in that
+/// order. The journal folder is the parent of the nearest top-level journal
+/// folder within the deepest layout (call-ops/<node>/<peer>/<call>/<entry>),
+/// or `path`'s parent for a file that sits in the journal folder. `None`: not
+/// a journal path, so nothing may be read through it.
+#[cfg(any(windows, test))]
+fn journal_folders(path: &Path) -> Option<Vec<PathBuf>> {
+    let parts: Vec<std::path::Component> = path.components().collect();
+    let n = parts.len();
+    let name = path.file_name()?.to_str()?;
+    let root_len = if JOURNAL_FILES.contains(&name) {
+        n - 1
+    } else {
+        (n.saturating_sub(5)..n).rev().find(|&i| matches!(parts[i],
+            std::path::Component::Normal(part) if JOURNAL_DIRS.iter().any(|dir| part == *dir)))?
+    };
+    if root_len == 0 { return None; }
+    let mut folder: PathBuf = parts[..root_len].iter().collect();
+    let mut folders = vec![folder.clone()];
+    for part in &parts[root_len..n - 1] {
+        folder.push(part);
+        folders.push(folder.clone());
+    }
+    Some(folders)
+}
+
+/// Windows: every existing folder from the journal folder down to `path` is a
+/// verified private folder. A link or reparse point on the way is refused, so
+/// a missing record is never read through a redirected folder. Below a folder
+/// that is really missing there is nothing to read.
+#[cfg(windows)]
+fn verify_folders(path: &Path) -> Result<(), ActionError> {
+    for folder in journal_folders(path).ok_or_else(storage_refused)? {
+        if absent(&folder) { return Ok(()); }
+        crate::private_fs::verify_dir(&folder).map_err(|_| storage_refused())?;
+    }
+    Ok(())
+}
+
 fn damaged_record() -> ActionError {
     // Do not log parser errors: they can contain bytes from a damaged record.
     eprintln!("spend ledger: required operation record or call index is missing, unreadable, or invalid");
@@ -794,6 +840,7 @@ fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
 /// is `NotFound`; anything else that does not verify is an error.
 #[cfg(windows)]
 fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    verify_folders(path).map_err(|_| std::io::Error::from(std::io::ErrorKind::PermissionDenied))?;
     crate::private_fs::read(path, MAX_RECORD_BYTES).map(|mut bytes| std::mem::take(&mut *bytes))
 }
 
@@ -805,6 +852,7 @@ fn present(path: &Path) -> Result<bool, ActionError> {
 /// Windows: an object at `path` counts only after it verifies; otherwise refuse.
 #[cfg(windows)]
 fn present(path: &Path) -> Result<bool, ActionError> {
+    verify_folders(path)?;
     if absent(path) { return Ok(false); }
     crate::private_fs::verify_file(path).map(|()| true).map_err(|_| storage_refused())
 }
@@ -1214,6 +1262,7 @@ fn history_entries(dir: &Path) -> Result<impl Iterator<Item = std::io::Result<st
 #[cfg(windows)]
 fn history_entries(dir: &Path) -> Result<impl Iterator<Item = std::io::Result<std::fs::DirEntry>>, ActionError> {
     let ops = dir.join("ops");
+    verify_folders(&ops)?;
     if absent(&ops) { return Ok(None.into_iter().flatten()); }
     crate::private_fs::verify_dir(&ops).map_err(|_| storage_refused())?;
     std::fs::read_dir(ops).map(|entries| Some(entries).into_iter().flatten()).map_err(unknown)
@@ -1355,6 +1404,7 @@ fn read_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>, ActionError> {
 /// or folder with another access list is refused, never treated as empty.
 #[cfg(windows)]
 fn read_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>, ActionError> {
+    verify_folders(dir)?;
     if absent(dir) { return Ok(Vec::new()); }
     crate::private_fs::verify_dir(dir).map_err(|_| storage_refused())?;
     std::fs::read_dir(dir).and_then(|entries| entries.collect::<Result<Vec<_>, _>>()).map_err(unknown)
@@ -1903,6 +1953,34 @@ mod windows_journal_tests {
         }
     }
 
+    // A folder on the way to a record that is a junction is refused, never read
+    // as "nothing there": not ops, not call-index, not a call-ops level.
+    #[test]
+    fn a_redirected_folder_above_a_record_is_refused() {
+        if elevated() { return; }
+        let call = "0123456789abcdef0123456789abcdef";
+        for case in ["ops", "call-index", "call-ops"] {
+            let dir = journal_dir(&format!("redirected-{case}"));
+            let journal = Journal::open(&dir).unwrap();
+            let id = new_operation_id().unwrap();
+            journal.begin_operation("node", "/messages/compose", &call_body(call), 2000,
+                Some((id.clone(), operation(&call_body(call))))).unwrap();
+            let moved = match case {
+                "call-ops" => call_membership_root(&dir, "node"),
+                _ => dir.join(case),
+            };
+            std::fs::rename(&moved, dir.join(format!("{case}-moved"))).unwrap();
+            let empty = temp_root(&format!("redirected-{case}-empty"));
+            crate::private_fs::ensure_dir(&empty).unwrap();
+            junction(&moved, &empty);
+            match case {
+                "ops" => assert!(journal.operation_record(&id).is_err(), "{case}"),
+                "call-index" => assert!(read_call_admission(&dir, "node", "peer", call).is_err(), "{case}"),
+                _ => assert!(journal.call_operations("node", Some("peer")).is_err(), "{case}"),
+            }
+        }
+    }
+
     // W02 / W14 on the history folder itself
     #[test]
     fn tampered_history_is_refused_without_writes() {
@@ -1943,6 +2021,35 @@ mod windows_journal_tests {
         junction(&link, &dir);
         assert!(initialize_history(&link).is_err());
         assert!(initialize_history(&foreign_owned_dir()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod journal_folder_tests {
+    use super::journal_folders;
+    use std::path::{Path, PathBuf};
+
+    fn folders(path: &str) -> Option<Vec<PathBuf>> { journal_folders(Path::new(path)) }
+
+    #[test]
+    fn every_folder_from_the_journal_folder_down_is_listed() {
+        let j = |parts: &[&str]| parts.iter().fold(PathBuf::from("/data/ops/app-spend"), |p, s| p.join(s));
+        assert_eq!(folders("/data/ops/app-spend/spend-pending.json"), Some(vec![j(&[])]));
+        assert_eq!(folders("/data/ops/app-spend/call-index-v2"), Some(vec![j(&[])]));
+        assert_eq!(folders("/data/ops/app-spend/ops"), Some(vec![j(&[])]));
+        assert_eq!(folders("/data/ops/app-spend/ops/a.json"), Some(vec![j(&[]), j(&["ops"])]));
+        assert_eq!(folders("/data/ops/app-spend/call-index-unresolved/x.json"), Some(vec![j(&[]), j(&["call-index-unresolved"])]));
+        assert_eq!(folders("/data/ops/app-spend/call-ops/n/p/c/op"),
+            Some(vec![j(&[]), j(&["call-ops"]), j(&["call-ops", "n"]), j(&["call-ops", "n", "p"]), j(&["call-ops", "n", "p", "c"])]));
+        // An "ops" folder above the journal folder is never taken for the journal's own.
+        assert_eq!(folders("/data/ops/app-spend/spend.lock"), Some(vec![j(&[])]));
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_journal_path_is_refused() {
+        assert_eq!(folders("/data/app-spend/other.json"), None);
+        assert_eq!(folders("/data/app-spend/a/b/c/d/e/f.json"), None);
+        assert_eq!(folders("ops"), None);
     }
 }
 
