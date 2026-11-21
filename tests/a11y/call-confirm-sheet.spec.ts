@@ -30,8 +30,9 @@ function confirmation(lang: 'en' | 'da') {
   return `<div class="call-confirm" role="dialog" data-call-confirm-box="audio">
     <p class="call-confirm-text"><strong>${app.uiCall} Maya?</strong> <span class="hint">${app.uiUpTo105} ${amount('21')}${app.uiNothingIsPaidUntilYouPressRing}</span></p>
     <p class="hint" data-call-minute-price>${fill(control.uiCallMinutePrice, amount('10'), amount('5'))}</p>
-    <p class="hint" data-call-reservation-max>${fill(control.uiCallReservationMax, amount('3 600'))}</p>
-    <p class="hint" data-call-stun-source>${app.uiNoSTUNServerIsSetSoCallsConnect}</p>
+    <p class="hint" data-call-reservation-max>${fill(control.uiCallReservationShort, amount('3 600'))}</p>
+    <details class="quiet-detail" data-call-reservation-detail><summary>${app.uiDetails}</summary><p class="hint">${fill(control.uiCallReservationMax, amount('3 600'))}</p></details>
+    <details class="quiet-detail" data-call-stun-detail><summary>${app.uiDetails}</summary><p class="hint" data-call-stun-source>${app.uiNoSTUNServerIsSetSoCallsConnect}</p></details>
     <div class="call-confirm-actions"><button type="button" class="soft" data-call-confirm-cancel>${app.uiCancel}</button><button type="button" class="primary soft money" data-call-confirm="audio">${app.uiRing}</button></div>
   </div>`;
 }
@@ -59,11 +60,24 @@ async function inReach(page: Page, phone: Phone, selector: string) {
   expect(r.own).toBe(true);
 }
 
+// A closed Details still lays out its hidden content (WebKit keeps a box for it), so only what checkVisibility()
+// reports as shown is measured; the sheet is then checked again with every Details open.
 async function checkSheet(page: Page, phone: Phone) {
+  await checkSheetOnce(page, phone);
+  const sheet = page.locator('.call-confirm');
+  const closed = await sheet.evaluate((el) => [...el.querySelectorAll('details')].filter((d) => !d.open).length);
+  if (closed === 0) return;
+  await sheet.evaluate((el) => { el.querySelectorAll('details').forEach((d) => { d.open = true; }); el.scrollTop = 0; });
+  expect(await sheet.evaluate((el) => [...el.querySelectorAll('details p')].every((p) => p.checkVisibility()))).toBe(true);
+  await checkSheetOnce(page, phone);
+}
+
+async function checkSheetOnce(page: Page, phone: Phone) {
   const sheet = page.locator('.call-confirm');
   const g = await sheet.evaluate((el) => {
     const b = el.getBoundingClientRect();
-    const outside = [...el.querySelectorAll<HTMLElement>('p, strong, span, button, .call-confirm-actions')]
+    const outside = [...el.querySelectorAll<HTMLElement>('p, strong, span, summary, button, .call-confirm-actions')]
+      .filter((child) => child.checkVisibility())
       .filter((child) => { const c = child.getBoundingClientRect(); return c.left < b.left - 0.5 || c.right > b.right + 0.5; })
       .map((child) => child.outerHTML.slice(0, 60));
     return { b: b.toJSON(), sideways: el.scrollWidth > el.clientWidth + 1, outside, scrolls: el.scrollHeight > el.clientHeight + 1, overflowY: getComputedStyle(el).overflowY };
@@ -85,7 +99,7 @@ async function checkSheet(page: Page, phone: Phone) {
   // Scrolled to the end, the last words sit above Cancel and Ring, not under them.
   const end = await sheet.evaluate((el) => {
     const actions = el.querySelector('.call-confirm-actions')!.getBoundingClientRect();
-    const texts = [...el.querySelectorAll('p')];
+    const texts = [...el.querySelectorAll('p')].filter((p) => p.checkVisibility());
     return { lastBottom: texts[texts.length - 1].getBoundingClientRect().bottom, actionsTop: actions.top, firstTop: texts[0].getBoundingClientRect().top };
   });
   expect(end.lastBottom).toBeLessThanOrEqual(end.actionsTop + 0.5);
