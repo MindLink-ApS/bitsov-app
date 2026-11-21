@@ -21991,7 +21991,11 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         let pays = paid.lock().unwrap().pays;
         let before = node.targets().iter().filter(|t| t.contains("/calls?")).count();
         let started = Instant::now();
-        let (end, ()) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+        // Time the operation itself: the driver below may keep sleeping after the refusal came back.
+        let ((end, took), ()) = tokio::join!(async {
+            let end = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await;
+            (end, started.elapsed())
+        }, async {
             until_end_is_waiting(&node, before).await;
             *node.state.node_id.lock().unwrap() = Some(C.into());
             switched.store(true, Ordering::SeqCst);
@@ -22005,7 +22009,7 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         });
         let error = end.expect_err("a switch never shows the call closed");
         assert_eq!(error.code, "not_dispatched");
-        assert!(started.elapsed() < END_WAIT_MAX / 2, "the switch ended the wait: {:?}", started.elapsed());
+        assert!(took < END_WAIT_MAX / 2, "the switch ended the wait: {took:?}");
         assert!(admission_is_open(&node, &offer));
         assert!(pending(&node).is_none());
         assert_eq!(hangups(&node), 1);
