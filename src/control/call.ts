@@ -1195,8 +1195,9 @@ export function createCallEngine(deps: CallDeps) {
     try {
       // On a node that keeps the call, the callee's reconnect request goes on the
       // call's own authority after the approval ran out (the host decides). A
-      // recovery offer is a new admission and still asks.
-      const held = !view.outgoing && deps.callContinuity?.() === true;
+      // recovery offer is a new admission and still asks. A call answered free
+      // was never approved for spending, so its paid reconnect always asks.
+      const held = !view.outgoing && deps.callContinuity?.() === true && freeAnswered !== view.callId;
       if (!held && deps.authorize && !await deps.authorize()) {
         recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
         return;
