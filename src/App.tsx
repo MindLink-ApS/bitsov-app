@@ -10,6 +10,7 @@ import { LockedNode, RememberUnlock } from './onboarding/LockedNode';
 import { RemoteOwnerCeremony } from './onboarding/RemoteOwnerCeremony';
 import { LocalOwnerCeremony } from './onboarding/LocalOwnerCeremony';
 import { InitializationRepair } from './onboarding/InitializationRepair';
+import { restoreFailureKind } from './onboarding/restoreFailure';
 import { OfflineNode } from './control/OfflineNode';
 import { softenError } from './control/userFacing';
 import { SoftError } from './control/SoftError';
@@ -637,8 +638,16 @@ function IdentityGate(props: {
   };
 
   const displayError = () => error() ?? props.restoreError();
-  // A failed restore gets its own plain summary; the raw error stays behind Details.
-  const restoreFailed = () => props.restoreError() !== null && displayError() === props.restoreError();
+  // A failed restore gets a summary that names the next step; the raw error stays behind Details.
+  // A phrase the host already saved needs quit and reopen, not a second look at the phrase.
+  const restoreSummary = () => {
+    const raw = props.restoreError();
+    if (raw === null || displayError() !== raw) return undefined;
+    const kind = restoreFailureKind(raw);
+    if (kind === 'saved') return t('obRestoreSavedReopen');
+    if (kind === 'phrase') return t('obRestoreFailed');
+    return undefined;
+  };
 
   return (
     <div class="state ready">
@@ -742,7 +751,7 @@ function IdentityGate(props: {
         <SoftError message={trustError()!} summary={t('obTrustSaveRetry')} />
       </Show>
       <Show when={displayError()}>
-        <SoftError message={displayError()!} summary={restoreFailed() ? t('obRestoreFailed') : undefined} />
+        <SoftError message={displayError()!} summary={restoreSummary()} />
       </Show>
     </div>
   );
