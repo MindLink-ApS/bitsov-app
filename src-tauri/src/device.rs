@@ -364,7 +364,7 @@ pub fn read_blob(store: &Path) -> std::io::Result<Option<Vec<u8>>> {
 
 pub fn save_blob(store: &Path, blob: &[u8]) -> Result<(), ActionError> {
     #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
-    { return crate::apple_key_material::save(store, blob).map_err(|e| ActionError::new("device_key", e)); }
+    { crate::apple_key_material::save(store, blob).map_err(|e| ActionError::new("device_key", e)) }
     #[cfg(all(target_os = "macos", feature = "mobile", not(test)))]
     { return Err(ActionError::new("device_key", "device Keychain storage is unavailable in the host mobile check")); }
     #[cfg(not(all(not(test), any(target_os = "ios", target_os = "macos"))))]
@@ -379,7 +379,7 @@ pub fn forget(store: &Path) {
 
 fn delete_protected(store: &Path) -> Result<(), String> {
     #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
-    { return crate::apple_key_material::delete(store); }
+    { crate::apple_key_material::delete(store) }
     #[cfg(not(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile"))))))]
     { let _ = store; Ok(()) }
 }

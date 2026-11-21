@@ -57,7 +57,7 @@ impl ClientKey {
     /// silently tightening it: a loosened mode means something else touched it.
     pub fn load_or_create(dir: &Path) -> Result<Self, PairError> {
         #[cfg(all(not(test), any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")))))]
-        { return keychain::load_native(dir); }
+        { keychain::load_native(dir) }
         #[cfg(all(target_os = "macos", feature = "mobile", not(test)))]
         { return Err(PairError::Local("client Keychain storage is unavailable in the host mobile check".into())); }
         // Windows stores only a sealed identity; see `windows_store`.
