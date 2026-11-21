@@ -230,7 +230,7 @@ fn serve_one(node: &PairingMock, reads: Option<&Reads>, check: Option<&Challenge
             (401, r#"{"error":"pairing proof did not verify"}"#.to_string())
         }
         Some(reads) if method == "GET" && READ_PATHS.contains(&path) => {
-            let (auth, _) = node.handle("GET", "/api/v1/identity", bearer.as_deref(), &[]);
+            let (auth, _) = node.handle("GET", "/api/v1/identity", bearer, &[]);
             if auth != 200 {
                 (
                     401,
@@ -248,7 +248,7 @@ fn serve_one(node: &PairingMock, reads: Option<&Reads>, check: Option<&Challenge
                 (exchange.status, body)
             }
         }
-        _ => node.handle(&method, &target, bearer.as_deref(), &body),
+        _ => node.handle(&method, &target, bearer, &body),
     };
     let reason = match status {
         200 => "OK",

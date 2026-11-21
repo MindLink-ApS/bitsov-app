@@ -2603,6 +2603,7 @@ pub fn http_client_builder() -> reqwest::ClientBuilder {
         .redirect(reqwest::redirect::Policy::none())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_proxy(
     api_base: &str,
     app_data_dir: &Path,
@@ -4947,7 +4948,7 @@ mod tests {
             let key = ClientKey::load_or_create(store.path()).unwrap();
             remember_endpoint(&descriptor, &answering_endpoint);
 
-            let error = connect_authenticated(&descriptor, &key, "test phone").await.err().expect("the box refused");
+            let error = connect_authenticated(&descriptor, &key, "test phone").await.expect_err("the box refused");
             assert!(expected(&error), "{error}");
             tokio::time::sleep(Duration::from_millis(50)).await;
             assert_eq!(requests.load(Ordering::SeqCst), 1);

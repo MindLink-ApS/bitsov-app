@@ -13354,7 +13354,8 @@ mod pairing_wiring_tests {
             let server = tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = vec![0; 4096];
-                let _ = stream.read(&mut request).await.unwrap();
+                let read = stream.read(&mut request).await.unwrap();
+                assert_ne!(read, 0, "the client sent a request");
                 let body = format!(r#"{{"code":"{code}","message":"remote unavailable"}}"#);
                 stream.write_all(format!("HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             });
@@ -21991,7 +21992,11 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         let pays = paid.lock().unwrap().pays;
         let before = node.targets().iter().filter(|t| t.contains("/calls?")).count();
         let started = Instant::now();
-        let (end, ()) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+        // Time the operation itself: the driver below may keep sleeping after the refusal came back.
+        let ((end, took), ()) = tokio::join!(async {
+            let end = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await;
+            (end, started.elapsed())
+        }, async {
             until_end_is_waiting(&node, before).await;
             *node.state.node_id.lock().unwrap() = Some(C.into());
             switched.store(true, Ordering::SeqCst);
@@ -22005,7 +22010,7 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         });
         let error = end.expect_err("a switch never shows the call closed");
         assert_eq!(error.code, "not_dispatched");
-        assert!(started.elapsed() < END_WAIT_MAX / 2, "the switch ended the wait: {:?}", started.elapsed());
+        assert!(took < END_WAIT_MAX / 2, "the switch ended the wait: {took:?}");
         assert!(admission_is_open(&node, &offer));
         assert!(pending(&node).is_none());
         assert_eq!(hangups(&node), 1);
@@ -25873,6 +25878,7 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         let now = now_unix();
         serde_json::json!({"op_id": "rel-1", "client_id": "c1", "granted_at": now, "expires_at": now + 86_400,
             "budget_msat": 200_000, "used_msat": 0, "remaining_msat": 200_000, "per_call_max_msat": 200_000,
+            "message_per_payment_max_msat": 200_000,
             "per_recipient_msat": {peer: 200_000}, "used_by_recipient": {}, "recipients_only": true,
             "per_act_max_by_recipient": {peer: per_act_msat}, "recipient_expires_at": {peer: now + 86_400}})
     }

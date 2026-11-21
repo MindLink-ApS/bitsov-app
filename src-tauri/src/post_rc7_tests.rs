@@ -443,7 +443,7 @@ async fn retained_node_requires_two_separate_consents_then_authenticates_normall
     std::fs::create_dir(seed.parent().unwrap()).unwrap();
     std::fs::write(&seed, "existing-identity").unwrap();
     let original = include_str!("../tests/fixtures/rc7-pricing.toml");
-    std::fs::write(&config, &original).unwrap();
+    std::fs::write(&config, original).unwrap();
     assert!(!local_owner::launch_enabled(true, &config).unwrap(),
         "a retained seed beside the config must not enable owner mode");
     std::fs::write(&program, format!(r#"#!/bin/sh
