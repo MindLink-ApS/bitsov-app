@@ -13,8 +13,11 @@ export type SoftenedError = {
   money?: boolean;
 };
 
-/** Map host/node error text to a calm summary (+ optional detail). */
-export function softenError(raw: unknown): SoftenedError {
+/**
+ * Map host/node error text to a calm summary (+ optional detail).
+ * `fallback` replaces only the generic summary for technical text; money text is never replaced.
+ */
+export function softenError(raw: unknown, fallback?: string): SoftenedError {
   const m = String(raw ?? '').trim();
   if (!m) return { summary: tr('caSomethingWentWrong'), detail: null };
 
@@ -60,6 +63,6 @@ export function softenError(raw: unknown): SoftenedError {
   }
 
   return technical(m)
-    ? { summary: tr('caThatCouldNotBeCompletedOpenDetailsForMore'), detail: m }
+    ? { summary: fallback ?? tr('caThatCouldNotBeCompletedOpenDetailsForMore'), detail: m }
     : { summary: m, detail: null };
 }

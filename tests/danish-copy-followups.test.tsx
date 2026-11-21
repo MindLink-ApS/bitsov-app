@@ -22,7 +22,7 @@ it('retains the payment, on-chain and fee meanings in Danish copy', () => {
   expect(t('uiTheseCategoriesOverlapAndDoNotAddUp')).toContain('i totalen på kæden');
   expect(t('uiTheseCategoriesOverlapAndDoNotAddUp')).toContain('fra det disponible beløb på kæden');
   expect(t('uiOnChainFundsHeldForAnchorChannelClosing')).toContain('tilbageholdt til gebyrer ved lukning');
-  expect(t('uiLocalOKMoneyReady')).toBe('Lokalt OK · Betalinger klar');
+  expect(t('uiLocalOKMoneyReady')).toBe('Forbundet · Klar til at betale');
   expect(t('extraLocalOKMoneyReady', 'x')).toBe('Lokalt OK · Betalinger klar · x');
   expect(t('moneyNotReady')).toBe('Betalinger er ikke klar endnu. Din node prøver automatisk igen.');
 });
@@ -56,7 +56,7 @@ it('localizes the provider channel confirmation as well as its cards', () => {
   expect(mount.textContent).toContain('Indstillinger → Node');
 });
 
-it.each([['Rasmus', 'Rasmus’'], ['Lars', 'Lars’'], ['Alex', 'Alex’'], ['Luz', 'Luz’'], ['MAX', 'MAX’'], ['Maya', 'Mayas']])('uses the Danish possessive for %s', (name, possessive) => {
+it.each([['Jens', 'Jens’'], ['Lars', 'Lars’'], ['Alex', 'Alex’'], ['Luz', 'Luz’'], ['MAX', 'MAX’'], ['Maya', 'Mayas']])('uses the Danish possessive for %s', (name, possessive) => {
   setLanguagePref('da');
   const quote = { kind: 0, own_msat: 1000, peer_msat: 2000, peer_stale: false, peer_age_secs: 0, max_routing_fee_msat: 0 };
   expect(costToSend({ kind: 'peer', id: 'a' }, quote, { name, nowMs: 1 })!.basis).toContain(`${possessive} pris`);
@@ -64,7 +64,7 @@ it.each([['Rasmus', 'Rasmus’'], ['Lars', 'Lars’'], ['Alex', 'Alex’'], ['Lu
 
 it.each(['en', 'da'] as const)('inflects names in the peer-not-ready message in %s', locale => {
   setLanguagePref(locale);
-  for (const [name, da] of [['Rasmus', 'Rasmus’'], ['Maya', 'Mayas']]) {
+  for (const [name, da] of [['Jens', 'Jens’'], ['Maya', 'Mayas']]) {
     expect(t('uiSNodeDoesNotTakeCallsYet', possessive(name)))
       .toBe(locale === 'da' ? `${da} boks oplyste ingen opkaldspris. De er måske offline, eller boksen tager måske ikke imod opkald endnu` : `${name}’s box gave no call price. They may be offline, or it may not take calls yet`);
     expect(peerNotReadyMessage({ code: 'peer_not_ready', reason: 'chain_unavailable' }, name))
@@ -75,7 +75,7 @@ it.each(['en', 'da'] as const)('inflects names in the peer-not-ready message in 
 it.each(['en', 'da'] as const)('uses typographic apostrophes for %s possessives without changing names', locale => {
   setLanguagePref(locale);
   for (const [name, english, danish] of [
-    ['Rasmus', 'Rasmus’s', 'Rasmus’'],
+    ['Jens', 'Jens’s', 'Jens’'],
     ['Lars', 'Lars’s', 'Lars’'],
     ['Alex', 'Alex’s', 'Alex’'],
     ['Luz', 'Luz’s', 'Luz’'],

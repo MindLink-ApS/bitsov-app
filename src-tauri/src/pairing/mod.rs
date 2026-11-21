@@ -18,6 +18,7 @@ mod client;
 pub(crate) mod key;
 
 use std::collections::HashMap;
+#[cfg(not(windows))]
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -143,6 +144,7 @@ impl std::fmt::Debug for Established {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Record {
     client_id: String,
     client_pubkey: String,
@@ -207,12 +209,21 @@ pub fn short_code(challenge: &[u8]) -> String {
 
 fn load_record(store: &Path, key: &ClientKey) -> Result<Option<Record>, PairError> {
     let path = store.join(RECORD_FILE);
-    if !path.exists() {
+    if key::nothing_at(&path) {
         return Ok(None);
     }
+    #[cfg(not(windows))]
     key::check_owner_only(&path, "pairing record")?;
+    #[cfg(not(windows))]
     let text = std::fs::read_to_string(&path)
         .map_err(|e| PairError::Local(format!("cannot read the pairing record: {e}")))?;
+    // Windows: one verified handle for the check and the read.
+    #[cfg(windows)]
+    let bytes = crate::private_fs::read(&path, MAX_RECORD_BYTES)
+        .map_err(|e| PairError::Local(format!("cannot read the pairing record: {e}")))?;
+    #[cfg(windows)]
+    let text = String::from_utf8(bytes.to_vec())
+        .map_err(|_| PairError::Local("the pairing record is corrupt".into()))?;
     let record: Record = serde_json::from_str(&text)
         .map_err(|_| PairError::Local("the pairing record is corrupt".into()))?;
     if record.client_pubkey != key.public_hex() {
@@ -223,6 +234,25 @@ fn load_record(store: &Path, key: &ClientKey) -> Result<Option<Record>, PairErro
     Ok(Some(record))
 }
 
+/// Largest pairing record read on Windows.
+#[cfg(windows)]
+const MAX_RECORD_BYTES: u64 = 64 * 1024;
+
+/// Write a new private scratch file and publish it by handle. A leftover
+/// scratch file is refused rather than deleted.
+#[cfg(windows)]
+fn save_record(store: &Path, record: &Record) -> Result<(), PairError> {
+    let text = serde_json::to_vec(record).expect("record serializes");
+    crate::private_fs::write_replacing_verified(
+        &store.join(format!("{RECORD_FILE}.tmp")),
+        &store.join(RECORD_FILE),
+        &text,
+        |e| PairError::Local(format!("cannot write the pairing record: {e}")),
+        |_| Ok(()),
+    )
+}
+
+#[cfg(not(windows))]
 fn save_record(store: &Path, record: &Record) -> Result<(), PairError> {
     let path = store.join(RECORD_FILE);
     let tmp = store.join(format!("{RECORD_FILE}.tmp"));
@@ -503,5 +533,43 @@ impl PairingView {
                 ..Self::with_state("failed")
             },
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_store_tests {
+    use super::*;
+    use crate::private_fs::fixtures::*;
+
+    #[test]
+    fn the_pairing_record_round_trips_and_tampering_is_refused() {
+        if elevated() {
+            return;
+        }
+        let root = temp_root("pairing-record");
+        let store = root.join("app-client");
+        let key = ClientKey::generate_ephemeral().unwrap();
+        save_remote_record(&store, &key, "client-1".into(), vec!["read".into()]).unwrap();
+        save_remote_record(&store, &key, "client-2".into(), vec!["read".into()]).unwrap();
+        let record = load_record(&store, &key).unwrap().unwrap();
+        assert_eq!(record.client_id, "client-2");
+        let path = store.join(RECORD_FILE);
+        let bytes = std::fs::read(&path).unwrap();
+        grant_everyone_read(&path);
+        assert!(load_record(&store, &key).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // ...and the tampered record is not overwritten either.
+        assert!(save_remote_record(&store, &key, "client-4".into(), vec![]).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // Reparse point at the record name.
+        let other = root.join("other");
+        std::fs::create_dir(&other).unwrap();
+        let store2 = root.join("app-client-2");
+        save_remote_record(&store2, &key, "client-3".into(), vec![]).unwrap();
+        std::fs::remove_file(store2.join(RECORD_FILE)).unwrap();
+        junction(&store2.join(RECORD_FILE), &other);
+        assert!(load_record(&store2, &key).is_err());
+        // Wrong owner: a system folder is never accepted as the store.
+        assert!(save_remote_record(&foreign_owned_dir(), &key, "c".into(), vec![]).is_err());
     }
 }

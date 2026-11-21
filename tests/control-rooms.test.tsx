@@ -303,8 +303,8 @@ describe('rooms in the shell', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.hasAttribute('data-trust-continue'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))!.click();
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
   async function openRoom(...picks: string[]) {
@@ -675,8 +675,8 @@ describe('rooms in the shell', () => {
     expect(host.used('message_send')).toHaveLength(1);
     expect($(`[data-room-leg="${A}"]`)!.getAttribute('data-leg-state')).toBe('undelivered');
     expect($('[data-room-send-msat]')!.getAttribute('data-room-send-msat')).toBe('2500');
-    expect(text(`[data-room-leg="${A}"]`)).toMatch(/up to 2.5 sats \(2.1 sats to them, plus a network fee\)/);
-    expect(text('[data-room-send] .kind')).toMatch(/up to 2.5 sats in all/);
+    expect(text(`[data-room-leg="${A}"]`)).toMatch(/up to about 3 sats \(about 2 sats to them, plus a network fee\)/);
+    expect(text('[data-room-send] .kind')).toMatch(/up to about 3 sats in all/);
   });
 
   it.each([

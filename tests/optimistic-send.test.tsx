@@ -48,7 +48,7 @@ describe('optimistic send', () => {
     await press('hello now');
     await vi.waitFor(() => expect(sending()).toHaveLength(1));
     expect(sending()[0].textContent).toContain('hello now');
-    expect(sending()[0].textContent).toContain('Sending · up to 9.75 sats');
+    expect(sending()[0].textContent).toContain('Sending · up to about 10 sats');
     expect(sending()[0].textContent).not.toMatch(/paid/i);
     expect(area().value).toBe('');
     await vi.waitFor(() => expect(pending).toHaveLength(1));

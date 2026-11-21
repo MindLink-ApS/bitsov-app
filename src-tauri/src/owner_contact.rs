@@ -730,4 +730,37 @@ mod tests {
         assert!(!p.view.owner_command.contains("--config"));
         assert!(!p.view.owner_command.contains("Dev external node"));
     }
+
+    /// The owner's receipt is a readiness signal: any damaged file is refused,
+    /// never read as "not yet written".
+    #[test]
+    fn owner_receipt_fails_closed() {
+        use crate::store_matrix::{assert_refuses, json_cases, Store};
+        let grant = NodeGrant {
+            client_id: "c1".into(), op_id: "ab12".into(), expires_at: 120,
+            budget_msat: 50_000, used_msat: 0, remaining_msat: 50_000,
+            per_call_max_msat: 5_000, ..Default::default()
+        };
+        let load = |dir: &Path| {
+            let p = pending();
+            let (planted, receipt) = (dir.join("receipt.json"), p.dir.as_ref().unwrap().path().join("receipt.json"));
+            // Rename keeps a symlink or directory as it is, and puts it back.
+            std::fs::rename(&planted, &receipt).unwrap();
+            let status = p.status(&grant, (0, 0), 0);
+            std::fs::rename(&receipt, &planted).unwrap();
+            status.map(drop).map_err(|e| e.message)
+        };
+        let store = Store {
+            name: "owner contact receipt.json",
+            valid: serde_json::to_vec(&serde_json::json!({
+                "recipient": "a".repeat(64), "max_total_msat": 5_000, "expires_at": 60,
+            })).unwrap(),
+            version_key: None,
+            prepare: &|_| {},
+            file: &|dir| dir.join("receipt.json"),
+            load: &load,
+            may_create: &[],
+        };
+        assert_ne!(assert_refuses(&store, &json_cases(&store)), 0);
+    }
 }

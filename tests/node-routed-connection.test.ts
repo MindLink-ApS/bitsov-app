@@ -40,6 +40,7 @@ function fakeAudio(mode: ReadyMode = 'ready') {
       feed: (f) => { entry.fed.push(f); },
       setMuted: (m) => { entry.muted.push(m); },
       codecs: () => ({ sending: 'pcmu', localCaps: 1, peerCaps: null }),
+      diagnostics: () => ({ sent: ['mulaw'], received: ['opus'], contextRate: 48_000 }),
       stats: async () => null,
       close: async () => { entry.closed = true; },
     };
@@ -65,6 +66,8 @@ describe('node-routed connection (the engine’s RTCPeerConnection surface)', ()
     expect((await conn.createAnswer()).type).toBe('answer');
     await expect(conn.addIceCandidate({ candidate: 'x' })).resolves.toBeUndefined();
     expect((await conn.getStats()).size).toBe(0);
+    // No audio engine yet: nothing to report.
+    expect((conn as unknown as { audioDiagnostics: () => unknown }).audioDiagnostics()).toBeNull();
   });
 
   it('caller: opens the node link for the call and its counterparty only after the node-routed answer, goes live when the host says open', async () => {
@@ -91,6 +94,8 @@ describe('node-routed connection (the engine’s RTCPeerConnection surface)', ()
     expect(a.made[0].fed).toHaveLength(1);
     a.made[0].transport.send(Uint8Array.of(1, 2));
     expect(b.sent).toHaveLength(1);
+    // The call report reads the engine's codecs through the connection.
+    expect((conn as unknown as { audioDiagnostics: () => unknown }).audioDiagnostics()).toEqual({ sent: ['mulaw'], received: ['opus'], contextRate: 48_000 });
     conn.close();
     expect(a.made[0].closed).toBe(true);
     expect(b.closed()).toBe(1);

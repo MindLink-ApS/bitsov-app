@@ -18,6 +18,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use zeroize::Zeroizing;
 
 use super::PairError;
+#[cfg_attr(windows, allow(unused_imports))]
 use crate::at_rest::{self, Sealer};
 
 /// File name of the client key inside the pairing store directory.
@@ -59,7 +60,11 @@ impl ClientKey {
         { return keychain::load_native(dir); }
         #[cfg(all(target_os = "macos", feature = "mobile", not(test)))]
         { return Err(PairError::Local("client Keychain storage is unavailable in the host mobile check".into())); }
-        #[cfg(not(all(not(test), any(target_os = "ios", target_os = "macos"))))]
+        // Windows stores only a sealed identity; see `windows_store`.
+        #[cfg(windows)]
+        #[allow(clippy::needless_return)]
+        { return windows_store::load_or_create(dir); }
+        #[cfg(not(any(windows, all(not(test), any(target_os = "ios", target_os = "macos")))))]
         match at_rest::installed() {
             Some(sealer) => Self::load_or_create_sealed(dir, sealer),
             None => Self::load_or_create_plain(dir),
@@ -129,7 +134,7 @@ impl ClientKey {
         let seed = if sealed_file_exists(dir)? {
             sealed_seed(&sealed, sealer)?
         } else {
-            let seed = if plain.exists() {
+            let seed = if !nothing_at(&plain) {
                 plain_seed(&plain)?
             } else {
                 let mut seed = Zeroizing::new([0u8; 32]);
@@ -227,6 +232,7 @@ fn sealed_file_exists(dir: &Path) -> Result<bool, PairError> {
     }
 }
 
+#[cfg(not(windows))]
 fn write_verified_seed(path: &Path, seed: &[u8; 32], sealer: &dyn Sealer) -> Result<(), PairError> {
     let ciphertext = sealer
         .seal(at_rest::CLIENT_SEED_PURPOSE, seed)
@@ -264,6 +270,7 @@ fn plain_seed(path: &Path) -> Result<Zeroizing<[u8; 32]>, PairError> {
     Ok(Zeroizing::new(seed))
 }
 
+#[cfg(not(windows))]
 fn sealed_seed(path: &Path, sealer: &dyn Sealer) -> Result<Zeroizing<[u8; 32]>, PairError> {
     check_owner_only(path, "protected client key file")?;
     let length = std::fs::metadata(path)
@@ -291,7 +298,7 @@ fn sealed_seed(path: &Path, sealer: &dyn Sealer) -> Result<Zeroizing<[u8; 32]>, 
 }
 
 /// Atomically replace `path` with an owner-only file holding `bytes`.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("sealed.tmp");
     let _ = std::fs::remove_file(&tmp);
@@ -333,6 +340,13 @@ pub(crate) fn restrict_dir(dir: &Path) -> Result<(), PairError> {
     Ok(())
 }
 
+/// True only when nothing at all is at `path`. A dangling symlink is not an
+/// absent store: reading through it says `NotFound`, but it must not pass for
+/// a fresh start.
+pub(crate) fn nothing_at(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// Open a new file at `0600`. Fails with `AlreadyExists` if it is there.
 #[cfg(unix)]
 pub(crate) fn create_new_protected(path: &Path) -> std::io::Result<std::fs::File> {
@@ -367,13 +381,14 @@ pub(crate) fn check_owner_only(path: &Path, what: &str) -> Result<(), PairError>
 }
 
 // Refuse before creating directories or files: skipping Unix modes would expose keys.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn restrict_dir(_dir: &Path) -> Result<(), PairError> {
     Err(PairError::Local(
         "private pairing storage is not supported on this platform".into(),
     ))
 }
 
+// Windows stores never take a path-only file; they use `crate::private_fs`.
 #[cfg(not(unix))]
 pub(crate) fn create_new_protected(_path: &Path) -> std::io::Result<std::fs::File> {
     Err(std::io::Error::new(
@@ -604,9 +619,21 @@ mod tests {
     }
 }
 
+/// Windows: the client identity on the private-file layer.
+#[cfg(windows)]
+#[path = "key/windows.rs"]
+mod windows_store;
+#[cfg(windows)]
+use windows_store::{sealed_seed, write_verified_seed};
+#[cfg(windows)]
+pub(crate) use windows_store::{restrict_dir, NO_PROTECTED_STORAGE};
+
 #[cfg(any(target_os = "ios", all(target_os = "macos", not(feature = "mobile")), all(test, unix)))]
 #[path = "key/keychain.rs"]
 mod keychain;
 
 #[cfg(all(not(test), target_os = "macos", not(feature = "mobile")))]
 pub(crate) fn storage_smoke_test() -> Result<&'static str, String> { keychain::smoke_test() }
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod linux;
