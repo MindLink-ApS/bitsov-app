@@ -2690,7 +2690,7 @@ export function ControlCenter(props: Props) {
             spendingReady={roomCanSpend()} spendBlock={roomSpendBlock()} approveSpending={() => openCallApproval(key)}
             panelRef={el => { waitingPanels.set(key, el); }}
             blocked={moneyBlocked()} streams={{ local: null, remote: null }} nameOf={nameOf} quote={actions.callQuote}
-            accept={(shown) => { if (!moneyBlocked()) void calls.acceptWaiting(key, shown); }} decline={(shown) => void calls.declineWaiting(key, shown)} ignore={() => calls.ignoreWaiting(key)} dismiss={() => calls.dismissWaiting(key)}
+            accept={(shown) => { if (moneyBlocked() || roomSpendBlock() === 'paused') return; void calls.acceptWaiting(key, shown); }} decline={(shown) => void calls.declineWaiting(key, shown)} ignore={() => calls.ignoreWaiting(key)} dismiss={() => calls.dismissWaiting(key)}
             hangup={() => {}} mute={() => {}} camera={() => {}} closeAgain={() => {}} endStuck={() => {}} callAgain={() => {}} />;
         }}</For>
       </div>
@@ -2741,7 +2741,7 @@ export function ControlCenter(props: Props) {
         videoStatus={routedVideo ? callVideoStatus() : null}
         nameOf={nameOf}
         quote={actions.callQuote}
-        accept={(shown) => { if (!moneyBlocked()) void calls.accept(shown); }}
+        accept={(shown) => { if (moneyBlocked() || roomSpendBlock() === 'paused') return; void calls.accept(shown); }}
         decline={(shown) => void calls.decline(shown)}
         ignore={() => calls.ignore()}
         hangup={() => void calls.hangup()}
@@ -4098,7 +4098,7 @@ function CallPanel(props: {
   confirmMinutes?: () => void;
   /** Opens Settings → General, where the STUN server is chosen. */
   openCallSettings?: () => void;
-  /** The main card only: Escape quiets the ringtone of a ringing call, or closes an ended card. It never answers, pays or hangs up. */
+  /** The main card only: Escape quiets the ringtone of a ringing call, or closes a fully settled ended card. It never answers, pays or hangs up. */
   quietRing?: () => void;
   /** This incoming call's ringtone was quieted on this device (display only). */
   ringQuiet?: boolean;
@@ -4153,14 +4153,31 @@ function CallPanel(props: {
   const person = () => callPersonName(v().peer);
   const who = () => person().name;
   const endLine = () => callEndLine(v(), who());
+  /**
+   * An ended card Escape may close: nothing settling or of unknown result, no call still open at the node,
+   * the node's end confirmed (or never needed), no minute still being paid (`minutes.paying`), no minute
+   * payment still unknown (`lostMinute` or `undeliveredMinute`, including after settle has cleared the hold),
+   * and no hold with money left in it (`remaining_msat`, including once the node has marked the hold closed).
+   * Otherwise only Close or End that call.
+   */
+  const escapeMayClose = () => {
+    const c = v();
+    if (c.pendingCount > 0 || c.unknownCount > 0 || c.stuck) return false;
+    if (c.close && c.close.status !== 'closed') return false;
+    const minutes = c.minutes;
+    if (minutes?.paying || minutes?.lostMinute || minutes?.undeliveredMinute) return false;
+    const hold = minutes?.reservation;
+    if (hold && (!hold.closed || hold.remaining_msat > 0)) return false;
+    return true;
+  };
   // Escape on the main card: a ringing call goes quiet (the card stays, both buttons still work);
-  // an ended card closes once nothing is settling. Calling, connecting and live calls ignore it.
+  // an ended card closes once it is fully settled. Calling, connecting and live calls ignore it.
   createEffect(() => {
     if (!props.quietRing) return;
     const phase = v().phase;
     if (props.approvalOpen) return;
     if (phase === 'incoming' && !v().silenced) onCleanup(onEscape(() => props.quietRing?.()));
-    else if (phase === 'ended' && v().pendingCount === 0) onCleanup(onEscape(() => props.dismiss()));
+    else if (phase === 'ended' && escapeMayClose()) onCleanup(onEscape(() => props.dismiss()));
   });
   /** What the card shows: interrupted node-routed media reads as Reconnecting (display only; the engine stays live). */
   const cardPhase = () => shownPhase(v());
@@ -4357,7 +4374,7 @@ function CallPanel(props: {
           <Switch>
             <Match when={v().phase === 'incoming'}>
               {/* No price on either button: Accept stays bounded by the quote read for it (`shown`), and Decline is the free local ignore. */}
-              <button type="button" class="primary soft money call-answer" data-call-accept disabled={props.blocked || props.answerBlocked || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.accept(q); }}>{tr('uiAccept')}</button>
+              <button type="button" class="primary soft money call-answer" data-call-accept disabled={props.blocked || props.answerBlocked || props.spendBlock === 'paused' || props.view.silenced || !shown()} onClick={() => { const q = shown(); if (q) props.accept(q); }}>{tr('uiAccept')}</button>
               <button type="button" class="danger soft call-decline" data-call-decline data-call-ignore disabled={props.view.silenced} onClick={() => props.ignore()}>{tr('uiDecline')}</button>
             </Match>
             <Match when={v().phase === 'ended'}>
