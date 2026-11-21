@@ -13354,7 +13354,8 @@ mod pairing_wiring_tests {
             let server = tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = vec![0; 4096];
-                let _ = stream.read(&mut request).await.unwrap();
+                let read = stream.read(&mut request).await.unwrap();
+                assert_ne!(read, 0, "the client sent a request");
                 let body = format!(r#"{{"code":"{code}","message":"remote unavailable"}}"#);
                 stream.write_all(format!("HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             });
