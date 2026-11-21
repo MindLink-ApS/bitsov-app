@@ -70,12 +70,17 @@ export function frameBytes(message: ArrayBuffer | Uint8Array | number[]): Uint8A
 /** The header that carries the uplink send count (the host's `SEND_ORDER_HEADER`). */
 export const MEDIA_ORDER_HEADER = 'x-bitsov-media-order';
 
+// Shared by every bridge the app makes (one per call connection) and never reset: a send still in
+// flight from an earlier socket counts lower than every new one, and the host drops it against the
+// base each open passes.
+let sent = 0;
+
 /** The host-owned socket, through Tauri commands. */
 export function hostMediaBridge(): MediaBridge {
   let current: Channel<ChannelMessage> | null = null;
-  // Never reset: a send still in flight from an earlier socket counts lower than every new one,
-  // and the host drops it against the base each open passes.
-  let sent = 0;
+  // Sends start once the host has opened its session. One made before would be dropped there with
+  // no session, and the new session would wait for its count.
+  let ready: Channel<ChannelMessage> | null = null;
   return {
     open: async (callId, peer, onFrame, onLink, sealed, video) => {
       const channel = new Channel<ChannelMessage>();
@@ -86,6 +91,7 @@ export function hostMediaBridge(): MediaBridge {
         if (link) onLink(link);
       };
       current = channel;
+      ready = null;
       // Without `sealed` and `video` these are the same arguments as a build without either.
       // `send_base`: the count this socket's sends start at, so the host drops any lower,
       // late send from an earlier socket instead of sending it to this call's peer.
@@ -93,9 +99,10 @@ export function hostMediaBridge(): MediaBridge {
       if (sealed) args.sealed = true;
       if (video) args.video = true;
       await invoke<void>('call_media_open', args);
+      if (current === channel) ready = channel;
     },
     send: (payload) => {
-      if (!current) return;
+      if (!current || ready !== current) return;
       const headers = { [MEDIA_ORDER_HEADER]: String(sent++) };
       void invoke<void>('call_media_send', payload, { headers }).catch(() => undefined);
     },
@@ -103,6 +110,7 @@ export function hostMediaBridge(): MediaBridge {
     close: async () => {
       if (!current) return;
       current = null;
+      ready = null;
       await invoke<void>('call_media_close').catch(() => undefined);
     },
   };
