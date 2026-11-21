@@ -346,6 +346,45 @@ describe('Decline and Accept with free replies (A4)', () => {
     t.e.endLocal();
   });
 
+  it('a refused ask on the caller\'s restart keeps the recovery: a later offer, once approved, is answered once', async () => {
+    vi.useFakeTimers();
+    let approved = true;
+    let release!: (ok: boolean) => void;
+    let held = false;
+    const authorize = vi.fn(() => held ? new Promise<boolean>((r) => { release = r; }) : Promise.resolve(approved));
+    const pcs: FakePc[] = [];
+    const t = engine({ free: true, authorize, callContinuity: () => true, quote: pricedLater(async () => ({ ok: true, value: QUOTE }) as Outcome<CallQuote>),
+      peerConnection: () => { const pc = new FakePc(); pcs.push(pc); return pc as unknown as RTCPeerConnection; } });
+    await t.e.receive(offer(), OWN);
+    await t.e.accept(QUOTE);
+    pcs[0].connectionState = 'connected'; pcs[0].onconnectionstatechange?.();
+    approved = false;
+    authorize.mockClear();
+    const restartOffer = (n: string): Message => ({ id: `in-400-${n}`, kind: 400, sender: A, recipient: OWN, timestamp: 0, payment_amount_msat: 1_000,
+      plaintext: JSON.stringify({ v: 1, call_id: n.repeat(32), media: 'audio', sdp: `v=0 offer\r\na=x-bitsov-restart-of:${ID}\r\n` }) });
+    // Refused: nothing answered, and the one recovery is still unused.
+    await t.e.receive(restartOffer('e'), OWN);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(authorize).toHaveBeenCalledTimes(1);
+    expect(t.sent.filter((s) => s.kind === 401)).toEqual([]);
+    expect(t.last().recoveryUsed).toBe(false);
+    // While a second ask is pending, a duplicate offer neither asks again nor spends the recovery.
+    held = true;
+    const first = t.e.receive(restartOffer('f'), OWN);
+    const dup = t.e.receive(restartOffer('f'), OWN);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(authorize).toHaveBeenCalledTimes(2);
+    expect(t.last().recoveryUsed).toBe(false);
+    // Approved: answered exactly once, and only now is the recovery spent.
+    release(true);
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.all([first, dup]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.sent.filter((s) => s.kind === 401)).toHaveLength(1);
+    expect(t.last().recoveryUsed).toBe(true);
+    t.e.endLocal();
+  });
+
   /** A price for the free Accept that never answers, then one the test answers by hand. */
   const pricedByHand = () => {
     let reads = 0;

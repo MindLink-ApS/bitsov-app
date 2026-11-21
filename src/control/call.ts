@@ -1319,11 +1319,34 @@ export function createCallEngine(deps: CallDeps) {
     }
     const q = quote!;
     if (!conn) return;
+    // A call answered free was never approved for spending, so answering the
+    // caller's restart asks first, as the outbound reconnect request does: a
+    // refused or lapsed approval keeps the one recovery for the next try. One
+    // ask at a time; the call is checked again once the answer is in.
+    const askedFirst = freeAnswered === view.callId && !!deps.authorize;
+    if (askedFirst) {
+      if (restartAsking) return;
+      restartAsking = true;
+      let approved = false;
+      try {
+        approved = await deps.authorize!();
+      } catch (error) {
+        restartAsking = false;
+        if (eligible()) recoveryRefused(conn, tr('caCallRecoveryFailed', asActionError(error).message));
+        return;
+      }
+      restartAsking = false;
+      if (!eligible()) return;
+      if (!approved) {
+        recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
+        return;
+      }
+    }
     restartAttempted = true;
     reconnect(conn);
     set({ recoveryUsed: true });
     try {
-      if (deps.authorize && !await deps.authorize()) {
+      if (!askedFirst && deps.authorize && !await deps.authorize()) {
         recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
         return;
       }
