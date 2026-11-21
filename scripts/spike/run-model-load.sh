@@ -24,11 +24,14 @@
 # Usage: scripts/spike/run-model-load.sh --model FILE.gguf [--llama-bin DIR] [--evidence-dir DIR] [--keep]
 #   DIR must not exist or be an empty directory (else refused before anything runs); evidence is
 #   exported only after a completed run and nothing else in DIR is touched (see j0-evidence.sh).
+# Environment: LLAMA_BIN (default $HOME/llama.cpp/build/bin; --llama-bin overrides it) and
+#   MODEL_DIR (default $HOME/models), the directory that may hold the LANE2-READY marker.
 
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PROFILE="$HERE/j0-confined-child.sb"
-LLAMA_BIN="$HOME/Desktop/seat-drafts/llama.cpp/build/bin"
+LLAMA_BIN="${LLAMA_BIN:-$HOME/llama.cpp/build/bin}"
+MODEL_DIR="${MODEL_DIR:-$HOME/models}"
 MODEL=""; EVID=""; KEEP=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -199,8 +202,8 @@ else out FAIL M5.gpu_only_for_llm_role "exits u=$M5U llm=$M5L assistant=$M5A (se
 
 echo "== M4b sha256 after"
 SHA_AFTER=$(shasum -a 256 "$MODEL" | cut -d' ' -f1); echo "sha256_after=$SHA_AFTER" >> "$RES/env.txt"
-MARK=$(sed -n "s/^model_sha256=//p" "$HOME/Desktop/seat-drafts/models/LANE2-READY" 2>/dev/null)
-MARKMODEL=$(sed -n "s/^model=//p" "$HOME/Desktop/seat-drafts/models/LANE2-READY" 2>/dev/null)
+MARK=$(sed -n "s/^model_sha256=//p" "$MODEL_DIR/LANE2-READY" 2>/dev/null)
+MARKMODEL=$(sed -n "s/^model=//p" "$MODEL_DIR/LANE2-READY" 2>/dev/null)
 if [[ "$SHA_BEFORE" =~ ^[0-9a-f]{64}$ ]] && [ "$SHA_BEFORE" = "$SHA_AFTER" ]; then
   if [ "$MARKMODEL" = "$MODEL" ] && [ -n "$MARK" ]; then
     [ "$MARK" = "$SHA_AFTER" ] && out PASS M4.model_bytes_unchanged "sha256 $SHA_AFTER before = after = Lane 2 marker" || out FAIL M4.model_bytes_unchanged "matches before/after but NOT Lane 2's marker $MARK"
