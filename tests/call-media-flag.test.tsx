@@ -302,7 +302,7 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     expect($('[data-call-route="node"]')?.hasAttribute('data-call-seal')).toBe(false);
     const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
     expect(JSON.parse((offer.args as { plaintext: string }).plaintext).sdp).not.toContain('x-bitsov-e2e');
-    expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer']);
+    expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer', 'send_base']);
   });
 
   /** Rings Maya on a sealing build and delivers an answer with these extra SDP lines. */
