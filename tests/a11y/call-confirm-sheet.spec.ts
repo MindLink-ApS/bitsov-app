@@ -136,7 +136,10 @@ for (const platform of PLATFORMS) for (const phone of PHONES) for (const lang of
 // a 320px screen before this sheet opens (on main as well), a separate shell issue outside this change.
 const APP_ROOTS = { ios: [17, 53], android: [17, 32] } as const;
 for (const platform of ['ios', 'android'] as const) for (const phone of PHONES) for (const root of APP_ROOTS[platform]) {
-  test(`app: Call opens a confirmation with Cancel and Ring in reach: ${platform}, ${phone.width}x${phone.height}, ${root}px text`, async ({ page }) => {
+  test(`app: Call opens a confirmation with Cancel and Ring in reach: ${platform}, ${phone.width}x${phone.height}, ${root}px text`, async ({ page, browserName }) => {
+    // The shell's Call button belongs to the app-to-app call UI, which needs VITE_CALL_MEDIA=webrtc. Only the
+    // WebKit run (playwright.webkit.config.ts) builds the app that way; the Chrome a11y run keeps the product default.
+    test.skip(browserName !== 'webkit', 'needs the WebKit run, where VITE_CALL_MEDIA=webrtc');
     await page.setViewportSize({ width: phone.width, height: phone.height });
     await page.goto('/?sample');
     await page.evaluate((value) => { document.documentElement.dataset.platform = value; }, platform);
