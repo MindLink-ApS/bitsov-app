@@ -2113,7 +2113,7 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect($('[data-call-approval] strong')?.textContent).toBe(lang === 'en'
       ? 'Approve spending before calling' : 'Godkend betalinger før opkald');
     expect($('[data-call-approval]')?.textContent).toContain(lang === 'en'
-      ? 'After approval, press Call or Accept again.' : 'Tryk Ring eller Acceptér igen, når du har godkendt.');
+      ? 'After approval, press Call or Answer again.' : 'Tryk Ring eller Besvar igen, når du har godkendt.');
     expect($('[data-call-approval]')?.textContent).not.toContain(lang === 'en'
       ? 'ask them to call again' : 'bed dem derefter ringe igen');
     expect(host.used('call_signal')).toHaveLength(0);
