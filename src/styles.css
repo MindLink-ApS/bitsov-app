@@ -2012,3 +2012,32 @@ html[data-platform='ios'] .first-spend-sheet { container: first-spend / inline-s
 .approval-steps { margin: var(--s-2) 0; padding-left: 1.4em; list-style: decimal; }
 .approval-steps > li + li { margin-top: var(--s-2); }
 .approval-steps code { display: block; margin: var(--s-1) 0; overflow-wrap: anywhere; }
+
+/* The Ring confirmation on phones: a sheet at the bottom of the screen, inside the safe area, never taller than it.
+   With large text it scrolls up and down only: every word wraps inside it, and Cancel and Ring stay pinned at its foot,
+   each on its own row when they do not fit side by side. Margins and padding are in px so large text keeps its width. */
+@media (max-width: 480px) {
+  .call-confirm {
+    position: fixed; top: auto; left: max(12px, var(--safe-area-left, 0px)); right: max(12px, var(--safe-area-right, 0px));
+    bottom: max(12px, var(--safe-area-bottom, 0px)); width: auto; max-width: none; z-index: 55; padding: 12px;
+    max-height: calc(100dvh - max(12px, var(--safe-area-top, 0px)) - max(12px, var(--safe-area-bottom, 0px)));
+    overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; overflow-wrap: anywhere;
+  }
+  .call-confirm > * { min-width: 0; max-width: 100%; }
+  .call-confirm-actions { position: sticky; bottom: -12px; margin: 0 -12px -12px; padding: 8px 12px 12px; background: var(--surface); flex-wrap: wrap; max-width: none; }
+  .call-confirm-actions button { flex: 1 1 auto; min-height: 44px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+}
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm {
+  position: fixed; top: auto; left: max(12px, var(--safe-area-left)); right: max(12px, var(--safe-area-right));
+  bottom: max(12px, var(--safe-area-bottom)); width: auto; max-width: none; z-index: 55; padding: 12px;
+  max-height: calc(100dvh - max(12px, var(--safe-area-top)) - max(12px, var(--safe-area-bottom)));
+  overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; overflow-wrap: anywhere;
+}
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm > * { min-width: 0; max-width: 100%; }
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions { position: sticky; bottom: -12px; margin: 0 -12px -12px; padding: 8px 12px 12px; background: var(--surface); flex-wrap: wrap; max-width: none; }
+html:is([data-platform='ios'], [data-platform='android']) .call-confirm-actions button { flex: 1 1 auto; min-height: 44px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+/* iOS keeps the full layout height under the keyboard: sit on the keyboard and fit the visible area, like .call-panel and .toast. */
+html[data-platform='ios'] .call-confirm {
+  bottom: calc(var(--keyboard-inset) + max(12px, var(--safe-area-bottom)));
+  max-height: calc(var(--visible-height, 100dvh) - max(12px, var(--safe-area-top)) - max(12px, var(--safe-area-bottom)));
+}
