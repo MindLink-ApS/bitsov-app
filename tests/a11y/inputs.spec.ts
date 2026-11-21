@@ -50,6 +50,7 @@ for (const theme of ['light', 'dark'] as const) {
     await checkInputs(page, info, 'settings-general', '[data-stun-input]');
     await page.locator('[data-settings-close]').click();
 
+    await page.locator('[data-rail-advanced] > summary').click();
     await page.locator('[data-track="discover"]').click();
     await checkInputs(page, info, 'link', '[data-discover-paste]');
 

@@ -193,3 +193,50 @@ it('offers notification permission with a call, never on first launch or without
   expect(native.requestPermission).toHaveBeenCalledOnce();
   expect(native.sendNotification).not.toHaveBeenCalled();
 });
+
+const windowsUa = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0';
+const linuxUa = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko)';
+const generic = { en: 'You have a new message', da: 'Du har en ny besked' } as const;
+const osLang = ([['Windows', windowsUa, 'Default'], ['Linux', linuxUa, 'message-new-instant']] as const).flatMap(([os, ua, sound]) => (['en', 'da'] as const).map(lang => [os, lang, ua, sound] as const));
+it.each(osLang)('notifies ordinary messages on %s with a generic %s line and its default sound, never calls or actions', async (_os, lang, ua, sound) => {
+  setLanguagePref(lang);
+  vi.stubGlobal('__TAURI_INTERNALS__', {});
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(ua);
+  const n = createMessageNotifications();
+  expect(n.calls).toBe(false);
+  n.message(message, 'me', 'Maya'); n.message(message, 'me', 'Maya');
+  n.call('call-1', 'Maya'); n.call('call-2', 'Maya', () => true, vi.fn()); await flush();
+  expect(native.sendNotification).toHaveBeenCalledExactlyOnceWith({ title: 'BitSov', body: generic[lang], sound });
+  expect(native.registerActionTypes).not.toHaveBeenCalled(); expect(native.onAction).not.toHaveBeenCalled();
+  // Neither the sender's name nor any part of the message reaches the title or body.
+  const shown = native.sendNotification.mock.calls.map(([o]) => `${o.title}\n${o.body}`).join('\n');
+  for (const leak of ['Maya', 'SECRET', 'content', message.sender]) expect(shown).not.toContain(leak);
+  n.setMuted(true); n.message({ ...message, id: 'm2' }, 'me', 'Maya'); await flush();
+  expect(native.sendNotification).toHaveBeenCalledOnce(); n.dispose();
+});
+
+it.each([['Windows', windowsUa], ['Linux', linuxUa]] as const)('wires live paid messages through the real shell on %s without call alerts or a call-time offer', async (_os, ua) => {
+  localStorage.removeItem('bitsov.notifications.muted');
+  const { ControlCenter } = await import('../src/control/Shell');
+  const { sampleSource, SAMPLE_OWN_ID } = await import('../src/control/sample');
+  vi.stubGlobal('__TAURI_INTERNALS__', {}); vi.stubGlobal('isTauri', true);
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(ua);
+  const source = sampleSource({ firstLiveMs: 1e9 });
+  let live!: Parameters<typeof source.onLive>[0];
+  source.onLive = async callback => { live = callback; return () => {}; };
+  mount = document.createElement('div'); document.body.append(mount);
+  dispose = render(() => <ControlCenter source={source} remote active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={null} />, mount);
+  await vi.waitFor(() => expect(live).toBeTypeOf('function'));
+  const incoming = { ...message, sender: 'a'.repeat(64), recipient: SAMPLE_OWN_ID, timestamp: Date.now() };
+  live({ type: 'message', message: incoming, room_id: null }); await flush();
+  expect(native.sendNotification).toHaveBeenCalledOnce();
+  expect(native.sendNotification.mock.calls[0][0]).toEqual({ title: 'BitSov', body: 'You have a new message', sound: expect.any(String) });
+  expect(JSON.stringify(native.sendNotification.mock.calls)).not.toContain(incoming.plaintext);
+  localStorage.removeItem('bitsov.notifications.asked'); localStorage.removeItem('bitsov.notifications.enabled');
+  live({ type: 'message', message: { ...incoming, id: 'offer', kind: 400, plaintext: JSON.stringify({ v: 1, call_id: 'a'.repeat(32), media: 'audio', sdp: 'private-sdp' }) }, room_id: null });
+  await flush();
+  expect(native.sendNotification).toHaveBeenCalledOnce();
+  expect(mount.querySelector('[data-notification-enable]')).toBeNull();
+  expect(native.registerActionTypes).not.toHaveBeenCalled(); expect(native.onAction).not.toHaveBeenCalled();
+  expect(native.requestPermission).not.toHaveBeenCalled();
+});

@@ -36,6 +36,8 @@ pub const KIND_FILE_REF: u16 = 200;
 /// 1:1 call signalling (genome kinds 400-403): offer, answer, ICE, hangup.
 /// The offer is the per-call admission, paid at the callee's `call_msat`.
 pub const KIND_CALL_OFFER: u16 = 400;
+/// The callee's answer: one paid signal.
+pub const KIND_CALL_ANSWER: u16 = 401;
 pub const KIND_CALL_HANGUP: u16 = 403;
 /// M6 (genome kind 404 `CALL_BLOCK`): one paid 60-second interval of a
 /// node-routed call, priced by the callee and drawn from the call's
@@ -770,21 +772,15 @@ pub struct ElevationReply {
 }
 
 impl ElevationReply {
-    /// `owner_config` is the node's `konsensus.toml` when this app knows it
-    /// (the node it launched, or an attached external node). A node that names
-    /// no config in its command gets it appended, so the owner can run the
-    /// command from any directory.
-    pub fn into_elevation(self, owner_config: Option<&std::path::Path>) -> Result<Elevation, ActionError> {
+    /// The node's own command is kept only for the box's operator, shown
+    /// behind Details. A `--config <path>` names a file on the box; it is cut
+    /// here, so no screen, tooltip or clipboard carries the box's config path.
+    pub fn into_elevation(self) -> Result<Elevation, ActionError> {
         if self.op_id.is_empty() || self.op_id.len() > 64 || !self.op_id.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(ActionError::node("the node returned an unexpected operation id"));
         }
         let owner_can_grant = self.owner_action.trim_start().starts_with("konsensus grant");
-        let mut owner_action = self.owner_action;
-        if owner_action.trim() == format!("konsensus grant --op {}", self.op_id) {
-            if let Some(path) = owner_config.and_then(config_arg) {
-                owner_action = format!("{} --config {path}", owner_action.trim());
-            }
-        }
+        let owner_action = without_config_path(&self.owner_action);
         Ok(Elevation {
             op_id: self.op_id,
             expires_at_ms: (self.expires_at.max(0) as u64).saturating_mul(1000),
@@ -794,23 +790,16 @@ impl ElevationReply {
     }
 }
 
-/// An absolute config path, single-quoted for a shell. None for a relative or
-/// overlong path, or one with characters no owner should be asked to paste. A
-/// quote or backslash is refused rather than escaped: no escape is safe in
-/// every shell (fish reads `\'` inside single quotes).
-fn config_arg(path: &std::path::Path) -> Option<String> {
-    let text = path.to_str()?;
-    if !path.is_absolute()
-        || text.len() > 400
-        || text.chars().any(|c| {
-            c.is_control()
-                || c == '\'' || c == '\\'
-                || matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
-        })
-    {
-        return None;
+/// A node command without its `--config` argument and anything after it (the
+/// node prints the path last). Text that is not a command is left as it is.
+pub fn without_config_path(action: &str) -> String {
+    if !action.trim_start().starts_with("konsensus ") {
+        return action.to_owned();
     }
-    Some(format!("'{text}'"))
+    match action.find(" --config") {
+        Some(at) => action[..at].trim_end().to_owned(),
+        None => action.trim_end().to_owned(),
+    }
 }
 
 /// `GET /pair/elevation/:op_id` → `status`.
@@ -1876,7 +1865,7 @@ mod tests {
             owner_action: "konsensus grant --op ab12".into(),
         };
         let mut gate = SpendGate::default();
-        gate.set_pending(reply.into_elevation(None).unwrap());
+        gate.set_pending(reply.into_elevation().unwrap());
         assert_eq!(gate.view(99_999).state, SpendState::Pending);
         assert_eq!(gate.check(99_999).unwrap_err().code, "spend_locked");
         assert_eq!(gate.view(100_000).state, SpendState::Expired);
@@ -1886,13 +1875,13 @@ mod tests {
             expires_at: 100,
             owner_action: "unavailable in this deployment: …".into(),
         };
-        gate.set_pending(sidecar.into_elevation(None).unwrap());
+        gate.set_pending(sidecar.into_elevation().unwrap());
         let view = gate.view(0);
         assert_eq!(view.state, SpendState::Unavailable);
         assert!(!view.pending.unwrap().owner_can_grant);
 
         let hostile = ElevationReply { op_id: "../x".into(), expires_at: 1, owner_action: String::new() };
-        assert!(hostile.into_elevation(None).is_err());
+        assert!(hostile.into_elevation().is_err());
         assert!(elevation_status_path("../../payments").is_err());
     }
 
@@ -1930,7 +1919,7 @@ mod tests {
     #[test]
     fn a_lapsed_request_says_why_until_the_next_ask() {
         let pending = |op: &str| ElevationReply { op_id: op.into(), expires_at: 100, owner_action: format!("konsensus grant --op {op}") }
-            .into_elevation(None)
+            .into_elevation()
             .unwrap();
         let mut gate = SpendGate::default();
         gate.set_pending(pending("ab12"));
@@ -1946,7 +1935,7 @@ mod tests {
 
         // A sidecar request running out offers no Ask again: it can never be granted.
         let sidecar = ElevationReply { op_id: "cd34".into(), expires_at: 100, owner_action: "unavailable in this deployment".into() }
-            .into_elevation(None)
+            .into_elevation()
             .unwrap();
         gate.set_pending(sidecar);
         let view = gate.view(100_000);
@@ -1960,20 +1949,25 @@ mod tests {
     }
 
     #[test]
-    fn only_a_safe_absolute_config_is_added_to_the_owner_command() {
+    fn the_owner_command_never_carries_the_boxs_config_path() {
         let reply = |action: &str| ElevationReply { op_id: "ab12".into(), expires_at: 1, owner_action: action.into() };
-        let with = |action: &str, config: &str| reply(action).into_elevation(Some(std::path::Path::new(config))).unwrap().owner_action;
-        assert_eq!(with("konsensus grant --op ab12", "/n/konsensus.toml"), "konsensus grant --op ab12 --config '/n/konsensus.toml'");
-        // Relative, or with characters that could rewrite what the owner sees: left out.
-        assert_eq!(with("konsensus grant --op ab12", "n/konsensus.toml"), "konsensus grant --op ab12");
-        assert_eq!(with("konsensus grant --op ab12", "/n/\u{202E}lmot.toml"), "konsensus grant --op ab12");
-        assert_eq!(with("konsensus grant --op ab12", "/n/\nx.toml"), "konsensus grant --op ab12");
-        assert_eq!(with("konsensus grant --op ab12", "/Users/o'neil/konsensus.toml"), "konsensus grant --op ab12");
-        assert_eq!(with("konsensus grant --op ab12", r"/a\' ; touch /tmp/p ; \'/k.toml"), "konsensus grant --op ab12");
-        assert_eq!(with("konsensus grant --op ab12", &format!("/{}", "n".repeat(500))), "konsensus grant --op ab12");
-        // Only the bare command of THIS request is extended.
-        assert_eq!(with("konsensus grant --op cd34", "/n/konsensus.toml"), "konsensus grant --op cd34");
-        assert_eq!(with("unavailable in this deployment", "/n/konsensus.toml"), "unavailable in this deployment");
+        let shown = |action: &str| reply(action).into_elevation().unwrap();
+        assert_eq!(shown("konsensus grant --op ab12").owner_action, "konsensus grant --op ab12");
+        // The node names its own config: the path never reaches the app's view.
+        for action in [
+            "konsensus grant --op ab12 --config '/data/umbrel/app-data/bitsov/konsensus.toml'",
+            "konsensus grant --op ab12 --config /srv/n/konsensus.toml",
+            "konsensus grant --op ab12  --config '/Volumes/My Node/konsensus.toml'  ",
+        ] {
+            let pending = shown(action);
+            assert_eq!(pending.owner_action, "konsensus grant --op ab12");
+            assert!(pending.owner_can_grant);
+            let json = serde_json::to_string(&pending).unwrap();
+            assert!(!json.contains("--config") && !json.contains("konsensus.toml"), "{json}");
+        }
+        // Not a command: kept as the node said it (the sidecar's refusal).
+        assert_eq!(shown("unavailable in this deployment").owner_action, "unavailable in this deployment");
+        assert!(!shown("unavailable in this deployment").owner_can_grant);
     }
 
     #[test]
@@ -2044,7 +2038,7 @@ mod tests {
         assert_eq!(room_sendable(&alone).unwrap_err().code, "room_unreachable");
     }
 
-    /// Codex's review fixture: a 21,000-msat regtest invoice signed by
+    /// A 21,000-msat regtest invoice signed by
     /// `CANONICAL_PAYEE`, and three re-encodings the node's parser accepts as
     /// that same invoice (a set padding bit in `p`, a leading zero word in `c`,
     /// a leading zero word in the features). Read from their raw words, each

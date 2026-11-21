@@ -26,6 +26,7 @@ export const phoneCopy = {
     legacy: 'Does this match your other screen?', legacyLine: 'Compare the code on both screens.', match: 'They match',
     update: 'Ask the owner for a new QR', updateLine: 'Your box may need an update first.',
     unsupported: 'This box needs an update before it can add this phone.',
+    trustKeysStay: 'Your keys stay in the node. This phone never shows your recovery phrase and keeps no copy of it.',
   },
   da: {
     start: 'Forbind til din boks', startLine: 'Anden enhed → Tilføj en enhed.',
@@ -54,5 +55,6 @@ export const phoneCopy = {
     legacy: 'Er dette ens på begge skærme?', legacyLine: 'Sammenlign koden på skærmene.', match: 'De er ens',
     update: 'Bed ejeren om en ny QR-kode', updateLine: 'Boksen skal måske opdateres først.',
     unsupported: 'Boksen skal opdateres, før den kan tilføje denne telefon.',
+    trustKeysStay: 'Dine nøgler bliver i noden. Denne telefon viser aldrig din gendannelsessætning og gemmer ingen kopi af den.',
   },
 };

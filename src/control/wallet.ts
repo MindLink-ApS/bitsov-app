@@ -53,7 +53,7 @@ export function channelWords(c: Channel): { state: 'open' | 'offline'; title: st
     return {
       state: 'open',
       title: tr('caOpen'),
-      line: tr('caYouCanSendUpToAndReceiveUpTo', fmtAmount(c.local_balance_msat), fmtAmount(c.remote_balance_msat)),
+      line: tr('caYouCanSendUpToAndReceiveUpTo', fmtAmount(c.local_balance_msat, 'down'), fmtAmount(c.remote_balance_msat, 'down')),
     };
   }
   return {

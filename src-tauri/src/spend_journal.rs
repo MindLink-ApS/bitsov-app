@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::act::{ActionError, OperationContext::Active};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Pending {
     /// Durable per-send identity. Separate from the deterministic operation fingerprint.
     #[serde(default)]
@@ -169,6 +170,7 @@ pub fn operation(body: &serde_json::Value) -> String {
 pub enum OperationState { Dispatching, AdmissionResumable, Paid, Unpaid, PaidUndelivered, FailedPaid, Unknown, Settled, Closed }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OperationRecord {
     pub op_id: String,
     pub node_id: String,
@@ -279,7 +281,7 @@ pub fn unknown(detail: impl std::fmt::Display) -> ActionError {
 pub fn read_pending(dir: &Path) -> Result<Option<Pending>, ActionError> {
     match std::fs::read(dir.join("spend-pending.json")) {
         Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(unknown),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && absent(&dir.join("spend-pending.json")) => Ok(None),
         Err(e) => Err(unknown(e)),
     }
 }
@@ -697,9 +699,19 @@ pub struct UnresolvedCall {
     pub hangup_cap_msat: Option<u64>,
 }
 
+/// A dangling symlink reads as `NotFound` but is not an empty slot.
+fn absent(path: &Path) -> bool {
+    crate::pairing::key::nothing_at(path)
+}
+
 fn damaged_record() -> ActionError {
     // Do not log parser errors: they can contain bytes from a damaged record.
     eprintln!("spend ledger: required operation record or call index is missing, unreadable, or invalid");
+    damaged_record_error()
+}
+
+/// The `damaged_record` error without its log line, for a failure already logged.
+fn damaged_record_error() -> ActionError {
     unknown("Required operation record or call index is missing, unreadable, or invalid.")
 }
 
@@ -710,7 +722,7 @@ fn read_operation(path: &Path, expected_id: Option<&str>) -> Result<Option<Opera
             if expected_id.is_some_and(|id| id != record.op_id) { return Err(damaged_record()); }
             Ok(Some(record))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && absent(path) => Ok(None),
         Err(_) => Err(damaged_record()),
     }
 }
@@ -773,9 +785,10 @@ pub fn list_operations(dir: &Path, node_id: &str, peer: Option<&str>, limit: usi
 /// Read an atomic index/record snapshot when a live signal arrives, before
 /// waiting on a dispatch. The snapshot grants no payment authority.
 pub fn read_call_admission(dir: &Path, node_id: &str, peer: &str, call: &str) -> Result<Option<OperationRecord>, ActionError> {
-    let entry: CallIndex = match std::fs::read(call_index_path(dir, node_id, peer, call)) {
+    let path = call_index_path(dir, node_id, peer, call);
+    let entry: CallIndex = match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| damaged_record())?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && absent(&path) => return Ok(None),
         Err(_) => return Err(damaged_record()),
     };
     if entry.op_id.len() != 36 || !entry.op_id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') {
@@ -885,11 +898,55 @@ fn write_call_membership(_dir: &Path, _record: &OperationRecord) -> Result<(), A
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CallIndex { op_id: String, created_ms: u64 }
 
 fn call_index_path(dir: &Path, node_id: &str, peer: &str, call: &str) -> PathBuf {
     let key = serde_json::to_vec(&(node_id, peer, call)).expect("string tuple serializes");
     dir.join("call-index").join(format!("{}.json", blake3::hash(&key).to_hex()))
+}
+
+/// What is at a call's index slot before `record` may be written there.
+// Windows initializes history without the index graph (see initialize_history).
+#[cfg_attr(windows, allow(dead_code))]
+enum IndexSlot { Absent, Keep, Replace }
+
+/// A call index slot that cannot be checked. Already logged by
+/// `damaged_record`; the caller turns it into `damaged_record_error`.
+#[cfg_attr(windows, allow(dead_code))]
+struct SlotDamaged;
+
+#[cfg_attr(windows, allow(dead_code))]
+fn slot_damaged() -> SlotDamaged {
+    let _ = damaged_record();
+    SlotDamaged
+}
+
+/// A mapping is only replaced when it is readable and names an operation
+/// record that exists and is a call admission for this same slot. A dangling
+/// symlink, an unreadable file or a mapping whose record is missing or
+/// damaged is evidence of an admission that cannot be checked any more:
+/// refuse, and leave it in place for the owner's repair.
+#[cfg_attr(windows, allow(dead_code))]
+fn index_slot(dir: &Path, path: &Path, record: &OperationRecord) -> Result<IndexSlot, SlotDamaged> {
+    let old: CallIndex = match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| slot_damaged())?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && absent(path) => return Ok(IndexSlot::Absent),
+        Err(_) => return Err(slot_damaged()),
+    };
+    if (old.created_ms, &old.op_id) >= (record.created_ms, &record.op_id) { return Ok(IndexSlot::Keep); }
+    if old.op_id == record.op_id { return Ok(IndexSlot::Replace); }
+    if old.op_id.len() != 36 || !old.op_id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') {
+        return Err(slot_damaged());
+    }
+    // read_operation has already logged its failure through damaged_record.
+    let mapped = read_operation(&dir.join("ops").join(format!("{}.json", old.op_id)), Some(&old.op_id))
+        .map_err(|_| SlotDamaged)?
+        .ok_or_else(slot_damaged)?;
+    let same_slot = matches!(mapped.kind.as_str(), "call_offer" | "call_recovery")
+        && mapped.call_id.as_deref().is_some_and(|call| call_index_path(dir, &mapped.node_id, &mapped.peer, call) == path);
+    if !same_slot { return Err(slot_damaged()); }
+    Ok(IndexSlot::Replace)
 }
 
 #[cfg(unix)]
@@ -901,6 +958,7 @@ fn history_lock(dir: &Path) -> Result<File, ActionError> {
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(windows, allow(dead_code))]
 fn history_lock(_dir: &Path) -> Result<File, ActionError> {
     Err(unknown("private spend journal storage is not supported on this platform"))
 }
@@ -911,14 +969,7 @@ fn write_call_index(dir: &Path, record: &OperationRecord) -> Result<(), ActionEr
     if !matches!(record.kind.as_str(), "call_offer" | "call_recovery") { return Ok(()); }
     let Some(call) = record.call_id.as_deref() else { return Ok(()) };
     let path = call_index_path(dir, &record.node_id, &record.peer, call);
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            let old: CallIndex = serde_json::from_slice(&bytes).map_err(|_| damaged_record())?;
-            if (old.created_ms, &old.op_id) >= (record.created_ms, &record.op_id) { return Ok(()); }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(damaged_record()),
-    }
+    if let IndexSlot::Keep = index_slot(dir, &path, record).map_err(|SlotDamaged| damaged_record_error())? { return Ok(()); }
     let parent = path.parent().expect("index directory");
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(parent).map_err(unknown)?;
     let next = path.with_extension("next");
@@ -940,6 +991,27 @@ fn write_call_index(_dir: &Path, _record: &OperationRecord) -> Result<(), Action
 /// One-time upgrade of pre-index H1 history, before authenticating/enabling money
 /// actions. Never invoked with NodeState::money or spend.lock held. Writers and
 /// migration serialize only a single index update at a time.
+/// Windows: operation records and indexes cannot be written there yet, so a
+/// valid history folder holds at most the migration marker. Anything else is
+/// unexpected and refused as is (no reset, no write). The folder and marker
+/// are private objects, and the marker is made durable with a real flush.
+#[cfg(windows)]
+pub fn initialize_history(dir: &Path) -> Result<(), ActionError> {
+    crate::private_fs::ensure_dir(dir).map_err(unknown)?;
+    let marker = dir.join("call-index-v2");
+    // Checked on every start, with or without a marker.
+    for entry in std::fs::read_dir(dir).map_err(unknown)? {
+        if entry.map_err(unknown)?.file_name() != "call-index-v2" {
+            return Err(damaged_record());
+        }
+    }
+    if !absent(&marker) {
+        return crate::private_fs::verify_file(&marker).map_err(unknown);
+    }
+    crate::private_fs::ensure_marker(&marker).map_err(unknown)
+}
+
+#[cfg(not(windows))]
 pub fn initialize_history(dir: &Path) -> Result<(), ActionError> {
     let marker = dir.join("call-index-v2");
     if marker.exists() { return Ok(()); }
@@ -953,12 +1025,10 @@ pub fn initialize_history(dir: &Path) -> Result<(), ActionError> {
         let Some(call) = record.call_id.as_deref() else { continue };
         let lock = history_lock(dir)?;
         lock.lock().map_err(unknown)?;
-        // Preserve a damaged existing mapping as a fail-closed marker for just
-        // this call. It must not stop migration/authentication for other calls.
-        let damaged = match std::fs::read(call_index_path(dir, &record.node_id, &record.peer, call)) {
-            Ok(bytes) => serde_json::from_slice::<CallIndex>(&bytes).is_err(),
-            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
-        };
+        // Preserve a damaged or dangling existing mapping as a fail-closed
+        // marker for just this call (the scan below marks it unresolved). It
+        // must not stop migration/authentication for other calls.
+        let damaged = index_slot(dir, &call_index_path(dir, &record.node_id, &record.peer, call), &record).is_err();
         if damaged {
             let _ = damaged_record();
             let _ = lock.unlock();
@@ -1020,6 +1090,66 @@ pub fn terminal(pending: &Pending, rows: &[serde_json::Value]) -> Option<&'stati
             _ => None,
         }
     })
+}
+
+#[cfg(all(test, windows))]
+mod windows_history_tests {
+    use super::*;
+    use crate::private_fs::fixtures::*;
+
+    #[test]
+    fn a_fresh_history_gets_a_private_marker_and_restarts_cleanly() {
+        if elevated() {
+            return;
+        }
+        let dir = temp_root("history").join("app-spend");
+        initialize_history(&dir).unwrap();
+        crate::private_fs::verify_file(&dir.join("call-index-v2")).unwrap();
+        initialize_history(&dir).unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn unexpected_or_tampered_history_is_refused_without_writes() {
+        if elevated() {
+            return;
+        }
+        let root = temp_root("history-tampered");
+        // An existing marker with a widened access list.
+        let dir = root.join("app-spend");
+        initialize_history(&dir).unwrap();
+        grant_everyone_read(&dir.join("call-index-v2"));
+        assert!(initialize_history(&dir).is_err());
+        // A valid marker plus any other entry: refused, nothing written.
+        let marked = root.join("app-spend-marked");
+        initialize_history(&marked).unwrap();
+        let marker_bytes = std::fs::read(marked.join("call-index-v2")).unwrap();
+        std::fs::create_dir(marked.join("ops")).unwrap();
+        assert!(initialize_history(&marked).is_err());
+        std::fs::remove_dir(marked.join("ops")).unwrap();
+        std::fs::write(marked.join("spend-pending.json"), b"{}").unwrap();
+        assert!(initialize_history(&marked).is_err());
+        assert_eq!(std::fs::read(marked.join("call-index-v2")).unwrap(), marker_bytes);
+        assert_eq!(std::fs::read(marked.join("spend-pending.json")).unwrap(), b"{}");
+        assert_eq!(std::fs::read_dir(&marked).unwrap().count(), 2);
+        // Any history object without the marker: refused, no marker written.
+        let other = root.join("app-spend-2");
+        crate::private_fs::ensure_dir(&other).unwrap();
+        std::fs::create_dir(other.join("ops")).unwrap();
+        assert!(initialize_history(&other).is_err());
+        assert!(absent(&other.join("call-index-v2")));
+        // A plainly created marker inherits its access list: refused.
+        let plain = root.join("app-spend-3");
+        crate::private_fs::ensure_dir(&plain).unwrap();
+        std::fs::write(plain.join("call-index-v2"), b"").unwrap();
+        assert!(initialize_history(&plain).is_err());
+        // Reparse point as the history folder.
+        let link = root.join("link");
+        junction(&link, &dir);
+        assert!(initialize_history(&link).is_err());
+        // Wrong owner.
+        assert!(initialize_history(&foreign_owned_dir()).is_err());
+    }
 }
 
 #[cfg(test)]
