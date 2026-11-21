@@ -477,6 +477,8 @@ use refusals::{NodePrePaymentRefusals, PrePaymentRefusals};
 #[cfg(feature = "call-seal")]
 pub mod call_seal;
 pub mod media;
+/// Latency-critical system activity while a call is live (macOS).
+pub mod call_activity;
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct NodeMembrane {

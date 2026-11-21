@@ -19,7 +19,7 @@
  * Nothing here contacts a STUN or TURN server, gathers candidates, or opens
  * a direct path to the peer app: the connection state follows the node link.
  */
-import type { CallAudio, MediaTransport } from './callAudio';
+import type { CallAudio, CallAudioDiagnostics, MediaTransport } from './callAudio';
 import type { CallVideo, VideoTransport } from './callVideo';
 import type { CallSeal, MediaBridge, MediaLink } from './mediaBridge';
 import { isVideoFrame } from './videoFrame';
@@ -318,6 +318,8 @@ export class NodeRoutedConnection {
   async addIceCandidate(_candidate: RTCIceCandidateInit): Promise<void> {}
   restartIce(): void {}
   async getStats(): Promise<RTCStatsReport> { return new Map() as unknown as RTCStatsReport; }
+  /** For the call report: which codecs carried this call's audio, and the context rate. Null without an engine. */
+  audioDiagnostics(): CallAudioDiagnostics | null { return this.audio?.diagnostics?.() ?? null; }
   addEventListener(): void {}
   removeEventListener(): void {}
 

@@ -8,6 +8,7 @@ pub(crate) enum NetworkRefusal {
     Mainnet,
     Unknown,
     Other,
+    #[cfg_attr(feature = "mobile", allow(dead_code))]
     LocalUnavailable,
 }
 

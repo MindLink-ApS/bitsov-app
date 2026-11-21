@@ -1240,6 +1240,21 @@ describe('call engine', () => {
     expect(e.view()).toHaveProperty('connection', { local: kind, remote: 'host' });
   });
 
+  it('keeps which codecs carried the audio and the context rate, up to the end of the call', async () => {
+    const { e } = engine();
+    await e.place(A, 'audio', QUOTE);
+    const pc = FakePc.made[0] as FakePc & { audioDiagnostics?: () => unknown };
+    let seen = { sent: ['opus'], received: ['opus'], contextRate: 48_000 };
+    pc.audioDiagnostics = () => seen;
+    pc.connect();
+    await vi.waitFor(() => expect(e.view().audio).toEqual({ sent: ['opus'], received: ['opus'], contextRate: 48_000 }));
+    // The engine fell back to mu-law late in the call; the end of the call still records it.
+    seen = { sent: ['opus', 'mulaw'], received: ['opus'], contextRate: 48_000 };
+    await e.hangup();
+    expect(e.view().phase).toBe('ended');
+    expect(e.view().audio).toEqual({ sent: ['opus', 'mulaw'], received: ['opus'], contextRate: 48_000 });
+  });
+
   it('places one paid offer at the quoted all-in, with STUN only, then goes live and hangs up once', async () => {
     const { e, sent, media, last } = engine();
     await Promise.all([e.place(A, 'audio', QUOTE), e.place(A, 'audio', QUOTE)]);

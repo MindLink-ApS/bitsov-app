@@ -726,9 +726,7 @@ impl NodeState {
     }
 
     fn for_profile(profile: crate::profile::AppProfile) -> Self {
-        let mut state = Self::default();
-        state.remote_only = profile.remote_only();
-        state.signet_only = profile.signet_only();
+        let state = Self { remote_only: profile.remote_only(), signet_only: profile.signet_only(), ..Self::default() };
         state.remote_mode.store(state.remote_only, Ordering::SeqCst);
         #[cfg(all(desktop, not(feature = "mobile")))]
         state.local_startup.store(!state.remote_only, Ordering::SeqCst);
@@ -2003,14 +2001,14 @@ async fn attach_remote_with(
         // No passcode: say so as its own kind, so the phone can open Settings.
         Err(error) if error.to_string() == remote_access::PASSCODE_REQUIRED => {
             state.remote_retry.failed(&remote_access::RemoteError::DeviceUnavailable);
-            return set_error(&state, error.to_string());
+            return set_error(state, error.to_string());
         }
         // A background attempt leaves any earlier, more specific error in place.
         Err(_) if interaction == Interaction::Background => {
             if state.error.lock().unwrap().is_none() { set_error(state, CONFIRM_TO_RECONNECT); }
             return;
         }
-        Err(error) => return set_error(&state, error.to_string()),
+        Err(error) => return set_error(state, error.to_string()),
     };
     let ctx = Arc::new(PairingCtx {
         client: PairingClient::new(state.http.clone(), state.api_base.clone()),
@@ -2529,18 +2527,15 @@ async fn connect_remote_with(state: &NodeState, app_data_dir: &Path, wait: bool,
                 };
                 state.phone_setup.lock().unwrap().get_or_insert_with(|| saved.as_ref().is_none_or(|d|
                     d.pending_phone_enrollment()));
-                match saved {
-                    Some(descriptor) => {
-                        // Every startup with a saved link (desktop, phone, any OS) picks up an ask left due.
-                        restore_budget_ask(state, app_data_dir);
-                        attach_remote_with(state, app_data_dir, descriptor, interaction).await
-                    }
-                    None => {
-                        #[cfg(any(mobile, feature = "mobile"))]
-                        {
-                            *state.pairing_view.lock().unwrap() = PairingView::starting();
-                            set_error(state, "Pair this phone with your home node to continue.");
-                        }
+                if let Some(descriptor) = saved {
+                    // Every startup with a saved link (desktop, phone, any OS) picks up an ask left due.
+                    restore_budget_ask(state, app_data_dir);
+                    attach_remote_with(state, app_data_dir, descriptor, interaction).await
+                } else {
+                    #[cfg(any(mobile, feature = "mobile"))]
+                    {
+                        *state.pairing_view.lock().unwrap() = PairingView::starting();
+                        set_error(state, "Pair this phone with your home node to continue.");
                     }
                 }
             } else if !wait || !*state.ready.lock().unwrap() {
@@ -3851,7 +3846,7 @@ async fn remote_access_import_at<R: tauri::Runtime>(
         *state.error.lock().unwrap() = None;
         pairing_imported_at(state, app_data_dir);
         spawn_remote_connect(_app, app_data_dir, true);
-        return Ok(RemoteImportView { restart_required: false, ..result });
+        Ok(RemoteImportView { restart_required: false, ..result })
     }
     // The owner chose a node at home: stop offering to create one here.
     #[cfg(all(desktop, not(feature = "mobile")))]
@@ -7798,6 +7793,7 @@ async fn resume_admission_send(state: &NodeState, pending_id: &str, peer: &str, 
     Ok(MoneyReply { text, operation_id: Some(id) })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn do_message_send_inner(
     state: &NodeState,
     recipient: &str,
@@ -8416,6 +8412,7 @@ async fn do_call_offer_with_minutes(
 ///   (defence in depth). Until a check passes the call is `Offering` and no
 ///   minute is payable; a hold above the consent is `Refused` for good (set
 ///   before the hangup), so it is never paid, and the call is hung up.
+///
 /// An offer that did not go through ends the call's consent for good: its
 /// terms can never be admitted later, under these or wider ones.
 async fn offer_within_consent(
@@ -8604,7 +8601,7 @@ mod pause_points {
     static GATES: Mutex<Vec<Gate>> = Mutex::new(Vec::new());
 
     /// One pause at `point` for this node: (arrived, release). Tests only.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(any(not(test), feature = "mobile"), allow(dead_code))]
     pub fn arm(api_base: &str, point: &'static str) -> (Arc<Notify>, Arc<Notify>) {
         let (arrived, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
         GATES.lock().unwrap().push(Gate { api_base: api_base.into(), point, arrived: arrived.clone(), release: release.clone() });
@@ -8880,21 +8877,6 @@ async fn held_call_plan(state: &NodeState, target: &str, kind: u16, plaintext: &
     }))?;
     let taken = state.held_calls.lock().unwrap().take(&node_id, target, &call_id, stops);
     Ok(taken.then_some((Auth::CallHold(stops), plan)))
-}
-
-/// One paid call signal (offer, answer, ICE or hangup) to one contact.
-/// Same authority as a 1:1 message: the owner's budget or the ten-minute
-/// window, one journaled spend at a time, a durable operation id when the
-/// node keeps them. Calls go to contacts already in the book: a first
-/// contact is a message, never a ring.
-async fn do_call_signal(
-    state: &NodeState,
-    peer: &str,
-    kind: u16,
-    plaintext: &str,
-    max_msat: u64,
-) -> Result<act::CallReceipt, ActionError> {
-    do_call_signal_for_admission(state, peer, kind, plaintext, max_msat, None).await
 }
 
 async fn do_call_signal_for_admission(
@@ -10175,7 +10157,7 @@ fn save_device_record_if(
 fn allow_device_change(state: &NodeState) -> Result<(), ActionError> {
     #[cfg(all(desktop, not(feature = "mobile")))]
     {
-        return local_owner::allow_legacy_device_change(state);
+        local_owner::allow_legacy_device_change(state)
     }
     #[cfg(any(mobile, feature = "mobile"))]
     {
@@ -10967,6 +10949,7 @@ async fn call_hold(
 
 /// `POST /messages/compose` for one call signal (kinds 400-403).
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 async fn call_signal(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -11310,6 +11293,7 @@ async fn ai_read_topic(state: &NodeState, topic: ai::Topic, since_ms: Option<u64
 
 /// One topic from the node, as the broker projects it, with its freshness.
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 async fn ai_read(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -11823,9 +11807,13 @@ struct MediaSession {
     #[allow(dead_code)]
     call_id: String,
     uplink: Arc<control::media::FrameQueue>,
+    /// Puts the renderer's uplink sends back in order before `uplink`.
+    send_order: Arc<control::media::SendOrder>,
     /// The video path, on a video call only.
     video: Option<Arc<control::media::VideoPath>>,
     stop: Arc<AtomicBool>,
+    /// This session's hold on the latency-critical activity for its call.
+    activity: Arc<control::call_activity::CallHold>,
 }
 
 /// Stop the current media session, if any. Idempotent; the socket task sees
@@ -11833,6 +11821,7 @@ struct MediaSession {
 fn stop_media_session(state: &NodeState) {
     if let Some(session) = state.media.lock().unwrap().take() {
         session.stop.store(true, Ordering::SeqCst);
+        session.activity.release();
         session.uplink.clear();
         if let Some(video) = session.video {
             video.clear();
@@ -11845,6 +11834,7 @@ fn stop_media_session(state: &NodeState) {
 /// reconnect with backoff, and stop on a refusal, on `stop`, or when the app
 /// quits. Frames from the node reach the renderer through a bounded
 /// drop-oldest queue drained into the channel; link transitions go as JSON.
+#[allow(clippy::too_many_arguments)]
 async fn media_bridge<R: tauri::Runtime>(
     app: AppHandle<R>,
     call_id: String,
@@ -11854,7 +11844,10 @@ async fn media_bridge<R: tauri::Runtime>(
     stop: Arc<AtomicBool>,
     mut seal: Option<Box<control::media::SealedMedia>>,
     channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    activity: Arc<control::call_activity::CallHold>,
 ) {
+    // However this task ends, panic included, it releases the hold.
+    let _activity = control::call_activity::ReleaseOnDrop(activity);
     let state = app.state::<NodeState>();
     let downlink = control::media::FrameQueue::new(control::media::QUEUE_FRAMES);
     let stopping = || stop.load(Ordering::SeqCst) || state.quitting.load(Ordering::SeqCst);
@@ -11901,9 +11894,12 @@ async fn media_bridge<R: tauri::Runtime>(
 /// previous one. No payment and no admission change here: the node admits the
 /// socket only for a `(peer, call_id)` it already knows, under the owner's token.
 /// `video` opens the video path on the same socket; a call without it is an
-/// audio session, unchanged.
+/// audio session, unchanged. `send_base`: the renderer's uplink send count at
+/// this open; any send counted lower belongs to an earlier socket and is
+/// dropped (see [`control::media::SendOrder`]).
 #[cfg(not(feature = "call-seal"))]
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 async fn call_media_open(
     window: WebviewWindow<impl tauri::Runtime>,
     app: AppHandle<impl tauri::Runtime>,
@@ -11912,12 +11908,13 @@ async fn call_media_open(
     peer: String,
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
     video: Option<bool>,
+    send_base: Option<u64>,
 ) -> Result<(), String> {
     reject_sealed_window(&window)?;
     drop(window);
     let call_id = control::media::call_id(&call_id)?;
     let peer = control::media::peer_id(&peer)?;
-    start_media_session(app, state.inner(), call_id, peer, video.unwrap_or(false), None, on_frame);
+    start_media_session(app, state.inner(), call_id, peer, video.unwrap_or(false), None, send_base, on_frame);
     Ok(())
 }
 
@@ -11938,6 +11935,7 @@ async fn call_media_open(
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
     sealed: Option<bool>,
     video: Option<bool>,
+    send_base: Option<u64>,
 ) -> Result<(), String> {
     reject_sealed_window(&window)?;
     drop(window);
@@ -11948,10 +11946,11 @@ async fn call_media_open(
     if video && seal.is_some() {
         return Err(control::call_seal::SealError::NotReady.code().to_string());
     }
-    start_media_session(app, state.inner(), call_id, peer, video, seal, on_frame);
+    start_media_session(app, state.inner(), call_id, peer, video, seal, send_base, on_frame);
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_media_session<R: tauri::Runtime>(
     app: AppHandle<R>,
     state: &NodeState,
@@ -11959,14 +11958,39 @@ fn start_media_session<R: tauri::Runtime>(
     peer: String,
     video: bool,
     seal: Option<Box<control::media::SealedMedia>>,
+    send_base: Option<u64>,
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) {
+    // Taken before the old session lets go: a session replaced for the same call keeps the activity.
+    let activity = Arc::new(control::call_activity::CallActivity::system().hold(&call_id));
+    let (uplink, video, stop) = install_media_session(state, &call_id, video, send_base, activity.clone());
+    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, video, stop, seal, on_frame, activity));
+}
+
+/// Replace the current media session, if any, with a new one for `call_id`
+/// whose send order starts at `send_base`. Answers the new session's uplink,
+/// video path and stop flag for its socket task.
+#[allow(clippy::type_complexity)]
+fn install_media_session(
+    state: &NodeState,
+    call_id: &str,
+    video: bool,
+    send_base: Option<u64>,
+    activity: Arc<control::call_activity::CallHold>,
+) -> (Arc<control::media::FrameQueue>, Option<Arc<control::media::VideoPath>>, Arc<AtomicBool>) {
     let uplink = Arc::new(control::media::FrameQueue::new(control::media::QUEUE_FRAMES));
     let video = video.then(|| Arc::new(control::media::VideoPath::new()));
     let stop = Arc::new(AtomicBool::new(false));
     stop_media_session(state);
-    *state.media.lock().unwrap() = Some(MediaSession { call_id: call_id.clone(), uplink: uplink.clone(), video: video.clone(), stop: stop.clone() });
-    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, video, stop, seal, on_frame));
+    *state.media.lock().unwrap() = Some(MediaSession {
+        call_id: call_id.to_string(),
+        uplink: uplink.clone(),
+        send_order: Arc::new(control::media::SendOrder::starting_at(send_base)),
+        video: video.clone(),
+        stop: stop.clone(),
+        activity,
+    });
+    (uplink, video, stop)
 }
 
 #[cfg(feature = "call-seal")]
@@ -12093,19 +12117,37 @@ fn media_payload(body: &tauri::ipc::InvokeBody) -> Result<Vec<u8>, String> {
 }
 
 /// One uplink payload for the open media session (raw bytes, no JSON). The
-/// host assigns `seq`; a full queue drops its oldest frame rather than stall.
+/// host assigns `seq` when it writes the frame; a full queue drops its oldest
+/// frame rather than stall. Async, so it runs off the main thread: a busy UI
+/// cannot hold outgoing audio back and let it go in a bunch. Sends run as
+/// separate tasks, so the renderer's count in [`control::media::SEND_ORDER_HEADER`]
+/// puts them back in order before the queue.
 #[tauri::command(rename_all = "snake_case")]
-fn call_media_send(
+async fn call_media_send(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
     reject_sealed_window(&window)?;
-    let payload = media_payload(request.body())?;
-    let slot = state.media.lock().unwrap();
-    let Some(session) = slot.as_ref() else { return Err("no media session is open".into()) };
-    session.uplink.push(payload);
-    Ok(())
+    let payload = media_payload(request.body());
+    let order = control::media::send_order(
+        request.headers().get(control::media::SEND_ORDER_HEADER).and_then(|value| value.to_str().ok()),
+    );
+    admit_media_send(state.inner(), order, payload)
+}
+
+/// One uplink send for whichever media session is open when it runs, which
+/// may be a newer one than the send was made for: the session's send order
+/// drops a send counted below its start.
+fn admit_media_send(state: &NodeState, order: Option<u64>, payload: Result<Vec<u8>, String>) -> Result<(), String> {
+    let session = state.media.lock().unwrap().as_ref().map(|session| (session.uplink.clone(), session.send_order.clone()));
+    let Some((uplink, send_order)) = session else {
+        payload?;
+        return Err("no media session is open".into());
+    };
+    let checked = payload.as_ref().map(|_| ()).map_err(Clone::clone);
+    send_order.admit(order, payload.ok(), &uplink);
+    checked
 }
 
 /// One uplink video payload for the open media session (raw bytes). Answers
@@ -12219,6 +12261,7 @@ fn run() {
         if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
             #[cfg(target_os = "ios")]
             bitsov_ffi::call_audio::terminate();
+            control::call_activity::CallActivity::system().shutdown();
             let state = app.state::<NodeState>();
             if let Some(proxy) = state.remote_proxy.lock().unwrap().take() {
                 proxy.stop();
@@ -12291,7 +12334,7 @@ fn resume_ios_startup(app: &AppHandle) -> bool {
 /// Normal CS-1 / CS-2 desktop shell: NodeState, wallet commands, bootstrap.
 fn app_builder() -> tauri::Builder<tauri::Wry> {
     let builder = tauri::Builder::default();
-    #[cfg(all(target_os = "macos", not(feature = "mobile")))]
+    #[cfg(all(any(target_os = "macos", target_os = "windows", target_os = "linux"), not(feature = "mobile")))]
     let builder = builder.plugin(tauri_plugin_notification::init());
     #[cfg(all(desktop, not(feature = "mobile")))]
     let builder = builder
@@ -12532,6 +12575,23 @@ fn assistant_mock_builder() -> tauri::Builder<tauri::Wry> {
 #[path = "beta_network_tests.rs"]
 mod beta_network_tests;
 
+/// One paid call signal (offer, answer, ICE or hangup) to one contact.
+/// Same authority as a 1:1 message: the owner's budget or the ten-minute
+/// window, one journaled spend at a time, a durable operation id when the
+/// node keeps them. Calls go to contacts already in the book: a first
+/// contact is a message, never a ring.
+#[cfg(test)]
+#[cfg_attr(feature = "mobile", allow(dead_code))]
+async fn do_call_signal(
+    state: &NodeState,
+    peer: &str,
+    kind: u16,
+    plaintext: &str,
+    max_msat: u64,
+) -> Result<act::CallReceipt, ActionError> {
+    do_call_signal_for_admission(state, peer, kind, plaintext, max_msat, None).await
+}
+
 #[cfg(test)]
 mod phone_signet_gate_tests {
     use super::*;
@@ -12638,8 +12698,8 @@ mod device_sign_error_tests {
         std::fs::write(&blob, b"not a readable enclave key").unwrap();
         #[cfg(unix)] {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&blob, std::fs::Permissions::from_mode(0)).unwrap();
-            std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0)).unwrap();
+            std::fs::set_permissions(&blob, std::fs::Permissions::from_mode(0o0)).unwrap();
+            std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o0)).unwrap();
         }
         for _ in 0..20 {
             assert_eq!(local_device_record(&state, dir.path()).unwrap(), Some(record.clone()));
@@ -12817,6 +12877,60 @@ fn with_call_seal_commands<R: tauri::Runtime>(
         } else {
             app(invoke)
         }
+    }
+}
+
+#[cfg(test)]
+mod media_send_session_tests {
+    use super::*;
+
+    struct NoActivity;
+    impl control::call_activity::ActivityDriver for NoActivity {
+        fn begin(&self) {}
+        fn end(&self) {}
+    }
+
+    fn open(state: &NodeState, send_base: Option<u64>) -> Arc<control::media::FrameQueue> {
+        let activity = control::call_activity::CallActivity::new(Box::new(NoActivity));
+        install_media_session(state, "call-1", false, send_base, Arc::new(activity.hold("call-1"))).0
+    }
+
+    fn drain(queue: &control::media::FrameQueue) -> Vec<u8> {
+        std::iter::from_fn(|| queue.try_pop()).map(|frame| frame[0]).collect()
+    }
+
+    /// A send from the old socket that only runs after close and a new open
+    /// looks up the new session; its lower count keeps it out of that uplink.
+    #[test]
+    fn a_stale_send_after_close_and_reopen_never_reaches_the_new_session() {
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        let old = open(&state, Some(0));
+        for count in 0..5u64 {
+            admit_media_send(&state, Some(count), Ok(vec![count as u8])).unwrap();
+        }
+        assert_eq!(drain(&old), [0, 1, 2, 3, 4]);
+        // Counts 5 and 6 were handed over for the old socket but have not run yet.
+        stop_media_session(&state);
+        let new = open(&state, Some(7));
+        admit_media_send(&state, Some(6), Ok(vec![6])).unwrap();
+        admit_media_send(&state, Some(5), Ok(vec![5])).unwrap();
+        assert!(drain(&new).is_empty(), "the old call's frames must not go to the new peer");
+        admit_media_send(&state, Some(7), Ok(vec![7])).unwrap();
+        admit_media_send(&state, Some(8), Ok(vec![8])).unwrap();
+        assert_eq!(drain(&new), [7, 8]);
+        assert!(drain(&old).is_empty());
+        stop_media_session(&state);
+    }
+
+    #[test]
+    fn a_send_without_a_session_or_count_keeps_todays_answers() {
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        assert!(admit_media_send(&state, Some(0), Ok(vec![0])).is_err());
+        let queue = open(&state, None);
+        admit_media_send(&state, None, Ok(vec![3])).unwrap();
+        assert!(admit_media_send(&state, Some(1), Err("bad".into())).is_err());
+        assert_eq!(drain(&queue), [3]);
+        stop_media_session(&state);
     }
 }
 
@@ -13549,7 +13663,8 @@ mod pairing_wiring_tests {
             let server = tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = vec![0; 4096];
-                stream.read(&mut request).await.unwrap();
+                let read = stream.read(&mut request).await.unwrap();
+                assert_ne!(read, 0, "the client sent a request");
                 let body = format!(r#"{{"code":"{code}","message":"remote unavailable"}}"#);
                 stream.write_all(format!("HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             });
@@ -15380,7 +15495,7 @@ mod control_act_tests {
                 assert_eq!(pending(&node).unwrap().operation_id, id);
                 continue;
             }
-            assert_eq!(op_ids(&node), [id.clone()], "the existing operation id is reused");
+            assert_eq!(op_ids(&node), std::slice::from_ref(&id), "the existing operation id is reused");
             assert_eq!(err.code, "spend_unknown", "retry={delivery_retry}, operation_id={has_operation_id}");
             assert!(!err.message.contains("Nothing was paid"));
             assert_eq!(err.operation_id, id);
@@ -19313,9 +19428,10 @@ mod control_act_tests {
         node.state.spend_timeout = Duration::from_secs(30);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let ops = paid.lock().unwrap();
-            let reached = if state.is_some() { ops.ops.len() > before } else { !ops.drop_next };
-            drop(ops);
+            let reached = {
+                let ops = paid.lock().unwrap();
+                if state.is_some() { ops.ops.len() > before } else { !ops.drop_next }
+            };
             if reached { return; }
             assert!(Instant::now() < deadline, "the node never took the minute");
             tokio::time::sleep(Duration::from_millis(2)).await;
@@ -22185,7 +22301,11 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         let pays = paid.lock().unwrap().pays;
         let before = node.targets().iter().filter(|t| t.contains("/calls?")).count();
         let started = Instant::now();
-        let (end, ()) = tokio::join!(do_op_end_call_when_node_ends(&node.state, CALL_ID, None), async {
+        // Time the operation itself: the driver below may keep sleeping after the refusal came back.
+        let ((end, took), ()) = tokio::join!(async {
+            let end = do_op_end_call_when_node_ends(&node.state, CALL_ID, None).await;
+            (end, started.elapsed())
+        }, async {
             until_end_is_waiting(&node, before).await;
             *node.state.node_id.lock().unwrap() = Some(C.into());
             switched.store(true, Ordering::SeqCst);
@@ -22199,7 +22319,7 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         });
         let error = end.expect_err("a switch never shows the call closed");
         assert_eq!(error.code, "not_dispatched");
-        assert!(started.elapsed() < END_WAIT_MAX / 2, "the switch ended the wait: {:?}", started.elapsed());
+        assert!(took < END_WAIT_MAX / 2, "the switch ended the wait: {took:?}");
         assert!(admission_is_open(&node, &offer));
         assert!(pending(&node).is_none());
         assert_eq!(hangups(&node), 1);
@@ -26704,6 +26824,7 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         let now = now_unix();
         serde_json::json!({"op_id": "rel-1", "client_id": "c1", "granted_at": now, "expires_at": now + 86_400,
             "budget_msat": 200_000, "used_msat": 0, "remaining_msat": 200_000, "per_call_max_msat": 200_000,
+            "message_per_payment_max_msat": 200_000,
             "per_recipient_msat": {peer: 200_000}, "used_by_recipient": {}, "recipients_only": true,
             "per_act_max_by_recipient": {peer: per_act_msat}, "recipient_expires_at": {peer: now + 86_400}})
     }
@@ -28555,7 +28676,7 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         spend_status_now(&node.state).await.unwrap();
         assert_eq!(asks(&node), 1);
         // The box said yes: the app keeps its own lock closed until the owner taps.
-        assert!(node.state.wants.lock().unwrap().window == false && node.state.wants.lock().unwrap().budget.is_none());
+        assert!(!node.state.wants.lock().unwrap().window && node.state.wants.lock().unwrap().budget.is_none());
         assert_ne!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Open);
         assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
 
@@ -30671,7 +30792,7 @@ mod assistant_acl_tests {
         }
 
         let main_caps: Vec<_> = caps.iter().filter(|cap| applies_to(cap, "main")).collect();
-        assert_eq!(main_caps.len(), 2, "main has its app and macOS notification capabilities");
+        assert_eq!(main_caps.len(), 3, "main has its app, macOS notification and Windows/Linux message notification capabilities");
         for cap in &main_caps {
             assert_eq!(string_list(cap, "windows"), vec!["main".to_string()]);
             assert!(cap.get("remote").map(|v| v.is_null()).unwrap_or(true));
@@ -30681,6 +30802,23 @@ mod assistant_acl_tests {
         let notification_perms = permission_identifiers(notification);
         assert_eq!(notification_perms.len(), 10, "only local delivery, action/listener and window restoration grants");
         assert!(notification_perms.iter().all(|id| id.starts_with("notification:allow-") || id.starts_with("core:window:allow-")));
+        // Windows and Linux get plain message delivery only: no action types, listeners
+        // or window restoration, and never the macOS approval capability.
+        let message = main_caps.iter().find(|cap| cap["identifier"] == "message-notification").expect("message notification capability");
+        assert_eq!(string_list(message, "platforms"), vec!["windows".to_string(), "linux".to_string()]);
+        assert_eq!(
+            permission_identifiers(message).into_iter().collect::<BTreeSet<_>>(),
+            [
+                "notification:allow-is-permission-granted",
+                "notification:allow-request-permission",
+                "notification:allow-notify",
+                "core:window:allow-is-focused",
+            ]
+            .map(String::from)
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+            "message notifications grant only permission checks, delivery and a focus read"
+        );
         let main = *main_caps.iter().find(|cap| cap["identifier"] == "default").expect("main app capability");
         assert_eq!(string_list(main, "windows"), vec!["main".to_string()]);
         assert!(!applies_to(main, "assistant"));
@@ -30719,6 +30857,41 @@ mod assistant_acl_tests {
                 "inline capability objects would bypass this directory scan"
             );
         }
+    }
+
+    #[test]
+    fn notification_plugin_is_registered_on_mac_windows_and_linux() {
+        let desktop = r#"any(target_os = "macos", target_os = "windows", target_os = "linux")"#;
+        let cargo = fs::read_to_string(manifest_dir().join("Cargo.toml")).expect("Cargo.toml");
+        let section = format!("[target.'cfg({desktop})'.dependencies]");
+        let deps = cargo.split(&section).nth(1).expect("notification target dependency").split("\n[").next().unwrap();
+        assert!(deps.contains("tauri-plugin-notification = "), "the plugin is a dependency on every desktop target");
+        let source = production_source();
+        let builder = function_source(&source, "app_builder");
+        assert!(
+            builder.contains(&format!("#[cfg(all({desktop}, not(feature = \"mobile\")))]\n    let builder = builder.plugin(tauri_plugin_notification::init());")),
+            "app_builder registers the plugin on the same desktop targets"
+        );
+    }
+
+    #[cfg(all(any(target_os = "windows", target_os = "linux"), not(feature = "mobile")))]
+    #[test]
+    fn notification_plugin_links_on_windows_and_linux() {
+        let init: fn() -> tauri::plugin::TauriPlugin<tauri::Wry> = tauri_plugin_notification::init;
+        let _ = init;
+    }
+
+    #[test]
+    fn uplink_audio_sends_run_off_the_main_thread_in_send_order() {
+        let source = production_source();
+        // A sync command runs on the main thread, where a busy UI bunches frames.
+        assert!(source.contains("async fn call_media_send("), "call_media_send must stay async");
+        let send = function_source(&source, "call_media_send");
+        assert!(send.contains("admit_media_send("), "sends go through the order, not straight onto the queue");
+        assert!(!send.contains("uplink.push("));
+        let admit = function_source(&source, "admit_media_send");
+        assert!(admit.contains("send_order.admit("), "sends go through the order, not straight onto the queue");
+        assert!(!admit.contains("uplink.push("));
     }
 
     #[test]

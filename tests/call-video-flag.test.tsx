@@ -198,7 +198,7 @@ describe('call video flag', () => {
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
     answer(host);
     await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
-    expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer']);
+    expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer', 'send_base']);
     expect(constraintsSeen.every((c) => !c.video)).toBe(true);
     expect(host.used('call_media_video_send')).toHaveLength(0);
     expect($('[data-call-route="node"]')?.textContent).toBe('The call travels through your own box and theirs. Those two boxes carry the sound, so they could hear it.');
@@ -267,7 +267,7 @@ describe('call video flag', () => {
       await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
       answer(host);
       await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
-      expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer']);
+      expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer', 'send_base']);
       expect(constraintsSeen.every((c) => !c.video)).toBe(true);
       expect(host.used('call_media_video_send')).toHaveLength(0);
       expect($('[data-call-route="node"]')?.textContent).toBe('The call travels through your own box and theirs. Those two boxes carry the sound, so they could hear it.');

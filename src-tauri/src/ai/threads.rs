@@ -255,7 +255,7 @@ fn write_sealed(
     }
     let mut temp =
         tempfile::NamedTempFile::new_in(dir).map_err(|_| "Could not save the assistant thread.")?;
-    temp.write_all(&ciphertext)
+    temp.write_all(ciphertext)
         .and_then(|()| temp.as_file().sync_all())
         .map_err(|_| "Could not save the assistant thread.")?;
     let readback =
@@ -263,7 +263,7 @@ fn write_sealed(
     if sealer.open(purpose, &readback)?.as_slice() != plain {
         return Err("The saved assistant thread failed verification.".into());
     }
-    temp.persist(&path)
+    temp.persist(path)
         .map_err(|_| "Could not save the assistant thread.")?;
     Ok(())
 }

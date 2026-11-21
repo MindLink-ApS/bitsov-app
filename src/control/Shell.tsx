@@ -379,7 +379,7 @@ let artifactSeq = 0;
 type NewArtifact = Artifact extends infer A ? (A extends Artifact ? Omit<A, 'id' | 'at'> & { at?: number } : never) : never;
 
 export function ControlCenter(props: Props) {
-  const notifications = isTauri() && /Macintosh|Mac OS X/.test(navigator.userAgent) && !isMobilePlatform() ? createMessageNotifications() : null;
+  const notifications = isTauri() && !isMobilePlatform() ? createMessageNotifications() : null;
   onMount(() => { void notifications?.checkPermission(); });
   onCleanup(() => notifications?.dispose());
   const phoneLayout = createPhoneLayout();
@@ -2332,7 +2332,7 @@ export function ControlCenter(props: Props) {
               onEnded={() => { void loadBudget(); void loadWallet(); }} />
           </Show>
           <Show when={notifications && props.active && !contextOpen() && walletTab() === null}>
-            <Show when={callView().phase !== 'idle' || waitingCalls().length > 0}><NotificationSettings notifications={notifications!} offer /></Show>
+            <Show when={notifications!.calls && (callView().phase !== 'idle' || waitingCalls().length > 0)}><NotificationSettings notifications={notifications!} offer /></Show>
           </Show>
           <Show when={moneyBlocked() && !phoneShell() && streamFrames() === 0}>
             <div class="money-notice-float">{moneyNotice()}</div>
@@ -4163,6 +4163,11 @@ function CallPanel(props: {
   const cardPhase = () => shownPhase(v());
   /** The M6 paid-minutes line is on the card (same condition as its render below). */
   const minutesShown = () => !!(props.routed && v().outgoing && v().minutes);
+  /** After the call: a minutes line is on the card (as `CallMinutesLine` renders one), so the signal summary may point to it. */
+  const minutesLineEnded = () => {
+    const m = v().minutes;
+    return minutesShown() && !!m && (m.reservation !== null || m.receiptsMsat > 0);
+  };
   /**
    * The ended call can cost nothing more, on positive evidence only: no signal payment in flight or unknown,
    * the host confirmed it ended every admission (`closed`; not yet started, closing, refused or unknown never count),
@@ -4256,17 +4261,17 @@ function CallPanel(props: {
               <p class="hint" data-call-paid="pending">
                 {v().paidMsat > 0 ? tr('uiThisCallPaidUpToSoFar', fmtAmount(v().paidMsat, 'up')) : ''}
                 {v().unknownCount > 0 ? tr('uiCheckPendingResult', v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)) : ''}
-                {v().pendingCount === 1 ? tr('uiAPaymentForThisCallIsStillSettling') : tr('uiPaymentsForThisCallAreStillSettling', v().pendingCount)}{tr('uiUpTo126')} {fmtAmount(v().pendingMsat, 'up')}{tr('uiTheTotalUpdatesWhen')} {v().pendingCount === 1 ? tr('uiItFinishes') : tr('uiTheyFinish')}{tr('uiMediaWasNotBilled')}
+                {v().pendingCount === 1 ? tr('uiAPaymentForThisCallIsStillSettling') : tr('uiPaymentsForThisCallAreStillSettling', v().pendingCount)}{tr('uiUpTo126')} {fmtAmount(v().pendingMsat, 'up')}{tr('uiTheTotalUpdatesWhen')} {v().pendingCount === 1 ? tr('uiItFinishes') : tr('uiTheyFinish')}{minutesLineEnded() ? tr('uiMinutesCountedApart') : tr('uiMediaWasNotBilled')}
               </p>
             </Match>
             <Match when={v().unknownCount > 0}>
               <p class="hint" data-call-paid="unknown">
                 {v().paidMsat > 0 ? tr('uiThisCallPaidUpTo', fmtAmount(v().paidMsat, 'up')) : tr('uiNoPaymentFromThisCallIsConfirmed')}{' '}
-                {v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)} {tr('uiUpTo133')} {fmtAmount(v().paidMsat + v().unknownMsat, 'up')} {tr('uiInAllIf')} {v().unknownCount === 1 ? tr('itPronoun') : tr('theyPronoun')} {tr('uiWentThroughCheckPendingResultMediaWasNot')}
+                {v().unknownCount === 1 ? tr('uiOneSignalSResultIsNotKnownYet') : tr('uiSignalsResultsAreNotKnownYet', v().unknownCount)} {tr('uiUpTo133')} {fmtAmount(v().paidMsat + v().unknownMsat, 'up')} {tr('uiInAllIf')} {v().unknownCount === 1 ? tr('itPronoun') : tr('theyPronoun')} {minutesLineEnded() ? tr('uiWentThroughCheckPendingResultMinutesApart') : tr('uiWentThroughCheckPendingResultMediaWasNot')}
               </p>
             </Match>
             <Match when={v().paidMsat > 0}>
-              <p class="hint" data-call-paid="settled">{tr('uiThisCallPaidUpTo136')} {fmtAmount(v().paidMsat, 'up')}{tr('uiEachSignalSPricePlusItsRoutingFee')}</p>
+              <p class="hint" data-call-paid="settled">{tr('uiThisCallPaidUpTo136')} {fmtAmount(v().paidMsat, 'up')}{minutesLineEnded() ? tr('uiEachSignalSPricePlusItsRoutingFeeMinutesApart') : tr('uiEachSignalSPricePlusItsRoutingFee')}</p>
             </Match>
             {/* A call that started (it has an id) and paid nothing; pre-flight refusals already say "Nothing was paid". */}
             <Match when={v().callId !== null}>
@@ -4403,7 +4408,8 @@ function CallPanel(props: {
             </Show>
             {/* With the paid minutes as the cost line, the signal cap is the detail. */}
             <Show when={v().paidMsat > 0 && minutesShown()}>
-              <p class="hint" data-call-paid>{tr('uiSignalCostCap')} {fmtAmount(v().paidMsat, 'up')} {tr('uiIncludesMaximumRoutingFeesSettledAmountMayBe')}</p>
+              {/* The caller's minutes are paid: never "media is not billed" next to them. */}
+              <p class="hint" data-call-paid>{tr('uiSignalCostCap')} {fmtAmount(v().paidMsat, 'up')} {tr('uiIncludesMaximumRoutingFeesMinutesApart')}</p>
             </Show>
             <Show when={v().connection}>
               {(connection) => <p class="hint" data-call-connection>{tr('uiConnection')} {connection().local === 'srflx' ? 'srflx(STUN)' : connection().local} {tr('uiLocal140')} {connection().remote === 'srflx' ? 'srflx(STUN)' : connection().remote} {tr('uiRemote')}</p>}

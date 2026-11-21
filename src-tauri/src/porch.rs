@@ -288,7 +288,7 @@ pub fn clean_text(text: &str) -> String {
         .chars()
         .map(|c| if matches!(c, '\r' | '\u{2028}' | '\u{2029}') { '\n' } else { c })
         .filter(|c| {
-            !(c.is_control() && !matches!(c, '\n' | '\t'))
+            (!c.is_control() || matches!(c, '\n' | '\t'))
                 && !matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
         })
         .collect()
