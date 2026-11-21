@@ -376,7 +376,7 @@ let artifactSeq = 0;
 type NewArtifact = Artifact extends infer A ? (A extends Artifact ? Omit<A, 'id' | 'at'> & { at?: number } : never) : never;
 
 export function ControlCenter(props: Props) {
-  const notifications = isTauri() && /Macintosh|Mac OS X/.test(navigator.userAgent) && !isMobilePlatform() ? createMessageNotifications() : null;
+  const notifications = isTauri() && !isMobilePlatform() ? createMessageNotifications() : null;
   onMount(() => { void notifications?.checkPermission(); });
   onCleanup(() => notifications?.dispose());
   const phoneLayout = createPhoneLayout();
@@ -2324,7 +2324,7 @@ export function ControlCenter(props: Props) {
               onEnded={() => { void loadBudget(); void loadWallet(); }} />
           </Show>
           <Show when={notifications && props.active && !contextOpen() && walletTab() === null}>
-            <Show when={callView().phase !== 'idle' || waitingCalls().length > 0}><NotificationSettings notifications={notifications!} offer /></Show>
+            <Show when={notifications!.calls && (callView().phase !== 'idle' || waitingCalls().length > 0)}><NotificationSettings notifications={notifications!} offer /></Show>
           </Show>
           <Show when={moneyBlocked() && !phoneShell() && streamFrames() === 0}>
             <div class="money-notice-float">{moneyNotice()}</div>
