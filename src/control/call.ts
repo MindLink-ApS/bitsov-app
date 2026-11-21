@@ -572,6 +572,8 @@ export function createCallEngine(deps: CallDeps) {
   /** The call (public id) this device answered free: it read no price first, so its later signals read one when needed. */
   let freeAnswered: string | null = null;
   let restartRequested = false;
+  /** A free-answered call's reconnect is waiting for its approval. */
+  let restartAsking = false;
   let restartAnswerPending = false;
   let restartTimer: ReturnType<typeof setTimeout> | undefined;
   let ringTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1187,6 +1189,20 @@ export function createCallEngine(deps: CallDeps) {
       if (pc !== conn || restartAttempted || restartRequested) return;
     }
     const q = quote!;
+    // A call answered free was never approved for spending, so its paid
+    // reconnect request asks first, before the recovery counts as used: a
+    // refused or lapsed approval keeps it for the next try.
+    const askedFirst = !view.outgoing && freeAnswered === view.callId && !!deps.authorize;
+    if (askedFirst) {
+      if (restartAsking) return;
+      restartAsking = true;
+      const approved = await deps.authorize!().finally(() => { restartAsking = false; });
+      if (pc !== conn || restartAttempted || restartRequested) return;
+      if (!approved) {
+        recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
+        return;
+      }
+    }
     // Only the original caller creates offers, so simultaneous failure cannot
     // produce glare or two fresh admission charges. The callee can request it.
     if (!view.outgoing) restartRequested = true;
@@ -1195,9 +1211,8 @@ export function createCallEngine(deps: CallDeps) {
     try {
       // On a node that keeps the call, the callee's reconnect request goes on the
       // call's own authority after the approval ran out (the host decides). A
-      // recovery offer is a new admission and still asks. A call answered free
-      // was never approved for spending, so its paid reconnect always asks.
-      const held = !view.outgoing && deps.callContinuity?.() === true && freeAnswered !== view.callId;
+      // recovery offer is a new admission and still asks.
+      const held = askedFirst || (!view.outgoing && deps.callContinuity?.() === true);
       if (!held && deps.authorize && !await deps.authorize()) {
         recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
         return;

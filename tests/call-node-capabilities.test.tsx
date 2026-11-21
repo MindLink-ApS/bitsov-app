@@ -304,6 +304,28 @@ describe('Decline and Accept with free replies (A4)', () => {
     t.e.endLocal();
   });
 
+  it('a refused ask after a free answer keeps the reconnect: once approved, the next drop sends it once', async () => {
+    vi.useFakeTimers();
+    const pcs: FakePc[] = [];
+    let approved = true;
+    const authorize = vi.fn(async () => approved);
+    const t = engine({ free: true, authorize, callContinuity: () => true, quote: pricedLater(async () => ({ ok: true, value: QUOTE }) as Outcome<CallQuote>),
+      peerConnection: () => { const pc = new FakePc(); pcs.push(pc); return pc as unknown as RTCPeerConnection; } });
+    await t.e.receive(offer(), OWN);
+    await t.e.accept(QUOTE);
+    approved = false;
+    drop(pcs[0]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.sent).toEqual([]);
+    expect(t.last().recoveryUsed).toBe(false);
+    approved = true;
+    drop(pcs[0]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.sent.map((s) => [s.kind, s.body.sdp_mid])).toEqual([[402, 'bitsov-restart-v1']]);
+    expect(t.last().recoveryUsed).toBe(true);
+    t.e.endLocal();
+  });
+
   it('a call answered free asks before it pays to answer the caller\'s restart, and pays nothing when refused', async () => {
     vi.useFakeTimers();
     let approved = true;
