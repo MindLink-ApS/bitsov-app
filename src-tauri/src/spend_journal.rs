@@ -353,7 +353,7 @@ impl Journal {
     pub fn pending(&self) -> Result<Option<Pending>, ActionError> {
         let mut pending = read_pending(&self.dir)?;
         let operation_id = pending.as_ref().and_then(|p| p.operation_id.clone());
-        let repair = (|| {
+        let repair = logical_write(|| {
             if let Some(p) = pending.as_mut().filter(|p| p.id.is_empty()) {
                 // Migrate under the journal lock before exposing a dismissal identity.
                 p.id = fresh_id()?;
@@ -361,7 +361,7 @@ impl Journal {
             }
             if let Some(p) = &pending { self.ensure_operation(p)?; }
             Ok(())
-        })();
+        });
         // The snapshot already names the dispatched operation, even when its
         // ledger/index cannot be read or repaired. Preserve it on every failure.
         crate::act::with_op(Active(operation_id.as_deref()), repair)?;
@@ -377,7 +377,7 @@ impl Journal {
     /// ([`Pending::resumable`]) may be replaced.
     pub fn begin_operation(&self, node_id: &str, path: &str, body: &serde_json::Value, max_msat: u64, operation: Option<(String, String)>) -> Result<Pending, ActionError> {
         let operation_id = operation.as_ref().map(|(id, _)| id.clone());
-        crate::act::with_op(Active(operation_id.as_deref()), (|| {
+        logical_write(|| crate::act::with_op(Active(operation_id.as_deref()), (|| {
         if self.pending()?.is_some_and(|p| !p.resumable) { return Err(unknown("Check the previous action first.")); }
         let (operation_id, op) = operation.map_or((None, None), |(id, op)| (Some(id), Some(op)));
         let mut pending = Pending {
@@ -439,7 +439,7 @@ impl Journal {
         self.save(&pending)?;
         if let Some(record) = &pending.operation_record { self.write_operation(record)?; }
         Ok(pending)
-        })())
+        })()))
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -451,10 +451,7 @@ impl Journal {
     /// handle, flush the folder. Success only when every step succeeded.
     #[cfg(windows)]
     pub fn save(&self, pending: &Pending) -> Result<(), ActionError> {
-        let bytes = serde_json::to_vec(pending).map_err(|_| not_changed())?;
-        put(&self.dir, &self.dir.join("spend-pending.json"), &bytes,
-            |b| serde_json::from_slice::<Pending>(b).is_ok())?;
-        self.ensure_operation(pending)
+        save_pending_in(&WinStore, &self.dir, pending, || self.ensure_operation(pending))
     }
 
     #[cfg(unix)]
@@ -504,6 +501,10 @@ impl Journal {
     /// Update exactly the captured admission; never resolve a reused call id
     /// again after waiting for the money lock. This does not settle payment.
     pub fn observe_call(&self, offer: &OperationRecord, ended: bool) -> Result<(), ActionError> {
+        logical_write(|| self.observe_call_once(offer, ended))
+    }
+
+    fn observe_call_once(&self, offer: &OperationRecord, ended: bool) -> Result<(), ActionError> {
         let mut record = self.operation_record(&offer.op_id)?.ok_or_else(damaged_record)?;
         if record.node_id != offer.node_id || record.peer != offer.peer || record.call_id != offer.call_id
             || !matches!(record.kind.as_str(), "call_offer" | "call_recovery") {
@@ -519,6 +520,10 @@ impl Journal {
     /// or payment. Only the exact indexed record (or its durable pending snapshot)
     /// can restore membership; corrupt mappings are never guessed from history.
     pub fn repair_call_index(&self, node_id: &str, index_id: &str) -> Result<Option<String>, ActionError> {
+        logical_write(|| self.repair_call_index_once(node_id, index_id))
+    }
+
+    fn repair_call_index_once(&self, node_id: &str, index_id: &str) -> Result<Option<String>, ActionError> {
         if index_id.len() != 64 || !index_id.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
             return Err(ActionError::invalid("invalid call index id"));
         }
@@ -568,6 +573,10 @@ impl Journal {
     }
 
     pub fn call_operations_for(&self, node_id: &str, peer: Option<&str>, call: Option<&str>) -> Result<Vec<OperationRecord>, ActionError> {
+        logical_write(|| self.call_operations_once(node_id, peer, call))
+    }
+
+    fn call_operations_once(&self, node_id: &str, peer: Option<&str>, call: Option<&str>) -> Result<Vec<OperationRecord>, ActionError> {
         // An H1 index may outlive its damaged offer. Its hashed key cannot tell
         // us the peer, so preserve the evidence and fail closed for calls only.
         for entry in read_entries(&self.dir.join("call-index-unresolved"))? {
@@ -595,8 +604,8 @@ impl Journal {
             for directory in calls {
                 for entry in read_entries(&directory)? {
                     let id = entry.file_name().to_string_lossy().into_owned();
-                    let record = crate::act::with_op(Active(Some(&id)),
-                        self.operation_record(&id).and_then(|r| r.ok_or_else(damaged_record)))?;
+                    let record = crate::act::with_op(Active(Some(&id)), verify_membership(&entry.path())
+                        .and_then(|()| self.operation_record(&id)).and_then(|r| r.ok_or_else(damaged_record)))?;
                     if record.node_id != node_id || peer.is_some_and(|p| record.peer != p)
                         || record.call_id.is_none() || call.is_some_and(|c| record.call_id.as_deref() != Some(c)) {
                         return crate::act::with_op(Active(Some(&id)), Err(damaged_record()));
@@ -683,11 +692,7 @@ impl Journal {
     #[cfg(windows)]
     fn write_operation(&self, record: &OperationRecord) -> Result<(), ActionError> {
         let path = self.operation_path(&record.op_id)?;
-        let bytes = serde_json::to_vec(record).map_err(|_| not_changed())?;
-        put(&self.dir, &path, &bytes,
-            |b| serde_json::from_slice::<OperationRecord>(b).is_ok_and(|r| r.op_id == record.op_id))?;
-        write_call_index(&self.dir, record)?;
-        write_call_membership(&self.dir, record)
+        write_operation_in(&WinStore, &self.dir, &path, record)
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -698,6 +703,10 @@ impl Journal {
     /// Commit history before releasing/replacing the pending slot. Evidence is
     /// whole-operation principal, never a retry's incremental budget charge.
     pub fn record_outcome(&self, pending: &Pending, state: OperationState, evidence: Option<&serde_json::Value>) -> Result<(), ActionError> {
+        logical_write(|| self.record_outcome_once(pending, state, evidence))
+    }
+
+    fn record_outcome_once(&self, pending: &Pending, state: OperationState, evidence: Option<&serde_json::Value>) -> Result<(), ActionError> {
         let Some(id) = &pending.operation_id else { return Ok(()) };
         self.ensure_operation(pending)?;
         let mut record = self.operation_record(id)?.ok_or_else(|| unknown("Missing operation record."))?;
@@ -800,6 +809,35 @@ fn present(path: &Path) -> Result<bool, ActionError> {
     crate::private_fs::verify_file(path).map(|()| true).map_err(|_| storage_refused())
 }
 
+#[cfg(not(windows))]
+fn history_marked(_dir: &Path, marker: &Path) -> Result<bool, ActionError> {
+    present(marker)
+}
+
+#[cfg(windows)]
+fn history_marked(dir: &Path, marker: &Path) -> Result<bool, ActionError> {
+    history_marked_in(&WinStore, dir, marker)
+}
+
+/// A visible migration marker does not prove its folder flush finished:
+/// flush again, and trust the marker only once that succeeds.
+#[cfg(any(windows, test))]
+fn history_marked_in<S: durable::Store>(store: &S, dir: &Path, marker: &Path) -> Result<bool, ActionError> {
+    if !store.verify(marker).map_err(|_| storage_refused())? { return Ok(false); }
+    marker_in(store, dir, marker).map(|()| true)
+}
+
+/// A call membership entry counts only as a verified private file.
+#[cfg(not(windows))]
+fn verify_membership(_path: &Path) -> Result<(), ActionError> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_membership(path: &Path) -> Result<(), ActionError> {
+    crate::private_fs::verify_file(path).map_err(|_| damaged_record())
+}
+
 /// An empty, durable marker file below the journal folder `_root`.
 #[cfg(not(windows))]
 fn create_marker(_root: &Path, path: &Path) -> Result<(), ActionError> {
@@ -811,7 +849,7 @@ fn create_marker(_root: &Path, path: &Path) -> Result<(), ActionError> {
 
 #[cfg(windows)]
 fn create_marker(root: &Path, path: &Path) -> Result<(), ActionError> {
-    durable::marker(&WinStore, root, path).map_err(journal_failure)
+    marker_in(&WinStore, root, path)
 }
 
 #[cfg(not(windows))]
@@ -822,36 +860,133 @@ fn remove_durably(path: &Path) -> Result<(), ActionError> {
 
 #[cfg(windows)]
 fn remove_durably(path: &Path) -> Result<(), ActionError> {
-    durable::remove(&WinStore, path).map_err(journal_failure)
+    journal_step(durable::remove(&WinStore, path))
 }
 
 /// Publish one record below the journal folder `root` (scratch: `.next`).
-#[cfg(windows)]
-fn put(root: &Path, dest: &Path, bytes: &[u8], check: impl FnOnce(&[u8]) -> bool) -> Result<(), ActionError> {
-    durable::put(&WinStore, root, &dest.with_extension("next"), dest, bytes, MAX_RECORD_BYTES, check)
-        .map_err(journal_failure)
-}
-
-/// A private object failed its check. No path or access-list detail is shown.
-#[cfg(windows)]
-fn storage_refused() -> ActionError {
-    unknown("The private spend journal storage did not pass its access check. Nothing was changed.")
+#[cfg(any(windows, test))]
+fn put_in<S: durable::Store>(store: &S, root: &Path, dest: &Path, bytes: &[u8], check: impl FnOnce(&[u8]) -> bool) -> Result<(), ActionError> {
+    journal_step(durable::put(store, root, &dest.with_extension("next"), dest, bytes, MAX_RECORD_BYTES, check))
 }
 
 #[cfg(any(windows, test))]
+fn marker_in<S: durable::Store>(store: &S, root: &Path, path: &Path) -> Result<(), ActionError> {
+    journal_step(durable::marker(store, root, path))
+}
+
+/// Windows `save`: the pending record first, then its operation graph.
+#[cfg(any(windows, test))]
+fn save_pending_in<S: durable::Store>(store: &S, dir: &Path, pending: &Pending,
+    graph: impl FnOnce() -> Result<(), ActionError>) -> Result<(), ActionError> {
+    logical_write(|| {
+        let bytes = serde_json::to_vec(pending).map_err(|_| not_changed())?;
+        put_in(store, dir, &dir.join("spend-pending.json"), &bytes,
+            |b| serde_json::from_slice::<Pending>(b).is_ok())?;
+        graph()
+    })
+}
+
+/// Windows `write_operation`: the record is published before its call index
+/// and membership advertise it.
+#[cfg(any(windows, test))]
+fn write_operation_in<S: durable::Store>(store: &S, dir: &Path, path: &Path, record: &OperationRecord) -> Result<(), ActionError> {
+    logical_write(|| {
+        let bytes = serde_json::to_vec(record).map_err(|_| not_changed())?;
+        put_in(store, dir, path, &bytes,
+            |b| serde_json::from_slice::<OperationRecord>(b).is_ok_and(|r| r.op_id == record.op_id))?;
+        write_call_index_in(store, dir, record)?;
+        write_call_membership_in(store, dir, record)
+    })
+}
+
+/// A private object failed its check. No path or access-list detail is shown.
+#[cfg(any(windows, test))]
+fn storage_refused() -> ActionError {
+    if sequence::published() { return may_not_be_on_disk(); }
+    unknown("The private spend journal storage did not pass its access check. Nothing was changed.")
+}
+
+/// "Not changed" holds only while nothing in this logical write was published.
+#[cfg(any(windows, test))]
 fn not_changed() -> ActionError {
+    if sequence::published() { return may_not_be_on_disk(); }
     unknown("The spend journal was not changed.")
 }
 
+#[cfg(any(windows, test))]
+fn may_not_be_on_disk() -> ActionError {
+    unknown("A spend journal change may not be on disk. Check the previous action before another spend.")
+}
+
 /// Only a write that finished every step succeeds. A failure before publish
-/// left the old record in place; any later failure may or may not be on disk.
+/// left that file's old record in place; any later failure may or may not be
+/// on disk. Once one file of a logical write is published, every later
+/// failure in it is uncertain too.
 #[cfg(any(windows, test))]
 fn journal_failure(failed: durable::Failed) -> ActionError {
     // The error kind names no path or record content.
     eprintln!("spend journal: write stopped at {:?} ({:?})", failed.stage, failed.error.kind());
     match failed.stage.outcome() {
         durable::Outcome::NotCommitted => not_changed(),
-        durable::Outcome::Uncertain => unknown("A spend journal change may not be on disk. Check the previous action before another spend."),
+        durable::Outcome::Uncertain => { sequence::mark_published(); may_not_be_on_disk() }
+    }
+}
+
+/// One file step of a logical write; a finished step counts as published.
+#[cfg(any(windows, test))]
+fn journal_step(result: Result<(), durable::Failed>) -> Result<(), ActionError> {
+    match result {
+        Ok(()) => { sequence::mark_published(); Ok(()) }
+        Err(failed) => Err(journal_failure(failed)),
+    }
+}
+
+/// One logical journal write (for example pending record, then operation,
+/// then call index and membership). Nested writes join the outermost one.
+#[cfg(any(windows, test))]
+fn logical_write<T>(f: impl FnOnce() -> T) -> T {
+    sequence::run(f)
+}
+
+#[cfg(not(any(windows, test)))]
+fn logical_write<T>(f: impl FnOnce() -> T) -> T {
+    f()
+}
+
+/// Per-thread record of whether the current logical write has published a
+/// file. Journal calls are synchronous and hold the journal locks.
+#[cfg(any(windows, test))]
+mod sequence {
+    use std::cell::Cell;
+
+    thread_local! {
+        static DEPTH: Cell<usize> = const { Cell::new(0) };
+        static PUBLISHED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    struct Scope { outermost: bool }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            DEPTH.with(|d| d.set(d.get() - 1));
+            if self.outermost { PUBLISHED.with(|p| p.set(false)); }
+        }
+    }
+
+    pub(super) fn run<T>(f: impl FnOnce() -> T) -> T {
+        let outermost = DEPTH.with(|d| { let depth = d.get(); d.set(depth + 1); depth == 0 });
+        if outermost { PUBLISHED.with(|p| p.set(false)); }
+        let _scope = Scope { outermost };
+        f()
+    }
+
+    /// Outside a logical write nothing is remembered.
+    pub(super) fn mark_published() {
+        if DEPTH.with(|d| d.get()) > 0 { PUBLISHED.with(|p| p.set(true)); }
+    }
+
+    pub(super) fn published() -> bool {
+        PUBLISHED.with(|p| p.get())
     }
 }
 
@@ -1159,6 +1294,7 @@ pub fn read_completed_call_admission(dir: &Path, node_id: &str, peer: &str, call
     for entry in read_entries(&directory)? {
         let id = entry.file_name().to_string_lossy().into_owned();
         if id.len() != 36 || !id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') { return Err(damaged_record()); }
+        verify_membership(&entry.path())?;
         let record = read_operation(&dir.join("ops").join(format!("{id}.json")), Some(&id))?
             .ok_or_else(damaged_record)?;
         if record.node_id != node_id || record.peer != peer || record.call_id.as_deref() != Some(call) {
@@ -1248,6 +1384,11 @@ fn write_call_membership(dir: &Path, record: &OperationRecord) -> Result<(), Act
 /// folder down and flushed into its parent; the empty entry is flushed too.
 #[cfg(windows)]
 fn write_call_membership(dir: &Path, record: &OperationRecord) -> Result<(), ActionError> {
+    write_call_membership_in(&WinStore, dir, record)
+}
+
+#[cfg(any(windows, test))]
+fn write_call_membership_in<S: durable::Store>(store: &S, dir: &Path, record: &OperationRecord) -> Result<(), ActionError> {
     if record.call_id.is_none() || !record.kind.starts_with("call_") { return Ok(()); }
     if record.op_id.len() != 36 || !record.op_id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') {
         return Err(damaged_record());
@@ -1256,7 +1397,7 @@ fn write_call_membership(dir: &Path, record: &OperationRecord) -> Result<(), Act
         .join(blake3::hash(record.peer.as_bytes()).to_hex().as_str())
         .join(blake3::hash(record.call_id.as_deref().unwrap().as_bytes()).to_hex().as_str())
         .join(&record.op_id);
-    create_marker(dir, &path)
+    marker_in(store, dir, &path)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1353,13 +1494,18 @@ fn write_call_index(dir: &Path, record: &OperationRecord) -> Result<(), ActionEr
 /// Windows: same slot rules as Unix; the index is a checked private record.
 #[cfg(windows)]
 fn write_call_index(dir: &Path, record: &OperationRecord) -> Result<(), ActionError> {
+    write_call_index_in(&WinStore, dir, record)
+}
+
+#[cfg(any(windows, test))]
+fn write_call_index_in<S: durable::Store>(store: &S, dir: &Path, record: &OperationRecord) -> Result<(), ActionError> {
     if !matches!(record.kind.as_str(), "call_offer" | "call_recovery") { return Ok(()); }
     let Some(call) = record.call_id.as_deref() else { return Ok(()) };
     let path = call_index_path(dir, &record.node_id, &record.peer, call);
     if let IndexSlot::Keep = index_slot(dir, &path, record).map_err(|SlotDamaged| damaged_record_error())? { return Ok(()); }
     let index = CallIndex { op_id: record.op_id.clone(), created_ms: record.created_ms };
     let bytes = serde_json::to_vec(&index).map_err(|_| not_changed())?;
-    put(dir, &path, &bytes, |b| serde_json::from_slice::<CallIndex>(b)
+    put_in(store, dir, &path, &bytes, |b| serde_json::from_slice::<CallIndex>(b)
         .is_ok_and(|i| i.op_id == record.op_id && i.created_ms == record.created_ms))
 }
 
@@ -1375,9 +1521,13 @@ fn write_call_index(_dir: &Path, _record: &OperationRecord) -> Result<(), Action
 /// and marker below it is read and written through the private-file layer.
 /// The marker is written last, after the steps before it were flushed.
 pub fn initialize_history(dir: &Path) -> Result<(), ActionError> {
+    logical_write(|| initialize_history_once(dir))
+}
+
+fn initialize_history_once(dir: &Path) -> Result<(), ActionError> {
     #[cfg(windows)] crate::private_fs::ensure_dir(dir).map_err(|_| storage_refused())?;
     let marker = dir.join("call-index-v2");
-    if present(&marker)? { return Ok(()); }
+    if history_marked(dir, &marker)? { return Ok(()); }
     for entry in history_entries(dir)? {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
@@ -1675,6 +1825,54 @@ mod windows_journal_tests {
         assert_eq!(page.skipped, 2);
     }
 
+    // W14: a populated history without its marker is migrated
+    #[test]
+    fn a_populated_history_without_its_marker_is_migrated() {
+        if elevated() { return; }
+        let dir = journal_dir("w14-markerless");
+        let journal = Journal::open(&dir).unwrap();
+        let call = "0123456789abcdef0123456789abcdef";
+        let id = new_operation_id().unwrap();
+        let p = journal.begin_operation("node", "/messages/compose", &call_body(call), 2000,
+            Some((id.clone(), operation(&call_body(call))))).unwrap();
+        journal.record_outcome(&p, OperationState::Settled, None).unwrap();
+        journal.clear().unwrap();
+        drop(journal);
+        remove_durably(&call_index_path(&dir, "node", "peer", call)).unwrap();
+        assert!(absent(&dir.join("call-index-v2")));
+        initialize_history(&dir).unwrap();
+        crate::private_fs::verify_file(&dir.join("call-index-v2")).unwrap();
+        assert_eq!(read_call_admission(&dir, "node", "peer", call).unwrap().unwrap().op_id, id);
+    }
+
+    // G3: a membership entry counts only as a verified private file
+    #[test]
+    fn a_membership_entry_that_does_not_verify_is_refused() {
+        if elevated() { return; }
+        let call = "0123456789abcdef0123456789abcdef";
+        for case in ["widened", "folder", "linked"] {
+            let dir = journal_dir(&format!("membership-{case}"));
+            let journal = Journal::open(&dir).unwrap();
+            let id = new_operation_id().unwrap();
+            journal.begin_operation("node", "/messages/compose", &call_body(call), 2000,
+                Some((id.clone(), operation(&call_body(call))))).unwrap();
+            let entry = call_membership_root(&dir, "node").join(blake3::hash(b"peer").to_hex().as_str())
+                .join(blake3::hash(call.as_bytes()).to_hex().as_str()).join(&id);
+            match case {
+                "widened" => grant_everyone_read(&entry),
+                "folder" => {
+                    remove_durably(&entry).unwrap();
+                    crate::private_fs::ensure_dir(&entry).unwrap();
+                }
+                _ => std::fs::hard_link(&entry, dir.join("linked")).unwrap(),
+            }
+            // The operation record itself is still valid.
+            crate::private_fs::verify_file(&dir.join("ops").join(format!("{id}.json"))).unwrap();
+            assert!(journal.call_operations("node", Some("peer")).is_err(), "{case}");
+            assert!(read_completed_call_admission(&dir, "node", "peer", call).is_err(), "{case}");
+        }
+    }
+
     // W02 / W14 on the history folder itself
     #[test]
     fn tampered_history_is_refused_without_writes() {
@@ -1921,6 +2119,117 @@ mod durable_tests {
         std::fs::write(&path, b"x").unwrap();
         durable::remove(&Posix, &path).unwrap();
         assert!(!path.exists());
+    }
+
+    /// A store whose folder flush can be made to fail.
+    struct FlushFails(std::cell::Cell<bool>);
+
+    impl Store for FlushFails {
+        type File = <Posix as Store>::File;
+        fn ensure_dir(&self, dir: &Path) -> std::io::Result<()> { Posix.ensure_dir(dir) }
+        fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+            if self.0.get() { return Err(std::io::Error::other("folder flush failed")); }
+            Posix.sync_dir(dir)
+        }
+        fn verify(&self, path: &Path) -> std::io::Result<bool> { Posix.verify(path) }
+        fn create(&self, path: &Path) -> std::io::Result<Self::File> { Posix.create(path) }
+        fn write(&self, file: &mut Self::File, bytes: &[u8]) -> std::io::Result<()> { Posix.write(file, bytes) }
+        fn read_back(&self, file: &mut Self::File, max: u64) -> std::io::Result<Vec<u8>> { Posix.read_back(file, max) }
+        fn publish(&self, file: Self::File, dest: &Path, bytes: &[u8]) -> std::io::Result<()> { Posix.publish(file, dest, bytes) }
+        fn open_existing(&self, path: &Path) -> std::io::Result<Self::File> { Posix.open_existing(path) }
+        fn delete(&self, file: Self::File) -> std::io::Result<()> { Posix.delete(file) }
+    }
+
+    const CALL: &str = "0123456789abcdef0123456789abcdef";
+
+    fn record(call: Option<&str>) -> OperationRecord {
+        OperationRecord {
+            op_id: new_operation_id().unwrap(), node_id: "node".into(),
+            kind: if call.is_some() { "call_offer" } else { "message" }.into(), peer: "peer".into(),
+            call_id: call.map(str::to_string), parent_op: None, request_hash: "h".into(), cap_msat: 2000,
+            state: OperationState::Dispatching, paid_msat: None, message_id: None, payment_hash: None,
+            created_ms: 1, settled_ms: None, reason: None, hangup_cap_msat: None, call_closed: false, call_answered: false,
+        }
+    }
+
+    fn op_path(dir: &Path, record: &OperationRecord) -> PathBuf {
+        dir.join("ops").join(format!("{}.json", record.op_id))
+    }
+
+    fn assert_uncertain(error: &ActionError) {
+        assert_eq!(error.code, "spend_unknown");
+        assert!(!error.message.contains("not changed"), "{}", error.message);
+        assert_eq!(error.message, may_not_be_on_disk().message);
+    }
+
+    // G1: pending record, then operation record
+    #[test]
+    fn an_operation_failure_after_the_pending_record_was_published_is_uncertain() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let pending: Pending = serde_json::from_slice(br#"{"id":"kept","node_id":"node","request_hash":"h","max_msat":1,
+            "target":null,"over_budget":false}"#).unwrap();
+        let record = record(None);
+        let op = op_path(dir, &record);
+        // A leftover scratch refuses the operation write before its publish.
+        std::fs::create_dir(dir.join("ops")).unwrap();
+        std::fs::write(op.with_extension("next"), b"{stale").unwrap();
+        let alone = write_operation_in(&Posix, dir, &op, &record).unwrap_err();
+        assert!(alone.message.contains("not changed"), "nothing else was written: {}", alone.message);
+        let error = save_pending_in(&Posix, dir, &pending, || write_operation_in(&Posix, dir, &op, &record)).unwrap_err();
+        assert_uncertain(&error);
+        let saved: Pending = serde_json::from_slice(&std::fs::read(dir.join("spend-pending.json")).unwrap()).unwrap();
+        assert_eq!(saved.id, "kept", "the published pending record is kept, not rolled back");
+        assert!(!op.exists());
+        assert_eq!(std::fs::read(op.with_extension("next")).unwrap(), b"{stale");
+        // The next logical write starts fresh.
+        assert!(write_operation_in(&Posix, dir, &op, &record).unwrap_err().message.contains("not changed"));
+    }
+
+    // G1: operation record, then call index or membership
+    #[test]
+    fn an_index_or_membership_failure_after_the_operation_was_published_is_uncertain() {
+        // Index: a leftover scratch refuses the index write before its publish.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let record = record(Some(CALL));
+        let op = op_path(dir, &record);
+        let index = call_index_path(dir, "node", "peer", CALL);
+        std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+        std::fs::write(index.with_extension("next"), b"{stale").unwrap();
+        assert_uncertain(&write_operation_in(&Posix, dir, &op, &record).unwrap_err());
+        assert!(op.exists() && !index.exists());
+        assert_eq!(std::fs::read(index.with_extension("next")).unwrap(), b"{stale");
+
+        // Membership: a folder where the entry belongs refuses it before it is created.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let entry = call_membership_root(dir, "node").join(blake3::hash(b"peer").to_hex().as_str())
+            .join(blake3::hash(CALL.as_bytes()).to_hex().as_str()).join(&record.op_id);
+        std::fs::create_dir_all(&entry).unwrap();
+        let op = op_path(dir, &record);
+        assert_uncertain(&write_operation_in(&Posix, dir, &op, &record).unwrap_err());
+        assert!(op.exists() && call_index_path(dir, "node", "peer", CALL).exists());
+        assert!(entry.is_dir(), "nothing is rolled back or replaced");
+    }
+
+    // G2: a visible migration marker is not trusted while its folder flush fails
+    #[test]
+    fn a_visible_history_marker_counts_only_after_its_folder_flush() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let marker = dir.join("call-index-v2");
+        let store = FlushFails(std::cell::Cell::new(false));
+        assert!(!history_marked_in(&store, dir, &marker).unwrap(), "no marker yet");
+        // As if the marker was created but its folder flush failed.
+        std::fs::write(&marker, b"").unwrap();
+        store.0.set(true);
+        assert_uncertain(&history_marked_in(&store, dir, &marker).unwrap_err());
+        assert!(history_marked_in(&store, dir, &marker).is_err(), "still failing: still not trusted");
+        store.0.set(false);
+        assert!(history_marked_in(&store, dir, &marker).unwrap());
+        assert!(history_marked_in(&store, dir, &marker).unwrap(), "idempotent");
+        assert_eq!(std::fs::read(&marker).unwrap(), b"", "never rewritten");
     }
 
     /// Current and legacy records fit the Windows bound with wide margin;
