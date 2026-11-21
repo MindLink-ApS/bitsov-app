@@ -1007,6 +1007,7 @@ impl durable::Store for WinStore {
     fn create(&self, path: &Path) -> std::io::Result<Self::File> { crate::private_fs::create_new(path) }
     // Only ever called on a scratch file this call just created.
     fn write(&self, file: &mut Self::File, bytes: &[u8]) -> std::io::Result<()> { file.replace_contents(bytes) }
+    fn sync_file(&self, path: &Path) -> std::io::Result<()> { crate::private_fs::open_writable(path)?.sync() }
     fn read_back(&self, file: &mut Self::File, max: u64) -> std::io::Result<Vec<u8>> {
         file.read_bounded(max).map(|mut bytes| std::mem::take(&mut *bytes))
     }
@@ -1071,6 +1072,8 @@ mod durable {
         fn create(&self, path: &Path) -> io::Result<Self::File>;
         /// Write the whole new file and flush it.
         fn write(&self, file: &mut Self::File, bytes: &[u8]) -> io::Result<()>;
+        /// Flush the existing verified file at `path`, never truncating it.
+        fn sync_file(&self, path: &Path) -> io::Result<()>;
         fn read_back(&self, file: &mut Self::File, max: u64) -> io::Result<Vec<u8>>;
         /// Rename the file over `dest` by handle and flush `dest`'s folder.
         fn publish(&self, file: Self::File, dest: &Path, bytes: &[u8]) -> io::Result<()>;
@@ -1164,6 +1167,9 @@ mod durable {
                 if !store.verify(path).map_err(at(Stage::Prepare))? {
                     return Err(Failed { stage: Stage::Prepare, error: io::ErrorKind::NotFound.into() });
                 }
+                // An earlier attempt may have made it visible but failed its
+                // file flush: finish that flush before trusting it.
+                store.sync_file(path).map_err(at(Stage::Barrier))?;
             }
             Err(error) => return Err(Failed { stage: Stage::Scratch, error }),
         }
@@ -1527,7 +1533,10 @@ pub fn initialize_history(dir: &Path) -> Result<(), ActionError> {
 fn initialize_history_once(dir: &Path) -> Result<(), ActionError> {
     #[cfg(windows)] crate::private_fs::ensure_dir(dir).map_err(|_| storage_refused())?;
     let marker = dir.join("call-index-v2");
-    if history_marked(dir, &marker)? { return Ok(()); }
+    if history_marked(dir, &marker)? {
+        #[cfg(windows)] verify_history_root(dir)?;
+        return Ok(());
+    }
     for entry in history_entries(dir)? {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
@@ -1567,6 +1576,27 @@ fn initialize_history_once(dir: &Path) -> Result<(), ActionError> {
         }
     }
     create_marker(dir, &marker)
+}
+
+/// Windows: a marked history folder holds only verified private objects.
+/// The two lock files are skipped here: `open_lock` verifies them on every
+/// open, and a verifying read open would fail while another handle holds them.
+#[cfg(windows)]
+fn verify_history_root(dir: &Path) -> Result<(), ActionError> {
+    for entry in std::fs::read_dir(dir).map_err(|_| storage_refused())? {
+        let entry = entry.map_err(|_| storage_refused())?;
+        let name = entry.file_name();
+        if name == "spend.lock" || name == "history.lock" { continue; }
+        let path = entry.path();
+        let kind = entry.file_type().map_err(|_| storage_refused())?;
+        let verified = if kind.is_dir() && !kind.is_symlink() {
+            crate::private_fs::verify_dir(&path)
+        } else {
+            crate::private_fs::verify_file(&path)
+        };
+        verified.map_err(|_| storage_refused())?;
+    }
+    Ok(())
 }
 
 fn fresh_id() -> Result<String, ActionError> {
@@ -1885,6 +1915,18 @@ mod windows_journal_tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "a fresh history holds only its marker");
         grant_everyone_read(&dir.join("call-index-v2"));
         assert!(initialize_history(&dir).is_err());
+        // A valid marker plus any entry that does not verify: refused, nothing written.
+        let marked = root.join("app-spend-marked");
+        initialize_history(&marked).unwrap();
+        let marker_bytes = std::fs::read(marked.join("call-index-v2")).unwrap();
+        std::fs::create_dir(marked.join("ops")).unwrap();
+        assert!(initialize_history(&marked).is_err());
+        std::fs::remove_dir(marked.join("ops")).unwrap();
+        std::fs::write(marked.join("spend-pending.json"), b"{}").unwrap();
+        assert!(initialize_history(&marked).is_err());
+        assert_eq!(std::fs::read(marked.join("call-index-v2")).unwrap(), marker_bytes);
+        assert_eq!(std::fs::read(marked.join("spend-pending.json")).unwrap(), b"{}");
+        assert_eq!(std::fs::read_dir(&marked).unwrap().count(), 2);
         // History objects that do not verify, without the marker: refused, no marker.
         let other = root.join("app-spend-2");
         crate::private_fs::ensure_dir(&other).unwrap();
@@ -1940,6 +1982,10 @@ mod durable_tests {
         fn write(&self, file: &mut Self::File, bytes: &[u8]) -> std::io::Result<()> {
             file.0.write_all(bytes)?;
             file.0.sync_all()
+        }
+        fn sync_file(&self, path: &Path) -> std::io::Result<()> {
+            if !self.verify(path)? { return Err(std::io::ErrorKind::NotFound.into()); }
+            OpenOptions::new().read(true).write(true).open(path)?.sync_all()
         }
         fn read_back(&self, file: &mut Self::File, max: u64) -> std::io::Result<Vec<u8>> {
             file.0.seek(SeekFrom::Start(0))?;
@@ -2134,10 +2180,70 @@ mod durable_tests {
         fn verify(&self, path: &Path) -> std::io::Result<bool> { Posix.verify(path) }
         fn create(&self, path: &Path) -> std::io::Result<Self::File> { Posix.create(path) }
         fn write(&self, file: &mut Self::File, bytes: &[u8]) -> std::io::Result<()> { Posix.write(file, bytes) }
+        fn sync_file(&self, path: &Path) -> std::io::Result<()> { Posix.sync_file(path) }
         fn read_back(&self, file: &mut Self::File, max: u64) -> std::io::Result<Vec<u8>> { Posix.read_back(file, max) }
         fn publish(&self, file: Self::File, dest: &Path, bytes: &[u8]) -> std::io::Result<()> { Posix.publish(file, dest, bytes) }
         fn open_existing(&self, path: &Path) -> std::io::Result<Self::File> { Posix.open_existing(path) }
         fn delete(&self, file: Self::File) -> std::io::Result<()> { Posix.delete(file) }
+    }
+
+    /// A store whose file flush can be made to fail; counts both flushes.
+    #[derive(Default)]
+    struct FileFlushFails { fail: std::cell::Cell<bool>, file_flushes: std::cell::Cell<u32>, dir_flushes: std::cell::Cell<u32> }
+
+    impl Store for FileFlushFails {
+        type File = <Posix as Store>::File;
+        fn ensure_dir(&self, dir: &Path) -> std::io::Result<()> { Posix.ensure_dir(dir) }
+        fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+            self.dir_flushes.set(self.dir_flushes.get() + 1);
+            Posix.sync_dir(dir)
+        }
+        fn verify(&self, path: &Path) -> std::io::Result<bool> { Posix.verify(path) }
+        fn create(&self, path: &Path) -> std::io::Result<Self::File> { Posix.create(path) }
+        fn write(&self, file: &mut Self::File, bytes: &[u8]) -> std::io::Result<()> {
+            file.0.write_all(bytes)?;
+            self.flush_file(&file.0)
+        }
+        fn sync_file(&self, path: &Path) -> std::io::Result<()> {
+            if !self.verify(path)? { return Err(std::io::ErrorKind::NotFound.into()); }
+            self.flush_file(&OpenOptions::new().read(true).write(true).open(path)?)
+        }
+        fn read_back(&self, file: &mut Self::File, max: u64) -> std::io::Result<Vec<u8>> { Posix.read_back(file, max) }
+        fn publish(&self, file: Self::File, dest: &Path, bytes: &[u8]) -> std::io::Result<()> { Posix.publish(file, dest, bytes) }
+        fn open_existing(&self, path: &Path) -> std::io::Result<Self::File> { Posix.open_existing(path) }
+        fn delete(&self, file: Self::File) -> std::io::Result<()> { Posix.delete(file) }
+    }
+
+    impl FileFlushFails {
+        fn flush_file(&self, file: &File) -> std::io::Result<()> {
+            self.file_flushes.set(self.file_flushes.get() + 1);
+            if self.fail.get() { return Err(std::io::Error::other("file flush failed")); }
+            file.sync_all()
+        }
+    }
+
+    #[test]
+    fn a_visible_marker_is_trusted_only_after_its_file_flush_succeeds() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("call-index-v2");
+        let store = FileFlushFails::default();
+        store.fail.set(true);
+        let failed = durable::marker(&store, root.path(), &path).unwrap_err();
+        assert_eq!(failed.stage.outcome(), Outcome::Uncertain, "the marker is visible");
+        assert!(path.exists());
+        // The file flush keeps failing: a retry must not report success.
+        let failed = durable::marker(&store, root.path(), &path).unwrap_err();
+        assert_eq!(failed.stage.outcome(), Outcome::Uncertain);
+        assert!(!history_marked_in(&store, root.path(), &path).is_ok_and(|marked| marked));
+        assert_eq!(store.file_flushes.get(), 3, "every retry flushes the file again");
+        // Once the file flush succeeds, the folder is flushed and the marker counts.
+        store.fail.set(false);
+        let dirs_before = store.dir_flushes.get();
+        assert!(history_marked_in(&store, root.path(), &path).unwrap());
+        assert_eq!(store.file_flushes.get(), 4);
+        assert!(store.dir_flushes.get() > dirs_before);
+        durable::marker(&store, root.path(), &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"", "never truncated or rewritten");
     }
 
     const CALL: &str = "0123456789abcdef0123456789abcdef";
@@ -2272,10 +2378,18 @@ mod durable_tests {
     }
 }
 
-#[cfg(all(test, not(windows)))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Main's lock test clones the lock handle; on Windows it is the verified handle's file.
+    #[cfg(windows)]
+    trait TryCloneLock { fn try_clone(&self) -> std::io::Result<File>; }
+    #[cfg(windows)]
+    impl TryCloneLock for LockFile {
+        fn try_clone(&self) -> std::io::Result<File> { self.as_file().try_clone() }
+    }
 
     fn history_fixture(dir: &Path, id: usize, state: OperationState, kind: &str) -> OperationRecord {
         let record = OperationRecord {
