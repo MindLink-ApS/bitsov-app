@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isPermissionGranted, requestPermission, onAction, registerActionTypes } from '@tauri-apps/plugin-notification';
 import { t } from '../i18n';
+import { isMacOS } from '../platform';
 import type { Message } from './types';
 
 const ASKED = 'bitsov.notifications.asked';
@@ -16,6 +17,11 @@ let nextCallNotification = 1_000_000;
 
 /** Only live arrivals enter here; history reads never produce alerts. */
 export function createMessageNotifications() {
+  // Calls (with their Show call action) and owner approvals stay on the Mac. Windows and
+  // Linux get plain message delivery: no action types, listeners or window restoration.
+  const calls = isMacOS();
+  const sound = calls ? 'NSUserNotificationDefaultSoundName'
+    : /\bWindows\b/.test(typeof navigator === 'undefined' ? '' : navigator.userAgent) ? 'Default' : 'message-new-instant';
   const [permission, setPermission] = createSignal<'checking' | 'prompt' | 'granted' | 'denied' | 'error'>('checking');
   const [muted, updateMuted] = createSignal(notificationsMuted());
   const [deferred, setDeferred] = createSignal(read(DEFERRED));
@@ -74,25 +80,26 @@ export function createMessageNotifications() {
       }
       const focused = await window.isFocused();
       if (disposed || muted() || focused || !current()) return;
-      // The locked macOS backend maps this sentinel to the OS default sound.
+      // The locked macOS backend maps this sentinel to the OS default sound; Windows and
+      // Linux use their own default message sound names.
       // The JS sendNotification wrapper discards its promise. Await the same plugin
       // command so native failures become visible in Settings instead of unhandled errors.
       const notificationId = open ? nextCallNotification++ : undefined;
       if (open) callActions.set(notificationId!, { current, open });
       await invoke('plugin:notification|notify', { options: { title: t('notificationApp'), body,
-        ...(open ? { id: notificationId, actionTypeId: 'bitsov-incoming-call' } : { sound: 'NSUserNotificationDefaultSoundName' }) } });
+        ...(open ? { id: notificationId, actionTypeId: 'bitsov-incoming-call' } : { sound }) } });
     } catch { if (!disposed) setPermission('error'); }
   };
   const name = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '').trim().slice(0, 80) || t('notificationSomeone');
   return {
-    permission, muted, deferred, checkPermission, request,
+    permission, muted, deferred, checkPermission, request, calls,
     setMuted(value: boolean) { updateMuted(value); save(MUTED, value); },
     defer() { setDeferred(true); save(DEFERRED, true); },
     message(message: Message, ownId: string, senderName: string) {
       if (message.sender.toLowerCase() === ownId.toLowerCase() || !((message.payment_amount_msat ?? 0) > 0) || ![0, 200].includes(message.kind)) return;
       void notify(`message:${message.id}`, t('notificationMessage', name(senderName)));
     },
-    call(id: string, callerName: string, current?: () => boolean, open?: () => void) { void notify(`call:${id}`, t('notificationCall', name(callerName)), current, open); },
+    call(id: string, callerName: string, current?: () => boolean, open?: () => void) { if (calls) void notify(`call:${id}`, t('notificationCall', name(callerName)), current, open); },
     dispose() { disposed = true; seen.clear(); callActions.clear(); void listener?.then(l => l.unregister()).catch(() => {}); },
   };
 }

@@ -12042,7 +12042,7 @@ fn resume_ios_startup(app: &AppHandle) -> bool {
 /// Normal CS-1 / CS-2 desktop shell: NodeState, wallet commands, bootstrap.
 fn app_builder() -> tauri::Builder<tauri::Wry> {
     let builder = tauri::Builder::default();
-    #[cfg(all(target_os = "macos", not(feature = "mobile")))]
+    #[cfg(all(any(target_os = "macos", target_os = "windows", target_os = "linux"), not(feature = "mobile")))]
     let builder = builder.plugin(tauri_plugin_notification::init());
     #[cfg(all(desktop, not(feature = "mobile")))]
     let builder = builder
@@ -29837,7 +29837,7 @@ mod assistant_acl_tests {
         }
 
         let main_caps: Vec<_> = caps.iter().filter(|cap| applies_to(cap, "main")).collect();
-        assert_eq!(main_caps.len(), 2, "main has its app and macOS notification capabilities");
+        assert_eq!(main_caps.len(), 3, "main has its app, macOS notification and Windows/Linux message notification capabilities");
         for cap in &main_caps {
             assert_eq!(string_list(cap, "windows"), vec!["main".to_string()]);
             assert!(cap.get("remote").map(|v| v.is_null()).unwrap_or(true));
@@ -29847,6 +29847,23 @@ mod assistant_acl_tests {
         let notification_perms = permission_identifiers(notification);
         assert_eq!(notification_perms.len(), 10, "only local delivery, action/listener and window restoration grants");
         assert!(notification_perms.iter().all(|id| id.starts_with("notification:allow-") || id.starts_with("core:window:allow-")));
+        // Windows and Linux get plain message delivery only: no action types, listeners
+        // or window restoration, and never the macOS approval capability.
+        let message = main_caps.iter().find(|cap| cap["identifier"] == "message-notification").expect("message notification capability");
+        assert_eq!(string_list(message, "platforms"), vec!["windows".to_string(), "linux".to_string()]);
+        assert_eq!(
+            permission_identifiers(message).into_iter().collect::<BTreeSet<_>>(),
+            [
+                "notification:allow-is-permission-granted",
+                "notification:allow-request-permission",
+                "notification:allow-notify",
+                "core:window:allow-is-focused",
+            ]
+            .map(String::from)
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+            "message notifications grant only permission checks, delivery and a focus read"
+        );
         let main = *main_caps.iter().find(|cap| cap["identifier"] == "default").expect("main app capability");
         assert_eq!(string_list(main, "windows"), vec!["main".to_string()]);
         assert!(!applies_to(main, "assistant"));
@@ -29885,6 +29902,28 @@ mod assistant_acl_tests {
                 "inline capability objects would bypass this directory scan"
             );
         }
+    }
+
+    #[test]
+    fn notification_plugin_is_registered_on_mac_windows_and_linux() {
+        let desktop = r#"any(target_os = "macos", target_os = "windows", target_os = "linux")"#;
+        let cargo = fs::read_to_string(manifest_dir().join("Cargo.toml")).expect("Cargo.toml");
+        let section = format!("[target.'cfg({desktop})'.dependencies]");
+        let deps = cargo.split(&section).nth(1).expect("notification target dependency").split("\n[").next().unwrap();
+        assert!(deps.contains("tauri-plugin-notification = "), "the plugin is a dependency on every desktop target");
+        let source = production_source();
+        let builder = function_source(&source, "app_builder");
+        assert!(
+            builder.contains(&format!("#[cfg(all({desktop}, not(feature = \"mobile\")))]\n    let builder = builder.plugin(tauri_plugin_notification::init());")),
+            "app_builder registers the plugin on the same desktop targets"
+        );
+    }
+
+    #[cfg(all(any(target_os = "windows", target_os = "linux"), not(feature = "mobile")))]
+    #[test]
+    fn notification_plugin_links_on_windows_and_linux() {
+        let init: fn() -> tauri::plugin::TauriPlugin<tauri::Wry> = tauri_plugin_notification::init;
+        let _ = init;
     }
 
     #[test]
