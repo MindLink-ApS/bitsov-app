@@ -43,7 +43,8 @@ android {
             isShrinkResources = true
             isDebuggable = false
             isJniDebuggable = false
-            // Unsigned until a separately reviewed distribution/signing setup.
+            // CI signs the aligned APK after Gradle; credentials stay out of Gradle.
+            // CI signerer den justerede APK efter Gradle; ingen nøgler i Gradle.
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
