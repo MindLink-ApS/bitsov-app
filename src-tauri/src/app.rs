@@ -11515,9 +11515,13 @@ struct MediaSession {
     #[allow(dead_code)]
     call_id: String,
     uplink: Arc<control::media::FrameQueue>,
+    /// Puts the renderer's uplink sends back in order before `uplink`.
+    send_order: Arc<control::media::SendOrder>,
     /// The video path, on a video call only.
     video: Option<Arc<control::media::VideoPath>>,
     stop: Arc<AtomicBool>,
+    /// This session's hold on the latency-critical activity for its call.
+    activity: Arc<control::call_activity::CallHold>,
 }
 
 /// Stop the current media session, if any. Idempotent; the socket task sees
@@ -11525,6 +11529,7 @@ struct MediaSession {
 fn stop_media_session(state: &NodeState) {
     if let Some(session) = state.media.lock().unwrap().take() {
         session.stop.store(true, Ordering::SeqCst);
+        session.activity.release();
         session.uplink.clear();
         if let Some(video) = session.video {
             video.clear();
@@ -11537,6 +11542,7 @@ fn stop_media_session(state: &NodeState) {
 /// reconnect with backoff, and stop on a refusal, on `stop`, or when the app
 /// quits. Frames from the node reach the renderer through a bounded
 /// drop-oldest queue drained into the channel; link transitions go as JSON.
+#[allow(clippy::too_many_arguments)]
 async fn media_bridge<R: tauri::Runtime>(
     app: AppHandle<R>,
     call_id: String,
@@ -11546,7 +11552,10 @@ async fn media_bridge<R: tauri::Runtime>(
     stop: Arc<AtomicBool>,
     mut seal: Option<Box<control::media::SealedMedia>>,
     channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    activity: Arc<control::call_activity::CallHold>,
 ) {
+    // However this task ends, panic included, it releases the hold.
+    let _activity = control::call_activity::ReleaseOnDrop(activity);
     let state = app.state::<NodeState>();
     let downlink = control::media::FrameQueue::new(control::media::QUEUE_FRAMES);
     let stopping = || stop.load(Ordering::SeqCst) || state.quitting.load(Ordering::SeqCst);
@@ -11593,9 +11602,12 @@ async fn media_bridge<R: tauri::Runtime>(
 /// previous one. No payment and no admission change here: the node admits the
 /// socket only for a `(peer, call_id)` it already knows, under the owner's token.
 /// `video` opens the video path on the same socket; a call without it is an
-/// audio session, unchanged.
+/// audio session, unchanged. `send_base`: the renderer's uplink send count at
+/// this open; any send counted lower belongs to an earlier socket and is
+/// dropped (see [`control::media::SendOrder`]).
 #[cfg(not(feature = "call-seal"))]
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 async fn call_media_open(
     window: WebviewWindow<impl tauri::Runtime>,
     app: AppHandle<impl tauri::Runtime>,
@@ -11604,12 +11616,13 @@ async fn call_media_open(
     peer: String,
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
     video: Option<bool>,
+    send_base: Option<u64>,
 ) -> Result<(), String> {
     reject_sealed_window(&window)?;
     drop(window);
     let call_id = control::media::call_id(&call_id)?;
     let peer = control::media::peer_id(&peer)?;
-    start_media_session(app, state.inner(), call_id, peer, video.unwrap_or(false), None, on_frame);
+    start_media_session(app, state.inner(), call_id, peer, video.unwrap_or(false), None, send_base, on_frame);
     Ok(())
 }
 
@@ -11630,6 +11643,7 @@ async fn call_media_open(
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
     sealed: Option<bool>,
     video: Option<bool>,
+    send_base: Option<u64>,
 ) -> Result<(), String> {
     reject_sealed_window(&window)?;
     drop(window);
@@ -11640,10 +11654,11 @@ async fn call_media_open(
     if video && seal.is_some() {
         return Err(control::call_seal::SealError::NotReady.code().to_string());
     }
-    start_media_session(app, state.inner(), call_id, peer, video, seal, on_frame);
+    start_media_session(app, state.inner(), call_id, peer, video, seal, send_base, on_frame);
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_media_session<R: tauri::Runtime>(
     app: AppHandle<R>,
     state: &NodeState,
@@ -11651,14 +11666,39 @@ fn start_media_session<R: tauri::Runtime>(
     peer: String,
     video: bool,
     seal: Option<Box<control::media::SealedMedia>>,
+    send_base: Option<u64>,
     on_frame: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) {
+    // Taken before the old session lets go: a session replaced for the same call keeps the activity.
+    let activity = Arc::new(control::call_activity::CallActivity::system().hold(&call_id));
+    let (uplink, video, stop) = install_media_session(state, &call_id, video, send_base, activity.clone());
+    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, video, stop, seal, on_frame, activity));
+}
+
+/// Replace the current media session, if any, with a new one for `call_id`
+/// whose send order starts at `send_base`. Answers the new session's uplink,
+/// video path and stop flag for its socket task.
+#[allow(clippy::type_complexity)]
+fn install_media_session(
+    state: &NodeState,
+    call_id: &str,
+    video: bool,
+    send_base: Option<u64>,
+    activity: Arc<control::call_activity::CallHold>,
+) -> (Arc<control::media::FrameQueue>, Option<Arc<control::media::VideoPath>>, Arc<AtomicBool>) {
     let uplink = Arc::new(control::media::FrameQueue::new(control::media::QUEUE_FRAMES));
     let video = video.then(|| Arc::new(control::media::VideoPath::new()));
     let stop = Arc::new(AtomicBool::new(false));
     stop_media_session(state);
-    *state.media.lock().unwrap() = Some(MediaSession { call_id: call_id.clone(), uplink: uplink.clone(), video: video.clone(), stop: stop.clone() });
-    tauri::async_runtime::spawn(media_bridge(app, call_id, peer, uplink, video, stop, seal, on_frame));
+    *state.media.lock().unwrap() = Some(MediaSession {
+        call_id: call_id.to_string(),
+        uplink: uplink.clone(),
+        send_order: Arc::new(control::media::SendOrder::starting_at(send_base)),
+        video: video.clone(),
+        stop: stop.clone(),
+        activity,
+    });
+    (uplink, video, stop)
 }
 
 #[cfg(feature = "call-seal")]
@@ -11785,19 +11825,37 @@ fn media_payload(body: &tauri::ipc::InvokeBody) -> Result<Vec<u8>, String> {
 }
 
 /// One uplink payload for the open media session (raw bytes, no JSON). The
-/// host assigns `seq`; a full queue drops its oldest frame rather than stall.
+/// host assigns `seq` when it writes the frame; a full queue drops its oldest
+/// frame rather than stall. Async, so it runs off the main thread: a busy UI
+/// cannot hold outgoing audio back and let it go in a bunch. Sends run as
+/// separate tasks, so the renderer's count in [`control::media::SEND_ORDER_HEADER`]
+/// puts them back in order before the queue.
 #[tauri::command(rename_all = "snake_case")]
-fn call_media_send(
+async fn call_media_send(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
     request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
     reject_sealed_window(&window)?;
-    let payload = media_payload(request.body())?;
-    let slot = state.media.lock().unwrap();
-    let Some(session) = slot.as_ref() else { return Err("no media session is open".into()) };
-    session.uplink.push(payload);
-    Ok(())
+    let payload = media_payload(request.body());
+    let order = control::media::send_order(
+        request.headers().get(control::media::SEND_ORDER_HEADER).and_then(|value| value.to_str().ok()),
+    );
+    admit_media_send(state.inner(), order, payload)
+}
+
+/// One uplink send for whichever media session is open when it runs, which
+/// may be a newer one than the send was made for: the session's send order
+/// drops a send counted below its start.
+fn admit_media_send(state: &NodeState, order: Option<u64>, payload: Result<Vec<u8>, String>) -> Result<(), String> {
+    let session = state.media.lock().unwrap().as_ref().map(|session| (session.uplink.clone(), session.send_order.clone()));
+    let Some((uplink, send_order)) = session else {
+        payload?;
+        return Err("no media session is open".into());
+    };
+    let checked = payload.as_ref().map(|_| ()).map_err(Clone::clone);
+    send_order.admit(order, payload.ok(), &uplink);
+    checked
 }
 
 /// One uplink video payload for the open media session (raw bytes). Answers
@@ -11911,6 +11969,7 @@ fn run() {
         if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
             #[cfg(target_os = "ios")]
             bitsov_ffi::call_audio::terminate();
+            control::call_activity::CallActivity::system().shutdown();
             let state = app.state::<NodeState>();
             if let Some(proxy) = state.remote_proxy.lock().unwrap().take() {
                 proxy.stop();
@@ -12508,6 +12567,60 @@ fn with_call_seal_commands<R: tauri::Runtime>(
         } else {
             app(invoke)
         }
+    }
+}
+
+#[cfg(test)]
+mod media_send_session_tests {
+    use super::*;
+
+    struct NoActivity;
+    impl control::call_activity::ActivityDriver for NoActivity {
+        fn begin(&self) {}
+        fn end(&self) {}
+    }
+
+    fn open(state: &NodeState, send_base: Option<u64>) -> Arc<control::media::FrameQueue> {
+        let activity = control::call_activity::CallActivity::new(Box::new(NoActivity));
+        install_media_session(state, "call-1", false, send_base, Arc::new(activity.hold("call-1"))).0
+    }
+
+    fn drain(queue: &control::media::FrameQueue) -> Vec<u8> {
+        std::iter::from_fn(|| queue.try_pop()).map(|frame| frame[0]).collect()
+    }
+
+    /// A send from the old socket that only runs after close and a new open
+    /// looks up the new session; its lower count keeps it out of that uplink.
+    #[test]
+    fn a_stale_send_after_close_and_reopen_never_reaches_the_new_session() {
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        let old = open(&state, Some(0));
+        for count in 0..5u64 {
+            admit_media_send(&state, Some(count), Ok(vec![count as u8])).unwrap();
+        }
+        assert_eq!(drain(&old), [0, 1, 2, 3, 4]);
+        // Counts 5 and 6 were handed over for the old socket but have not run yet.
+        stop_media_session(&state);
+        let new = open(&state, Some(7));
+        admit_media_send(&state, Some(6), Ok(vec![6])).unwrap();
+        admit_media_send(&state, Some(5), Ok(vec![5])).unwrap();
+        assert!(drain(&new).is_empty(), "the old call's frames must not go to the new peer");
+        admit_media_send(&state, Some(7), Ok(vec![7])).unwrap();
+        admit_media_send(&state, Some(8), Ok(vec![8])).unwrap();
+        assert_eq!(drain(&new), [7, 8]);
+        assert!(drain(&old).is_empty());
+        stop_media_session(&state);
+    }
+
+    #[test]
+    fn a_send_without_a_session_or_count_keeps_todays_answers() {
+        let state = NodeState::for_api("http://127.0.0.1:1/api/v1");
+        assert!(admit_media_send(&state, Some(0), Ok(vec![0])).is_err());
+        let queue = open(&state, None);
+        admit_media_send(&state, None, Ok(vec![3])).unwrap();
+        assert!(admit_media_send(&state, Some(1), Err("bad".into())).is_err());
+        assert_eq!(drain(&queue), [3]);
+        stop_media_session(&state);
     }
 }
 
@@ -29772,6 +29885,19 @@ mod assistant_acl_tests {
                 "inline capability objects would bypass this directory scan"
             );
         }
+    }
+
+    #[test]
+    fn uplink_audio_sends_run_off_the_main_thread_in_send_order() {
+        let source = production_source();
+        // A sync command runs on the main thread, where a busy UI bunches frames.
+        assert!(source.contains("async fn call_media_send("), "call_media_send must stay async");
+        let send = function_source(&source, "call_media_send");
+        assert!(send.contains("admit_media_send("), "sends go through the order, not straight onto the queue");
+        assert!(!send.contains("uplink.push("));
+        let admit = function_source(&source, "admit_media_send");
+        assert!(admit.contains("send_order.admit("), "sends go through the order, not straight onto the queue");
+        assert!(!admit.contains("uplink.push("));
     }
 
     #[test]

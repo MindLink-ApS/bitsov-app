@@ -9,7 +9,11 @@
  * Downlink: the channel carries raw frames (seq + payload) as binary and
  * link transitions as JSON objects (`{ link, detail }`; Tauri hands a JSON
  * channel payload to the page already parsed). Uplink: one `call_media_send`
- * per payload, raw bytes, no JSON.
+ * per payload, raw bytes, no JSON, with a running count in a header. The host
+ * runs each send off its main thread, so sends can reach it out of order; the
+ * count lets it put them back in the order they were sent, and drop one that
+ * comes too late or belongs to an earlier socket (each open passes the count
+ * its sends start at).
  */
 import { Channel, invoke } from '@tauri-apps/api/core';
 
@@ -63,9 +67,20 @@ export function frameBytes(message: ArrayBuffer | Uint8Array | number[]): Uint8A
   return Uint8Array.from(message);
 }
 
+/** The header that carries the uplink send count (the host's `SEND_ORDER_HEADER`). */
+export const MEDIA_ORDER_HEADER = 'x-bitsov-media-order';
+
+// Shared by every bridge the app makes (one per call connection) and never reset: a send still in
+// flight from an earlier socket counts lower than every new one, and the host drops it against the
+// base each open passes.
+let sent = 0;
+
 /** The host-owned socket, through Tauri commands. */
 export function hostMediaBridge(): MediaBridge {
   let current: Channel<ChannelMessage> | null = null;
+  // Sends start once the host has opened its session. One made before would be dropped there with
+  // no session, and the new session would wait for its count.
+  let ready: Channel<ChannelMessage> | null = null;
   return {
     open: async (callId, peer, onFrame, onLink, sealed, video) => {
       const channel = new Channel<ChannelMessage>();
@@ -76,20 +91,26 @@ export function hostMediaBridge(): MediaBridge {
         if (link) onLink(link);
       };
       current = channel;
-      // Without `sealed` and `video` this is the same three arguments as a build without either.
-      const args: Record<string, unknown> = { call_id: callId, peer, on_frame: channel };
+      ready = null;
+      // Without `sealed` and `video` these are the same arguments as a build without either.
+      // `send_base`: the count this socket's sends start at, so the host drops any lower,
+      // late send from an earlier socket instead of sending it to this call's peer.
+      const args: Record<string, unknown> = { call_id: callId, peer, on_frame: channel, send_base: sent };
       if (sealed) args.sealed = true;
       if (video) args.video = true;
       await invoke<void>('call_media_open', args);
+      if (current === channel) ready = channel;
     },
     send: (payload) => {
-      if (!current) return;
-      void invoke<void>('call_media_send', payload).catch(() => undefined);
+      if (!current || ready !== current) return;
+      const headers = { [MEDIA_ORDER_HEADER]: String(sent++) };
+      void invoke<void>('call_media_send', payload, { headers }).catch(() => undefined);
     },
     sendVideo: (payload) => (current ? invoke<number>('call_media_video_send', payload).catch(() => 0) : Promise.resolve(0)),
     close: async () => {
       if (!current) return;
       current = null;
+      ready = null;
       await invoke<void>('call_media_close').catch(() => undefined);
     },
   };
