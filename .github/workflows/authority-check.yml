@@ -44,6 +44,12 @@ jobs:
           python3 scripts/test-package-mac.py
           python3 scripts/test-package-mac-arch.py
 
+      # Overlay and download guards only; no build, no network.
+      - name: Windows preview build script guards
+        run: |
+          shellcheck scripts/build-windows-remote.sh scripts/test-build-windows-remote.sh
+          bash scripts/test-build-windows-remote.sh
+
       # app #16. The source-guard layer needs no bundle and no macOS: it asserts the
       # run loop still handles BOTH RunEvent variants, that teardown never hunts a
       # port, and that SIGTERM precedes SIGKILL. The live-bundle layer skips here and
