@@ -956,6 +956,8 @@ button.small:not(.primary) { font-size: var(--t-xs); padding: 4px 10px; backgrou
   .msg { max-width: 92%; }
   .cost { flex-wrap: wrap; row-gap: 0; }
   .cost .basis { flex-basis: 100%; }
+  /* A room's can't-send reason wraps instead of being cut off (UX-10). */
+  [data-room-composer] .cost .basis { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
   .ai-providers { padding-left: var(--s-4); padding-right: var(--s-4); flex-wrap: nowrap; overflow-x: auto; }
   .ai-provider { flex: none; }
   .ai-answer { max-width: 100%; }
