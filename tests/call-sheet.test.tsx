@@ -2,7 +2,7 @@
  * The call sheet reads like a phone call: the person (their local name and a
  * round avatar), one status line, and big Answer / Decline or Cancel / Hang up.
  * No price, spending approval or command on its face; costs stay under Details.
- * Escape quiets a ringing call or closes an ended card, and never answers,
+ * Escape quiets a ringing call or closes a settled ended card, and never answers,
  * pays or hangs up. Presentation only: the call engine is driven as in the
  * other call tests, and every check reads the rendered card.
  */
@@ -449,7 +449,12 @@ describe('the call sheet in the app', () => {
     await vi.waitFor(() => expect($('[data-call-spend-needed]')).not.toBeNull());
     expect($('[data-call-spend-needed]')!.textContent).toBe(line);
     expect($('[data-call-spend-approve]')).toBeNull();
-    expect($<HTMLButtonElement>('[data-call-accept]')?.disabled ?? true).toBe(true);
+    // The price read has finished (Answer is no longer waiting on it), and Answer still cannot be pressed.
+    await vi.waitFor(() => expect(host.used('call_quote').length).toBeGreaterThan(0));
+    await vi.waitFor(() => expect($('[data-call-answer-cost]')).not.toBeNull());
+    const accept = $<HTMLButtonElement>('[data-call-accept]');
+    expect(accept).not.toBeNull();
+    expect(accept!.disabled).toBe(true);
     expect(host.used('spend_request')).toHaveLength(0);
     $<HTMLButtonElement>('[data-call-decline]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="incoming"]')).toBeNull());
@@ -505,6 +510,54 @@ describe('the call sheet in the app', () => {
     await vi.waitFor(() => expect(escapeDepth()).toBe(1));
     key('Escape');
     await vi.waitFor(() => expect($('[data-call-panel]')).toBeNull());
+  });
+
+  /** Escape on an ended card that is not settled leaves it up; Close (still offered) is the deliberate way out. */
+  const escapeKeepsCard = async (host: ReturnType<typeof stubHost>) => {
+    const ends = host.used('op_end_call').length;
+    const signals = host.used('call_signal').length;
+    key('Escape');
+    await new Promise((r) => setTimeout(r, 50));
+    expect($('[data-call-panel="ended"]')).not.toBeNull();
+    expect(host.used('op_end_call')).toHaveLength(ends);
+    expect(host.used('call_signal')).toHaveLength(signals);
+    expect(host.used('spend_request')).toHaveLength(0);
+    $<HTMLButtonElement>('[data-call-dismiss]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel]')).toBeNull());
+  };
+
+  it('Escape does not close an ended card while an earlier call is still open at the node', async () => {
+    const host = stubHost({
+      call_signal: () => { throw { code: 'call_admission_open', message: 'End the existing call before starting another admission. Nothing was paid.', operation_id: 'op-old' }; },
+    });
+    await openShell();
+    await ring();
+    await vi.waitFor(() => expect($('[data-call-end-stuck]')).not.toBeNull());
+    expect($<HTMLButtonElement>('[data-call-dismiss]')!.disabled).toBe(false);
+    await escapeKeepsCard(host);
+  });
+
+  it('Escape does not close an ended card whose end result is not known yet', async () => {
+    const host = stubHost({ op_end_call: () => { throw { code: 'spend_unknown', message: 'Outcome unknown.' }; } });
+    await openShell();
+    await ring();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-close="unknown"]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-dismiss]')?.disabled).toBe(false));
+    await escapeKeepsCard(host);
+  });
+
+  it('Escape does not close an ended card the node has not closed', async () => {
+    const host = stubHost({ op_end_call: () => { throw { code: 'price_changed', message: 'Price changed.' }; } });
+    await openShell();
+    await ring();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    $<HTMLButtonElement>('[data-call-hangup]')!.click();
+    await vi.waitFor(() => expect($('[data-call-close="refused"]')).not.toBeNull());
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-dismiss]')?.disabled).toBe(false));
+    expect($('[data-call-close-retry]')).not.toBeNull();
+    await escapeKeepsCard(host);
   });
 });
 
