@@ -43,6 +43,7 @@ jobs:
           bash scripts/test-dev-external-wrapper.sh
           python3 scripts/test-package-mac.py
           python3 scripts/test-package-mac-arch.py
+          python3 scripts/test-build-local-mac-arm64.py
 
       # app #16. The source-guard layer needs no bundle and no macOS: it asserts the
       # run loop still handles BOTH RunEvent variants, that teardown never hunts a
