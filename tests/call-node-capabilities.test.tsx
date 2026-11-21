@@ -326,6 +326,41 @@ describe('Decline and Accept with free replies (A4)', () => {
     t.e.endLocal();
   });
 
+  it('an ask left open when a call ends does not block the next call\'s reconnect, and its late answer sends nothing', async () => {
+    vi.useFakeTimers();
+    const pcs: FakePc[] = [];
+    const pending: ((ok: boolean) => void)[] = [];
+    let holdAsks = false;
+    const authorize = vi.fn(() => holdAsks ? new Promise<boolean>((r) => { pending.push(r); }) : Promise.resolve(true));
+    const t = engine({ free: true, authorize, callContinuity: () => true, quote: pricedLater(async () => ({ ok: true, value: QUOTE }) as Outcome<CallQuote>),
+      peerConnection: () => { const pc = new FakePc(); pcs.push(pc); return pc as unknown as RTCPeerConnection; } });
+    await t.e.receive(offer(), OWN);
+    await t.e.accept(QUOTE);
+    // The first call drops and its reconnect ask stays open; then the call ends.
+    holdAsks = true;
+    drop(pcs[0]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pending).toHaveLength(1);
+    t.e.endLocal();
+    await vi.advanceTimersByTimeAsync(0);
+    // A second call on the same engine drops: it asks for its own reconnect at once.
+    holdAsks = false;
+    const before = t.sent.length;
+    await t.e.receive({ ...offer(), id: 'in-400-2', plaintext: JSON.stringify({ v: 1, call_id: 'c'.repeat(32), media: 'audio', sdp: 'offer' }) }, OWN);
+    await t.e.accept(QUOTE);
+    const asked = authorize.mock.calls.length;
+    drop(pcs[pcs.length - 1]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(authorize.mock.calls.length).toBe(asked + 1);
+    expect(t.sent.slice(before).filter((s) => s.kind === 402)).toHaveLength(1);
+    // The first call's late approval changes nothing: no second request, the new call's recovery used once.
+    pending[0](true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.sent.slice(before).filter((s) => s.kind === 402)).toHaveLength(1);
+    expect(t.last().recoveryUsed).toBe(true);
+    t.e.endLocal();
+  });
+
   it('a paid call whose reconnect approval is refused keeps the reconnect: once approved, the next drop sends it once', async () => {
     vi.useFakeTimers();
     const pcs: FakePc[] = [];

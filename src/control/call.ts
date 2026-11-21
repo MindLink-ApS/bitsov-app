@@ -579,8 +579,10 @@ export function createCallEngine(deps: CallDeps) {
   /** The call (public id) this device answered free: it read no price first, so its later signals read one when needed. */
   let freeAnswered: string | null = null;
   let restartRequested = false;
-  /** A free-answered call's reconnect is waiting for its approval. */
-  let restartAsking = false;
+  /** The connection whose reconnect is waiting for its approval (one ask at a time).
+   *  Tied to that connection, so an ask left open when a call ends neither blocks
+   *  the next call nor clears its ask when it finally answers. */
+  let restartAsking: RTCPeerConnection | null = null;
   let restartAnswerPending = false;
   let restartTimer: ReturnType<typeof setTimeout> | undefined;
   let ringTimer: ReturnType<typeof setTimeout> | undefined;
@@ -752,6 +754,7 @@ export function createCallEngine(deps: CallDeps) {
     restartAttempted = false;
     restartRequested = false;
     restartAnswerPending = false;
+    restartAsking = null;
     clearTimeout(restartTimer);
     restartTimer = undefined;
     captures.forEach((cancel) => cancel());
@@ -1229,9 +1232,9 @@ export function createCallEngine(deps: CallDeps) {
     const continuity = !view.outgoing && deps.callContinuity?.() === true;
     const askedFirst = !!deps.authorize && ((!view.outgoing && freeAnswered === view.callId) || !continuity);
     if (askedFirst) {
-      if (restartAsking) return;
-      restartAsking = true;
-      const approved = await deps.authorize!().finally(() => { restartAsking = false; });
+      if (restartAsking === conn) return;
+      restartAsking = conn;
+      const approved = await deps.authorize!().finally(() => { if (restartAsking === conn) restartAsking = null; });
       if (pc !== conn || restartAttempted || restartRequested) return;
       if (!approved) {
         recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
@@ -1320,17 +1323,17 @@ export function createCallEngine(deps: CallDeps) {
     // again once the answer is in.
     const askedFirst = !!deps.authorize;
     if (askedFirst) {
-      if (restartAsking) return;
-      restartAsking = true;
+      if (restartAsking === conn) return;
+      restartAsking = conn;
       let approved = false;
       try {
         approved = await deps.authorize!();
       } catch (error) {
-        restartAsking = false;
+        if (restartAsking === conn) restartAsking = null;
         if (eligible()) recoveryRefused(conn, tr('caCallRecoveryFailed', asActionError(error).message));
         return;
       }
-      restartAsking = false;
+      if (restartAsking === conn) restartAsking = null;
       if (!eligible()) return;
       if (!approved) {
         recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
