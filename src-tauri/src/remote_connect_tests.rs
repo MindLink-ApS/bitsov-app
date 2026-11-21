@@ -716,6 +716,8 @@ async fn connected_controlled_box(app: &tauri::App<tauri::test::MockRuntime>, di
 // refresh and the live feed (its recovery, its refresh and its socket) neither
 // dial nor repeat the token exchange until the owner acts; then both resume.
 #[tokio::test]
+// Teardown keeps the proxy guard held across stop_and_wait, as before.
+#[allow(clippy::await_holding_lock)]
 async fn a_refused_session_stops_status_probes_token_refresh_and_live_recovery() {
     let app = app();
     let state = app.state::<NodeState>();
@@ -749,8 +751,7 @@ async fn a_refused_session_stops_status_probes_token_refresh_and_live_recovery()
     let resumed = control.counts();
     assert_eq!(live_feed_socket(&state).await, 404, "the socket reaches the box again");
     assert_eq!(control.counts().0, resumed.0 + 1, "dials resume");
-    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
-    proxy.stop_and_wait().await;
+    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
     task.abort();
 }
 
@@ -758,6 +759,8 @@ async fn a_refused_session_stops_status_probes_token_refresh_and_live_recovery()
 // it. A due token refresh then stays quiet, and the next status poll shows the
 // refusal, all without another dial or token request.
 #[tokio::test]
+// Teardown keeps the proxy guard held across stop_and_wait, as before.
+#[allow(clippy::await_holding_lock)]
 async fn a_refusal_met_by_the_proxy_stops_refresh_and_reaches_the_pairing_view() {
     let app = app();
     let state = app.state::<NodeState>();
@@ -779,14 +782,15 @@ async fn a_refusal_met_by_the_proxy_stops_refresh_and_reaches_the_pairing_view()
         assert_eq!(live_feed_socket(&state).await, 403);
     }
     assert_eq!(control.counts(), refused, "no dial and no token request while refused");
-    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
-    proxy.stop_and_wait().await;
+    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
     task.abort();
 }
 
 // A remote-mode token exchange the node answers 401, 403 or 404 is a refusal of
 // this app's pairing, end to end: the snapshot says so, and nothing redials.
 #[tokio::test]
+// Teardown keeps the proxy guard held across stop_and_wait, as before.
+#[allow(clippy::await_holding_lock)]
 async fn a_refused_token_exchange_after_attach_marks_the_pairing_refused() {
     for (challenge, token) in [(401, 0), (0, 403), (0, 404)] {
         let app = app();
@@ -803,8 +807,7 @@ async fn a_refused_token_exchange_after_attach_marks_the_pairing_refused() {
         status_poll(&state).await;
         tokio::time::timeout(Duration::from_secs(3), reconnect_remote_background(&state)).await.unwrap().unwrap();
         assert_eq!(control.counts(), refused, "{challenge} {token}: nothing redials");
-        let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
-        proxy.stop_and_wait().await;
+        state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
         task.abort();
     }
 }
@@ -827,6 +830,8 @@ fn owner_ticket(endpoint: String) -> String {
 // reconnects with the existing pairing (same client identity, no code) and
 // never presents the ticket again; nothing shows the refused panel.
 #[tokio::test]
+// Teardown keeps the proxy guard held across stop_and_wait, as before.
+#[allow(clippy::await_holding_lock)]
 async fn an_already_paired_ticket_reconnects_with_the_existing_pairing() {
     let app = app();
     let state = app.state::<NodeState>();
@@ -846,8 +851,7 @@ async fn an_already_paired_ticket_reconnects_with_the_existing_pairing() {
     // Later tunnels use the existing pairing too, never the ticket.
     assert_eq!(live_feed_socket(&state).await, 404, "the socket reaches the box");
     assert_eq!(control.ticket_auths.load(Ordering::SeqCst), 1);
-    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
-    proxy.stop_and_wait().await;
+    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
     task.abort();
 }
 
@@ -872,6 +876,8 @@ async fn connected_pinned_box(dir: &Path) -> (tauri::App<tauri::test::MockRuntim
 // handshake stops every automatic path (polls, token refresh, the live feed's
 // recovery and socket) and retires the session until the owner acts.
 #[tokio::test]
+// Teardown keeps the proxy guard held across stop_and_wait, as before.
+#[allow(clippy::await_holding_lock)]
 async fn a_refusal_met_by_status_polling_stops_every_automatic_dial() {
     let dir = tempfile::tempdir().unwrap();
     let (app, control, task) = connected_pinned_box(dir.path()).await;
@@ -917,8 +923,7 @@ async fn a_refusal_met_by_status_polling_stops_every_automatic_dial() {
     let polled = control.counts();
     assert_eq!(live_feed_socket(&state).await, 404, "the socket reaches the box again");
     assert_eq!(control.counts().0, polled.0 + 1, "tunnels dial again");
-    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
-    proxy.stop_and_wait().await;
+    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
     task.abort();
 }
 
@@ -926,6 +931,8 @@ async fn a_refusal_met_by_status_polling_stops_every_automatic_dial() {
 // That reply shares the `Refused` variant but is not about this app's pairing:
 // it never marks the pairing refused, and polling keeps dialing.
 #[tokio::test]
+// Teardown keeps the proxy guard held across stop_and_wait, as before.
+#[allow(clippy::await_holding_lock)]
 async fn a_lock_status_error_is_not_a_refusal_of_the_pairing() {
     let dir = tempfile::tempdir().unwrap();
     let (app, control, task) = connected_pinned_box(dir.path()).await;
@@ -941,8 +948,7 @@ async fn a_lock_status_error_is_not_a_refusal_of_the_pairing() {
         assert!(!state.remote_retry.is_refused(), "{status}: not a refusal");
         assert!(!state.pairing_snapshot().refused, "{status}");
     }
-    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
-    proxy.stop_and_wait().await;
+    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
     task.abort();
 }
 
@@ -950,6 +956,8 @@ async fn a_lock_status_error_is_not_a_refusal_of_the_pairing() {
 // refuses this app. They queue behind the first handshake; once it is refused,
 // the queued ones answer 403 without dialing.
 #[tokio::test]
+// Teardown keeps the proxy guard held across stop_and_wait, as before.
+#[allow(clippy::await_holding_lock)]
 async fn queued_proxy_tunnels_do_not_dial_after_a_refusal() {
     let app = app();
     let state = app.state::<NodeState>();
@@ -965,8 +973,7 @@ async fn queued_proxy_tunnels_do_not_dial_after_a_refusal() {
     assert_eq!(statuses, (403, 403, 403, 403, 403));
     assert_eq!(control.counts(), (before.0 + 1, before.1), "only the first tunnel reached the box");
     assert!(state.remote_retry.is_refused());
-    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
-    proxy.stop_and_wait().await;
+    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
     task.abort();
 }
 
@@ -974,6 +981,8 @@ async fn queued_proxy_tunnels_do_not_dial_after_a_refusal() {
 // already ready has nothing left to do: another token exchange would only spend
 // the node's rate limit.
 #[tokio::test]
+// Teardown keeps the proxy guard held across stop_and_wait, as before.
+#[allow(clippy::await_holding_lock)]
 async fn a_queued_bootstrap_does_not_redo_a_ready_session() {
     let app = app();
     let state = app.state::<NodeState>();
@@ -988,14 +997,15 @@ async fn a_queued_bootstrap_does_not_redo_a_ready_session() {
     tokio::time::timeout(Duration::from_secs(5), &mut queued).await.unwrap().unwrap();
     assert_eq!(control.counts(), settled, "no new handshake or token request");
     assert!(state.status_snapshot().ready);
-    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
-    proxy.stop_and_wait().await;
+    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
     task.abort();
 }
 
 // An attach cancelled after it published its proxy leaves auth unfinished. The
 // queued bootstrap finishes it, so the app does not sit waiting for a Reconnect.
 #[tokio::test]
+// Teardown keeps the proxy guard held across stop_and_wait, as before.
+#[allow(clippy::await_holding_lock)]
 async fn a_queued_bootstrap_resumes_auth_left_unfinished_behind_a_proxy() {
     let app = app();
     let state = app.state::<NodeState>();
@@ -1006,7 +1016,6 @@ async fn a_queued_bootstrap_resumes_auth_left_unfinished_behind_a_proxy() {
     tokio::time::timeout(Duration::from_secs(5), connect_remote_at(&state, dir.path(), true)).await.unwrap().unwrap();
     assert!(state.status_snapshot().ready, "the unfinished auth must complete");
     assert!(control.counts().1 > settled.1, "the token exchange must run again");
-    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
-    proxy.stop_and_wait().await;
+    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
     task.abort();
 }
