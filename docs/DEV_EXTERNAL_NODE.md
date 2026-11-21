@@ -15,6 +15,28 @@ To bundle a separate debug `.app` for pairing a test Mac with a remote node, see
 BITSOV_DEV_EXTERNAL_NODE=/abs/path/to/your/node-data-dir npm run tauri:dev:external
 ```
 
+## Dock icon wrapper
+
+`tauri.dev-external.conf.json` sets `bundle.active=false`, so Tauri makes no `.app`
+and the bare debug binary shows a generic Dock icon. To get the BitSov icon, wrap the
+binary that `npm run tauri:dev:external` built:
+
+```bash
+BITSOV_DEV_EXTERNAL_NODE=/abs/path/to/your/node-data-dir \
+  scripts/make-dev-external-wrapper.sh src-tauri/target/debug/bitsov-app \
+  "$HOME/Applications/BitSov Dev External.app"
+```
+
+With `CARGO_TARGET_DIR` set, the binary is under that directory's `debug/`. The
+wrapper's `Info.plist` starts from `src-tauri/Info.plist`, so the microphone, camera
+and local network usage strings stay; macOS ends an app that asks for the microphone
+without one. The wrapper then gets identifier `tech.mindlink.bitsov.devexternal`, `CFBundleIconFile` =
+`icon.icns` and a copy of `src-tauri/icons/icon.icns` in `Contents/Resources/`.
+`BITSOV_DEV_EXTERNAL_NODE` is optional; when set, it goes into `LSEnvironment` so a
+Dock or Finder launch attaches to that node dir. The wrapper is unsigned and is not
+built, launched or notarised by the script. Rebuild it after each new debug build.
+`scripts/test-dev-external-wrapper.sh` checks the generated bundle.
+
 ## What the app does in this mode
 
 - It talks to `http://127.0.0.1:3141/api/v1` only, as in every other mode. It refuses

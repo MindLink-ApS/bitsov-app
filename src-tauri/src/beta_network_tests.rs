@@ -165,6 +165,7 @@ pub(super) struct ReportControl {
     pub calls: Mutex<std::collections::BTreeMap<String, usize>>,
     pub probe_401: AtomicBool,
     pub require_latest: AtomicBool,
+    pub fail_identity: AtomicBool,
     pub pause: Mutex<Option<Arc<ReportPause>>>,
 }
 
@@ -201,6 +202,10 @@ pub(super) fn auth_fixture_controlled(network: Option<serde_json::Value>, routes
 }
 
 pub(super) fn auth_fixture_controlled_for_identifier(identifier: &str, network: Option<serde_json::Value>, routes: mock_node::pairing::PairRoutes, pause: Option<Pause>, control: Arc<ReportControl>) -> (NodeState, tempfile::TempDir, StatusServer) {
+    auth_fixture_controlled_for_state(NodeState::for_identifier(identifier), network, routes, pause, control)
+}
+
+pub(super) fn auth_fixture_controlled_for_state(state: NodeState, network: Option<serde_json::Value>, routes: mock_node::pairing::PairRoutes, pause: Option<Pause>, control: Arc<ReportControl>) -> (NodeState, tempfile::TempDir, StatusServer) {
     use std::io::{BufRead, Read, Write};
     let dir = tempfile::tempdir().unwrap();
     let node = test_support::mock(dir.path(), routes, now_unix());
@@ -209,7 +214,7 @@ pub(super) fn auth_fixture_controlled_for_identifier(identifier: &str, network: 
     assert_ne!(addr.port(), 3141);
     let stopped = Arc::new(AtomicBool::new(false));
     let stop = stopped.clone();
-    let mut state = NodeState::for_identifier(identifier);
+    let mut state = state;
     state.api_base = format!("http://localhost:{}/api/v1", addr.port());
     *state.external_node.lock().unwrap() = Some(dir.path().to_path_buf());
     let codes = state.printed_codes.clone();
@@ -260,6 +265,8 @@ pub(super) fn auth_fixture_controlled_for_identifier(identifier: &str, network: 
                 if control.probe_401.swap(false, Ordering::SeqCst) || auth.is_none() {
                     (401, "{}".into())
                 } else { (200, "{}".into()) }
+            } else if path == "/identity" && control.fail_identity.load(Ordering::SeqCst) {
+                (503, r#"{"error":"unavailable"}"#.into())
             } else if parts[1] == "/api/v1/health" { (200, "{}".into()) }
             else { node.handle(&parts[0], &parts[1], auth.as_deref(), &body) };
             if matches!(path, "/pair/token" | "/auth/local") && status == 200 {
@@ -493,6 +500,178 @@ async fn beta_signet_bootstrap_replaces_an_old_refusal() {
     finish_auth(&state, dir.path()).await;
     assert_eq!(state.pairing_snapshot().bootstrap.as_deref(), Some("bootstrap"));
     assert_eq!(serde_json::to_value(state.status_snapshot()).unwrap()["network_refusal"], "none");
+}
+
+/// A phone build of the product app paired to a node that reports mainnet.
+fn phone_fixture(control: Arc<ReportControl>) -> (NodeState, tempfile::TempDir, StatusServer) {
+    let state = NodeState::for_profile(crate::profile::AppProfile::for_platform("tech.mindlink.bitsov", true));
+    assert!(state.signet_only);
+    auth_fixture_controlled_for_state(state, Some("bitcoin".into()), mock_node::pairing::PairRoutes::Live, None, control)
+}
+
+async fn assert_no_wallet_dispatch(state: &NodeState, control: &ReportControl) {
+    assert!(do_invoice_create(state, 1_000, "", 3600).await.is_err());
+    assert_eq!(control.count("/payments/invoice"), 0, "no wallet request may reach an unverified node");
+}
+
+#[tokio::test]
+async fn phone_identity_failure_keeps_wallet_requests_off_the_node() {
+    let control = Arc::new(ReportControl::default());
+    control.fail_identity.store(true, Ordering::SeqCst);
+    let (state, dir, _server) = phone_fixture(control.clone());
+    finish_auth(&state, dir.path()).await;
+    assert_eq!(control.count("/identity"), 1);
+    assert_eq!(control.count("/status"), 0, "the network check never ran");
+    assert!(!state.status_snapshot().ready);
+    assert_no_wallet_dispatch(&state, &control).await;
+}
+
+#[tokio::test]
+async fn phone_wallet_requests_wait_for_the_network_check() {
+    let control = Arc::new(ReportControl::default());
+    let (state, dir, _server) = phone_fixture(control.clone());
+    authenticate(&state, dir.path()).await.unwrap();
+    assert!(state.token.lock().unwrap().is_some());
+    assert_eq!(control.count("/status"), 0, "the network check has not run yet");
+    assert_no_wallet_dispatch(&state, &control).await;
+}
+
+#[tokio::test]
+async fn beta_new_credential_does_not_inherit_an_earlier_network_check() {
+    let control = Arc::new(ReportControl::default());
+    let (state, dir, _server) = auth_fixture_controlled(Some("signet".into()), mock_node::pairing::PairRoutes::Live, None, control.clone());
+    finish_auth(&state, dir.path()).await;
+    assert!(state.status_snapshot().ready);
+    authenticate(&state, dir.path()).await.unwrap();
+    assert!(state.token.lock().unwrap().is_some());
+    assert_no_wallet_dispatch(&state, &control).await;
+}
+
+#[tokio::test]
+async fn beta_verified_signet_session_still_reaches_wallet_routes() {
+    let control = Arc::new(ReportControl::default());
+    let (state, dir, _server) = auth_fixture_controlled(Some("signet".into()), mock_node::pairing::PairRoutes::Live, None, control.clone());
+    finish_auth(&state, dir.path()).await;
+    assert!(state.status_snapshot().ready);
+    let _ = do_invoice_create(&state, 1_000, "", 3600).await;
+    assert_eq!(control.count("/payments/invoice"), 1);
+}
+
+async fn file_read_after(reauthenticate: bool) -> usize {
+    let control = Arc::new(ReportControl::default());
+    let (state, dir, _server) = auth_fixture_controlled(Some("signet".into()), mock_node::pairing::PairRoutes::Live, None, control.clone());
+    finish_auth(&state, dir.path()).await;
+    assert!(state.status_snapshot().ready);
+    if reauthenticate { authenticate(&state, dir.path()).await.unwrap(); }
+    let _ = read_file_blob(&state, "f1").await;
+    control.count("/files/f1")
+}
+
+#[tokio::test]
+async fn beta_direct_reads_wait_for_the_network_check_of_a_new_credential() {
+    assert_eq!(file_read_after(false).await, 1, "a checked session reaches the node");
+    assert_eq!(file_read_after(true).await, 0, "a new credential reads nothing before its network check");
+}
+
+/// Answers every request with 200 and records the credential each one carried.
+fn bearer_recorder() -> (String, Arc<Mutex<Vec<Option<String>>>>) {
+    use std::io::{BufRead, Read, Write};
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let base = format!("http://localhost:{}/api/v1", listener.local_addr().unwrap().port());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    std::thread::spawn(move || for stream in listener.incoming() {
+        let Ok(stream) = stream else { break };
+        let mut reader = std::io::BufReader::new(stream);
+        let (mut line, mut length, mut auth) = (String::new(), 0, None);
+        if reader.read_line(&mut line).is_err() { continue; }
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).is_err() || line == "\r\n" || line.is_empty() { break; }
+            let Some((name, value)) = line.split_once(':') else { continue };
+            if name.eq_ignore_ascii_case("content-length") { length = value.trim().parse().unwrap_or(0); }
+            if name.eq_ignore_ascii_case("authorization") { auth = value.trim().strip_prefix("Bearer ").map(str::to_owned); }
+        }
+        let mut body = vec![0; length];
+        let _ = reader.read_exact(&mut body);
+        record.lock().unwrap().push(auth);
+        let _ = write!(reader.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}");
+    });
+    (base, seen)
+}
+
+/// A credential replaced right after a request passed its network check must
+/// not ride that check: the request carries the checked credential or nothing.
+#[tokio::test]
+async fn beta_request_never_carries_a_credential_replaced_after_its_network_check() {
+    let (base, seen) = bearer_recorder();
+    let mut state = NodeState::for_identifier(BETA);
+    assert!(state.signet_only);
+    state.api_base = base;
+    *state.token.lock().unwrap() = Some("tok.checked".into());
+    let epoch = *state.network_auth_epoch.lock().unwrap();
+    *state.network_verified.lock().unwrap() = Some(epoch);
+
+    // Stop the request after its network check, before dispatch.
+    let (arrived, release) = pause_points::arm(&state.api_base, "after_network_check");
+    let request = call_api(&state, reqwest::Method::POST, "/payments/invoice", Some(serde_json::json!({})));
+    tokio::pin!(request);
+    tokio::select! {
+        _ = arrived.notified() => {},
+        result = &mut request => panic!("the request ended before its network check: {result:?}"),
+    }
+    // A new sign-in publishes its credential as `authenticate` does: under the
+    // network authority, the old check is cleared and the new credential set.
+    {
+        let _authority = state.network_auth_epoch.lock().unwrap();
+        *state.network_verified.lock().unwrap() = None;
+        *state.token.lock().unwrap() = Some("tok.unchecked".into());
+    }
+    release.notify_one();
+    let _ = request.await;
+    assert!(
+        !seen.lock().unwrap().iter().any(|auth| auth.as_deref() == Some("tok.unchecked")),
+        "a credential that never passed a network check reached the node",
+    );
+    assert_eq!(*seen.lock().unwrap(), [Some("tok.checked".to_owned())], "the request carries the credential it checked");
+
+    // The new credential is refused until its own check passes; nothing is sent.
+    let sent = seen.lock().unwrap().len();
+    assert_eq!(
+        call_api(&state, reqwest::Method::POST, "/payments/invoice", Some(serde_json::json!({}))).await,
+        Err(NETWORK_UNCHECKED.into()),
+    );
+    assert_eq!(seen.lock().unwrap().len(), sent);
+}
+
+/// A network report taken before a new sign-in cannot approve the new
+/// credential: it waits for its own identity and network checks.
+#[tokio::test]
+async fn beta_earlier_network_report_never_approves_a_replacement_credential() {
+    let control = Arc::new(ReportControl::default());
+    let (state, dir, _server) = auth_fixture_controlled(Some("signet".into()), mock_node::pairing::PairRoutes::Live, None, control.clone());
+
+    // The first sign-in's report is read, then held before it is accepted.
+    let (arrived, release) = pause_points::arm(&state.api_base, "before_report_accept");
+    let first = finish_auth(&state, dir.path());
+    tokio::pin!(first);
+    tokio::select! {
+        _ = arrived.notified() => {},
+        () = &mut first => panic!("the first sign-in finished before its report was accepted"),
+    }
+    assert_eq!(control.count("/status"), 1);
+    // A second sign-in publishes its credential while that report waits.
+    authenticate(&state, dir.path()).await.unwrap();
+    assert!(state.token.lock().unwrap().is_some());
+    release.notify_one();
+    first.await;
+
+    assert!(!state.status_snapshot().ready, "an earlier report made the new credential ready");
+    assert_no_wallet_dispatch(&state, &control).await;
+    // Its own report then approves it.
+    require_signet_report(&state, false).await.unwrap();
+    let _ = do_invoice_create(&state, 1_000, "", 3600).await;
+    assert_eq!(control.count("/payments/invoice"), 1);
 }
 
 #[path = "beta_network_renewal_tests.rs"]

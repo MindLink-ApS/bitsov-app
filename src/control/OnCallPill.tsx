@@ -1,6 +1,6 @@
 import { t } from '../i18n';
 import { createEffect, createSignal, onCleanup, Show } from 'solid-js';
-import type { CallView } from './call';
+import { shownDropAt, shownPhase, type CallView } from './call';
 import { duration } from './voice';
 
 /** One word per call state, the same in the pill and the call panel's title. */
@@ -27,16 +27,19 @@ export function OnCallPill(props: { view: CallView; onReturn: () => void }) {
     onCleanup(() => window.clearInterval(timer));
   });
   const shown = () => props.view.phase !== 'idle' && props.view.phase !== 'incoming';
+  // Interrupted node-routed media reads as Reconnecting here too (display only).
+  const phase = () => shownPhase(props.view);
   const text = () => {
     // The browser reports no network (display only, #238): said on the pill too.
-    const word = CALL_STATE_WORD[props.view.phase] + (props.view.offline ? t('uiOffline504') : '');
-    if (props.view.phase === 'reconnecting' && props.view.dropAt !== null) return `${word} · ${Math.max(0, Math.ceil((props.view.dropAt - now()) / 1000))} s`;
-    return props.view.phase === 'live' && props.view.liveAt !== null
+    const word = CALL_STATE_WORD[phase()] + (props.view.offline ? t('uiOffline504') : '');
+    const dropAt = shownDropAt(props.view);
+    if (phase() === 'reconnecting' && dropAt !== null) return `${word} · ${Math.max(0, Math.ceil((dropAt - now()) / 1000))} s`;
+    return phase() === 'live' && props.view.liveAt !== null
       ? `${word} · ${duration(Math.max(0, now() - props.view.liveAt)).padStart(5, '0')}`
       : word;
   };
   return <Show when={shown()}>
-    <button type="button" class="on-call-pill" data-on-call={props.view.phase} aria-label={t('uiReturnToCall', CALL_STATE_WORD[props.view.phase])} onClick={props.onReturn}>
+    <button type="button" class="on-call-pill" data-on-call={phase()} aria-label={t('uiReturnToCall', CALL_STATE_WORD[phase()])} onClick={props.onReturn}>
       <span class="dot" aria-hidden="true" />
       <span>{text()}</span>
     </button>

@@ -395,7 +395,7 @@ tested support claim. Recheck the rc24 sidecar minos in CI using its published s
 ## CI artifact
 
 `.github/workflows/mac-package.yml` ("Mac Package") does not run on every
-push to `main`. macos-14 is billed at 10× Linux, so the ad-hoc signed Tauri
+push to `main`. The ad-hoc signed app
 bundle runs nightly (05:00 UTC, default branch), on `v*` tags, on
 `workflow_dispatch`, and on a pull request when `full-ci` is added. The
 label sticks: later pushes to that PR build again. Adding or removing any
@@ -409,7 +409,7 @@ unsupported previews. These packaging jobs are not required checks.
   `contents: read` only. It uses `github.token` read-only for `gh release download`.
 - Fetches the pinned sidecar and explicitly re-verifies all sidecars before
   `scripts/package-mac.sh --dmg --use-existing-sidecar`. The offline checker
-  unit tests run on Linux in Authority Check, not on this 10× runner. The
+  unit tests run on Linux. The
   package script and Tauri hook re-check the sidecars too.
   The package script compares the bundled node to the source before signing.
   Before zipping, CI requires the resource seal and repeats strict signature
