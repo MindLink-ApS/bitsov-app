@@ -214,7 +214,7 @@ async fn old_refresh_cannot_publish_after_connection_generation_changes() {
         for index in 0..2 {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut bytes = [0; 4096];
-            stream.read(&mut bytes).await.unwrap();
+            let _ = stream.read(&mut bytes).await.unwrap();
             let body = if index == 0 { serde_json::json!({"challenge":"bitsov-pair-token-v1:test"}) }
                 else { serde_json::json!({"token":"late-old-token", "scopes":["read"], "expires_at":now_unix()+600}) }.to_string();
             if index == 1 {
@@ -749,7 +749,8 @@ async fn a_refused_session_stops_status_probes_token_refresh_and_live_recovery()
     let resumed = control.counts();
     assert_eq!(live_feed_socket(&state).await, 404, "the socket reaches the box again");
     assert_eq!(control.counts().0, resumed.0 + 1, "dials resume");
-    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
+    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
+    proxy.stop_and_wait().await;
     task.abort();
 }
 
@@ -778,7 +779,8 @@ async fn a_refusal_met_by_the_proxy_stops_refresh_and_reaches_the_pairing_view()
         assert_eq!(live_feed_socket(&state).await, 403);
     }
     assert_eq!(control.counts(), refused, "no dial and no token request while refused");
-    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
+    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
+    proxy.stop_and_wait().await;
     task.abort();
 }
 
@@ -801,7 +803,8 @@ async fn a_refused_token_exchange_after_attach_marks_the_pairing_refused() {
         status_poll(&state).await;
         tokio::time::timeout(Duration::from_secs(3), reconnect_remote_background(&state)).await.unwrap().unwrap();
         assert_eq!(control.counts(), refused, "{challenge} {token}: nothing redials");
-        state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
+        let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
+        proxy.stop_and_wait().await;
         task.abort();
     }
 }
@@ -843,7 +846,8 @@ async fn an_already_paired_ticket_reconnects_with_the_existing_pairing() {
     // Later tunnels use the existing pairing too, never the ticket.
     assert_eq!(live_feed_socket(&state).await, 404, "the socket reaches the box");
     assert_eq!(control.ticket_auths.load(Ordering::SeqCst), 1);
-    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
+    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
+    proxy.stop_and_wait().await;
     task.abort();
 }
 
@@ -913,7 +917,8 @@ async fn a_refusal_met_by_status_polling_stops_every_automatic_dial() {
     let polled = control.counts();
     assert_eq!(live_feed_socket(&state).await, 404, "the socket reaches the box again");
     assert_eq!(control.counts().0, polled.0 + 1, "tunnels dial again");
-    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
+    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
+    proxy.stop_and_wait().await;
     task.abort();
 }
 
@@ -936,7 +941,8 @@ async fn a_lock_status_error_is_not_a_refusal_of_the_pairing() {
         assert!(!state.remote_retry.is_refused(), "{status}: not a refusal");
         assert!(!state.pairing_snapshot().refused, "{status}");
     }
-    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
+    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
+    proxy.stop_and_wait().await;
     task.abort();
 }
 
@@ -959,7 +965,8 @@ async fn queued_proxy_tunnels_do_not_dial_after_a_refusal() {
     assert_eq!(statuses, (403, 403, 403, 403, 403));
     assert_eq!(control.counts(), (before.0 + 1, before.1), "only the first tunnel reached the box");
     assert!(state.remote_retry.is_refused());
-    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
+    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
+    proxy.stop_and_wait().await;
     task.abort();
 }
 
@@ -981,7 +988,8 @@ async fn a_queued_bootstrap_does_not_redo_a_ready_session() {
     tokio::time::timeout(Duration::from_secs(5), &mut queued).await.unwrap().unwrap();
     assert_eq!(control.counts(), settled, "no new handshake or token request");
     assert!(state.status_snapshot().ready);
-    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
+    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
+    proxy.stop_and_wait().await;
     task.abort();
 }
 
@@ -998,6 +1006,7 @@ async fn a_queued_bootstrap_resumes_auth_left_unfinished_behind_a_proxy() {
     tokio::time::timeout(Duration::from_secs(5), connect_remote_at(&state, dir.path(), true)).await.unwrap().unwrap();
     assert!(state.status_snapshot().ready, "the unfinished auth must complete");
     assert!(control.counts().1 > settled.1, "the token exchange must run again");
-    state.remote_proxy.lock().unwrap().take().unwrap().stop_and_wait().await;
+    let proxy = state.remote_proxy.lock().unwrap().take().unwrap();
+    proxy.stop_and_wait().await;
     task.abort();
 }
