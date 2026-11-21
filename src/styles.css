@@ -1923,8 +1923,32 @@ html:is([data-platform='ios'], [data-platform='android']) .cc[data-phone-shell='
   grid-template-areas: 'status' 'content' 'tabs';
   padding-bottom: 0;
 }
+/* Fixed call/meeting cards are siblings of .cc; reserve the phone tab row when the shell is active. */
+html:is([data-platform='ios'], [data-platform='android']):has(.cc[data-phone-shell='true']) {
+  --phone-tab-bar-h: calc(var(--s-1) + 44px + max(var(--s-1), var(--safe-area-bottom, env(safe-area-inset-bottom, 0px))));
+}
+html[data-keyboard-open='true']:has(.cc[data-phone-shell='true']) { --phone-tab-bar-h: 0px; }
+html:is([data-platform='ios'], [data-platform='android']):has(.cc[data-phone-shell='true']) .call-panel {
+  bottom: calc(max(var(--s-6), env(safe-area-inset-bottom, 0px)) + var(--phone-tab-bar-h));
+}
+html[data-platform='ios']:has(.cc[data-phone-shell='true']) .call-panel {
+  bottom: calc(var(--keyboard-inset) + max(var(--s-6), var(--safe-area-bottom)) + var(--phone-tab-bar-h));
+}
+/* Queued cards scroll inside .waiting-calls; an edge offset would push their header out of the list. */
+html:is([data-platform='ios'], [data-platform='android']):has(.cc[data-phone-shell='true']) .waiting-calls .call-panel {
+  bottom: auto;
+}
+html:is([data-platform='ios'], [data-platform='android']):has(.cc[data-phone-shell='true']) :is(.meeting-panel, .call-panel[data-call-panel]) {
+  max-height: calc(100dvh - max(var(--s-6), env(safe-area-inset-top, 0px)) - max(var(--s-6), env(safe-area-inset-bottom, 0px)) - var(--phone-tab-bar-h));
+}
+html[data-platform='ios']:has(.cc[data-phone-shell='true']) :is(.meeting-panel, .call-panel[data-call-panel]) {
+  max-height: calc(var(--visible-height, 100dvh) - max(var(--s-4), var(--safe-area-top)) - max(var(--s-6), var(--safe-area-bottom)) - var(--phone-tab-bar-h));
+}
 .cc[data-phone-shell='true'] [hidden] { display: none !important; }
 .phone-status { grid-area: status; max-height: 45vh; overflow-y: auto; min-width: 0; padding: var(--s-2) var(--s-4); border-bottom: 1px solid var(--line); background: var(--sunk); }
+@media (orientation: landscape) {
+  .phone-status { max-height: 30vh; }
+}
 .phone-status .node-pill { margin: 0; max-width: 100%; white-space: normal; }
 .phone-status .node-pill .what { white-space: normal; overflow-wrap: anywhere; }
 .phone-status .money-notice { margin: var(--s-1) 0 0; padding: 0; }

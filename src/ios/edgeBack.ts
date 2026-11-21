@@ -62,15 +62,15 @@ export function navigationBlocked(includeReceive = false): boolean {
   const selector = '[data-swipe-money="true"], [data-composer-panel], [data-wallet-send], [data-starter-balance], '
     + '[data-swipe-approval="true"], [data-first-spend-scrim], [data-contact-approval], [data-approval="pending"], '
     + '[data-ai-card="disclosure"][data-state="preview"], [data-ai-card="disclosure"][data-state="sending"], '
-    + '.owner-approval, [data-owner-approval-sheet], [data-phone-onboarding="words"], [data-phone-onboarding="fingerprint"], '
-    + '[data-swipe-call="true"]';
+    + '.owner-approval, [data-owner-approval-sheet], [data-phone-onboarding="words"], [data-phone-onboarding="fingerprint"]';
   return Array.from(document.querySelectorAll(selector + (includeReceive ? ', [data-wallet-receive]' : ''))).some(visibleNavigationSurface)
     || Array.from(document.querySelectorAll('dialog[open], [role="dialog"]')).some(el => visibleNavigationSurface(el)
-      && !el.matches('[data-settings], [data-wallet-page], [data-contact-panel]'));
+      && !el.matches('[data-settings], [data-wallet-page], [data-contact-panel], [data-call-panel], [data-meeting-panel]:not([data-meeting-panel="planning"])'));
 }
+const callNavigationBlocked = () => Array.from(document.querySelectorAll('[data-swipe-call="true"]')).some(visibleNavigationSurface);
 /** The same buttons handle taps and gestures. New/unrecognized dialogs fail closed. */
 export function visibleBackDestination(): Destination | null {
-  if (navigationBlocked(true)) return null;
+  if (navigationBlocked(true) || callNavigationBlocked()) return null;
   const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('button[data-ios-back]')).filter(el => visibleNavigationSurface(el) && !el.disabled);
   const route = backRoute({ routes: buttons.map(el => el.dataset.iosBack as BackRoute), money: false, approval: false, call: false, modal: false });
   const button = buttons.find(el => el.dataset.iosBack === route);
