@@ -19,7 +19,7 @@ mod tests {
         replies: Vec<(&'static str, u16, String)>,
     ) -> (NodeState, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let state = NodeState::for_api(&format!(
+        let state = NodeState::for_api(format!(
             "http://127.0.0.1:{}/api/v1",
             listener.local_addr().unwrap().port()
         ));
@@ -528,7 +528,7 @@ async fn submit(
             device: Device {
                 public_key: &record.public_key,
                 name: "BitSov app on this Mac",
-                proof: &proof,
+                proof,
             },
         })
         .map_err(|_| "Could not encode backup confirmation")?,
