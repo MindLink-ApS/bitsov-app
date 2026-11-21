@@ -326,6 +326,53 @@ describe('Decline and Accept with free replies (A4)', () => {
     t.e.endLocal();
   });
 
+  it('a paid call whose reconnect approval is refused keeps the reconnect: once approved, the next drop sends it once', async () => {
+    vi.useFakeTimers();
+    const pcs: FakePc[] = [];
+    let approved = true;
+    const authorize = vi.fn(async () => approved);
+    const t = engine({ authorize, peerConnection: () => { const pc = new FakePc(); pcs.push(pc); return pc as unknown as RTCPeerConnection; } });
+    await t.e.receive(offer(), OWN);
+    await t.e.accept(QUOTE);
+    const answered = t.sent.length;
+    approved = false;
+    drop(pcs[0]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.sent.slice(answered)).toEqual([]);
+    expect(t.last().recoveryUsed).toBe(false);
+    approved = true;
+    drop(pcs[0]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.sent.slice(answered).map((s) => [s.kind, s.body.sdp_mid])).toEqual([[402, 'bitsov-restart-v1']]);
+    expect(t.last().recoveryUsed).toBe(true);
+    t.e.endLocal();
+  });
+
+  it('a paid call refused approval for the caller\'s restart keeps the recovery: a later offer, once approved, is answered once', async () => {
+    vi.useFakeTimers();
+    let approved = true;
+    const authorize = vi.fn(async () => approved);
+    const pcs: FakePc[] = [];
+    const t = engine({ authorize, peerConnection: () => { const pc = new FakePc(); pcs.push(pc); return pc as unknown as RTCPeerConnection; } });
+    await t.e.receive(offer(), OWN);
+    await t.e.accept(QUOTE);
+    pcs[0].connectionState = 'connected'; pcs[0].onconnectionstatechange?.();
+    const answered = t.sent.filter((s) => s.kind === 401).length;
+    approved = false;
+    const restartOffer = (n: string): Message => ({ id: `in-400-${n}`, kind: 400, sender: A, recipient: OWN, timestamp: 0, payment_amount_msat: 1_000,
+      plaintext: JSON.stringify({ v: 1, call_id: n.repeat(32), media: 'audio', sdp: `v=0 offer\r\na=x-bitsov-restart-of:${ID}\r\n` }) });
+    await t.e.receive(restartOffer('e'), OWN);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.sent.filter((s) => s.kind === 401)).toHaveLength(answered);
+    expect(t.last().recoveryUsed).toBe(false);
+    approved = true;
+    await t.e.receive(restartOffer('f'), OWN);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.sent.filter((s) => s.kind === 401)).toHaveLength(answered + 1);
+    expect(t.last().recoveryUsed).toBe(true);
+    t.e.endLocal();
+  });
+
   it('a call answered free asks before it pays to answer the caller\'s restart, and pays nothing when refused', async () => {
     vi.useFakeTimers();
     let approved = true;

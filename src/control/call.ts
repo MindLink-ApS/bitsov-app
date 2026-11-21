@@ -1221,10 +1221,13 @@ export function createCallEngine(deps: CallDeps) {
       if (pc !== conn || restartAttempted || restartRequested) return;
     }
     const q = quote!;
-    // A call answered free was never approved for spending, so its paid
-    // reconnect request asks first, before the recovery counts as used: a
-    // refused or lapsed approval keeps it for the next try.
-    const askedFirst = !view.outgoing && freeAnswered === view.callId && !!deps.authorize;
+    // Whenever this reconnect needs an approval, it asks first, before the
+    // recovery counts as used: a refused or lapsed approval keeps it for the
+    // next try. A call answered free was never approved, so it always asks. On a
+    // node that keeps the call, a paid callee's reconnect request goes on the
+    // call's own authority (the host decides) and asks nothing.
+    const continuity = !view.outgoing && deps.callContinuity?.() === true;
+    const askedFirst = !!deps.authorize && ((!view.outgoing && freeAnswered === view.callId) || !continuity);
     if (askedFirst) {
       if (restartAsking) return;
       restartAsking = true;
@@ -1241,14 +1244,6 @@ export function createCallEngine(deps: CallDeps) {
     else restartAttempted = true;
     set({ recoveryUsed: true });
     try {
-      // On a node that keeps the call, the callee's reconnect request goes on the
-      // call's own authority after the approval ran out (the host decides). A
-      // recovery offer is a new admission and still asks.
-      const held = askedFirst || (!view.outgoing && deps.callContinuity?.() === true);
-      if (!held && deps.authorize && !await deps.authorize()) {
-        recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
-        return;
-      }
       if (pc !== conn) return;
       if (!view.outgoing) {
         const r = await pay(CALL_ICE, { candidate: '', sdp_mid: RESTART_REQUEST_MID }, signalCost(q));
@@ -1319,11 +1314,11 @@ export function createCallEngine(deps: CallDeps) {
     }
     const q = quote!;
     if (!conn) return;
-    // A call answered free was never approved for spending, so answering the
-    // caller's restart asks first, as the outbound reconnect request does: a
-    // refused or lapsed approval keeps the one recovery for the next try. One
-    // ask at a time; the call is checked again once the answer is in.
-    const askedFirst = freeAnswered === view.callId && !!deps.authorize;
+    // Answering the caller's restart is a new paid answer, so it asks first, as
+    // the outbound reconnect request does: a refused or lapsed approval keeps
+    // the one recovery for the next try. One ask at a time; the call is checked
+    // again once the answer is in.
+    const askedFirst = !!deps.authorize;
     if (askedFirst) {
       if (restartAsking) return;
       restartAsking = true;
@@ -1346,10 +1341,6 @@ export function createCallEngine(deps: CallDeps) {
     reconnect(conn);
     set({ recoveryUsed: true });
     try {
-      if (!askedFirst && deps.authorize && !await deps.authorize()) {
-        recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
-        return;
-      }
       if (pc !== conn) return;
       wireId = signal.call_id;
       admissions.add(signal.call_id);
