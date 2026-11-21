@@ -97,7 +97,8 @@ export function createMessageNotifications() {
     defer() { setDeferred(true); save(DEFERRED, true); },
     message(message: Message, ownId: string, senderName: string) {
       if (message.sender.toLowerCase() === ownId.toLowerCase() || !((message.payment_amount_msat ?? 0) > 0) || ![0, 200].includes(message.kind)) return;
-      void notify(`message:${message.id}`, t('notificationMessage', name(senderName)));
+      // Windows and Linux show a generic line: no sender identifier and no message content.
+      void notify(`message:${message.id}`, calls ? t('notificationMessage', name(senderName)) : t('notificationNewMessage'));
     },
     call(id: string, callerName: string, current?: () => boolean, open?: () => void) { if (calls) void notify(`call:${id}`, t('notificationCall', name(callerName)), current, open); },
     dispose() { disposed = true; seen.clear(); callActions.clear(); void listener?.then(l => l.unregister()).catch(() => {}); },
