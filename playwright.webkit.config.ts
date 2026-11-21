@@ -19,7 +19,7 @@ export default defineConfig({
     viewport: { width: 393, height: 852 },
     isMobile: true,
     hasTouch: true,
-    reducedMotion: 'reduce',
+    contextOptions: { reducedMotion: 'reduce' },
     baseURL: `http://127.0.0.1:${port}`,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
