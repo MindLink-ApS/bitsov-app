@@ -504,7 +504,7 @@ describe('control center shell', () => {
     expect(calls.some((c) => c.cmd === 'message_send')).toBe(false);
   });
 
-  it('Codex #229: Touch ID A succeeds with its envelope read delayed, A ends and B opens between polls, B\'s envelope arrives: zero sends', async () => {
+  it('Touch ID A succeeds with its envelope read delayed, A ends and B opens between polls, B\'s envelope arrives: zero sends', async () => {
     const openV = { state: 'open', lapse: null, basis: 'node_grant', open_until_ms: Date.now() + 600_000, pending: null, window_ms: 600_000, granted_op: 'cd34', armed_by_request: null };
     let envelopes: Record<string, number> = {};
     const grant = (envelopes: Record<string, number>) => ({
@@ -772,7 +772,7 @@ describe('control center shell', () => {
     expect(host.sent).toEqual([]);
   }, 15_000);
 
-  it('Codex cxr-touch-1 #1: approved behind a send still in flight, then leaving the chat: it never sends when its turn comes', async () => {
+  it('approved behind a send still in flight, then leaving the chat: it never sends when its turn comes', async () => {
     let release!: () => void;
     const st = {
       ids: { [A]: 'env-0' } as Record<string, string | null>, envelopes: { [A]: Date.now() + DAY } as Record<string, number>,
@@ -809,7 +809,7 @@ describe('control center shell', () => {
   }, 20_000);
 
   /**
-   * The Codex repro's opening: 'one' goes under A's live env-0 and stays in
+   * The queued-send reproduction: 'one' goes under A's live env-0 and stays in
    * flight; env-0 ends; 'two' is a Touch ID approve & send, approved (env-1)
    * and handed to the queue behind 'one'. Returns the release for 'one'.
    */
@@ -843,7 +843,7 @@ describe('control center shell', () => {
   }
   const budgetReads = (host: ReturnType<typeof touchHost>) => host.calls.filter((c) => c.cmd === 'budget_status').length;
 
-  it('Codex cxr-touch-1 r2 #1: a queued approve & send never goes from a budget read known to be stale', async () => {
+  it('a queued approve & send never goes from a budget read known to be stale', async () => {
     const { st, host, go } = await twoHandedBehindOne();
     st.budgetFail = true;
     const reads = budgetReads(host);
@@ -854,7 +854,7 @@ describe('control center shell', () => {
     await waitFor(() => expect(unsentReason()).toContain('It needs Touch ID again. Press Send to ask.'));
   }, 30_000);
 
-  it('Codex cxr-touch-1 r2 #2: its envelope removed and then the same one restored while queued: cancelled for good', async () => {
+  it('its envelope removed and then the same one restored while queued: cancelled for good', async () => {
     const { st, host, go } = await twoHandedBehindOne();
     st.ids = {};
     let reads = budgetReads(host);
@@ -869,7 +869,7 @@ describe('control center shell', () => {
     await waitFor(() => expect(unsentReason()).toContain('The approval was cancelled or lapsed before it went through.'));
   }, 30_000);
 
-  it('Codex cxr-touch-1 r2 #3: Touch ID approvals off and on again on this Mac while queued: cancelled for good', async () => {
+  it('Touch ID approvals off and on again on this Mac while queued: cancelled for good', async () => {
     const { st, host, go } = await twoHandedBehindOne();
     const deviceReads = () => host.calls.filter((c) => c.cmd === 'device_key_status').length;
     st.device = 'none';
@@ -885,7 +885,7 @@ describe('control center shell', () => {
     await waitFor(() => expect(unsentReason()).toContain('Touch ID approvals on this Mac stopped before it went through.'));
   }, 60_000);
 
-  it('Codex cxr-touch-1 r2: through the budget path (autopay open), leaving the chat before its turn never sends it', async () => {
+  it('through the budget path (autopay open), leaving the chat before its turn never sends it', async () => {
     const { host, go } = await twoHandedBehindOne({ budgetPath: true });
     click(`[data-track="peer:${B}"]`);
     await go();
@@ -894,13 +894,13 @@ describe('control center shell', () => {
     await waitFor(() => expect(unsentReason()).toContain('You left this chat before it was sent.'));
   }, 30_000);
 
-  it('Codex cxr-touch-1 r2: through the budget path, with nothing revoked, it sends once after the send ahead', async () => {
+  it('through the budget path, with nothing revoked, it sends once after the send ahead', async () => {
     const { host, go } = await twoHandedBehindOne({ budgetPath: true });
     await go();
     await waitFor(() => expect(host.sent).toEqual(['one', 'two']));
   }, 30_000);
 
-  it('Codex cxr-touch-1 r4: approvals on this Mac stop and come back while the Touch ID answer is still out: never sent', async () => {
+  it('approvals on this Mac stop and come back while the Touch ID answer is still out: never sent', async () => {
     let answer!: () => void;
     const st: Parameters<typeof touchHost>[0] = {
       ids: {}, envelopes: {}, device: 'registered',
@@ -928,7 +928,7 @@ describe('control center shell', () => {
     expect(mount.querySelector('[data-sending]')).toBeNull();
   }, 60_000);
 
-  it('Codex cxr-touch-1 #2: a node grant that expires after its envelope was seen never sends, even once spending opens', async () => {
+  it('a node grant that expires after its envelope was seen never sends, even once spending opens', async () => {
     const st = { ids: {} as Record<string, string | null>, envelopes: {} as Record<string, number>, spendOpen: false, grantUntil: undefined as number | undefined,
       approve: () => { st.ids = { [A]: 'env-1' }; st.envelopes = { [A]: Date.now() + DAY }; st.grantUntil = Date.now() + 1500; return { envelope_id: 'env-1' }; } };
     const host = touchHost(st);
@@ -1244,11 +1244,11 @@ describe('control center shell', () => {
     it('promises no command at the node only when the node says it can (owner_device_approval_v1)', async () => {
       await open(true, none);
       const today = mount.querySelector('[data-touch-id-first]')!.textContent!;
-      expect(today).toContain('Your node does not yet accept Touch ID approvals in place of its command');
-      expect(today).not.toContain('without a command at the node');
+      expect(today).toContain('Your box does not yet accept Touch ID approvals, so for now the person who set it up approves at the box');
+      expect(today).not.toContain('with nothing to do at the box');
       dispose?.(); mount?.remove(); vi.unstubAllGlobals();
       await open(true, none, ['owner_device_approval_v1']);
-      await waitFor(() => expect(mount.querySelector('[data-touch-id-first]')!.textContent).toContain('one Touch ID tap approves a contact here, without a command at the node'));
+      await waitFor(() => expect(mount.querySelector('[data-touch-id-first]')!.textContent).toContain('one Touch ID tap approves a contact here, with nothing to do at the box'));
     });
 
     it('a lapsed setup says "again", not "one time"', async () => {

@@ -119,7 +119,7 @@ function StarterStep(props: { nodeId: string; api: StarterApi } & Navigation) {
       <p role="status" aria-live="polite">{words()}</p>
       <Show when={status() && confirmed(status()!)} fallback={<p class="hint">{t('starterPending')}</p>}>
         <Show when={Number.isSafeInteger(status()?.push_sats) && status()!.push_sats! >= 0}>
-          <p>{t('starterReceived', amount(status()!.push_sats! * 1000))}</p>
+          <p>{t('starterReceived', amount(status()!.push_sats! * 1000, 'down'))}</p>
         </Show>
         <p class="hint">{t('starterSpendable')}</p>
       </Show>

@@ -85,7 +85,7 @@ fn load_from(
         None => {
             let mut random = Zeroizing::new([0u8; 32]);
             getrandom::getrandom(&mut *random).map_err(|_| "Could not generate the seed password")?;
-            let password = Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(&*random).into_bytes());
+            let password = Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(random.as_slice()).into_bytes());
             add(&password)?;
             Ok(password)
         }

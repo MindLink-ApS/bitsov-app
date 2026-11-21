@@ -78,6 +78,8 @@ it('keeps paid amounts on the bubble, never in an empty composer', async () => {
   await vi.waitFor(() => expect($('[data-message="message-a"]')).not.toBeNull());
   expect($<HTMLTextAreaElement>('[data-composer] textarea').value).toBe('');
   expect($('[data-send-price]').textContent).not.toMatch(/paid|betalt/);
+  const cost = $<HTMLButtonElement>('[data-message="message-a"] .sats-meta');
+  cost.click();
   expect($('[data-message="message-a"]').textContent).toContain('1 sat');
 });
 it('moves sending → sent → delivered on a delivery event', async () => {

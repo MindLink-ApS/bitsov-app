@@ -17,21 +17,23 @@ async function open(source: ReturnType<typeof sampleSource>) {
 }
 
 it.each([
-  ['en', 'Your box reads the chain from a public service.', 'See how to use your own', 'Bitcoin Core or Electrum'],
-  ['da', 'Din boks læser kæden fra en offentlig tjeneste.', 'Se, hvordan du bruger din egen', 'Bitcoin Core eller Electrum'],
-] as const)('shows the default public source and accessible guidance (%s)', async (lang, notice, action, guidance) => {
+  ['en', 'Your box follows the Bitcoin network through a public service. Nothing is needed from you.', 'Use your own instead (advanced)', 'Bitcoin Core or Electrum'],
+  ['da', 'Din boks følger Bitcoin-netværket via en offentlig tjeneste. Du behøver ikke gøre noget.', 'Brug din egen i stedet (avanceret)', 'Bitcoin Core eller Electrum'],
+] as const)('shows the default public source and accessible guidance under Settings → Node (%s)', async (lang, notice, action, guidance) => {
   setLanguagePref(lang);
   const source = sampleSource({ firstLiveMs: 1e9 });
   const base = await source.nodeOverview();
   source.nodeOverview = async () => ({ ...base, chain_view: { explorer_default: true, trust_level: 'third_party' } });
   await open(source);
-  await vi.waitFor(() => expect(mount.querySelector('[data-chain-notice]')?.textContent).toContain(notice));
-  expect(mount.querySelector('[data-chain-notice] [role="status"]')?.textContent).toBe(notice);
-  const summary = mount.querySelector<HTMLElement>('[data-chain-notice] summary')!;
+  mount.querySelector<HTMLButtonElement>('.rail .node-pill')!.click();
+  const node = '[data-panel="node"] [data-chain-notice]';
+  await vi.waitFor(() => expect(mount.querySelector(node)?.textContent).toContain(notice));
+  expect(mount.querySelector(`${node} [role="status"]`)?.textContent).toBe(notice);
+  const summary = mount.querySelector<HTMLElement>(`${node} summary`)!;
   expect(summary.textContent).toBe(action);
   summary.click();
-  expect(mount.querySelector('[data-chain-notice] details')?.hasAttribute('open')).toBe(true);
-  expect(mount.querySelector('[data-chain-notice] details')?.textContent).toContain(guidance);
+  expect(mount.querySelector(`${node} details`)?.hasAttribute('open')).toBe(true);
+  expect(mount.querySelector(`${node} details`)?.textContent).toContain(guidance);
   expect(mount.querySelector('[data-money-notice]')).toBeNull();
 });
 

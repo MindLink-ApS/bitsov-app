@@ -19,7 +19,7 @@ mod tests {
         replies: Vec<(&'static str, u16, String)>,
     ) -> (NodeState, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let state = NodeState::for_api(&format!(
+        let state = NodeState::for_api(format!(
             "http://127.0.0.1:{}/api/v1",
             listener.local_addr().unwrap().port()
         ));
@@ -528,7 +528,7 @@ async fn submit(
             device: Device {
                 public_key: &record.public_key,
                 name: "BitSov app on this Mac",
-                proof: &proof,
+                proof,
             },
         })
         .map_err(|_| "Could not encode backup confirmation")?,
@@ -664,13 +664,13 @@ async fn mark_live(state: &NodeState, expected: &str) -> Result<(), String> {
 }
 pub async fn verify_device(state: &NodeState) -> Result<(), String> {
     let store = device_store(state).map_err(|e| e.message)?;
-    let (_, mut record) = local_key(state, &store).map_err(|e| e.message)?.ok_or("Owner device not enrolled on this Mac. Enroll through the owner console; setup cannot reopen on an initialized node.")?;
+    let (_, mut record) = local_key(state, &store).map_err(|e| e.message)?.ok_or("This Mac is not added as an owner device yet. Ask the person who set up your box to add it; setup cannot reopen on a box that is already set up.")?;
     let binding = device_binding(state).await.map_err(|e| e.message)?;
     let id = key_id(&record.public_key)?;
     if binding.device_approvals.as_deref() != Some("enabled")
         || !binding.device_keys.iter().any(|k| k.key_id == id)
     {
-        return Err("Owner device not enrolled or approvals disabled. This Mac has only the authority reported by the node. Enroll through the owner console; the recovery phrase cannot be shown again.".into());
+        return Err("This Mac needs approval before it can approve payments. It has only what your box allows it. Ask the person who set up your box to add it; the recovery phrase cannot be shown again.".into());
     }
     let _guard = state.device_lifecycle.lock().unwrap();
     if device::load_record(&store).as_ref() != Some(&record) {
@@ -1053,6 +1053,7 @@ pub fn allow_legacy_device_change(state: &NodeState) -> Result<(), ActionError> 
     Ok(())
 }
 
-#[cfg(test)]
+// Uses the Unix-only beta network fixtures.
+#[cfg(all(test, unix))]
 #[path = "local_owner/network_tests.rs"]
 mod network_tests;

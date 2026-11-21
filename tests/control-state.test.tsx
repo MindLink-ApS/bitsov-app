@@ -29,14 +29,15 @@ const m = (id: string, sender: string, recipient: string, timestamp: number): Me
 const live = (message: Message, room_id: string | null = null): LiveEvent => ({ type: 'message', message, room_id });
 
 describe('sats display', () => {
-  it('keeps msat precision instead of rounding a price', () => {
-    expect(sats(1000)).toBe('1');
-    expect(sats(4242)).toBe('4.242');
-    expect(sats(1500)).toBe('1.5');
-    expect(sats(482_500_000)).toBe('482\u202f500');
-    expect(satUnit(1000)).toBe('sat');
-    expect(satUnit(2000)).toBe('sats');
-    expect(satUnit(1500)).toBe('sats');
+  it('shows whole sats, rounding a price up (never down) and saying so', () => {
+    expect(sats(1000, 'up')).toBe('1');
+    expect(sats(4242, 'up')).toBe('about 5');
+    expect(sats(1500, 'up')).toBe('about 2');
+    expect(sats(4001, 'up')).toBe('about 5');
+    expect(sats(482_500_000, 'up')).toBe('482\u202f500');
+    expect(satUnit(1000, 'up')).toBe('sat');
+    expect(satUnit(2000, 'up')).toBe('sats');
+    expect(satUnit(1500, 'up')).toBe('sats');
   });
 });
 
