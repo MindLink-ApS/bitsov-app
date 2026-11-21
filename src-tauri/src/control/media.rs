@@ -514,6 +514,12 @@ impl SentWindow {
     }
 }
 
+impl Default for VideoPath {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VideoPath {
     /// A path paced for a node at the default limits, until the node says otherwise.
     pub fn new() -> Self {
@@ -722,6 +728,7 @@ pub enum SessionEnd {
 /// frames up (assigning `seq`) and validated frames down into `downlink`,
 /// until the socket closes, drops, or `stopping` says so. Errors never quote
 /// the URL (it holds the token).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_media_session(
     url: &str,
     token: &str,
@@ -815,7 +822,7 @@ pub async fn run_media_session_full(
     on_open: &(dyn Fn(MediaLink) + Send + Sync),
 ) -> Result<(), SessionEnd> {
     let dropped = |why: &str| SessionEnd::Dropped(why.to_string());
-    let ws_protocols = |token: &str| ws_protocols(token).map_err(|why| SessionEnd::Dropped(why));
+    let ws_protocols = |token: &str| ws_protocols(token).map_err(SessionEnd::Dropped);
     let mut request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
         .map_err(|_| dropped("the media request could not be built"))?;
     request.headers_mut().insert(

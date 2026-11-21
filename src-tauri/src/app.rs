@@ -664,9 +664,7 @@ impl NodeState {
     }
 
     fn for_profile(profile: crate::profile::AppProfile) -> Self {
-        let mut state = Self::default();
-        state.remote_only = profile.remote_only();
-        state.signet_only = profile.signet_only();
+        let state = Self { remote_only: profile.remote_only(), signet_only: profile.signet_only(), ..Self::default() };
         state.remote_mode.store(state.remote_only, Ordering::SeqCst);
         #[cfg(all(desktop, not(feature = "mobile")))]
         state.local_startup.store(!state.remote_only, Ordering::SeqCst);
@@ -1939,14 +1937,14 @@ async fn attach_remote_with(
         // No passcode: say so as its own kind, so the phone can open Settings.
         Err(error) if error.to_string() == remote_access::PASSCODE_REQUIRED => {
             state.remote_retry.failed(&remote_access::RemoteError::DeviceUnavailable);
-            return set_error(&state, error.to_string());
+            return set_error(state, error.to_string());
         }
         // A background attempt leaves any earlier, more specific error in place.
         Err(_) if interaction == Interaction::Background => {
             if state.error.lock().unwrap().is_none() { set_error(state, CONFIRM_TO_RECONNECT); }
             return;
         }
-        Err(error) => return set_error(&state, error.to_string()),
+        Err(error) => return set_error(state, error.to_string()),
     };
     let ctx = Arc::new(PairingCtx {
         client: PairingClient::new(state.http.clone(), state.api_base.clone()),
@@ -2465,18 +2463,15 @@ async fn connect_remote_with(state: &NodeState, app_data_dir: &Path, wait: bool,
                 };
                 state.phone_setup.lock().unwrap().get_or_insert_with(|| saved.as_ref().is_none_or(|d|
                     d.pending_phone_enrollment()));
-                match saved {
-                    Some(descriptor) => {
-                        // Every startup with a saved link (desktop, phone, any OS) picks up an ask left due.
-                        restore_budget_ask(state, app_data_dir);
-                        attach_remote_with(state, app_data_dir, descriptor, interaction).await
-                    }
-                    None => {
-                        #[cfg(any(mobile, feature = "mobile"))]
-                        {
-                            *state.pairing_view.lock().unwrap() = PairingView::starting();
-                            set_error(state, "Pair this phone with your home node to continue.");
-                        }
+                if let Some(descriptor) = saved {
+                    // Every startup with a saved link (desktop, phone, any OS) picks up an ask left due.
+                    restore_budget_ask(state, app_data_dir);
+                    attach_remote_with(state, app_data_dir, descriptor, interaction).await
+                } else {
+                    #[cfg(any(mobile, feature = "mobile"))]
+                    {
+                        *state.pairing_view.lock().unwrap() = PairingView::starting();
+                        set_error(state, "Pair this phone with your home node to continue.");
                     }
                 }
             } else if !wait || !*state.ready.lock().unwrap() {
@@ -3786,7 +3781,7 @@ async fn remote_access_import_at<R: tauri::Runtime>(
         *state.error.lock().unwrap() = None;
         pairing_imported_at(state, app_data_dir);
         spawn_remote_connect(_app, app_data_dir, true);
-        return Ok(RemoteImportView { restart_required: false, ..result });
+        Ok(RemoteImportView { restart_required: false, ..result })
     }
     // The owner chose a node at home: stop offering to create one here.
     #[cfg(all(desktop, not(feature = "mobile")))]
@@ -7709,6 +7704,7 @@ async fn resume_admission_send(state: &NodeState, pending_id: &str, peer: &str, 
     Ok(MoneyReply { text, operation_id: Some(id) })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn do_message_send_inner(
     state: &NodeState,
     recipient: &str,
@@ -8327,6 +8323,7 @@ async fn do_call_offer_with_minutes(
 ///   (defence in depth). Until a check passes the call is `Offering` and no
 ///   minute is payable; a hold above the consent is `Refused` for good (set
 ///   before the hangup), so it is never paid, and the call is hung up.
+///
 /// An offer that did not go through ends the call's consent for good: its
 /// terms can never be admitted later, under these or wider ones.
 async fn offer_within_consent(
@@ -8515,7 +8512,7 @@ mod pause_points {
     static GATES: Mutex<Vec<Gate>> = Mutex::new(Vec::new());
 
     /// One pause at `point` for this node: (arrived, release). Tests only.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(any(not(test), feature = "mobile"), allow(dead_code))]
     pub fn arm(api_base: &str, point: &'static str) -> (Arc<Notify>, Arc<Notify>) {
         let (arrived, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
         GATES.lock().unwrap().push(Gate { api_base: api_base.into(), point, arrived: arrived.clone(), release: release.clone() });
@@ -8715,21 +8712,6 @@ async fn do_call_block(state: &NodeState, peer: &str, call_id: &str, seq: u32) -
         })
     }.await;
     act::with_op(Fallback(existing_operation.as_deref()), result)
-}
-
-/// One paid call signal (offer, answer, ICE or hangup) to one contact.
-/// Same authority as a 1:1 message: the owner's budget or the ten-minute
-/// window, one journaled spend at a time, a durable operation id when the
-/// node keeps them. Calls go to contacts already in the book: a first
-/// contact is a message, never a ring.
-async fn do_call_signal(
-    state: &NodeState,
-    peer: &str,
-    kind: u16,
-    plaintext: &str,
-    max_msat: u64,
-) -> Result<act::CallReceipt, ActionError> {
-    do_call_signal_for_admission(state, peer, kind, plaintext, max_msat, None).await
 }
 
 async fn do_call_signal_for_admission(
@@ -9975,7 +9957,7 @@ fn save_device_record_if(
 fn allow_device_change(state: &NodeState) -> Result<(), ActionError> {
     #[cfg(all(desktop, not(feature = "mobile")))]
     {
-        return local_owner::allow_legacy_device_change(state);
+        local_owner::allow_legacy_device_change(state)
     }
     #[cfg(any(mobile, feature = "mobile"))]
     {
@@ -10766,6 +10748,7 @@ async fn call_hold(
 
 /// `POST /messages/compose` for one call signal (kinds 400-403).
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 async fn call_signal(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -11002,6 +10985,7 @@ async fn ai_read_topic(state: &NodeState, topic: ai::Topic, since_ms: Option<u64
 
 /// One topic from the node, as the broker projects it, with its freshness.
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 async fn ai_read(
     window: WebviewWindow<impl tauri::Runtime>,
     state: State<'_, NodeState>,
@@ -12042,7 +12026,7 @@ fn resume_ios_startup(app: &AppHandle) -> bool {
 /// Normal CS-1 / CS-2 desktop shell: NodeState, wallet commands, bootstrap.
 fn app_builder() -> tauri::Builder<tauri::Wry> {
     let builder = tauri::Builder::default();
-    #[cfg(all(target_os = "macos", not(feature = "mobile")))]
+    #[cfg(all(any(target_os = "macos", target_os = "windows", target_os = "linux"), not(feature = "mobile")))]
     let builder = builder.plugin(tauri_plugin_notification::init());
     #[cfg(all(desktop, not(feature = "mobile")))]
     let builder = builder
@@ -12282,6 +12266,23 @@ fn assistant_mock_builder() -> tauri::Builder<tauri::Wry> {
 #[path = "beta_network_tests.rs"]
 mod beta_network_tests;
 
+/// One paid call signal (offer, answer, ICE or hangup) to one contact.
+/// Same authority as a 1:1 message: the owner's budget or the ten-minute
+/// window, one journaled spend at a time, a durable operation id when the
+/// node keeps them. Calls go to contacts already in the book: a first
+/// contact is a message, never a ring.
+#[cfg(test)]
+#[cfg_attr(feature = "mobile", allow(dead_code))]
+async fn do_call_signal(
+    state: &NodeState,
+    peer: &str,
+    kind: u16,
+    plaintext: &str,
+    max_msat: u64,
+) -> Result<act::CallReceipt, ActionError> {
+    do_call_signal_for_admission(state, peer, kind, plaintext, max_msat, None).await
+}
+
 #[cfg(test)]
 mod phone_signet_gate_tests {
     use super::*;
@@ -12388,8 +12389,8 @@ mod device_sign_error_tests {
         std::fs::write(&blob, b"not a readable enclave key").unwrap();
         #[cfg(unix)] {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&blob, std::fs::Permissions::from_mode(0o000)).unwrap();
-            std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o000)).unwrap();
+            std::fs::set_permissions(&blob, std::fs::Permissions::from_mode(0o0)).unwrap();
+            std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o0)).unwrap();
         }
         for _ in 0..20 {
             assert_eq!(local_device_record(&state, dir.path()).unwrap(), Some(record.clone()));
@@ -15185,7 +15186,7 @@ mod control_act_tests {
                 assert_eq!(pending(&node).unwrap().operation_id, id);
                 continue;
             }
-            assert_eq!(op_ids(&node), [id.clone()], "the existing operation id is reused");
+            assert_eq!(op_ids(&node), std::slice::from_ref(&id), "the existing operation id is reused");
             assert_eq!(err.code, "spend_unknown", "retry={delivery_retry}, operation_id={has_operation_id}");
             assert!(!err.message.contains("Nothing was paid"));
             assert_eq!(err.operation_id, id);
@@ -19118,9 +19119,10 @@ mod control_act_tests {
         node.state.spend_timeout = Duration::from_secs(30);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let ops = paid.lock().unwrap();
-            let reached = if state.is_some() { ops.ops.len() > before } else { !ops.drop_next };
-            drop(ops);
+            let reached = {
+                let ops = paid.lock().unwrap();
+                if state.is_some() { ops.ops.len() > before } else { !ops.drop_next }
+            };
             if reached { return; }
             assert!(Instant::now() < deadline, "the node never took the minute");
             tokio::time::sleep(Duration::from_millis(2)).await;
@@ -25872,6 +25874,7 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         let now = now_unix();
         serde_json::json!({"op_id": "rel-1", "client_id": "c1", "granted_at": now, "expires_at": now + 86_400,
             "budget_msat": 200_000, "used_msat": 0, "remaining_msat": 200_000, "per_call_max_msat": 200_000,
+            "message_per_payment_max_msat": 200_000,
             "per_recipient_msat": {peer: 200_000}, "used_by_recipient": {}, "recipients_only": true,
             "per_act_max_by_recipient": {peer: per_act_msat}, "recipient_expires_at": {peer: now + 86_400}})
     }
@@ -27723,7 +27726,7 @@ fn bound_status_read_does_not_dispatch_after_deadline_during_final_validation() 
         spend_status_now(&node.state).await.unwrap();
         assert_eq!(asks(&node), 1);
         // The box said yes: the app keeps its own lock closed until the owner taps.
-        assert!(node.state.wants.lock().unwrap().window == false && node.state.wants.lock().unwrap().budget.is_none());
+        assert!(!node.state.wants.lock().unwrap().window && node.state.wants.lock().unwrap().budget.is_none());
         assert_ne!(node.state.spend.lock().unwrap().view(now_ms()).state, act::SpendState::Open);
         assert_eq!(budget_now(&node.state).autopay.state, budget::AutopayState::Off);
 
@@ -29838,7 +29841,7 @@ mod assistant_acl_tests {
         }
 
         let main_caps: Vec<_> = caps.iter().filter(|cap| applies_to(cap, "main")).collect();
-        assert_eq!(main_caps.len(), 2, "main has its app and macOS notification capabilities");
+        assert_eq!(main_caps.len(), 3, "main has its app, macOS notification and Windows/Linux message notification capabilities");
         for cap in &main_caps {
             assert_eq!(string_list(cap, "windows"), vec!["main".to_string()]);
             assert!(cap.get("remote").map(|v| v.is_null()).unwrap_or(true));
@@ -29848,6 +29851,23 @@ mod assistant_acl_tests {
         let notification_perms = permission_identifiers(notification);
         assert_eq!(notification_perms.len(), 10, "only local delivery, action/listener and window restoration grants");
         assert!(notification_perms.iter().all(|id| id.starts_with("notification:allow-") || id.starts_with("core:window:allow-")));
+        // Windows and Linux get plain message delivery only: no action types, listeners
+        // or window restoration, and never the macOS approval capability.
+        let message = main_caps.iter().find(|cap| cap["identifier"] == "message-notification").expect("message notification capability");
+        assert_eq!(string_list(message, "platforms"), vec!["windows".to_string(), "linux".to_string()]);
+        assert_eq!(
+            permission_identifiers(message).into_iter().collect::<BTreeSet<_>>(),
+            [
+                "notification:allow-is-permission-granted",
+                "notification:allow-request-permission",
+                "notification:allow-notify",
+                "core:window:allow-is-focused",
+            ]
+            .map(String::from)
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+            "message notifications grant only permission checks, delivery and a focus read"
+        );
         let main = *main_caps.iter().find(|cap| cap["identifier"] == "default").expect("main app capability");
         assert_eq!(string_list(main, "windows"), vec!["main".to_string()]);
         assert!(!applies_to(main, "assistant"));
@@ -29886,6 +29906,28 @@ mod assistant_acl_tests {
                 "inline capability objects would bypass this directory scan"
             );
         }
+    }
+
+    #[test]
+    fn notification_plugin_is_registered_on_mac_windows_and_linux() {
+        let desktop = r#"any(target_os = "macos", target_os = "windows", target_os = "linux")"#;
+        let cargo = fs::read_to_string(manifest_dir().join("Cargo.toml")).expect("Cargo.toml");
+        let section = format!("[target.'cfg({desktop})'.dependencies]");
+        let deps = cargo.split(&section).nth(1).expect("notification target dependency").split("\n[").next().unwrap();
+        assert!(deps.contains("tauri-plugin-notification = "), "the plugin is a dependency on every desktop target");
+        let source = production_source();
+        let builder = function_source(&source, "app_builder");
+        assert!(
+            builder.contains(&format!("#[cfg(all({desktop}, not(feature = \"mobile\")))]\n    let builder = builder.plugin(tauri_plugin_notification::init());")),
+            "app_builder registers the plugin on the same desktop targets"
+        );
+    }
+
+    #[cfg(all(any(target_os = "windows", target_os = "linux"), not(feature = "mobile")))]
+    #[test]
+    fn notification_plugin_links_on_windows_and_linux() {
+        let init: fn() -> tauri::plugin::TauriPlugin<tauri::Wry> = tauri_plugin_notification::init;
+        let _ = init;
     }
 
     #[test]
