@@ -1,6 +1,6 @@
 //! Explicit Linux storage preparation. Startup does not install this provider.
 use super::Sealer;
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
+use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305 as WrappingCipher, KeyInit, Nonce};
 use zeroize::Zeroizing;
 
 const HEADER: &[u8; 8] = b"BSLSS002";
@@ -8,12 +8,13 @@ const PREFIX_LEN: usize = 8 + 32 + 12;
 const MAX_PLAINTEXT: usize = 8192;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProviderError { Unavailable, Locked, Failed }
+pub(crate) enum ProviderError { Unavailable, Missing, Locked, Failed }
 
 impl std::fmt::Display for ProviderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Unavailable => "Secret Service is unavailable",
+            Self::Missing => "Secret Service item is missing; restore the original item",
             Self::Locked => "Secret Service is locked",
             Self::Failed => "Secret Service operation failed",
         })
@@ -31,6 +32,14 @@ pub(crate) struct LinuxSealer {
 }
 
 fn failed<T>(_: T) -> String { ProviderError::Failed.to_string() }
+
+fn key_hasher() -> Zeroizing<blake3::Hasher> { Zeroizing::new(blake3::Hasher::new()) }
+
+fn wrapping_key_id(key: &[u8]) -> [u8; 32] {
+    let mut hasher = key_hasher();
+    hasher.update(key);
+    *hasher.finalize().as_bytes()
+}
 
 impl LinuxSealer {
     /// Construct without connecting, unlocking, or installing a provider.
@@ -57,8 +66,8 @@ impl Sealer for LinuxSealer {
     fn seal(&self, purpose: &str, plaintext: &[u8]) -> Result<Vec<u8>, String> {
         if plaintext.len() > MAX_PLAINTEXT { return Err(failed(())); }
         let wrapping_key = self.backend.key(false).map_err(|error| error.to_string())?;
-        if blake3::hash(&wrapping_key).as_bytes() != &self.key_id { return Err(failed(())); }
-        let key = LessSafeKey::new(UnboundKey::new(&CHACHA20_POLY1305, &wrapping_key).map_err(failed)?);
+        if wrapping_key_id(&wrapping_key) != self.key_id { return Err(failed(())); }
+        let key = WrappingCipher::new_from_slice(&wrapping_key).map_err(failed)?;
         let mut nonce = [0; 12];
         getrandom::getrandom(&mut nonce).map_err(failed)?;
         let mut sealed = Vec::with_capacity(PREFIX_LEN + plaintext.len() + 16);
@@ -67,7 +76,7 @@ impl Sealer for LinuxSealer {
         sealed.extend_from_slice(&nonce);
         let aad = self.aad(purpose, &sealed)?;
         let mut body = Zeroizing::new(plaintext.to_vec());
-        key.seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::from(aad), &mut *body)
+        key.encrypt_in_place(Nonce::from_slice(&nonce), &aad, &mut *body)
             .map_err(failed)?;
         sealed.extend_from_slice(&body);
         Ok(sealed)
@@ -77,14 +86,12 @@ impl Sealer for LinuxSealer {
         if sealed.len() < PREFIX_LEN + 16 || sealed.len() > PREFIX_LEN + MAX_PLAINTEXT + 16
             || &sealed[..8] != HEADER { return Err(failed(())); }
         let wrapping_key = self.backend.key(false).map_err(|error| error.to_string())?;
-        if blake3::hash(&wrapping_key).as_bytes() != &self.key_id || self.key_id != sealed[8..40] { return Err(failed(())); }
-        let key = LessSafeKey::new(UnboundKey::new(&CHACHA20_POLY1305, &wrapping_key).map_err(failed)?);
+        if wrapping_key_id(&wrapping_key) != self.key_id || self.key_id != sealed[8..40] { return Err(failed(())); }
+        let key = WrappingCipher::new_from_slice(&wrapping_key).map_err(failed)?;
         let nonce: [u8; 12] = sealed[40..PREFIX_LEN].try_into().map_err(failed)?;
         let aad = self.aad(purpose, &sealed[..PREFIX_LEN])?;
         let mut body = Zeroizing::new(sealed[PREFIX_LEN..].to_vec());
-        let length = key.open_in_place(Nonce::assume_unique_for_key(nonce), Aad::from(aad), &mut body)
-            .map_err(failed)?.len();
-        body.truncate(length);
+        key.decrypt_in_place(Nonce::from_slice(&nonce), &aad, &mut *body).map_err(failed)?;
         Ok(body)
     }
 }
