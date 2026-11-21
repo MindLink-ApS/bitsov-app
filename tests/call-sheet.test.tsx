@@ -73,6 +73,16 @@ describe('the call sheet head', () => {
     expect(root.querySelector('[data-call-status-live]')!.getAttribute('role')).toBe('status');
   });
 
+  it('an ended call that never connected keeps the "read this" highlight on its status line', () => {
+    dispose = render(() => <div class="call-panel"><CallSheetHead view={view({ phase: 'ended', reason: 'declined' })} name="Maya" known nameId="n" statusId="s" now={0} /></div>, root);
+    const css = readFileSync(join(process.cwd(), 'src/styles.css'), 'utf8');
+    const selectors = [...css.matchAll(/^([^{}\n]*\[data-call-ended\][^{}\n]*)\{/gm)].map((m) => m[1].trim());
+    expect(selectors.length).toBeGreaterThan(0);
+    // Every rule meant for the ended reason applies to the element the sheet actually renders.
+    const status = root.querySelector('#s')!;
+    for (const sel of selectors) expect(status.matches(sel) || status.querySelector(sel) !== null).toBe(true);
+  });
+
   it('an unknown caller: Unknown contact, a neutral avatar, and no id anywhere in the head', () => {
     setLanguagePref('da');
     dispose = render(() => <CallSheetHead view={view({ phase: 'incoming' })} name="Ukendt kontakt" known={false} nameId="n" statusId="s" now={0} />, root);
@@ -324,6 +334,29 @@ describe('the call sheet in the app', () => {
     const focusable = [...$('[data-call-panel="incoming"]')!.querySelectorAll<HTMLElement>('button, summary, a[href], input')]
       .map((el) => el.matches('[data-call-accept]') ? 'answer' : el.matches('[data-call-decline]') ? 'decline' : el.tagName === 'SUMMARY' ? 'details' : el.outerHTML.slice(0, 40));
     expect(focusable).toEqual(['answer', 'decline', 'details']);
+  });
+
+  it.each(['unset', 'closed'] as const)('spending %s: still one Details after Answer and Decline, with the setup inside it', async (block) => {
+    const host = stubHost({
+      pairing_status: () => ({ ...paired, scopes: ['read', 'receive'] }),
+      spend_status: () => ({ state: block === 'closed' ? 'expired' : 'locked', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 }),
+      budget_status: () => block === 'unset' ? null : ({
+        paused: false, waiting_for_owner: false, ceiling_msat: 500_000, max_daily_msat: 100_000_000, spent_msat: 0, unsettled_msat: 0,
+        preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }],
+        rows: [{ target: A, room: false, limit_msat: 50_000, spent_msat: 0 }],
+        autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null },
+        window_ms: 600_000, node_grant: null,
+      }),
+    });
+    await openShell();
+    incoming(host);
+    await vi.waitFor(() => expect($('[data-call-spend-needed]')).not.toBeNull());
+    const panel = $('[data-call-panel="incoming"]')!;
+    const focusable = [...panel.querySelectorAll<HTMLElement>('button, summary, a[href], input')]
+      .map((el) => el.matches('[data-call-accept]') ? 'answer' : el.matches('[data-call-decline]') ? 'decline' : el.tagName === 'SUMMARY' ? 'details' : el.matches('[data-call-spend-approve]') ? 'setup' : el.outerHTML.slice(0, 40));
+    expect(focusable).toEqual(['answer', 'decline', 'details', 'setup']);
+    expect(panel.querySelectorAll('details')).toHaveLength(1);
+    expect($('[data-call-spend-approve]')!.closest('details')!.open).toBe(false);
   });
 
   it('Escape quiets the ringtone only: the sheet stays, nothing is answered, sent or paid', async () => {

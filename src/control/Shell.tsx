@@ -4210,19 +4210,13 @@ function CallPanel(props: {
           <p class="hint" data-call-decline-note>{tr('caCallDeclineFreeNote')}</p>
         </Show>
         {/* Spending is agreed when the device is paired. If it is not open now, the ringing card says why in plain words:
-            never set up, paused, or set up but not approved right now. The way to approve stays one tap away under
-            Details, never a spending form over the ringing card. Approving cannot lift a pause, so a paused card offers none. */}
+            never set up, paused, or set up but not approved right now. The way to approve sits in the card's one Details,
+            after Answer and Decline, never a spending form over the ringing card. Approving cannot lift a pause, so a paused
+            card offers none. */}
         <Show when={v().phase === 'incoming' && props.spendingReady === false}>
           <p class="hint" role="status" data-call-spend-needed>
             {tr(props.spendBlock === 'paused' ? 'callSpendingPaused' : props.spendBlock === 'closed' ? 'caAnswerNeedsSpendingApproval' : 'callNotSetUp')}
           </p>
-          <Show when={props.spendBlock !== 'paused'}>
-            <details class="quiet-detail" data-call-setup-detail>
-              <summary>{tr('uiDetails')}</summary>
-              <Show when={props.spendBlock !== 'closed'}><p class="hint">{tr('caAnswerNeedsSpendingApproval')}</p></Show>
-              <button type="button" class="link" data-call-spend-approve disabled={props.blocked || v().silenced} onClick={() => props.approveSpending?.()}>{tr(props.spendBlock === 'closed' ? 'uiApproveSpending' : 'callSetUp')}</button>
-            </details>
-          </Show>
         </Show>
         {props.approval}
         {/* No surprise camera: before Accept, a video call says the camera comes on, and how to turn it off. */}
@@ -4413,6 +4407,13 @@ function CallPanel(props: {
         <Show when={v().phase !== 'ended' && (!props.routed || v().phase !== 'idle')}>
           <details class="quiet-detail" data-call-details>
             <summary>{tr('uiDetails')}</summary>
+            {/* Spending not open on a ringing card: how to set it up or approve it, in this one Details (none for a pause). */}
+            <Show when={v().phase === 'incoming' && props.spendingReady === false && props.spendBlock !== 'paused'}>
+              <div data-call-setup-detail>
+                <Show when={props.spendBlock !== 'closed'}><p class="hint">{tr('caAnswerNeedsSpendingApproval')}</p></Show>
+                <button type="button" class="link" data-call-spend-approve disabled={props.blocked || v().silenced} onClick={() => props.approveSpending?.()}>{tr(props.spendBlock === 'closed' ? 'uiApproveSpending' : 'callSetUp')}</button>
+              </div>
+            </Show>
             {/* What answering can cost this owner, in words: the answer, their own hangup, and only a reconnect beyond that (each one signal, all-in).
                 Kept one tap away here: the ringing card itself carries no price. */}
             {/* Who this is when they are not a contact: the start of their key, for a deliberate check. */}

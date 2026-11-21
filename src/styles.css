@@ -1306,7 +1306,7 @@ button.danger.soft { border-radius: var(--r-chip); padding: 7px 14px; font-weigh
 .call-panel header strong { font-weight: 600; }
 .call-panel [data-call-paid] { color: var(--muted); }
 /* An ended call that never started (e.g. above the grant ceiling): read it, nothing moved. */
-.call-panel p.hint[data-call-ended] { color: var(--ink); background: var(--raised); border-left: 3px solid var(--money); border-radius: var(--r-control); padding: var(--s-2) var(--s-3); max-width: none; line-height: 1.5; }
+.call-panel .call-status:has([data-call-ended]) { color: var(--ink); background: var(--raised); border-left: 3px solid var(--money); border-radius: var(--r-control); padding: var(--s-2) var(--s-3); max-width: none; line-height: 1.5; }
 .call-panel .duration { color: var(--muted); }
 .meeting-panel .meeting-legs label { font-size: var(--t-sm); }
 
