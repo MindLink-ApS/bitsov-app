@@ -32,6 +32,8 @@ const QUOTE: CallQuote = { offer_msat: 10_000, offer_max_routing_fee_msat: 5_000
  * closed while money is still in it (`remaining_msat`) or a minute is still being paid.
  * `clearHold`: settle retired the reservation once the node dropped the call. A minute paid
  * as the call ended can still be unknown (`lostMinute`) or paid and not delivered (`undeliveredMinute`).
+ * `closed` defaults to true (the node has marked the hold closed). `confirming`: the owner's hold
+ * confirmation is still with the host, which can still be true after settle has cleared the reservation.
  */
 const endedMinutes = (over: {
   paying: boolean;
@@ -39,13 +41,15 @@ const endedMinutes = (over: {
   lostMinute?: boolean;
   undeliveredMinute?: boolean;
   clearHold?: boolean;
+  closed?: boolean;
+  confirming?: boolean;
 }): MinutesView => {
   const reservation: CallReservation | null = over.clearHold ? null : {
     reserved_msat: 15_000, spent_msat: 0, remaining_msat: over.remaining_msat,
-    per_block_msat: 10_000, per_block_fee_msat: 5_000, max_call_minutes: 1, released_msat: 0, closed: true,
+    per_block_msat: 10_000, per_block_fee_msat: 5_000, max_call_minutes: 1, released_msat: 0, closed: over.closed ?? true,
   };
   return {
-    agreedBlockMsat: 10_000, reservationMaxMsat: 15_000, reservation, confirmed: true, confirming: false, holdError: null,
+    agreedBlockMsat: 10_000, reservationMaxMsat: 15_000, reservation, confirmed: true, confirming: over.confirming === true, holdError: null,
     paidUntilMs: null, blocks: 0, receiptsMsat: 0, paying: over.paying,
     lostMinute: over.lostMinute === true, undeliveredMinute: over.undeliveredMinute === true,
     undeliveredPendingId: null, stop: null, settled: false, final: false,
@@ -516,6 +520,40 @@ describe('the call sheet in the app', () => {
     expect(host.used('op_end_call')).toHaveLength(0);
   });
 
+  it('payments paused: a waiting Answer refuses even when its callback is invoked directly', async () => {
+    const host = stubHost({
+      spend_status: () => ({ state: 'expired', basis: null, open_until_ms: null, pending: null, window_ms: 600_000 }),
+      budget_status: () => ({
+        paused: true, waiting_for_owner: false, ceiling_msat: 500_000, max_daily_msat: 100_000_000, spent_msat: 0, unsettled_msat: 0,
+        preset: 'careful', presets: [{ id: 'careful', contact_msat: 50_000, room_msat: 100_000, ceiling_msat: 500_000 }],
+        rows: [{ target: A, room: false, limit_msat: 50_000, spent_msat: 0 }],
+        autopay: { state: 'off', open_until_ms: null, ceiling_msat: null, basis: null },
+        window_ms: 600_000, node_grant: null,
+      }),
+    });
+    await openShell();
+    incoming(host);
+    await vi.waitFor(() => expect($('[data-call-main][data-call-panel="incoming"]')).not.toBeNull());
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'live-waiting', kind: 400, sender: A, recipient: OWN, timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: 'f'.repeat(32), media: 'audio', sdp: 'v=0 waiting' }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-panel="incoming"]')).not.toBeNull());
+    // Decline the first call for free so the waiting card is otherwise answerable. Only the pause can stop it.
+    $<HTMLButtonElement>('[data-call-main] [data-call-decline]')!.click();
+    await vi.waitFor(() => expect($('[data-call-main]')).toBeNull());
+    await vi.waitFor(() => expect($('[data-waiting-calls] [data-call-answer-cost]')).not.toBeNull());
+    const accept = $<HTMLButtonElement>('[data-waiting-calls] [data-call-accept]')!;
+    expect(accept.disabled).toBe(true);
+    const signals = host.used('call_signal').length;
+    accept.disabled = false;
+    accept.click();
+    await new Promise((r) => setTimeout(r, 100));
+    expect($('[data-waiting-calls] [data-call-panel="incoming"]')).not.toBeNull();
+    expect($('[data-call-panel="connecting"]')).toBeNull();
+    expect($('[data-call-approval]')).toBeNull();
+    expect(host.used('call_signal')).toHaveLength(signals);
+    expect(host.used('spend_request')).toHaveLength(0);
+    expect(host.used('op_end_call')).toHaveLength(0);
+  });
+
   it.each([
     ['en', 'Calling…', 'Cancel', 'Ringing…', 'Hang up', 'In call'],
     ['da', 'Ringer op…', 'Annuller', 'Ringer…', 'Læg på', 'I samtale'],
@@ -654,6 +692,20 @@ describe('the call sheet in the app', () => {
     await vi.waitFor(() => expect($('[data-call-close]')).toBeNull());
     return host;
   };
+
+  it('Escape does not close an ended card while the minutes hold is still open, even with nothing left in it', async () => {
+    const host = await hangupWithMinutes({ paying: false, remaining_msat: 0, closed: false });
+    // Nothing is left in the hold, and it is not marked closed, so only that open hold can keep the card.
+    expect($('[data-call-nothing-more]')).toBeNull();
+    await escapeKeepsCard(host);
+  });
+
+  it('Escape does not close an ended card while the minutes hold is still being confirmed', async () => {
+    const host = await hangupWithMinutes({ paying: false, remaining_msat: 0, clearHold: true, confirming: true });
+    // Settle has already dropped the reservation. Only the in-flight confirmation can keep the card.
+    expect($('[data-call-nothing-more]')).toBeNull();
+    await escapeKeepsCard(host);
+  });
 
   it.each([
     ['lost', { paying: false, remaining_msat: 0, lostMinute: true, clearHold: true }],
