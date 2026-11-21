@@ -6,7 +6,7 @@ afterEach(() => setLanguagePref('en'));
 it('preserves both paid-but-undelivered warnings exactly in Danish', () => {
   setLanguagePref('da');
   expect(undeliveredCopy({ paid_msat: 1500, retry: true })).toEqual({
-    title: 'Betalt 1,5 sats · endnu ikke leveret',
+    title: 'Betalt ca. 2 sats · endnu ikke leveret',
     body: 'Send ikke igen. Et nyt leveringsforsøg betaler intet nyt.',
     detail: 'Betalingen er gennemført; beskeden er ikke leveret. Et nyt forsøg sender det allerede betalte bevis igen. Hvis der skal betales mere (beskedpris eller adgang efter en genforbindelse), stopper den før betaling og spørger først med prisen.',
   });

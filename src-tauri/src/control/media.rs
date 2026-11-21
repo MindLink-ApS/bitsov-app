@@ -300,6 +300,93 @@ impl FrameQueue {
     }
 }
 
+/// The request header that carries the renderer's running count of uplink
+/// sends: the order in which it handed frames over.
+pub const SEND_ORDER_HEADER: &str = "x-bitsov-media-order";
+/// Later frames held while an earlier one has not arrived. Past this many
+/// (80 ms of audio) the missing frame is given up on and the rest go on.
+pub const SEND_ORDER_HOLD: usize = 4;
+
+/// A renderer's send count from its request header; anything else is none.
+pub fn send_order(value: Option<&str>) -> Option<u64> {
+    value?.trim().parse().ok()
+}
+
+/// Puts uplink frames back in the order the renderer sent them before they
+/// enter the uplink queue. Each send runs as its own task off the main thread,
+/// and two of them can reach this point in either order. Nothing here assigns
+/// `seq` or waits: `seq` is still assigned when a frame is written to the
+/// socket, and the queue keeps its own drop-oldest rule.
+///
+/// A frame counted below the next expected one is dropped, never queued: one
+/// that turns up after its gap was skipped, or one from an earlier session
+/// (the renderer's count never resets, and the session starts at the count it
+/// had at open). The receiver conceals a missing frame as one lost on the way;
+/// a frame sent out of place would be heard.
+#[derive(Default)]
+pub struct SendOrder {
+    state: Mutex<SendOrderState>,
+}
+
+#[derive(Default)]
+struct SendOrderState {
+    /// The count expected next: the session's base, or else the first frame
+    /// that arrives.
+    next: Option<u64>,
+    /// Frames that came early. `None`: a send that failed its checks, which
+    /// only frees its place.
+    held: std::collections::BTreeMap<u64, Option<Vec<u8>>>,
+}
+
+impl SendOrder {
+    /// A send order whose first expected count is `base`, the renderer's count
+    /// when it opened this session; none keeps the first frame that arrives.
+    pub fn starting_at(base: Option<u64>) -> Self {
+        Self { state: Mutex::new(SendOrderState { next: base, ..SendOrderState::default() }) }
+    }
+
+    /// Take one send: `order` is its count (none from a renderer that does not
+    /// send one, which goes straight on), `payload` the frame, or none when the
+    /// send failed its checks. Every frame now in order goes onto `queue`.
+    pub fn admit(&self, order: Option<u64>, payload: Option<Vec<u8>>, queue: &FrameQueue) {
+        // Held across the pushes, so frames enter the queue in the order released.
+        let mut state = self.state.lock().unwrap();
+        let Some(order) = order else {
+            if let Some(payload) = payload {
+                queue.push(payload);
+            }
+            return;
+        };
+        let next = *state.next.get_or_insert(order);
+        if order < next {
+            // Its place was given up, or it belongs to an earlier session:
+            // dropped, so nothing leaves out of capture order.
+            return;
+        }
+        state.held.insert(order, payload);
+        if order > next && state.held.len() <= SEND_ORDER_HOLD {
+            return;
+        }
+        let mut next = if order == next { next } else { *state.held.keys().next().expect("a frame is held") };
+        while let Some(payload) = state.held.remove(&next) {
+            if let Some(payload) = payload {
+                queue.push(payload);
+            }
+            next += 1;
+            // Too many waited behind a gap: skip it.
+            if !state.held.contains_key(&next) && state.held.len() > SEND_ORDER_HOLD {
+                next = *state.held.keys().next().expect("a frame is held");
+            }
+        }
+        state.next = Some(next);
+    }
+
+    /// Frames waiting for an earlier one.
+    pub fn held(&self) -> usize {
+        self.state.lock().unwrap().held.len()
+    }
+}
+
 /// What the video path may send per second: a token bucket, so in any one
 /// second it sends at most its rate plus one burst. The node counts in fixed
 /// one-second windows and closes the socket past its budget, so video must
@@ -1093,6 +1180,191 @@ mod tests {
         assert!(!zero.push(vec![1]));
         assert!(zero.push(vec![2]));
         assert_eq!(zero.try_pop(), Some(vec![2]));
+    }
+
+    fn drain(queue: &FrameQueue) -> Vec<u8> {
+        std::iter::from_fn(|| queue.try_pop()).map(|frame| frame[0]).collect()
+    }
+
+    #[test]
+    fn send_order_reads_only_a_plain_count() {
+        assert_eq!(send_order(Some("17")), Some(17));
+        assert_eq!(send_order(Some(" 0 ")), Some(0));
+        assert_eq!(send_order(Some("-1")), None);
+        assert_eq!(send_order(Some("x")), None);
+        assert_eq!(send_order(None), None);
+    }
+
+    #[test]
+    fn sends_that_arrive_out_of_order_enter_the_queue_in_order() {
+        let order = SendOrder::default();
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        for (count, byte) in [(10, 10), (12, 12), (13, 13), (11, 11), (15, 15), (14, 14)] {
+            order.admit(Some(count), Some(vec![byte]), &queue);
+        }
+        assert_eq!(drain(&queue), [10, 11, 12, 13, 14, 15]);
+        assert_eq!(order.held(), 0);
+    }
+
+    #[test]
+    fn a_failed_send_frees_its_place() {
+        let order = SendOrder::default();
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(Some(0), Some(vec![0]), &queue);
+        order.admit(Some(2), Some(vec![2]), &queue);
+        assert_eq!(drain(&queue), [0]);
+        order.admit(Some(1), None, &queue);
+        assert_eq!(drain(&queue), [2]);
+    }
+
+    #[test]
+    fn a_missing_send_is_given_up_after_the_hold() {
+        let order = SendOrder::default();
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(Some(0), Some(vec![0]), &queue);
+        for count in 2..2 + SEND_ORDER_HOLD as u64 {
+            order.admit(Some(count), Some(vec![count as u8]), &queue);
+        }
+        assert_eq!(drain(&queue), [0], "the hold waits for 1");
+        order.admit(Some(6), Some(vec![6]), &queue);
+        assert_eq!(drain(&queue), [2, 3, 4, 5, 6]);
+        // The missing one turns up after all: too late, dropped rather than
+        // sent after 2..6, where it would be heard out of place.
+        order.admit(Some(1), Some(vec![1]), &queue);
+        order.admit(Some(7), Some(vec![7]), &queue);
+        assert_eq!(drain(&queue), [7]);
+    }
+
+    /// No frame ever leaves after one counted higher.
+    fn assert_capture_order(sent: &[u8]) {
+        assert!(sent.windows(2).all(|pair| pair[0] < pair[1]), "out of capture order: {sent:?}");
+    }
+
+    #[test]
+    fn with_a_base_a_first_frame_that_arrives_late_still_leaves_first() {
+        let order = SendOrder::starting_at(Some(0));
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        for count in [1u64, 0, 2] {
+            order.admit(Some(count), Some(vec![count as u8]), &queue);
+        }
+        let sent = drain(&queue);
+        assert_eq!(sent, [0, 1, 2]);
+        assert_capture_order(&sent);
+    }
+
+    #[test]
+    fn without_a_base_a_frame_below_the_first_arrival_is_dropped_not_reordered() {
+        let order = SendOrder::starting_at(None);
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        for count in [1u64, 0, 2] {
+            order.admit(Some(count), Some(vec![count as u8]), &queue);
+        }
+        let sent = drain(&queue);
+        assert_eq!(sent, [1, 2]);
+        assert_capture_order(&sent);
+    }
+
+    #[test]
+    fn a_late_frame_after_a_skip_is_dropped_not_appended() {
+        let order = SendOrder::starting_at(Some(0));
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(Some(0), Some(vec![0]), &queue);
+        for count in 2..3 + SEND_ORDER_HOLD as u64 {
+            order.admit(Some(count), Some(vec![count as u8]), &queue);
+        }
+        order.admit(Some(1), Some(vec![1]), &queue);
+        order.admit(Some(7), Some(vec![7]), &queue);
+        let sent = drain(&queue);
+        assert_eq!(sent, [0, 2, 3, 4, 5, 6, 7]);
+        assert_capture_order(&sent);
+        assert_eq!(order.held(), 0);
+    }
+
+    #[test]
+    fn with_a_base_a_stale_frame_counted_lower_is_dropped() {
+        let order = SendOrder::starting_at(Some(40));
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(Some(39), Some(vec![39]), &queue);
+        order.admit(Some(12), Some(vec![12]), &queue);
+        assert!(drain(&queue).is_empty());
+        assert_eq!(order.held(), 0);
+        order.admit(Some(41), Some(vec![41]), &queue);
+        assert_eq!(drain(&queue), Vec::<u8>::new(), "41 waits for 40");
+        order.admit(Some(40), Some(vec![40]), &queue);
+        assert_eq!(drain(&queue), [40, 41]);
+    }
+
+    #[test]
+    fn sends_without_a_count_go_straight_on() {
+        let order = SendOrder::default();
+        let queue = FrameQueue::new(QUEUE_FRAMES);
+        order.admit(None, Some(vec![2]), &queue);
+        order.admit(None, Some(vec![1]), &queue);
+        order.admit(None, None, &queue);
+        assert_eq!(drain(&queue), [2, 1]);
+    }
+
+    #[test]
+    fn the_queue_keeps_its_drop_oldest_rule_behind_the_order() {
+        let order = SendOrder::default();
+        let queue = FrameQueue::new(3);
+        for count in [0u64, 2, 1, 3, 4] {
+            order.admit(Some(count), Some(vec![count as u8]), &queue);
+        }
+        assert_eq!(queue.dropped(), 2);
+        assert_eq!(drain(&queue), [2, 3, 4]);
+    }
+
+    /// Sends arriving scrambled while the socket side drains slowly: the
+    /// sender never waits on the consumer, and what leaves is in send order.
+    #[test]
+    fn order_holds_under_a_slow_consumer_and_the_sender_never_waits() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+        use std::time::Instant;
+        const FRAMES: u64 = 400;
+        let order = SendOrder::default();
+        let queue = Arc::new(FrameQueue::new(QUEUE_FRAMES));
+        let done = Arc::new(AtomicBool::new(false));
+        let popped = Arc::new(AtomicUsize::new(0));
+        let consumer = {
+            let (queue, done, popped) = (queue.clone(), done.clone(), popped.clone());
+            std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                loop {
+                    match queue.try_pop() {
+                        Some(frame) => {
+                            seen.push(u64::from_be_bytes(frame.try_into().unwrap()));
+                            popped.fetch_add(1, Ordering::SeqCst);
+                            // A socket far slower than the sender.
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        None if done.load(Ordering::SeqCst) => return seen,
+                        None => std::thread::sleep(Duration::from_micros(200)),
+                    }
+                }
+            })
+        };
+        let mut slowest = Duration::ZERO;
+        // After the first, each block of four arrives in a different scrambled
+        // order, as sends in flight together can.
+        for block in (0..FRAMES).step_by(4) {
+            for (index, step) in [2, 0, 3, 1].into_iter().enumerate() {
+                let count = if block == 0 { index as u64 } else { block + (step + block / 4) % 4 };
+                let begun = Instant::now();
+                order.admit(Some(count), Some(count.to_be_bytes().to_vec()), &queue);
+                slowest = slowest.max(begun.elapsed());
+            }
+        }
+        let consumed_while_sending = popped.load(Ordering::SeqCst);
+        done.store(true, Ordering::SeqCst);
+        let seen = consumer.join().unwrap();
+        assert!(slowest < Duration::from_millis(50), "a send waited {slowest:?}");
+        assert!(consumed_while_sending < FRAMES as usize / 2, "the sender kept pace with the consumer ({consumed_while_sending} taken)");
+        assert_eq!(order.held(), 0);
+        assert!(seen.windows(2).all(|pair| pair[0] < pair[1]), "out of order: {seen:?}");
+        assert!(queue.dropped() > 0, "the slow consumer let the queue fill");
+        assert_eq!(seen.len() as u64 + queue.dropped(), FRAMES, "only the queue's own rule drops");
     }
 
     #[tokio::test]

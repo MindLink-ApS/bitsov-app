@@ -185,6 +185,7 @@ const insideStream = async (page: Page) => {
 test('1280x800: the money notice leaves the assistant provider bar usable', async ({ page }) => {
   await openApp(page);
   // Ask your node: the provider bar sits right under the chat header.
+  await page.locator('[data-rail-advanced] > summary').click();
   await page.locator('[data-track="ai"]').click();
   await expect(page.locator('section.track [data-ai-providers] button').first()).toBeVisible();
   const notice = await showNotice(page);
@@ -256,6 +257,7 @@ const openAssistantBars = async (page: Page, height: number) => {
   await page.addInitScript(assistantHost);
   await page.goto('/');
   await page.locator('button', { hasText: 'I understand' }).first().click();
+  await page.locator('[data-rail-advanced] > summary').click();
   await page.locator('[data-track^="assistant:"]').first().click();
   await expect(page.locator('section.track [data-assistant-ready]')).toBeVisible();
   // Watches and the local-server options open: the bars above the list are as tall as they get.

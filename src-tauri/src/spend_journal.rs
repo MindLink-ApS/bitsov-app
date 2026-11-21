@@ -105,6 +105,22 @@ pub struct Pending {
     /// the node answers from its record and never pays one key twice.
     #[serde(default)]
     pub direct: Option<DirectRequest>,
+    /// Saved by a cleanup that has proven this attempt unpaid, just before it
+    /// releases the attempt's reservation. If that release, or the clear after
+    /// it, then fails, reconciliation carries out exactly this decision: it
+    /// asks no node and decides nothing itself. Written only in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpaid_release: Option<UnpaidRelease>,
+}
+
+/// A cleanup's saved decision: release the reservation, record the outcome,
+/// then put back `restore` (the record from before the attempt) or clear.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnpaidRelease {
+    pub outcome: OperationState,
+    #[serde(default)]
+    pub restore: Option<Box<Pending>>,
 }
 
 /// `POST /payments/pay` or `/payments/keysend` under a client `request_id`
@@ -362,7 +378,7 @@ impl Journal {
             max_msat, target: None, over_budget: false, accounting_msat: None, evidence_reservation_msat: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false,
             peer: operation_id.as_ref().and(body["recipient"].as_str()).map(str::to_string),
             operation_id, dispatched_at: None, op, resumable: false, non_dispatch_proven: false, admission_resume: false, compose_fee_msat: body["max_routing_fee_msat"].as_u64(), failure_final_on: None, operation_record: None,
-            direct: None,
+            direct: None, unpaid_release: None,
         };
         if let Some(id) = &pending.operation_id {
             let signal_kind = body["kind"].as_u64().unwrap_or(0);
@@ -907,12 +923,16 @@ fn call_index_path(dir: &Path, node_id: &str, peer: &str, call: &str) -> PathBuf
 }
 
 /// What is at a call's index slot before `record` may be written there.
+// Windows initializes history without the index graph (see initialize_history).
+#[cfg_attr(windows, allow(dead_code))]
 enum IndexSlot { Absent, Keep, Replace }
 
 /// A call index slot that cannot be checked. Already logged by
 /// `damaged_record`; the caller turns it into `damaged_record_error`.
+#[cfg_attr(windows, allow(dead_code))]
 struct SlotDamaged;
 
+#[cfg_attr(windows, allow(dead_code))]
 fn slot_damaged() -> SlotDamaged {
     let _ = damaged_record();
     SlotDamaged
@@ -923,6 +943,7 @@ fn slot_damaged() -> SlotDamaged {
 /// symlink, an unreadable file or a mapping whose record is missing or
 /// damaged is evidence of an admission that cannot be checked any more:
 /// refuse, and leave it in place for the owner's repair.
+#[cfg_attr(windows, allow(dead_code))]
 fn index_slot(dir: &Path, path: &Path, record: &OperationRecord) -> Result<IndexSlot, SlotDamaged> {
     let old: CallIndex = match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| slot_damaged())?,
@@ -953,6 +974,7 @@ fn history_lock(dir: &Path) -> Result<File, ActionError> {
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(windows, allow(dead_code))]
 fn history_lock(_dir: &Path) -> Result<File, ActionError> {
     Err(unknown("private spend journal storage is not supported on this platform"))
 }
@@ -985,6 +1007,27 @@ fn write_call_index(_dir: &Path, _record: &OperationRecord) -> Result<(), Action
 /// One-time upgrade of pre-index H1 history, before authenticating/enabling money
 /// actions. Never invoked with NodeState::money or spend.lock held. Writers and
 /// migration serialize only a single index update at a time.
+/// Windows: operation records and indexes cannot be written there yet, so a
+/// valid history folder holds at most the migration marker. Anything else is
+/// unexpected and refused as is (no reset, no write). The folder and marker
+/// are private objects, and the marker is made durable with a real flush.
+#[cfg(windows)]
+pub fn initialize_history(dir: &Path) -> Result<(), ActionError> {
+    crate::private_fs::ensure_dir(dir).map_err(unknown)?;
+    let marker = dir.join("call-index-v2");
+    // Checked on every start, with or without a marker.
+    for entry in std::fs::read_dir(dir).map_err(unknown)? {
+        if entry.map_err(unknown)?.file_name() != "call-index-v2" {
+            return Err(damaged_record());
+        }
+    }
+    if !absent(&marker) {
+        return crate::private_fs::verify_file(&marker).map_err(unknown);
+    }
+    crate::private_fs::ensure_marker(&marker).map_err(unknown)
+}
+
+#[cfg(not(windows))]
 pub fn initialize_history(dir: &Path) -> Result<(), ActionError> {
     let marker = dir.join("call-index-v2");
     if marker.exists() { return Ok(()); }
@@ -1063,6 +1106,66 @@ pub fn terminal(pending: &Pending, rows: &[serde_json::Value]) -> Option<&'stati
             _ => None,
         }
     })
+}
+
+#[cfg(all(test, windows))]
+mod windows_history_tests {
+    use super::*;
+    use crate::private_fs::fixtures::*;
+
+    #[test]
+    fn a_fresh_history_gets_a_private_marker_and_restarts_cleanly() {
+        if elevated() {
+            return;
+        }
+        let dir = temp_root("history").join("app-spend");
+        initialize_history(&dir).unwrap();
+        crate::private_fs::verify_file(&dir.join("call-index-v2")).unwrap();
+        initialize_history(&dir).unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn unexpected_or_tampered_history_is_refused_without_writes() {
+        if elevated() {
+            return;
+        }
+        let root = temp_root("history-tampered");
+        // An existing marker with a widened access list.
+        let dir = root.join("app-spend");
+        initialize_history(&dir).unwrap();
+        grant_everyone_read(&dir.join("call-index-v2"));
+        assert!(initialize_history(&dir).is_err());
+        // A valid marker plus any other entry: refused, nothing written.
+        let marked = root.join("app-spend-marked");
+        initialize_history(&marked).unwrap();
+        let marker_bytes = std::fs::read(marked.join("call-index-v2")).unwrap();
+        std::fs::create_dir(marked.join("ops")).unwrap();
+        assert!(initialize_history(&marked).is_err());
+        std::fs::remove_dir(marked.join("ops")).unwrap();
+        std::fs::write(marked.join("spend-pending.json"), b"{}").unwrap();
+        assert!(initialize_history(&marked).is_err());
+        assert_eq!(std::fs::read(marked.join("call-index-v2")).unwrap(), marker_bytes);
+        assert_eq!(std::fs::read(marked.join("spend-pending.json")).unwrap(), b"{}");
+        assert_eq!(std::fs::read_dir(&marked).unwrap().count(), 2);
+        // Any history object without the marker: refused, no marker written.
+        let other = root.join("app-spend-2");
+        crate::private_fs::ensure_dir(&other).unwrap();
+        std::fs::create_dir(other.join("ops")).unwrap();
+        assert!(initialize_history(&other).is_err());
+        assert!(absent(&other.join("call-index-v2")));
+        // A plainly created marker inherits its access list: refused.
+        let plain = root.join("app-spend-3");
+        crate::private_fs::ensure_dir(&plain).unwrap();
+        std::fs::write(plain.join("call-index-v2"), b"").unwrap();
+        assert!(initialize_history(&plain).is_err());
+        // Reparse point as the history folder.
+        let link = root.join("link");
+        junction(&link, &dir);
+        assert!(initialize_history(&link).is_err());
+        // Wrong owner.
+        assert!(initialize_history(&foreign_owned_dir()).is_err());
+    }
 }
 
 #[cfg(test)]
@@ -1613,7 +1716,7 @@ mod tests {
     #[test]
     fn reconciliation_needs_exact_terminal_outgoing_evidence() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, failure_final_on: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, non_dispatch_proven: false, admission_resume: false, compose_fee_msat: None, operation_record: None, direct: None };
+            target:Some(Target::Payment { hash:"abc".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, failure_final_on: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, non_dispatch_proven: false, admission_resume: false, compose_fee_msat: None, operation_record: None, direct: None, unpaid_release: None };
         assert_eq!(terminal(&p, &[]), None);
         assert_eq!(terminal(&p, &[json!({"payment_hash":"other", "amount_msat":2000, "direction":"outgoing", "status":"settled"})]), None);
         for status in ["pending", "inflight", "expired", "unknown"] {
@@ -1629,7 +1732,7 @@ mod tests {
     #[test]
     fn message_reconciliation_rejects_other_sender_and_recipient() {
         let p = Pending { id: "attempt".into(), rollback_charge_id: None, node_id:"node".into(), request_hash:"hash".into(), max_msat:2000,
-            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, failure_final_on: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, non_dispatch_proven: false, admission_resume: false, compose_fee_msat: None, operation_record: None, direct: None };
+            target:Some(Target::Message { id:"abc".into(), peer:"peer".into() }), over_budget:false, accounting_msat: None, evidence_reservation_msat: None, failure_final_on: None, paid: None, undelivered: None, charge_id: None, budgeted: false, all_in: false, operation_id: None, dispatched_at: None, op: None, peer: None, resumable: false, non_dispatch_proven: false, admission_resume: false, compose_fee_msat: None, operation_record: None, direct: None, unpaid_release: None };
         let mut row = json!({"id":"abc", "sender":"other", "recipient":"peer", "payment_amount_msat":2000});
         assert_eq!(terminal(&p, &[row.clone()]), None);
         row["sender"] = json!("node");

@@ -827,6 +827,8 @@ export type Delivery = { status: 'accepted' | 'sent' | 'queued' | 'delivered' | 
 /** A local, inline artifact in a track: the result of an action taken there. */
 export type Artifact =
   | { id: string; at: number; type: 'missed-call'; peer: string; media: 'audio' | 'video' }
+  /** One system line per call in the chat, from its call traffic (never the traffic itself). */
+  | { id: string; at: number; type: 'call-line'; callId: string; media: 'audio' | 'video'; minutes: number | null }
   | { id: string; at: number; type: 'invoice'; invoice: InvoiceView }
   /** `invoice`: the bolt11 an invoice payment paid, so a request card can show it paid. */
   | { id: string; at: number; type: 'payment'; receipt: PaymentReceipt; invoice?: string }

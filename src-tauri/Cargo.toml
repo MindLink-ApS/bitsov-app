@@ -62,8 +62,9 @@ shared_child = "1.1"
 tauri-plugin-shell = "2"
 rfd = "0.15"
 
-# Local approval notifications on the Mac only (official Tauri 2 plugin).
-[target.'cfg(target_os = "macos")'.dependencies]
+# Local notifications (official Tauri 2 plugin): owner approvals and calls on the
+# Mac, ordinary message notifications on the Mac, Windows and Linux.
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 tauri-plugin-notification = "=2.7.0"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
