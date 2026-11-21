@@ -25,6 +25,7 @@ import { createNodeRoutedConnection, LINK_GRACE_MS, nodeRoutedSdp, type MediaSes
 import type { CallAudio } from '../src/control/callAudio';
 import type { MediaBridge, MediaLink } from '../src/control/mediaBridge';
 import { amount } from '../src/control/format';
+import { callEndLine } from '../src/control/callEnd';
 import { provenUnpaid } from '../src/control/paymentOutcome';
 import type { ActionError, CallQuote, CallReceipt, CallReservation, CallStatus, NodeGrantSummary, SpendView } from '../src/control/types';
 import type { PairingView as OnboardingPairingView } from '../src/onboarding/pairing';
@@ -988,7 +989,7 @@ describe('node-routed calls carry audio only, and a dead media session stops the
       getUserMedia: async (c) => { media.push(c); return audioStream(); },
       peerConnection: () => createNodeRoutedConnection({
         callId: () => calls?.view().callId ?? null, peer: () => calls?.view().peer ?? null, bridge, audio,
-        onSession: (event) => { sessions.push(event); if (event.state === 'closed') calls?.mediaClosed(event.callId); },
+        onSession: (event) => { sessions.push(event); if (event.state === 'closed') calls?.mediaClosed(event.callId, { refused: event.refused === true }); },
       }),
       now: () => Date.now(),
       onView: (v) => views.push(v),
@@ -1042,6 +1043,32 @@ describe('node-routed calls carry audio only, and a dead media session stops the
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(pay).toHaveBeenCalledTimes(1);
     expect(e.sessions.map((x) => x.state)).toEqual(['open', 'closed']);
+  });
+
+  // The real adapter and engine: the node refuses the media socket after the box approval ended.
+  it.each([
+    [false, 401, true], [false, 403, true], [true, 403, false], [false, 503, false],
+  ] as const)('continuity %s, the node refusing media with %s after the approval ended: budget ran out = %s', async (continuity, code, budget) => {
+    const node = fakeNode({ now: () => Date.now(), minutes: 10 });
+    const pay = vi.fn(async (_p: string, _c: string, seq: number) => { node.settle(seq); return ok(receipt(seq)); });
+    const grantEnds = Date.now() + 4 * 60_000;
+    const e = routedEngine(minutesOf(node, pay), {
+      callLimitMinutes: () => 2, callContinuity: () => continuity,
+      grant: () => ({ budget_msat: 5_000_000, remaining_msat: 5_000_000, per_call_max_msat: 5_000_000, expires_at_ms: grantEnds, envelopes: null }),
+    });
+    await e.engine.place(A, 'audio', QUOTE);
+    await vi.waitFor(() => expect(e.last().minutes?.reservation).not.toBeNull());
+    await e.engine.confirmMinutes();
+    await e.engine.receive(answerMessage, OWN);
+    await vi.waitFor(() => expect(pay).toHaveBeenCalledWith(A, ID, 0));
+    await vi.advanceTimersByTimeAsync(0);
+    e.link({ link: 'open', detail: null });
+    await vi.waitFor(() => expect(e.last().phase).toBe('live'));
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(e.last().phase).toBe('live');
+    e.link({ link: 'ended', detail: `the node refused the media socket (${code})` });
+    expect(e.last()).toMatchObject({ phase: 'ended', budgetEnded: budget });
+    expect(callEndLine(e.last(), 'Maya').text === 'The budget ran out during the call, so it ended.').toBe(budget);
   });
 
   it('frozen media: a node link down for 3 s shows Reconnecting, back to Live when it returns, and ends after its grace; nothing extra is sent', async () => {
@@ -1749,6 +1776,79 @@ describe('the shell: consent, running cost, stop states and summary', () => {
     expect(host.used('call_signal')).toHaveLength(0);
     expect(capture).not.toHaveBeenCalled();
   });
+  // A node that keeps an admitted call through its approval's end (`call_continuity_v1`):
+  // the same short approval no longer refuses the call. The legacy refusals above stay.
+  const OVERVIEW = (capabilities: string[]) => () => ({ node_id: OWN, status: 'ok', version: 'api v2', connected_peers: 1, e2ee_sessions: 1, pending_deliveries: 0,
+    lightning_available: true, block_height: 1, uptime_secs: 1, lightning_backend: 'ldk', chain_backend: 'esplora', read_at: Date.now(), capabilities });
+  it('a continuity node rings with one minute left on the box approval', async () => {
+    const host = stubHost({ grant: { ...SHORT(), expires_at_ms: Date.now() + 60_000 }, replies: { node_overview: OVERVIEW(['call_continuity_v1']) } });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
+    expect(host.used('call_signal').map((c) => (c.args as { kind: number }).kind)).toEqual([400]);
+  });
+  it('a continuity node answers with five minutes left on the box approval', async () => {
+    const host = stubHost({ grant: SHORT(), replies: { node_overview: OVERVIEW(['call_continuity_v1']) } });
+    await openShell();
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'incoming', kind: 400, sender: A, recipient: OWN,
+      timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_signal').map((c) => (c.args as { kind: number }).kind)).toEqual([401]));
+    expect($('[data-call-error]')).toBeNull();
+  });
+  it('with free replies on both nodes, Accept needs no price and shows no paid Details', async () => {
+    let priced = true;
+    const host = stubHost({ grant: { ...SHORT(), expires_at_ms: Date.now() + 86_400_000 },
+      quote: () => { if (priced) return QUOTE; throw { code: 'call_price_unknown', message: 'Their node gave no live call price.' }; },
+      replies: {
+        node_overview: OVERVIEW(['call_reply_free_v1']),
+        peers_list: () => [{ node_id: A, addr: null, label: 'Maya', connected: true, fingerprint: null, meetings: true, free_replies: true }],
+        call_free_reply: (args) => ({ message_id: 'r1', kind: (args as { kind: number }).kind, amount_msat: 0, total_msat: 0, max_routing_fee_msat: 0, delivered: true, accepted: true, sent_at_ms: Date.now() }),
+      } });
+    await openShell();
+    // Their node gives no price for this call.
+    priced = false;
+    host.emitLive({ type: 'message', room_id: null, message: { id: 'incoming', kind: 400, sender: A, recipient: OWN,
+      timestamp: Date.now(), plaintext: JSON.stringify({ v: 1, call_id: ID, media: 'audio', sdp: nodeRoutedSdp('offer', ID) }), payment_amount_msat: 10_000 } });
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-accept]')?.disabled).toBe(false));
+    expect($('[data-call-answer-detail]')).toBeNull();
+    expect($('[data-call-answer-price]')).toBeNull();
+    $<HTMLButtonElement>('[data-call-accept]')!.click();
+    await vi.waitFor(() => expect(host.used('call_free_reply').map((c) => (c.args as { kind: number }).kind)).toEqual([401]));
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+  it.each([
+    ['allowance or free replies alone', ['standing_allowance_v1', 'call_reply_free_v1']],
+    ['a near name', ['call_continuity_v2']],
+  ] as const)('%s does not lift the guard: a short approval still rings nothing', async (_name, capabilities) => {
+    const host = stubHost({ grant: SHORT(), replies: { node_overview: OVERVIEW([...capabilities]) } });
+    await openShell();
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
+    $<HTMLButtonElement>('[data-call-confirm="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
+    expect(host.used('call_signal')).toHaveLength(0);
+  });
+  it.each([
+    ['en', 'a whole day', 86_400_000, [], 'Ready for calls'],
+    ['da', 'a whole day', 86_400_000, [], 'Klar til opkald'],
+    ['en', 'five minutes on a continuity node', 5 * 60_000 - 1_000, ['call_continuity_v1'], 'Ready for calls'],
+    ['en', 'five minutes', 5 * 60_000 - 1_000, [], 'Not ready for calls: your box’s approval ends in 5 min, before a call could end.'],
+    ['da', 'five minutes', 5 * 60_000 - 1_000, [], 'Ikke klar til opkald: godkendelsen fra din boks udløber om 5 min, før et opkald kan nå at slutte.'],
+    ['en', 'an expired grant', -1_000, ['call_continuity_v1', 'standing_allowance_v1'], 'Not ready for calls yet: your box has not approved spending for this app.'],
+    ['da', 'an expired grant', -1_000, ['standing_allowance_v1'], 'Ikke klar til opkald endnu: din boks har ikke godkendt betalinger for denne app.'],
+  ] as const)('the ring confirm says whether calls are ready (%s, %s)', async (lang, _name, left, capabilities, said) => {
+    stubHost({ grant: { ...SHORT(), expires_at_ms: Date.now() + left }, replies: { node_overview: OVERVIEW([...capabilities]) } });
+    await openShell(); setLanguagePref(lang);
+    $<HTMLButtonElement>('[data-call="audio"]')!.click();
+    await vi.waitFor(() => expect($('[data-call-ready]')?.textContent).toBe(said));
+    expect($('[data-call-ready]')!.getAttribute('data-call-ready')).toBe(said.startsWith('Ready') || said.startsWith('Klar') ? 'ready' : 'not-ready');
+    expect(visibleText($('[data-call-confirm-box]')!)).not.toMatch(/konsensus\s|--op\b|--config\b|Terminal/);
+  });
+
   // The box's call limit is unknown until its first hold: assume the most any node allows (240 min).
   const HOUR = () => ({ ...SHORT(), expires_at_ms: Date.now() + 60 * 60_000 });
   it('an unknown call limit counts as the longest any box allows: a one-hour approval rings nothing and pays nothing', async () => {

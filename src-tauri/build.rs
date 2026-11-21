@@ -131,6 +131,7 @@ fn main() {
             "call_audio_session",
             "call_quote",
             "call_signal",
+            "call_free_reply",
             "call_status",
             "call_block",
             "call_hold",

@@ -30,6 +30,8 @@ export const CALL_HANGUP = 403;
 export const RING_MS = 60_000;
 /** Bound the renderer wait; the host journal still owns any unresolved payment. */
 export const SIGNAL_TIMEOUT_MS = 30_000;
+/** Backoff before a reconnect's price is read again after a failed read; then no more for that drop. */
+const PRICE_RETRY_MS = [2_000, 5_000, 10_000];
 /** How long to wait for ICE gathering before sending what we have. */
 export const GATHER_MS = 3_000;
 /** A permission prompt may never settle; release the call after this wait. */
@@ -303,6 +305,24 @@ export type CallView = {
    * tap of Call or Accept, before anything is sent or paid, so nothing was.
    */
   mediaDenied: boolean;
+  /**
+   * A Decline sent as a free reply (both nodes take them): `sending`, then
+   * `delivered` (their node accepted it), `not_sent` (our node refused it before
+   * sending) or `unknown`. Null for the local Ignore. Never paid either way.
+   */
+  freeDecline: 'sending' | 'delivered' | 'not_sent' | 'unknown' | null;
+  /**
+   * On a node without call continuity: the call was cut after the box
+   * approval it was admitted under ran out (its media refused, or a minute
+   * refused). The ended card says the budget ran out.
+   */
+  budgetEnded: boolean;
+  /**
+   * A call answered free was hung up here, but no hangup could be sent: no
+   * live price for it could be read. Their side may still be on the line until
+   * the call ends by itself. Nothing was paid for it.
+   */
+  hangupUnsent: boolean;
 };
 
 /** `closed`: the host ended it (or nothing was owed); `unknown`: check pending result; `refused`: still open. */
@@ -368,7 +388,7 @@ export const IDLE: CallView = {
   phase: 'idle', state: 'idle', peer: null, callId: null, media: 'audio', outgoing: false,
   liveAt: null, muted: false, camera: false, paidMsat: 0, unknownCount: 0, unknownMsat: 0, pendingCount: 0, pendingMsat: 0, connection: null, audio: null, reason: null, error: null, interruptedUntil: null, errorKey: null, endWords: null, endRaw: null, offline: false,
   close: null, stuck: null, dropAt: null, recoveryUsed: false, recoveryUsedBefore: false, recoveryError: null, minutes: null,
-  stopped: null, mediaDenied: false,
+  stopped: null, mediaDenied: false, freeDecline: null, budgetEnded: false, hangupUnsent: false,
 };
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: ActionError };
@@ -398,6 +418,15 @@ export type CallDeps = {
   grant?: () => NodeGrantSummary | null;
   /** This box's call limit in minutes, once seen on one of its holds; null while unknown. */
   callLimitMinutes?: () => number | null;
+  /**
+   * Our node keeps an admitted call after its grant ends (`call_continuity_v1`):
+   * no call window before Ring or Accept. Absent or false: the window stays.
+   */
+  callContinuity?: () => boolean;
+  /** Our node and this caller's node both take free call replies (`call_reply_free_v1`). Absent or false: never free. */
+  freeReply?: (peer: string) => boolean;
+  /** Send an answer or a declined hangup as a free reply (zero cap, no grant). Never followed by a paid retry. */
+  sendFree?: (peer: string, kind: number, plaintext: string) => Promise<Outcome<CallReceipt>>;
   /** `minutes`: only on a node-routed offer, the minutes agreed before Ring (kept by the host). */
   /** `maxHangupMsat`, on an offer: the most its hangup was shown to cost. The host saves no higher ceiling for End. */
   signal: (peer: string, kind: number, plaintext: string, maxMsat: number, minutes?: MinutesConsent, maxHangupMsat?: number) => Promise<Outcome<CallReceipt>>;
@@ -512,6 +541,27 @@ export function createCallEngine(deps: CallDeps) {
     deps.onWaiting?.([...waiting.values()].map(c => c.view()));
   };
   let pc: RTCPeerConnection | null = null;
+  /** When the box approval this call was placed or answered under ends (display only, for the end line). */
+  let grantEnds: { callId: string; at: number } | null = null;
+  const noteGrantEnd = (callId: string | null) => {
+    const at = deps.grant?.()?.expires_at_ms;
+    grantEnds = callId && typeof at === 'number' && Number.isFinite(at) ? { callId, at } : null;
+  };
+  /** On a node without continuity, the approval this call was admitted under has ended: its node cuts it. */
+  const cutByExpiry = (callId: string | null) =>
+    deps.callContinuity?.() !== true && callId !== null && grantEnds?.callId === callId && deps.now() >= grantEnds.at;
+  /** The minutes left on the box approval when it would end before a call could; never on a node that keeps the call. */
+  const windowShort = () => deps.callContinuity?.() === true ? null : windowEndsBeforeCall(deps.grant?.(), deps.now(), deps.callLimitMinutes?.());
+  /** One free reply, bounded in time like a paid signal; a host call that never returns is unknown. */
+  const sendFree = async (peer: string, kind: number, body: Omit<Signal, 'v' | 'call_id'>, targetId: string): Promise<Outcome<CallReceipt>> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<Outcome<CallReceipt>>((resolve) => {
+      timer = setTimeout(() => resolve({ ok: false, error: { code: 'call_reply_unknown', message: tr('caFreeReplyUnknown') } as ActionError }), SIGNAL_TIMEOUT_MS);
+    });
+    const sent = Promise.resolve().then(() => deps.sendFree!(peer, kind, JSON.stringify({ v: 1, call_id: targetId, ...body })))
+      .catch((error): Outcome<CallReceipt> => ({ ok: false, error: asActionError(error) }));
+    try { return await Promise.race([sent, timeout]); } finally { clearTimeout(timer); }
+  };
   /** M6 A2: this call's paid-minutes session (outgoing: pays; incoming: watches). */
   let minutes: CallMinutes | null = null;
   let local: MediaStream | null = null;
@@ -526,7 +576,11 @@ export function createCallEngine(deps: CallDeps) {
   let negotiated = false;
   let answerInFlight = false;
   let restartAttempted = false;
+  /** The call (public id) this device answered free: it read no price first, so its later signals read one when needed. */
+  let freeAnswered: string | null = null;
   let restartRequested = false;
+  /** A free-answered call's reconnect is waiting for its approval. */
+  let restartAsking = false;
   let restartAnswerPending = false;
   let restartTimer: ReturnType<typeof setTimeout> | undefined;
   let ringTimer: ReturnType<typeof setTimeout> | undefined;
@@ -688,6 +742,9 @@ export function createCallEngine(deps: CallDeps) {
     cameraBusy = false;
     wireId = null;
     pendingRestartId = null;
+    clearTimeout(priceRetryTimer);
+    priceRetries = 0;
+    restartQueued = [];
     admissions.clear();
     pendingPeerEnds.clear();
     negotiated = false;
@@ -903,6 +960,13 @@ export function createCallEngine(deps: CallDeps) {
     dropTimer = undefined;
     clearTimeout(restartTimer);
     restartTimer = undefined;
+    // A real heal (the media back after a drop) gives the next drop its own price
+    // reads. A reconcile of a connection that never dropped, as after a refused
+    // reconnect, is no heal: its bound and its pending retry stay.
+    if (view.phase === 'reconnecting') {
+      clearTimeout(priceRetryTimer);
+      priceRetries = 0;
+    }
     // Healed: the refusal stays said while live; it is remembered so the next drop starts without it.
     if (view.recoveryError !== null) { healedRefusal = view.recoveryError; set({ recoveryError: null }); }
     if (view.phase !== 'live') {
@@ -1071,6 +1135,66 @@ export function createCallEngine(deps: CallDeps) {
     return r;
   };
 
+  /**
+   * This call's live signal price: the one read for it, or, on a call answered
+   * free (which read none before answering), one read now, bounded in time.
+   * Null when none can be read: then nothing is sent, and the caller says so.
+   */
+  const livePrice = async (callId: string | null, peer: string | null): Promise<CallQuote | null> => {
+    if (quote) return quote;
+    if (callId === null || peer === null || freeAnswered !== callId) return null;
+    const q = await readPrice(peer);
+    if (view.callId !== callId) return null;
+    if (q) quote ??= q;
+    return quote;
+  };
+  /** One usable live signal price from this contact, bounded in time; null otherwise. Bound to no view. */
+  const readPrice = async (peer: string): Promise<CallQuote | null> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), SIGNAL_TIMEOUT_MS); });
+    const read = Promise.resolve().then(() => deps.quote(peer)).catch(() => null);
+    const q = await Promise.race([read, late]).finally(() => clearTimeout(timer));
+    return q?.ok && answerCost(q.value) !== null ? q.value : null;
+  };
+  /** A free-answered call whose hangup is being priced: its card is neither dismissed nor replaced meanwhile. */
+  let hangupPricing: string | null = null;
+  /** A reconnect waiting for its price: nothing of the recovery is spent until there is one. */
+  let restartPricing = false;
+  /** Reconnects asked for while a price was being read: run once it is read, or retried with it. */
+  let restartQueued: (() => void)[] = [];
+  /** How many times this drop's reconnect price was read again after a failed read. Reset when the call heals. */
+  let priceRetries = 0;
+  let priceRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * The price a reconnect of a call answered free needs. True: there is one, go
+   * ahead. False: not now. A reconnect asked for meanwhile is kept and runs
+   * after this read; a failed read is said, and retried (`again` and the kept
+   * ones) after a bounded backoff while the call is live and still on this
+   * connection. Nothing of the recovery is spent before a price exists.
+   */
+  const restartPrice = async (conn: RTCPeerConnection, again: () => void): Promise<boolean> => {
+    if (quote) return true;
+    if (restartPricing) { restartQueued.push(again); return false; }
+    restartPricing = true;
+    const priced = await livePrice(view.callId, view.peer).finally(() => { restartPricing = false; });
+    const queued = restartQueued;
+    restartQueued = [];
+    if (pc !== conn || !active()) return false;
+    if (priced) { queued.forEach((run) => run()); return true; }
+    recoveryRefused(conn, tr('caCallPriceUnreadNothingPaid'));
+    if (priceRetries < PRICE_RETRY_MS.length) {
+      const delay = PRICE_RETRY_MS[priceRetries++];
+      clearTimeout(priceRetryTimer);
+      priceRetryTimer = setTimeout(() => { if (pc === conn && active()) [again, ...queued].forEach((run) => run()); }, delay);
+    }
+    return false;
+  };
+  /** A recovery step went out: a refusal said earlier for this drop is no longer true. */
+  const recoveryWent = () => {
+    if (view.recoveryError === null) return;
+    set({ recoveryError: null, ...(view.error === view.recoveryError ? { error: null } : {}) });
+  };
+
   const reconnect = (conn: RTCPeerConnection) => {
     if (pc !== conn || !active()) return;
     clearTimeout(ringTimer);
@@ -1087,15 +1211,41 @@ export function createCallEngine(deps: CallDeps) {
   };
 
   const restart = async (conn: RTCPeerConnection) => {
-    if (pc !== conn || !negotiated || !quote || restartAttempted || restartRequested) return;
-    const q = quote;
+    if (pc !== conn || !negotiated || restartAttempted || restartRequested) return;
+    if (!quote && freeAnswered !== view.callId) return;
+    // A call answered free reads its price first. Without one nothing is sent and
+    // nothing of the recovery is spent; it is tried again while the drop lasts.
+    if (!quote) {
+      const again = () => { if (pc === conn && view.phase === 'reconnecting') void restart(conn); };
+      if (!await restartPrice(conn, again)) return;
+      if (pc !== conn || restartAttempted || restartRequested) return;
+    }
+    const q = quote!;
+    // A call answered free was never approved for spending, so its paid
+    // reconnect request asks first, before the recovery counts as used: a
+    // refused or lapsed approval keeps it for the next try.
+    const askedFirst = !view.outgoing && freeAnswered === view.callId && !!deps.authorize;
+    if (askedFirst) {
+      if (restartAsking) return;
+      restartAsking = true;
+      const approved = await deps.authorize!().finally(() => { restartAsking = false; });
+      if (pc !== conn || restartAttempted || restartRequested) return;
+      if (!approved) {
+        recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
+        return;
+      }
+    }
     // Only the original caller creates offers, so simultaneous failure cannot
     // produce glare or two fresh admission charges. The callee can request it.
     if (!view.outgoing) restartRequested = true;
     else restartAttempted = true;
     set({ recoveryUsed: true });
     try {
-      if (deps.authorize && !await deps.authorize()) {
+      // On a node that keeps the call, the callee's reconnect request goes on the
+      // call's own authority after the approval ran out (the host decides). A
+      // recovery offer is a new admission and still asks.
+      const held = askedFirst || (!view.outgoing && deps.callContinuity?.() === true);
+      if (!held && deps.authorize && !await deps.authorize()) {
         recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
         return;
       }
@@ -1103,6 +1253,7 @@ export function createCallEngine(deps: CallDeps) {
       if (!view.outgoing) {
         const r = await pay(CALL_ICE, { candidate: '', sdp_mid: RESTART_REQUEST_MID }, signalCost(q));
         if (!r.ok) recoveryRefused(conn, r.error.message);
+        else if (pc === conn) recoveryWent();
         return;
       }
       if (q.offer_msat === null) { reconcileConnection(conn); return; }
@@ -1141,6 +1292,7 @@ export function createCallEngine(deps: CallDeps) {
       if (r.ok) {
         wireId = id;
         admissions.add(id);
+        recoveryWent();
       } else {
         restartAnswerPending = false;
         if (provenUnpaid(r.error.code)) own = own.filter((call) => call !== id);
@@ -1156,13 +1308,45 @@ export function createCallEngine(deps: CallDeps) {
 
   const answerRestart = async (signal: Signal) => {
     const conn = pc;
-    if (!conn || !quote || !negotiated || view.outgoing || restartAttempted || !active() ||
-        restartParent(signal.sdp!) !== view.callId || admissions.has(signal.call_id) || signal.media !== view.media) return;
+    const eligible = () => !!conn && pc === conn && negotiated && !view.outgoing && !restartAttempted && active() &&
+        restartParent(signal.sdp!) === view.callId && !admissions.has(signal.call_id) && signal.media === view.media;
+    if (!eligible() || (!quote && freeAnswered !== view.callId)) return;
+    // A call answered free reads its price before it takes the restart: without
+    // one the restart is not applied and the recovery is not spent.
+    if (!quote) {
+      if (!await restartPrice(conn!, () => void answerRestart(signal))) return;
+      if (!eligible()) return;
+    }
+    const q = quote!;
+    if (!conn) return;
+    // A call answered free was never approved for spending, so answering the
+    // caller's restart asks first, as the outbound reconnect request does: a
+    // refused or lapsed approval keeps the one recovery for the next try. One
+    // ask at a time; the call is checked again once the answer is in.
+    const askedFirst = freeAnswered === view.callId && !!deps.authorize;
+    if (askedFirst) {
+      if (restartAsking) return;
+      restartAsking = true;
+      let approved = false;
+      try {
+        approved = await deps.authorize!();
+      } catch (error) {
+        restartAsking = false;
+        if (eligible()) recoveryRefused(conn, tr('caCallRecoveryFailed', asActionError(error).message));
+        return;
+      }
+      restartAsking = false;
+      if (!eligible()) return;
+      if (!approved) {
+        recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
+        return;
+      }
+    }
     restartAttempted = true;
     reconnect(conn);
     set({ recoveryUsed: true });
     try {
-      if (deps.authorize && !await deps.authorize()) {
+      if (!askedFirst && deps.authorize && !await deps.authorize()) {
         recoveryRefused(conn, tr('caCallRecoveryNeedsSpendingApproval'));
         return;
       }
@@ -1177,8 +1361,9 @@ export function createCallEngine(deps: CallDeps) {
       if (pc !== conn) return;
       await gathered(conn, GATHER_MS);
       if (pc !== conn) return;
-      const r = await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(quote));
+      const r = await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(q));
       if (!r.ok) recoveryRefused(conn, r.error.message);
+      else if (pc === conn) recoveryWent();
     } catch (error) {
       recoveryRefused(conn, tr('caCallRecoveryFailed', asActionError(error).message));
     }
@@ -1191,7 +1376,12 @@ export function createCallEngine(deps: CallDeps) {
       peer, callId, agreedBlockMsat, reservationMaxMsat, pays, deps: deps.minutes!, now: deps.now,
       onChange: (m) => { if (view.callId === callId) set({ minutes: m }); },
       // The node ended it, or paying stopped: the call ends now, never left 'connected'.
-      onStop: (stop) => { if (view.callId === callId && active()) end(stop.code === 'unpaid' ? 'unpaid' : stop.code === 'node_ended' ? 'hangup' : 'failed', stop.message); },
+      onStop: (stop) => {
+        if (view.callId !== callId || !active()) return;
+        // A minute refused after the approval ended on a node that does not keep the call: the budget ran out.
+        if ((stop.code === 'payment_failed' || stop.code === 'budget_limit' || stop.code === 'unpaid') && cutByExpiry(callId)) set({ budgetEnded: true });
+        end(stop.code === 'unpaid' ? 'unpaid' : stop.code === 'node_ended' ? 'hangup' : 'failed', stop.message);
+      },
       // A call that ended (or was replaced) is never paid for, whatever its session still believes.
       canPay: () => minutes === session && view.callId === callId && active(),
     });
@@ -1222,13 +1412,21 @@ export function createCallEngine(deps: CallDeps) {
     }
   };
 
-  /** Accept the ringing call: one paid answer, at most the price `shown` on the button. */
-  const accept = (shown: CallQuote) => guarded(async () => {
+  /**
+   * Accept the ringing call: one paid answer, at most the price `shown` on the
+   * button. When our node and theirs both take free replies, the answer goes
+   * out free (zero cap, never retried paid), so no price is read or needed.
+   */
+  const accept = (shown: CallQuote | null) => guarded(async () => {
     if (view.phase !== 'incoming' || !offerSdp) return;
     const callId = view.callId;
+    // Decided once, before anything is read: a free answer never becomes a paid one.
+    const free = !!deps.sendFree && deps.freeReply?.(view.peer!) === true;
+    if (!free && !shown) return;
     // Never answer a node-routed call the box approval would cut off: nothing is sent or paid, and it keeps ringing.
+    // A node that keeps an admitted call past its approval's end has no such window.
     if (deps.minutes) {
-      const left = windowEndsBeforeCall(deps.grant?.(), deps.now(), deps.callLimitMinutes?.());
+      const left = windowShort();
       if (left !== null) { set({ error: tr('caCallWindowShortAnswer', left) }); return; }
     }
     if (deps.authorize && !await deps.authorize()) return;
@@ -1237,11 +1435,19 @@ export function createCallEngine(deps: CallDeps) {
     // An earlier refused Accept may have left its reason on the card: this one goes ahead.
     set({ phase: 'connecting', error: null });
     awaitConnect(callId!);
-    const q = await deps.quote(view.peer!);
-    if (view.callId !== callId || !active()) return;
-    const refused = answerRefusal(shown, q);
-    if (refused !== null || !q.ok) { endSaying(() => answerRefusal(shown, q) ?? tr('caCallEndAnswerFailed')); return; }
-    quote = q.value;
+    if (free) {
+      // Read only for this call's later signals (its hangup, a reconnect); the free answer does not wait for it.
+      const peer = view.peer!;
+      void Promise.resolve().then(() => deps.quote(peer)).then((q) => {
+        if (view.callId === callId && active() && quote === null && q.ok && answerCost(q.value) !== null) quote = q.value;
+      }, () => {});
+    } else {
+      const q = await deps.quote(view.peer!);
+      if (view.callId !== callId || !active()) return;
+      const refused = answerRefusal(shown!, q);
+      if (refused !== null || !q.ok) { endSaying(() => answerRefusal(shown!, q) ?? tr('caCallEndAnswerFailed')); return; }
+      quote = q.value;
+    }
     let conn: RTCPeerConnection;
     try {
       conn = await open(view.media);
@@ -1258,11 +1464,16 @@ export function createCallEngine(deps: CallDeps) {
     if (view.callId !== callId || !active()) return;
     // Checked again at the paid step: preparing media takes time, and the approval may have changed meanwhile.
     if (deps.minutes) {
-      const late = windowEndsBeforeCall(deps.grant?.(), deps.now(), deps.callLimitMinutes?.());
+      const late = windowShort();
       if (late !== null) { endSaying(() => tr('caCallWindowShortAnswer', late)); return; }
     }
+    noteGrantEnd(callId);
     negotiated = true; // The peer may see the answer before our host receipt.
-    const r = await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(quote));
+    if (free) freeAnswered = callId;
+    // Both nodes take free replies: the answer goes out free, and a refusal is never retried paid.
+    const r = free
+      ? await sendFree(view.peer!, CALL_ANSWER, { sdp: conn.localDescription!.sdp }, wireId ?? callId!)
+      : await pay(CALL_ANSWER, { sdp: conn.localDescription!.sdp }, signalCost(quote!));
     if (view.callId !== callId || !active()) return;
     if (!r.ok) endRawly('caCallEndAnswerFailed', r.error.message);
     else {
@@ -1277,7 +1488,7 @@ export function createCallEngine(deps: CallDeps) {
   const api = {
     view: () => view,
     /** Move an untouched waiting offer to the normal answer path after media is free. */
-    acceptWaiting: async (id: string, shown: CallQuote) => {
+    acceptWaiting: async (id: string, shown: CallQuote | null) => {
       if (active() || busy || deps.busy?.() || view.pendingCount || view.unknownCount || (view.close && view.close.status !== 'closed')) {
         waiting.get(id)?.note(tr('incomingWaiting'));
         return;
@@ -1314,6 +1525,8 @@ export function createCallEngine(deps: CallDeps) {
       // M6: a node-routed call carries audio only (no camera is captured or offered), unless node-routed video is on.
       const media: CallMedia = deps.routed && !deps.routedVideo ? 'audio' : requested;
       if (active() || deps.busy?.()) return;
+      // The last call's hangup is still being priced: its card stays until that hangup is sent or said unsent.
+      if (hangupPricing !== null) { if (view.callId === hangupPricing) set({ error: tr('caLastCallStillEnding') }); return; }
       deps.onBudgetNeeded?.(null);
       if (q.offer_msat === null || q.call_total_msat === null) {
         set({ ...IDLE, phase: 'ended', peer, error: tr('caTheirNodeDoesNotTakeCallsYetNothingWas'), endWords: () => tr('caTheirNodeDoesNotTakeCallsYetNothingWas') });
@@ -1352,8 +1565,9 @@ export function createCallEngine(deps: CallDeps) {
         return;
       }
       // Nor inside a box approval that would end before the call could: the call would die there.
+      // A node that keeps an admitted call past its approval's end has no such window.
       if (deps.minutes) {
-        const left = windowEndsBeforeCall(grant, deps.now(), deps.callLimitMinutes?.());
+        const left = windowShort();
         if (left !== null) {
           set({ ...IDLE, phase: 'ended', peer, error: tr('caCallWindowShortRing', left), endWords: () => tr('caCallWindowShortRing', left) });
           return;
@@ -1390,9 +1604,10 @@ export function createCallEngine(deps: CallDeps) {
       if (cancelled === callId || view.callId !== callId || !active()) return;
       // Checked again at the paid step: preparing media takes time, and the approval may have changed meanwhile.
       if (deps.minutes) {
-        const late = windowEndsBeforeCall(deps.grant?.(), deps.now(), deps.callLimitMinutes?.());
+        const late = windowShort();
         if (late !== null) { endSaying(() => tr('caCallWindowShortRing', late)); return; }
       }
+      noteGrantEnd(callId);
       // From here the host may hold this admission: every end asks it to close it.
       own.push(callId);
       const r = await pay(CALL_OFFER, { media, sdp: conn.localDescription!.sdp }, q.offer_msat + q.offer_max_routing_fee_msat, undefined, undefined, false, consent, signalCost(q));
@@ -1436,13 +1651,38 @@ export function createCallEngine(deps: CallDeps) {
      * the node ended the link). The call ends now, so its minutes stop being
      * paid, even if the connection's own `closed` state never reached here.
      */
-    mediaClosed: (callId: string) => {
+    mediaClosed: (callId: string, opts: { refused?: boolean } = {}) => {
       if (ending || !active() || view.callId !== callId) return;
+      // Refused after the approval ended, on a node that does not keep the call: the budget ran out.
+      if (opts.refused && cutByExpiry(callId)) { set({ budgetEnded: true }); end('failed', tr('caCallEndedBudgetRanOut')); return; }
       end('failed', tr('caTheNodeMediaLinkClosed'));
     },
 
     /** M6 A2: the owner confirms the node's hold for this outgoing call (as the card shows it). */
     confirmMinutes: async () => { if (view.outgoing && active()) await minutes?.confirm(); },
+
+    /**
+     * Decline the ringing call. When our node and theirs both take free
+     * replies: one free declined hangup (zero cap, no grant, no spend
+     * request), so their phone stops ringing; the card says only what is
+     * known of its delivery, and a refusal is never retried paid. Otherwise
+     * the local Ignore: nothing is sent or paid, and their ring times out.
+     */
+    refuse: () => guarded(async () => {
+      if (view.phase !== 'incoming' || view.silenced || !view.peer || !view.callId) return;
+      const peer = view.peer;
+      const callId = view.callId;
+      if (!deps.sendFree || deps.freeReply?.(peer) !== true) { api.ignore(); return; }
+      const id = wireId ?? callId;
+      set({ silenced: true, freeDecline: 'sending' });
+      end('declined');
+      const r = await sendFree(peer, CALL_HANGUP, { reason: 'declined' }, id);
+      if (view.callId !== callId) return;
+      // Told only on their node's acceptance (it stored the reply), not on a transport write alone.
+      const outcome = r.ok ? (r.value.delivered && r.value.accepted ? 'delivered' : 'unknown')
+        : r.error.code === 'call_reply_not_free' || r.error.code === 'call_reply_not_sent' || r.error.code === 'invalid' ? 'not_sent' : 'unknown';
+      set({ freeDecline: outcome });
+    }),
 
     /** Stop ringing on this device: nothing is sent or paid, and their ring times out by itself. */
     ignore: () => {
@@ -1482,14 +1722,40 @@ export function createCallEngine(deps: CallDeps) {
       if (!active()) return;
       const callId = view.callId;
       const notify = view.phase !== 'calling' && view.phase !== 'incoming' && quote;
+      // A call answered free read no price first: its hangup is still owed, priced now.
+      const unpriced = !notify && view.phase !== 'calling' && view.phase !== 'incoming' && freeAnswered !== null && freeAnswered === callId;
       const ids = [...admissions].reverse();
       const mine = new Set(deps.endCall ? own : []);
       const owner = { peer: view.peer, callId }; // Keep late cleanup bound to this peer.
       cancelled = callId;
       // Every hangup owed is pending before the call ends, not one by one as each is sent.
       if (notify) ids.filter(id => !mine.has(id)).forEach(() => owe(signalCost(notify)));
+      const unpricedIds = unpriced ? ids.filter(id => !mine.has(id)) : [];
+      // Owed before the call ends, its price not yet known: the card is neither
+      // dismissed nor replaced until it is sent or said unsent.
+      if (unpricedIds.length) { owe(0); hangupPricing = callId; }
       const operationIds = [...(admissionOps.get(callId!) ?? [])];
-      end('hangup', null, { record: !notify });
+      end('hangup', null, { record: !notify && !unpriced });
+      if (unpricedIds.length) {
+        const q = await readPrice(owner.peer!).finally(() => { if (hangupPricing === callId) hangupPricing = null; });
+        const here = view.callId === callId;
+        if (!q) {
+          // No live price, so the host could send no hangup either: said, never left silent.
+          if (here) set({ pendingCount: view.pendingCount - 1, hangupUnsent: true });
+          publishWaiting();
+          return;
+        }
+        // The owed hangup now has its price: one owed per admission, each sent for this call, whatever the card shows.
+        if (here) set({ pendingCount: view.pendingCount + unpricedIds.length - 1, pendingMsat: view.pendingMsat + unpricedIds.length * signalCost(q) });
+        for (const id of unpricedIds) {
+          try {
+            const r = await pay(CALL_HANGUP, { reason: 'hangup' }, signalCost(q), id, owner, true);
+            if (!r.ok && view.callId === callId) set({ error: r.error.message });
+          } catch (error) {
+            if (view.callId === callId) set({ error: asActionError(error).message });
+          }
+        }
+      }
       if (notify) {
         for (const id of ids) {
           if (mine.has(id)) continue;
@@ -1639,7 +1905,7 @@ export function createCallEngine(deps: CallDeps) {
           // get a visible card, including while another call holds the microphone.
           if (s.meeting || restartParent(s.sdp!) || seenOffers.has(offerKey)) return;
           seenOffers.add(offerKey);
-          if (active() || deps.busy?.()) {
+          if (active() || deps.busy?.() || hangupPricing !== null) {
             const child = createCallEngine({ ...deps, busy: () => false, onWaiting: undefined,
               onView: publishWaiting, onStreams: () => {}, audioSession: undefined });
             waiting.set(offerKey, child);
