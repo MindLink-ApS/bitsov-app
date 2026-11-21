@@ -475,7 +475,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "npm run -- tauri ios xcode-script -v --platform \"${PLATFORM_DISPLAY_NAME:?}\" --sdk-root \"${SDKROOT:?}\" --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration \"${CONFIGURATION:?}\" ${FORCE_COLOR} ${ARCHS:?}\n";
+			shellScript = "# The simulator smoke script has already built this library with Cargo.\nif [ \"${BITSOV_IOS_SIM_PREBUILT:-}\" = 1 ]; then\n  if [ \"${PLATFORM_NAME:-}\" != iphonesimulator ] || [ \"${CODE_SIGNING_ALLOWED:-}\" != NO ]; then\n    echo \"Prebuilt smoke library requires an unsigned iOS Simulator build.\" >&2\n    exit 1\n  fi\n  test -s \"${SRCROOT}/Externals/${ARCHS}/${CONFIGURATION}/libapp.a\"\n  exit $?\nfi\nnpm run -- tauri ios xcode-script -v --platform \"${PLATFORM_DISPLAY_NAME:?}\" --sdk-root \"${SDKROOT:?}\" --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration \"${CONFIGURATION:?}\" ${FORCE_COLOR} ${ARCHS:?}\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

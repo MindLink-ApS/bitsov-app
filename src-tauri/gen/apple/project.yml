@@ -93,6 +93,15 @@ targets:
       - sdk: WebKit.framework
     preBuildScripts:
       - script: |
+          # The simulator smoke script has already built this library with Cargo.
+          if [ "${BITSOV_IOS_SIM_PREBUILT:-}" = 1 ]; then
+            if [ "${PLATFORM_NAME:-}" != iphonesimulator ] || [ "${CODE_SIGNING_ALLOWED:-}" != NO ]; then
+              echo "Prebuilt smoke library requires an unsigned iOS Simulator build." >&2
+              exit 1
+            fi
+            test -s "${SRCROOT}/Externals/${ARCHS}/${CONFIGURATION}/libapp.a"
+            exit $?
+          fi
           npm run -- tauri ios xcode-script -v --platform "${PLATFORM_DISPLAY_NAME:?}" --sdk-root "${SDKROOT:?}" --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration "${CONFIGURATION:?}" ${FORCE_COLOR} ${ARCHS:?}
         name: Build Rust Code
         basedOnDependencyAnalysis: false
