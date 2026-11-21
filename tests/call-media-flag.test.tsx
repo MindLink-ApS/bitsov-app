@@ -206,8 +206,8 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     mount = document.createElement('div');
     document.body.appendChild(mount);
     dispose = render(() => <App />, mount);
-    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.textContent?.includes('I understand'))).toBe(true));
-    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('I understand'))!.click();
+    await vi.waitFor(() => expect([...mount.querySelectorAll('button')].some((b) => b.hasAttribute('data-trust-continue'))).toBe(true));
+    [...mount.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.hasAttribute('data-trust-continue'))!.click();
     await vi.waitFor(() => expect($(`[data-track="peer:${A}"]`)?.getAttribute('aria-current')).toBe('true'));
   }
 
@@ -250,7 +250,7 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
     await vi.waitFor(() => expect($('[data-call-panel="ringing"]')).not.toBeNull());
-    expect($('[data-call-route="node"]')?.textContent).toBe('The call goes through your box and theirs. Both boxes can hear it.');
+    expect($('[data-call-route="node"]')?.textContent).toBe('The call travels through your own box and theirs. Those two boxes carry the sound, so they could hear it.');
     // The offer went out with the node-routed marker, so an M6 peer joins at its node.
     const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
     expect(JSON.parse((offer.args as { plaintext: string }).plaintext).sdp).toContain('a=x-bitsov-media:node-routed-v1');
@@ -284,23 +284,25 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await vi.waitFor(() => expect($('[data-call-panel="live"]')).not.toBeNull());
     expect($('[data-call-route="node"]')).not.toBeNull();
     expect(FakePc.made).toBe(0);
-    expect(FakeAudioContext.made).toHaveLength(1);
+    // The local ringback had its own context while ringing; it closed on the answer. One call audio graph is left.
+    await vi.waitFor(() => expect(FakeAudioContext.made.filter((c) => !c.closed)).toHaveLength(1));
+    const callAudio = FakeAudioContext.made.find((c) => !c.closed)!;
     // Hang up: the host ends the admission and the media socket closes with the call.
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect(host.used('call_media_close').length).toBeGreaterThan(0));
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    await vi.waitFor(() => expect(FakeAudioContext.made[0].closed).toBe(true));
+    await vi.waitFor(() => expect(callAudio.closed).toBe(true));
   });
 
   it('with sealing off, no seal command runs and the label and the offer are as they were', async () => {
     const host = stubHost();
     await routedLive(host);
     for (const cmd of ['call_seal_offer', 'call_seal_answer', 'call_seal_accept', 'call_seal_cancel']) expect(host.used(cmd)).toHaveLength(0);
-    expect($('[data-call-route="node"]')?.textContent).toBe('The call goes through your box and theirs. Both boxes can hear it.');
+    expect($('[data-call-route="node"]')?.textContent).toBe('The call travels through your own box and theirs. Those two boxes carry the sound, so they could hear it.');
     expect($('[data-call-route="node"]')?.hasAttribute('data-call-seal')).toBe(false);
     const offer = host.used('call_signal').find((c) => (c.args as { kind: number }).kind === 400)!;
     expect(JSON.parse((offer.args as { plaintext: string }).plaintext).sdp).not.toContain('x-bitsov-e2e');
-    expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer']);
+    expect(Object.keys(host.used('call_media_open')[0].args as object).sort()).toEqual(['call_id', 'on_frame', 'peer', 'send_base']);
   });
 
   /** Rings Maya on a sealing build and delivers an answer with these extra SDP lines. */
@@ -333,7 +335,7 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     host.media({ link: 'sealed', detail: null });
     await vi.waitFor(() => expect($('[data-call-route="node"]')?.getAttribute('data-call-seal')).toBe('sealed'));
     expect($('[data-call-route="node"]')?.textContent).toMatch(/unless one of them is attacking the call/);
-    expect($('[data-call-route="node"]')?.textContent).not.toMatch(/Both boxes can hear it/);
+    expect($('[data-call-route="node"]')?.textContent).not.toMatch(/so they could hear it|Both boxes can hear it/);
   });
 
   it('with sealing on, an answer that cannot be sealed ends the call before any audio, and blames no side', async () => {
@@ -461,7 +463,9 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await vi.waitFor(() => expect(host.used('call_media_open')).toHaveLength(1));
     host.media({ link: 'ended', detail: 'the node refused the media socket (403)' });
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
-    expect($('[data-call-ended]')?.textContent).toBe('The call audio link through your node closed.');
+    // Never connected: said as such, with the technical words under Details.
+    expect($('[data-call-ended]')?.textContent).toBe('The call to Maya could not connect.');
+    expect($('[data-call-end-detail]')!.textContent).toContain('The call audio link through your node closed.');
   });
 
   /** Rings Maya and brings the call live through the host media socket. */
@@ -507,7 +511,7 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     expect(details.open).toBe(false);
     expect(details.querySelector('summary')?.textContent).toBe('Details');
     expect(details.querySelector('[data-call-route="node"]')).toBeNull();
-    expect($('[data-call-panel] [data-call-route="node"]')?.textContent).toBe('The call goes through your box and theirs. Both boxes can hear it.');
+    expect($('[data-call-panel] [data-call-route="node"]')?.textContent).toBe('The call travels through your own box and theirs. Those two boxes carry the sound, so they could hear it.');
     expect($('[data-call-panel]')!.querySelectorAll('[data-call-route]')).toHaveLength(1);
     $<HTMLButtonElement>('[data-call-hangup]')!.click();
     await vi.waitFor(() => expect($('[data-call-panel="ended"]')).not.toBeNull());
@@ -522,7 +526,7 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     const details = $<HTMLDetailsElement>('[data-call-panel] [data-call-details]')!;
     expect(details.querySelector('summary')?.textContent).toBe('Detaljer');
     expect(details.querySelector('[data-call-route="node"]')).toBeNull();
-    expect($('[data-call-panel] [data-call-route="node"]')?.textContent).toBe('Opkaldet går gennem din boks og deres. Begge bokse kan høre det.');
+    expect($('[data-call-panel] [data-call-route="node"]')?.textContent).toBe('Opkaldet går gennem din egen boks og deres. De to bokse bærer lyden, så de kunne høre den.');
     expect($('[data-call-panel]')!.textContent).not.toMatch(/Betal|Lightning-betalingsadresse/);
   });
 
@@ -535,6 +539,6 @@ describe('the shell with node-routed audio on (M6 build profile)', () => {
     await vi.waitFor(() => expect($<HTMLButtonElement>('[data-call-confirm="audio"]')?.disabled).toBe(false));
     $<HTMLButtonElement>('[data-call-confirm="audio"]')?.click();
     await vi.waitFor(() => expect($('[data-call-route="node"]')).not.toBeNull());
-    expect($('[data-call-route="node"]')?.textContent).toBe('Opkaldet går gennem din boks og deres. Begge bokse kan høre det.');
+    expect($('[data-call-route="node"]')?.textContent).toBe('Opkaldet går gennem din egen boks og deres. De to bokse bærer lyden, så de kunne høre den.');
   });
 });

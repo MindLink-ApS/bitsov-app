@@ -268,6 +268,22 @@ describe('composing an answer', () => {
     expect(read('prices').text).toMatch(/^You charge 1 sat for a message; 3 sats for a file/);
   });
 
+  it.each([
+    ['en', 'Encrypted node-to-node sessions: 3'],
+    ['da', 'Krypterede sessioner mellem noder: 3'],
+  ] as const)('qualifies the session count in copied node reports (%s)', (language, label) => {
+    try {
+      setLanguagePref(language);
+      const read = sampleRead('node', null);
+      if (read.state !== 'live') throw new Error('sample not live');
+      const answer = answerFrom(read, { kind: 'read', topic: 'node', sinceMs: null, window: null }, names);
+      expect(answer.cards).toHaveLength(1);
+      expect(cardText(answer.cards[0], names)).toContain(label);
+    } finally {
+      setLanguagePref('en');
+    }
+  });
+
   it('ages an answer on screen and marks it stale past its bound or when the node says so', () => {
     const f = paymentsRead().freshness;
     expect(sourceLine(f, NOW, NOW)).toEqual({ state: 'fresh', text: 'Updated just now (by your node’s clock).' });
@@ -437,6 +453,29 @@ describe('the AI track', () => {
     click('[data-track="ai"]');
     await vi.waitFor(() => expect($('[data-provider="shared"]')).not.toBeNull());
   }
+
+  it.each([
+    ['en', 'Encrypted node-to-node sessions'],
+    ['da', 'Krypterede sessioner mellem noder'],
+  ] as const)('identifies the endpoints of displayed session counts (%s)', async (language, label) => {
+    try {
+      setLanguagePref(language);
+      await openAi(false);
+      ask('How is my node doing?');
+      await vi.waitFor(() => expect($('[data-ai-card="node"]')).not.toBeNull());
+      const session = [...$('[data-ai-card="node"]')!.querySelectorAll('dt')].find((dt) => dt.textContent === label);
+      expect(session).toBeDefined();
+      expect(session?.nextElementSibling?.textContent).toBe('3');
+
+      click('[data-tab="node"]');
+      await vi.waitFor(() => expect($('[data-panel="node"]')).not.toBeNull());
+      const overviewSession = [...$('[data-panel="node"]')!.querySelectorAll('dt')].find((dt) => dt.textContent === label);
+      expect(overviewSession).toBeDefined();
+      expect(overviewSession?.nextElementSibling?.textContent).toBe('3');
+    } finally {
+      setLanguagePref('en');
+    }
+  });
 
   it('keeps named assistants read-only, separate, reloadable and forgettable', async () => {
     const threads: Record<string, { revision: number; turns: unknown[] }> = {};

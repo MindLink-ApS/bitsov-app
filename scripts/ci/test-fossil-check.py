@@ -16,6 +16,37 @@ HOME_PATH = "/".join(("", "Users", "example", "project"))
 PRIVATE_NAME = "fixture-confidential-repository"
 PLANNING_PATH = "/".join(("docs", "private", "plan.md"))
 
+RESERVED = tuple("".join(map(chr, codes)) for codes in (
+    (99, 111, 100, 101, 120),
+    (102, 97, 98, 108, 101),
+    (103, 114, 111, 107),
+    (103, 114, 111, 107, 98, 111, 116),
+    (99, 108, 97, 117, 100, 101),
+    (97, 116, 108, 97, 115),
+    (110, 111, 118, 97),
+))
+ATTRIBUTIONS = tuple(
+    f"{name} {role}"
+    for name in ("cursor", "composer")
+    for role in ("agent", "review", "reviewer", "findings")
+) + tuple(
+    f"{action} by {name}"
+    for name in ("cursor", "composer")
+    for action in ("reviewed", "generated", "authored")
+)
+SCANNER_EXAMPLES = (
+    ("scripts/ci/fossil-check.py",
+     '        "session link": re.compile(re.escape("' + RESERVED[4]
+     + '.ai/" + "code/session"), re.I),'),
+    ("scripts/ci/fossil-check.py",
+     r'            r"\.(?:' + RESERVED[4] + "|" + RESERVED[0]
+     + r'|agents)[/\\](?:plans?|planning)|"'),
+    ("scripts/ci/test-fossil-check.py",
+     'SESSION = "' + RESERVED[4] + '.ai/" + "code/session/fixture"'),
+    ("scripts/ci/test-fossil-check.py",
+     '                  "/".join((".' + RESERVED[4] + '", "plans", "plan.md"))]'),
+)
+
 
 class FossilCheckTests(unittest.TestCase):
     def setUp(self):
@@ -156,6 +187,146 @@ class FossilCheckTests(unittest.TestCase):
     def test_invalid_or_unavailable_revision_fails_closed(self):
         self.check(2, base="not-a-commit")
         self.check(2, base="f" * 40)
+
+    def check_change(self, name, content, expected):
+        self.write(name, content)
+        self.commit()
+        try:
+            result = self.check(expected)
+            output = result.stdout + result.stderr
+            self.assertNotIn(name, output)
+            if expected == 1:
+                self.assertIn("internal attribution", result.stderr)
+                self.assertNotIn(content.strip(), output)
+                for token in RESERVED + ("cursor", "composer"):
+                    self.assertNotIn(token, output.casefold())
+            return result
+        finally:
+            self.base = self.git("rev-parse", "HEAD")
+
+    def test_reserved_tokens_in_added_comments_titles_and_docs(self):
+        for index, name in enumerate(RESERVED):
+            for variant, token in enumerate((name, name.upper(), name.title())):
+                examples = (
+                    ("sample.rs", f"// [{token}]: regression\n"),
+                    ("tests/sample.test.ts", f'it("({token}) regression", () => {{}});\n'),
+                    ("docs/notes.md", f"## Review: {token}!\n"),
+                )
+                for location, (path, content) in enumerate(examples):
+                    with self.subTest(index=index, variant=variant, location=location):
+                        self.check_change(path, content, 1)
+
+    def test_attribution_phrases_are_case_insensitive(self):
+        for index, phrase in enumerate(ATTRIBUTIONS):
+            for variant, text in enumerate((phrase, phrase.upper(), phrase.title())):
+                with self.subTest(index=index, variant=variant):
+                    self.check_change("docs/notes.md", f"// [{text.replace(' ', '-')}]: note\n", 1)
+
+    def test_attribution_phrases_do_not_span_added_lines(self):
+        for index, phrase in enumerate(ATTRIBUTIONS):
+            words = phrase.upper().split()
+            for split in range(1, len(words)):
+                with self.subTest(index=index, split=split):
+                    content = " ".join(words[:split]) + "\n" + " ".join(words[split:]) + "\n"
+                    self.check_change(f"docs/wrapped-{index}-{split}.md", content, 0)
+
+    def test_adjacent_added_lines_keep_independent_word_boundaries(self):
+        for index, phrase in enumerate(ATTRIBUTIONS):
+            words = phrase.split()
+            for split in range(1, len(words)):
+                with self.subTest(index=index, split=split):
+                    content = ("Update the " + " ".join(words[:split]) + "\n"
+                               + " ".join(words[split:]) + " status is ready\n")
+                    self.check_change(f"docs/adjacent-{index}-{split}.md", content, 0)
+
+    def test_inline_attribution_still_fails_between_benign_added_lines(self):
+        for index, phrase in enumerate(ATTRIBUTIONS):
+            with self.subTest(index=index):
+                text = "\t-- ".join(phrase.upper().split())
+                content = f"public text before\n// [{text}]: note\npublic text after\n"
+                self.check_change(f"docs/inline-{index}.md", content, 1)
+
+    def test_attribution_fragments_do_not_join_unrelated_changes(self):
+        context = "".join(f"unchanged line {index}\n" for index in range(20))
+        self.write("notes.md", context)
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD")
+        self.check_change("notes.md", "reviewed by\n" + context + "composer\n", 0)
+        self.write("first.md", "reviewed by\n")
+        self.write("second.md", "composer\n")
+        self.commit()
+        self.check(0)
+        self.base = self.git("rev-parse", "HEAD")
+        self.check_change("first.md", "reviewed by\ncomposer\n", 0)
+
+    def test_punctuation_and_underscores_bound_reserved_tokens(self):
+        for index, token in enumerate(RESERVED):
+            with self.subTest(index=index):
+                self.check_change("notes.md", f"prefix_{token}_suffix /{token}.md {token}'s\n", 1)
+
+    def test_reserved_tokens_in_changed_paths_are_redacted(self):
+        for index, token in enumerate(RESERVED):
+            with self.subTest(index=index):
+                result = self.check_change(f"docs/{token.upper()}-notes.md", "public text\n", 1)
+                self.assertIn("changed file path", result.stderr)
+                self.assertNotIn(token, result.stdout + result.stderr)
+
+    def test_attribution_phrases_in_changed_paths(self):
+        for index, phrase in enumerate(ATTRIBUTIONS):
+            with self.subTest(index=index):
+                path = "docs/" + phrase.upper().replace(" ", "-") + ".md"
+                self.check_change(path, "public text\n", 1)
+
+    def test_benign_text_beside_historical_attribution_and_removal(self):
+        for index, token in enumerate(RESERVED):
+            with self.subTest(index=index):
+                self.write("historical.md", f"// {token}\n")
+                self.commit()
+                self.base = self.git("rev-parse", "HEAD")
+                self.check_change("historical.md", f"// {token}\nnew public text\n", 0)
+                self.check_change("historical.md", "new public text\n", 0)
+
+    def test_renaming_a_file_rechecks_attribution(self):
+        self.write("historical.md", f"// {RESERVED[0]}\n")
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD")
+        self.git("mv", "historical.md", "renamed.md")
+        self.commit()
+        result = self.check(1)
+        self.assertIn("internal attribution", result.stderr)
+        self.assertNotIn(RESERVED[0], result.stdout + result.stderr)
+
+    def test_ordinary_ui_words_provider_identifiers_licences_and_substrings(self):
+        provider = "".join(map(chr, (79, 112, 101, 110, 65, 73)))
+        lines = [
+            "cursor position; composer input; MessageComposer; CursorPosition",
+            f"{provider}-compatible endpoint; parse_{provider.lower()}_models",
+            "Copyright (c) Example Contributors; SPDX-License-Identifier: MIT",
+        ] + [f"prefix{token}suffix {token}Component" for token in RESERVED]
+        self.check_change("src/components.txt", "\n".join(lines) + "\n", 0)
+
+    def test_scanner_examples_require_exact_path_and_content(self):
+        for index, (path, line) in enumerate(SCANNER_EXAMPLES):
+            with self.subTest(index=index):
+                self.check_change(path, line + "\n", 0)
+                self.check_change(path, line + f" # {RESERVED[0]}\n", 1)
+                self.check_change(path, line + " \n", 1)
+                self.check_change(f"other/{Path(path).name}", line + "\n", 1)
+
+    def test_added_header_text_cannot_select_an_exception_path(self):
+        path, line = SCANNER_EXAMPLES[0]
+        self.check_change("notes.md", f"++ b/{path}\n{line}\n", 1)
+
+    def test_filename_alone_does_not_exempt_new_attribution(self):
+        for path in ("scripts/ci/fossil-check.py", "scripts/ci/test-fossil-check.py"):
+            self.check_change(path, f"// {RESERVED[0]}\n", 1)
+
+    def test_complete_scanner_and_fixture_additions_pass(self):
+        self.set_names("synthetic-" + "unreferenced-repository")
+        for path in (CHECKER, Path(__file__)):
+            self.write("scripts/ci/" + path.name, path.read_text())
+        self.commit()
+        self.check(0)
 
 
 if __name__ == "__main__":

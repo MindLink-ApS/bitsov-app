@@ -498,6 +498,7 @@ version = "0.0.1"
 dependencies = [
  "libc",
  "ring",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

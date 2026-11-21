@@ -2,6 +2,7 @@ import { language, systemLanguage } from '../i18n';
 import { createSignal, createUniqueId, onMount, Show } from 'solid-js';
 import { usePairingActivity } from '../pairingActivity';
 import { PrimaryAction } from './PrimaryAction';
+import { phoneCopy } from './phoneCopy';
 
 /** G6 remains an explicit acknowledgement after enrollment, before the shell. */
 export function PhoneTrust(props: { onContinue: () => Promise<void>; locale?: string }) {
@@ -28,9 +29,7 @@ export function PhoneTrust(props: { onContinue: () => Promise<void>; locale?: st
       <p>{da()
         ? 'Nøglerne ligger på den anden maskine. Alle, der kan logge ind på den, kan bruge dine indskud. Indsæt kun penge, hvis du stoler på værten.'
         : 'This node’s keys live on the remote machine. Anyone with access — whoever can log in to that computer — can spend what you deposit. Only fund a node whose host you trust.'}</p>
-      <p>{da()
-        ? 'Nøglerne bliver i boksen. BitSov viser aldrig din gendannelsessætning og kopierer den aldrig.'
-        : 'Your keys stay in the node. BitSov never shows you your recovery phrase and never copies it anywhere.'}</p>
+      <p>{phoneCopy[da() ? 'da' : 'en'].trustKeysStay}</p>
     </details>
   </main>;
 }

@@ -5,6 +5,7 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:window:allow-destroy",
     "allow-node-status",
     "allow-node-unlock",
     "allow-node-unlock-password",

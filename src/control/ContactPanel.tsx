@@ -274,6 +274,14 @@ export function ContactPanel(props: {
               {tr('caLinkAsThisContact')}</button>
           </div>
         </div>
+
+        <details class="panel" data-contact-technical>
+          <summary>{tr('contactTechnical')}</summary>
+          <dl class="facts">
+            <dt>{tr('contactNodeId')}</dt>
+            <dd class="mono" style={{ 'overflow-wrap': 'anywhere' }} data-contact-node-id data-contact-node-key>{contactKey()}</dd>
+          </dl>
+        </details>
       </aside>
     </>
   );
