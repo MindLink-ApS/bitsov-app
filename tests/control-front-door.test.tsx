@@ -347,6 +347,8 @@ describe('front door Discover and editor', () => {
     pub.click();
     await viWait();
     expect(root.querySelector('[data-fd-edit-error]')?.textContent).toMatch(/over|16384|bytes/i);
+    // A size error is not a failed read: no Reconnect, which would re-read the card and drop the edits.
+    expect(root.querySelector('[data-soft-error="fd-edit-error"] [data-soft-reconnect]')).toBeNull();
   });
 
   it('hashes CV text through the host before publish', async () => {

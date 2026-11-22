@@ -337,9 +337,13 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
   const [loading, setLoading] = createSignal(true);
   // Only the latest read may fill the editor or end its wait.
   let loadRevision = 0;
+  // The error the last read left. Only that one offers Reconnect: a publish, size, media or copy
+  // error must never re-read the card, which would drop unsaved edits.
+  const [loadErr, setLoadErr] = createSignal<string | null>(null);
   const load = () => {
     const revision = ++loadRevision;
     setErr(null);
+    setLoadErr(null);
     setLoading(true);
     props.source.frontDoorMine().finally(() => { if (revision === loadRevision) setLoading(false); }).then(
       (c) => {
@@ -363,7 +367,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
         if (revision !== loadRevision) return;
         setMine(null);
         const m = asActionError(e).message;
-        if (!m.includes('front_door_missing')) setErr(m);
+        if (!m.includes('front_door_missing')) { setErr(m); setLoadErr(m); }
       },
     );
   };
@@ -658,7 +662,7 @@ export function FrontDoorEditor(props: { source: Source; now: number }) {
         </Show>
       </div>
       <Show when={!ownerAsk() ? err() : null}>
-        {(e) => <SoftError message={e()} data="fd-edit-error" class="hint" onReconnect={load} />}
+        {(e) => <SoftError message={e()} data="fd-edit-error" class="hint" onReconnect={e() === loadErr() ? load : undefined} />}
       </Show>
       <Show when={ownerAsk()}>
         {(ask) => (
