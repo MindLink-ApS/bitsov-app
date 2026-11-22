@@ -9149,7 +9149,7 @@ function WalletPanel(props: { moneyBlocked: boolean; wallet: WalletOverview | nu
         </Show>
       </div>
       <Show when={props.fund}>
-        <div data-panel="receive">{props.fund}</div>
+        {(fund) => <div data-panel="receive">{fund()}</div>}
       </Show>
     </>
   );
