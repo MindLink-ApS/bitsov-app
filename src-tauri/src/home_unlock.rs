@@ -286,7 +286,7 @@ async fn unlock_with(
     if binding.client_id != connection.client_id || binding.fingerprint != status.fingerprint {
         return Err("This device's saved unlock binding does not match the node.".into());
     }
-    let (blob, record) = local_key(state, &ctx.store).map_err(|e| e.message)?.ok_or_else(|| {
+    let (blob, record) = local_key(state, &ctx.store).map_err(|e| e.message)?.ok_or({
         if cfg!(target_os = "android") {
             "This device has no enrolled approval key for this node."
         } else {
@@ -341,9 +341,8 @@ async fn unlock_with(
                         "The Keychain unlock request stopped."
                     }
                 })?
-                .map_err(|error| {
+                .inspect_err(|_| {
                     *state.home_unlock_state.lock().unwrap() = "no-password";
-                    error
                 })?
         }
     };

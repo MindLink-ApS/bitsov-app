@@ -12,8 +12,8 @@ describe('owner approval contract helpers', () => {
     expect(termLines(base({ kind: 'spend_grant', terms: { budget_msat: 500_000, per_call_max_msat: 10_000, window_secs: 600 } }))).toEqual([
       'Let this app spend', 'Budget: up to 500 sats', 'Each payment: up to 10 sats', 'Messages: up to 6 sats each', 'For: 10 min', 'To: any contact, within the budget',
     ]);
-    expect(termLines(base({ kind: 'spend_grant', terms: { budget_msat: 1000, per_call_max_msat: 1000, window_secs: 86_400, recipient: A } }), () => 'Maya'))
-      .toEqual(['Let this app spend', 'Budget: up to 1 sat', 'Each payment: up to 1 sat', 'Messages: up to 1 sat each', 'For: 24 h', `Only to: Maya (aaaaaa…aaaaaa)`]);
+    expect(termLines(base({ kind: 'spend_grant', terms: { budget_msat: 1000, per_call_max_msat: 1000, window_secs: 86_400, recipient: A } }), () => 'Robin'))
+      .toEqual(['Let this app spend', 'Budget: up to 1 sat', 'Each payment: up to 1 sat', 'Messages: up to 1 sat each', 'For: 24 h', `Only to: Robin (aaaaaa…aaaaaa)`]);
   });
   it('first contact terms', () => {
     expect(termLines(base({ kind: 'first_contact', terms: { recipient: A, max_total_msat: 14_000, budget_msat: 50_000 } }))).toEqual([

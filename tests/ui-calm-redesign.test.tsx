@@ -199,10 +199,10 @@ describe('BTC mode never appends sats to a BTC figure', () => {
     expect(mount.textContent).not.toMatch(btcThenSats);
 
     // Quoted re-admission / first-contact card when present in sample spend path:
-    // open first-contact door by selecting Maya (sample peer) if a door quote is shown.
-    const maya = SAMPLE_PEERS[0]?.node_id;
-    if (maya) {
-      const link = mount.querySelector(`[data-track="peer:${maya.toLowerCase()}"]`) as HTMLButtonElement | null;
+    // open first-contact door by selecting Robin (sample peer) if a door quote is shown.
+    const robin = SAMPLE_PEERS[0]?.node_id;
+    if (robin) {
+      const link = mount.querySelector(`[data-track="peer:${robin.toLowerCase()}"]`) as HTMLButtonElement | null;
       link?.click();
     }
     await vi.waitFor(() => expect(mount.querySelector('[data-composer]')).not.toBeNull());

@@ -28,14 +28,14 @@ afterEach(() => {
   setLanguagePref('en');
 });
 const $ = <T extends HTMLElement = HTMLElement>(s: string) => mount.querySelector<T>(s)!;
-const maya = SAMPLE_PEERS[0].node_id;
+const robin = SAMPLE_PEERS[0].node_id;
 
-async function openMaya(source = sampleSource({ firstLiveMs: 1e9 })) {
+async function openRobin(source = sampleSource({ firstLiveMs: 1e9 })) {
   mount = document.createElement('div');
   document.body.appendChild(mount);
   dispose = render(() => <ControlCenter source={source} active ready error={null} ownId={SAMPLE_OWN_ID} firstRun={<span />} />, mount);
-  await vi.waitFor(() => expect($(`[data-track="peer:${maya}"]`)).not.toBeNull());
-  $<HTMLButtonElement>(`[data-track="peer:${maya}"]`).click();
+  await vi.waitFor(() => expect($(`[data-track="peer:${robin}"]`)).not.toBeNull());
+  $<HTMLButtonElement>(`[data-track="peer:${robin}"]`).click();
   await vi.waitFor(() => expect($('[data-contact-open]')).not.toBeNull());
   return source;
 }
@@ -65,15 +65,15 @@ it.each([
 
 // P1-4: no node key next to the name; it lives under Technical on the contact sheet.
 it('keeps the node key out of the chat header and shows it under Technical on the contact sheet', async () => {
-  await openMaya();
+  await openRobin();
   const head = $('.track-head').textContent ?? '';
-  expect(head).toContain('Maya');
-  expect(head).not.toContain(shortId(maya));
+  expect(head).toContain('Robin');
+  expect(head).not.toContain(shortId(robin));
   expect(head).not.toMatch(/[0-9a-f]{8}…[0-9a-f]{8}/);
   $<HTMLButtonElement>('[data-contact-open]').click();
   await vi.waitFor(() => expect($('[data-contact-panel="open"]')).not.toBeNull());
   expect($('[data-contact-technical] summary').textContent).toBe('Technical');
-  expect($('[data-contact-node-key]').textContent).toBe(maya);
+  expect($('[data-contact-node-key]').textContent).toBe(robin);
   setLanguagePref('da');
   expect($('[data-contact-technical] summary').textContent).toBe('Teknisk');
 });
@@ -84,7 +84,7 @@ it('shows no cost under a sent message until it is tapped, and never says the fe
   source.spendStatus = async () => ({ state: 'open', basis: 'node_grant', open_until_ms: Date.now() + 600000, pending: null, window_ms: 600000 });
   source.priceQuote = async () => ({ kind: 0, own_msat: 9000, peer_msat: 1000, peer_age_secs: 30, peer_stale: false, max_routing_fee_msat: 5000 });
   source.send = vi.fn(async (recipient, isRoom) => ({ message_id: 'sent', recipient, is_room: isRoom, delivered: true, amount_msat: 1000, sent_at_ms: Date.now() }));
-  await openMaya(source);
+  await openRobin(source);
   const area = $<HTMLTextAreaElement>('[data-composer] textarea');
   area.value = 'hej';
   area.dispatchEvent(new Event('input', { bubbles: true }));
@@ -147,10 +147,10 @@ it('asks "You are in a call with X" before closing during a live call, and only 
     const guard = createCallQuitGuard(peer, () => win);
     await Promise.resolve();
     expect(win.listening()).toBe(false);
-    setPeer('Maya');
+    setPeer('Robin');
     await vi.waitFor(() => expect(win.listening()).toBe(true));
     expect(await win.close()).toBe(false);
-    expect(guard.asking()).toBe('Maya');
+    expect(guard.asking()).toBe('Robin');
     expect(win.destroyed).toBe(0);
     guard.stay();
     expect(guard.asking()).toBeNull();
@@ -166,11 +166,11 @@ it('asks "You are in a call with X" before closing during a live call, and only 
 });
 
 it.each([
-  ['en', 'You are in a call with Maya. Closing BitSov drops the call. Close anyway?'],
-  ['da', 'Du er i et opkald med Maya. Hvis du lukker BitSov, afbrydes opkaldet. Luk alligevel?'],
+  ['en', 'You are in a call with Robin. Closing BitSov drops the call. Close anyway?'],
+  ['da', 'Du er i et opkald med Robin. Hvis du lukker BitSov, afbrydes opkaldet. Luk alligevel?'],
 ] as const)('says the %s quit question plainly', (locale, text) => {
   setLanguagePref(locale);
-  expect(t('quitDuringCall', 'Maya')).toBe(text);
+  expect(t('quitDuringCall', 'Robin')).toBe(text);
 });
 
 // Review round 1: rounding direction is chosen per site; parts add up; the quit dialog is a real modal.
@@ -210,8 +210,8 @@ it.each([
 ] as const)('%s quit copy says what the button does: close the app, and the call drops', (locale, button, question) => {
   setLanguagePref(locale);
   expect(t('quitCloseAndDrop')).toBe(button);
-  expect(t('quitDuringCall', 'Maya')).toMatch(question);
-  expect(t('quitDuringCall', 'Maya')).not.toMatch(/End it|quit\?/);
+  expect(t('quitDuringCall', 'Robin')).toMatch(question);
+  expect(t('quitDuringCall', 'Robin')).not.toMatch(/End it|quit\?/);
 });
 
 it.each(['en', 'da'] as const)('says an unknown fee amount truthfully and calmly in %s', (locale) => {
@@ -229,7 +229,7 @@ it('keeps keyboard focus inside the quit dialog and gives it back on Stay', asyn
   const close = vi.fn();
   dispose = render(() => <>
     <div data-behind><button type="button" data-opener>Hang up</button></div>
-    <Show when={open()}><QuitConfirm name="Maya" onStay={stay} onClose={close} /></Show>
+    <Show when={open()}><QuitConfirm name="Robin" onStay={stay} onClose={close} /></Show>
   </>, mount);
   $<HTMLButtonElement>('[data-opener]').focus();
   setOpen(true);
@@ -253,7 +253,7 @@ it('opens the quit question as a native modal, above a spending sheet that is al
   const stay = vi.fn(() => setOpen(false));
   dispose = render(() => <>
     <dialog data-sheet><button type="button">Allow</button></dialog>
-    <Show when={open()}><QuitConfirm name="Maya" onStay={stay} onClose={vi.fn()} /></Show>
+    <Show when={open()}><QuitConfirm name="Robin" onStay={stay} onClose={vi.fn()} /></Show>
   </>, mount);
   const sheet = $<HTMLDialogElement>('[data-sheet]');
   sheet.showModal();
@@ -278,7 +278,7 @@ it('opens the quit question as a native modal, above a spending sheet that is al
 // What is left to spend rounds down: never show more remaining than exists.
 it('shows a remaining budget rounded down: 1.5 sats left is about 1, never about 2', () => {
   setLanguagePref('en');
-  const text = ringBudgetText('Maya', { leftMsat: 1500, holdMsat: 3500 });
+  const text = ringBudgetText('Robin', { leftMsat: 1500, holdMsat: 3500 });
   expect(text).toContain('only about 1 sat left');
   // The hold is the most the call may cost: it still rounds up.
   expect(text).toContain('holds up to about 4 sats');

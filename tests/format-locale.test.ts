@@ -77,7 +77,7 @@ it('groups signed large values; only BTC keeps msat precision', () => {
 
 it.each(['en', 'da'] as const)('uses readable digit groups in %s running text and copy-pastes exactly', locale => {
   setLanguagePref(locale);
-  expect(t('uiSentTo', amount(1250000, 'up'), 'Maya')).toContain('1\u202f250 sats');
+  expect(t('uiSentTo', amount(1250000, 'up'), 'Robin')).toContain('1\u202f250 sats');
   expect(t('uiBalancesAndCostsUseThisUnitEverywhereYour')).toContain('1 sat = 1\u202f000');
   expect(parseAmount(sats(1250000, 'up'), 'sats')).toBe(1250000);
   expect(amountText(1250000, 'sats')).toBe('1250');

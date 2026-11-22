@@ -62,7 +62,7 @@ export const SUGGESTIONS = (): readonly string[] => [
   tr('caWhatDidISpendThisWeek'),
   tr('caHowMuchIsInMyWallet'),
   tr('caHowIsMyNodeDoing'),
-  tr('caDraftA2SatMessageToMaya'),
+  tr('caDraftA2SatMessageToRobin'),
 ];
 
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -125,9 +125,9 @@ const TOPICS: [AiTopic, RegExp][] = [
 // Free-form text, contact names and draft bodies are never translated.
 const suggestionKeys = [
   'caWhatDidISpendThisWeek', 'caHowMuchIsInMyWallet', 'caHowIsMyNodeDoing',
-  'caDraftA2SatMessageToMaya', 'caHowMuchInboundLiquidityDoIHave',
+  'caDraftA2SatMessageToRobin', 'caHowMuchInboundLiquidityDoIHave',
   'caWhatDoICharge', 'caWhatDidISpendToday', 'caWhoMessagedMe',
-  'caDraftAMessageToMaya', 'caPayMaya500Sats', 'caRequest2000SatsFromJosh',
+  'caDraftAMessageToRobin', 'caPayRobin500Sats', 'caRequest2000SatsFromKim',
 ] as const satisfies readonly CopyKey[];
 function ruleQuestion(text: string): string {
   const normalized = text.trim().toLocaleLowerCase();
@@ -382,7 +382,7 @@ export function unknownText(): string {
 
 export function noPeerText(what: Proposal['kind']): string {
   const verb = { message: tr('caDraftAMessage'), pay: tr('caPrepareAPayment'), request: tr('caPrepareAnInvoice') }[what];
-  return tr('caToINeedExactlyOneOfYourContactsBy', verb, what === 'message' ? '' : tr('caAnAmountInSats'), { message: tr('caDraftAMessageToMaya'), pay: tr('caPayMaya500Sats'), request: tr('caRequest2000SatsFromJosh') }[what]);
+  return tr('caToINeedExactlyOneOfYourContactsBy', verb, what === 'message' ? '' : tr('caAnAmountInSats'), { message: tr('caDraftAMessageToRobin'), pay: tr('caPayRobin500Sats'), request: tr('caRequest2000SatsFromKim') }[what]);
 }
 
 /** What the track says after preparing an action. It never says it sent or paid. */
