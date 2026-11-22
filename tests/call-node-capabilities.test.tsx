@@ -513,6 +513,35 @@ describe('Decline and Accept with free replies (A4)', () => {
     expect(t.e.view().phase).toBe('idle');
   });
 
+  it('a drop that heals while its reconnect price is read asks nothing and spends nothing', async () => {
+    vi.useFakeTimers();
+    let reads = 0;
+    let land: (o: Outcome<CallQuote>) => void = () => {};
+    const quote = () => {
+      reads++;
+      if (reads === 1) return new Promise<Outcome<CallQuote>>(() => {});
+      return new Promise<Outcome<CallQuote>>((r) => { land = r; });
+    };
+    const authorize = vi.fn(async () => true);
+    const pcs: FakePc[] = [];
+    const t = engine({ free: true, quote, authorize, peerConnection: () => { const pc = new FakePc(); pcs.push(pc); return pc as unknown as RTCPeerConnection; } });
+    await t.e.receive(offer(), OWN);
+    await t.e.accept(QUOTE);
+    const asked = authorize.mock.calls.length;
+    drop(pcs[0]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reads).toBe(2);
+    // The call comes back while the price is still being read; then the price lands.
+    pcs[0].connectionState = 'connected'; pcs[0].onconnectionstatechange?.();
+    expect(t.last().phase).toBe('live');
+    land({ ok: true, value: QUOTE });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(authorize).toHaveBeenCalledTimes(asked);
+    expect(t.sent).toEqual([]);
+    expect(t.last().recoveryUsed).toBe(false);
+    t.e.endLocal();
+  });
+
   it('a reconnect whose price cannot be read spends nothing: the next drop, priced, asks exactly once', async () => {
     vi.useFakeTimers();
     let reads = 0;

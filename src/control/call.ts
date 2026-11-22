@@ -585,7 +585,10 @@ export function createCallEngine(deps: CallDeps) {
   let restartAsking: RTCPeerConnection | null = null;
   /** Whether that ask is our own reconnect request (not an answer to the caller's restart). */
   let restartAskIsRequest = false;
-  /** The caller's restart that landed while our own reconnect request was asking: that one approval answers it. */
+  /** The caller's restart that landed while our own reconnect request was asking: that one approval answers it.
+   *  One slot is enough because the caller sends one recovery offer per call (`restartAttempted`); a repeat
+   *  replaces it, and the answer is checked again (`eligible`) before anything is paid. While answering the
+   *  caller's restart is itself asking, a repeat is dropped: that ask already covers the one offer. */
   let restartOfferWaiting: Signal | null = null;
   let restartAnswerPending = false;
   let restartTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1222,12 +1225,16 @@ export function createCallEngine(deps: CallDeps) {
   const restart = async (conn: RTCPeerConnection) => {
     if (pc !== conn || !negotiated || restartAttempted || restartRequested) return;
     if (!quote && freeAnswered !== view.callId) return;
+    // A drop that heals before this reconnect asks or sends spends nothing: the
+    // price read and the approval below can both outlast it.
+    const dropped = view.phase === 'reconnecting';
     // A call answered free reads its price first. Without one nothing is sent and
     // nothing of the recovery is spent; it is tried again while the drop lasts.
     if (!quote) {
       const again = () => { if (pc === conn && view.phase === 'reconnecting') void restart(conn); };
       if (!await restartPrice(conn, again)) return;
       if (pc !== conn || restartAttempted || restartRequested) return;
+      if (dropped && view.phase !== 'reconnecting') return;
     }
     const q = quote!;
     // Whenever this reconnect needs an approval, it asks first, before the
@@ -1241,8 +1248,6 @@ export function createCallEngine(deps: CallDeps) {
       if (restartAsking === conn) return;
       restartAsking = conn;
       restartAskIsRequest = true;
-      // A drop that heals while the ask is open spends nothing on its approval.
-      const dropped = view.phase === 'reconnecting';
       let approved = false;
       let failure: string | null = null;
       try {
