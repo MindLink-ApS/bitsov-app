@@ -87,6 +87,38 @@ fn written(file: &mut VerifiedFile, bytes: &[u8]) -> io::Result<()> {
     file.replace_contents(bytes)
 }
 
+/// Verify an existing private folder without changing it.
+pub(crate) fn verify_dir(path: &Path) -> io::Result<()> {
+    win_private::open_verified(path, ObjectKind::Dir, Access::Read).map(drop)
+}
+
+/// Flush a private folder's entries. Every error is returned.
+pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
+    win_private::sync_dir(dir)
+}
+
+/// A new private scratch file (`CREATE_NEW`): anything already at `path`
+/// fails with `AlreadyExists` and is left as it is.
+pub(crate) fn create_new(path: &Path) -> io::Result<VerifiedFile> {
+    win_private::create_new_private(path)
+}
+
+/// Rename a verified scratch file over `dest` by handle, then flush the
+/// folder. An error does not say whether the rename happened.
+pub(crate) fn publish_replacing(file: VerifiedFile, dest: &Path, bytes: &[u8]) -> io::Result<()> {
+    win_private::publish(file, dest, bytes, true)
+}
+
+/// Open an existing private file for writing or deletion by handle.
+pub(crate) fn open_writable(path: &Path) -> io::Result<VerifiedFile> {
+    win_private::open_verified(path, ObjectKind::File, Access::ReadWrite)
+}
+
+/// Open or create a private lock file; exclusion comes from OS locks.
+pub(crate) fn open_lock(path: &Path) -> io::Result<VerifiedFile> {
+    win_private::open_lock(path)
+}
+
 /// Create an empty private marker file and make it durable. An existing
 /// object at `path` is verified instead and left as it is.
 pub(crate) fn ensure_marker(path: &Path) -> io::Result<()> {
